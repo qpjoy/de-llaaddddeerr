@@ -1,0 +1,734 @@
+#!/usr/bin/env node
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const node_child_process_1 = require("node:child_process");
+const node_fs_1 = require("node:fs");
+const promises_1 = require("node:fs/promises");
+const node_os_1 = require("node:os");
+const node_path_1 = require("node:path");
+const hdo_1 = require("./hdo");
+const h2i_1 = require("./h2i");
+const open_1 = require("./open");
+const wg_1 = require("./wg");
+const args = process.argv.slice(2);
+const packageRoot = (0, node_path_1.resolve)(__dirname, '..');
+const bundledClientScript = (0, node_path_1.resolve)(packageRoot, 'resources/mihomo-client.sh');
+const repoClientScript = (0, node_path_1.resolve)(packageRoot, '../../../scripts/mihomo-client.sh');
+const defaultInstallTarget = '/usr/local/bin/mihomo-client';
+const defaultMihomoConfigFile = '/etc/mihomo-client/config.yaml';
+const defaultK8sImageNamespace = 'k8s.io';
+const defaultK8sRuntimeImages = ['postgres:16-alpine', 'coredns/coredns:1.11.3', 'caddy:2.8.4-alpine'];
+const defaultNoProxyEntries = [
+    'localhost',
+    '127.0.0.1',
+    '::1',
+    'postgres',
+    'market',
+    'db',
+    'redis',
+    'host.docker.internal',
+    'docker.for.mac.host.internal',
+    'docker.for.win.localhost',
+    'kubernetes.docker.internal',
+    'kubernetes.default.svc',
+    '.cluster.local',
+    '10.0.0.0/8',
+    '172.16.0.0/12',
+    '192.168.0.0/16',
+    '169.254.0.0/16',
+    '169.254.169.254',
+    '169.254.169.254/32',
+    '100.100.100.200',
+    '100.100.100.200/32',
+    '100.64.0.0/10',
+    '100.88.0.0/16',
+    '100.89.0.0/16',
+    '100.90.0.0/16',
+    '10.88.0.0/16',
+    '10.89.0.0/16',
+    '10.90.0.0/16',
+    '10.91.0.0/16',
+    '.local',
+    '.lan',
+];
+const clientCommands = new Set([
+    'setup',
+    'install',
+    'update-subscription',
+    'start',
+    'stop',
+    'restart',
+    'status',
+    'logs',
+    'enable',
+    'disable',
+    'upgrade-systemd',
+    'reload',
+    'port',
+    'listen',
+    'server-on',
+    'server-off',
+    'egress-on',
+    'egress-off',
+    'proxy-on',
+    'proxy-off',
+    'tun-on',
+    'tun-off',
+    'ssh-proxy-on',
+    'ssh-proxy-off',
+    'daemon-proxy-on',
+    'daemon-proxy-off',
+    'docker-proxy-on',
+    'docker-proxy-off',
+    'docker-build-proxy',
+    'run',
+    'test',
+    'print-env',
+    'print-unset-env',
+    'uninstall',
+]);
+function help() {
+    process.stdout.write(`QPJoy Tunnel CLI
+
+Usage:
+  qp-tunnel-cli help
+  qp-tunnel-cli install-script [--target /usr/local/bin/mihomo-client]
+  qp-tunnel-cli script-path
+  qp-tunnel-cli client-help
+  qp-tunnel-cli k8s preload-images [--image postgres:16-alpine]
+  qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
+  qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --username user
+  qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --anonymous
+  qp-tunnel-cli open install --subnet 100.127.0.0/24
+  qp-tunnel-cli open reconfigure --client-to-client
+  qp-tunnel-cli open create internal-01 --ip 100.127.0.10
+  qp-tunnel-cli open enroll --file internal-01.ovpn
+  qp-tunnel-cli wg install --host 203.0.113.10 --subnet 100.127.50.0/24
+  qp-tunnel-cli wg create internal-01 --ip 100.127.50.10
+  qp-tunnel-cli wg enroll --file internal-01.conf
+  qp-tunnel-cli <mihomo-client command> [options]
+  qp-tunnel-cli -- <command> [args...]
+  qp-tunnel-cli <command-path> [args...]
+
+Common commands:
+  qp-tunnel-cli install --url http://IP:3434/peer_user01.mihomo.yaml --user download --password pass
+  qp-tunnel-cli install --instance subscriptions --mixed-port 7890 --url http://user:pass@IP:3434/peer_subscriptions.mihomo.yaml
+  qp-tunnel-cli status --instance subscriptions
+  qp-tunnel-cli update-subscription --instance subscriptions
+  qp-tunnel-cli install --url http://internal:18090/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-internal.yaml
+  qp-tunnel-cli install --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
+  qp-tunnel-cli status
+  qp-tunnel-cli start
+  qp-tunnel-cli egress-on
+  qp-tunnel-cli egress-off
+  qp-tunnel-cli docker-build-proxy on
+  qp-tunnel-cli docker-build-proxy off
+  eval "$(qp-tunnel-cli print-unset-env)"
+  qp-tunnel-cli tun-on
+  MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS=203.0.113.10/32 sudo -E qp-tunnel-cli tun-on
+  qp-tunnel-cli tun-off
+  qp-tunnel-cli k8s preload-images
+  qp-tunnel-cli update-subscription
+  qp-tunnel-cli reload
+  qp-tunnel-cli port 7888
+  qp-tunnel-cli listen on
+  qp-tunnel-cli listen on 7890
+  qp-tunnel-cli listen off
+  qp-tunnel-cli hdo status
+  qp-tunnel-cli h2i status
+  qp-tunnel-cli open status
+  qp-tunnel-cli open help
+  qp-tunnel-cli wg status
+  qp-tunnel-cli wg help
+  qp-tunnel-cli uninstall --purge
+  qp-tunnel-cli ./electron-server/scripts/manage.sh redeploy
+
+The npm package distributes the Linux mihomo-client script and a cross-platform
+HDO WireGuard enrollment command. Linux mihomo-client commands re-run through
+sudo when needed, then execute the bundled shell script.
+
+The default Mihomo instance remains on mixed-port 7788 with its historical paths.
+Named instances use isolated state, binary, launcher and systemd unit paths. The
+reserved subscriptions instance is explicit-use-only: applications connect to
+its local port directly, and host-wide proxy/SSH/daemon/TUN wiring is refused.
+
+Unknown commands are executed with QPJoy proxy variables injected. Host commands
+receive HTTP_PROXY=http://127.0.0.1:<mixed-port>; Docker/Compose build contexts
+also receive container-facing variables such as MARKET_CONTAINER_HTTP_PROXY and
+QP_TUNNEL_CONTAINER_HTTP_PROXY=http://host.docker.internal:<mixed-port>.
+
+K8s/containerd hosts keep a separate image store from Docker. After tun-on or
+egress-on makes Docker pulls work, preload runtime images into containerd:
+  sudo qp-tunnel-cli tun-on
+  sudo qp-tunnel-cli k8s preload-images
+  sudo qp-tunnel-cli tun-off
+
+tun-on uses server-safer defaults: Linux auto-redirect is off by default, local
+and private networks bypass TUN, and the current SSH client IP is preserved.
+Add public ingress sources with MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS or
+/etc/mihomo-client/tun-route-exclude-addresses.txt before enabling tun-on.
+
+Install the script as a normal server command:
+  sudo qp-tunnel-cli install-script
+  sudo mihomo-client status
+  sudo mihomo-client egress-on
+
+Enroll this machine into an HDO mesh:
+  HDO_PASSWORD=... qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
+
+Reverse access over OpenVPN, so an Oversea host can reach back into a machine
+that only has outbound connectivity. The Oversea side installs a server; the
+inside machine enrolls as a spoke with route-nopull, so it receives one stable
+address and nothing else about its networking changes:
+  sudo qp-tunnel-cli open install --host 203.0.113.10
+  sudo qp-tunnel-cli open create internal-01
+  sudo qp-tunnel-cli open enroll --file internal-01.ovpn
+Run 'qp-tunnel-cli open help' for the full command set.
+
+Managed WireGuard provides a global VPN with IPv4 egress, tunnel DNS, and IPv6
+bypass prevention. It defaults to 100.127.50.0/24 so it does not collide with
+OpenVPN's 100.127.0.0/24:
+  sudo qp-tunnel-cli wg install --host 203.0.113.10 --port-range 20000-20100
+  sudo qp-tunnel-cli wg create internal-01
+  sudo qp-tunnel-cli wg enroll --file internal-01.conf
+  sudo qp-tunnel-cli wg rotate-port
+Run 'qp-tunnel-cli wg help' for the full command set.
+`);
+}
+function clientHelp() {
+    runScriptWithoutSudo(['help']);
+}
+function version() {
+    try {
+        const pkg = JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.resolve)(packageRoot, 'package.json'), 'utf8'));
+        return pkg.version ?? 'unknown';
+    }
+    catch {
+        return 'unknown';
+    }
+}
+function isRoot() {
+    return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+function resolveClientScript() {
+    if ((0, node_fs_1.existsSync)(bundledClientScript)) {
+        return bundledClientScript;
+    }
+    if ((0, node_fs_1.existsSync)(repoClientScript)) {
+        return repoClientScript;
+    }
+    process.stderr.write(`Could not find mihomo-client.sh. Expected ${bundledClientScript} in the npm package.\n`);
+    process.exit(1);
+}
+function exitFromSpawn(result) {
+    if (result.error) {
+        process.stderr.write(`${result.error.message}\n`);
+        process.exit(1);
+    }
+    if (result.signal) {
+        process.stderr.write(`Command terminated by signal ${result.signal}\n`);
+        process.exit(1);
+    }
+    process.exit(result.status ?? 0);
+}
+function sudoSelf(cliArgs) {
+    const sudoEnvironment = [
+        'H2I_BOOTSTRAP_URL',
+        'MX_H2I_BOOTSTRAP_BASE_URL',
+        'H2I_USERNAME',
+        'H2I_PASSWORD',
+        'H2I_ACCESS_TOKEN',
+        'H2I_USER_ID',
+    ].join(',');
+    const sudoOptions = cliArgs[0] === 'h2i'
+        ? [`--preserve-env=${sudoEnvironment}`]
+        : ['-E'];
+    const result = (0, node_child_process_1.spawnSync)('sudo', [...sudoOptions, process.execPath, __filename, ...cliArgs], {
+        stdio: 'inherit',
+        env: process.env,
+    });
+    exitFromSpawn(result);
+}
+function runScriptWithoutSudo(scriptArgs) {
+    const result = (0, node_child_process_1.spawnSync)('bash', [resolveClientScript(), ...scriptArgs], {
+        stdio: 'inherit',
+        env: process.env,
+    });
+    exitFromSpawn(result);
+}
+function runClientCommand(scriptArgs) {
+    if (process.platform !== 'linux') {
+        process.stderr.write('mihomo-client commands target Linux systemd servers. Use this CLI on the server host.\n');
+        process.exit(1);
+    }
+    // Printing the unset lines touches nothing privileged, and prompting for a
+    // sudo password inside `eval "$(...)"` would be both surprising and unusable.
+    if (!isRoot() && scriptArgs[0] !== 'print-unset-env') {
+        sudoSelf(scriptArgs);
+    }
+    runScriptWithoutSudo(scriptArgs);
+}
+function mixedPortFromConfig() {
+    const explicit = process.env.QP_TUNNEL_MIXED_PORT || process.env.MIHOMO_MIXED_PORT;
+    if (explicit && /^\d+$/.test(explicit)) {
+        return explicit;
+    }
+    const configFile = process.env.MIHOMO_CONFIG_FILE || defaultMihomoConfigFile;
+    if (!(0, node_fs_1.existsSync)(configFile)) {
+        process.stderr.write(`Mihomo config not found: ${configFile}\nRun: sudo qp-tunnel-cli install ... && sudo qp-tunnel-cli egress-on\n`);
+        process.exit(1);
+    }
+    const content = (0, node_fs_1.readFileSync)(configFile, 'utf8');
+    const match = /^\s*mixed-port\s*:\s*(\d+)/m.exec(content);
+    if (!match) {
+        process.stderr.write(`Could not detect mixed-port from ${configFile}\n`);
+        process.exit(1);
+    }
+    return match[1];
+}
+function mergeCsvValues(...values) {
+    const seen = new Set();
+    const merged = [];
+    for (const value of values) {
+        for (const item of (value || '').split(',')) {
+            const trimmed = item.trim();
+            if (!trimmed || seen.has(trimmed))
+                continue;
+            seen.add(trimmed);
+            merged.push(trimmed);
+        }
+    }
+    return merged.join(',');
+}
+function proxyEnvironment() {
+    const port = mixedPortFromConfig();
+    const hostProxy = `http://127.0.0.1:${port}`;
+    const hostSocksProxy = `socks5://127.0.0.1:${port}`;
+    const containerHost = process.env.QP_TUNNEL_CONTAINER_HOST || 'host.docker.internal';
+    const containerProxy = `http://${containerHost}:${port}`;
+    const noProxy = mergeCsvValues(process.env.NO_PROXY, process.env.no_proxy, defaultNoProxyEntries.join(','));
+    const containerNoProxy = mergeCsvValues(process.env.MARKET_CONTAINER_NO_PROXY, process.env.QP_TUNNEL_CONTAINER_NO_PROXY, noProxy);
+    return {
+        ...process.env,
+        HTTP_PROXY: hostProxy,
+        HTTPS_PROXY: hostProxy,
+        ALL_PROXY: hostSocksProxy,
+        http_proxy: hostProxy,
+        https_proxy: hostProxy,
+        all_proxy: hostSocksProxy,
+        NO_PROXY: noProxy,
+        no_proxy: noProxy,
+        npm_config_proxy: hostProxy,
+        npm_config_https_proxy: hostProxy,
+        npm_config_noproxy: noProxy,
+        pnpm_config_proxy: hostProxy,
+        pnpm_config_https_proxy: hostProxy,
+        pnpm_config_noproxy: noProxy,
+        QP_TUNNEL_MIXED_PORT: port,
+        QP_TUNNEL_HOST_HTTP_PROXY: hostProxy,
+        QP_TUNNEL_HOST_HTTPS_PROXY: hostProxy,
+        QP_TUNNEL_HOST_ALL_PROXY: hostSocksProxy,
+        QP_TUNNEL_CONTAINER_HTTP_PROXY: containerProxy,
+        QP_TUNNEL_CONTAINER_HTTPS_PROXY: containerProxy,
+        QP_TUNNEL_CONTAINER_NO_PROXY: containerNoProxy,
+        CONTAINER_HTTP_PROXY: containerProxy,
+        CONTAINER_HTTPS_PROXY: containerProxy,
+        CONTAINER_NO_PROXY: containerNoProxy,
+        BUILD_CONTAINER_HTTP_PROXY: containerProxy,
+        BUILD_CONTAINER_HTTPS_PROXY: containerProxy,
+        BUILD_CONTAINER_NO_PROXY: containerNoProxy,
+        MARKET_CONTAINER_HTTP_PROXY: process.env.MARKET_CONTAINER_HTTP_PROXY || containerProxy,
+        MARKET_CONTAINER_HTTPS_PROXY: process.env.MARKET_CONTAINER_HTTPS_PROXY || containerProxy,
+        MARKET_CONTAINER_NO_PROXY: containerNoProxy,
+    };
+}
+function runExternalCommand(commandArgs) {
+    if (commandArgs.length === 0) {
+        process.stderr.write('Missing command after qp-tunnel-cli --\n');
+        process.exit(1);
+    }
+    const [rawCommand, ...rawArgs] = commandArgs;
+    const command = rawCommand === 'sudo' && !rawArgs.includes('-E') ? 'sudo' : rawCommand;
+    const commandArgsWithSudoEnv = rawCommand === 'sudo' && !rawArgs.includes('-E') ? ['-E', ...rawArgs] : rawArgs;
+    const result = (0, node_child_process_1.spawnSync)(command, commandArgsWithSudoEnv, {
+        stdio: 'inherit',
+        env: proxyEnvironment(),
+    });
+    exitFromSpawn(result);
+}
+function commandAvailable(command) {
+    const result = (0, node_child_process_1.spawnSync)('sh', ['-c', `command -v ${command} >/dev/null 2>&1`], {
+        stdio: 'ignore',
+    });
+    return result.status === 0;
+}
+function shellQuote(value) {
+    if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+        return value;
+    }
+    return `'${value.replace(/'/g, "'\\''")}'`;
+}
+function runStep(command, commandArgs, dryRun = false) {
+    process.stdout.write(`+ ${[command, ...commandArgs].map(shellQuote).join(' ')}\n`);
+    if (dryRun) {
+        return;
+    }
+    const result = (0, node_child_process_1.spawnSync)(command, commandArgs, {
+        stdio: 'inherit',
+        env: process.env,
+    });
+    if (result.error) {
+        process.stderr.write(`${result.error.message}\n`);
+        process.exit(1);
+    }
+    if (result.signal) {
+        process.stderr.write(`Command terminated by signal ${result.signal}\n`);
+        process.exit(1);
+    }
+    if ((result.status ?? 0) !== 0) {
+        process.exit(result.status ?? 1);
+    }
+}
+function commandSucceeds(command, commandArgs) {
+    const result = (0, node_child_process_1.spawnSync)(command, commandArgs, {
+        stdio: 'ignore',
+        env: process.env,
+    });
+    return !result.error && !result.signal && result.status === 0;
+}
+function splitImageList(value) {
+    return value
+        .split(/[\s,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+function dedupe(values) {
+    const seen = new Set();
+    const result = [];
+    for (const value of values) {
+        if (seen.has(value))
+            continue;
+        seen.add(value);
+        result.push(value);
+    }
+    return result;
+}
+function k8sHelp() {
+    process.stdout.write(`Usage:
+  qp-tunnel-cli k8s help
+  qp-tunnel-cli k8s preload-images [options]
+
+Options:
+  --image <image>       Add one image. Can be repeated.
+  --images <images>     Add comma- or space-separated images.
+  --from-cluster        Include images referenced by current Kubernetes pods.
+  --namespace <name>    containerd namespace. Default: ${defaultK8sImageNamespace}
+  --no-pull             Import only images already present in Docker.
+  --dry-run             Print commands without running them.
+
+Default images used when no image options are provided and --from-cluster is not set:
+  ${defaultK8sRuntimeImages.join(' ')}
+
+The preload command pulls with Docker, saves each image, then imports it into
+containerd's k8s.io namespace so kubelet can start pods without reaching the
+remote registry itself. Run it after tun-on or egress-on on the K8s host.
+`);
+}
+function parseK8sPreloadArgs(commandArgs) {
+    let namespace = defaultK8sImageNamespace;
+    let pull = true;
+    let dryRun = false;
+    let fromCluster = false;
+    const images = [];
+    for (let index = 0; index < commandArgs.length; index += 1) {
+        const arg = commandArgs[index];
+        if (arg === '--image') {
+            const value = commandArgs[index + 1];
+            if (!value) {
+                process.stderr.write('Missing value for --image.\n');
+                process.exit(1);
+            }
+            images.push(value);
+            index += 1;
+        }
+        else if (arg === '--images') {
+            const value = commandArgs[index + 1];
+            if (!value) {
+                process.stderr.write('Missing value for --images.\n');
+                process.exit(1);
+            }
+            images.push(...splitImageList(value));
+            index += 1;
+        }
+        else if (arg === '--namespace') {
+            const value = commandArgs[index + 1];
+            if (!value) {
+                process.stderr.write('Missing value for --namespace.\n');
+                process.exit(1);
+            }
+            namespace = value;
+            index += 1;
+        }
+        else if (arg === '--no-pull') {
+            pull = false;
+        }
+        else if (arg === '--dry-run') {
+            dryRun = true;
+        }
+        else if (arg === '--from-cluster') {
+            fromCluster = true;
+        }
+        else if (arg === '--help' || arg === '-h') {
+            k8sHelp();
+            process.exit(0);
+        }
+        else {
+            process.stderr.write(`Unknown k8s preload-images option: ${arg}\n`);
+            process.exit(1);
+        }
+    }
+    return {
+        dryRun,
+        fromCluster,
+        images: dedupe(images),
+        namespace,
+        pull,
+    };
+}
+function ensureK8sHostTools(dryRun, fromCluster) {
+    if (dryRun) {
+        return;
+    }
+    const requiredCommands = fromCluster ? ['docker', 'ctr', 'kubectl'] : ['docker', 'ctr'];
+    const missing = requiredCommands.filter((command) => !commandAvailable(command));
+    if (missing.length > 0) {
+        process.stderr.write(`Missing required command(s): ${missing.join(', ')}\nInstall Docker and containerd, then retry on the K8s host.\n`);
+        process.exit(1);
+    }
+}
+function collectImagesFromContainerList(value, images) {
+    if (!Array.isArray(value)) {
+        return;
+    }
+    for (const container of value) {
+        if (typeof container === 'object' &&
+            container !== null &&
+            'image' in container &&
+            typeof container.image === 'string') {
+            images.push(container.image);
+        }
+    }
+}
+function collectClusterPodImages(dryRun) {
+    process.stdout.write('+ kubectl get pods -A -o json\n');
+    if (dryRun) {
+        return [];
+    }
+    const result = (0, node_child_process_1.spawnSync)('kubectl', ['get', 'pods', '-A', '-o', 'json'], {
+        encoding: 'utf8',
+        env: process.env,
+    });
+    if (result.error) {
+        process.stderr.write(`${result.error.message}\n`);
+        process.exit(1);
+    }
+    if (result.signal) {
+        process.stderr.write(`Command terminated by signal ${result.signal}\n`);
+        process.exit(1);
+    }
+    if ((result.status ?? 0) !== 0) {
+        process.stderr.write(result.stderr || 'kubectl get pods failed.\n');
+        process.exit(result.status ?? 1);
+    }
+    const parsed = JSON.parse(result.stdout);
+    const images = [];
+    for (const item of parsed.items ?? []) {
+        const spec = item.spec ?? {};
+        collectImagesFromContainerList(spec.initContainers, images);
+        collectImagesFromContainerList(spec.containers, images);
+        collectImagesFromContainerList(spec.ephemeralContainers, images);
+    }
+    return dedupe(images);
+}
+function importDockerImageIntoContainerd(image, namespace, dryRun) {
+    const tempDir = dryRun ? '/tmp/qp-tunnel-cli-k8s-dry-run' : (0, node_fs_1.mkdtempSync)((0, node_path_1.join)((0, node_os_1.tmpdir)(), 'qp-tunnel-cli-k8s-'));
+    const archive = (0, node_path_1.join)(tempDir, 'image.tar');
+    try {
+        runStep('docker', ['save', image, '-o', archive], dryRun);
+        runStep('ctr', ['-n', namespace, 'images', 'import', archive], dryRun);
+    }
+    finally {
+        if (!dryRun) {
+            (0, node_fs_1.rmSync)(tempDir, { recursive: true, force: true });
+        }
+    }
+}
+function preloadK8sImages(commandArgs) {
+    if (process.platform !== 'linux') {
+        process.stderr.write('K8s/containerd image preload targets Linux servers. Run this on the K8s host.\n');
+        process.exit(1);
+    }
+    if (!isRoot()) {
+        sudoSelf(['k8s', 'preload-images', ...commandArgs]);
+    }
+    const options = parseK8sPreloadArgs(commandArgs);
+    ensureK8sHostTools(options.dryRun, options.fromCluster);
+    const clusterImages = options.fromCluster ? collectClusterPodImages(options.dryRun) : [];
+    const images = dedupe([
+        ...(options.images.length > 0 || options.fromCluster ? options.images : defaultK8sRuntimeImages),
+        ...clusterImages,
+    ]);
+    if (images.length === 0) {
+        process.stderr.write('No K8s images found to preload.\n');
+        process.exit(1);
+    }
+    process.stdout.write(`Preloading ${images.length} image(s) into containerd namespace ${options.namespace}\n`);
+    for (const image of images) {
+        process.stdout.write(`\nImage: ${image}\n`);
+        const inDocker = !options.dryRun && commandSucceeds('docker', ['image', 'inspect', image]);
+        if (!inDocker && options.pull) {
+            runStep('docker', ['pull', image], options.dryRun);
+        }
+        else if (!inDocker && !options.pull) {
+            process.stderr.write(`Docker image is missing and --no-pull was set: ${image}\n`);
+            process.exit(1);
+        }
+        importDockerImageIntoContainerd(image, options.namespace, options.dryRun);
+    }
+    process.stdout.write('\nK8s/containerd image preload complete.\n');
+}
+function runK8sCommand(commandArgs) {
+    const subcommand = commandArgs[0] ?? 'help';
+    if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
+        k8sHelp();
+        return;
+    }
+    if (subcommand === 'preload' || subcommand === 'preload-images' || subcommand === 'containerd-preload') {
+        preloadK8sImages(commandArgs.slice(1));
+        return;
+    }
+    process.stderr.write(`Unknown k8s command: ${subcommand}\n`);
+    k8sHelp();
+    process.exit(1);
+}
+function parseInstallScriptArgs(scriptArgs) {
+    let target = defaultInstallTarget;
+    for (let index = 0; index < scriptArgs.length; index += 1) {
+        const arg = scriptArgs[index];
+        if (arg === '--target') {
+            const value = scriptArgs[index + 1];
+            if (!value) {
+                process.stderr.write('Missing value for --target.\n');
+                process.exit(1);
+            }
+            target = value;
+            index += 1;
+        }
+        else if (arg === '--help' || arg === '-h') {
+            process.stdout.write(`Usage:
+  qp-tunnel-cli install-script [--target /usr/local/bin/mihomo-client]
+
+Copies the bundled mihomo-client.sh to the target path and chmods it 755.
+`);
+            process.exit(0);
+        }
+        else {
+            process.stderr.write(`Unknown install-script option: ${arg}\n`);
+            process.exit(1);
+        }
+    }
+    return (0, node_path_1.resolve)(target);
+}
+function isPermissionError(error) {
+    return (typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'EACCES');
+}
+function installClientScript(scriptArgs) {
+    const target = parseInstallScriptArgs(scriptArgs);
+    const source = resolveClientScript();
+    try {
+        (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(target), { recursive: true });
+        (0, node_fs_1.copyFileSync)(source, target);
+        (0, node_fs_1.chmodSync)(target, 0o755);
+    }
+    catch (error) {
+        if (!isRoot() && isPermissionError(error)) {
+            sudoSelf(['install-script', ...scriptArgs]);
+        }
+        throw error;
+    }
+    process.stdout.write(`Installed mihomo-client launcher to ${target}\n`);
+}
+async function printScriptPath() {
+    const script = resolveClientScript();
+    try {
+        await (0, promises_1.access)(script, node_fs_1.constants.R_OK);
+    }
+    catch {
+        process.stderr.write(`Script is not readable: ${script}\n`);
+        process.exit(1);
+    }
+    process.stdout.write(`${script}\n`);
+}
+async function main() {
+    const command = args[0] ?? 'help';
+    if (command === '--') {
+        runExternalCommand(args.slice(1));
+    }
+    if (command === 'help' || command === '--help' || command === '-h') {
+        help();
+        return;
+    }
+    if (command === 'version' || command === '--version' || command === '-v') {
+        process.stdout.write(`${version()}\n`);
+        return;
+    }
+    if (command === 'client-help') {
+        clientHelp();
+    }
+    if (command === 'script-path') {
+        await printScriptPath();
+        return;
+    }
+    if (command === 'install-script') {
+        installClientScript(args.slice(1));
+        return;
+    }
+    if (command === 'k8s') {
+        runK8sCommand(args.slice(1));
+        return;
+    }
+    if (command === 'hdo' || command === 'hdo-enroll' || command === 'hdo-refresh') {
+        const hdoArgs = command === 'hdo' ? args.slice(1) : [command.replace(/^hdo-/, ''), ...args.slice(1)];
+        await (0, hdo_1.runHdoCli)(hdoArgs, { isRoot, sudoSelf });
+        return;
+    }
+    if (command === 'h2i' || command === 'h2i-enroll') {
+        const h2iArgs = command === 'h2i' ? args.slice(1) : ['enroll', ...args.slice(1)];
+        await (0, h2i_1.runH2iCli)(h2iArgs, { isRoot, sudoSelf });
+        return;
+    }
+    if (command === 'open' || command === 'ovpn' || command === 'openvpn') {
+        await (0, open_1.runOpenCli)(args.slice(1), { isRoot, sudoSelf });
+        return;
+    }
+    if (command === 'wg' || command === 'wireguard') {
+        await (0, wg_1.runWgCli)(args.slice(1), { isRoot, sudoSelf });
+        return;
+    }
+    const passthroughCommand = command === '--verbose' ? args[1] : command;
+    if (passthroughCommand && clientCommands.has(passthroughCommand)) {
+        runClientCommand(args);
+    }
+    if (args.length > 0) {
+        runExternalCommand(args);
+    }
+    help();
+}
+main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+});

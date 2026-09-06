@@ -177,6 +177,12 @@ key for that consumer, including a replacement key during zero-downtime rotation
 - is not written to localStorage, sessionStorage, a URL or an Admin API;
 - is sent only as `Authorization: Bearer …` to the existing public Hub path.
 
+This is the only value an operator may need to paste. The complete secret is shown once when **API Keys** issues
+or rotates it; a masked list row cannot be converted back into the secret, so a lost value must be rotated rather
+than revealed. While this page remains mounted, one successful zero-cost capability check is reused for subsequent
+cache and refresh choices. The workbench generates request idempotency keys itself, receives or recovers request
+UUIDs itself, and exposes no UUID input in the normal flow.
+
 No destructive key migration is required. `consumer` remains Hub's internal identity for grants, quotas, usage
 and future price-book resolution; it is not a second credential shown to the caller. Existing active Live keys
 continue to resolve to that identity after the normal database migrations are applied.
@@ -207,22 +213,27 @@ replacing it with a Live key is not an in-page recovery path.
 
 For provider-capable requests, the workbench stores only the secret-free exact request ledger, a one-way
 API-key-secret fingerprint and, when the Hub returned one, the request UUID. A transport/persistence-ambiguous
-result is first reconciled with `GET /api/v1/requests/{requestId}` using the original Live key. This read creates
-no Hub usage and cannot dispatch a provider call. `reserved` and `unknown` keep the browser lock and never enable
-POST replay; `committed` enables one exact replay of the prior path, normalized body and `Idempotency-Key`;
-`released` clears the local lock, clears the anti-misclick confirmation and requires a fresh confirmation before
-any new provider-capable request. Creating a new `Idempotency-Key` while the original is unresolved can turn an
-uncertain attempt into a second dispatch and another provider-cost event. By contrast, a 502
-`external_platform_response_unusable` is a stable committed failure: it may carry provider cost, but exact replay
-returns the same 502 without redispatch and the UI does not retain an endless ambiguity lock.
-Editing or rotating the Hub Public API key may discard a resolved local replay shortcut, but it never clears an
-ambiguous request lock. For an ambiguous Live request, a credential-fingerprint mismatch rejects even the status
-lookup and requires the original Live secret or operator reconciliation; the workbench does not guess that a
-replacement belongs to the same consumer and does not unlock a new request. Browser records written before the
-request UUID was retained accept a pasted UUID from the original response. When a transport failure returned no
-UUID, the page exposes an explicit operator path using the retained `Idempotency-Key`; it never falls back to POST.
-A historical Test-key record always follows the operator-only path above. Backend authorization and idempotency
-scope remain consumer-scoped.
+result is first reconciled with a read-only request-status call. When the UUID is present the page uses
+`GET /api/v1/requests/{requestId}`; otherwise it sends the retained key in the `Idempotency-Key` header to
+`GET /api/v1/requests/by-idempotency-key`. Neither read creates Hub usage or dispatches a provider call.
+`reserved` and `unknown` keep the browser lock and never enable POST replay; `committed` enables one exact replay
+of the prior path, normalized body and `Idempotency-Key`; `released` clears the local lock, clears the
+anti-misclick confirmation and requires a fresh confirmation before any new provider-capable request. Creating a
+new `Idempotency-Key` while the original is unresolved can turn an uncertain attempt into a second dispatch and
+another provider-cost event. By contrast, a 502 `external_platform_response_unusable` is a stable committed
+failure: it may carry provider cost, but exact replay returns the same 502 without redispatch and the UI does not
+retain an endless ambiguity lock.
+
+The status lookup is authorized by the current Hub Public API key's consumer, not by equality with the old secret
+fingerprint. A rotated active key for the same consumer can therefore reconcile the request; another consumer
+receives `404 request_not_found`. Browser ledger schema v1 is migrated in place to v2: valid body,
+`Idempotency-Key`, fingerprint and request identity are retained; corrupt entries are removed; UUID-less entries
+are resolved automatically through the header-based lookup after the current key passes its zero-cost check. The
+normal product flow contains no UUID field and never asks an operator to copy one from an old response. A missing
+server row clears an orphaned browser-only record only when it came from the historical v1 ledger and an
+authenticated consumer-scoped lookup returns the explicit `request_not_found` code. A route-level `not_found`, a
+new v2 ambiguity or any other failure stays fail-closed. Backend usage, gateway, provider-call and archive evidence
+is never deleted by this browser migration.
 
 The upstream JustOne key remains in **数据清洗中心 → 外部数据平台 → JustOne → API Key 管理**. Reveal/copy
 requires a second Admin Token check; it never belongs in this product, source-catalog metadata or public docs.
@@ -391,17 +402,19 @@ apply customer rates through the same consumer identity, without issuing a secon
 
 - Same path + same normalized body + same `Idempotency-Key` means one exact logical request.
 - Same `Idempotency-Key` + different body returns `409 idempotency_conflict`.
-- An ambiguous request is recovered by reading `GET /api/v1/requests/{requestId}`, not by repeating the POST.
-  `reserved` and `unknown` are still unresolved and keep the acquisition lock. A new `Idempotency-Key` is never a
-  recovery mechanism. `committed` is the only status that enables exact POST replay; `released` requires a fresh
-  acquisition confirmation and a new key. A committed `external_platform_response_unusable` is resolved evidence,
-  not an ambiguous browser lock.
-- Replay is consumer-scoped in the backend. The browser workbench stores only a one-way fingerprint of the
-  exact API-key secret and requires that same secret for conservative status lookup and committed replay; rotating a
-  key does not reveal whether two secrets belong to the same consumer in browser memory.
-- A historical ambiguous Test-key record remains locked to its stored body, `Idempotency-Key` and fingerprint for
-  operator reconciliation. The page neither validates nor replays it and does not convert it into a Live request;
-  independently chosen safe-demo and `cache_only` reads remain available.
+- An ambiguous request is recovered by reading `GET /api/v1/requests/{requestId}`, or by sending the retained
+  `Idempotency-Key` header to `GET /api/v1/requests/by-idempotency-key` when an older client has no UUID. It is never
+  recovered by repeating the POST. `reserved` and `unknown` are still unresolved and keep the acquisition lock. A
+  new `Idempotency-Key` is never a recovery mechanism. `committed` is the only status that enables exact POST replay;
+  `released` requires a fresh acquisition confirmation and a new key. A committed
+  `external_platform_response_unusable` is resolved evidence, not an ambiguous browser lock.
+- Lookup and replay are consumer-scoped in the backend. The browser retains a one-way fingerprint only as local
+  evidence; it does not require the obsolete secret. A current active key for the same consumer can reconcile a
+  request after key rotation, while the server returns `request_not_found` for another consumer.
+- A historical ambiguous Test-key browser record is migrated to the same v2 ledger. The workbench never sends the
+  Test secret to ecommerce, but a current verified Live key can perform the read-only idempotency lookup if it belongs
+  to the same consumer. `reserved`/`unknown` remain locked; a missing or different-consumer record cannot be guessed
+  or replayed. Independently chosen safe-demo and `cache_only` reads remain available.
 - A next cursor is a new request and uses a new `Idempotency-Key`.
 - Returning to page one is explicit: replay a `committed` original `Idempotency-Key` for the original result, or use
   a new `Idempotency-Key` to ask for a new first-page observation after any unresolved lock has been reconciled.
@@ -486,11 +499,13 @@ historical evidence and are not simulated from other endpoints.
   assertion.
 - Switching from any sandbox strategy to Live resets the real strategy to `cache_only`. Changing any request
   semantic or key clears a prior acquisition confirmation.
-- Live mode cannot submit without a `mih_live_` Hub Public API Key and explicit cost confirmation.
-- A Test key makes no capabilities, search or media request from the workbench; a historical ambiguous Test
-  record stays locked for operator reconciliation.
-- Ambiguous recovery sends only `GET /api/v1/requests/{requestId}`. `reserved`/`unknown` retain the lock,
-  `committed` alone enables exact replay, and `released` resets the cost confirmation before a new request.
+- Live mode cannot submit without a verified `mih_live_` Hub Public API Key. A provider-capable `cache_first` or
+  `refresh` request additionally requires one explicit cost confirmation; `cache_only` does not.
+- A Test key makes no ecommerce capabilities, search or media request from the workbench. A migrated historical
+  record is reconciled only after a current Live key passes the zero-cost check.
+- Ambiguous recovery sends only one of the two request-status GETs. The normal flow exposes no UUID input.
+  `reserved`/`unknown` retain the lock, `committed` alone enables exact replay, and `released` resets the cost
+  confirmation before a new request.
 - The provider key cannot appear in browser storage, URL, source catalog or public output.
 - `live`, `fresh_cache`, `stored_fallback` and `idempotent_replay` are visibly distinct.
 - API errors render inside the main treasure-box panel as a full-width, first-screen status with error code and

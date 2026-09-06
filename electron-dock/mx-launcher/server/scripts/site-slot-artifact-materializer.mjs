@@ -13,6 +13,12 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  tunnelCliDegradedFallbackFiles,
+  tunnelCliExecutableFiles,
+  tunnelCliFullFallbackFiles,
+  tunnelCliFullFallbackReady
+} from './site-slot-tunnel-cli-contract.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const mxRoot = resolveMxRoot(scriptDir);
@@ -218,22 +224,11 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
       ? ['Domestic and Internal host-runner bootstrap use this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.']
       : ['Server-safe degraded qp-tunnel-cli fallback was materialized without compiling electron-plugin/native dependencies. It is enough for Internal API image build; refresh from a built @qpjoy/tunnel-cli tarball before relying on Domestic offline qp-tunnel-cli node commands.'],
     buildStaging: (staging) => {
-      copyRequired(sourceRoot, join(staging, 'package'), [
-        'package.json',
-        'README.md',
-        'README.setup.md',
-        'resources/mihomo-client.sh'
-      ]);
-      if (fullFallbackReady) {
-        copyOptional(sourceRoot, join(staging, 'package'), [
-          'dist/index.js',
-          'dist/hdo.js',
-          'dist/h2i.js',
-          'dist/index.d.ts',
-          'dist/hdo.d.ts',
-          'dist/h2i.d.ts'
-        ]);
-      }
+      copyRequired(
+        sourceRoot,
+        join(staging, 'package'),
+        fullFallbackReady ? tunnelCliFullFallbackFiles : tunnelCliDegradedFallbackFiles
+      );
       const binDir = join(staging, 'bin');
       mkdirSync(binDir, { recursive: true });
       writeFileSync(join(binDir, 'qp-tunnel-cli'), [
@@ -272,20 +267,11 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
       ].join('\n'));
       copyTunnelCliRuntimeDependencies(staging, { allowMissing: !fullFallbackReady });
       chmodIfExists(join(binDir, 'qp-tunnel-cli'), 0o755);
-      chmodIfExists(join(staging, 'package/resources/mihomo-client.sh'), 0o755);
+      for (const file of tunnelCliExecutableFiles) {
+        chmodIfExists(join(staging, 'package', file), 0o755);
+      }
     }
   });
-}
-
-function tunnelCliFullFallbackReady(sourceRoot) {
-  return [
-    'dist/index.js',
-    'dist/hdo.js',
-    'dist/h2i.js',
-    'dist/index.d.ts',
-    'dist/hdo.d.ts',
-    'dist/h2i.d.ts'
-  ].every((file) => existsSync(join(sourceRoot, file)));
 }
 
 function tunnelCliRuntimeReady() {

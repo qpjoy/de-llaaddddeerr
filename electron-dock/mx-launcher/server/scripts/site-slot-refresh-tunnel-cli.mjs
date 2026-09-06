@@ -13,6 +13,10 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  tunnelCliExecutableFiles,
+  tunnelCliFullFallbackFiles
+} from './site-slot-tunnel-cli-contract.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const mxRoot = resolve(scriptDir, '../..');
@@ -25,19 +29,8 @@ const requestedVersion = optionValue('--version') || positionalArgs()[0] || (fro
 
 if (fromLocal && fromTarball) die('Use only one of --from-local DIR or --from-tarball FILE');
 
-const requiredFiles = [
-  'package.json',
-  'README.md',
-  'README.setup.md',
-  'dist/index.js',
-  'dist/hdo.js',
-  'dist/h2i.js',
-  'dist/index.d.ts',
-  'dist/hdo.d.ts',
-  'dist/h2i.d.ts',
-  'resources/mihomo-client.sh',
-  'resources/manage.sh'
-];
+const requiredFiles = tunnelCliFullFallbackFiles;
+const executableFiles = new Set(tunnelCliExecutableFiles);
 
 const sourceDir = fromLocal ? resolve(fromLocal) : fromTarball ? fetchFromTarball(fromTarball) : fetchFromNpm();
 const packageJson = readPackageJson(sourceDir);
@@ -117,7 +110,7 @@ function copyFallbackSource(sourceRoot, targetRoot) {
     const target = join(targetRoot, file);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
-    if (file === 'resources/mihomo-client.sh' || file === 'resources/manage.sh') chmodSync(target, 0o755);
+    if (executableFiles.has(file)) chmodSync(target, 0o755);
   }
 }
 

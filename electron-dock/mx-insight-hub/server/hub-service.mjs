@@ -205,6 +205,7 @@ const CANONICAL_SEARCH_USAGE_SCOPE = 'data.canonical-search'
 const TOKENIZE_MAX_TEXT_LENGTH = 4_096
 const TOKENIZE_MAX_TOKENS = 8_192
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/
 
 function canonicalPlatform(value) {
   const platform = requiredString(value, 'platform').toLowerCase()
@@ -231,6 +232,32 @@ function requiredUuid(value, field) {
   const normalized = requiredString(value, field)
   assert(UUID_PATTERN.test(normalized), 400, 'invalid_request', `${field} must be a UUID`)
   return normalized
+}
+
+function requiredIdempotencyKey(value) {
+  assert(value, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
+  assert(
+    typeof value === 'string' && IDEMPOTENCY_KEY_PATTERN.test(value),
+    400,
+    'invalid_idempotency_key',
+    'Idempotency-Key must contain 8-128 safe characters',
+  )
+  return value
+}
+
+function publicRequestStatus(record) {
+  return {
+    id: record.id,
+    status: record.status,
+    ...(record.platform ? { platform: record.platform } : {}),
+    ...(record.capability ? { capability: record.capability } : {}),
+    units: record.status === 'committed' ? record.unitsActual : null,
+    errorCode: record.errorCode,
+    ...(record.deliverySourceMode ? { sourceMode: record.deliverySourceMode } : {}),
+    ...(record.capturedAt ? { capturedAt: record.capturedAt } : {}),
+    reservedAt: record.reservedAt,
+    completedAt: record.completedAt,
+  }
 }
 
 function optionalUuid(value, field) {
@@ -2469,18 +2496,15 @@ export class HubService {
     await this.store.reapStaleReservations()
     const record = await this.store.getRequest(requiredUuid(requestId, 'requestId'), context.consumer.id)
     assert(record, 404, 'request_not_found', 'Request not found')
-    return {
-      id: record.id,
-      status: record.status,
-      ...(record.platform ? { platform: record.platform } : {}),
-      ...(record.capability ? { capability: record.capability } : {}),
-      units: record.status === 'committed' ? record.unitsActual : null,
-      errorCode: record.errorCode,
-      ...(record.deliverySourceMode ? { sourceMode: record.deliverySourceMode } : {}),
-      ...(record.capturedAt ? { capturedAt: record.capturedAt } : {}),
-      reservedAt: record.reservedAt,
-      completedAt: record.completedAt,
-    }
+    return publicRequestStatus(record)
+  }
+
+  async requestStatusByIdempotencyKey(context, idempotencyKey) {
+    const key = requiredIdempotencyKey(idempotencyKey)
+    await this.store.reapStaleReservations()
+    const record = await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, key)
+    assert(record, 404, 'request_not_found', 'Request not found')
+    return publicRequestStatus(record)
   }
 
   #enterExternalMedia(consumerId) {

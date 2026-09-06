@@ -4509,6 +4509,18 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/requests/by-idempotency-key') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'request status lookup')
+        sendJson(response, 200, {
+          data: await service.requestStatusByIdempotencyKey(
+            context,
+            request.headers['idempotency-key'],
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/api/v1/requests/:id')
       if (request.method === 'GET' && params) {
         const context = await requirePublic(request)

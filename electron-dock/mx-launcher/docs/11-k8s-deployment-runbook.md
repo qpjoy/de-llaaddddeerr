@@ -743,8 +743,9 @@ runtime 配置、精确重建 DNS service，并以 UDP/TCP 查询验收。
 Apply Domestic Runtime`。不要绕过 Config Center 直接裸跑 materializer，以免新 artifact
 缺少现有 WireGuard secret。
 
-构建镜像前，脚本会检查 `site-slots/domestic/qp-tunnel-cli` fallback 是否包含
-`dist/index.js`、`dist/hdo.js` 和声明文件。CentOS/Internal runtime 主机默认不安装或编译
+构建镜像前，脚本会检查 `site-slots/domestic/qp-tunnel-cli` fallback 是否包含完整的
+`dist/index|hdo|h2i|open|wg` JS/声明文件及 OpenVPN/WireGuard shell resources。
+CentOS/Internal runtime 主机默认不安装或编译
 `electron-plugin` workspace，避免触发 `better-sqlite3`、Electron native module、
 node-gyp 等桌面/原生依赖；如果 fallback dist 缺失，materializer 会生成一个
 server-safe degraded fallback，足够完成 Internal API 镜像构建和 K8s 部署。需要给

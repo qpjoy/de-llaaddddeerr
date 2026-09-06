@@ -112,6 +112,7 @@ Usage:
   qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --username user
   qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --anonymous
   qp-tunnel-cli open install --subnet 100.127.0.0/24
+  qp-tunnel-cli open reconfigure --client-to-client
   qp-tunnel-cli open create internal-01 --ip 100.127.0.10
   qp-tunnel-cli open enroll --file internal-01.ovpn
   qp-tunnel-cli wg install --host 203.0.113.10 --subnet 100.127.50.0/24

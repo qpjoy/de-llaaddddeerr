@@ -3541,6 +3541,44 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /requests/by-idempotency-key:
+    get:
+      operationId: getRequestByIdempotencyKey
+      summary: Find the authenticated consumer's request by its original idempotency key
+      description: >-
+        Read-only recovery for clients that retained the original Idempotency-Key
+        but did not receive the durable request UUID. Send the value only in the
+        Idempotency-Key header, never in the URL. The lookup creates no usage,
+        cannot dispatch an upstream call, and returns neither the stored response
+        body nor the idempotency key. Any active key for the same consumer may
+        query the record; another consumer receives request_not_found. data.id is
+        the original request UUID while the envelope requestId identifies this
+        lookup operation.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'
+      responses:
+        "200":
+          description: Caller-owned, no-dispatch request status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RequestStatus"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /requests/{requestId}:
     get:
       operationId: getRequest

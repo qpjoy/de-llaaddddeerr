@@ -108,10 +108,13 @@ external I/O. If an older workbench left an ambiguous Test-key record, it preser
 
 For an ambiguous Live outcome, recovery preserves the exact Public path, normalized body and
 `Idempotency-Key`. A different `Idempotency-Key` can create a second live dispatch and another provider-cost
-event. Replacing the Hub Public API key may clear only a resolved local replay shortcut. An ambiguous lock is
-retained; an API-key-secret fingerprint mismatch rejects replay and requires the original Live secret or operator
-reconciliation, without guessing that a replacement belongs to the same consumer or unlocking a new request.
-Backend authorization and idempotency remain consumer-scoped.
+event. The browser first uses a known Request ID when available; otherwise it calls
+`GET /api/v1/requests/by-idempotency-key` with the original value in the `Idempotency-Key` header. The current
+active Hub Public API key may perform either lookup when it belongs to the same consumer, including after key
+rotation. A locally stored API-key fingerprint is evidence for diagnostics, not an authorization requirement, and
+the UI never asks the user to find or paste a UUID. A different consumer receives `request_not_found` without
+learning whether the request exists. `reserved` and `unknown` remain locked for reconciliation; only `committed`
+is replayed and `released` permits a new request. Backend authorization and idempotency remain consumer-scoped.
 None of this exposes the JustOne credential or provider endpoint identity through the Public contract.
 
 The Public authentication order is also independent of JustOne: a missing Hub Public API key is

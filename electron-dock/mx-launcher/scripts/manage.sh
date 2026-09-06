@@ -1144,10 +1144,19 @@ qp_tunnel_cli_fallback_ready() {
     dist/index.js
     dist/hdo.js
     dist/h2i.js
+    dist/open.js
+    dist/wg.js
     dist/index.d.ts
     dist/hdo.d.ts
     dist/h2i.d.ts
+    dist/open.d.ts
+    dist/wg.d.ts
     resources/mihomo-client.sh
+    resources/manage.sh
+    resources/openvpn-server.sh
+    resources/openvpn-client.sh
+    resources/wireguard.sh
+    resources/china-ipv4-coarse.txt
   )
   local file
   for file in "${required[@]}"; do

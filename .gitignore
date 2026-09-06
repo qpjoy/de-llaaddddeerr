@@ -55,6 +55,20 @@ electron-dock/mx-launcher/.tmp/
 electron-dock/mx-launcher/demos/mx-h2i/.env
 electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/refresh-metadata.json
 
+# The Domestic qp-tunnel-cli fallback is a checked-in release input, not a local build output.
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/
+electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/*
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/index.js
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/index.d.ts
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/hdo.js
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/hdo.d.ts
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/h2i.js
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/h2i.d.ts
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/open.js
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/open.d.ts
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/wg.js
+!electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/dist/wg.d.ts
+
 deploy-demo/
 
 # MX Launcher demo dev-mode (local|npm) switch state

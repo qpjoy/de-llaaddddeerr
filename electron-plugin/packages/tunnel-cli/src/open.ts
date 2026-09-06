@@ -41,6 +41,7 @@ const scriptCandidates = {
 /** Commands that only ever make sense on the Oversea server. */
 const serverOnlyCommands = new Set([
   'install',
+  'reconfigure',
   'create',
   'reissue',
   'list',
@@ -254,6 +255,8 @@ Oversea server:
   qp-tunnel-cli open install [--subnet CIDR] [--port PORT] [--proto udp|tcp]
                              [--host ADDR] [--port-range 20000-20100]
                              [--runtime auto|docker|host]
+  qp-tunnel-cli open reconfigure --client-to-client
+  qp-tunnel-cli open reconfigure --no-client-to-client
   qp-tunnel-cli open create internal-01 [--ip 100.127.0.10] [--oversea]
   qp-tunnel-cli open reissue internal-01
   qp-tunnel-cli open list

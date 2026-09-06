@@ -44,7 +44,8 @@ default via 192.168.1.1 dev eno2          物理出口
 # 海外
 qp-tunnel-cli open preflight --server --subnet 100.127.0.0/24
 qp-tunnel-cli open install --host 203.0.113.10 --port-range 20000-20100
-qp-tunnel-cli open create internal-01 --ip 100.127.0.10 --oversea
+qp-tunnel-cli open create internal-01 --ip 100.127.0.10
+qp-tunnel-cli open reconfigure --client-to-client
 qp-tunnel-cli open list
 qp-tunnel-cli open reachable
 
@@ -62,6 +63,11 @@ qp-tunnel-cli open egress off
 `--instance` 是命名空间，默认 `mx`，**一台海外服务器一个 instance**。每个 instance
 独占接口名、systemd unit、iptables 链和状态目录，所以一台内网机器可以同时连多台
 海外服务器而互不干扰。
+
+Windows 不运行 spoke 脚本，而是直接导入 `open create` 生成的 profile：OpenVPN
+Community GUI 用 `.ovpn`，OpenVPN Connect 用 `.connect.ovpn`。`--oversea` 不是
+“客户端位于海外”的标记，而是允许该客户端后续选择服务端 egress 的权限；只做
+固定 VPN 地址互访时不要加。
 
 ## 4. 网段：为什么是 `100.127.0.0/24`
 
@@ -90,7 +96,7 @@ kubeadm 默认不用，离 HDO 占用的 100.88–100.91 足够远，而且 tunn
 
 ## 5. 客户端的非侵入保证
 
-生成的 `client.conf` 固定包含：
+CLI `enroll` 后生成的受管 `client.conf` 固定包含：
 
 ```
 dev ovpn-<instance>          # 不抢 tun0；接口名由 instance 决定，绝不自动挑
@@ -103,12 +109,17 @@ pull-filter ignore "route"
 pull-filter ignore "route-ipv6"
 pull-filter ignore "block-outside-dns"
 pull-filter ignore "register-dns"
-script-security 0            # 没有 up/down 钩子，谁都改不了 resolv.conf
+script-security 1            # 只允许 OpenVPN 自带的接口/路由 helper，不允许自定义脚本
 ```
 
 `route-nopull` 保留 `ifconfig`，所以仍然拿到分配地址，内核只多一条
 `100.127.0.0/24 dev ovpn-mx` 的直连路由。OpenVPN ≥ 2.5 已经把 `dhcp-option`
 并入 `route-nopull`，显式 pull-filter 是为了让 RHEL 上的老客户端得到同样约束。
+
+这里的 `script-security 1` 是 Linux/RHEL 上配置 tun 接口所需的最低等级；等级 2 才会
+允许自定义脚本，因此它不会引入修改 DNS 或默认路由的 hook。直接签发的 `.ovpn`
+profile 仍然写 `script-security 0`；两种路径都由 `route-nopull` 和 pull-filter 限制
+服务端路由输入。
 
 服务端也不 push 任何东西（`write_server_config` 里没有一行 `push`），所以就算有人
 绕过本工具直接 `openvpn --config`，也一样拿不到路由和 DNS。
@@ -191,6 +202,50 @@ OpenVPN 自己会依次重试。零协调成本。
 所有防火墙规则都放在 `QP-OPEN-<instance>` 和 `QP-OPEN-<instance>-NAT` 两条专属链里，
 `PREROUTING`/`POSTROUTING` 上只有一条跳转，卸载时精确删除。有测试守住这条规矩。
 
+### 6.5 多 spoke 固定地址互访（peer mesh）
+
+默认关闭 spoke 互访。需要让外网 Windows、海外 Linux 和内网服务器通过各自固定
+VPN 地址互通时，在 hub 上执行一次：
+
+```bash
+sudo qp-tunnel-cli open reconfigure --server --instance mx --client-to-client
+```
+
+这是窄范围、可回滚的重配置，不是第二次 `install --force`。命令只替换
+`server.conf` 中 tunnel-cli 自己管理的 peer-mesh 指令，以及 `server.env` 中对应
+开关；endpoint、subnet、runtime、egress、PKI、CCD 固定地址、已经签发的 profiles、
+iptables 和 sysctl 都保持原样。服务正在运行时只短重启一次；新配置启动失败会恢复
+旧的 `server.conf`/`server.env`，再启动旧服务。原有内网客户端只会短暂重连，不需要
+重新 enroll、reissue 或导入 profile。
+
+开启时，服务端配置尾部固定按以下顺序写入：
+
+```text
+ignore-unknown-option disable-dco
+disable-dco
+client-to-client
+```
+
+原因是 OpenVPN 2.6+ 的 DCO 会让数据绕过 OpenVPN 用户态，单写
+`client-to-client` 不能保证客户端互访。显式关闭服务端 DCO 后，spoke 间数据在
+OpenVPN 用户态转发，不需要为了 peer mesh 打开 `net.ipv4.ip_forward`，也不需要新增
+Linux `FORWARD` 规则；`ignore-unknown-option` 让较旧、尚不认识 `disable-dco` 的
+OpenVPN 忽略这一条。
+
+这是**所有 enrolled 客户端的 full-trust mesh**，不是 spoke isolation firewall。
+它只让客户端通过 VPN 网段地址互访，例如 Windows 访问 `100.127.0.10`；不会自动
+发布内网 LAN、Docker bridge、Kubernetes CNI 或其他本地网段。要访问那些网段，需要
+另行设计 site-to-site 路由、回程和访问控制，不能靠这个开关隐式完成。
+
+关闭用户态 mesh 的回滚命令是：
+
+```bash
+sudo qp-tunnel-cli open reconfigure --server --instance mx --no-client-to-client
+```
+
+它同样不改防火墙或 sysctl。若机器上原本就有其他内核转发策略，关闭这个开关也不
+等同于建立客户端隔离；需要隔离时应另做明确的防火墙策略。
+
 ## 7. 红线
 
 以下东西全程不碰，任何后续改动都不应该突破：
@@ -201,12 +256,14 @@ OpenVPN 自己会依次重试。零协调成本。
   我们只用 `qp-openvpn-client@`、`qp-openvpn-server@`、`qp-openvpn-firewall@`，
   而且发现同名文件不是自己写的就直接拒绝覆盖
 - `/etc/resolv.conf`、`systemd-resolved`、任何 resolver
-- `net.ipv4.ip_forward`（只有服务端为了 egress NAT 才开，写在独立的 sysctl.d 文件里）
+- `net.ipv4.ip_forward`（只有服务端为了 egress NAT 才开，写在独立的 sysctl.d 文件里；
+  peer mesh 的 `reconfigure` 不改它）
+- Linux `FORWARD` 规则（peer mesh 走 OpenVPN 用户态，不靠新增 host-wide 转发规则）
 - 上述两条自有链之外的任何 iptables 链
 
-对 `@qpjoy/tunnel-cli` 自身：新增只有 `src/open.ts` 和两个 `resources/openvpn-*.sh`，
-`index.ts` 只多一行 dispatch。`h2i.ts`、`hdo.ts`、`mihomo-client.sh` 一行未改，
-`npm i -g` 之后的默认行为完全不变。
+对 `@qpjoy/tunnel-cli` 自身：OpenVPN 的功能改动保持在 `src/open.ts`、
+`scripts/openvpn-server.sh` 及其打包镜像内；`index.ts` 只注册命令入口。
+`h2i.ts`、`hdo.ts`、`mihomo-client.sh` 和既有登录语义不随这个功能改变。
 
 ## 8. Egress（可选，默认关闭）
 
@@ -269,6 +326,11 @@ client-config-dir，与客户端实现无关。
 | `<name>.ovpn` | OpenVPN 2.4.7+、Tunnelblick、Windows 社区版 GUI、`open enroll` | 完整严格版：`topology subnet`、6 条 `pull-filter`、`script-security 0`、`ignore-unknown-option` + `cipher` 兼容行 |
 | `<name>.connect.ovpn` | **OpenVPN Connect**、iOS/Android 官方 App | 只留 OpenVPN 3 认识的：`route-nopull` + `data-ciphers`，其余全部去掉 |
 
+Windows 也按这一列选择：OpenVPN Community GUI 导入 `.ovpn`，OpenVPN Connect
+导入 `.connect.ovpn`。给 Windows 签发独立身份和固定地址，不要和内网服务器复用
+profile；只做 peer mesh 时不要传 `--oversea`。连通后访问的是对端 VPN 固定地址，
+目标服务还必须监听该地址（或 `0.0.0.0`），并允许来自 VPN 网段的对应端口。
+
 ### OpenVPN 3 到底不认什么（实测）
 
 2026-08-26 用 OpenVPN Connect 实测，它**不是忽略未知选项，而是整份 profile 拒绝**：
@@ -324,6 +386,9 @@ VPN" 勾选项，**默认的 Set nameserver 就会改 DNS**。Windows GUI 以服
 - **内网生产服务器：用 `qp-tunnel-cli open enroll`。** 那台机器的网络复杂度正是
   preflight 和 doctor 存在的理由。
 - **临时验证、手机、别人的电脑：直接导入没问题**，profile 本身就是安全的。
+- **外网 Windows：使用对应 GUI 的 profile 直接导入。** 导入前确认 VPN 网段不与
+  Windows 本地路由冲突；若需要内网主动访问 Windows，还要为具体端口配置范围受限的
+  Windows Defender Firewall 入站规则。
 - 直接导入前至少手动做一次冲突检查：把 profile 头部的 `# qp-open-subnet:` 拿出来，
   和目标机器的 `ip route show table all` 比一遍。
 
@@ -335,6 +400,17 @@ VPN" 勾选项，**默认的 Set nameserver 就会改 DNS**。Windows GUI 以服
 qp-tunnel-cli open reachable          # ping 每个已配置 spoke 的固定地址
 curl http://100.127.0.10:<port>/healthz
 ```
+
+开启 peer mesh 后，再从 Windows 对内网固定 VPN 地址做端口级验证，例如 PowerShell：
+
+```powershell
+Test-NetConnection 100.127.0.10 -Port 22
+Get-NetRoute -DestinationPrefix 0.0.0.0/0
+Get-DnsClientServerAddress
+```
+
+第一条验证目标业务端口，后两条确认导入前后的默认路由和 DNS 没有变化。Windows
+客户端自身的 GUI 里也不能额外开启“所有流量走 VPN”或 DNS 接管。
 
 内网侧，不靠声称靠 diff：
 
@@ -349,7 +425,8 @@ Hub API 可达。
 
 - 海外新服务器的云厂商与 VPC 网段（AWS 默认 VPC 是 `172.31.0.0/16`，
   会影响候选段判断；`preflight --server` 会实测）
-- 是否需要多台内网机器接同一个 server（决定要不要开 `client-to-client`）
+- full-trust peer mesh 是否长期满足授权边界；若未来有不互信的客户端，需要显式 ACL
+  或拆成不同 instance，而不是把 `--no-client-to-client` 当成隔离防火墙
 - `10.8.0.0/24` 上那套已有 OpenVPN server 的归属与去留（当前一律不碰）
 - 是否把 `open` 收进 `site-slots/oversea/` 做成可推送模块，以及 Admin UI 入口。
   materializer 的 `materializeOversea()` 本身就是一个 modules 数组，

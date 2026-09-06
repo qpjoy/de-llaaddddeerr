@@ -1842,6 +1842,28 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         },
       },
     },
+    '/requests/by-idempotency-key': {
+      get: {
+        tags: ['Evidence'],
+        operationId: 'getPublicRequestStatusByIdempotencyKey',
+        summary: 'Find this consumer\'s request by its original idempotency key',
+        description: 'Recovery path for a client that retained its Idempotency-Key but did not receive the durable request UUID. Send the value only in the Idempotency-Key header. This consumer-scoped GET creates no usage, returns no stored response body or idempotency key and cannot dispatch an upstream call. Any current active key for the same consumer may perform the lookup; another consumer receives request_not_found.',
+        parameters: [{
+          name: 'Idempotency-Key', in: 'header', required: true,
+          schema: { type: 'string', minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$' },
+          description: 'The exact key retained for the original request. Do not put it in a URL query or path.',
+        }],
+        responses: {
+          200: {
+            description: 'Caller-owned request status. data.id is the original durable request UUID; the envelope requestId identifies this lookup.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/RequestStatusEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          404: errorResponse,
+        },
+      },
+    },
     '/requests/{requestId}': {
       get: {
         tags: ['Evidence'],
@@ -4396,7 +4418,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $REFRESH_KEY" \
   -d "$REFRESH_BODY" | jq '.meta.sourceMode,.requestId,.data.page'</code></pre>
-    <p>只有返回 <code>sourceMode=live</code> 才证明本次成功结果来自新采集；<code>stored_fallback</code> 可能发生在一次失败派发之后，最终采购成本仍以 Internal provider-call 证据为准。若首次结果不确定，先以响应的 requestId 查询 <code>GET /api/v1/requests/{requestId}</code>；该 GET 不创建 usage，也不会调用供应方。<code>reserved</code> 或 <code>unknown</code> 时不得重复 POST，<code>released</code> 时任何新采集都需重新明确确认。只有状态已是 <code>committed</code>，才可原样重放已提交请求：</p>
+    <p>只有返回 <code>sourceMode=live</code> 才证明本次成功结果来自新采集；<code>stored_fallback</code> 可能发生在一次失败派发之后，最终采购成本仍以 Internal provider-call 证据为准。若首次结果不确定，优先以响应的 requestId 查询 <code>GET /api/v1/requests/{requestId}</code>；旧客户端若只保留原幂等键，则把它放入 <code>Idempotency-Key</code> 请求头并查询 <code>GET /api/v1/requests/by-idempotency-key</code>。两种 GET 都不创建 usage，也不会调用供应方；同一 consumer 当前有效的任一 Key 都可核对。<code>reserved</code> 或 <code>unknown</code> 时不得重复 POST，<code>released</code> 时任何新采集都需重新明确确认。只有状态已是 <code>committed</code>，才可原样重放已提交请求：</p>
     <pre><code>curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   -H 'Content-Type: application/json' \
@@ -4413,14 +4435,14 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
       <tr><td>404 <code>stored_snapshot_not_found</code></td><td><code>cache_only</code> 没有命中精确存量；本次没有调用外部平台。可修改条件、切换本地安全演示，或在明确确认成本后发起 <code>refresh</code>。</td></tr>
       <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后以原 requestId 调用只读状态 GET；不要 POST 原请求或换键形成第二次派发。</td></tr>
       <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable</code></td><td>本次尝试在供应方派发前被正在处理的请求或既有隔离挡住；它已释放，不是“以后一定不派发”的稳定重放。停止自动重试，由 operator 核查，并在任何后续实时调用前重新明确确认。</td></tr>
-      <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和 requestId，只调用请求状态 GET。<code>reserved</code>/<code>unknown</code> 保持锁定并交给 operator，只有 <code>committed</code> 才允许精确 POST 重放。</td></tr>
+      <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和可用的 requestId，只调用请求状态 GET。没有 UUID 时使用幂等键请求头的查询接口，不让用户手工猜或填写 UUID。<code>reserved</code>/<code>unknown</code> 保持锁定并交给 operator，只有 <code>committed</code> 才允许精确 POST 重放。</td></tr>
       <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId 并检查脱敏归档。</td></tr>
       <tr><td>429 <code>quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
       <tr><td>429 external platform busy / capacity</td><td>Hub 并发保护和外部容量是不同原因；按响应退避，不要自动生成另一把幂等键。</td></tr>
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
       <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
     </tbody></table>
-    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件；恢复条件本身不发请求，核对动作只调用状态 GET。旧账本可粘贴原响应 UUID；没有 UUID 时明确转 operator。只有 <code>committed</code> 才显示精确重放，<code>released</code> 会解除本地锁并重置成本确认。切换演示不会删除实时请求账本。</p>
+    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件；恢复条件本身不发请求，核对动作只调用状态 GET。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>，不要求用户查找或粘贴 UUID。只有已迁移旧账本收到明确的 <code>request_not_found</code> 才清除孤儿记录；路由不存在或其他核对失败继续保持锁定。只有 <code>committed</code> 才自动精确重放，<code>released</code> 会解除本地锁并重置成本确认。切换演示不会删除实时请求账本。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 
@@ -4725,6 +4747,7 @@ curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timelin
     <h2 id="discovery">能力、请求状态与用量</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 与 <code>timeline.datasets</code> 分别是 bounded context 和双向时间线支持清单，各自的 <code>ready</code> 是独立服务索引门禁；<code>message_timeline</code> 明示正式时间线能力。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/by-idempotency-key</code></div><p>旧客户端若保留了原 <code>Idempotency-Key</code>、却没有拿到 UUID，可把原值放在同名请求头中自动找回请求状态。可使用同一 consumer 当前有效的任一 Hub Public API Key；该 GET 不创建 usage、不访问外部平台，也不返回原响应正文或幂等键。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
     </section>
 

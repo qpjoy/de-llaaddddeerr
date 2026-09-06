@@ -49,13 +49,15 @@ sudo qp-tunnel-cli open enroll --file internal-01.ovpn
 sudo qp-tunnel-cli open doctor
 ```
 
-Enrollment is deliberately containing. The generated client configuration uses
-`route-nopull` plus explicit pull-filters and `script-security 0`, and the
-server pushes nothing at all, so joining the link cannot install routes, move
-the default gateway or touch the resolver. The only kernel change is the
-connected route for the tunnel interface. `open doctor` proves it by diffing
-the live default route, `/etc/resolv.conf` and the nat table against a snapshot
-taken before enrollment.
+Enrollment is deliberately containing. Issued `.ovpn` profiles use
+`route-nopull`, explicit pull-filters and `script-security 0`. After CLI
+enrollment, the managed `client.conf` uses `script-security 1` so OpenVPN can
+run its built-in, managed route helper; it still permits no user-supplied hook.
+The server pushes nothing at all, so joining the link cannot install arbitrary
+routes, move the default gateway or touch the resolver. The only unavoidable
+kernel change is the connected route for the tunnel interface. `open doctor`
+proves it by diffing the live default route, `/etc/resolv.conf` and the nat
+table against a snapshot taken before enrollment.
 
 `open preflight` enumerates the kernel routing table, Docker networks, the CNI
 and any WireGuard overlay, and refuses a tunnel subnet that overlaps any of
@@ -70,6 +72,30 @@ so one inside machine can hold links to several Oversea servers at once:
 sudo qp-tunnel-cli open enroll --instance jp01 --file jp01.ovpn
 sudo qp-tunnel-cli open enroll --instance us01 --file us01.ovpn
 ```
+
+To let trusted spokes reach one another by their fixed VPN addresses, enable
+the server's peer mesh without reinstalling either side:
+
+```bash
+sudo qp-tunnel-cli open reconfigure --server --instance mx --client-to-client
+```
+
+`reconfigure` changes only the peer-mesh directives owned by tunnel-cli in
+`server.conf` and the matching value in `server.env`. It preserves the endpoint,
+subnet, runtime, egress setting, PKI, client-config-dir addresses, issued
+profiles, firewall and sysctl state. A running server receives one short
+restart; if the new configuration does not start, the old files are restored
+and started again. Existing spokes reconnect with their current certificates
+and addresses, so the inside server does not need another `enroll`.
+
+When peer mesh is enabled, the generated block is deliberately ordered as
+`ignore-unknown-option disable-dco`, `disable-dco`, then `client-to-client`.
+This keeps inter-client forwarding in OpenVPN userspace on DCO-capable servers,
+without adding host-wide `ip_forward` or `FORWARD` rules. It is a full-trust
+mesh among every enrolled client, not an isolation firewall: each client can
+reach every other client's VPN address. It does not expose a spoke's LAN,
+Docker networks or other local subnets; that would require an explicit
+site-to-site routing design.
 
 The distribution `openvpn-server@.service` and `openvpn-client@.service`
 templates are never created, modified or enabled; an unrelated OpenVPN
@@ -110,6 +136,14 @@ Both are self-contained: generic `dev tun`, inlined certificates, and the fixed
 address still comes from the server's client-config-dir. Containment lives in
 the file rather than in the tooling, and the server pushes nothing at all, so a
 direct import is equally unable to install routes or DNS.
+
+For Windows, import `<name>.ovpn` into the OpenVPN Community GUI, or
+`<name>.connect.ovpn` into OpenVPN Connect. Do not pass `--oversea` merely
+because the computer is geographically overseas: that flag grants the client
+eligibility to opt into server egress and is unrelated to peer-mesh access.
+With peer mesh enabled, Windows reaches the inside server at its fixed VPN
+address; the target service must listen on that address (or all interfaces),
+and its host firewall must allow the required port from the VPN subnet.
 
 OpenVPN 3 rejects a whole profile rather than ignoring options it does not
 know. Measured against a real Connect log, the option it names is `topology`,

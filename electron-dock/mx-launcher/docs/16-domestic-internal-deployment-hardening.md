@@ -111,10 +111,13 @@ Failed to load @qpjoy/electron-core-wireguard from qp-tunnel-cli
 
 脚本和 host-runner 防线：
 
-- fallback runtime readiness 必须同时检查 `bin/qp-tunnel-cli`、CLI package 的
+- host-runner 对已部署 archive 保留 H2I 兼容门槛：`bin/qp-tunnel-cli`、CLI package 的
   `package.json` / `dist/index.js` / `dist/h2i.js`，以及
   `@qpjoy/electron-core-wireguard`、`@qpjoy/mx-launcher-core`、
-  `@qpjoy/mx-launcher-standalone` 各自的 package/dist。
+  `@qpjoy/mx-launcher-standalone` 各自的 package/dist。这样升级 host-runner 不会阻断旧 H2I。
+- refresh/materializer 对新发行 archive 使用更严格的完整性门槛：
+  `dist/index|hdo|h2i|open|wg` JS/声明文件、OpenVPN/WireGuard shell resources 和
+  `china-ipv4-coarse.txt` 必须全部存在，不能再发布会在加载新 CLI 入口时缺模块的 artifact。
 - archive candidate 应优先使用当前 state/runtime artifact，再回退到项目 artifact，
   最后才考虑 `server/artifacts`，避免旧模板包覆盖新包。
 - UI 的 `wg runtime` 必须展示 `missing / qp-tunnel-cli` 以及真实 module load error。
@@ -199,12 +202,14 @@ Ubuntu 无桌面环境时使用 `qp-tunnel-cli h2i` 接入 V2。它不是 V1 `hd
 Internal 持有账号、Product Network lease、snapshot 和配置真相；Domestic 只暴露 HTTPS
 bootstrap facade、同步 relay peer，并承载客户端到 Internal 的 WireGuard 数据面。
 
-离线发布的 `mx-domestic-qp-tunnel-cli-fallback.tar.gz` 必须包含 Node.js CLI 的
-`package/dist/h2i.js`、`@qpjoy/electron-core-wireguard`、`@qpjoy/mx-launcher-core` 和
+离线发布的 `mx-domestic-qp-tunnel-cli-fallback.tar.gz` 必须包含 Node.js CLI 的完整
+`package/dist`（含 `hdo`、`h2i`、`open`、`wg`）及对应 OpenVPN/WireGuard resources，
+以及 `@qpjoy/electron-core-wireguard`、`@qpjoy/mx-launcher-core` 和
 `@qpjoy/mx-launcher-standalone` 的 package/dist；运行 H2I 还要求宿主机 Node.js 18 或更新版本。
-缺少这些内容时 host-runner 必须把 archive 判为 not ready，CLI 入口必须给出明确错误，不能把
-Node 16 的运行时 `ReferenceError` 暴露给操作者。非 H2I 的 legacy 命令仍可回退到
-`resources/mihomo-client.sh`。
+新发行缺少完整 CLI 内容时 refresh/materializer 不能把它判为 full fallback；但 host-runner
+继续接受满足旧 H2I 核心文件与依赖门槛的已部署 archive。旧包若连 H2I 核心或依赖也不完整，
+CLI 入口必须给出明确错误，不能把 Node 16 的运行时 `ReferenceError` 暴露给操作者。
+非 H2I 的 legacy 命令仍可回退到 `resources/mihomo-client.sh`。
 
 账号登录使用 Domestic 的 HTTPS bootstrap URL；密码放在环境变量或 root-only 文件中，避免写入
 shell history：

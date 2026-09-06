@@ -1269,6 +1269,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/virtual-supermarket/products/{id}',
       '/data/virtual-supermarket/search',
       '/night-all/search/{operation}',
+      '/requests/by-idempotency-key',
       '/requests/{requestId}',
       '/tools/tokenize',
       '/usage',
@@ -1281,6 +1282,12 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.doesNotMatch(serialized, /mih_(?:live|test)_[A-Za-z0-9_-]+/i)
     assert.match(serialized, /Idempotency-Key/)
     assert.match(serialized, /opaque nextCursor/i)
+    const lookup = document.paths['/requests/by-idempotency-key'].get
+    assert.equal(lookup.parameters[0].name, 'Idempotency-Key')
+    assert.equal(lookup.parameters[0].in, 'header')
+    assert.equal(lookup.parameters[0].required, true)
+    assert.match(lookup.description, /creates no usage/i)
+    assert.match(lookup.description, /another consumer receives request_not_found/i)
     assert.equal(
       document.paths['/tools/tokenize'].post.requestBody.content['application/json'].schema.$ref,
       '#/components/schemas/TokenizeRequest',

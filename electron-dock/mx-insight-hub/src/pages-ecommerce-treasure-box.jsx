@@ -59,7 +59,8 @@ const DEMO_CACHE_ONLY_SCENE_OPTIONS = [
 ]
 const DEMO_CACHE_ONLY_SCENES = new Set(DEMO_CACHE_ONLY_SCENE_OPTIONS.map(({ value }) => value))
 
-const LIVE_REQUEST_STORAGE_KEY = 'mx-insight-hub.ecommerce-treasure-box.live-request.v1'
+const LEGACY_LIVE_REQUEST_STORAGE_KEY = 'mx-insight-hub.ecommerce-treasure-box.live-request.v1'
+const LIVE_REQUEST_STORAGE_KEY = 'mx-insight-hub.ecommerce-treasure-box.live-request.v2'
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
 const DISPLAY_PAGE_SIZE_OPTIONS = [
   { value: '3', label: '3 件 / 页' },
@@ -208,14 +209,14 @@ function ecommerceErrorPresentation(error) {
   if (['external_platform_outcome_unknown', 'request_outcome_unknown', 'upstream_outcome_unknown'].includes(code)) {
     return {
       title: '这次实时请求的结果暂时无法确认',
-      description: '请求可能已经发往外部平台。原请求条件与 Idempotency-Key 已锁定；请用 Request ID 做零上游状态查询，unknown 只能交由管理员核查，不能 POST 重放或新建请求规避锁定。',
+      description: '请求可能已经发往外部平台。原请求条件与 Idempotency-Key 已写入本地账本；验证 Live Key 后页面会自动做零上游查询。unknown 只能交由管理员核查，不能 POST 重放或新建请求规避锁定。',
       operatorAction: true,
     }
   }
   if (code === 'request_in_progress') {
     return {
       title: '同一实时请求仍在处理中',
-      description: '本次尝试没有新增外部采集。请等待并只查询原 Request ID；不要 POST 原请求或并发创建新的请求标识。零费用演示不受影响。',
+      description: '本次尝试没有新增外部采集。请等待页面按本地幂等账本做只读查询；不要 POST 原请求或并发创建新的请求标识。零费用演示不受影响。',
       operatorAction: true,
     }
   }
@@ -257,7 +258,7 @@ function ecommerceErrorPresentation(error) {
   if (code === 'external_platform_rejected') {
     return {
       title: '外部数据服务拒绝了本次查询',
-      description: '请检查平台、关键词、排序和价格条件后再提交。若条件有效，请携带 Request ID 联系管理员，不要连续自动重试。',
+      description: '请检查平台、关键词、排序和价格条件后再提交。若条件有效，请保留页面展示的错误证据并联系管理员，不要连续自动重试。',
       operatorAction: true,
     }
   }
@@ -284,7 +285,7 @@ function ecommerceErrorPresentation(error) {
   }
   return {
     title: '商品数据暂时没有交付',
-    description: '请保留错误码和 Request ID，稍后再试；若持续出现，请交由管理员核查。页面不会自动发起新的外部采集。',
+    description: '请保留页面展示的错误码与请求证据，稍后再试；若持续出现，请交由管理员核查。页面不会自动发起新的外部采集。',
     operatorAction: true,
   }
 }
@@ -486,55 +487,112 @@ function storedRequestBody(value) {
   })
 }
 
+export function normalizedStoredLiveRequest(parsed) {
+  const body = storedRequestBody(parsed?.body)
+  const keyFingerprint = parsed?.keyFingerprint || parsed?.consumerFingerprint
+  const requestId = typeof parsed?.requestId === 'string' && REQUEST_ID_PATTERN.test(parsed.requestId.trim())
+    ? parsed.requestId.trim()
+    : null
+  if (
+    !body
+    || !/^treasure-[0-9a-f-]{36}$/u.test(parsed?.idempotencyKey || '')
+    || !/^[0-9a-f]{64}$/u.test(keyFingerprint || '')
+    || !['pending', 'ambiguous', 'resolved'].includes(parsed?.outcome)
+  ) return null
+  return {
+    body,
+    idempotencyKey: parsed.idempotencyKey,
+    keyFingerprint,
+    ...(requestId ? { requestId } : {}),
+    ...(parsed?.migratedFromV1 === true ? { migratedFromV1: true } : {}),
+    // A tab refresh while fetch was pending makes the outcome ambiguous.
+    outcome: parsed.outcome === 'pending' ? 'ambiguous' : parsed.outcome,
+  }
+}
+
+export function liveRequestRecoveryDecision({
+  status = '',
+  httpStatus = 0,
+  errorCode = '',
+  migratedFromV1 = false,
+} = {}) {
+  if (status === 'committed') return 'replay'
+  if (status === 'released') return 'unlock'
+  if (status === 'reserved') return 'hold_reserved'
+  if (status === 'unknown') return 'hold_unknown'
+  if (migratedFromV1 && httpStatus === 404 && errorCode === 'request_not_found') return 'clear_orphan'
+  if (httpStatus === 404 && errorCode === 'not_found') return 'deployment_mismatch'
+  return 'hold'
+}
+
+export function liveRequestStorageDecision(parsed, { legacy = false } = {}) {
+  const record = normalizedStoredLiveRequest(parsed)
+  if (!record) return { action: 'remove', record: null }
+  if (legacy) return { action: 'migrate', record: { ...record, migratedFromV1: true } }
+  return { action: 'keep', record }
+}
+
+function removeStoredLiveRequest(key) {
+  try {
+    window.sessionStorage.removeItem(key)
+  } catch {
+    // In-memory state remains fail-closed when browser storage is unavailable.
+  }
+}
+
 function loadLiveRequest() {
   if (typeof window === 'undefined') return null
-  try {
-    const parsed = JSON.parse(window.sessionStorage.getItem(LIVE_REQUEST_STORAGE_KEY) || 'null')
-    const body = storedRequestBody(parsed?.body)
-    const keyFingerprint = parsed?.keyFingerprint || parsed?.consumerFingerprint
-    const requestId = typeof parsed?.requestId === 'string' && REQUEST_ID_PATTERN.test(parsed.requestId.trim())
-      ? parsed.requestId.trim()
-      : null
-    if (
-      !body
-      || !/^treasure-[0-9a-f-]{36}$/u.test(parsed?.idempotencyKey || '')
-      || !/^[0-9a-f]{64}$/u.test(keyFingerprint || '')
-      || !['pending', 'ambiguous', 'resolved'].includes(parsed?.outcome)
-    ) {
-      window.sessionStorage.removeItem(LIVE_REQUEST_STORAGE_KEY)
+  for (const storageKey of [LIVE_REQUEST_STORAGE_KEY, LEGACY_LIVE_REQUEST_STORAGE_KEY]) {
+    let serialized
+    try {
+      serialized = window.sessionStorage.getItem(storageKey)
+    } catch {
       return null
     }
-    return {
-      body,
-      idempotencyKey: parsed.idempotencyKey,
-      keyFingerprint,
-      ...(requestId ? { requestId } : {}),
-      // A tab refresh while fetch was pending makes the outcome ambiguous.
-      outcome: parsed.outcome === 'pending' ? 'ambiguous' : parsed.outcome,
+    if (!serialized) continue
+    let parsed
+    try {
+      parsed = JSON.parse(serialized)
+    } catch {
+      removeStoredLiveRequest(storageKey)
+      continue
     }
-  } catch {
-    return null
+    const decision = liveRequestStorageDecision(parsed, {
+      legacy: storageKey === LEGACY_LIVE_REQUEST_STORAGE_KEY,
+    })
+    if (decision.action === 'remove') {
+      removeStoredLiveRequest(storageKey)
+      continue
+    }
+    if (decision.action === 'migrate') {
+      try {
+        persistLiveRequest(decision.record)
+      } catch {
+        // Keep the valid v1 record when v2 migration cannot be persisted.
+      }
+    }
+    return decision.record
   }
+  return null
 }
 
 function persistLiveRequest(record) {
   if (typeof window === 'undefined') throw new Error('实时请求只能从浏览器发起。')
   window.sessionStorage.setItem(LIVE_REQUEST_STORAGE_KEY, JSON.stringify({
+    version: 2,
     body: record.body,
     idempotencyKey: record.idempotencyKey,
     keyFingerprint: record.keyFingerprint,
     ...(REQUEST_ID_PATTERN.test(record.requestId || '') ? { requestId: record.requestId } : {}),
+    ...(record.migratedFromV1 === true ? { migratedFromV1: true } : {}),
     outcome: record.outcome,
   }))
+  removeStoredLiveRequest(LEGACY_LIVE_REQUEST_STORAGE_KEY)
 }
 
 function clearPersistedLiveRequest() {
-  try {
-    window.sessionStorage.removeItem(LIVE_REQUEST_STORAGE_KEY)
-  } catch {
-    // Fingerprint comparison still prevents a stale record from being replayed
-    // under another API Key secret if browser storage becomes unavailable.
-  }
+  removeStoredLiveRequest(LIVE_REQUEST_STORAGE_KEY)
+  removeStoredLiveRequest(LEGACY_LIVE_REQUEST_STORAGE_KEY)
 }
 
 function ambiguousLiveFailure(error) {
@@ -696,11 +754,11 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const keyInputRef = useRef(null)
   const requestEpochRef = useRef(0)
   const requestInFlightRef = useRef(false)
+  const keyVerificationInFlightRef = useRef(false)
   const mountedRef = useRef(true)
   const verifiedKeyFingerprintRef = useRef(null)
   const [lastLiveRequest, setLastLiveRequest] = useState(loadLiveRequest)
   const lastLiveRequestRef = useRef(lastLiveRequest)
-  const [recoveryRequestIdInput, setRecoveryRequestIdInput] = useState(lastLiveRequest?.requestId || '')
   const [recoveryStatus, setRecoveryStatus] = useState(null)
   const [mode, setMode] = useState('safe_demo')
   const [demoDeliveryMode, setDemoDeliveryMode] = useState('cache_first')
@@ -739,12 +797,9 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const resolvedReplayAvailable = mode === 'hub_live' && lastLiveRequest?.outcome === 'resolved'
   const semanticsLocked = phase === 'searching'
   const keyUsable = ['ready', 'degraded'].includes(keyCheck.status)
-  const recoveryRequestId = lastLiveRequest?.requestId || recoveryRequestIdInput.trim()
-  const recoveryRequestIdValid = REQUEST_ID_PATTERN.test(recoveryRequestId)
-  const ambiguousStatusCheckReady = hasAmbiguousLiveRequest
+  const ambiguousLookupReady = hasAmbiguousLiveRequest
     && keyUsable
-    && keyCheck.fingerprint === lastLiveRequest?.keyFingerprint
-    && recoveryRequestIdValid
+    && verifiedKeyFingerprintRef.current === keyCheck.fingerprint
   const providerRequestBlockedByAmbiguity = mode === 'hub_live'
     && hasAmbiguousLiveRequest
     && !ambiguousOriginalSelected
@@ -759,6 +814,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
       mountedRef.current = false
       requestEpochRef.current += 1
       requestInFlightRef.current = false
+      keyVerificationInFlightRef.current = false
     }
   }, [])
 
@@ -779,14 +835,12 @@ export function EcommerceTreasureBoxPage({ notify }) {
     }
     lastLiveRequestRef.current = remembered
     setLastLiveRequest(remembered)
-    if (remembered.requestId) setRecoveryRequestIdInput(remembered.requestId)
   }
 
   const forgetLiveRequest = () => {
     clearPersistedLiveRequest()
     lastLiveRequestRef.current = null
     setLastLiveRequest(null)
-    setRecoveryRequestIdInput('')
     setRecoveryStatus(null)
   }
 
@@ -880,80 +934,102 @@ export function EcommerceTreasureBoxPage({ notify }) {
     setPhase('idle')
   }
 
-  const checkAmbiguousRequestStatus = async () => {
+  const checkAmbiguousRequestStatus = async ({ apiKeyOverride, fingerprintOverride } = {}) => {
     const pending = lastLiveRequestRef.current
-    const apiKey = hubApiKey.trim()
-    if (phase === 'searching' || pending?.outcome !== 'ambiguous') return
-    if (!apiKey || !keyUsable || !keyCheck.fingerprint || verifiedKeyFingerprintRef.current !== keyCheck.fingerprint) {
-      setError({ message: '请先用原 Live Key 完成零费用验证，再核对原请求状态。状态核对不会创建 Hub usage 或调用外部平台。' })
-      return
-    }
-    if (keyCheck.fingerprint !== pending.keyFingerprint) {
-      setError({ message: '当前 API Key secret 与原请求不匹配。请找回原 Live Key，或携带原 Idempotency-Key 交由运维核查；不要创建新的外部采集。' })
-      return
-    }
-    const requestId = pending.requestId || recoveryRequestIdInput.trim()
-    if (!REQUEST_ID_PATTERN.test(requestId)) {
-      setError({ message: '旧浏览器记录没有可用的 Request ID。请粘贴原响应中的 UUID；如果当时只发生网络中断而没有收到 ID，请携带原 Idempotency-Key 交由运维核查。' })
+    const apiKey = String(apiKeyOverride || hubApiKey).trim()
+    const fingerprint = fingerprintOverride || keyCheck.fingerprint
+    if (requestInFlightRef.current || pending?.outcome !== 'ambiguous') return
+    if (!apiKey || !fingerprint || verifiedKeyFingerprintRef.current !== fingerprint) {
+      setError({ message: '请先完成零费用 Key 验证。验证成功后，页面会自动用本地幂等账本核对原请求；无需查找或填写 Request ID。' })
       return
     }
 
     const epoch = beginRequest()
     if (epoch == null) return
     setError(null)
+    setRecoveryStatus('checking')
     try {
-      const result = await publicDataApi.requestStatus(apiKey, requestId)
+      const result = await publicDataApi.requestByIdempotencyKey(apiKey, pending.idempotencyKey)
       if (!finishRequest(epoch)) return
       setPhase('idle')
-      const status = result.payload?.data?.status
-      if (status === 'committed') {
-        rememberLiveRequest({ ...pending, requestId, outcome: 'resolved' })
-        setRecoveryStatus('committed')
-        notify?.('原请求已确认 committed；现在可以安全重放原结果，不会新增 usage 或外部采集。', 'success')
+      const status = String(result.payload?.data?.status || '').toLowerCase()
+      const recoveryDecision = liveRequestRecoveryDecision({ status })
+      const resultRequestId = result.payload?.data?.id
+      const requestId = typeof resultRequestId === 'string' && REQUEST_ID_PATTERN.test(resultRequestId)
+        ? resultRequestId
+        : pending.requestId
+      if (recoveryDecision === 'replay') {
+        setMode('hub_live')
+        setMarketplace(pending.body.marketplace)
+        setQuery(pending.body.query)
+        setDeliveryMode(pending.body.deliveryMode || 'cache_first')
+        setSort(pending.body.sort || availableSorts('hub_live', pending.body.marketplace)[0]?.value || '')
+        rememberLiveRequest({ ...pending, ...(requestId ? { requestId } : {}), outcome: 'resolved' })
+        setRecoveryStatus('replaying')
+        notify?.('原请求已确认 committed，正在自动读取已提交结果；不会新增 Hub usage 或外部采集。', 'success')
+        await runLive({ replay: true, apiKeyOverride: apiKey, fingerprintOverride: fingerprint })
         return
       }
-      if (status === 'released') {
+      if (recoveryDecision === 'unlock') {
         forgetLiveRequest()
         setRecoveryStatus('released')
         setChargeConfirmed(false)
         notify?.('原预留已确认 released，本地未决锁已解除；任何新采集都必须重新确认。', 'success')
         return
       }
-      if (status === 'reserved') {
-        rememberLiveRequest({ ...pending, requestId, outcome: 'ambiguous' })
+      if (recoveryDecision === 'hold_reserved') {
+        rememberLiveRequest({ ...pending, ...(requestId ? { requestId } : {}), outcome: 'ambiguous' })
         setRecoveryStatus('reserved')
         setError({
           status: 409,
           code: 'request_in_progress',
-          requestId,
-          message: 'Hub 仍将原请求标记为 reserved。请稍后只查询状态，不要 POST 原请求或创建新的 Idempotency-Key。',
+          ...(requestId ? { requestId } : {}),
+          message: 'Hub 仍将原请求标记为 reserved。页面只保留只读存量和安全演示；稍后可再次零上游核对，不会 POST 原请求。',
         })
         return
       }
-      if (status === 'unknown') {
-        rememberLiveRequest({ ...pending, requestId, outcome: 'ambiguous' })
+      if (recoveryDecision === 'hold_unknown') {
+        rememberLiveRequest({ ...pending, ...(requestId ? { requestId } : {}), outcome: 'ambiguous' })
         setRecoveryStatus('unknown')
         setError({
           status: 409,
           code: 'request_outcome_unknown',
-          requestId,
-          message: 'Hub 已将原请求标记为 unknown。浏览器不能安全重放；请保留 Request ID 与 Idempotency-Key，交由运维核查。',
+          ...(requestId ? { requestId } : {}),
+          message: 'Hub 已将原请求标记为 unknown。浏览器不会 POST 重放或创建新的外部采集；本地审计账本会继续保留。',
         })
         return
       }
-      rememberLiveRequest({ ...pending, requestId, outcome: 'ambiguous' })
+      rememberLiveRequest({ ...pending, ...(requestId ? { requestId } : {}), outcome: 'ambiguous' })
       setRecoveryStatus('unknown_status')
       setError({
-        requestId,
-        message: 'Hub 返回了未识别的请求状态。本地锁将继续保留；请交由运维核查，不要发起新的外部采集。',
+        ...(requestId ? { requestId } : {}),
+        message: 'Hub 返回了未识别的请求状态。本地审计账本会继续保留；页面不会发起新的外部采集。',
       })
     } catch (statusError) {
       if (!finishRequest(epoch)) return
       setPhase('idle')
-      setRecoveryStatus('lookup_failed')
+      const recoveryDecision = liveRequestRecoveryDecision({
+        httpStatus: statusError?.status,
+        errorCode: statusError?.code,
+        migratedFromV1: pending.migratedFromV1 === true,
+      })
+      if (recoveryDecision === 'clear_orphan') {
+        forgetLiveRequest()
+        setRecoveryStatus('orphan_cleared')
+        setChargeConfirmed(false)
+        setError(null)
+        notify?.('旧版未决账本已由 Hub 明确确认为不存在，已安全清理；新的外部采集仍需重新确认。', 'success')
+        return
+      }
+      const deploymentMismatch = recoveryDecision === 'deployment_mismatch'
+      setRecoveryStatus(deploymentMismatch ? 'deployment_mismatch' : [403, 404].includes(statusError?.status) ? 'not_accessible' : 'lookup_failed')
       setError({
         ...statusError,
-        message: `${statusError?.message || '原请求状态查询失败'}。本地未决锁仍保留；本次只读查询没有创建 Hub usage 或调用外部平台。`,
+        message: deploymentMismatch
+          ? '当前 Public API 尚未提供按幂等键查询路由。请先完成与页面同版本的部署；本地账本会保留，页面不会 POST 或访问 JustOne。'
+          : [403, 404].includes(statusError?.status)
+          ? '当前调用身份无法核对这条旧幂等记录。本地审计账本会继续保留，页面不会 POST 或创建新的外部采集；请交由运维核查 consumer 归属。'
+          : `${statusError?.message || '原请求状态查询失败'}。本地审计账本仍保留；本次 GET 没有创建 Hub usage 或调用外部平台。`,
       })
     }
   }
@@ -1012,25 +1088,11 @@ export function EcommerceTreasureBoxPage({ notify }) {
     notify?.(`安全策略沙盘完成：${scenario.evidence.demoTitle}；实际没有访问 Hub Data API，也没有创建 Hub usage 或外部采集。`, 'success')
   }
 
-  const runLive = async ({ replay = false } = {}) => {
-    const apiKey = hubApiKey.trim()
+  const runLive = async ({ replay = false, apiKeyOverride, fingerprintOverride } = {}) => {
+    const apiKey = String(apiKeyOverride || hubApiKey).trim()
     if (!apiKey) {
       keyInputRef.current?.focus()
       setError({ message: '实时模式使用“API Keys”已签发的开放能力 API Key；无需电商专用 Key，也不接受 JustOne 上游密钥。' })
-      return
-    }
-    const fingerprint = keyCheck.fingerprint
-    if (
-      !keyUsable
-      || !fingerprint
-      || verifiedKeyFingerprintRef.current !== fingerprint
-    ) {
-      setError({ message: '请先点击“零费用验证 Key”，确认这是当前 Public API 实例可用且已授权 ecommerce 的完整 Hub Public API secret。' })
-      return
-    }
-    const previous = lastLiveRequestRef.current
-    if (replay && previous?.outcome !== 'resolved') {
-      setError({ message: '原请求尚未确认 committed。请先做零上游状态核对；reserved 或 unknown 状态不能从浏览器 POST 重放。' })
       return
     }
     const providerMayRun = deliveryMode !== 'cache_only'
@@ -1038,8 +1100,22 @@ export function EcommerceTreasureBoxPage({ notify }) {
       setError({ message: '这是管理演示页的防误触确认：当前交付策略可能发起一次新的外部采集。' })
       return
     }
+    let fingerprint = fingerprintOverride || keyCheck.fingerprint
+    if (
+      !fingerprint
+      || verifiedKeyFingerprintRef.current !== fingerprint
+    ) {
+      const verification = await verifyHubApiKey()
+      if (!verification || verification.reconciledPending) return
+      fingerprint = verification.fingerprint
+    }
+    const previous = lastLiveRequestRef.current
+    if (replay && previous?.outcome !== 'resolved') {
+      setError({ message: '原请求尚未确认 committed。页面只会先做零上游状态核对；reserved 或 unknown 状态不能从浏览器 POST 重放。' })
+      return
+    }
     if (!replay && providerMayRun && previous?.outcome === 'ambiguous') {
-      setError({ message: '上一请求的结果仍不确定。可以继续只读 Hub 存量；若要访问外部平台，请先查询原请求状态或交由管理员核查。' })
+      setError({ message: '上一请求的结果仍不确定。可以继续只读 Hub 存量；验证 Key 后页面会按原幂等键自动核对，reserved 或 unknown 不会 POST。' })
       return
     }
     const body = replay ? previous?.body : currentLiveBody
@@ -1060,13 +1136,6 @@ export function EcommerceTreasureBoxPage({ notify }) {
     setError(null)
     try {
       if (!requestIsCurrent(epoch)) return
-      if (replay && previous?.keyFingerprint !== fingerprint) {
-        setChargeConfirmed(false)
-        setPhase('idle')
-        setError({ message: '演示页检测到 API Key secret 已更换。原 body 与 Idempotency-Key 已继续锁定；必须找回原 secret 查询状态，或交由运维核查，不能创建新请求。' })
-        finishRequest(epoch)
-        return
-      }
       verifiedKeyFingerprintRef.current = fingerprint
       if (tracksProviderRisk) {
         // Persist before any request that can reach a provider. A cache-only
@@ -1160,7 +1229,10 @@ export function EcommerceTreasureBoxPage({ notify }) {
       return
     }
     if (mode === 'safe_demo') await runSafeDemo()
-    else if (ambiguousOriginalSelected) await checkAmbiguousRequestStatus()
+    else if (ambiguousOriginalSelected) {
+      if (ambiguousLookupReady) await checkAmbiguousRequestStatus()
+      else await verifyHubApiKey()
+    }
     else await runLive()
   }
 
@@ -1184,11 +1256,11 @@ export function EcommerceTreasureBoxPage({ notify }) {
     if (!apiKey) {
       keyInputRef.current?.focus()
       setKeyCheck({ status: 'invalid', fingerprint: null, message: '请粘贴签发时显示的完整 Hub Public API secret' })
-      return
+      return null
     }
     if (apiKey.includes('****')) {
       setKeyCheck({ status: 'invalid', fingerprint: null, message: '这是列表中的掩码标识，不能用于调用；请重新签发并复制只显示一次的完整 secret' })
-      return
+      return null
     }
     if (apiKey.startsWith('mih_test_')) {
       setKeyCheck({
@@ -1198,12 +1270,14 @@ export function EcommerceTreasureBoxPage({ notify }) {
           ? '历史 Test Key 不能从演示页核对或恢复外部请求；原 body 与 Idempotency-Key 已继续锁定，请交由运维核查，切勿创建新请求'
           : 'Test 前缀当前只是兼容标签，并非隔离沙箱；外部电商采集只接受 mih_live_ Key',
       })
-      return
+      return null
     }
     if (!/^mih_live_/u.test(apiKey)) {
       setKeyCheck({ status: 'invalid', fingerprint: null, message: 'Hub Public API secret 应以 mih_live_ 开头；不要填写列表掩码、Admin token 或 JustOne key' })
-      return
+      return null
     }
+    if (keyVerificationInFlightRef.current) return null
+    keyVerificationInFlightRef.current = true
     setCheckingKey(true)
     setError(null)
     try {
@@ -1218,7 +1292,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
       if (!ecommerce) {
         verifiedKeyFingerprintRef.current = null
         setKeyCheck({ status: 'missing_grant', fingerprint, message: 'Key 有效，但所属 consumer 未授予 ecommerce' })
-        return
+        return null
       }
       verifiedKeyFingerprintRef.current = fingerprint
       if (typeof ecommerce !== 'object' || ecommerce.ready !== true) {
@@ -1227,21 +1301,28 @@ export function EcommerceTreasureBoxPage({ notify }) {
           fingerprint,
           message: 'Key 与 ecommerce 授权有效；当前上游未就绪，仍可尝试缓存、存档或精确重放',
         })
-        return
+      } else {
+        setKeyCheck({
+          status: 'ready',
+          fingerprint,
+          message: 'Key 有效 · ecommerce 已授权 · 当前路由就绪',
+        })
       }
-      setKeyCheck({
-        status: 'ready',
-        fingerprint,
-        message: 'Key 有效 · ecommerce 已授权 · 当前路由就绪',
-      })
       notify?.('开放能力 API Key 预检通过：没有创建 Hub usage，也没有发起外部采集。', 'success')
+      const reconciledPending = lastLiveRequestRef.current?.outcome === 'ambiguous'
+      if (reconciledPending) {
+        await checkAmbiguousRequestStatus({ apiKeyOverride: apiKey, fingerprintOverride: fingerprint })
+      }
+      return { apiKey, fingerprint, reconciledPending }
     } catch (checkError) {
       verifiedKeyFingerprintRef.current = null
       const message = checkError?.code === 'invalid_api_key'
         ? '不是当前 Public API 实例可用的完整 secret：不要粘贴列表中的掩码、Admin token 或 JustOne key；内存模式重启后需重新签发'
         : checkError?.message || 'Key 验证失败'
       setKeyCheck({ status: 'invalid', fingerprint: null, message })
+      return null
     } finally {
+      keyVerificationInFlightRef.current = false
       setCheckingKey(false)
     }
   }
@@ -1298,7 +1379,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
               {deliveryMode === 'cache_only' ? (
                 <div className="mih-treasure-cache-guarantee"><ShieldCheck size={17} weight="duotone" aria-hidden="true" /><span><strong>只读保障：本次不会调用外部平台</strong><small>只查同一调用身份下的精确缓存或存档；命中会记录 Hub usage，未命中会明确提示，不会偷偷切到 JustOne。</small></span></div>
               ) : (
-                <label className="mih-treasure-charge-confirm"><input type="checkbox" checked={chargeConfirmed} disabled={semanticsLocked || !keyUsable || hasAmbiguousLiveRequest || providerRequestBlockedByAmbiguity} onChange={(event) => setChargeConfirmed(event.target.checked)} /><span><strong>演示页防误触：允许一次新的外部采集</strong><small>这不是客户端 API 的额外权限。预检不创建 Hub usage；本次请求可能产生内部采购成本；客户计价仍由 Hub 自己的 price book 决定。</small></span></label>
+                <label className="mih-treasure-charge-confirm"><input type="checkbox" checked={chargeConfirmed} disabled={semanticsLocked || hasAmbiguousLiveRequest || providerRequestBlockedByAmbiguity} onChange={(event) => setChargeConfirmed(event.target.checked)} /><span><strong>演示页防误触：允许一次新的外部采集</strong><small>这不是客户端 API 的额外权限。可以先选择条件并确认，再验证同一把 Key；本次请求可能产生内部采购成本，客户计价仍由 Hub 自己的 price book 决定。</small></span></label>
               )}
             </div>
           ) : null}
@@ -1308,46 +1389,35 @@ export function EcommerceTreasureBoxPage({ notify }) {
               <span>
                 <strong>上一次外部采集请求仍待核查</strong>
                 <small>{mode === 'safe_demo'
-                  ? '原请求与 Idempotency-Key 会继续保留，但不影响本地安全演示。切回 Hub 开放 API 后可做零上游状态核对。'
-                  : recoveryStatus === 'reserved'
-                    ? '服务端仍为 reserved：只可继续查询状态，不要 POST 原请求或创建新 Idempotency-Key。'
-                    : recoveryStatus === 'unknown'
-                      ? '服务端已为 unknown：浏览器不能安全重放，请保留证据并交由运维核查。'
-                      : '筛选项仍可编辑，也可只读 Hub 存量；新的外部采集会被阻止。先查询原请求状态，只有 committed 才能重放原结果。'}</small>
-                {lastLiveRequest?.requestId ? <small>Request ID <code>{lastLiveRequest.requestId}</code></small> : null}
-                {mode === 'hub_live' && !lastLiveRequest?.requestId ? (
-                  <label className="mih-treasure-recovery-id">
-                    <span>旧记录缺少 Request ID</span>
-                    <input
-                      className="qp-input"
-                      value={recoveryRequestIdInput}
-                      disabled={phase === 'searching'}
-                      onChange={(event) => setRecoveryRequestIdInput(event.target.value)}
-                      placeholder="粘贴原响应中的 UUID"
-                      aria-label="原请求 Request ID"
-                    />
-                  </label>
-                ) : null}
+                  ? '原请求与 Idempotency-Key 会继续保留，但不影响本地安全演示。切回 Hub 开放 API 后，验证 Key 即会自动做零上游状态核对。'
+                  : recoveryStatus === 'checking'
+                    ? '正在使用本地幂等账本做只读 GET 核对；无需查找 Request ID，也不会 POST 或访问 JustOne。'
+                    : recoveryStatus === 'reserved'
+                      ? '服务端仍为 reserved：页面只保留安全演示和只读存量，不会 POST 原请求或创建新 Idempotency-Key。'
+                      : recoveryStatus === 'unknown'
+                        ? '服务端已为 unknown：浏览器只保留安全演示和只读存量，不会 POST；请交由运维核查。'
+                        : recoveryStatus === 'deployment_mismatch'
+                          ? 'Public API 查询路由与页面版本不一致；本地账本继续保留，先完成同版本部署，浏览器不会 POST。'
+                        : recoveryStatus === 'not_accessible'
+                          ? '当前 consumer 无法读取这条旧记录；本地账本继续保留，浏览器不会 POST，请交由运维核查归属。'
+                          : '筛选项仍可编辑，也可只读 Hub 存量；新的外部采集会被阻止。验证任一同 consumer 的 active Live Key 后会自动核对。'}</small>
                 {mode === 'hub_live' ? (
                   <div className="mih-treasure-recovery-actions">
                     <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={phase === 'searching'} onClick={restoreAmbiguousRequestFields}>恢复原请求条件</button>
-                    <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={phase === 'searching' || !ambiguousStatusCheckReady} onClick={checkAmbiguousRequestStatus}>
-                      {!keyUsable || keyCheck.fingerprint !== lastLiveRequest?.keyFingerprint
-                        ? '先验证原 Live Key'
-                        : !recoveryRequestIdValid
-                          ? '粘贴 Request ID 后核对'
-                          : '查询原请求状态 · 0 上游调用'}
+                    <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={phase === 'searching' || !ambiguousLookupReady} onClick={() => checkAmbiguousRequestStatus()}>
+                      {ambiguousLookupReady ? '再次核对状态 · 只读 GET / 0 上游调用' : '验证 Live Key 后自动核对'}
                     </button>
-                    <a href="#/external-platforms?provider=justone&range=24h">无 Request ID？交由运维核查<ArrowRight size={13} aria-hidden="true" /></a>
+                    <a href="#/external-platforms?provider=justone&range=24h">需要人工核查 consumer 归属<ArrowRight size={13} aria-hidden="true" /></a>
                   </div>
                 ) : null}
               </span>
             </div>
           ) : null}
-          {recoveryStatus === 'committed' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原请求已确认 committed</strong><small>现在才可使用下方幂等 POST 读取原结果；不会新增 Hub usage 或外部采集。</small></span></div> : null}
+          {recoveryStatus === 'replaying' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原请求已确认 committed</strong><small>正在自动使用相同 body 与 Idempotency-Key 读取原结果；不会新增 Hub usage 或外部采集。</small></span></div> : null}
           {recoveryStatus === 'released' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原预留已确认 released</strong><small>本地未决锁已解除。若要发起新的外部采集，必须重新勾选成本确认；页面会创建新的 Idempotency-Key。</small></span></div> : null}
-          <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || (mode === 'hub_live' && !keyUsable) || (ambiguousOriginalSelected && !ambiguousStatusCheckReady) || providerRequestBlockedByAmbiguity}>
-            {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : ambiguousOriginalSelected ? (ambiguousStatusCheckReady ? '查询原请求状态 · 0 上游调用' : recoveryRequestIdValid ? '先验证原 Live Key' : '粘贴 Request ID 后核对') : providerRequestBlockedByAmbiguity ? '先核对未决请求或改为只读' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? '重新采集最新数据' : '调用开放 API'}</>}
+          {recoveryStatus === 'orphan_cleared' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>旧版未决账本已安全清理</strong><small>Hub 明确返回 request_not_found；这不是通用路由 404。若要发起新的外部采集，仍需重新确认。</small></span></div> : null}
+          <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || providerRequestBlockedByAmbiguity}>
+            {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : ambiguousOriginalSelected ? (ambiguousLookupReady ? '核对并自动恢复原请求 · 0 上游调用' : '验证 Key 后自动核对原请求') : providerRequestBlockedByAmbiguity ? '先核对未决请求或改为只读' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? '重新采集最新数据' : '调用开放 API'}</>}
           </button>
           {resolvedReplayAvailable ? <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={phase === 'searching'} onClick={() => runLive({ replay: true })}><ArrowClockwise size={15} aria-hidden="true" />读取已提交的原结果 · 幂等 POST / 0 新增 usage / 外部采集</button> : null}
           <p className="mih-treasure-auth-note"><LockKey size={15} aria-hidden="true" />这里使用客户端已获得的同一把 Hub Public API secret；无需为 ecommerce 另签 Key。列表掩码不能调用，供应方密钥只在“外部数据平台”管理。</p>

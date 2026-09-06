@@ -1779,6 +1779,24 @@ a new `Idempotency-Key`. `committed` permits an exact same-body, same-key replay
 provider-capable acquisition is a new intent and requires a fresh key and any
 applicable explicit confirmation.
 
+If the client persisted its original idempotency key but did not receive the
+request UUID, use the consumer-scoped lookup instead:
+
+```http
+GET /api/v1/requests/by-idempotency-key
+Authorization: Bearer <current active Hub Public API key>
+Idempotency-Key: <original caller-generated key>
+```
+
+This lookup has the same read-only guarantees as the UUID route: it creates no
+usage, never calls an external platform and returns neither the stored response
+body nor the idempotency key. `data.id` is the original durable request UUID;
+the top-level `requestId` remains the correlation ID of the lookup itself. Any
+active key for the same consumer may perform the lookup, including a rotated
+replacement key. A key owned by another consumer receives `404
+request_not_found`, so callers cannot probe another consumer's ledger. Clients
+must not place the idempotency key in a URL query or path.
+
 ## Usage
 
 ```http

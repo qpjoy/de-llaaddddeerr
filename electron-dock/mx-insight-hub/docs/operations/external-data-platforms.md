@@ -126,11 +126,13 @@ Troubleshoot credentials from the outside inward; do not replace one key because
 | Internal provider dispatch | Server-held JustOne API Key | The caller never supplies it. Missing configuration, upstream credential rejection, balance or provider capacity is sanitized as an external-platform availability/capacity error. It must not become Public `invalid_api_key`. |
 
 `502 external_platform_outcome_unknown` and `502 external_platform_response_unusable` are post-dispatch
-evidence and may already have consumed provider quota or incurred Hub procurement cost. Preserve the request ID,
-normalized body and original `Idempotency-Key`; do not rotate the Hub Public API Key, JustOne API Key or
-`Idempotency-Key` merely to force another attempt. For an ambiguous outcome, query only
-`GET /api/v1/requests/{requestId}` with the original Hub Public API key. This read creates no usage and cannot
-dispatch JustOne. Do not repeat the ecommerce POST until that status is `committed`.
+evidence and may already have consumed provider quota or incurred Hub procurement cost. Preserve the normalized
+body and original `Idempotency-Key`; do not rotate the Hub Public API Key, JustOne API Key or idempotency key merely
+to force another attempt. For an ambiguous outcome, query `GET /api/v1/requests/{requestId}` when the UUID was
+received. When an older client retained only its idempotency key, call
+`GET /api/v1/requests/by-idempotency-key` with that value in the `Idempotency-Key` header. Either lookup may use
+any current active Hub Public API key belonging to the same consumer; both create no usage and cannot dispatch
+JustOne. Do not repeat the ecommerce POST while the returned state is `reserved` or `unknown`.
 
 The request-status result is an operational state, not a retry timer:
 
@@ -141,16 +143,19 @@ The request-status result is an operational state, not a retry timer:
 | `committed` | The original outcome is durable. An exact same-body, same-key POST may now retrieve that committed result without another usage or provider dispatch. |
 | `released` | Hub proved the reservation was released. Clear the browser lock, but require a new explicit cost confirmation and a new idempotency key for any acquisition. |
 
-Browser ledgers written before Request ID retention can accept a UUID copied from the original response. If a
-transport failure returned no Request ID, use the retained `Idempotency-Key` for operator-side, consumer-scoped
-ledger lookup. Do not guess a UUID and do not use POST as a lookup mechanism.
+Browser ledger v1 records are migrated to v2 without asking for a UUID. After the current Hub Public API key passes
+the zero-cost capability check, the workbench automatically uses the retained `Idempotency-Key` header for a
+consumer-scoped lookup and stores the returned request identity. Corrupt browser-only entries are removed;
+server-side usage/provider/archive evidence is retained. Do not put an idempotency key in a URL and do not use
+POST as a lookup mechanism.
 
-An old browser record marked ambiguous under a Test key is different: keep its exact body, original
-`Idempotency-Key` and one-way credential fingerprint locked, and transfer the available request identity to
-operator reconciliation. The workbench may continue local safe-demo and `cache_only` reads with independently
-editable filters because neither can create a provider call. Do not paste the historical Test secret, replace it
-with a Live key or start another `cache_first`/`refresh` attempt until retained usage/gateway/provider/archive
-evidence has been reviewed.
+An old browser record marked ambiguous under a Test key keeps its exact body, original `Idempotency-Key` and
+one-way credential fingerprint as migration evidence. The Test secret is never sent to ecommerce. After a current
+Live key passes the zero-cost capability check, the workbench may use that key for the header-based status lookup;
+the backend resolves consumer ownership. A same-consumer `committed` or `released` result follows the normal
+recovery rules, while `reserved`/`unknown` remains locked and a foreign or absent record cannot be guessed or
+replayed. Local safe-demo and `cache_only` reads remain independently available because neither can create a
+provider call.
 
 ```bash
 (
@@ -435,7 +440,7 @@ then evaluate quota plan or recharge.
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
 | `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
-| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep request ID and original `Idempotency-Key`; use only `GET /api/v1/requests/{requestId}` from the browser. `reserved`/`unknown` must not POST. Reconcile call, usage and archive evidence; never issue a new-key automatic retry. |
+| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep the original `Idempotency-Key` and Request ID when available. Use `GET /api/v1/requests/{requestId}`, or use `GET /api/v1/requests/by-idempotency-key` with the key in the request header when no UUID was captured. Either lookup uses the current active Public API key for the same consumer. `reserved`/`unknown` must not POST. Reconcile call, usage and archive evidence; never issue a new-key automatic retry. |
 | rising `stored_fallback` | Live path is failing while exact snapshots still satisfy clients. | Check capture age, fallback reason, provider state and stale deadline. Do not report the response as live. |
 | provider calls exceed Hub requests | Ledger reconciliation failure. | Freeze connector rollout and inspect transactions; do not estimate spend from incomplete counters. |
 | canonical/ES count lags calls | Ingest or projection backlog, not necessarily acquisition loss. | Verify response/item archives and ingest-run linkage, then repair queue/outbox. Do not repeat the provider-backed search. |

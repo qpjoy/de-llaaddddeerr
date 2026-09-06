@@ -197,6 +197,11 @@ export const publicDataApi = {
     `/api/v1/requests/${encodeURIComponent(requestId)}`,
     { signal },
   ),
+  requestByIdempotencyKey: (apiKey, idempotencyKey, { signal } = {}) => publicDataRequest(
+    apiKey,
+    '/api/v1/requests/by-idempotency-key',
+    { idempotencyKey, signal },
+  ),
   ecommerceProductsSearch: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/data/ecommerce/products/search',
