@@ -10350,6 +10350,38 @@ button.mih-catalog-status {
   background: color-mix(in srgb, var(--qp-warning) 7%, var(--qp-bg-4));
 }
 
+.mih-treasure-demo-boundary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--qp-info) 36%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 10px;
+  background: color-mix(in srgb, var(--qp-info) 7%, var(--qp-bg-4));
+  color: var(--qp-info);
+}
+
+.mih-treasure-demo-boundary > svg {
+  margin-top: 1px;
+}
+
+.mih-treasure-demo-boundary > span {
+  display: grid;
+  gap: 3px;
+}
+
+.mih-treasure-demo-boundary strong {
+  color: var(--qp-text-2);
+  font-size: 10px;
+}
+
+.mih-treasure-demo-boundary small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .mih-treasure-key-check {
   display: grid;
   gap: 7px;
@@ -10394,6 +10426,28 @@ button.mih-catalog-status {
 .mih-treasure-key-check--missing_grant > span,
 .mih-treasure-key-check--missing_grant > span svg {
   color: var(--qp-danger);
+}
+
+.mih-treasure-public-origin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.mih-treasure-public-origin > svg {
+  flex: 0 0 auto;
+  color: var(--qp-info);
+}
+
+.mih-treasure-public-origin small {
+  flex-basis: 100%;
+  color: var(--qp-text-4);
 }
 
 .mih-treasure-charge-confirm {
@@ -10505,6 +10559,39 @@ button.mih-catalog-status {
   margin-top: 5px;
 }
 
+.mih-treasure-recovery-note--resolved {
+  border-color: color-mix(in srgb, var(--qp-success) 38%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-success) 7%, var(--qp-bg-4));
+  color: var(--qp-success);
+}
+
+.mih-treasure-recovery-id {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.mih-treasure-recovery-id > span {
+  color: var(--qp-text-2);
+  font-size: 9px;
+}
+
+.mih-treasure-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.mih-treasure-recovery-actions a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 5px;
+  color: var(--qp-text-3);
+  font-size: 9px;
+}
+
 .mih-treasure-product-error {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -10515,6 +10602,12 @@ button.mih-catalog-status {
   padding: 16px 18px;
   background: color-mix(in srgb, var(--qp-warning) 7%, var(--qp-bg-3));
   color: var(--qp-warning);
+}
+
+.mih-treasure-lab > .mih-treasure-product-error {
+  grid-column: 1 / -1;
+  border-width: 0 0 1px;
+  border-radius: 0;
 }
 
 .mih-treasure-product-error__copy {
@@ -10928,6 +11021,20 @@ button.mih-catalog-status {
 }
 
 .mih-treasure-call-evidence > header svg {
+  color: var(--qp-primary);
+}
+
+.mih-treasure-demo-trace {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.mih-treasure-demo-trace li::marker {
   color: var(--qp-primary);
 }
 

@@ -1429,11 +1429,21 @@ k8s_smoke() {
   # on the Internal host, so reach them directly on loopback (no port-forward).
   local admin_base="http://127.0.0.1:18151"
   local public_base="http://127.0.0.1:18150"
+  local configured_public_base=""
   wait_http "${admin_base}/health/live" 90 \
     || die "Admin API not reachable on the host at ${admin_base} (hostNetwork bind failed?)"
   wait_http "${public_base}/health/live" 90 \
     || die "Public API not reachable on the host at ${public_base} (hostNetwork bind failed?)"
+  if ! configured_public_base="$(
+    kubectl -n mx-insight-hub get configmap mx-insight-hub-config \
+      -o jsonpath='{.data.MX_INSIGHT_PUBLIC_URL}'
+  )"; then
+    die "could not read MX_INSIGHT_PUBLIC_URL from ConfigMap mx-insight-hub-config"
+  fi
+  [ -n "$configured_public_base" ] \
+    || die "MX_INSIGHT_PUBLIC_URL is empty in ConfigMap mx-insight-hub-config"
   MX_SMOKE_BASE_URL="$admin_base" \
+  MX_SMOKE_PUBLIC_BASE_URL="$configured_public_base" \
   MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
     node "${ROOT_DIR}/scripts/smoke.mjs"
 }

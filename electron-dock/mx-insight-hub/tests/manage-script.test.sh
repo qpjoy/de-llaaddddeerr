@@ -1765,6 +1765,32 @@ grep -q -- '--from-literal=MX_INSIGHT_PUBLIC_URL=' "$ROOT_DIR/scripts/manage.sh"
 grep -q 'MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150' "$ROOT_DIR/scripts/manage.sh"
 printf 'ok - public browser origin is wired into runtime deployment config\n'
 
+k8s_smoke_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-k8s-smoke.XXXXXX")"
+K8S_SMOKE_MARKER="$k8s_smoke_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  wait_http() { printf "wait=%s\n" "$1" >>"$K8S_SMOKE_MARKER"; }
+  kubectl() {
+    case " $* " in
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_PUBLIC_URL"*)
+        printf "https://public.example.test"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  node() {
+    printf "admin=%s\npublic=%s\nscript=%s\n" \
+      "$MX_SMOKE_BASE_URL" "$MX_SMOKE_PUBLIC_BASE_URL" "$1" >>"$K8S_SMOKE_MARKER"
+  }
+  k8s_smoke
+' _ "$ROOT_DIR"
+assert_eq \
+  $'wait=http://127.0.0.1:18151/health/live\nwait=http://127.0.0.1:18150/health/live\nadmin=http://127.0.0.1:18151\npublic=https://public.example.test\nscript='"$ROOT_DIR"'/scripts/smoke.mjs' \
+  "$(cat "$k8s_smoke_marker")" \
+  'Kubernetes smoke sends the ConfigMap Public origin to the route probe'
+rm -f -- "$k8s_smoke_marker"
+
 public_url_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-public-url.XXXXXX")"
 rm -f -- "$public_url_marker"
 PUBLIC_URL_MARKER="$public_url_marker" \

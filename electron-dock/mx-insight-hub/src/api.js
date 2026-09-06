@@ -52,6 +52,12 @@ function publicApiBase() {
   return runtimePublicApiBase || FALLBACK_PUBLIC_API_BASE
 }
 
+export function publicApiOrigin() {
+  const configured = publicApiBase()
+  if (configured) return configured
+  return typeof window !== 'undefined' ? window.location.origin : ''
+}
+
 export function publicDocsHref(path = '/docs') {
   const normalizedPath = path.startsWith('/docs') ? path : `/docs/${String(path).replace(/^\/+/, '')}`
   if (runtimePublicApiBase) return `${runtimePublicApiBase}${normalizedPath}`
@@ -184,6 +190,11 @@ export const publicDataApi = {
   capabilities: (apiKey, { signal } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/data/capabilities',
+    { signal },
+  ),
+  requestStatus: (apiKey, requestId, { signal } = {}) => publicDataRequest(
+    apiKey,
+    `/api/v1/requests/${encodeURIComponent(requestId)}`,
     { signal },
   ),
   ecommerceProductsSearch: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(

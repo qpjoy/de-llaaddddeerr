@@ -3551,7 +3551,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200":
-          description: Caller-owned request status without stored upstream response body.
+          description: Caller-owned, no-dispatch request status without stored upstream response body. Reserved and unknown do not permit POST replay; committed permits exact replay; released requires a newly confirmed request intent.
           content:
             application/json:
               schema:

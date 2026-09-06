@@ -39,9 +39,11 @@ test('treasure box reuses the ordinary Open Capabilities API key and never persi
   assert.doesNotMatch(pageSource, /Hub consumer API Key/u)
   assert.match(pageSource, /publicDocsHref\('\/docs\/ecommerce-treasure-box'\)/u)
   const persistedRequest = pageSource.match(/function persistLiveRequest\(record\) \{[\s\S]*?\n\}/u)?.[0] || ''
-  for (const field of ['body', 'idempotencyKey', 'keyFingerprint', 'outcome']) {
+  for (const field of ['body', 'idempotencyKey', 'keyFingerprint', 'requestId', 'outcome']) {
     assert.match(persistedRequest, new RegExp(`record\\.${field}`, 'u'))
   }
+  assert.match(pageSource, /REQUEST_ID_PATTERN\.test\(parsed\.requestId\.trim\(\)\)/u)
+  assert.match(pageSource, /\.\.\.\(requestId \? \{ requestId \} : \{\}\)/u)
   assert.doesNotMatch(persistedRequest, /hubApiKey|apiKey|authorization/iu)
   assert.doesNotMatch(pageSource, /localStorage\.(?:setItem|getItem)/u)
   assert.doesNotMatch(pageSource, /docs\.justoneapi\.com\/.*(?:token|key)=/iu)
@@ -74,14 +76,69 @@ test('treasure box exposes safe stored, cache-first and explicit refresh deliver
   }
 })
 
+test('safe demo independently simulates all delivery strategies with zero Hub and zero upstream traffic', async () => {
+  const [, , pageSource, , styleSource] = await sources()
+  const demoOptions = pageSource.match(/const DEMO_DELIVERY_MODE_OPTIONS = \[[\s\S]*?\n\]/u)?.[0] || ''
+  const demoScenario = pageSource.match(/function safeDemoScenario[\s\S]*?\n\}\n\nfunction safeDemoIdleMessage/u)?.[0] || ''
+  const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}\n\n  const runLive/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
+  const changeDemoDeliveryMode = pageSource.match(/const changeDemoDeliveryMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDemoCacheOnlyScene/u)?.[0] || ''
+
+  for (const deliveryMode of ['cache_only', 'cache_first', 'refresh']) {
+    assert.match(demoOptions, new RegExp(`value: '${deliveryMode}'`, 'u'))
+  }
+  assert.match(pageSource, /const \[demoDeliveryMode, setDemoDeliveryMode\] = useState\('cache_first'\)/u)
+  assert.match(pageSource, /const \[demoCacheOnlyScene, setDemoCacheOnlyScene\] = useState\('no_inventory'\)/u)
+  assert.match(pageSource, /label="模拟交付策略"[^\n]+options=\{DEMO_DELIVERY_MODE_OPTIONS\}[^\n]+onChange=\{changeDemoDeliveryMode\}/u)
+  assert.match(pageSource, /label="cache_only 演练场景"[^\n]+options=\{DEMO_CACHE_ONLY_SCENE_OPTIONS\}[^\n]+onChange=\{changeDemoCacheOnlyScene\}/u)
+  assert.match(pageSource, /浏览器本地策略沙盘 · 实际 0 Hub \/ 0 上游/u)
+  assert.match(pageSource, /sourceMode=safe_demo/u)
+  assert.match(demoScenario, /sourceMode: 'safe_demo'/u)
+  assert.doesNotMatch(demoScenario, /\bsourceMode: '(?:live|fresh_cache|stored_fallback|idempotent_replay)'/u)
+  assert.match(demoScenario, /simulatedErrorCode: 'stored_snapshot_not_found'/u)
+  assert.match(demoScenario, /products: \[\][\s\S]*?实际 0 Hub \/ 0 上游/u)
+  assert.match(demoScenario, /simulatedSourceMode: 'stored_fallback'/u)
+  assert.match(demoScenario, /simulatedSourceMode: 'live'/u)
+  assert.match(runSafeDemo, /safeDemoScenario\(\{ demoDeliveryMode, demoCacheOnlyScene, candidates \}\)/u)
+  assert.match(runSafeDemo, /demoRunId: `demo-\$\{crypto\.randomUUID\(\)\}`/u)
+  assert.doesNotMatch(runSafeDemo, /publicDataApi|fetch\(|requestId:|rememberLiveRequest|persistLiveRequest|sessionStorage/u)
+  assert.match(changeMode, /if \(value === 'hub_live'\) setDeliveryMode\('cache_only'\)/u)
+  assert.doesNotMatch(changeDemoDeliveryMode, /setDeliveryMode\(/u)
+  assert.match(styleSource, /\.mih-treasure-demo-boundary/u)
+  assert.match(styleSource, /\.mih-treasure-demo-trace/u)
+})
+
+test('every request-semantic edit clears live acquisition confirmation', async () => {
+  const [, , pageSource] = await sources()
+  const handlers = [
+    ['mode', /const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u],
+    ['live delivery', /const changeDeliveryMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDemoDeliveryMode/u],
+    ['demo delivery', /const changeDemoDeliveryMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDemoCacheOnlyScene/u],
+    ['demo cache scene', /const changeDemoCacheOnlyScene = \(value\) => \{[\s\S]*?\n  \}\n\n  const restoreAmbiguousRequestFields/u],
+    ['marketplace', /const changeMarketplace = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeSort/u],
+    ['sort', /const changeSort = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeQuery/u],
+    ['query', /const changeQuery = \(value\) => \{[\s\S]*?\n  \}\n\n  const revealResults/u],
+    ['Hub key', /const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u],
+  ]
+  for (const [name, pattern] of handlers) {
+    const handler = pageSource.match(pattern)?.[0] || ''
+    assert.match(handler, /setChargeConfirmed\(false\)/u, `${name} changes must invalidate prior confirmation`)
+  }
+  assert.match(pageSource, /label="排序"[^\n]+onChange=\{changeSort\}/u)
+  assert.match(pageSource, /onChange=\{\(event\) => changeQuery\(event\.target\.value\)\}/u)
+})
+
 test('live key preflight is zero-cost, rejects every Test key and preserves an ambiguous lock', async () => {
   const [, apiSource, pageSource] = await sources()
   const capabilitiesApi = apiSource.match(/capabilities: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
+  const requestStatusApi = apiSource.match(/requestStatus: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
   const verifyKey = pageSource.match(/const verifyHubApiKey = async \(\) => \{[\s\S]*?\n  \}\n\n  return \(/u)?.[0] || ''
   const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
 
   assert.match(capabilitiesApi, /'\/api\/v1\/data\/capabilities'/u)
   assert.doesNotMatch(capabilitiesApi, /method: 'POST'|ecommerce\/products\/search/u)
+  assert.match(requestStatusApi, /`\/api\/v1\/requests\/\$\{encodeURIComponent\(requestId\)\}`/u)
+  assert.doesNotMatch(requestStatusApi, /method: 'POST'|ecommerce\/products\/search/u)
   assert.match(verifyKey, /publicDataApi\.capabilities\(apiKey\)/u)
   assert.doesNotMatch(verifyKey, /ecommerceProductsSearch|rememberLiveRequest|persistLiveRequest|idempotencyKey/u)
   assert.match(verifyKey, /apiKey\.includes\('\*\*\*\*'\)/u)
@@ -92,7 +149,7 @@ test('live key preflight is zero-cost, rejects every Test key and preserves an a
   assert.doesNotMatch(verifyKey, /recoveringLegacyTestRequest/u)
   assert.match(verifyKey, /if \(apiKey\.startsWith\('mih_test_'\)\)/u)
   assert.match(verifyKey, /Test 前缀当前只是兼容标签，并非隔离沙箱/u)
-  assert.match(verifyKey, /历史 Test Key 不能从演示页恢复外部请求[\s\S]*?交由运维核查/u)
+  assert.match(verifyKey, /历史 Test Key 不能从演示页核对或恢复外部请求[\s\S]*?交由运维核查/u)
   assert.ok(
     verifyKey.indexOf("apiKey.startsWith('mih_test_')") < verifyKey.indexOf('publicDataApi.capabilities(apiKey)'),
     'the compatibility-only Test-key policy must be resolved before any Hub request',
@@ -107,10 +164,12 @@ test('live key preflight is zero-cost, rejects every Test key and preserves an a
   assert.doesNotMatch(pageSource, /placeholder="mxk_/u)
   assert.match(pageSource, /type="button"[^>]+onClick=\{verifyHubApiKey\}[\s\S]*?零费用验证 Key/u)
   assert.match(pageSource, /预检不创建 Hub usage/u)
-  assert.match(pageSource, /上一次外部采集请求仍待核查[\s\S]*?Idempotency-Key[\s\S]*?管理员核查/u)
-  assert.match(pageSource, /const ambiguousLiveReplayReady = ambiguousRetryAvailable[\s\S]*?keyCheck\.fingerprint === lastLiveRequest\?\.keyFingerprint/u)
-  assert.match(pageSource, /ambiguousRetryAvailable && !ambiguousLiveReplayReady/u)
-  assert.match(pageSource, /ambiguousLiveReplayReady \? '使用原 Idempotency-Key 精确重试' : '先验证原 Live Key'/u)
+  assert.match(apiSource, /export function publicApiOrigin\(\)/u)
+  assert.match(pageSource, /本页调用 Public API：[\s\S]*?publicApiOrigin\(\)[\s\S]*?MX_INSIGHT_PUBLIC_URL/u)
+  assert.match(pageSource, /上一次外部采集请求仍待核查[\s\S]*?Idempotency-Key[\s\S]*?运维核查/u)
+  assert.match(pageSource, /const ambiguousStatusCheckReady = hasAmbiguousLiveRequest[\s\S]*?keyCheck\.fingerprint === lastLiveRequest\?\.keyFingerprint[\s\S]*?recoveryRequestIdValid/u)
+  assert.match(pageSource, /ambiguousOriginalSelected && !ambiguousStatusCheckReady/u)
+  assert.match(pageSource, /查询原请求状态 · 0 上游调用/u)
   assert.match(changeKey, /setKeyCheck\(\{ status: 'idle', fingerprint: null/u)
   assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'\) forgetLiveRequest\(\)/u)
   assert.match(pageSource, /const keyUsable = \['ready', 'degraded'\]\.includes\(keyCheck\.status\)/u)
@@ -139,9 +198,11 @@ test('live verification script preserves one recovery identity across ambiguous 
   assert.doesNotMatch(script, /no paid request|paid upstream dispatch/u)
 })
 
-test('live requests durably bind the exact request before fetch and fail closed on ambiguity', async () => {
+test('live requests bind before fetch and ambiguous recovery is status-only until committed', async () => {
   const [, , pageSource] = await sources()
   const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
+  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\) => \{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const submit = pageSource.match(/const submit = async \(event\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
   const ambiguityClassifier = pageSource.match(/function ambiguousLiveFailure\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
   const ambiguousCodes = pageSource.match(/const AMBIGUOUS_LIVE_ERROR_CODES = new Set\(\[[\s\S]*?\]\)/u)?.[0] || ''
   const mismatchBlock = runLive.match(/if \(replay && previous\?\.keyFingerprint !== fingerprint\) \{[\s\S]*?\n      \}/u)?.[0] || ''
@@ -155,12 +216,20 @@ test('live requests durably bind the exact request before fetch and fail closed 
       < runLive.indexOf('publicDataApi.ecommerceProductsSearch'),
     'the durable request record must be written before fetch',
   )
-  assert.match(runLive, /outcome: replay && previous\?\.outcome === 'ambiguous' \? 'ambiguous' : 'pending'/u)
-  assert.ok(
-    runLive.indexOf("outcome: replay && previous?.outcome === 'ambiguous' ? 'ambiguous' : 'pending'")
-      < runLive.indexOf('publicDataApi.ecommerceProductsSearch'),
-    'an exact ambiguous recovery must stay locked in the current page session until a completed delivery arrives',
-  )
+  assert.match(runLive, /if \(replay && previous\?\.outcome !== 'resolved'\)/u)
+  assert.match(runLive, /outcome: replay \? 'resolved' : 'pending'/u)
+  assert.match(runLive, /requestError\?\.requestId \? \{ requestId: requestError\.requestId \}/u)
+  assert.match(statusCheck, /publicDataApi\.requestStatus\(apiKey, requestId\)/u)
+  assert.doesNotMatch(statusCheck, /ecommerceProductsSearch|method:\s*'POST'/u)
+  assert.match(submit, /if \(ambiguousOriginalSelected\) await checkAmbiguousRequestStatus\(\)/u)
+  assert.doesNotMatch(submit, /runLive\(\{ replay: ambiguous/u)
+  for (const status of ['committed', 'released', 'reserved', 'unknown']) {
+    assert.match(statusCheck, new RegExp(`status === '${status}'`, 'u'))
+  }
+  assert.match(statusCheck, /status === 'committed'[\s\S]*?outcome: 'resolved'/u)
+  assert.match(statusCheck, /status === 'released'[\s\S]*?forgetLiveRequest\(\)[\s\S]*?setChargeConfirmed\(false\)/u)
+  assert.match(statusCheck, /status === 'reserved'[\s\S]*?code: 'request_in_progress'/u)
+  assert.match(statusCheck, /status === 'unknown'[\s\S]*?code: 'request_outcome_unknown'/u)
   for (const code of [
     'external_platform_outcome_unknown',
     'request_outcome_unknown',
@@ -172,7 +241,7 @@ test('live requests durably bind the exact request before fetch and fail closed 
     ambiguityClassifier.indexOf('error?.status === 409') < ambiguityClassifier.indexOf('AMBIGUOUS_LIVE_ERROR_CODES.has'),
     'a fresh server-side suppression must not become a no-confirmation replay merely because it shares an ambiguity code',
   )
-  assert.match(runLive, /previous\?\.outcome === 'ambiguous'[\s\S]*?可以继续只读 Hub 存量/u)
+  assert.match(runLive, /previous\?\.outcome === 'ambiguous'[\s\S]*?查询原请求状态/u)
   assert.match(mismatchBlock, /previous\?\.keyFingerprint !== fingerprint/u)
   assert.doesNotMatch(mismatchBlock, /forgetLiveRequest/u)
   assert.match(mismatchBlock, /原 body 与 Idempotency-Key 已继续锁定/u)
@@ -185,7 +254,8 @@ test('an ambiguous live request preserves its ledger while safe demo stays avail
   const [, , pageSource] = await sources()
   const keyField = pageSource.match(/<Field label="开放能力 API Key"[\s\S]*?<\/Field>/u)?.[0] || ''
   const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
-  const restoreAmbiguous = pageSource.match(/const restoreAmbiguousRequest = \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const restoreAmbiguous = pageSource.match(/const restoreAmbiguousRequestFields = \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\) => \{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
   const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
 
   assert.match(pageSource, /requestInFlightRef\.current/u)
@@ -201,22 +271,29 @@ test('an ambiguous live request preserves its ledger while safe demo stays avail
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
   assert.match(keyField, /type="password"[\s\S]*?disabled=\{phase === 'searching' \|\| checkingKey\}/u)
   assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
-  assert.doesNotMatch(pageSource, /const semanticsLocked = [^\n]*ambiguousRetryAvailable/u)
+  assert.doesNotMatch(pageSource, /const semanticsLocked = [^\n]*ambiguousOriginalSelected/u)
   assert.match(changeMode, /if \(phase === 'searching'\) return/u)
   assert.doesNotMatch(changeMode, /setMarketplace\(pending\.body\.marketplace\)|setQuery\(pending\.body\.query\)/u)
   assert.match(restoreAmbiguous, /setMarketplace\(pending\.body\.marketplace\)/u)
   assert.match(restoreAmbiguous, /setQuery\(pending\.body\.query\)/u)
   assert.match(restoreAmbiguous, /setDeliveryMode\(pending\.body\.deliveryMode \|\| 'cache_first'\)/u)
+  assert.doesNotMatch(restoreAmbiguous, /ecommerceProductsSearch|requestStatus/u)
+  assert.match(statusCheck, /REQUEST_ID_PATTERN\.test\(requestId\)/u)
+  assert.match(statusCheck, /keyCheck\.fingerprint !== pending\.keyFingerprint/u)
+  assert.match(pageSource, /placeholder="粘贴原响应中的 UUID"/u)
+  assert.match(pageSource, /无 Request ID？交由运维核查/u)
+  assert.match(pageSource, /恢复原请求条件/u)
+  assert.doesNotMatch(pageSource, /恢复原请求用于精确重试|使用原 Idempotency-Key 精确重试/u)
   assert.doesNotMatch(changeMode, /forgetLiveRequest|clearPersistedLiveRequest/u)
   assert.doesNotMatch(runSafeDemo, /publicDataApi|forgetLiveRequest|clearPersistedLiveRequest/u)
   assert.match(pageSource, /hasAmbiguousLiveRequest \? \([\s\S]*?筛选项仍可编辑，也可只读 Hub 存量/u)
-  assert.match(pageSource, /mode === 'safe_demo' \? '零费用演示只使用页面示例，不访问 Hub 或上游。'/u)
+  assert.match(pageSource, /mode === 'safe_demo' \? safeDemoIdleMessage\(demoDeliveryMode, demoCacheOnlyScene\)/u)
   assert.match(pageSource, /aria-pressed=\{capabilityGroup === group\.id\}/u)
   assert.doesNotMatch(pageSource, /role="tab(?:list)?"|aria-selected=/u)
 })
 
 test('data-product errors are localized by ownership and always retain operator evidence', async () => {
-  const [, , pageSource] = await sources()
+  const [, , pageSource, , styleSource] = await sources()
   const presentation = pageSource.match(/function ecommerceErrorPresentation\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
   const errorState = pageSource.match(/function TreasureProductError[\s\S]*?\n\}/u)?.[0] || ''
 
@@ -240,6 +317,9 @@ test('data-product errors are localized by ownership and always retain operator 
   assert.match(errorState, /转到零费用演示/u)
   assert.match(errorState, /查看上游运行状态/u)
   assert.doesNotMatch(errorState, /error\?\.message \|\| '数据请求失败'/u)
+  assert.match(pageSource, /<section className="qp-panel mih-treasure-lab">\s*\{error \? <TreasureProductError/u)
+  assert.equal(pageSource.match(/<TreasureProductError\b/gu)?.length, 1)
+  assert.match(styleSource, /\.mih-treasure-lab > \.mih-treasure-product-error \{[\s\S]*?grid-column: 1 \/ -1/u)
   assert.match(pageSource, /这次没有找到商品/u)
   assert.match(pageSource, /这是正常空结果/u)
 })
@@ -326,7 +406,7 @@ test('treasure box presents truthful safe, live, cache, fallback and replay stat
   for (const value of ['safe_demo', 'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay']) {
     assert.match(pageSource, new RegExp(value, 'u'))
   }
-  for (const label of ['安全演示 · 0 上游调用', 'Here you are', '缓存里刚好有一份', '先给你可靠的存档']) {
+  for (const label of ['安全演示 · 0 Hub / 0 上游', 'Here you are', '缓存里刚好有一份', '先给你可靠的存档']) {
     assert.match(pageSource, new RegExp(label, 'u'))
   }
   assert.match(pageSource, /phase === 'searching' \? SEARCHING_ASSET : PRESENTING_ASSET/u)

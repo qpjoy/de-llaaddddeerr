@@ -1771,8 +1771,13 @@ GET /api/v1/requests/{requestId}
 
 Only the owning consumer can read the record. Data calls identify their
 `platform`; generic tools identify their `capability`. Exactly one is present.
-An `unknown` state means the outcome is ambiguous; the caller must not
-automatically repeat the request with a new `Idempotency-Key`.
+This read creates no usage and cannot dispatch an upstream call. `reserved`
+means the request may still be running and `unknown` means the outcome remains
+ambiguous; neither state permits the caller to repeat the original POST or use
+a new `Idempotency-Key`. `committed` permits an exact same-body, same-key replay.
+`released` proves that reservation is no longer holding an outcome; a later
+provider-capable acquisition is a new intent and requires a fresh key and any
+applicable explicit confirmation.
 
 ## Usage
 

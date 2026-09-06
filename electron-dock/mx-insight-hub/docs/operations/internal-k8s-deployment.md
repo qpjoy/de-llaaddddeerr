@@ -40,6 +40,9 @@ Create `.env.internal` with mode `0600`:
 ```bash
 MX_INSIGHT_ADMIN_TOKEN=<long-random-token>
 MX_INSIGHT_API_KEY_PEPPER=<long-random-pepper>
+# Browser-reachable Public API origin. Omit only when the Internal host IP
+# default (http://10.88.88.88:18150) is intentionally reachable by operators.
+MX_INSIGHT_PUBLIC_URL=https://hub.example.com
 NIGHT_ALL_BASE_URL=http://192.168.1.2:13141
 NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
 
@@ -115,6 +118,36 @@ Order:
 7. roll out public, Admin, projector and ingest workloads, apply NetworkPolicy,
    and run smoke checks;
 8. remove scoped temporary build/import artifacts.
+
+### Browser Public-origin smoke and 404 triage
+
+`MX_INSIGHT_PUBLIC_URL` is the browser-reachable HTTP(S) **origin** of the Public
+listener. It contains no credentials, path, query or fragment. The deploy
+normalizes it into `mx-insight-hub-config`; the restarted Admin process returns
+the same value as `publicApiBaseUrl` in an authenticated Admin session. The SPA
+then sends bearer-key `/api/v1/*` calls to that origin instead of the Admin
+listener. The Internal default is `http://10.88.88.88:18150`; Admin remains on
+`18151`.
+
+Kubernetes smoke reads the published ConfigMap value and sends a browser-shaped
+`OPTIONS /api/v1/data/ecommerce/products/search` request to that exact origin. It
+must return `204`. This preflight carries no API key or request body and finishes
+before authentication, usage reservation, cache lookup or external-platform
+dispatch, so it cannot call JustOne. A failure therefore identifies Public-origin,
+listener or exact-path routing rather than provider availability.
+
+For a browser POST, inspect the JSON error code rather than treating every HTTP
+404 as a missing route:
+
+- `stored_snapshot_not_found` means the Public route matched and a valid
+  `cache_only` request had no exact retained snapshot. This is an expected
+  zero-provider-call result; use the safe demo, change the query, or make a
+  separately confirmed provider-capable request if acquisition is intended.
+- `not_found` means the request did not reach a matching Public handler. Confirm
+  the request method and exact path, check that the authenticated Admin session's
+  `publicApiBaseUrl` equals the ConfigMap origin, and verify `/api/v1/*` is routed
+  to Public `18150`, not Admin `18151`. Re-run the affected Admin/Public rollout
+  after correcting a stale ConfigMap environment or image.
 
 Only the Admin Pod receives the read-only `/shared_dir` hostPath. The current
 Internal host owns that directory with numeric group `10` (`wheel`), so the Pod

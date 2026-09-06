@@ -128,7 +128,22 @@ Troubleshoot credentials from the outside inward; do not replace one key because
 `502 external_platform_outcome_unknown` and `502 external_platform_response_unusable` are post-dispatch
 evidence and may already have consumed provider quota or incurred Hub procurement cost. Preserve the request ID,
 normalized body and original `Idempotency-Key`; do not rotate the Hub Public API Key, JustOne API Key or
-`Idempotency-Key` merely to force another attempt.
+`Idempotency-Key` merely to force another attempt. For an ambiguous outcome, query only
+`GET /api/v1/requests/{requestId}` with the original Hub Public API key. This read creates no usage and cannot
+dispatch JustOne. Do not repeat the ecommerce POST until that status is `committed`.
+
+The request-status result is an operational state, not a retry timer:
+
+| Status | Browser / operator action |
+| --- | --- |
+| `reserved` | The request may still be running. Keep the original lock and query the same Request ID later; do not POST or create another idempotency key. |
+| `unknown` | The outcome cannot be proved. Keep the lock and reconcile usage, provider-call and archive evidence; browser replay remains disabled. |
+| `committed` | The original outcome is durable. An exact same-body, same-key POST may now retrieve that committed result without another usage or provider dispatch. |
+| `released` | Hub proved the reservation was released. Clear the browser lock, but require a new explicit cost confirmation and a new idempotency key for any acquisition. |
+
+Browser ledgers written before Request ID retention can accept a UUID copied from the original response. If a
+transport failure returned no Request ID, use the retained `Idempotency-Key` for operator-side, consumer-scoped
+ledger lookup. Do not guess a UUID and do not use POST as a lookup mechanism.
 
 An old browser record marked ambiguous under a Test key is different: keep its exact body, original
 `Idempotency-Key` and one-way credential fingerprint locked, and transfer the available request identity to
@@ -207,9 +222,10 @@ and an approved non-production query.
 Read the Hub API key without writing it to shell history. The first call below intentionally permits exactly
 one live upstream dispatch that may incur provider procurement cost; do not put it in readiness, CI or a
 retry loop. Prefer `scripts/justone-apicall.sh`: it performs the zero-cost preflight first, prints the
-non-secret recovery `Idempotency-Key` and body before dispatch, then verifies an exact replay. If a transport
-or outcome error is ambiguous, rerun only with those exact `HUB_IDEMPOTENCY_KEY` and
-`HUB_ECOMMERCE_QUERY` values; never create a new `Idempotency-Key` or query to probe the result.
+non-secret recovery `Idempotency-Key` and body before dispatch, then verifies an exact replay only after a
+completed first response. If a transport or outcome error is ambiguous, do not rerun the POST. Query the returned
+Request ID through the read-only status endpoint; if no Request ID was received, stop and reconcile the printed
+`HUB_IDEMPOTENCY_KEY` and `HUB_ECOMMERCE_QUERY` operationally. Never create a new key or query to probe the result.
 
 ```bash
 # Local Compose uses the combined listener on :18180. Internal Kubernetes uses
@@ -419,7 +435,7 @@ then evaluate quota plan or recharge.
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
 | `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
-| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep request ID and original `Idempotency-Key`; never issue a new-`Idempotency-Key` automatic retry. Reconcile call, usage and archive evidence. |
+| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep request ID and original `Idempotency-Key`; use only `GET /api/v1/requests/{requestId}` from the browser. `reserved`/`unknown` must not POST. Reconcile call, usage and archive evidence; never issue a new-key automatic retry. |
 | rising `stored_fallback` | Live path is failing while exact snapshots still satisfy clients. | Check capture age, fallback reason, provider state and stale deadline. Do not report the response as live. |
 | provider calls exceed Hub requests | Ledger reconciliation failure. | Freeze connector rollout and inspect transactions; do not estimate spend from incomplete counters. |
 | canonical/ES count lags calls | Ingest or projection backlog, not necessarily acquisition loss. | Verify response/item archives and ingest-run linkage, then repair queue/outbox. Do not repeat the provider-backed search. |
