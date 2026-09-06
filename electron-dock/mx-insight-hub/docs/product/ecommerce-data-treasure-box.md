@@ -226,6 +226,28 @@ provider quota or incurred Hub procurement cost and
 must not be retried with a new `Idempotency-Key`. This ordering prevents a provider credential incident from being mistaken
 for a customer-key problem.
 
+### Product-page failure presentation
+
+The Admin data-product page translates provider-neutral API errors into an operator-facing state while retaining the
+stable `error.code` and `requestId` as evidence. It does not expose the upstream response, provider credential or internal
+price ledger.
+
+| Category | Product-page guidance | Safe next action |
+| --- | --- | --- |
+| HTTP 502 `external_platform_response_unusable` | External data returned but could not be mapped to the stable Hub product contract. The page does not display partially trusted products. | Do not create a new idempotency key. Preserve the request evidence and inspect the archived response. The same key replays the committed 502 without another provider dispatch. |
+| HTTP 502 `external_platform_outcome_unknown` | The page cannot prove whether this external dispatch completed. | Keep the original body and `Idempotency-Key`; use only the exact recovery path or operator reconciliation. |
+| HTTP 409 `request_outcome_unknown`, `external_platform_response_unusable` | This browser attempt was suppressed before provider dispatch by an earlier unresolved request or endpoint contract quarantine. The earlier call may still have incurred procurement cost. | The page does not turn this released attempt into a no-confirmation replay. Stop automatic retries, inspect the operator evidence, and explicitly reconfirm any later Live request. |
+| HTTP 409 `request_in_progress` | An equal request is still being handled; this browser attempt did not add a provider dispatch. | Wait for the active request. Do not create a parallel request or automatically replay this released attempt. |
+| provider configuration, availability or capacity | The current exact request has neither a deliverable live result nor an eligible snapshot. | Check **External data platforms**, provider availability and quota. Do not rotate the customer Hub key. |
+| `quota_exceeded` | The Hub consumer policy rejected the request. | Wait for the Hub window or change the consumer's ecommerce policy. |
+| HTTP 200 with `items=[]` | A valid delivery found no matching items; this is not an interface failure. | Adjust the query or marketplace. Keep the returned source mode and request evidence; an empty result does not prove zero provider cost. |
+
+An unresolved Live request never disables **Safe demo**. Safe demo remains a browser-only fixture path with zero Hub
+usage and zero provider dispatch. Switching to it does not delete or alter the unresolved Live ledger. When the operator
+switches back to Live, the page restores the original marketplace, query and sort before allowing an exact replay.
+A fresh HTTP 409 suppression is different: it is released rather than stored as an ambiguous browser request, so a
+later Live submission must pass the explicit acquisition confirmation again.
+
 ## 6. Stable API contract
 
 ### Request

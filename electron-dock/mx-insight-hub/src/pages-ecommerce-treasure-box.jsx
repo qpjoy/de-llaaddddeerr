@@ -19,9 +19,10 @@ import {
   ShieldCheck,
   ShoppingBagOpen,
   Sparkle,
+  WarningCircle,
 } from '@phosphor-icons/react'
 import { publicDataApi, publicDocsHref } from './api.js'
-import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
+import { DropdownField, Field, PageHeading } from './components.jsx'
 
 const SEARCHING_ASSET = 'assets/ecommerce-treasure-box/data-cat-searching.webp'
 const PRESENTING_ASSET = 'assets/ecommerce-treasure-box/data-cat-presenting.webp'
@@ -49,6 +50,7 @@ const AMBIGUOUS_LIVE_ERROR_CODES = new Set([
   'external_platform_outcome_unknown',
   'external_platform_response_unusable',
   'request_outcome_unknown',
+  'request_in_progress',
   'upstream_outcome_unknown',
 ])
 
@@ -144,6 +146,120 @@ function priceLabel(pricing = {}) {
 function sourceModeEvidence(mode) {
   return SOURCE_MODE_LABELS[mode] || {
     label: mode || '尚未调用', tone: 'unknown', providerCall: '—', hubUsage: '—', note: '完成一次请求后显示真实交付路径',
+  }
+}
+
+function ecommerceErrorPresentation(error) {
+  const code = error?.code || ''
+  if (!code) {
+    return {
+      title: error?.message || '商品数据暂时没有交付',
+      description: '请调整输入后再试；页面不会因为这条提示自动发起外部采集。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'external_platform_response_unusable') {
+    if (error?.status === 409) {
+      return {
+        title: '同类实时请求正因响应格式问题被隔离',
+        description: '本次尝试在上游派发前停止，没有新增外部采集；触发隔离的早先调用仍可能有内部采购成本。请勿连续重试，交由管理员核查响应归档后再重新确认实时调用。',
+        operatorAction: true,
+      }
+    }
+    return {
+      title: '外部数据已返回，但暂时无法整理成 Hub 商品',
+      description: 'Hub 没有展示不符合稳定合同的数据。该调用可能已产生内部采购成本；请保留原请求标识，不要换 Idempotency-Key 或连续重试，并交由管理员核查响应归档。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'request_outcome_unknown' && error?.status === 409) {
+    return {
+      title: '同类实时请求仍在未决隔离期',
+      description: '本次尝试在上游派发前停止，没有新增外部采集；早先的请求结果仍可能未知。请勿自动重试或换 Idempotency-Key，交由管理员核查后再重新确认实时调用。',
+      operatorAction: true,
+    }
+  }
+  if (['external_platform_outcome_unknown', 'request_outcome_unknown', 'upstream_outcome_unknown'].includes(code)) {
+    return {
+      title: '这次实时请求的结果暂时无法确认',
+      description: '请求可能已经发往外部平台。原请求条件与 Idempotency-Key 已锁定；只能精确重放原请求或交由管理员核查，不能新建请求规避锁定。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'request_in_progress') {
+    return {
+      title: '同一实时请求仍在处理中',
+      description: '本次尝试没有新增外部采集。请等待正在处理的请求完成；不要并发创建新的请求标识。零费用演示不受影响。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'external_platform_not_configured') {
+    return {
+      title: '实时数据源尚未配置完成',
+      description: '当前也没有可交付的精确缓存或存档。请管理员前往“数据清洗中心 → 外部数据平台”检查凭据和发布门禁；这不是客户端 API Key 失效。',
+      operatorAction: true,
+    }
+  }
+  if (['external_platform_unavailable', 'external_platform_circuit_open'].includes(code)) {
+    return {
+      title: '实时商品数据暂不可用',
+      description: 'Hub 当前没有可交付的精确存档。请稍后重试同一请求，不要连续刷新；也可以先使用零费用演示查看产品交互。',
+      operatorAction: true,
+    }
+  }
+  if (['external_platform_capacity_exceeded', 'external_platform_capacity_unavailable'].includes(code)) {
+    return {
+      title: '外部数据容量暂不可用',
+      description: '请稍后重试，或请管理员检查外部平台额度与可用性；无需更换 Hub API Key。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'external_platform_busy') {
+    return {
+      title: '实时请求较多，请稍后再试',
+      description: 'Hub 已在派发前保护上游，本次没有新增外部采集。请退避后按原条件重试。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'quota_exceeded') {
+    return {
+      title: '当前调用身份的 Hub 请求额度已用完',
+      description: '等待计量窗口恢复，或请管理员调整 ecommerce 策略；无需重新签发 API Key。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'external_platform_rejected') {
+    return {
+      title: '外部数据服务拒绝了本次查询',
+      description: '请检查平台、关键词、排序和价格条件后再提交。若条件有效，请携带 Request ID 联系管理员，不要连续自动重试。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'invalid_api_key') {
+    return {
+      title: '开放能力 API Key 无效或已失效',
+      description: error?.message || '请使用当前 Hub 实例签发的完整 Live Key；不要填写列表掩码、Admin Token 或外部平台密钥。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'platform_not_granted') {
+    return {
+      title: '此调用身份尚未开通电商数据',
+      description: error?.message || '请在“开放能力”中为该 consumer 授予 ecommerce；原 API Key 无需重新签发。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'test_key_not_supported') {
+    return {
+      title: 'Test Key 不能用于实时电商采集',
+      description: 'Test 前缀不是隔离沙箱。请改用已授权 ecommerce 的 mih_live_ Key；零费用演示无需 Key。',
+      operatorAction: false,
+    }
+  }
+  return {
+    title: '商品数据暂时没有交付',
+    description: '请保留错误码和 Request ID，稍后再试；若持续出现，请交由管理员核查。页面不会自动发起新的外部采集。',
+    operatorAction: true,
   }
 }
 
@@ -280,6 +396,13 @@ function clearPersistedLiveRequest() {
 }
 
 function ambiguousLiveFailure(error) {
+  // Every 409 is a server-side suppression result for this browser attempt.
+  // It may have been blocked by another idempotency key or a global contract
+  // quarantine, so treating it as a no-confirmation replay can dispatch for
+  // the first time after the lease expires. The caller keeps a pre-existing
+  // ambiguous record when this was already an exact replay; a fresh 409 is
+  // released and any later Live attempt must be confirmed again.
+  if (error?.status === 409) return false
   if (AMBIGUOUS_LIVE_ERROR_CODES.has(error?.code)) return true
   return error?.status == null || error?.status === 0
 }
@@ -391,6 +514,27 @@ function CallEvidence({ evidence }) {
   )
 }
 
+function TreasureProductError({ error, mode, onUseSafeDemo }) {
+  const presentation = ecommerceErrorPresentation(error)
+  return (
+    <section className="mih-treasure-product-error" role="alert">
+      <WarningCircle size={30} weight="duotone" aria-hidden="true" />
+      <div className="mih-treasure-product-error__copy">
+        <strong>{presentation.title}</strong>
+        <p>{presentation.description}</p>
+        <small>
+          {error?.code ? <>错误码 <code>{error.code}</code></> : '本次操作未完成'}
+          {error?.requestId ? <> · Request ID <code>{error.requestId}</code></> : null}
+        </small>
+      </div>
+      <div className="mih-treasure-product-error__actions">
+        {mode !== 'safe_demo' ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={onUseSafeDemo}>转到零费用演示</button> : null}
+        {presentation.operatorAction ? <a className="qp-button qp-button--ghost qp-button--sm" href="#/external-platforms?provider=justone&range=24h">查看上游运行状态<ArrowRight size={14} aria-hidden="true" /></a> : null}
+      </div>
+    </section>
+  )
+}
+
 export function EcommerceTreasureBoxPage({ notify }) {
   const keyInputRef = useRef(null)
   const requestEpochRef = useRef(0)
@@ -399,7 +543,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const verifiedKeyFingerprintRef = useRef(null)
   const [lastLiveRequest, setLastLiveRequest] = useState(loadLiveRequest)
   const lastLiveRequestRef = useRef(lastLiveRequest)
-  const [mode, setMode] = useState(() => lastLiveRequest?.outcome === 'ambiguous' ? 'hub_live' : 'safe_demo')
+  const [mode, setMode] = useState('safe_demo')
   const [marketplace, setMarketplace] = useState('taobao')
   const [sort, setSort] = useState('sales_desc')
   const [query, setQuery] = useState('便携相机')
@@ -413,9 +557,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const [displayPageSize, setDisplayPageSize] = useState('6')
   const [displayPage, setDisplayPage] = useState(0)
   const [selected, setSelected] = useState(null)
-  const [error, setError] = useState(() => lastLiveRequest?.outcome === 'ambiguous' ? {
-    message: '检测到上次实时请求在完成前中断，原 body 与 Idempotency-Key 已锁定。请验证原 Live Key；如果它是历史 Test Key 或原凭据不可用，请交由运维核查。不能创建新请求。',
-  } : null)
+  const [error, setError] = useState(null)
   const [evidence, setEvidence] = useState(null)
   const [capabilityGroup, setCapabilityGroup] = useState('connected')
 
@@ -424,7 +566,8 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const pageSize = Number(displayPageSize)
   const displayPageCount = Math.max(1, Math.ceil(products.length / pageSize))
   const visibleProducts = products.slice(displayPage * pageSize, (displayPage + 1) * pageSize)
-  const ambiguousRetryAvailable = mode === 'hub_live' && lastLiveRequest?.outcome === 'ambiguous'
+  const hasAmbiguousLiveRequest = lastLiveRequest?.outcome === 'ambiguous'
+  const ambiguousRetryAvailable = mode === 'hub_live' && hasAmbiguousLiveRequest
   const resolvedReplayAvailable = mode === 'hub_live' && lastLiveRequest?.outcome === 'resolved'
   const semanticsLocked = phase === 'searching' || ambiguousRetryAvailable
   const keyUsable = ['ready', 'degraded'].includes(keyCheck.status)
@@ -485,10 +628,21 @@ export function EcommerceTreasureBoxPage({ notify }) {
   }
 
   const changeMode = (value) => {
-    if (semanticsLocked) return
+    if (phase === 'searching') return
+    const pending = lastLiveRequestRef.current
     setMode(value)
-    setSort(availableSorts(value, marketplace)[0]?.value || '')
-    setError(null)
+    if (value === 'hub_live' && pending?.outcome === 'ambiguous') {
+      setMarketplace(pending.body.marketplace)
+      setQuery(pending.body.query)
+      setSort(pending.body.sort || availableSorts(value, pending.body.marketplace)[0]?.value || '')
+      setError({
+        code: 'request_outcome_unknown',
+        message: '上一次实时请求仍待核查；原请求条件与 Idempotency-Key 已锁定。',
+      })
+    } else {
+      setSort(availableSorts(value, marketplace)[0]?.value || '')
+      setError(null)
+    }
     setEvidence(null)
     setResultPage(null)
     setDisplayPage(0)
@@ -586,7 +740,10 @@ export function EcommerceTreasureBoxPage({ notify }) {
         body,
         idempotencyKey,
         keyFingerprint: fingerprint,
-        outcome: 'pending',
+        // An exact recovery remains ambiguous until Hub returns a completed
+        // delivery. Keeping this state through a 409 prevents the current
+        // page session from unlocking an ordinary, newly billable request.
+        outcome: replay && previous?.outcome === 'ambiguous' ? 'ambiguous' : 'pending',
       }
       // This durable, secret-free request ledger must be committed before
       // fetch. If storage is unavailable, fail closed rather than risk losing
@@ -761,7 +918,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
       <section className="qp-panel mih-treasure-lab">
         <form className="mih-treasure-controls" onSubmit={submit}>
           <header><MagicWand size={20} weight="duotone" aria-hidden="true" /><div><strong>告诉小聚你要什么</strong><small>先选安全演示，确认交互后再发实时请求。</small></div></header>
-          <DropdownField label="获取方式" value={mode} options={MODE_OPTIONS} disabled={semanticsLocked} onChange={changeMode} />
+          <DropdownField label="获取方式" value={mode} options={MODE_OPTIONS} disabled={phase === 'searching'} onChange={changeMode} />
           <DropdownField label="平台" value={marketplace} options={MARKETPLACES} disabled={semanticsLocked} onChange={changeMarketplace} />
           <DropdownField label="排序" value={sort} options={sortOptions} disabled={semanticsLocked || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={setSort} />
           <DropdownField label="每页陈列" value={displayPageSize} options={DISPLAY_PAGE_SIZE_OPTIONS} disabled={semanticsLocked} onChange={(value) => { setDisplayPageSize(value); setDisplayPage(0); setSelected(products[0] || null) }} />
@@ -781,6 +938,12 @@ export function EcommerceTreasureBoxPage({ notify }) {
               <label className="mih-treasure-charge-confirm"><input type="checkbox" checked={chargeConfirmed} disabled={semanticsLocked || !keyUsable} onChange={(event) => setChargeConfirmed(event.target.checked)} /><span><strong>演示页防误触：允许一次新的外部采集</strong><small>这不是客户端 API 的额外权限。预检不创建 Hub usage；正式搜索缓存未命中时可能产生内部采购成本；客户计价待未来 Hub price book。</small></span></label>
             </div>
           ) : null}
+          {mode === 'safe_demo' && hasAmbiguousLiveRequest ? (
+            <div className="mih-treasure-recovery-note" role="status">
+              <Fingerprint size={17} weight="duotone" aria-hidden="true" />
+              <span><strong>上一次实时请求仍待核查</strong><small>它的原请求条件与 Idempotency-Key 会继续保留，但不会影响零费用演示。切回实时模式后只能精确重放或交由管理员核查。</small></span>
+            </div>
+          ) : null}
           <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || (mode === 'hub_live' && !keyUsable) || (ambiguousRetryAvailable && !ambiguousLiveReplayReady)}>
             {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在掏百宝袋</> : <><MagnifyingGlass size={17} aria-hidden="true" />{mode === 'safe_demo' ? '开始零费用演示' : ambiguousRetryAvailable ? (ambiguousLiveReplayReady ? '使用原 Idempotency-Key 重试' : '已锁定 · 验证原 Live Key') : '调用开放 API'}</>}
           </button>
@@ -793,8 +956,8 @@ export function EcommerceTreasureBoxPage({ notify }) {
           <span className="mih-treasure-stage__provider">当前唯一上游候选 <strong>JustOne</strong></span>
           {phase === 'presenting' ? (
             <div className="mih-treasure-speech">
-              <strong>{evidence?.sourceMode === 'fresh_cache' ? '缓存里刚好有一份' : evidence?.sourceMode === 'stored_fallback' ? '先给你可靠的存档' : 'Here you are'}</strong>
-              <small>{products.length ? `${products.length} 件归一化商品 · 陈列 ${displayPage + 1}/${displayPageCount}` : '这次没有找到可用商品'}</small>
+              <strong>{products.length ? (evidence?.sourceMode === 'fresh_cache' ? '缓存里刚好有一份' : evidence?.sourceMode === 'stored_fallback' ? '先给你可靠的存档' : 'Here you are') : '这次没有找到商品'}</strong>
+              <small>{products.length ? `${products.length} 件归一化商品 · 陈列 ${displayPage + 1}/${displayPageCount}` : '这是正常空结果，可以换关键词或平台；交付证据仍会保留'}</small>
             </div>
           ) : null}
           <img
@@ -811,7 +974,12 @@ export function EcommerceTreasureBoxPage({ notify }) {
               <button type="button" aria-label="下一陈列页" disabled={displayPage >= displayPageCount - 1} onClick={() => showDisplayPage(displayPage + 1)}><CaretRight size={15} aria-hidden="true" /></button>
             </nav>
           ) : null}
-          {phase === 'idle' ? <p className="mih-treasure-stage__welcome"><Sparkle size={17} weight="fill" aria-hidden="true" />我会先找 Hub 已有数据，需要时才去上游。</p> : null}
+          {phase === 'idle' ? (
+            <p className="mih-treasure-stage__welcome">
+              <Sparkle size={17} weight="fill" aria-hidden="true" />
+              {mode === 'safe_demo' ? '零费用演示只使用页面示例，不访问 Hub 或上游。' : '我会先找 Hub 已有数据，需要时才去上游。'}
+            </p>
+          ) : null}
         </div>
 
         <aside className="mih-treasure-inspector">
@@ -820,7 +988,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
         </aside>
       </section>
 
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <TreasureProductError error={error} mode={mode} onUseSafeDemo={() => changeMode('safe_demo')} /> : null}
 
       <section className="mih-treasure-section">
         <header className="mih-treasure-section__header">

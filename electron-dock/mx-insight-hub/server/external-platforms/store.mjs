@@ -317,7 +317,7 @@ export class MemoryExternalPlatformStore {
         unitsActual: Math.max(1, fallbackResponseBody?.data?.items?.length || 0),
         upstreamLatencyMs: latencyMs,
       })
-    } else if (outcome === 'rejected') {
+    } else if (outcome === 'rejected' || outcome === 'succeeded_unusable') {
       await this.usageStore.commitRequest(delivery.usageRequestId, {
         responseStatus: failureResponseStatus,
         responseBody: failureResponseBody || {
@@ -1002,7 +1002,7 @@ export class PostgresExternalPlatformStore {
         return
       }
 
-      const usage = outcome === 'rejected'
+      const usage = outcome === 'rejected' || outcome === 'succeeded_unusable'
         ? await client.query(
             `UPDATE usage_requests SET
                status = 'committed', response_status = $2, response_body = $3,

@@ -80,7 +80,7 @@ test('live key preflight is zero-cost, rejects every Test key and preserves an a
   assert.doesNotMatch(pageSource, /placeholder="mxk_/u)
   assert.match(pageSource, /type="button"[^>]+onClick=\{verifyHubApiKey\}[\s\S]*?零费用验证 Key/u)
   assert.match(pageSource, /预检不创建 Hub usage/u)
-  assert.match(pageSource, /原 body 与 Idempotency-Key 已锁定[\s\S]*?原 Live Key[\s\S]*?运维核查/u)
+  assert.match(pageSource, /上一次实时请求仍待核查[\s\S]*?原请求条件与 Idempotency-Key[\s\S]*?管理员核查/u)
   assert.match(pageSource, /const ambiguousLiveReplayReady = ambiguousRetryAvailable[\s\S]*?keyCheck\.fingerprint === lastLiveRequest\?\.keyFingerprint/u)
   assert.match(pageSource, /ambiguousRetryAvailable && !ambiguousLiveReplayReady/u)
   assert.match(pageSource, /ambiguousLiveReplayReady \? '使用原 Idempotency-Key 重试' : '已锁定 · 验证原 Live Key'/u)
@@ -112,6 +112,7 @@ test('live verification script preserves one recovery identity across ambiguous 
 test('live requests durably bind the exact request before fetch and fail closed on ambiguity', async () => {
   const [, , pageSource] = await sources()
   const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
+  const ambiguityClassifier = pageSource.match(/function ambiguousLiveFailure\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
   const mismatchBlock = runLive.match(/if \(replay && previous\?\.keyFingerprint !== fingerprint\) \{[\s\S]*?\n      \}/u)?.[0] || ''
   const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
 
@@ -123,11 +124,23 @@ test('live requests durably bind the exact request before fetch and fail closed 
       < runLive.indexOf('publicDataApi.ecommerceProductsSearch'),
     'the durable request record must be written before fetch',
   )
+  assert.match(runLive, /outcome: replay && previous\?\.outcome === 'ambiguous' \? 'ambiguous' : 'pending'/u)
+  assert.ok(
+    runLive.indexOf("outcome: replay && previous?.outcome === 'ambiguous' ? 'ambiguous' : 'pending'")
+      < runLive.indexOf('publicDataApi.ecommerceProductsSearch'),
+    'an exact ambiguous recovery must stay locked in the current page session until a completed delivery arrives',
+  )
   for (const code of [
     'external_platform_outcome_unknown',
     'external_platform_response_unusable',
     'request_outcome_unknown',
+    'request_in_progress',
   ]) assert.match(pageSource, new RegExp(code, 'u'))
+  assert.match(ambiguityClassifier, /if \(error\?\.status === 409\) return false/u)
+  assert.ok(
+    ambiguityClassifier.indexOf('error?.status === 409') < ambiguityClassifier.indexOf('AMBIGUOUS_LIVE_ERROR_CODES.has'),
+    'a fresh server-side suppression must not become a no-confirmation replay merely because it shares an ambiguity code',
+  )
   assert.match(runLive, /previous\?\.outcome === 'ambiguous'[\s\S]*?只能使用原 Idempotency-Key 重试/u)
   assert.match(mismatchBlock, /previous\?\.keyFingerprint !== fingerprint/u)
   assert.doesNotMatch(mismatchBlock, /forgetLiveRequest/u)
@@ -136,21 +149,64 @@ test('live requests durably bind the exact request before fetch and fail closed 
   assert.match(runLive, /if \(!\(replay && previous\?\.outcome === 'ambiguous'\)\) forgetLiveRequest\(\)/u)
 })
 
-test('request controls lock in flight, stale responses are guarded and atlas choices are buttons', async () => {
+test('an ambiguous live request preserves its ledger while safe demo stays available', async () => {
   const [, , pageSource] = await sources()
   const keyField = pageSource.match(/<Field label="开放能力 API Key"[\s\S]*?<\/Field>/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
 
   assert.match(pageSource, /requestInFlightRef\.current/u)
   assert.match(pageSource, /requestEpochRef\.current/u)
   assert.match(pageSource, /useEffect\(\(\) => \{[\s\S]*?mountedRef\.current = true[\s\S]*?return \(\) => \{/u)
   assert.match(pageSource, /if \(!finishRequest\(epoch\)\) return/u)
-  assert.match(pageSource, /label="获取方式"[\s\S]*?disabled=\{semanticsLocked\}/u)
+  assert.match(pageSource, /const \[mode, setMode\] = useState\('safe_demo'\)/u)
+  assert.match(pageSource, /const hasAmbiguousLiveRequest = lastLiveRequest\?\.outcome === 'ambiguous'/u)
+  assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching'\}/u)
+  assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="排序"[\s\S]*?disabled=\{semanticsLocked/u)
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
   assert.match(keyField, /type="password"[\s\S]*?disabled=\{phase === 'searching' \|\| checkingKey\}/u)
+  assert.match(changeMode, /if \(phase === 'searching'\) return/u)
+  assert.match(changeMode, /value === 'hub_live' && pending\?\.outcome === 'ambiguous'/u)
+  assert.match(changeMode, /setMarketplace\(pending\.body\.marketplace\)/u)
+  assert.match(changeMode, /setQuery\(pending\.body\.query\)/u)
+  assert.match(changeMode, /setSort\(pending\.body\.sort/u)
+  assert.doesNotMatch(changeMode, /forgetLiveRequest|clearPersistedLiveRequest/u)
+  assert.doesNotMatch(runSafeDemo, /publicDataApi|forgetLiveRequest|clearPersistedLiveRequest/u)
+  assert.match(pageSource, /mode === 'safe_demo' && hasAmbiguousLiveRequest[\s\S]*?不会影响零费用演示/u)
+  assert.match(pageSource, /mode === 'safe_demo' \? '零费用演示只使用页面示例，不访问 Hub 或上游。'/u)
   assert.match(pageSource, /aria-pressed=\{capabilityGroup === group\.id\}/u)
   assert.doesNotMatch(pageSource, /role="tab(?:list)?"|aria-selected=/u)
+})
+
+test('data-product errors are localized by ownership and always retain operator evidence', async () => {
+  const [, , pageSource] = await sources()
+  const presentation = pageSource.match(/function ecommerceErrorPresentation\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  const errorState = pageSource.match(/function TreasureProductError[\s\S]*?\n\}/u)?.[0] || ''
+
+  for (const [code, copy] of [
+    ['external_platform_response_unusable', '外部数据已返回，但暂时无法整理成 Hub 商品'],
+    ['external_platform_outcome_unknown', '这次实时请求的结果暂时无法确认'],
+    ['request_in_progress', '同一实时请求仍在处理中'],
+    ['external_platform_not_configured', '实时数据源尚未配置完成'],
+    ['external_platform_capacity_exceeded', '外部数据容量暂不可用'],
+    ['external_platform_busy', '实时请求较多，请稍后再试'],
+    ['quota_exceeded', '当前调用身份的 Hub 请求额度已用完'],
+    ['external_platform_rejected', '外部数据服务拒绝了本次查询'],
+  ]) {
+    assert.match(presentation, new RegExp(code, 'u'))
+    assert.match(presentation, new RegExp(copy, 'u'))
+  }
+  assert.match(presentation, /error\?\.status === 409[\s\S]*?本次尝试在上游派发前停止，没有新增外部采集/u)
+  assert.match(presentation, /同类实时请求仍在未决隔离期[\s\S]*?早先的请求结果仍可能未知/u)
+  assert.match(errorState, /error\.code/u)
+  assert.match(errorState, /error\.requestId/u)
+  assert.match(errorState, /转到零费用演示/u)
+  assert.match(errorState, /查看上游运行状态/u)
+  assert.doesNotMatch(errorState, /error\?\.message \|\| '数据请求失败'/u)
+  assert.match(pageSource, /这次没有找到商品/u)
+  assert.match(pageSource, /这是正常空结果/u)
 })
 
 test('safe demo applies platform, query and supported sort semantics without loading product images', async () => {

@@ -882,7 +882,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['External Data'],
         operationId: 'searchExternalCommerceProducts',
         summary: 'Search marketplace products through the governed external data gateway',
-        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, page, cursor, sort and price; pageSize and routing fields are not part of this contract. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub may satisfy an exact request from a fresh snapshot or an exact last-good fallback, but never labels a stored result as live. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
+        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, page, cursor, sort and price; pageSize and routing fields are not part of this contract. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub may satisfy an exact request from a fresh snapshot or an exact last-good fallback, but never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
         'x-mx-error-codes': {
           400: [
             'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
@@ -4365,10 +4365,15 @@ fi</code></pre>
       <tr><td>403 <code>platform_not_granted</code></td><td>为同一 consumer 配置 <code>ecommerce</code> grant；原 Hub Public API Key 无需轮换或重新签发。</td></tr>
       <tr><td>403 <code>test_key_not_supported</code></td><td>改用正式 <code>mih_live_</code> Key。Test 只是兼容标签，不是零成本沙箱；该拒绝发生在 usage reservation 和供应方调用之前。</td></tr>
       <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后用相同 <code>Idempotency-Key</code> 查询，不要换键形成第二次派发。</td></tr>
-      <tr><td>409/502 outcome unknown 或 response unusable</td><td>保留相同 <code>Idempotency-Key</code> 和 requestId，停止自动重试并交给 operator 调查。</td></tr>
-      <tr><td>429</td><td>遵守配额窗口；指数退避只能重试同一逻辑请求。</td></tr>
+      <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable</code></td><td>本次尝试在供应方派发前被正在处理的请求或既有隔离挡住；它已释放，不是“以后一定不派发”的稳定重放。停止自动重试，由 operator 核查，并在任何后续实时调用前重新明确确认。</td></tr>
+      <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和 requestId，停止自动重试并交给 operator 调查。</td></tr>
+      <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId 并检查脱敏归档。</td></tr>
+      <tr><td>429 <code>quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
+      <tr><td>429 external platform busy / capacity</td><td>Hub 并发保护和外部容量是不同原因；按响应退避，不要自动生成另一把幂等键。</td></tr>
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
+      <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
     </tbody></table>
+    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时保留错误码和 Request ID。未解决的实时请求不会阻塞“零费用演示”；切换演示不会删除实时请求账本，切回实时模式时仍恢复原请求条件并维持幂等保护。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 

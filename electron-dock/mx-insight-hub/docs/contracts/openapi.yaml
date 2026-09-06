@@ -1884,7 +1884,10 @@ paths:
         exclusive. Prefer Hub's opaque nextCursor, keep marketplace/query/sort/
         price unchanged, and use a new Idempotency-Key for every next page. Hub
         may serve an exact fresh snapshot or exact last-good fallback, but never
-        labels stored data as live. External platform identity, credentials,
+        labels stored data as live. A provider success that cannot be normalized
+        is committed as a stable 502; replaying the same Idempotency-Key returns
+        that error without another provider call. A 200 response with an empty
+        items array is a valid delivery, not an interface failure. External platform identity, credentials,
         endpoint coordinates, provider rate/balance/free quota, procurement
         amounts, customer invoices and raw responses are not exposed. sourceMode
         is delivery evidence, not a customer price.

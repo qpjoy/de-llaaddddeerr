@@ -442,13 +442,30 @@ test('a billed code=0 response that cannot be normalized is archived and never r
     },
   })
   const state = await fixture({ adapter })
+  const originalBody = { marketplace: 'jd', query: 'camera' }
+  let originalRequestId
   await assert.rejects(
     () => state.gateway.search(state.context, {
-      body: { marketplace: 'jd', query: 'camera' },
+      body: originalBody,
       idempotencyKey: 'unusable-shape-01',
       path: '/api/v1/data/ecommerce/products/search',
     }),
-    (error) => error?.code === 'external_platform_response_unusable',
+    (error) => {
+      originalRequestId = error?.details?.requestId
+      return error?.status === 502
+        && error?.code === 'external_platform_response_unusable'
+        && typeof originalRequestId === 'string'
+    },
+  )
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: originalBody,
+      idempotencyKey: 'unusable-shape-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 502
+      && error?.code === 'external_platform_response_unusable'
+      && error?.details?.requestId === originalRequestId,
   )
   await assert.rejects(
     () => state.gateway.search(state.context, {
@@ -470,6 +487,11 @@ test('a billed code=0 response that cannot be normalized is archived and never r
   assert.equal(call.costMinor, 5)
   assert.equal(call.upstreamRequestId, 'upstream-request-1')
   assert.equal(state.platformStore.responseArchives.size, 1)
+  const usage = state.usageStore.requests.get(originalRequestId)
+  assert.equal(usage.status, 'committed')
+  assert.equal(usage.responseStatus, 502)
+  assert.equal(usage.responseBody.error.code, 'external_platform_response_unusable')
+  assert.equal(state.platformStore.requests.at(-2).sourceMode, 'idempotent_replay')
   assert.doesNotMatch(
     JSON.stringify([...state.platformStore.responseArchives.values()]),
     /provider-secret-that-must-not-be-stored/u,

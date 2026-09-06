@@ -457,7 +457,16 @@ The public response intentionally contains no billing or quota fields. On
 `external_platform_outcome_unknown`, `external_platform_response_unusable`, or
 `request_outcome_unknown`, retain the request ID and original `Idempotency-Key`;
 do not create a new `Idempotency-Key` for an automatic retry because an external call may
-already have occurred.
+already have occurred. `external_platform_response_unusable` is a known provider
+success whose payload failed the Hub normalizer: Hub commits its public 502 as a
+stable failure, so the same key replays that 502 without another provider call.
+True transport or persistence ambiguity remains `request_outcome_unknown`.
+An HTTP 409 `request_outcome_unknown`, `request_in_progress`, or
+`external_platform_response_unusable` can instead describe a new request that Hub suppressed before provider dispatch
+because an earlier request or endpoint contract is still quarantined. That suppressed attempt is released, not a
+committed replay; clients must not treat its idempotency key as proof that a later request cannot dispatch.
+An HTTP 200 response with `data.items=[]` is a valid empty delivery, not an API
+failure, and does not by itself prove that provider cost was zero.
 
 ### External platform Admin credential control
 

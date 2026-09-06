@@ -605,10 +605,15 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 401 | `api_key_required`, `invalid_api_key` | 提供当前 Hub 实例通过 API Keys 签发的完整 Hub Public API Key；不要用管理令牌、掩码或供应方密钥。 |
 | 403 | `test_key_not_supported` | 外部 ecommerce 仅接受 `mih_live_` Hub Public API Key。不要把 Test 当沙箱，也不要用 Live Key 替代历史模糊请求来自动重放。该拒绝不创建 usage reservation 或上游调用。 |
 | 403 | `platform_not_granted` | Live Key 有效；请 operator 为 consumer 授予 `ecommerce`。 |
-| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `external_platform_response_unusable` | 同请求保留原 `Idempotency-Key`/requestId；冷却期内不要更换 `Idempotency-Key` 自动重发。 |
-| 429 | `quota_exceeded`, `external_platform_busy`, `external_platform_capacity_exceeded` | 按策略窗口退避；不要并发放大。 |
-| 502 | `external_platform_response_unusable`, `external_platform_outcome_unknown`, `external_platform_rejected` | 保存 requestId；前两种可能已经产生外部调用，禁止自动更换 `Idempotency-Key`。 |
+| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown` | 同请求保留原 `Idempotency-Key`/requestId；冷却期内不要更换 `Idempotency-Key` 自动重发。 |
+| 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
+| 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |
+| 429 | `external_platform_busy`, `external_platform_capacity_exceeded` | Hub 并发保护或外部容量不足；按响应退避，不要并发放大。 |
+| 502 | `external_platform_response_unusable` | 上游成功 envelope 无法映射。该稳定错误会随同一 `Idempotency-Key` 重放且不再次派发；保存 requestId 并由 operator 核查。 |
+| 502 | `external_platform_outcome_unknown` | 结果可能已经产生外部调用；保存 requestId 和原幂等键，禁止自动换键重试。 |
+| 502 | `external_platform_rejected` | 上游已确定拒绝；检查请求条件，避免连续自动重试。 |
 | 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable` | 若没有 exact fallback，按运维窗口退避。 |
+| 200 | `data.items=[]` | 正常空结果，不是接口故障；可调整关键词或平台。空结果不能证明上游成本为零。 |
 
 `external_platform_not_configured` intentionally does not expose whether a
 provider release gate, credential source or internal credential store is the

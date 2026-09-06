@@ -358,7 +358,7 @@ test('gateway request insert has exactly eleven positional values in contract or
   ])
 })
 
-test('definite provider rejection atomically commits the stable error response', async () => {
+test('known provider failures atomically commit stable error responses', async () => {
   const input = callInput()
   const queries = []
   const client = {
@@ -401,5 +401,29 @@ test('definite provider rejection atomically commits the stable error response',
   assert.equal(usage.values[1], 400)
   assert.deepEqual(usage.values[2], responseBody)
   assert.equal(usage.values[5], 'invalid_marketplace')
+  assert.equal(queries.at(-1).sql, 'COMMIT')
+
+  const unusableBody = {
+    error: { code: 'external_platform_response_unusable', message: 'Response could not be normalized' },
+  }
+  const beforeUnusable = queries.length
+  await store.finishFailure({
+    callId: randomUUID(),
+    delivery: { ...input, usageRequestId: randomUUID() },
+    outcome: 'succeeded_unusable',
+    httpStatus: 200,
+    businessCode: 0,
+    billed: true,
+    latencyMs: 18,
+    errorCode: 'invalid_upstream_contract',
+    failureResponseStatus: 502,
+    failureResponseBody: unusableBody,
+    affectsCircuit: false,
+  })
+
+  const unusableUsage = queries.slice(beforeUnusable).find(({ sql }) => /UPDATE usage_requests/u.test(sql))
+  assert.match(unusableUsage.sql, /status = 'committed'/u)
+  assert.equal(unusableUsage.values[1], 502)
+  assert.deepEqual(unusableUsage.values[2], unusableBody)
   assert.equal(queries.at(-1).sql, 'COMMIT')
 })

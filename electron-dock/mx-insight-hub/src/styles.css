@@ -10447,6 +10447,81 @@ button.mih-catalog-status {
   color: var(--qp-success);
 }
 
+.mih-treasure-recovery-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--qp-warning) 38%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 10px;
+  background: color-mix(in srgb, var(--qp-warning) 7%, var(--qp-bg-4));
+  color: var(--qp-warning);
+}
+
+.mih-treasure-recovery-note > span {
+  display: grid;
+  gap: 2px;
+}
+
+.mih-treasure-recovery-note strong {
+  color: var(--qp-text-2);
+  font-size: 10px;
+}
+
+.mih-treasure-recovery-note small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.mih-treasure-product-error {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--qp-warning) 44%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 16px 18px;
+  background: color-mix(in srgb, var(--qp-warning) 7%, var(--qp-bg-3));
+  color: var(--qp-warning);
+}
+
+.mih-treasure-product-error__copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.mih-treasure-product-error__copy > strong {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-treasure-product-error__copy > p,
+.mih-treasure-product-error__copy > small {
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.5;
+}
+
+.mih-treasure-product-error__copy > small {
+  color: var(--qp-text-4);
+}
+
+.mih-treasure-product-error__copy code {
+  overflow-wrap: anywhere;
+  color: var(--qp-text-2);
+}
+
+.mih-treasure-product-error__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .mih-treasure-stage {
   position: relative;
   display: grid;
@@ -11122,6 +11197,7 @@ button.mih-catalog-status {
   .mih-treasure-controls > header,
   .mih-treasure-controls > .mih-treasure-search,
   .mih-treasure-controls > .mih-treasure-live-auth,
+  .mih-treasure-controls > .mih-treasure-recovery-note,
   .mih-treasure-controls > .mih-treasure-auth-note {
     grid-column: 1 / -1;
   }
@@ -11197,6 +11273,17 @@ button.mih-catalog-status {
   .mih-treasure-inspector {
     border-top: 1px solid var(--qp-line);
     border-left: 0;
+  }
+
+  .mih-treasure-product-error {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .mih-treasure-product-error__actions {
+    grid-column: 2;
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .mih-treasure-cost-table {
