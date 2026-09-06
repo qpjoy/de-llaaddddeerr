@@ -233,6 +233,7 @@ export class ExternalPlatformGateway {
       marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
       pagination: 'opaque_cursor',
       idempotencyKey: 'optional',
+      deliveryModes: ['cache_only', 'cache_first', 'refresh'],
       freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
     }
   }
@@ -287,6 +288,13 @@ export class ExternalPlatformGateway {
     const suppliedKey = idempotencyKey != null && idempotencyKey !== ''
     if (suppliedKey && (typeof idempotencyKey !== 'string' || !IDEMPOTENCY_PATTERN.test(idempotencyKey))) {
       throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8-128 safe characters')
+    }
+    if (normalized.deliveryMode === 'refresh' && !suppliedKey) {
+      throw new AppError(
+        400,
+        'idempotency_key_required',
+        'Idempotency-Key is required when deliveryMode is refresh',
+      )
     }
     const cacheBucket = Math.floor(Date.now() / this.config.freshTtlMs)
     const effectiveKey = suppliedKey
@@ -384,24 +392,42 @@ export class ExternalPlatformGateway {
       operation: JUSTONE_OPERATION,
       fingerprint: requestFingerprint,
     }, now)
-    if (snapshot && new Date(snapshot.freshUntil) >= now) {
+    const snapshotIsFresh = snapshot && new Date(snapshot.freshUntil) >= now
+    if (
+      snapshot
+      && (
+        normalized.deliveryMode === 'cache_only'
+        || (normalized.deliveryMode === 'cache_first' && snapshotIsFresh)
+      )
+    ) {
+      const sourceMode = snapshotIsFresh ? 'fresh_cache' : 'stored_fallback'
       const responseBody = deliveryBody(snapshot.responseBody, {
         requestId: activeRequestId,
-        sourceMode: 'fresh_cache',
+        sourceMode,
         capturedAt: snapshot.capturedAt,
+        ...(snapshotIsFresh ? {} : { fallbackReason: 'cache_only' }),
       })
       await this.platformStore.commitSnapshotDelivery({
         delivery,
         snapshot,
-        sourceMode: 'fresh_cache',
+        sourceMode,
         responseBody,
       })
       return resultFromBody(responseBody, {
         requestId: activeRequestId,
         replay: false,
-        sourceMode: 'fresh_cache',
+        sourceMode,
         capturedAt: snapshot.capturedAt,
       })
+    }
+    if (normalized.deliveryMode === 'cache_only') {
+      await this.platformStore.rejectWithoutDispatch({
+        delivery,
+        sourceMode: 'unavailable',
+        status: 404,
+        errorCode: 'stored_snapshot_not_found',
+      })
+      throw new AppError(404, 'stored_snapshot_not_found', 'No stored result matches this request')
     }
 
     const state = await this.platformStore.providerState('justone')

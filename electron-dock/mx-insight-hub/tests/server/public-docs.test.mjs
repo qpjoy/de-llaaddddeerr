@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
 import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
-const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
+const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi/i
+const FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS = /tikhub|rapidapi|justone/i
 const NIGHT_ALL_COMMON_FIELDS = [
   'businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page',
   'cursor', 'concurrency', 'params', 'includeRaw',
@@ -132,10 +133,11 @@ function assertExternalCommerceContract(document) {
       'invalid_query', 'invalid_page', 'invalid_cursor', 'invalid_pagination',
       'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
       'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
-      'invalid_idempotency_key',
+      'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
     ],
     401: ['api_key_required', 'invalid_api_key'],
     403: ['platform_not_granted', 'test_key_not_supported'],
+    404: ['stored_snapshot_not_found'],
     409: [
       'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
       'external_platform_response_unusable',
@@ -153,7 +155,7 @@ function assertExternalCommerceContract(document) {
   })
   assert.deepEqual(
     Object.keys(operation.responses).map(Number).sort((left, right) => left - right),
-    [200, 400, 401, 403, 409, 413, 429, 502, 503],
+    [200, 400, 401, 403, 404, 409, 413, 429, 502, 503],
   )
 
   assert.equal(operation.parameters.length, 1)
@@ -173,13 +175,15 @@ function assertExternalCommerceContract(document) {
   assert.deepEqual(request.required, ['marketplace', 'query'])
   assert.deepEqual(request.not, { required: ['page', 'cursor'] })
   assert.deepEqual(Object.keys(request.properties), [
-    'marketplace', 'query', 'page', 'cursor', 'sort', 'price',
+    'marketplace', 'query', 'deliveryMode', 'page', 'cursor', 'sort', 'price',
   ])
   assert.equal(request.properties.pageSize, undefined)
   assert.deepEqual(request.properties.marketplace.enum, [
     'taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu',
   ])
   assert.equal(request.properties.query.maxLength, 200)
+  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh'])
+  assert.equal(request.properties.deliveryMode.default, 'cache_first')
   assert.equal(request.properties.page.default, 1)
   assert.equal(request.properties.page.maximum, 1000)
   assert.equal(request.properties.cursor.maxLength, 4096)
@@ -276,6 +280,9 @@ function assertExternalCommerceContract(document) {
   assert.deepEqual(platformProperties.freshnessModes.items.enum, [
     'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay',
   ])
+  assert.deepEqual(platformProperties.deliveryModes.items.enum, [
+    'cache_only', 'cache_first', 'refresh',
+  ])
   const ecommerce = capabilitiesContent.example.data.platforms
     .find(({ platform }) => platform === 'ecommerce')
   assert.deepEqual(ecommerce, {
@@ -288,6 +295,7 @@ function assertExternalCommerceContract(document) {
     marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
     pagination: 'opaque_cursor',
     idempotencyKey: 'optional',
+    deliveryModes: ['cache_only', 'cache_first', 'refresh'],
     freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
   })
 }
@@ -1041,6 +1049,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/ecommerce\/products\/search/)
     assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
     assert.match(html, /电商数据百宝箱/)
+    assert.match(pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html, /JustOne/)
     assert.match(html, /同一把 Hub Public API Key/u)
     assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
     assert.match(html, /第二个候选通过合同验证后/u)
@@ -1050,7 +1059,8 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /stored_fallback/)
     assert.match(html, /相同 <code>Idempotency-Key<\/code> 只重放已提交的原 502，不再次调用上游/u)
     assert.match(html, /它已释放，不是“以后一定不派发”的稳定重放/u)
-    assert.match(html, /未解决的实时请求不会阻塞“零费用演示”/u)
+    assert.match(html, /未解决的实时请求不会阻塞本地安全演示或 <code>cache_only<\/code> 存量浏览/u)
+    assert.match(html, /不会锁死筛选条件/u)
     assert.match(html, /200 且 <code>items=\[\]<\/code>/u)
     assert.match(html, /href="\/docs\/night-all"/)
     assert.match(html, /<h2 id="night-all">Night-All 兼容层<\/h2>/)
@@ -1267,6 +1277,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
 
     const serialized = JSON.stringify(document)
     assert.doesNotMatch(serialized, FORBIDDEN_PUBLIC_DOC_DETAILS)
+    assert.doesNotMatch(serialized, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.doesNotMatch(serialized, /mih_(?:live|test)_[A-Za-z0-9_-]+/i)
     assert.match(serialized, /Idempotency-Key/)
     assert.match(serialized, /opaque nextCursor/i)

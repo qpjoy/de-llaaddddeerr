@@ -4,6 +4,7 @@ export const JUSTONE_PROVIDER_KEY = 'justone'
 export const JUSTONE_OPERATION = 'ecommerce.products.search'
 export const JUSTONE_CONTRACT_VERSION = 'justone.product-search.v1'
 export const ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION = 'mx-insight-hub.ecommerce-products.v1'
+export const ECOMMERCE_DELIVERY_MODES = Object.freeze(['cache_only', 'cache_first', 'refresh'])
 
 const MAX_QUERY_LENGTH = 200
 const MAX_CURSOR_LENGTH = 4_096
@@ -216,6 +217,17 @@ function defaultSort(marketplace) {
   return null
 }
 
+function normalizedDeliveryMode(value) {
+  if (value === undefined || value === null || value === '') return 'cache_first'
+  if (typeof value !== 'string' || !ECOMMERCE_DELIVERY_MODES.includes(value)) {
+    throw new JustOneContractError(
+      'invalid_delivery_mode',
+      'deliveryMode must be cache_only, cache_first or refresh',
+    )
+  }
+  return value
+}
+
 function normalizedSort(value, marketplace, descriptor) {
   if (!descriptor.sortMap) {
     if (value !== undefined && value !== null && value !== '') {
@@ -278,7 +290,7 @@ export function normalizeJustOneProductSearchRequest(body, {
   maxPageSize,
 } = {}) {
   if (!plainObject(body)) throw new JustOneContractError('invalid_request', 'request body must be an object')
-  const allowed = new Set(['marketplace', 'query', 'page', 'cursor', 'sort', 'price'])
+  const allowed = new Set(['marketplace', 'query', 'page', 'cursor', 'sort', 'price', 'deliveryMode'])
   const unknown = Object.keys(body).filter((key) => !allowed.has(key))
   if (unknown.length > 0) {
     throw new JustOneContractError('unsupported_request_field', `unsupported request field: ${unknown[0]}`)
@@ -292,6 +304,7 @@ export function normalizeJustOneProductSearchRequest(body, {
   const descriptor = JUSTONE_ENDPOINTS[marketplace]
   if (!descriptor) throw new JustOneContractError('unsupported_marketplace', 'marketplace is not supported')
   const query = normalizedText(body.query, { maxLength: MAX_QUERY_LENGTH, name: 'query', required: true })
+  const deliveryMode = normalizedDeliveryMode(body.deliveryMode)
   const sort = normalizedSort(body.sort, marketplace, descriptor)
   const price = normalizedPriceRange(body.price, marketplace)
   const cursor = safeCursor(body.cursor)
@@ -322,6 +335,7 @@ export function normalizeJustOneProductSearchRequest(body, {
     operation: JUSTONE_OPERATION,
     marketplace,
     query,
+    deliveryMode,
     page,
     sort,
     price,
@@ -333,6 +347,9 @@ export function normalizeJustOneProductSearchRequest(body, {
     upstreamQuery: Object.freeze(upstreamQuery),
     maxPageSize: normalizedMaxPageSize(maxPageSize),
     fingerprintBody: Object.freeze({
+      // Delivery mode controls whether Hub may refresh this data; it does not
+      // change the logical query/snapshot identity. Idempotent replay always
+      // wins over a later attempt to change this preference with the same key.
       contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
       marketplace,
       query,

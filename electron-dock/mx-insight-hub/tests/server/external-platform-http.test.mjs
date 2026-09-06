@@ -146,7 +146,7 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
   })
   const server = createServer(app)
   const baseUrl = await listen(server)
-  const request = async (idempotencyKey, secret = apiKey.secret) => {
+  const request = async (idempotencyKey, secret = apiKey.secret, body = BODY) => {
     const response = await fetch(`${baseUrl}${PATH}`, {
       method: 'POST',
       headers: {
@@ -154,7 +154,7 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
         'content-type': 'application/json',
         'idempotency-key': idempotencyKey,
       },
-      body: JSON.stringify(BODY),
+      body: JSON.stringify(body),
     })
     return { response, payload: await response.json() }
   }
@@ -209,8 +209,35 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     assert.equal(usageAfterTestRejection.units, 0)
     assert.deepEqual(usageAfterTestRejection.byPlatform, {})
 
-    const live = await request('http-live-key-0001')
-    const cached = await request('http-cache-key-001', rotatedApiKey.secret)
+    const cacheOnlyMiss = await request(
+      'http-cache-miss-01',
+      apiKey.secret,
+      { marketplace: 'jd', query: 'not-yet-retained', deliveryMode: 'cache_only' },
+    )
+    assert.equal(cacheOnlyMiss.response.status, 404)
+    assert.equal(cacheOnlyMiss.payload.error.code, 'stored_snapshot_not_found')
+    assert.equal(adapterCalls, 0)
+    assert.equal(platformStore.calls.size, 0)
+
+    const refreshWithoutKey = await fetch(`${baseUrl}${PATH}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey.secret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ ...BODY, deliveryMode: 'refresh' }),
+    })
+    assert.equal(refreshWithoutKey.status, 400)
+    assert.equal((await refreshWithoutKey.json()).error.code, 'idempotency_key_required')
+    assert.equal(adapterCalls, 0)
+
+    const refreshBody = { ...BODY, deliveryMode: 'refresh' }
+    const live = await request('http-live-key-0001', apiKey.secret, refreshBody)
+    const cached = await request(
+      'http-cache-key-001',
+      rotatedApiKey.secret,
+      { ...BODY, deliveryMode: 'cache_only' },
+    )
 
     assert.equal(live.response.status, 200)
     assert.equal(cached.response.status, 200)
@@ -239,11 +266,11 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     assert.deepEqual(cached.payload.data.items, live.payload.data.items)
 
     const usageAfterCache = await usageStore.usage({ consumerId: consumer.id })
-    assert.equal(usageAfterCache.requests, 2)
+    assert.equal(usageAfterCache.requests, 3)
     assert.equal(usageAfterCache.committed, 2)
     assert.equal(usageAfterCache.units, 2)
 
-    const replay = await request('http-live-key-0001', rotatedApiKey.secret)
+    const replay = await request('http-live-key-0001', rotatedApiKey.secret, refreshBody)
     assert.equal(replay.response.status, 200)
     assert.equal(replay.payload.meta.sourceMode, 'idempotent_replay')
     assert.equal(replay.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
@@ -295,7 +322,7 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     assert.equal(unauthorized.headers.get('access-control-allow-origin'), '*')
 
     const analytics = await platformStore.analytics({ from: new Date(0) })
-    assert.equal(analytics.totals.hubRequests, 3)
+    assert.equal(analytics.totals.hubRequests, 4)
     assert.equal(analytics.totals.upstreamCalls, 1)
     assert.equal(analytics.totals.billedCalls, 1)
     assert.equal(analytics.totals.knownCostMinor, 5)

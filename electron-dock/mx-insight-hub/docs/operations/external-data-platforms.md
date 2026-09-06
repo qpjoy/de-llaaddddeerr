@@ -17,6 +17,10 @@ multi-provider runtime router or automatic supplier failover. “Provider-neutra
 contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot delivery modes, not evidence that another
 provider was called. Provider candidates shown in a catalog remain planning evidence until released.
 
+The same public search accepts a provider-neutral `deliveryMode`: `cache_only` forbids provider dispatch,
+`cache_first` preserves the compatible fresh-cache-first behavior, and `refresh` explicitly permits one new
+acquisition and requires a caller-supplied `Idempotency-Key`. This field does not name or route a supplier.
+
 The feature is additive:
 
 - an absent JustOne credential disables only new JustOne dispatches;
@@ -65,7 +69,9 @@ cost requires an explicit operator decision.
 7. Grant `ecommerce` only to the intended consumer and set its request/window/page policy through the
    existing platform administration workflow. A source-catalog entry or API key alone does not grant access.
    External ecommerce search and media accept only an active `mih_live_` Hub Public API Key; no separate
-   product key is issued.
+   product key is issued. Existing Live keys already resolve to that consumer and need no credential-row
+   migration: applying the normal migrations is sufficient, and enabling the grant makes all active keys of
+   that consumer eligible under the same policy.
 8. Leave `MX_INSIGHT_JUSTONE_BILLING_JSON` absent until a price book is reviewed. Current configuration
    accepts only `source=manual`; price records require a three-letter currency and `pricingAsOf`. A missing
    price, balance or free quota must remain null/unknown, not zero.
@@ -126,9 +132,10 @@ normalized body and original `Idempotency-Key`; do not rotate the Hub Public API
 
 An old browser record marked ambiguous under a Test key is different: keep its exact body, original
 `Idempotency-Key` and one-way credential fingerprint locked, and transfer the available request identity to
-operator reconciliation. The current workbench deliberately sends no capabilities, search or media request for
-that record. Do not paste the historical Test secret, replace it with a Live key or create a new logical request
-until retained usage/gateway/provider/archive evidence has been reviewed.
+operator reconciliation. The workbench may continue local safe-demo and `cache_only` reads with independently
+editable filters because neither can create a provider call. Do not paste the historical Test secret, replace it
+with a Live key or start another `cache_first`/`refresh` attempt until retained usage/gateway/provider/archive
+evidence has been reviewed.
 
 ```bash
 (
@@ -212,7 +219,7 @@ read -rsp 'MX Insight API Key: ' HUB_API_KEY
 printf '\n'
 LIVE_KEY="external-live-$(uuidgen)"
 CACHE_KEY="external-cache-$(uuidgen)"
-REQUEST_BODY='{"marketplace":"jd","query":"approved smoke query"}'
+REQUEST_BODY='{"marketplace":"jd","query":"approved smoke query","deliveryMode":"refresh"}'
 
 LIVE_RESPONSE=$(curl -sS -D /tmp/mxih-external-live.headers -X POST \
   -H "Authorization: Bearer $HUB_API_KEY" \
@@ -226,13 +233,13 @@ printf '%s\n' "$LIVE_RESPONSE" \
 sed -n '/^x-mx-insight-/Ip;/^idempotent-replay:/Ip;/^age:/Ip;/^warning:/Ip' \
   /tmp/mxih-external-live.headers
 
-# Run before MX_INSIGHT_JUSTONE_FRESH_TTL_MS expires. A new Idempotency-Key makes this a
-# separately metered Hub request; the identical normalized body reuses Hub data.
+# This request is a separately metered Hub delivery but forbids another provider call.
+CACHE_BODY='{"marketplace":"jd","query":"approved smoke query","deliveryMode":"cache_only"}'
 CACHE_RESPONSE=$(curl -sS -D /tmp/mxih-external-cache.headers -X POST \
   -H "Authorization: Bearer $HUB_API_KEY" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $CACHE_KEY" \
-  -d "$REQUEST_BODY" \
+  -d "$CACHE_BODY" \
   "$HUB_PUBLIC_URL/api/v1/data/ecommerce/products/search")
 
 printf '%s\n' "$CACHE_RESPONSE" \
@@ -251,7 +258,8 @@ Acceptance for the pair:
 - `meta.sourceMode` and `x-mx-insight-source-mode` agree;
 - capture/serve timestamps and non-negative age are present;
 - `requestId` equals `x-mx-insight-request-id`.
-- the first response is `live`, adding one `provider_calls` row and one Hub usage request;
+- a successful first response is `live`, adding one `provider_calls` row and one Hub usage request; a failed
+  refresh may return an exact `stored_fallback`, so verify Internal evidence rather than assuming a charge;
 - the second response is `fresh_cache`, has a different request ID but the same `capturedAt` and item payload,
   adds a second Hub usage request, and adds no provider call or provider cost;
 - Admin metrics increase by `hubRequests=2`, `upstreamCalls=1`, `freshCache=1` and
@@ -404,6 +412,7 @@ then evaluate quota plan or recharge.
 | `api_key_required` / `invalid_api_key` | The ordinary Hub Public API credential is missing, invalid, expired or revoked. | Verify/reissue that Hub key and its expiry. Do not paste or rotate the JustOne key. |
 | `test_key_not_supported` | A valid legacy Test key reached an external ecommerce search or media route. | Use a Live key only for a deliberately new request. For a historical ambiguous Test record, keep its body/`Idempotency-Key` lock and reconcile it operationally; do not replay it from the page. No usage reservation or provider/media call occurred for this rejection. |
 | `platform_not_granted` | The Hub key is valid, but its consumer lacks the `ecommerce` grant. | Grant the product through the governed Hub authorization workflow; a source-catalog/provider credential does not grant it. |
+| `stored_snapshot_not_found` | A `cache_only` request found no exact retained snapshot. No provider call was made. | Change the business filters, use the clearly marked local safe demo, or explicitly authorize one `refresh` request with a new Idempotency-Key. |
 | `quota_exceeded` | The authenticated consumer exhausted its Hub ecommerce policy window. | Inspect the consumer policy and demand. Do not treat it as JustOne balance or free-quota evidence. |
 | `external_platform_not_configured` | The provider-neutral Public path cannot dispatch: the contract gate may be closed, no DB/environment credential may be usable, or the credential store may be unavailable. | Check the JustOne page's safe `provider.configuration` and `credential` fields, then the Public Pod's non-secret gate state. Do not reveal/decode the key or restart/reconfigure Launcher/MX-H2I. |
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |

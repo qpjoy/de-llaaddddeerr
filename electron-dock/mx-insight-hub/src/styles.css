@@ -10426,6 +10426,31 @@ button.mih-catalog-status {
   line-height: 1.45;
 }
 
+.mih-treasure-cache-guarantee {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: var(--qp-success);
+}
+
+.mih-treasure-cache-guarantee > span {
+  display: grid;
+  gap: 2px;
+}
+
+.mih-treasure-cache-guarantee strong {
+  color: var(--qp-text-2);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.mih-treasure-cache-guarantee small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .mih-treasure-search {
   justify-content: center;
   width: 100%;
@@ -10473,6 +10498,11 @@ button.mih-catalog-status {
   color: var(--qp-text-3);
   font-size: 9px;
   line-height: 1.45;
+}
+
+.mih-treasure-recovery-note .qp-button {
+  justify-self: start;
+  margin-top: 5px;
 }
 
 .mih-treasure-product-error {

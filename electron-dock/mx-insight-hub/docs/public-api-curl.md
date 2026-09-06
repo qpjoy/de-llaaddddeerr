@@ -456,7 +456,8 @@ continuation 或 raw response。
 接受供应方密钥。为该 Key 所属 consumer 启用 ecommerce 后，其全部有效 Key 立即继承授权。
 本节所有搜索和媒体示例要求 `$HUB_KEY` 是以 `mih_live_` 开头的完整 Hub Public API Key。
 若旧版百宝箱留下 Test-key `ambiguous` 记录，只保留原 body、原 `Idempotency-Key` 和指纹锁供
-运维核查；不要运行本节 curl、粘贴旧 Test secret 或换成 Live Key 尝试恢复。
+运维核查；不要粘贴旧 Test secret 或换成 Live Key 尝试恢复该请求。独立的本地安全演示和
+`cache_only` 存量读取不创建 provider call，仍可继续使用。
 
 body 是严格对象，只允许以下字段：
 
@@ -464,6 +465,7 @@ body 是严格对象，只允许以下字段：
 | --- | --- |
 | `marketplace` | 必填；`taobao\|tmall\|jd\|xiaohongshu_ec\|xianyu`。 |
 | `query` | 必填；NFKC 规范化并 trim 后 1–200 字符。 |
+| `deliveryMode` | 可选；`cache_only\|cache_first\|refresh`，默认 `cache_first`。`cache_only` 禁止上游派发；`refresh` 绕过新鲜快照且必须显式提供 Idempotency-Key。 |
 | `page` | 可选；整数 `1..1000`，默认 1，不能与 `cursor` 同时使用。 |
 | `cursor` | 可选；上一页返回的不透明 `nextCursor`，最多 4096 字符。 |
 | `sort` | marketplace 专属：淘宝/天猫支持 `relevance\|sales_desc\|price_asc\|price_desc`；闲鱼支持 `relevance\|recent\|seller_credit\|price_asc\|price_desc\|price_drop\|newest`；京东和小红书店铺不接受。 |
@@ -489,6 +491,36 @@ ECOMMERCE_FIRST=$(curl -sS -X POST \
 
 printf '%s\n' "$ECOMMERCE_FIRST" \
   | jq '{contractVersion, items: .data.items, page: .data.page, freshness: .meta, requestId}'
+```
+
+若要保证本次不产生外部平台调用，使用同一路径并显式发送 `cache_only`。命中存量会形成一笔
+新的 Hub usage，未命中返回 `404 stored_snapshot_not_found` 并释放预留；两种情况都不会创建
+provider-call：
+
+```bash
+ECOMMERCE_STORED_KEY="$(new_idempotency_key)"
+ECOMMERCE_STORED_BODY='{"marketplace":"taobao","query":"AI recorder","sort":"sales_desc","price":{"min":"100","max":"800"},"deliveryMode":"cache_only"}'
+curl -sS -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $ECOMMERCE_STORED_KEY" \
+  -d "$ECOMMERCE_STORED_BODY" \
+  "$HUB_URL/api/v1/data/ecommerce/products/search" | jq
+```
+
+若要明确尝试一次可能产生外部供应方采购成本的新采集，将同一 body 的 `deliveryMode` 设为
+`refresh`，生成一个新的 Idempotency-Key，并且只执行一次。不要把该调用放入 readiness 或
+自动重试循环。
+
+```bash
+ECOMMERCE_REFRESH_KEY="$(new_idempotency_key)"
+ECOMMERCE_REFRESH_BODY=$(printf '%s\n' "$ECOMMERCE_BODY" | jq -c '. + {deliveryMode:"refresh"}')
+curl -sS -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $ECOMMERCE_REFRESH_KEY" \
+  -d "$ECOMMERCE_REFRESH_BODY" \
+  "$HUB_URL/api/v1/data/ecommerce/products/search" | jq
 ```
 
 同一页发生网络传输重试时，原样复用 `ECOMMERCE_FIRST_KEY` 和 body。调用下一页时必须使用
@@ -592,7 +624,8 @@ consumer、该请求是已提交且 HTTP 200 的 ecommerce 请求，并且 item/
 | `stored_fallback` | 实时路径不可用，返回同请求的 last-good 快照。 | 检查 `fallbackReason`、`Age`、`Warning: 110`，不得标成实时。 |
 | `idempotent_replay` | 同 `Idempotency-Key`、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
 
-`Idempotency-Key` 在传输层可省略，但建议始终显式提供。省略时 Hub 只根据规范化请求生成
+`Idempotency-Key` 对 `cache_only` 和 `cache_first` 可省略，但 `refresh` 必须提供；建议所有模式
+都显式提供。省略时 Hub 只根据规范化请求生成
 短期 freshness-bucket key，客户端不能用它实现持久重放。缓存与 fallback 都严格绑定当前
 consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 canonical search
 结果拼装。
@@ -601,10 +634,11 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 
 | HTTP | `error.code` | 处理方式 |
 | --- | --- | --- |
-| 400 | `unsupported_marketplace`, `unsupported_sort`, `unsupported_price_filter`, `invalid_pagination`, `cursor_scope_mismatch`, `unsupported_request_field` | 修正请求或从无 cursor 首页开始，不要原样重试。 |
+| 400 | `unsupported_marketplace`, `unsupported_sort`, `unsupported_price_filter`, `invalid_pagination`, `cursor_scope_mismatch`, `unsupported_request_field`, `invalid_delivery_mode`, `idempotency_key_required` | 修正请求、交付策略或从无 cursor 首页开始，不要原样重试。 |
 | 401 | `api_key_required`, `invalid_api_key` | 提供当前 Hub 实例通过 API Keys 签发的完整 Hub Public API Key；不要用管理令牌、掩码或供应方密钥。 |
 | 403 | `test_key_not_supported` | 外部 ecommerce 仅接受 `mih_live_` Hub Public API Key。不要把 Test 当沙箱，也不要用 Live Key 替代历史模糊请求来自动重放。该拒绝不创建 usage reservation 或上游调用。 |
 | 403 | `platform_not_granted` | Live Key 有效；请 operator 为 consumer 授予 `ecommerce`。 |
+| 404 | `stored_snapshot_not_found` | `cache_only` 未命中精确存量；本次没有调用外部平台。换条件或明确确认一次 `refresh`。 |
 | 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown` | 同请求保留原 `Idempotency-Key`/requestId；冷却期内不要更换 `Idempotency-Key` 自动重发。 |
 | 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
 | 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |

@@ -35,7 +35,7 @@ contractVersion = mx-insight-hub.ecommerce-products.v1
 authorization platform = ecommerce
 ```
 
-The request allowlist is exactly `marketplace`, `query`, `page`, `cursor`, `sort` and `price`. There is no
+The request allowlist is exactly `marketplace`, `query`, `deliveryMode`, `page`, `cursor`, `sort` and `price`. There is no
 caller-controlled `pageSize`; result size is server policy. `page` and `cursor` are mutually exclusive.
 The response contains normalized product, price, shop, image, signal and attribute fields plus
 `capturedAt`, `servedAt`, `sourceMode` and `ageSeconds`. It never contains the JustOne identity, token,
@@ -105,6 +105,10 @@ the key for transport retries of that exact page. Reusing it with a changed requ
 `409 idempotency_conflict`. Every next-page request has a changed cursor/body and therefore must use a new
 `Idempotency-Key`.
 
+`deliveryMode` is deliberately excluded from the logical data fingerprint: it controls whether Hub may refresh
+the same query snapshot, not which data was requested. Consequently, reusing a committed Idempotency-Key with a
+different delivery preference replays the original result instead of converting it into a new dispatch.
+
 When a caller omits the key, Hub derives a short-lived freshness-bucket key. This is a convenience and
 duplicate guard, not a durable client replay contract. The gateway additionally holds an exact
 consumer/operation/fingerprint dispatch lease so two concurrent requests with different `Idempotency-Key` values cannot both
@@ -145,6 +149,15 @@ Snapshots are keyed by consumer, operation and the complete normalized request f
 - `stored_fallback` serves an exact last-good snapshot within the configured stale window when dispatch is
   unavailable, rejected, unusable, concurrency-guarded or circuit-open;
 - `idempotent_replay` serves the immutable result already committed to the same caller-supplied `Idempotency-Key`.
+
+The caller can constrain that state machine without naming a provider:
+
+- `cache_only` returns only the exact retained snapshot, never enters provider readiness/concurrency/lease or
+  dispatch, and returns `404 stored_snapshot_not_found` after releasing its usage reservation on a miss;
+- `cache_first` is the backward-compatible default and follows the fresh-cache-first path above;
+- `refresh` bypasses a pre-existing fresh snapshot, requires a caller-supplied Idempotency-Key, and attempts one
+  governed dispatch; an exact retained snapshot may still be the fallback after pre-dispatch unavailability or
+  dispatch failure.
 
 There is no fuzzy-query, cross-consumer, cross-marketplace, cross-page, canonical-search or “similar item”
 fallback. A stored delivery always exposes capture/serve time, age and source mode; stale fallback also
@@ -241,7 +254,8 @@ back to a neutral local icon without changing the original search evidence.
   the serving of already-stored Hub data.
 - A browser ledger left ambiguous by an older Test-key workbench is retained only as a locked body,
   `Idempotency-Key` and credential fingerprint for operator reconciliation. The current page does not validate or
-  replay it and never substitutes a Live key.
+  replay it and never substitutes a Live key. The record does not freeze business filters or block local safe-demo
+  and `cache_only` reads; it blocks only another provider-capable request until exact recovery or reconciliation.
 
 ## Consequences
 

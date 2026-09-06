@@ -47,6 +47,33 @@ test('treasure box reuses the ordinary Open Capabilities API key and never persi
   assert.doesNotMatch(pageSource, /docs\.justoneapi\.com\/.*(?:token|key)=/iu)
 })
 
+test('treasure box exposes safe stored, cache-first and explicit refresh delivery on one API', async () => {
+  const [, , pageSource] = await sources()
+  const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
+  const storedBody = pageSource.match(/function storedRequestBody\(value\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const changeDeliveryMode = pageSource.match(/const changeDeliveryMode = \(value\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+
+  for (const mode of ['cache_only', 'cache_first', 'refresh']) {
+    assert.match(pageSource, new RegExp(`value: '${mode}'`, 'u'))
+  }
+  assert.match(pageSource, /const \[deliveryMode, setDeliveryMode\] = useState\('cache_only'\)/u)
+  assert.match(pageSource, /label="交付策略"[\s\S]*?options=\{DELIVERY_MODE_OPTIONS\}/u)
+  assert.match(pageSource, /只读保障：本次不会调用外部平台/u)
+  assert.match(pageSource, /读取 Hub 存量/u)
+  assert.match(pageSource, /重新采集最新数据/u)
+  assert.match(runLive, /const providerMayRun = deliveryMode !== 'cache_only'/u)
+  assert.match(runLive, /if \(!replay && providerMayRun && !chargeConfirmed\)/u)
+  assert.match(runLive, /if \(tracksProviderRisk\) \{[\s\S]*?rememberLiveRequest/u)
+  assert.match(storedBody, /deliveryMode: value\.deliveryMode \|\| 'cache_first'/u)
+  assert.match(pageSource, /stored_snapshot_not_found[\s\S]*?没有调用 JustOne/u)
+  for (const transition of [changeMode, changeDeliveryMode]) {
+    assert.match(transition, /setProducts\(\[\]\)/u)
+    assert.match(transition, /setSelected\(null\)/u)
+    assert.match(transition, /setEvidence\(null\)/u)
+  }
+})
+
 test('live key preflight is zero-cost, rejects every Test key and preserves an ambiguous lock', async () => {
   const [, apiSource, pageSource] = await sources()
   const capabilitiesApi = apiSource.match(/capabilities: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
@@ -80,10 +107,10 @@ test('live key preflight is zero-cost, rejects every Test key and preserves an a
   assert.doesNotMatch(pageSource, /placeholder="mxk_/u)
   assert.match(pageSource, /type="button"[^>]+onClick=\{verifyHubApiKey\}[\s\S]*?零费用验证 Key/u)
   assert.match(pageSource, /预检不创建 Hub usage/u)
-  assert.match(pageSource, /上一次实时请求仍待核查[\s\S]*?原请求条件与 Idempotency-Key[\s\S]*?管理员核查/u)
+  assert.match(pageSource, /上一次外部采集请求仍待核查[\s\S]*?Idempotency-Key[\s\S]*?管理员核查/u)
   assert.match(pageSource, /const ambiguousLiveReplayReady = ambiguousRetryAvailable[\s\S]*?keyCheck\.fingerprint === lastLiveRequest\?\.keyFingerprint/u)
   assert.match(pageSource, /ambiguousRetryAvailable && !ambiguousLiveReplayReady/u)
-  assert.match(pageSource, /ambiguousLiveReplayReady \? '使用原 Idempotency-Key 重试' : '已锁定 · 验证原 Live Key'/u)
+  assert.match(pageSource, /ambiguousLiveReplayReady \? '使用原 Idempotency-Key 精确重试' : '先验证原 Live Key'/u)
   assert.match(changeKey, /setKeyCheck\(\{ status: 'idle', fingerprint: null/u)
   assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'\) forgetLiveRequest\(\)/u)
   assert.match(pageSource, /const keyUsable = \['ready', 'degraded'\]\.includes\(keyCheck\.status\)/u)
@@ -103,7 +130,10 @@ test('live verification script preserves one recovery identity across ambiguous 
   assert.match(script, /HUB_ECOMMERCE_QUERY:-蓝牙耳机受控实时检查-\$\{LIVE_KEY##\*-\}/u)
   assert.ok(recoveryKey >= 0 && recoveryKey < firstDispatch, 'recovery key must be shown before dispatch')
   assert.ok(recoveryBody >= 0 && recoveryBody < firstDispatch, 'recovery body must be shown before dispatch')
-  assert.match(script, /external_platform_outcome_unknown\|external_platform_response_unusable\|request_outcome_unknown\|request_in_progress/u)
+  assert.match(script, /deliveryMode:"refresh"/u)
+  assert.match(script, /external_platform_outcome_unknown\|request_outcome_unknown/u)
+  assert.match(script, /external_platform_response_unusable[\s\S]*?502 is committed/u)
+  assert.match(script, /request_in_progress[\s\S]*?suppressed before dispatch/u)
   assert.match(script, /Recover only with the same Idempotency-Key and identical body/u)
   assert.match(script, /idempotent_replay\)[\s\S]*?original request completed; this run created no new Hub usage or provider dispatch/u)
   assert.doesNotMatch(script, /no paid request|paid upstream dispatch/u)
@@ -113,6 +143,7 @@ test('live requests durably bind the exact request before fetch and fail closed 
   const [, , pageSource] = await sources()
   const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
   const ambiguityClassifier = pageSource.match(/function ambiguousLiveFailure\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  const ambiguousCodes = pageSource.match(/const AMBIGUOUS_LIVE_ERROR_CODES = new Set\(\[[\s\S]*?\]\)/u)?.[0] || ''
   const mismatchBlock = runLive.match(/if \(replay && previous\?\.keyFingerprint !== fingerprint\) \{[\s\S]*?\n      \}/u)?.[0] || ''
   const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
 
@@ -132,27 +163,29 @@ test('live requests durably bind the exact request before fetch and fail closed 
   )
   for (const code of [
     'external_platform_outcome_unknown',
-    'external_platform_response_unusable',
     'request_outcome_unknown',
     'request_in_progress',
   ]) assert.match(pageSource, new RegExp(code, 'u'))
+  assert.doesNotMatch(ambiguousCodes, /external_platform_response_unusable/u)
   assert.match(ambiguityClassifier, /if \(error\?\.status === 409\) return false/u)
   assert.ok(
     ambiguityClassifier.indexOf('error?.status === 409') < ambiguityClassifier.indexOf('AMBIGUOUS_LIVE_ERROR_CODES.has'),
     'a fresh server-side suppression must not become a no-confirmation replay merely because it shares an ambiguity code',
   )
-  assert.match(runLive, /previous\?\.outcome === 'ambiguous'[\s\S]*?只能使用原 Idempotency-Key 重试/u)
+  assert.match(runLive, /previous\?\.outcome === 'ambiguous'[\s\S]*?可以继续只读 Hub 存量/u)
   assert.match(mismatchBlock, /previous\?\.keyFingerprint !== fingerprint/u)
   assert.doesNotMatch(mismatchBlock, /forgetLiveRequest/u)
   assert.match(mismatchBlock, /原 body 与 Idempotency-Key 已继续锁定/u)
   assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'/u)
-  assert.match(runLive, /if \(!\(replay && previous\?\.outcome === 'ambiguous'\)\) forgetLiveRequest\(\)/u)
+  assert.match(runLive, /stableCommittedFailure[\s\S]*?outcome: 'resolved'/u)
+  assert.match(runLive, /tracksProviderRisk[\s\S]*?rememberLiveRequest\(requestRecord, \{ failClosed: true \}\)/u)
 })
 
 test('an ambiguous live request preserves its ledger while safe demo stays available', async () => {
   const [, , pageSource] = await sources()
   const keyField = pageSource.match(/<Field label="开放能力 API Key"[\s\S]*?<\/Field>/u)?.[0] || ''
-  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
+  const restoreAmbiguous = pageSource.match(/const restoreAmbiguousRequest = \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
   const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
 
   assert.match(pageSource, /requestInFlightRef\.current/u)
@@ -167,14 +200,16 @@ test('an ambiguous live request preserves its ledger while safe demo stays avail
   assert.match(pageSource, /label="排序"[\s\S]*?disabled=\{semanticsLocked/u)
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
   assert.match(keyField, /type="password"[\s\S]*?disabled=\{phase === 'searching' \|\| checkingKey\}/u)
+  assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
+  assert.doesNotMatch(pageSource, /const semanticsLocked = [^\n]*ambiguousRetryAvailable/u)
   assert.match(changeMode, /if \(phase === 'searching'\) return/u)
-  assert.match(changeMode, /value === 'hub_live' && pending\?\.outcome === 'ambiguous'/u)
-  assert.match(changeMode, /setMarketplace\(pending\.body\.marketplace\)/u)
-  assert.match(changeMode, /setQuery\(pending\.body\.query\)/u)
-  assert.match(changeMode, /setSort\(pending\.body\.sort/u)
+  assert.doesNotMatch(changeMode, /setMarketplace\(pending\.body\.marketplace\)|setQuery\(pending\.body\.query\)/u)
+  assert.match(restoreAmbiguous, /setMarketplace\(pending\.body\.marketplace\)/u)
+  assert.match(restoreAmbiguous, /setQuery\(pending\.body\.query\)/u)
+  assert.match(restoreAmbiguous, /setDeliveryMode\(pending\.body\.deliveryMode \|\| 'cache_first'\)/u)
   assert.doesNotMatch(changeMode, /forgetLiveRequest|clearPersistedLiveRequest/u)
   assert.doesNotMatch(runSafeDemo, /publicDataApi|forgetLiveRequest|clearPersistedLiveRequest/u)
-  assert.match(pageSource, /mode === 'safe_demo' && hasAmbiguousLiveRequest[\s\S]*?不会影响零费用演示/u)
+  assert.match(pageSource, /hasAmbiguousLiveRequest \? \([\s\S]*?筛选项仍可编辑，也可只读 Hub 存量/u)
   assert.match(pageSource, /mode === 'safe_demo' \? '零费用演示只使用页面示例，不访问 Hub 或上游。'/u)
   assert.match(pageSource, /aria-pressed=\{capabilityGroup === group\.id\}/u)
   assert.doesNotMatch(pageSource, /role="tab(?:list)?"|aria-selected=/u)

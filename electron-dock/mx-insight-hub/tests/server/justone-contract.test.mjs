@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
+  ECOMMERCE_DELIVERY_MODES,
   JUSTONE_BUSINESS_CODES,
   JUSTONE_CONTRACT_VERSION,
   JUSTONE_ENDPOINTS,
@@ -71,6 +72,22 @@ test('provider-neutral request maps only reviewed marketplace parameters', () =>
   })
   assert.equal(taobao.endpointKey, 'taobao-tmall.product-search.v1')
   assert.equal(taobao.fingerprintBody.page, 2)
+  assert.equal(taobao.deliveryMode, 'cache_first')
+  assert.deepEqual(ECOMMERCE_DELIVERY_MODES, ['cache_only', 'cache_first', 'refresh'])
+
+  const cacheOnly = normalizeJustOneProductSearchRequest({
+    marketplace: 'taobao', query: '焕颜有方', deliveryMode: 'cache_only',
+  })
+  const refresh = normalizeJustOneProductSearchRequest({
+    marketplace: 'taobao', query: '焕颜有方', deliveryMode: 'refresh',
+  })
+  assert.equal(cacheOnly.deliveryMode, 'cache_only')
+  assert.equal(refresh.deliveryMode, 'refresh')
+  assert.deepEqual(
+    cacheOnly.fingerprintBody,
+    refresh.fingerprintBody,
+    'delivery preference must not fragment the logical query snapshot',
+  )
 
   const tmall = normalizeJustOneProductSearchRequest({ marketplace: 'tmall', query: '面霜' })
   assert.deepEqual(tmall.upstreamQuery, {
@@ -90,6 +107,10 @@ test('provider-neutral request maps only reviewed marketplace parameters', () =>
   assert.throws(
     () => normalizeJustOneProductSearchRequest({ marketplace: 'xianyu', query: '相机', price: { min: 1 } }),
     (error) => error instanceof JustOneContractError && error.code === 'unsupported_price_filter',
+  )
+  assert.throws(
+    () => normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '手机', deliveryMode: 'provider_only' }),
+    (error) => error instanceof JustOneContractError && error.code === 'invalid_delivery_mode',
   )
 })
 

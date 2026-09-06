@@ -292,12 +292,29 @@ escalate it for operator reconciliation; do not send it through search or media,
 and do not substitute a Live key.
 
 The request is a strict object. Its complete field allowlist is `marketplace`,
-`query`, `page`, `cursor`, `sort`, and `price`; any other field returns
+`query`, `deliveryMode`, `page`, `cursor`, `sort`, and `price`; any other field returns
 `400 unsupported_request_field`. In particular, there is no `pageSize` field:
 Hub owns the bounded result-size policy. `marketplace` is one of `taobao`,
 `tmall`, `jd`, `xiaohongshu_ec`, or `xianyu`. `query` is NFKC-normalized,
 trimmed, required, and limited to 200 characters. `page` is an integer from 1
 through 1,000 and defaults to 1.
+
+`deliveryMode` is optional and defaults to `cache_first` for backward
+compatibility. It is a delivery intent, never a provider selector:
+
+- `cache_only` reads only an exact same-consumer Hub snapshot. It never creates
+  an external provider call. A missing snapshot returns
+  `404 stored_snapshot_not_found`; a retained stale snapshot can be returned as
+  `stored_fallback`.
+- `cache_first` uses an exact fresh snapshot when present, otherwise permits one
+  governed acquisition and can fall back to an exact retained snapshot.
+- `refresh` bypasses an exact fresh snapshot and permits one new acquisition. It
+  requires a caller-supplied `Idempotency-Key`, and can still return
+  `stored_fallback` after an attempted acquisition fails.
+
+Changing only `deliveryMode` does not change the logical snapshot identity.
+Reusing an already committed `Idempotency-Key` therefore replays its original
+result; it cannot turn an old cache delivery into a new refresh.
 
 The Admin treasure-box choices `3`, `6`, and `9` are browser-local presentation
 sizes over the current returned batch. They are not request fields, do not
@@ -324,8 +341,9 @@ Sort and price support are marketplace-specific:
   `price_desc`, `price_drop`, and `newest`; the default is `relevance`.
 - `jd` and `xiaohongshu_ec` do not accept `sort`; neither accepts `price`.
 
-`Idempotency-Key` is optional at transport level but strongly recommended for
-auditable replay control. Use the same `Idempotency-Key` only when retrying the exact same
+`Idempotency-Key` is optional for `cache_only` and `cache_first`, but required
+for `refresh`; it remains strongly recommended for auditable replay control.
+Use the same `Idempotency-Key` only when retrying the exact same
 path and page body. The key permanently binds that request; reusing it with a
 different body returns `409 idempotency_conflict`. Every continuation has a
 different body and **must use a new Idempotency-Key**. When the header is
@@ -437,6 +455,12 @@ neither a Hub usage request nor an external call or provider-cost event. The
 gateway audit trail may record delivery of the replay, but that delivery is not
 a new Hub usage or provider procurement-cost event. That fact does not decide
 whether a future Hub customer price book prices replay delivery.
+
+A `cache_only` hit is still a new authenticated Hub delivery and therefore a
+new Hub usage record, while creating no provider call. A `cache_only` miss
+releases its usage reservation and returns 404. This distinction is deliberate:
+provider procurement cost, Hub operational usage and future customer billing
+are separate ledgers.
 
 Hub operational usage and provider cost are separate ledgers. Neither is a
 customer invoice. A future versioned Hub price book may decide whether a live,

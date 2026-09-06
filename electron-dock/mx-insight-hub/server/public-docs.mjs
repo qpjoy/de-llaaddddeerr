@@ -456,7 +456,7 @@ const nightAllCompatibilityIdempotencyParameter = {
 const externalCommerceIdempotencyParameter = {
   ...idempotencyParameter,
   required: false,
-  description: 'Optional but recommended for explicit replay control. Reuse the same Idempotency-Key only for a transport retry of the exact same page request. Every next-page request changes the body and must use a new Idempotency-Key. When omitted, Hub derives a short-lived freshness-bucket key for the normalized request.',
+  description: 'Optional for cache_only and cache_first, but required for refresh. Reuse the same Idempotency-Key only for a transport retry of the exact same page request. Every next-page request changes the body and must use a new Idempotency-Key. When omitted, Hub derives a short-lived freshness-bucket key for the normalized request.',
 }
 
 const searchResponse = {
@@ -840,6 +840,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
                         pagination: 'opaque_cursor',
                         idempotencyKey: 'optional',
+                        deliveryModes: ['cache_only', 'cache_first', 'refresh'],
                         freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
                       },
                       { platform: 'xiaohongshu', ready: true },
@@ -882,17 +883,18 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['External Data'],
         operationId: 'searchExternalCommerceProducts',
         summary: 'Search marketplace products through the governed external data gateway',
-        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, page, cursor, sort and price; pageSize and routing fields are not part of this contract. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub may satisfy an exact request from a fresh snapshot or an exact last-good fallback, but never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
+        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, deliveryMode, page, cursor, sort and price; pageSize and provider-routing fields are not part of this contract. deliveryMode defaults to cache_first: cache_only never dispatches external acquisition and returns 404 when no exact snapshot exists; refresh bypasses a fresh snapshot, requires a caller-supplied Idempotency-Key and may still deliver an exact stored fallback when acquisition fails. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
         'x-mx-error-codes': {
           400: [
             'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
             'invalid_query', 'invalid_page', 'invalid_cursor', 'invalid_pagination',
             'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
             'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
-            'invalid_idempotency_key',
+            'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
           ],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'test_key_not_supported'],
+          404: ['stored_snapshot_not_found'],
           409: [
             'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
             'external_platform_response_unusable',
@@ -919,6 +921,14 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   summary: 'First page',
                   value: { marketplace: 'jd', query: 'AI recorder' },
                 },
+                storedOnly: {
+                  summary: 'Read an exact Hub snapshot without external acquisition',
+                  value: { marketplace: 'jd', query: 'AI recorder', deliveryMode: 'cache_only' },
+                },
+                explicitRefresh: {
+                  summary: 'Bypass a fresh snapshot and attempt one governed acquisition',
+                  value: { marketplace: 'jd', query: 'AI recorder', deliveryMode: 'refresh' },
+                },
                 continuation: {
                   summary: 'Continuation with the opaque Hub cursor',
                   value: { marketplace: 'jd', query: 'AI recorder', cursor: 'opaque-next-cursor' },
@@ -932,6 +942,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: errorResponse,
           401: errorResponse,
           403: errorResponse,
+          404: errorResponse,
           409: errorResponse,
           413: errorResponse,
           429: errorResponse,
@@ -1904,13 +1915,19 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         additionalProperties: false,
         required: ['marketplace', 'query'],
         not: { required: ['page', 'cursor'] },
-        description: 'Provider-neutral product search. page and cursor are mutually exclusive. The server owns result-size policy; pageSize is intentionally unsupported.',
+        description: 'Provider-neutral product search. deliveryMode controls only whether Hub may dispatch external acquisition; it never selects a provider. page and cursor are mutually exclusive. The server owns result-size policy; pageSize is intentionally unsupported.',
         properties: {
           marketplace: {
             type: 'string',
             enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
           },
           query: { type: 'string', minLength: 1, maxLength: 200 },
+          deliveryMode: {
+            type: 'string',
+            enum: ['cache_only', 'cache_first', 'refresh'],
+            default: 'cache_first',
+            description: 'cache_only reads only an exact Hub snapshot and never dispatches externally; cache_first reuses a fresh snapshot before acquisition; refresh bypasses a fresh snapshot, requires Idempotency-Key and may fall back to an exact stored snapshot after an acquisition failure.',
+          },
           page: {
             type: 'integer', minimum: 1, maximum: 1000, default: 1,
             description: 'Numeric page for a first traversal. Do not combine with cursor; continuation cursors are preferred.',
@@ -3911,6 +3928,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     },
                     pagination: { type: 'string', enum: ['opaque_cursor'] },
                     idempotencyKey: { type: 'string', enum: ['optional'] },
+                    deliveryModes: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'] },
+                    },
                     freshnessModes: {
                       type: 'array',
                       items: {
@@ -4249,7 +4270,7 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     <section class="doc-page" data-doc-page="ecommerce-treasure-box">
     <h2 id="ecommerce-treasure-box">电商数据百宝箱</h2>
     <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
-    <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；本次文档分组没有修改任何 API 路径、字段或授权规则。</div>
+    <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；路径和授权规则不变，新增的可选 <code>deliveryMode</code> 只表达 Hub 是否可以访问外部平台，不是供应方选择器。</div>
     <p><code>ecommerce</code> 是稳定的数据域，不是某一家供应方的名字；<code>marketplace</code> 是本次要检索的业务站点，也不是供应方选择器。当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移。第二个候选通过合同验证后，Hub 才会在私有路由层按操作、marketplace、已验证合同版本、凭据健康、熔断/配额、成本和租户策略确定性选择。调用方不能通过请求字段指定供应方，也不需要在新增供应方后修改集成。</p>
     <div class="notice">当前及未来，一次逻辑请求都最多派发给一个外部候选。未来 Hub 只有在尚未创建 provider-call 证据或发出网络请求、且能确定候选不可用时才可改选；一旦外部派发开始，超时、结果未知、可能已消耗供应方额度/内部采购成本或响应不可规范化，都不得自动改投第二家，避免重复成本与语义漂移。</div>
 
@@ -4263,11 +4284,11 @@ printf '\n'
 curl -sS "$HUB_URL/api/v1/data/capabilities" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   | jq '.data.platforms[] | select(.platform == "ecommerce")'</code></pre>
-    <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>。</p>
+    <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>，请求策略为 <code>cache_only / cache_first / refresh</code>。</p>
     <p><code>401 invalid_api_key</code> 表示认证失败：必须使用同一个 Hub 实例签发时仅展示一次的完整 Hub Public API secret；列表中的掩码、admin token 和外部平台密钥都不能调用公开数据接口。认证通过但其调用身份未授予 ecommerce 时返回 <code>403 platform_not_granted</code>；使用兼容 Test Key 发起正式电商搜索则返回 <code>403 test_key_not_supported</code>，且在建立 usage reservation 或调用供应方前拒绝。授予后原 Live Key 无需重签。</p>
 
     <h3>2. 发起一次可追踪搜索</h3>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>需要 <code>ecommerce</code> platform grant。body 是严格对象，不接受路由供应方、上游 endpoint、原始参数或 <code>pageSize</code>。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>需要 <code>ecommerce</code> platform grant。body 是严格对象，不接受路由供应方、上游 endpoint、原始参数或 <code>pageSize</code>。省略 <code>deliveryMode</code> 时保持兼容，等同 <code>cache_first</code>。</p></div>
     <pre><code>REQUEST_KEY="ecommerce-demo-$(uuidgen)"
 REQUEST_BODY='{"marketplace":"jd","query":"便携相机"}'
 
@@ -4280,6 +4301,7 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
     <table><thead><tr><th>字段</th><th>约束</th><th>平台差异</th></tr></thead><tbody>
       <tr><td><code>marketplace</code></td><td>必填，使用上方五个稳定枚举之一</td><td>决定可用过滤与排序，不决定授权</td></tr>
       <tr><td><code>query</code></td><td>必填，1–200 字符，NFKC 规范化</td><td>所有平台</td></tr>
+      <tr><td><code>deliveryMode</code></td><td>可选，默认 <code>cache_first</code></td><td><code>cache_only</code> 绝不发起外部采集；<code>cache_first</code> 新鲜快照优先；<code>refresh</code> 绕过新鲜快照并要求显式 Idempotency-Key</td></tr>
       <tr><td><code>sort</code></td><td>可选；必须是当前 marketplace 支持的值</td><td>淘宝/天猫：<code>relevance|sales_desc|price_asc|price_desc</code>；闲鱼：<code>relevance|recent|seller_credit|price_asc|price_desc|price_drop|newest</code>；京东和小红书电商不接受</td></tr>
       <tr><td><code>price</code></td><td>可选 <code>{min,max}</code>，金额必须是十进制字符串</td><td>只支持淘宝/天猫</td></tr>
       <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
@@ -4344,13 +4366,37 @@ fi</code></pre>
     <div class="notice"><code>hasMore=false</code> 或 <code>hasMore=null</code> 都必须停止。null 表示 Hub 没有足够证据安全地产生 continuation；客户端不能改用自增页码绕过。</div>
 
     <h3>6. 同一接口的交付与成本语义</h3>
+    <p>请求里的 <code>deliveryMode</code> 是调用意图，响应里的 <code>sourceMode</code> 是实际交付证据，两者不能混为一谈。三种请求策略都使用同一把 Hub Public API Key 和同一路径：</p>
+    <table><thead><tr><th>deliveryMode</th><th>外部采集</th><th>行为</th></tr></thead><tbody>
+      <tr><td><code>cache_only</code></td><td>禁止</td><td>只查同 consumer、同规范化请求的精确 Hub 快照；新鲜返回 <code>fresh_cache</code>，过期但仍在保留期内返回 <code>stored_fallback</code>，没有快照返回 <code>404 stored_snapshot_not_found</code>。</td></tr>
+      <tr><td><code>cache_first</code></td><td>按需</td><td>默认兼容模式；有新鲜快照就直接交付，否则允许一次受治理的外部采集，并在失败时使用精确存量兜底。</td></tr>
+      <tr><td><code>refresh</code></td><td>明确允许</td><td>绕过新鲜快照尝试重新采集，必须提供调用方 Idempotency-Key；上游失败时仍可能返回精确存量兜底，因此是否真的调用及成功必须看证据。</td></tr>
+    </tbody></table>
     <table><thead><tr><th>sourceMode</th><th>新 Hub usage</th><th>新上游调用</th><th>调用方含义</th></tr></thead><tbody>
       <tr><td><code>live</code></td><td>是</td><td>是</td><td>本次完成新的实时采集；上游成本以私有计费证据为准。</td></tr>
       <tr><td><code>fresh_cache</code></td><td>是</td><td>否</td><td>新的客户请求复用仍新鲜的同请求快照。</td></tr>
       <tr><td><code>stored_fallback</code></td><td>是</td><td>可能</td><td>可能在派发前兜底，也可能在一次失败派发后兜底；不能一概写成零上游费用。</td></tr>
       <tr><td><code>idempotent_replay</code></td><td>否</td><td>否</td><td>相同 <code>Idempotency-Key</code>、路径和 body 重放原已提交结果。</td></tr>
     </tbody></table>
-    <p>要演示保证不新增 Hub usage 或外部采集的同接口读取，请原样重放上一步成功请求：</p>
+    <p>要安全检查存量而不产生新的外部调用，使用新的请求键和 <code>cache_only</code>。命中仍是一笔新的 Hub 请求/usage；未命中返回 404 并释放预留，但两种情况都不会产生 provider-call：</p>
+    <pre><code>CACHE_ONLY_KEY="ecommerce-cache-only-$(uuidgen)"
+CACHE_ONLY_BODY='{"marketplace":"jd","query":"便携相机","deliveryMode":"cache_only"}'
+
+curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $CACHE_ONLY_KEY" \
+  -d "$CACHE_ONLY_BODY" | jq</code></pre>
+    <p>要明确演示一次可能产生 JustOne 采购成本的新采集，必须由操作者确认后改为 <code>refresh</code>，并创建只属于这次意图的新 Idempotency-Key。不要把它放进 readiness、轮询或自动重试：</p>
+    <pre><code>REFRESH_KEY="ecommerce-refresh-$(uuidgen)"
+REFRESH_BODY='{"marketplace":"jd","query":"便携相机","deliveryMode":"refresh"}'
+
+curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $REFRESH_KEY" \
+  -d "$REFRESH_BODY" | jq '.meta.sourceMode,.requestId,.data.page'</code></pre>
+    <p>只有返回 <code>sourceMode=live</code> 才证明本次成功结果来自新采集；<code>stored_fallback</code> 可能发生在一次失败派发之后，最终采购成本仍以 Internal provider-call 证据为准。要演示保证不新增 Hub usage 或外部采集，则原样重放已经提交的成功请求：</p>
     <pre><code>curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   -H 'Content-Type: application/json' \
@@ -4364,6 +4410,7 @@ fi</code></pre>
       <tr><td>401 <code>api_key_required / invalid_api_key</code></td><td>提供当前实例签发的完整 Hub Public API Key；仅在失效、过期或撤销时轮换，不要发送上游密钥。</td></tr>
       <tr><td>403 <code>platform_not_granted</code></td><td>为同一 consumer 配置 <code>ecommerce</code> grant；原 Hub Public API Key 无需轮换或重新签发。</td></tr>
       <tr><td>403 <code>test_key_not_supported</code></td><td>改用正式 <code>mih_live_</code> Key。Test 只是兼容标签，不是零成本沙箱；该拒绝发生在 usage reservation 和供应方调用之前。</td></tr>
+      <tr><td>404 <code>stored_snapshot_not_found</code></td><td><code>cache_only</code> 没有命中精确存量；本次没有调用外部平台。可修改条件、切换本地安全演示，或在明确确认成本后发起 <code>refresh</code>。</td></tr>
       <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后用相同 <code>Idempotency-Key</code> 查询，不要换键形成第二次派发。</td></tr>
       <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable</code></td><td>本次尝试在供应方派发前被正在处理的请求或既有隔离挡住；它已释放，不是“以后一定不派发”的稳定重放。停止自动重试，由 operator 核查，并在任何后续实时调用前重新明确确认。</td></tr>
       <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和 requestId，停止自动重试并交给 operator 调查。</td></tr>
@@ -4373,7 +4420,7 @@ fi</code></pre>
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
       <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
     </tbody></table>
-    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时保留错误码和 Request ID。未解决的实时请求不会阻塞“零费用演示”；切换演示不会删除实时请求账本，切回实时模式时仍恢复原请求条件并维持幂等保护。</p>
+    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时保留错误码和 Request ID。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件；只有再次允许外部采集时才要求先恢复原请求精确重试或由 operator 完成核查。切换演示不会删除实时请求账本。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 

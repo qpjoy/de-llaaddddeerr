@@ -2,7 +2,7 @@
 
 Status: implemented Admin demo and public documentation; live acquisition remains governed by the existing ecommerce contract.
 
-Last reviewed: 2026-09-06.
+Last reviewed: 2026-09-07.
 
 Related documents:
 
@@ -84,7 +84,8 @@ URLs, tokens, endpoint IDs, raw envelopes, archive keys and internal costs are n
 2. The default **安全演示** mode uses clearly labelled in-browser examples. Its search action does not call the
    Public product-search API, create Hub usage or dispatch a provider request. Normal Admin session/bootstrap
    traffic is outside this promise.
-3. The operator chooses a marketplace, sort mode and query.
+3. In **Hub 开放 API**, the operator chooses one request-side delivery strategy: **只读 Hub 存量**,
+   **智能交付（缓存优先）**, or **重新采集**. It then chooses a marketplace, sort mode and query.
 4. The searching pose appears while the request is pending.
 5. Results emerge as keyboard-focusable product spheres around the mascot. A visible live item may load its
    first retained image only through the authenticated Hub media relay. The browser never assigns an upstream
@@ -147,9 +148,9 @@ customer quota or provider budget. Pressing its search button stays entirely in 
 Hub Public API key. The surrounding Admin application may still refresh its own authenticated session or other
 Admin data, so “safe” must not be described as a blanket browser-offline mode.
 
-### Live Hub API
+### Hub Open API
 
-Live mode uses the same **Hub Public API Key** already issued through **API Keys**. There is no ecommerce-specific
+Hub API mode uses the same **Hub Public API Key** already issued through **API Keys**. There is no ecommerce-specific
 or second “consumer key”: enabling `ecommerce` on the key's owning consumer immediately applies to every active
 key for that consumer, including a replacement key during zero-downtime rotation. The value:
 
@@ -159,10 +160,15 @@ key for that consumer, including a replacement key during zero-downtime rotation
 - is not written to localStorage, sessionStorage, a URL or an Admin API;
 - is sent only as `Authorization: Bearer …` to the existing public Hub path.
 
-The Admin workbench requires a per-request confirmation before a new logical request. This is only a demo-page
-anti-misclick guard, not another client authorization step. Direct API callers send their one Hub Public API key
-and the request. The confirmation clears after a completed request. Exact replay uses the previous request body
-and previous `Idempotency-Key`, so it cannot silently become a new dispatch.
+No destructive key migration is required. `consumer` remains Hub's internal identity for grants, quotas, usage
+and future price-book resolution; it is not a second credential shown to the caller. Existing active Live keys
+continue to resolve to that identity after the normal database migrations are applied.
+
+The Admin workbench requires a per-request confirmation only when `cache_first` or `refresh` can reach an
+external provider. This is only a demo-page anti-misclick guard, not another client authorization step. Direct
+API callers send their one Hub Public API key and the request. `cache_only` needs no cost confirmation and is
+hard-gated server-side from provider dispatch. Exact replay uses the previous request body and previous
+`Idempotency-Key`, so it cannot silently become a new dispatch.
 
 External ecommerce acquisition accepts only `mih_live_` keys. A legacy `mih_test_` value is compatibility
 metadata, not an isolated sandbox: for a consumer with the `ecommerce` grant, capabilities reports that platform
@@ -172,15 +178,17 @@ or image-loader call. Neither rejection creates usage or provider-cost evidence.
 
 The workbench rejects a Test prefix before calling capabilities. If an older workbench version left an
 `ambiguous` Test-key request in browser recovery state, the current page preserves its exact body, original
-`Idempotency-Key` and one-way credential fingerprint as a locked operational record, but sends no capabilities,
-search or media request. It instructs the operator to reconcile the historical attempt; pasting the old Test
-secret or replacing it with a Live key is not an in-page recovery path.
+`Idempotency-Key` and one-way credential fingerprint as an operational record. The record does not freeze the
+filters and does not block safe-demo or `cache_only` browsing with a valid Live key; it blocks only a new
+provider-capable request until exact recovery or operator reconciliation. Pasting the old Test secret or
+replacing it with a Live key is not an in-page recovery path.
 
-For Live requests, the workbench stores only the secret-free exact request ledger and a one-way API-key-secret
-fingerprint for replay. An ambiguous result -- including a transport interruption or an accepted response that
-cannot be normalized -- must be retried, if at all, with the same path, normalized body and `Idempotency-Key`.
-Creating a new `Idempotency-Key` can turn an uncertain live attempt into a second dispatch and another
-provider-cost event.
+For provider-capable requests, the workbench stores only the secret-free exact request ledger and a one-way
+API-key-secret fingerprint for replay. A transport/persistence-ambiguous result must be retried, if at all, with
+the same path, normalized body and `Idempotency-Key`. Creating a new `Idempotency-Key` can turn an uncertain
+attempt into a second dispatch and another provider-cost event. By contrast, a 502
+`external_platform_response_unusable` is a stable committed failure: it may carry provider cost, but exact replay
+returns the same 502 without redispatch and the UI does not retain an endless ambiguity lock.
 Editing or rotating the Hub Public API key may discard a resolved local replay shortcut, but it never clears an
 ambiguous request lock. For an ambiguous Live request, a credential-fingerprint mismatch rejects the action and
 requires the original Live secret or operator reconciliation; the workbench does not guess that a replacement
@@ -238,15 +246,17 @@ price ledger.
 | HTTP 502 `external_platform_outcome_unknown` | The page cannot prove whether this external dispatch completed. | Keep the original body and `Idempotency-Key`; use only the exact recovery path or operator reconciliation. |
 | HTTP 409 `request_outcome_unknown`, `external_platform_response_unusable` | This browser attempt was suppressed before provider dispatch by an earlier unresolved request or endpoint contract quarantine. The earlier call may still have incurred procurement cost. | The page does not turn this released attempt into a no-confirmation replay. Stop automatic retries, inspect the operator evidence, and explicitly reconfirm any later Live request. |
 | HTTP 409 `request_in_progress` | An equal request is still being handled; this browser attempt did not add a provider dispatch. | Wait for the active request. Do not create a parallel request or automatically replay this released attempt. |
+| HTTP 404 `stored_snapshot_not_found` | `cache_only` found no exact retained snapshot. | No provider call occurred. Change filters, use safe demo, or explicitly confirm one `refresh`. |
 | provider configuration, availability or capacity | The current exact request has neither a deliverable live result nor an eligible snapshot. | Check **External data platforms**, provider availability and quota. Do not rotate the customer Hub key. |
 | `quota_exceeded` | The Hub consumer policy rejected the request. | Wait for the Hub window or change the consumer's ecommerce policy. |
 | HTTP 200 with `items=[]` | A valid delivery found no matching items; this is not an interface failure. | Adjust the query or marketplace. Keep the returned source mode and request evidence; an empty result does not prove zero provider cost. |
 
-An unresolved Live request never disables **Safe demo**. Safe demo remains a browser-only fixture path with zero Hub
-usage and zero provider dispatch. Switching to it does not delete or alter the unresolved Live ledger. When the operator
-switches back to Live, the page restores the original marketplace, query and sort before allowing an exact replay.
+An unresolved provider request never disables **Safe demo**, `cache_only`, or the marketplace/sort/page-size/query
+controls. Safe demo remains a browser-only fixture path with zero Hub usage and zero provider dispatch. Switching
+to it does not delete or alter the unresolved ledger. A dedicated recovery action restores the original
+marketplace, query, sort and delivery mode for exact replay; unrelated provider-capable submissions remain blocked.
 A fresh HTTP 409 suppression is different: it is released rather than stored as an ambiguous browser request, so a
-later Live submission must pass the explicit acquisition confirmation again.
+later provider-capable submission must pass the explicit acquisition confirmation again.
 
 ## 6. Stable API contract
 
@@ -265,6 +275,7 @@ Allowed body keys are exactly:
 | --- | --- | --- |
 | `marketplace` | yes | `taobao`, `tmall`, `jd`, `xiaohongshu_ec` or `xianyu`. |
 | `query` | yes | NFKC-normalized non-empty text, maximum 200 characters. |
+| `deliveryMode` | no | `cache_only`, `cache_first` or `refresh`; defaults to `cache_first` for old clients. `refresh` requires a caller-supplied `Idempotency-Key`. |
 | `page` | no | 1–1000; mutually exclusive with `cursor`. |
 | `cursor` | no | Opaque authenticated-encrypted Hub cursor; maximum 4096 characters. |
 | `sort` | no | Marketplace-specific allowlist below. |
@@ -322,6 +333,12 @@ service. Per-consumer rate/concurrency and relay-wide concurrency exhaustion ret
 
 Hub usage, provider procurement cost and customer pricing are three independent domains.
 
+| deliveryMode | Provider permission | Result |
+| --- | --- | --- |
+| `cache_only` | forbidden | Exact fresh/stale Hub snapshot only; otherwise `404 stored_snapshot_not_found`. A hit is a Hub usage delivery but never a provider call. |
+| `cache_first` | allowed after a fresh-cache miss | Backward-compatible default; may return fresh cache, live data or exact fallback. |
+| `refresh` | explicitly allowed | Bypasses a pre-existing fresh snapshot, requires `Idempotency-Key`, and may still return exact fallback after a failed attempt. |
+
 | sourceMode | New Hub usage row | New provider dispatch | Cost interpretation |
 | --- | --- | --- | --- |
 | `live` | yes | yes | A business-success response is recorded as provider-billed under the reviewed provider rule; that is internal procurement evidence, not a Hub customer charge. Monetary amount remains unknown unless a reviewed provider price book is configured. |
@@ -340,13 +357,15 @@ apply customer rates through the same consumer identity, without issuing a secon
 
 - Same path + same normalized body + same `Idempotency-Key` means one exact logical request.
 - Same `Idempotency-Key` + different body returns `409 idempotency_conflict`.
-- Every Live ambiguous retry reuses the exact original path, normalized body and `Idempotency-Key`. This includes transport
-  failures and accepted-but-unusable provider responses; a new `Idempotency-Key` is never a recovery mechanism.
+- Every genuinely ambiguous provider retry reuses the exact original path, normalized body and `Idempotency-Key`.
+  This includes transport/persistence outcomes that Hub cannot prove; a new `Idempotency-Key` is never a recovery
+  mechanism. A committed `external_platform_response_unusable` is resolved evidence, not an ambiguous browser lock.
 - Replay is consumer-scoped in the backend. The browser workbench stores only a one-way fingerprint of the
   exact API-key secret and requires that same secret for conservative ambiguous-outcome recovery; rotating a
   key does not reveal whether two secrets belong to the same consumer in browser memory.
 - A historical ambiguous Test-key record remains locked to its stored body, `Idempotency-Key` and fingerprint for
-  operator reconciliation. The page neither validates nor replays it and does not convert it into a Live request.
+  operator reconciliation. The page neither validates nor replays it and does not convert it into a Live request;
+  independently chosen safe-demo and `cache_only` reads remain available.
 - A next cursor is a new request and uses a new `Idempotency-Key`.
 - Returning to page one is explicit: replay the original `Idempotency-Key` for the original result, or use a new `Idempotency-Key` to ask
   for a new first-page observation.

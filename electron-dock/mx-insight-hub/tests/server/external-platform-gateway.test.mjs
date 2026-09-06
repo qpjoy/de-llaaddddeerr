@@ -179,6 +179,101 @@ test('live, fresh-cache and idempotent replay are separate delivery modes and on
   assert.equal(analytics.totals.knownCostMinor, 5)
 })
 
+test('cache-only never dispatches and reports an exact miss without consuming usage', async () => {
+  let calls = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        calls += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+
+  let requestId
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'never-seen', deliveryMode: 'cache_only' },
+      idempotencyKey: 'cache-only-miss-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => {
+      requestId = error?.details?.requestId
+      return error instanceof AppError
+        && error.status === 404
+        && error.code === 'stored_snapshot_not_found'
+        && typeof requestId === 'string'
+    },
+  )
+
+  assert.equal(calls, 0)
+  assert.equal(state.platformStore.calls.size, 0)
+  assert.equal(state.usageStore.requests.get(requestId).status, 'released')
+  assert.equal(state.usageStore.requests.get(requestId).errorCode, 'stored_snapshot_not_found')
+  assert.equal(state.platformStore.requests.at(-1).sourceMode, 'unavailable')
+})
+
+test('cache-only serves stale Hub data while refresh explicitly reacquires it', async () => {
+  let calls = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        calls += 1
+        return successfulResult(body, options)
+      },
+    },
+    gatewayConfig: config({ freshTtlMs: 1, staleTtlMs: 60_000 }),
+  })
+  const body = { marketplace: 'jd', query: 'camera' }
+
+  await state.gateway.search(state.context, {
+    body,
+    idempotencyKey: 'delivery-live-0001',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 3))
+
+  const stored = await state.gateway.search(state.context, {
+    body: { ...body, deliveryMode: 'cache_only' },
+    idempotencyKey: 'delivery-stored-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  const refreshed = await state.gateway.search(state.context, {
+    body: { ...body, deliveryMode: 'refresh' },
+    idempotencyKey: 'delivery-refresh-1',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+
+  assert.equal(stored.sourceMode, 'stored_fallback')
+  assert.equal(stored.body.meta.fallbackReason, 'cache_only')
+  assert.equal(refreshed.sourceMode, 'live')
+  assert.equal(calls, 2)
+})
+
+test('refresh requires a caller-supplied idempotency key before any reservation or dispatch', async () => {
+  let calls = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        calls += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'camera', deliveryMode: 'refresh' },
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error instanceof AppError
+      && error.status === 400
+      && error.code === 'idempotency_key_required',
+  )
+  assert.equal(calls, 0)
+  assert.equal(state.usageStore.requests.size, 0)
+})
+
 test('missing dynamic credential fails closed before a provider call is recorded', async () => {
   let resolutions = 0
   let dispatches = 0

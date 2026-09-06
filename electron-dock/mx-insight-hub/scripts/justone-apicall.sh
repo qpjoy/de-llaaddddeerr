@@ -97,7 +97,7 @@ case "$LIVE_KEY" in
 esac
 UNIQUE_QUERY="${HUB_ECOMMERCE_QUERY:-蓝牙耳机受控实时检查-${LIVE_KEY##*-}}"
 REQUEST_BODY="$(jq -nc --arg query "$UNIQUE_QUERY" \
-  '{marketplace:"jd",query:$query}')"
+  '{marketplace:"jd",query:$query,deliveryMode:"refresh"}')"
 
 # These values contain no credential. Print them before dispatch so an
 # interrupted or ambiguous response can be recovered with the exact same
@@ -128,8 +128,14 @@ case "$LIVE_HTTP_STATUS" in
   *)
     LIVE_ERROR_CODE="$(jq -r '.error.code // empty' "$LIVE_BODY" 2>/dev/null || true)"
     case "$LIVE_ERROR_CODE" in
-      external_platform_outcome_unknown|external_platform_response_unusable|request_outcome_unknown|request_in_progress)
+      external_platform_outcome_unknown|request_outcome_unknown)
         fail "The live outcome is ambiguous (${LIVE_ERROR_CODE}). Recover only with the same Idempotency-Key and identical body shown above; never mint a new Idempotency-Key."
+        ;;
+      external_platform_response_unusable)
+        fail "The provider returned a successful envelope that Hub could not normalize. The 502 is committed and may carry provider cost; the same Idempotency-Key replays it without another provider call."
+        ;;
+      request_in_progress)
+        fail "This attempt was suppressed before dispatch because an equal provider call is already in progress. Keep this Idempotency-Key and inspect the existing request before any later refresh."
         ;;
       *) fail "The first live request was rejected (${LIVE_ERROR_CODE:-unknown_error}); no replay check was sent." ;;
     esac

@@ -1699,6 +1699,9 @@ paths:
                               items: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu] }
                             pagination: { type: string, enum: [opaque_cursor] }
                             idempotencyKey: { type: string, enum: [optional] }
+                            deliveryModes:
+                              type: array
+                              items: { type: string, enum: [cache_only, cache_first, refresh] }
                             freshnessModes:
                               type: array
                               items: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
@@ -1795,6 +1798,7 @@ paths:
                       marketplaces: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
                       pagination: opaque_cursor
                       idempotencyKey: optional
+                      deliveryModes: [cache_only, cache_first, refresh]
                       freshnessModes: [live, fresh_cache, stored_fallback, idempotent_replay]
                     - platform: xiaohongshu
                       ready: true
@@ -1878,9 +1882,13 @@ paths:
         valid legacy test key receives 403 test_key_not_supported before grant
         lookup, usage reservation, cache lookup or provider dispatch; the
         rejection creates no usage reservation and invokes no provider. The strict
-        body accepts only marketplace, query, page, cursor,
-        sort and price; pageSize and routing
-        fields are not part of this contract. page and cursor are mutually
+        body accepts only marketplace, query, deliveryMode, page, cursor,
+        sort and price; pageSize and provider-routing fields are not part of
+        this contract. deliveryMode defaults to cache_first: cache_only never
+        dispatches external acquisition and returns 404 when no exact snapshot
+        exists; refresh bypasses a fresh snapshot, requires a caller-supplied
+        Idempotency-Key and may still deliver an exact stored fallback when
+        acquisition fails. page and cursor are mutually
         exclusive. Prefer Hub's opaque nextCursor, keep marketplace/query/sort/
         price unchanged, and use a new Idempotency-Key for every next page. Hub
         may serve an exact fresh snapshot or exact last-good fallback, but never
@@ -1892,9 +1900,10 @@ paths:
         amounts, customer invoices and raw responses are not exposed. sourceMode
         is delivery evidence, not a customer price.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_idempotency_key]
+        "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, test_key_not_supported]
+        "404": [stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "413": [payload_too_large]
         "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
@@ -1905,7 +1914,8 @@ paths:
           in: header
           required: false
           description: >-
-            Optional but recommended for explicit replay control. Reuse it only
+            Optional for cache_only and cache_first, but required for refresh.
+            Reuse it only
             for a transport retry of the exact same page request. Every next-page
             request changes the body and must use a new Idempotency-Key. When omitted, Hub
             derives a short-lived freshness-bucket key for the normalized request.
@@ -1923,6 +1933,12 @@ paths:
               firstPage:
                 summary: First page
                 value: { marketplace: jd, query: AI recorder }
+              storedOnly:
+                summary: Read an exact Hub snapshot without external acquisition
+                value: { marketplace: jd, query: AI recorder, deliveryMode: cache_only }
+              explicitRefresh:
+                summary: Bypass a fresh snapshot and attempt one governed acquisition
+                value: { marketplace: jd, query: AI recorder, deliveryMode: refresh }
               continuation:
                 summary: Continuation with the opaque Hub cursor
                 value: { marketplace: jd, query: AI recorder, cursor: opaque-next-cursor }
@@ -1954,6 +1970,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
@@ -5837,13 +5854,24 @@ components:
       required: [marketplace, query]
       not: { required: [page, cursor] }
       description: >-
-        Provider-neutral product search. page and cursor are mutually exclusive.
-        The server owns result-size policy; pageSize is intentionally unsupported.
+        Provider-neutral product search. deliveryMode controls only whether Hub
+        may dispatch external acquisition; it never selects a provider. page and
+        cursor are mutually exclusive. The server owns result-size policy;
+        pageSize is intentionally unsupported.
       properties:
         marketplace:
           type: string
           enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
         query: { type: string, minLength: 1, maxLength: 200 }
+        deliveryMode:
+          type: string
+          enum: [cache_only, cache_first, refresh]
+          default: cache_first
+          description: >-
+            cache_only reads only an exact Hub snapshot and never dispatches
+            externally; cache_first reuses a fresh snapshot before acquisition;
+            refresh bypasses a fresh snapshot, requires Idempotency-Key and may
+            fall back to an exact stored snapshot after an acquisition failure.
         page:
           type: integer
           minimum: 1
