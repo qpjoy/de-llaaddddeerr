@@ -8,7 +8,7 @@ import { AppError } from './core/errors.mjs'
 //
 // No object store, no content-addressing, no lifecycle tiers. Recordings and
 // reports are the only large things here, they expire on a fixed schedule, and
-// the database keeps the index. See specs/10-deployment.md.
+// the database keeps the index. See docs/10-deployment.md.
 
 const CONTENT_TYPES = {
   '.mp4': 'video/mp4',

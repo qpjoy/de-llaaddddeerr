@@ -25,12 +25,20 @@ import {
 } from './core/http.mjs'
 import { newToken, sha256 } from './core/ids.mjs'
 import { sanitizeUrl } from './core/redact.mjs'
+import {
+  RUN_EVENT_CAP,
+  RunEventBus,
+  createRunEventRecorder,
+  normalizeRunEvent,
+  normalizeRunEvents,
+} from './events/run-events.mjs'
 import { requireRole, ROLES } from './identity/index.mjs'
 import { completeBuildRun, findBuildArtifact } from './ingest/build.mjs'
 import { junitToSummary } from './ingest/junit.mjs'
 import { NOTIFY_KINDS, adapterFor, redactChannel } from './notify/adapters.mjs'
 import { enqueueForRun } from './notify/dispatch.mjs'
 import { NOTIFY_EVENTS } from './notify/events.mjs'
+import { catalogSubsetFor, parseCaseFilter, resolveCaseFilter } from './ingest/case-filter.mjs'
 import { compareWithCatalog, normalizeSourceRef, normalizeSummary } from './ingest/summary.mjs'
 import { renderReport } from './report.mjs'
 import {
@@ -50,7 +58,14 @@ import {
   exportCatalog,
   parseCaseInput,
 } from './routes/cases.mjs'
-import { claimDeadlineFor, computeNextRunAt } from './scheduler.mjs'
+import {
+  RUNS_ON,
+  assertPlacementPossible,
+  resolvePlacement,
+  runnerIsOnline,
+} from './runner/placement.mjs'
+import { runnerMatchesSuite } from './store/memory.mjs'
+import { computeNextRunAt } from './scheduler.mjs'
 import { parsePush, taskBranch, verifySignature } from './webhooks.mjs'
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/u
@@ -61,6 +76,11 @@ const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/u
 const ENGINES = ['cypress', 'playwright', 'playwright-electron', 'pytest', 'k6', 'generic']
 const SURFACES = ['web', 'electron']
 const RUNNER_KINDS = ['server', 'local']
+// How long a machine has to redeem an enrolment code.
+//
+// Short because the command carrying it ends up in shell history and in chat
+// messages; long enough that "let me find a terminal" is not a race.
+const ENROLLMENT_TTL_MS = 15 * 60_000
 // Where the system under test comes from. `self` means the suite starts its own
 // target — 罗盘's `pnpm e2e:local` builds the SPA and serves it on loopback — so
 // asking a task for a target URL would be asking for a value nothing reads.
@@ -166,7 +186,16 @@ function parseCatalogFile(body) {
   return { catalogFile, cases }
 }
 
-export function createApp({ store, config, identity, artifacts, logger = console }) {
+export function createApp({
+  store,
+  config,
+  identity,
+  artifacts,
+  logger = console,
+  runEvents = new RunEventBus(),
+}) {
+  const recordRunEvents = createRunEventRecorder({ store, bus: runEvents })
+
   async function requireApp(appSlug) {
     const app = await store.getAppBySlug(appSlug)
     if (!app) {
@@ -250,6 +279,100 @@ export function createApp({ store, config, identity, artifacts, logger = console
         .map((entry) => `${entry.runner} 缺 ${entry.missing.join('、')}`)
         .join('；')}。`,
     }
+  }
+
+  /**
+   * The 「在哪跑」 choice off a request body, checked against reality.
+   *
+   * Validated here rather than at dispatch time on purpose: a task that names
+   * a machine which cannot run it would otherwise look fine, produce a run that
+   * waits, and expire twelve hours later saying only 「已过期」.
+   */
+  async function readPlacement(body, suite) {
+    const runsOn = enumValue(body, 'runsOn', RUNS_ON, defaultRunsOnFor(suite))
+    const runnerId =
+      runsOn === 'pinned-runner' ? optionalString(body, 'runnerId', { maxLength: 64 }) : null
+    const runner = runnerId ? await store.getRunner(runnerId) : null
+    assertPlacementPossible({ runsOn, suite, runner, runnerMatches: runnerMatchesSuite })
+    return { runsOn, runnerId }
+  }
+
+  const defaultRunsOnFor = (suite) => (suite.runnerKind === 'local' ? 'any-runner' : 'server')
+
+  /** What to tell the person who just pressed run. */
+  async function placementNote(placement, suite) {
+    if (placement.runsOn === 'server') {
+      return '已排队，服务端容器会尽快开始。服务端不录像——要看回放请派给执行机。'
+    }
+    if (placement.runsOn === 'pinned-runner') {
+      const runner = await store.getRunner(placement.assignedRunnerId)
+      return runnerIsOnline(runner)
+        ? `已派给「${runner.name}」，它应该马上就会开始。`
+        : `已排队，但「${runner?.name ?? '这台机器'}」当前不在线。它一上线就会接手；到认领窗口结束还没上线就标记为已过期（不算失败）。`
+    }
+    const runners = await store.listRunners()
+    const capable = runners.filter((entry) => runnerIsOnline(entry) && runnerMatchesSuite(entry, suite))
+    return capable.length > 0
+      ? `已排队，${capable.length} 台在线执行机能接这条套件。`
+      : '已排队，但现在没有能跑这条套件的在线执行机。到「执行机」页面把一台电脑接进来，它一上线就会接手。'
+  }
+
+  /**
+   * The address to put in a command somebody is about to paste.
+   *
+   * Taken from the request rather than from configuration, because the person
+   * is looking at this page, from that machine, at that address — so it
+   * demonstrably resolves there. `MXT_PUBLIC_URL` is the fallback for a Host
+   * header that cannot be trusted to be a host at all: the value ends up inside
+   * a shell command, so anything that is not plainly a hostname is refused
+   * rather than escaped.
+   */
+  function publicBase(request) {
+    const host = request.headers['x-forwarded-host'] ?? request.headers.host
+    if (typeof host === 'string' && /^[a-zA-Z0-9._-]+(:\d{1,5})?$/u.test(host)) {
+      const forwarded = String(request.headers['x-forwarded-proto'] ?? '').split(',')[0].trim()
+      const protocol = forwarded === 'https' || request.socket?.encrypted ? 'https' : 'http'
+      return `${protocol}://${host}`
+    }
+    return config.publicUrl || config.selfUrl
+  }
+
+  /**
+   * The two install scripts and the runner they install.
+   *
+   * All three are unauthenticated, and have to be: the machine running them has
+   * no credentials yet — the enrolment code in the command *is* the credential.
+   * What is served here is this platform's own client code and contains no
+   * secret; the code the person pastes is what turns it into their machine.
+   */
+  async function handleInstall(request, response, url) {
+    if (request.method !== 'GET') return false
+    const base = publicBase(request)
+
+    if (url.pathname === '/install/mxt-runner.mjs') {
+      // One file, no dependencies — `bin/mxt-runner.mjs` imports nothing but
+      // node: builtins. That is what makes "install the runner" a download
+      // rather than a package manager, a lockfile and a build step.
+      const file = resolve(webRoot, '../bin/mxt-runner.mjs')
+      const info = await stat(file).catch(() => null)
+      if (!info) return false
+      response.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'content-length': info.size,
+        'cache-control': 'no-store',
+      })
+      await pipeline(createReadStream(file), response)
+      return true
+    }
+
+    const script = url.pathname === '/install.ps1' ? windowsInstaller(base) : url.pathname === '/install.sh' ? unixInstaller(base) : null
+    if (script === null) return false
+    response.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    response.end(script)
+    return true
   }
 
   async function requireRun(runId) {
@@ -356,13 +479,13 @@ export function createApp({ store, config, identity, artifacts, logger = console
         profile: task.profile,
         track: task.track,
         engine: suite.engine,
-        status: suite.runnerKind === 'local' ? 'pending-runner' : 'queued',
         trigger: 'webhook',
         targetUrl: task.targetUrl,
         appPackage,
         sourceRef: { ref: push.branch, gitSha: push.gitSha },
-        claimDeadline: claimDeadlineFor(task, suite, now),
         createdBy: 'webhook',
+        caseFilter: task.caseFilter ?? null,
+        ...resolvePlacement({ task, suite, now }),
       })
       await store.updateTask(task.id, { lastRunId: run.id })
       created.push(run.id)
@@ -422,6 +545,7 @@ export function createApp({ store, config, identity, artifacts, logger = console
               tasks: '/api/v1/tasks',
               runs: '/api/v1/runs',
               report: '/api/v1/runs/:runId/report',
+              liveEvents: '/api/v1/runs/:runId/events',
             },
           },
         }
@@ -524,6 +648,42 @@ export function createApp({ store, config, identity, artifacts, logger = console
           after: created,
         })
         return { status: 201, body: { app: created } }
+      },
+    },
+    {
+      method: 'DELETE',
+      pattern: '/api/v1/apps/:app',
+      handler: async ({ params, url, principal, request }) => {
+        // Admin only. This is the one delete on the platform that takes history
+        // with it: every run, every case result, every recording of this
+        // application goes at the same time.
+        requireRole(principal, 'admin')
+        const app = await requireApp(params.app)
+        const runs = await store.listRuns({ appId: app.id, limit: 1 })
+        const force = url.searchParams.get('force') === 'true'
+        if (runs.length > 0 && !force) {
+          // Refusing by default is the point. An application with runs is an
+          // application with trend data, and "I meant to delete the other one"
+          // has no undo here.
+          throw new AppError(409, 'app_has_runs', `应用「${app.displayName}」还有执行记录`, {
+            hint: '删除会连同全部执行记录、用例结果和录像一起消失。确认要删就加 ?force=true。',
+          })
+        }
+        const removed = await store.deleteApp(app.id)
+        // Artifacts live on disk; no foreign key reaches them. Failing to
+        // remove them must not fail the delete that already happened.
+        for (const runId of removed?.runIds ?? []) {
+          await artifacts.remove(runId).catch(() => {})
+        }
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'app.delete',
+          resourceType: 'app',
+          resourceId: app.id,
+          before: { slug: app.slug, displayName: app.displayName, runs: removed?.runIds.length ?? 0 },
+        })
+        return { status: 200, body: { deleted: app.slug, runs: removed?.runIds.length ?? 0 } }
       },
     },
     {
@@ -699,6 +859,39 @@ export function createApp({ store, config, identity, artifacts, logger = console
 
     // -- cases ---------------------------------------------------------------
     {
+      method: 'DELETE',
+      pattern: '/api/v1/apps/:app/suites/:suite',
+      handler: async ({ params, url, principal, request }) => {
+        requireRole(principal, 'admin')
+        const app = await requireApp(params.app)
+        const suite = await requireSuite(app.id, params.suite)
+        const runs = await store.listRuns({ appId: app.id, limit: 200 })
+        const mine = runs.filter((run) => run.suiteId === suite.id)
+        if (mine.length > 0 && url.searchParams.get('force') !== 'true') {
+          // Same rule as deleting an application: history is not something to
+          // lose by reflex. The tasks pointing at this suite go too, which is
+          // the part people do not expect, so it is said out loud.
+          throw new AppError(409, 'suite_has_runs', `套件「${suite.displayName}」还有执行记录`, {
+            hint: '删除会连同它的执行记录和指向它的任务一起消失。确认要删就加 ?force=true。',
+          })
+        }
+        const removed = await store.deleteSuite(suite.id)
+        for (const runId of removed?.runIds ?? []) {
+          await artifacts.remove(runId).catch(() => {})
+        }
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'suite.delete',
+          resourceType: 'suite',
+          resourceId: suite.id,
+          appId: app.id,
+          before: { slug: suite.slug, displayName: suite.displayName, runs: removed?.runIds.length ?? 0 },
+        })
+        return { status: 200, body: { deleted: suite.slug, runs: removed?.runIds.length ?? 0 } }
+      },
+    },
+    {
       method: 'GET',
       pattern: '/api/v1/apps/:app/cases',
       handler: async ({ params, url }) => {
@@ -873,10 +1066,20 @@ export function createApp({ store, config, identity, artifacts, logger = console
           runAt = parsed.toISOString()
         }
 
+        const placement = await readPlacement(body, suite)
+        // Validated at creation, not at dispatch: a filter naming a case that
+        // does not exist should fail while the person who typed it is still
+        // looking at the form.
+        const caseFilter = optionalString(body, 'caseFilter', { maxLength: 1000 })
+        if (caseFilter) await resolveCaseFilter({ store, appId: app.id, filter: caseFilter, suiteSlug: suite.slug })
+
         const draft = {
+          caseFilter: caseFilter || null,
           appId: app.id,
           suiteId: suite.id,
           name: requiredString(body, 'name'),
+          runsOn: placement.runsOn,
+          runnerId: placement.runnerId,
           profile: enumValue(body, 'profile', PROFILES, 'mock'),
           track: enumValue(body, 'track', TRACKS, 'functional'),
           targetUrl: targetUrl(body, 'targetUrl', {
@@ -902,6 +1105,18 @@ export function createApp({ store, config, identity, artifacts, logger = console
         const task = await store.getTask(params.taskId)
         if (!task) throw new AppError(404, 'task_not_found', '找不到该任务')
         const patch = {}
+        if (Object.hasOwn(body, 'runsOn')) {
+          const suite = await store.getSuite(task.suiteId)
+          if (!suite) throw new AppError(404, 'suite_not_found', '这个任务的套件已经不在了')
+          const placement = await readPlacement(body, suite)
+          patch.runsOn = placement.runsOn
+          patch.runnerId = placement.runnerId
+        }
+        if (Object.hasOwn(body, 'caseFilter')) {
+          const caseFilter = optionalString(body, 'caseFilter', { maxLength: 1000 })
+          if (caseFilter) await resolveCaseFilter({ store, appId: task.appId, filter: caseFilter })
+          patch.caseFilter = caseFilter || null
+        }
         if (Object.hasOwn(body, 'name')) patch.name = requiredString(body, 'name')
         if (Object.hasOwn(body, 'enabled')) patch.enabled = body.enabled === true
         if (Object.hasOwn(body, 'targetUrl')) patch.targetUrl = targetUrl(body)
@@ -935,7 +1150,10 @@ export function createApp({ store, config, identity, artifacts, logger = console
     {
       method: 'POST',
       pattern: '/api/v1/tasks/:taskId:run',
-      handler: async ({ params, principal }) => {
+      // A one-off filter in the body overrides the task's own. That is the
+      // 「只重跑这条」 button: the task keeps meaning "the whole suite", and one
+      // execution of it does not.
+      handler: async ({ params, body, principal }) => {
         requireRole(principal, 'operator')
         const task = await store.getTask(params.taskId)
         if (!task) throw new AppError(404, 'task_not_found', '找不到该任务')
@@ -948,6 +1166,13 @@ export function createApp({ store, config, identity, artifacts, logger = console
         // if a newer installer is published meanwhile, the run must still be
         // the run of the build it was created for.
         const appPackage = suite.surface === 'electron' ? (app?.latestPackage ?? null) : null
+        const placement = resolvePlacement({ task, suite, now })
+        const caseFilter = Object.hasOwn(body, 'caseFilter')
+          ? optionalString(body, 'caseFilter', { maxLength: 1000 })
+          : task.caseFilter
+        if (caseFilter) {
+          await resolveCaseFilter({ store, appId: task.appId, filter: caseFilter, suiteSlug: suite.slug })
+        }
         const run = await store.createRun({
           appId: task.appId,
           suiteId: suite.id,
@@ -955,23 +1180,20 @@ export function createApp({ store, config, identity, artifacts, logger = console
           profile: task.profile,
           track: task.track,
           engine: suite.engine,
-          status: suite.runnerKind === 'local' ? 'pending-runner' : 'queued',
           trigger: 'manual',
           targetUrl: task.targetUrl,
           appPackage,
           sourceRef: appPackage?.gitSha ? { ref: app?.defaultBranch ?? null, gitSha: appPackage.gitSha } : null,
-          claimDeadline: claimDeadlineFor(task, suite, now),
           createdBy: principal.id,
+          caseFilter: caseFilter || null,
+          ...placement,
         })
         await store.updateTask(task.id, { lastRunId: run.id })
         return {
           status: 202,
           body: {
             run,
-            note:
-              suite.runnerKind === 'local'
-                ? '已排队，等待一台可用的执行机认领。没有在线执行机时会一直等到认领窗口结束。'
-                : '已排队，服务端执行机会尽快开始。',
+            note: await placementNote(placement, suite),
           },
         }
       },
@@ -1408,13 +1630,167 @@ export function createApp({ store, config, identity, artifacts, logger = console
       },
     },
     {
+      method: 'POST',
+      pattern: '/api/v1/runners:enroll',
+      handler: async ({ principal, request }) => {
+        requireRole(principal, 'operator')
+        const code = newToken('mxt-enr')
+        const enrollment = await store.createEnrollment({
+          codeSha256: sha256(code),
+          principal: principal.id,
+          expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString(),
+        })
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'runner.enroll_code',
+          resourceType: 'runner',
+          resourceId: enrollment.id,
+          after: { expiresAt: enrollment.expiresAt },
+        })
+        const base = publicBase(request)
+        return {
+          status: 201,
+          body: {
+            enrollment: { id: enrollment.id, expiresAt: enrollment.expiresAt },
+            // The code is returned exactly once, like every other credential
+            // here. Losing it costs one click.
+            code,
+            // Built here rather than in the browser so that the shape of the
+            // command has one definition. It is also the only place that knows
+            // whether the platform is behind a proxy.
+            commands: {
+              windows: `powershell -NoProfile -Command "$env:MXT_CODE='${code}'; irm ${base}/install.ps1 | iex"`,
+              unix: `curl -fsSL ${base}/install.sh | MXT_CODE=${code} sh`,
+            },
+          },
+        }
+      },
+    },
+    {
       method: 'GET',
-      pattern: '/api/v1/runners',
-      handler: async () => {
-        const runners = await store.listRunners()
+      pattern: '/api/v1/enrollments/:enrollmentId',
+      handler: async ({ params, principal }) => {
+        const enrollment = await store.getEnrollment(params.enrollmentId)
+        // Same answer for "no such code" and "someone else's code": telling
+        // them apart would let anyone enumerate outstanding enrolments.
+        if (!enrollment || (enrollment.principal !== principal.id && principal.role !== 'admin')) {
+          throw new AppError(404, 'enrollment_not_found', '找不到这个接入码')
+        }
+        const runner = enrollment.runnerId ? await store.getRunner(enrollment.runnerId) : null
         return {
           status: 200,
-          body: { runners: runners.map((entry) => ({ ...entry, tokenSha256: undefined })) },
+          body: {
+            status: enrollment.usedAt
+              ? 'claimed'
+              : new Date(enrollment.expiresAt) <= new Date()
+                ? 'expired'
+                : 'pending',
+            expiresAt: enrollment.expiresAt,
+            runner: runner ? { ...runner, tokenSha256: undefined, online: runnerIsOnline(runner) } : null,
+          },
+        }
+      },
+    },
+    {
+      method: 'POST',
+      pattern: '/runner/v1/runners:enroll',
+      // The one write path with no credential of its own: the machine has none
+      // yet, and the code in the body *is* the credential. Single use, fifteen
+      // minutes, and it can only ever create a runner owned by the person who
+      // asked for it.
+      auth: 'none',
+      handler: async ({ body, request }) => {
+        const presented = requiredString(body, 'code', { maxLength: 128 })
+        const enrollment = await store.getEnrollmentByCodeHash(sha256(presented))
+        if (!enrollment) throw new AppError(401, 'enrollment_invalid', '接入码无效')
+        if (enrollment.usedAt) {
+          throw new AppError(409, 'enrollment_used', '这个接入码已经用过了', {
+            hint: '一个码只能接一台机器。回到「执行机」页面再点一次「把这台电脑变成执行机」。',
+          })
+        }
+        if (new Date(enrollment.expiresAt) <= new Date()) {
+          throw new AppError(410, 'enrollment_expired', '接入码已过期（有效期 15 分钟）')
+        }
+
+        // Burned before the runner is created, not after: if creating the
+        // runner then fails, the person asks for another code — annoying. The
+        // other order leaves a window in which one code enrols two machines.
+        const consumed = await store.consumeEnrollment(enrollment.id)
+        if (!consumed) throw new AppError(409, 'enrollment_used', '这个接入码已经用过了')
+
+        const token = newToken('mxt-rnr')
+        const runner = await store.registerRunner({
+          name: requiredString(body, 'name', { maxLength: 96 }),
+          kind: enumValue(body, 'kind', RUNNER_KINDS, 'local'),
+          os: enumValue(body, 'os', ['linux', 'windows', 'macos']),
+          arch: optionalString(body, 'arch', { maxLength: 16 }),
+          capabilities: {
+            engines: stringArray(body.engines, { maxItems: 5, maxLength: 32 }).filter((entry) =>
+              ENGINES.includes(entry),
+            ),
+            surfaces: stringArray(body.surfaces, { maxItems: 5, maxLength: 20 }).filter((entry) =>
+              SURFACES.includes(entry),
+            ),
+            concurrency: Math.min(16, Math.max(1, Number(body.concurrency) || 1)),
+          },
+          // From the code, never from the machine. A machine does not get to
+          // say whose it is.
+          ownerPrincipal: enrollment.principal,
+          tokenSha256: sha256(token),
+        })
+        // The browser that issued the code is polling for exactly this.
+        await store.attachEnrollmentRunner(enrollment.id, runner.id).catch(() => null)
+        await recordAudit(store, {
+          principal: { id: enrollment.principal, displayName: enrollment.principal },
+          request,
+          action: 'runner.enroll',
+          resourceType: 'runner',
+          resourceId: runner.id,
+          after: { name: runner.name, os: runner.os, kind: runner.kind },
+        })
+        return { status: 201, body: { runner: { ...runner, tokenSha256: undefined }, token } }
+      },
+    },
+    {
+      method: 'DELETE',
+      pattern: '/api/v1/runners/:runnerId',
+      handler: async ({ params, principal, request }) => {
+        const runner = await store.getRunner(params.runnerId)
+        if (!runner) throw new AppError(404, 'runner_not_found', '找不到这台执行机')
+        // Your own machine is yours to remove; anyone else's takes an admin.
+        if (runner.ownerPrincipal !== principal.id) requireRole(principal, 'admin')
+        await store.deleteRunner(runner.id)
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'runner.remove',
+          resourceType: 'runner',
+          resourceId: runner.id,
+          before: { name: runner.name, os: runner.os, kind: runner.kind },
+        })
+        return { status: 204, body: null }
+      },
+    },
+    {
+      method: 'GET',
+      pattern: '/api/v1/runners',
+      handler: async ({ principal }) => {
+        const runners = await store.listRunners()
+        const now = Date.now()
+        return {
+          status: 200,
+          body: {
+            runners: runners.map((entry) => ({
+              ...entry,
+              tokenSha256: undefined,
+              // Derived, not stored — docs/25 §5. A stored flag would survive a
+              // crash and claim a machine is there when it is not; this cannot.
+              online: runnerIsOnline(entry, now),
+              // "Mine" is what the 「我的这台电脑」 choice resolves against.
+              mine: Boolean(principal?.id) && entry.ownerPrincipal === principal.id,
+            })),
+          },
         }
       },
     },
@@ -1438,6 +1814,15 @@ export function createApp({ store, config, identity, artifacts, logger = console
         await store.touchRunner(runner.id, 'busy')
         const { run, suite } = claimed
         const app = await store.getApp(run.appId)
+        // The first thing the run page can show. It is written by the server
+        // rather than reported by the runner on purpose: a runner that never
+        // reports anything else still produces a timeline that starts with
+        // "this machine picked it up", which is the answer to the most common
+        // question about a run that looks stuck.
+        await recordRunEvents(run.id, [
+          normalizeRunEvent({ kind: 'run.claimed', runner: runner.name, os: runner.os }),
+          normalizeRunEvent({ kind: 'stage', stage: 'claim', status: 'ok' }),
+        ]).catch((error) => logger?.error?.(`[events] ${run.id}: ${error.message}`))
         return {
           status: 200,
           body: {
@@ -1469,7 +1854,15 @@ export function createApp({ store, config, identity, artifacts, logger = console
             command: suite.command,
             leaseSeconds: Math.floor(config.runLeaseMs / 1000),
             runToken,
-            env: runnerEnv({ run, suite, app, config }),
+            env: runnerEnv({
+              run,
+              suite,
+              app,
+              config,
+              caseFilter: run.caseFilter
+                ? await resolveCaseFilter({ store, appId: run.appId, filter: run.caseFilter })
+                : null,
+            }),
           },
         }
       },
@@ -1484,7 +1877,29 @@ export function createApp({ store, config, identity, artifacts, logger = console
         }
         const leaseUntil = new Date(Date.now() + config.runLeaseMs).toISOString()
         await store.updateRun(run.id, { leaseUntil })
+        // Renewing the lease is also the machine saying it is alive. Without
+        // this, a runner that is busy for twenty minutes shows as offline for
+        // nineteen of them, because only the idle claim poll used to touch it.
+        if (run.runnerId) await store.touchRunner(run.runnerId, 'busy')
         return { status: 200, body: { leaseUntil } }
+      },
+    },
+    {
+      method: 'POST',
+      pattern: '/runner/v1/runs/:runId/events',
+      auth: 'runScope',
+      handler: async ({ run, body }) => {
+        if (['passed', 'failed', 'flaky', 'blocked', 'expired', 'cancelled'].includes(run.status)) {
+          // Refusing beats appending. A run whose result is recorded has a
+          // timeline that is finished; letting a straggling batch extend it
+          // would put events after the end of the run.
+          throw new AppError(409, 'run_finished', `这次执行已经是「${run.status}」，不再接收进度`)
+        }
+        const result = await recordRunEvents(run.id, normalizeRunEvents(body.events))
+        return {
+          status: 202,
+          body: { accepted: result.events.length, dropped: result.dropped, lastSeq: result.events.at(-1)?.seq ?? null },
+        }
       },
     },
     {
@@ -1503,6 +1918,16 @@ export function createApp({ store, config, identity, artifacts, logger = console
       auth: 'runScope',
       handler: async ({ run, body }) => {
         const completed = await completeRun({ store, artifacts, run, body, config })
+        // Closes the timeline, and with it the browser's stream. Written after
+        // the result is recorded, so a page that reacts to this event and
+        // refetches the run always reads the final status.
+        await recordRunEvents(completed.id, [
+          normalizeRunEvent({
+            kind: 'run.finished',
+            status: completed.status,
+            durationMs: completed.durationMs,
+          }),
+        ]).catch((error) => logger?.error?.(`[events] ${completed.id}: ${error.message}`))
         // Queue only — delivery happens on the scheduler tick. A runner
         // reporting its result must not wait on someone else's chat server,
         // and a slow webhook must not look like a slow test run.
@@ -1516,9 +1941,131 @@ export function createApp({ store, config, identity, artifacts, logger = console
     },
   ]
 
+  const TERMINAL_RUN_STATUS = ['passed', 'failed', 'flaky', 'blocked', 'expired', 'cancelled']
+  const SSE_HEARTBEAT_MS = 15_000
+
+  /**
+   * A run's progress as Server-Sent Events.
+   *
+   * SSE rather than a socket, for the reasons in docs/25 §2: the data travels
+   * one way, `EventSource` reconnects and resumes by itself with
+   * `Last-Event-ID`, and `web/` stays a directory with no build step.
+   */
+  async function streamRunEvents({ run, request, response, url }) {
+    const fromHeader = Number(request.headers['last-event-id'])
+    const fromQuery = Number(url.searchParams.get('lastEventId'))
+    let cursor = 0
+    if (Number.isFinite(fromHeader) && fromHeader > 0) cursor = fromHeader
+    else if (Number.isFinite(fromQuery) && fromQuery > 0) cursor = fromQuery
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+      // Without this, an nginx or ingress in front of the platform buffers the
+      // whole stream: the "live" timeline then arrives in one lump, at the end,
+      // which is worse than not having it.
+      'x-accel-buffering': 'no',
+    })
+
+    let closed = false
+    let timer = null
+    let unsubscribe = () => {}
+    const stop = () => {
+      closed = true
+      unsubscribe()
+      if (timer) clearInterval(timer)
+    }
+    const write = (event) => {
+      if (closed) return
+      cursor = Math.max(cursor, event.seq)
+      try {
+        response.write(
+          `id: ${event.seq}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`,
+        )
+      } catch {
+        stop()
+      }
+    }
+
+    // Subscribing before reading the backlog, and holding what arrives in
+    // between, closes a real gap: the other order has a window in which an
+    // event is in neither place — already past the query, not yet in a
+    // subscription that does not exist.
+    const buffered = []
+    let live = false
+    unsubscribe = runEvents.subscribe(run.id, (events) => {
+      if (!live) {
+        buffered.push(...events)
+        return
+      }
+      for (const event of events) {
+        if (event.seq > cursor) write(event)
+        // The run just ended. Closing here rather than on the next heartbeat is
+        // the difference between the page showing its result immediately and
+        // sitting on a finished run for another fifteen seconds.
+        if (event.kind === 'run.finished') queueMicrotask(() => finish(event.payload?.status ?? 'finished'))
+      }
+    })
+
+    request.on('close', stop)
+
+    function finish(status) {
+      if (closed) return
+      try {
+        response.write(`event: end\ndata: ${JSON.stringify({ status })}\n\n`)
+      } catch {
+        /* the client is gone; stopping is all that is left to do */
+      }
+      stop()
+      response.end()
+    }
+
+    for (const event of await store.listRunEvents(run.id, { afterSeq: cursor, limit: RUN_EVENT_CAP })) {
+      write(event)
+    }
+    for (const event of buffered) if (event.seq > cursor) write(event)
+    live = true
+
+    if (TERMINAL_RUN_STATUS.includes(run.status)) {
+      finish(run.status)
+      return
+    }
+
+    timer = setInterval(async () => {
+      if (closed) return
+      try {
+        response.write(': ping\n\n')
+      } catch {
+        stop()
+        return
+      }
+      // Re-read the run rather than waiting for a `run.finished` event: a
+      // server-side k8s Job is closed out by the dispatcher's reconcile loop,
+      // and on a future multi-replica deployment that loop may not even be in
+      // this process. Polling the status here is what keeps the page correct
+      // when nothing was published on this bus.
+      const current = await store.getRun(run.id).catch(() => null)
+      if (!current || TERMINAL_RUN_STATUS.includes(current.status)) {
+        for (const event of await store.listRunEvents(run.id, { afterSeq: cursor, limit: 500 })) {
+          write(event)
+        }
+        finish(current?.status ?? 'unknown')
+      }
+    }, SSE_HEARTBEAT_MS)
+    timer.unref?.()
+  }
+
   // Routes whose response is not JSON are handled separately: they stream, set
   // their own content type, or render HTML.
   async function handleSpecial(request, response, url) {
+    const eventStream = routeMatch(url.pathname, '/api/v1/runs/:runId/events')
+    if (eventStream && request.method === 'GET') {
+      const run = await requireRun(eventStream.runId)
+      await streamRunEvents({ run, request, response, url })
+      return true
+    }
+
     const report = routeMatch(url.pathname, '/api/v1/runs/:runId/report')
     if (report && request.method === 'GET') {
       const run = await requireRun(report.runId)
@@ -1584,6 +2131,7 @@ export function createApp({ store, config, identity, artifacts, logger = console
     try {
       // Static assets and the SPA shell need no credentials; the data behind
       // them does.
+      if (await handleInstall(request, response, url)) return
       if (await serveStatic(request, response, url)) return
 
       for (const route of routes) {
@@ -1658,6 +2206,105 @@ export function createApp({ store, config, identity, artifacts, logger = console
   }
 }
 
+/**
+ * The macOS / Linux installer.
+ *
+ * Deliberately does not install Node. A script that pulls a language runtime
+ * onto somebody's laptop without asking is not a script anybody should paste,
+ * and the failure it prevents — "node: command not found" — is one sentence to
+ * explain and one command to fix.
+ */
+function unixInstaller(base) {
+  return `#!/bin/sh
+# MXT 执行机安装脚本。把这台电脑接进测试平台。
+#
+#   curl -fsSL ${base}/install.sh | MXT_CODE=<接入码> sh
+#
+# 装完就在前台跑着等任务，关掉窗口就断开。要常驻再单独装成服务。
+set -eu
+
+MXT_SERVER="\${MXT_SERVER:-${base}}"
+if [ -z "\${MXT_CODE:-}" ]; then
+  echo "缺少 MXT_CODE。到平台的「执行机」页面点「把这台电脑变成执行机」拿一个接入码。" >&2
+  exit 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "没有找到 node。执行机需要 Node.js 20 或更高版本：https://nodejs.org" >&2
+  exit 1
+fi
+# parseInt over split("."): no nested quotes, so neither shell can eat them.
+NODE_MAJOR=$(node -p 'parseInt(process.versions.node)')
+if [ "$NODE_MAJOR" -lt 20 ]; then
+  echo "Node.js 版本过低（当前 $(node -v)），需要 20 以上。" >&2
+  exit 1
+fi
+
+# 装在用户目录下，不需要管理员权限。
+case "$(uname -s)" in
+  Darwin) DEFAULT_DIR="$HOME/Library/Application Support/MXT/runner" ;;
+  *)      DEFAULT_DIR="$HOME/.local/share/mxt/runner" ;;
+esac
+MXT_DIR="\${MXT_RUNNER_HOME:-$DEFAULT_DIR}"
+mkdir -p "$MXT_DIR"
+
+echo "[mxt] 下载执行机到 $MXT_DIR"
+curl -fsSL "$MXT_SERVER/install/mxt-runner.mjs" -o "$MXT_DIR/mxt-runner.mjs"
+
+echo "[mxt] 注册这台机器"
+node "$MXT_DIR/mxt-runner.mjs" enroll --server "$MXT_SERVER" --code "$MXT_CODE"
+
+echo "[mxt] 开始等待任务（Ctrl+C 退出，不影响已注册的身份）"
+# exec 而不是普通调用：这样 Ctrl+C 直接送到执行机，而不是先杀掉这层 shell。
+exec node "$MXT_DIR/mxt-runner.mjs" watch
+`
+}
+
+/** The Windows installer. Same shape, same refusal to install Node for you. */
+function windowsInstaller(base) {
+  return `# MXT 执行机安装脚本。把这台电脑接进测试平台。
+#
+#   powershell -NoProfile -Command "$env:MXT_CODE='<接入码>'; irm ${base}/install.ps1 | iex"
+#
+# 装完就在前台跑着等任务，关掉窗口就断开。要常驻再单独装成服务。
+$ErrorActionPreference = 'Stop'
+
+$server = if ($env:MXT_SERVER) { $env:MXT_SERVER } else { '${base}' }
+if (-not $env:MXT_CODE) {
+  Write-Error "缺少 MXT_CODE。到平台的「执行机」页面点「把这台电脑变成执行机」拿一个接入码。"
+  exit 1
+}
+
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $node) {
+  Write-Error "没有找到 node。执行机需要 Node.js 20 或更高版本：https://nodejs.org"
+  exit 1
+}
+# parseInt rather than a split on the dot: PowerShell strips the inner double
+# quotes when it hands the argument to node, which then sees a bare dot and
+# fails to parse — silently reporting the version as too low.
+$major = [int](& node -p 'parseInt(process.versions.node)')
+if ($major -lt 20) {
+  Write-Error "Node.js 版本过低（当前 $(& node -v)），需要 20 以上。"
+  exit 1
+}
+
+# %LOCALAPPDATA% 不需要管理员权限，这是刻意的：第一步就要提权的内部工具没人会用。
+$dir = if ($env:MXT_RUNNER_HOME) { $env:MXT_RUNNER_HOME } else { Join-Path $env:LOCALAPPDATA 'MXT\runner' }
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+Write-Host "[mxt] 下载执行机到 $dir"
+Invoke-WebRequest -UseBasicParsing "$server/install/mxt-runner.mjs" -OutFile (Join-Path $dir 'mxt-runner.mjs')
+
+Write-Host "[mxt] 注册这台机器"
+& node (Join-Path $dir 'mxt-runner.mjs') enroll --server $server --code $env:MXT_CODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[mxt] 开始等待任务（Ctrl+C 退出，不影响已注册的身份）"
+& node (Join-Path $dir 'mxt-runner.mjs') watch
+`
+}
+
 async function serveStatic(request, response, url) {
   if (request.method !== 'GET') return false
   const pathname = url.pathname === '/' ? '/index.html' : url.pathname
@@ -1725,7 +2372,7 @@ async function serveStatic(request, response, url) {
  * `scripts/e2e-run.mjs` reads those names, so the platform speaks them too
  * rather than asking that repository to rename anything.
  */
-export function runnerEnv({ run, suite, app, config }) {
+export function runnerEnv({ run, suite, app, config, caseFilter = null }) {
   const artifactsRoot = `${config.artifactsDir}/runs`
   const artifactsDir = `${artifactsRoot}/${run.id}`
   const env = {
@@ -1746,6 +2393,27 @@ export function runnerEnv({ run, suite, app, config }) {
     // suite write to `.../<runId>/<runId>`, where the platform then found no
     // summary.json and reported a perfectly good run as blocked.
     E2E_ARTIFACTS_DIR: artifactsRoot,
+    // Recording is a choice about what the run is *for*.
+    //
+    // A server-side run answers "does it pass, and how long did it take" — a
+    // nightly regression that records every case fills a PVC with video nobody
+    // watches. A run on someone's machine is the one you asked for *because*
+    // you want to see it.
+    MXT_RECORD_VIDEO: (run.runsOn ?? 'server') === 'server' ? '0' : '1',
+  }
+  if (caseFilter) {
+    // Two forms of the same restriction. `MXT_CASE_FILTER` is the contract's
+    // own (docs/04) and carries what the person wrote, Case IDs included.
+    // `E2E_SPEC` is the compass alias and carries spec paths only — the form an
+    // engine can act on — which is why the platform resolves the ids first.
+    env.MXT_CASE_FILTER = caseFilter.raw
+    if (caseFilter.specs.length > 0) env.E2E_SPEC = caseFilter.specs.join(',')
+  }
+  // Cypress reads this one itself, so a suite gets the behaviour with no change
+  // to its config at all. Playwright has no env equivalent — a Playwright suite
+  // that cares has to read MXT_RECORD_VIDEO in its own config.
+  if (suite.engine === 'cypress' || suite.engine === 'cypress-electron') {
+    env.CYPRESS_VIDEO = env.MXT_RECORD_VIDEO === '1' ? 'true' : 'false'
   }
   if (run.targetUrl) {
     env.MXT_BASE_URL = run.targetUrl
@@ -1876,7 +2544,27 @@ export async function completeRun({ store, artifacts, run, body, config = null }
   const catalogCases = (await store.listCases(run.appId)).filter(
     (entry) => !entry.suiteSlug || !suiteSlug || entry.suiteSlug === suiteSlug,
   )
-  const { cases, catalog } = compareWithCatalog(catalogCases, normalized.cases)
+  // A run that was asked for three cases is measured against those three.
+  // Comparing it with the whole catalog would report the rest as "registered
+  // but never ran" — true in the narrowest sense, and it would make `notRun`
+  // worthless the first time anybody reran a single case.
+  const filter = run.caseFilter
+    ? await resolveCaseFilter({ store, appId: run.appId, filter: run.caseFilter }).catch(() => null)
+    : null
+  const inScope = catalogSubsetFor(catalogCases, filter)
+  const { cases, catalog } = compareWithCatalog(inScope, normalized.cases, {
+    // A suite may reconcile against its own full catalog and report every case
+    // it knows about — compass does. Those extra entries are registered cases
+    // outside this run's scope, not unknown ones.
+    outOfScopeIds: filter
+      ? new Set(
+          catalogCases
+            .filter((entry) => !inScope.some((scoped) => scoped.caseId === entry.caseId))
+            .map((entry) => entry.caseId),
+        )
+      : null,
+  })
+  if (filter) catalog.caseFilter = filter.raw
 
   const finishedAt = new Date()
   const startedAt = run.startedAt ? new Date(run.startedAt) : finishedAt

@@ -2,7 +2,7 @@ import pg from 'pg'
 import { AppError } from '../core/errors.mjs'
 import { newId } from '../core/ids.mjs'
 
-// PostgreSQL store against the `mx_test` database (specs/02-domain-model.md).
+// PostgreSQL store against the `mx_test` database (docs/02-domain-model.md).
 // Same interface as MemoryStore.
 
 const iso = (value) => (value instanceof Date ? value.toISOString() : value ?? null)
@@ -152,6 +152,9 @@ function mapTask(row) {
     profile: row.profile,
     track: row.track,
     targetUrl: row.target_url,
+    runsOn: row.runs_on ?? null,
+    runnerId: row.runner_id ?? null,
+    caseFilter: row.case_filter ?? null,
     scheduleKind: row.schedule_kind,
     cronExpr: row.cron_expr,
     runAt: iso(row.run_at),
@@ -179,6 +182,9 @@ function mapRun(row) {
     targetUrl: row.target_url,
     sourceRef: row.source_ref ?? {},
     appPackage: row.app_package ?? null,
+    runsOn: row.runs_on ?? null,
+    assignedRunnerId: row.assigned_runner_id ?? null,
+    caseFilter: row.case_filter ?? null,
     runnerId: row.runner_id,
     runTokenSha256: row.run_token_sha256,
     artifacts: row.artifacts ?? {},
@@ -204,6 +210,18 @@ function mapRunCase(row) {
     errorText: row.error_text,
     specPath: row.spec_path,
     title: row.title,
+  }
+}
+
+function mapEnrollment(row) {
+  return {
+    id: row.id,
+    codeSha256: row.code_sha256,
+    principal: row.principal,
+    expiresAt: iso(row.expires_at),
+    usedAt: iso(row.used_at),
+    runnerId: row.runner_id,
+    createdAt: iso(row.created_at),
   }
 }
 
@@ -292,6 +310,22 @@ export class PostgresStore {
   async getAppBySlug(slug) {
     const { rows } = await this.pool.query('SELECT * FROM mxt_apps WHERE slug = $1', [slug])
     return rows[0] ? mapApp(rows[0]) : null
+  }
+
+  /**
+   * Remove an application. Suites, tasks, cases, runs, steps and events all go
+   * with it through the ON DELETE CASCADE chain declared in 001_initial.sql.
+   *
+   * The run ids are collected *before* the delete and handed back: artifacts
+   * live on disk, and no foreign key reaches them.
+   */
+  async deleteApp(id) {
+    return this.#tx(async (client) => {
+      const { rows: runs } = await client.query('SELECT id FROM mxt_runs WHERE app_id = $1', [id])
+      const { rowCount } = await client.query('DELETE FROM mxt_apps WHERE id = $1', [id])
+      if (rowCount === 0) return null
+      return { runIds: runs.map((row) => row.id) }
+    })
   }
 
   async setWebhookSecret(appId, record) {
@@ -416,6 +450,19 @@ export class PostgresStore {
     return rows[0] ? mapSuite(rows[0]) : null
   }
 
+  /**
+   * Remove a suite. Tasks and runs go with it through the cascade; cases keep
+   * their `suite_slug`, because a registered case outlives whatever ran it.
+   */
+  async deleteSuite(id) {
+    return this.#tx(async (client) => {
+      const { rows: runs } = await client.query('SELECT id FROM mxt_runs WHERE suite_id = $1', [id])
+      const { rowCount } = await client.query('DELETE FROM mxt_suites WHERE id = $1', [id])
+      if (rowCount === 0) return null
+      return { runIds: runs.map((row) => row.id) }
+    })
+  }
+
   async listSuites(appId) {
     const { rows } = await this.pool.query(
       'SELECT * FROM mxt_suites WHERE app_id = $1 ORDER BY slug',
@@ -507,8 +554,9 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `INSERT INTO mxt_tasks
          (id, app_id, suite_id, name, profile, track, target_url, schedule_kind,
-          cron_expr, run_at, timezone, claim_window_minutes, enabled, next_run_at, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+          cron_expr, run_at, timezone, claim_window_minutes, enabled, next_run_at, created_by,
+          runs_on, runner_id, case_filter)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
       [
         id,
         input.appId,
@@ -525,6 +573,9 @@ export class PostgresStore {
         input.enabled !== false,
         input.nextRunAt ?? null,
         input.createdBy ?? null,
+        input.runsOn ?? null,
+        input.runnerId ?? null,
+        input.caseFilter ?? null,
       ],
     )
     return mapTask(rows[0])
@@ -557,6 +608,9 @@ export class PostgresStore {
       runAt: 'run_at',
       timezone: 'timezone',
       claimWindowMinutes: 'claim_window_minutes',
+      runsOn: 'runs_on',
+      runnerId: 'runner_id',
+      caseFilter: 'case_filter',
       enabled: 'enabled',
       nextRunAt: 'next_run_at',
       lastRunId: 'last_run_id',
@@ -597,8 +651,9 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `INSERT INTO mxt_runs
          (id, app_id, suite_id, task_id, profile, track, engine, status, trigger,
-          target_url, source_ref, app_package, claim_deadline, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14) RETURNING *`,
+          target_url, source_ref, app_package, claim_deadline, created_by,
+          runs_on, assigned_runner_id, case_filter)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15,$16,$17) RETURNING *`,
       [
         id,
         input.appId,
@@ -614,6 +669,9 @@ export class PostgresStore {
         input.appPackage ? JSON.stringify(input.appPackage) : null,
         input.claimDeadline ?? null,
         input.createdBy ?? null,
+        input.runsOn ?? null,
+        input.assignedRunnerId ?? null,
+        input.caseFilter ?? null,
       ],
     )
     return mapRun(rows[0])
@@ -691,6 +749,17 @@ export class PostgresStore {
         `SELECT r.* FROM mxt_runs r
            JOIN mxt_suites s ON s.id = r.suite_id
           WHERE r.status IN ('queued','pending-runner')
+            -- A run destined for the platform's own capacity is never handed
+            -- to a person's laptop, even one that could technically run it: the
+            -- point of choosing "服务器静默跑" is that it does not depend on
+            -- anyone being at their desk. A machine registered with kind
+            -- 'server' IS that capacity: that is how a deployment without
+            -- Kubernetes runs headless work at all.
+            AND (coalesce(r.runs_on, 'any-runner') <> 'server' OR $5 = 'server')
+            -- A pinned run belongs to exactly one machine. Without this line
+            -- the pin would be a suggestion, and the run record would name a
+            -- machine that never touched it.
+            AND (r.assigned_runner_id IS NULL OR r.assigned_runner_id = $4)
             AND s.engine = ANY($1::text[])
             AND s.surface = ANY($2::text[])
             AND (
@@ -705,7 +774,7 @@ export class PostgresStore {
           ORDER BY r.queued_at
           FOR UPDATE OF r SKIP LOCKED
           LIMIT 1`,
-        [capabilities.engines ?? [], capabilities.surfaces ?? [], runner.os],
+        [capabilities.engines ?? [], capabilities.surfaces ?? [], runner.os, runner.id, runner.kind],
       )
       if (!rows[0]) return null
       const { rows: updated } = await client.query(
@@ -833,6 +902,74 @@ export class PostgresStore {
     return grouped
   }
 
+  /**
+   * Append progress events under a per-run advisory lock.
+   *
+   * The lock is what makes `seq` monotonic without a sequence object per run.
+   * Two writers do exist in practice — the runner's batch and the server's own
+   * `run.claimed` / `run.finished` — and without serialising them the two
+   * would compute the same `max(seq) + 1` and one insert would lose the race
+   * against the primary key.
+   */
+  async appendRunEvents(runId, events, { cap = Infinity } = {}) {
+    if (events.length === 0) return { events: [], dropped: 0, total: 0 }
+    return this.#tx(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [runId])
+      const { rows: state } = await client.query(
+        'SELECT coalesce(max(seq), 0) AS max_seq, count(*)::int AS total FROM mxt_run_events WHERE run_id = $1',
+        [runId],
+      )
+      let seq = Number(state[0].max_seq)
+      let total = Number(state[0].total)
+      const stored = []
+      let dropped = 0
+      for (const event of events) {
+        if (total >= cap) {
+          dropped += 1
+          continue
+        }
+        seq += 1
+        total += 1
+        const { rows } = await client.query(
+          `INSERT INTO mxt_run_events (run_id, seq, at, kind, payload)
+           VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING seq, at, kind, payload`,
+          [runId, seq, event.at ?? new Date().toISOString(), event.kind, JSON.stringify(event.payload ?? {})],
+        )
+        stored.push({ seq: rows[0].seq, at: iso(rows[0].at), kind: rows[0].kind, payload: rows[0].payload })
+      }
+      return { events: stored, dropped, total }
+    })
+  }
+
+  async listRunEvents(runId, { afterSeq = 0, limit = 1000 } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT seq, at, kind, payload FROM mxt_run_events
+       WHERE run_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`,
+      [runId, afterSeq, limit],
+    )
+    return rows.map((row) => ({ seq: row.seq, at: iso(row.at), kind: row.kind, payload: row.payload ?? {} }))
+  }
+
+  /**
+   * Drop progress events older than the retention window.
+   *
+   * They are capped per run, not in total: a hundred runs a day at the cap is
+   * half a million rows a week, and nothing was deleting them. docs/25 said the
+   * retention matched the artifacts'; only the artifacts had a sweep.
+   */
+  async purgeRunEvents(before) {
+    const { rowCount } = await this.pool.query('DELETE FROM mxt_run_events WHERE at < $1', [before])
+    return rowCount
+  }
+
+  async countRunEvents(runId) {
+    const { rows } = await this.pool.query(
+      'SELECT count(*)::int AS total FROM mxt_run_events WHERE run_id = $1',
+      [runId],
+    )
+    return rows[0].total
+  }
+
   async sweepStaleRuns(now) {
     const { rows: expired } = await this.pool.query(
       `UPDATE mxt_runs SET status = 'expired', finished_at = $1
@@ -875,6 +1012,68 @@ export class PostgresStore {
       ],
     )
     return mapRunner(rows[0])
+  }
+
+  // -- runner enrollment -----------------------------------------------------
+
+  async createEnrollment(input) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO mxt_runner_enrollments (id, code_sha256, principal, expires_at)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [newId('enr'), input.codeSha256, input.principal, input.expiresAt],
+    )
+    return mapEnrollment(rows[0])
+  }
+
+  async getEnrollment(id) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM mxt_runner_enrollments WHERE id = $1',
+      [id],
+    )
+    return rows[0] ? mapEnrollment(rows[0]) : null
+  }
+
+  async getEnrollmentByCodeHash(hash) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM mxt_runner_enrollments WHERE code_sha256 = $1',
+      [hash],
+    )
+    return rows[0] ? mapEnrollment(rows[0]) : null
+  }
+
+  /**
+   * Burn the code, in one statement.
+   *
+   * `used_at IS NULL` in the WHERE clause is the single-use rule: two machines
+   * redeeming the same code at the same moment both run this, and exactly one
+   * of them gets a row back.
+   */
+  async consumeEnrollment(id, { runnerId = null, usedAt = new Date().toISOString() } = {}) {
+    const { rows } = await this.pool.query(
+      `UPDATE mxt_runner_enrollments SET used_at = $2, runner_id = $3
+        WHERE id = $1 AND used_at IS NULL RETURNING *`,
+      [id, usedAt, runnerId],
+    )
+    return rows[0] ? mapEnrollment(rows[0]) : null
+  }
+
+  /** Record which machine a burned code produced, for the page that is waiting. */
+  async attachEnrollmentRunner(id, runnerId) {
+    const { rows } = await this.pool.query(
+      'UPDATE mxt_runner_enrollments SET runner_id = $2 WHERE id = $1 RETURNING *',
+      [id, runnerId],
+    )
+    return rows[0] ? mapEnrollment(rows[0]) : null
+  }
+
+  async deleteRunner(id) {
+    const { rowCount } = await this.pool.query('DELETE FROM mxt_runners WHERE id = $1', [id])
+    return rowCount > 0
+  }
+
+  async getRunner(id) {
+    const { rows } = await this.pool.query('SELECT * FROM mxt_runners WHERE id = $1', [id])
+    return rows[0] ? mapRunner(rows[0]) : null
   }
 
   async getRunnerByTokenHash(hash) {

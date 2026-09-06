@@ -208,8 +208,7 @@ test('a result that cannot be delivered is retried and then surfaces as a failed
   // `exit 0` at the end of the old script meant Kubernetes saw every Job as
   // successful, discarding the one signal that survives a container that dies
   // before it can report anything.
-  assert.match(script, /--data-binary @\/tmp\/payload\.json/u)
-  assert.match(script, /"\$attempt" -le 3/u)
+  assert.match(script, /mxt-api\.js post ".*:complete" \/tmp\/payload\.json 3/u, '结果要带重试')
   assert.match(script, /exit 75/u)
 })
 
@@ -418,4 +417,104 @@ test('the run pin still wins over both', () => {
     ),
     'abc123',
   )
+})
+
+// -- the scripts the container actually runs ----------------------------------
+//
+// Every one of these is a JavaScript file written inside a JavaScript template
+// literal, then written again inside a shell heredoc. Two escaping layers, and
+// both have already broken it once: a newline escape in the embedded source
+// became a real newline, and a top-level `await` became a syntax error because
+// /tmp has no package.json and node parses a bare .js as CommonJS.
+//
+// Neither failure showed up until a container tried to run it. This is that
+// check, moved to where it costs nothing.
+
+test('every embedded script parses the way the container will parse it', async () => {
+  const { Script } = await import('node:vm')
+  const source = dispatcher().script({ apiBase: 'http://mxt' })
+
+  for (const name of ['mxt-api.js', 'mxt-exec.js', 'mxt-progress.js', 'mxt-report.js', 'mxt-blocked.js']) {
+    const opening = `cat > /tmp/${name} <<'MXT_EOF'\n`
+    assert.ok(source.includes(opening), `${name} 必须在脚本里被创建，而不只是被调用`)
+    const body = source.split(opening)[1].split('\nMXT_EOF')[0]
+    // `new Script` parses as a classic script — exactly what `node file.js`
+    // does for a .js with no package.json. Top-level await fails here, as it
+    // would there.
+    assert.doesNotThrow(() => new Script(body, { filename: name }), `${name} 语法错误`)
+  }
+})
+
+test('nothing in the container reaches for curl', () => {
+  // cypress/included has node and no curl, and the platform runs JavaScript in
+  // that image by definition. The first real Kubernetes dispatch died here: the
+  // tests ran and the result could not be handed back.
+  const source = dispatcher().script({ apiBase: 'http://mxt' })
+  assert.ok(!/curl\s+-/u.test(source), '容器脚本不能依赖 curl')
+})
+
+test('the suite output has somewhere to go', () => {
+  const job = dispatcher().manifest({
+    run: { id: 'trun_x', appId: 'app_1', suiteId: 'ste_1' },
+    suite: { slug: 's', engine: 'cypress', surface: 'web', command: ['pnpm', 'e2e'] },
+    app: { slug: 'a' },
+    env: {},
+    runToken: 'mxt-run_x',
+    apiBase: 'http://mxt:8790',
+  })
+  const env = job.spec.template.spec.containers[0].env
+  const url = env.find((entry) => entry.name === 'MXT_EVENTS_URL')
+  assert.equal(url?.value, 'http://mxt:8790/runner/v1/runs/trun_x/events')
+})
+
+test('a private repository can be given a credential from configuration alone', async () => {
+  // This path was dead: `MXT_GIT_TOKEN_SECRET` was read by the config and never
+  // passed to the Deployment, and the Job looked for a key nothing wrote. A
+  // private repo failed at `git fetch` with no way to fix it from config.
+  const { loadConfig } = await import('../server/config.mjs')
+  const { KubernetesDispatcher } = await import('../server/runner/dispatcher.mjs')
+  const build = (env) =>
+    new KubernetesDispatcher({
+      config: loadConfig({ MXT_STORE: 'memory', MXT_ADMIN_TOKEN: 'x', ...env }),
+      namespace: 'n',
+    }).manifest({
+      run: { id: 'trun_1' },
+      suite: { slug: 's', engine: 'cypress', command: ['pnpm', 'e2e'] },
+      app: { slug: 'a', repoUrl: 'https://github.com/org/private' },
+      env: {},
+      runToken: 'mxt-run_x',
+      apiBase: 'http://mxt',
+    })
+
+  const fromPlatformSecret = build({}).spec.template.spec.containers[0].env.find(
+    (entry) => entry.name === 'MXT_GIT_TOKEN',
+  )
+  assert.equal(fromPlatformSecret.valueFrom.secretKeyRef.name, 'mx-test-framework-secrets')
+  assert.equal(fromPlatformSecret.valueFrom.secretKeyRef.key, 'MXT_GIT_TOKEN')
+  assert.equal(fromPlatformSecret.valueFrom.secretKeyRef.optional, true, '公开仓库不该因为没有凭据就起不来')
+
+  const overridden = build({
+    MXT_GIT_TOKEN_SECRET: 'someone-elses-secret',
+    MXT_GIT_TOKEN_SECRET_KEY: 'token',
+  }).spec.template.spec.containers[0].env.find((entry) => entry.name === 'MXT_GIT_TOKEN')
+  assert.equal(overridden.valueFrom.secretKeyRef.name, 'someone-elses-secret')
+  assert.equal(overridden.valueFrom.secretKeyRef.key, 'token')
+})
+
+test('collection is only reported as done once there is something to collect', () => {
+  // The first real dispatch reported `upload ok` and then `upload failed` on the
+  // same run: the stage was marked done unconditionally, and the "produced no
+  // report" check fired afterwards. Two claims about one step, and the failure
+  // was attributed to collecting the artefacts rather than to the suite that
+  // produced none.
+  const script = dispatcher().script({ apiBase: 'http://mxt' })
+  const check = script.indexOf('runner produced neither summary.json')
+  const uploadOk = script.indexOf('stage upload ok')
+  assert.ok(check !== -1 && uploadOk !== -1)
+  assert.ok(uploadOk > check, '「收产物」要在确认有产物之后才算成功')
+})
+
+test('a suite with no repository says so instead of hanging on 检出', () => {
+  const script = dispatcher().script({ apiBase: 'http://mxt' })
+  assert.match(script, /stage checkout skipped/u)
 })

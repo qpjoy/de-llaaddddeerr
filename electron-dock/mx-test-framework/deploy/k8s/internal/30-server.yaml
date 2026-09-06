@@ -76,6 +76,20 @@ spec:
                   name: mx-test-framework-secrets
                   key: MXT_LAUNCHER_URL
                   optional: true
+            # Which Kubernetes Secret holds the git credential a runner Job
+            # needs for a private repository under test.
+            #
+            # The platform only passes the *name* down; the value is mounted
+            # into the Job itself, so a token for someone else's repository is
+            # never in this pod's environment. Optional, because a public
+            # repository needs none — and without it a private one fails at
+            # `git fetch` with a message that says exactly that.
+            - name: MXT_GIT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_GIT_TOKEN_SECRET
+                  optional: true
             # The address a person can open, used for the link in an alert.
             # Optional: without it notifications still arrive, just without a
             # link. `optional: true` so a deployment predating it still starts.

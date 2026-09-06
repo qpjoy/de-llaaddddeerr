@@ -31,7 +31,7 @@ Jenkins 是**部署出来的服务**。把服务塞进库里，两边的版本�
 
 ## 那条硬约束为什么重要
 
-它是 [MXT ADR-0001](../../mx-test-framework/specs/adr/0001-standalone-platform.md)
+它是 [MXT ADR-0001](../../mx-test-framework/docs/adr/0001-standalone-platform.md)
 "平台是增益，不是前置依赖"的同一条推理再走一层：
 
 - MXT 挂了，被测仓库的 `pnpm e2e:local` 仍要能独立跑通

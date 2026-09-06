@@ -5,7 +5,7 @@
 
 ## 一句话：现在不要部署它
 
-[MXT ADR-0006](../mx-test-framework/specs/adr/0006-mxt-absorbs-builds-jenkins-deferred.md)
+[MXT ADR-0006](../mx-test-framework/docs/adr/0006-mxt-absorbs-builds-jenkins-deferred.md)
 的结论是 **Jenkins 对当前范围没有不可取代之处**——唯一真正难复制的是多阶段流水线
 DSL，而当前的流水线只有三步（构建 → 发布给 Release Center → 通知）。
 「构建」这个动作由 MXT 的 `kind: build` 作业吸收，跑在它本来就需要的那台

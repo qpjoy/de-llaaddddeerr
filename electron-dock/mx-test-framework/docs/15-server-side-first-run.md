@@ -206,3 +206,79 @@ MXT      = 界面 + 用例语义 + 报告 + 历史       所有人打开这里
 | flaky 计分与 quarantine | 只在文档里 |
 | `real` profile 的环境与只读账号 | 09 号文档开放项 #1，至今未定 |
 | 本地 runner 不会 clone / 不下载安装包 | Electron 的无人值守做不了，见 [14 §3](14-ci-runners-and-stack.md#3-临时执行机) |
+
+## 登录能进接口、进不了界面？看 Cookie 的 Secure
+
+症状：账号密码都对，`curl` 打 `/api/v1/auth/login` 返回 200，但浏览器里点登录就是回到
+登录页，控制台一片 401。
+
+原因是 `Secure` 的会话 Cookie 走 http:// 会被浏览器**一声不吭地丢掉**：登录请求本身
+成功了，Cookie 没存下来，下一个请求当然 401。**它长得和密码错了一模一样**，而且出现的
+地址正是 deploy 自己打印出来的那个。
+
+平台现在按 `MXT_PUBLIC_URL` 的协议自己决定：
+
+| `MXT_PUBLIC_URL` | Cookie 带 Secure |
+| --- | --- |
+| 没设 | 带（安全的默认值不该因为没配就降级） |
+| `https://…` | 带 |
+| `http://<内网 IP 或域名>` | **不带** |
+| `http://127.0.0.1` / `localhost` | 带（回环是可信源，浏览器认） |
+
+`MXT_INSECURE_COOKIES=true` / `false` 仍然可以强制覆盖。
+
+内网如果最终会上 https，把 `MXT_PUBLIC_URL` 设成 https 的地址就自动回到带 Secure。
+
+## 被测仓库是私有的
+
+容器里没有你的 GitHub 登录态，`git fetch` 会失败并且说得很清楚：
+
+```
+fatal: could not read Username for 'https://github.com'
+[mxt] blocked: git fetch of 'public' failed (missing ref, or no credentials for a private repo)
+```
+
+给平台一个只读的 PAT 就行，一行配置：
+
+```bash
+echo 'MXT_GIT_TOKEN=github_pat_你的只读令牌' >> .env.internal
+bash scripts/manage.sh deploy
+```
+
+它进的是平台自己的 Kubernetes Secret，再由平台**只把 Secret 的名字**下发给 runner Job；
+token 的值挂进 Job 自己的环境，不经过平台 Pod 的环境变量。容器里也不会把它写进
+`.git/config`——脚本用的是 git 的 credential helper，进程表里同样看不到。
+
+token 需要的权限只有对被测仓库的 `contents: read`。
+
+不想用平台的 Secret（比如令牌由别的系统管理）就指过去：
+`MXT_GIT_TOKEN_SECRET=<secret 名>`，键名默认 `token`，可用 `MXT_GIT_TOKEN_SECRET_KEY` 改。
+
+## 怎么从浏览器验证这套东西是真的
+
+一条从零到「看见一次真实执行跑完」的路径。**不需要 GitHub，不需要凭据**——前提是被测
+仓库在本机有一份检出。
+
+| 步骤 | 在界面上做什么 | 应该看到什么 |
+| --- | --- | --- |
+| 1 | 打开平台地址，账号随便填，密码用 `MXT_ADMIN_TOKEN` | 进到「概览」，四张引导卡片、任务/执行机计数 |
+| 2 | 「应用与用例」→ 罗盘 →「管理用例」 | 27 条用例，有的标着「待实现」——目录来自被测仓库，不是在这里手写的 |
+| 3 | 「执行机」→「把这台电脑变成执行机」 | 弹出一条命令；粘到本机终端里跑，**卡片自己变绿**，列表里多一台「在线」 |
+| 4 | 「测试任务」→「新建任务」 | 「在哪跑」四选一；把套件切到桌面端，「服务器静默跑」那项会自己变灰并说明原因 |
+| 5 | 选「我的这台电脑」，创建，点「立即执行」 | 跳到执行详情：**七段流水依次点亮**，用例一条条冒出来，不用刷新 |
+| 6 | 等它跑完 | 页面**自己**切到结果视图：通过数、耗时、目录执行率、每条用例的步骤 |
+| 7 | 点「完整报告」 | 三个分母各自命名的覆盖率表 + 用例明细 |
+| 8 | 回到执行详情，展开某条失败用例 | 「只重跑这条」——建一次只跑它的执行，覆盖率按这个范围算 |
+| 9 | 「执行记录」 | 历次执行并列，能看出趋势 |
+
+第 5 步之前，如果被测仓库是私有的、又还没配 `MXT_GIT_TOKEN`，把 suite 指到本机检出即可：
+
+```bash
+curl -X PATCH -H "authorization: Bearer $MXT_ADMIN_TOKEN" -H 'content-type: application/json'   -d '{"runnerKind":"local","repoUrl":"E:/你的/luopan","defaultBranch":"public"}'   http://<平台>/api/v1/apps/luopan/suites/web-mock
+```
+
+**本地目录就是合法的 git remote**，run 记录里照样有真实的 gitSha。配好令牌之后再改回
+`{"runnerKind":"server","repoUrl":"https://github.com/…"}`，就回到服务端无人值守。
+
+想确认平台自己没坏（而不是被测应用没坏），跑 `bash scripts/manage.sh verify`：它对着
+真部署走完注册 → 建任务 → 执行 → 认领 → 归一 → 查步骤的全链路，21 项断言。

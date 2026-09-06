@@ -138,3 +138,24 @@ test('an empty catalog yields zeroes, not a division by zero', () => {
   assert.equal(catalog.coverage.catalogPassPercent, 0)
   assert.equal(catalog.catalogTotal, 0)
 })
+
+test('a Windows runner reports backslash paths; the platform stores one spelling', async () => {
+  // 罗盘 on Windows writes a spec path with backslashes, while the artefact it
+  // uploads is `videos/cypress/e2e/smoke/auth.cy.ts.mp4`. Everything that
+  // matched one against the other — the recording on the run page, the spec a
+  // filtered rerun resolves — silently found nothing.
+  const { normalizeSummary } = await import('../server/ingest/summary.mjs')
+  const windowsSpec = ['cypress', 'e2e', 'smoke', 'auth.cy.ts'].join(String.fromCharCode(92))
+  const normalized = normalizeSummary({
+    schemaVersion: 1,
+    runId: 'trun_x',
+    status: 'passed',
+    specs: [{ name: windowsSpec, status: 'passed', tests: [{ title: '登录跳转', state: 'passed', durationMs: 10 }] }],
+    functional: {
+      cases: [{ id: 'LP-FE-AUTH-001', status: 'passed', actualSpec: windowsSpec, actualTitle: '登录跳转' }],
+    },
+  })
+  const [testCase] = normalized.cases
+  assert.equal(testCase.specPath, 'cypress/e2e/smoke/auth.cy.ts')
+  assert.ok(!testCase.specPath.includes(String.fromCharCode(92)), '入库之后只有一种写法')
+})

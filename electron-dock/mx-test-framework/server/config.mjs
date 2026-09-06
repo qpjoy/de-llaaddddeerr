@@ -56,9 +56,28 @@ export function loadConfig(environment = process.env) {
     // and is useless in a chat message, so notifications need their own.
     // Unset means alerts carry no link — degraded but not broken.
     publicUrl: (environment.MXT_PUBLIC_URL?.trim() || '').replace(/\/$/u, ''),
-    // Session cookies get the Secure flag unless explicitly told otherwise, so
-    // the default is the safe one and plain-HTTP local dev is the exception.
-    secureCookies: environment.MXT_INSECURE_COOKIES !== 'true',
+    // Session cookies get the Secure flag unless the deployment is demonstrably
+    // plain HTTP.
+    //
+    // A `Secure` cookie sent over http:// is dropped by the browser without a
+    // word: the login POST returns 200, the session never sticks, and the next
+    // request comes back 401. It looks exactly like a wrong password, which is
+    // the worst way for this to fail — the address it happens at is the one the
+    // deploy itself prints.
+    //
+    // So the scheme of MXT_PUBLIC_URL decides, because that is the address
+    // people actually open. Unset stays Secure: that is the safe default, and
+    // an operator who never said where the platform lives should not get a
+    // downgrade. `MXT_INSECURE_COOKIES` still overrides both, either way.
+    secureCookies: (() => {
+      if (environment.MXT_INSECURE_COOKIES === 'true') return false
+      if (environment.MXT_INSECURE_COOKIES === 'false') return true
+      const url = environment.MXT_PUBLIC_URL?.trim() || ''
+      // Loopback is a trustworthy origin in every current browser, so a Secure
+      // cookie is accepted there and the flag costs nothing.
+      if (/^http:\/\/(?!localhost|127\.0\.0\.1|\[::1\])/u.test(url)) return false
+      return true
+    })(),
     // First login provisions this role. `viewer` means a new account can look
     // but not act until an admin raises it.
     defaultMemberRole: environment.MXT_DEFAULT_ROLE?.trim() || 'viewer',
@@ -75,7 +94,19 @@ export function loadConfig(environment = process.env) {
     // Name of a k8s Secret holding a `token` key used to clone private repos.
     // Optional: without it, only public repositories can be checked out, and a
     // private one fails as `blocked` with that reason rather than hanging.
-    gitTokenSecret: environment.MXT_GIT_TOKEN_SECRET?.trim() || null,
+    // The git credential a runner Job needs for a private repository.
+    //
+    // Defaults to the platform's own Secret, under the key `manage.sh` already
+    // writes there — so enabling this is one line in `.env.internal`
+    // (`MXT_GIT_TOKEN=…`) rather than a second Secret somebody has to create,
+    // name, and remember. It used to point at a secret nothing created, which
+    // made the whole path dead: a private repository failed at `git fetch` with
+    // no way to fix it from configuration.
+    //
+    // Both halves stay overridable for the case this default does not fit: a
+    // token managed outside this deployment, in a Secret with its own key.
+    gitTokenSecret: environment.MXT_GIT_TOKEN_SECRET?.trim() || 'mx-test-framework-secrets',
+    gitTokenSecretKey: environment.MXT_GIT_TOKEN_SECRET_KEY?.trim() || 'MXT_GIT_TOKEN',
     // Encryption key for the credential store, as a 32-byte Buffer. Parsed and
     // validated here rather than at first use: a malformed key should stop the
     // deploy, not surface weeks later as a run that cannot log in.

@@ -1,4 +1,5 @@
 import { nextCronTime } from './core/cron.mjs'
+import { resolvePlacement } from './runner/placement.mjs'
 
 // Turns due tasks into runs, and reaps runs nobody is looking after.
 //
@@ -19,15 +20,6 @@ export function computeNextRunAt(task, after = new Date()) {
   return null // manual
 }
 
-export function claimDeadlineFor(task, suite, now) {
-  // Only local-runner work waits for a machine to appear. Server-side runs are
-  // dispatched by the platform itself, so a deadline there would just be a
-  // second timeout on top of the lease.
-  if (suite.runnerKind !== 'local') return null
-  const minutes = task?.claimWindowMinutes ?? 720
-  return new Date(now.getTime() + minutes * 60_000).toISOString()
-}
-
 export async function runDueTasks(store, now = new Date()) {
   const due = await store.dueTasks(now)
   const created = []
@@ -40,6 +32,7 @@ export async function runDueTasks(store, now = new Date()) {
       await store.updateTask(task.id, { enabled: false, nextRunAt: null })
       continue
     }
+    const placement = resolvePlacement({ task, suite, now })
     const run = await store.createRun({
       appId: task.appId,
       suiteId: suite.id,
@@ -47,11 +40,11 @@ export async function runDueTasks(store, now = new Date()) {
       profile: task.profile,
       track: task.track,
       engine: suite.engine,
-      status: suite.runnerKind === 'local' ? 'pending-runner' : 'queued',
       trigger: 'schedule',
       targetUrl: task.targetUrl,
-      claimDeadline: claimDeadlineFor(task, suite, now),
       createdBy: task.createdBy,
+      caseFilter: task.caseFilter ?? null,
+      ...placement,
     })
     created.push(run)
 

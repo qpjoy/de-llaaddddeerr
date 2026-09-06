@@ -1,4 +1,4 @@
-# MX Test Framework · Specs
+# MX Test Framework · 设计文档
 
 MX Test Framework（简称 **MXT**）是一个独立的 e2e 测试平台，位于
 `electron-dock/mx-test-framework`，与 `mx-launcher`、`mx-insight-hub` 同级。
@@ -34,6 +34,8 @@ MX Test Framework（简称 **MXT**）是一个独立的 e2e 测试平台，位�
 | [22-webhook-triggers.md](22-webhook-triggers.md) | **Webhook 触发**：唯一无鉴权路由的写法、原始字节验签、payload 永远不是指令、run 钉在推送的 commit 上 |
 | [23-local-verification.md](23-local-verification.md) | **本机验证记录**：第一次真部署 + 罗盘 web/electron 两条流程跑通；`_electron` spike 的答案；实跑抓到的三个 bug |
 | [24-windows-local-service.md](24-windows-local-service.md) | **Windows 本地服务版**：一台 Windows 跑完整平台做测试与 demo，与内网 Linux 服务端 + Windows/Mac runner 的正式形态并列，含 Windows 特有的坑 |
+| [25-live-runs-and-runner-onboarding.md](25-live-runs-and-runner-onboarding.md) | **实时执行与执行机自助接入**：为什么缺的是事件而不是通道、浏览器用 SSE、runner 用 socket.io 的时机、多标签页用 room 不用 redis map、在线状态用 last_seen_at、客户端为什么不上 Docker、建任务时选「在哪跑」 |
+| [26-what-is-still-missing.md](26-what-is-still-missing.md) | **全局复盘**：48 条接口界面只用了 15 条、零通知渠道、零 cron、备份是文档里的一件不存在的事；按测试/PM/总监/运维/安全五种角色列缺口，按「失效顺序」排优先级 |
 
 ## 架构决策记录
 

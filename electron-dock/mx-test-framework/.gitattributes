@@ -1,0 +1,14 @@
+# Migrations are hashed byte-for-byte.
+#
+# The migrator records sha256 of each applied file and refuses to continue if it
+# ever changes (migrations/README.md explains why that rule is right). It hashes
+# the raw bytes — so a file checked out as CRLF on Windows and as LF on Linux is
+# *two different migrations* as far as that check is concerned, and a database
+# migrated from CI can never be migrated again from a Windows workstation.
+#
+# Pinning the line endings costs nothing and removes the whole class.
+migrations/*.sql text eol=lf
+
+# Same reasoning, one step removed: these are copied into the runner image and
+# executed there, and a stray CR is a syntax error in a shell script.
+*.sh text eol=lf

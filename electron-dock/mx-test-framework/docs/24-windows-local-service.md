@@ -136,6 +136,13 @@ MXT_APP_PATH="E:/world/workspace/mingxi/luopan-e2e/po-frontend/dist/electron/Pac
 cd electron-dock/mx-test-framework
 node bin/mxt-runner.mjs login --server http://127.0.0.1:8790 --username 你 --password local-admin-change-me
 node bin/mxt-runner.mjs register --name "本机 Windows" --engines cypress,playwright-electron --surfaces web,electron
+```
+
+这台机器如果还要接「服务器静默跑」的任务（本地服务版没有 k8s，无头任务只能它来跑），
+注册时加上 `--kind server`：那类任务只派给平台自己的容量，不会派给个人电脑
+（[25 §13](25-live-runs-and-runner-onboarding.md)）。
+
+```bash
 
 # 数据目录必须指到非系统盘，理由见 §5.1
 MXT_RUNNER_DATA_DIR=E:/mxt-runner node bin/mxt-runner.mjs watch
@@ -222,6 +229,30 @@ Git Bash 传中文参数给 `curl -d` 会乱码（平台侧存下来是 `????`�
 写脚本时把 payload 先写进文件再 `--data-binary @file`，
 或者干脆用 `node -e` 构造。**平台本身处理中文没有问题**——
 乱码只发生在 shell 传参这一段。
+
+### 5.4b 55432 可能落在 Windows 的保留端口段里
+
+compose 把 PostgreSQL 映射到宿主的 55432。Windows 会为 Hyper-V 预留成片的高位端口，
+55432 有时正好在里面，症状是：
+
+```
+bind: An attempt was made to access a socket in a way forbidden by its access permissions
+```
+
+看着像防火墙或者权限问题，**其实两者都不是**。查保留段：
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+换一个不在保留段里的端口即可：`MXT_PG_PORT=55500 bash scripts/manage.sh local up`。
+
+### 5.4c Git Bash 传中文参数会乱码
+
+`node bin/mxt-runner.mjs register --name "本机 Windows"` 在 Git Bash 里执行，
+平台上存下来的名字是乱码；同一条命令在 PowerShell 里正常。是 argv 的编码，不是平台
+的问题——**Windows 上就用 PowerShell 跑执行机的命令**，自助接入给出的也是 PowerShell
+那一条。
 
 ### 5.5 执行机的 PATH 可能缺 PowerShell
 

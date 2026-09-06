@@ -1,7 +1,7 @@
 # Artifact storage is deliberately its own volume, separate from the database
 # and from anything a production workload uses. Recordings are the one thing
 # here that grows without bound, so when it fills it must only affect testing.
-# See specs/10-deployment.md.
+# See docs/10-deployment.md.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

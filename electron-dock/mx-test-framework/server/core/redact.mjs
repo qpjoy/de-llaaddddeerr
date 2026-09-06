@@ -3,7 +3,7 @@
 // Runners are expected to redact too (compass already does), but a runner
 // executes code from the application repository under test, so the platform
 // cannot treat its output as trusted. Everything that reaches the database goes
-// through here first. See specs/05-tracks-and-artifacts.md.
+// through here first. See docs/05-tracks-and-artifacts.md.
 
 const BEARER = /Bearer\s+[^\s,;"']+/giu
 const LABELLED_SECRET =

@@ -19,7 +19,9 @@ export class MemoryStore {
   #runs = new Map()
   #runCases = [] // { runId, ...case }
   #steps = [] // { runId, caseId, seq, ... }
+  #runEvents = new Map() // runId -> [{ seq, at, kind, payload }]
   #runners = new Map()
+  #enrollments = new Map()
   #members = new Map()
 
   async close() {}
@@ -61,6 +63,29 @@ export class MemoryStore {
 
   async getAppBySlug(slug) {
     return clone([...this.#apps.values()].find((app) => app.slug === slug)) ?? null
+  }
+
+  /**
+   * Remove an application and everything that hangs off it.
+   *
+   * Mirrors the ON DELETE CASCADE chain in 001_initial.sql, because the two
+   * stores have to agree about what disappears — a memory-mode test that leaves
+   * orphaned runs behind would prove the opposite of what it looks like it
+   * proves. Returns the run ids so the caller can delete their artifacts, which
+   * live on disk and no cascade can reach.
+   */
+  async deleteApp(id) {
+    if (!this.#apps.delete(id)) return null
+    const runIds = [...this.#runs.values()].filter((run) => run.appId === id).map((run) => run.id)
+    for (const runId of runIds) this.#runs.delete(runId)
+    for (const [suiteId, suite] of this.#suites) if (suite.appId === id) this.#suites.delete(suiteId)
+    for (const [taskId, task] of this.#tasks) if (task.appId === id) this.#tasks.delete(taskId)
+    for (const [key, entry] of this.#cases) if (entry.appId === id) this.#cases.delete(key)
+    for (const [secretId, secret] of this.#secrets) if (secret.appId === id) this.#secrets.delete(secretId)
+    this.#runCases = this.#runCases.filter((entry) => !runIds.includes(entry.runId))
+    this.#steps = this.#steps.filter((entry) => !runIds.includes(entry.runId))
+    for (const runId of runIds) this.#runEvents.delete(runId)
+    return { runIds }
   }
 
   async setWebhookSecret(appId, record) {
@@ -143,6 +168,27 @@ export class MemoryStore {
     }
     this.#suites.set(id, suite)
     return clone(suite)
+  }
+
+  /**
+   * Remove a suite, and with it the tasks that pointed at it and the runs it
+   * produced — the same cascade 001_initial.sql declares.
+   *
+   * Cases keep their `suiteSlug`: a case is registered by the test team, and
+   * deleting the suite that happened to run it is not a reason to forget that
+   * the case exists.
+   */
+  async deleteSuite(id) {
+    if (!this.#suites.delete(id)) return null
+    const runIds = [...this.#runs.values()].filter((run) => run.suiteId === id).map((run) => run.id)
+    for (const runId of runIds) {
+      this.#runs.delete(runId)
+      this.#runEvents.delete(runId)
+    }
+    for (const [taskId, task] of this.#tasks) if (task.suiteId === id) this.#tasks.delete(taskId)
+    this.#runCases = this.#runCases.filter((entry) => !runIds.includes(entry.runId))
+    this.#steps = this.#steps.filter((entry) => !runIds.includes(entry.runId))
+    return { runIds }
   }
 
   async listSuites(appId) {
@@ -232,6 +278,9 @@ export class MemoryStore {
   async createTask(input) {
     const task = {
       id: newId('tsk'),
+      runsOn: null,
+      runnerId: null,
+      caseFilter: null,
       ...input,
       lastRunId: null,
       createdAt: new Date().toISOString(),
@@ -289,6 +338,9 @@ export class MemoryStore {
       artifacts: {},
       blockedReason: null,
       appPackage: null,
+      runsOn: null,
+      assignedRunnerId: null,
+      caseFilter: null,
       queuedAt: new Date().toISOString(),
       ...input,
     }
@@ -329,6 +381,15 @@ export class MemoryStore {
   async claimRun({ runner, leaseMs, now, runTokenSha256 = null }) {
     const candidates = [...this.#runs.values()]
       .filter((run) => run.status === 'queued' || run.status === 'pending-runner')
+      // A run destined for the platform's own capacity is never handed to a
+      // person's laptop, even one that could technically run it: choosing
+      // 「服务器静默跑」 means it must not depend on anyone being at their desk.
+      // A machine registered as `kind: server` *is* that capacity — that is how
+      // a deployment with no Kubernetes runs headless work at all.
+      .filter((run) => (run.runsOn ?? 'any-runner') !== 'server' || runner.kind === 'server')
+      // A pin names one machine. Without this the pin would be a suggestion,
+      // and the run record would name a machine that never touched it.
+      .filter((run) => !run.assignedRunnerId || run.assignedRunnerId === runner.id)
       .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt))
 
     for (const run of candidates) {
@@ -392,6 +453,54 @@ export class MemoryStore {
     return Object.fromEntries(grouped)
   }
 
+  /**
+   * Append progress events, numbering them here rather than trusting the
+   * caller's numbering. Returns what was actually stored plus how many were
+   * dropped, so the caller can record the truncation instead of hiding it.
+   */
+  async appendRunEvents(runId, events, { cap = Infinity } = {}) {
+    const list = this.#runEvents.get(runId) ?? []
+    this.#runEvents.set(runId, list)
+    const stored = []
+    let dropped = 0
+    for (const event of events) {
+      if (list.length >= cap) {
+        dropped += 1
+        continue
+      }
+      const record = {
+        seq: (list.at(-1)?.seq ?? 0) + 1,
+        at: event.at ?? new Date().toISOString(),
+        kind: event.kind,
+        payload: event.payload ?? {},
+      }
+      list.push(record)
+      stored.push(clone(record))
+    }
+    return { events: stored, dropped, total: list.length }
+  }
+
+  async listRunEvents(runId, { afterSeq = 0, limit = 1000 } = {}) {
+    const list = this.#runEvents.get(runId) ?? []
+    return clone(list.filter((entry) => entry.seq > afterSeq).slice(0, limit))
+  }
+
+  /** Drop progress events older than the retention window. */
+  async purgeRunEvents(before) {
+    let removed = 0
+    for (const [runId, list] of this.#runEvents) {
+      const kept = list.filter((entry) => entry.at >= before)
+      removed += list.length - kept.length
+      if (kept.length === 0) this.#runEvents.delete(runId)
+      else this.#runEvents.set(runId, kept)
+    }
+    return removed
+  }
+
+  async countRunEvents(runId) {
+    return this.#runEvents.get(runId)?.length ?? 0
+  }
+
   /** Runs nobody claimed inside the window, and runs whose runner went silent. */
   async sweepStaleRuns(now) {
     const stamp = now.toISOString()
@@ -429,6 +538,56 @@ export class MemoryStore {
     }
     this.#runners.set(runner.id, runner)
     return clone(runner)
+  }
+
+  // -- runner enrollment -----------------------------------------------------
+
+  async createEnrollment(input) {
+    const enrollment = {
+      id: newId('enr'),
+      usedAt: null,
+      runnerId: null,
+      createdAt: new Date().toISOString(),
+      ...input,
+    }
+    this.#enrollments.set(enrollment.id, enrollment)
+    return clone(enrollment)
+  }
+
+  async getEnrollment(id) {
+    return clone(this.#enrollments.get(id)) ?? null
+  }
+
+  async getEnrollmentByCodeHash(hash) {
+    return clone([...this.#enrollments.values()].find((entry) => entry.codeSha256 === hash)) ?? null
+  }
+
+  /**
+   * Burn the code. Returns null if it was already used, which is what makes
+   * two machines racing on the same code resolve to one winner.
+   */
+  async consumeEnrollment(id, { runnerId = null, usedAt = new Date().toISOString() } = {}) {
+    const enrollment = this.#enrollments.get(id)
+    if (!enrollment || enrollment.usedAt) return null
+    enrollment.usedAt = usedAt
+    enrollment.runnerId = runnerId
+    return clone(enrollment)
+  }
+
+  /** Record which machine a burned code produced, for the page that is waiting. */
+  async attachEnrollmentRunner(id, runnerId) {
+    const enrollment = this.#enrollments.get(id)
+    if (!enrollment) return null
+    enrollment.runnerId = runnerId
+    return clone(enrollment)
+  }
+
+  async deleteRunner(id) {
+    return this.#runners.delete(id)
+  }
+
+  async getRunner(id) {
+    return clone(this.#runners.get(id)) ?? null
   }
 
   async getRunnerByTokenHash(hash) {

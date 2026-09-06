@@ -67,13 +67,17 @@ spec:
 ### 本地 runner
 
 ```
-1. 平台上点「下载执行器」        → 拿到 mxt-runner（单文件 CLI）
-2. mxt-runner login             → 浏览器打开 mx-launcher 登录页
-                                  用现有 mx-launcher 账号登录并授权
-3. mxt-runner watch             → 常驻，认领分配给这台机器的任务
-   或 mxt-runner run <taskId>   → 只跑指定的一个任务
+1. 平台「执行机」页面点「把这台电脑变成执行机」→ 拿到一条命令（含 15 分钟的一次性接入码）
+2. 粘到这台机器的终端            → 脚本下载单文件 CLI、注册、起 watch
+                                  不在这台机器上输密码，也不需要管理员权限
+3. 常驻等待，认领能力匹配的任务  → 或 mxt-runner once 只取一个
 4. 本地执行 → 产物上传服务器    → 平台上和服务端跑的任务一视同仁地展示
+5. 不想要了 → mxt-runner uninstall（--purge 连缓存一起删）
 ```
+
+手工路径仍然在：`mxt-runner login` + `register`，适合脚本化和常开的机器
+（那种机器用 `--kind server`）。自助接入的细节见
+[25 §6](25-live-runs-and-runner-onboarding.md)。
 
 登录复用 mx-launcher 已开放的 User Center 接口
 （`/internal/v1/user-center/token/introspect` 校验，`/internal/v1/sdk/oauth/token` 换取），

@@ -54,7 +54,7 @@
 
 ### P0 · 骨架与部署 ✅ 代码完成，待上机
 
-- [x] specs 与 ADR
+- [x] 设计文档与 ADR
 - [x] `contracts/` JSON Schema、`migrations/001_initial.sql`
 - [x] `server/`：apps / suites / cases / tasks / runs / claim / complete
 - [x] 调度器：立即 / 定时一次 / cron 重复；`pending-runner` 排队与 `expired` 回收
@@ -86,6 +86,11 @@
 - [x] 平台侧渲染报告（不再依赖 mochawesome 相对路径）
 - [x] 步骤时间轴 + 录像跳转，产物服务支持 HTTP Range
 - [x] 对外分享：`?redacted=true` 脱敏副本 + `?brand=` 品牌层
+- [x] **实时执行视图**：`run_events` + SSE + 执行流水条（[25](25-live-runs-and-runner-onboarding.md) §15）
+- [x] **建任务时选「在哪跑」**：服务器 / 我的电脑 / 指定执行机；服务端轨默认不录像（[25](25-live-runs-and-runner-onboarding.md) §15b）
+- [x] **执行机自助接入**：一次性接入码 + install 脚本 + 卡片自动变绿（[25](25-live-runs-and-runner-onboarding.md) §15c）
+- [x] **只跑其中几条**：`MXT_CASE_FILTER` 真正实现，失败用例可一键重跑（[25](25-live-runs-and-runner-onboarding.md) §15d）
+- [x] **删除应用**：`DELETE /api/v1/apps/:app`，有执行记录时默认拒绝
 - [ ] 单一 spec 双轨执行，compass 的 `demo/` 目录开始清空
 - [ ] flaky 检测与 quarantine
 - [ ] 分享链接与有效期（目前脱敏报告靠参数，未做独立分享令牌）

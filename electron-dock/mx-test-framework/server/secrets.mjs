@@ -4,7 +4,7 @@ import { AppError } from './core/errors.mjs'
 
 // The credentials a suite needs to sign into the application under test.
 //
-// Two design questions were open here, and the specs disagreed with each other.
+// Two design questions were open here, and the design docs disagreed with each other.
 //
 // **How are they delivered?** ADR-0005 said environment variables; 13 §1.3
 // item 13 said environment variables are unsafe and proposed mounted files.

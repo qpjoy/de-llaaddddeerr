@@ -331,7 +331,7 @@ Job substrate，必须另立 ADR，继续隔离产品数据库、服务身份与
 
 MXT 是独立兄弟平台，定义已部署应用的浏览器/Electron 黑盒路径；跨项目与 API 支持仍按其
 路线交付。其权威模型、状态、当前交付范围和 runner 合同以
-[`mx-test-framework/specs`](../../../mx-test-framework/specs/README.md) 为准；本文不复制 MXT 的
+[`mx-test-framework/docs`](../../../mx-test-framework/docs/README.md) 为准；本文不复制 MXT 的
 控制 API、case catalog 或工件格式。
 
 边界如下：
@@ -599,6 +599,6 @@ Release 无法重放和凭据外泄风险。
 - [Trust and runtime boundaries](trust-runtime-boundaries.md)
 - [Unified identity and platform modules](unified-identity-and-platform-modules.md)
 - [BI and Data Agent evolution](bi-and-data-agent-evolution.md)
-- [MXT 设计入口](../../../mx-test-framework/specs/README.md)
-- [MXT scope](../../../mx-test-framework/specs/00-overview-and-scope.md)
-- [MXT standalone-platform ADR](../../../mx-test-framework/specs/adr/0001-standalone-platform.md)
+- [MXT 设计入口](../../../mx-test-framework/docs/README.md)
+- [MXT scope](../../../mx-test-framework/docs/00-overview-and-scope.md)
+- [MXT standalone-platform ADR](../../../mx-test-framework/docs/adr/0001-standalone-platform.md)

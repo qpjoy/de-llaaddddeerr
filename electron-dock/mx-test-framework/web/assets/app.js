@@ -63,7 +63,7 @@ const clock = (ms) =>
 
 // -- state & api -------------------------------------------------------------
 
-const state = { me: null, apps: [], route: { name: 'overview', params: {} }, loginEnabled: true }
+const state = { me: null, apps: [], route: { name: 'overview', params: {} }, loginEnabled: true, stream: null }
 
 function toast(message, tone = 'info') {
   const node = $(
@@ -142,7 +142,12 @@ window.addEventListener('popstate', () => {
 
 // -- modal -------------------------------------------------------------------
 
-function modal({ title, body, confirmLabel = '保存', onConfirm, wide = false }) {
+/**
+ * `confirmLabel: null` makes a dialog with nothing to submit — one that is
+ * showing you something rather than asking you for something. `onClose` fires
+ * however it is dismissed, so a dialog that started a poll can stop it.
+ */
+function modal({ title, body, confirmLabel = '保存', onConfirm, onClose, wide = false }) {
   const backdrop = $(`
     <div class="mxt-backdrop">
       <div class="mxt-modal" style="${wide ? 'width:min(880px,100%)' : ''}" role="dialog" aria-modal="true">
@@ -152,18 +157,21 @@ function modal({ title, body, confirmLabel = '保存', onConfirm, wide = false }
         </div>
         <div class="mxt-modal__body"></div>
         <div class="mxt-modal__foot">
-          <button class="qp-button qp-button--ghost" data-close>取消</button>
-          <button class="qp-button qp-button--primary" data-confirm>${esc(confirmLabel)}</button>
+          <button class="qp-button qp-button--ghost" data-close>${confirmLabel ? '取消' : '关闭'}</button>
+          ${confirmLabel ? `<button class="qp-button qp-button--primary" data-confirm>${esc(confirmLabel)}</button>` : ''}
         </div>
       </div>
     </div>`)
   backdrop.querySelector('.mxt-modal__body').append(body)
-  const close = () => backdrop.remove()
+  const close = () => {
+    backdrop.remove()
+    onClose?.()
+  }
   backdrop.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', close))
   backdrop.addEventListener('click', (event) => {
     if (event.target === backdrop) close()
   })
-  backdrop.querySelector('[data-confirm]').addEventListener(
+  backdrop.querySelector('[data-confirm]')?.addEventListener(
     'click',
     guard(async (event) => {
       const button = event.currentTarget
@@ -337,9 +345,24 @@ async function pageRuns(main) {
     <div class="mxt-panel">${runsTable(runs)}</div>`
 }
 
+/** Where a task runs, in words. Falls back to the old implicit behaviour. */
+function runsOnLabel(task, runnerById) {
+  if (task.runsOn === 'server') return '服务器（不录像）'
+  if (task.runsOn === 'any-runner') return '任意执行机'
+  if (task.runsOn === 'pinned-runner') {
+    const runner = runnerById?.get(task.runnerId)
+    return runner ? `执行机：${runner.name}` : '执行机（已删除）'
+  }
+  return '按套件默认'
+}
+
 async function pageTasks(main) {
-  const [{ tasks }] = await Promise.all([api('GET', '/api/v1/tasks')])
+  const [{ tasks }, { runners }] = await Promise.all([
+    api('GET', '/api/v1/tasks'),
+    api('GET', '/api/v1/runners').catch(() => ({ runners: [] })),
+  ])
   const appById = new Map(state.apps.map((app) => [app.id, app]))
+  const runnerById = new Map(runners.map((runner) => [runner.id, runner]))
   const canEdit = state.me?.role !== 'viewer'
 
   main.innerHTML = `
@@ -371,13 +394,16 @@ async function pageTasks(main) {
         tasks.length === 0
           ? '<div class="mxt-empty">暂无任务</div>'
           : `<div class="mxt-table__wrap"><table class="mxt-table">
-        <thead><tr><th>名称</th><th>应用</th><th>调度</th><th>下次执行</th><th>上次结果</th><th></th></tr></thead>
+        <thead><tr><th>名称</th><th>应用</th><th>在哪跑</th><th>调度</th><th>下次执行</th><th>上次结果</th><th></th></tr></thead>
         <tbody>${tasks
           .map(
             (task) => `
           <tr>
-            <td><b>${esc(task.name)}</b><div class="qp-caption qp-muted">${esc(task.profile)} / ${esc(task.track)}</div></td>
+            <td><b>${esc(task.name)}</b><div class="qp-caption qp-muted">${esc(task.profile)} / ${esc(task.track)}${
+              task.caseFilter ? ` · 只跑 ${esc(task.caseFilter)}` : ''
+            }</div></td>
             <td class="qp-body-2">${esc(appById.get(task.appId)?.displayName ?? '—')}</td>
+            <td class="qp-body-2 qp-muted">${esc(runsOnLabel(task, runnerById))}</td>
             <td class="qp-body-2 qp-muted">${
               task.scheduleKind === 'cron'
                 ? `定时 <code>${esc(task.cronExpr)}</code>`
@@ -425,6 +451,13 @@ async function newTaskDialog() {
   for (const app of state.apps) {
     suitesByApp[app.slug] = (await api('GET', `/api/v1/apps/${app.slug}/suites`)).suites
   }
+  const { runners } = await api('GET', '/api/v1/runners').catch(() => ({ runners: [] }))
+  // Every machine that is up can be named explicitly, platform capacity
+  // included — it is a real machine and pinning to it is a real thing to want.
+  const online = runners.filter((runner) => runner.online)
+  // 「我的这台电脑」 means a person's own machine, which is the one that has a
+  // screen to watch and records what happened on it.
+  const mine = online.filter((runner) => runner.mine && runner.kind !== 'server')
   const firstApp = state.apps[0].slug
   const body = $(`
     <form class="mxt-form">
@@ -460,6 +493,40 @@ async function newTaskDialog() {
         )}
       </div>
       ${field(
+        '在哪跑',
+        `<select class="qp-select" name="where">
+           <option value="server">服务器静默跑 —— 快，出报告，不录像</option>
+           <option value="mine">我的这台电脑 —— 有录像，能看着它点</option>
+           <option value="pinned-runner">指定一台执行机</option>
+           <option value="any-runner">任意执行机 —— 谁先空出来谁跑</option>
+         </select>`,
+        '桌面端套件只能在执行机上跑：服务器上没有 Windows 和 macOS。',
+      )}
+      <div data-runner hidden>
+        ${field(
+          '哪一台',
+          `<select class="qp-select" name="runnerId">${
+            online.length
+              ? online
+                  .map(
+                    (runner) =>
+                      `<option value="${esc(runner.id)}">${esc(runner.name)} · ${esc(runner.os)}${runner.mine ? '（我的）' : ''}</option>`,
+                  )
+                  .join('')
+              : '<option value="">（当前没有在线执行机）</option>'
+          }</select>`,
+        )}
+      </div>
+      <div data-no-runner hidden class="mxt-banner mxt-banner--info">
+        <b>还没有可用的执行机。</b>
+        <p class="qp-body-2">到「执行机」页面，把这台电脑接进来——三条命令，不需要管理员权限。接进来之后回到这里刷新即可。</p>
+      </div>
+      ${field(
+        '只跑其中几条（可选）',
+        '<input class="qp-input" name="caseFilter" placeholder="LP-FE-AUTH-001, smoke/*.cy.ts">',
+        '逗号分隔：用例 ID 或 spec 路径。留空跑整条套件。填了之后覆盖率只按这几条算。',
+      )}
+      ${field(
         '什么时候跑',
         `<select class="qp-select" name="kind">
            <option value="manual">手动 —— 我点了才跑</option>
@@ -477,15 +544,69 @@ async function newTaskDialog() {
 
   const appSelect = body.querySelector('[name=app]')
   const suiteSelect = body.querySelector('[name=suite]')
+  const whereSelect = body.querySelector('[name=where]')
+  const runnerSelect = body.querySelector('[name=runnerId]')
+
+  const currentSuite = () =>
+    (suitesByApp[appSelect.value] ?? []).find((suite) => suite.slug === suiteSelect.value) ?? null
+
+  // The server cannot run a desktop suite — there is no Windows on it and no
+  // installer to launch. Saying so here beats letting the API refuse after the
+  // person has filled in the rest of the form.
+  const syncWhere = () => {
+    const suite = currentSuite()
+    // A self-contained suite starts its own target — 罗盘 builds the SPA and
+    // serves it on loopback. A URL typed here would be injected and then
+    // overridden by the suite, so the field says so instead of taking it.
+    const selfHosted = suite?.targetMode === 'self'
+    const urlField = body.querySelector('[name=targetUrl]')
+    urlField.disabled = Boolean(selfHosted)
+    if (selfHosted) urlField.value = ''
+    urlField.placeholder = selfHosted
+      ? '这条套件自己起被测目标，不需要地址'
+      : 'https://compass.example.internal'
+    const hint = urlField.closest('.qp-field')?.querySelector('.mxt-hint')
+    if (hint) {
+      hint.textContent = selfHosted
+        ? '这条套件是自包含的：它自己构建并起一个本地服务，填地址也会被它覆盖。'
+        : '不要带账号密码或问号参数。桌面端套件可以留空。'
+    }
+    const desktop = suite && suite.surface !== 'web' && suite.surface !== 'api'
+    const serverOption = whereSelect.querySelector('option[value=server]')
+    serverOption.disabled = Boolean(desktop)
+    serverOption.textContent = desktop
+      ? '服务器静默跑 —— 桌面端套件不能在服务器上跑'
+      : '服务器静默跑 —— 快，出报告，不录像'
+    if (desktop && whereSelect.value === 'server') whereSelect.value = online.length ? 'mine' : 'any-runner'
+
+    const needsRunner = whereSelect.value === 'pinned-runner' || whereSelect.value === 'mine'
+    body.querySelector('[data-runner]').hidden = whereSelect.value !== 'pinned-runner'
+    body.querySelector('[data-no-runner]').hidden = !(
+      (whereSelect.value === 'mine' && mine.length === 0) ||
+      (needsRunner && online.length === 0)
+    )
+    if (whereSelect.value === 'mine') {
+      // 「我的这台电脑」 is a shortcut, not a fourth kind of placement: it
+      // resolves to one named machine, so the task record says which one. A
+      // task that fires at 2am has to name a machine — "whoever is at this
+      // browser" is not something a scheduler can act on.
+      const own = mine[0] ?? null
+      if (own) runnerSelect.value = own.id
+    }
+  }
+
   const syncSuites = () => {
     const suites = suitesByApp[appSelect.value] ?? []
     suiteSelect.innerHTML = suites.length
       ? suites.map((suite) => `<option value="${esc(suite.slug)}">${esc(suite.displayName)}</option>`).join('')
       : '<option value="">（该应用还没有配置套件，需要管理员先建）</option>'
+    syncWhere()
   }
   appSelect.value = firstApp
   syncSuites()
   appSelect.addEventListener('change', syncSuites)
+  suiteSelect.addEventListener('change', syncWhere)
+  whereSelect.addEventListener('change', syncWhere)
   body.querySelector('[name=kind]').addEventListener('change', (event) => {
     body.querySelector('[data-cron]').hidden = event.target.value !== 'cron'
   })
@@ -497,6 +618,13 @@ async function newTaskDialog() {
     onConfirm: async (close) => {
       const data = Object.fromEntries(new FormData(body))
       if (!data.suite) throw new Error('该应用还没有测试套件，请先让管理员配置。')
+      const runsOn = data.where === 'mine' ? 'pinned-runner' : data.where
+      if (data.where === 'mine' && mine.length === 0) {
+        throw new Error('这台电脑还没接进来。到「执行机」页面按提示跑三条命令，再回来建任务。')
+      }
+      if (runsOn === 'pinned-runner' && !data.runnerId) {
+        throw new Error('还没有在线的执行机可以指派。先到「执行机」页面接入一台。')
+      }
       await api('POST', '/api/v1/tasks', {
         app: data.app,
         suite: data.suite,
@@ -504,6 +632,9 @@ async function newTaskDialog() {
         profile: data.profile,
         track: data.track,
         targetUrl: data.targetUrl || undefined,
+        caseFilter: data.caseFilter || undefined,
+        runsOn,
+        runnerId: runsOn === 'pinned-runner' ? data.runnerId : undefined,
         schedule: data.kind === 'cron' ? { kind: 'cron', cronExpr: data.cronExpr } : { kind: 'manual' },
       })
       toast('任务已创建')
@@ -511,6 +642,235 @@ async function newTaskDialog() {
       render()
     },
   })
+}
+
+// -- live run timeline -------------------------------------------------------
+//
+// One EventSource per run page, opened for finished runs as well as running
+// ones: the backlog a live page needs is exactly the history a finished page
+// wants, and for a finished run the server replays it and closes immediately.
+//
+// EventSource rather than a socket library — see docs/25 §2. Reconnection and
+// resume-from-last-seq are the browser's job here, not ours.
+
+const RUN_ACTIVE = ['queued', 'pending-runner', 'running']
+
+const RUN_EVENT_KINDS = [
+  'run.claimed',
+  'stage',
+  'case.started',
+  'case.finished',
+  'step',
+  'log',
+  'run.finished',
+]
+
+/** The pipeline, in order. Mirrors RUN_STAGES in server/events/run-events.mjs. */
+const FLOW_STAGES = [
+  ['claim', '认领'],
+  ['checkout', '检出'],
+  ['install', '装依赖'],
+  ['launch', '启动'],
+  ['execute', '执行'],
+  ['upload', '收产物'],
+  ['archive', '归档'],
+]
+
+function closeStream() {
+  if (state.stream) {
+    state.stream.close()
+    state.stream = null
+  }
+}
+
+function newLiveModel() {
+  return {
+    stages: new Map(),
+    cases: new Map(),
+    order: [],
+    logs: [],
+    counts: { passed: 0, failed: 0 },
+    runner: null,
+    currentCase: null,
+    finished: null,
+    lastSeq: 0,
+  }
+}
+
+function liveCase(model, caseId) {
+  const key = caseId || '(未命名)'
+  let entry = model.cases.get(key)
+  if (!entry) {
+    entry = { caseId: key, title: '', status: 'running', steps: [], durationMs: null }
+    model.cases.set(key, entry)
+    model.order.push(key)
+  }
+  return entry
+}
+
+function applyRunEvent(model, event) {
+  const payload = event.payload ?? {}
+  model.lastSeq = Math.max(model.lastSeq, event.seq ?? 0)
+  if (event.kind === 'run.claimed') {
+    model.runner = payload.runner || null
+  } else if (event.kind === 'stage') {
+    const index = FLOW_STAGES.findIndex(([key]) => key === payload.stage)
+    if (index !== -1) {
+      // A stage that never reported and has now been overtaken did not happen:
+      // a web suite launches no installer, and leaving 「启动」 pending forever
+      // would read as stuck rather than as not applicable.
+      for (const [key] of FLOW_STAGES.slice(0, index)) {
+        if (!model.stages.has(key)) model.stages.set(key, { status: 'skipped', detail: '' })
+      }
+      const status =
+        payload.status === 'ok' ? 'done' : payload.status === 'failed' ? 'failed' : 'active'
+      model.stages.set(payload.stage, { status, detail: payload.detail || '' })
+    }
+  } else if (event.kind === 'case.started') {
+    const entry = liveCase(model, payload.caseId)
+    entry.title = payload.title || entry.title
+    entry.status = 'running'
+    model.currentCase = entry.caseId
+  } else if (event.kind === 'case.finished') {
+    const entry = liveCase(model, payload.caseId)
+    entry.status = payload.status
+    entry.durationMs = payload.durationMs
+    if (payload.status === 'passed' || payload.status === 'flaky') model.counts.passed += 1
+    if (payload.status === 'failed') model.counts.failed += 1
+    if (model.currentCase === entry.caseId) model.currentCase = null
+  } else if (event.kind === 'step') {
+    liveCase(model, payload.caseId).steps.push({
+      seq: payload.seq,
+      label: payload.label,
+      status: payload.status,
+      offsetMs: payload.offsetMs,
+    })
+  } else if (event.kind === 'log') {
+    model.logs.push(payload.line ?? '')
+    if (model.logs.length > 200) model.logs.shift()
+  } else if (event.kind === 'run.finished') {
+    model.stages.set('archive', { status: 'done', detail: '' })
+    model.finished = payload.status || 'finished'
+  }
+}
+
+function flowHtml(model, run) {
+  const waiting = model.stages.size === 0
+  // The one line that says why a run died must not be an ellipsis.
+  const broke = FLOW_STAGES.map(([key, label]) => [label, model.stages.get(key)]).find(([, entry]) => entry?.status === 'failed')
+  const nodes = FLOW_STAGES.map(([key, label], index) => {
+    const entry = model.stages.get(key) ?? { status: 'pending', detail: '' }
+    return `
+      <div class="mxt-flow__node is-${entry.status}">
+        <span class="mxt-flow__dot">${index + 1}</span>
+        <span class="mxt-flow__label">${label}</span>
+        <span class="mxt-flow__detail" title="${esc(entry.detail ?? '')}">${esc(entry.detail ?? '')}</span>
+      </div>`
+  }).join('')
+  return `
+    <div class="mxt-flow">${nodes}</div>
+    ${
+      broke
+        ? `<div class="mxt-flow__failure"><b>卡在「${esc(broke[0])}」</b><span>${esc(broke[1].detail || '没有更多信息，展开下面的「详细输出」看容器日志')}</span></div>`
+        : ''
+    }
+    <p class="qp-caption qp-muted mxt-flow__foot">${
+      waiting
+        ? run.status === 'pending-runner'
+          ? '还没有执行机接手。接一台电脑进来，这条流水就会开始走。'
+          : '等待执行机上报第一条进度……'
+        : model.runner
+          ? `执行机：${esc(model.runner)}`
+          : '服务端执行'
+    }</p>`
+}
+
+function liveCasesHtml(model) {
+  if (model.order.length === 0) {
+    return `<div class="mxt-empty">
+      还没有用例开始。<br>
+      <span class="qp-caption">看不到用例级进度，通常是这条 suite 还没接进度上报——流水条仍然会走完。</span>
+    </div>`
+  }
+  return model.order
+    .map((caseId) => {
+      const entry = model.cases.get(caseId)
+      const steps = entry.steps
+        .slice(-6)
+        .map(
+          (step) => `
+          <li class="mxt-step ${step.status === 'failed' ? 'mxt-step--danger' : ''}">
+            <span class="mxt-step__seq">${step.seq}</span>
+            <span class="mxt-step__label">${esc(step.label ?? '')}</span>
+            <span class="mxt-step__time is-plain">${step.offsetMs != null ? clock(step.offsetMs) : '—'}</span>
+          </li>`,
+        )
+        .join('')
+      return `
+      <div class="mxt-live-case ${entry.status === 'running' ? 'is-running' : ''}">
+        <div class="mxt-live-case__head">
+          ${statusTag(entry.status)}
+          <code>${esc(entry.caseId)}</code>
+          <span class="mxt-case-row__title">${esc(entry.title ?? '')}</span>
+          <span class="qp-caption qp-muted">${entry.durationMs != null ? dur(entry.durationMs) : ''}</span>
+        </div>
+        ${steps ? `<ol class="mxt-steps">${steps}</ol>` : ''}
+      </div>`
+    })
+    .join('')
+}
+
+/**
+ * Subscribe and keep the page in step with the run.
+ *
+ * Renders are coalesced into an animation frame: a suite reporting a step every
+ * few milliseconds would otherwise spend the run rebuilding DOM, and the result
+ * on screen would be identical.
+ */
+function startRunStream(run, onUpdate, onEnd) {
+  closeStream()
+  const model = newLiveModel()
+  const source = new EventSource(`/api/v1/runs/${run.id}/events`)
+  state.stream = source
+
+  let frame = null
+  const schedule = () => {
+    if (frame) return
+    frame = requestAnimationFrame(() => {
+      frame = null
+      onUpdate(model)
+    })
+  }
+
+  for (const kind of RUN_EVENT_KINDS) {
+    source.addEventListener(kind, (message) => {
+      try {
+        applyRunEvent(model, JSON.parse(message.data))
+      } catch {
+        // A frame this page cannot parse is one the server should not have
+        // sent. Dropping it beats tearing down a working stream.
+        return
+      }
+      schedule()
+    })
+  }
+  // Paint once before anything arrives. A run nobody has claimed yet has an
+  // empty timeline, and an empty timeline still has something to say —
+  // 「还没有执行机接手」 beats a spinner that never resolves.
+  schedule()
+
+  source.addEventListener('end', (message) => {
+    closeStream()
+    let status = null
+    try {
+      status = JSON.parse(message.data)?.status ?? null
+    } catch {
+      /* the status is a nicety; the end is the signal */
+    }
+    onUpdate(model)
+    onEnd?.(status, model)
+  })
+  return model
 }
 
 async function pageRun(main, { runId }) {
@@ -523,11 +883,15 @@ async function pageRun(main, { runId }) {
   const coverage = run.catalog?.coverage ?? {}
   const base = `/api/v1/runs/${runId}/artifacts`
   const videos = artifacts.filter((entry) => /\.(mp4|webm)$/i.test(entry.path))
+  const active = RUN_ACTIVE.includes(run.status)
 
   const pickVideo = (testCase) => {
     if (videos.length === 0) return null
     if (testCase.specPath) {
-      const name = testCase.specPath.split('/').pop()
+      // A Windows runner used to report cypress\\e2e\\auth.cy.ts while the
+      // artefact it uploaded was videos/cypress/e2e/auth.cy.ts.mp4. Ingest
+      // normalises that now; records written before it did are still here.
+      const name = testCase.specPath.split('\\').join('/').split('/').pop()
       const hit = videos.find((entry) => entry.path.includes(name))
       if (hit) return hit
     }
@@ -541,6 +905,12 @@ async function pageRun(main, { runId }) {
         <p class="qp-body-2 qp-muted">
           ${esc(suite?.displayName ?? '')} · ${esc(run.profile)}/${esc(run.track)} ·
           ${ago(run.finishedAt ?? run.queuedAt)} · <span class="mxt-mono">${esc(run.id)}</span>
+          ${
+            run.caseFilter
+              ? `<br><span class="mxt-status mxt-status--info">只跑了 ${esc(run.caseFilter)}</span>
+                 <span class="qp-caption qp-muted">覆盖率按这个范围算，不能和全量执行直接比</span>`
+              : ''
+          }
         </p>
       </div>
       <div class="mxt-actions">
@@ -558,24 +928,28 @@ async function pageRun(main, { runId }) {
         : ''
     }
     ${
-      ['queued', 'pending-runner', 'running'].includes(run.status)
-        ? `<div class="mxt-banner mxt-banner--info">
+      active
+        ? `<div class="mxt-banner mxt-banner--info" data-live-banner>
              <b>${STATUS[run.status][0]}。</b>
              ${
                run.status === 'pending-runner'
                  ? '这条套件要在真实电脑上跑，正在等一台执行机认领。到「执行机」页面看怎么把自己的电脑接进来。'
-                 : '正在执行，稍后刷新即可看到结果。'
+                 : '下面是实时进度，跑完会自动刷新，不用手动刷页面。'
              }
            </div>`
         : ''
     }
 
+    <div class="mxt-panel mxt-panel--flow" data-flow>
+      <div class="qp-spinner"></div>
+    </div>
+
     <div class="mxt-tiles">
-      <div class="mxt-tile"><p class="qp-caption qp-muted">结果</p><p class="mxt-tile__value" style="font-size:20px">${
+      <div class="mxt-tile"><p class="qp-caption qp-muted">结果</p><p class="mxt-tile__value" style="font-size:20px" data-tile="status">${
         STATUS[run.status]?.[0] ?? run.status
       }</p></div>
-      <div class="mxt-tile mxt-tile--success"><p class="qp-caption qp-muted">通过</p><p class="mxt-tile__value">${counts.passed ?? 0}</p></div>
-      <div class="mxt-tile mxt-tile--danger"><p class="qp-caption qp-muted">失败</p><p class="mxt-tile__value">${counts.failed ?? 0}</p></div>
+      <div class="mxt-tile mxt-tile--success"><p class="qp-caption qp-muted">通过</p><p class="mxt-tile__value" data-tile="passed">${counts.passed ?? 0}</p></div>
+      <div class="mxt-tile mxt-tile--danger"><p class="qp-caption qp-muted">失败</p><p class="mxt-tile__value" data-tile="failed">${counts.failed ?? 0}</p></div>
       <div class="mxt-tile mxt-tile--warning"><p class="qp-caption qp-muted">未执行</p><p class="mxt-tile__value">${counts.notRun ?? 0}</p></div>
       <div class="mxt-tile"><p class="qp-caption qp-muted">耗时</p><p class="mxt-tile__value" style="font-size:20px">${dur(run.durationMs)}</p></div>
     </div>
@@ -589,7 +963,16 @@ async function pageRun(main, { runId }) {
         : ''
     }
 
-    <div class="mxt-panel">
+    ${
+      active
+        ? `<div class="mxt-panel">
+             <div class="mxt-panel__head">
+               <h2>正在执行</h2>
+               <span class="qp-body-2 qp-muted" data-live-count></span>
+             </div>
+             <div data-live-cases><div class="mxt-empty">等待用例开始……</div></div>
+           </div>`
+        : `<div class="mxt-panel">
       <div class="mxt-panel__head">
         <h2>用例明细</h2>
         <span class="qp-body-2 qp-muted">
@@ -612,6 +995,14 @@ async function pageRun(main, { runId }) {
             <span class="qp-caption qp-muted">${dur(testCase.durationMs)}</span>
           </summary>
           <div class="mxt-case-row__body">
+            ${
+              run.taskId && testCase.status !== 'notRun'
+                ? `<div class="mxt-case-row__tools">
+                     <button class="qp-button qp-button--sm qp-button--outline" data-rerun="${esc(testCase.caseId)}">只重跑这条</button>
+                     <span class="qp-caption qp-muted">跑同一个任务，但只跑这一条用例</span>
+                   </div>`
+                : ''
+            }
             ${testCase.errorText ? `<pre class="mxt-error">${esc(testCase.errorText)}</pre>` : ''}
             ${
               testCase.status === 'notRun'
@@ -649,6 +1040,28 @@ async function pageRun(main, { runId }) {
               .join('')
       }
     </div>`
+    }
+    <div class="mxt-panel" data-log-panel hidden>
+      <details class="mxt-live-log"><summary>详细输出</summary><pre data-live-log></pre></details>
+    </div>`
+
+  main.querySelectorAll('[data-rerun]').forEach((button) =>
+    button.addEventListener(
+      'click',
+      guard(async () => {
+        button.disabled = true
+        try {
+          const result = await api('POST', `/api/v1/tasks/${run.taskId}:run`, {
+            caseFilter: button.dataset.rerun,
+          })
+          toast(result.note ?? '已排队')
+          go(`/runs/${result.run.id}`)
+        } finally {
+          button.disabled = false
+        }
+      }),
+    ),
+  )
 
   main.addEventListener('click', (event) => {
     const button = event.target.closest('[data-seek]')
@@ -658,6 +1071,48 @@ async function pageRun(main, { runId }) {
     video.currentTime = Number(button.dataset.seek)
     video.play().catch(() => {})
   })
+
+  const flow = main.querySelector('[data-flow]')
+  const liveCases = main.querySelector('[data-live-cases]')
+  const liveCount = main.querySelector('[data-live-count]')
+  const liveLog = main.querySelector('[data-live-log]')
+
+  startRunStream(
+    run,
+    (model) => {
+      flow.innerHTML = flowHtml(model, run)
+      // Logs show on a finished run too: after it failed is exactly when
+      // somebody wants the output, and that is when the live panel is gone.
+      if (liveLog && model.logs.length > 0) {
+        liveLog.textContent = model.logs.join(String.fromCharCode(10))
+        const panel = main.querySelector('[data-log-panel]')
+        if (panel) panel.hidden = false
+      }
+      if (!active) return
+      liveCases.innerHTML = liveCasesHtml(model)
+      liveCount.textContent = model.order.length
+        ? `已跑 ${model.order.length} 条 · 通过 ${model.counts.passed} · 失败 ${model.counts.failed}`
+        : ''
+      // The header has to move with the pipeline. A run that had visibly been
+      // claimed still read 「等待执行机」 in the result tile and in the banner,
+      // because only the flow and the counters were being updated.
+      const statusTile = main.querySelector('[data-tile="status"]')
+      if (statusTile && model.runner) statusTile.textContent = STATUS.running[0]
+      const banner = main.querySelector('[data-live-banner]')
+      if (banner && model.runner) {
+        banner.innerHTML = '<b>执行中。</b>' + esc(model.runner) + ' 已经接手，下面是实时进度，跑完会自动刷新。'
+      }
+      main.querySelector('[data-tile="passed"]').textContent = model.counts.passed
+      main.querySelector('[data-tile="failed"]').textContent = model.counts.failed
+      if (liveLog) liveLog.textContent = model.logs.join('\n')
+    },
+    (status) => {
+      // The events said the run is over; the run record is what the page shows
+      // once it is. Re-entering the route refetches cases, counts and videos in
+      // one place instead of maintaining a second copy of that rendering here.
+      if (active && status) render()
+    },
+  )
 }
 
 async function pageApps(main) {
@@ -684,11 +1139,38 @@ async function pageApps(main) {
             <td><b>${esc(app.displayName)}</b></td>
             <td><code>${esc(app.slug)}</code></td>
             <td class="qp-body-2 qp-muted">${(app.surfaces ?? []).join('、') || '—'}</td>
-            <td><a class="mxt-link" href="/apps/${esc(app.slug)}/cases" data-nav>管理用例 →</a></td>
+            <td class="mxt-row-actions">
+              <a class="mxt-link" href="/apps/${esc(app.slug)}/cases" data-nav>管理用例 →</a>
+              ${admin ? `<button class="qp-button qp-button--sm qp-button--ghost" data-drop="${esc(app.slug)}" data-name="${esc(app.displayName)}">删除</button>` : ''}
+            </td>
           </tr>`,
           )
           .join('')}</tbody></table></div></div>`
     }`
+
+  main.querySelectorAll('[data-drop]').forEach((button) =>
+    button.addEventListener(
+      'click',
+      guard(async () => {
+        const slug = button.dataset.drop
+        // Two prompts, because the second one is a different question. The first
+        // asks "this application?"; the second only appears when there is
+        // history to lose, and says how much.
+        if (!confirm(`删除应用「${button.dataset.name}」？`)) return
+        let result = await api('DELETE', `/api/v1/apps/${slug}`).catch((error) => error)
+        if (result instanceof Error) {
+          if (!/执行记录/u.test(result.message)) throw result
+          if (!confirm(`${result.message}
+
+它的全部执行记录、用例结果和录像都会一起删掉，不能恢复。确定？`)) return
+          result = await api('DELETE', `/api/v1/apps/${slug}?force=true`)
+        }
+        toast(result.runs > 0 ? `已删除，连同 ${result.runs} 次执行记录` : '已删除')
+        state.apps = (await api('GET', '/api/v1/apps')).apps
+        render()
+      }),
+    ),
+  )
 
   main.querySelector('[data-new-app]')?.addEventListener('click', () => {
     const body = $(`
@@ -895,22 +1377,131 @@ function caseDialog(appSlug, existing, onDone) {
   })
 }
 
+/**
+ * The enrolment card: ask for a code, show one command, wait for the machine.
+ *
+ * It polls rather than opening a stream. That is a deliberate exception to
+ * docs/25 §2 and worth naming: this asks one question, about one thing, for at
+ * most fifteen minutes, while a person watches — and it stops the moment the
+ * machine appears or the card closes. A second live channel would cost more
+ * than it saves here.
+ */
+async function enrollDialog(onConnected) {
+  const created = await api('POST', '/api/v1/runners:enroll')
+  const windows = /win/iu.test(navigator.userAgent)
+  const body = $(`
+    <div class="mxt-enroll">
+      <p class="qp-body-1">在<b>这台电脑</b>上打开${windows ? ' PowerShell' : '终端'}，粘贴这一条命令：</p>
+      <div class="mxt-enroll__tabs">
+        <button class="qp-button qp-button--sm ${windows ? 'qp-button--primary' : 'qp-button--outline'}" data-os="windows">Windows</button>
+        <button class="qp-button qp-button--sm ${windows ? 'qp-button--outline' : 'qp-button--primary'}" data-os="unix">macOS / Linux</button>
+      </div>
+      <pre class="mxt-enroll__cmd" data-cmd></pre>
+      <div class="mxt-enroll__actions">
+        <button class="qp-button qp-button--outline qp-button--sm" data-copy>复制命令</button>
+        <span class="qp-caption qp-muted" data-status>等这台电脑连上来……</span>
+      </div>
+      <p class="qp-caption qp-muted">
+        接入码 15 分钟内有效，只能用一次。脚本会把执行机装到用户目录下（不需要管理员权限），
+        然后在前台等任务——关掉窗口就断开，身份还在。
+      </p>
+    </div>`)
+
+  let os = windows ? 'windows' : 'unix'
+  const cmd = body.querySelector('[data-cmd]')
+  const status = body.querySelector('[data-status]')
+  const paint = () => {
+    cmd.textContent = created.commands[os]
+    body.querySelectorAll('[data-os]').forEach((button) => {
+      button.classList.toggle('qp-button--primary', button.dataset.os === os)
+      button.classList.toggle('qp-button--outline', button.dataset.os !== os)
+    })
+  }
+  paint()
+  body.querySelectorAll('[data-os]').forEach((button) =>
+    button.addEventListener('click', () => {
+      os = button.dataset.os
+      paint()
+    }),
+  )
+  body.querySelector('[data-copy]').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(created.commands[os])
+      toast('命令已复制')
+    } catch {
+      // Clipboard access can be refused; the command is on screen either way.
+      toast('复制失败，请手动选中命令复制', 'danger')
+    }
+  })
+
+  let stopped = false
+  const dialog = modal({
+    title: '把这台电脑变成执行机',
+    body,
+    confirmLabel: null,
+    onClose: () => {
+      stopped = true
+    },
+  })
+
+  const poll = async () => {
+    while (!stopped) {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      if (stopped) return
+      const state = await api('GET', `/api/v1/enrollments/${created.enrollment.id}`).catch(() => null)
+      if (!state) continue
+      if (state.status === 'claimed' && state.runner) {
+        status.textContent = `已连接：${state.runner.name}`
+        status.classList.add('is-connected')
+        stopped = true
+        toast(`「${state.runner.name}」已接入`)
+        setTimeout(() => {
+          dialog.close()
+          onConnected?.()
+        }, 1200)
+        return
+      }
+      if (state.status === 'expired') {
+        status.textContent = '接入码已过期，关掉重新点一次即可。'
+        stopped = true
+        return
+      }
+    }
+  }
+  poll()
+}
+
+/**
+ * A machine's state in its own words.
+ *
+ * Run statuses were being borrowed for this, which put 「通过」 next to a
+ * computer that had merely checked in. Online is computed from the last
+ * check-in, never stored: a stored flag survives a crash and goes on claiming
+ * the machine is there.
+ */
+function runnerTag(runner) {
+  if (!runner.online) return '<span class="mxt-status mxt-status--muted">离线</span>'
+  if (runner.status === 'busy') return '<span class="mxt-status mxt-status--info">正在跑</span>'
+  return '<span class="mxt-status mxt-status--success">在线</span>'
+}
+
 async function pageRunners(main) {
   const { runners } = await api('GET', '/api/v1/runners')
-  const origin = location.origin
+  const canEnroll = state.me?.role !== 'viewer'
   main.innerHTML = `
-    <div class="mxt-head"><div>
-      <h1 class="qp-heading-1">执行机</h1>
-      <p class="qp-body-2 qp-muted">网页测试由服务器自动跑；桌面应用测试需要一台真实的 Windows 或 Mac。</p>
-    </div></div>
+    <div class="mxt-head">
+      <div>
+        <h1 class="qp-heading-1">执行机</h1>
+        <p class="qp-body-2 qp-muted">网页测试由服务器自动跑；桌面应用测试需要一台真实的 Windows 或 Mac。</p>
+      </div>
+      ${canEnroll ? '<div class="mxt-actions"><button class="qp-button qp-button--primary" data-enroll>把这台电脑变成执行机</button></div>' : ''}
+    </div>
 
     <div class="mxt-guide"><div class="mxt-guide__body">
-      <h3>把自己的电脑变成执行机</h3>
-      <p>桌面端（Electron）测试没法在服务器上跑——服务器上没有 Windows 和 macOS。用下面三条命令把你的电脑接进来，任务就会派给它。</p>
-      <pre class="mxt-error" style="background:var(--qp-bg-3);border-color:var(--qp-line);color:var(--qp-text-2)">npx mxt-runner login --server ${esc(origin)}
-npx mxt-runner register --name "我的电脑"
-npx mxt-runner watch</pre>
-      <p class="qp-body-2">用你自己的 mx-launcher 账号登录即可，不需要额外开通。跑完关掉窗口就行。</p>
+      <h3>接进来之后能做什么</h3>
+      <p>建任务时就能选「我的这台电脑」——桌面端测试只能这么跑，网页测试这么跑还会留下录像。</p>
+      <p class="qp-body-2">点右上角的按钮拿一条命令，粘到这台电脑的终端里就行：不用在这台机器上输密码，也不需要管理员权限。装好之后在前台等任务，关掉窗口就断开。</p>
+      <p class="qp-caption qp-muted">要撤掉：<code>node mxt-runner.mjs uninstall</code>（加 <code>--purge</code> 连缓存一起删）。</p>
     </div></div>
 
     <div class="mxt-panel">
@@ -918,22 +1509,45 @@ npx mxt-runner watch</pre>
         runners.length === 0
           ? '<div class="mxt-empty">还没有执行机。<br>网页测试仍然可以跑（服务器自动执行），桌面测试需要先接一台电脑进来。</div>'
           : `<div class="mxt-table__wrap"><table class="mxt-table">
-        <thead><tr><th>名称</th><th>状态</th><th>系统</th><th>能跑什么</th><th>归属</th><th>最近活跃</th></tr></thead>
+        <thead><tr><th>名称</th><th>状态</th><th>类型</th><th>系统</th><th>能跑什么</th><th>归属</th><th>最近活跃</th><th></th></tr></thead>
         <tbody>${runners
           .map(
             (runner) => `
           <tr>
-            <td><b>${esc(runner.name)}</b></td>
-            <td>${statusTag(runner.status === 'offline' ? 'expired' : runner.status === 'busy' ? 'running' : 'passed')}</td>
+            <td><b>${esc(runner.name)}</b>${runner.mine ? ' <span class="qp-tag">我的</span>' : ''}</td>
+            <td>${runnerTag(runner)}</td>
+            <td class="qp-body-2 qp-muted">${runner.kind === 'server' ? '平台容量' : '个人电脑'}</td>
             <td class="qp-body-2">${esc(runner.os)}${runner.arch ? ` / ${esc(runner.arch)}` : ''}</td>
             <td class="qp-body-2 qp-muted">${(runner.capabilities?.surfaces ?? []).join('、')}</td>
             <td class="qp-body-2 qp-muted">${esc(runner.ownerPrincipal ?? '—')}</td>
             <td class="qp-body-2 qp-muted">${ago(runner.lastSeenAt)}</td>
+            <td>${
+              runner.mine || state.me?.role === 'admin'
+                ? `<button class="qp-button qp-button--sm qp-button--ghost" data-remove="${esc(runner.id)}" data-name="${esc(runner.name)}">移除</button>`
+                : ''
+            }</td>
           </tr>`,
           )
           .join('')}</tbody></table></div>`
       }
     </div>`
+
+  main.querySelector('[data-enroll]')?.addEventListener('click', guard(() => enrollDialog(() => render())))
+  main.querySelectorAll('[data-remove]').forEach((button) =>
+    button.addEventListener(
+      'click',
+      guard(async () => {
+        // Removing the row does not stop a runner that is still running; say so
+        // rather than letting it reappear on its next check-in and look haunted.
+        if (!confirm(`把「${button.dataset.name}」从列表里移除？
+
+这台机器上如果还开着 watch，要在那边 Ctrl+C 停掉。`)) return
+        await api('DELETE', `/api/v1/runners/${button.dataset.remove}`)
+        toast('已移除')
+        render()
+      }),
+    ),
+  )
 }
 
 async function pageMembers(main) {
@@ -1058,6 +1672,10 @@ const PAGES = {
 async function render() {
   const root = document.getElementById('root')
   root.className = ''
+  // Every render replaces the page, so any stream the previous one opened has
+  // nothing left to update. Left open, navigating between runs would stack one
+  // connection per visit against the browser's six-per-origin ceiling.
+  closeStream()
   if (!state.me) {
     renderLogin(root)
     return

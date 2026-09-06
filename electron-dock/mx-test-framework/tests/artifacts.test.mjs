@@ -159,3 +159,48 @@ test('purge removes old run directories and leaves recent ones', async () => {
   assert.ok(purged.includes('trun_old'), JSON.stringify(purged))
   assert.ok(!purged.includes('trun_3'), '近期产物不应被清理')
 })
+
+// -- retention actually runs ---------------------------------------------------
+//
+// `purgeOlderThan` was written when the artifact store was, and for months its
+// only caller was the test above it. The 30-day policy in docs/10 was a sentence
+// nothing executed. docs/26 §2.2.
+
+test('the retention sweep runs on the scheduler tick, and only occasionally', async () => {
+  const { sweepRetention } = await import('../server/index.mjs')
+  const purged = []
+  const artifacts = { purgeOlderThan: async () => purged.splice(0) }
+  const events = []
+  const store = { purgeRunEvents: async (before) => { events.push(before); return 3 } }
+  const config = { artifactRetainDays: 30 }
+  const state = {}
+  const now = Date.parse('2026-09-03T00:00:00Z')
+
+  purged.push('trun_old')
+  const first = await sweepRetention({ store, artifacts, config, state, logger: null, now })
+  assert.deepEqual(first, { runs: 1, events: 3 })
+  // The cutoff it hands the store is the same window the artifacts use.
+  assert.equal(events[0], new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
+
+  // A minute later the scheduler ticks again and this must do nothing.
+  assert.equal(await sweepRetention({ store, artifacts, config, state, logger: null, now: now + 60_000 }), null)
+  assert.equal(events.length, 1)
+
+  // Six hours on, it runs again.
+  const later = await sweepRetention({ store, artifacts, config, state, logger: null, now: now + 6 * 60 * 60 * 1000 })
+  assert.equal(later.events, 3)
+})
+
+test('one half of the sweep failing does not stop the other', async () => {
+  const { sweepRetention } = await import('../server/index.mjs')
+  const errors = []
+  const result = await sweepRetention({
+    artifacts: { purgeOlderThan: async () => { throw new Error('volume is read-only') } },
+    store: { purgeRunEvents: async () => 7 },
+    config: { artifactRetainDays: 30 },
+    state: {},
+    logger: { error: (message) => errors.push(message), log: () => {} },
+  })
+  assert.deepEqual(result, { runs: 0, events: 7 })
+  assert.match(errors[0], /read-only/u)
+})

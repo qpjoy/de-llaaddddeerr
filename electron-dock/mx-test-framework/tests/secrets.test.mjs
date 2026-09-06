@@ -184,8 +184,10 @@ test('secrets never appear in the Kubernetes Job manifest', async () => {
   const serialized = JSON.stringify(manifest)
   assert.ok(!serialized.includes('super-secret-password'))
   assert.ok(!serialized.includes('LUOPAN_TEST_PASSWORD'))
-  // Instead the container fetches them with its run-scoped token.
-  assert.match(manifest.spec.template.spec.containers[0].args[0], /runs\/\$MXT_RUN_ID\/secrets/u)
+  // Instead the container fetches them with its run-scoped token. The route
+  // carries a {run} placeholder the helper fills in, so the id is never spliced
+  // into a URL by the shell.
+  assert.match(manifest.spec.template.spec.containers[0].args[0], /runs\/\{run\}\/secrets/u)
 })
 
 test('the container puts secrets in the test process env, not the shell env', async () => {
@@ -194,9 +196,10 @@ test('the container puts secrets in the test process env, not the shell env', as
     config: loadConfig({ MXT_STORE: 'memory' }),
     namespace: 'n',
   }).script({ apiBase: 'http://mxt' })
-  // curl writes to a file; the exec wrapper reads it, unlinks it, and merges it
-  // into the child's env. /proc/<shell pid>/environ never holds a credential.
-  assert.match(script, /-o \/tmp\/mxt-secrets\.json/u)
+  // The API helper writes them to a file; the exec wrapper reads it, unlinks
+  // it, and merges it into the child's env. /proc/<shell pid>/environ never
+  // holds a credential.
+  assert.match(script, /mxt-api\.js get .* \/tmp\/mxt-secrets\.json/u)
   assert.match(script, /fs\.unlinkSync\('\/tmp\/mxt-secrets\.json'\)/u)
   assert.ok(!/export .*MXT_SECRET/u.test(script), 'secrets must not be exported into the shell')
 })

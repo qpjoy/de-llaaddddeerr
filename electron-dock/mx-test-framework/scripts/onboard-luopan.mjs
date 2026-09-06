@@ -83,7 +83,7 @@ const electron = await call('POST', '/api/v1/apps/luopan/suites', {
   surface: 'electron',
   runnerKind: 'local',
   // The desktop用例住在测试团队自己的仓库，不在 po-frontend 里
-  // （[ADR-0007](../specs/adr/0007-test-code-ownership.md)）。把它写成
+  // （[ADR-0007](../docs/adr/0007-test-code-ownership.md)）。把它写成
   // po-frontend + `pnpm e2e:electron` 会必然失败：那个脚本在被测仓库里根本
   // 不存在，而 po-frontend 至今一行未改，正是这条决定想要的结果。
   repoUrl: process.env.LUOPAN_QA_REPO || 'E:/world/workspace/mingxi/luopan-qa-e2e',
@@ -141,7 +141,7 @@ if (!checkout) {
   // Each catalog is read from the repository that owns the tests it describes.
   //
   // The web cases live with the application; the desktop cases live in the test
-  // team's own repository ([ADR-0007](../specs/adr/0007-test-code-ownership.md)).
+  // team's own repository ([ADR-0007](../docs/adr/0007-test-code-ownership.md)).
   // Syncing only the first left the Electron run reporting `unmapped: 4` — the
   // drift check working exactly as designed, on a gap this script had created.
   const sources = [

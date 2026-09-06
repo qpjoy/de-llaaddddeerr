@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mx.internal/schemas/mxt/case-catalog.v2.json",
   "title": "MXT case catalog",
-  "description": "The list of cases that SHOULD exist, kept in the application repo and synced to the platform via POST /api/v1/apps/:app/catalog:sync. See specs/03-case-catalog.md. schemaVersion 1 catalogs (compass) are accepted; missing fields take defaults.",
+  "description": "The list of cases that SHOULD exist, kept in the application repo and synced to the platform via POST /api/v1/apps/:app/catalog:sync. See docs/03-case-catalog.md. schemaVersion 1 catalogs (compass) are accepted; missing fields take defaults.",
   "type": "object",
   "required": [
     "schemaVersion",

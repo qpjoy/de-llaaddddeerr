@@ -110,3 +110,19 @@ MXT_ARTIFACT_RETAIN_DAYS=30
 | PVC 满 | 新 run 置 `blocked` 并明确报"产物存储已满"，不静默丢产物 |
 | 没有可用 runner | run 停在 `pending-runner`，不算失败（[11](11-runner-environments.md)） |
 | MXT 整体不可用 | 被测应用仓库里的 `pnpm e2e:local` 照常能跑。**平台是增益，不是前置依赖** |
+
+## 迁移是不可变的
+
+已经跑过的迁移文件不能再改，一个字符都不行——包括注释和换行符。改了的后果是所有已部署
+的库当场无法迁移。细节、踩过的两次坑、以及不同步之后怎么修，见
+[`migrations/README.md`](../migrations/README.md)。
+
+## 保留期是自动执行的
+
+产物目录和进度事件都按 `MXT_ARTIFACT_RETAIN_DAYS`（默认 30 天）过期，由**调度器自己
+每 6 小时扫一次**——不是 Kubernetes CronJob：平台已经有一个按时醒来的东西，
+再加一个就是再加一个会悄悄停掉的东西。
+
+`manage.sh clean` 仍然在，用来手动提前清理，或者顺带删掉已完成的 runner Job
+和悬空镜像。**它不再是保留策略唯一的执行者**——在此之前，那句「默认保留 30 天」
+是一句没有任何代码在执行的话。

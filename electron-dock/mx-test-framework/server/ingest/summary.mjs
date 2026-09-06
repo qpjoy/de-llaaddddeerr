@@ -1,13 +1,16 @@
 import { AppError } from '../core/errors.mjs'
 import { redactLine, redactText, sanitizeUrl } from '../core/redact.mjs'
 
+const posixPath = (value) =>
+  typeof value === 'string' ? value.split('\\').join('/') : value
+
 // Normalize a runner's summary.json into the platform's run/case/step shape.
 //
 // Two input shapes are accepted:
 //   v2 — the platform contract (contracts/runner-summary.schema.json)
 //   v1 — what compass already writes today, so its 23 existing Cypress cases
 //        onboard without editing the application repository at all. See
-//        specs/08-compass-onboarding.md.
+//        docs/08-compass-onboarding.md.
 
 const CASE_STATUSES = new Set(['passed', 'failed', 'skipped', 'flaky', 'notRun'])
 const STEP_STATUSES = new Set(['passed', 'failed', 'skipped'])
@@ -63,7 +66,7 @@ function normalizeCase(entry) {
     status: CASE_STATUSES.has(entry?.status) ? entry.status : 'skipped',
     attempts: Math.max(1, integer(entry?.attempts, 1)),
     durationMs: integer(entry?.durationMs),
-    specPath: redactLine(entry?.spec, 240) || null,
+    specPath: posixPath(redactLine(entry?.spec, 240)) || null,
     title: redactLine(entry?.title, 300) || null,
     errorText: entry?.error ? redactText(entry.error, 4096) : null,
     steps: normalizeSteps(entry?.steps),
@@ -102,7 +105,7 @@ function casesFromV1(summary) {
         status: CASE_STATUSES.has(entry?.status) ? entry.status : 'notRun',
         attempts: execution.attempts ?? 1,
         durationMs: execution.durationMs ?? 0,
-        specPath: redactLine(entry.actualSpec || entry.spec, 240) || null,
+        specPath: posixPath(redactLine(entry.actualSpec || entry.spec, 240)) || null,
         title: redactLine(entry.actualTitle || entry.title, 300) || null,
         errorText: execution.error ? redactText(execution.error, 4096) : null,
         steps: [],
@@ -260,7 +263,16 @@ function resolveStatus({ reported, exitCode, totals, summary }) {
  * `notRun` is the point of this: a case that quietly stopped running is
  * invisible in a plain pass count.
  */
-export function compareWithCatalog(catalogCases, runCases) {
+/**
+ * Reconcile what ran against what was registered.
+ *
+ * `outOfScopeIds` names cases that are in the application's catalog but outside
+ * *this* run's scope — the other twenty-two when somebody reran one. They are
+ * neither counted nor reported as unmapped: a suite that reconciles against its
+ * own full catalog (compass writes one) reports them, and calling those
+ * "not in the catalog" would be exactly backwards.
+ */
+export function compareWithCatalog(catalogCases, runCases, { outOfScopeIds = null } = {}) {
   const byId = new Map(runCases.map((entry) => [entry.caseId, entry]))
   const merged = []
   // Catalog-only tallies. Unmapped cases are reported separately and must not
@@ -276,7 +288,15 @@ export function compareWithCatalog(catalogCases, runCases) {
   }
 
   const unmapped = []
+  const outOfScope = []
   for (const entry of byId.values()) {
+    if (outOfScopeIds?.has(entry.caseId)) {
+      // Registered, and deliberately not part of this run. Dropped from the
+      // case list entirely: showing it as 「未执行」 would be true of a full run
+      // and misleading here.
+      outOfScope.push(entry.caseId)
+      continue
+    }
     unmapped.push({
       caseId: entry.caseId,
       spec: entry.specPath,
@@ -297,9 +317,10 @@ export function compareWithCatalog(catalogCases, runCases) {
       catalogTotal,
       counts,
       unmapped,
+      ...(outOfScope.length > 0 ? { outOfScope: outOfScope.length } : {}),
       // Four numerators, three different denominators, all named. A single
       // "coverage" figure here would be read as requirement coverage, which
-      // nothing in this system is able to measure. See specs/03-case-catalog.md.
+      // nothing in this system is able to measure. See docs/03-case-catalog.md.
       coverage: {
         catalogCompletionPercent: percent(completed, catalogTotal),
         catalogPassPercent: percent(counts.passed, catalogTotal),

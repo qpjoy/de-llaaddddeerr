@@ -1,7 +1,7 @@
 # 13 · 平台复盘与重构方案
 
 > 立场：运维（SRE / 平台工程）+ 测试开发（SDET）双视角。
-> 对象：`electron-dock/mx-test-framework` 现有 specs 与代码，以及被测目标
+> 对象：`electron-dock/mx-test-framework` 现有 docs 与代码，以及被测目标
 > `mingxi/luopan/po-frontend`（compass · Quasar Vue3 + Electron）。
 > 结论先行放在 [§0](#0-结论先行)，论证在后。
 
@@ -11,7 +11,7 @@
 
 ### 0.1 现状判断
 
-设计文档（specs 00–12）的**判断力是够的**：0/1/2 退出码、`blocked ≠ passed`、零用例即受阻、
+设计文档（docs 00–12）的**判断力是够的**：0/1/2 退出码、`blocked ≠ passed`、零用例即受阻、
 catalog drift（notRun / unmapped / duplicate）、三个分母不合并成一个"覆盖率"、
 拒绝把运行时 AI 浏览器当日常执行器——这几条都踩在业界正确答案上，不是新手设计。
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mx.internal/schemas/mxt/runner-summary.v2.json",
   "title": "MXT runner summary",
-  "description": "Written by a runner to $MXT_ARTIFACTS_DIR/summary.json. See specs/04-runner-contract.md. Exit code wins over `status` when they disagree, because a crashed process may leave this file half-written.",
+  "description": "Written by a runner to $MXT_ARTIFACTS_DIR/summary.json. See docs/04-runner-contract.md. Exit code wins over `status` when they disagree, because a crashed process may leave this file half-written.",
   "type": "object",
   "required": ["schemaVersion", "runId", "app", "status", "totals"],
   "additionalProperties": true,

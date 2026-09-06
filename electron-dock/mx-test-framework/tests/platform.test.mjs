@@ -409,3 +409,41 @@ test('a viewer can look but not act', async () => {
   assert.doesNotThrow(() => requireRole({ role: 'operator' }, 'operator'))
   assert.doesNotThrow(() => requireRole({ role: 'admin' }, 'operator'))
 })
+
+// -- session cookies over plain HTTP -------------------------------------------
+//
+// A `Secure` cookie sent over http:// is dropped by the browser silently: login
+// returns 200, the session never sticks, and the next request is 401. It reads
+// as a wrong password, at the exact address the deploy prints.
+
+test('the Secure flag follows the scheme people actually browse to', async () => {
+  const { loadConfig } = await import('../server/config.mjs')
+  const base = { MXT_ADMIN_TOKEN: 'x', MXT_ARTIFACTS_DIR: '/tmp' }
+
+  assert.equal(loadConfig(base).secureCookies, true, 'unset means keep the safe default')
+  assert.equal(
+    loadConfig({ ...base, MXT_PUBLIC_URL: 'https://mxt.internal' }).secureCookies,
+    true,
+  )
+  // The case that breaks login on an intranet rollout.
+  assert.equal(
+    loadConfig({ ...base, MXT_PUBLIC_URL: 'http://10.20.30.40:30879' }).secureCookies,
+    false,
+  )
+  // Loopback is a trustworthy origin, so the flag costs nothing there.
+  assert.equal(
+    loadConfig({ ...base, MXT_PUBLIC_URL: 'http://127.0.0.1:30879' }).secureCookies,
+    true,
+  )
+  // The switch still wins, in both directions.
+  assert.equal(
+    loadConfig({ ...base, MXT_PUBLIC_URL: 'https://mxt.internal', MXT_INSECURE_COOKIES: 'true' })
+      .secureCookies,
+    false,
+  )
+  assert.equal(
+    loadConfig({ ...base, MXT_PUBLIC_URL: 'http://10.20.30.40:30879', MXT_INSECURE_COOKIES: 'false' })
+      .secureCookies,
+    true,
+  )
+})

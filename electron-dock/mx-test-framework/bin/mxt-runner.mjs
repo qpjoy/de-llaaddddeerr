@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline/promises'
-import { homedir, platform, arch } from 'node:os'
+import { homedir, hostname, platform, arch } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 
 // Where the runner keeps its credentials. Small, and belongs with the user.
@@ -137,15 +137,84 @@ async function cmdRegister() {
   const engines = (argValue('engines') || 'playwright-electron,playwright').split(',')
   const surfaces = (argValue('surfaces') || 'electron').split(',')
 
+  // `local` is a person's own machine; `server` is capacity the team runs on
+  // purpose. The difference is not cosmetic: work created as 「服务器静默跑」
+  // is only ever handed to a `server` machine, so that a nightly regression
+  // never waits on somebody's laptop being awake.
+  const kind = argValue('kind', 'local')
+  if (!['local', 'server'].includes(kind)) die('--kind 只能是 local 或 server')
+
   const result = await api(config, 'POST', '/runner/v1/runners:register', {
     token: config.userToken,
-    body: { name, kind: 'local', os: OS_NAME, arch: arch(), engines, surfaces },
+    body: { name, kind, os: OS_NAME, arch: arch(), engines, surfaces },
   }).catch((error) => die(error.message))
 
   await saveConfig({ runnerId: result.runner.id, runnerToken: result.token, runnerName: name })
   say(`✓ 已注册执行机「${name}」(${OS_NAME}/${arch()})`)
   say(`  可执行：${engines.join(', ')} × ${surfaces.join(', ')}`)
   say('下一步：mxt-runner watch  —— 常驻等待任务')
+}
+
+/**
+ * Register this machine with a one-shot code instead of a password.
+ *
+ * The difference from `login` + `register` is who types a secret where: this
+ * way nobody's mx-launcher password is ever entered on a machine that is about
+ * to run test code. The code is minted in a browser by someone already signed
+ * in, is good for fifteen minutes, and works exactly once.
+ */
+async function cmdEnroll() {
+  const server = (argValue('server') || process.env.MXT_SERVER || '').replace(/\/+$/u, '')
+  const code = argValue('code') || process.env.MXT_CODE
+  if (!server) die('需要 --server https://你的测试平台地址')
+  if (!code) die('需要 --code <接入码>：在平台的「执行机」页面点「把这台电脑变成执行机」')
+
+  const name = argValue('name') || hostname() || `${OS_NAME}-runner`
+  // What this machine offers. Broad on purpose: the runner installs each
+  // suite's own dependencies at run time, so what really limits a machine is
+  // its operating system, not what happens to be installed on it today.
+  const engines = (argValue('engines') || 'cypress,playwright,playwright-electron').split(',')
+  const surfaces = (argValue('surfaces') || 'web,electron').split(',')
+  const kind = argValue('kind', 'local')
+  if (!['local', 'server'].includes(kind)) die('--kind 只能是 local 或 server')
+
+  const result = await api({ server }, 'POST', '/runner/v1/runners:enroll', {
+    body: { code, name, kind, os: OS_NAME, arch: arch(), engines, surfaces },
+  }).catch((error) => die(error.message))
+
+  await saveConfig({
+    server,
+    runnerId: result.runner.id,
+    runnerToken: result.token,
+    runnerName: result.runner.name,
+  })
+  say(`✓ 已接入「${result.runner.name}」(${OS_NAME}/${arch()})`)
+  say(`  平台：${server}`)
+  say('  这台机器现在会出现在平台的「执行机」列表里。')
+}
+
+/**
+ * Undo it. One command, because a tool that is easy to attach and awkward to
+ * remove is a tool people hesitate to attach in the first place.
+ */
+async function cmdUninstall() {
+  const config = await loadConfig()
+  if (!config.server) return say('这台机器没有接入过任何平台。')
+
+  if (config.runnerId && config.runnerToken) {
+    await api(config, 'DELETE', `/api/v1/runners/${config.runnerId}`, {
+      token: config.runnerToken,
+    }).catch((error) => say(`! 平台上没能注销（${error.message}），可以在界面上手动删除`))
+  }
+  await rm(CONFIG_FILE, { force: true })
+  const data = dataDir()
+  if (process.argv.includes('--purge')) {
+    await rm(data, { recursive: true, force: true })
+    say(`✓ 已注销并删除 ${data}`)
+  } else {
+    say('✓ 已注销，凭据已删除。')
+    say(`  检出与产物仍在 ${data}（加 --purge 一并删掉）`)
+  }
 }
 
 async function cmdStatus() {
@@ -378,7 +447,7 @@ async function installPackage(file, root) {
   }
 
   if (process.platform === 'darwin' && lower.endsWith('.dmg')) {
-    // Untested — this runner has never run on a Mac ([23 §1](../specs/23-local-verification.md)).
+    // Untested — this runner has never run on a Mac ([23 §1](../docs/23-local-verification.md)).
     // Written out rather than left as a TODO so the first Mac run fails on a
     // real detail instead of on "not implemented".
     const mount = join(root, 'mnt')
@@ -463,23 +532,153 @@ async function findExecutable(root, excludeWords) {
   )
 }
 
-function runCommand(command, { cwd, env, quiet = false }) {
+function runCommand(command, { cwd, env, quiet = false, onLine = null }) {
   return new Promise((resolvePromise) => {
     const child = spawn(command[0], command.slice(1), {
       cwd,
       env,
-      stdio: quiet ? 'ignore' : 'inherit',
+      // Piped only when somebody is reading: inheriting is what makes the
+      // suite's own output appear in this terminal unchanged, colours and
+      // progress bars included, and that is worth keeping for every command
+      // whose lines nobody parses.
+      stdio: quiet ? 'ignore' : onLine ? ['inherit', 'pipe', 'pipe'] : 'inherit',
       // Windows needs a shell to resolve `pnpm` to `pnpm.cmd`. Safe because the
       // platform's allowlist rejects any argument containing shell
       // metacharacters before the command ever reaches a runner.
       shell: process.platform === 'win32',
     })
+    if (onLine && child.stdout) {
+      forwardLines(child.stdout, process.stdout, (line) => onLine(line, 'stdout'))
+      forwardLines(child.stderr, process.stderr, (line) => onLine(line, 'stderr'))
+    }
     child.on('error', (error) => {
       console.error(`[mxt-runner] 无法启动命令：${error.message}`)
       resolvePromise(2)
     })
     child.on('close', (code) => resolvePromise(code ?? 2))
   })
+}
+
+/**
+ * Echo a stream through to the terminal and hand each complete line to `sink`.
+ *
+ * Splitting on newlines rather than on chunk boundaries matters: a marker line
+ * arrives split across two `data` events often enough that parsing chunks
+ * would drop steps at random and only under load.
+ */
+function forwardLines(source, mirror, sink) {
+  let buffer = ''
+  source.setEncoding('utf8')
+  source.on('data', (chunk) => {
+    mirror.write(chunk)
+    buffer += chunk
+    let index = buffer.indexOf('\n')
+    while (index !== -1) {
+      const line = buffer.slice(0, index).replace(/\r$/u, '')
+      buffer = buffer.slice(index + 1)
+      if (line) sink(line)
+      index = buffer.indexOf('\n')
+    }
+    // A single line longer than this is not a step report, it is a stack trace
+    // or a minified bundle being printed. Dropping the tail keeps memory bounded.
+    if (buffer.length > 64 * 1024) buffer = ''
+  })
+  source.on('end', () => {
+    if (buffer.trim()) sink(buffer.replace(/\r$/u, ''))
+    buffer = ''
+  })
+}
+
+/**
+ * Progress reporting: what the run page shows while the tests are still running.
+ *
+ * Three properties, all of them deliberate (docs/25 §10):
+ *
+ * 1. **Best effort.** A platform that cannot be reached must never fail a run
+ *    that is otherwise fine, so every send swallows its error. The result
+ *    upload is the reporting path that has to work; this one is a convenience.
+ * 2. **Batched.** One POST per second, not one per step. A suite emitting a
+ *    step every 50ms would otherwise spend the run doing HTTP.
+ * 3. **The test code never talks to the platform.** It writes a line to stdout
+ *    and this reads it. A spec has no token, no URL, and nothing to configure —
+ *    and when it crashes, the last lines it printed still arrive.
+ */
+const EVENT_MARKER = '##MXT##'
+const MAX_STDERR_EVENTS = 200
+
+function createReporter(config, runId, runToken) {
+  const queue = []
+  let sending = false
+  let stderrBudget = MAX_STDERR_EVENTS
+  // The stage a failure should be attributed to. Tracked here because the
+  // `catch` that reports a blocked run is far away from the step that broke.
+  let openStage = 'claim'
+
+  const flush = async () => {
+    if (sending || queue.length === 0) return
+    sending = true
+    const batch = queue.splice(0, 200)
+    try {
+      await api(config, 'POST', `/runner/v1/runs/${runId}/events`, {
+        token: runToken,
+        body: { events: batch },
+      })
+    } catch {
+      // Deliberately silent — see (1) above. Printing here would put a network
+      // warning between every two lines of a suite's own output.
+    } finally {
+      sending = false
+    }
+  }
+  const timer = setInterval(() => void flush(), 1000)
+  timer.unref?.()
+
+  const emit = (event) => {
+    // The queue is bounded for the same reason the server caps the table: a
+    // test stuck in a loop must not be able to grow this without limit.
+    if (queue.length < 1000) queue.push({ at: new Date().toISOString(), ...event })
+  }
+
+  return {
+    emit,
+    stage(stage, status = 'started', detail = '') {
+      if (status === 'started') openStage = stage
+      emit({ kind: 'stage', stage, status, detail })
+    },
+    get openStage() {
+      return openStage
+    },
+    /** One line of the suite's output, marker or not. */
+    line(line, stream) {
+      const index = line.indexOf(EVENT_MARKER)
+      if (index !== -1) {
+        try {
+          const parsed = JSON.parse(line.slice(index + EVENT_MARKER.length))
+          if (parsed && typeof parsed === 'object') emit(parsed)
+        } catch {
+          // A malformed marker is the suite's problem, not the run's.
+        }
+        return
+      }
+      // Plain stdout is not shipped: an install log would fill the timeline
+      // with thousands of lines nobody reads. stderr is, up to a budget,
+      // because when a run goes wrong that is where it says so.
+      if (stream === 'stderr' && stderrBudget > 0) {
+        stderrBudget -= 1
+        emit({ kind: 'log', stream: 'stderr', line })
+      }
+    },
+    async close() {
+      clearInterval(timer)
+      // Drain rather than fire-and-forget: the last events are the ones that
+      // say how the run ended, and they are worth one extra round trip.
+      while (queue.length > 0) {
+        const before = queue.length
+        await flush()
+        if (queue.length >= before) break
+      }
+    },
+  }
 }
 
 /**
@@ -587,6 +786,7 @@ async function executeOnce(config) {
     // then found no summary.json.
     E2E_ARTIFACTS_DIR: artifactsRoot,
   }
+  const reporter = createReporter(config, runId, runToken)
   const heartbeat = setInterval(() => {
     api(config, 'POST', `/runner/v1/runs/${runId}/heartbeat`, { token: runToken }).catch(() => {})
   }, 60_000)
@@ -599,6 +799,7 @@ async function executeOnce(config) {
     // Everything up to the test command is infrastructure: if any of it fails
     // the run is `blocked`, not a red test. Confusing the two is how a team
     // learns to ignore red.
+    reporter.stage('checkout')
     const checkout = await prepareCheckout({
       repoUrl: claimed.app?.repoUrl ?? null,
       ref: claimed.sourceRef ?? null,
@@ -607,6 +808,7 @@ async function executeOnce(config) {
     })
     gitSha = checkout.gitSha
     if (gitSha) say(`  检出 ${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}`)
+    reporter.stage('checkout', 'ok', gitSha ? `${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}` : '本地目录')
 
     // The suite's workingDir is the project root inside the checkout, so one
     // runner can serve several suites of a monorepo.
@@ -620,15 +822,19 @@ async function executeOnce(config) {
     if (claimed.appPackage?.url) {
       // Desktop suites test a built installer, not the source tree. The path is
       // handed to the suite so its spec can launch exactly this build.
+      reporter.stage('launch', 'started', `下载安装包 ${claimed.appPackage.filename ?? ''}`.trim())
       const downloaded = await downloadPackage(config, claimed.appPackage)
       // What the suite gets is a launchable application, not the delivery
       // format it arrived in.
       childEnv.MXT_APP_PATH = await preparePackage(claimed.appPackage, downloaded)
+      reporter.stage('launch', 'ok')
     }
 
     if (claimed.app?.repoUrl) {
+      reporter.stage('install')
       const installCode = await installDependencies(workDir, childEnv)
       if (installCode !== 0) throw new Error(`依赖安装失败（退出码 ${installCode}）`)
+      reporter.stage('install', 'ok')
     }
 
     if (!command || command.length === 0) {
@@ -652,7 +858,13 @@ async function executeOnce(config) {
     }
 
     say(`  执行：${command.join(' ')}（工作目录 ${workDir}）`)
-    exitCode = await runCommand(command, { cwd: workDir, env: childEnv })
+    reporter.stage('execute')
+    exitCode = await runCommand(command, {
+      cwd: workDir,
+      env: childEnv,
+      onLine: (line, stream) => reporter.line(line, stream),
+    })
+    reporter.stage('execute', exitCode === 0 ? 'ok' : 'failed', `退出码 ${exitCode}`)
 
     // A build suite produces a file, not a result. Copy it where the platform
     // looks so the normal artifact upload carries it — the platform hashes what
@@ -669,11 +881,17 @@ async function executeOnce(config) {
     blockedReason = error.message
     exitCode = 2
     say(`  ⚠ ${blockedReason}`)
+    // Which stage broke is the whole question when a run comes back blocked,
+    // and it is answered here rather than left to be read out of a log.
+    reporter.stage(reporter.openStage, 'failed', blockedReason)
   }
   clearInterval(heartbeat)
 
+  reporter.stage('upload')
   const count = await uploadArtifacts(config, runId, runToken, artifactsDir)
   if (count > 0) say(`  已上传 ${count} 个产物`)
+  reporter.stage('upload', 'ok', `${count} 个文件`)
+  await reporter.close()
 
   const body = { exitCode }
   let summary = null
@@ -750,10 +968,14 @@ async function cmdWatch({ once = false } = {}) {
 
 const usage = `mxt-runner — 在自己的电脑上执行测试平台派发的任务
 
-  mxt-runner login --server <平台地址>   用 mx-launcher 账号登录
-  mxt-runner register --name <名字>      把这台机器注册为执行机
+  mxt-runner enroll --server <地址> --code <接入码>
+      在平台「执行机」页面点一下拿到接入码，不用在这台机器上输密码
+  mxt-runner login --server <平台地址>   用 mx-launcher 账号登录（另一条路）
+  mxt-runner register --name <名字>      登录之后手工注册
       --engines  默认 playwright-electron,playwright
       --surfaces 默认 electron
+      --kind     local（个人电脑）或 server（团队常开的机器）
+  mxt-runner uninstall [--purge]         注销这台机器；--purge 连缓存一起删
   mxt-runner watch [--workdir <目录>]    常驻认领任务
   mxt-runner once  [--workdir <目录>]    只取一个任务
   mxt-runner status                      看当前配置
@@ -769,7 +991,9 @@ Windows 上通常是系统盘，一个应用就要几 GB。用别的盘：
 
 const command = process.argv[2]
 try {
-  if (command === 'login') await cmdLogin()
+  if (command === 'enroll') await cmdEnroll()
+  else if (command === 'uninstall') await cmdUninstall()
+  else if (command === 'login') await cmdLogin()
   else if (command === 'register') await cmdRegister()
   else if (command === 'watch') await cmdWatch()
   else if (command === 'once') await cmdWatch({ once: true })

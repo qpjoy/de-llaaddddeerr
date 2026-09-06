@@ -18,7 +18,7 @@
 | `MXT_BASE_URL` | Web 必填 | 被测目标，绝对 HTTP(S)，无凭据无 query |
 | `MXT_APP_PATH` | 桌面必填 | 被测应用可执行文件路径 |
 | `MXT_ARTIFACTS_DIR` | 是 | 产物输出根目录，runner 只往这里写 |
-| `MXT_CASE_FILTER` | 否 | 逗号分隔 Case ID 或 spec glob，用于重跑单个用例 |
+| `MXT_CASE_FILTER` | 否 | 逗号分隔 Case ID 或 spec glob，用于重跑单个用例。**Case ID 由平台查目录翻译成 spec 路径后再下发**（见下） |
 | `MXT_DEMO_HOLD_MS` | 否 | demo 轨每步停留毫秒，默认 900 |
 | `MXT_CALLBACK_URL` | 否 | 实时 step 上报地址 |
 | `MXT_RUN_TOKEN` | 否 | run 作用域短期 token，配合 callback / 上传 |
@@ -27,6 +27,21 @@
 **存量别名**：接入 compass 时平台同时注入 `E2E_RUN_ID` / `E2E_BASE_URL` /
 `E2E_PROFILE` / `E2E_TRACK` / `E2E_ARTIFACTS_DIR` / `E2E_SPEC`，值与 `MXT_*` 对应。
 compass 的 `scripts/e2e-run.mjs` 因此**一行不改**就能被平台驱动。
+
+### 关于用例筛选
+
+`MXT_CASE_FILTER` 里可以写 Case ID，但**引擎只认文件**。所以平台在派活之前先查目录，
+把 Case ID 翻成 spec 路径，放进 `E2E_SPEC`：Case ID 到文件的映射只有平台知道，
+那正是目录的用途。
+
+两条随之而来的规矩：
+
+1. **翻不出来就拒绝派活**，不是跑全量。目录里没有这个 ID，或者这条用例还没有 spec
+   （「已登记、待实现」），都在建任务的那一刻报错。一个悄悄忽略了筛选、把整套跑完的
+   run，比报错糟糕得多。
+2. **按 Case ID 筛选，跑的仍然是整个 spec 文件。** Cypress 没法只跑文件里的一个
+   test。所以同文件里的兄弟用例也在这次执行的范围内，平台把它们算进这次的分母——
+   它们没上报就是真没跑到。
 
 ## 输出：产物布局
 

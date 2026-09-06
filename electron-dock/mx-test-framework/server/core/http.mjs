@@ -290,7 +290,7 @@ export function suiteCommand(value) {
   for (const token of argv) {
     // Control characters break argv handling and let a crafted argument forge
     // extra lines in the run log.
-    if (/[ -]/u.test(token)) {
+    if (/[\u0000-\u001f\u007f]/u.test(token)) {
       throw new AppError(400, 'invalid_request', 'command 的参数不能包含控制字符')
     }
   }

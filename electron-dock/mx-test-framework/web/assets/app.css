@@ -350,3 +350,201 @@
 
 .qp-muted { color: var(--qp-text-3); }
 .mxt-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--qp-font-body-2); }
+
+/* -- run pipeline ---------------------------------------------------------
+   The state of a run as a shape rather than as a word. A person looking at a
+   stuck run wants "which stage" before they want anything else, and reading it
+   off a console log is what makes older CI tools feel like archaeology. */
+
+.mxt-panel--flow { padding: var(--qp-space-4) var(--qp-space-4) var(--qp-space-3); }
+
+.mxt-flow {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.mxt-flow__node {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-width: 96px;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+
+/* The connector belongs to the node on its left, so the last one has none. */
+.mxt-flow__node:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 13px;
+  left: calc(50% + 18px);
+  width: calc(100% - 36px);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--qp-bg-4);
+  transition: background var(--qp-transition-fast);
+}
+
+.mxt-flow__dot {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--qp-line);
+  background: var(--qp-bg-3);
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-body-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.mxt-flow__label { font-size: var(--qp-font-body-2); color: var(--qp-text-2); }
+.mxt-flow__detail {
+  font-size: var(--qp-font-caption);
+  color: var(--qp-text-3);
+  max-width: 15ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mxt-flow__foot { margin: var(--qp-space-3) 0 0; }
+
+.mxt-flow__node.is-done .mxt-flow__dot { background: var(--qp-success); border-color: var(--qp-success); color: #06210f; }
+.mxt-flow__node.is-done .mxt-flow__label { color: var(--qp-text-1); }
+.mxt-flow__node.is-done::after { background: var(--qp-success); }
+
+.mxt-flow__node.is-active .mxt-flow__dot {
+  background: var(--qp-primary);
+  border-color: var(--qp-primary);
+  color: #06210f;
+  animation: mxt-pulse 1.4s ease-in-out infinite;
+}
+.mxt-flow__node.is-active .mxt-flow__label { color: var(--qp-text-1); }
+
+.mxt-flow__node.is-failed .mxt-flow__dot { background: var(--qp-danger); border-color: var(--qp-danger); color: #2a0508; }
+.mxt-flow__node.is-failed .mxt-flow__label { color: var(--qp-danger); }
+.mxt-flow__node.is-failed::after { background: var(--qp-bg-4); }
+
+.mxt-flow__node.is-skipped .mxt-flow__dot { opacity: 0.45; }
+.mxt-flow__node.is-skipped .mxt-flow__label { color: var(--qp-text-3); }
+.mxt-flow__node.is-skipped::after { background: var(--qp-bg-4); }
+
+@keyframes mxt-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(94, 142, 236, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(94, 142, 236, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mxt-flow__node.is-active .mxt-flow__dot { animation: none; }
+}
+
+/* -- live case list -------------------------------------------------------- */
+
+.mxt-live-case { padding: var(--qp-space-3) var(--qp-space-4); border-bottom: 1px solid var(--qp-line); }
+.mxt-live-case:last-of-type { border-bottom: 0; }
+.mxt-live-case.is-running { background: var(--qp-bg-hover); }
+.mxt-live-case__head { display: flex; align-items: center; gap: var(--qp-space-3); }
+.mxt-live-case__head code { font-size: var(--qp-font-body-2); color: var(--qp-text-2); }
+.mxt-live-case .mxt-steps { margin: var(--qp-space-2) 0 0; padding-left: 0; }
+
+.mxt-live-log { border-top: 1px solid var(--qp-line); }
+.mxt-live-log summary {
+  padding: var(--qp-space-3) var(--qp-space-4);
+  cursor: pointer;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-body-2);
+}
+.mxt-live-log pre {
+  margin: 0;
+  padding: 0 var(--qp-space-4) var(--qp-space-4);
+  max-height: 260px;
+  overflow: auto;
+  color: var(--qp-text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--qp-font-caption);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+/* -- enrolment card -------------------------------------------------------- */
+
+.mxt-enroll { display: flex; flex-direction: column; gap: var(--qp-space-3); }
+.mxt-enroll p { margin: 0; }
+.mxt-enroll__tabs { display: flex; gap: var(--qp-space-2); }
+
+.mxt-enroll__cmd {
+  margin: 0;
+  padding: var(--qp-space-3);
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  background: var(--qp-bg-3);
+  color: var(--qp-text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--qp-font-body-2);
+  line-height: 1.7;
+  /* The command is long and must stay selectable in one piece: wrapping beats
+     a horizontal scrollbar nobody notices before copying half of it. */
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
+.mxt-enroll__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--qp-space-3);
+}
+
+.mxt-enroll__actions [data-status]::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--qp-warning);
+  animation: mxt-pulse 1.4s ease-in-out infinite;
+}
+.mxt-enroll__actions [data-status].is-connected {
+  color: var(--qp-success);
+}
+.mxt-enroll__actions [data-status].is-connected::before {
+  background: var(--qp-success);
+  animation: none;
+}
+
+.mxt-row-actions { display: flex; align-items: center; gap: var(--qp-space-3); justify-content: flex-end; }
+
+.mxt-case-row__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--qp-space-3);
+  margin-bottom: var(--qp-space-3);
+}
+
+/* A failed stage says why, in full. The pipeline node above it only has room
+   for a label, and an ellipsis is the least useful thing to show someone whose
+   run just died. */
+.mxt-flow__failure {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--qp-space-3);
+  padding: var(--qp-space-3);
+  border: 1px solid rgba(238, 96, 103, 0.35);
+  border-left: 3px solid var(--qp-danger);
+  border-radius: var(--qp-radius-sm);
+  background: rgba(238, 96, 103, 0.08);
+}
+.mxt-flow__failure b { color: var(--qp-danger); font-size: var(--qp-font-body-1); }
+.mxt-flow__failure span {
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-body-2);
+  line-height: 1.7;
+  word-break: break-word;
+}
