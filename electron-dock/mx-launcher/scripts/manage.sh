@@ -96,7 +96,7 @@ Usage:
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
   bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down
-  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-cni|down
+  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
@@ -197,6 +197,9 @@ run_pnpm_dir() {
   shift
   local version
   version="$(pnpm_version_for_dir "$dir")"
+  if [ -z "$version" ] && { [ "$dir" = "$ROOT" ] || [[ "$dir" == "$ROOT/"* ]]; }; then
+    version="$(pnpm_version_for_dir "$ROOT")"
+  fi
   if [ -n "$version" ] && command -v corepack >/dev/null 2>&1; then
     corepack "pnpm@$version" --dir "$dir" "$@"
     return
@@ -5605,6 +5608,7 @@ Gateway:
   - Smoke URL: http://127.0.0.1:18090 by default
 
 Commands:
+  bash scripts/manage.sh ops internal-production predeploy
   bash scripts/manage.sh ops internal-production deploy
   bash scripts/manage.sh ops internal-production status
   bash scripts/manage.sh ops internal-production gateway-smoke
@@ -5614,6 +5618,9 @@ Commands:
   bash scripts/manage.sh ops internal-production down
 
 Notes:
+  - Deploy runs the release SDK publisher test and server typecheck with the
+    repository-pinned pnpm before building an image. Emergency break-glass only:
+    set MX_INTERNAL_PRODUCTION_SKIP_PREDEPLOY_GATE=1 to skip this gate.
   - qpjoy/mx-launcher-server:shadow is local-only. Deploy does not push it to
     Docker Hub; it imports and verifies the image in containerd k8s.io after
     Docker build.
@@ -5665,6 +5672,32 @@ Notes:
     bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply
   - HDO V1 uses 8080 and hdo-home/hdo-internal; this path does not stop them.
 EOF
+}
+
+internal_production_predeploy_gate() {
+  local skip="${MX_INTERNAL_PRODUCTION_SKIP_PREDEPLOY_GATE:-0}"
+  case "$skip" in
+    0) ;;
+    1)
+      say "WARNING: skip Internal production predeploy gate (break-glass: MX_INTERNAL_PRODUCTION_SKIP_PREDEPLOY_GATE=1)"
+      return 0
+      ;;
+    *)
+      die "MX_INTERNAL_PRODUCTION_SKIP_PREDEPLOY_GATE must be 0 or 1"
+      ;;
+  esac
+
+  command -v corepack >/dev/null 2>&1 || die "corepack is required for the Internal production predeploy gate"
+  [ -n "$(pnpm_version_for_dir "$ROOT")" ] || die "package.json must pin pnpm with packageManager before Internal production deploy"
+  [ -f "$ROOT/server/src/modules/release/release-sdk-publisher.test.ts" ] || \
+    die "missing release SDK publisher test"
+
+  say "predeploy gate: release SDK publisher test"
+  run_pnpm_dir "$ROOT/server" exec node --test --import tsx \
+    src/modules/release/release-sdk-publisher.test.ts
+  say "predeploy gate: server typecheck"
+  run_pnpm_dir "$ROOT/server" run typecheck
+  say "Internal production predeploy gate OK"
 }
 
 ops_internal_production_repair_kubeadm_endpoint_if_requested() {
@@ -5771,7 +5804,7 @@ ops_internal_production() {
   local action="$1"
   shift || true
   case "$action" in
-    plan) ;;
+    plan|predeploy) ;;
     *) k8s_configure_proxy_bypass ;;
   esac
   case "$action" in
@@ -5779,9 +5812,14 @@ ops_internal_production() {
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production plan"
       ops_internal_production_plan
       ;;
+    predeploy)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production predeploy"
+      internal_production_predeploy_gate
+      ;;
     deploy|cycle)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
+      internal_production_predeploy_gate
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready
       say "preflight server/.env and current K8s Secret state"
@@ -5860,7 +5898,7 @@ ops_internal_production() {
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
       ;;
   esac
 }
@@ -6482,7 +6520,7 @@ case "$cmd" in
         ops_insight_hub "$@"
         ;;
       internal-production)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
         ops_internal_production "$@"
         ;;
       *)

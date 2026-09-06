@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
 import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
-const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
+const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi/i
+const FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS = /tikhub|rapidapi|justone/i
 const NIGHT_ALL_COMMON_FIELDS = [
   'businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page',
   'cursor', 'concurrency', 'params', 'includeRaw',
@@ -119,6 +120,184 @@ function assertNightAllCompatibilityRequestSchema(schema) {
 function resolveSchema(document, schema) {
   if (!schema?.$ref) return schema
   return document.components.schemas[schema.$ref.split('/').at(-1)]
+}
+
+function assertExternalCommerceContract(document) {
+  const operation = document.paths['/data/ecommerce/products/search']?.post
+  assert.ok(operation)
+  assert.equal(operation.operationId, 'searchExternalCommerceProducts')
+  assert.doesNotMatch(JSON.stringify(operation), /tikhub|rapidapi|justone/i)
+  assert.deepEqual(operation['x-mx-error-codes'], {
+    400: [
+      'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
+      'invalid_query', 'invalid_page', 'invalid_cursor', 'invalid_pagination',
+      'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
+      'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
+      'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
+    ],
+    401: ['api_key_required', 'invalid_api_key'],
+    403: ['platform_not_granted', 'test_key_not_supported'],
+    404: ['stored_snapshot_not_found'],
+    409: [
+      'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
+      'external_platform_response_unusable',
+    ],
+    413: ['payload_too_large'],
+    429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+    502: [
+      'external_platform_response_unusable', 'external_platform_outcome_unknown',
+      'external_platform_rejected',
+    ],
+    503: [
+      'external_platform_unavailable', 'external_platform_not_configured',
+      'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+    ],
+  })
+  assert.deepEqual(
+    Object.keys(operation.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 409, 413, 429, 502, 503],
+  )
+
+  assert.equal(operation.parameters.length, 1)
+  const idempotency = operation.parameters[0]
+  assert.equal(idempotency.name, 'Idempotency-Key')
+  assert.equal(idempotency.in, 'header')
+  assert.equal(idempotency.required, false)
+  assert.match(idempotency.description, /next-page request changes the body and must use a new Idempotency-Key/i)
+  assert.equal(idempotency.schema.minLength, 8)
+  assert.equal(idempotency.schema.maxLength, 128)
+
+  const requestRef = operation.requestBody.content['application/json'].schema
+  assert.equal(requestRef.$ref, '#/components/schemas/ExternalCommerceProductSearchRequest')
+  const request = resolveSchema(document, requestRef)
+  assert.equal(request.type, 'object')
+  assert.equal(request.additionalProperties, false)
+  assert.deepEqual(request.required, ['marketplace', 'query'])
+  assert.deepEqual(request.not, { required: ['page', 'cursor'] })
+  assert.deepEqual(Object.keys(request.properties), [
+    'marketplace', 'query', 'deliveryMode', 'page', 'cursor', 'sort', 'price',
+  ])
+  assert.equal(request.properties.pageSize, undefined)
+  assert.deepEqual(request.properties.marketplace.enum, [
+    'taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu',
+  ])
+  assert.equal(request.properties.query.maxLength, 200)
+  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh'])
+  assert.equal(request.properties.deliveryMode.default, 'cache_first')
+  assert.equal(request.properties.page.default, 1)
+  assert.equal(request.properties.page.maximum, 1000)
+  assert.equal(request.properties.cursor.maxLength, 4096)
+  assert.equal(request.properties.price.additionalProperties, false)
+  assert.deepEqual(Object.keys(request.properties.price.properties), ['min', 'max'])
+  for (const field of ['min', 'max']) {
+    const amount = request.properties.price.properties[field]
+    assert.equal(amount.type, 'string', field)
+    assert.equal(amount.oneOf, undefined, field)
+    const decimal = new RegExp(amount.pattern)
+    assert.match('0', decimal, field)
+    assert.match('999999999999.12345678', decimal, field)
+    assert.doesNotMatch('01', decimal, field)
+    assert.doesNotMatch('1e2', decimal, field)
+  }
+
+  const responseRef = operation.responses[200].content['application/json'].schema
+  assert.equal(responseRef.$ref, '#/components/schemas/ExternalCommerceProductSearchEnvelope')
+  assert.deepEqual(
+    operation.responses[200].headers['x-mx-insight-source-mode'].schema.enum,
+    ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+  )
+  for (const header of [
+    'x-mx-insight-request-id', 'idempotent-replay', 'x-mx-insight-source-mode',
+    'x-mx-insight-captured-at', 'Age', 'Warning',
+  ]) assert.ok(operation.responses[200].headers[header], header)
+
+  const envelope = resolveSchema(document, responseRef)
+  assert.equal(envelope.additionalProperties, false)
+  assert.deepEqual(envelope.required, ['contractVersion', 'data', 'meta', 'requestId'])
+  assert.equal(
+    envelope.properties.contractVersion.const,
+    'mx-insight-hub.ecommerce-products.v1',
+  )
+  assert.deepEqual(envelope.properties.data.required, ['items', 'page'])
+  assert.equal(
+    envelope.properties.data.properties.items.items.$ref,
+    '#/components/schemas/ExternalCommerceProduct',
+  )
+  const meta = envelope.properties.meta
+  assert.deepEqual(meta.required, ['capturedAt', 'servedAt', 'sourceMode', 'ageSeconds'])
+  assert.deepEqual(meta.properties.sourceMode.enum, [
+    'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay',
+  ])
+  assert.equal(meta.properties.ageSeconds.minimum, 0)
+
+  const product = document.components.schemas.ExternalCommerceProduct
+  assert.equal(product.additionalProperties, false)
+  assert.deepEqual(Object.keys(product.properties), [
+    'id', 'marketplace', 'title', 'url', 'pricing', 'shop', 'images', 'signals', 'attributes',
+  ])
+  assert.deepEqual(product.properties.pricing.required, ['current', 'original', 'currency'])
+  assert.deepEqual(product.properties.shop.required, ['id', 'name'])
+  assert.equal(product.properties.images.maxItems, 20)
+
+  const page = document.components.schemas.ExternalCommerceProductSearchPage
+  assert.deepEqual(page.properties.hasMore.type, ['boolean', 'null'])
+  assert.deepEqual(page.properties.nextCursor.type, ['string', 'null'])
+  assert.equal(page.properties.nextCursor.maxLength, 4096)
+
+  const media = document.paths['/data/ecommerce/products/media']?.get
+  assert.ok(media)
+  assert.equal(media.operationId, 'getExternalCommerceProductMedia')
+  assert.doesNotMatch(JSON.stringify(media), /provider|tikhub|rapidapi|justone/i)
+  assert.deepEqual(media.parameters.map(({ name }) => name), [
+    'requestId', 'itemId', 'imageIndex',
+  ])
+  assert.equal(media.parameters.every(({ required }) => required), true)
+  assert.equal(media.parameters[0].schema.format, 'uuid')
+  assert.equal(media.parameters[1].schema.maxLength, 512)
+  assert.equal(media.parameters[2].schema.minimum, 0)
+  assert.equal(media.parameters[2].schema.maximum, 19)
+  assert.deepEqual(
+    Object.keys(media.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 413, 415, 422, 429, 502, 503, 504],
+  )
+  assert.deepEqual(
+    Object.keys(media.responses[200].content).sort(),
+    ['image/jpeg', 'image/png', 'image/webp'],
+  )
+  for (const response of Object.values(media.responses[200].content)) {
+    assert.equal(response.schema.type, 'string')
+    assert.equal(response.schema.format, 'binary')
+  }
+  assert.match(media.description, /creates no Hub usage record/i)
+  assert.match(media.description, /never accepts an arbitrary URL/i)
+  assert.deepEqual(media['x-mx-error-codes'][403], ['platform_not_granted', 'test_key_not_supported'])
+
+  const capabilitiesContent = document.paths['/data/capabilities'].get.responses[200]
+    .content['application/json']
+  const capabilitiesEnvelope = resolveSchema(document, capabilitiesContent.schema)
+  const platformProperties = capabilitiesEnvelope.properties.data.properties.platforms.items.properties
+  assert.deepEqual(platformProperties.servingMode.enum, ['stored', 'live_with_stored_fallback'])
+  assert.deepEqual(platformProperties.freshnessModes.items.enum, [
+    'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay',
+  ])
+  assert.deepEqual(platformProperties.deliveryModes.items.enum, [
+    'cache_only', 'cache_first', 'refresh',
+  ])
+  const ecommerce = capabilitiesContent.example.data.platforms
+    .find(({ platform }) => platform === 'ecommerce')
+  assert.deepEqual(ecommerce, {
+    platform: 'ecommerce',
+    ready: true,
+    capabilities: ['product_search'],
+    source: 'hub',
+    servingMode: 'live_with_stored_fallback',
+    contractVersion: 'mx-insight-hub.ecommerce-products.v1',
+    marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+    pagination: 'opaque_cursor',
+    idempotencyKey: 'optional',
+    deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+    freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+  })
 }
 
 function assertCanonicalContextContract(document) {
@@ -445,7 +624,7 @@ function assertNightAllPublicContract(document) {
 
   const platformProperties = dataSchema.properties.platforms.items.properties
   assert.deepEqual(platformProperties.source.enum, ['hub'])
-  assert.deepEqual(platformProperties.servingMode.enum, ['stored'])
+  assert.deepEqual(platformProperties.servingMode.enum, ['stored', 'live_with_stored_fallback'])
 
   const capabilitiesExample = capabilitiesContent.example
   const telegram = capabilitiesExample.data.platforms.find(({ platform }) => platform === 'telegram')
@@ -852,7 +1031,7 @@ async function withServer(listenerMode, run) {
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
     const pagePaths = [
-      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
@@ -867,6 +1046,22 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(response.headers.get('content-security-policy'), /default-src 'none'/)
     assert.match(html, /MX Insight Hub/)
     assert.match(html, /\/api\/v1\/data\/search/)
+    assert.match(html, /\/api\/v1\/data\/ecommerce\/products\/search/)
+    assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
+    assert.match(html, /电商数据百宝箱/)
+    assert.match(pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html, /JustOne/)
+    assert.match(html, /同一把 Hub Public API Key/u)
+    assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
+    assert.match(html, /第二个候选通过合同验证后/u)
+    assert.match(html, /相同 <code>Idempotency-Key<\/code>/u)
+    assert.match(html, /Hub customer|Hub 客户计价/u)
+    assert.match(html, /fresh_cache/)
+    assert.match(html, /stored_fallback/)
+    assert.match(html, /相同 <code>Idempotency-Key<\/code> 只重放已提交的原 502，不再次调用上游/u)
+    assert.match(html, /它已释放，不是“以后一定不派发”的稳定重放/u)
+    assert.match(html, /未解决的实时请求不会阻塞本地安全演示或 <code>cache_only<\/code> 存量浏览/u)
+    assert.match(html, /不会锁死筛选条件/u)
+    assert.match(html, /200 且 <code>items=\[\]<\/code>/u)
     assert.match(html, /href="\/docs\/night-all"/)
     assert.match(html, /<h2 id="night-all">Night-All 兼容层<\/h2>/)
     assert.match(html, /\/api\/v1\/night-all\/search\/raw/)
@@ -937,7 +1132,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /minQualityScore/)
     assert.match(html, /countryCode/)
     assert.match(html, /候选 author、contentType/)
-    assert.match(html, /旧 Key 会返回.*idempotency_conflict/)
+    assert.match(html, /旧值会返回.*idempotency_conflict/)
     assert.match(html, /featuredProvinceCodes/)
     assert.match(html, /public_opinion/)
     assert.match(html, /public_opinion\.all_ingested\.read/)
@@ -984,6 +1179,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     const pages = [
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
+      ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据百宝箱'],
       ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
       ['/docs/search', 'search', '通用搜索'],
       ['/docs/telegram', 'telegram', 'Telegram 会话'],
@@ -1016,7 +1212,9 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.match(legacyHtml, /location\.hash\.slice\(1\)/)
     assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
     assert.match(legacyHtml, /'virtual-supermarket':'\/docs\/virtual-supermarket'/)
+    assert.match(legacyHtml, /'ecommerce-treasure-box':'\/docs\/ecommerce-treasure-box'/)
     assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
+    assert.match(legacyHtml, /class="nav-section">数据产品<\/span>/)
 
     for (const [alias, canonical] of [
       ['/docs/authentication', '/docs/auth'],
@@ -1045,6 +1243,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/canonical/items/{id}/timeline',
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/ecommerce/products/media',
+      '/data/ecommerce/products/search',
       '/data/mobile-commerce/items',
       '/data/public-opinion/funnel',
       '/data/public-opinion/items/{id}',
@@ -1077,6 +1277,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
 
     const serialized = JSON.stringify(document)
     assert.doesNotMatch(serialized, FORBIDDEN_PUBLIC_DOC_DETAILS)
+    assert.doesNotMatch(serialized, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.doesNotMatch(serialized, /mih_(?:live|test)_[A-Za-z0-9_-]+/i)
     assert.match(serialized, /Idempotency-Key/)
     assert.match(serialized, /opaque nextCursor/i)
@@ -1108,6 +1309,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assertCanonicalTimelineContract(document)
     assertDataProductPublicContract(document)
     assertVirtualSupermarketContract(document)
+    assertExternalCommerceContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -1153,6 +1355,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
     fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)),
     'utf8',
   )
+  assert.doesNotMatch(source, /tikhub|rapidapi|justone/i)
   const parsed = spawnSync('python3', ['-c', [
     'import json, sys',
     'import yaml',
@@ -1175,6 +1378,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
     search: 'searchStoredTelegram',
   })
   assertVirtualSupermarketContract(document)
+  assertExternalCommerceContract(document)
   assertPublicDataProductMirror(PUBLIC_OPENAPI_DOCUMENT, document)
 })
 
@@ -1207,9 +1411,50 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /source_catalog_entry_not_found/)
 })
 
+test('external data platform public contract and internal operations guidance stay aligned', async () => {
+  const [contract, curlGuide, staticOpenApi, adr, operations] = await Promise.all([
+    readFile(fileURLToPath(new URL('../../docs/contracts/public-api-v1.md', import.meta.url)), 'utf8'),
+    readFile(fileURLToPath(new URL('../../docs/public-api-curl.md', import.meta.url)), 'utf8'),
+    readFile(fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)), 'utf8'),
+    readFile(fileURLToPath(new URL('../../docs/adr/0013-external-data-platform-gateway.md', import.meta.url)), 'utf8'),
+    readFile(fileURLToPath(new URL('../../docs/operations/external-data-platforms.md', import.meta.url)), 'utf8'),
+  ])
+
+  for (const source of [contract, curlGuide, staticOpenApi]) {
+    assert.doesNotMatch(source, /tikhub|rapidapi|justone/i)
+  }
+  for (const source of [contract, curlGuide]) {
+    assert.match(source, /\/api\/v1\/data\/ecommerce\/products\/search/)
+    assert.match(source, /mx-insight-hub\.ecommerce-products\.v1/)
+    assert.match(source, /marketplace.*query.*page.*cursor.*sort.*price/is)
+    assert.match(source, /(?:no|没有) `?pageSize`?/i)
+    assert.match(source, /page.*cursor.*mutually exclusive|page.*cursor.*互斥/is)
+    assert.match(source, /next.*new.*Idempotency-Key|下一页.*新的.*Idempotency-Key/is)
+    for (const mode of ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay']) {
+      assert.match(source, new RegExp(mode))
+    }
+    for (const field of ['capturedAt', 'servedAt', 'sourceMode', 'ageSeconds']) {
+      assert.match(source, new RegExp(field))
+    }
+  }
+
+  assert.match(adr, /JustOne/)
+  assert.match(operations, /JustOne/)
+  for (const capability of [
+    'search_intent', 'search_post_detail', 'search_post_comments', 'youtube_channel_comments',
+  ]) assert.match(adr, new RegExp(capability))
+  assert.match(adr, /capability-gap inventory/i)
+  assert.match(adr, /unknown is never displayed or aggregated as zero/i)
+  assert.match(adr, /justone\/\{marketplace\}\/product-search\/\{endpointVersion\}/)
+  assert.match(operations, /gateway_requests.*Hub demand/is)
+  assert.match(operations, /provider_calls.*actual JustOne dispatches/is)
+  assert.match(operations, /next-page request.*new.*Idempotency-Key|下一页.*新的.*Idempotency-Key/is)
+  assert.match(operations, /Launcher.*MX-H2I/is)
+})
+
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
-    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
+    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
       const response = await fetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)

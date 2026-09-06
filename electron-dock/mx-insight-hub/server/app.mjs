@@ -460,9 +460,12 @@ export function createApp({
   search = null,
   searchReindex = null,
   embedding = null,
+  externalPlatformAdmin = null,
+  externalPlatformGateway = null,
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
+  publicApiBaseUrl = null,
   staticRoot,
   logger = console,
 }) {
@@ -1027,11 +1030,24 @@ export function createApp({
         throw new AppError(404, 'not_found', 'Route not found')
       }
 
-      if (request.method === 'OPTIONS') {
+      // Bearer-key public routes are intentionally callable by browser clients
+      // hosted on the separately isolated Admin listener. The token is supplied
+      // explicitly (never a cookie), so wildcard origin does not grant ambient
+      // authority. Expose only the delivery headers needed to distinguish a
+      // live dispatch, cache/fallback and idempotent replay.
+      if (listenerMode !== 'admin' && isPublicPath) {
+        response.setHeader('access-control-allow-origin', '*')
+        response.setHeader(
+          'access-control-expose-headers',
+          'idempotent-replay, x-mx-insight-request-id, x-mx-insight-source-mode, x-mx-insight-captured-at, age, warning',
+        )
+      }
+
+      if (request.method === 'OPTIONS' && isPublicPath) {
         response.writeHead(204, {
           'access-control-allow-origin': '*',
-          'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key, x-mx-insight-admin-token',
-          'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key',
+          'access-control-allow-methods': 'GET, POST, OPTIONS',
         })
         response.end()
         return
@@ -1167,6 +1183,9 @@ export function createApp({
             capabilities: principal.capabilities,
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
+            // Deployment routing metadata, not a credential. Browser clients
+            // still need their ordinary Hub Public API key for every public call.
+            publicApiBaseUrl,
             // Diagnostic pair for federated sessions: what the provider said,
             // and what would have granted platform admin.
             ...(principal.launcherScopes
@@ -1909,6 +1928,78 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/internal/v1/admin/usage') {
         sendJson(response, 200, {
           data: await scopedUsageFor(principal, queryFilters(searchParams)),
+          requestId,
+        })
+        return
+      }
+
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {
+        requireSourceAdmin(principal)
+        if (!externalPlatformAdmin) {
+          throw new AppError(503, 'external_platform_store_unavailable', 'External platform analytics are unavailable')
+        }
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'range')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported external-platform query fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.overview(searchParams.get('range') || '7d'),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/credential/reveal')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform credential reveal')
+        if (typeof externalPlatformAdmin?.revealCredential !== 'function') {
+          throw new AppError(503, 'external_platform_credential_store_unavailable', 'External platform credential storage is unavailable')
+        }
+        const body = await readJson(request, 16 * 1024)
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new AppError(400, 'invalid_external_platform_credential_reveal', 'Request body must be an object')
+        }
+        const unsupported = Object.keys(body).filter((field) => field !== 'adminToken')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'invalid_external_platform_credential_reveal', `Request contains unsupported field ${unsupported[0]}`)
+        }
+        if (!adminToken || typeof body.adminToken !== 'string' || !secureEqual(body.adminToken, adminToken)) {
+          throw new AppError(403, 'admin_token_reauthentication_required', 'Re-enter the Hub admin token to reveal this credential')
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.revealCredential(params.provider),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/credential')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform credential update')
+        if (typeof externalPlatformAdmin?.updateCredential !== 'function') {
+          throw new AppError(503, 'external_platform_credential_store_unavailable', 'External platform credential storage is unavailable')
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.updateCredential(
+            params.provider,
+            await readJson(request, 16 * 1024),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        if (!externalPlatformAdmin) {
+          throw new AppError(503, 'external_platform_store_unavailable', 'External platform analytics are unavailable')
+        }
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'range')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported external-platform query fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.detail(params.provider, searchParams.get('range') || '7d'),
           requestId,
         })
         return
@@ -3994,6 +4085,75 @@ export function createApp({
         sendJson(response, 200, { ...payload, requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/ecommerce/products/media') {
+        const downstream = new AbortController()
+        let deliveryTimer = null
+        let resolveDelivery
+        let deliveryFinished = false
+        const deliveryComplete = new Promise((resolve) => { resolveDelivery = resolve })
+        const finishDelivery = () => {
+          if (deliveryFinished) return
+          deliveryFinished = true
+          if (deliveryTimer) clearTimeout(deliveryTimer)
+          request.removeListener('aborted', cancelDownstream)
+          response.removeListener('close', cancelDownstream)
+          response.removeListener('finish', finishDelivery)
+          resolveDelivery()
+        }
+        const cancelDownstream = () => {
+          downstream.abort()
+          finishDelivery()
+        }
+        request.once('aborted', cancelDownstream)
+        response.once('close', cancelDownstream)
+        response.once('finish', finishDelivery)
+        if (request.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        const context = await requirePublic(request)
+        if (downstream.signal.aborted || request.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        const allowedQueryFields = new Set(['requestId', 'itemId', 'imageIndex'])
+        for (const field of searchParams.keys()) {
+          if (!allowedQueryFields.has(field)) {
+            throw new AppError(400, 'unsupported_fields', `${field} query parameter is not allowed`)
+          }
+        }
+        for (const field of allowedQueryFields) {
+          if (searchParams.getAll(field).length !== 1) {
+            throw new AppError(400, 'invalid_request', `${field} query parameter must appear exactly once`)
+          }
+        }
+        const media = await service.ecommerceProductImage(context, {
+          requestId: requiredQuery(searchParams, 'requestId'),
+          itemId: requiredQuery(searchParams, 'itemId'),
+          imageIndex: requiredQuery(searchParams, 'imageIndex'),
+          signal: downstream.signal,
+          deliveryComplete,
+        })
+        if (downstream.signal.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        deliveryTimer = setTimeout(() => response.destroy(), 15_000)
+        deliveryTimer.unref?.()
+        response.writeHead(200, {
+          'content-type': media.contentType,
+          'content-length': media.body.length,
+          'cache-control': 'private, no-store',
+          'content-security-policy': "default-src 'none'; sandbox",
+          'cross-origin-resource-policy': 'same-origin',
+          'referrer-policy': 'no-referrer',
+          vary: 'Authorization',
+          'x-content-type-options': 'nosniff',
+          'x-mx-insight-request-id': requestId,
+        })
+        response.end(media.body)
+        return
+      }
       if (request.method === 'GET' && pathname === '/api/v1/data/mobile-commerce/items') {
         const context = await requirePublic(request)
         sendJson(response, 200, {
@@ -4002,6 +4162,28 @@ export function createApp({
             Object.fromEntries(searchParams.entries()),
           ),
           requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/ecommerce/products/search') {
+        const context = await requirePublic(request)
+        if (!externalPlatformGateway) {
+          throw new AppError(503, 'external_platform_unavailable', 'External product search is unavailable')
+        }
+        const result = await externalPlatformGateway.search(context, {
+          body: await readJson(request, 64 * 1024),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
         })
         return
       }
@@ -4353,17 +4535,26 @@ export function createApp({
 
       throw new AppError(404, 'not_found', 'Route not found')
     } catch (error) {
+      if (response.destroyed || response.writableEnded) return
       const appError = error instanceof AppError
         ? error
         : new AppError(500, 'internal_error', 'Internal server error')
       if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
+      const detailRequestId = appError.details?.requestId
+      const durableRequestId = typeof detailRequestId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(detailRequestId)
+        ? detailRequestId
+        : null
+      if (durableRequestId) {
+        response.setHeader('x-mx-insight-request-id', durableRequestId)
+      }
       sendJson(response, appError.status, {
         error: {
           code: appError.code,
           message: appError.message,
           ...(appError.details ? { details: appError.details } : {}),
         },
-        requestId,
+        requestId: durableRequestId || requestId,
       })
     }
   }

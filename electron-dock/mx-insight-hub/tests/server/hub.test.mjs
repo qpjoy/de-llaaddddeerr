@@ -3,7 +3,11 @@ import { createServer } from 'node:http'
 import { after, before, test } from 'node:test'
 import { NightAllAdapter } from '../../server/adapters/night-all.mjs'
 import { createApp } from '../../server/app.mjs'
-import { loadConfig, parseDeploymentEgressSnapshot } from '../../server/config.mjs'
+import {
+  loadConfig,
+  parseDeploymentEgressSnapshot,
+  preflightJustOneConfig,
+} from '../../server/config.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -171,6 +175,154 @@ test('public listener does not require or receive an admin token', () => {
     () => loadConfig({ MX_INSIGHT_LISTENER_MODE: 'admin', MX_INSIGHT_STORE: 'memory', MX_INSIGHT_API_KEY_PEPPER: PEPPER }),
     /MX_INSIGHT_ADMIN_TOKEN is required/,
   )
+})
+
+test('public browser origin is optional, normalized and rejects unsafe URL parts', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  assert.equal(loadConfig(base).publicApiBaseUrl, null)
+  assert.equal(
+    loadConfig({ ...base, MX_INSIGHT_PUBLIC_URL: ' https://Hub.Example:443/ ' }).publicApiBaseUrl,
+    'https://hub.example',
+  )
+  assert.equal(
+    loadConfig({ ...base, MX_INSIGHT_PUBLIC_URL: 'http://10.88.88.88:18150' }).publicApiBaseUrl,
+    'http://10.88.88.88:18150',
+  )
+
+  for (const value of [
+    'ftp://hub.example',
+    'https://user:secret@hub.example',
+    'https://hub.example/api',
+    'https://hub.example?target=public',
+    'https://hub.example/#docs',
+    `https://hub.example/${'x'.repeat(2_100)}`,
+  ]) {
+    assert.throws(
+      () => loadConfig({ ...base, MX_INSIGHT_PUBLIC_URL: value }),
+      (error) => error?.status === 500 && error?.code === 'invalid_configuration',
+    )
+  }
+})
+
+test('optional external-platform configuration keeps credentials off the admin plane and unknown billing explicit', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  const disabled = loadConfig(base)
+  assert.equal(disabled.justOne.token, null)
+  assert.equal(disabled.justOne.configured, false)
+  assert.equal(disabled.justOne.contractVerified, false)
+  assert.equal(disabled.justOne.dispatchEnabled, false)
+  assert.equal(disabled.justOne.configurationError, null)
+  assert.equal(disabled.justOne.unknownFingerprintCooldownMs, 900_000)
+  assert.equal(disabled.justOne.billing.source, 'unknown')
+  assert.equal(disabled.justOne.billing.freeDailyCalls, null)
+
+  const adminSignal = loadConfig({ ...base, MX_INSIGHT_JUSTONE_CONFIGURED: '1' })
+  assert.equal(adminSignal.justOne.configured, true)
+  assert.equal(adminSignal.justOne.token, null)
+  assert.equal(adminSignal.justOne.dispatchEnabled, false)
+
+  const configured = loadConfig({
+    ...base,
+    MX_INSIGHT_JUSTONE_TOKEN: 'provider-token',
+    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_JUSTONE_BILLING_JSON: JSON.stringify({
+      source: 'manual',
+      currency: 'CNY',
+      pricingAsOf: '2026-09-03T00:00:00Z',
+      freeDailyCalls: 100,
+      unitCostMinorByEndpoint: { 'jd.product-search.v1': 5 },
+    }),
+  })
+  assert.equal(configured.justOne.configured, true)
+  assert.equal(configured.justOne.contractVerified, true)
+  assert.equal(configured.justOne.dispatchEnabled, true)
+  assert.equal(configured.justOne.billing.unitCostMinorByEndpoint['jd.product-search.v1'], 5)
+  const isolatedFailure = loadConfig({
+    ...base,
+    MX_INSIGHT_JUSTONE_TOKEN: 'must-not-survive-a-bad-config',
+    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_JUSTONE_TIMEOUT_MS: '120001',
+  })
+  assert.equal(isolatedFailure.justOne.token, null)
+  assert.equal(isolatedFailure.justOne.dispatchEnabled, false)
+  assert.equal(isolatedFailure.justOne.configurationError.code, 'invalid_configuration')
+  assert.match(isolatedFailure.justOne.configurationError.message, /must not exceed 120000/)
+  assert.doesNotMatch(JSON.stringify(isolatedFailure.justOne), /must-not-survive/)
+  assert.throws(
+    () => preflightJustOneConfig({ ...base, MX_INSIGHT_JUSTONE_TIMEOUT_MS: '120001' }),
+    /must not exceed 120000/,
+  )
+})
+
+test('JustOne activation is fail-closed and strict preflight validates TTL and paid-dispatch lease bounds', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  const awaitingVerification = loadConfig({
+    ...base,
+    MX_INSIGHT_JUSTONE_TOKEN: 'provider-token',
+  })
+  assert.equal(awaitingVerification.justOne.configured, true)
+  assert.equal(awaitingVerification.justOne.contractVerified, false)
+  assert.equal(awaitingVerification.justOne.dispatchEnabled, false)
+
+  const invalidTtl = loadConfig({
+    ...base,
+    MX_INSIGHT_JUSTONE_FRESH_TTL_MS: '60001',
+    MX_INSIGHT_JUSTONE_STALE_TTL_MS: '60000',
+  })
+  assert.equal(invalidTtl.justOne.dispatchEnabled, false)
+  assert.match(invalidTtl.justOne.configurationError.message, /greater than or equal/)
+  assert.throws(
+    () => preflightJustOneConfig({
+      ...base,
+      MX_INSIGHT_JUSTONE_FRESH_TTL_MS: '60001',
+      MX_INSIGHT_JUSTONE_STALE_TTL_MS: '60000',
+    }),
+    /greater than or equal/,
+  )
+
+  const insufficientLease = loadConfig({
+    ...base,
+    MX_INSIGHT_JUSTONE_TOKEN: 'provider-token',
+    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_JUSTONE_TIMEOUT_MS: '120000',
+    MX_INSIGHT_RESERVATION_LEASE_MS: '149999',
+  })
+  assert.equal(insufficientLease.reservationLeaseMs, 149999)
+  assert.equal(insufficientLease.justOne.dispatchEnabled, false)
+  assert.match(insufficientLease.justOne.configurationError.message, /plus 30000/)
+  assert.throws(
+    () => preflightJustOneConfig({
+      ...base,
+      MX_INSIGHT_JUSTONE_TOKEN: 'provider-token',
+      MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+      MX_INSIGHT_JUSTONE_TIMEOUT_MS: '120000',
+      MX_INSIGHT_RESERVATION_LEASE_MS: '149999',
+    }),
+    /plus 30000/,
+  )
+
+  for (const badEnvironment of [
+    { MX_INSIGHT_JUSTONE_BILLING_JSON: '{' },
+    { MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '0' },
+  ]) {
+    const isolated = loadConfig({ ...base, ...badEnvironment })
+    assert.equal(isolated.justOne.dispatchEnabled, false)
+    assert.equal(isolated.justOne.configurationError.code, 'invalid_configuration')
+    assert.doesNotThrow(() => JSON.stringify(isolated.justOne.configurationError))
+    assert.throws(() => preflightJustOneConfig({ ...base, ...badEnvironment }))
+  }
 })
 
 test('explicit Elasticsearch URL wins over the Kubernetes service fallback', () => {
@@ -557,7 +709,7 @@ test('health reports liveness and dependencies', async () => {
 })
 
 test('listener modes fail closed across public and admin planes', async () => {
-  async function isolatedCall(listenerMode, path, headers, method = 'GET') {
+  async function isolatedResponse(listenerMode, path, headers, method = 'GET') {
     const isolated = createServer(createApp({
       service,
       store,
@@ -568,11 +720,13 @@ test('listener modes fail closed across public and admin planes', async () => {
     }))
     await new Promise((resolve) => isolated.listen(0, '127.0.0.1', resolve))
     try {
-      const response = await fetch(`http://127.0.0.1:${isolated.address().port}${path}`, { headers, method })
-      return response.status
+      return await fetch(`http://127.0.0.1:${isolated.address().port}${path}`, { headers, method })
     } finally {
       await new Promise((resolve) => isolated.close(resolve))
     }
+  }
+  async function isolatedCall(listenerMode, path, headers, method = 'GET') {
+    return (await isolatedResponse(listenerMode, path, headers, method)).status
   }
 
   assert.equal(
@@ -591,6 +745,22 @@ test('listener modes fail closed across public and admin planes', async () => {
     await isolatedCall('admin', '/api/v1/data/capabilities', { authorization: 'Bearer invalid' }),
     404,
   )
+  const adminPublicPreflight = await isolatedResponse(
+    'admin',
+    '/api/v1/data/ecommerce/products/search',
+    { origin: 'https://console.example.test', 'access-control-request-method': 'POST' },
+    'OPTIONS',
+  )
+  assert.equal(adminPublicPreflight.status, 404)
+  assert.equal(adminPublicPreflight.headers.get('access-control-allow-origin'), null)
+  const publicAdminPreflight = await isolatedResponse(
+    'public',
+    '/internal/v1/admin/session',
+    { origin: 'https://console.example.test', 'access-control-request-method': 'GET' },
+    'OPTIONS',
+  )
+  assert.equal(publicAdminPreflight.status, 404)
+  assert.equal(publicAdminPreflight.headers.get('access-control-allow-origin'), null)
 
   const publicServer = createServer(createApp({
     service,

@@ -4,7 +4,7 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
-export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
@@ -439,7 +439,7 @@ const idempotencyParameter = {
   name: 'Idempotency-Key',
   in: 'header',
   required: true,
-  description: 'The key is global within one consumer. Reuse it only when retrying the exact same path and normalized body; a new path, body or page requires a new key.',
+  description: 'The Idempotency-Key is global within one consumer. Reuse it only when retrying the exact same path and normalized body; a new path, body or page requires a new Idempotency-Key.',
   schema: {
     type: 'string',
     minLength: 8,
@@ -450,7 +450,13 @@ const idempotencyParameter = {
 
 const nightAllCompatibilityIdempotencyParameter = {
   ...idempotencyParameter,
-  description: 'Permanently names one immutable paid dispatch for this exact path and normalized body. Reuse always replays that result; use a new key only when intentionally requesting a new live call.',
+  description: 'Permanently names one immutable provider dispatch for this exact path and normalized body. The dispatch may consume provider quota or Hub procurement cost; it does not prove a Hub customer charge. Reuse always replays that result; use a new Idempotency-Key only when intentionally requesting a new live call.',
+}
+
+const externalCommerceIdempotencyParameter = {
+  ...idempotencyParameter,
+  required: false,
+  description: 'Optional for cache_only and cache_first, but required for refresh. Reuse the same Idempotency-Key only for a transport retry of the exact same page request. Every next-page request changes the body and must use a new Idempotency-Key. When omitted, Hub derives a short-lived freshness-bucket key for the normalized request.',
 }
 
 const searchResponse = {
@@ -470,6 +476,68 @@ const searchResponse = {
       schema: { $ref: '#/components/schemas/SearchEnvelope' },
     },
   },
+}
+
+const externalCommerceProductSearchResponse = {
+  description: 'Provider-neutral product results plus explicit Hub freshness metadata.',
+  headers: {
+    'x-mx-insight-request-id': {
+      description: 'Durable Hub request identifier.',
+      schema: { type: 'string', format: 'uuid' },
+    },
+    'idempotent-replay': {
+      description: 'Whether this body is the committed result for the same caller-supplied idempotency key.',
+      schema: { type: 'string', enum: ['true', 'false'] },
+    },
+    'x-mx-insight-source-mode': {
+      description: 'How Hub satisfied this request.',
+      schema: {
+        type: 'string',
+        enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+      },
+    },
+    'x-mx-insight-captured-at': {
+      description: 'When the delivered external-data snapshot was captured.',
+      schema: { type: 'string', format: 'date-time' },
+    },
+    Age: {
+      description: 'Whole seconds between capture and delivery.',
+      schema: { type: 'integer', minimum: 0 },
+    },
+    Warning: {
+      description: 'HTTP Warning 110 is present when sourceMode is stored_fallback.',
+      schema: { type: 'string' },
+    },
+  },
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/ExternalCommerceProductSearchEnvelope' },
+    },
+  },
+}
+
+const externalCommerceProductMediaResponse = {
+  description: 'A bounded image retained by the same consumer search response and fetched through the Hub media relay. This read does not create Hub usage or dispatch a product-search request.',
+  headers: {
+    'x-mx-insight-request-id': {
+      description: 'Request identifier for this media read, distinct from the search requestId query parameter.',
+      schema: { type: 'string', format: 'uuid' },
+    },
+    'cache-control': {
+      description: 'Prevents a consumer-authorized image response from being retained by shared or browser caches.',
+      schema: { type: 'string', example: 'private, no-store' },
+    },
+    vary: {
+      description: 'Declares that authorization is part of the response selection boundary.',
+      schema: { type: 'string', example: 'Authorization' },
+    },
+  },
+  content: Object.fromEntries(
+    ['image/jpeg', 'image/png', 'image/webp']
+      .map((contentType) => [contentType, {
+        schema: { type: 'string', format: 'binary' },
+      }]),
+  ),
 }
 
 const nightAllCompatibilityResponse = {
@@ -641,6 +709,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
     { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
     { name: 'Virtual Supermarket', description: 'Reconstruct the on-shelf Hub storefront using semantic department, aisle, shelf and position data.' },
+    { name: 'External Data', description: 'Call governed external data platforms through provider-neutral Hub contracts.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
@@ -761,6 +830,19 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         source: 'hub',
                         servingMode: 'stored',
                       },
+                      {
+                        platform: 'ecommerce',
+                        ready: true,
+                        capabilities: ['product_search'],
+                        source: 'hub',
+                        servingMode: 'live_with_stored_fallback',
+                        contractVersion: 'mx-insight-hub.ecommerce-products.v1',
+                        marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+                        pagination: 'opaque_cursor',
+                        idempotencyKey: 'optional',
+                        deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+                        freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+                      },
                       { platform: 'xiaohongshu', ready: true },
                       { platform: 'twitter', ready: true },
                     ],
@@ -796,12 +878,138 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         },
       },
     },
+    '/data/ecommerce/products/search': {
+      post: {
+        tags: ['External Data'],
+        operationId: 'searchExternalCommerceProducts',
+        summary: 'Search marketplace products through the governed external data gateway',
+        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, deliveryMode, page, cursor, sort and price; pageSize and provider-routing fields are not part of this contract. deliveryMode defaults to cache_first: cache_only never dispatches external acquisition and returns 404 when no exact snapshot exists; refresh bypasses a fresh snapshot, requires a caller-supplied Idempotency-Key and may still deliver an exact stored fallback when acquisition fails. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
+        'x-mx-error-codes': {
+          400: [
+            'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
+            'invalid_query', 'invalid_page', 'invalid_cursor', 'invalid_pagination',
+            'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
+            'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
+            'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
+          ],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'test_key_not_supported'],
+          404: ['stored_snapshot_not_found'],
+          409: [
+            'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
+            'external_platform_response_unusable',
+          ],
+          413: ['payload_too_large'],
+          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+          502: [
+            'external_platform_response_unusable', 'external_platform_outcome_unknown',
+            'external_platform_rejected',
+          ],
+          503: [
+            'external_platform_unavailable', 'external_platform_not_configured',
+            'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+          ],
+        },
+        parameters: [externalCommerceIdempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/ExternalCommerceProductSearchRequest' },
+              examples: {
+                firstPage: {
+                  summary: 'First page',
+                  value: { marketplace: 'jd', query: 'AI recorder' },
+                },
+                storedOnly: {
+                  summary: 'Read an exact Hub snapshot without external acquisition',
+                  value: { marketplace: 'jd', query: 'AI recorder', deliveryMode: 'cache_only' },
+                },
+                explicitRefresh: {
+                  summary: 'Bypass a fresh snapshot and attempt one governed acquisition',
+                  value: { marketplace: 'jd', query: 'AI recorder', deliveryMode: 'refresh' },
+                },
+                continuation: {
+                  summary: 'Continuation with the opaque Hub cursor',
+                  value: { marketplace: 'jd', query: 'AI recorder', cursor: 'opaque-next-cursor' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: externalCommerceProductSearchResponse,
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          409: errorResponse,
+          413: errorResponse,
+          429: errorResponse,
+          502: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    '/data/ecommerce/products/media': {
+      get: {
+        tags: ['External Data'],
+        operationId: 'getExternalCommerceProductMedia',
+        summary: 'Read one retained product image through the governed Hub media relay',
+        'x-mx-strict-query': true,
+        description: 'Authenticates an ordinary Live Hub Public API key and requires the same consumer identity that received a committed ecommerce search result. Test keys are rejected before any store or image-loader work. requestId identifies that response, itemId identifies one returned item and imageIndex selects one of its retained images; these are the only accepted query parameters and each must appear exactly once. Hub never accepts an arbitrary URL on this endpoint. The relay permits bounded public HTTPS JPEG, PNG and WebP images only, validates DNS and every redirect, limits dimensions, duration, rate and concurrency, and rejects private-network destinations, oversized bodies and mismatched content. This read creates no Hub usage record and dispatches no product-search request.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'test_key_not_supported'],
+          404: ['external_media_not_found'],
+          413: ['external_media_too_large'],
+          415: ['external_media_type_rejected', 'external_media_content_invalid', 'external_media_dimensions_rejected'],
+          422: ['external_media_url_invalid', 'external_media_url_blocked', 'external_media_host_blocked'],
+          429: ['external_media_rate_limited', 'external_media_busy'],
+          502: ['external_media_unavailable', 'external_media_redirect_rejected'],
+          503: ['external_media_unavailable'],
+          504: ['external_media_timeout'],
+        },
+        parameters: [
+          {
+            name: 'requestId', in: 'query', required: true,
+            description: 'requestId from the committed ecommerce search response that contained the image reference.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            name: 'itemId', in: 'query', required: true,
+            description: 'Exact item id from that response.',
+            schema: { type: 'string', minLength: 1, maxLength: 512 },
+          },
+          {
+            name: 'imageIndex', in: 'query', required: true,
+            description: 'Zero-based index into that item\'s images array.',
+            schema: { type: 'integer', minimum: 0, maximum: 19 },
+          },
+        ],
+        responses: {
+          200: externalCommerceProductMediaResponse,
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          413: errorResponse,
+          415: errorResponse,
+          422: errorResponse,
+          429: errorResponse,
+          502: errorResponse,
+          503: errorResponse,
+          504: errorResponse,
+        },
+      },
+    },
     '/data/search': {
       post: {
         tags: ['Search'],
         operationId: 'searchData',
         summary: 'Search one explicitly selected platform',
-        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. public_opinion is Hub-local and is deliberately rejected by this Night-All-oriented compatibility route; use the province feed, /data/stored/search or /data/canonical/search. Each page uses its own idempotency key; replay the same body with the same key.',
+        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. public_opinion is Hub-local and is deliberately rejected by this Night-All-oriented compatibility route; use the province feed, /data/stored/search or /data/canonical/search. Each page uses its own Idempotency-Key; replay the same body with the same Idempotency-Key.',
         'x-mx-error-codes': {
           400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields', 'unsupported_match_mode', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported'],
           401: ['api_key_required', 'invalid_api_key'],
@@ -839,7 +1047,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Compatibility'],
         operationId: 'searchNightAllCompatibility',
         summary: 'Call one of the three Night-All legacy search operations',
-        description: 'The Hub authenticates and authorizes the platform, then checks the Hub-pinned, grant-filtered data.legacySearch dispatch matrix returned by GET /data/capabilities. The selected platform must appear in both supportedPlatforms and readyPlatforms; a data.platforms entry alone, including telegram, does not grant a legacy operation. The matrix is owned by the deployed Hub release and is not fetched from Night-All at request time. readyPlatforms means Hub permits dispatch under that pinned contract; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. A null or invalid matrix fails closed before dispatch. The Hub injects its consumer businessId, records the attempt, and stores complete responses as exact last-good snapshots. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return that exact snapshot. An unusable 2xx is outcome-unknown because paid work may already have happened. The response body retains Night-All data fields unchanged. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy. Work-budget arithmetic bounds returned/processed item work, not Night-All provider calls or billing.',
+        description: 'The Hub authenticates and authorizes the platform, then checks the Hub-pinned, grant-filtered data.legacySearch dispatch matrix returned by GET /data/capabilities. The selected platform must appear in both supportedPlatforms and readyPlatforms; a data.platforms entry alone, including telegram, does not grant a legacy operation. The matrix is owned by the deployed Hub release and is not fetched from Night-All at request time. readyPlatforms means Hub permits dispatch under that pinned contract; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. A null or invalid matrix fails closed before dispatch. The Hub injects its consumer businessId, records the attempt, and stores complete responses as exact last-good snapshots. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return that exact snapshot. An unusable 2xx is outcome-unknown because supplier quota or internal procurement cost may already have been consumed. The response body retains Night-All data fields unchanged. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy. Work-budget arithmetic bounds returned/processed item work, not Night-All provider calls or billing.',
         'x-mx-error-codes': {
           400: ['invalid_request', 'invalid_cursor', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported', 'night_all_rejected'],
           401: ['api_key_required', 'invalid_api_key'],
@@ -1639,7 +1847,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Evidence'],
         operationId: 'getPublicRequestStatus',
         summary: 'Read the outcome of a request owned by this consumer',
-        description: 'Use x-mx-insight-request-id from a search response. An unknown status is ambiguous: do not repeat with a new idempotency key.',
+        description: 'Use x-mx-insight-request-id from a search response. This GET creates no usage and cannot dispatch an upstream call. reserved and unknown remain ambiguous and must not be POSTed again; committed permits exact replay; released requires a newly confirmed acquisition intent.',
         parameters: [{
           name: 'requestId', in: 'path', required: true,
           schema: { type: 'string', format: 'uuid' },
@@ -1680,13 +1888,13 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         type: 'http',
         scheme: 'bearer',
         bearerFormat: 'MX-API-Key',
-        description: 'Authorization: Bearer <issued API key>',
+        description: 'Authorization: Bearer <ordinary Hub Public API key issued through API Keys>. The key resolves to one consumer. Hub resolves grants and quotas for that identity; future customer pricing will resolve through its versioned subscription and price-book snapshot without requiring another credential.',
       },
       apiKeyHeader: {
         type: 'apiKey',
         in: 'header',
         name: 'x-api-key',
-        description: 'Alternative to the Bearer header.',
+        description: 'The same ordinary Hub Public API key as bearerKey, supplied through x-api-key instead of Authorization. This is not a provider credential or a product-specific key.',
       },
     },
     schemas: {
@@ -1700,6 +1908,167 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Opaque nextCursor from the prior page.' },
           type: resultTypeProperty,
+        },
+      },
+      ExternalCommerceProductSearchRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['marketplace', 'query'],
+        not: { required: ['page', 'cursor'] },
+        description: 'Provider-neutral product search. deliveryMode controls only whether Hub may dispatch external acquisition; it never selects a provider. page and cursor are mutually exclusive. The server owns result-size policy; pageSize is intentionally unsupported.',
+        properties: {
+          marketplace: {
+            type: 'string',
+            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+          },
+          query: { type: 'string', minLength: 1, maxLength: 200 },
+          deliveryMode: {
+            type: 'string',
+            enum: ['cache_only', 'cache_first', 'refresh'],
+            default: 'cache_first',
+            description: 'cache_only reads only an exact Hub snapshot and never dispatches externally; cache_first reuses a fresh snapshot before acquisition; refresh bypasses a fresh snapshot, requires Idempotency-Key and may fall back to an exact stored snapshot after an acquisition failure.',
+          },
+          page: {
+            type: 'integer', minimum: 1, maximum: 1000, default: 1,
+            description: 'Numeric page for a first traversal. Do not combine with cursor; continuation cursors are preferred.',
+          },
+          cursor: {
+            type: 'string', minLength: 1, maxLength: 4096,
+            description: 'Opaque nextCursor from the prior response. Return it unchanged with the same marketplace, query, sort and price.',
+          },
+          sort: {
+            type: 'string',
+            enum: ['relevance', 'sales_desc', 'price_asc', 'price_desc', 'recent', 'seller_credit', 'price_drop', 'newest'],
+            description: 'Marketplace-specific. taobao/tmall accept relevance, sales_desc, price_asc and price_desc; xianyu accepts relevance, recent, seller_credit, price_asc, price_desc, price_drop and newest; jd and xiaohongshu_ec do not accept sort.',
+          },
+          price: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Optional taobao/tmall-only inclusive price range. min must not exceed max.',
+            properties: {
+              min: {
+                type: 'string',
+                pattern: '^(?:0|[1-9][0-9]{0,11})(?:[.][0-9]{1,8})?$',
+              },
+              max: {
+                type: 'string',
+                pattern: '^(?:0|[1-9][0-9]{0,11})(?:[.][0-9]{1,8})?$',
+              },
+            },
+          },
+        },
+      },
+      ExternalCommerceProduct: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'marketplace', 'title', 'url', 'pricing', 'shop', 'images', 'signals', 'attributes'],
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 256 },
+          marketplace: {
+            type: 'string',
+            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+          },
+          title: { type: ['string', 'null'], maxLength: 4096 },
+          url: { type: ['string', 'null'], format: 'uri', maxLength: 2048 },
+          pricing: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['current', 'original', 'currency'],
+            properties: {
+              current: { type: ['string', 'null'], maxLength: 128 },
+              original: { type: ['string', 'null'], maxLength: 128 },
+              currency: { type: 'string', minLength: 1, maxLength: 16 },
+            },
+          },
+          shop: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['id', 'name'],
+            properties: {
+              id: { type: ['string', 'null'], maxLength: 256 },
+              name: { type: ['string', 'null'], maxLength: 512 },
+            },
+          },
+          images: {
+            type: 'array', maxItems: 20,
+            items: { type: 'string', format: 'uri', maxLength: 2048 },
+          },
+          signals: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['sales', 'reviewCount', 'location'],
+            properties: {
+              sales: { type: ['string', 'null'], maxLength: 128 },
+              reviewCount: { type: ['string', 'null'], maxLength: 128 },
+              location: { type: ['string', 'null'], maxLength: 512 },
+            },
+          },
+          attributes: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['brand', 'category'],
+            properties: {
+              brand: { type: ['string', 'null'], maxLength: 512 },
+              category: { type: ['string', 'null'], maxLength: 512 },
+            },
+          },
+        },
+      },
+      ExternalCommerceProductSearchPage: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['page', 'returnedCount', 'discardedCount', 'hasMore', 'nextCursor'],
+        properties: {
+          page: { type: 'integer', minimum: 1, maximum: 1000 },
+          returnedCount: { type: 'integer', minimum: 0 },
+          discardedCount: { type: 'integer', minimum: 0 },
+          hasMore: {
+            type: ['boolean', 'null'],
+            description: 'null means the platform hinted at more data but Hub could not issue a safe continuation; do not guess another page.',
+          },
+          nextCursor: {
+            type: ['string', 'null'], maxLength: 4096,
+            description: 'Opaque Hub cursor. null means the client must stop this traversal.',
+          },
+        },
+      },
+      ExternalCommerceProductSearchEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'data', 'meta', 'requestId'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.ecommerce-products.v1' },
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items', 'page'],
+            properties: {
+              items: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/ExternalCommerceProduct' },
+              },
+              page: { $ref: '#/components/schemas/ExternalCommerceProductSearchPage' },
+            },
+          },
+          meta: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['capturedAt', 'servedAt', 'sourceMode', 'ageSeconds'],
+            properties: {
+              capturedAt: { type: 'string', format: 'date-time' },
+              servedAt: { type: 'string', format: 'date-time' },
+              sourceMode: {
+                type: 'string',
+                enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+              },
+              ageSeconds: { type: 'integer', minimum: 0 },
+              fallbackReason: {
+                type: 'string',
+                description: 'Bounded reason category present only for stored_fallback.',
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
         },
       },
       NightAllLegacyRequest: {
@@ -3547,7 +3916,29 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     platform: { type: 'string' }, ready: { type: 'boolean' },
                     capabilities: { type: 'array', items: { type: 'string' } },
                     source: { type: 'string', enum: ['hub'], description: 'Present for Hub-owned platform entries.' },
-                    servingMode: { type: 'string', enum: ['stored'], description: 'Present for Hub-owned stored-data entries.' },
+                    servingMode: {
+                      type: 'string',
+                      enum: ['stored', 'live_with_stored_fallback'],
+                      description: 'Present for Hub-owned stored or governed live-with-fallback entries.',
+                    },
+                    contractVersion: { type: 'string', description: 'Stable Hub contract version when the platform exposes one.' },
+                    marketplaces: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'] },
+                    },
+                    pagination: { type: 'string', enum: ['opaque_cursor'] },
+                    idempotencyKey: { type: 'string', enum: ['optional'] },
+                    deliveryModes: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'] },
+                    },
+                    freshnessModes: {
+                      type: 'array',
+                      items: {
+                        type: 'string',
+                        enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+                      },
+                    },
                     context: { $ref: '#/components/schemas/CanonicalContextCapability' },
                     timeline: { $ref: '#/components/schemas/CanonicalTimelineCapability' },
                   },
@@ -3678,17 +4069,18 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
 }
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
-  { key: 'start', path: '/docs', label: '开始调用' },
-  { key: 'rules', path: '/docs/auth', label: '认证与调用规则' },
-  { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录' },
-  { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市' },
-  { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话' },
-  { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情' },
-  { key: 'search', path: '/docs/search', label: '通用搜索' },
-  { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层' },
-  { key: 'tools', path: '/docs/tools', label: '通用工具' },
-  { key: 'discovery', path: '/docs/evidence', label: '能力与证据' },
-  { key: 'errors', path: '/docs/errors', label: '错误与重试' },
+  { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
+  { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
+  { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录', section: '数据目录' },
+  { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
+  { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
+  { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
+  { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
+  { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
+  { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
+  { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
+  { key: 'discovery', path: '/docs/evidence', label: '能力与证据', section: '运维契约' },
+  { key: 'errors', path: '/docs/errors', label: '错误与重试', section: '运维契约' },
 ])
 
 const PUBLIC_DOCS_ROUTE_ALIASES = Object.freeze({
@@ -3716,6 +4108,8 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
     .brand strong { display:block; font-size:16px; }
     .brand span,.eyebrow,.muted { color:var(--muted); }
     nav a { display:block; padding:7px 10px; border-left:2px solid transparent; color:var(--muted); }
+    .nav-section { display:block; margin:17px 10px 4px; color:#5f758b; font-size:10px; font-weight:800; letter-spacing:.13em; text-transform:uppercase; }
+    nav .nav-section:first-child { margin-top:0; }
     nav a:hover { border-color:var(--cyan); color:var(--text); text-decoration:none; background:#11202d; }
     nav a.active { border-color:var(--cyan); color:var(--cyan); background:#112b31; }
     main { width:min(1120px,100%); padding:54px clamp(24px,5vw,72px) 90px; }
@@ -3758,7 +4152,7 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
   <main>
     <section class="doc-page" data-doc-page="start">
     <header id="start"><div class="eyebrow">Consumer contract · API v1</div><h1>统一数据访问，<br>由授权边界控制。</h1>
-      <p class="lead">通过一个调用者 API Key 访问已授权平台与通用能力。Telegram 与省级舆情数据由 Hub 的规范化数据层提供，通用搜索和分词工具保持稳定响应结构。</p></header>
+      <p class="lead">通过一把 Hub Public API Key 访问该调用身份已授权的平台与通用能力。Telegram 与省级舆情数据由 Hub 的规范化数据层提供，通用搜索和分词工具保持稳定响应结构。</p></header>
     <div class="cards"><div class="card"><strong>Base path</strong><code>/api/v1</code></div><div class="card"><strong>Authentication</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>Machine contract</strong><a href="/docs/openapi.json">OpenAPI 3.1 JSON</a></div></div>
     <script>${PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT}</script>
     </section>
@@ -3776,8 +4170,8 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
     <h3>幂等、游标与配额</h3>
     <table><thead><tr><th>规则</th><th>客户端行为</th></tr></thead><tbody>
-      <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一。仅在重试完全相同的路径和规范化 body 时复用；新路径、新 body 或新页面必须使用新 Key。</td></tr>
-      <tr><td>舆情可见性契约升级</td><td>可命中 <code>public_opinion</code> 的 stored/canonical 搜索会把 formal/candidate 可见性契约写入幂等指纹。升级后不要复用升级前的 Key；请生成新 Key。旧 Key 会返回 <code>409 idempotency_conflict</code>，不会回放升级前可能未门禁的响应。</td></tr>
+      <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一。仅在重试完全相同的路径和规范化 body 时复用；新路径、新 body 或新页面必须使用新的 <code>Idempotency-Key</code>。</td></tr>
+      <tr><td>舆情可见性契约升级</td><td>可命中 <code>public_opinion</code> 的 stored/canonical 搜索会把 formal/candidate 可见性契约写入幂等指纹。升级后不要复用升级前的 <code>Idempotency-Key</code>；请生成新值。旧值会返回 <code>409 idempotency_conflict</code>，不会回放升级前可能未门禁的响应。</td></tr>
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
@@ -3873,6 +4267,163 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     </tbody></table>
     </section>
 
+    <section class="doc-page" data-doc-page="ecommerce-treasure-box">
+    <h2 id="ecommerce-treasure-box">电商数据百宝箱</h2>
+    <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
+    <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；路径和授权规则不变，新增的可选 <code>deliveryMode</code> 只表达 Hub 是否可以访问外部平台，不是供应方选择器。</div>
+    <p><code>ecommerce</code> 是稳定的数据域，不是某一家供应方的名字；<code>marketplace</code> 是本次要检索的业务站点，也不是供应方选择器。当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移。第二个候选通过合同验证后，Hub 才会在私有路由层按操作、marketplace、已验证合同版本、凭据健康、熔断/配额、成本和租户策略确定性选择。调用方不能通过请求字段指定供应方，也不需要在新增供应方后修改集成。</p>
+    <div class="notice">当前及未来，一次逻辑请求都最多派发给一个外部候选。未来 Hub 只有在尚未创建 provider-call 证据或发出网络请求、且能确定候选不可用时才可改选；一旦外部派发开始，超时、结果未知、可能已消耗供应方额度/内部采购成本或响应不可规范化，都不得自动改投第二家，避免重复成本与语义漂移。</div>
+
+    <h3>1. 授权与运行能力预检</h3>
+    <p>使用管理台“API Keys”签发的同一把 Hub Public API Key，而不是任何上游密钥。无需为 ecommerce 再签一把 Key；为其所属调用身份启用 <code>ecommerce</code> 后即可直接调用，轮换 Key 也无需重配。外部电商采集只接受 <code>mih_live_</code>；旧 <code>mih_test_</code> 只是兼容元数据，不是隔离沙箱，capabilities 会把 ecommerce 报为 <code>ready=false</code>。先检查 capabilities 中的 <code>ecommerce</code> 项；Live Key 的 <code>ready=true</code> 表示当前允许实时调度，false 时仍可能按同一请求返回有效存储兜底。</p>
+    <pre><code>export HUB_URL="https://hub.example.com"
+read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
+export MX_INSIGHT_API_KEY
+printf '\n'
+
+curl -sS "$HUB_URL/api/v1/data/capabilities" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '.data.platforms[] | select(.platform == "ecommerce")'</code></pre>
+    <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>，请求策略为 <code>cache_only / cache_first / refresh</code>。</p>
+    <p><code>401 invalid_api_key</code> 表示认证失败：必须使用同一个 Hub 实例签发时仅展示一次的完整 Hub Public API secret；列表中的掩码、admin token 和外部平台密钥都不能调用公开数据接口。认证通过但其调用身份未授予 ecommerce 时返回 <code>403 platform_not_granted</code>；使用兼容 Test Key 发起正式电商搜索则返回 <code>403 test_key_not_supported</code>，且在建立 usage reservation 或调用供应方前拒绝。授予后原 Live Key 无需重签。</p>
+
+    <h3>2. 发起一次可追踪搜索</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>需要 <code>ecommerce</code> platform grant。body 是严格对象，不接受路由供应方、上游 endpoint、原始参数或 <code>pageSize</code>。省略 <code>deliveryMode</code> 时保持兼容，等同 <code>cache_first</code>。</p></div>
+    <pre><code>REQUEST_KEY="ecommerce-demo-$(uuidgen)"
+REQUEST_BODY='{"marketplace":"jd","query":"便携相机"}'
+
+curl -sS -D /tmp/mx-ecommerce.headers -X POST \
+  "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $REQUEST_KEY" \
+  -d "$REQUEST_BODY" | tee /tmp/mx-ecommerce.json | jq</code></pre>
+    <table><thead><tr><th>字段</th><th>约束</th><th>平台差异</th></tr></thead><tbody>
+      <tr><td><code>marketplace</code></td><td>必填，使用上方五个稳定枚举之一</td><td>决定可用过滤与排序，不决定授权</td></tr>
+      <tr><td><code>query</code></td><td>必填，1–200 字符，NFKC 规范化</td><td>所有平台</td></tr>
+      <tr><td><code>deliveryMode</code></td><td>可选，默认 <code>cache_first</code></td><td><code>cache_only</code> 绝不发起外部采集；<code>cache_first</code> 新鲜快照优先；<code>refresh</code> 绕过新鲜快照并要求显式 Idempotency-Key</td></tr>
+      <tr><td><code>sort</code></td><td>可选；必须是当前 marketplace 支持的值</td><td>淘宝/天猫：<code>relevance|sales_desc|price_asc|price_desc</code>；闲鱼：<code>relevance|recent|seller_credit|price_asc|price_desc|price_drop|newest</code>；京东和小红书电商不接受</td></tr>
+      <tr><td><code>price</code></td><td>可选 <code>{min,max}</code>，金额必须是十进制字符串</td><td>只支持淘宝/天猫</td></tr>
+      <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
+      <tr><td><code>cursor</code></td><td>只使用上页返回的不透明签名值</td><td>绑定 marketplace/query/sort/price；不要解析或拼接</td></tr>
+    </tbody></table>
+    <p>管理端的“每页陈列 3/6/9 件”只对当前已返回批次做本地展示分页，切换时不会调用 Hub、不会新增 usage、也不会触发上游。公开 v1 请求体仍不接受 <code>pageSize</code>；真正读取下一批数据必须使用响应的 <code>nextCursor</code> 并创建新的 Idempotency-Key。</p>
+
+    <h3>3. 消费统一响应</h3>
+    <pre><code>{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [{
+      "id": "platform-native-id",
+      "marketplace": "jd",
+      "title": "便携相机",
+      "url": "https://example.invalid/product",
+      "pricing": { "current": "899.00", "original": null, "currency": "CNY" },
+      "shop": { "id": "shop-id", "name": "店铺名称" },
+      "images": [],
+      "signals": { "sales": null, "reviewCount": "120", "location": "杭州" },
+      "attributes": { "brand": null, "category": "数码影像" }
+    }],
+    "page": { "page": 1, "returnedCount": 1, "discardedCount": 0, "hasMore": false, "nextCursor": null }
+  },
+  "meta": {
+    "capturedAt": "2026-09-06T00:00:00.000Z",
+    "servedAt": "2026-09-06T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}</code></pre>
+    <p>字段没有可靠来源时为 null 或空数组，不由 Hub 猜值。调用方用 <code>contractVersion</code> 选择解析器，用 <code>capturedAt / servedAt / ageSeconds</code> 判断时效，用 <code>sourceMode</code> 判断本次交付路径；不要从响应速度推断是否调用上游。</p>
+
+    <h3>4. 安全读取商品图片</h3>
+    <p>搜索响应的 <code>images[]</code> 是归档引用，浏览器不应直接把任意外部 URL 放入 <code>img src</code>。管理端使用同一把 Hub Public API Key、搜索响应的 <code>requestId</code>、商品 <code>id</code> 和图片序号，从 Hub 受控媒体读取接口获得 Blob；接口不接受 URL 参数。</p>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/ecommerce/products/media</code></div><p>只读取属于同一 consumer、已提交且 HTTP 200 的 ecommerce 搜索快照。仅允许公网 HTTPS 栅格图片，并限制重定向、DNS 目标、类型、内容魔数、超时与 4 MiB 大小。</p></div>
+    <pre><code>SEARCH_REQUEST_ID=$(jq -r '.requestId' /tmp/mx-ecommerce.json)
+ITEM_ID=$(jq -r '.data.items[0].id' /tmp/mx-ecommerce.json)
+
+curl -sS -G "$HUB_URL/api/v1/data/ecommerce/products/media" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode "requestId=$SEARCH_REQUEST_ID" \
+  --data-urlencode "itemId=$ITEM_ID" \
+  --data-urlencode 'imageIndex=0' \
+  -o /tmp/mx-ecommerce-product-image</code></pre>
+    <p>这次媒体读取不创建 Hub usage，也不派发商品搜索或新的外部采集；它可能通过受控中继读取搜索结果已经引用的公网图片。图片不存在或被安全策略拒绝时，客户端应显示占位图，不应回退为直连原始 URL。</p>
+
+    <h3>5. 翻页、返回第一页与幂等重放</h3>
+    <p>完全相同的一页在网络重试时必须复用原 <code>Idempotency-Key</code>。下一页携带 <code>nextCursor</code> 并生成新的 <code>Idempotency-Key</code>；用户返回第一页时，可以重放首次 <code>Idempotency-Key</code> 获得完全相同的已提交结果，也可以用新的 <code>Idempotency-Key</code> 发起一次新的首页读取。两种意图不能混用。</p>
+    <pre><code>NEXT_CURSOR=$(jq -r '.data.page.nextCursor // empty' /tmp/mx-ecommerce.json)
+if [ -n "$NEXT_CURSOR" ]; then
+  NEXT_KEY="ecommerce-next-$(uuidgen)"
+  jq -n --arg cursor "$NEXT_CURSOR" \
+    '{marketplace:"jd",query:"便携相机",cursor:$cursor}' \
+    | curl -sS -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+        -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+        -H 'Content-Type: application/json' \
+        -H "Idempotency-Key: $NEXT_KEY" \
+        --data-binary @- | jq
+fi</code></pre>
+    <div class="notice"><code>hasMore=false</code> 或 <code>hasMore=null</code> 都必须停止。null 表示 Hub 没有足够证据安全地产生 continuation；客户端不能改用自增页码绕过。</div>
+
+    <h3>6. 同一接口的交付与成本语义</h3>
+    <p>请求里的 <code>deliveryMode</code> 是调用意图，响应里的 <code>sourceMode</code> 是实际交付证据，两者不能混为一谈。三种请求策略都使用同一把 Hub Public API Key 和同一路径：</p>
+    <table><thead><tr><th>deliveryMode</th><th>外部采集</th><th>行为</th></tr></thead><tbody>
+      <tr><td><code>cache_only</code></td><td>禁止</td><td>只查同 consumer、同规范化请求的精确 Hub 快照；新鲜返回 <code>fresh_cache</code>，过期但仍在保留期内返回 <code>stored_fallback</code>，没有快照返回 <code>404 stored_snapshot_not_found</code>。</td></tr>
+      <tr><td><code>cache_first</code></td><td>按需</td><td>默认兼容模式；有新鲜快照就直接交付，否则允许一次受治理的外部采集，并在失败时使用精确存量兜底。</td></tr>
+      <tr><td><code>refresh</code></td><td>明确允许</td><td>绕过新鲜快照尝试重新采集，必须提供调用方 Idempotency-Key；上游失败时仍可能返回精确存量兜底，因此是否真的调用及成功必须看证据。</td></tr>
+    </tbody></table>
+    <table><thead><tr><th>sourceMode</th><th>新 Hub usage</th><th>新上游调用</th><th>调用方含义</th></tr></thead><tbody>
+      <tr><td><code>live</code></td><td>是</td><td>是</td><td>本次完成新的实时采集；上游成本以私有计费证据为准。</td></tr>
+      <tr><td><code>fresh_cache</code></td><td>是</td><td>否</td><td>新的客户请求复用仍新鲜的同请求快照。</td></tr>
+      <tr><td><code>stored_fallback</code></td><td>是</td><td>可能</td><td>可能在派发前兜底，也可能在一次失败派发后兜底；不能一概写成零上游费用。</td></tr>
+      <tr><td><code>idempotent_replay</code></td><td>否</td><td>否</td><td>相同 <code>Idempotency-Key</code>、路径和 body 重放原已提交结果。</td></tr>
+    </tbody></table>
+    <p>要安全检查存量而不产生新的外部调用，使用新的请求键和 <code>cache_only</code>。命中仍是一笔新的 Hub 请求/usage；未命中返回 404 并释放预留，但两种情况都不会产生 provider-call：</p>
+    <pre><code>CACHE_ONLY_KEY="ecommerce-cache-only-$(uuidgen)"
+CACHE_ONLY_BODY='{"marketplace":"jd","query":"便携相机","deliveryMode":"cache_only"}'
+
+curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $CACHE_ONLY_KEY" \
+  -d "$CACHE_ONLY_BODY" | jq</code></pre>
+    <p>要明确演示一次可能产生 JustOne 采购成本的新采集，必须由操作者确认后改为 <code>refresh</code>，并创建只属于这次意图的新 Idempotency-Key。不要把它放进 readiness、轮询或自动重试：</p>
+    <pre><code>REFRESH_KEY="ecommerce-refresh-$(uuidgen)"
+REFRESH_BODY='{"marketplace":"jd","query":"便携相机","deliveryMode":"refresh"}'
+
+curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $REFRESH_KEY" \
+  -d "$REFRESH_BODY" | jq '.meta.sourceMode,.requestId,.data.page'</code></pre>
+    <p>只有返回 <code>sourceMode=live</code> 才证明本次成功结果来自新采集；<code>stored_fallback</code> 可能发生在一次失败派发之后，最终采购成本仍以 Internal provider-call 证据为准。若首次结果不确定，先以响应的 requestId 查询 <code>GET /api/v1/requests/{requestId}</code>；该 GET 不创建 usage，也不会调用供应方。<code>reserved</code> 或 <code>unknown</code> 时不得重复 POST，<code>released</code> 时任何新采集都需重新明确确认。只有状态已是 <code>committed</code>，才可原样重放已提交请求：</p>
+    <pre><code>curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $REQUEST_KEY" \
+  -d "$REQUEST_BODY" | jq '.meta.sourceMode,.requestId'</code></pre>
+    <p>预期 <code>sourceMode=idempotent_replay</code>，并且 requestId 与首次调用一致。Hub usage、供应方采购成本与 Hub 客户计价是三套逻辑；供应方费率、余额、免费额度和采购证据只在 Internal，未来客户费率由独立版本化 Hub price book 决定。当前响应只报告交付事实，不返回发票金额，也不会把未知价格显示成零。</p>
+
+    <h3>7. 错误、重试与数据归档</h3>
+    <table><thead><tr><th>HTTP / error.code</th><th>客户端动作</th></tr></thead><tbody>
+      <tr><td>400 请求、筛选、游标错误</td><td>修正请求并使用新的 <code>Idempotency-Key</code>；不要重复错误 body。</td></tr>
+      <tr><td>401 <code>api_key_required / invalid_api_key</code></td><td>提供当前实例签发的完整 Hub Public API Key；仅在失效、过期或撤销时轮换，不要发送上游密钥。</td></tr>
+      <tr><td>403 <code>platform_not_granted</code></td><td>为同一 consumer 配置 <code>ecommerce</code> grant；原 Hub Public API Key 无需轮换或重新签发。</td></tr>
+      <tr><td>403 <code>test_key_not_supported</code></td><td>改用正式 <code>mih_live_</code> Key。Test 只是兼容标签，不是零成本沙箱；该拒绝发生在 usage reservation 和供应方调用之前。</td></tr>
+      <tr><td>404 <code>stored_snapshot_not_found</code></td><td><code>cache_only</code> 没有命中精确存量；本次没有调用外部平台。可修改条件、切换本地安全演示，或在明确确认成本后发起 <code>refresh</code>。</td></tr>
+      <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后以原 requestId 调用只读状态 GET；不要 POST 原请求或换键形成第二次派发。</td></tr>
+      <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable</code></td><td>本次尝试在供应方派发前被正在处理的请求或既有隔离挡住；它已释放，不是“以后一定不派发”的稳定重放。停止自动重试，由 operator 核查，并在任何后续实时调用前重新明确确认。</td></tr>
+      <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和 requestId，只调用请求状态 GET。<code>reserved</code>/<code>unknown</code> 保持锁定并交给 operator，只有 <code>committed</code> 才允许精确 POST 重放。</td></tr>
+      <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId 并检查脱敏归档。</td></tr>
+      <tr><td>429 <code>quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
+      <tr><td>429 external platform busy / capacity</td><td>Hub 并发保护和外部容量是不同原因；按响应退避，不要自动生成另一把幂等键。</td></tr>
+      <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
+      <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
+    </tbody></table>
+    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件；恢复条件本身不发请求，核对动作只调用状态 GET。旧账本可粘贴原响应 UUID；没有 UUID 时明确转 operator。只有 <code>committed</code> 才显示精确重放，<code>released</code> 会解除本地锁并重置成本确认。切换演示不会删除实时请求账本。</p>
+    <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
+    </section>
+
     <section class="doc-page" data-doc-page="virtual-supermarket">
     <h2 id="virtual-supermarket">虚拟超市</h2>
     <div class="notice">虚拟超市是 Hub 拥有的商品发布产品，要求独立 <code>virtual_supermarket</code> platform grant。<code>mobile_commerce</code> 采集读和 <code>source_catalog</code> 源目录读都不会隐式授予该产品，反向也不成立。</div>
@@ -3912,6 +4463,34 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
 
     <section class="doc-page" data-doc-page="search">
     <h2 id="search">通用搜索</h2>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>通过 Hub 的外部数据平台网关检索商品。需要 <code>ecommerce</code> 授权；公开合同不会暴露外部平台身份、凭据、接口地址或原始响应。</p></div>
+    <div class="notice">body 只接受 <code>marketplace</code>、<code>query</code>、<code>page</code>、<code>cursor</code>、<code>sort</code>、<code>price</code>，没有 <code>pageSize</code>。<code>page</code> 与 <code>cursor</code> 互斥。重试同一页时复用同一个 <code>Idempotency-Key</code>；使用 <code>nextCursor</code> 请求下一页时必须换新的 <code>Idempotency-Key</code>，并保持 marketplace/query/sort/price 不变。</div>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: ecommerce-$(uuidgen)" \
+  -d '{"marketplace":"jd","query":"AI recorder"}' | jq</code></pre>
+    <pre><code>{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [],
+    "page": { "page": 1, "returnedCount": 0, "discardedCount": 0, "hasMore": false, "nextCursor": null }
+  },
+  "meta": {
+    "capturedAt": "2026-09-03T00:00:00.000Z",
+    "servedAt": "2026-09-03T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}</code></pre>
+    <table><thead><tr><th>sourceMode</th><th>含义</th></tr></thead><tbody>
+      <tr><td><code>live</code></td><td>本次完成一次新的外部数据调用。</td></tr>
+      <tr><td><code>fresh_cache</code></td><td>返回同一调用者、同一规范化请求的有效 Hub 快照，没有再次调用外部数据平台。</td></tr>
+      <tr><td><code>stored_fallback</code></td><td>外部调用不可用时返回同请求的 last-good 快照；同时返回年龄信息与 HTTP Warning 110。</td></tr>
+      <tr><td><code>idempotent_replay</code></td><td>同 <code>Idempotency-Key</code>、同路径、同 body 的已提交结果重放。</td></tr>
+    </tbody></table>
+    <p><code>hasMore=null</code> 表示没有足够证据安全继续，调用方必须停止，不能自行拼页码或外部 continuation。<code>capturedAt</code>、<code>servedAt</code> 与 <code>ageSeconds</code> 始终用于判断数据时效。</p>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/search</code></div><p>在一个请求中选择一个已授权平台。<code>platform=telegram</code> 使用 Hub 已清洗数据。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/search" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
@@ -4053,7 +4632,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Idempotency-Key: night-all-user-info-$(uuidgen)" \\
   -d '{"platform":"twitter","username":"openai"}'</code></pre>
     <p>响应 body 保留 Night-All 当前业务字段，不在此层脱敏。Hub 通过响应头返回 durable request ID、<code>live|stale</code> 和采集时间；网络/超时、不可用的 2xx content-type/JSON/envelope，或真实非 2xx 的 502/503/504 才会回放完全相同请求的 last-good 快照。不可用 2xx 记为 outcome unknown。</p>
-    <p><code>Idempotency-Key</code> 永久绑定一次付费 dispatch；重用永远回放该结果，新鲜调用必须换新 key。legacy <code>includeRaw:false</code> 可接受但会在 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。未来脱敏应通过独立、版本化的 Hub projection/API 提供。</p>
+    <p><code>Idempotency-Key</code> 永久绑定一次可能产生供应方采购成本的 live dispatch；重用永远回放该结果，新鲜调用必须换新的 <code>Idempotency-Key</code>。legacy <code>includeRaw:false</code> 可接受但会在 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。未来脱敏应通过独立、版本化的 Hub projection/API 提供。</p>
     <table><thead><tr><th>HTTP / code</th><th>含义</th></tr></thead><tbody>
       <tr><td><code>400 platform_operation_unsupported</code></td><td>平台不在该 operation 的 <code>supportedPlatforms</code>；Telegram 会走此分支。</td></tr>
       <tr><td><code>503 platform_operation_unavailable</code></td><td>平台在固定支持集内，但当前 Hub dispatch 矩阵未将其列入 <code>readyPlatforms</code>；这不是 provider 健康状态。</td></tr>
@@ -4132,7 +4711,7 @@ curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timelin
     <div class="notice"><code>eventTime</code> 保留服务端排序和游标排他使用的 UTC 六位微秒值。<code>consistency=live-keyset</code> 表示它不是冻结快照：并发新写入、晚到或删除可能改变尚未读取的边界外集合。<code>hasMore</code> 只说明 Hub 当前 stored active 数据；不证明 Telegram 上游已完整，也不提供 changes feed。即使 <code>newer.hasMore=false</code>，仍保留其 cursor：有新项时推进到最新返回项，空页保持原 token，客户端可用它轮询之后写入；older 耗尽时 cursor 为 null。此 GET 不调用 Telegram 或其他上游采集。</div>
     <h3>外部会话应用复刻流程</h3>
     <table><thead><tr><th>步骤</th><th>调用与客户端动作</th></tr></thead><tbody>
-      <tr><td>1. 搜索</td><td><code>POST /data/telegram/search</code> 并提供本页唯一的 <code>Idempotency-Key</code>；搜索结果下一页 body 含新 cursor，必须换新 Key。</td></tr>
+      <tr><td>1. 搜索</td><td><code>POST /data/telegram/search</code> 并提供本页唯一的 <code>Idempotency-Key</code>；搜索结果下一页 body 含新 cursor，必须换新的 <code>Idempotency-Key</code>。</td></tr>
       <tr><td>2. 选中命中</td><td>优先取 message item 的 <code>canonicalId</code>；canonical search item 则取 <code>id</code>，作为 timeline 路径 ID。</td></tr>
       <tr><td>3. 建立窗口</td><td><code>GET .../{id}/timeline?before=10&amp;after=10</code>；timeline GET 不需要幂等 Key。</td></tr>
       <tr><td>4. 向上滚动</td><td>回传 <code>pageInfo.older.cursor</code>，按 canonical ID 去重后 prepend；记录插入前后 scroll height 差值并补偿 <code>scrollTop</code>，保持用户当前视口。</td></tr>
@@ -4174,9 +4753,14 @@ function normalizedDocsPath(pathname) {
 }
 
 function docsNavigation(activeKey) {
+  let section = null
   return PUBLIC_DOCS_ROUTES.map((route) => {
     const active = route.key === activeKey
-    return `<a href="${route.path}"${active ? ' class="active" aria-current="page"' : ''}>${route.label}</a>`
+    const heading = route.section !== section
+      ? `<span class="nav-section">${route.section}</span>`
+      : ''
+    section = route.section
+    return `${heading}<a href="${route.path}"${active ? ' class="active" aria-current="page"' : ''}>${route.label}</a>`
   }).join('')
 }
 

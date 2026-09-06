@@ -248,7 +248,7 @@ bash scripts/manage.sh verify-data-path <api-key>
 | 阶段 | 验证的东西 |
 | --- | --- |
 | 1/5 capabilities | key 有效、平台已授权 |
-| 2/5 search | Night-All 可达、返回了 items（**这一步是计费的**） |
+| 2/5 search | Night-All 可达、返回了 items（**可能消耗供应方额度或产生 Hub 内部采购成本；不代表已向客户扣费**） |
 | 3/5 ingest → PG | 异步入库确实落地（接口返回时并不等它） |
 | 4/5 outbox → projector | 投影事件被消费干净 |
 | 5/5 Elasticsearch | 文档真的进了索引 |

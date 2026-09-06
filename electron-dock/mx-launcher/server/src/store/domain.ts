@@ -1550,10 +1550,7 @@ function appCenterManifestNestedString(value: Record<string, unknown>, section: 
 function defaultAppPackageName(appId: string): string {
   if (appId === MX_H2I_PRODUCT_ID) return '@qpjoy/mx-h2i-demo';
   if (appId === APP_CENTER_PRODUCT_ID) return '@qpjoy/electron-launcher-appcenter';
-  // Luopan predates packageName persistence in AppCenter. Keep the historical
-  // package identity server-side so old registrations can join the current
-  // release identity flow without changing their network productId.
-  if (appId === 'luopan') return '@qpjoy/luopan-demo';
+  if (appId === 'luopan') return 'compass';
   return `@qpjoy/electron-launcher-app-${safeIdPart(appId).toLowerCase() || 'app'}`;
 }
 
@@ -2347,10 +2344,10 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       fullName: 'Luopan AI Intelligence Console',
       builtin: true,
       systemOwned: true,
-      packageName: '@qpjoy/luopan-demo',
+      packageName: 'compass',
       version: '0.1.0',
       category: 'intelligence',
-      description: 'Standalone Luopan launcher demo for Internal, User Center, Release Center, and Home To Oversea validation.',
+      description: 'Standalone Luopan/Compass launcher for Internal, User Center, Release Center, and Home To Oversea.',
       launcherMode: 'standalone',
       standaloneChannelProductId: 'luopan',
       productNetworkId: 'luopan',

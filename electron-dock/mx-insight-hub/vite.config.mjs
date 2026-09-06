@@ -20,6 +20,7 @@ export default defineConfig({
     allowedHosts: ["terminal.local"],
     proxy: {
       "/api": devApiTarget,
+      "/docs": devApiTarget,
       "/health": devApiTarget,
       "/internal": devApiTarget,
     },

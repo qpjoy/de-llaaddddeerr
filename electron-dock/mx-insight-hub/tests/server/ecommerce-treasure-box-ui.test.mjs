@@ -1,0 +1,441 @@
+import assert from 'node:assert/strict'
+import { readFile, stat } from 'node:fs/promises'
+import test from 'node:test'
+
+async function sources() {
+  return Promise.all([
+    readFile(new URL('../../src/App.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/api.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/pages-ecommerce-treasure-box.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/pages-source-catalog.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/styles.css', import.meta.url), 'utf8'),
+  ])
+}
+
+test('ecommerce treasure box is an Admin-token-only data product', async () => {
+  const [appSource] = await sources()
+  const route = appSource.match(/\{ path: '\/data-products\/ecommerce-treasure-box',[^\n]+\}/u)?.[0] || ''
+
+  assert.match(appSource, /lazy\(\(\) => import\('\.\/pages-ecommerce-treasure-box\.jsx'\)/u)
+  assert.match(route, /label: '电商数据百宝箱'/u)
+  assert.match(route, /navParent: DATA_PRODUCTS_NAV_KEY/u)
+  assert.match(route, /component: EcommerceTreasureBoxPage/u)
+  assert.match(route, /platformAdmin: true/u)
+  assert.match(route, /adminTokenOnly: true/u)
+})
+
+test('treasure box reuses the ordinary Open Capabilities API key and never persists its secret', async () => {
+  const [, apiSource, pageSource] = await sources()
+
+  assert.match(apiSource, /export const publicDataApi/u)
+  assert.match(apiSource, /\/api\/v1\/data\/ecommerce\/products\/search/u)
+  assert.match(pageSource, /publicDataApi\.ecommerceProductsSearch/u)
+  assert.match(pageSource, /type="password"/u)
+  assert.match(pageSource, /autocomplete="off"/iu)
+  assert.match(pageSource, /开放能力 API Key/u)
+  assert.match(pageSource, /无需另签产品 Key/u)
+  assert.match(pageSource, /演示页防误触：允许一次新的外部采集/u)
+  assert.match(pageSource, /这不是客户端 API 的额外权限/u)
+  assert.doesNotMatch(pageSource, /Hub consumer API Key/u)
+  assert.match(pageSource, /publicDocsHref\('\/docs\/ecommerce-treasure-box'\)/u)
+  const persistedRequest = pageSource.match(/function persistLiveRequest\(record\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  for (const field of ['body', 'idempotencyKey', 'keyFingerprint', 'requestId', 'outcome']) {
+    assert.match(persistedRequest, new RegExp(`record\\.${field}`, 'u'))
+  }
+  assert.match(pageSource, /REQUEST_ID_PATTERN\.test\(parsed\.requestId\.trim\(\)\)/u)
+  assert.match(pageSource, /\.\.\.\(requestId \? \{ requestId \} : \{\}\)/u)
+  assert.doesNotMatch(persistedRequest, /hubApiKey|apiKey|authorization/iu)
+  assert.doesNotMatch(pageSource, /localStorage\.(?:setItem|getItem)/u)
+  assert.doesNotMatch(pageSource, /docs\.justoneapi\.com\/.*(?:token|key)=/iu)
+})
+
+test('treasure box exposes safe stored, cache-first and explicit refresh delivery on one API', async () => {
+  const [, , pageSource] = await sources()
+  const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
+  const storedBody = pageSource.match(/function storedRequestBody\(value\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const changeDeliveryMode = pageSource.match(/const changeDeliveryMode = \(value\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+
+  for (const mode of ['cache_only', 'cache_first', 'refresh']) {
+    assert.match(pageSource, new RegExp(`value: '${mode}'`, 'u'))
+  }
+  assert.match(pageSource, /const \[deliveryMode, setDeliveryMode\] = useState\('cache_only'\)/u)
+  assert.match(pageSource, /label="交付策略"[\s\S]*?options=\{DELIVERY_MODE_OPTIONS\}/u)
+  assert.match(pageSource, /只读保障：本次不会调用外部平台/u)
+  assert.match(pageSource, /读取 Hub 存量/u)
+  assert.match(pageSource, /重新采集最新数据/u)
+  assert.match(runLive, /const providerMayRun = deliveryMode !== 'cache_only'/u)
+  assert.match(runLive, /if \(!replay && providerMayRun && !chargeConfirmed\)/u)
+  assert.match(runLive, /if \(tracksProviderRisk\) \{[\s\S]*?rememberLiveRequest/u)
+  assert.match(storedBody, /deliveryMode: value\.deliveryMode \|\| 'cache_first'/u)
+  assert.match(pageSource, /stored_snapshot_not_found[\s\S]*?没有调用 JustOne/u)
+  for (const transition of [changeMode, changeDeliveryMode]) {
+    assert.match(transition, /setProducts\(\[\]\)/u)
+    assert.match(transition, /setSelected\(null\)/u)
+    assert.match(transition, /setEvidence\(null\)/u)
+  }
+})
+
+test('safe demo independently simulates all delivery strategies with zero Hub and zero upstream traffic', async () => {
+  const [, , pageSource, , styleSource] = await sources()
+  const demoOptions = pageSource.match(/const DEMO_DELIVERY_MODE_OPTIONS = \[[\s\S]*?\n\]/u)?.[0] || ''
+  const demoScenario = pageSource.match(/function safeDemoScenario[\s\S]*?\n\}\n\nfunction safeDemoIdleMessage/u)?.[0] || ''
+  const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}\n\n  const runLive/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
+  const changeDemoDeliveryMode = pageSource.match(/const changeDemoDeliveryMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDemoCacheOnlyScene/u)?.[0] || ''
+
+  for (const deliveryMode of ['cache_only', 'cache_first', 'refresh']) {
+    assert.match(demoOptions, new RegExp(`value: '${deliveryMode}'`, 'u'))
+  }
+  assert.match(pageSource, /const \[demoDeliveryMode, setDemoDeliveryMode\] = useState\('cache_first'\)/u)
+  assert.match(pageSource, /const \[demoCacheOnlyScene, setDemoCacheOnlyScene\] = useState\('no_inventory'\)/u)
+  assert.match(pageSource, /label="模拟交付策略"[^\n]+options=\{DEMO_DELIVERY_MODE_OPTIONS\}[^\n]+onChange=\{changeDemoDeliveryMode\}/u)
+  assert.match(pageSource, /label="cache_only 演练场景"[^\n]+options=\{DEMO_CACHE_ONLY_SCENE_OPTIONS\}[^\n]+onChange=\{changeDemoCacheOnlyScene\}/u)
+  assert.match(pageSource, /浏览器本地策略沙盘 · 实际 0 Hub \/ 0 上游/u)
+  assert.match(pageSource, /sourceMode=safe_demo/u)
+  assert.match(demoScenario, /sourceMode: 'safe_demo'/u)
+  assert.doesNotMatch(demoScenario, /\bsourceMode: '(?:live|fresh_cache|stored_fallback|idempotent_replay)'/u)
+  assert.match(demoScenario, /simulatedErrorCode: 'stored_snapshot_not_found'/u)
+  assert.match(demoScenario, /products: \[\][\s\S]*?实际 0 Hub \/ 0 上游/u)
+  assert.match(demoScenario, /simulatedSourceMode: 'stored_fallback'/u)
+  assert.match(demoScenario, /simulatedSourceMode: 'live'/u)
+  assert.match(runSafeDemo, /safeDemoScenario\(\{ demoDeliveryMode, demoCacheOnlyScene, candidates \}\)/u)
+  assert.match(runSafeDemo, /demoRunId: `demo-\$\{crypto\.randomUUID\(\)\}`/u)
+  assert.doesNotMatch(runSafeDemo, /publicDataApi|fetch\(|requestId:|rememberLiveRequest|persistLiveRequest|sessionStorage/u)
+  assert.match(changeMode, /if \(value === 'hub_live'\) setDeliveryMode\('cache_only'\)/u)
+  assert.doesNotMatch(changeDemoDeliveryMode, /setDeliveryMode\(/u)
+  assert.match(styleSource, /\.mih-treasure-demo-boundary/u)
+  assert.match(styleSource, /\.mih-treasure-demo-trace/u)
+})
+
+test('every request-semantic edit clears live acquisition confirmation', async () => {
+  const [, , pageSource] = await sources()
+  const handlers = [
+    ['mode', /const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u],
+    ['live delivery', /const changeDeliveryMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDemoDeliveryMode/u],
+    ['demo delivery', /const changeDemoDeliveryMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDemoCacheOnlyScene/u],
+    ['demo cache scene', /const changeDemoCacheOnlyScene = \(value\) => \{[\s\S]*?\n  \}\n\n  const restoreAmbiguousRequestFields/u],
+    ['marketplace', /const changeMarketplace = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeSort/u],
+    ['sort', /const changeSort = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeQuery/u],
+    ['query', /const changeQuery = \(value\) => \{[\s\S]*?\n  \}\n\n  const revealResults/u],
+    ['Hub key', /const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u],
+  ]
+  for (const [name, pattern] of handlers) {
+    const handler = pageSource.match(pattern)?.[0] || ''
+    assert.match(handler, /setChargeConfirmed\(false\)/u, `${name} changes must invalidate prior confirmation`)
+  }
+  assert.match(pageSource, /label="排序"[^\n]+onChange=\{changeSort\}/u)
+  assert.match(pageSource, /onChange=\{\(event\) => changeQuery\(event\.target\.value\)\}/u)
+})
+
+test('live key preflight is zero-cost, rejects every Test key and preserves an ambiguous lock', async () => {
+  const [, apiSource, pageSource] = await sources()
+  const capabilitiesApi = apiSource.match(/capabilities: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
+  const requestStatusApi = apiSource.match(/requestStatus: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
+  const verifyKey = pageSource.match(/const verifyHubApiKey = async \(\) => \{[\s\S]*?\n  \}\n\n  return \(/u)?.[0] || ''
+  const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
+
+  assert.match(capabilitiesApi, /'\/api\/v1\/data\/capabilities'/u)
+  assert.doesNotMatch(capabilitiesApi, /method: 'POST'|ecommerce\/products\/search/u)
+  assert.match(requestStatusApi, /`\/api\/v1\/requests\/\$\{encodeURIComponent\(requestId\)\}`/u)
+  assert.doesNotMatch(requestStatusApi, /method: 'POST'|ecommerce\/products\/search/u)
+  assert.match(verifyKey, /publicDataApi\.capabilities\(apiKey\)/u)
+  assert.doesNotMatch(verifyKey, /ecommerceProductsSearch|rememberLiveRequest|persistLiveRequest|idempotencyKey/u)
+  assert.match(verifyKey, /apiKey\.includes\('\*\*\*\*'\)/u)
+  assert.ok(
+    verifyKey.indexOf("apiKey.includes('****')") < verifyKey.indexOf('publicDataApi.capabilities(apiKey)'),
+    'a masked key identifier must be rejected before any Hub request',
+  )
+  assert.doesNotMatch(verifyKey, /recoveringLegacyTestRequest/u)
+  assert.match(verifyKey, /if \(apiKey\.startsWith\('mih_test_'\)\)/u)
+  assert.match(verifyKey, /Test 前缀当前只是兼容标签，并非隔离沙箱/u)
+  assert.match(verifyKey, /历史 Test Key 不能从演示页核对或恢复外部请求[\s\S]*?交由运维核查/u)
+  assert.ok(
+    verifyKey.indexOf("apiKey.startsWith('mih_test_')") < verifyKey.indexOf('publicDataApi.capabilities(apiKey)'),
+    'the compatibility-only Test-key policy must be resolved before any Hub request',
+  )
+  assert.match(verifyKey, /\^mih_live_/u)
+  assert.match(verifyKey, /entry\?\.platform\) === 'ecommerce'/u)
+  assert.match(verifyKey, /status: 'missing_grant'/u)
+  assert.match(verifyKey, /status: 'degraded'/u)
+  assert.match(verifyKey, /status: 'ready'/u)
+  assert.match(pageSource, /placeholder="mih_live_…"/u)
+  assert.doesNotMatch(pageSource, /placeholder="[^"]*mih_test_/u)
+  assert.doesNotMatch(pageSource, /placeholder="mxk_/u)
+  assert.match(pageSource, /type="button"[^>]+onClick=\{verifyHubApiKey\}[\s\S]*?零费用验证 Key/u)
+  assert.match(pageSource, /预检不创建 Hub usage/u)
+  assert.match(apiSource, /export function publicApiOrigin\(\)/u)
+  assert.match(pageSource, /本页调用 Public API：[\s\S]*?publicApiOrigin\(\)[\s\S]*?MX_INSIGHT_PUBLIC_URL/u)
+  assert.match(pageSource, /上一次外部采集请求仍待核查[\s\S]*?Idempotency-Key[\s\S]*?运维核查/u)
+  assert.match(pageSource, /const ambiguousStatusCheckReady = hasAmbiguousLiveRequest[\s\S]*?keyCheck\.fingerprint === lastLiveRequest\?\.keyFingerprint[\s\S]*?recoveryRequestIdValid/u)
+  assert.match(pageSource, /ambiguousOriginalSelected && !ambiguousStatusCheckReady/u)
+  assert.match(pageSource, /查询原请求状态 · 0 上游调用/u)
+  assert.match(changeKey, /setKeyCheck\(\{ status: 'idle', fingerprint: null/u)
+  assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'\) forgetLiveRequest\(\)/u)
+  assert.match(pageSource, /const keyUsable = \['ready', 'degraded'\]\.includes\(keyCheck\.status\)/u)
+  assert.match(pageSource, /mode === 'hub_live' && !keyUsable/u)
+})
+
+test('live verification script preserves one recovery identity across ambiguous outcomes', async () => {
+  const script = await readFile(new URL('../../scripts/justone-apicall.sh', import.meta.url), 'utf8')
+  const firstHubRequest = script.indexOf('PREFLIGHT_HTTP_STATUS=$(curl')
+  const firstDispatch = script.indexOf('if ! LIVE_HTTP_STATUS=$(curl')
+  const recoveryKey = script.indexOf("printf 'Recovery Idempotency-Key:")
+  const recoveryBody = script.indexOf("printf 'Recovery request body:")
+
+  assert.match(script, /mih_test_\*\) fail "mih_test_ is compatibility metadata, not a no-cost sandbox/u)
+  assert.ok(script.indexOf('mih_test_*) fail') < firstHubRequest, 'Test keys must fail before any Hub request')
+  assert.match(script, /LIVE_KEY="\$\{HUB_IDEMPOTENCY_KEY:-\}"/u)
+  assert.match(script, /HUB_ECOMMERCE_QUERY:-蓝牙耳机受控实时检查-\$\{LIVE_KEY##\*-\}/u)
+  assert.ok(recoveryKey >= 0 && recoveryKey < firstDispatch, 'recovery key must be shown before dispatch')
+  assert.ok(recoveryBody >= 0 && recoveryBody < firstDispatch, 'recovery body must be shown before dispatch')
+  assert.match(script, /deliveryMode:"refresh"/u)
+  assert.match(script, /external_platform_outcome_unknown\|request_outcome_unknown/u)
+  assert.match(script, /external_platform_response_unusable[\s\S]*?502 is committed/u)
+  assert.match(script, /request_in_progress[\s\S]*?suppressed before dispatch/u)
+  assert.match(script, /Recover only with the same Idempotency-Key and identical body/u)
+  assert.match(script, /idempotent_replay\)[\s\S]*?original request completed; this run created no new Hub usage or provider dispatch/u)
+  assert.doesNotMatch(script, /no paid request|paid upstream dispatch/u)
+})
+
+test('live requests bind before fetch and ambiguous recovery is status-only until committed', async () => {
+  const [, , pageSource] = await sources()
+  const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
+  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\) => \{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const submit = pageSource.match(/const submit = async \(event\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const ambiguityClassifier = pageSource.match(/function ambiguousLiveFailure\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  const ambiguousCodes = pageSource.match(/const AMBIGUOUS_LIVE_ERROR_CODES = new Set\(\[[\s\S]*?\]\)/u)?.[0] || ''
+  const mismatchBlock = runLive.match(/if \(replay && previous\?\.keyFingerprint !== fingerprint\) \{[\s\S]*?\n      \}/u)?.[0] || ''
+  const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
+
+  assert.match(pageSource, /crypto\.subtle\.digest\('SHA-256'/u)
+  assert.match(pageSource, /sessionStorage\.setItem\(LIVE_REQUEST_STORAGE_KEY/u)
+  assert.match(pageSource, /parsed\.outcome === 'pending' \? 'ambiguous'/u)
+  assert.ok(
+    runLive.indexOf('rememberLiveRequest(requestRecord, { failClosed: true })')
+      < runLive.indexOf('publicDataApi.ecommerceProductsSearch'),
+    'the durable request record must be written before fetch',
+  )
+  assert.match(runLive, /if \(replay && previous\?\.outcome !== 'resolved'\)/u)
+  assert.match(runLive, /outcome: replay \? 'resolved' : 'pending'/u)
+  assert.match(runLive, /requestError\?\.requestId \? \{ requestId: requestError\.requestId \}/u)
+  assert.match(statusCheck, /publicDataApi\.requestStatus\(apiKey, requestId\)/u)
+  assert.doesNotMatch(statusCheck, /ecommerceProductsSearch|method:\s*'POST'/u)
+  assert.match(submit, /if \(ambiguousOriginalSelected\) await checkAmbiguousRequestStatus\(\)/u)
+  assert.doesNotMatch(submit, /runLive\(\{ replay: ambiguous/u)
+  for (const status of ['committed', 'released', 'reserved', 'unknown']) {
+    assert.match(statusCheck, new RegExp(`status === '${status}'`, 'u'))
+  }
+  assert.match(statusCheck, /status === 'committed'[\s\S]*?outcome: 'resolved'/u)
+  assert.match(statusCheck, /status === 'released'[\s\S]*?forgetLiveRequest\(\)[\s\S]*?setChargeConfirmed\(false\)/u)
+  assert.match(statusCheck, /status === 'reserved'[\s\S]*?code: 'request_in_progress'/u)
+  assert.match(statusCheck, /status === 'unknown'[\s\S]*?code: 'request_outcome_unknown'/u)
+  for (const code of [
+    'external_platform_outcome_unknown',
+    'request_outcome_unknown',
+    'request_in_progress',
+  ]) assert.match(pageSource, new RegExp(code, 'u'))
+  assert.doesNotMatch(ambiguousCodes, /external_platform_response_unusable/u)
+  assert.match(ambiguityClassifier, /if \(error\?\.status === 409\) return false/u)
+  assert.ok(
+    ambiguityClassifier.indexOf('error?.status === 409') < ambiguityClassifier.indexOf('AMBIGUOUS_LIVE_ERROR_CODES.has'),
+    'a fresh server-side suppression must not become a no-confirmation replay merely because it shares an ambiguity code',
+  )
+  assert.match(runLive, /previous\?\.outcome === 'ambiguous'[\s\S]*?查询原请求状态/u)
+  assert.match(mismatchBlock, /previous\?\.keyFingerprint !== fingerprint/u)
+  assert.doesNotMatch(mismatchBlock, /forgetLiveRequest/u)
+  assert.match(mismatchBlock, /原 body 与 Idempotency-Key 已继续锁定/u)
+  assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'/u)
+  assert.match(runLive, /stableCommittedFailure[\s\S]*?outcome: 'resolved'/u)
+  assert.match(runLive, /tracksProviderRisk[\s\S]*?rememberLiveRequest\(requestRecord, \{ failClosed: true \}\)/u)
+})
+
+test('an ambiguous live request preserves its ledger while safe demo stays available', async () => {
+  const [, , pageSource] = await sources()
+  const keyField = pageSource.match(/<Field label="开放能力 API Key"[\s\S]*?<\/Field>/u)?.[0] || ''
+  const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
+  const restoreAmbiguous = pageSource.match(/const restoreAmbiguousRequestFields = \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\) => \{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+
+  assert.match(pageSource, /requestInFlightRef\.current/u)
+  assert.match(pageSource, /requestEpochRef\.current/u)
+  assert.match(pageSource, /useEffect\(\(\) => \{[\s\S]*?mountedRef\.current = true[\s\S]*?return \(\) => \{/u)
+  assert.match(pageSource, /if \(!finishRequest\(epoch\)\) return/u)
+  assert.match(pageSource, /const \[mode, setMode\] = useState\('safe_demo'\)/u)
+  assert.match(pageSource, /const hasAmbiguousLiveRequest = lastLiveRequest\?\.outcome === 'ambiguous'/u)
+  assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching'\}/u)
+  assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)
+  assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
+  assert.match(pageSource, /label="排序"[\s\S]*?disabled=\{semanticsLocked/u)
+  assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
+  assert.match(keyField, /type="password"[\s\S]*?disabled=\{phase === 'searching' \|\| checkingKey\}/u)
+  assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
+  assert.doesNotMatch(pageSource, /const semanticsLocked = [^\n]*ambiguousOriginalSelected/u)
+  assert.match(changeMode, /if \(phase === 'searching'\) return/u)
+  assert.doesNotMatch(changeMode, /setMarketplace\(pending\.body\.marketplace\)|setQuery\(pending\.body\.query\)/u)
+  assert.match(restoreAmbiguous, /setMarketplace\(pending\.body\.marketplace\)/u)
+  assert.match(restoreAmbiguous, /setQuery\(pending\.body\.query\)/u)
+  assert.match(restoreAmbiguous, /setDeliveryMode\(pending\.body\.deliveryMode \|\| 'cache_first'\)/u)
+  assert.doesNotMatch(restoreAmbiguous, /ecommerceProductsSearch|requestStatus/u)
+  assert.match(statusCheck, /REQUEST_ID_PATTERN\.test\(requestId\)/u)
+  assert.match(statusCheck, /keyCheck\.fingerprint !== pending\.keyFingerprint/u)
+  assert.match(pageSource, /placeholder="粘贴原响应中的 UUID"/u)
+  assert.match(pageSource, /无 Request ID？交由运维核查/u)
+  assert.match(pageSource, /恢复原请求条件/u)
+  assert.doesNotMatch(pageSource, /恢复原请求用于精确重试|使用原 Idempotency-Key 精确重试/u)
+  assert.doesNotMatch(changeMode, /forgetLiveRequest|clearPersistedLiveRequest/u)
+  assert.doesNotMatch(runSafeDemo, /publicDataApi|forgetLiveRequest|clearPersistedLiveRequest/u)
+  assert.match(pageSource, /hasAmbiguousLiveRequest \? \([\s\S]*?筛选项仍可编辑，也可只读 Hub 存量/u)
+  assert.match(pageSource, /mode === 'safe_demo' \? safeDemoIdleMessage\(demoDeliveryMode, demoCacheOnlyScene\)/u)
+  assert.match(pageSource, /aria-pressed=\{capabilityGroup === group\.id\}/u)
+  assert.doesNotMatch(pageSource, /role="tab(?:list)?"|aria-selected=/u)
+})
+
+test('data-product errors are localized by ownership and always retain operator evidence', async () => {
+  const [, , pageSource, , styleSource] = await sources()
+  const presentation = pageSource.match(/function ecommerceErrorPresentation\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
+  const errorState = pageSource.match(/function TreasureProductError[\s\S]*?\n\}/u)?.[0] || ''
+
+  for (const [code, copy] of [
+    ['external_platform_response_unusable', '外部数据已返回，但暂时无法整理成 Hub 商品'],
+    ['external_platform_outcome_unknown', '这次实时请求的结果暂时无法确认'],
+    ['request_in_progress', '同一实时请求仍在处理中'],
+    ['external_platform_not_configured', '实时数据源尚未配置完成'],
+    ['external_platform_capacity_exceeded', '外部数据容量暂不可用'],
+    ['external_platform_busy', '实时请求较多，请稍后再试'],
+    ['quota_exceeded', '当前调用身份的 Hub 请求额度已用完'],
+    ['external_platform_rejected', '外部数据服务拒绝了本次查询'],
+  ]) {
+    assert.match(presentation, new RegExp(code, 'u'))
+    assert.match(presentation, new RegExp(copy, 'u'))
+  }
+  assert.match(presentation, /error\?\.status === 409[\s\S]*?本次尝试在上游派发前停止，没有新增外部采集/u)
+  assert.match(presentation, /同类实时请求仍在未决隔离期[\s\S]*?早先的请求结果仍可能未知/u)
+  assert.match(errorState, /error\.code/u)
+  assert.match(errorState, /error\.requestId/u)
+  assert.match(errorState, /转到零费用演示/u)
+  assert.match(errorState, /查看上游运行状态/u)
+  assert.doesNotMatch(errorState, /error\?\.message \|\| '数据请求失败'/u)
+  assert.match(pageSource, /<section className="qp-panel mih-treasure-lab">\s*\{error \? <TreasureProductError/u)
+  assert.equal(pageSource.match(/<TreasureProductError\b/gu)?.length, 1)
+  assert.match(styleSource, /\.mih-treasure-lab > \.mih-treasure-product-error \{[\s\S]*?grid-column: 1 \/ -1/u)
+  assert.match(pageSource, /这次没有找到商品/u)
+  assert.match(pageSource, /这是正常空结果/u)
+})
+
+test('safe demo applies platform, query and supported sort semantics without loading product images', async () => {
+  const [, , pageSource] = await sources()
+  const demoSearch = pageSource.match(/function demoProducts[\s\S]*?\n\}/u)?.[0] || ''
+
+  assert.match(demoSearch, /item\.marketplace === marketplace/u)
+  assert.match(demoSearch, /terms\.every/u)
+  assert.match(demoSearch, /price_asc/u)
+  assert.match(demoSearch, /sales_desc/u)
+  assert.match(pageSource, /SAFE_DEMO_SORTS/u)
+  assert.match(pageSource, /apiKey=\{mode === 'hub_live' \? hubApiKey\.trim\(\) : ''\}/u)
+})
+
+test('optional product imagery is loaded only through the authenticated Hub media relay', async () => {
+  const [, apiSource, pageSource] = await sources()
+  const hubProductImage = pageSource.match(/function HubProductImage[\s\S]*?\n\}/u)?.[0] || ''
+  const productOrb = pageSource.match(/function ProductOrb[\s\S]*?\n\}/u)?.[0] || ''
+
+  assert.match(apiSource, /\/api\/v1\/data\/ecommerce\/products\/media/u)
+  assert.match(apiSource, /authorization: `Bearer \$\{apiKey\}`/u)
+  assert.match(apiSource, /ecommerceProductImage: \(apiKey,[\s\S]*?publicDataImage/u)
+  assert.match(productOrb, /<HubProductImage apiKey=\{apiKey\} requestId=\{requestId\} item=\{item\} \/>/u)
+  assert.doesNotMatch(productOrb, /item\.images|<img\b|src=/u)
+  assert.match(hubProductImage, /publicDataApi\.ecommerceProductImage\(apiKey/u)
+  assert.match(hubProductImage, /requestId,[\s\S]*?itemId: item\.id,[\s\S]*?imageIndex: 0/u)
+  assert.match(hubProductImage, /URL\.createObjectURL\(blob\)/u)
+  assert.match(hubProductImage, /<img src=\{source\}/u)
+  assert.match(hubProductImage, /<Package/u)
+  assert.doesNotMatch(hubProductImage, /item\.images\s*\[/u)
+  assert.doesNotMatch(pageSource, /fetch\(/u)
+  assert.doesNotMatch(pageSource, /src=\{[^}]*item\??\.images|src=\{[^}]*product\??\.images/iu)
+})
+
+test('product spheres support local 3, 6 or 9 item display pages without another data request', async () => {
+  const [, , pageSource] = await sources()
+  const pageSizeOptions = pageSource.match(/const DISPLAY_PAGE_SIZE_OPTIONS = \[[\s\S]*?\n\]/u)?.[0] || ''
+  const showDisplayPage = pageSource.match(/const showDisplayPage = \(nextPage\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
+  const pageSizeControl = pageSource.match(/<DropdownField label="每页陈列"[^\n]+/u)?.[0] || ''
+
+  for (const [value, label] of [['3', '3 件 / 页'], ['6', '6 件 / 页'], ['9', '9 件 / 页']]) {
+    assert.match(pageSizeOptions, new RegExp(`value: '${value}', label: '${label}'`, 'u'))
+  }
+  assert.match(pageSource, /useState\('6'\)/u)
+  assert.match(pageSource, /Math\.ceil\(products\.length \/ pageSize\)/u)
+  assert.match(pageSource, /products\.slice\(displayPage \* pageSize, \(displayPage \+ 1\) \* pageSize\)/u)
+  assert.match(pageSizeControl, /options=\{DISPLAY_PAGE_SIZE_OPTIONS\}/u)
+  assert.match(pageSizeControl, /setDisplayPageSize\(value\); setDisplayPage\(0\)/u)
+  assert.doesNotMatch(pageSizeControl, /publicDataApi|fetch\(/u)
+  assert.match(pageSource, /const angle = \(-120 \+ \(index \* 360\) \/ total\)/u)
+  assert.match(pageSource, /total=\{visibleProducts\.length\}/u)
+  assert.match(showDisplayPage, /setDisplayPage\(bounded\)/u)
+  assert.match(showDisplayPage, /setSelected\(products\[bounded \* pageSize\] \|\| null\)/u)
+  assert.doesNotMatch(showDisplayPage, /publicDataApi|fetch\(/u)
+  assert.match(pageSource, /aria-label="商品陈列分页"/u)
+  assert.match(pageSource, /aria-label="上一陈列页"/u)
+  assert.match(pageSource, /aria-label="下一陈列页"/u)
+})
+
+test('direct Admin-listener visits resolve the isolated Public API and docs surfaces', async () => {
+  const [appSource, apiSource, pageSource] = await sources()
+  const pagesSource = await readFile(new URL('../../src/pages.jsx', import.meta.url), 'utf8')
+  const viteSource = await readFile(new URL('../../vite.config.mjs', import.meta.url), 'utf8')
+
+  assert.match(apiSource, /VITE_MX_INSIGHT_PUBLIC_API_BASE/u)
+  assert.match(apiSource, /window\.location\.port === '18151'/u)
+  assert.match(apiSource, /url\.port = '18150'/u)
+  assert.match(apiSource, /export function configurePublicApiBase/u)
+  assert.match(apiSource, /fetch\(`\$\{publicApiBase\(\)\}\$\{path\}`/u)
+  assert.match(appSource, /configurePublicApiBase\(data\?\.publicApiBaseUrl\)/u)
+  assert.match(apiSource, /export function publicDocsHref/u)
+  assert.doesNotMatch(pagesSource, /const PUBLIC_DOCS_HREF = publicDocsHref/u)
+  assert.match(pagesSource, /href=\{publicDocsHref\(\)\}/u)
+  assert.doesNotMatch(pageSource, /const ECOMMERCE_DOCS_HREF = publicDocsHref/u)
+  assert.match(pageSource, /href=\{publicDocsHref\('\/docs\/ecommerce-treasure-box'\)\}/u)
+  assert.match(viteSource, /"\/docs": devApiTarget/u)
+})
+
+test('treasure box presents truthful safe, live, cache, fallback and replay states', async () => {
+  const [, , pageSource, , styleSource] = await sources()
+
+  for (const value of ['safe_demo', 'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay']) {
+    assert.match(pageSource, new RegExp(value, 'u'))
+  }
+  for (const label of ['安全演示 · 0 Hub / 0 上游', 'Here you are', '缓存里刚好有一份', '先给你可靠的存档']) {
+    assert.match(pageSource, new RegExp(label, 'u'))
+  }
+  assert.match(pageSource, /phase === 'searching' \? SEARCHING_ASSET : PRESENTING_ASSET/u)
+  assert.match(pageSource, /aria-label=\{`查看 \$\{item\.title \|\| item\.id\} 的属性`\}/u)
+  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.mih-treasure-orb/u)
+  assert.match(styleSource, /@media \(max-width: 720px\)[\s\S]*?\.mih-treasure-stage/u)
+})
+
+test('generated mascot poses are real transparent raster assets', async () => {
+  const [, , pageSource] = await sources()
+  for (const file of ['data-cat-searching.webp', 'data-cat-presenting.webp']) {
+    assert.match(pageSource, new RegExp(`assets/ecommerce-treasure-box/${file}`, 'u'))
+    const info = await stat(new URL(`../../public/assets/ecommerce-treasure-box/${file}`, import.meta.url))
+    assert.ok(info.size > 50_000, `${file} should be a substantive generated raster asset`)
+  }
+  assert.doesNotMatch(pageSource, /<svg\b|<canvas\b|<select\b/iu)
+})
+
+test('source catalog distinguishes verified JustOne runtime marketplaces from connector evidence', async () => {
+  const [, , , catalogSource] = await sources()
+
+  for (const sourceKey of ['0058', '0059', '0060', '0064', '0073']) {
+    assert.match(catalogSource, new RegExp(`source-catalog-${sourceKey}`, 'u'))
+  }
+  assert.doesNotMatch(
+    catalogSource.match(/const JUSTONE_CONNECTED_SOURCE_KEYS = new Set\(\[[\s\S]*?\]\)/u)?.[0] || '',
+    /source-catalog-0062|source-catalog-0063/u,
+  )
+  assert.match(catalogSource, /JustOne · 商品搜索已接/u)
+  assert.match(catalogSource, /JustOne · 接入线索/u)
+  assert.match(catalogSource, /id: 'justone-connected'/u)
+})

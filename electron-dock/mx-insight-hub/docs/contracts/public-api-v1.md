@@ -64,6 +64,29 @@ by itself. Funnel and unshown-record diagnostics require both grants. The
 `catalog_metadata`, `catalog_detail`, and `filtered_browse` when its stored
 serving surface is ready.
 
+An explicitly granted `ecommerce` entry advertises `product_search`,
+`contractVersion=mx-insight-hub.ecommerce-products.v1`, the supported
+marketplaces, `pagination=opaque_cursor`, `idempotencyKey=optional`, and the
+four freshness modes. Its `servingMode=live_with_stored_fallback` distinguishes
+it from stored-only products. `ready=true` means the deployed Hub has a usable
+adapter; it is not a promise that the external platform, quota or network is
+healthy for the next call.
+
+For a valid legacy `mih_test_` key whose consumer has that grant, the same
+`ecommerce` entry is returned with `ready=false` regardless of adapter readiness.
+Test is compatibility metadata, not an ecommerce sandbox; clients must not use
+that entry to attempt acquisition. Reading capabilities itself creates no
+ecommerce usage reservation and does not call a provider.
+
+The credential is the same Hub Public API key issued through the ordinary API
+Keys lifecycle. Enabling `ecommerce` on its owning consumer takes effect for all
+active keys of that consumer; Hub does not issue an ecommerce-specific or
+supplier key to the caller. Grants and policies live on the stable consumer
+identity so key rotation does not require reconfiguration.
+External ecommerce search and media nevertheless require one of those ordinary
+keys to have the `mih_live_` environment/prefix; this is a route gate, not a
+second product credential.
+
 ## Source catalog
 
 ```http
@@ -231,6 +254,288 @@ directory `{id,name}`; both values are null without an approved mapping, while
 full mapping evidence remains Admin-only. Title similarity does not merge rows
 when a reviewed marketplace product identity is absent.
 
+## External data platform product search
+
+```http
+POST /api/v1/data/ecommerce/products/search
+Authorization: Bearer <mih_live_ Hub Public API key>
+Idempotency-Key: <caller-generated key for this page>
+Content-Type: application/json
+
+{
+  "marketplace": "jd",
+  "query": "AI recorder"
+}
+```
+
+This route requires the explicit `ecommerce` platform grant. It is a stable Hub
+contract over a governed external data platform, not a transparent proxy. The
+public request and response never contain the external platform identity,
+credential, endpoint, private continuation value, or raw response.
+
+`ecommerce` is a provider-neutral data authorization domain, not the identity
+of a physical supplier. The current release has one private eligible adapter and
+no multi-provider runtime router or automatic supplier failover; adding another
+verified adapter later does not change the caller contract. A missing, invalid,
+or revoked Hub Public API key
+returns `401 api_key_required` or `401 invalid_api_key`. An otherwise valid key
+with Test environment returns `403 test_key_not_supported` before grant lookup,
+usage reservation, cache lookup or provider dispatch. An otherwise valid Live
+key whose consumer lacks the `ecommerce` grant returns
+`403 platform_not_granted`. Clients must not treat those conditions as
+interchangeable. A Test-key rejection creates no usage reservation and makes no
+provider call.
+
+An ambiguous request recorded by an older client under a Test key is not a
+replay exception. Preserve its exact body and `Idempotency-Key` as evidence and
+escalate it for operator reconciliation; do not send it through search or media,
+and do not substitute a Live key.
+
+The request is a strict object. Its complete field allowlist is `marketplace`,
+`query`, `deliveryMode`, `page`, `cursor`, `sort`, and `price`; any other field returns
+`400 unsupported_request_field`. In particular, there is no `pageSize` field:
+Hub owns the bounded result-size policy. `marketplace` is one of `taobao`,
+`tmall`, `jd`, `xiaohongshu_ec`, or `xianyu`. `query` is NFKC-normalized,
+trimmed, required, and limited to 200 characters. `page` is an integer from 1
+through 1,000 and defaults to 1.
+
+`deliveryMode` is optional and defaults to `cache_first` for backward
+compatibility. It is a delivery intent, never a provider selector:
+
+- `cache_only` reads only an exact same-consumer Hub snapshot. It never creates
+  an external provider call. A missing snapshot returns
+  `404 stored_snapshot_not_found`; a retained stale snapshot can be returned as
+  `stored_fallback`.
+- `cache_first` uses an exact fresh snapshot when present, otherwise permits one
+  governed acquisition and can fall back to an exact retained snapshot.
+- `refresh` bypasses an exact fresh snapshot and permits one new acquisition. It
+  requires a caller-supplied `Idempotency-Key`, and can still return
+  `stored_fallback` after an attempted acquisition fails.
+
+Changing only `deliveryMode` does not change the logical snapshot identity.
+Reusing an already committed `Idempotency-Key` therefore replays its original
+result; it cannot turn an old cache delivery into a new refresh.
+
+The Admin treasure-box choices `3`, `6`, and `9` are browser-local presentation
+sizes over the current returned batch. They are not request fields, do not
+resize a Hub page, and do not independently dispatch another product search.
+
+`page` and `cursor` are mutually exclusive. Prefer the opaque `nextCursor`
+returned by Hub, return it unchanged, and keep `marketplace`, `query`, `sort`,
+and `price` identical. The cursor is authenticated-encrypted and consumer/scope
+bound; changing a bound field, tampering, or reusing it for another consumer
+returns `400 cursor_scope_mismatch` or `400 invalid_cursor`. Some marketplaces
+require an opaque continuation after page one, so clients must not synthesize a numeric next page.
+If `nextCursor` is null, stop. `hasMore=null` means the external response did not
+provide enough evidence for Hub to issue a safe continuation; it is not
+permission to guess another page.
+
+Sort and price support are marketplace-specific:
+
+- `taobao` and `tmall` accept `relevance`, `sales_desc`, `price_asc`, and
+  `price_desc`; the default is `sales_desc`. They also accept an inclusive
+  `price` object with optional non-negative decimal-string `min` and `max`
+  values. Numbers, exponent notation, whitespace and leading zeroes are not
+  accepted; each value allows at most 12 integer and 8 fractional digits.
+- `xianyu` accepts `relevance`, `recent`, `seller_credit`, `price_asc`,
+  `price_desc`, `price_drop`, and `newest`; the default is `relevance`.
+- `jd` and `xiaohongshu_ec` do not accept `sort`; neither accepts `price`.
+
+`Idempotency-Key` is optional for `cache_only` and `cache_first`, but required
+for `refresh`; it remains strongly recommended for auditable replay control.
+Use the same `Idempotency-Key` only when retrying the exact same
+path and page body. The key permanently binds that request; reusing it with a
+different body returns `409 idempotency_conflict`. Every continuation has a
+different body and **must use a new Idempotency-Key**. When the header is
+omitted, Hub derives a short-lived freshness-bucket key from the normalized
+request; clients must not rely on that generated key for durable replay.
+
+The response is provider-neutral:
+
+```json
+{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [{
+      "id": "product-id",
+      "marketplace": "jd",
+      "title": "AI recorder",
+      "url": null,
+      "pricing": { "current": "399", "original": null, "currency": "CNY" },
+      "shop": { "id": null, "name": "Example shop" },
+      "images": [],
+      "signals": { "sales": null, "reviewCount": "25", "location": null },
+      "attributes": { "brand": null, "category": null }
+    }],
+    "page": {
+      "page": 1,
+      "returnedCount": 1,
+      "discardedCount": 0,
+      "hasMore": false,
+      "nextCursor": null
+    }
+  },
+  "meta": {
+    "capturedAt": "2026-09-03T00:00:00.000Z",
+    "servedAt": "2026-09-03T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}
+```
+
+`meta.sourceMode` is always one of:
+
+- `live`: Hub completed a new external data call;
+- `fresh_cache`: an exact, still-fresh snapshot for the same consumer and
+  normalized request was served without another external call;
+- `stored_fallback`: an exact last-good snapshot was served because the live
+  path was unavailable; the response includes freshness age, a bounded
+  `fallbackReason`, and HTTP `Warning: 110 - "Response is stale"`;
+- `idempotent_replay`: the committed result for the same caller `Idempotency-Key`, path, and
+  body was replayed without another external call.
+
+### Ecommerce product media relay
+
+```http
+GET /api/v1/data/ecommerce/products/media?requestId=<uuid>&itemId=<id>&imageIndex=0
+Authorization: Bearer <mih_live_ Hub Public API key>
+```
+
+This route safely relays one image referenced by a previously committed product
+search response. `requestId`, `itemId`, and `imageIndex` are required;
+`imageIndex` is an integer from 0 through 19. These are the complete query
+allowlist; any additional query key returns `400 unsupported_fields`. The route
+deliberately accepts no source URL. It resolves the source only from the named Hub response and applies
+bounded scheme, address, redirect, content-type, content-signature, timeout,
+and byte-size checks before returning JPEG, PNG, or WebP bytes. AVIF and GIF are
+not accepted by this contract.
+
+Access requires all of the following:
+
+- a valid `mih_live_` Hub Public API key and a current `ecommerce` platform grant on its owning consumer;
+- a request owned by that same consumer;
+- `platform=ecommerce`, `status=committed`, and `responseStatus=200` on that
+  request;
+- an exact item ID and existing image index in its committed response body.
+
+Missing or invalid authentication returns `401 api_key_required` or
+`401 invalid_api_key`; a valid Test key returns `403 test_key_not_supported`
+before any committed-result lookup, rate/concurrency entry or media-loader call;
+a missing grant on a valid Live key returns `403 platform_not_granted`.
+Requests that do not exist, belong to another consumer, are not a committed 200
+ecommerce result, or do not contain the requested item/image return the same
+`404 external_media_not_found` response and do not disclose ownership.
+Rejected sources use bounded media 4xx errors; a source that cannot be fetched
+safely returns a bounded 502 error and an end-to-end deadline returns
+`504 external_media_timeout`. Per-consumer request-window exhaustion
+returns `429 external_media_rate_limited`; per-consumer or relay-wide concurrency
+exhaustion returns `429 external_media_busy`. Clients back off and do not fan
+out retries.
+
+The media GET does not reserve or commit Hub usage, does not dispatch product
+search, and does not change the source mode or accounting of the original
+request. It can perform a bounded image fetch through the relay, so clients
+must not poll or fan out. Hub uses a same-consumer bounded short-lived server
+cache to avoid duplicate upstream reads. A successful response has
+the verified image Content-Type, `Cache-Control: private, no-store`,
+`Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`,
+`X-Content-Type-Options: nosniff`, `Vary: Authorization`, and an
+`x-mx-insight-request-id` for the media request itself. Browser and shared
+caches must not retain or collapse different bearer credentials onto the same URL.
+A Test-key rejection also performs no stored-result lookup or image fetch.
+
+Starting without a fresh snapshot, two requests with the same normalized body
+but two different valid `Idempotency-Key` values produce `live` followed by
+`fresh_cache`. They are two distinct committed Hub usage requests, but only the
+first performs an external provider call and creates provider-cost evidence.
+Repeating the same body with the same `Idempotency-Key` produces `idempotent_replay`: it adds
+neither a Hub usage request nor an external call or provider-cost event. The
+gateway audit trail may record delivery of the replay, but that delivery is not
+a new Hub usage or provider procurement-cost event. That fact does not decide
+whether a future Hub customer price book prices replay delivery.
+
+A `cache_only` hit is still a new authenticated Hub delivery and therefore a
+new Hub usage record, while creating no provider call. A `cache_only` miss
+releases its usage reservation and returns 404. This distinction is deliberate:
+provider procurement cost, Hub operational usage and future customer billing
+are separate ledgers.
+
+Hub operational usage and provider cost are separate ledgers. Neither is a
+customer invoice. A future versioned Hub price book may decide whether a live,
+cached, fallback, or replayed delivery is customer-billable; it must not infer
+that decision by copying the provider's call cost. Provider rates, balances,
+free quota and procurement evidence remain Internal-only and never appear in
+Public capability, search or media responses.
+
+Every success also returns `x-mx-insight-request-id`,
+`x-mx-insight-source-mode`, `x-mx-insight-captured-at`, `Age`, and
+`idempotent-replay`. `capturedAt` describes the delivered snapshot, while
+`servedAt` describes this response; clients should use them and `ageSeconds`
+instead of assuming a `200` response is live. A fallback is scoped to the exact
+consumer and normalized request. Hub does not substitute a fuzzy query, another
+consumer's data, or a canonical-search result.
+
+The public response intentionally contains no billing or quota fields. On
+`external_platform_outcome_unknown`, `external_platform_response_unusable`, or
+`request_outcome_unknown`, retain the request ID and original `Idempotency-Key`;
+do not create a new `Idempotency-Key` for an automatic retry because an external call may
+already have occurred. `external_platform_response_unusable` is a known provider
+success whose payload failed the Hub normalizer: Hub commits its public 502 as a
+stable failure, so the same key replays that 502 without another provider call.
+True transport or persistence ambiguity remains `request_outcome_unknown`.
+An HTTP 409 `request_outcome_unknown`, `request_in_progress`, or
+`external_platform_response_unusable` can instead describe a new request that Hub suppressed before provider dispatch
+because an earlier request or endpoint contract is still quarantined. That suppressed attempt is released, not a
+committed replay; clients must not treat its idempotency key as proof that a later request cannot dispatch.
+An HTTP 200 response with `data.items=[]` is a valid empty delivery, not an API
+failure, and does not by itself prove that provider cost was zero.
+
+### External platform Admin credential control
+
+External-platform overview and detail are available only to the break-glass
+Admin Token at `GET /internal/v1/admin/external-platforms` and
+`GET /internal/v1/admin/external-platforms/{provider}`. Launcher sessions and
+public API keys are rejected. Ordinary overview, detail, and update responses
+never contain a plaintext key. Detail exposes only the safe credential DTO
+`{source, revision, credentialConfigured, revealable, updatedAt}`.
+
+Replace a provider key in database-managed storage with:
+
+```http
+PUT /internal/v1/admin/external-platforms/{provider}/credential
+X-MX-Insight-Admin-Token: <admin token>
+Content-Type: application/json
+
+{
+  "apiKey": "<provider API key>",
+  "expectedRevision": 3
+}
+```
+
+`apiKey` is write-only and is not echoed. `expectedRevision` provides
+optimistic-concurrency protection. An environment-managed key is never
+revealable or copied into database storage by Hub; an operator must submit the
+key again to migrate it.
+
+Viewing or copying a database-managed key requires step-up verification with
+the Admin Token in both the Admin header and request body:
+
+```http
+POST /internal/v1/admin/external-platforms/{provider}/credential/reveal
+X-MX-Insight-Admin-Token: <admin token>
+Content-Type: application/json
+
+{
+  "adminToken": "<admin token>"
+}
+```
+
+This is the only response allowed to contain `{apiKey}`. It carries
+`Cache-Control: no-store`; clients must keep the plaintext only in the local
+reveal interaction and clear it when that interaction closes.
+
 ## Tokenize text
 
 ```http
@@ -273,7 +578,7 @@ tokens. `errorCode`, when present, is a bounded category and never contains an
 upstream body, URL, credential or stack.
 
 The request uses the same idempotency ledger as search. Replaying the same path
-and body with the same key returns the stored bounded response without another
+and body with the same `Idempotency-Key` returns the stored bounded response without another
 segmenter call or usage charge. Reusing that key with different text returns
 `idempotency_conflict`. A successful request consumes one request from the
 capability's `maxRequests/windowSeconds` policy and records at least one usage
@@ -373,7 +678,7 @@ upstream reference contract additionally caps `crawl` and `user-info` at 100.
 Raw query count × page size and crawl identity count × page size × activity-type
 count must also fit the policy work budget or the Hub returns
 `400 work_budget_exceeded`. This bounds processed item work, not the exact number
-of paid provider calls.
+of provider calls or their procurement cost.
 
 The response body preserves the Night-All legacy envelope:
 
@@ -422,7 +727,7 @@ replace last-good, preventing an older non-empty snapshot from resurfacing. Only
 
 Each new `Idempotency-Key` may dispatch once; a committed live or stale delivery
 is permanently replayed by that key, and a deliberately new live call needs a
-new key. After network/timeout ambiguity, an unusable HTTP 2xx
+new `Idempotency-Key`. After network/timeout ambiguity, an unusable HTTP 2xx
 content-type/JSON/envelope, or a definite upstream `502`, `503` or `504`, Hub may
 return HTTP 200 from an unexpired complete snapshot for the exact consumer,
 operation and full normalized request fingerprint. The snapshot retains the same
@@ -441,13 +746,13 @@ Without that exact snapshot:
 | other definite non-2xx HTTP rejection | `502 night_all_rejected` |
 | network error, Hub timeout, or unusable HTTP 2xx contract after dispatch | `502 upstream_outcome_unknown`; request becomes `unknown` |
 
-An ambiguous request must not be automatically retried with a new key. A
+An ambiguous request must not be automatically retried with a new `Idempotency-Key`. A
 dispatched compatibility error includes the durable Hub ID as
 `error.details.requestId`; successful live/stale delivery carries it in
 `x-mx-insight-request-id`. Use that ID with
-`GET /api/v1/requests/{hub-request-id}`. A replay with the same key reports the
+`GET /api/v1/requests/{hub-request-id}`. A replay with the same `Idempotency-Key` reports the
 held unknown outcome. Hub does not emit `504` for its own timeout because it cannot
-prove that a paid upstream did no work.
+prove that a dispatched upstream did no work or incur no procurement cost.
 
 This facade is distinct from `/api/v1/data/search` and from canonical stored
 search. Its complete/partial live payloads also enter the governed
@@ -1398,7 +1703,7 @@ filters, match mode, page size and bounded first-page analysis state. Later
 pages reuse the same applied profile, tokens and backend instead of calling the
 segmenter again. Do not decode or construct it, and do not change those inputs
 while paging. Each distinct page request needs its own stable idempotency key;
-replay that exact page body with the same key.
+replay that exact page body with the same `Idempotency-Key`.
 
 Elasticsearch supplies ranked full-text results when available. It opens a PIT
 whose keep-alive is renewed for two minutes on each page, orders by
@@ -1466,8 +1771,13 @@ GET /api/v1/requests/{requestId}
 
 Only the owning consumer can read the record. Data calls identify their
 `platform`; generic tools identify their `capability`. Exactly one is present.
-An `unknown` state means the outcome is ambiguous; the caller must not
-automatically repeat the request with a new key.
+This read creates no usage and cannot dispatch an upstream call. `reserved`
+means the request may still be running and `unknown` means the outcome remains
+ambiguous; neither state permits the caller to repeat the original POST or use
+a new `Idempotency-Key`. `committed` permits an exact same-body, same-key replay.
+`released` proves that reservation is no longer holding an outcome; a later
+provider-capable acquisition is a new intent and requires a fresh key and any
+applicable explicit confirmation.
 
 ## Usage
 

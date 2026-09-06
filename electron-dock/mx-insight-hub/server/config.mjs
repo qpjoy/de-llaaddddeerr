@@ -1,6 +1,13 @@
 import { loadCommonConfig } from '@qpjoy/mx-common'
 import { AppError } from './core/errors.mjs'
+import {
+  disabledJustOneConfig,
+  parseJustOneConfig,
+  preflightJustOneConfig,
+} from './external-platforms/config.mjs'
 import { parseServerFileRoots } from './ingest/external/server-files.mjs'
+
+export { parseJustOneConfig, preflightJustOneConfig }
 
 export const PRODUCT_ID = 'mx-insight-hub'
 
@@ -156,6 +163,30 @@ function required(environment, name) {
   return value
 }
 
+export function parsePublicUrl(value) {
+  if (value == null || String(value).trim() === '') return null
+  if (typeof value !== 'string' || value.length > 2_048 || /[\0\r\n]/u.test(value)) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_PUBLIC_URL must be a valid HTTP(S) origin or empty')
+  }
+  let parsed
+  try {
+    parsed = new URL(value.trim())
+  } catch {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_PUBLIC_URL must be a valid HTTP(S) origin or empty')
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol)
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || (parsed.pathname !== '' && parsed.pathname !== '/')
+  ) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_PUBLIC_URL must be an HTTP(S) origin without credentials, path, query or fragment')
+  }
+  return parsed.origin
+}
+
 export function loadConfig(environment = process.env) {
   const listenerMode = environment.MX_INSIGHT_LISTENER_MODE || 'combined'
   if (!['combined', 'public', 'admin'].includes(listenerMode)) {
@@ -174,7 +205,6 @@ export function loadConfig(environment = process.env) {
     throw new AppError(500, 'invalid_configuration', 'DATABASE_URL is required for postgres storage')
   }
   const nightAllTimeoutMs = positiveInteger(environment.NIGHT_ALL_TIMEOUT_MS, 30_000, 'NIGHT_ALL_TIMEOUT_MS')
-
   // Shared data-plane configuration (Elasticsearch, queue, segmenter). Absent
   // values are not an error: every store described here is an optional
   // accelerator, and the Hub must start and serve without any of them.
@@ -248,6 +278,21 @@ export function loadConfig(environment = process.env) {
       .filter(Boolean),
   }
 
+  const reservationLeaseMs = positiveInteger(
+    environment.MX_INSIGHT_RESERVATION_LEASE_MS,
+    Math.max(150_000, nightAllTimeoutMs + 30_000),
+    'MX_INSIGHT_RESERVATION_LEASE_MS',
+  )
+  let justOne
+  try {
+    justOne = parseJustOneConfig(environment, { reservationLeaseMs })
+  } catch (error) {
+    // Paid external providers are optional. A bad provider-only value must not
+    // take down admin/login, stored reads, or unrelated workers. The strict
+    // deploy preflight still rejects it before a ConfigMap can be changed.
+    justOne = disabledJustOneConfig(environment, error)
+  }
+
   return {
     common,
     launcher,
@@ -257,15 +302,15 @@ export function loadConfig(environment = process.env) {
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),
     listenerMode,
+    // Non-secret browser routing metadata. The Admin SPA receives this through
+    // its authenticated session and still authenticates every public request
+    // with the caller's ordinary Hub Public API key.
+    publicApiBaseUrl: parsePublicUrl(environment.MX_INSIGHT_PUBLIC_URL),
     adminToken: listenerMode === 'public'
       ? environment.MX_INSIGHT_ADMIN_TOKEN?.trim() || null
       : required(environment, 'MX_INSIGHT_ADMIN_TOKEN'),
     apiKeyPepper: required(environment, 'MX_INSIGHT_API_KEY_PEPPER'),
-    reservationLeaseMs: positiveInteger(
-      environment.MX_INSIGHT_RESERVATION_LEASE_MS,
-      Math.max(120_000, nightAllTimeoutMs + 30_000),
-      'MX_INSIGHT_RESERVATION_LEASE_MS',
-    ),
+    reservationLeaseMs,
     storeDriver,
     databaseUrl,
     nightAll: {
@@ -277,6 +322,7 @@ export function loadConfig(environment = process.env) {
       // unavailable while the search path keeps working.
       exportToken: environment.NIGHT_ALL_EXPORT_TOKEN || null,
     },
+    justOne,
     backfill: {
       // Platforms the Hub will backfill. Restricted by default to the three
       // with normalizer hooks in server/ingest/normalizers.mjs; anything else

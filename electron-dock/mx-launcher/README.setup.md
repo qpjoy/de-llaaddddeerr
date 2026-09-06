@@ -71,6 +71,13 @@ MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
 # MX_SHADOW_BUILD_NETWORK=host
 
+# deploy 会先用仓库锁定的 pnpm 自动跑 release publisher 测试和 server typecheck。
+# 也可在不碰 K8s/镜像前单独运行同一道门禁：
+bash scripts/manage.sh ops internal-production predeploy
+
+# 仅当本次不更新 qp-tunnel-cli 且缓存 fallback 已确认可用时，才取消下行注释执行：
+# MX_SHADOW_REFRESH_QP_TUNNEL_CLI_FROM_NPM=0 bash scripts/manage.sh ops internal-production deploy
+
 # 7788代理
 TMPDIR=/data/tmp \
 MX_K8S_OS_HOSTNAME=mx-internal-server \

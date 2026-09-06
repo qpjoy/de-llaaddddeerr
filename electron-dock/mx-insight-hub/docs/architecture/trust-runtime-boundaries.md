@@ -26,10 +26,15 @@ The public Kubernetes Service never selects an admin-mode Pod. This matters beca
 - Public API keys are checked inside MX Insight on every request; gateway metadata is not authorization.
 - Launcher-to-Hub management calls use a separate admin token and short timeout.
 - Hub-to-Night-All requires a workload token when Night-All supports it. Network placement alone is not identity.
-- Night-All provider secrets never enter the Hub database or public response.
+- Night-All-owned provider secrets never enter the Hub database or public response. A directly integrated
+  Hub external platform such as JustOne is a separate, intentional exception: its UI-managed credential is
+  isolated in the Hub credential table, is selected only by the Admin reveal path and public dispatch
+  runtime, and never enters an ordinary management or public response.
 - Direct PostgreSQL source passwords are the intentional exception: they are
   plaintext Hub catalog data available only to the Admin Token, and make Hub
   database/backup access credential-sensitive.
+- UI-managed external-platform credentials follow the same credential-trusted database/backup boundary;
+  reveal additionally requires Admin Token reauthentication.
 - Public requests reject `businessId`, `provider`, `endpointId`, `availabilityMode`, arbitrary `params`, and raw-response flags.
 - Private Admin is not the public data-plane. A public route must not wildcard proxy the admin listener.
 

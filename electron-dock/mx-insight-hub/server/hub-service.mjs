@@ -130,6 +130,15 @@ const DEFAULT_POLICY = Object.freeze({
 })
 const DEFAULT_API_KEY_LIFETIME_DAYS = 180
 const MAX_API_KEY_LIFETIME_DAYS = 730
+const DEFAULT_EXTERNAL_MEDIA_POLICY = Object.freeze({
+  maxRequests: 120,
+  windowMs: 60_000,
+  maxConcurrency: 4,
+})
+
+function isTestApiKey(apiKey) {
+  return apiKey?.environment === 'test' || apiKey?.prefix?.startsWith('mih_test_')
+}
 
 const PLATFORM_ALIASES = new Map([
   ['x', 'twitter'],
@@ -163,6 +172,7 @@ const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor',
 const RESULT_TYPES = new Set(['fresh', 'stable'])
 const FRESH_REPLAY_WINDOW_MS = 120_000
 const PUBLIC_OPINION_VISIBILITY_CONTRACT = 'public-opinion.publication-visibility.v1'
+const ECOMMERCE_PLATFORM = 'ecommerce'
 
 function publicDataProductContract(response, contractVersion) {
   const payload = { ...response, contractVersion }
@@ -332,8 +342,12 @@ export class HubService {
     ingestQueueName = 'mx-insight-hub:ingest',
     searchQueries = null,
     segmenter = null,
+    externalPlatformCapabilities = null,
+    externalImageLoader = null,
+    externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     logger = console,
   }) {
+    const mediaPolicy = externalMediaPolicy || DEFAULT_EXTERNAL_MEDIA_POLICY
     this.store = store
     this.adapter = adapter
     this.apiKeyPepper = apiKeyPepper
@@ -345,6 +359,14 @@ export class HubService {
     this.ingestQueueName = ingestQueueName
     this.searchQueries = searchQueries
     this.segmenter = segmenter
+    this.externalPlatformCapabilities = externalPlatformCapabilities
+    this.externalImageLoader = externalImageLoader
+    this.externalMediaPolicy = {
+      maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
+      windowMs: Math.max(1_000, Math.floor(Number(mediaPolicy.windowMs) || DEFAULT_EXTERNAL_MEDIA_POLICY.windowMs)),
+      maxConcurrency: Math.max(1, Math.floor(Number(mediaPolicy.maxConcurrency) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxConcurrency)),
+    }
+    this.externalMediaWindows = new Map()
     this.logger = logger
   }
 
@@ -528,6 +550,7 @@ export class HubService {
       SOURCE_CATALOG_PLATFORM,
       MOBILE_COMMERCE_PLATFORM,
       VIRTUAL_SUPERMARKET_PLATFORM,
+      ECOMMERCE_PLATFORM,
     ])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
@@ -699,6 +722,25 @@ export class HubService {
             'marketplace_filter',
           ],
         })
+      }
+    }
+    if (canonicalGrants.includes(ECOMMERCE_PLATFORM) && this.externalPlatformCapabilities) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms)) {
+        const ecommerceIndex = platforms.findIndex((entry) => (
+          (entry?.platform || entry) === ECOMMERCE_PLATFORM
+        ))
+        if (ecommerceIndex < 0) {
+          const ecommerce = await this.externalPlatformCapabilities()
+          platforms.push(isTestApiKey(context.apiKey)
+            ? { ...ecommerce, ready: false }
+            : ecommerce)
+        } else if (isTestApiKey(context.apiKey)) {
+          const ecommerce = platforms[ecommerceIndex]
+          platforms[ecommerceIndex] = typeof ecommerce === 'object'
+            ? { ...ecommerce, ready: false }
+            : { platform: ECOMMERCE_PLATFORM, ready: false }
+        }
       }
     }
     const capabilityGrants = typeof this.store.listCapabilityGrants === 'function'
@@ -2438,6 +2480,106 @@ export class HubService {
       ...(record.capturedAt ? { capturedAt: record.capturedAt } : {}),
       reservedAt: record.reservedAt,
       completedAt: record.completedAt,
+    }
+  }
+
+  #enterExternalMedia(consumerId) {
+    const now = Date.now()
+    if (this.externalMediaWindows.size > 1_000) {
+      for (const [id, candidate] of this.externalMediaWindows) {
+        if (candidate.active === 0 && now - candidate.startedAt >= this.externalMediaPolicy.windowMs) {
+          this.externalMediaWindows.delete(id)
+        }
+      }
+    }
+    let window = this.externalMediaWindows.get(consumerId)
+    if (!window) {
+      window = { startedAt: now, requests: 0, active: 0 }
+      this.externalMediaWindows.set(consumerId, window)
+    } else if (now - window.startedAt >= this.externalMediaPolicy.windowMs) {
+      // A rate-window rollover must not erase still-running relays. Concurrency
+      // is an instantaneous boundary, independent of the request-count window.
+      window.startedAt = now
+      window.requests = 0
+    }
+    assert(
+      window.requests < this.externalMediaPolicy.maxRequests,
+      429,
+      'external_media_rate_limited',
+      'Product image request limit exceeded',
+    )
+    // Busy attempts still consume the request window. Otherwise a consumer
+    // holding one relay open could hammer grant/store checks without limit.
+    window.requests += 1
+    assert(
+      window.active < this.externalMediaPolicy.maxConcurrency,
+      429,
+      'external_media_busy',
+      'Product image relay is busy',
+    )
+    window.active += 1
+    return () => {
+      window.active = Math.max(0, window.active - 1)
+    }
+  }
+
+  async ecommerceProductImage(context, {
+    requestId,
+    itemId,
+    imageIndex,
+    signal,
+    deliveryComplete = null,
+  }) {
+    assert(
+      !isTestApiKey(context.apiKey),
+      403,
+      'test_key_not_supported',
+      'Test API keys cannot access external ecommerce media',
+    )
+    assert(
+      this.externalImageLoader && typeof this.store.getCommittedEcommerceImageSource === 'function',
+      503,
+      'external_media_unavailable',
+      'Product image relay is unavailable',
+    )
+    const grants = await this.store.listGrants(context.consumer.id)
+    assert(grants.includes('ecommerce'), 403, 'platform_not_granted', 'Platform is not granted')
+    const release = this.#enterExternalMedia(context.consumer.id)
+    let releaseDeferred = false
+    try {
+      const normalizedRequestId = requiredUuid(requestId, 'requestId')
+      const normalizedItemId = requiredString(itemId, 'itemId')
+      assert(
+        normalizedItemId.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(normalizedItemId),
+        400,
+        'invalid_request',
+        'itemId must be at most 512 characters and contain no control characters',
+      )
+      const normalizedImageIndex = Number(imageIndex)
+      assert(
+        Number.isInteger(normalizedImageIndex) && normalizedImageIndex >= 0 && normalizedImageIndex < 20,
+        400,
+        'invalid_request',
+        'imageIndex must be an integer from 0 to 19',
+      )
+      const sourceUrl = await this.store.getCommittedEcommerceImageSource({
+        requestId: normalizedRequestId,
+        consumerId: context.consumer.id,
+        itemId: normalizedItemId,
+        imageIndex: normalizedImageIndex,
+      })
+      assert(sourceUrl, 404, 'external_media_not_found', 'Product image is not available for this request')
+      const media = await this.externalImageLoader(sourceUrl, {
+        signal,
+        cacheScope: context.consumer.id,
+      })
+      if (deliveryComplete && typeof deliveryComplete.then === 'function') {
+        releaseDeferred = true
+        Promise.resolve(deliveryComplete).then(release, release)
+      }
+      return media
+    } finally {
+      if (!releaseDeferred) release()
     }
   }
 

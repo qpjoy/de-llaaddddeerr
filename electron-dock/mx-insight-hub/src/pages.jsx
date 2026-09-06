@@ -24,7 +24,7 @@ import {
   Users,
   WarningCircle,
 } from '@phosphor-icons/react'
-import { adminApi } from './api.js'
+import { adminApi, publicDocsHref } from './api.js'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from './open-capabilities.js'
 import {
   DropdownField,
@@ -70,6 +70,9 @@ const PLATFORM_CATALOG = [
   'telegram',
   'public_opinion',
   'source_catalog',
+  'mobile_commerce',
+  'virtual_supermarket',
+  'ecommerce',
 ]
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }
@@ -88,16 +91,14 @@ const CAPABILITY_CATALOG = {
   },
 }
 
-const PUBLIC_DOCS_HREF = (() => {
-  const configured = import.meta.env.VITE_MX_INSIGHT_PUBLIC_DOCS_URL?.trim()
-  if (configured) return configured
-  if (typeof window !== 'undefined' && window.location.port === '18151') {
-    const url = new URL('/docs', window.location.origin)
-    url.port = '18150'
-    return url.toString()
-  }
-  return '/docs'
-})()
+const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = {
+  ecommerce: {
+    kind: 'Hub 数据域',
+    operation: 'ecommerce.products.search',
+    route: 'Hub 内部路由',
+    policyNote: '启用即允许该调用身份请求电商数据；当前固定单候选，缓存与内部采购成本由 Hub 管理。',
+  },
+}
 
 function tenantAllows(session, tenantId, capability) {
   if (!tenantId) return false
@@ -831,7 +832,12 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     try {
       const key = await adminApi.createApiKey(token, form)
       setOpen(false)
-      setIssuedSecret({ secret: key.secret, expiresAt: key.expiresAt })
+      setIssuedSecret({
+        secret: key.secret,
+        expiresAt: key.expiresAt,
+        tenantId: key.tenantId,
+        consumerId: key.consumerId,
+      })
       state.refresh()
       notify('API Key 已签发', 'success')
     } catch (error) {
@@ -862,7 +868,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
   return (
     <>
-      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="密钥只在签发时显示一次；权限、配额和用量绑定到调用者，默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="客户端只需要一把开放能力 API Key。当前权限、配额与用量按其调用身份（consumer）解析，轮换密钥不会丢配置；未来客户费率由版本化订阅 / price book 解析。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
         {canIssueKey ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
             <Plus size={17} aria-hidden="true" />签发 API Key
@@ -881,13 +887,17 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       <Panel title="已签发密钥" subtitle={`${keys.length} 条记录`}>
         {keys.length ? (
           <Table label="API Key 列表">
-            <thead><tr><th>名称</th><th>调用者</th><th>密钥标识</th><th>状态</th><th>有效至</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
+            <thead><tr><th>名称</th><th>调用者</th><th>密钥标识（不可用于调用）</th><th>环境</th><th>状态</th><th>有效至</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
             <tbody>
               {keys.map((key) => (
                 <tr key={key.id}>
                   <td><strong>{key.name}</strong><small>{formatDate(key.createdAt)} 签发</small></td>
                   <td>{consumerNames.get(key.consumerId) || key.consumerId}</td>
-                  <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code></td>
+                  <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code><small>仅用于核对；完整 secret 只在签发时显示一次</small></td>
+                  <td>
+                    <strong>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? 'Test · 兼容标签' : 'Live'}</strong>
+                    <small>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? '非沙箱；外部电商接口拒绝使用' : '正式开放能力凭据'}</small>
+                  </td>
                   <td><StatusBadge status={key.effectiveStatus || key.status} /></td>
                   <td>{formatDate(key.expiresAt)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
@@ -896,9 +906,9 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                       <a
                         className="qp-button qp-button--ghost qp-button--sm"
                         href={`#/platforms?${new URLSearchParams({ tenantId: key.tenantId, consumerId: key.consumerId })}`}
-                        aria-label={`管理 ${key.name} 所属调用者的平台授权`}
+                        aria-label={`配置 ${key.name} 所属调用身份的开放能力`}
                       >
-                        <SlidersHorizontal size={15} aria-hidden="true" />平台授权
+                        <SlidersHorizontal size={15} aria-hidden="true" />配置开放能力
                       </a>
                     ) : null}
                     {tenantAllows(session, key.tenantId, 'apikey.write') ? (
@@ -924,7 +934,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       {open ? (
         <Modal
           title="签发 API Key"
-          description="选择所属调用者和环境。完整 secret 只会显示一次。"
+          description="选择所属调用者。管理台当前只签发 Live Key；完整 secret 只会显示一次。"
           onClose={() => !saving && setOpen(false)}
           footer={(
             <>
@@ -941,9 +951,6 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <Field label="密钥名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
             </Field>
-            <DropdownField label="环境" value={form.environment}
-              onChange={(environment) => setForm({ ...form, environment })}
-              options={[{ value: 'live', label: 'Live' }, { value: 'test', label: 'Test' }]} />
             <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
               <input
                 className="qp-input"
@@ -962,7 +969,23 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       ) : null}
 
       {issuedSecret ? (
-        <Modal title="API Key 已签发" description={`这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。`} onClose={() => setIssuedSecret(null)} footer={<button className="qp-button qp-button--primary" type="button" onClick={() => setIssuedSecret(null)}>我已安全保存</button>}>
+        <Modal
+          title="API Key 已签发"
+          description={`这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。同一把 Key 可调用该身份已启用的全部开放能力。`}
+          onClose={() => setIssuedSecret(null)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setIssuedSecret(null)}>我已安全保存</button>
+              <a
+                className="qp-button qp-button--primary"
+                href={`#/platforms?${new URLSearchParams({ tenantId: issuedSecret.tenantId, consumerId: issuedSecret.consumerId })}`}
+                onClick={() => setIssuedSecret(null)}
+              >
+                我已保存，配置开放能力
+              </a>
+            </>
+          )}
+        >
           <SecretPanel secret={issuedSecret.secret} onCopied={() => notify('密钥已复制', 'success')} />
         </Modal>
       ) : null}
@@ -1173,6 +1196,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   )
   const contextUnavailable = state.loading || !contextMatchesRequest
   const hasPlatformWrite = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
+  const canReadApiKeys = tenantAllows(session, selectedConsumer?.tenantId, 'apikey.read')
   const canUpdatePlatform = hasPlatformWrite && !contextUnavailable
   const mutationPending = Boolean(busyPlatform || busyCapability)
   const mutationDisabled = mutationPending || contextUnavailable
@@ -1272,8 +1296,9 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
   return (
     <>
-      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="每项能力按 consumer × capability 独立授权和滑动计量；同一调用者的所有 API Key 共享请求上限。" loading={state.loading} onRefresh={state.refresh}>
-        <a className="qp-button qp-button--outline" href={PUBLIC_DOCS_HREF} target="_blank" rel="noreferrer">查看公共 API 文档</a>
+      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="一把 Hub API Key 可直接调用其身份已授权的所有接口；为 ecommerce 或其他能力启用授权时，无需签发第二把 Key。" loading={state.loading} onRefresh={state.refresh}>
+        {canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
+        <a className="qp-button qp-button--outline" href={publicDocsHref()} target="_blank" rel="noreferrer">查看公共 API 文档</a>
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar">
@@ -1312,19 +1337,53 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
             <span>当前授权对象</span>
             <strong>{selectedTenant?.name || data.tenantId} / {selectedConsumer.name}</strong>
             <code className="mih-mono">Consumer ID: {selectedConsumer.id}</code>
-            <small>API Key 仅继承其所属调用者的数据平台与通用能力授权</small>
+            <small>该调用身份的所有有效 API Key 立即共享这里的数据域、能力与配额；轮换 Key 无需重配</small>
           </div>
         ) : null}
       </section>
 
-      <Panel title="平台授权矩阵" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用`}>
+      <section className="qp-panel mih-provider-routing-boundary" aria-label="电商能力与上游路由边界">
+        <div className="mih-provider-routing-boundary__intro">
+          <span><Cloud size={19} weight="duotone" aria-hidden="true" /></span>
+          <div>
+            <strong>对外授权 Hub 数据域，对内选择上游适配器</strong>
+            <p>可归一化的商品检索统一授权 <code>ecommerce</code>；列表里的具体平台仅保留给“平台身份本身就是接口语义”的兼容能力。调用方只持有同一把 Hub API Key，不会看到或指定供应方。</p>
+          </div>
+        </div>
+        <div className="mih-provider-routing-boundary__flow" aria-label="电商请求分流">
+          <span><small>PUBLIC GRANT</small><strong>ecommerce</strong></span>
+          <ArrowRight size={16} aria-hidden="true" />
+          <span><small>HUB OPERATION</small><strong>products.search</strong></span>
+          <ArrowRight size={16} aria-hidden="true" />
+          <span><small>ROUTING BOUNDARY</small><strong>Hub 内部路由</strong></span>
+        </div>
+        <footer>
+          <span>当前运行时只有 JustOne 单候选，没有多供应商故障转移。第二家通过合同验证后，Hub 才会按 marketplace、版本、健康、配额 / 成本与租户策略在派发前确定性选路，并把 cursor 固定到已选适配器；客户仍使用同一把 Key。未来客户费率通过版本化订阅 / price book 生效。</span>
+          {session?.platformAdmin && session?.kind === 'admin-token' ? <a className="qp-button qp-button--ghost qp-button--sm" href="#/external-platforms?range=24h">管理内部上游<ArrowRight size={15} aria-hidden="true" /></a> : null}
+        </footer>
+      </section>
+
+      <Panel title="API Key 可访问的数据平台 / 数据域" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；配置随 Key 所属调用身份生效，不使用供应商 API Key`}>
         {data.consumerId ? (
           <Table label="平台授权与策略">
-            <thead><tr><th>平台</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>操作</th></tr></thead>
+            <thead><tr><th>开放项</th><th>能力类型</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>操作</th></tr></thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.platform}>
-                  <td><strong>{platformLabel(row.platform)}</strong><small>{row.platform}</small></td>
+                  <td>
+                    <strong>{platformLabel(row.platform)}</strong>
+                    <small>{row.platform}</small>
+                    {PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform] ? (
+                      <>
+                        <small>{PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform].operation} · {PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform].route}</small>
+                        <small>{PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform].policyNote}</small>
+                      </>
+                    ) : null}
+                  </td>
+                  <td>
+                    <strong>{PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform]?.kind || '来源平台'}</strong>
+                    <small>{PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform] ? '内部可聚合多个供应方' : '平台身份属于合同语义'}</small>
+                  </td>
                   <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已启用' : '未启用'} /></td>
                   <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                   <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
@@ -1410,7 +1469,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       {configureTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${platformLabel(configureTarget.platform)}`}
-          description={`保存后立即作用于调用者「${selectedConsumer?.name || data.consumerId}」的新请求。`}
+          description={`保存后立即作用于调用身份「${selectedConsumer?.name || data.consumerId}」的所有有效 API Key；轮换密钥无需重配。`}
           onClose={() => !busyPlatform && setConfigureTarget(null)}
           footer={(
             <>

@@ -23,6 +23,7 @@ import {
   Globe,
   Kanban,
   ListChecks,
+  MagicWand,
   MagnifyingGlass,
   NotePencil,
   Path,
@@ -110,6 +111,7 @@ const GOVERNANCE_KINDS = [...TAXONOMY_KINDS, OWNER_KIND]
 
 const BUILTIN_VIEWS = [
   { id: 'all', label: '底表', icon: Rows, predicate: (item) => !item.archivedAt },
+  { id: 'justone-connected', label: 'JustOne 已接', icon: MagicWand, predicate: (item) => !item.archivedAt && JUSTONE_CONNECTED_SOURCE_KEYS.has(item.sourceKey) },
   { id: 'covered', label: '已覆盖', icon: CheckCircle, predicate: (item) => !item.archivedAt && item.coverageStatus === 'covered' },
   { id: 'uncovered', label: '未覆盖', icon: Compass, predicate: (item) => !item.archivedAt && item.coverageStatus === 'not_covered' },
   { id: 'in-progress', label: '进行中', icon: Pulse, predicate: (item) => !item.archivedAt && ['doing', 'exploring'].includes(item.deliveryStatus) },
@@ -118,6 +120,32 @@ const BUILTIN_VIEWS = [
   { id: 'archived', label: '已归档', icon: Archive, predicate: (item) => Boolean(item.archivedAt) },
 ]
 const REFERENCE_VIEW = { id: 'references', label: '治理引用', icon: TreeStructure, predicate: () => true }
+
+const JUSTONE_CONNECTED_SOURCE_KEYS = new Set([
+  'source-catalog-0058',
+  'source-catalog-0059',
+  'source-catalog-0060',
+  'source-catalog-0064',
+  'source-catalog-0073',
+])
+
+function connectorHint(item, value) {
+  if (String(value).toLocaleLowerCase('en-US') !== 'justone') {
+    return { label: value, kind: 'hint', title: `${value} 接入线索` }
+  }
+  if (JUSTONE_CONNECTED_SOURCE_KEYS.has(item.sourceKey)) {
+    return {
+      label: 'JustOne · 商品搜索已接',
+      kind: 'connected',
+      title: 'Hub ecommerce.products.search 已有已核验 marketplace 合同',
+    }
+  }
+  return {
+    label: 'JustOne · 接入线索',
+    kind: 'evidence',
+    title: '历史目录记录了 JustOne 线索，但当前没有可调用的 Hub 商品搜索合同',
+  }
+}
 
 const SECTION_OPTIONS = [
   { id: 'overview', label: '数据源总览', icon: ChartDonut },
@@ -1038,7 +1066,7 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
                     <td><CatalogBadge dimension="delivery" value={item.deliveryStatus} ariaLabel={`编辑 ${item.canonicalName} 的实施阶段`} onClick={() => openEditor(item, 'governance')} /></td>
                     <td><span className={`mih-source-priority mih-source-priority--${item.priority.toLowerCase()}`}>{item.priority}</span></td>
                     <td>{item.owner ? <span className="mih-source-owner"><UserCircle size={15} aria-hidden="true" />{item.owner}</span> : <button className="mih-source-unassigned" type="button" onClick={() => openEditor(item, 'governance')}>待分配</button>}</td>
-                    <td><div className="mih-source-cell-tags">{item.connectorHints?.slice(0, 2).map((value) => <span key={value}>{value}</span>)}{!item.connectorHints?.length ? <small>—</small> : null}</div></td>
+                    <td><div className="mih-source-cell-tags">{item.connectorHints?.slice(0, 2).map((value) => { const hint = connectorHint(item, value); return <span className={`mih-source-connector mih-source-connector--${hint.kind}`} title={hint.title} key={value}>{hint.label}</span> })}{!item.connectorHints?.length ? <small>—</small> : null}</div></td>
                     <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${item.canonicalName}`} onClick={() => openEditor(item)}><NotePencil size={16} aria-hidden="true" /></button></td>
                   </tr>
                 )),

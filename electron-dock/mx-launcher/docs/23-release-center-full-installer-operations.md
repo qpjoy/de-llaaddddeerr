@@ -86,6 +86,11 @@ MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
 ```
 
+上面的命令只用于 mx-launcher Internal Server 代码、migration、K8s 配置或 Secret 发生变化
+时。Luopan 日常上传 DMG/ASAR、创建发布计划和审批 gate 属于 Release Center 数据面操作，
+不需要重新部署 Server，也不需要手工运行 Corepack；真正执行 `internal-production deploy`
+时会自动使用仓库锁定的 pnpm 完成 predeploy 检查。
+
 `MX_RELEASE_OSS_SECRET_SOURCE` 支持：
 
 - `env`：声明式合并显式值；已有 Secret 时可只轮换一个 key。空的
@@ -303,7 +308,7 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- `
   --e2e-result passed
 ```
 
-Luopan 当前固定使用 `channel=shadow`，而不是 MX-H2I 示例中的 `stable`。产品开发者
+Luopan 正式发布固定使用 `channel=stable`。产品开发者
 应在受保护的 Internal CI 使用账号独立的 `client_credentials`；完整的 artifactId、
 定向验证、gate 和全量流程见 [docs/25](./25-release-center-developer-api.md)：
 
@@ -316,7 +321,7 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- \
   --platform darwin --arch arm64 \
   --artifact <Luopan-arm64.dmg> \
   --current-version 0.1.0 --version 0.1.1 \
-  --channel shadow --e2e-result running
+  --channel stable --e2e-result running
 ```
 
 先由 CI/受控验证机完成 digest、签名、安装与启动 smoke，再用 approve scope 过定向

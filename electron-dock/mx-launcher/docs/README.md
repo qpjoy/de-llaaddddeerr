@@ -22,6 +22,8 @@
   密码、飞书、访客 profile 与安全切换。
 - [26-mx-insight-hub-integration-architecture.md](./26-mx-insight-hub-integration-architecture.md)：
   MX Insight Hub 与 Night-All 数据产品边界。
+- [29-unified-launcher-updater-integration.md](./29-unified-launcher-updater-integration.md)：
+  通用应用 updater、ProductNetwork 相对制品地址、Electron 产品接入与 Luopan 一次性 L3 切换边界。
 
 带“目标架构”或“后续”状态的文档不代表代码已经实现。运行时能力必须以实现、测试和
 部署证据为准。

@@ -1,5 +1,10 @@
 # MX-H2I 正式交付、npm 发布与 Luopan Handoff 方案
 
+> **历史交付记录（已被部分取代）**：本文保留 2026-07 的包发布与 Luopan handoff 演进过程，
+> 其中版本号、updater 分层和“未发布”状态不再作为当前接入指令。通用 L3 updater、正式
+> Luopan/Compass 身份映射与 2.3.18 接入请以
+> [29-unified-launcher-updater-integration.md](29-unified-launcher-updater-integration.md) 为准。
+
 本文档回答四个问题：
 
 1. 哪些包必须发布到 npm、按什么顺序和版本策略发布，开发态 workspace 引用和线上 npm 引用如何切换。

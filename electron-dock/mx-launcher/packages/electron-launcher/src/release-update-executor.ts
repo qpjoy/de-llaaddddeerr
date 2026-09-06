@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
   downloadElectronLauncherReleaseArtifactToFile,
+  type ElectronLauncherArtifactDownloadProgress,
   type ElectronLauncherReleaseArtifactRef,
   type ElectronLauncherReleaseUpdater,
   type ElectronLauncherUpdateCheckResult
@@ -21,7 +23,7 @@ import {
  */
 
 export type ElectronLauncherUpdateExecutorPhase =
-  | 'idle' | 'checking' | 'downloading' | 'verifying' | 'staged' | 'activating' | 'reported' | 'failed';
+  | 'idle' | 'checking' | 'downloading' | 'verifying' | 'staged' | 'activating' | 'reported' | 'cancelled' | 'failed';
 
 export type ElectronLauncherNetworkGateState =
   | 'idle' | 'connected' | 'connecting' | 'recovering' | 'permission-required';
@@ -62,6 +64,19 @@ export interface ElectronLauncherUpdateExecutionResult {
   artifacts: ElectronLauncherArtifactExecution[];
 }
 
+export interface ElectronLauncherUpdateExecutionOptions {
+  signal?: AbortSignal;
+  downloadTimeoutMs?: number;
+  onProgress?: (progress: ElectronLauncherArtifactDownloadProgress) => void;
+}
+
+export interface ElectronLauncherStagedInstallerContext {
+  /** Exact result path returned by execute(), when retained by the product. */
+  stagedPath?: string | null;
+  /** Exact Release Center release whose staging directory should be used. */
+  releaseId?: string | null;
+}
+
 interface SlotPointer {
   version: string;
   path: string;
@@ -90,7 +105,10 @@ export interface ElectronLauncherArtifactActivation {
 }
 
 export interface ElectronLauncherReleaseUpdateExecutor {
-  execute(check: ElectronLauncherUpdateCheckResult): Promise<ElectronLauncherUpdateExecutionResult>;
+  execute(
+    check: ElectronLauncherUpdateCheckResult,
+    options?: ElectronLauncherUpdateExecutionOptions
+  ): Promise<ElectronLauncherUpdateExecutionResult>;
   /**
    * Activate an artifact that was already downloaded and digest-verified by
    * the product's own download path. Applies the same gate and slot rules as
@@ -102,7 +120,10 @@ export interface ElectronLauncherReleaseUpdateExecutor {
     context?: { releaseId?: string | null }
   ): Promise<ElectronLauncherArtifactActivation>;
   /** Manual confirmation step for installer-class artifacts. */
-  openStagedInstaller(artifact: ElectronLauncherReleaseArtifactRef): Promise<string>;
+  openStagedInstaller(
+    artifact: ElectronLauncherReleaseArtifactRef,
+    context?: ElectronLauncherStagedInstallerContext
+  ): Promise<string>;
   /** Roll the given slot back to its previous pointer. */
   rollback(slot: 'config' | 'renderer'): Promise<SlotPointer | null>;
 }
@@ -112,8 +133,13 @@ export function createElectronLauncherReleaseUpdateExecutor(
 ): ElectronLauncherReleaseUpdateExecutor {
   const baseDir = options.baseDir;
   if (!baseDir?.trim()) throw new Error('release update executor requires baseDir');
+  const stagedArtifacts = new Map<string, { releaseId: string; path: string }>();
   const phase = (value: ElectronLauncherUpdateExecutorPhase, detail: Record<string, unknown> = {}) => {
-    options.onPhase?.(value, detail);
+    try {
+      options.onPhase?.(value, detail);
+    } catch {
+      // State observation must not interrupt a verified update transaction.
+    }
   };
   const report = async (status: string, metadata: Record<string, unknown>) => {
     try {
@@ -134,13 +160,10 @@ export function createElectronLauncherReleaseUpdateExecutor(
   async function stageArtifact(
     releaseId: string,
     artifact: ElectronLauncherReleaseArtifactRef,
-    artifactBaseUrl: string
+    artifactBaseUrl: string,
+    executionOptions: ElectronLauncherUpdateExecutionOptions
   ): Promise<string> {
-    const fileName = basename(artifact.fileName
-      ? basename(artifact.fileName)
-      : artifact.url
-        ? basename(new URL(artifact.url, `${artifactBaseUrl.replace(/\/+$/, '')}/`).pathname) || artifact.artifactId
-        : artifact.artifactId);
+    const fileName = releaseArtifactFileName(artifact, artifactBaseUrl);
     if (!fileName || fileName === '.' || fileName === '..') {
       throw new Error(`invalid release artifact fileName: ${artifact.fileName || artifact.artifactId}`);
     }
@@ -148,35 +171,68 @@ export function createElectronLauncherReleaseUpdateExecutor(
     const targetPath = join(baseDir, STAGING_DIR, releaseDir, fileName);
     phase('downloading', { artifactId: artifact.artifactId, targetPath });
     await report('download-started', { artifactId: artifact.artifactId, releaseId });
-    phase('verifying', { artifactId: artifact.artifactId });
     await downloadElectronLauncherReleaseArtifactToFile({
       artifact,
       targetPath,
-      baseUrl: artifactBaseUrl
+      baseUrl: artifactBaseUrl,
+      signal: executionOptions.signal,
+      timeoutMs: executionOptions.downloadTimeoutMs,
+      onProgress: (progress) => {
+        if (progress.phase === 'verifying') {
+          phase('verifying', { artifactId: artifact.artifactId, bytes: progress.bytesReceived });
+        }
+        try {
+          executionOptions.onProgress?.(progress);
+        } catch {
+          // Progress is observational and cannot abort the update transaction.
+        }
+      }
     });
+    stagedArtifacts.set(artifact.artifactId, { releaseId, path: targetPath });
     return targetPath;
   }
 
   async function activateSlot(
     slot: 'config' | 'renderer',
     artifact: ElectronLauncherReleaseArtifactRef,
-    stagedPath: string
+    stagedPath: string,
+    apply: ((activePath: string) => void | Promise<void>) | undefined
   ): Promise<string> {
     const slotDir = join(baseDir, SLOTS_DIR, slot);
     await mkdir(slotDir, { recursive: true });
     const version = safeLauncherPackageSegment(artifact.version, 'version');
-    const activePath = join(slotDir, `active-${version}-${basename(stagedPath)}`);
+    const activePath = join(
+      slotDir,
+      `active-${version}-${randomUUID()}-${basename(stagedPath)}`
+    );
     const tempPath = `${activePath}.next`;
-    await copyFile(stagedPath, tempPath);
-    await rm(activePath, { force: true });
-    await rename(tempPath, activePath);
+    try {
+      await copyFile(stagedPath, tempPath);
+      await rename(tempPath, activePath);
+    } catch (error) {
+      await rm(tempPath, { force: true });
+      throw error;
+    }
     const current = await readPointer(join(slotDir, 'current.json'));
-    if (current) await writePointer(join(slotDir, 'previous.json'), current);
-    await writePointer(join(slotDir, 'current.json'), {
-      version,
-      path: activePath,
-      activatedAt: new Date().toISOString()
-    });
+    try {
+      await apply?.(activePath);
+    } catch (error) {
+      if (current) await restoreAppliedSlot(apply, current.path);
+      await rm(activePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    try {
+      if (current) await writePointer(join(slotDir, 'previous.json'), current);
+      await writePointer(join(slotDir, 'current.json'), {
+        version,
+        path: activePath,
+        activatedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      if (current) await restoreAppliedSlot(apply, current.path);
+      await rm(activePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
     return activePath;
   }
 
@@ -204,13 +260,11 @@ export function createElectronLauncherReleaseUpdateExecutor(
     }
     phase('activating', { artifactId: artifact.artifactId, artifactClass });
     if (artifactClass === 'config') {
-      result.activePath = await activateSlot('config', artifact, stagedPath);
-      await options.applyConfig?.(result.activePath);
+      result.activePath = await activateSlot('config', artifact, stagedPath, options.applyConfig);
       result.activated = true;
       await report('artifact-applied', { artifactId: artifact.artifactId, releaseId, artifactClass, path: result.activePath });
     } else if (artifactClass === 'renderer') {
-      result.activePath = await activateSlot('renderer', artifact, stagedPath);
-      await options.applyRenderer?.(result.activePath);
+      result.activePath = await activateSlot('renderer', artifact, stagedPath, options.applyRenderer);
       result.activated = true;
       await report('artifact-applied', { artifactId: artifact.artifactId, releaseId, artifactClass, path: result.activePath });
     } else if (artifactClass === 'npm-package' || artifactClass === 'asar') {
@@ -241,7 +295,7 @@ export function createElectronLauncherReleaseUpdateExecutor(
   }
 
   return {
-    async execute(check) {
+    async execute(check, executionOptions = {}) {
       phase('checking', { status: check.status });
       if (check.status !== 'update-available' || !check.plan) {
         phase('idle', { reason: check.reason });
@@ -249,6 +303,8 @@ export function createElectronLauncherReleaseUpdateExecutor(
       }
       const releaseId = check.plan.releaseId;
       const executions: ElectronLauncherArtifactExecution[] = [];
+      let successfulArtifacts = 0;
+      let cancelled = false;
       for (const artifact of check.artifacts) {
         const artifactClass = classifyElectronLauncherUpdateArtifact(artifact.kind);
         const execution: ElectronLauncherArtifactExecution = {
@@ -261,10 +317,27 @@ export function createElectronLauncherReleaseUpdateExecutor(
           error: null
         };
         executions.push(execution);
+        if (executionOptions.signal?.aborted) {
+          execution.phase = 'cancelled';
+          execution.error = cancellationMessage(executionOptions.signal.reason);
+          cancelled = true;
+          break;
+        }
+        if (artifactClass === 'unknown') {
+          execution.phase = 'failed';
+          execution.error = `unsupported release artifact kind: ${artifact.kind}`;
+          await report('artifact-unsupported', {
+            artifactId: artifact.artifactId,
+            releaseId,
+            kind: artifact.kind
+          });
+          continue;
+        }
         try {
-          const stagedPath = await stageArtifact(releaseId, artifact, check.baseUrl);
+          const stagedPath = await stageArtifact(releaseId, artifact, check.baseUrl, executionOptions);
           execution.stagedPath = stagedPath;
           execution.phase = 'staged';
+          phase('staged', { artifactId: artifact.artifactId, targetPath: stagedPath });
           await report(artifactClass === 'installer' ? 'installer-downloaded' : 'artifact-staged', {
             artifactId: artifact.artifactId,
             releaseId,
@@ -272,21 +345,48 @@ export function createElectronLauncherReleaseUpdateExecutor(
             path: stagedPath
           });
 
-          if (artifactClass === 'installer') continue; // installer activation is always manual
+          if (artifactClass === 'installer') {
+            successfulArtifacts += 1;
+            continue; // installer activation is always manual
+          }
 
           if (!artifact.autoApply) {
             execution.deferredReason = 'manual activation required';
+            successfulArtifacts += 1;
             continue;
           }
+          throwIfExecutionCancelled(executionOptions.signal);
           const activation = await performActivation(artifact, stagedPath, releaseId);
           execution.activated = activation.activated;
           execution.deferredReason = activation.deferredReason;
           execution.phase = 'reported';
+          successfulArtifacts += 1;
         } catch (error) {
-          execution.phase = 'failed';
+          const wasCancelled = isAbortError(error) || executionOptions.signal?.aborted === true;
+          execution.phase = wasCancelled ? 'cancelled' : 'failed';
           execution.error = error instanceof Error ? error.message : String(error);
-          await report('download-failed', { artifactId: artifact.artifactId, releaseId, error: execution.error });
+          await report(
+            wasCancelled
+              ? execution.stagedPath ? 'artifact-activation-cancelled' : 'download-cancelled'
+              : execution.stagedPath ? 'artifact-activation-failed' : 'download-failed',
+            { artifactId: artifact.artifactId, releaseId, error: execution.error }
+          );
+          if (wasCancelled) {
+            cancelled = true;
+            break;
+          }
         }
+      }
+      if (cancelled) {
+        const reason = executions.find((item) => item.phase === 'cancelled')?.error || 'update cancelled';
+        phase('cancelled', { releaseId, reason });
+        return { releaseId, executed: successfulArtifacts > 0, reason, artifacts: executions };
+      }
+      if (successfulArtifacts === 0) {
+        const reason = executions.find((item) => item.error)?.error
+          || (executions.length === 0 ? 'release plan contains no applicable artifacts' : 'all release artifacts failed');
+        phase('failed', { releaseId, reason });
+        return { releaseId, executed: false, reason, artifacts: executions };
       }
       phase('reported', { releaseId });
       return { releaseId, executed: true, reason: check.reason, artifacts: executions };
@@ -297,11 +397,50 @@ export function createElectronLauncherReleaseUpdateExecutor(
       return performActivation(artifact, stagedPath, context?.releaseId ?? null);
     },
 
-    async openStagedInstaller(artifact) {
-      const fileName = artifact.url ? basename(new URL(artifact.url).pathname) || artifact.artifactId : artifact.artifactId;
-      const candidates = [join(baseDir, STAGING_DIR)];
-      // staged as updates/<releaseId>/<file>; find the newest match
-      const path = await findStagedFile(candidates[0], fileName);
+    async openStagedInstaller(artifact, context = {}) {
+      if (classifyElectronLauncherUpdateArtifact(artifact.kind) !== 'installer') {
+        throw new Error(`release artifact is not an installer: ${artifact.kind}`);
+      }
+      const fileName = releaseArtifactFileName(artifact);
+      const recorded = stagedArtifacts.get(artifact.artifactId);
+      const stagingRoot = resolve(baseDir, STAGING_DIR);
+      const exactReleasePath = context.releaseId
+        ? resolve(
+            stagingRoot,
+            safeLauncherPackageSegment(context.releaseId, 'releaseId'),
+            fileName
+          )
+        : null;
+      const requestedStagedPath = context.stagedPath?.trim()
+        ? resolve(context.stagedPath.trim())
+        : null;
+      if (requestedStagedPath && !pathIsInside(requestedStagedPath, stagingRoot)) {
+        throw new Error('staged installer path must stay inside the updater staging directory');
+      }
+      if (requestedStagedPath && exactReleasePath && requestedStagedPath !== exactReleasePath) {
+        throw new Error('staged installer path does not match the requested releaseId');
+      }
+      if (
+        requestedStagedPath
+        && !exactReleasePath
+        && (!recorded || resolve(recorded.path) !== requestedStagedPath)
+      ) {
+        throw new Error('staged installer path was not produced by this executor');
+      }
+      const exactPath = requestedStagedPath
+        || exactReleasePath
+        || (recorded ? resolve(recorded.path) : null)
+        || null;
+      if (exactPath && basename(exactPath) !== fileName) {
+        throw new Error(`staged installer fileName mismatch: expected ${fileName}`);
+      }
+      if (exactPath && !existsSync(exactPath)) {
+        throw new Error(`installer not staged: ${exactPath}`);
+      }
+      const path = exactPath
+        // Compatibility for a product that creates a fresh executor after a
+        // legacy download. Normal execute/open flows always use the exact map.
+        || await findStagedFile(join(baseDir, STAGING_DIR), fileName);
       if (!path) throw new Error(`installer not staged: ${fileName}`);
       await options.openInstaller?.(path);
       await report('installer-opened', { artifactId: artifact.artifactId, path });
@@ -313,10 +452,15 @@ export function createElectronLauncherReleaseUpdateExecutor(
       const previous = await readPointer(join(slotDir, 'previous.json'));
       if (!previous) return null;
       const current = await readPointer(join(slotDir, 'current.json'));
-      await writePointer(join(slotDir, 'current.json'), previous);
-      if (current) await writePointer(join(slotDir, 'previous.json'), current);
-      if (slot === 'config') await options.applyConfig?.(previous.path);
-      if (slot === 'renderer') await options.applyRenderer?.(previous.path);
+      const apply = slot === 'config' ? options.applyConfig : options.applyRenderer;
+      await apply?.(previous.path);
+      try {
+        await writePointer(join(slotDir, 'current.json'), previous);
+        if (current) await writePointer(join(slotDir, 'previous.json'), current);
+      } catch (error) {
+        if (current) await restoreAppliedSlot(apply, current.path);
+        throw error;
+      }
       await report('artifact-rolled-back', { slot, version: previous.version, path: previous.path });
       return previous;
     }
@@ -415,15 +559,16 @@ export async function reportElectronLauncherInstallCompletionIfUpgraded(input: {
 
 async function findStagedFile(stagingRoot: string, fileName: string): Promise<string | null> {
   if (!existsSync(stagingRoot)) return null;
-  const { readdir, stat } = await import('node:fs/promises');
-  let newest: { path: string; mtime: number } | null = null;
+  const { readdir } = await import('node:fs/promises');
+  const matches: string[] = [];
   for (const release of await readdir(stagingRoot)) {
     const candidate = join(stagingRoot, release, fileName);
-    if (!existsSync(candidate)) continue;
-    const info = await stat(candidate);
-    if (!newest || info.mtimeMs > newest.mtime) newest = { path: candidate, mtime: info.mtimeMs };
+    if (existsSync(candidate)) matches.push(candidate);
   }
-  return newest?.path ?? null;
+  if (matches.length > 1) {
+    throw new Error(`staged installer is ambiguous across releases: ${fileName}`);
+  }
+  return matches[0] ?? null;
 }
 
 async function readPointer(path: string): Promise<SlotPointer | null> {
@@ -436,6 +581,68 @@ async function readPointer(path: string): Promise<SlotPointer | null> {
 }
 
 async function writePointer(path: string, pointer: SlotPointer): Promise<void> {
-  await mkdir(join(path, '..'), { recursive: true });
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(pointer, null, 2));
+}
+
+function releaseArtifactFileName(
+  artifact: ElectronLauncherReleaseArtifactRef,
+  baseUrl?: string
+): string {
+  let fileName = artifact.fileName?.trim() ? basename(artifact.fileName.trim()) : '';
+  if (!fileName && artifact.url?.trim()) {
+    const base = baseUrl?.trim()
+      ? `${baseUrl.replace(/\/+$/, '')}/`
+      : 'http://electron-launcher.invalid/';
+    const encoded = basename(new URL(artifact.url, base).pathname);
+    if (encoded) {
+      try {
+        fileName = basename(decodeURIComponent(encoded));
+      } catch {
+        fileName = encoded;
+      }
+    }
+  }
+  if (!fileName) fileName = basename(artifact.artifactId);
+  if (!fileName || fileName === '.' || fileName === '..') {
+    throw new Error(`invalid release artifact fileName: ${artifact.fileName || artifact.artifactId}`);
+  }
+  return fileName;
+}
+
+function pathIsInside(candidate: string, parent: string): boolean {
+  const pathFromParent = relative(parent, candidate);
+  return pathFromParent === ''
+    || (!pathFromParent.startsWith(`..${sep}`) && pathFromParent !== '..' && !isAbsolute(pathFromParent));
+}
+
+async function restoreAppliedSlot(
+  apply: ((activePath: string) => void | Promise<void>) | undefined,
+  previousPath: string
+): Promise<void> {
+  if (!apply) return;
+  try {
+    await apply(previousPath);
+  } catch {
+    // Preserve the original activation error. The current pointer still names
+    // the previous version, so a restart retains a recoverable state.
+  }
+}
+
+function throwIfExecutionCancelled(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error(cancellationMessage(signal.reason));
+  error.name = 'AbortError';
+  throw error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error
+    && (error.name === 'AbortError' || (error as NodeJS.ErrnoException).code === 'ABORT_ERR');
+}
+
+function cancellationMessage(reason: unknown): string {
+  return reason instanceof Error && reason.message
+    ? reason.message
+    : 'update cancelled';
 }

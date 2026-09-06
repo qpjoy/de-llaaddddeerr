@@ -2,9 +2,9 @@
 
 ## Source role
 
-Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub, JustOne, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence; and owns upstream credentials and provider quotas.
+Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub, legacy JustOne routes, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence; and owns the credentials and quotas for those routes. The versioned JustOne ecommerce product-search capability is implemented as a separate, release-gated Hub-native connector governed by [ADR-0013](../adr/0013-external-data-platform-gateway.md).
 
-MX Insight Hub does not duplicate or fork this logic. Its adapter calls a versioned private Night-All capability contract and converts it into a stable consumer contract.
+MX Insight Hub does not duplicate Night-All's remaining provider orchestration. Its Night-All adapter calls a versioned private capability contract, while its JustOne adapter owns only the pinned ecommerce product-search endpoints behind the same provider-neutral Hub boundary.
 
 For Internal production, keep the host Night-All as the only writer and call it through a workload-authenticated host facade/private Service. A second full Docker Night-All is for isolated local snapshot testing, not a production read shortcut and never shares production PG/Redis or scheduler ownership.
 
@@ -74,8 +74,10 @@ snapshot material, and the snapshot keeps the same upstream fields for exact
 replay.
 
 The facade always attempts live Night-All first for a new `Idempotency-Key`.
-Once a live or stale delivery commits, that key permanently replays the one paid
-dispatch; requesting current data requires a new key. On an ambiguous
+Once a live or stale delivery commits, that `Idempotency-Key` permanently replays
+the committed delivery. Its live attempt may have consumed provider quota or
+incurred Hub procurement cost; it does not prove a Hub customer charge. Requesting
+current data requires a new `Idempotency-Key`. On an ambiguous
 network/timeout outcome, an unusable HTTP 2xx content-type/JSON/envelope, or a
 definite upstream `502`/`503`/`504`, Hub may return the prior complete response
 for the exact authenticated consumer, operation and normalized request
@@ -86,12 +88,12 @@ canonical record set is never substituted. Stale HTTP 200 responses carry
 `x-mx-insight-source-mode: stale`, capture time, `Age` and `Warning: 110` headers.
 
 With no usable exact snapshot, an unusable HTTP 2xx response is
-`502 upstream_outcome_unknown` and leaves usage `unknown`; the same key cannot
+`502 upstream_outcome_unknown` and leaves usage `unknown`; the same `Idempotency-Key` cannot
 dispatch again. A definite upstream `400`, `404`, `409`, `422` or
 `429` retains that public HTTP status behind a safe error; other definite failures
 map to `502`. A Hub timeout or network loss after dispatch is
 `502 upstream_outcome_unknown`, leaves the request ledger `unknown`, and must not
-be retried automatically with a new idempotency key. See
+be retried automatically with a new `Idempotency-Key`. See
 [ADR-0010](../adr/0010-night-all-compatibility-facade.md) and the
 [cache/fallback design](ingestion-cache-and-fallback.md).
 
@@ -166,11 +168,11 @@ as raw evidence and do not create canonical edges.
 
 ## Idempotency and unknown outcomes
 
-Night-All’s current search facade is not guaranteed to be end-to-end idempotent: a search may call a paid provider and write audit/cache/observation records. Therefore:
+Night-All’s current search facade is not guaranteed to be end-to-end idempotent: a search may call an upstream provider, consume provider quota or incur Hub procurement cost, and write audit/cache/observation records. Therefore:
 
-1. Hub stores the caller idempotency key and request fingerprint before dispatch.
-2. Same key + same fingerprint replays a committed response.
-3. Same key + different fingerprint returns `409 idempotency_conflict`.
+1. Hub stores the caller `Idempotency-Key` and request fingerprint before dispatch.
+2. Same `Idempotency-Key` + same fingerprint replays a committed response.
+3. Same `Idempotency-Key` + different fingerprint returns `409 idempotency_conflict`.
 4. Definite Night-All HTTP rejection releases the reservation unless an exact
    complete compatibility snapshot is delivered and the request is committed as
    a stale delivery.
@@ -189,7 +191,7 @@ historical query must never be returned as if it were live.
 
 ## Platform readiness
 
-Night-All exposes a broad 15-platform catalog, but catalog presence is not proof of a live production contract. Grant only platforms that have passed a real credential/endpoint/pagination verification. Automated deploy smoke must not call all paid platforms.
+Night-All exposes a broad 15-platform catalog, but catalog presence is not proof of a live production contract. Grant only platforms that have passed a real credential/endpoint/pagination verification. Automated deploy smoke must not call provider-backed live acquisition endpoints.
 
 Before deployment, probe the actual Internal revision and route. The local Night-All checkout contains the new `/api/v1/data/search` and durable-cursor work, but repository presence is not proof that the host has that commit/migration. The adapter must also validate the response business status because Night-All can report a failed/partial platform result inside an HTTP 200 envelope, and readiness must inspect dependency sub-status rather than a top-level `ok` alone.
 
@@ -212,13 +214,13 @@ proxied by Hub. The target is to extend the upstream data contract with
 `post_detail`, `post_comments` and `profile` capabilities so they inherit catalog
 readiness, opaque cursors and stable fields.
 
-Night-All remains the connector while it owns upstream routing and paid-token
-business policy. Direct TikHub/JustOne connectors may later replace it per
-platform + operation behind the same Hub boundary: shadow against bounded approved
-calls/fixtures, compare both original legacy envelopes and canonical records, then
-cut over with an explicit rollback policy. Provider selection stays server-side,
-and the public compatibility paths, consumer API keys and canonical search
-contract do not change.
+Night-All remains the connector wherever it owns upstream routing and provider-credential/billing
+business policy. JustOne ecommerce product search is the first implemented
+operation-scoped Hub-native connector; other JustOne/TikHub routes
+remain unchanged until each is shadowed against bounded approved calls/fixtures,
+compared at legacy-envelope and canonical levels, and cut over with an explicit
+rollback policy. Provider selection stays server-side, and public compatibility
+paths, Hub Public API keys and canonical search contracts do not change.
 
 ## Night-All work that stays outside this repository
 

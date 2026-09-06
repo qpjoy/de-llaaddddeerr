@@ -162,6 +162,7 @@ export {
   createElectronLauncherReleaseUpdater,
   downloadElectronLauncherReleaseArtifactToFile,
   type ElectronLauncherArtifactDownloadInput,
+  type ElectronLauncherArtifactDownloadProgress,
   type ElectronLauncherArtifactDownloadResult,
   type ElectronLauncherReleaseActivationMode,
   type ElectronLauncherReleaseArtifactRef,
@@ -196,11 +197,30 @@ export {
   type ElectronLauncherArtifactExecution,
   type ElectronLauncherNetworkGateState,
   type ElectronLauncherReleaseUpdateExecutor,
+  type ElectronLauncherStagedInstallerContext,
   type ElectronLauncherUpdateArtifactClass,
+  type ElectronLauncherUpdateExecutionOptions,
   type ElectronLauncherUpdateExecutionResult,
   type ElectronLauncherUpdateExecutorOptions,
   type ElectronLauncherUpdateExecutorPhase
 } from './release-update-executor.js';
+export {
+  createElectronLauncherApplicationUpdater,
+  type ElectronLauncherApplicationDistribution,
+  type ElectronLauncherApplicationUpdateArtifactCandidate,
+  type ElectronLauncherApplicationUpdateCandidate,
+  type ElectronLauncherApplicationUpdateComponent,
+  type ElectronLauncherApplicationUpdateComponentCandidate,
+  type ElectronLauncherApplicationUpdateContext,
+  type ElectronLauncherApplicationUpdateLifecycleContext,
+  type ElectronLauncherApplicationUpdateOperation,
+  type ElectronLauncherApplicationUpdateOperationInput,
+  type ElectronLauncherApplicationUpdateOperationOptions,
+  type ElectronLauncherApplicationUpdater,
+  type ElectronLauncherApplicationUpdaterOptions,
+  type ElectronLauncherApplicationUpdatePhase,
+  type ElectronLauncherApplicationUpdateState
+} from './application-updater.js';
 
 export const ELECTRON_LAUNCHER_PACKAGE_NAME = '@qpjoy/electron-launcher';
 

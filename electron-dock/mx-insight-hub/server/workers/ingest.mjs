@@ -13,6 +13,7 @@ import { ExternalSourcePuller } from '../ingest/external/source-puller.mjs'
 import { SQLiteApiSourcePuller } from '../ingest/external/sqlite-api-source.mjs'
 import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
+import { rehydrateJustOneQueuedRecords } from '../ingest/justone.mjs'
 import {
   assertProvinceOpinionHanlpConfigured,
   isProvinceOpinionSourceKey,
@@ -71,6 +72,33 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'))
 
   async function handleIngest(payload) {
+    if (payload?.kind === 'external-platform-result') {
+      if (
+        payload.providerKey !== 'justone'
+        || payload.datasetId !== 'ecommerce.products.v1'
+        || payload.platform !== 'ecommerce'
+        || !Array.isArray(payload.records)
+      ) {
+        throw new Error('external-platform ingest payload does not match the pinned contract')
+      }
+      const records = rehydrateJustOneQueuedRecords(payload.records)
+      const result = await store.ingestExternalRecords({
+        datasetId: payload.datasetId,
+        platform: payload.platform,
+        records,
+        importRunId: null,
+        connectorId: 'external-platform:justone',
+        externalPlatformLineage: {
+          requestId: payload.requestId ?? null,
+          queryFingerprint: payload.queryFingerprint ?? null,
+          providerCallId: payload.providerCallId ?? null,
+        },
+      })
+      logger.log(
+        `[ingest] external-platform/justone request=${payload.requestId} ingested=${result.ingested} changed=${result.changed}`,
+      )
+      return
+    }
     if (payload?.kind === 'night-all-compat-result') {
       const normalized = normalizeNightAllLegacyPayload(
         payload.rawPayload,

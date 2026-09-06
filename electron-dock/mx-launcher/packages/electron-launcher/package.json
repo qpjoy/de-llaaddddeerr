@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "2.3.17",
+  "version": "2.3.18",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -37,6 +37,10 @@
     "./release-updater": {
       "types": "./dist/release-updater.d.ts",
       "import": "./dist/release-updater.js"
+    },
+    "./application-updater": {
+      "types": "./dist/application-updater.d.ts",
+      "import": "./dist/application-updater.js"
     },
     "./local-ports": {
       "types": "./dist/local-ports.d.ts",
@@ -80,6 +84,8 @@
     "test:wireguard-darwin-safety": "pnpm build && node --test scripts/wireguard-darwin-safety.test.mjs",
     "smoke:wireguard-windows-nrpt": "pnpm build && node scripts/wireguard-windows-nrpt-smoke.mjs",
     "test:release-updater": "pnpm build && node --test scripts/release-updater.test.mjs",
+    "test:application-updater": "pnpm build && node --test scripts/application-updater.test.mjs",
+    "test:updater": "pnpm build && node --test scripts/release-updater.test.mjs scripts/application-updater.test.mjs",
     "test:asar-bootstrap": "pnpm build && node --test scripts/asar-bootstrap.test.mjs",
     "prepack": "pnpm build"
   },
