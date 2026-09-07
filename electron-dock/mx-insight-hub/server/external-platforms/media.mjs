@@ -19,6 +19,12 @@ const IMAGE_CONTENT_TYPES = new Set([
   'image/png',
   'image/webp',
 ])
+const LEGACY_ALICDN_SEARCH_IMAGE_HOSTS = new Map([
+  ['g.search.alicdn.com', 'g-search1.alicdn.com'],
+  ['g.search1.alicdn.com', 'g-search1.alicdn.com'],
+  ['g.search2.alicdn.com', 'g-search2.alicdn.com'],
+  ['g.search3.alicdn.com', 'g-search3.alicdn.com'],
+])
 
 const BLOCKED_ADDRESSES = new BlockList()
 for (const [address, prefix] of [
@@ -78,6 +84,11 @@ function imageUrl(value, base = null) {
   } catch {
     throw imageError(422, 'external_media_url_invalid', 'Product image URL is invalid')
   }
+  // JustOne's Taobao/Tmall response can retain Alibaba's dotted search-image
+  // aliases, which are not covered by the CDN's wildcard TLS certificate.
+  // Use only the exact corresponding HTTPS aliases; never relax TLS checks.
+  const sourceHostname = parsed.hostname.toLowerCase()
+  parsed.hostname = LEGACY_ALICDN_SEARCH_IMAGE_HOSTS.get(sourceHostname) || parsed.hostname
   const hostname = parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase()
   if (
     parsed.protocol !== 'https:'

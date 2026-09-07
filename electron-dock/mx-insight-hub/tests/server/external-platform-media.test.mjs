@@ -209,6 +209,33 @@ test('external image loader accepts bounded JPEG, PNG and WebP images', async (t
   }
 })
 
+test('external image loader canonicalizes legacy Alibaba search image hosts before dispatch', async () => {
+  const lookupCalls = []
+  const requestCalls = []
+  const loader = createExternalImageLoader({
+    lookup: publicLookup(lookupCalls),
+    request: async (url) => {
+      requestCalls.push(String(url))
+      return response({ body: bodyOf(pngImage()) })
+    },
+    agentFactory: noAgent,
+  })
+
+  for (const [source, expected] of [
+    ['g.search.alicdn.com', 'g-search1.alicdn.com'],
+    ['g.search1.alicdn.com', 'g-search1.alicdn.com'],
+    ['g.search2.alicdn.com', 'g-search2.alicdn.com'],
+    ['g.search3.alicdn.com', 'g-search3.alicdn.com'],
+  ]) {
+    await loader(`https://${source}/img/bao/uploaded/product.png?quality=90#ignored`)
+    assert.equal(lookupCalls.at(-1).hostname, expected)
+    assert.equal(
+      requestCalls.at(-1),
+      `https://${expected}/img/bao/uploaded/product.png?quality=90`,
+    )
+  }
+})
+
 test('external image loader blocks IPv6 transition and NAT64 targets before dispatch', async () => {
   const blocked = [
     '::7f00:1',

@@ -105,6 +105,12 @@ size. Per-consumer rate/concurrency and global relay concurrency have explicit 4
 creates no Hub usage record and dispatches no product-search request; `private` caching varies on Authorization,
 and failure changes only presentation rather than the original search evidence.
 
+Observed Taobao/Tmall results can retain Alibaba's legacy dotted image hosts `g.search.alicdn.com` and
+`g.search1-3.alicdn.com`, whose names are not covered by the CDN wildcard certificate. At media-read time only,
+Hub maps those exact hosts to the corresponding TLS-valid `g-search1-3.alicdn.com` aliases before the normal DNS,
+redirect and content checks. TLS verification remains enabled, other hosts are unchanged, and the committed
+search snapshot stays immutable, so an existing result does not require another potentially billable search.
+
 External ecommerce search and media accept only the ordinary `mih_live_` Hub Public API Key; there is no
 JustOne-product credential. A valid legacy Test key with the ecommerce grant sees `ready=false` in capabilities,
 and search/media return `403 test_key_not_supported` before usage reservation, committed-result/media lookup or
