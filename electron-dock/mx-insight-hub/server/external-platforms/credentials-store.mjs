@@ -1,10 +1,10 @@
 import { AppError } from '../core/errors.mjs'
 
-const PROVIDER_KEY = 'justone'
 const UPDATE_FIELDS = new Set(['apiKey', 'expectedRevision'])
+const PROVIDER_KEY_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/u
 
-function assertProvider(providerKey) {
-  if (providerKey !== PROVIDER_KEY) {
+function assertProvider(providerKey, expectedProviderKey) {
+  if (!PROVIDER_KEY_PATTERN.test(providerKey) || providerKey !== expectedProviderKey) {
     throw new AppError(404, 'external_platform_not_found', 'External platform not found')
   }
 }
@@ -78,7 +78,9 @@ function revisionConflict(expectedRevision, currentRevision) {
 }
 
 export class MemoryExternalPlatformCredentialStore {
-  constructor({ environmentConfigured = false } = {}) {
+  constructor({ environmentConfigured = false, providerKey = 'justone' } = {}) {
+    if (!PROVIDER_KEY_PATTERN.test(providerKey)) throw new TypeError('providerKey is invalid')
+    this.providerKey = providerKey
     this.environmentConfigured = Boolean(environmentConfigured)
     this.setting = {
       source: 'environment',
@@ -89,7 +91,7 @@ export class MemoryExternalPlatformCredentialStore {
   }
 
   async describeCredential(providerKey) {
-    assertProvider(providerKey)
+    assertProvider(providerKey, this.providerKey)
     return safeCredential(this.setting, {
       environmentConfigured: this.environmentConfigured,
       databaseConfigured: this.apiKey != null,
@@ -97,7 +99,7 @@ export class MemoryExternalPlatformCredentialStore {
   }
 
   async updateCredential(providerKey, input, { updatedBy = 'admin-token' } = {}) {
-    assertProvider(providerKey)
+    assertProvider(providerKey, this.providerKey)
     const normalized = normalizeUpdate(input)
     if (normalized.expectedRevision !== this.setting.revision) {
       throw revisionConflict(normalized.expectedRevision, this.setting.revision)
@@ -114,7 +116,7 @@ export class MemoryExternalPlatformCredentialStore {
 
   /** Secret-bearing runtime/re-auth query. Never include its result in ordinary DTOs. */
   async readCredential(providerKey) {
-    assertProvider(providerKey)
+    assertProvider(providerKey, this.providerKey)
     if (this.setting.source !== 'database') return null
     if (!this.apiKey) throw credentialStoreUnavailable()
     return this.apiKey
@@ -122,13 +124,15 @@ export class MemoryExternalPlatformCredentialStore {
 }
 
 export class PostgresExternalPlatformCredentialStore {
-  constructor({ pool, environmentConfigured = false }) {
+  constructor({ pool, environmentConfigured = false, providerKey = 'justone' }) {
+    if (!PROVIDER_KEY_PATTERN.test(providerKey)) throw new TypeError('providerKey is invalid')
     this.pool = pool
+    this.providerKey = providerKey
     this.environmentConfigured = Boolean(environmentConfigured)
   }
 
   async describeCredential(providerKey) {
-    assertProvider(providerKey)
+    assertProvider(providerKey, this.providerKey)
     const { rows } = await this.pool.query(
       `SELECT settings.source, settings.revision, settings.updated_at,
               EXISTS (
@@ -148,7 +152,7 @@ export class PostgresExternalPlatformCredentialStore {
   }
 
   async updateCredential(providerKey, input, { updatedBy = 'admin-token' } = {}) {
-    assertProvider(providerKey)
+    assertProvider(providerKey, this.providerKey)
     const normalized = normalizeUpdate(input)
     try {
       const client = await this.pool.connect()
@@ -226,7 +230,7 @@ export class PostgresExternalPlatformCredentialStore {
 
   /** Secret-bearing runtime/re-auth query. Never include its result in ordinary DTOs. */
   async readCredential(providerKey) {
-    assertProvider(providerKey)
+    assertProvider(providerKey, this.providerKey)
     try {
       const { rows } = await this.pool.query(
         `SELECT settings.source, credential.api_key
@@ -250,8 +254,9 @@ export class PostgresExternalPlatformCredentialStore {
 export function createExternalPlatformCredentialStore({
   pool = null,
   environmentConfigured = false,
+  providerKey = 'justone',
 } = {}) {
   return pool
-    ? new PostgresExternalPlatformCredentialStore({ pool, environmentConfigured })
-    : new MemoryExternalPlatformCredentialStore({ environmentConfigured })
+    ? new PostgresExternalPlatformCredentialStore({ pool, environmentConfigured, providerKey })
+    : new MemoryExternalPlatformCredentialStore({ environmentConfigured, providerKey })
 }

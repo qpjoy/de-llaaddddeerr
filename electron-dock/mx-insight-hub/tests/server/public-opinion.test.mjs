@@ -482,7 +482,6 @@ test('public province routes enforce grants, paginate safely and keep public_opi
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Province tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Province consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Province key' })
   await service.putPlatformConfiguration('public_opinion', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -491,6 +490,7 @@ test('public province routes enforce grants, paginate safely and keep public_opi
     windowSeconds: 60,
     maxPageSize: 1,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Province key' })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant consumer' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN, logger: { error() {} } })

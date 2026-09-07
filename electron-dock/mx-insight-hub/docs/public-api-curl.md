@@ -44,7 +44,9 @@ new_idempotency_key() {
 下文每个 POST 都会生成格式合法且新的 `Idempotency-Key`。如果只是重试
 **相同路径和完全相同的规范化 body**，应复用已有的 `IDEMPOTENCY_KEY`，不要再次
 执行 `new_idempotency_key`。更换 body、路径或 cursor 页面必须使用新的 `Idempotency-Key`。同一个
-key 对应不同请求会返回 `409 idempotency_conflict`。
+key 对应不同请求会返回 `409 idempotency_conflict`。POST 重试还必须继续使用创建该 usage
+记录的同一把 Hub API Key；同一 consumer 的另一把 Key 只能执行只读状态查询，不能接管旧记录，
+需要发起新业务请求时应使用新的 `Idempotency-Key`。
 
 所有 JSON 错误均采用稳定结构：
 
@@ -195,7 +197,9 @@ Hub 部署有可用 adapter，不承诺下一次外部调用的网络、余额�
 本节需要显式 `source_catalog` platform grant，只接受 API Key。负责 consumer 的
 Hub operator 必须先完成授权；调用者不能通过 Public API 自行授权。三个 GET 都独立
 计量且不使用幂等 key。operator 在 Hub 管理台“开放能力”中依次选择租户、调用者和
-“数据源目录”，配置配额后启用；授权按 consumer 动态生效，已有 API Key 无需重新签发。
+“数据源目录”，配置配额后启用。新 Key 在签发时冻结明确的平台/能力范围；撤销 consumer
+授权会立即收窄旧 Key，新增授权则必须重新签发并显式勾选该范围。迁移期的
+`legacy_dynamic` Key 仅用于兼容，应该轮换。
 为了让本节可以单独复制执行，请静默读取 API Key，避免把凭据写入 shell history：
 
 ```bash
@@ -453,7 +457,8 @@ continuation 或 raw response。
 之前，不会创建 usage reservation 或上游调用。调用方应据此区分“重新提供/签发 Key”、
 “使用 Live Key”和“补授数据域权限”。
 这里使用管理台 **API Keys** 已签发的同一把 Key；不需要为 ecommerce 另签 Key，也不需要或
-接受供应方密钥。为该 Key 所属 consumer 启用 ecommerce 后，其全部有效 Key 立即继承授权。
+接受供应方密钥。新 Key 必须在签发时把 `ecommerce` 选入 entitlement snapshot；consumer
+撤权会立即阻断它，但之后重新授予不会静默扩大旧 Key，需要签发明确包含该范围的替代 Key。
 本节所有搜索和媒体示例要求 `$HUB_KEY` 是以 `mih_live_` 开头的完整 Hub Public API Key。
 若旧版百宝箱留下 Test-key `ambiguous` 记录，只保留原 body、原 `Idempotency-Key` 和指纹锁供
 审计；不要粘贴旧 Test secret 或换成 Live Key 重放该请求。管理台使用当前 Live Key 自动执行
@@ -607,7 +612,8 @@ consumer、该请求是已提交且 HTTP 200 的 ecommerce 请求，并且 item/
 当前 consumer 统一返回 `404 external_media_not_found`。图片来源被安全策略拒绝时返回 4xx，
 外部图片暂不可读取时返回 502，端到端超时返回 `504 external_media_timeout`。超过 consumer 媒体请求窗口返回
 `429 external_media_rate_limited`；consumer 或中继全局并发已满返回
-`429 external_media_busy`，调用方必须退避而不是并发重试。
+`429 external_media_busy`。图片源站自身返回 429 时，Hub 返回不可自动重试的
+`502 external_media_source_throttled`，不会把源站限流伪装成 Hub busy；调用方必须停止放大重试。
 
 这次 GET 不创建 Hub usage，不派发商品搜索，也不改变原搜索的 `sourceMode`；它只是按既有
 提交结果读取一项媒体内容。它仍可能按需访问图片来源，因此客户端不要轮询或并发放大；Hub
@@ -639,7 +645,7 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 400 | `unsupported_marketplace`, `unsupported_sort`, `unsupported_price_filter`, `invalid_pagination`, `cursor_scope_mismatch`, `unsupported_request_field`, `invalid_delivery_mode`, `idempotency_key_required` | 修正请求、交付策略或从无 cursor 首页开始，不要原样重试。 |
 | 401 | `api_key_required`, `invalid_api_key` | 提供当前 Hub 实例通过 API Keys 签发的完整 Hub Public API Key；不要用管理令牌、掩码或供应方密钥。 |
 | 403 | `test_key_not_supported` | 外部 ecommerce 仅接受 `mih_live_` Hub Public API Key。不要把 Test 当沙箱，也不要用 Live Key 替代历史模糊请求来自动重放。该拒绝不创建 usage reservation 或上游调用。 |
-| 403 | `platform_not_granted` | Live Key 有效；请 operator 为 consumer 授予 `ecommerce`。 |
+| 403 | `platform_not_granted` | Key 的 snapshot 没有 `ecommerce`，或 consumer 已撤销该授权；授权后签发明确包含该范围的新 Key。 |
 | 400 | `invalid_uncertain_retry` | `X-MX-Insight-Retry-Of` 格式错误或未与 `refresh` 配对。管理台会从自动状态 GET 构造该头；不要手填或猜 UUID。 |
 | 404 | `stored_snapshot_not_found` | `cache_only` 未命中精确存量；本次没有调用外部平台。可换条件，或选择 `refresh` 并点击主按钮授权一次采集。 |
 | 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `uncertain_retry_not_allowed` | 保留原 `Idempotency-Key`/requestId，不要自动换 Key。管理台由同一主按钮先执行状态 GET；只有明确为 `unknown` 且当前选择 `refresh` 时，才自动使用新 Key 和 retry-of 头发起一次独立采集。 |
@@ -662,6 +668,83 @@ the Admin-only external-platform runbook without probing the live acquisition ro
 Hub usage、供应方采购成本与 Hub 客户计价是三个相互独立的计量/计价域。当前前两者已有
 运行证据；客户计价待独立、版本化的 Hub price book 落地，并继续作用于同一 consumer，
 无需更换 API Key，也不能从 `sourceMode` 或供应方成本直接推导。
+
+## 3.4 小红书笔记 API
+
+### `POST /api/v1/data/post`
+
+本接口把官方笔记链接归一化为稳定的
+`mx-insight-hub.social-post.v1`，要求当前 Key 的 immutable snapshot 和 consumer
+当前授权同时包含 `xiaohongshu` 与 `social.posts.resolve`。供应方身份、上游密钥、原始
+envelope 和成本都不会出现在公开响应中。
+
+```bash
+XHS_BODY='{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/0123456789abcdef01234567","deliveryMode":"cache_first"}'
+XHS_KEY="xhs-note-$(uuidgen)"
+
+XHS_RESULT=$(curl -sS -D /tmp/mxih-xhs.headers -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $XHS_KEY" \
+  -d "$XHS_BODY" \
+  "$HUB_URL/api/v1/data/post")
+
+printf '%s\n' "$XHS_RESULT" \
+  | jq '{contractVersion,data:{item:{id:.data.item.id,title:.data.item.title,text:.data.item.text,tags:.data.item.tags,author:.data.item.author,metrics:.data.item.metrics,media:.data.item.media}},meta,requestId}'
+```
+
+兼容旧客户的 `POST /api/v1/xiaohongshu/app/get_note_info` 接受相同 body，并在缺失
+`platform` 时默认小红书。两个 URL 共享同一个规范化 fingerprint/幂等域；新客户应使用
+`/data/post`，不要为了重试在两个 URL 间切换。输入只接受官方
+`xiaohongshu.com` 笔记 URL 或 `xhslink.com` / `xhslink.cn` 分享 URL；不接受任意网页、
+上游参数或凭据。
+
+`cache_only|cache_first|refresh` 的交付证据与 3.3 节一致。`refresh` 必须有调用方生成的
+`Idempotency-Key`。完全相同的传输重试复用原 body/key；`409 reserved/unknown` 或
+`502 outcome_unknown` 不能自动换 key 重试。某些无效/失效笔记可能已被外部平台接受并消耗
+容量，因此 Hub 只对已严格识别的单笔不存在结果做短时 negative cache。调用方显式提供的
+key 仍按 consumer 唯一并绑定首次使用它的 API Key，跨 Key 重用返回
+`409 idempotency_conflict`；省略 header 时 Hub 生成包含 API Key 身份的短时 key，因此同一
+consumer 的不同 Key 会各自记一笔 usage，但继续共享 consumer 级快照和外采 dispatch lease。
+
+### `GET /api/v1/data/posts/media`
+
+响应里的每个 `media[].url` 已是同源 Hub 中继 locator，不包含上游地址；
+`author.avatarUrl` 当前固定为 `null`。用同一 consumer 的 Live Key 获取 locator（浏览器端先
+fetch 为 Blob，不能用不带 Authorization 的裸 `<img>` 请求）。也可以用已提交结果的
+`requestId` 和 `0..19` 的 `mediaIndex` 直接构造同一中继路径；客户端可以在服务端并发护栏内
+并发加载一页多图：
+
+```bash
+XHS_REQUEST_ID=$(printf '%s\n' "$XHS_RESULT" | jq -r '.requestId')
+XHS_MEDIA_COUNT=$(printf '%s\n' "$XHS_RESULT" | jq '.data.item.media | length')
+export XHS_REQUEST_ID
+
+if [ "$XHS_MEDIA_COUNT" -gt 0 ]; then
+  seq 0 $((XHS_MEDIA_COUNT - 1)) \
+    | xargs -P 12 -I '{}' sh -c '
+        curl -fsS -G \
+          -H "Authorization: Bearer $HUB_KEY" \
+          --data-urlencode "requestId=$XHS_REQUEST_ID" \
+          --data-urlencode "mediaIndex={}" \
+          "$HUB_URL/api/v1/data/posts/media" \
+          -o "/tmp/mxih-xhs-{}.img"
+      '
+fi
+```
+
+生产客户端不必固定为 12；应限制自己的同时在途请求并对单图失败显示占位符。Hub 当前默认
+允许每个 consumer 16、单实例全局 32 个媒体请求，并受独立的滑动窗口限制；这些是部署护栏，
+不是套餐承诺，运营可在容量验证后调高。媒体 GET 不创建 note usage、不再次请求笔记、不接受
+原图 URL，并返回 `Cache-Control: private, no-store`。
+
+常见错误：`400 invalid_post_url|invalid_platform|unsupported_fields`、
+`403 platform_not_granted|capability_not_granted|test_key_not_supported`、
+`404 post_not_found|stored_snapshot_not_found|external_media_not_found`、
+`429 quota_exceeded|external_platform_busy|external_platform_capacity_exceeded|external_media_busy`、
+`502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
+`503 external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`。
+429 是 Hub 额度/并发或外部平台容量类别，不是域名封禁的证据；保留 requestId 后按错误码处理。
 
 ## 4. 搜索 API
 

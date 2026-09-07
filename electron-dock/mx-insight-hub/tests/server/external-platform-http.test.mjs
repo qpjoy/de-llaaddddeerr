@@ -64,6 +64,14 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
   })
   const tenant = await service.createTenant({ name: 'HTTP Tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'HTTP Consumer' })
+  await service.putPlatformConfiguration('ecommerce', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+    maxPageSize: 20,
+  })
   const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'HTTP Key' })
   const rotatedApiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rotated HTTP Key' })
   const testApiKey = await service.createApiKey({
@@ -74,14 +82,6 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
   // Simulate a row created before environment metadata was backfilled. The
   // immutable prefix remains authoritative enough to fail closed.
   usageStore.apiKeys.get(testApiKey.id).environment = 'live'
-  await service.putPlatformConfiguration('ecommerce', {
-    tenantId: tenant.id,
-    consumerId: consumer.id,
-    enabled: true,
-    maxRequests: 10,
-    windowSeconds: 3_600,
-    maxPageSize: 20,
-  })
   await usageStore.setPlatformGrant(consumer.id, 'youtube', true)
   service.adapter.capabilities = async () => ({
     // A broad legacy adapter must not override the Test-key readiness gate.
@@ -270,7 +270,11 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     assert.equal(usageAfterCache.committed, 2)
     assert.equal(usageAfterCache.units, 2)
 
-    const replay = await request('http-live-key-0001', rotatedApiKey.secret, refreshBody)
+    const crossKeyReplay = await request('http-live-key-0001', rotatedApiKey.secret, refreshBody)
+    assert.equal(crossKeyReplay.response.status, 409)
+    assert.equal(crossKeyReplay.payload.error.code, 'idempotency_conflict')
+
+    const replay = await request('http-live-key-0001', apiKey.secret, refreshBody)
     assert.equal(replay.response.status, 200)
     assert.equal(replay.payload.meta.sourceMode, 'idempotent_replay')
     assert.equal(replay.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')

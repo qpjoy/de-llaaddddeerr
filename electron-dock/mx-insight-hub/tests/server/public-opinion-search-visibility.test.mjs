@@ -405,7 +405,6 @@ test('Hub public-opinion fingerprints bind the publication contract while cursor
   })
   const tenant = await service.createTenant({ name: 'Visibility fingerprint tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Visibility fingerprint consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Visibility fingerprint key' })
   for (const platform of ['public_opinion', 'telegram']) {
     await service.putPlatformConfiguration(platform, {
       tenantId: tenant.id,
@@ -416,6 +415,7 @@ test('Hub public-opinion fingerprints bind the publication contract while cursor
       maxPageSize: 20,
     })
   }
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Visibility fingerprint key' })
   const context = await service.authenticate(key.secret)
 
   await service.storedSearch(context, {

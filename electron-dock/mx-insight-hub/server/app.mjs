@@ -90,6 +90,7 @@ function queryFilters(searchParams) {
   return {
     tenantId: searchParams.get('tenantId') || undefined,
     consumerId: searchParams.get('consumerId') || undefined,
+    apiKeyId: searchParams.get('apiKeyId') || undefined,
     from: searchParams.get('from') || undefined,
     to: searchParams.get('to') || undefined,
   }
@@ -462,6 +463,7 @@ export function createApp({
   embedding = null,
   externalPlatformAdmin = null,
   externalPlatformGateway = null,
+  tikHubGateway = null,
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -1870,6 +1872,20 @@ export function createApp({
         sendJson(response, 201, { data: await service.createConsumer(body), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/consumers/:id/plan')
+      if (request.method === 'PUT' && params) {
+        requirePlatformAdmin(principal)
+        requireNoQuery(searchParams, 'consumer plan assignment')
+        sendJson(response, 200, {
+          data: await service.assignConsumerPlan(
+            params.id,
+            await readJson(request, 16 * 1024),
+            principal.memberId || principal.kind || 'admin-token',
+          ),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/api-keys') {
         const consumerId = searchParams.get('consumerId') || undefined
         await assertConsumerCapability(principal, consumerId, 'apikey.read')
@@ -1889,10 +1905,33 @@ export function createApp({
         sendJson(response, 201, { data: await service.createApiKey(body), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/overview')
+      if (request.method === 'GET' && params) {
+        await assertApiKeyCapability(principal, params.id, 'apikey.read')
+        sendJson(response, 200, { data: await service.getApiKeyOverview(params.id), requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/revoke')
       if (request.method === 'POST' && params) {
         await assertApiKeyCapability(principal, params.id, 'apikey.write')
         sendJson(response, 200, { data: await service.revokeApiKey(params.id), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/plans') {
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'consumerId')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported plans query fields: ${unsupported.join(', ')}`)
+        }
+        const consumerId = searchParams.get('consumerId') || null
+        if (consumerId) await assertConsumerCapability(principal, consumerId, 'consumer.read')
+        else scopeTenantCapability(principal, null, 'consumer.read')
+        sendJson(response, 200, {
+          data: {
+            catalog: await service.listPlans(),
+            currentPlan: consumerId ? await service.getConsumerPlan(consumerId) : null,
+          },
+          requestId,
+        })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/platforms') {
@@ -1926,8 +1965,10 @@ export function createApp({
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/usage') {
+        const filters = queryFilters(searchParams)
+        if (filters.apiKeyId) await assertApiKeyCapability(principal, filters.apiKeyId, 'usage.read')
         sendJson(response, 200, {
-          data: await scopedUsageFor(principal, queryFilters(searchParams)),
+          data: await scopedUsageFor(principal, filters),
           requestId,
         })
         return
@@ -4143,6 +4184,9 @@ export function createApp({
         response.writeHead(200, {
           'content-type': media.contentType,
           'content-length': media.body.length,
+          // The service-side cache is consumer scoped. Browser caches are not:
+          // this route accepts either Authorization or X-API-Key, so do not let
+          // one credential reuse another credential's private media response.
           'cache-control': 'private, no-store',
           'content-security-policy': "default-src 'none'; sandbox",
           'cross-origin-resource-policy': 'same-origin',
@@ -4152,6 +4196,104 @@ export function createApp({
           'x-mx-insight-request-id': requestId,
         })
         response.end(media.body)
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/posts/media') {
+        const downstream = new AbortController()
+        let deliveryTimer = null
+        let resolveDelivery
+        let deliveryFinished = false
+        const deliveryComplete = new Promise((resolve) => { resolveDelivery = resolve })
+        const finishDelivery = () => {
+          if (deliveryFinished) return
+          deliveryFinished = true
+          if (deliveryTimer) clearTimeout(deliveryTimer)
+          request.removeListener('aborted', cancelDownstream)
+          response.removeListener('close', cancelDownstream)
+          response.removeListener('finish', finishDelivery)
+          resolveDelivery()
+        }
+        const cancelDownstream = () => {
+          downstream.abort()
+          finishDelivery()
+        }
+        request.once('aborted', cancelDownstream)
+        response.once('close', cancelDownstream)
+        response.once('finish', finishDelivery)
+        if (request.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        const context = await requirePublic(request)
+        if (downstream.signal.aborted || request.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        const allowedQueryFields = new Set(['requestId', 'mediaIndex'])
+        for (const field of searchParams.keys()) {
+          if (!allowedQueryFields.has(field)) {
+            throw new AppError(400, 'unsupported_fields', `${field} query parameter is not allowed`)
+          }
+        }
+        for (const field of allowedQueryFields) {
+          if (searchParams.getAll(field).length !== 1) {
+            throw new AppError(400, 'invalid_request', `${field} query parameter must appear exactly once`)
+          }
+        }
+        const media = await service.socialPostImage(context, {
+          requestId: requiredQuery(searchParams, 'requestId'),
+          mediaIndex: requiredQuery(searchParams, 'mediaIndex'),
+          signal: downstream.signal,
+          deliveryComplete,
+        })
+        if (downstream.signal.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        deliveryTimer = setTimeout(() => response.destroy(), 15_000)
+        deliveryTimer.unref?.()
+        response.writeHead(200, {
+          'content-type': media.contentType,
+          'content-length': media.body.length,
+          'cache-control': 'private, no-store',
+          'content-security-policy': "default-src 'none'; sandbox",
+          'cross-origin-resource-policy': 'same-origin',
+          'referrer-policy': 'no-referrer',
+          vary: 'Authorization',
+          'x-content-type-options': 'nosniff',
+          'x-mx-insight-request-id': requestId,
+        })
+        response.end(media.body)
+        return
+      }
+      if (request.method === 'POST' && (
+        pathname === '/api/v1/data/post'
+        || pathname === '/api/v1/xiaohongshu/app/get_note_info'
+      )) {
+        const context = await requirePublic(request)
+        if (!tikHubGateway) {
+          throw new AppError(503, 'external_platform_unavailable', 'External post acquisition is unavailable')
+        }
+        const rawBody = await readJson(request, 16 * 1024)
+        const body = pathname === '/api/v1/xiaohongshu/app/get_note_info'
+          ? { ...rawBody, platform: rawBody?.platform || 'xiaohongshu' }
+          : rawBody
+        const result = await tikHubGateway.getPost(context, {
+          body,
+          idempotencyKey: request.headers['idempotency-key'],
+          retryOfRequestId: request.headers['x-mx-insight-retry-of'],
+          // Both public spellings name the same paid operation. Keeping one
+          // fingerprint path prevents duplicate upstream charges across aliases.
+          path: '/api/v1/data/post',
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback' ? { warning: '110 - "Response is stale"' } : {}),
+        })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/mobile-commerce/items') {

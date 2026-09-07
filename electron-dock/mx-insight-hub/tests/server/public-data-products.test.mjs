@@ -87,38 +87,49 @@ test('public-opinion diagnostics require API Key, platform and step-up grants, t
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Diagnostics tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Diagnostics consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Diagnostics key' })
+  const noPlatformKey = await service.createApiKey({ consumerId: consumer.id, name: 'No platform key' })
+  await service.putPlatformConfiguration('public_opinion', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 20,
+    windowSeconds: 3600,
+    maxPageSize: 2,
+  })
+  const platformOnlyKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Platform-only key',
+    platforms: ['public_opinion'],
+    capabilities: [],
+  })
+  await service.putCapabilityConfiguration('public_opinion.diagnostics.read', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 4,
+    windowSeconds: 3600,
+  })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Diagnostics key',
+    platforms: ['public_opinion'],
+    capabilities: ['public_opinion.diagnostics.read'],
+  })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
     const apiHeaders = { authorization: `Bearer ${key.secret}` }
     const noPlatform = await call(baseUrl, '/api/v1/data/public-opinion/funnel', {
-      headers: apiHeaders,
+      headers: { authorization: `Bearer ${noPlatformKey.secret}` },
     })
     assert.equal(noPlatform.response.status, 403)
     assert.equal(noPlatform.payload.error.code, 'platform_not_granted')
 
-    await service.putPlatformConfiguration('public_opinion', {
-      tenantId: tenant.id,
-      consumerId: consumer.id,
-      enabled: true,
-      maxRequests: 20,
-      windowSeconds: 3600,
-      maxPageSize: 2,
-    })
     const noStepUp = await call(baseUrl, '/api/v1/data/public-opinion/funnel', {
-      headers: apiHeaders,
+      headers: { authorization: `Bearer ${platformOnlyKey.secret}` },
     })
     assert.equal(noStepUp.response.status, 403)
     assert.equal(noStepUp.payload.error.code, 'capability_not_granted')
-
-    await service.putCapabilityConfiguration('public_opinion.diagnostics.read', {
-      tenantId: tenant.id,
-      consumerId: consumer.id,
-      enabled: true,
-      maxRequests: 4,
-      windowSeconds: 3600,
-    })
 
     for (const headers of [
       { 'x-mx-insight-admin-token': ADMIN_TOKEN },

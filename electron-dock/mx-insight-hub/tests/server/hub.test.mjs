@@ -516,13 +516,30 @@ test('Hub validator is equivalent to the strict Night-All v1 single-platform fie
 
 test('expired reservations become unknown instead of permanent in-progress requests', async () => {
   const leaseStore = new MemoryStore()
+  const leaseService = new HubService({
+    store: leaseStore,
+    adapter: {},
+    apiKeyPepper: PEPPER,
+  })
+  const tenant = await leaseService.createTenant({ name: 'Lease tenant' })
+  const consumer = await leaseService.createConsumer({ tenantId: tenant.id, name: 'Lease consumer' })
+  await leaseService.putPlatformConfiguration('xhs', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+    maxPageSize: 100,
+  })
+  const key = await leaseService.createApiKey({ consumerId: consumer.id, name: 'Lease key' })
+  const context = await leaseService.authenticate(key.secret)
   const reservation = await leaseStore.reserve({
     requestId: 'request-lease-test',
     idempotencyKey: 'lease-test-key',
     fingerprint: 'fingerprint',
-    tenantId: 'tenant',
-    consumerId: 'consumer',
-    apiKeyId: 'key',
+    tenantId: context.tenant.id,
+    consumerId: context.consumer.id,
+    apiKeyId: context.apiKey.id,
     platform: 'xiaohongshu',
     unitsReserved: 1,
     leaseExpiresAt: new Date(Date.now() - 1000),
@@ -531,7 +548,7 @@ test('expired reservations become unknown instead of permanent in-progress reque
   })
   assert.equal(reservation.request.status, 'reserved')
   assert.equal(await leaseStore.reapStaleReservations(), 1)
-  const request = await leaseStore.getRequest('request-lease-test', 'consumer')
+  const request = await leaseStore.getRequest('request-lease-test', context.consumer.id)
   assert.equal(request.status, 'unknown')
   assert.equal(request.errorCode, 'reservation_lease_expired')
 })
@@ -805,6 +822,19 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   const consumer = consumerResult.payload.data
   assert.match(consumer.businessId, /^mxih:/)
 
+  await call('/internal/v1/admin/platforms/xhs', {
+    method: 'PUT',
+    headers: adminHeaders,
+    body: {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+      maxRequests: 10,
+      windowSeconds: 3600,
+      maxPageSize: 5,
+    },
+  })
+
   const keyResult = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
@@ -824,18 +854,6 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   assert.equal(keys.payload.data[0].secret, undefined)
   assert.equal(keys.payload.data[0].digest, undefined)
 
-  await call('/internal/v1/admin/platforms/xhs', {
-    method: 'PUT',
-    headers: adminHeaders,
-    body: {
-      tenantId: tenant.id,
-      consumerId: consumer.id,
-      enabled: true,
-      maxRequests: 10,
-      windowSeconds: 3600,
-      maxPageSize: 5,
-    },
-  })
   const wildcardGrant = await call('/internal/v1/admin/platforms/all', {
     method: 'PUT',
     headers: adminHeaders,
@@ -1006,17 +1024,17 @@ test('Night-All compatibility route preserves the envelope and serves only an ex
 test('ambiguous POST is called once and held in unknown state', async () => {
   const tenant = (await store.listTenants())[0]
   const consumer = (await store.listConsumers(tenant.id))[0]
+  await call('/internal/v1/admin/platforms/twitter', {
+    method: 'PUT',
+    headers: adminHeaders,
+    body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
+  })
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
     body: { consumerId: consumer.id, name: 'Unknown test key' },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}` }
-  await call('/internal/v1/admin/platforms/twitter', {
-    method: 'PUT',
-    headers: adminHeaders,
-    body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
-  })
   const first = await call('/api/v1/data/search', {
     method: 'POST',
     headers: { ...headers, 'idempotency-key': 'unknown-one' },
@@ -1039,17 +1057,17 @@ test('ambiguous POST is called once and held in unknown state', async () => {
 test('known upstream rejection releases reservation so explicit retry is possible', async () => {
   const tenant = (await store.listTenants())[0]
   const consumer = (await store.listConsumers(tenant.id))[0]
+  await call('/internal/v1/admin/platforms/facebook', {
+    method: 'PUT',
+    headers: adminHeaders,
+    body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
+  })
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
     body: { consumerId: consumer.id, name: 'Release test key' },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}`, 'idempotency-key': 'released-one' }
-  await call('/internal/v1/admin/platforms/facebook', {
-    method: 'PUT',
-    headers: adminHeaders,
-    body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
-  })
   const body = { platform: 'facebook', query: 'AI' }
   const first = await call('/api/v1/data/search', { method: 'POST', headers, body })
   const second = await call('/api/v1/data/search', { method: 'POST', headers, body })

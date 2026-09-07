@@ -217,7 +217,6 @@ test('canonical endpoint searches one authorized global projection with filters,
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER, searchQueries })
   const tenant = await service.createTenant({ name: 'Canonical search tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Canonical search consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Canonical search key' })
   await service.putPlatformConfiguration('xiaohongshu', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -234,6 +233,7 @@ test('canonical endpoint searches one authorized global projection with filters,
     windowSeconds: 120,
     maxPageSize: 2,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Canonical search key' })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant consumer' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN, logger: { error() {} } })

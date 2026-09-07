@@ -269,13 +269,24 @@ export class ExternalPlatformGateway {
         'Test API keys cannot dispatch external ecommerce acquisition',
       )
     }
-    const grants = await this.usageStore.listGrants(context.consumer.id)
+    const grants = typeof this.usageStore.listEffectiveGrants === 'function'
+      ? await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
+      : await this.usageStore.listGrants(context.consumer.id)
     if (!grants.includes(AUTHORIZATION_PLATFORM)) {
       throw new AppError(403, 'platform_not_granted', 'E-commerce data is not granted')
     }
-    const policy = {
+    const consumerPolicy = {
       ...this.defaultPolicy,
       ...((await this.usageStore.getPolicy(context.consumer.id, AUTHORIZATION_PLATFORM)) || {}),
+    }
+    const keyEntitlement = typeof this.usageStore.getApiKeyPlatformEntitlement === 'function'
+      ? await this.usageStore.getApiKeyPlatformEntitlement(context.apiKey.id, AUTHORIZATION_PLATFORM)
+      : null
+    const policy = {
+      ...consumerPolicy,
+      maxPageSize: keyEntitlement
+        ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
+        : consumerPolicy.maxPageSize,
     }
     const codec = createExternalPlatformCursorCodec(this.apiKeyPepper, context.consumer.id)
     let normalized

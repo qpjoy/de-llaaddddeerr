@@ -9,19 +9,20 @@ The pepper is a K8s Secret, not a database field. A database dump alone must not
 ## Lifecycle
 
 1. Issue under one consumer. The current Admin UI signs `live` keys only.
-2. Grants, quotas and limits currently remain consumer-scoped; every active key resolves them on each request. A future immutable subscription/entitlement snapshot may preserve the policy version used for authorization, but it remains metadata behind the same credential rather than a second product key.
+2. Select a subset of the consumer's current platform/capability grants. The server freezes those entitlements and their request/page ceilings into an immutable key snapshot; omission selects all grants that exist at issuance time.
 3. Record last-used/request evidence without storing the plaintext.
 4. Rotate by issuing a second key, verifying traffic, then revoking the old key.
 5. Revocation is immediate for database-backed auth; caches must have bounded TTL and explicit invalidation later.
 
-The client normally receives one active Hub Public API key and uses it for every
-Hub capability granted to that consumer, including `ecommerce`; no product-specific
-key is issued. Policy remains consumer-scoped deliberately: during rotation the old
-and replacement keys may overlap briefly and must inherit the same authorization,
-quota and limits. Future customer pricing must resolve through a versioned
-subscription/entitlement and price-book snapshot without asking the client for a
-second credential. Workloads that require isolated permissions or budgets use
-separate consumers rather than sibling keys.
+The client normally receives one ordinary Hub Public API key; there is no
+provider-specific key format. A request is allowed only by the intersection of
+the key snapshot and the consumer's current grants. Consumer revocation therefore
+takes effect immediately, while a later grant or higher ceiling does not silently
+expand an existing key: issue a replacement and explicitly select the new scope.
+Keys created before the entitlement migration are marked `legacy_dynamic` and
+should be rotated. A consumer may now issue sibling keys for different platforms
+or workloads while keeping usage attribution per key; a separate consumer remains
+the stronger boundary for independent business identity or shared-budget isolation.
 
 The backend continues to recognize `environment=test` as compatibility metadata,
 but it does **not** provide an isolated sandbox. The Admin UI therefore issues only
@@ -53,8 +54,8 @@ lookups remain blocked.
 - Admin token: permits internal operator API access; never accepted by public routes.
 - Night-All service token: workload identity on the private Hub-to-Night-All hop.
 - Night-All upstream/provider credentials: remain in Night-All Credential Center.
-- Hub external-platform credential: a JustOne environment fallback is injected
-  only into the Public/combined runtime. Prefer the Admin-token UI, which stores
+- Hub external-platform credentials: JustOne and TikHub environment fallbacks are
+  injected only into the Public/combined runtime. Prefer the Admin-token UI, which stores
   the value in isolated `control.external_platform_provider_credentials`; safe
   DTOs return only source/revision/configured metadata, and reveal requires a
   second Admin Token check. Saving or rotating this credential does not open the

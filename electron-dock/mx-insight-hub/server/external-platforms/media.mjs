@@ -10,10 +10,10 @@ const MAX_IMAGE_PIXELS = 8_000_000
 const MAX_REDIRECTS = 2
 const MAX_WEBP_CHUNKS = 4_096
 const DEFAULT_TIMEOUT_MS = 5_000
-const DEFAULT_MAX_CONCURRENCY = 16
-const DEFAULT_CACHE_BYTES = 32 * 1024 * 1024
-const DEFAULT_CACHE_ENTRIES = 64
-const DEFAULT_CACHE_TTL_MS = 5 * 60_000
+const DEFAULT_MAX_CONCURRENCY = 32
+const DEFAULT_CACHE_BYTES = 128 * 1024 * 1024
+const DEFAULT_CACHE_ENTRIES = 2_048
+const DEFAULT_CACHE_TTL_MS = 60 * 60_000
 const IMAGE_CONTENT_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -394,6 +394,13 @@ export function createExternalImageLoader({
             }
             current = imageUrl(Array.isArray(location) ? location[0] : location, current)
             continue
+          }
+          if (upstream.statusCode === 429) {
+            upstream.body.destroy?.()
+            // This is the image origin/CDN throttling the Hub, not a Hub
+            // consumer quota or relay-concurrency signal.  Keep it a distinct
+            // non-retryable code so browser backoff cannot amplify that origin.
+            throw imageError(502, 'external_media_source_throttled', 'Product image source is temporarily throttled')
           }
           if (upstream.statusCode !== 200) {
             upstream.body.destroy?.()

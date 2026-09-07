@@ -321,10 +321,11 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
         if (/INSERT INTO external_platform\.dispatch_leases/u.test(sql)) {
           return { rows: [] }
         }
-        if (/SELECT outcome, completed_at/u.test(sql)) {
+        if (/SELECT outcome, error_code, completed_at/u.test(sql)) {
           return {
             rows: [{
               outcome: 'unknown',
+              error_code: null,
               completed_at: completedAt,
               blocked_until: new Date(completedAt.getTime() + 60_000),
             }],
@@ -351,6 +352,8 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
   assert.equal(result.reason, 'unknown')
   assert.equal(queries[0].values[7], retryOfRequestId)
   assert.equal(queries[0].values[8], CONTRACT_V1)
+  assert.equal(queries[0].values[9], 'justone')
+  assert.match(queries[0].sql, /call\.provider_key = \$10/u)
   assert.match(
     queries[0].sql,
     /call\.outcome = 'unknown'[\s\S]*?call\.usage_request_id <> \$8/u,
@@ -360,8 +363,11 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
     queries[0].sql,
     /call\.endpoint_key = \$7[\s\S]*?call\.contract_version = \$9[\s\S]*?call\.outcome = 'succeeded_unusable'/u,
   )
+  assert.match(queries[0].sql, /call\.error_code IS DISTINCT FROM 'upstream_note_unavailable'/u)
   assert.equal(queries[1].values[5], retryOfRequestId)
   assert.equal(queries[1].values[6], CONTRACT_V1)
+  assert.equal(queries[1].values[7], 'justone')
+  assert.match(queries[1].sql, /WHERE provider_key = \$8/u)
   assert.match(
     queries[1].sql,
     /outcome = 'unknown'[\s\S]*?usage_request_id <> \$6/u,
@@ -370,6 +376,7 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
     queries[1].sql,
     /endpoint_key = \$5[\s\S]*?contract_version = \$7[\s\S]*?outcome = 'succeeded_unusable'/u,
   )
+  assert.match(queries[1].sql, /error_code IS DISTINCT FROM 'upstream_note_unavailable'/u)
 })
 
 test('Postgres beginProviderCall locks and inserts only its owned reservation', async () => {
@@ -401,14 +408,17 @@ test('Postgres beginProviderCall locks and inserts only its owned reservation', 
     startedAt: startedAt.toISOString(),
   })
   const inserted = queries.find(({ sql }) => /WITH owned_request AS MATERIALIZED/u.test(sql))
-  assert.equal(inserted.values.length, 12)
+  assert.equal(inserted.values.length, 14)
   assert.match(inserted.sql, /request\.id = \$5[\s\S]*?request\.status = 'reserved'/u)
   assert.match(inserted.sql, /request\.tenant_id = \$2[\s\S]*?request\.consumer_id = \$3/u)
   assert.match(inserted.sql, /request\.api_key_id = \$4[\s\S]*?request\.fingerprint = \$11/u)
-  assert.match(inserted.sql, /request\.platform = 'ecommerce'/u)
+  assert.match(inserted.sql, /request\.platform = \$14/u)
   assert.match(inserted.sql, /request\.lease_expires_at > now\(\)/u)
   assert.match(inserted.sql, /retry_of_usage_request_id/u)
   assert.equal(inserted.values[11], null)
+  assert.equal(inserted.values[12], 'justone')
+  assert.equal(inserted.values[13], 'ecommerce')
+  assert.match(inserted.sql, /SELECT \$1, \$13, \$2/u)
   assert.match(inserted.sql, /FOR UPDATE[\s\S]*?INSERT INTO external_platform\.provider_calls/u)
   assert.equal(queries.at(-1).sql, 'COMMIT')
   assert.equal(releasedWith, null)
@@ -445,7 +455,9 @@ test('Postgres provider-call insert validates and persists uncertain retry linea
   assert.match(inserted.sql, /retry\.tenant_id = \$2/u)
   assert.match(inserted.sql, /retry\.consumer_id = \$3/u)
   assert.match(inserted.sql, /retry\.fingerprint = \$11/u)
-  assert.match(inserted.sql, /retry\.platform = 'ecommerce'/u)
+  assert.match(inserted.sql, /retry\.platform = \$14/u)
+  assert.equal(inserted.values[12], 'justone')
+  assert.equal(inserted.values[13], 'ecommerce')
   assert.match(inserted.sql, /previous_retry\.retry_of_usage_request_id = retry\.id/u)
   assert.match(inserted.sql, /request_fingerprint, retry_of_usage_request_id/u)
   assert.match(inserted.sql, /\$12::uuid IS NULL OR EXISTS \(SELECT 1 FROM retry_target\)/u)
@@ -488,7 +500,7 @@ test('Postgres beginProviderCall reconciles a lost COMMIT only with the full own
     input.id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
     input.operation, input.contractVersion, input.endpointKey,
     input.endpointVersion, input.marketplace, input.fingerprint,
-    null,
+    null, 'justone', 'ecommerce',
   ])
   for (const pattern of [
     /call\.tenant_id = \$2/u,
@@ -502,9 +514,10 @@ test('Postgres beginProviderCall reconciles a lost COMMIT only with the full own
     /call\.marketplace = \$10/u,
     /call\.request_fingerprint = \$11/u,
     /call\.retry_of_usage_request_id IS NOT DISTINCT FROM \$12::uuid/u,
+    /call\.provider_key = \$13/u,
     /call\.outcome = 'pending'/u,
     /request\.status = 'reserved'/u,
-    /request\.platform = 'ecommerce'/u,
+    /request\.platform = \$14/u,
   ]) assert.match(reconciliation.sql, pattern)
 })
 
@@ -604,7 +617,7 @@ test('memory analytics separates provider success from Hub-usable success', asyn
   assert.equal(analytics.totals.unusableSuccesses, 1)
 })
 
-test('gateway request insert has exactly eleven positional values in contract order', async () => {
+test('gateway request insert has exactly twelve positional values in contract order', async () => {
   let inserted
   const store = new PostgresExternalPlatformStore({
     pool: {
@@ -629,8 +642,8 @@ test('gateway request insert has exactly eleven positional values in contract or
     errorCode: 'upstream_unavailable',
   })
 
-  assert.equal(Math.max(...[...inserted.sql.matchAll(/\$(\d+)/gu)].map((match) => Number(match[1]))), 11)
-  assert.equal(inserted.values.length, 11)
+  assert.equal(Math.max(...[...inserted.sql.matchAll(/\$(\d+)/gu)].map((match) => Number(match[1]))), 12)
+  assert.equal(inserted.values.length, 12)
   assert.deepEqual(inserted.values.slice(1), [
     delivery.tenantId,
     delivery.consumerId,
@@ -642,7 +655,10 @@ test('gateway request insert has exactly eleven positional values in contract or
     null,
     null,
     'upstream_unavailable',
+    'justone',
   ])
+  assert.match(inserted.sql, /\(id, provider_key, tenant_id/u)
+  assert.match(inserted.sql, /VALUES \(\$1, \$12, \$2/u)
 })
 
 test('known provider failures atomically commit stable error responses', async () => {

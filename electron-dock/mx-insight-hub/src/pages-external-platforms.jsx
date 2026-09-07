@@ -60,7 +60,12 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
+const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub'])
 const UNKNOWN = '未知'
+
+function providerDisplayName(provider) {
+  return provider === 'tikhub' ? 'TikHub' : provider === 'justone' ? 'JustOne' : provider || '外部平台'
+}
 
 const PROCESSING_STAGES = [
   {
@@ -81,7 +86,7 @@ const PROCESSING_STAGES = [
     key: 'adapter',
     aliases: ['adapter', 'provider_adapter', 'upstreamAdapter', 'provider'],
     label: '版本化上游适配',
-    description: '隔离 JustOne 历史接口、参数与响应差异，保留可审计证据。',
+    description: '隔离外部平台的接口、参数与响应差异，保留可审计证据。',
     icon: FlowArrow,
   },
   {
@@ -744,7 +749,7 @@ function OverviewMetricRail({ overview }) {
 }
 
 function ProviderCard({ item, range }) {
-  const canOpen = item.key === 'justone'
+  const canOpen = SUPPORTED_PROVIDERS.has(item.key)
   return (
     <article className="qp-panel mih-external-provider-card">
       <header>
@@ -765,7 +770,7 @@ function ProviderCard({ item, range }) {
       <footer>
         <span>最近观测：{displayDate(item.lastObservedAt)}</span>
         {canOpen ? (
-          <a className="qp-button qp-button--outline qp-button--sm" href={`#/external-platforms?provider=justone&range=${encodeURIComponent(range)}`}>
+          <a className="qp-button qp-button--outline qp-button--sm" href={`#/external-platforms?provider=${encodeURIComponent(item.key)}&range=${encodeURIComponent(range)}`}>
             查看详情<ArrowRight size={14} aria-hidden="true" />
           </a>
         ) : <span className="qp-tag">详情尚未接入</span>}
@@ -839,6 +844,7 @@ function ExternalPlatformCredentialRevealModal({
   onUnauthorized,
   notify,
 }) {
+  const providerName = providerDisplayName(provider)
   const [adminToken, setAdminToken] = useState('')
   const [revealedApiKey, setRevealedApiKey] = useState('')
   const [revealedVisible, setRevealedVisible] = useState(false)
@@ -877,14 +883,14 @@ function ExternalPlatformCredentialRevealModal({
   const copyRevealedApiKey = async () => {
     const copied = await copyText(revealedApiKey)
     notify?.(
-      copied ? 'JustOne API Key 已复制' : '无法访问剪贴板，请手动选择复制',
+      copied ? `${providerName} API Key 已复制` : '无法访问剪贴板，请手动选择复制',
       copied ? 'success' : 'danger',
     )
   }
 
   return (
     <Modal
-      title="查看 JustOne API Key"
+      title={`查看 ${providerName} API Key`}
       description="这是唯一会返回明文 Key 的管理操作；请重新输入 Hub Admin Token。明文只保留在此弹窗，响应禁止缓存。"
       onClose={clearAndClose}
       busy={busy}
@@ -923,7 +929,7 @@ function ExternalPlatformCredentialRevealModal({
               <button
                 className="qp-button qp-button--ghost qp-icon-button"
                 type="button"
-                aria-label={revealedVisible ? '隐藏 JustOne API Key' : '显示 JustOne API Key'}
+                aria-label={revealedVisible ? `隐藏 ${providerName} API Key` : `显示 ${providerName} API Key`}
                 aria-pressed={revealedVisible}
                 onClick={() => setRevealedVisible((visible) => !visible)}
               >
@@ -948,6 +954,7 @@ function ExternalPlatformCredentialPanel({
   onUnauthorized,
   notify,
 }) {
+  const providerName = providerDisplayName(provider)
   const [apiKey, setApiKey] = useState('')
   const [apiKeyVisible, setApiKeyVisible] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -981,14 +988,14 @@ function ExternalPlatformCredentialPanel({
       setApiKey('')
       setApiKeyVisible(false)
       notify?.(
-        hasEnvironmentCredential ? 'JustOne API Key 已迁移到数据库来源' : 'JustOne API Key 已保存',
+        hasEnvironmentCredential ? `${providerName} API Key 已迁移到数据库来源` : `${providerName} API Key 已保存`,
         'success',
       )
       onSaved?.()
     } catch (requestError) {
       if (requestError?.status === 401) onUnauthorized?.(requestError)
       setError(requestError)
-      notify?.(requestError?.message || 'JustOne API Key 保存失败', 'danger')
+      notify?.(requestError?.message || `${providerName} API Key 保存失败`, 'danger')
     } finally {
       setSaving(false)
     }
@@ -1021,7 +1028,7 @@ function ExternalPlatformCredentialPanel({
                 maxLength="4096"
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
-                placeholder="输入新的 JustOne API Key"
+                placeholder={`输入新的 ${providerName} API Key`}
                 disabled={saving}
                 required
               />
@@ -1073,7 +1080,7 @@ function DetailMetricRail({ detail }) {
       ? formatNumber(detail.quota.remaining)
       : UNKNOWN
   return (
-    <section className="mih-external-kpis mih-external-kpis--detail" aria-label="JustOne 当前窗口指标">
+    <section className="mih-external-kpis mih-external-kpis--detail" aria-label={`${detail.displayName || '外部平台'} 当前窗口指标`}>
       <MetricCard icon={Pulse} label="Hub 请求" value={formatOptionalNumber(detail.summary.hubRequests)} hint="对外稳定 API" tone="info" />
       <MetricCard icon={FlowArrow} label="实际上游调用" value={formatOptionalNumber(detail.summary.upstreamCalls)} hint="真实调用证据" tone="archetype" />
       <MetricCard icon={CheckCircle} label="Hub 成功率" value={formatPercent(detail.summary.successRate)} hint="按 Hub 结果口径" tone="success" />
@@ -1266,13 +1273,14 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
   const load = useCallback(() => adminApi.externalPlatform(token, provider, { range }), [provider, range, token])
   const remote = useRemoteData(load, onUnauthorized)
   const detail = useMemo(() => normalizeDetail(remote.data, provider), [provider, remote.data])
+  const providerName = detail.displayName || providerDisplayName(provider)
 
   return (
     <>
       <PageHeading
         className="mih-command-heading"
-        eyebrow="EXTERNAL PLATFORM / JUSTONE"
-        title="JustOne 调用与数据保障"
+        eyebrow={`EXTERNAL PLATFORM / ${String(provider).toUpperCase()}`}
+        title={`${providerName} 调用与数据保障`}
         description="从 Hub 请求到上游付费调用、版本适配、数据归档与成本规划的同一管理视图。"
         loading={remote.loading}
         onRefresh={remote.refresh}
@@ -1281,11 +1289,11 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
         <RangeControl range={range} setQuery={setQuery} />
       </PageHeading>
 
-      {remote.loading && !remote.data ? <LoadingState label="正在读取 JustOne 管理证据" /> : null}
+      {remote.loading && !remote.data ? <LoadingState label={`正在读取 ${providerDisplayName(provider)} 管理证据`} /> : null}
       {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
       {remote.data ? (
         <>
-          <section className="mih-external-detail-status" aria-label="JustOne 当前状态">
+          <section className="mih-external-detail-status" aria-label={`${providerName} 当前状态`}>
             <span><Globe size={20} weight="duotone" aria-hidden="true" /></span>
             <div><strong>{detail.displayName}</strong><small className="mih-mono">provider={detail.key || provider}</small></div>
             <StatusBadge status={detail.status} label={statusLabel(detail.status)} />
@@ -1310,12 +1318,12 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             <TenantRanking tenants={detail.tenants} currency={detail.cost.currency} />
             <ProtectionPanel guardrails={detail.guardrails} notes={detail.notes} />
           </section>
-          <DifferencePanel />
+          {provider === 'justone' ? <DifferencePanel /> : null}
         </>
       ) : !remote.loading && !remote.error ? (
         <EmptyState
           icon={Globe}
-          title="JustOne 详情响应为空"
+          title={`${providerDisplayName(provider)} 详情响应为空`}
           description="管理接口没有返回可展示的运行证据；页面不会用默认指标代替。"
           action={<a className="qp-button qp-button--outline" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />返回平台总览</a>}
         />
@@ -1330,7 +1338,7 @@ function UnsupportedProvider({ provider, range }) {
       <PageHeading
         eyebrow="DATA CLEANING CENTER / EXTERNAL PLATFORMS"
         title="外部数据平台"
-        description="当前详情路由只接受 provider=justone。"
+        description="当前详情路由只接受已登记的外部数据平台。"
       />
       <EmptyState
         icon={WarningCircle}
@@ -1347,8 +1355,8 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   const range = VALID_RANGES.has(rawRange) ? rawRange : '24h'
   const provider = (query.get('provider') || '').trim().toLowerCase()
 
-  if (provider && provider !== 'justone') return <UnsupportedProvider provider={provider} range={range} />
-  if (provider === 'justone') {
+  if (provider && !SUPPORTED_PROVIDERS.has(provider)) return <UnsupportedProvider provider={provider} range={range} />
+  if (provider) {
     return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   }
   return <PlatformsOverview token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />

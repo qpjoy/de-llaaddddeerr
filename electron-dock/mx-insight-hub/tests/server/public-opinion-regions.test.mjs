@@ -145,7 +145,6 @@ async function withFixture(run) {
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Public opinion regions tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Regions consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Regions key' })
   await service.putPlatformConfiguration('public_opinion', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -154,6 +153,7 @@ async function withFixture(run) {
     windowSeconds: 3_600,
     maxPageSize: 100,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Regions key' })
   const noGrantConsumer = await service.createConsumer({
     tenantId: tenant.id,
     name: 'Regions consumer without platform grant',
@@ -267,7 +267,13 @@ test('CN all_ingested is separately granted while the legacy province feed stays
       maxRequests: 100,
       windowSeconds: 3_600,
     })
-    const capabilities = await call('/api/v1/data/capabilities')
+    const allIngestedKey = await service.createApiKey({
+      consumerId: consumer.id,
+      name: 'Regions all-ingested key',
+      platforms: ['public_opinion'],
+      capabilities: [ALL_INGESTED_CAPABILITY],
+    })
+    const capabilities = await call('/api/v1/data/capabilities', allIngestedKey.secret)
     assert.deepEqual(
       capabilities.payload.data.capabilities.find(
         (entry) => entry.capability === ALL_INGESTED_CAPABILITY,
@@ -275,7 +281,7 @@ test('CN all_ingested is separately granted while the legacy province feed stays
       { capability: ALL_INGESTED_CAPABILITY, ready: true },
     )
 
-    const result = await call(path)
+    const result = await call(path, allIngestedKey.secret)
     assert.equal(result.response.status, 200)
     assert.deepEqual(result.payload.data.visibility, {
       mode: 'all_ingested',
@@ -307,7 +313,7 @@ test('CN all_ingested is separately granted while the legacy province feed stays
     store.getPublicOpinionRegionServingIndexStatus = async () => {
       throw new Error('catalog unavailable')
     }
-    const unavailable = await call(path)
+    const unavailable = await call(path, allIngestedKey.secret)
     assert.equal(unavailable.response.status, 503)
     assert.equal(unavailable.payload.error.code, 'serving_indexes_unavailable')
   })

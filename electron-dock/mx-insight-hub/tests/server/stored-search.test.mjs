@@ -179,7 +179,6 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER, searchQueries })
   const tenant = await service.createTenant({ name: 'Stored search tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Stored search consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Stored search key' })
   await service.putPlatformConfiguration('xiaohongshu', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -196,6 +195,7 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
     windowSeconds: 3_600,
     maxPageSize: 2,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Stored search key' })
   const app = createApp({
     service,
     store,

@@ -79,13 +79,21 @@ that entry to attempt acquisition. Reading capabilities itself creates no
 ecommerce usage reservation and does not call a provider.
 
 The credential is the same Hub Public API key issued through the ordinary API
-Keys lifecycle. Enabling `ecommerce` on its owning consumer takes effect for all
-active keys of that consumer; Hub does not issue an ecommerce-specific or
-supplier key to the caller. Grants and policies live on the stable consumer
-identity so key rotation does not require reconfiguration.
-External ecommerce search and media nevertheless require one of those ordinary
-keys to have the `mih_live_` environment/prefix; this is a route gate, not a
-second product credential.
+Keys lifecycle; Hub never issues a supplier key to the caller. A newly issued
+key freezes the selected subset of its consumer's current platform and
+capability grants together with bounded quota ceilings. Removing a consumer
+grant immediately narrows every key, while a later grant never silently expands
+an existing snapshot key: issue a replacement key that explicitly selects the
+new scope. Grandfathered `legacy_dynamic` keys keep the old dynamic behavior
+only during migration and should be rotated. External ecommerce search and
+media also require a Live key; this is a route gate, not a second product
+credential.
+
+An `Idempotency-Key` is unique within a consumer, but a mutating POST or replay
+must use the same Hub API key that created its usage record. Another API key for
+the same consumer may perform the documented read-only status lookup, but it
+cannot take over, replay or refresh that record; it must use a new
+`Idempotency-Key`. This keeps per-key business usage attribution immutable.
 
 ## Source catalog
 
@@ -370,7 +378,7 @@ The response is provider-neutral:
 ```json
 {
   "contractVersion": "mx-insight-hub.ecommerce-products.v1",
-  "data": {
+  "data": { "item": {
     "items": [{
       "id": "product-id",
       "marketplace": "jd",
@@ -446,8 +454,9 @@ Rejected sources use bounded media 4xx errors; a source that cannot be fetched
 safely returns a bounded 502 error and an end-to-end deadline returns
 `504 external_media_timeout`. Per-consumer request-window exhaustion
 returns `429 external_media_rate_limited`; per-consumer or relay-wide concurrency
-exhaustion returns `429 external_media_busy`. Clients back off and do not fan
-out retries.
+exhaustion returns `429 external_media_busy`. If the retained image origin itself
+returns 429, Hub reports the non-retryable `502 external_media_source_throttled`
+instead of mislabelling it as Hub capacity. Clients do not fan out retries.
 
 The media GET does not reserve or commit Hub usage, does not dispatch product
 search, and does not change the source mode or accounting of the original
@@ -1770,21 +1779,131 @@ most 200 characters) and `pageSize` (at most the consumer policy/server limit).
 It is a metered safe `GET`, so it does not take an idempotency key and each
 retry is a new request.
 
-## Planned capabilities
+## Xiaohongshu note detail
 
-Not implemented. Recorded here so the client-facing shape stays stable once the upstream capabilities land. Each keeps the same auth (`Authorization: Bearer <API key>`), grant checks, quota accounting and freshness envelope as `search`.
+The first implemented social-post resolver accepts an official Xiaohongshu note
+link and returns a provider-neutral Hub contract:
 
 ```http
-POST /api/v1/data/post          { "platform": "...", "postId": "..." }
-POST /api/v1/data/comments      { "platform": "...", "postId": "...", "pageSize": 20, "cursor": "..." }
+POST /api/v1/data/post
+Authorization: Bearer <Hub Public API key>
+Content-Type: application/json
+Idempotency-Key: xhs-note-20260907-0001
+
+{
+  "platform": "xiaohongshu",
+  "url": "https://www.xiaohongshu.com/explore/0123456789abcdef01234567",
+  "deliveryMode": "cache_first"
+}
 ```
 
-`post` and `comments` depend on upstream `post_detail`/`post_comments` capabilities that the versioned Night-All data contract does not yet expose; see [Night-All integration](../architecture/night-all-integration.md). Until they exist under readiness governance these routes stay unpublished rather than silently proxying an ungoverned legacy route.
+For clients migrating from the historical spelling, the following alias accepts
+the same strict body and defaults a missing `platform` to `xiaohongshu`:
 
-Identifier lookups take `postId` as the caller-facing name; platform-specific
-aliases such as `noteId`, `awemeId` or `tweetId` are normalized internally and
-are not part of this contract. Cross-platform generic entity search remains a
-future capability; the Telegram-specific entity route above is implemented.
+```http
+POST /api/v1/xiaohongshu/app/get_note_info
+```
+
+Both paths are one logical paid operation and use the same canonical
+fingerprint/idempotency namespace, so switching path spellings cannot create a
+second dispatch for an otherwise identical request. New integrations should
+use `/data/post`.
+
+The body accepts only `platform`, `url`, and `deliveryMode`. `platform` must be
+`xiaohongshu` on the canonical path. `url` must be an official
+`xiaohongshu.com` explore/discovery link containing a 24-character note ID, or
+an `xhslink.com` / `xhslink.cn` share link. Arbitrary URLs, credentials, ports,
+fragments, provider routing and raw upstream parameters are rejected.
+`deliveryMode` is `cache_only`, `cache_first` (default), or `refresh` with the
+same delivery semantics as ecommerce. `refresh` requires a caller-supplied
+`Idempotency-Key`; transport retries reuse the exact body/key and are never
+automatically converted into a second external call. A supplied key is scoped
+to the consumer and remains bound to the API key that first used it, so another
+API key gets `409 idempotency_conflict`. If `cache_only` or `cache_first` omits
+the header, Hub derives an API-key-scoped freshness-bucket key: separate API
+keys keep separate usage attribution, while consumer-scoped snapshots and the
+dispatch lease still suppress duplicate external acquisition.
+
+Authorization requires all of the following:
+
+- an active Live Hub Public API key;
+- the key's immutable platform entitlement includes `xiaohongshu`, and the
+  consumer still has that grant;
+- the key's immutable capability entitlement includes
+  `social.posts.resolve`, and the consumer still has that capability;
+- the active plan, key ceilings, platform policy, and capability policy all
+  allow the request. The most restrictive applicable limit wins.
+
+The success contract is `mx-insight-hub.social-post.v1`:
+
+```json
+{
+  "contractVersion": "mx-insight-hub.social-post.v1",
+  "data": { "item": {
+    "id": "xiaohongshu:0123456789abcdef01234567",
+    "externalId": "0123456789abcdef01234567",
+    "platform": "xiaohongshu",
+    "contentType": "post",
+    "url": "https://www.xiaohongshu.com/explore/0123456789abcdef01234567",
+    "title": "示例标题",
+    "text": "示例正文",
+    "tags": ["旅行", "杭州"],
+    "author": { "id": "author-id", "name": "作者", "avatarUrl": null },
+    "metrics": { "liked": 12, "collected": 3, "comments": 4, "shared": 1 },
+    "media": [{ "type": "image", "url": "/api/v1/data/posts/media?requestId=00000000-0000-4000-8000-000000000001&mediaIndex=0" }],
+    "publishedAt": "2026-09-07T00:00:00.000Z",
+    "collectedAt": "2026-09-07T00:00:01.000Z"
+  } },
+  "meta": {
+    "capturedAt": "2026-09-07T00:00:01.000Z",
+    "servedAt": "2026-09-07T00:00:01.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000001"
+}
+```
+
+Provider identity, credential, endpoint, raw envelope, upstream media/avatar
+URLs, diagnostic cache URL, procurement price and customer invoice are
+intentionally absent. `author.avatarUrl` is currently `null`; every
+`media[].url` is already a same-origin Hub relay locator bound to the owning
+consumer, committed response and media index. Fetch that locator with the same
+consumer's Live Key (then render the returned bytes as a Blob):
+
+```http
+GET /api/v1/data/posts/media?requestId=<response requestId>&mediaIndex=0
+Authorization: Bearer <same consumer's Live Hub Public API key>
+```
+
+The locator expands to the following route contract. Only `requestId` and `mediaIndex` are accepted, each exactly once;
+`mediaIndex` is `0..19`. The relay never accepts an arbitrary source URL,
+creates no new Hub usage record, and never dispatches another note request. It
+applies the common public-HTTPS/DNS/redirect/content/size/time/rate/concurrency
+guards and returns JPEG, PNG, or WebP bytes with `Cache-Control: private,
+no-store`. Clients may request multiple retained images concurrently within the
+advertised tenant and global safeguards and should show a local placeholder for
+an individual rejected image.
+
+Stable errors include `400 invalid_post_url|invalid_platform|unsupported_fields`,
+`403 platform_not_granted|capability_not_granted|test_key_not_supported`,
+`404 post_not_found|stored_snapshot_not_found`, `409 request_in_progress|`
+`idempotency_conflict|request_outcome_unknown|uncertain_retry_not_allowed`,
+`429 quota_exceeded|external_platform_busy|external_platform_capacity_exceeded`,
+`502 external_platform_response_unusable|external_platform_outcome_unknown|`
+`external_platform_rejected`, and `503 external_platform_not_configured|`
+`external_platform_circuit_open|external_platform_capacity_unavailable`.
+An accepted but missing/invalid note can still consume external capacity, so
+the Hub negative-caches only the narrowly verified request-local miss and does
+not automatically retry it.
+
+## Planned social capabilities
+
+`POST /api/v1/data/comments`, other platform-specific post resolvers, and
+cross-platform generic entity search remain unpublished until each adapter has
+a reviewed identity rule, bounded pagination/work budget, sanitized fixture and
+readiness gate. They must not be inferred from the implemented Xiaohongshu note
+route or silently proxied through the Night-All compatibility facade.
 
 ## Request status
 

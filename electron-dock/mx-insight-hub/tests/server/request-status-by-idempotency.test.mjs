@@ -26,6 +26,16 @@ async function withFixture(run) {
   const tenant = await service.createTenant({ name: 'Request status tenant' })
   const owner = await service.createConsumer({ tenantId: tenant.id, name: 'Request owner' })
   const other = await service.createConsumer({ tenantId: tenant.id, name: 'Other consumer' })
+  for (const consumer of [owner, other]) {
+    await service.putPlatformConfiguration('ecommerce', {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+      maxRequests: 100,
+      windowSeconds: 3_600,
+      maxPageSize: 100,
+    })
+  }
   const ownerKey = await service.createApiKey({ consumerId: owner.id, name: 'Owner key' })
   const otherKey = await service.createApiKey({ consumerId: other.id, name: 'Other key' })
   const server = createServer(createApp({

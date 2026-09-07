@@ -89,6 +89,12 @@ const CAPABILITY_CATALOG = {
     endpoint: 'GET /api/v1/data/public-opinion/regions/{regionCode}/items',
     usageHint: '还必须同时授予 public_opinion 平台；默认不向新调用者开放',
   },
+  'social.posts.resolve': {
+    label: '社交笔记详情',
+    description: '按官方笔记链接获取正文、作者、标签、互动量与媒体清单；可能产生外部数据成本',
+    endpoint: 'POST /api/v1/data/post',
+    usageHint: '当前需同时授予 xiaohongshu 平台；历史 Key 不会自动获得此能力',
+  },
 }
 
 const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = {
@@ -97,6 +103,12 @@ const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = {
     operation: 'ecommerce.products.search',
     route: 'Hub 内部路由',
     policyNote: '启用即允许该调用身份请求电商数据；当前固定单候选，缓存与内部采购成本由 Hub 管理。',
+  },
+  xiaohongshu: {
+    kind: '来源平台',
+    operation: 'social.posts.resolve',
+    route: 'Hub 内部路由',
+    policyNote: '平台授权与付费笔记详情能力分开；Key 必须同时包含 social.posts.resolve。',
   },
 }
 
@@ -796,10 +808,16 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
-  const [form, setForm] = useState({ consumerId: '', name: '', environment: 'live', expiresInDays: 180 })
+  const [form, setForm] = useState({ consumerId: '', name: '', environment: 'live', expiresInDays: 180, platforms: [], capabilities: [] })
+  const [scopeOptions, setScopeOptions] = useState({ platforms: [], capabilities: [] })
+  const [scopeLoading, setScopeLoading] = useState(false)
+  const scopeRequestRef = useRef(0)
   const [issuedSecret, setIssuedSecret] = useState(null)
   const [revokeTarget, setRevokeTarget] = useState(null)
   const [revoking, setRevoking] = useState(false)
+  const [overviewTarget, setOverviewTarget] = useState(null)
+  const [overviewLoading, setOverviewLoading] = useState(false)
+  const [overviewError, setOverviewError] = useState(null)
 
   const load = useCallback(async () => {
     const allConsumers = (await adminApi.consumers(token)) || []
@@ -816,14 +834,58 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const canIssueKey = writableConsumers.length > 0
   const consumerNames = new Map(consumers.map((consumer) => [consumer.id, consumer.name]))
 
-  const showCreate = () => {
+  const applyScopes = async (targetConsumerId) => {
+    const generation = ++scopeRequestRef.current
+    setScopeOptions({ platforms: [], capabilities: [] })
+    setScopeLoading(true)
+    const target = writableConsumers.find((consumer) => consumer.id === targetConsumerId)
+    if (!target) {
+      if (scopeRequestRef.current === generation) setScopeLoading(false)
+      return
+    }
+    try {
+      const configuration = await adminApi.platforms(token, { tenantId: target.tenantId, consumerId: target.id })
+      if (scopeRequestRef.current !== generation) return
+      const scopes = {
+        platforms: [...(configuration?.grants || [])].sort(),
+        capabilities: [...(configuration?.capabilityGrants || [])].sort(),
+      }
+      setScopeOptions(scopes)
+      setForm((current) => current.consumerId === targetConsumerId
+        ? { ...current, platforms: scopes.platforms, capabilities: scopes.capabilities }
+        : current)
+    } catch (error) {
+      if (scopeRequestRef.current !== generation) return
+      if (error?.status === 401) onUnauthorized(error)
+      setFormError(error)
+    } finally {
+      if (scopeRequestRef.current === generation) setScopeLoading(false)
+    }
+  }
+
+  const showCreate = async () => {
     const targetConsumerId = writableConsumers.some((consumer) => consumer.id === selectedConsumerId)
       ? selectedConsumerId
       : writableConsumers[0]?.id || ''
-    setForm({ consumerId: targetConsumerId, name: '', environment: 'live', expiresInDays: 180 })
+    setForm({ consumerId: targetConsumerId, name: '', environment: 'live', expiresInDays: 180, platforms: [], capabilities: [] })
+    setScopeOptions({ platforms: [], capabilities: [] })
     setFormError(null)
     setOpen(true)
+    await applyScopes(targetConsumerId)
   }
+
+  const changeFormConsumer = async (targetConsumerId) => {
+    setForm((current) => ({ ...current, consumerId: targetConsumerId, platforms: [], capabilities: [] }))
+    setFormError(null)
+    await applyScopes(targetConsumerId)
+  }
+
+  const toggleScope = (field, value) => setForm((current) => ({
+    ...current,
+    [field]: current[field].includes(value)
+      ? current[field].filter((entry) => entry !== value)
+      : [...current[field], value].sort(),
+  }))
 
   const create = async (event) => {
     event.preventDefault()
@@ -863,12 +925,27 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     }
   }
 
+  const showOverview = async (key) => {
+    setOverviewTarget({ key, data: null })
+    setOverviewError(null)
+    setOverviewLoading(true)
+    try {
+      const data = await adminApi.apiKeyOverview(token, key.id)
+      setOverviewTarget((current) => current?.key.id === key.id ? { key, data } : current)
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setOverviewError(error)
+    } finally {
+      setOverviewLoading(false)
+    }
+  }
+
   if (state.loading && !state.data) return <LoadingState label="正在加载 API Keys" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   return (
     <>
-      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="客户端只需要一把开放能力 API Key。当前权限、配额与用量按其调用身份（consumer）解析，轮换密钥不会丢配置；未来客户费率由版本化订阅 / price book 解析。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="每把 Key 在签发时固化平台与能力范围，并独立统计用量。调用者授权减少会立即收窄现有 Key；新增授权需要重新签发。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
         {canIssueKey ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
             <Plus size={17} aria-hidden="true" />签发 API Key
@@ -887,13 +964,14 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       <Panel title="已签发密钥" subtitle={`${keys.length} 条记录`}>
         {keys.length ? (
           <Table label="API Key 列表">
-            <thead><tr><th>名称</th><th>调用者</th><th>密钥标识（不可用于调用）</th><th>环境</th><th>状态</th><th>有效至</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
+            <thead><tr><th>名称</th><th>调用者</th><th>密钥标识（不可用于调用）</th><th>授权范围</th><th>环境</th><th>状态</th><th>有效至</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
             <tbody>
               {keys.map((key) => (
                 <tr key={key.id}>
                   <td><strong>{key.name}</strong><small>{formatDate(key.createdAt)} 签发</small></td>
                   <td>{consumerNames.get(key.consumerId) || key.consumerId}</td>
                   <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code><small>仅用于核对；完整 secret 只在签发时显示一次</small></td>
+                  <td><strong>{key.platforms?.length || 0} 平台 · {key.capabilities?.length || 0} 能力</strong><small>{[...(key.platforms || []), ...(key.capabilities || [])].join('、') || '无调用权限'}</small></td>
                   <td>
                     <strong>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? 'Test · 兼容标签' : 'Live'}</strong>
                     <small>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? '非沙箱；外部电商接口拒绝使用' : '正式开放能力凭据'}</small>
@@ -902,6 +980,9 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                   <td>{formatDate(key.expiresAt)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
                   <td className="mih-table__actions mih-table__actions--wide">
+                    <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showOverview(key)}>
+                      <ChartLine size={15} aria-hidden="true" />额度与用量
+                    </button>
                     {tenantAllows(session, key.tenantId, 'platform.write') ? (
                       <a
                         className="qp-button qp-button--ghost qp-button--sm"
@@ -934,22 +1015,44 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       {open ? (
         <Modal
           title="签发 API Key"
-          description="选择所属调用者。管理台当前只签发 Live Key；完整 secret 只会显示一次。"
-          onClose={() => !saving && setOpen(false)}
+          description="先选择调用者，再从其当前授权中勾选这把 Key 的不可变范围；完整 secret 只显示一次。"
+          onClose={() => {
+            if (!saving) {
+              scopeRequestRef.current += 1
+              setOpen(false)
+            }
+          }}
           footer={(
             <>
               <button className="qp-button qp-button--ghost" type="button" onClick={() => setOpen(false)} disabled={saving}>取消</button>
-              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving}>{saving ? '正在签发' : '签发密钥'}</button>
+              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading || (form.platforms.length === 0 && form.capabilities.length === 0)}>{saving ? '正在签发' : '签发密钥'}</button>
             </>
           )}
         >
           <form id="create-api-key" className="mih-form" onSubmit={create}>
             <DropdownField label="调用者" value={form.consumerId}
-              onChange={(consumerId) => setForm({ ...form, consumerId })}
+              onChange={changeFormConsumer}
               options={writableConsumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
+              disabled={scopeLoading}
               required autoFocus />
             <Field label="密钥名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
+            </Field>
+            <Field label="平台范围" hint="只展示调用者当前已授权的平台；扩大范围需要签发新 Key。">
+              <div className="mih-key-scopes">
+                {scopeOptions.platforms.map((platform) => (
+                  <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
+                ))}
+                {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权，请先到“开放能力”配置。</small> : null}
+              </div>
+            </Field>
+            <Field label="能力范围" hint="产生外部费用的操作采用独立能力授权，不随平台授权自动开启。">
+              <div className="mih-key-scopes">
+                {scopeOptions.capabilities.map((capability) => (
+                  <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
+                ))}
+                {!scopeLoading && scopeOptions.capabilities.length === 0 ? <small>暂无通用能力授权。</small> : null}
+              </div>
             </Field>
             <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
               <input
@@ -971,7 +1074,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       {issuedSecret ? (
         <Modal
           title="API Key 已签发"
-          description={`这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。同一把 Key 可调用该身份已启用的全部开放能力。`}
+          description={`这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用签发时勾选、且调用者当前仍允许的范围。`}
           onClose={() => setIssuedSecret(null)}
           footer={(
             <>
@@ -1005,6 +1108,39 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           <div className="mih-confirm-copy"><WarningCircle size={26} weight="duotone" aria-hidden="true" /><p>将撤销 <strong>{revokeTarget.name}</strong>（{revokeTarget.prefix}****{revokeTarget.lastFour}）。</p></div>
         </Modal>
       ) : null}
+
+      {overviewTarget ? (
+        <Modal
+          title={`${overviewTarget.key.name} · 额度与用量`}
+          description="这里的调用量只属于这一把 Key；套餐总额仍由同一调用者下的所有 Key 共享。"
+          onClose={() => !overviewLoading && setOverviewTarget(null)}
+          footer={<button className="qp-button qp-button--primary" type="button" onClick={() => setOverviewTarget(null)} disabled={overviewLoading}>关闭</button>}
+        >
+          {overviewLoading && !overviewTarget.data ? <LoadingState label="正在读取 Key 用量" /> : null}
+          {overviewError ? <ErrorState error={overviewError} onRetry={() => showOverview(overviewTarget.key)} /> : null}
+          {overviewTarget.data ? (
+            <div className="mih-form">
+              <section className="mih-metric-grid mih-metric-grid--compact">
+                <MetricCard icon={Pulse} label="累计请求" value={formatNumber(overviewTarget.data.usage?.requests || 0)} hint={`已提交 ${formatNumber(overviewTarget.data.usage?.committed || 0)}`} />
+                <MetricCard icon={Coins} label="所属套餐" value={overviewTarget.data.plan?.name || '未分配'} hint={overviewTarget.data.plan ? `${overviewTarget.data.plan.key} · v${overviewTarget.data.plan.version}` : '无套餐总额'} />
+                <MetricCard icon={Globe} label="平台范围" value={formatNumber(overviewTarget.data.platformEntitlements?.length || 0)} hint={overviewTarget.key.scopeMode === 'legacy_dynamic' ? '历史 Key · 跟随调用者授权' : '签发快照'} />
+                <MetricCard icon={Brain} label="能力范围" value={formatNumber(overviewTarget.data.capabilityEntitlements?.length || 0)} hint="平台与付费能力需同时满足" />
+              </section>
+              <Table label="API Key 平台与能力额度">
+                <thead><tr><th>范围</th><th>窗口请求</th><th>窗口秒数</th><th>最大分页</th></tr></thead>
+                <tbody>
+                  {(overviewTarget.data.platformEntitlements || []).map((entry) => (
+                    <tr key={`platform:${entry.platform}`}><td><strong>{platformLabel(entry.platform)}</strong><small>{entry.platform}</small></td><td>{formatNumber(entry.maxRequests)}</td><td>{formatNumber(entry.windowSeconds)}</td><td>{formatNumber(entry.maxPageSize)}</td></tr>
+                  ))}
+                  {(overviewTarget.data.capabilityEntitlements || []).map((entry) => (
+                    <tr key={`capability:${entry.capability}`}><td><strong>{CAPABILITY_CATALOG[entry.capability]?.label || entry.capability}</strong><small>{entry.capability}</small></td><td>{formatNumber(entry.maxRequests)}</td><td>{formatNumber(entry.windowSeconds)}</td><td>—</td></tr>
+                  ))}
+                </tbody>
+              </Table>
+            </div>
+          ) : null}
+        </Modal>
+      ) : null}
     </>
   )
 }
@@ -1024,13 +1160,25 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
   return { tenants: safeTenants, consumers, tenantId, consumerId, configuration }
 }
 
-export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized }) {
+export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
-  const load = useCallback(
-    () => loadConfigurationContext(token, requestedTenantId, requestedConsumerId),
-    [requestedConsumerId, requestedTenantId, token],
-  )
+  const requestedContext = `${requestedTenantId}\u0000${requestedConsumerId}`
+  const contextRef = useRef(requestedContext)
+  contextRef.current = requestedContext
+  const [assigningPlanVersionId, setAssigningPlanVersionId] = useState('')
+  const load = useCallback(async () => {
+    const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId)
+    if (!context.consumerId) return { ...context, plans: { catalog: [], currentPlan: null }, usage: {} }
+    const monthStart = new Date()
+    monthStart.setUTCDate(1)
+    monthStart.setUTCHours(0, 0, 0, 0)
+    const [plans, usage] = await Promise.all([
+      adminApi.plans(token, context.consumerId),
+      adminApi.usage(token, { consumerId: context.consumerId, from: monthStart.toISOString() }),
+    ])
+    return { ...context, plans: plans || { catalog: [], currentPlan: null }, usage: usage || {} }
+  }, [requestedConsumerId, requestedTenantId, token])
   const state = useRemoteData(load, onUnauthorized)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载配额策略" />
@@ -1044,10 +1192,47 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const platformHref = `#/platforms?${new URLSearchParams({ tenantId: data.tenantId || '', consumerId: data.consumerId || '' })}`
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
   const canManagePlatform = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
+  const currentPlan = data.plans?.currentPlan
+  const planLimits = currentPlan?.limits || {}
+  const monthlyUsed = Number(data.usage?.requests || 0)
+  const monthlyLimit = Number(planLimits.monthlyRequests || 0)
+  const monthlyRemaining = monthlyLimit > 0 ? Math.max(0, monthlyLimit - monthlyUsed) : null
+  const canAssignPlan = Boolean(
+    session?.platformAdmin
+    && data.consumerId
+    && Number.isInteger(currentPlan?.revision)
+    && currentPlan.revision > 0,
+  )
+
+  const assignPlan = async (plan) => {
+    if (
+      !canAssignPlan
+      || assigningPlanVersionId
+      || plan.versionId === currentPlan.versionId
+      || plan.key === 'legacy-unmetered'
+    ) return
+    const targetContext = contextRef.current
+    const targetConsumerId = data.consumerId
+    setAssigningPlanVersionId(plan.versionId)
+    try {
+      await adminApi.assignConsumerPlan(token, targetConsumerId, {
+        planVersionId: plan.versionId,
+        expectedRevision: currentPlan.revision,
+      })
+      const refreshed = await load()
+      if (contextRef.current === targetContext) state.setData(refreshed)
+      notify?.(`调用者「${selectedConsumer?.name || targetConsumerId}」已分配 ${plan.name} v${plan.version}`, 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      notify?.(error.message || '套餐分配失败，请刷新后重试', 'danger')
+    } finally {
+      setAssigningPlanVersionId('')
+    }
+  }
 
   return (
     <>
-      <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="数据平台和通用能力按 consumer × platform/capability 执行独立滑动窗口；同一调用者的所有 API Key 共享对应上限。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="套餐总额、调用者策略与 API Key 签发额度同时生效；每次请求会受其中最严格的边界约束。" loading={state.loading} onRefresh={state.refresh}>
         {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理开放能力</a> : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
@@ -1068,13 +1253,57 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         />
       </section>
 
-      <section className="mih-metric-grid mih-metric-grid--compact" aria-label="默认配额基线">
-        <MetricCard icon={Pulse} label="默认滑动窗口上限" value={formatNumber(DEFAULT_POLICY.maxRequests)} hint="每个平台或能力" />
-        <MetricCard icon={Timer} label="滑动窗口长度" value="1 小时" hint={`${DEFAULT_POLICY.windowSeconds} 秒`} tone="info" />
-        <MetricCard icon={Database} label="最大分页" value={formatNumber(DEFAULT_POLICY.maxPageSize)} hint="单次 pageSize" tone="warning" />
+      <section className="mih-metric-grid mih-metric-grid--compact" aria-label="当前套餐与配额基线">
+        <MetricCard icon={Coins} label="当前套餐" value={currentPlan?.name || '未分配'} hint={currentPlan ? `${currentPlan.key} · v${currentPlan.version} · 修订 ${currentPlan.revision}` : '请联系平台管理员'} />
+        <MetricCard icon={Pulse} label="本月请求" value={formatNumber(monthlyUsed)} hint={monthlyRemaining == null ? '历史兼容：不设月总额' : `剩余 ${formatNumber(monthlyRemaining)} / ${formatNumber(monthlyLimit)}`} />
+        <MetricCard icon={Timer} label="套餐突发边界" value={planLimits.burstRps ? `${formatNumber(planLimits.burstRps)} RPS` : '不限制'} hint={planLimits.windowSeconds ? `${formatNumber(planLimits.maxRequests)} / ${formatNumber(planLimits.windowSeconds)} 秒` : '平台与 Key 滑动窗口仍独立生效'} tone="info" />
+        <MetricCard icon={Database} label="套餐最大分页" value={planLimits.maxPageSize ? formatNumber(planLimits.maxPageSize) : '按策略'} hint="与 Key ceiling 取最小值" tone="warning" />
         <MetricCard icon={Globe} label="已授权平台" value={formatNumber(grants.size)} hint="按调用者显式授权" tone="success" />
         <MetricCard icon={Brain} label="已授权通用能力" value={formatNumber(capabilityGrants.size)} hint="不隐含数据读取权" tone="info" />
       </section>
+
+      <Panel title="套餐目录" subtitle="套餐版本一经发布不可原地改价；调用者绑定具体版本用于对账">
+        {data.plans?.catalog?.length ? (
+          <Table label="套餐目录">
+            <thead><tr><th>套餐</th><th>版本</th><th>月请求</th><th>滑动窗口</th><th>突发</th><th>分页</th><th>价格状态</th>{session?.platformAdmin ? <th>操作</th> : null}</tr></thead>
+            <tbody>{data.plans.catalog.map((plan) => (
+              <tr key={plan.versionId}>
+                <td><strong>{plan.name}</strong><small>{plan.key}{plan.versionId === currentPlan?.versionId ? ' · 当前' : ''}</small></td>
+                <td>v{plan.version}</td>
+                <td>{plan.limits?.monthlyRequests ? formatNumber(plan.limits.monthlyRequests) : '不限制'}</td>
+                <td>{plan.limits?.maxRequests ? `${formatNumber(plan.limits.maxRequests)} / ${formatNumber(plan.limits.windowSeconds)} 秒` : '按调用者策略'}</td>
+                <td>{plan.limits?.burstRps ? `${formatNumber(plan.limits.burstRps)} RPS` : '不限制'}</td>
+                <td>{plan.limits?.maxPageSize ? formatNumber(plan.limits.maxPageSize) : '按策略'}</td>
+                <td>{plan.pricing?.mode === 'operator_price_book' ? '待运营价目表' : '历史兼容'}</td>
+                {session?.platformAdmin ? (
+                  <td>
+                    {plan.key === 'legacy-unmetered' ? (
+                      <small>{plan.versionId === currentPlan?.versionId ? '当前历史绑定' : '仅保留现有绑定'}</small>
+                    ) : (
+                      <button
+                        className="qp-button qp-button--ghost qp-button--sm"
+                        type="button"
+                        disabled={
+                          !canAssignPlan
+                          || Boolean(assigningPlanVersionId)
+                          || plan.versionId === currentPlan?.versionId
+                          || plan.status !== 'active'
+                          || plan.versionStatus !== 'published'
+                        }
+                        onClick={() => assignPlan(plan)}
+                      >
+                        {plan.versionId === currentPlan?.versionId
+                          ? '已分配'
+                          : assigningPlanVersionId === plan.versionId ? '分配中…' : '分配此版本'}
+                      </button>
+                    )}
+                  </td>
+                ) : null}
+              </tr>
+            ))}</tbody>
+          </Table>
+        ) : <EmptyState icon={Coins} title="尚无套餐版本" description="数据库迁移完成后会显示可分配套餐。" />}
+      </Panel>
 
       <Panel title="平台级配额" subtitle="显式策略覆盖默认基线">
         {policies.length ? (
@@ -1103,7 +1332,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         )}
       </Panel>
 
-      <Panel title="通用能力配额" subtitle="按 consumer × capability 滑动计量；同一调用者的所有 API Key 共享上限，不使用 pageSize">
+      <Panel title="通用能力配额" subtitle="调用者 × capability 总窗口与每 Key 签发 ceiling 独立计量；不使用 pageSize">
         {capabilityPolicies.length ? (
           <Table label="通用能力配额策略">
             <thead><tr><th>能力</th><th>授权</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>更新时间</th></tr></thead>
@@ -1296,7 +1525,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
   return (
     <>
-      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="一把 Hub API Key 可直接调用其身份已授权的所有接口；为 ecommerce 或其他能力启用授权时，无需签发第二把 Key。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="调用者授权是上限，API Key 在签发时选择其中的平台与能力。停用会立即收窄现有 Key；新增能力需重新签发并显式勾选。" loading={state.loading} onRefresh={state.refresh}>
         {canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
         <a className="qp-button qp-button--outline" href={publicDocsHref()} target="_blank" rel="noreferrer">查看公共 API 文档</a>
       </PageHeading>
@@ -1337,7 +1566,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
             <span>当前授权对象</span>
             <strong>{selectedTenant?.name || data.tenantId} / {selectedConsumer.name}</strong>
             <code className="mih-mono">Consumer ID: {selectedConsumer.id}</code>
-            <small>该调用身份的所有有效 API Key 立即共享这里的数据域、能力与配额；轮换 Key 无需重配</small>
+            <small>现有 Key 只会被这里的变更收窄，不会因新增授权而静默扩权；扩大范围请签发新 Key</small>
           </div>
         ) : null}
       </section>
@@ -1363,7 +1592,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         </footer>
       </section>
 
-      <Panel title="API Key 可访问的数据平台 / 数据域" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；配置随 Key 所属调用身份生效，不使用供应商 API Key`}>
+      <Panel title="API Key 可访问的数据平台 / 数据域" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；调用者授权是上限，新 Key 签发时再选择 immutable snapshot`}>
         {data.consumerId ? (
           <Table label="平台授权与策略">
             <thead><tr><th>开放项</th><th>能力类型</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>操作</th></tr></thead>
@@ -1416,7 +1645,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         )}
       </Panel>
 
-      <Panel title="通用开放 API" subtitle={`${capabilityGrants.size} / ${capabilityRows.length} 已启用；所有 Key 共享调用者能力配额，不授予数据集读取权限`}>
+      <Panel title="通用开放 API" subtitle={`${capabilityGrants.size} / ${capabilityRows.length} 已启用；调用者总配额与 Key 独立额度同时生效，不授予数据集读取权限`}>
         {data.consumerId ? (
           capabilityRows.length ? (
             <Table label="通用 API 授权与策略">
@@ -1469,7 +1698,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       {configureTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${platformLabel(configureTarget.platform)}`}
-          description={`保存后立即作用于调用身份「${selectedConsumer?.name || data.consumerId}」的所有有效 API Key；轮换密钥无需重配。`}
+          description={`停用后会立即收窄调用身份「${selectedConsumer?.name || data.consumerId}」的所有 Key；启用后仅新签且勾选该范围的 Key 可用。`}
           onClose={() => !busyPlatform && setConfigureTarget(null)}
           footer={(
             <>

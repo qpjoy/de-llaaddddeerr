@@ -23,6 +23,7 @@ import {
 } from '@phosphor-icons/react'
 import { publicApiOrigin, publicDataApi, publicDocsHref } from './api.js'
 import { DropdownField, Field, PageHeading } from './components.jsx'
+import { productMediaLoader } from './product-media-loader.js'
 
 const SEARCHING_ASSET = 'assets/ecommerce-treasure-box/data-cat-searching.webp'
 const PRESENTING_ASSET = 'assets/ecommerce-treasure-box/data-cat-presenting.webp'
@@ -264,7 +265,7 @@ function ecommerceErrorPresentation(error) {
   if (code === 'quota_exceeded') {
     return {
       title: '当前调用身份的 Hub 请求额度已用完',
-      description: '等待计量窗口恢复，或请管理员调整 ecommerce 策略；无需重新签发 API Key。',
+      description: '等待计量窗口恢复；若需提高这把 Key 在签发时冻结的上限，请管理员审核后签发替代 Key。',
       operatorAction: false,
     }
   }
@@ -285,7 +286,7 @@ function ecommerceErrorPresentation(error) {
   if (code === 'platform_not_granted') {
     return {
       title: '此调用身份尚未开通电商数据',
-      description: error?.message || '请在“开放能力”中为该 consumer 授予 ecommerce；原 API Key 无需重新签发。',
+      description: error?.message || '请先为 consumer 授予 ecommerce，再签发明确包含该范围的新 API Key；新增授权不会扩大旧 snapshot Key。',
       operatorAction: false,
     }
   }
@@ -675,11 +676,11 @@ function HubProductImage({ apiKey, requestId, item }) {
     if (!apiKey || !requestId || !item?.id || !item?.images?.length) return undefined
     const controller = new AbortController()
     let objectUrl = null
-    publicDataApi.ecommerceProductImage(apiKey, {
+    productMediaLoader.load(() => publicDataApi.ecommerceProductImage(apiKey, {
       requestId,
       itemId: item.id,
       imageIndex: 0,
-    }, { signal: controller.signal }).then((blob) => {
+    }, { signal: controller.signal }), { signal: controller.signal }).then((blob) => {
       if (controller.signal.aborted) return
       objectUrl = URL.createObjectURL(blob)
       setSource(objectUrl)
@@ -1355,7 +1356,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
           })
           setError({
             ...requestError,
-            message: '该 Key 所属调用身份当前没有 ecommerce 授权；在“开放能力”授予后，原 Key 无需重新签发。',
+            message: '该 Key 的 snapshot 没有 ecommerce，或所属调用身份已撤权；授权后请签发明确包含该范围的新 Key。',
           })
         } else {
           setError(requestError)
@@ -1429,7 +1430,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
       ))
       if (!ecommerce) {
         verifiedKeyFingerprintRef.current = null
-        setKeyCheck({ status: 'missing_grant', fingerprint, message: 'Key 有效，但所属 consumer 未授予 ecommerce' })
+        setKeyCheck({ status: 'missing_grant', fingerprint, message: 'Key 有效，但其 snapshot 未包含 ecommerce，或 consumer 已撤权' })
         return null
       }
       verifiedKeyFingerprintRef.current = fingerprint
@@ -1501,7 +1502,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
           </Field>
           {mode === 'hub_live' ? (
             <div className="mih-treasure-live-auth">
-              <Field label="开放能力 API Key" hint="就是客户端从“API Keys”获得的同一把 Hub Public API secret；为其调用身份启用 ecommerce 后即可使用，无需另签 Key。">
+              <Field label="开放能力 API Key" hint="就是客户端从“API Keys”获得的同一把 Hub Public API secret；签发时必须显式包含 ecommerce，新增授权不会扩大旧 snapshot Key。">
                 <span className="mih-treasure-key"><Key size={17} aria-hidden="true" /><input ref={keyInputRef} className="qp-input" type="password" autoComplete="off" value={hubApiKey} disabled={phase === 'searching' || checkingKey} onChange={(event) => changeHubApiKey(event.target.value)} placeholder="mih_live_…" /></span>
               </Field>
               <div className={`mih-treasure-key-check mih-treasure-key-check--${keyCheck.status}`} role="status" aria-live="polite">
@@ -1548,7 +1549,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
             {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : providerRequestBlockedByAmbiguity ? '改为重新采集或只读存量' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? (hasAmbiguousLiveRequest ? '自动核对后重新采集' : '重新采集最新数据') : '调用开放 API'}</>}
           </button>
           {resolvedReplayAvailable ? <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={phase === 'searching'} onClick={() => runLive({ replay: true })}><ArrowClockwise size={15} aria-hidden="true" />读取已提交的原结果 · 幂等 POST / 0 新增 usage / 外部采集</button> : null}
-          <p className="mih-treasure-auth-note"><LockKey size={15} aria-hidden="true" />这里使用客户端已获得的同一把 Hub Public API secret；无需为 ecommerce 另签 Key。列表掩码不能调用，供应方密钥只在“外部数据平台”管理。</p>
+          <p className="mih-treasure-auth-note"><LockKey size={15} aria-hidden="true" />这里使用普通 Hub Public API secret，不是供应方 Key；它必须在签发时包含 ecommerce entitlement。列表掩码不能调用，供应方密钥只在“外部数据平台”管理。</p>
         </form>
 
         <div className={`mih-treasure-stage mih-treasure-stage--${phase}`} aria-live="polite">

@@ -247,3 +247,179 @@ export function preflightJustOneConfig(environment = process.env) {
     dispatchEnabled: config.dispatchEnabled,
   }
 }
+
+function unknownTikHubBilling() {
+  return {
+    source: 'unknown',
+    currency: null,
+    pricingAsOf: null,
+    unitCostMinor: null,
+    monthlyBudgetMinor: null,
+  }
+}
+
+function parseTikHubBilling(raw) {
+  if (raw == null || String(raw).trim() === '') return unknownTikHubBilling()
+  let value
+  try { value = JSON.parse(raw) } catch {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TIKHUB_BILLING_JSON must be valid JSON')
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TIKHUB_BILLING_JSON must be an object')
+  }
+  const fields = new Set(['source', 'currency', 'pricingAsOf', 'unitCostMinor', 'monthlyBudgetMinor'])
+  const unsupported = Object.keys(value).filter((field) => !fields.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(500, 'invalid_configuration', `MX_INSIGHT_TIKHUB_BILLING_JSON contains unsupported field ${unsupported[0]}`)
+  }
+  if (value.source !== 'manual') {
+    throw new AppError(500, 'invalid_configuration', 'TikHub billing source must be manual')
+  }
+  const currency = String(value.currency || '').toUpperCase()
+  if (!/^[A-Z]{3}$/u.test(currency)) {
+    throw new AppError(500, 'invalid_configuration', 'TikHub billing currency must be a three-letter code')
+  }
+  const pricedAt = new Date(value.pricingAsOf)
+  if (!Number.isFinite(pricedAt.getTime())) {
+    throw new AppError(500, 'invalid_configuration', 'TikHub pricingAsOf must be an ISO date')
+  }
+  return {
+    source: 'manual',
+    currency,
+    pricingAsOf: pricedAt.toISOString(),
+    unitCostMinor: optionalNonNegativeInteger(value.unitCostMinor, 'TikHub unitCostMinor'),
+    monthlyBudgetMinor: optionalNonNegativeInteger(value.monthlyBudgetMinor, 'TikHub monthlyBudgetMinor'),
+  }
+}
+
+export function parseTikHubConfig(environment = process.env, {
+  reservationLeaseMs = positiveInteger(
+    environment.MX_INSIGHT_RESERVATION_LEASE_MS,
+    150_000,
+    'MX_INSIGHT_RESERVATION_LEASE_MS',
+  ),
+} = {}) {
+  const baseUrl = environment.MX_INSIGHT_TIKHUB_BASE_URL?.trim() || 'https://api.tikhub.io'
+  if (!['https://api.tikhub.io', 'https://api.tikhub.dev'].includes(baseUrl)) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_TIKHUB_BASE_URL must be https://api.tikhub.io or https://api.tikhub.dev',
+    )
+  }
+  const apiKey = environment.MX_INSIGHT_TIKHUB_API_KEY?.trim() || null
+  if (apiKey && apiKey.length > 4_096) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TIKHUB_API_KEY must not exceed 4096 characters')
+  }
+  const contractVerified = binaryFlag(
+    environment.MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED,
+    'MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED',
+  )
+  const configuredSignal = binaryFlag(
+    environment.MX_INSIGHT_TIKHUB_CONFIGURED,
+    'MX_INSIGHT_TIKHUB_CONFIGURED',
+  )
+  const timeoutMs = positiveInteger(
+    environment.MX_INSIGHT_TIKHUB_TIMEOUT_MS,
+    30_000,
+    'MX_INSIGHT_TIKHUB_TIMEOUT_MS',
+  )
+  if (timeoutMs > 120_000) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TIKHUB_TIMEOUT_MS must not exceed 120000')
+  }
+  if (contractVerified && reservationLeaseMs < timeoutMs + 30_000) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_RESERVATION_LEASE_MS must be at least MX_INSIGHT_TIKHUB_TIMEOUT_MS plus 30000 when the TikHub contract is verified',
+    )
+  }
+  const freshTtlMs = positiveInteger(
+    environment.MX_INSIGHT_TIKHUB_FRESH_TTL_MS,
+    24 * 60 * 60_000,
+    'MX_INSIGHT_TIKHUB_FRESH_TTL_MS',
+  )
+  const staleTtlMs = positiveInteger(
+    environment.MX_INSIGHT_TIKHUB_STALE_TTL_MS,
+    30 * 24 * 60 * 60_000,
+    'MX_INSIGHT_TIKHUB_STALE_TTL_MS',
+  )
+  if (staleTtlMs < freshTtlMs) {
+    throw new AppError(500, 'invalid_configuration', 'TikHub stale TTL must be greater than or equal to fresh TTL')
+  }
+  const configured = Boolean(apiKey) || configuredSignal
+  return {
+    baseUrl,
+    apiKey,
+    configured,
+    contractVerified,
+    dispatchEnabled: Boolean(apiKey && contractVerified),
+    configurationError: null,
+    timeoutMs,
+    freshTtlMs,
+    staleTtlMs,
+    unknownFingerprintCooldownMs: positiveInteger(
+      environment.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
+      15 * 60_000,
+      'MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS',
+    ),
+    maxConcurrency: positiveInteger(
+      environment.MX_INSIGHT_TIKHUB_MAX_CONCURRENCY,
+      8,
+      'MX_INSIGHT_TIKHUB_MAX_CONCURRENCY',
+    ),
+    maxConsumerConcurrency: positiveInteger(
+      environment.MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY,
+      8,
+      'MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY',
+    ),
+    circuitFailureThreshold: positiveInteger(
+      environment.MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES,
+      3,
+      'MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES',
+    ),
+    circuitOpenMs: positiveInteger(
+      environment.MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS,
+      60_000,
+      'MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS',
+    ),
+    billing: parseTikHubBilling(environment.MX_INSIGHT_TIKHUB_BILLING_JSON),
+  }
+}
+
+export function disabledTikHubConfig(environment, error) {
+  return {
+    baseUrl: ['https://api.tikhub.io', 'https://api.tikhub.dev']
+      .includes(environment.MX_INSIGHT_TIKHUB_BASE_URL?.trim())
+      ? environment.MX_INSIGHT_TIKHUB_BASE_URL.trim()
+      : 'https://api.tikhub.io',
+    apiKey: null,
+    configured: Boolean(environment.MX_INSIGHT_TIKHUB_API_KEY?.trim())
+      || environment.MX_INSIGHT_TIKHUB_CONFIGURED === '1',
+    contractVerified: environment.MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED === '1',
+    dispatchEnabled: false,
+    configurationError: {
+      code: 'invalid_configuration',
+      message: error instanceof AppError && error.code === 'invalid_configuration'
+        ? error.message : 'TikHub configuration is invalid',
+    },
+    timeoutMs: 30_000,
+    freshTtlMs: 24 * 60 * 60_000,
+    staleTtlMs: 30 * 24 * 60 * 60_000,
+    unknownFingerprintCooldownMs: 15 * 60_000,
+    maxConcurrency: 8,
+    maxConsumerConcurrency: 8,
+    circuitFailureThreshold: 3,
+    circuitOpenMs: 60_000,
+    billing: unknownTikHubBilling(),
+  }
+}
+
+export function preflightTikHubConfig(environment = process.env) {
+  const config = parseTikHubConfig(environment)
+  return {
+    configured: config.configured,
+    contractVerified: config.contractVerified,
+    dispatchEnabled: config.dispatchEnabled,
+  }
+}

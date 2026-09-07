@@ -296,7 +296,6 @@ test('canonical context endpoint is API-key/grant metered and never calls Launch
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Context tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Context consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Context key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -305,6 +304,7 @@ test('canonical context endpoint is API-key/grant metered and never calls Launch
     windowSeconds: 60,
     maxPageSize: 2,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Context key' })
   const app = createApp({ service, store, adapter, identity, adminToken: ADMIN_TOKEN, logger: { error() {} } })
 
   await withServer(app, async (baseUrl) => {
@@ -363,7 +363,6 @@ test('canonical context endpoint fails closed for missing grants, unsupported re
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Context failure tenant' })
   const granted = await service.createConsumer({ tenantId: tenant.id, name: 'Granted context consumer' })
-  const grantedKey = await service.createApiKey({ consumerId: granted.id, name: 'Granted context key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id,
     consumerId: granted.id,
@@ -372,6 +371,7 @@ test('canonical context endpoint fails closed for missing grants, unsupported re
     windowSeconds: 60,
     maxPageSize: 100,
   })
+  const grantedKey = await service.createApiKey({ consumerId: granted.id, name: 'Granted context key' })
   const denied = await service.createConsumer({ tenantId: tenant.id, name: 'Denied context consumer' })
   const deniedKey = await service.createApiKey({ consumerId: denied.id, name: 'Denied context key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN, logger: { error() {} } })

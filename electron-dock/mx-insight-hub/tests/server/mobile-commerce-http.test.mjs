@@ -68,7 +68,6 @@ function mobileRow(catalogEntry) {
 
 async function createConsumerFixture(service, tenant, name, platforms = []) {
   const consumer = await service.createConsumer({ tenantId: tenant.id, name })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: `${name} key` })
   for (const platform of platforms) {
     await service.putPlatformConfiguration(platform, {
       tenantId: tenant.id,
@@ -79,6 +78,7 @@ async function createConsumerFixture(service, tenant, name, platforms = []) {
       maxPageSize: 50,
     })
   }
+  const key = await service.createApiKey({ consumerId: consumer.id, name: `${name} key` })
   return { consumer, key }
 }
 

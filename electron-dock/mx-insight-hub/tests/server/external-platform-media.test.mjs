@@ -209,6 +209,19 @@ test('external image loader accepts bounded JPEG, PNG and WebP images', async (t
   }
 })
 
+test('image-origin throttling is distinct from Hub 429 limits and is not labelled busy', async () => {
+  const loader = createExternalImageLoader({
+    lookup: publicLookup(),
+    request: async () => response({ statusCode: 429, contentType: null }),
+    agentFactory: noAgent,
+  })
+
+  await rejectsMedia(() => loader('https://images.example.test/throttled.png'), {
+    status: 502,
+    code: 'external_media_source_throttled',
+  })
+})
+
 test('external image loader canonicalizes legacy Alibaba search image hosts before dispatch', async () => {
   const lookupCalls = []
   const requestCalls = []
@@ -644,14 +657,13 @@ async function createConsumer(store, name) {
   return store.createConsumer({ tenantId: tenant.id, name, status: 'active' })
 }
 
-async function createUsageRequest(store, consumer, {
+async function createUsageRequest(store, consumer, apiKey, {
   platform = 'ecommerce',
   committed = true,
   responseStatus = 200,
   image = 'https://images.example.test/product.png',
 } = {}) {
   const requestId = randomUUID()
-  const apiKey = await store.createApiKey({ consumerId: consumer.id, name: `key-${requestId}` })
   await store.reserve({
     requestId,
     idempotencyKey: `media-${requestId}`,
@@ -685,6 +697,7 @@ test('product image source is available only from the same consumer committed ec
   const owner = await createConsumer(store, 'Owner')
   const stranger = await createConsumer(store, 'Stranger')
   await store.setPlatformGrant(owner.id, 'ecommerce', true)
+  await store.setPlatformGrant(owner.id, 'telegram', true)
   await store.setPlatformGrant(stranger.id, 'ecommerce', true)
   const loadedSources = []
   const service = new HubService({
@@ -696,23 +709,27 @@ test('product image source is available only from the same consumer committed ec
       return { body: Buffer.from('safe-image'), contentType: 'image/png' }
     },
   })
-  const committed = await createUsageRequest(store, owner)
-  const reserved = await createUsageRequest(store, owner, { committed: false })
-  const wrongPlatform = await createUsageRequest(store, owner, { platform: 'telegram' })
-  const failedResponse = await createUsageRequest(store, owner, { responseStatus: 502 })
+  const ownerApiKey = await service.createApiKey({ consumerId: owner.id, name: 'Owner media key' })
+  const strangerApiKey = await service.createApiKey({ consumerId: stranger.id, name: 'Stranger media key' })
+  const ownerContext = { consumer: { id: owner.id }, apiKey: ownerApiKey }
+  const strangerContext = { consumer: { id: stranger.id }, apiKey: strangerApiKey }
+  const committed = await createUsageRequest(store, owner, ownerApiKey)
+  const reserved = await createUsageRequest(store, owner, ownerApiKey, { committed: false })
+  const wrongPlatform = await createUsageRequest(store, owner, ownerApiKey, { platform: 'telegram' })
+  const failedResponse = await createUsageRequest(store, owner, ownerApiKey, { responseStatus: 502 })
 
   const media = await service.ecommerceProductImage(
-    { consumer: { id: owner.id } },
+    ownerContext,
     { requestId: committed, itemId: 'product-1', imageIndex: '0' },
   )
   assert.equal(media.contentType, 'image/png')
   assert.deepEqual(loadedSources, ['https://images.example.test/product.png'])
 
   for (const [context, requestId] of [
-    [{ consumer: { id: stranger.id } }, committed],
-    [{ consumer: { id: owner.id } }, reserved],
-    [{ consumer: { id: owner.id } }, wrongPlatform],
-    [{ consumer: { id: owner.id } }, failedResponse],
+    [strangerContext, committed],
+    [ownerContext, reserved],
+    [ownerContext, wrongPlatform],
+    [ownerContext, failedResponse],
   ]) {
     await rejectsMedia(
       () => service.ecommerceProductImage(context, {
@@ -727,7 +744,7 @@ test('product image source is available only from the same consumer committed ec
   await store.setPlatformGrant(owner.id, 'ecommerce', false)
   await rejectsMedia(
     () => service.ecommerceProductImage(
-      { consumer: { id: owner.id } },
+      ownerContext,
       { requestId: committed, itemId: 'product-1', imageIndex: '0' },
     ),
     { status: 403, code: 'platform_not_granted' },
@@ -740,7 +757,6 @@ test('product image reads enforce a separate per-consumer request window', async
   const store = new MemoryStore()
   const consumer = await createConsumer(store, 'Rate Limited')
   await store.setPlatformGrant(consumer.id, 'ecommerce', true)
-  const requestId = await createUsageRequest(store, consumer)
   const service = new HubService({
     store,
     adapter: {},
@@ -748,14 +764,17 @@ test('product image reads enforce a separate per-consumer request window', async
     externalMediaPolicy: { maxRequests: 1, windowMs: 60_000, maxConcurrency: 1 },
     externalImageLoader: async () => ({ body: pngImage(), contentType: 'image/png' }),
   })
+  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rate media key' })
+  const context = { consumer: { id: consumer.id }, apiKey }
+  const requestId = await createUsageRequest(store, consumer, apiKey)
 
   await service.ecommerceProductImage(
-    { consumer: { id: consumer.id } },
+    context,
     { requestId, itemId: 'product-1', imageIndex: '0' },
   )
   await rejectsMedia(
     () => service.ecommerceProductImage(
-      { consumer: { id: consumer.id } },
+      context,
       { requestId, itemId: 'product-1', imageIndex: '0' },
     ),
     { status: 429, code: 'external_media_rate_limited' },
@@ -767,7 +786,6 @@ test('product image reads enforce per-consumer concurrency before another relay 
   const store = new MemoryStore()
   const consumer = await createConsumer(store, 'Concurrent')
   await store.setPlatformGrant(consumer.id, 'ecommerce', true)
-  const requestId = await createUsageRequest(store, consumer)
   const started = deferred()
   const released = deferred()
   let loaderCalls = 0
@@ -783,15 +801,18 @@ test('product image reads enforce per-consumer concurrency before another relay 
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
+  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Concurrency media key' })
+  const context = { consumer: { id: consumer.id }, apiKey }
+  const requestId = await createUsageRequest(store, consumer, apiKey)
 
   const first = service.ecommerceProductImage(
-    { consumer: { id: consumer.id } },
+    context,
     { requestId, itemId: 'product-1', imageIndex: '0' },
   )
   await started.promise
   await rejectsMedia(
     () => service.ecommerceProductImage(
-      { consumer: { id: consumer.id } },
+      context,
       { requestId, itemId: 'product-1', imageIndex: '0' },
     ),
     { status: 429, code: 'external_media_busy' },
@@ -806,7 +827,6 @@ test('product image concurrency remains held until downstream delivery completes
   const store = new MemoryStore()
   const consumer = await createConsumer(store, 'Delivery')
   await store.setPlatformGrant(consumer.id, 'ecommerce', true)
-  const requestId = await createUsageRequest(store, consumer)
   const delivery = deferred()
   let loaderCalls = 0
   const service = new HubService({
@@ -819,9 +839,12 @@ test('product image concurrency remains held until downstream delivery completes
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
+  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Delivery media key' })
+  const context = { consumer: { id: consumer.id }, apiKey }
+  const requestId = await createUsageRequest(store, consumer, apiKey)
 
   await service.ecommerceProductImage(
-    { consumer: { id: consumer.id } },
+    context,
     {
       requestId,
       itemId: 'product-1',
@@ -831,7 +854,7 @@ test('product image concurrency remains held until downstream delivery completes
   )
   await rejectsMedia(
     () => service.ecommerceProductImage(
-      { consumer: { id: consumer.id } },
+      context,
       { requestId, itemId: 'product-1', imageIndex: '0' },
     ),
     { status: 429, code: 'external_media_busy' },
@@ -839,7 +862,7 @@ test('product image concurrency remains held until downstream delivery completes
   delivery.resolve()
   await Promise.resolve()
   await service.ecommerceProductImage(
-    { consumer: { id: consumer.id } },
+    context,
     { requestId, itemId: 'product-1', imageIndex: '0' },
   )
   assert.equal(loaderCalls, 2)
@@ -850,7 +873,6 @@ test('busy media attempts also consume the per-consumer request window', async (
   const store = new MemoryStore()
   const consumer = await createConsumer(store, 'Busy Window')
   await store.setPlatformGrant(consumer.id, 'ecommerce', true)
-  const requestId = await createUsageRequest(store, consumer)
   const started = deferred()
   const released = deferred()
   const service = new HubService({
@@ -864,16 +886,19 @@ test('busy media attempts also consume the per-consumer request window', async (
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
+  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Busy media key' })
+  const context = { consumer: { id: consumer.id }, apiKey }
+  const requestId = await createUsageRequest(store, consumer, apiKey)
 
   const first = service.ecommerceProductImage(
-    { consumer: { id: consumer.id } },
+    context,
     { requestId, itemId: 'product-1', imageIndex: '0' },
   )
   await started.promise
   for (let attempt = 0; attempt < 2; attempt += 1) {
     await rejectsMedia(
       () => service.ecommerceProductImage(
-        { consumer: { id: consumer.id } },
+        context,
         { requestId, itemId: 'product-1', imageIndex: '0' },
       ),
       { status: 429, code: 'external_media_busy' },
@@ -881,7 +906,7 @@ test('busy media attempts also consume the per-consumer request window', async (
   }
   await rejectsMedia(
     () => service.ecommerceProductImage(
-      { consumer: { id: consumer.id } },
+      context,
       { requestId, itemId: 'product-1', imageIndex: '0' },
     ),
     { status: 429, code: 'external_media_rate_limited' },
@@ -895,7 +920,6 @@ test('rate-window rollover preserves active per-consumer media concurrency', asy
   const store = new MemoryStore()
   const consumer = await createConsumer(store, 'Rollover')
   await store.setPlatformGrant(consumer.id, 'ecommerce', true)
-  const requestId = await createUsageRequest(store, consumer)
   const started = deferred()
   const released = deferred()
   let loaderCalls = 0
@@ -911,16 +935,19 @@ test('rate-window rollover preserves active per-consumer media concurrency', asy
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
+  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rollover media key' })
+  const context = { consumer: { id: consumer.id }, apiKey }
+  const requestId = await createUsageRequest(store, consumer, apiKey)
 
   const first = service.ecommerceProductImage(
-    { consumer: { id: consumer.id } },
+    context,
     { requestId, itemId: 'product-1', imageIndex: '0' },
   )
   await started.promise
   service.externalMediaWindows.get(consumer.id).startedAt = Date.now() - 2_000
   await rejectsMedia(
     () => service.ecommerceProductImage(
-      { consumer: { id: consumer.id } },
+      context,
       { requestId, itemId: 'product-1', imageIndex: '0' },
     ),
     { status: 429, code: 'external_media_busy' },

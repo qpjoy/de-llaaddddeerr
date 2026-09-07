@@ -202,7 +202,6 @@ async function timelineFixture({ maxPageSize = 50 } = {}) {
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER, searchQueries })
   const tenant = await service.createTenant({ name: 'Canonical timeline tenant' })
   const granted = await service.createConsumer({ tenantId: tenant.id, name: 'Timeline consumer A' })
-  const grantedKey = await service.createApiKey({ consumerId: granted.id, name: 'Timeline key A' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id,
     consumerId: granted.id,
@@ -211,9 +210,9 @@ async function timelineFixture({ maxPageSize = 50 } = {}) {
     windowSeconds: 60,
     maxPageSize,
   })
+  const grantedKey = await service.createApiKey({ consumerId: granted.id, name: 'Timeline key A' })
 
   const otherGranted = await service.createConsumer({ tenantId: tenant.id, name: 'Timeline consumer B' })
-  const otherGrantedKey = await service.createApiKey({ consumerId: otherGranted.id, name: 'Timeline key B' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id,
     consumerId: otherGranted.id,
@@ -222,6 +221,7 @@ async function timelineFixture({ maxPageSize = 50 } = {}) {
     windowSeconds: 60,
     maxPageSize,
   })
+  const otherGrantedKey = await service.createApiKey({ consumerId: otherGranted.id, name: 'Timeline key B' })
 
   const denied = await service.createConsumer({ tenantId: tenant.id, name: 'Timeline denied consumer' })
   const deniedKey = await service.createApiKey({ consumerId: denied.id, name: 'Timeline denied key' })

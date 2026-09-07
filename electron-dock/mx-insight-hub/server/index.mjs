@@ -5,11 +5,16 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
+import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { createApp } from './app.mjs'
 import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
-import { ExternalPlatformAdminService } from './external-platforms/admin.mjs'
+import {
+  ExternalPlatformAdminService,
+  MultiExternalPlatformAdminService,
+} from './external-platforms/admin.mjs'
 import { ExternalPlatformGateway } from './external-platforms/gateway.mjs'
+import { TikHubGateway } from './external-platforms/tikhub-gateway.mjs'
 import { createExternalImageLoader } from './external-platforms/media.mjs'
 import { createExternalPlatformCredentialStore } from './external-platforms/credentials-store.mjs'
 import { createExternalPlatformStore } from './external-platforms/store.mjs'
@@ -107,6 +112,20 @@ export async function createRuntime(config = loadConfig()) {
     pool,
     environmentConfigured: Boolean(config.justOne.configured),
   })
+  const tikHubPlatformStore = createExternalPlatformStore({
+    pool,
+    usageStore: store,
+    providerKey: 'tikhub',
+    authorizationPlatform: 'xiaohongshu',
+    circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
+    circuitOpenMs: config.tikHub.circuitOpenMs,
+    uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
+  })
+  const tikHubCredentialStore = createExternalPlatformCredentialStore({
+    pool,
+    providerKey: 'tikhub',
+    environmentConfigured: Boolean(config.tikHub.configured),
+  })
   // JustOne is optional and is never a Hub readiness dependency. The admin
   // listener still receives truthful configuration/analytics, while only a
   // listener that serves public APIs constructs the credentialed adapter.
@@ -119,18 +138,46 @@ export async function createRuntime(config = loadConfig()) {
         timeoutMs: config.justOne.timeoutMs,
       })
     : null
-  const externalPlatformAdmin = new ExternalPlatformAdminService({
+  const tikHubAdapter = config.tikHub.contractVerified
+    && !config.tikHub.configurationError
+    && config.listenerMode !== 'admin'
+    ? new TikHubAdapter({
+        baseUrl: config.tikHub.baseUrl,
+        apiKey: config.tikHub.apiKey,
+        credentialResolver: () => tikHubCredentialStore.readCredential('tikhub'),
+        timeoutMs: config.tikHub.timeoutMs,
+      })
+    : null
+  const justOnePlatformAdmin = new ExternalPlatformAdminService({
     store: externalPlatformStore,
     config: config.justOne,
     credentialStore: externalPlatformCredentialStore,
     durable: Boolean(pool),
   })
+  const tikHubPlatformAdmin = new ExternalPlatformAdminService({
+    store: tikHubPlatformStore,
+    config: config.tikHub,
+    credentialStore: tikHubCredentialStore,
+    durable: Boolean(pool),
+    providerKey: 'tikhub',
+  })
+  const externalPlatformAdmin = new MultiExternalPlatformAdminService([
+    justOnePlatformAdmin,
+    tikHubPlatformAdmin,
+  ])
   const externalPlatformGateway = new ExternalPlatformGateway({
     usageStore: store,
     platformStore: externalPlatformStore,
     adapter: justOneAdapter,
     config: config.justOne,
     apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: config.reservationLeaseMs,
+  })
+  const tikHubGateway = new TikHubGateway({
+    usageStore: store,
+    platformStore: tikHubPlatformStore,
+    adapter: tikHubAdapter,
+    config: config.tikHub,
     reservationLeaseMs: config.reservationLeaseMs,
   })
   const service = new HubService({
@@ -141,7 +188,18 @@ export async function createRuntime(config = loadConfig()) {
     searchQueries: search?.queries ?? null,
     segmenter,
     externalPlatformCapabilities: () => externalPlatformGateway.capabilities(),
-    externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader(),
+    externalPostCapabilities: () => tikHubGateway.capabilities(),
+    externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader({
+      maxConcurrency: config.externalMedia.maxConcurrency,
+      maxCacheBytes: config.externalMedia.cacheBytes,
+      maxCacheEntries: config.externalMedia.cacheEntries,
+      cacheTtlMs: config.externalMedia.cacheTtlMs,
+    }),
+    externalMediaPolicy: {
+      maxRequests: config.externalMedia.maxRequests,
+      windowMs: config.externalMedia.windowMs,
+      maxConcurrency: config.externalMedia.maxConsumerConcurrency,
+    },
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({
@@ -172,6 +230,7 @@ export async function createRuntime(config = loadConfig()) {
     embedding,
     externalPlatformAdmin,
     externalPlatformGateway,
+    tikHubGateway,
     segmenterConfig: config.common.segmenter,
     launcherAudience: config.launcher.audience,
     backfillPlatforms: config.backfill.platforms,
@@ -186,6 +245,7 @@ export async function createRuntime(config = loadConfig()) {
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
+    tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubAdapter,
   }
 }
 

@@ -66,6 +66,45 @@ export const EXTERNAL_PLATFORM_CAPABILITY_MATRIX = [
   },
 ]
 
+export const TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX = [
+  {
+    capability: 'social.posts.resolve',
+    label: '小红书笔记详情',
+    hubContractVersion: 'mx-insight-hub.social-post.v1',
+    providerMapping: 'direct_versioned_adapter',
+    scope: 'xiaohongshu',
+    status: 'implemented',
+    fallback: 'exact_fingerprint_snapshot',
+    note: '接受官方笔记链接，输出 Hub 稳定正文、标签、作者、指标与媒体引用。',
+  },
+]
+
+const JUSTONE_METADATA = Object.freeze({
+  key: 'justone',
+  displayName: 'JustOne',
+  description: '由 Hub 直接对接的外部电商数据接口平台；凭证、endpoint 与原始响应不暴露给调用方。',
+  capabilities: ['ecommerce.products.search'],
+  capabilityMatrix: EXTERNAL_PLATFORM_CAPABILITY_MATRIX,
+  marketplaces: JUSTONE_MARKETPLACES,
+  adapterLabel: '版本化 JustOne Adapter',
+  adapterDescription: '仅允许已核验的商品搜索 endpoint；业务成功与 Hub 可用响应分别记账，不盲目重试。',
+  billingNote: '供应商公开资料未提供可验证的账户净账单 API；未知成本不会按 0 展示。',
+  freshnessNote: '专用抓取接口与缓存型通用搜索分别建模；当前只接入已核验的商品搜索版本。',
+})
+
+const TIKHUB_METADATA = Object.freeze({
+  key: 'tikhub',
+  displayName: 'TikHub',
+  description: 'Hub 直连的小红书数据 Provider；客户只看 Hub 合同、授权、用量与缓存状态。',
+  capabilities: ['social.posts.resolve'],
+  capabilityMatrix: TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX,
+  marketplaces: [{ key: 'xiaohongshu', label: '小红书' }],
+  adapterLabel: '版本化 TikHub Adapter',
+  adapterDescription: '固定 App V2 笔记详情 endpoint，校验响应身份并区分无效笔记、容量、认证和契约漂移。',
+  billingNote: '按已核验人工价目记录上游标价；Hub 缓存命中不会重复触发上游调用。',
+  freshnessNote: '相同租户、能力和笔记指纹优先命中 24 小时新鲜快照；异常时仅在保留期内回退。',
+})
+
 function ratio(numerator, denominator) {
   return denominator > 0 ? Number((numerator / denominator).toFixed(4)) : null
 }
@@ -108,7 +147,7 @@ function providerStatus(config, state, now) {
   return 'configured'
 }
 
-function costProjection(analytics, config, range) {
+function costProjection(analytics, config, range, providerName = '外部平台') {
   const billing = config.billing
   const callsPerDay = analytics.totals.upstreamCalls / range.days
   const projectedMonthlyCalls = Math.ceil(callsPerDay * 30)
@@ -120,7 +159,9 @@ function costProjection(analytics, config, range) {
   const projectedPaidCalls = indeterminateBillingCalls > 0 || freeDaily == null
     ? null
     : Math.max(0, projectedMonthlyBilledCalls - freeDaily * 30)
-  const endpointCosts = Object.values(billing.unitCostMinorByEndpoint || {})
+  const endpointCosts = billing.unitCostMinor == null
+    ? Object.values(billing.unitCostMinorByEndpoint || {})
+    : [billing.unitCostMinor]
   const oneKnownPrice = endpointCosts.length === 1 ? endpointCosts[0] : null
   const incompleteCostEvidence = indeterminateBillingCalls > 0 || unknownCostCalls > 0
   const projectedMonthlyCostMinor = !incompleteCostEvidence
@@ -135,7 +176,7 @@ function costProjection(analytics, config, range) {
   } else if (unknownCostCalls > 0) {
     recommendation = `有 ${unknownCostCalls} 次已计费调用缺少单价或成本证据；补齐 endpoint 价目与账单后再预测月成本。`
   } else if (billing.source === 'unknown' || endpointCosts.length === 0) {
-    recommendation = 'JustOne 未公开稳定的余额/价格查询接口；先导入经核验的价目表，避免把未知成本显示为 0。'
+    recommendation = `${providerName} 尚未配置经核验的价目证据；先录入带日期的价目表，避免把未知成本显示为 0。`
   } else if (projectedMonthlyCostMinor == null) {
     recommendation = '各接口单价不同，需按 endpoint 调用结构预测；当前只展示已知成本，不给出伪精确充值额。'
   } else if (configuredBudget == null) {
@@ -167,7 +208,7 @@ function costProjection(analytics, config, range) {
   }
 }
 
-function providerProjection(analytics, todayAnalytics, config, range, now) {
+function providerProjection(analytics, todayAnalytics, config, range, now, metadata = JUSTONE_METADATA) {
   const totals = analytics.totals
   const status = providerStatus(config, analytics.state, now)
   const avoidedUpstreamCalls = totals.freshCache
@@ -181,8 +222,8 @@ function providerProjection(analytics, todayAnalytics, config, range, now) {
     ? null
     : todayAnalytics.totals.billedCalls
   return {
-    key: 'justone',
-    displayName: 'JustOne',
+    key: metadata.key,
+    displayName: metadata.displayName,
     kind: 'external_data_api',
     status,
     configured: config.configured ?? Boolean(config.token),
@@ -200,9 +241,9 @@ function providerProjection(analytics, todayAnalytics, config, range, now) {
           }
         : null,
     },
-    description: '由 Hub 直接对接的外部数据接口平台；凭证、endpoint 与原始响应不暴露给调用方。',
-    capabilities: ['ecommerce.products.search'],
-    marketplaces: JUSTONE_MARKETPLACES,
+    description: metadata.description,
+    capabilities: metadata.capabilities,
+    marketplaces: metadata.marketplaces,
     metrics: {
       ...totals,
       avoidedUpstreamCalls,
@@ -224,7 +265,7 @@ function providerProjection(analytics, todayAnalytics, config, range, now) {
         ? '官方公开文档未声明固定每日免费额度，也未发现稳定额度查询 API。'
         : '人工维护值；接入经验证的 provider API 后可切换为 provider_api。',
     },
-    billing: costProjection(analytics, config, range),
+    billing: costProjection(analytics, config, range, metadata.displayName),
     freshness: {
       lastCallAt: totals.lastCallAt,
       lastSuccessAt: totals.lastSuccessAt,
@@ -242,22 +283,31 @@ function fallbackCredential(config) {
   return {
     source: 'environment',
     revision: 0,
-    credentialConfigured: Boolean(config.configured ?? config.token),
+    credentialConfigured: Boolean(config.configured ?? config.token ?? config.apiKey),
     revealable: false,
     updatedAt: null,
   }
 }
 
 export class ExternalPlatformAdminService {
-  constructor({ store, config, credentialStore = null, durable = false }) {
+  constructor({
+    store,
+    config,
+    credentialStore = null,
+    durable = false,
+    providerKey = 'justone',
+    metadata = null,
+  }) {
     this.store = store
     this.config = config
     this.credentialStore = credentialStore
     this.durable = durable
+    this.providerKey = providerKey
+    this.metadata = metadata || (providerKey === 'tikhub' ? TIKHUB_METADATA : JUSTONE_METADATA)
   }
 
   #assertProvider(providerKey) {
-    if (providerKey !== 'justone') {
+    if (providerKey !== this.providerKey) {
       throw new AppError(404, 'external_platform_not_found', 'External platform not found')
     }
   }
@@ -273,7 +323,7 @@ export class ExternalPlatformAdminService {
     return this.credentialStore
   }
 
-  async #credential(providerKey = 'justone') {
+  async #credential(providerKey = this.providerKey) {
     this.#assertProvider(providerKey)
     if (!this.credentialStore) return fallbackCredential(this.config)
     return this.credentialStore.describeCredential(providerKey)
@@ -290,7 +340,7 @@ export class ExternalPlatformAdminService {
     const provider = providerProjection(analytics, todayAnalytics, {
       ...this.config,
       configured: credential.credentialConfigured,
-    }, range, now)
+    }, range, now, this.metadata)
     return { now, range, analytics, provider, credential }
   }
 
@@ -349,8 +399,8 @@ export class ExternalPlatformAdminService {
         },
         {
           key: 'provider_adapter',
-          label: '版本化 JustOne Adapter',
-          description: '仅允许已核验的商品搜索 endpoint；code=0 计费与 Hub 可用响应分别记账，不盲目重试。',
+          label: this.metadata.adapterLabel,
+          description: this.metadata.adapterDescription,
           status: provider.configured ? provider.status : 'not_configured',
         },
         {
@@ -369,7 +419,7 @@ export class ExternalPlatformAdminService {
           + row.circuitRejected,
         hubSuccessRate: ratio(row.successfulHubRequests, row.hubRequests),
       })),
-      capabilities: EXTERNAL_PLATFORM_CAPABILITY_MATRIX,
+      capabilities: this.metadata.capabilityMatrix,
       tenants: analytics.tenants.map((tenant) => ({
         ...tenant,
         grossEstimatedCostMinor: tenant.knownCostMinor,
@@ -401,8 +451,8 @@ export class ExternalPlatformAdminService {
       },
       costPlan: provider.billing,
       notes: {
-        billing: 'JustOne 公开文档说明仅 code=0 计费；未发现公开余额、价目或固定免费额度 API。未知值不会按 0 展示。',
-        freshness: '专用抓取接口与缓存型通用搜索必须分别建模；当前只接入已核验的商品搜索 v1。',
+        billing: this.metadata.billingNote,
+        freshness: this.metadata.freshnessNote,
       },
     }
   }
@@ -434,5 +484,89 @@ export class ExternalPlatformAdminService {
       )
     }
     return { apiKey }
+  }
+}
+
+function summed(providers, field) {
+  return providers.reduce((total, provider) => total + Number(provider.metrics?.[field] || 0), 0)
+}
+
+function sumKnownValues(providers, read) {
+  const values = providers.map(read).filter((value) => Number.isFinite(value))
+  return values.length === providers.length && values.length > 0
+    ? values.reduce((total, value) => total + value, 0)
+    : null
+}
+
+/**
+ * One admin surface over independently isolated provider stores.  A failure in
+ * one provider's analytics is reported on that provider's detail request and
+ * cannot change another provider's credential, circuit or usage ledger.
+ */
+export class MultiExternalPlatformAdminService {
+  constructor(services) {
+    this.services = new Map(services.map((service) => [service.providerKey, service]))
+  }
+
+  #service(providerKey) {
+    const service = this.services.get(providerKey)
+    if (!service) throw new AppError(404, 'external_platform_not_found', 'External platform not found')
+    return service
+  }
+
+  async overview(rangeValue) {
+    const views = await Promise.all([...this.services.values()].map((service) => service.overview(rangeValue)))
+    const providers = views.flatMap((view) => view.providers || [])
+    const hubRequests = summed(providers, 'hubRequests')
+    const successfulHubRequests = summed(providers, 'successfulHubRequests')
+    const upstreamCalls = summed(providers, 'upstreamCalls')
+    const successfulUpstreamCalls = summed(providers, 'successfulUpstreamCalls')
+    const usableUpstreamCalls = summed(providers, 'usableUpstreamCalls')
+    const currencies = [...new Set(providers.map((provider) => provider.billing?.currency).filter(Boolean))]
+    const aggregateCurrency = currencies.length === 1 ? currencies[0] : null
+    const aggregateCosts = currencies.length <= 1
+    return {
+      contractVersion: 'mx-insight-hub.external-platform-admin.v1',
+      range: views[0]?.range || rangeValue || '7d',
+      generatedAt: new Date().toISOString(),
+      summary: {
+        providerCount: providers.length,
+        configuredProviders: providers.filter((provider) => provider.configured).length,
+        hubRequests,
+        successfulHubRequests,
+        hubSuccessRate: ratio(successfulHubRequests, hubRequests),
+        upstreamCalls,
+        successfulUpstreamCalls,
+        usableUpstreamCalls,
+        unusableSuccesses: summed(providers, 'unusableSuccesses'),
+        billedCalls: summed(providers, 'billedCalls'),
+        indeterminateBillingCalls: summed(providers, 'indeterminateBillingCalls'),
+        upstreamSuccessRate: ratio(successfulUpstreamCalls, upstreamCalls),
+        upstreamUsableRate: ratio(usableUpstreamCalls, upstreamCalls),
+        avoidedUpstreamCalls: summed(providers, 'avoidedUpstreamCalls'),
+        actualCostMinor: aggregateCosts
+          ? sumKnownValues(providers, (provider) => provider.billing?.actualCostMinor)
+          : null,
+        grossEstimatedCostMinor: aggregateCosts
+          ? sumKnownValues(providers, (provider) => provider.billing?.grossEstimatedCostMinor)
+          : null,
+        knownCostMinor: aggregateCosts ? summed(providers, 'knownCostMinor') : null,
+        unknownCostCalls: summed(providers, 'unknownCostCalls'),
+        currency: aggregateCurrency,
+      },
+      providers,
+    }
+  }
+
+  detail(providerKey, rangeValue) {
+    return this.#service(providerKey).detail(providerKey, rangeValue)
+  }
+
+  updateCredential(providerKey, input) {
+    return this.#service(providerKey).updateCredential(providerKey, input)
+  }
+
+  revealCredential(providerKey) {
+    return this.#service(providerKey).revealCredential(providerKey)
   }
 }

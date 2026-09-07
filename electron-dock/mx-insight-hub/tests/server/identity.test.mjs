@@ -422,6 +422,9 @@ test('scoped dashboard counts only mixed-role tenants and weights latency by com
   const hiddenConsumer = await create('/internal/v1/admin/consumers', {
     tenantId: hiddenTenant.id, name: 'Dashboard Hidden Consumer',
   })
+  for (const consumer of [ownerConsumer, viewerConsumer, hiddenConsumer]) {
+    await store.setPlatformGrant(consumer.id, 'xiaohongshu', true)
+  }
   const ownerKey = await create('/internal/v1/admin/api-keys', {
     consumerId: ownerConsumer.id, name: 'Dashboard Owner Key',
   })

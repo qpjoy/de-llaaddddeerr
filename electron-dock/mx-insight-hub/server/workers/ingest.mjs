@@ -15,6 +15,11 @@ import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
 import { rehydrateJustOneQueuedRecords } from '../ingest/justone.mjs'
 import {
+  rehydrateTikHubXiaohongshuQueuedRecords,
+  TIKHUB_XIAOHONGSHU_CONNECTOR_ID,
+  TIKHUB_XIAOHONGSHU_DATASET_ID,
+} from '../ingest/tikhub-xiaohongshu.mjs'
+import {
   assertProvinceOpinionHanlpConfigured,
   isProvinceOpinionSourceKey,
 } from '../ingest/province/monitor-pipeline.mjs'
@@ -73,21 +78,25 @@ async function main() {
 
   async function handleIngest(payload) {
     if (payload?.kind === 'external-platform-result') {
-      if (
-        payload.providerKey !== 'justone'
-        || payload.datasetId !== 'ecommerce.products.v1'
-        || payload.platform !== 'ecommerce'
-        || !Array.isArray(payload.records)
-      ) {
+      const justOne = payload.providerKey === 'justone'
+        && payload.datasetId === 'ecommerce.products.v1'
+        && payload.platform === 'ecommerce'
+      const tikHubXiaohongshu = payload.providerKey === 'tikhub'
+        && payload.datasetId === TIKHUB_XIAOHONGSHU_DATASET_ID
+        && payload.platform === 'xiaohongshu'
+      if ((!justOne && !tikHubXiaohongshu) || !Array.isArray(payload.records)) {
         throw new Error('external-platform ingest payload does not match the pinned contract')
       }
-      const records = rehydrateJustOneQueuedRecords(payload.records)
+      const records = justOne
+        ? rehydrateJustOneQueuedRecords(payload.records)
+        : rehydrateTikHubXiaohongshuQueuedRecords(payload.records)
+      const connectorId = justOne ? 'external-platform:justone' : TIKHUB_XIAOHONGSHU_CONNECTOR_ID
       const result = await store.ingestExternalRecords({
         datasetId: payload.datasetId,
         platform: payload.platform,
         records,
         importRunId: null,
-        connectorId: 'external-platform:justone',
+        connectorId,
         externalPlatformLineage: {
           requestId: payload.requestId ?? null,
           queryFingerprint: payload.queryFingerprint ?? null,
@@ -95,7 +104,7 @@ async function main() {
         },
       })
       logger.log(
-        `[ingest] external-platform/justone request=${payload.requestId} ingested=${result.ingested} changed=${result.changed}`,
+        `[ingest] external-platform/${payload.providerKey} request=${payload.requestId} ingested=${result.ingested} changed=${result.changed}`,
       )
       return
     }

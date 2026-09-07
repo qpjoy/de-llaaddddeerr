@@ -68,7 +68,6 @@ async function withFixture(run, { maxRequests = 100, maxPageSize = 2 } = {}) {
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Source catalog tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Source catalog consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Source catalog key' })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant consumer' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   await service.putPlatformConfiguration('source_catalog', {
@@ -79,6 +78,7 @@ async function withFixture(run, { maxRequests = 100, maxPageSize = 2 } = {}) {
     windowSeconds: 3_600,
     maxPageSize,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Source catalog key' })
 
   const owner = await store.createSourceCatalogOwner(normalizeSourceCatalogOwnerCreate({
     ownerKey: 'public-owner',

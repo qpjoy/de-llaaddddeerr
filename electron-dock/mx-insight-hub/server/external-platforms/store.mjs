@@ -12,7 +12,7 @@ function snapshotKey({ consumerId, operation, fingerprint }) {
 function requestEvent(input, overrides = {}) {
   return {
     id: randomUUID(),
-    providerKey: 'justone',
+    providerKey: input.providerKey,
     tenantId: input.tenantId,
     consumerId: input.consumerId,
     usageRequestId: input.usageRequestId ?? null,
@@ -36,11 +36,15 @@ function rangeRows(rows, from) {
 export class MemoryExternalPlatformStore {
   constructor({
     usageStore,
+    providerKey = 'justone',
+    authorizationPlatform = 'ecommerce',
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
     uncertainCooldownMs = 15 * 60_000,
   } = {}) {
     this.usageStore = usageStore
+    this.providerKey = providerKey
+    this.authorizationPlatform = authorizationPlatform
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
     this.uncertainCooldownMs = uncertainCooldownMs
@@ -50,7 +54,7 @@ export class MemoryExternalPlatformStore {
     this.requests = []
     this.leases = new Map()
     this.state = {
-      providerKey: 'justone',
+      providerKey,
       consecutiveFailures: 0,
       circuitOpenUntil: null,
       lastCallAt: null,
@@ -114,6 +118,13 @@ export class MemoryExternalPlatformStore {
                 call.endpointKey === endpointKey
                 && call.contractVersion === contractVersion
                 && call.outcome === 'succeeded_unusable'
+                && call.errorCode !== 'upstream_note_unavailable'
+              )
+              || (
+                call.consumerId === consumerId
+                && call.fingerprint === fingerprint
+                && call.outcome === 'succeeded_unusable'
+                && call.errorCode === 'upstream_note_unavailable'
               )
             )
             && new Date(call.completedAt).getTime() + this.uncertainCooldownMs > now
@@ -124,7 +135,9 @@ export class MemoryExternalPlatformStore {
     if (blocker) {
       return {
         kind: 'blocked',
-        reason: blocker.outcome,
+        reason: blocker.errorCode === 'upstream_note_unavailable'
+          ? blocker.errorCode
+          : blocker.outcome,
         blockedUntil: blocker.outcome === 'pending'
           ? null
           : iso(new Date(blocker.completedAt).getTime() + this.uncertainCooldownMs),
@@ -144,7 +157,8 @@ export class MemoryExternalPlatformStore {
     if (this.leases.get(key)?.ownerRequestId === ownerRequestId) this.leases.delete(key)
   }
 
-  async providerState() {
+  async providerState(providerKey = this.providerKey) {
+    if (providerKey !== this.providerKey) return null
     return clone(this.state)
   }
 
@@ -160,7 +174,7 @@ export class MemoryExternalPlatformStore {
       || usage.consumerId !== input.consumerId
       || usage.apiKeyId !== input.apiKeyId
       || usage.fingerprint !== input.fingerprint
-      || usage.platform !== 'ecommerce'
+      || usage.platform !== this.authorizationPlatform
       || (leaseExpiresAt != null && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.now()))
     ) {
       throw new AppError(
@@ -179,7 +193,7 @@ export class MemoryExternalPlatformStore {
         || retryTarget.status !== 'unknown'
         || retryTarget.tenantId !== input.tenantId
         || retryTarget.consumerId !== input.consumerId
-        || retryTarget.platform !== 'ecommerce'
+        || retryTarget.platform !== this.authorizationPlatform
         || retryTarget.fingerprint !== input.fingerprint
         || retryAlreadyUsed
       ) {
@@ -200,7 +214,7 @@ export class MemoryExternalPlatformStore {
     const call = {
       id,
       ...clone(input),
-      providerKey: 'justone',
+      providerKey: this.providerKey,
       outcome: 'pending',
       startedAt: iso(),
       completedAt: null,
@@ -257,7 +271,7 @@ export class MemoryExternalPlatformStore {
     const key = snapshotKey(delivery)
     const snapshot = {
       id: this.snapshots.get(key)?.id ?? randomUUID(),
-      providerKey: 'justone',
+      providerKey: this.providerKey,
       consumerId: delivery.consumerId,
       operation: delivery.operation,
       fingerprint: delivery.fingerprint,
@@ -270,6 +284,7 @@ export class MemoryExternalPlatformStore {
     this.snapshots.set(key, snapshot)
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode: 'live',
       succeeded: true,
       responseStatus: 200,
@@ -294,6 +309,7 @@ export class MemoryExternalPlatformStore {
     })
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode,
       succeeded: true,
       responseStatus: 200,
@@ -377,6 +393,7 @@ export class MemoryExternalPlatformStore {
     if (snapshot) {
       this.requests.push(requestEvent({
         ...delivery,
+        providerKey: this.providerKey,
         sourceMode: 'stored_fallback',
         succeeded: true,
         responseStatus: 200,
@@ -388,6 +405,7 @@ export class MemoryExternalPlatformStore {
     }
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode: 'unavailable',
       succeeded: false,
       responseStatus: failureResponseStatus,
@@ -400,6 +418,7 @@ export class MemoryExternalPlatformStore {
     await this.usageStore.releaseRequest(delivery.usageRequestId, errorCode)
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode,
       succeeded: false,
       responseStatus: status,
@@ -439,6 +458,7 @@ export class MemoryExternalPlatformStore {
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode: 'unavailable',
       succeeded: false,
       responseStatus: 503,
@@ -457,6 +477,7 @@ export class MemoryExternalPlatformStore {
   }) {
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode,
       succeeded,
       responseStatus: status,
@@ -467,6 +488,7 @@ export class MemoryExternalPlatformStore {
   async recordGatewayAttempt({ delivery, sourceMode, succeeded, status, errorCode = null }) {
     this.requests.push(requestEvent({
       ...delivery,
+      providerKey: this.providerKey,
       sourceMode,
       succeeded,
       responseStatus: status,
@@ -521,12 +543,16 @@ function pgSnapshot(row) {
 export class PostgresExternalPlatformStore {
   constructor({
     pool,
+    providerKey = 'justone',
+    authorizationPlatform = 'ecommerce',
     queueName = 'mx-insight-hub:ingest',
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
     uncertainCooldownMs = 15 * 60_000,
   }) {
     this.pool = pool
+    this.providerKey = providerKey
+    this.authorizationPlatform = authorizationPlatform
     this.queueName = queueName
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
@@ -577,7 +603,7 @@ export class PostgresExternalPlatformStore {
         WHERE NOT EXISTS (
           SELECT 1
             FROM external_platform.provider_calls call
-           WHERE call.provider_key = 'justone'
+           WHERE call.provider_key = $10
              AND call.operation = $2
              AND (
                (
@@ -597,6 +623,13 @@ export class PostgresExternalPlatformStore {
                      call.endpoint_key = $7
                      AND call.contract_version = $9
                      AND call.outcome = 'succeeded_unusable'
+                     AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                   )
+                   OR (
+                     call.consumer_id = $1
+                     AND call.request_fingerprint = $3
+                     AND call.outcome = 'succeeded_unusable'
+                     AND call.error_code = 'upstream_note_unavailable'
                    )
                  )
                  AND call.completed_at > now() - make_interval(secs => $6)
@@ -615,18 +648,19 @@ export class PostgresExternalPlatformStore {
         endpointKey,
         retryOfRequestId,
         contractVersion,
+        this.providerKey,
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
 
     const blocker = await this.pool.query(
-      `SELECT outcome, completed_at,
+      `SELECT outcome, error_code, completed_at,
               CASE
                 WHEN outcome = 'pending' THEN NULL
                 ELSE completed_at + make_interval(secs => $4)
               END AS blocked_until
          FROM external_platform.provider_calls
-        WHERE provider_key = 'justone'
+        WHERE provider_key = $8
           AND operation = $2
           AND (
             (
@@ -646,6 +680,13 @@ export class PostgresExternalPlatformStore {
                   endpoint_key = $5
                   AND contract_version = $7
                   AND outcome = 'succeeded_unusable'
+                  AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                )
+                OR (
+                  consumer_id = $1
+                  AND request_fingerprint = $3
+                  AND outcome = 'succeeded_unusable'
+                  AND error_code = 'upstream_note_unavailable'
                 )
               )
               AND completed_at > now() - make_interval(secs => $4)
@@ -657,12 +698,15 @@ export class PostgresExternalPlatformStore {
         consumerId, operation, fingerprint,
         Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey, retryOfRequestId,
         contractVersion,
+        this.providerKey,
       ],
     )
     if (blocker.rows[0]) {
       return {
         kind: 'blocked',
-        reason: blocker.rows[0].outcome,
+        reason: blocker.rows[0].error_code === 'upstream_note_unavailable'
+          ? blocker.rows[0].error_code
+          : blocker.rows[0].outcome,
         blockedUntil: blocker.rows[0].blocked_until ? iso(blocker.rows[0].blocked_until) : null,
       }
     }
@@ -686,7 +730,8 @@ export class PostgresExternalPlatformStore {
     )
   }
 
-  async providerState(providerKey = 'justone') {
+  async providerState(providerKey = this.providerKey) {
+    if (providerKey !== this.providerKey) return null
     const { rows } = await this.pool.query(
       `SELECT provider_key, consecutive_failures, circuit_open_until, last_call_at,
               last_success_at, last_failure_at, last_error_code
@@ -711,7 +756,7 @@ export class PostgresExternalPlatformStore {
       id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
       input.operation, input.contractVersion, input.endpointKey,
       input.endpointVersion, input.marketplace, input.fingerprint,
-      input.retryOfRequestId ?? null,
+      input.retryOfRequestId ?? null, this.providerKey, this.authorizationPlatform,
     ]
     try {
       return await transaction(this.pool, async (client) => {
@@ -725,7 +770,7 @@ export class PostgresExternalPlatformStore {
                 AND request.consumer_id = $3
                 AND request.api_key_id = $4
                 AND request.fingerprint = $11
-                AND request.platform = 'ecommerce'
+                AND request.platform = $14
                 AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())
               FOR UPDATE
            ), retry_target AS MATERIALIZED (
@@ -736,7 +781,7 @@ export class PostgresExternalPlatformStore {
                 AND retry.tenant_id = $2
                 AND retry.consumer_id = $3
                 AND retry.fingerprint = $11
-                AND retry.platform = 'ecommerce'
+                AND retry.platform = $14
                 AND NOT EXISTS (
                   SELECT 1
                     FROM external_platform.provider_calls previous_retry
@@ -748,7 +793,7 @@ export class PostgresExternalPlatformStore {
              (id, provider_key, tenant_id, consumer_id, api_key_id, usage_request_id,
               operation, contract_version, endpoint_key, endpoint_version, marketplace,
               request_fingerprint, retry_of_usage_request_id)
-           SELECT $1, 'justone', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+           SELECT $1, $13, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
              FROM owned_request
             WHERE $12::uuid IS NULL OR EXISTS (SELECT 1 FROM retry_target)
            RETURNING id, started_at`,
@@ -768,8 +813,8 @@ export class PostgresExternalPlatformStore {
         await client.query(
           `UPDATE external_platform.provider_state
               SET last_call_at = $1, updated_at = now()
-            WHERE provider_key = 'justone'`,
-          [rows[0].started_at],
+            WHERE provider_key = $2`,
+          [rows[0].started_at, this.providerKey],
         )
         return { id, startedAt: iso(rows[0].started_at) }
       })
@@ -782,7 +827,7 @@ export class PostgresExternalPlatformStore {
            FROM external_platform.provider_calls call
            JOIN usage_requests request ON request.id = call.usage_request_id
           WHERE call.id = $1
-            AND call.provider_key = 'justone'
+            AND call.provider_key = $13
             AND call.tenant_id = $2
             AND call.consumer_id = $3
             AND call.api_key_id = $4
@@ -796,7 +841,7 @@ export class PostgresExternalPlatformStore {
             AND call.retry_of_usage_request_id IS NOT DISTINCT FROM $12::uuid
             AND call.outcome = 'pending'
             AND request.status = 'reserved'
-            AND request.platform = 'ecommerce'
+            AND request.platform = $14
             AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())`,
         values,
       ).catch(() => ({ rows: [] }))
@@ -869,7 +914,7 @@ export class PostgresExternalPlatformStore {
         `INSERT INTO external_platform.response_snapshots
            (id, provider_key, consumer_id, operation, request_fingerprint,
             response_body, captured_at, fresh_until, stale_until, last_success_call_id)
-         VALUES ($1, 'justone', $2, $3, $4, $5, $6, $7, $8, $9)
+         VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (consumer_id, operation, request_fingerprint) DO UPDATE SET
            provider_key = EXCLUDED.provider_key,
            response_body = EXCLUDED.response_body,
@@ -882,6 +927,7 @@ export class PostgresExternalPlatformStore {
         [
           snapshotId, delivery.consumerId, delivery.operation, delivery.fingerprint,
           snapshotBody, capturedAt, freshUntil, staleUntil, callId,
+          this.providerKey,
         ],
       )
       const snapshot = pgSnapshot(snapshotResult.rows[0])
@@ -917,7 +963,8 @@ export class PostgresExternalPlatformStore {
         `UPDATE external_platform.provider_state SET
            consecutive_failures = 0, circuit_open_until = NULL,
            last_success_at = now(), last_error_code = NULL, updated_at = now()
-         WHERE provider_key = 'justone'`,
+         WHERE provider_key = $1`,
+        [this.providerKey],
       )
       if (ingestJob) {
         await client.query(
@@ -986,8 +1033,8 @@ export class PostgresExternalPlatformStore {
            ELSE circuit_open_until
          END,
          last_failure_at = now(), last_error_code = $3, updated_at = now()
-       WHERE provider_key = 'justone'`,
-      [this.circuitFailureThreshold, Math.ceil(this.circuitOpenMs / 1_000), errorCode],
+       WHERE provider_key = $4`,
+      [this.circuitFailureThreshold, Math.ceil(this.circuitOpenMs / 1_000), errorCode, this.providerKey],
     )
   }
 
@@ -1037,7 +1084,9 @@ export class PostgresExternalPlatformStore {
         capturedAt: responseArchive?.capturedAt ?? new Date(),
         archiveObjects,
       })
-      if (affectsCircuit) await this.#advanceFailureState(client, errorCode)
+      if (affectsCircuit) {
+        await this.#advanceFailureState(client, errorCode)
+      }
       if (snapshot) {
         const locked = await client.query(
           `SELECT * FROM external_platform.response_snapshots
@@ -1229,12 +1278,12 @@ export class PostgresExternalPlatformStore {
          (id, provider_key, tenant_id, consumer_id, usage_request_id,
           request_fingerprint, source_mode, succeeded, response_status,
           provider_call_id, snapshot_id, error_code)
-       VALUES ($1, 'justone', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       VALUES ($1, $12, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         randomUUID(), input.tenantId, input.consumerId, input.usageRequestId,
         input.fingerprint, input.sourceMode, input.succeeded,
         input.responseStatus, input.providerCallId ?? null, input.snapshotId ?? null,
-        input.errorCode ?? null,
+        input.errorCode ?? null, this.providerKey,
       ],
     )
   }
@@ -1271,19 +1320,21 @@ export class PostgresExternalPlatformStore {
            (id, provider_key, object_kind, marketplace, operation, endpoint_version,
             captured_date, archive_path, response_pointer, source_key, payload_sha256,
             raw_payload, provider_call_id, item_ordinal)
-         VALUES ($1, 'justone', $2, $3, $4, $5, $6::date, $7, $8, $9, $10, $11, $12, $13)
+         VALUES ($1, $14, $2, $3, $4, $5, $6::date, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (provider_call_id, item_ordinal) DO NOTHING`,
         [
           randomUUID(), object.kind === 'response' ? 'response' : 'item',
           object.marketplace, delivery.operation, object.endpointVersion,
           capturedDate, object.archivePath, object.envelopePointer || '$', object.sourceKey,
           object.payloadSha256, object.rawPayload, callId, ordinal,
+          this.providerKey,
         ],
       )
     }
   }
 
   async analytics({ from, bucket = 'hour' }) {
+    const providerKey = this.providerKey
     const bucketSql = bucket === 'day' ? 'day' : 'hour'
     const [requestResult, callResult, trendResult, tenantResult, endpointResult, state] = await Promise.all([
       this.pool.query(
@@ -1301,8 +1352,8 @@ export class PostgresExternalPlatformStore {
                 count(*) FILTER (WHERE source_mode = 'duplicate_suppressed')::integer AS duplicate_suppressed,
                 count(*) FILTER (WHERE source_mode = 'circuit_rejected')::integer AS circuit_rejected
            FROM external_platform.gateway_requests
-          WHERE provider_key = 'justone' AND created_at >= $1`,
-        [from],
+          WHERE provider_key = $2 AND created_at >= $1`,
+        [from, providerKey],
       ),
       this.pool.query(
         `SELECT count(*)::integer AS upstream_calls,
@@ -1322,8 +1373,8 @@ export class PostgresExternalPlatformStore {
                 max(started_at) AS last_call_at,
                 max(completed_at) FILTER (WHERE outcome = 'succeeded') AS last_success_at
            FROM external_platform.provider_calls
-          WHERE provider_key = 'justone' AND started_at >= $1`,
-        [from],
+          WHERE provider_key = $2 AND started_at >= $1`,
+        [from, providerKey],
       ),
       this.pool.query(
         `WITH requests AS (
@@ -1340,21 +1391,21 @@ export class PostgresExternalPlatformStore {
                   count(*) FILTER (WHERE NOT succeeded)::integer AS rejected,
                   count(*) FILTER (WHERE succeeded)::integer AS succeeded
              FROM external_platform.gateway_requests
-            WHERE provider_key = 'justone' AND created_at >= $1
+            WHERE provider_key = $2 AND created_at >= $1
             GROUP BY 1
          ), calls AS (
            SELECT date_trunc('${bucketSql}', started_at) AS bucket,
                   count(*)::integer AS upstream_calls,
                   sum(cost_minor) FILTER (WHERE cost_minor IS NOT NULL)::bigint AS cost_minor
              FROM external_platform.provider_calls
-            WHERE provider_key = 'justone' AND started_at >= $1
+            WHERE provider_key = $2 AND started_at >= $1
             GROUP BY 1
          )
          SELECT requests.*, coalesce(calls.upstream_calls, 0)::integer AS upstream_calls,
                 calls.cost_minor
            FROM requests LEFT JOIN calls USING (bucket)
           ORDER BY bucket`,
-        [from],
+        [from, providerKey],
       ),
       this.pool.query(
         `SELECT tenant.id, tenant.name,
@@ -1366,11 +1417,11 @@ export class PostgresExternalPlatformStore {
            JOIN tenants tenant ON tenant.id = request.tenant_id
            LEFT JOIN external_platform.provider_calls call
              ON call.id = request.provider_call_id
-          WHERE request.provider_key = 'justone' AND request.created_at >= $1
+          WHERE request.provider_key = $2 AND request.created_at >= $1
           GROUP BY tenant.id, tenant.name
           ORDER BY hub_requests DESC, tenant.name
           LIMIT 20`,
-        [from],
+        [from, providerKey],
       ),
       this.pool.query(
         `SELECT endpoint_key, endpoint_version, marketplace,
@@ -1381,12 +1432,12 @@ export class PostgresExternalPlatformStore {
                 count(*) FILTER (WHERE outcome = 'succeeded')::integer AS usable,
                 sum(cost_minor) FILTER (WHERE cost_minor IS NOT NULL)::bigint AS cost_minor
            FROM external_platform.provider_calls
-          WHERE provider_key = 'justone' AND started_at >= $1
+          WHERE provider_key = $2 AND started_at >= $1
           GROUP BY endpoint_key, endpoint_version, marketplace
           ORDER BY calls DESC, endpoint_key`,
-        [from],
+        [from, providerKey],
       ),
-      this.providerState('justone'),
+      this.providerState(providerKey),
     ])
     const request = requestResult.rows[0]
     const call = callResult.rows[0]

@@ -25,6 +25,7 @@ DEPLOY_PREVIOUS_DOCKER_IMAGE_ID=""
 DEPLOY_PULLED_RUNTIME_IMAGE=""
 DEPLOY_LOCK_DIR=""
 DEPLOY_K8S_NODE_NAME=""
+DEPLOY_FROZEN_ADMIN=0
 
 say() { printf '[mx-insight-hub] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
@@ -68,6 +69,8 @@ api_key_rotation_decision() {
   MX_INSIGHT_KEY_SECRET="$secret" \
   MX_INSIGHT_KEY_NOW_MS="$now_ms" \
   MX_INSIGHT_KEY_ROTATION_DAYS="$API_KEY_ROTATION_WINDOW_DAYS" \
+  MX_INSIGHT_KEY_REQUIRED_PLATFORMS="${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" \
+  MX_INSIGHT_KEY_REQUIRED_CAPABILITIES="${MX_INSIGHT_BOOTSTRAP_CAPABILITIES:-}" \
     node -e '
       let input = ""
       process.stdin.setEncoding("utf8")
@@ -92,6 +95,27 @@ api_key_rotation_decision() {
           process.stdout.write(`rotate|${key.id}|${status || "inactive"}|${key.expiresAt || ""}`)
           return
         }
+        const normalizedSet = (raw) => new Set(String(raw || "").split(",")
+          .map((entry) => entry.trim().toLowerCase()).filter(Boolean))
+        const requiredPlatforms = normalizedSet(process.env.MX_INSIGHT_KEY_REQUIRED_PLATFORMS)
+        const requiredCapabilities = normalizedSet(process.env.MX_INSIGHT_KEY_REQUIRED_CAPABILITIES)
+        if (requiredPlatforms.has("xiaohongshu")) requiredCapabilities.add("social.posts.resolve")
+        if (requiredPlatforms.size || requiredCapabilities.size) {
+          if (key.scopeMode === "legacy_dynamic") {
+            process.stdout.write(`rotate|${key.id}|legacy_scope_mode|${key.expiresAt || ""}`)
+            return
+          }
+          const platforms = new Set(Array.isArray(key.platforms) ? key.platforms : [])
+          const capabilities = new Set(Array.isArray(key.capabilities) ? key.capabilities : [])
+          const missing = [
+            ...[...requiredPlatforms].filter((entry) => !platforms.has(entry)),
+            ...[...requiredCapabilities].filter((entry) => !capabilities.has(entry)),
+          ]
+          if (missing.length) {
+            process.stdout.write(`rotate|${key.id}|scope_change|${key.expiresAt || ""}`)
+            return
+          }
+        }
         const expiresAtMs = Date.parse(key.expiresAt)
         if (!Number.isFinite(expiresAtMs)) {
           process.stdout.write(`rotate|${key.id}|missing_expiry|`)
@@ -115,6 +139,13 @@ cleanup_deploy_runtime() {
   local status=$?
   local lock_owner=""
   trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$DEPLOY_FROZEN_ADMIN" = 1 ] \
+    && command -v kubectl >/dev/null 2>&1; then
+    say "restoring the Hub Admin replica after an interrupted staged rollout" >&2
+    kubectl -n mx-insight-hub scale deployment/mx-insight-hub-admin --replicas=1 \
+      >/dev/null 2>&1 || true
+    DEPLOY_FROZEN_ADMIN=0
+  fi
   if [ -n "$DEPLOY_PORT_FORWARD_PID" ]; then
     kill "$DEPLOY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
     wait "$DEPLOY_PORT_FORWARD_PID" 2>/dev/null || true
@@ -610,6 +641,61 @@ preserve_existing_justone_runtime_config() {
   fi
 }
 
+# TikHub has its own secret and contract gate. Keep both stable across routine
+# deploys; an omitted shell value must never erase a working credential or
+# silently change whether paid traffic may leave the cluster.
+preserve_existing_tikhub_runtime_config() {
+  local namespace="mx-insight-hub"
+  local existing=""
+  local clear_key="${MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY:-0}"
+
+  case "$clear_key" in
+    0|1) ;;
+    *) die "MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY must be 0 or 1" ;;
+  esac
+
+  if [ "$clear_key" = "1" ]; then
+    MX_INSIGHT_TIKHUB_API_KEY=""
+    export MX_INSIGHT_TIKHUB_API_KEY
+    say "clearing the retained TikHub environment fallback (one-shot request)"
+  elif [ -z "${MX_INSIGHT_TIKHUB_API_KEY:-}" ] \
+    || [[ ! "$MX_INSIGHT_TIKHUB_API_KEY" =~ [^[:space:]] ]]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get secret mx-insight-hub-secrets \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_TIKHUB_API_KEY']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained TikHub environment fallback; refusing to replace the runtime Secret"
+    fi
+    if [ -n "$existing" ]; then
+      need base64
+      MX_INSIGHT_TIKHUB_API_KEY="$(printf '%s' "$existing" | base64 -d)" \
+        || die "could not decode the retained TikHub environment fallback"
+      export MX_INSIGHT_TIKHUB_API_KEY
+      say "preserving the retained TikHub environment fallback (value hidden)"
+    fi
+  fi
+
+  if [ "${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED+x}" != x ]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained TikHub contract gate; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      case "$existing" in
+        0|1) ;;
+        *) die "retained MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED must be 0 or 1" ;;
+      esac
+      MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$existing"
+      export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED
+      say "preserving retained TikHub contract gate: ${existing}"
+    fi
+  fi
+}
+
 # Locate the Launcher User Center in the cluster.
 #
 # The URL is discovered rather than configured because the parts an operator has
@@ -850,6 +936,15 @@ create_runtime_config() {
     justone_configured=1
   fi
   local justone_contract_verified="${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}"
+  local tikhub_api_key="${MX_INSIGHT_TIKHUB_API_KEY:-}"
+  if [[ ! "$tikhub_api_key" =~ [^[:space:]] ]]; then
+    tikhub_api_key=""
+  fi
+  local tikhub_configured=0
+  if [ -n "$tikhub_api_key" ]; then
+    tikhub_configured=1
+  fi
+  local tikhub_contract_verified="${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
   if ! public_url="$(
@@ -891,6 +986,52 @@ create_runtime_config() {
   else
     say "JustOne contract gate is enabled; public dispatch requires the Admin-UI database credential."
   fi
+  local tikhub_preflight_error=""
+  if ! tikhub_preflight_error="$(
+    MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
+    MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
+    MX_INSIGHT_TIKHUB_API_KEY="$tikhub_api_key" \
+    MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
+    node --input-type=module -e '
+      try {
+        const { preflightTikHubConfig } = await import(process.argv[1])
+        preflightTikHubConfig(process.env)
+      } catch (error) {
+        process.stderr.write(error?.message || "TikHub configuration is invalid")
+        process.exit(1)
+      }
+    ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
+  )"; then
+    die "TikHub preflight failed: ${tikhub_preflight_error}"
+  fi
+  if [ "$tikhub_contract_verified" != "1" ]; then
+    say "TikHub upstream dispatch is disabled by the contract gate; stored Hub data remains available."
+  elif [ "$tikhub_configured" = "1" ]; then
+    say "TikHub contract gate is enabled; environment fallback is present (value hidden)."
+  else
+    say "TikHub contract gate is enabled; public dispatch requires the Admin-UI database credential."
+  fi
+  local media_preflight_error=""
+  if ! media_preflight_error="$(
+    MX_INSIGHT_EXTERNAL_MEDIA_MAX_REQUESTS="${MX_INSIGHT_EXTERNAL_MEDIA_MAX_REQUESTS:-1200}" \
+    MX_INSIGHT_EXTERNAL_MEDIA_WINDOW_MS="${MX_INSIGHT_EXTERNAL_MEDIA_WINDOW_MS:-60000}" \
+    MX_INSIGHT_EXTERNAL_MEDIA_CONSUMER_CONCURRENCY="${MX_INSIGHT_EXTERNAL_MEDIA_CONSUMER_CONCURRENCY:-16}" \
+    MX_INSIGHT_EXTERNAL_MEDIA_GLOBAL_CONCURRENCY="${MX_INSIGHT_EXTERNAL_MEDIA_GLOBAL_CONCURRENCY:-32}" \
+    MX_INSIGHT_EXTERNAL_MEDIA_CACHE_BYTES="${MX_INSIGHT_EXTERNAL_MEDIA_CACHE_BYTES:-134217728}" \
+    MX_INSIGHT_EXTERNAL_MEDIA_CACHE_ENTRIES="${MX_INSIGHT_EXTERNAL_MEDIA_CACHE_ENTRIES:-2048}" \
+    MX_INSIGHT_EXTERNAL_MEDIA_CACHE_TTL_MS="${MX_INSIGHT_EXTERNAL_MEDIA_CACHE_TTL_MS:-3600000}" \
+    node --input-type=module -e '
+      try {
+        const { parseExternalMediaConfig } = await import(process.argv[1])
+        parseExternalMediaConfig(process.env)
+      } catch (error) {
+        process.stderr.write(error?.message || "external media configuration is invalid")
+        process.exit(1)
+      }
+    ' "${ROOT_DIR}/server/external-media-config.mjs" 2>&1
+  )"; then
+    die "external media preflight failed: ${media_preflight_error}"
+  fi
   local docker_proxy_snapshot
   docker_proxy_snapshot="$(docker_daemon_proxy_snapshot)"
   local -a secret_values=(
@@ -900,6 +1041,7 @@ create_runtime_config() {
     NIGHT_ALL_SERVICE_TOKEN "${NIGHT_ALL_SERVICE_TOKEN:-}"
     NIGHT_ALL_EXPORT_TOKEN "${NIGHT_ALL_EXPORT_TOKEN:-}"
     MX_INSIGHT_JUSTONE_TOKEN "$justone_token"
+    MX_INSIGHT_TIKHUB_API_KEY "$tikhub_api_key"
     MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT "$docker_proxy_snapshot"
   )
   if [ -n "${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}" ]; then
@@ -973,6 +1115,25 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES="${MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS="${MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS:-60000}" \
     --from-literal=MX_INSIGHT_JUSTONE_BILLING_JSON="${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" \
+    --from-literal=MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
+    --from-literal=MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
+    --from-literal=MX_INSIGHT_TIKHUB_BASE_URL="${MX_INSIGHT_TIKHUB_BASE_URL:-https://api.tikhub.io}" \
+    --from-literal=MX_INSIGHT_TIKHUB_TIMEOUT_MS="${MX_INSIGHT_TIKHUB_TIMEOUT_MS:-30000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_FRESH_TTL_MS="${MX_INSIGHT_TIKHUB_FRESH_TTL_MS:-86400000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_STALE_TTL_MS="${MX_INSIGHT_TIKHUB_STALE_TTL_MS:-2592000000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-8}" \
+    --from-literal=MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY:-8}" \
+    --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES="${MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES:-3}" \
+    --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS="${MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS:-60000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_BILLING_JSON="${MX_INSIGHT_TIKHUB_BILLING_JSON:-}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_MAX_REQUESTS="${MX_INSIGHT_EXTERNAL_MEDIA_MAX_REQUESTS:-1200}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_WINDOW_MS="${MX_INSIGHT_EXTERNAL_MEDIA_WINDOW_MS:-60000}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_CONSUMER_CONCURRENCY="${MX_INSIGHT_EXTERNAL_MEDIA_CONSUMER_CONCURRENCY:-16}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_GLOBAL_CONCURRENCY="${MX_INSIGHT_EXTERNAL_MEDIA_GLOBAL_CONCURRENCY:-32}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_CACHE_BYTES="${MX_INSIGHT_EXTERNAL_MEDIA_CACHE_BYTES:-134217728}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_CACHE_ENTRIES="${MX_INSIGHT_EXTERNAL_MEDIA_CACHE_ENTRIES:-2048}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_CACHE_TTL_MS="${MX_INSIGHT_EXTERNAL_MEDIA_CACHE_TTL_MS:-3600000}" \
     --from-literal=MX_COMMON_ELASTICSEARCH_URL="$elasticsearch_url" \
     --from-literal=MX_COMMON_REDIS_URL="$redis_url" \
     --from-literal=MX_COMMON_HANLP_URL="${MX_COMMON_HANLP_URL:-}" \
@@ -1317,6 +1478,18 @@ ensure_canonical_context_serving_indexes() {
   fi
 }
 
+# Build quota indexes online before the Public API rollout. These indexes back
+# per-Key, monthly-plan and burst checks on the append-only usage ledger.
+ensure_api_key_quota_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/api-key-quota-indexes.sql"
+  [ -r "$sql_file" ] || die "API-key quota-index SQL is missing: ${sql_file}"
+  say "reconciling API-key and plan quota indexes"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "API-key quota indexes could not be reconciled"
+  fi
+}
+
 # Explicit, irreversible removal of the retired local PostgreSQL.
 #
 # Separate command, never part of deploy, and it names what it will destroy
@@ -1350,6 +1523,7 @@ apply_k8s() {
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
   preserve_existing_justone_runtime_config
+  preserve_existing_tikhub_runtime_config
   discover_hanlp_url
   create_runtime_config
   create_model_key_secret
@@ -1359,6 +1533,20 @@ apply_k8s() {
   # previously deployed local StatefulSet is left untouched here and removed
   # only by the explicit `decommission-local-postgres` action.
   warn_local_postgres_present
+
+  # Freeze only the Hub Admin writer while the additive schema and Public API
+  # are upgraded. This closes the mixed-version window in which an old Admin
+  # could issue a legacy-dynamic key, or a new snapshot key could hit an old
+  # Public pod. Launcher and MX-H2I are separate workloads and stay online.
+  if kubectl -n "$namespace" get deployment/mx-insight-hub-admin >/dev/null 2>&1; then
+    DEPLOY_FROZEN_ADMIN=1
+    say "temporarily freezing Hub Admin writes for the API-key schema rollout"
+    kubectl -n "$namespace" scale deployment/mx-insight-hub-admin --replicas=0
+    if ! kubectl -n "$namespace" wait --for=delete pod \
+      -l app.kubernetes.io/name=mx-insight-hub-admin --timeout=120s; then
+      die "Hub Admin did not stop before the staged rollout"
+    fi
+  fi
 
   kubectl -n "$namespace" delete job mx-insight-hub-migrate --ignore-not-found
   render_file "${K8S_DIR}/20-migration-job.yaml" | kubectl apply -f -
@@ -1370,21 +1558,31 @@ apply_k8s() {
 
   ensure_province_opinion_serving_indexes
   ensure_canonical_context_serving_indexes
+  ensure_api_key_quota_indexes
 
+  # Public understands both grandfathered legacy keys and the new immutable
+  # snapshots, so it must become ready before the new Admin can mint snapshots.
   render_file "${K8S_DIR}/30-public-api.yaml" | kubectl apply -f -
+  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-public
+  if ! kubectl -n "$namespace" rollout status \
+    deployment/mx-insight-hub-public --timeout=300s; then
+    k8s_api_diagnostics
+    die "Hub Public API did not become ready"
+  fi
+
   render_file "${K8S_DIR}/31-admin-api.yaml" | kubectl apply -f -
+  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-admin
+  if ! kubectl -n "$namespace" rollout status \
+    deployment/mx-insight-hub-admin --timeout=300s; then
+    k8s_api_diagnostics
+    die "Hub Admin API did not become ready"
+  fi
+  DEPLOY_FROZEN_ADMIN=0
+
   render_file "${K8S_DIR}/32-projector.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/40-network-policy.yaml"
-  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-public deployment/mx-insight-hub-admin
-  if ! kubectl -n "$namespace" rollout status \
-    deployment/mx-insight-hub-public --timeout=300s \
-    || ! kubectl -n "$namespace" rollout status \
-      deployment/mx-insight-hub-admin --timeout=300s; then
-    k8s_api_diagnostics
-    die "Hub API workloads did not become ready"
-  fi
 
   # The projector is scaled to match deploy-time search availability rather
   # than starting a strict reconcile against a cluster already known to be
@@ -1448,14 +1646,20 @@ k8s_smoke() {
     node "${ROOT_DIR}/scripts/smoke.mjs"
 }
 
-# A retained bootstrap key keeps the grants of its consumer. Operators may add
-# newly approved platforms through MX_INSIGHT_BOOTSTRAP_PLATFORMS without
-# rotating that key, but an empty setting must never expand its permissions from
-# upstream or Hub-local capability discovery.
-reconcile_reused_bootstrap_platforms() {
+# Bootstrap remains best-effort for historical deployments with no declared
+# contract. Once an operator explicitly names a plan or scope, however, deploy
+# must fail closed instead of presenting a partially usable customer key.
+bootstrap_configuration_is_explicit() {
+  [ -n "${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}${MX_INSIGHT_BOOTSTRAP_CAPABILITIES:-}${MX_INSIGHT_BOOTSTRAP_PLAN_KEY:-}" ]
+}
+
+# A retained snapshot key still depends on the consumer's current plan and
+# grants. Reconcile only the operator-declared contract; an empty setting must
+# never expand permissions from upstream or Hub-local capability discovery.
+reconcile_reused_bootstrap_configuration() {
   local namespace="$1"
   local admin_base="$2"
-  [ -n "${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" ] || return 0
+  bootstrap_configuration_is_explicit || return 0
 
   local tenant_id consumer_id grant_body
   tenant_id="$(
@@ -1469,8 +1673,8 @@ reconcile_reused_bootstrap_platforms() {
       | base64 -d 2>/dev/null || true
   )"
   if [ -z "$tenant_id" ] || [ -z "$consumer_id" ]; then
-    say "WARNING: explicit bootstrap platforms were not reconciled because the stored tenant/consumer IDs are missing."
-    return 0
+    say "WARNING: explicit bootstrap configuration was not reconciled because the stored tenant/consumer IDs are missing."
+    return 1
   fi
 
   grant_body="$(
@@ -1483,7 +1687,96 @@ reconcile_reused_bootstrap_platforms() {
       }))'
   )"
 
-  local platform encoded_platform reconciled=""
+  local normalized_platforms
+  if ! normalized_platforms="$(
+    MX_INSIGHT_BOOTSTRAP_PLATFORMS="${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" \
+      node -e '
+        const seen = new Set()
+        for (const entry of (process.env.MX_INSIGHT_BOOTSTRAP_PLATFORMS || "").split(",")) {
+          const platform = entry.trim().toLowerCase()
+          if (!platform || seen.has(platform)) continue
+          seen.add(platform)
+          process.stdout.write(`${platform}\n`)
+        }
+      '
+  )"; then
+    say "WARNING: could not normalize explicit bootstrap platforms."
+    return 1
+  fi
+
+  local plan_required=0 platform
+  [ -n "${MX_INSIGHT_BOOTSTRAP_PLAN_KEY:-}" ] && plan_required=1
+  while IFS= read -r platform; do
+    [ "$platform" = "xiaohongshu" ] && plan_required=1
+  done <<<"$normalized_platforms"
+
+  if [ "$plan_required" = "1" ]; then
+    local encoded_consumer plan_json plan_decision plan_action plan_version_id expected_revision plan_version plan_body
+    encoded_consumer="$(
+      MX_INSIGHT_BOOTSTRAP_CONSUMER_ID="$consumer_id" \
+        node -e 'process.stdout.write(encodeURIComponent(process.env.MX_INSIGHT_BOOTSTRAP_CONSUMER_ID))'
+    )"
+    if ! plan_json="$(
+      curl_with_protected_header \
+        'x-mx-insight-admin-token' "$MX_INSIGHT_ADMIN_TOKEN" \
+        -fsS \
+        "${admin_base}/internal/v1/admin/plans?consumerId=${encoded_consumer}"
+    )"; then
+      say "WARNING: could not read the explicit bootstrap plan assignment."
+      return 1
+    fi
+    if ! plan_decision="$(
+      MX_INSIGHT_BOOTSTRAP_PLAN_KEY="${MX_INSIGHT_BOOTSTRAP_PLAN_KEY:-launch-1m}" \
+        node -e '
+          const fs = require("node:fs")
+          const payload = JSON.parse(fs.readFileSync(0, "utf8"))
+          const key = (process.env.MX_INSIGHT_BOOTSTRAP_PLAN_KEY || "").trim().toLowerCase()
+          if (!/^[a-z][a-z0-9._-]{0,63}$/.test(key)) throw new Error("invalid plan key")
+          const data = payload?.data
+          const catalog = Array.isArray(data?.catalog) ? data.catalog : []
+          const target = catalog.find((plan) => (
+            plan?.key === key
+            && plan?.status === "active"
+            && plan?.versionStatus === "published"
+          ))
+          if (!target?.versionId) throw new Error("target plan unavailable")
+          const current = data?.currentPlan
+          if (!current || !Number.isInteger(current.revision) || current.revision <= 0) {
+            throw new Error("missing revisioned assignment")
+          }
+          const action = current.versionId === target.versionId ? "unchanged" : "assign"
+          process.stdout.write(`${action}|${target.versionId}|${current.revision}|${target.version ?? ""}`)
+        ' <<<"$plan_json"
+    )"; then
+      say "WARNING: explicit bootstrap plan response was invalid or the requested plan was unavailable."
+      return 1
+    fi
+    IFS='|' read -r plan_action plan_version_id expected_revision plan_version <<<"$plan_decision"
+    if [ "$plan_action" = "assign" ]; then
+      plan_body="$(
+        MX_INSIGHT_BOOTSTRAP_PLAN_VERSION_ID="$plan_version_id" \
+        MX_INSIGHT_BOOTSTRAP_PLAN_REVISION="$expected_revision" \
+          node -e 'process.stdout.write(JSON.stringify({
+            planVersionId: process.env.MX_INSIGHT_BOOTSTRAP_PLAN_VERSION_ID,
+            expectedRevision: Number(process.env.MX_INSIGHT_BOOTSTRAP_PLAN_REVISION),
+          }))'
+      )"
+      if ! curl_with_protected_header \
+        'x-mx-insight-admin-token' "$MX_INSIGHT_ADMIN_TOKEN" \
+        -fsS -X PUT \
+        -H 'content-type: application/json' \
+        --data "$plan_body" \
+        "${admin_base}/internal/v1/admin/consumers/${encoded_consumer}/plan" >/dev/null; then
+        say "WARNING: could not assign the explicit bootstrap plan."
+        return 1
+      fi
+      say "Reconciled explicit bootstrap plan: ${MX_INSIGHT_BOOTSTRAP_PLAN_KEY:-launch-1m} v${plan_version}."
+    else
+      say "Explicit bootstrap plan already assigned: ${MX_INSIGHT_BOOTSTRAP_PLAN_KEY:-launch-1m} v${plan_version}."
+    fi
+  fi
+
+  local encoded_platform reconciled="" failed=0
   while IFS= read -r platform; do
     [ -n "$platform" ] || continue
     encoded_platform="$(
@@ -1499,35 +1792,65 @@ reconcile_reused_bootstrap_platforms() {
       reconciled="${reconciled}${reconciled:+, }${platform}"
     else
       say "WARNING: could not reconcile explicit bootstrap platform ${platform}."
+      failed=1
     fi
-  done < <(
-    MX_INSIGHT_BOOTSTRAP_PLATFORMS="$MX_INSIGHT_BOOTSTRAP_PLATFORMS" \
-      node -e '
-        const seen = new Set()
-        for (const entry of (process.env.MX_INSIGHT_BOOTSTRAP_PLATFORMS || "").split(",")) {
-          const platform = entry.trim().toLowerCase()
-          if (!platform || seen.has(platform)) continue
-          seen.add(platform)
-          process.stdout.write(`${platform}\n`)
-        }
-      '
-  )
+  done <<<"$normalized_platforms"
   if [ -n "$reconciled" ]; then
     say "Reconciled explicit bootstrap platform grants: ${reconciled}."
   fi
+
+  local capability encoded_capability reconciled_capabilities=""
+  while IFS= read -r capability; do
+    [ -n "$capability" ] || continue
+    encoded_capability="$(
+      MX_INSIGHT_BOOTSTRAP_CAPABILITY="$capability" \
+        node -e 'process.stdout.write(encodeURIComponent(process.env.MX_INSIGHT_BOOTSTRAP_CAPABILITY))'
+    )"
+    if curl_with_protected_header \
+      'x-mx-insight-admin-token' "$MX_INSIGHT_ADMIN_TOKEN" \
+      -fsS -X PUT \
+      -H 'content-type: application/json' \
+      --data "$grant_body" \
+      "${admin_base}/internal/v1/admin/capabilities/${encoded_capability}" >/dev/null; then
+      reconciled_capabilities="${reconciled_capabilities}${reconciled_capabilities:+, }${capability}"
+    else
+      say "WARNING: could not reconcile explicit bootstrap capability ${capability}."
+      failed=1
+    fi
+  done < <(
+    MX_INSIGHT_BOOTSTRAP_PLATFORMS="${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" \
+    MX_INSIGHT_BOOTSTRAP_CAPABILITIES="${MX_INSIGHT_BOOTSTRAP_CAPABILITIES:-}" \
+      node -e '
+        const seen = new Set()
+        for (const entry of (process.env.MX_INSIGHT_BOOTSTRAP_CAPABILITIES || "").split(",")) {
+          const capability = entry.trim().toLowerCase()
+          if (capability) seen.add(capability)
+        }
+        const platforms = new Set((process.env.MX_INSIGHT_BOOTSTRAP_PLATFORMS || "").split(",")
+          .map((entry) => entry.trim().toLowerCase()).filter(Boolean))
+        if (platforms.has("xiaohongshu")) seen.add("social.posts.resolve")
+        for (const capability of seen) process.stdout.write(`${capability}\n`)
+      '
+  )
+  if [ -n "$reconciled_capabilities" ]; then
+    say "Reconciled explicit bootstrap capability grants: ${reconciled_capabilities}."
+  fi
+  return "$failed"
 }
 
 # Idempotently guarantee a usable public API key after deploy. The plaintext key
 # is stored in the mx-insight-hub-bootstrap Secret and reused on later deploys, so
-# no manual admin call is needed to start pulling platform data. Best-effort: a
-# provisioning failure warns but never fails the deploy.
+# no manual admin call is needed to start pulling platform data. Provisioning is
+# best-effort only without an explicit bootstrap contract; declared plan/scope
+# failures stop deploy before it can advertise an unusable customer credential.
 ensure_default_api_key() {
   local namespace="mx-insight-hub"
   local admin_base="http://127.0.0.1:18151"
   need base64
   need curl
   need node
-  local previous_key_id=""
+  local previous_key_id="" explicit_bootstrap=0
+  bootstrap_configuration_is_explicit && explicit_bootstrap=1
   BOOTSTRAP_API_KEY="$(
     kubectl -n "$namespace" get secret mx-insight-hub-bootstrap \
       -o jsonpath='{.data.MX_INSIGHT_API_KEY}' --ignore-not-found 2>/dev/null \
@@ -1543,8 +1866,13 @@ ensure_default_api_key() {
         || die "could not evaluate the stored bootstrap API key"
       IFS='|' read -r action previous_key_id reason expires_at <<<"$decision"
       if [ "$action" = "reuse" ]; then
+        if ! reconcile_reused_bootstrap_configuration "$namespace" "$admin_base"; then
+          if [ "$explicit_bootstrap" = "1" ]; then
+            die "explicit bootstrap configuration could not be reconciled; refusing to reuse the stored API key"
+          fi
+          say "WARNING: bootstrap configuration could not be reconciled; retaining the stored key."
+        fi
         say "Reusing stored bootstrap API key; valid beyond the ${API_KEY_ROTATION_WINDOW_DAYS}-day rotation window (${expires_at})."
-        reconcile_reused_bootstrap_platforms "$namespace" "$admin_base"
         return 0
       fi
       say "Rotating stored bootstrap API key (${reason}); the old key remains valid until the replacement is persisted."
@@ -1553,6 +1881,9 @@ ensure_default_api_key() {
       # Do not replace a credential merely because the Admin API is temporarily
       # unavailable: minting may fail for the same reason and must not disturb
       # the last recoverable plaintext key.
+      if [ "$explicit_bootstrap" = "1" ]; then
+        die "could not inspect the stored bootstrap API key required by explicit bootstrap configuration"
+      fi
       say "WARNING: could not inspect bootstrap API-key expiry; retaining the stored key for this deploy."
       return 0
     fi
@@ -1565,8 +1896,13 @@ ensure_default_api_key() {
     NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
     NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}" \
     MX_INSIGHT_BOOTSTRAP_PLATFORMS="${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" \
+    MX_INSIGHT_BOOTSTRAP_CAPABILITIES="${MX_INSIGHT_BOOTSTRAP_CAPABILITIES:-}" \
+    MX_INSIGHT_BOOTSTRAP_PLAN_KEY="${MX_INSIGHT_BOOTSTRAP_PLAN_KEY:-}" \
       node "${ROOT_DIR}/scripts/provision.mjs"
   )"; then
+    if [ "$explicit_bootstrap" = "1" ]; then
+      die "explicit bootstrap API-key provisioning failed"
+    fi
     say "WARNING: bootstrap API-key provisioning failed. The Hub is up; create a key via the Admin API when Night-All access is needed."
     BOOTSTRAP_API_KEY=""
     return 0
@@ -1825,6 +2161,12 @@ ops_action() {
   local justone_contract_override=""
   local justone_clear_override_set=0
   local justone_clear_override=""
+  local tikhub_key_override_set=0
+  local tikhub_key_override=""
+  local tikhub_contract_override_set=0
+  local tikhub_contract_override=""
+  local tikhub_clear_override_set=0
+  local tikhub_clear_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
   need kubectl
   if [ "${MX_INSIGHT_SYNC_LAUNCHER+x}" = x ]; then
@@ -1843,6 +2185,18 @@ ops_action() {
     justone_clear_override_set=1
     justone_clear_override="$MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN"
   fi
+  if [ "${MX_INSIGHT_TIKHUB_API_KEY+x}" = x ]; then
+    tikhub_key_override_set=1
+    tikhub_key_override="$MX_INSIGHT_TIKHUB_API_KEY"
+  fi
+  if [ "${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED+x}" = x ]; then
+    tikhub_contract_override_set=1
+    tikhub_contract_override="$MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED"
+  fi
+  if [ "${MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY+x}" = x ]; then
+    tikhub_clear_override_set=1
+    tikhub_clear_override="$MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY"
+  fi
   load_env_file "${ROOT_DIR}/.env.internal"
   # A one-shot safety choice on the command line must beat the persisted env
   # file. The Launcher delegator explicitly passes 1; an independent Hub deploy
@@ -1859,6 +2213,14 @@ ops_action() {
     MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_override"
     export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
   fi
+  if [ "$tikhub_key_override_set" = 1 ]; then
+    MX_INSIGHT_TIKHUB_API_KEY="$tikhub_key_override"
+    export MX_INSIGHT_TIKHUB_API_KEY
+  fi
+  if [ "$tikhub_contract_override_set" = 1 ]; then
+    MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_override"
+    export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED
+  fi
   # Clearing a retained paid-provider secret is intentionally one-shot. Ignore
   # a persisted copy of this flag; it must be present in the command environment.
   if [ "$justone_clear_override_set" = 1 ]; then
@@ -1866,6 +2228,12 @@ ops_action() {
     export MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN
   else
     unset MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN
+  fi
+  if [ "$tikhub_clear_override_set" = 1 ]; then
+    MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY="$tikhub_clear_override"
+    export MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY
+  else
+    unset MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY
   fi
   case "$action" in
     plan)

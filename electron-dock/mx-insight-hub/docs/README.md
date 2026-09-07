@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-09-06.
+Last reviewed: 2026-09-07.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -8,7 +8,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 
 | Area | Current state |
 | --- | --- |
-| Modular monolith API | Implemented: multiple tenants, tenant rename, consumers, one-time API keys, explicit platform grants, per-platform limits, request idempotency, usage and health. Each consumer belongs to exactly one tenant. |
+| Modular monolith API | Implemented: multiple tenants, tenant rename, consumers, one-time API keys, immutable per-key platform/capability entitlement snapshots, plan assignments, effective quota intersection, request idempotency, usage and health. Each consumer belongs to exactly one tenant. Legacy dynamic keys remain explicitly identified for migration; newly granted capabilities require a newly issued key. |
 | Admin console | Implemented with the shared MX Launcher Neon Void design package, including platform-admin tenant create/list/rename and explicit tenant selection when creating a consumer. |
 | Open capabilities | Implemented: platform-independent capability grants and quotas reuse the existing tenant/consumer/API Key lifecycle. `nlp.tokenize` is the first capability and reports the actual HanLP/Jieba/bigram backend plus degradation state. |
 | Data Center | Implemented as an Admin-Token-only PostgreSQL canonical catalog with dataset aggregates, full Admin record detail, exact totals, numbered pages and direct page jumps. Elasticsearch supplies ranked search only; PostgreSQL remains the authoritative count. |
@@ -22,11 +22,12 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON and deletion-marked rows in PostgreSQL, uses deterministic identities and Hub transaction idempotency, and performs an initial/manual full alignment followed by append-oriented overlap polling plus a bounded previous-day window at 02:00 Asia/Shanghai. It never schedules an automatic historical full scan and is not merged into the PostgreSQL public Telegram datasets. |
 | Virtual supermarket | A Hub-owned publication product above immutable mobile-commerce captures, with independent publication UUIDs and three shared-data views: 逛超市, 超市全景 and 目录模式. The panorama is only a renderer over stable department/aisle/shelf/position semantics. Public reads require the independent `virtual_supermarket` grant, expose only on-shelf allowlisted fields and bind cursors to `storefrontRevision`; external replicas page a complete revision with default `newest`, then apply metadata sortOrder plus placement.position client-side. Off-shelf/archive never deletes the referenced canonical capture. |
 | Ecommerce data treasure box | Implemented as an Admin-token-only product-search workbench above the provider-neutral `POST /api/v1/data/ecommerce/products/search` contract. The original “小聚” mascot exposes idle/searching/presenting states, keyboard-accessible product spheres, a browser-local safe demo, and truthful live/cache/fallback/replay evidence. The same ordinary `mih_live_` Hub Public API key is used everywhere; no product/consumer second key or credential-row migration exists. Optional `deliveryMode` keeps old callers on `cache_first`, lets the workbench default to `cache_only` with a hard no-provider-dispatch guarantee, and makes `refresh` an explicit Idempotency-Key-protected acquisition intent. Selecting `refresh` and pressing the main button is the authorization; there is no extra confirmation checkbox. Legacy Test keys still fail before usage or external I/O. An ambiguous request retains its exact body/key evidence without freezing filters or safe-demo/`cache_only` browsing. The main action performs the consumer-scoped status GET automatically; an explicit `unknown` can lead to one new-key `refresh` with an automatically populated retry-of header, while `reserved` and lookup failure remain blocked. Split deployments deliver the non-secret `MX_INSIGHT_PUBLIC_URL` origin through the authenticated Admin session. Admin results load retained images only through the authenticated bounded media relay. The stable endpoint and OpenAPI stay provider-neutral; `/docs/ecommerce-treasure-box`, the Admin capability atlas and the internal JustOne map may explain the current implementation while distinguishing five verified marketplaces from provider-catalog candidates. |
+| Xiaohongshu note product | Implemented: the provider-neutral `POST /api/v1/data/post` contract and compatibility alias `/api/v1/xiaohongshu/app/get_note_info` accept one note/share link, normalize note content, author, engagement, tags and media, use exact idempotency/cache/fallback evidence, and enqueue canonical ingestion after a successful live response. The ink-scroll Admin product and browser-local history are implemented. Durable object storage and durable cross-device history are not; current images use the authenticated bounded media relay. |
 | Nationwide province public opinion | Repository implementation, default paused: the fixed PostgreSQL source, province hot/latest/detail/coverage boundary, append-only raw source revisions and a source-revision-anchored rule/Agent analysis pipeline are defined. Additive P1 contracts provide a stable 34-province catalog and a bounded nationwide-or-province region feed for `CN` or one exact catalog code. The feed is fixed to `visibility=all_ingested`, `sort=latest` and required `from`/`to`, and requires both the `public_opinion` platform grant and non-default `public_opinion.all_ingested.read` capability. Its `canonical_current_safe` corpus includes unclassified, unscored and rejected current records, while excluding raw rows, history, deleted records and records without a revision-fenced current publication state. Existing province/coverage/detail/search APIs are unchanged; city catalog/feed is P2. Night-All migration `042_monitor_strategy_results_hub_watermark.sql` provides the ordered writer contract; additive migration `043_monitor_strategy_result_source_stage.sql` lets the existing result table carry `formal` and gated `candidate` source rows without creating a second product table. Hub migration 035 owns revision-fenced publication, quality and geography state and content-v5 projects only bounded typed fields; raw assertions and provider evidence remain private. Rollout must install and verify Hub 035 plus formal-only serving gates first, then apply Night-All 042/043 to its database and upgrade every Night-All reader while the writer gate stays off; only after old readers have drained may operators enable the candidate writer and, separately, the paused Hub analysis pipeline. No environment rollout, upstream connection, data import, provider setup or consumer grant is implied. |
 | Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded Admin-plane reindex operation are implemented. The repository includes versioned allowlisted profiles and the content-v5 mapping; each deployed environment remains gated on its strict blue/green index validation. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Agent Market | Implemented as an Internal Admin-only learning/dry-run slice with one advanced-search example: editable per-stage prompts and model parameters, Zod/JSON Schema contracts and examples, explicit trace/evaluation, recoverable stage trash, read-only PG/ES/semantic retrieval, bounded corrective retry and grounded citations/refusal. Saving definitions reuses the existing Hub Admin Token session and is revisioned; there is no Agent-Market-specific credential. Dry runs make zero business-data writes and do not alter public search, production analysis pipelines, Launcher login or MX-H2I networking. A Node.js LangChain/LangGraph Studio, compiler, generic runtime, Hub data-node pack and production release lifecycle are documented target designs, not current implementation. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
-| Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
+| Plans, quota and billing | Implemented now: versioned plans, revisioned platform-admin consumer assignment with actor audit and no-op protection, immutable per-key entitlements, effective plan/consumer/key quota enforcement and usage evidence. `launch-1m` uses a reachable 1,000,000/month total plus 100 RPS and page-size 100; platform and Key windows remain independent. Pending: tenant self-service purchase/assignment, dynamic customer price books, subscription lifecycle, append-only monetary ledger, invoice engine, BI and Data Agent monetization. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
 
 ## Search evolution boundary
@@ -96,20 +97,21 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 23. [Ecommerce data treasure-box product and interaction design](product/ecommerce-data-treasure-box.md)
 24. [JustOne capability map and Hub adoption plan](integrations/justone-capability-map.md)
 25. [External data platform operations](operations/external-data-platforms.md)
-26. [Nationwide province public-opinion source](architecture/province-public-opinion-source.md)
-27. [Nationwide public-opinion sourcing and geography evidence](architecture/nationwide-public-opinion-sourcing.md)
-28. [Nationwide province public-opinion operations](operations/province-public-opinion-ingestion.md)
-29. [Public-opinion volume, quality and archive troubleshooting](operations/public-opinion-volume-quality-archive.md)
-30. [Backup and restore](operations/backup-restore.md)
-31. [Observability and SLO](operations/observability-slo.md)
-32. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
-33. [Agent Market advanced-search dry run](architecture/agent-market-advanced-search.md)
-34. [Agent Studio governed lifecycle](architecture/agent-studio-governed-lifecycle.md)
-35. [Agent Studio LangGraph runtime and Hub data-node design](architecture/agent-studio-langgraph-data-orchestration.md)
-36. [ADR-0012: Hub-native Agent Studio](adr/0012-hub-native-agent-studio.md)
-37. [Historical Agent Studio build-vs-buy evaluation (superseded)](architecture/agent-studio-platform-boundaries-and-build-vs-buy.md)
-38. [Agent provider settings](operations/agent-provider-settings.md)
-39. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+26. [Hub-owned static media data plane](adr/0014-hub-owned-static-media-data-plane.md)
+27. [Nationwide province public-opinion source](architecture/province-public-opinion-source.md)
+28. [Nationwide public-opinion sourcing and geography evidence](architecture/nationwide-public-opinion-sourcing.md)
+29. [Nationwide province public-opinion operations](operations/province-public-opinion-ingestion.md)
+30. [Public-opinion volume, quality and archive troubleshooting](operations/public-opinion-volume-quality-archive.md)
+31. [Backup and restore](operations/backup-restore.md)
+32. [Observability and SLO](operations/observability-slo.md)
+33. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+34. [Agent Market advanced-search dry run](architecture/agent-market-advanced-search.md)
+35. [Agent Studio governed lifecycle](architecture/agent-studio-governed-lifecycle.md)
+36. [Agent Studio LangGraph runtime and Hub data-node design](architecture/agent-studio-langgraph-data-orchestration.md)
+37. [ADR-0012: Hub-native Agent Studio](adr/0012-hub-native-agent-studio.md)
+38. [Historical Agent Studio build-vs-buy evaluation (superseded)](architecture/agent-studio-platform-boundaries-and-build-vs-buy.md)
+39. [Agent provider settings](operations/agent-provider-settings.md)
+40. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 
@@ -125,3 +127,5 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 - [ADR-0010: Night-All compatibility facade and exact snapshot fallback](adr/0010-night-all-compatibility-facade.md)
 - [ADR-0011: source catalog authority](adr/0011-source-catalog-authority.md)
 - [ADR-0012: Hub-native Agent Studio owns authoring, runtime evidence, evaluation and release](adr/0012-hub-native-agent-studio.md)
+- [ADR-0013: provider-neutral external data platform gateway](adr/0013-external-data-platform-gateway.md)
+- [ADR-0014: Hub-owned static media data plane on shared object-storage infrastructure](adr/0014-hub-owned-static-media-data-plane.md)

@@ -8,6 +8,7 @@ import {
   DownloadSimple,
   MagnifyingGlass,
   NewspaperClipping,
+  Scroll,
   Package,
   Pulse,
   ChartLine,
@@ -61,11 +62,22 @@ const LazyAgentStudioPage = lazy(() => import('./pages-agent-studio.tsx').then((
 const LazyEcommerceTreasureBoxPage = lazy(() => import('./pages-ecommerce-treasure-box.jsx').then((module) => ({
   default: module.EcommerceTreasureBoxPage,
 })))
+const LazyXiaohongshuNotePage = lazy(() => import('./pages-xiaohongshu-note.jsx').then((module) => ({
+  default: module.XiaohongshuNotePage,
+})))
 
 function EcommerceTreasureBoxPage(props) {
   return (
     <Suspense fallback={<LoadingState label="正在加载电商数据百宝箱" />}>
       <LazyEcommerceTreasureBoxPage {...props} />
+    </Suspense>
+  )
+}
+
+function XiaohongshuNotePage(props) {
+  return (
+    <Suspense fallback={<LoadingState label="正在加载小红书笔记画卷" />}>
+      <LazyXiaohongshuNotePage {...props} />
     </Suspense>
   )
 }
@@ -306,6 +318,7 @@ const ROUTES = [
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据百宝箱', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -822,7 +835,7 @@ export function App() {
             </button>
           </div>
         </header>
-        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
+        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
           <Page {...pageProps} />
         </main>
       </div>

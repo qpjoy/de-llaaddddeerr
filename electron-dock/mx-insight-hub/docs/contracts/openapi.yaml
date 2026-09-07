@@ -6,7 +6,10 @@ info:
     Stable consumer contract. Night-All and provider details are normally
     private implementation concerns; the three explicitly namespaced
     /night-all/search compatibility routes are the documented exception and
-    preserve the current upstream application payload unchanged.
+    preserve the current upstream application payload unchanged. Idempotency
+    keys are unique within a consumer, but POST replay and fresh-window
+    re-execution stay bound to the Hub API key that created the usage record;
+    another API key must use a new idempotency key.
 servers:
   - url: /api/v1
 security:
@@ -1505,7 +1508,9 @@ paths:
         - name: capability
           in: path
           required: true
-          schema: { type: string, enum: [nlp.tokenize] }
+          schema:
+            type: string
+            enum: [nlp.tokenize, social.posts.resolve, public_opinion.all_ingested.read, public_opinion.diagnostics.read]
       requestBody:
         required: true
         content:
@@ -1705,6 +1710,20 @@ paths:
                             freshnessModes:
                               type: array
                               items: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
+                            input: { type: string, enum: [official_note_url] }
+                            postDetail:
+                              type: object
+                              additionalProperties: false
+                              required: [ready, source, servingMode, contractVersion, input, deliveryModes]
+                              properties:
+                                ready: { type: boolean }
+                                source: { type: string, const: hub }
+                                servingMode: { type: string, const: live_with_stored_fallback }
+                                contractVersion: { type: string, const: mx-insight-hub.social-post.v1 }
+                                input: { type: string, const: official_note_url }
+                                deliveryModes:
+                                  type: array
+                                  items: { type: string, enum: [cache_only, cache_first, refresh] }
                             context: { $ref: "#/components/schemas/CanonicalContextCapability" }
                             timeline: { $ref: "#/components/schemas/CanonicalTimelineCapability" }
                       legacySearch:
@@ -1725,7 +1744,7 @@ paths:
                           additionalProperties: false
                           required: [capability, ready]
                           properties:
-                            capability: { type: string, enum: [nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read] }
+                            capability: { type: string, enum: [nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve] }
                             ready: { type: boolean }
                   requestId: { type: string }
               example:
@@ -1802,6 +1821,14 @@ paths:
                       freshnessModes: [live, fresh_cache, stored_fallback, idempotent_replay]
                     - platform: xiaohongshu
                       ready: true
+                      capabilities: [post_detail]
+                      postDetail:
+                        ready: true
+                        source: hub
+                        servingMode: live_with_stored_fallback
+                        contractVersion: mx-insight-hub.social-post.v1
+                        input: official_note_url
+                        deliveryModes: [cache_only, cache_first, refresh]
                     - platform: twitter
                       ready: true
                   legacySearch:
@@ -1820,6 +1847,7 @@ paths:
                     - { capability: nlp.tokenize, ready: true }
                     - { capability: public_opinion.all_ingested.read, ready: true }
                     - { capability: public_opinion.diagnostics.read, ready: true }
+                    - { capability: social.posts.resolve, ready: true }
                 requestId: 00000000-0000-4000-8000-000000000001
   /tools/tokenize:
     post:
@@ -1875,10 +1903,11 @@ paths:
       operationId: searchExternalCommerceProducts
       summary: Search marketplace products through the governed external data gateway.
       description: >-
-        Uses the ordinary Hub Public API key issued through API Keys and requires
-        the ecommerce grant on its owning consumer; every active key for that
-        consumer inherits the grant, so no ecommerce-specific or provider key is
-        accepted. External ecommerce acquisition accepts only a live Hub key. A
+        Uses the ordinary Hub Public API key issued through API Keys. The key's
+        immutable entitlement snapshot must include ecommerce, and its owning
+        consumer must still retain that grant; a later consumer grant never
+        widens an existing snapshot key. No ecommerce-specific or provider key
+        is accepted. External ecommerce acquisition accepts only a live Hub key. A
         valid legacy test key receives 403 test_key_not_supported before grant
         lookup, usage reservation, cache lookup or provider dispatch; the
         rejection creates no usage reservation and invokes no provider. The strict
@@ -2027,7 +2056,7 @@ paths:
         "415": [external_media_type_rejected, external_media_content_invalid, external_media_dimensions_rejected]
         "422": [external_media_url_invalid, external_media_url_blocked, external_media_host_blocked]
         "429": [external_media_rate_limited, external_media_busy]
-        "502": [external_media_unavailable, external_media_redirect_rejected]
+        "502": [external_media_unavailable, external_media_redirect_rejected, external_media_source_throttled]
         "503": [external_media_unavailable]
         "504": [external_media_timeout]
       parameters:
@@ -2062,6 +2091,223 @@ paths:
             vary:
               description: Keeps authenticated media cache entries distinct by consumer credential.
               schema: { type: string, example: "Authorization" }
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+  /data/post:
+    post:
+      operationId: resolveExternalSocialPost
+      summary: Resolve one Xiaohongshu note link through the governed external data gateway.
+      description: >-
+        Canonical provider-neutral social-post route. The strict body accepts
+        only platform=xiaohongshu, an official Xiaohongshu note/share URL and
+        deliveryMode. A Live Hub Public API key must have immutable
+        xiaohongshu and social.posts.resolve entitlements while both consumer
+        grants remain active. cache_only never dispatches external acquisition;
+        cache_first is the default; refresh requires Idempotency-Key. This path
+        and the compatibility alias share one canonical fingerprint and
+        idempotency namespace. Public responses omit external platform identity,
+        credentials, endpoint coordinates, upstream media/avatar URLs, raw
+        envelopes, diagnostic cache URLs, procurement price and customer
+        invoice. Each media url is an authenticated same-origin Hub relay
+        locator bound to the response requestId and media index.
+      x-mx-canonical-operation: /data/post
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_json, invalid_platform, invalid_post_url, unsupported_fields, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
+        "404": [post_not_found, stored_snapshot_not_found]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
+        "413": [payload_too_large]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >-
+            Optional for cache_only and cache_first, but required for refresh.
+            Reuse it only for a transport retry of the exact same normalized
+            note URL. Both route spellings share one idempotency namespace. A
+            supplied key is consumer-scoped and bound to its first API key.
+            When omitted, Hub derives an API-key-scoped freshness-bucket key;
+            separate API keys keep separate usage while sharing consumer
+            snapshots and dispatch suppression.
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+        - name: X-MX-Insight-Retry-Of
+          in: header
+          required: false
+          description: >-
+            Matching prior same-consumer request UUID whose durable outcome is
+            unknown. Requires refresh and a different new Idempotency-Key; it
+            never bypasses reserved state, response quarantine, quota, circuit
+            or concurrency.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/XiaohongshuPostRequest" }
+            example:
+              platform: xiaohongshu
+              url: https://www.xiaohongshu.com/explore/0123456789abcdef01234567
+              deliveryMode: cache_first
+      responses:
+        "200":
+          description: >-
+            A normalized social post plus Hub freshness evidence. Media URLs
+            are same-origin authenticated Hub relay locators; upstream media
+            and avatar URLs are not exposed.
+          headers:
+            x-mx-insight-request-id: { schema: { type: string, format: uuid } }
+            idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
+            x-mx-insight-source-mode: { schema: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] } }
+            x-mx-insight-captured-at: { schema: { type: string, format: date-time } }
+            Age: { schema: { type: integer, minimum: 0 } }
+            Warning: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalSocialPostEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /xiaohongshu/app/get_note_info:
+    post:
+      operationId: getXiaohongshuNoteInfoCompatibility
+      summary: Compatibility alias for resolving one Xiaohongshu note link.
+      deprecated: true
+      description: >-
+        Compatibility spelling for existing clients; a missing platform
+        defaults to xiaohongshu. New clients use /data/post. It has the same
+        authorization, quota, cache, response, error and idempotency semantics
+        as the canonical route, and never creates a separate dispatch merely
+        because the URL spelling changed.
+      x-mx-canonical-operation: /data/post
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_json, invalid_platform, invalid_post_url, unsupported_fields, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
+        "404": [post_not_found, stored_snapshot_not_found]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
+        "413": [payload_too_large]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >-
+            Optional for cache_only and cache_first, but required for refresh.
+            Reuse only for a transport retry of the exact normalized note URL.
+            A supplied key is consumer-scoped and bound to its first API key.
+            When omitted, Hub derives an API-key-scoped freshness-bucket key;
+            separate API keys keep separate usage while sharing consumer
+            snapshots and dispatch suppression.
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+        - name: X-MX-Insight-Retry-Of
+          in: header
+          required: false
+          description: >-
+            Matching prior same-consumer request UUID whose durable outcome is
+            unknown. Requires refresh and a different new Idempotency-Key.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/XiaohongshuPostCompatibilityRequest" }
+            example:
+              url: https://www.xiaohongshu.com/explore/0123456789abcdef01234567
+              deliveryMode: cache_first
+      responses:
+        "200":
+          description: >-
+            A normalized social post plus Hub freshness evidence. Media URLs
+            are same-origin authenticated Hub relay locators; upstream media
+            and avatar URLs are not exposed.
+          headers:
+            x-mx-insight-request-id: { schema: { type: string, format: uuid } }
+            idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
+            x-mx-insight-source-mode: { schema: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] } }
+            x-mx-insight-captured-at: { schema: { type: string, format: date-time } }
+            Age: { schema: { type: integer, minimum: 0 } }
+            Warning: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalSocialPostEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/posts/media:
+    get:
+      operationId: getExternalSocialPostMedia
+      summary: Read one retained social-post image through the governed Hub media relay.
+      x-mx-strict-query: true
+      description: >-
+        Requires a Live Hub Public API key from the same consumer as the
+        committed post response, plus effective xiaohongshu and
+        social.posts.resolve entitlements. requestId and mediaIndex are the
+        complete query allowlist and each appears exactly once. Hub never
+        accepts an arbitrary source URL. Multiple reads can run concurrently
+        within bounded DNS, redirect, type, dimensions, body, duration, rate
+        and concurrency safeguards. This read creates no Hub usage and
+        dispatches no post-detail request.
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
+        "404": [external_media_not_found]
+        "413": [external_media_too_large]
+        "415": [external_media_type_rejected, external_media_content_invalid, external_media_dimensions_rejected]
+        "422": [external_media_url_invalid, external_media_url_blocked, external_media_host_blocked]
+        "429": [external_media_rate_limited, external_media_busy]
+        "502": [external_media_unavailable, external_media_redirect_rejected, external_media_source_throttled]
+        "503": [external_media_unavailable]
+        "504": [external_media_timeout]
+      parameters:
+        - name: requestId
+          in: query
+          required: true
+          description: requestId from the committed social-post response.
+          schema: { type: string, format: uuid }
+        - name: mediaIndex
+          in: query
+          required: true
+          description: Zero-based index into data.item.media.
+          schema: { type: integer, minimum: 0, maximum: 19 }
+      responses:
+        "200":
+          description: One bounded image retained by the same consumer response.
+          headers:
+            x-mx-insight-request-id: { schema: { type: string, format: uuid } }
+            cache-control: { schema: { type: string, example: "private, no-store" } }
+            vary: { schema: { type: string, example: Authorization } }
           content:
             image/jpeg: { schema: { type: string, format: binary } }
             image/png: { schema: { type: string, format: binary } }
@@ -4930,6 +5176,27 @@ components:
           maximum: 730
           default: 180
           description: Whole-day lifetime measured from server-side issuance time.
+        platforms:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          description: >-
+            Optional explicit subset of the consumer's current platform grants.
+            Omission snapshots all current platform grants. Later grants do not
+            expand the key; revoke still narrows it immediately.
+          items:
+            type: string
+            pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$"
+        capabilities:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          description: >-
+            Optional explicit subset of the consumer's current capability
+            grants. Omission snapshots all current capabilities.
+          items:
+            type: string
+            enum: [nlp.tokenize, social.posts.resolve, public_opinion.all_ingested.read, public_opinion.diagnostics.read]
     ApiKeyMetadata:
       type: object
       required:
@@ -4946,6 +5213,9 @@ components:
         - expiresAt
         - revokedAt
         - lastUsedAt
+        - scopeMode
+        - platforms
+        - capabilities
       properties:
         id: { type: string, format: uuid }
         tenantId: { type: string, format: uuid }
@@ -4955,6 +5225,20 @@ components:
           type: string
           description: Non-secret display prefix; never sufficient for authentication.
         lastFour: { type: string, minLength: 4, maxLength: 4 }
+        scopeMode:
+          type: string
+          enum: [snapshot, legacy_dynamic]
+          description: >-
+            New keys use immutable snapshot scope. legacy_dynamic is a
+            grandfathered migration mode and should be rotated.
+        platforms:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { type: string }
         environment:
           type: string
           enum: [live, test]
@@ -6051,6 +6335,116 @@ components:
             fallbackReason:
               type: string
               description: Bounded reason category present only for stored_fallback.
+        requestId: { type: string, format: uuid }
+    XiaohongshuPostRequest:
+      type: object
+      additionalProperties: false
+      required: [platform, url]
+      properties:
+        platform: { type: string, const: xiaohongshu }
+        url:
+          type: string
+          format: uri
+          minLength: 1
+          maxLength: 2048
+          description: >-
+            Official xiaohongshu.com explore/discovery note URL with a
+            24-character note ID, or an xhslink.com/xhslink.cn share URL.
+            Credentials, ports and fragments are rejected.
+        deliveryMode:
+          type: string
+          enum: [cache_only, cache_first, refresh]
+          default: cache_first
+    XiaohongshuPostCompatibilityRequest:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        platform: { type: string, const: xiaohongshu, default: xiaohongshu }
+        url: { $ref: "#/components/schemas/XiaohongshuPostRequest/properties/url" }
+        deliveryMode: { $ref: "#/components/schemas/XiaohongshuPostRequest/properties/deliveryMode" }
+    ExternalSocialPostMedia:
+      type: object
+      additionalProperties: false
+      required: [type, url]
+      properties:
+        type: { type: string, const: image }
+        url:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          pattern: "^/api/v1/data/posts/media\\?requestId=[0-9a-f-]+&mediaIndex=(?:[0-9]|1[0-9])$"
+          description: >-
+            Same-origin authenticated Hub media relay locator bound to this
+            response requestId and media index. It is never an upstream URL.
+    ExternalSocialPost:
+      type: object
+      additionalProperties: false
+      required: [id, externalId, platform, contentType, url, title, text, tags, author, metrics, media, publishedAt, collectedAt]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 256 }
+        externalId: { type: string, pattern: "^[0-9a-f]{24}$" }
+        platform: { type: string, const: xiaohongshu }
+        contentType: { type: string, const: post }
+        url: { type: string, format: uri, maxLength: 2048 }
+        title: { type: [string, "null"], maxLength: 500 }
+        text: { type: [string, "null"], maxLength: 50000 }
+        tags:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 160 }
+        author:
+          type: object
+          additionalProperties: false
+          required: [id, name, avatarUrl]
+          properties:
+            id: { type: [string, "null"], maxLength: 128 }
+            name: { type: [string, "null"], maxLength: 256 }
+            avatarUrl:
+              type: [string, "null"]
+              format: uri-reference
+              maxLength: 2048
+              description: >-
+                Reserved for a future Hub-owned avatar locator. Currently null;
+                upstream avatar URLs are never exposed.
+        metrics:
+          type: object
+          additionalProperties: false
+          required: [liked, collected, comments, shared]
+          properties:
+            liked: { type: [integer, "null"], minimum: 0 }
+            collected: { type: [integer, "null"], minimum: 0 }
+            comments: { type: [integer, "null"], minimum: 0 }
+            shared: { type: [integer, "null"], minimum: 0 }
+        media:
+          type: array
+          maxItems: 20
+          items: { $ref: "#/components/schemas/ExternalSocialPostMedia" }
+        publishedAt: { type: [string, "null"], format: date-time }
+        collectedAt: { type: string, format: date-time }
+    ExternalSocialPostEnvelope:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, data, meta, requestId]
+      properties:
+        contractVersion: { type: string, const: mx-insight-hub.social-post.v1 }
+        data:
+          type: object
+          additionalProperties: false
+          required: [item]
+          properties:
+            item: { $ref: "#/components/schemas/ExternalSocialPost" }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [capturedAt, servedAt, sourceMode, ageSeconds]
+          properties:
+            capturedAt: { type: string, format: date-time }
+            servedAt: { type: string, format: date-time }
+            sourceMode: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
+            ageSeconds: { type: integer, minimum: 0 }
+            fallbackReason: { type: string, maxLength: 160 }
         requestId: { type: string, format: uuid }
     SearchRequest:
       type: object

@@ -4,7 +4,7 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
-export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','xiaohongshu-note':'/docs/xiaohongshu-note','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
@@ -439,7 +439,7 @@ const idempotencyParameter = {
   name: 'Idempotency-Key',
   in: 'header',
   required: true,
-  description: 'The Idempotency-Key is global within one consumer. Reuse it only when retrying the exact same path and normalized body; a new path, body or page requires a new Idempotency-Key.',
+  description: 'The Idempotency-Key is global within one consumer and remains bound to the Hub API key that created its usage record. Reuse it only with that same API key when retrying the exact same path and normalized body; another API key, a new path, body or page requires a new Idempotency-Key.',
   schema: {
     type: 'string',
     minLength: 8,
@@ -464,6 +464,20 @@ const externalCommerceUncertainRepeatParameter = {
   in: 'header',
   required: false,
   description: 'UUID of a matching prior same-consumer ecommerce request whose durable status is unknown. It explicitly accepts possible duplicate provider cost for one intentionally new refresh. Hub verifies the operation and normalized fingerprint. It requires deliveryMode=refresh and a different new Idempotency-Key. It never bypasses reserved state, succeeded-unusable quarantine, failed status lookup, route/version mismatch, quota, circuit or concurrency.',
+  schema: { type: 'string', format: 'uuid' },
+}
+
+const externalPostIdempotencyParameter = {
+  ...idempotencyParameter,
+  required: false,
+  description: 'Optional for cache_only and cache_first, but required for refresh. Reuse it only for a transport retry of the exact same normalized note URL. The canonical and compatibility route spellings share one idempotency namespace; changing the path does not authorize another external call. A caller-supplied key is consumer-scoped and remains bound to the API key that first used it. When omitted, Hub derives an API-key-scoped bounded freshness-bucket key so separate API keys receive separate usage attribution while sharing consumer snapshots and dispatch suppression.',
+}
+
+const externalPostUncertainRepeatParameter = {
+  name: 'X-MX-Insight-Retry-Of',
+  in: 'header',
+  required: false,
+  description: 'UUID of a matching prior same-consumer Xiaohongshu post request whose durable outcome is unknown. It requires deliveryMode=refresh and a different new Idempotency-Key. Hub verifies the operation and normalized note identity; it never bypasses a reserved request, response quarantine, failed status lookup, quota, circuit or concurrency.',
   schema: { type: 'string', format: 'uuid' },
 }
 
@@ -524,6 +538,16 @@ const externalCommerceProductSearchResponse = {
   },
 }
 
+const externalSocialPostResponse = {
+  description: 'A provider-neutral normalized social post plus explicit Hub freshness metadata. Every media url is a same-origin authenticated Hub relay locator; upstream media and avatar URLs are not exposed.',
+  headers: externalCommerceProductSearchResponse.headers,
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/ExternalSocialPostEnvelope' },
+    },
+  },
+}
+
 const externalCommerceProductMediaResponse = {
   description: 'A bounded image retained by the same consumer search response and fetched through the Hub media relay. This read does not create Hub usage or dispatch a product-search request.',
   headers: {
@@ -546,6 +570,81 @@ const externalCommerceProductMediaResponse = {
         schema: { type: 'string', format: 'binary' },
       }]),
   ),
+}
+
+const externalSocialPostMediaResponse = {
+  ...externalCommerceProductMediaResponse,
+  description: 'One bounded image retained by the same consumer\'s committed social-post response. This read creates no Hub usage and dispatches no post-detail request.',
+}
+
+function externalSocialPostOperation({ compatibilityAlias = false } = {}) {
+  return {
+    tags: ['External Data'],
+    operationId: compatibilityAlias ? 'getXiaohongshuNoteInfoCompatibility' : 'resolveExternalSocialPost',
+    summary: compatibilityAlias
+      ? 'Compatibility alias for resolving one Xiaohongshu note link'
+      : 'Resolve one Xiaohongshu note link through the governed external data gateway',
+    ...(compatibilityAlias ? { deprecated: true } : {}),
+    description: `${compatibilityAlias
+      ? 'Compatibility spelling for existing clients. A missing platform defaults to xiaohongshu. New clients should use /data/post. '
+      : 'Canonical provider-neutral social-post route. platform must be xiaohongshu. '
+    }The request accepts only an official Xiaohongshu note or share URL plus deliveryMode. It requires a Live Hub Public API key whose immutable platform and capability snapshots include xiaohongshu and social.posts.resolve, while those consumer grants remain active. cache_only never dispatches external acquisition; cache_first is the default; refresh requires Idempotency-Key. Both route spellings share one canonical fingerprint and idempotency namespace. The response never exposes external platform identity, credentials, endpoint coordinates, upstream media or avatar URLs, raw envelopes, diagnostic cache URLs, procurement price or customer invoice. media[].url is an authenticated same-origin Hub relay locator bound to this response requestId and media index. An accepted but unavailable note may consume external capacity, so a verified request-local miss is negative-cached and is never retried automatically.`,
+    'x-mx-canonical-operation': '/data/post',
+    'x-mx-error-codes': {
+      400: [
+        'invalid_request', 'invalid_json', 'invalid_platform', 'invalid_post_url', 'unsupported_fields',
+        'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
+        'invalid_uncertain_retry',
+      ],
+      401: ['api_key_required', 'invalid_api_key'],
+      403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
+      404: ['post_not_found', 'stored_snapshot_not_found'],
+      409: [
+        'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
+        'external_platform_response_unusable', 'uncertain_retry_not_allowed',
+      ],
+      413: ['payload_too_large'],
+      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+      502: [
+        'external_platform_response_unusable', 'external_platform_outcome_unknown',
+        'external_platform_rejected',
+      ],
+      503: [
+        'external_platform_unavailable', 'external_platform_not_configured',
+        'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+      ],
+    },
+    parameters: [externalPostIdempotencyParameter, externalPostUncertainRepeatParameter],
+    requestBody: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: {
+            $ref: compatibilityAlias
+              ? '#/components/schemas/XiaohongshuPostCompatibilityRequest'
+              : '#/components/schemas/XiaohongshuPostRequest',
+          },
+          example: {
+            ...(compatibilityAlias ? {} : { platform: 'xiaohongshu' }),
+            url: 'https://www.xiaohongshu.com/explore/0123456789abcdef01234567',
+            deliveryMode: 'cache_first',
+          },
+        },
+      },
+    },
+    responses: {
+      200: externalSocialPostResponse,
+      400: errorResponse,
+      401: errorResponse,
+      403: errorResponse,
+      404: errorResponse,
+      409: errorResponse,
+      413: errorResponse,
+      429: errorResponse,
+      502: errorResponse,
+      503: errorResponse,
+    },
+  }
 }
 
 const nightAllCompatibilityResponse = {
@@ -851,7 +950,19 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         deliveryModes: ['cache_only', 'cache_first', 'refresh'],
                         freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
                       },
-                      { platform: 'xiaohongshu', ready: true },
+                      {
+                        platform: 'xiaohongshu',
+                        ready: true,
+                        capabilities: ['post_detail'],
+                        postDetail: {
+                          ready: true,
+                          source: 'hub',
+                          servingMode: 'live_with_stored_fallback',
+                          contractVersion: 'mx-insight-hub.social-post.v1',
+                          input: 'official_note_url',
+                          deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+                        },
+                      },
                       { platform: 'twitter', ready: true },
                     ],
                     legacySearch: {
@@ -875,6 +986,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       { capability: 'nlp.tokenize', ready: true },
                       { capability: 'public_opinion.all_ingested.read', ready: true },
                       { capability: 'public_opinion.diagnostics.read', ready: true },
+                      { capability: 'social.posts.resolve', ready: true },
                     ],
                   },
                   requestId: '00000000-0000-4000-8000-000000000001',
@@ -976,7 +1088,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           415: ['external_media_type_rejected', 'external_media_content_invalid', 'external_media_dimensions_rejected'],
           422: ['external_media_url_invalid', 'external_media_url_blocked', 'external_media_host_blocked'],
           429: ['external_media_rate_limited', 'external_media_busy'],
-          502: ['external_media_unavailable', 'external_media_redirect_rejected'],
+          502: ['external_media_unavailable', 'external_media_redirect_rejected', 'external_media_source_throttled'],
           503: ['external_media_unavailable'],
           504: ['external_media_timeout'],
         },
@@ -999,6 +1111,60 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         ],
         responses: {
           200: externalCommerceProductMediaResponse,
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          413: errorResponse,
+          415: errorResponse,
+          422: errorResponse,
+          429: errorResponse,
+          502: errorResponse,
+          503: errorResponse,
+          504: errorResponse,
+        },
+      },
+    },
+    '/data/post': {
+      post: externalSocialPostOperation(),
+    },
+    '/xiaohongshu/app/get_note_info': {
+      post: externalSocialPostOperation({ compatibilityAlias: true }),
+    },
+    '/data/posts/media': {
+      get: {
+        tags: ['External Data'],
+        operationId: 'getExternalSocialPostMedia',
+        summary: 'Read one retained social-post image through the governed Hub media relay',
+        'x-mx-strict-query': true,
+        description: 'Requires a Live Hub Public API key from the same consumer that received the committed post response, plus effective xiaohongshu and social.posts.resolve entitlements. requestId and mediaIndex are the complete query allowlist and must each appear exactly once. Hub never accepts an arbitrary source URL. The relay validates public HTTPS DNS and every redirect, enforces bounded type, dimensions, body, duration, rate and concurrency, and returns only JPEG, PNG or WebP. Multiple image reads may run concurrently within the deployment safeguards. This read creates no Hub usage and dispatches no post-detail request.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
+          404: ['external_media_not_found'],
+          413: ['external_media_too_large'],
+          415: ['external_media_type_rejected', 'external_media_content_invalid', 'external_media_dimensions_rejected'],
+          422: ['external_media_url_invalid', 'external_media_url_blocked', 'external_media_host_blocked'],
+          429: ['external_media_rate_limited', 'external_media_busy'],
+          502: ['external_media_unavailable', 'external_media_redirect_rejected', 'external_media_source_throttled'],
+          503: ['external_media_unavailable'],
+          504: ['external_media_timeout'],
+        },
+        parameters: [
+          {
+            name: 'requestId', in: 'query', required: true,
+            description: 'requestId from the committed social-post response that contained the media reference.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            name: 'mediaIndex', in: 'query', required: true,
+            description: 'Zero-based index into data.item.media.',
+            schema: { type: 'integer', minimum: 0, maximum: 19 },
+          },
+        ],
+        responses: {
+          200: externalSocialPostMediaResponse,
           400: errorResponse,
           401: errorResponse,
           403: errorResponse,
@@ -2097,6 +2263,118 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                 type: 'string',
                 description: 'Bounded reason category present only for stored_fallback.',
               },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      XiaohongshuPostRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['platform', 'url'],
+        properties: {
+          platform: { type: 'string', const: 'xiaohongshu' },
+          url: {
+            type: 'string', format: 'uri', minLength: 1, maxLength: 2048,
+            description: 'Official xiaohongshu.com explore/discovery note URL with a 24-character note ID, or an xhslink.com/xhslink.cn share URL. Credentials, ports and fragments are rejected.',
+          },
+          deliveryMode: {
+            type: 'string', enum: ['cache_only', 'cache_first', 'refresh'], default: 'cache_first',
+          },
+        },
+      },
+      XiaohongshuPostCompatibilityRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['url'],
+        properties: {
+          platform: { type: 'string', const: 'xiaohongshu', default: 'xiaohongshu' },
+          url: { $ref: '#/components/schemas/XiaohongshuPostRequest/properties/url' },
+          deliveryMode: { $ref: '#/components/schemas/XiaohongshuPostRequest/properties/deliveryMode' },
+        },
+      },
+      ExternalSocialPostMedia: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['type', 'url'],
+        properties: {
+          type: { type: 'string', const: 'image' },
+          url: {
+            type: 'string', format: 'uri-reference', maxLength: 2048,
+            pattern: '^/api/v1/data/posts/media\\?requestId=[0-9a-f-]+&mediaIndex=(?:[0-9]|1[0-9])$',
+            description: 'Same-origin authenticated Hub media relay locator bound to this response requestId and media index. It is never an upstream URL.',
+          },
+        },
+      },
+      ExternalSocialPost: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'id', 'externalId', 'platform', 'contentType', 'url', 'title', 'text',
+          'tags', 'author', 'metrics', 'media', 'publishedAt', 'collectedAt',
+        ],
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 256 },
+          externalId: { type: 'string', pattern: '^[0-9a-f]{24}$' },
+          platform: { type: 'string', const: 'xiaohongshu' },
+          contentType: { type: 'string', const: 'post' },
+          url: { type: 'string', format: 'uri', maxLength: 2048 },
+          title: { type: ['string', 'null'], maxLength: 500 },
+          text: { type: ['string', 'null'], maxLength: 50000 },
+          tags: {
+            type: 'array', maxItems: 100, uniqueItems: true,
+            items: { type: 'string', minLength: 1, maxLength: 160 },
+          },
+          author: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'name', 'avatarUrl'],
+            properties: {
+              id: { type: ['string', 'null'], maxLength: 128 },
+              name: { type: ['string', 'null'], maxLength: 256 },
+              avatarUrl: {
+                type: ['string', 'null'], format: 'uri-reference', maxLength: 2048,
+                description: 'Reserved for a future Hub-owned avatar locator. Currently null; upstream avatar URLs are never exposed.',
+              },
+            },
+          },
+          metrics: {
+            type: 'object', additionalProperties: false,
+            required: ['liked', 'collected', 'comments', 'shared'],
+            properties: Object.fromEntries(
+              ['liked', 'collected', 'comments', 'shared']
+                .map((field) => [field, { type: ['integer', 'null'], minimum: 0 }]),
+            ),
+          },
+          media: {
+            type: 'array', maxItems: 20,
+            items: { $ref: '#/components/schemas/ExternalSocialPostMedia' },
+          },
+          publishedAt: { type: ['string', 'null'], format: 'date-time' },
+          collectedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ExternalSocialPostEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'data', 'meta', 'requestId'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.social-post.v1' },
+          data: {
+            type: 'object', additionalProperties: false, required: ['item'],
+            properties: { item: { $ref: '#/components/schemas/ExternalSocialPost' } },
+          },
+          meta: {
+            type: 'object', additionalProperties: false,
+            required: ['capturedAt', 'servedAt', 'sourceMode', 'ageSeconds'],
+            properties: {
+              capturedAt: { type: 'string', format: 'date-time' },
+              servedAt: { type: 'string', format: 'date-time' },
+              sourceMode: {
+                type: 'string',
+                enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+              },
+              ageSeconds: { type: 'integer', minimum: 0 },
+              fallbackReason: { type: 'string', maxLength: 160 },
             },
           },
           requestId: { type: 'string', format: 'uuid' },
@@ -3970,6 +4248,23 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
                       },
                     },
+                    input: { type: 'string', enum: ['official_note_url'] },
+                    postDetail: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['ready', 'source', 'servingMode', 'contractVersion', 'input', 'deliveryModes'],
+                      properties: {
+                        ready: { type: 'boolean' },
+                        source: { type: 'string', const: 'hub' },
+                        servingMode: { type: 'string', const: 'live_with_stored_fallback' },
+                        contractVersion: { type: 'string', const: 'mx-insight-hub.social-post.v1' },
+                        input: { type: 'string', const: 'official_note_url' },
+                        deliveryModes: {
+                          type: 'array',
+                          items: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'] },
+                        },
+                      },
+                    },
                     context: { $ref: '#/components/schemas/CanonicalContextCapability' },
                     timeline: { $ref: '#/components/schemas/CanonicalTimelineCapability' },
                   },
@@ -3991,7 +4286,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   properties: {
                     capability: {
                       type: 'string',
-                      enum: ['nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read'],
+                      enum: ['nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read', 'social.posts.resolve'],
                     },
                     ready: { type: 'boolean' },
                   },
@@ -4104,6 +4399,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
   { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录', section: '数据目录' },
   { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
+  { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
@@ -4201,7 +4497,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
     <h3>幂等、游标与配额</h3>
     <table><thead><tr><th>规则</th><th>客户端行为</th></tr></thead><tbody>
-      <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一。仅在重试完全相同的路径和规范化 body 时复用；新路径、新 body 或新页面必须使用新的 <code>Idempotency-Key</code>。</td></tr>
+      <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一，并绑定创建 usage 记录的 Hub API Key。仅用同一把 API Key 重试完全相同的路径和规范化 body；另一把 API Key、新路径、新 body 或新页面必须使用新的 <code>Idempotency-Key</code>。</td></tr>
       <tr><td>舆情可见性契约升级</td><td>可命中 <code>public_opinion</code> 的 stored/canonical 搜索会把 formal/candidate 可见性契约写入幂等指纹。升级后不要复用升级前的 <code>Idempotency-Key</code>；请生成新值。旧值会返回 <code>409 idempotency_conflict</code>，不会回放升级前可能未门禁的响应。</td></tr>
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
@@ -4215,7 +4511,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <section class="doc-page" data-doc-page="source-catalog">
     <h2 id="source-catalog">数据源目录</h2>
     <div class="notice">这是只读、active-only 的已治理业务视图。负责该调用者的 Hub operator 必须先授予 <code>source_catalog</code> platform grant；调用者不能通过 Public API 自行授权。三个 GET 都只接受已签发的调用者 API Key，按同一 platform policy 独立计量，不使用 <code>Idempotency-Key</code>。</div>
-    <p>授权入口是 Hub 管理台的“开放能力”：依次选择租户、调用者和“数据源目录”，配置配额后启用。授权按 consumer 动态生效，已有 API Key 不需要重新签发。</p>
+    <p>授权入口是 Hub 管理台的“开放能力”：依次选择租户、调用者和“数据源目录”，配置配额后启用。新 Key 在签发时冻结明确范围；撤销 consumer 授权立即收窄旧 Key，新增授权则要签发并显式选择该范围的新 Key。迁移期的 legacy_dynamic Key 应轮换。</p>
     <h3>1. 准备 API Key 并确认授权</h3>
     <pre><code>export HUB_URL="https://hub.minsight-ai.com"
 read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
@@ -4316,7 +4612,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   | jq '.data.platforms[] | select(.platform == "ecommerce")'</code></pre>
     <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>，请求策略为 <code>cache_only / cache_first / refresh</code>。</p>
-    <p><code>401 invalid_api_key</code> 表示认证失败：必须使用同一个 Hub 实例签发时仅展示一次的完整 Hub Public API secret；列表中的掩码、admin token 和外部平台密钥都不能调用公开数据接口。认证通过但其调用身份未授予 ecommerce 时返回 <code>403 platform_not_granted</code>；使用兼容 Test Key 发起正式电商搜索则返回 <code>403 test_key_not_supported</code>，且在建立 usage reservation 或调用供应方前拒绝。授予后原 Live Key 无需重签。</p>
+    <p><code>401 invalid_api_key</code> 表示认证失败：必须使用同一个 Hub 实例签发时仅展示一次的完整 Hub Public API secret；列表中的掩码、admin token 和外部平台密钥都不能调用公开数据接口。认证通过但 Key snapshot 未包含 ecommerce，或 consumer 已撤销该授权时，返回 <code>403 platform_not_granted</code>；后续补授不会扩大旧 snapshot Key，需签发明确包含 ecommerce 的替代 Key。使用兼容 Test Key 发起正式电商搜索则返回 <code>403 test_key_not_supported</code>，且在建立 usage reservation 或调用供应方前拒绝。</p>
     <div class="notice">管理台百宝箱不要求第二把 Key、UUID、费用复选框或人工 consumer 归属核查。选择 <code>refresh</code> 并点击“重新采集最新数据”即明确授权一次可能产生上游成本的新采集；这个唯一入口会自动完成能力预检与必要的只读请求状态 GET，再决定精确重放或一次受控新采集。</div>
 
     <h3>2. 发起一次可追踪搜索</h3>
@@ -4440,7 +4736,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     <table><thead><tr><th>HTTP / error.code</th><th>客户端动作</th></tr></thead><tbody>
       <tr><td>400 请求、筛选、游标错误或 <code>invalid_uncertain_retry</code></td><td>修正请求；retry-of 只接受 <code>refresh</code> 和格式正确的旧请求 UUID。不要重复错误 body。</td></tr>
       <tr><td>401 <code>api_key_required / invalid_api_key</code></td><td>提供当前实例签发的完整 Hub Public API Key；仅在失效、过期或撤销时轮换，不要发送上游密钥。</td></tr>
-      <tr><td>403 <code>platform_not_granted</code></td><td>为同一 consumer 配置 <code>ecommerce</code> grant；原 Hub Public API Key 无需轮换或重新签发。</td></tr>
+      <tr><td>403 <code>platform_not_granted</code></td><td>Key snapshot 没有 <code>ecommerce</code>，或 consumer 已撤权；配置授权后签发明确包含该范围的新 Key。</td></tr>
       <tr><td>403 <code>test_key_not_supported</code></td><td>改用正式 <code>mih_live_</code> Key。Test 只是兼容标签，不是零成本沙箱；该拒绝发生在 usage reservation 和供应方调用之前。</td></tr>
       <tr><td>404 <code>stored_snapshot_not_found</code></td><td><code>cache_only</code> 没有命中精确存量；本次没有调用外部平台。可修改条件、切换本地安全演示，或在明确确认成本后发起 <code>refresh</code>。</td></tr>
       <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后以原 requestId 调用只读状态 GET；不要 POST 原请求或换键形成第二次派发。</td></tr>
@@ -4454,6 +4750,45 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     </tbody></table>
     <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件。主搜索按钮是唯一入口：页面自动调用状态 GET，没有额外核对按钮、费用复选框，也不要求用户查找或粘贴 UUID、人工核查 consumer 归属。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>。v1 或 v2 本地账本只有在同一 consumer 的查询明确返回 <code>request_not_found</code> 时才清除孤儿记录；路由级 <code>not_found</code> 和其他查询失败继续保留审计。<code>committed</code> 自动精确重放，<code>released</code> 关闭旧记录；只有明确 <code>unknown</code> 可在用户已选择 <code>refresh</code> 并点击重采按钮后，用新幂等键和页面自动填入的 <code>X-MX-Insight-Retry-Of</code> 旧请求 ID 发起一次新采集。<code>reserved</code>、网络失败、路由/版本不匹配和 succeeded-unusable 隔离继续阻止外部调用。切换演示不会删除实时请求账本。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
+    </section>
+
+    <section class="doc-page" data-doc-page="xiaohongshu-note">
+    <h2 id="xiaohongshu-note">小红书笔记</h2>
+    <div class="notice">生产接入使用 <code>POST /api/v1/data/post</code>。它需要 Live Hub Public API Key 的 immutable snapshot 同时包含 <code>xiaohongshu</code> 和 <code>social.posts.resolve</code>，且 consumer 当前仍保留两项授权。</div>
+    <h3>1. 输入链接，获取正文与标签</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/post</code></div><p>body 只接受 <code>platform</code>、<code>url</code>、<code>deliveryMode</code>；只允许官方小红书笔记或分享链接。</p></div>
+    <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
+XHS_BODY='{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/0123456789abcdef01234567","deliveryMode":"cache_first"}'
+curl -sS -D /tmp/mxih-xhs.headers -X POST "$HUB_URL/api/v1/data/post" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $XHS_KEY" \
+  -d "$XHS_BODY" \
+  | tee /tmp/mxih-xhs.json \
+  | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
+    <p>返回合同固定为 <code>mx-insight-hub.social-post.v1</code>。正文、标题、标签、作者、互动量、图片引用、发布时间与采集时间都在 <code>data.item</code>；<code>meta.sourceMode</code> 是 <code>live|fresh_cache|stored_fallback|idempotent_replay</code>。每个 <code>media[].url</code> 已投影为绑定本次 requestId/index 的同源 Hub 中继 locator，作者头像暂返回 null；公开响应不包含任何上游媒体 URL、外部平台身份、上游密钥、endpoint、raw envelope、诊断缓存 URL、采购价格或客户账单。</p>
+    <h3>2. 历史兼容 URL</h3>
+    <p><code>POST /api/v1/xiaohongshu/app/get_note_info</code> 是 deprecated alias：接受同样的严格 body，并在未传 platform 时默认 <code>xiaohongshu</code>。两个 URL 共享同一规范化 fingerprint 和幂等域；切换 URL 不是第二次付费调用的授权。新客户始终使用 <code>/data/post</code>。</p>
+    <h3>3. 并发读取图片</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/posts/media?requestId=...&amp;mediaIndex=0</code></div><p>只读取当前 consumer 已提交响应中的一张图片；不接受任意源 URL、不创建 note usage、不再次派发笔记请求。</p></div>
+    <pre><code>REQUEST_ID=$(jq -r '.requestId' /tmp/mxih-xhs.json)
+curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode "requestId=$REQUEST_ID" \
+  --data-urlencode 'mediaIndex=0' \
+  -o /tmp/mxih-xhs-0.img</code></pre>
+    <p><code>requestId</code> 与 <code>mediaIndex</code> 必须各出现一次，index 为 <code>0..19</code>。响应中的 <code>media[].url</code> 就是该路径的同源 locator；客户端须带同一 consumer 的 Live Key 拉取为 Blob。可以在服务端的 consumer/global 并发护栏内并发加载多图；单图失败显示本地占位符，绝不能猜测或回退到上游 URL。返回只允许 JPEG、PNG、WebP，且带 <code>Cache-Control: private, no-store</code>。</p>
+    <h3>4. 缓存、429 与重试</h3>
+    <p><code>cache_only</code> 绝不外采；<code>cache_first</code> 默认先读同 consumer 的精确新鲜快照；<code>refresh</code> 绕过新鲜快照并强制调用方提供 Idempotency-Key。无效或失效笔记也可能被外部平台接受并消耗容量，所以 request-local miss 会短时 negative-cache，客户端不得自动换 key 重试。</p>
+    <table><thead><tr><th>错误</th><th>处理</th></tr></thead><tbody>
+      <tr><td><code>400 invalid_post_url / unsupported_fields</code></td><td>只提交官方链接与三个允许字段。</td></tr>
+      <tr><td><code>403 platform_not_granted / capability_not_granted</code></td><td>为 consumer 授权后签发同时包含两项 scope 的新 Key。</td></tr>
+      <tr><td><code>404 post_not_found / stored_snapshot_not_found</code></td><td>前者是已严格识别的笔记不可用；后者只是 cache_only 未命中。</td></tr>
+      <tr><td><code>429 quota_exceeded</code></td><td>Hub 套餐/Key/consumer 限额；等待窗口或由管理员调整。</td></tr>
+      <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded</code></td><td>Hub 并发或外部容量类别；按响应退避，不能据此断言 IP 或域名封禁。</td></tr>
+      <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>
+      <tr><td><code>503 not_configured / circuit_open / capacity_unavailable</code></td><td>稍后用相同意图重试，或由 operator 检查内部平台状态。</td></tr>
+    </tbody></table>
     </section>
 
     <section class="doc-page" data-doc-page="virtual-supermarket">

@@ -49,8 +49,8 @@ async function fixture({ adapter, gatewayConfig = config() } = {}) {
   })
   const tenant = await hub.createTenant({ name: 'Tenant A' })
   const consumer = await hub.createConsumer({ tenantId: tenant.id, name: 'Consumer A' })
-  const key = await hub.createApiKey({ consumerId: consumer.id, name: 'Key A' })
   await usageStore.setPlatformGrant(consumer.id, 'ecommerce', true)
+  const key = await hub.createApiKey({ consumerId: consumer.id, name: 'Key A' })
   await usageStore.putPolicy({
     tenantId: tenant.id,
     consumerId: consumer.id,

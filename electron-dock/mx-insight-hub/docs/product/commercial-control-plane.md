@@ -1,6 +1,10 @@
 # 订阅、分组、Key、额度与商业控制面
 
-状态：目标设计。当前 MVP 只实现 tenant、consumer、API key、平台 grant、请求窗口和 usage evidence；plan version、subscription、credit ledger、invoice 和 Launcher SSO 尚未实现。
+状态：分阶段实现。当前已实现 tenant/consumer、Launcher opaque-token 联邦登录、每把新 Key
+的 platform/capability entitlement snapshot、版本化 plan catalog、consumer plan assignment、
+月度套餐/突发/Key/consumer 最严边界的原子 quota、usage evidence，以及 `/plans` 控制台中的
+平台管理员 CAS 套餐分配。当前仍未实现客户自助换套餐/购买、版本化 customer price book、subscription 生命周期、
+credit ledger、invoice/payment、持久账单导出和外部 ToC 门户。
 
 ## 1. 对象边界
 
@@ -14,7 +18,7 @@
 | Subscription | tenant/consumer 在一段时间内订阅某个 plan version | Hub |
 | API key | consumer 的可轮换凭据，绑定环境和 entitlement snapshot | Hub |
 | Credit account/ledger | 预付、赠送、预占、结算、释放、退款和调整 | Hub |
-| Provider quota/cost | Night-All 上游 credential 的容量和实际成本 | Night-All |
+| Provider quota/cost | 物理上游 credential 的容量和实际采购成本；直连适配器由 Hub 记录，Night-All 兼容调用仍由 Night-All 提供来源证据 | Hub gateway / Night-All legacy |
 
 外部用户只登录 Launcher；Hub 不保存第二套密码。外部程序只维护 Hub API key（未来可增加 OAuth client credential），不需要同时维护 Launcher 用户 API 和 Night-All key。
 
@@ -66,6 +70,8 @@ commercial_outbox
 关键约束：
 
 - plan/group 发布后不可原地改语义；变更创建新 version；
+- consumer 套餐分配以 `revision` 做 compare-and-swap；实际切换会记录 actor、前后版本和前后修订，
+  重复分配同一版本是 no-op，不刷新 `assignedAt`、额度周期或审计事件；
 - subscription 保存 plan/group/price-book snapshot，续费时才切版本；
 - API key 绑定一个 consumer、environment 和 subscription entitlement snapshot；
 - 金额/credit 使用定点整数和明确 currency/unit，不用 float；
@@ -87,6 +93,14 @@ Hub tenant 角色建议：
 | `viewer` | 只读 Dashboard/usage |
 
 Launcher 的全局 `insight.admin` 只允许进入 Hub；进入后还要检查 tenant membership。不得让 `mx-admin` 或 gateway admission 直接绕过 Hub tenant、field、credit 或审计策略。
+
+当前套餐分配是平台运维动作：仅 `platformAdmin` 可调用
+`PUT /internal/v1/admin/consumers/{consumerId}/plan`，body 必须恰好为
+`{"planVersionId":"<published-active-version-uuid>","expectedRevision":<current-positive-revision>}`。
+`assignedBy` 只从已认证 principal 取得，调用方不能提交；修订不匹配返回
+`409 plan_assignment_revision_conflict`，要求刷新后重新确认。
+`legacy-unmetered` 只用于保留迁移时已有绑定：同版本重放仍是 no-op，但不能新分配，服务端返回
+`409 plan_version_grandfather_only`，管理台也不提供分配按钮。
 
 ## 5. 订阅生命周期
 
@@ -126,10 +140,12 @@ stateDiagram-v2
 没有期限的 key 在迁移时获得新的 180 天窗口，避免发布瞬间中断现有调用；仍应按轮换
 流程逐步替换。过期和撤销都不会删除历史 usage 或审计证据。
 
-当前平台授权和平台 Policy 绑定到 `consumer`，不是单把 key；因此一个调用者可授权
-多个平台，它名下所有有效 key 共享这组平台权限和额度策略。若需要同一调用者下按 key
-再细分平台，必须新增 key-scoped grant/entitlement，不能只在签发界面保存一个无执行力
-的勾选列表。
+当前实现已经把授权分成两层：consumer grant/policy 是可随时收窄的上限；每把新 Key 在
+签发时保存所选 platform/capability 与当时额度 ceiling 的 immutable snapshot。一次请求必须
+同时通过 consumer 当前授权与 Key snapshot，且 plan、consumer policy、capability policy 和
+Key ceiling 取最严格值。consumer 撤权立即收窄所有 Key；之后新增授权或提高 ceiling 不会
+静默扩大旧 Key，必须签发明确选择新范围/上限的替代 Key。迁移前 Key 标记为
+`legacy_dynamic` 并暂时保留旧语义，运营应按 overlap 流程轮换为 snapshot Key。
 
 当前 `environment=test` 只是一项兼容元数据，尚未形成隔离沙箱，不能把 `mih_test_` 当作通用
 零费用凭据。管理台当前仅签发 Live Key。外部 ecommerce 另有 fail-closed 路由门禁：有授权的
@@ -195,7 +211,11 @@ Hub Admin 提供：
 - platform/capability readiness 和 refresh/cache evidence；
 - audit、approval 和 reconciliation。
 
-Launcher AppCenter 只展示入口和 offline-safe 摘要。未来 SSO 将短期 Launcher bearer 传到 Hub Admin，由 Hub 验证 JWKS 和 tenant membership；Launcher Server 的 service admin token 不发送到浏览器。可以新窗口打开或 shell 内嵌，但 URL、cookie origin、CSP 和 logout 必须独立评审。
+Launcher AppCenter 只展示入口和 offline-safe 摘要。当前 SSO 把短期 Launcher opaque bearer
+传到 Hub Admin，由 Hub 调用 Launcher introspection 并绑定 Hub-local tenant membership；
+Launcher Server 的 service admin token 不发送到浏览器。外部客户可复用同一身份协议，但
+必须使用独立 audience/client、Hub tenant role 和入口，不能复用 MX-H2I 项目角色或会话表。
+当前管理台已支持租户委派管理，独立 ToC 自助门户及自助订阅/账单尚未实现。
 
 ## 10. 对外接口分面
 
@@ -209,8 +229,8 @@ public/admin listener 继续物理分离。任何 public wildcard route 都不�
 
 ## 11. 最小交付顺序
 
-1. 版本化 access group + key entitlement snapshot，替代当前 consumer mutable grant 的生产语义。
-2. plan/subscription 状态和多维 quota，不先做支付渠道。
+1. **已完成本阶段**：key entitlement snapshot 与 consumer 当前授权取交集；access-group 版本化仍待后续抽象。
+2. **部分完成**：版本化 plan catalog、默认 assignment、平台管理员 CAS assignment、月度套餐/突发/Key/consumer quota 已有；subscription 状态和客户自助变更尚未实现。`launch-1m` 的套餐层只设 1,000,000 次/月、100 RPS 和最大分页 100；具体平台与每把 Key 的滑动窗口继续独立生效，避免套餐小时窗口让月额度理论不可达。
 3. append-only credit ledger、reserve/commit/release/refund 和 reconciliation。
 4. Launcher JWKS identity binding、tenant roles 和 self-service UI。
 5. price book、invoice line/export；需要在线支付时再接支付 provider。

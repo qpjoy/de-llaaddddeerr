@@ -107,7 +107,6 @@ async function withServer(callback) {
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Virtual supermarket tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Granted consumer' })
-  const publicKey = await service.createApiKey({ consumerId: consumer.id, name: 'Public key' })
   await service.putPlatformConfiguration('virtual_supermarket', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -124,6 +123,7 @@ async function withServer(callback) {
     windowSeconds: 3600,
     maxPageSize: 25,
   })
+  const publicKey = await service.createApiKey({ consumerId: consumer.id, name: 'Public key' })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   const identity = {
@@ -529,6 +529,11 @@ test('virtual supermarket keeps canonical truth separate while governing safe pu
       baseUrl,
       `/api/v1/data/virtual-supermarket/search?query=${encodeURIComponent(SECRET_SOURCE_AUTHOR)}`,
       { token: publicKey },
+    )
+    assert.equal(
+      hiddenSourceAuthorSearch.response.status,
+      200,
+      JSON.stringify(hiddenSourceAuthorSearch.payload),
     )
     assert.deepEqual(hiddenSourceAuthorSearch.payload.data.items, [])
     const adminHiddenSourceTitleSearch = await call(

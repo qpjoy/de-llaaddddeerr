@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
 import { NIGHT_ALL_LEGACY_OPERATIONS } from './contracts/night-all-legacy.mjs'
+import { XIAOHONGSHU_POST_OPERATION } from './contracts/tikhub-xiaohongshu.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -131,9 +132,9 @@ const DEFAULT_POLICY = Object.freeze({
 const DEFAULT_API_KEY_LIFETIME_DAYS = 180
 const MAX_API_KEY_LIFETIME_DAYS = 730
 const DEFAULT_EXTERNAL_MEDIA_POLICY = Object.freeze({
-  maxRequests: 120,
+  maxRequests: 1_200,
   windowMs: 60_000,
-  maxConcurrency: 4,
+  maxConcurrency: 16,
 })
 
 function isTestApiKey(apiKey) {
@@ -198,6 +199,7 @@ const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
   TOKENIZE_CAPABILITY,
+  XIAOHONGSHU_POST_OPERATION,
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
@@ -274,6 +276,7 @@ function usageFilters(filters = {}) {
   const normalized = {
     tenantId: optionalUuid(filters.tenantId, 'tenantId'),
     consumerId: optionalUuid(filters.consumerId, 'consumerId'),
+    apiKeyId: optionalUuid(filters.apiKeyId, 'apiKeyId'),
   }
   for (const field of ['from', 'to']) {
     if (filters[field]) {
@@ -300,6 +303,13 @@ function apiKeyLifetimeDays(value) {
     `expiresInDays must not exceed ${MAX_API_KEY_LIFETIME_DAYS}`,
   )
   return days
+}
+
+function requestedScopes(value, field, canonicalize) {
+  if (value == null) return null
+  assert(Array.isArray(value), 400, 'invalid_request', `${field} must be an array`)
+  assert(value.length <= 128, 400, 'invalid_request', `${field} must contain at most 128 entries`)
+  return [...new Set(value.map((entry) => canonicalize(entry)))].sort()
 }
 
 function optionalNightAllBusinessId(value) {
@@ -370,6 +380,7 @@ export class HubService {
     searchQueries = null,
     segmenter = null,
     externalPlatformCapabilities = null,
+    externalPostCapabilities = null,
     externalImageLoader = null,
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     logger = console,
@@ -387,6 +398,7 @@ export class HubService {
     this.searchQueries = searchQueries
     this.segmenter = segmenter
     this.externalPlatformCapabilities = externalPlatformCapabilities
+    this.externalPostCapabilities = externalPostCapabilities
     this.externalImageLoader = externalImageLoader
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
@@ -436,6 +448,11 @@ export class HubService {
   }
 
   async createApiKey(body) {
+    assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
+    const unsupported = Object.keys(body).filter(
+      (field) => !['consumerId', 'name', 'environment', 'expiresInDays', 'platforms', 'capabilities'].includes(field),
+    )
+    assert(unsupported.length === 0, 400, 'unsupported_fields', `Unsupported API key fields: ${unsupported.join(', ')}`)
     const consumerId = requiredUuid(body.consumerId, 'consumerId')
     const consumer = await this.store.getConsumer(consumerId)
     assert(consumer, 404, 'consumer_not_found', 'Consumer not found')
@@ -443,6 +460,55 @@ export class HubService {
     assert(['live', 'test'].includes(environment), 400, 'invalid_request', 'environment must be live or test')
     const expiresInDays = apiKeyLifetimeDays(body.expiresInDays)
     const expiresAt = new Date(Date.now() + expiresInDays * 86_400_000).toISOString()
+    const consumerPlatforms = await this.store.listGrants(consumerId)
+    const consumerCapabilities = typeof this.store.listCapabilityGrants === 'function'
+      ? await this.store.listCapabilityGrants(consumerId)
+      : []
+    const requestedPlatforms = requestedScopes(body.platforms, 'platforms', canonicalPlatform)
+    const requestedCapabilities = requestedScopes(body.capabilities, 'capabilities', canonicalCapability)
+    const platforms = requestedPlatforms ?? [...consumerPlatforms]
+    const capabilities = requestedCapabilities ?? [...consumerCapabilities]
+    const consumerPlatformSet = new Set(consumerPlatforms)
+    const consumerCapabilitySet = new Set(consumerCapabilities)
+    const plan = typeof this.store.getConsumerPlan === 'function'
+      ? await this.store.getConsumerPlan(consumerId)
+      : null
+    const invalidPlatforms = platforms.filter((platform) => !consumerPlatformSet.has(platform))
+    const invalidCapabilities = capabilities.filter((capability) => !consumerCapabilitySet.has(capability))
+    assert(
+      invalidPlatforms.length === 0,
+      400,
+      'api_key_scope_not_granted',
+      `API key platforms must be a subset of the consumer grants: ${invalidPlatforms.join(', ')}`,
+    )
+    assert(
+      invalidCapabilities.length === 0,
+      400,
+      'api_key_scope_not_granted',
+      `API key capabilities must be a subset of the consumer grants: ${invalidCapabilities.join(', ')}`,
+    )
+    const platformEntitlements = await Promise.all(platforms.map(async (platform) => {
+      const policy = { ...this.defaultPolicy, ...((await this.store.getPolicy(consumerId, platform)) || {}) }
+      return {
+        platform,
+        maxRequests: Math.min(policy.maxRequests, plan?.limits?.maxRequests || Number.POSITIVE_INFINITY),
+        windowSeconds: policy.windowSeconds,
+        maxPageSize: Math.min(policy.maxPageSize, plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY),
+      }
+    }))
+    const capabilityEntitlements = await Promise.all(capabilities.map(async (capability) => {
+      const policy = {
+        ...this.defaultPolicy,
+        ...((typeof this.store.getCapabilityPolicy === 'function'
+          ? await this.store.getCapabilityPolicy(consumerId, capability)
+          : null) || {}),
+      }
+      return {
+        capability,
+        maxRequests: Math.min(policy.maxRequests, plan?.limits?.maxRequests || Number.POSITIVE_INFINITY),
+        windowSeconds: policy.windowSeconds,
+      }
+    }))
     const issued = issueApiKey(this.apiKeyPepper, environment)
     const record = await this.store.createApiKey({
       ...issued,
@@ -451,6 +517,8 @@ export class HubService {
       tenantId: consumer.tenantId,
       consumerId,
       name: requiredString(body.name, 'name'),
+      platformEntitlements,
+      capabilityEntitlements,
     })
     return { ...record, secret: issued.plaintext }
   }
@@ -468,6 +536,132 @@ export class HubService {
     const context = await this.store.findApiKeyByDigest(hmacSecret(secret, this.apiKeyPepper))
     assert(context, 401, 'invalid_api_key', 'API key is invalid, expired, or revoked')
     return context
+  }
+
+  listPlans() {
+    assert(typeof this.store.listPlans === 'function', 503, 'plan_store_unavailable', 'Plans require the current Hub database migration')
+    return this.store.listPlans()
+  }
+
+  async getConsumerPlan(consumerIdInput) {
+    const consumerId = requiredUuid(consumerIdInput, 'consumerId')
+    assert(await this.store.getConsumer(consumerId), 404, 'consumer_not_found', 'Consumer not found')
+    assert(typeof this.store.getConsumerPlan === 'function', 503, 'plan_store_unavailable', 'Plans require the current Hub database migration')
+    return this.store.getConsumerPlan(consumerId)
+  }
+
+  async assignConsumerPlan(consumerIdInput, body, assignedByInput) {
+    assert(
+      body && typeof body === 'object' && !Array.isArray(body),
+      400,
+      'invalid_request',
+      'JSON object body is required',
+    )
+    const unsupported = Object.keys(body).filter(
+      (field) => !['planVersionId', 'expectedRevision'].includes(field),
+    )
+    assert(
+      unsupported.length === 0,
+      400,
+      'unsupported_fields',
+      `Unsupported plan assignment fields: ${unsupported.join(', ')}`,
+    )
+    const consumerId = requiredUuid(consumerIdInput, 'consumerId').toLowerCase()
+    const planVersionId = requiredUuid(body.planVersionId, 'planVersionId').toLowerCase()
+    assert(
+      Number.isInteger(body.expectedRevision)
+        && body.expectedRevision > 0
+        && body.expectedRevision <= 2_147_483_647,
+      400,
+      'invalid_request',
+      'expectedRevision must be a positive 32-bit integer',
+    )
+    const assignedBy = requiredString(assignedByInput, 'assignedBy')
+    assert(
+      assignedBy.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(assignedBy),
+      400,
+      'invalid_request',
+      'assignedBy must be at most 256 characters and contain no control characters',
+    )
+    assert(
+      typeof this.store.replaceConsumerPlan === 'function',
+      503,
+      'plan_store_unavailable',
+      'Plan assignment requires the current Hub database migration',
+    )
+    return this.store.replaceConsumerPlan({
+      consumerId,
+      planVersionId,
+      expectedRevision: body.expectedRevision,
+      assignedBy,
+    })
+  }
+
+  async getApiKeyOverview(apiKeyIdInput) {
+    const apiKeyId = requiredUuid(apiKeyIdInput, 'apiKeyId')
+    const apiKey = (await this.store.listApiKeys()).find((candidate) => candidate.id === apiKeyId)
+    assert(apiKey, 404, 'api_key_not_found', 'API key not found')
+    const [platformEntitlements, capabilityEntitlements, plan, usage] = await Promise.all([
+      typeof this.store.listApiKeyPlatformEntitlements === 'function'
+        ? this.store.listApiKeyPlatformEntitlements(apiKeyId)
+        : [],
+      typeof this.store.listApiKeyCapabilityEntitlements === 'function'
+        ? this.store.listApiKeyCapabilityEntitlements(apiKeyId)
+        : [],
+      typeof this.store.getConsumerPlan === 'function'
+        ? this.store.getConsumerPlan(apiKey.consumerId)
+        : null,
+      this.store.usage({ apiKeyId }),
+    ])
+    return { apiKey, platformEntitlements, capabilityEntitlements, plan, usage }
+  }
+
+  async #effectivePlatformGrants(context) {
+    if (typeof this.store.listEffectiveGrants === 'function') {
+      return this.store.listEffectiveGrants(context.consumer.id, context.apiKey.id)
+    }
+    return this.store.listGrants(context.consumer.id)
+  }
+
+  async #effectiveCapabilityGrants(context) {
+    if (typeof this.store.listEffectiveCapabilityGrants === 'function') {
+      return this.store.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
+    }
+    return typeof this.store.listCapabilityGrants === 'function'
+      ? this.store.listCapabilityGrants(context.consumer.id)
+      : []
+  }
+
+  async #effectivePlatformPolicy(context, platform) {
+    const consumerPolicy = {
+      ...this.defaultPolicy,
+      ...((await this.store.getPolicy(context.consumer.id, platform)) || {}),
+    }
+    const entitlement = typeof this.store.getApiKeyPlatformEntitlement === 'function'
+      ? await this.store.getApiKeyPlatformEntitlement(context.apiKey.id, platform)
+      : null
+    const plan = typeof this.store.getConsumerPlan === 'function'
+      ? await this.store.getConsumerPlan(context.consumer.id)
+      : null
+    return {
+      ...consumerPolicy,
+      maxPageSize: entitlement
+        ? Math.min(
+            consumerPolicy.maxPageSize,
+            entitlement.maxPageSize,
+            plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY,
+          )
+        : Math.min(consumerPolicy.maxPageSize, plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY),
+    }
+  }
+
+  async #effectiveCapabilityPolicy(context, capability) {
+    return {
+      ...this.defaultPolicy,
+      ...((typeof this.store.getCapabilityPolicy === 'function'
+        ? await this.store.getCapabilityPolicy(context.consumer.id, capability)
+        : null) || {}),
+    }
   }
 
   async getPlatformConfiguration({ tenantId, consumerId }) {
@@ -497,6 +691,12 @@ export class HubService {
           ready: typeof this.store.getAdminPublicOpinionFunnel === 'function'
             && typeof this.store.listAdminPublicOpinionBrowseRecords === 'function'
             && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function',
+        },
+        {
+          capability: XIAOHONGSHU_POST_OPERATION,
+          ready: this.externalPostCapabilities
+            ? Boolean((await this.externalPostCapabilities()).ready)
+            : false,
         },
       ],
     }
@@ -569,7 +769,7 @@ export class HubService {
   }
 
   async capabilities(context) {
-    const grants = await this.store.listGrants(context.consumer.id)
+    const grants = await this.#effectivePlatformGrants(context)
     const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
     const localStoredPlatforms = new Set([
       'telegram',
@@ -580,9 +780,19 @@ export class HubService {
       ECOMMERCE_PLATFORM,
     ])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
-    const payload = nightAllGrants.length > 0
-      ? await this.adapter.capabilities(nightAllGrants)
-      : { data: { platforms: [], legacySearch: null } }
+    let payload = { data: { platforms: [], legacySearch: null } }
+    if (nightAllGrants.length > 0) {
+      try {
+        const upstream = await this.adapter.capabilities(nightAllGrants)
+        if (upstream?.data && Array.isArray(upstream.data.platforms)) payload = upstream
+        else this.logger?.warn?.('[night-all] capability response is unavailable or malformed')
+      } catch {
+        // Capability discovery is a composition of independent providers.  A
+        // Night-All outage must not hide Hub-native or direct TikHub abilities,
+        // nor should it log a potentially secret-bearing transport error.
+        this.logger?.warn?.('[night-all] capability discovery is unavailable')
+      }
+    }
     if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
@@ -770,9 +980,45 @@ export class HubService {
         }
       }
     }
-    const capabilityGrants = typeof this.store.listCapabilityGrants === 'function'
-      ? await this.store.listCapabilityGrants(context.consumer.id)
-      : []
+    const capabilityGrants = await this.#effectiveCapabilityGrants(context)
+    let externalPostCapability = null
+    if (
+      canonicalGrants.includes('xiaohongshu')
+      && capabilityGrants.includes(XIAOHONGSHU_POST_OPERATION)
+      && this.externalPostCapabilities
+    ) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms)) {
+        const capability = await this.externalPostCapabilities()
+        externalPostCapability = capability
+        const index = platforms.findIndex((entry) => (entry?.platform || entry) === 'xiaohongshu')
+        const postDetail = {
+          ready: isTestApiKey(context.apiKey) ? false : Boolean(capability.ready),
+          source: 'hub',
+          servingMode: capability.servingMode,
+          contractVersion: capability.contractVersion,
+          input: capability.input,
+          deliveryModes: capability.deliveryModes,
+        }
+        if (index < 0) {
+          platforms.push({
+            platform: 'xiaohongshu',
+            ready: postDetail.ready,
+            source: 'hub',
+            servingMode: capability.servingMode,
+            capabilities: ['post_detail'],
+            postDetail,
+          })
+        } else if (typeof platforms[index] === 'object') {
+          const current = platforms[index]
+          platforms[index] = {
+            ...current,
+            capabilities: [...new Set([...(current.capabilities || []), ...capability.capabilities])],
+            postDetail,
+          }
+        }
+      }
+    }
     const allIngestedReady = capabilityGrants.includes(PUBLIC_OPINION_ALL_INGESTED_CAPABILITY)
       ? await this.#publicOpinionRegionServingReady()
       : false
@@ -793,7 +1039,9 @@ export class HubService {
                 ? allIngestedReady
                 : capability === PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY
                   ? diagnosticsReady
-                  : false,
+                  : capability === XIAOHONGSHU_POST_OPERATION
+                    ? !isTestApiKey(context.apiKey) && Boolean(externalPostCapability?.ready)
+                    : false,
           })),
       },
     }
@@ -815,14 +1063,9 @@ export class HubService {
     assert(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text), 400, 'invalid_request', 'text contains unsupported control characters')
     assert(/[\p{L}\p{N}]/u.test(text), 400, 'invalid_request', 'text must contain at least one letter or number')
 
-    const grants = typeof this.store.listCapabilityGrants === 'function'
-      ? await this.store.listCapabilityGrants(context.consumer.id)
-      : []
+    const grants = await this.#effectiveCapabilityGrants(context)
     assert(grants.includes(TOKENIZE_CAPABILITY), 403, 'capability_not_granted', 'Capability is not granted')
-    const policy = {
-      ...this.defaultPolicy,
-      ...((await this.store.getCapabilityPolicy(context.consumer.id, TOKENIZE_CAPABILITY)) || {}),
-    }
+    const policy = await this.#effectiveCapabilityPolicy(context, TOKENIZE_CAPABILITY)
 
     const requestId = randomUUID()
     const startedAt = performance.now()
@@ -1762,9 +2005,7 @@ export class HubService {
       platformPolicy.maxPageSize,
       this.apiKeyPepper,
     )
-    const grants = typeof this.store.listCapabilityGrants === 'function'
-      ? await this.store.listCapabilityGrants(context.consumer.id)
-      : []
+    const grants = await this.#effectiveCapabilityGrants(context)
     assert(
       grants.includes(PUBLIC_OPINION_ALL_INGESTED_CAPABILITY),
       403,
@@ -2051,15 +2292,12 @@ export class HubService {
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const platform = canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
-    const grants = await this.store.listGrants(context.consumer.id)
+    const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
     if (!this.searchQueries?.searchContent) {
       throw new AppError(503, 'stored_search_unavailable', 'Stored search requires the PostgreSQL search layer')
     }
-    const policy = {
-      ...this.defaultPolicy,
-      ...((await this.store.getPolicy(context.consumer.id, platform)) || {}),
-    }
+    const policy = await this.#effectivePlatformPolicy(context, platform)
     const query = normalizeStoredSearchQuery(
       { ...body, platform },
       policy.maxPageSize,
@@ -2183,7 +2421,7 @@ export class HubService {
       'Idempotency-Key must contain 8-128 safe characters',
     )
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
-    const grants = [...new Set(await this.store.listGrants(context.consumer.id))].sort()
+    const grants = [...new Set(await this.#effectivePlatformGrants(context))].sort()
     assert(grants.length > 0, 403, 'platform_not_granted', 'At least one platform grant is required')
     const platform = body.platform == null ? null : canonicalPlatform(body.platform)
     if (platform) {
@@ -2193,10 +2431,10 @@ export class HubService {
     if (!this.searchQueries?.searchContent) {
       throw new AppError(503, 'canonical_search_unavailable', 'Canonical search requires the PostgreSQL search layer')
     }
-    const policies = await Promise.all(grants.map(async (name) => ({
-      ...this.defaultPolicy,
-      ...((await this.store.getPolicy(context.consumer.id, name)) || {}),
-    })))
+    const policies = await Promise.all(grants.map((name) => this.#effectivePlatformPolicy(context, name)))
+    const keyEntitlements = typeof this.store.getApiKeyPlatformEntitlement === 'function'
+      ? await Promise.all(grants.map((name) => this.store.getApiKeyPlatformEntitlement(context.apiKey.id, name)))
+      : policies
     // A unified read needs one stable, conservative quota policy. Its separate
     // usage bucket always applies the strictest request/page limit and longest
     // window across the consumer's complete current grant set. Using the same
@@ -2207,6 +2445,10 @@ export class HubService {
       maxRequests: Math.min(...policies.map((entry) => entry.maxRequests)),
       windowSeconds: Math.max(...policies.map((entry) => entry.windowSeconds)),
       maxPageSize: Math.min(...policies.map((entry) => entry.maxPageSize)),
+    }
+    const apiKeyQuota = {
+      maxRequests: Math.min(...keyEntitlements.map((entry) => entry?.maxRequests ?? this.defaultPolicy.maxRequests)),
+      windowSeconds: Math.max(...keyEntitlements.map((entry) => entry?.windowSeconds ?? this.defaultPolicy.windowSeconds)),
     }
     const query = normalizeCanonicalSearchQuery(
       { ...body, platform },
@@ -2261,6 +2503,8 @@ export class HubService {
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
+      apiKeyQuota,
+      authorizationPlatforms: grants,
       replayWindowMs: replayWindowFor(resultType),
     })
 
@@ -2331,12 +2575,9 @@ export class HubService {
   }
 
   async #storedPlatformPolicy(context, platform, label) {
-    const grants = await this.store.listGrants(context.consumer.id)
+    const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes(platform), 403, 'platform_not_granted', `${label} is not granted`)
-    return {
-      ...this.defaultPolicy,
-      ...((await this.store.getPolicy(context.consumer.id, platform)) || {}),
-    }
+    return this.#effectivePlatformPolicy(context, platform)
   }
 
   async #publicOpinionDiagnosticsPolicy(context) {
@@ -2345,24 +2586,17 @@ export class HubService {
       PUBLIC_OPINION_PLATFORM,
       'Public opinion',
     )
-    const grants = typeof this.store.listCapabilityGrants === 'function'
-      ? await this.store.listCapabilityGrants(context.consumer.id)
-      : []
+    const grants = await this.#effectiveCapabilityGrants(context)
     assert(
       grants.includes(PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY),
       403,
       'capability_not_granted',
       'Public-opinion diagnostics are not granted',
     )
-    const capabilityPolicy = {
-      ...this.defaultPolicy,
-      ...((typeof this.store.getCapabilityPolicy === 'function'
-        ? await this.store.getCapabilityPolicy(
-            context.consumer.id,
-            PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
-          )
-        : null) || {}),
-    }
+    const capabilityPolicy = await this.#effectiveCapabilityPolicy(
+      context,
+      PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+    )
     return {
       maxPageSize: platformPolicy.maxPageSize,
       policy: {
@@ -2566,7 +2800,7 @@ export class HubService {
       'external_media_unavailable',
       'Product image relay is unavailable',
     )
-    const grants = await this.store.listGrants(context.consumer.id)
+    const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes('ecommerce'), 403, 'platform_not_granted', 'Platform is not granted')
     const release = this.#enterExternalMedia(context.consumer.id)
     let releaseDeferred = false
@@ -2607,6 +2841,61 @@ export class HubService {
     }
   }
 
+  async socialPostImage(context, {
+    requestId,
+    mediaIndex,
+    signal,
+    deliveryComplete = null,
+  }) {
+    assert(
+      !isTestApiKey(context.apiKey),
+      403,
+      'test_key_not_supported',
+      'Test API keys cannot access external social media',
+    )
+    assert(
+      this.externalImageLoader && typeof this.store.getCommittedSocialPostMediaSource === 'function',
+      503,
+      'external_media_unavailable',
+      'Social image relay is unavailable',
+    )
+    const [platforms, capabilities] = await Promise.all([
+      this.#effectivePlatformGrants(context),
+      this.#effectiveCapabilityGrants(context),
+    ])
+    assert(platforms.includes('xiaohongshu'), 403, 'platform_not_granted', 'Platform is not granted')
+    assert(capabilities.includes(XIAOHONGSHU_POST_OPERATION), 403, 'capability_not_granted', 'Post detail is not granted')
+    const release = this.#enterExternalMedia(context.consumer.id)
+    let releaseDeferred = false
+    try {
+      const normalizedRequestId = requiredUuid(requestId, 'requestId')
+      const normalizedMediaIndex = Number(mediaIndex)
+      assert(
+        Number.isInteger(normalizedMediaIndex) && normalizedMediaIndex >= 0 && normalizedMediaIndex < 20,
+        400,
+        'invalid_request',
+        'mediaIndex must be an integer from 0 to 19',
+      )
+      const sourceUrl = await this.store.getCommittedSocialPostMediaSource({
+        requestId: normalizedRequestId,
+        consumerId: context.consumer.id,
+        mediaIndex: normalizedMediaIndex,
+      })
+      assert(sourceUrl, 404, 'external_media_not_found', 'Social image is not available for this request')
+      const media = await this.externalImageLoader(sourceUrl, {
+        signal,
+        cacheScope: context.consumer.id,
+      })
+      if (deliveryComplete && typeof deliveryComplete.then === 'function') {
+        releaseDeferred = true
+        Promise.resolve(deliveryComplete).then(release, release)
+      }
+      return media
+    } finally {
+      if (!releaseDeferred) release()
+    }
+  }
+
   async nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path }) {
     assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
@@ -2620,16 +2909,23 @@ export class HubService {
 
     const requestedPlatform = canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(requestedPlatform), 400, 'invalid_platform', 'A single explicit platform is required')
-    const grants = await this.store.listGrants(context.consumer.id)
+    const grants = await this.#effectivePlatformGrants(context)
     const matchingGrant = grants.find((grant) => canonicalPlatform(grant) === requestedPlatform)
     assert(matchingGrant, 403, 'platform_not_granted', 'Platform is not granted')
     const storedPolicy = (await this.store.getPolicy(context.consumer.id, requestedPlatform))
       || (matchingGrant !== requestedPlatform
         ? await this.store.getPolicy(context.consumer.id, matchingGrant)
         : null)
+    const keyEntitlement = typeof this.store.getApiKeyPlatformEntitlement === 'function'
+      ? await this.store.getApiKeyPlatformEntitlement(context.apiKey.id, matchingGrant)
+      : null
     const policy = {
       ...this.defaultPolicy,
       ...(storedPolicy || {}),
+      maxPageSize: Math.min(
+        storedPolicy?.maxPageSize || this.defaultPolicy.maxPageSize,
+        keyEntitlement?.maxPageSize || Number.POSITIVE_INFINITY,
+      ),
     }
     const normalized = normalizeNightAllCompatibilityRequest(operation, body, {
       businessId: context.consumer.businessId,
@@ -2976,7 +3272,7 @@ export class HubService {
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
     const query = requiredString(body.query, 'query')
     assert(query.length <= 500, 400, 'invalid_request', 'query must not exceed 500 characters')
-    const grants = await this.store.listGrants(context.consumer.id)
+    const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
     assert(
       platform !== PUBLIC_OPINION_PLATFORM,
@@ -2985,10 +3281,7 @@ export class HubService {
       'public_opinion is Hub-stored; use the province feed or canonical stored search',
     )
 
-    const policy = {
-      ...this.defaultPolicy,
-      ...((await this.store.getPolicy(context.consumer.id, platform)) || {}),
-    }
+    const policy = await this.#effectivePlatformPolicy(context, platform)
     const pageSize = positiveInteger(body.pageSize, 'pageSize', 20)
     assert(
       pageSize <= policy.maxPageSize,

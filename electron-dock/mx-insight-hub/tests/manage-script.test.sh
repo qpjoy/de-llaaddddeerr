@@ -264,6 +264,21 @@ assert_eq \
     0)" \
   'effective expiry overrides raw active status'
 
+assert_eq \
+  'rotate|11111111-1111-4111-8111-111111111111|legacy_scope_mode|1970-02-01T00:00:00.000Z' \
+  "$(MX_INSIGHT_BOOTSTRAP_PLATFORMS=xiaohongshu api_key_rotation_decision \
+    '{"data":[{"id":"11111111-1111-4111-8111-111111111111","prefix":"mih_live_rotation","lastFour":"1234","scopeMode":"legacy_dynamic","platforms":["xiaohongshu"],"capabilities":["social.posts.resolve"],"status":"active","effectiveStatus":"active","expiresAt":"1970-02-01T00:00:00.000Z"}]}' \
+    "$rotation_secret" \
+    0)" \
+  'operator-declared scopes rotate a grandfathered dynamic key'
+assert_eq \
+  'rotate|11111111-1111-4111-8111-111111111111|scope_change|1970-02-01T00:00:00.000Z' \
+  "$(MX_INSIGHT_BOOTSTRAP_PLATFORMS=xiaohongshu api_key_rotation_decision \
+    '{"data":[{"id":"11111111-1111-4111-8111-111111111111","prefix":"mih_live_rotation","lastFour":"1234","scopeMode":"snapshot","platforms":["xiaohongshu"],"capabilities":[],"status":"active","effectiveStatus":"active","expiresAt":"1970-02-01T00:00:00.000Z"}]}' \
+    "$rotation_secret" \
+    0)" \
+  'Xiaohongshu scope rotates a snapshot missing social.posts.resolve'
+
 # Reusing a healthy bootstrap key must not mint or rotate it. An operator can
 # explicitly add a newly approved platform to that same consumer, and deploy
 # output must never echo the retained plaintext key.
@@ -331,7 +346,7 @@ bash -c '
     case "$*" in
       *"/internal/v1/admin/api-keys"*)
         audit_curl_header key-list "x-mx-insight-admin-token: $MX_INSIGHT_ADMIN_TOKEN" "$@" || return
-        printf '\''{"data":[{"id":"33333333-3333-4333-8333-333333333333","prefix":"%s","lastFour":"%s","status":"active","effectiveStatus":"active","expiresAt":"2999-01-01T00:00:00.000Z"}]}'\'' "$REUSE_PREFIX" "$REUSE_LAST_FOUR"
+        printf '\''{"data":[{"id":"33333333-3333-4333-8333-333333333333","prefix":"%s","lastFour":"%s","scopeMode":"snapshot","platforms":["telegram"],"capabilities":[],"status":"active","effectiveStatus":"active","expiresAt":"2999-01-01T00:00:00.000Z"}]}'\'' "$REUSE_PREFIX" "$REUSE_LAST_FOUR"
         ;;
       *"-X PUT"*"/internal/v1/admin/platforms/telegram"*)
         audit_curl_header platform-grant "x-mx-insight-admin-token: $MX_INSIGHT_ADMIN_TOKEN" "$@" || return
@@ -373,6 +388,171 @@ grep -q 'stored in Secret mx-insight-hub-bootstrap (plaintext withheld)' "$reuse
 grep -q 'bash scripts/manage.sh verify-data-path' "$reuse_output"
 rm -f -- "$reuse_events" "$reuse_output" "$reuse_curl_audit"
 printf 'ok - bootstrap grant reconciliation protects credentials and deploy output withholds keys\n'
+
+# A retained key must reconcile an explicitly selected plan before reporting a
+# successful reuse. The request body is generated structurally rather than by
+# interpolating operator input into JSON.
+plan_reuse_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-plan-reuse.XXXXXX")"
+plan_reuse_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-plan-output.XXXXXX")"
+plan_reuse_secret='mih_live_plan_reuse_material_0001'
+plan_reuse_encoded="$(printf '%s' "$plan_reuse_secret" | base64)"
+plan_reuse_tenant_encoded="$(printf '%s' 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' | base64)"
+plan_reuse_consumer_encoded="$(printf '%s' 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' | base64)"
+PLAN_REUSE_EVENTS="$plan_reuse_events" \
+PLAN_REUSE_SECRET="$plan_reuse_secret" \
+PLAN_REUSE_ENCODED="$plan_reuse_encoded" \
+PLAN_REUSE_TENANT_ENCODED="$plan_reuse_tenant_encoded" \
+PLAN_REUSE_CONSUMER_ENCODED="$plan_reuse_consumer_encoded" \
+MX_INSIGHT_ADMIN_TOKEN='plan-reuse-admin-token-with-at-least-32-bytes' \
+MX_INSIGHT_BOOTSTRAP_PLAN_KEY='launch-1m' \
+NIGHT_ALL_BASE_URL='' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    case "$*" in
+      *"MX_INSIGHT_API_KEY"*) printf "%s" "$PLAN_REUSE_ENCODED" ;;
+      *"MX_INSIGHT_TENANT_ID"*) printf "%s" "$PLAN_REUSE_TENANT_ENCODED" ;;
+      *"MX_INSIGHT_CONSUMER_ID"*) printf "%s" "$PLAN_REUSE_CONSUMER_ENCODED" ;;
+      *) return 1 ;;
+    esac
+  }
+  curl() {
+    case "$*" in
+      *"/internal/v1/admin/api-keys"*)
+        printf '\''{"data":[{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","prefix":"mih_live_plan","lastFour":"0001","scopeMode":"snapshot","platforms":[],"capabilities":[],"status":"active","effectiveStatus":"active","expiresAt":"2999-01-01T00:00:00.000Z"}]}'\''
+        ;;
+      *"/internal/v1/admin/plans?consumerId="*)
+        printf '\''{"data":{"currentPlan":{"versionId":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","revision":7},"catalog":[{"key":"launch-1m","status":"active","versionStatus":"published","versionId":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","version":1}]}}'\''
+        ;;
+      *"-X PUT"*"/internal/v1/admin/consumers/"*"/plan"*)
+        capture_next=0
+        request_body=""
+        for argument in "$@"; do
+          if [ "$capture_next" = "1" ]; then request_body="$argument"; break; fi
+          [ "$argument" = "--data" ] && capture_next=1
+        done
+        printf "plan:%s\n" "$request_body" >>"$PLAN_REUSE_EVENTS"
+        printf '\''{"data":{"versionId":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","revision":8}}'\''
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  node() {
+    case "$*" in
+      *"scripts/provision.mjs"*) printf "mint\n" >>"$PLAN_REUSE_EVENTS"; return 1 ;;
+      *) command node "$@" ;;
+    esac
+  }
+  ensure_default_api_key
+' _ "$ROOT_DIR" >"$plan_reuse_output" 2>&1
+assert_eq \
+  'plan:{"planVersionId":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","expectedRevision":7}' \
+  "$(cat "$plan_reuse_events")" \
+  'retained bootstrap key reconciles its explicit plan without minting'
+grep -q 'Reconciled explicit bootstrap plan: launch-1m v1' "$plan_reuse_output"
+grep -q 'Reusing stored bootstrap API key' "$plan_reuse_output"
+rm -f -- "$plan_reuse_events" "$plan_reuse_output"
+printf 'ok - retained bootstrap key reconciles plan before successful reuse\n'
+
+# Explicit scope is a delivery contract: a failed grant must stop deploy before
+# it can claim the stored key is ready or mint an unrelated replacement.
+scope_failure_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-scope-failure.XXXXXX")"
+scope_failure_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-scope-output.XXXXXX")"
+scope_failure_secret='mih_live_scope_failure_material_0002'
+scope_failure_encoded="$(printf '%s' "$scope_failure_secret" | base64)"
+scope_failure_tenant_encoded="$(printf '%s' '11111111-aaaa-4111-8111-111111111111' | base64)"
+scope_failure_consumer_encoded="$(printf '%s' '22222222-bbbb-4222-8222-222222222222' | base64)"
+if SCOPE_FAILURE_EVENTS="$scope_failure_events" \
+  SCOPE_FAILURE_ENCODED="$scope_failure_encoded" \
+  SCOPE_FAILURE_TENANT_ENCODED="$scope_failure_tenant_encoded" \
+  SCOPE_FAILURE_CONSUMER_ENCODED="$scope_failure_consumer_encoded" \
+  MX_INSIGHT_ADMIN_TOKEN='scope-failure-admin-token-with-at-least-32-bytes' \
+  MX_INSIGHT_BOOTSTRAP_PLATFORMS='telegram' \
+  NIGHT_ALL_BASE_URL='' \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    kubectl() {
+      case "$*" in
+        *"MX_INSIGHT_API_KEY"*) printf "%s" "$SCOPE_FAILURE_ENCODED" ;;
+        *"MX_INSIGHT_TENANT_ID"*) printf "%s" "$SCOPE_FAILURE_TENANT_ENCODED" ;;
+        *"MX_INSIGHT_CONSUMER_ID"*) printf "%s" "$SCOPE_FAILURE_CONSUMER_ENCODED" ;;
+        *) return 1 ;;
+      esac
+    }
+    curl() {
+      case "$*" in
+        *"/internal/v1/admin/api-keys"*)
+          printf '\''{"data":[{"id":"33333333-cccc-4333-8333-333333333333","prefix":"mih_live_scope","lastFour":"0002","scopeMode":"snapshot","platforms":["telegram"],"capabilities":[],"status":"active","effectiveStatus":"active","expiresAt":"2999-01-01T00:00:00.000Z"}]}'\''
+          ;;
+        *"-X PUT"*"/internal/v1/admin/platforms/telegram"*) return 22 ;;
+        *) return 1 ;;
+      esac
+    }
+    node() {
+      case "$*" in
+        *"scripts/provision.mjs"*) printf "mint\n" >>"$SCOPE_FAILURE_EVENTS"; return 1 ;;
+        *) command node "$@" ;;
+      esac
+    }
+    ensure_default_api_key
+  ' _ "$ROOT_DIR" >"$scope_failure_output" 2>&1; then
+  printf 'not ok - explicit bootstrap scope failure did not stop deploy\n' >&2
+  exit 1
+fi
+assert_eq '' "$(cat "$scope_failure_events")" 'failed retained-key scope reconciliation never mints'
+grep -q 'explicit bootstrap configuration could not be reconciled' "$scope_failure_output"
+if grep -q 'Reusing stored bootstrap API key' "$scope_failure_output"; then
+  printf 'not ok - failed explicit scope reconciliation claimed successful key reuse\n' >&2
+  exit 1
+fi
+if grep -Fq "$scope_failure_secret" "$scope_failure_output"; then
+  printf 'not ok - failed explicit scope reconciliation exposed the API key\n' >&2
+  exit 1
+fi
+rm -f -- "$scope_failure_events" "$scope_failure_output"
+printf 'ok - explicit retained-key scope reconciliation fails closed\n'
+
+# Preserve historical best-effort behavior only when no bootstrap contract is
+# declared; the same provisioning failure is fatal once a capability is named.
+provision_failure_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-provision-failure.XXXXXX")"
+if MX_INSIGHT_ADMIN_TOKEN='provision-admin-token-with-at-least-32-bytes' \
+  MX_INSIGHT_BOOTSTRAP_CAPABILITIES='nlp.tokenize' \
+  NIGHT_ALL_BASE_URL='' \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    kubectl() { return 0; }
+    node() {
+      case "$*" in
+        *"scripts/provision.mjs"*) return 1 ;;
+        *) command node "$@" ;;
+      esac
+    }
+    ensure_default_api_key
+  ' _ "$ROOT_DIR" >"$provision_failure_output" 2>&1; then
+  printf 'not ok - explicit bootstrap provisioning failure did not stop deploy\n' >&2
+  exit 1
+fi
+grep -q 'explicit bootstrap API-key provisioning failed' "$provision_failure_output"
+MX_INSIGHT_ADMIN_TOKEN='provision-admin-token-with-at-least-32-bytes' \
+NIGHT_ALL_BASE_URL='' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { return 0; }
+  node() {
+    case "$*" in
+      *"scripts/provision.mjs"*) return 1 ;;
+      *) command node "$@" ;;
+    esac
+  }
+  ensure_default_api_key
+' _ "$ROOT_DIR" >>"$provision_failure_output" 2>&1
+grep -q 'WARNING: bootstrap API-key provisioning failed' "$provision_failure_output"
+rm -f -- "$provision_failure_output"
+printf 'ok - explicit bootstrap provisioning fails closed while legacy bootstrap remains best effort\n'
 
 # Rotation is overlap-safe: mint and persist the replacement before revoking
 # the old key. Stubs record externally visible ordering while the real decision

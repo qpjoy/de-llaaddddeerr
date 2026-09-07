@@ -164,8 +164,8 @@ async function publicDataRequest(apiKey, path, {
   return { payload, evidence }
 }
 
-async function publicDataImage(apiKey, query, { signal } = {}) {
-  const response = await fetch(`${publicApiBase()}/api/v1/data/ecommerce/products/media${queryString(query)}`, {
+async function publicDataImage(apiKey, path, query, { signal } = {}) {
+  const response = await fetch(`${publicApiBase()}${path}${queryString(query)}`, {
     signal,
     headers: {
       accept: 'image/webp,image/png,image/jpeg',
@@ -209,9 +209,21 @@ export const publicDataApi = {
     '/api/v1/data/ecommerce/products/search',
     { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
+  xiaohongshuNote: (apiKey, body, { idempotencyKey, retryOfRequestId, signal } = {}) => publicDataRequest(
+    apiKey,
+    '/api/v1/data/post',
+    { method: 'POST', body, idempotencyKey, retryOfRequestId, signal },
+  ),
   ecommerceProductImage: (apiKey, { requestId, itemId, imageIndex = 0 }, { signal } = {}) => publicDataImage(
     apiKey,
+    '/api/v1/data/ecommerce/products/media',
     { requestId, itemId, imageIndex },
+    { signal },
+  ),
+  socialPostImage: (apiKey, { requestId, mediaIndex = 0 }, { signal } = {}) => publicDataImage(
+    apiKey,
+    '/api/v1/data/posts/media',
+    { requestId, mediaIndex },
     { signal },
   ),
 }
@@ -279,7 +291,14 @@ export const adminApi = {
   createConsumer: (token, body) => request(token, `${ADMIN_ROOT}/consumers`, { method: 'POST', body }),
   apiKeys: (token, consumerId) => request(token, `${ADMIN_ROOT}/api-keys`, { query: { consumerId } }),
   createApiKey: (token, body) => request(token, `${ADMIN_ROOT}/api-keys`, { method: 'POST', body }),
+  apiKeyOverview: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/overview`),
   revokeApiKey: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
+  plans: (token, consumerId) => request(token, `${ADMIN_ROOT}/plans`, { query: { consumerId } }),
+  assignConsumerPlan: (token, consumerId, body) => request(
+    token,
+    `${ADMIN_ROOT}/consumers/${encodeURIComponent(consumerId)}/plan`,
+    { method: 'PUT', body },
+  ),
   platforms: (token, query) => request(token, `${ADMIN_ROOT}/platforms`, { query }),
   updatePlatform: (token, platform, body) => request(
     token,

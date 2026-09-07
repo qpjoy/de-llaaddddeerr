@@ -1,21 +1,26 @@
 # External data platform gateway operations
 
-Status: JustOne ecommerce product search implemented; PostgreSQL required for durable analytics, archive,
-snapshot and canonical lineage.
+Status: JustOne ecommerce product search and direct TikHub Xiaohongshu note acquisition implemented;
+PostgreSQL required for durable analytics, archive, snapshot, quota and canonical lineage.
 
 Related decision: [ADR-0013](../adr/0013-external-data-platform-gateway.md).
 
 ## 1. Operational boundary
 
 This gateway handles provider-backed realtime external acquisition, which may consume quota or incur Hub
-procurement cost, separately from scheduled cleaning jobs. Its first
-provider is JustOne, but public callers use only the Hub-owned
-`POST /api/v1/data/ecommerce/products/search` contract and the `ecommerce` grant.
+procurement cost, separately from scheduled cleaning jobs. Public callers use only Hub-owned contracts:
 
-The current deployed topology is single-provider: JustOne is the only ecommerce adapter and there is no
-multi-provider runtime router or automatic supplier failover. “Provider-neutral” describes the Public Hub
-contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot delivery modes, not evidence that another
-provider was called. Provider candidates shown in a catalog remain planning evidence until released.
+- `POST /api/v1/data/ecommerce/products/search` with the `ecommerce` platform entitlement;
+- `POST /api/v1/data/post` with both the `xiaohongshu` platform entitlement and
+  `social.posts.resolve` capability entitlement. The legacy spelling
+  `/api/v1/xiaohongshu/app/get_note_info` is an alias of the same canonical operation, not a second route to
+  purchase or meter independently.
+
+The current topology has one provider per released operation: JustOne for ecommerce search and TikHub for
+Xiaohongshu note detail. There is no multi-provider runtime router or automatic supplier failover.
+“Provider-neutral” describes the Public Hub contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot
+delivery modes, not evidence that another provider was called. Provider candidates shown in a catalog remain
+planning evidence until released.
 
 The same public search accepts a provider-neutral `deliveryMode`: `cache_only` forbids provider dispatch,
 `cache_first` preserves the compatible fresh-cache-first behavior, and `refresh` explicitly permits one new
@@ -24,6 +29,7 @@ acquisition and requires a caller-supplied `Idempotency-Key`. This field does no
 The feature is additive:
 
 - an absent JustOne credential disables only new JustOne dispatches;
+- an absent TikHub credential disables only new Xiaohongshu note dispatches;
 - exact last-good snapshots may remain available until their stale deadline;
 - Hub stored search, cleaning jobs and canonical data continue independently;
 - Launcher, SessionGate, MX-H2I login, WireGuard, DNS and user networking have no dependency on this
@@ -34,12 +40,20 @@ cost requires an explicit operator decision.
 
 ## 2. Activation checklist
 
-1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql` and
-   `052_external_platform_credentials.sql` and
-   `053_external_platform_uncertain_retry.sql` are applied.
+1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql`,
+   `052_external_platform_credentials.sql`, `053_external_platform_uncertain_retry.sql` and
+   `054_api_key_entitlements_plans_and_tikhub.sql` are applied. Install
+   `scripts/api-key-quota-indexes.sql` through the documented concurrent-index phase after migration 054.
    Do not create or patch the `external_platform` tables by hand.
 2. Use PostgreSQL storage (`MX_INSIGHT_STORE=postgres` with `DATABASE_URL`). Memory mode is acceptable only
    for contract tests; it cannot be accepted as durable archive/lineage evidence.
+   When bootstrap explicitly includes `xiaohongshu`, keep
+   `MX_INSIGHT_BOOTSTRAP_PLAN_KEY=launch-1m` (the default). Provisioning resolves that key to the current
+   active published version and CAS-reconciles an existing consumer before any API key is minted. Reusing a
+   retained snapshot key reconciles the declared plan first as well. A missing version, stale revision, failed
+   assignment or failed scope grant aborts an explicitly configured deploy before it can report the key ready;
+   it never falls through to a legacy-unmetered Xiaohongshu key. Deployments with no explicit bootstrap plan,
+   platform or capability retain the historical best-effort behavior.
 3. Prefer **数据清洗中心 → 外部数据平台 → JustOne → API Key 管理** for a new or rotated key. The password
    input is never prefilled. Ordinary Admin responses expose only safe credential metadata; reveal/copy
    requires a second Admin Token check and the plaintext exists only in the open modal. Saving a key does
@@ -70,9 +84,10 @@ cost requires an explicit operator decision.
 7. Grant `ecommerce` only to the intended consumer and set its request/window/page policy through the
    existing platform administration workflow. A source-catalog entry or API key alone does not grant access.
    External ecommerce search and media accept only an active `mih_live_` Hub Public API Key; no separate
-   product key is issued. Existing Live keys already resolve to that consumer and need no credential-row
-   migration: applying the normal migrations is sufficient, and enabling the grant makes all active keys of
-   that consumer eligible under the same policy.
+   product key is issued. For a new key, grant the intended platform/capability first and then issue the key:
+   its entitlement snapshot is immutable and a later consumer grant does not widen it. Consumer revocation or
+   plan reduction still narrows effective access immediately. Keys migrated as `legacy_dynamic` retain only
+   bounded compatibility behavior and should be replaced deliberately, not treated as the model for new keys.
 8. Leave `MX_INSIGHT_JUSTONE_BILLING_JSON` absent until a price book is reviewed. Current configuration
    accepts only `source=manual`; price records require a three-letter currency and `pricingAsOf`. A missing
    price, balance or free quota must remain null/unknown, not zero.
@@ -89,6 +104,46 @@ UI-managed database key is retained independently in PostgreSQL and remains the
 preferred credential source. Command-environment values take precedence over
 `.env.internal` for an intentional activation or emergency stop.
 
+### Direct TikHub / Xiaohongshu activation
+
+The Hub adapter is pinned to TikHub's App V2 note-detail operation and accepts only an official Xiaohongshu note
+or share URL. Mainland deployments use `https://api.tikhub.dev`; deployments outside mainland China retain
+`https://api.tikhub.io`. Arbitrary provider origins fail at startup. Keep
+`MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0` until a redacted fixture from the actual account verifies the response
+shape, billing classification and one bounded live smoke. An HTTP/business success with unusable note content is
+quarantined and must not be retried automatically because the upstream call may already have been charged.
+
+Prefer the Hub Admin credential UI for a new key. To copy the existing Night-All credential without printing it,
+run the checked migration helper on the Internal host. It reads only
+`crawlerProviders.tikhub.apiKey`, rejects symlinks or group/world-readable configuration, uses optimistic
+credential revision, never logs plaintext and never removes or rewrites the Night-All source file:
+
+```bash
+cd electron-dock/mx-insight-hub
+export NIGHT_ALL_CONFIG_PATH='/Users/qpjoy/workspace/mingxi/Night-All/config.json'
+export MX_INSIGHT_ADMIN_BASE_URL='http://127.0.0.1:18151'
+read -rsp 'Hub Admin Token: ' MX_INSIGHT_ADMIN_TOKEN
+printf '\n'
+export MX_INSIGHT_ADMIN_TOKEN
+
+MX_INSIGHT_TIKHUB_MIGRATION_DRY_RUN=1 npm run migrate:tikhub-credential
+npm run migrate:tikhub-credential
+
+unset MX_INSIGHT_ADMIN_TOKEN NIGHT_ALL_CONFIG_PATH MX_INSIGHT_ADMIN_BASE_URL
+```
+
+Dry-run validates the source and target revision but performs no write. After the real migration, inspect only
+safe credential metadata, persist the independently reviewed gate/base URL in the release environment, deploy
+the Hub data plane, and issue a new Live key whose immutable snapshot contains both `xiaohongshu` and
+`social.posts.resolve`. Never delete the Night-All credential until the Hub rollback window has closed.
+
+Defaults are deliberately cache-heavy and bounded: exact successful note results remain fresh for 24 hours and
+eligible for stored fallback for 30 days; request-local confirmed missing notes receive a negative cache. The
+provider acquisition ceiling defaults to eight globally and eight per consumer. This limit governs paid note
+acquisition, not image reads. The authenticated media relay separately allows 16 in-flight reads per consumer
+and 32 globally, while browser clients default to 12 concurrent image loads with duplicate coalescing and a
+bounded in-process cache.
+
 ## 3. Management views and credential operations
 
 The management page **数据清洗中心 → 外部数据平台** reads these Internal Admin endpoints:
@@ -96,17 +151,19 @@ The management page **数据清洗中心 → 外部数据平台** reads these In
 ```text
 GET /internal/v1/admin/external-platforms?range=24h|7d|30d
 GET /internal/v1/admin/external-platforms/justone?range=24h|7d|30d
+GET /internal/v1/admin/external-platforms/tikhub?range=24h|7d|30d
 ```
 
-Both retain the Admin-token-only source-management boundary. A Launcher session, including a platform admin
+All retain the Admin-token-only source-management boundary. A Launcher session, including a platform admin
 membership, is not sufficient. Unknown query fields fail with `400 unsupported_fields`; an unsupported range
 fails with `400 invalid_range`.
 
-The JustOne detail page also provides the only browser credential workflow:
+Each provider detail page provides the corresponding browser credential workflow. Replace `{provider}` with
+`justone` or `tikhub`:
 
-- save/rotate through `PUT /internal/v1/admin/external-platforms/justone/credential` with `apiKey` and the
+- save/rotate through `PUT /internal/v1/admin/external-platforms/{provider}/credential` with `apiKey` and the
   currently displayed `expectedRevision`;
-- reveal through `POST /internal/v1/admin/external-platforms/justone/credential/reveal`, re-entering the
+- reveal through `POST /internal/v1/admin/external-platforms/{provider}/credential/reveal`, re-entering the
   Admin Token in the request body;
 - environment-managed keys are marked configured but not revealable; enter the value again to migrate it;
 - successful save clears the input, and closing the reveal dialog clears both the reauthentication value and
@@ -122,6 +179,7 @@ Troubleshoot credentials from the outside inward; do not replace one key because
 | --- | --- | --- |
 | Internal external-platform management | Hub Admin Token only | Missing management auth is `401 admin_auth_required`; a Launcher session or Hub Public API key is `403 admin_token_required`. Provider credential reveal additionally returns `403 admin_token_reauthentication_required` when the re-entered Admin Token is absent or wrong. |
 | Public ecommerce with a Live key | Ordinary `mih_live_` Hub Public API Key in bearer or `x-api-key` form | Missing is `401 api_key_required`; invalid, expired or revoked is `401 invalid_api_key`; valid but without `ecommerce` on its owning consumer is `403 platform_not_granted`. No ecommerce-specific key exists. |
+| Public Xiaohongshu note with a Live key | Ordinary `mih_live_` Hub Public API Key in bearer or `x-api-key` form | The immutable key snapshot and current consumer authorization must both include `xiaohongshu` and `social.posts.resolve`. Missing platform is `403 platform_not_granted`; missing capability is `403 capability_not_granted`. |
 | Public ecommerce with a legacy Test key | Ordinary Hub Public API Key carrying compatibility `environment=test` metadata | With an ecommerce grant, capabilities keeps the entry but reports `ready=false`; search and media return `403 test_key_not_supported` before usage reservation, stored-result/media lookup or provider dispatch. It is not a sandbox. |
 | Hub request policy | Authenticated and granted consumer | `429 quota_exceeded` is consumer quota; `429 external_platform_busy` is Hub concurrency protection. Neither is a provider-key prompt. |
 | Internal provider dispatch | Server-held JustOne API Key | The caller never supplies it. Missing configuration, upstream credential rejection, balance or provider capacity is sanitized as an external-platform availability/capacity error. It must not become Public `invalid_api_key`. |
@@ -449,6 +507,7 @@ then evaluate quota plan or recharge.
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
 | `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
+| `external_media_source_throttled` | The retained image origin/CDN returned HTTP 429; this is not a Hub consumer quota or relay-concurrency limit. | Do not retry automatically or run another paid data request. Inspect the retained host and origin policy, then wait or serve a durable Hub-owned asset once materialization is enabled. |
 | `external_media_unavailable` | A retained product image reached the media relay, but its upstream host returned a non-200 response or the TLS/transport request failed. | Reuse the committed search request while checking the retained image hostname and CDN response; do not run another paid search. Known legacy Alibaba `g.search[1-3].alicdn.com` names are mapped to their TLS-valid `g-search1-3.alicdn.com` aliases without disabling certificate validation. |
 | `invalid_uncertain_retry` | Retry-of is malformed or is not paired with `refresh`. | Do not hand-edit the UUID. Let the workbench obtain it through the status GET and construct the header. |
 | `uncertain_retry_not_allowed` | The old idempotency key was reused, or the referenced record is absent, already consumed, not eligible `unknown`, or does not match the same consumer/ecommerce fingerprint. The same response hides cross-consumer records. | Keep the old evidence. Do not retry or probe another identifier; `reserved` and succeeded-unusable quarantine are not overrideable. |
@@ -466,6 +525,13 @@ a database-managed key exists. If the deployment still uses the environment fall
 same time by prefixing that deploy with
 `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`. Exact stored fallback may continue until `staleUntil`; afterward
 Public API returns unavailable.
+
+TikHub is independently disabled with `MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0`; remove a retained environment
+fallback only with the one-shot `MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY=1` deploy flag. This does not disable JustOne,
+cached/stored Hub data, Launcher or MX-H2I. A 429 from `external_platform_capacity_exceeded` means the upstream
+response was classified as rate/quota capacity exhaustion; it is not evidence by itself of an IP or domain
+block. `quota_exceeded`, `external_platform_busy` and `external_media_rate_limited` are separate Hub-owned 429
+classes. Preserve request ID and sanitized provider evidence before changing concurrency or credentials.
 
 Keep the prior release's environment secret available for the whole rollback window before migrating source
 authority to the database; an older binary cannot read migration 052's credential row. Conversely, rolling

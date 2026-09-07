@@ -69,7 +69,7 @@ test('external-platform page supports JustOne detail without changing session ga
   assert.match(route, /platformAdmin: true/u)
   assert.match(route, /adminTokenOnly: true/u)
   assert.match(pageSource, /query\.get\('provider'\)/u)
-  assert.match(pageSource, /provider !== 'justone'/u)
+  assert.match(pageSource, /const SUPPORTED_PROVIDERS = new Set\(\['justone', 'tikhub'\]\)[\s\S]*?provider && !SUPPORTED_PROVIDERS\.has\(provider\)/u)
   assert.match(pageSource, /adminApi\.externalPlatform\(token, provider, \{ range \}\)/u)
   assert.doesNotMatch(pageSource, /<select\b/iu)
   assert.match(pageSource, /<DropdownField/u)

@@ -308,6 +308,122 @@ function assertExternalCommerceContract(document) {
   })
 }
 
+function assertExternalSocialPostContract(document) {
+  const canonical = document.paths['/data/post']?.post
+  const compatibility = document.paths['/xiaohongshu/app/get_note_info']?.post
+  const media = document.paths['/data/posts/media']?.get
+  assert.ok(canonical)
+  assert.ok(compatibility)
+  assert.ok(media)
+  assert.equal(canonical.operationId, 'resolveExternalSocialPost')
+  assert.equal(compatibility.operationId, 'getXiaohongshuNoteInfoCompatibility')
+  assert.equal(compatibility.deprecated, true)
+  assert.equal(canonical['x-mx-canonical-operation'], '/data/post')
+  assert.equal(compatibility['x-mx-canonical-operation'], '/data/post')
+  assert.doesNotMatch(
+    JSON.stringify({ canonical, compatibility, media }),
+    FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS,
+  )
+  assert.deepEqual(canonical['x-mx-error-codes'][403], [
+    'platform_not_granted', 'capability_not_granted', 'test_key_not_supported',
+  ])
+  assert.deepEqual(canonical['x-mx-error-codes'][429], [
+    'quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded',
+  ])
+  assert.deepEqual(compatibility['x-mx-error-codes'], canonical['x-mx-error-codes'])
+  assert.equal(
+    canonical.requestBody.content['application/json'].schema.$ref,
+    '#/components/schemas/XiaohongshuPostRequest',
+  )
+  assert.equal(
+    compatibility.requestBody.content['application/json'].schema.$ref,
+    '#/components/schemas/XiaohongshuPostCompatibilityRequest',
+  )
+  for (const operation of [canonical, compatibility]) {
+    assert.deepEqual(operation.parameters.map(({ name }) => name), [
+      'Idempotency-Key', 'X-MX-Insight-Retry-Of',
+    ])
+    assert.equal(
+      operation.responses[200].content['application/json'].schema.$ref,
+      '#/components/schemas/ExternalSocialPostEnvelope',
+    )
+    assert.deepEqual(
+      operation.responses[200].headers['x-mx-insight-source-mode'].schema.enum,
+      ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+    )
+  }
+
+  const request = document.components.schemas.XiaohongshuPostRequest
+  const compatibilityRequest = document.components.schemas.XiaohongshuPostCompatibilityRequest
+  const post = document.components.schemas.ExternalSocialPost
+  const envelope = document.components.schemas.ExternalSocialPostEnvelope
+  assert.equal(request.additionalProperties, false)
+  assert.deepEqual(request.required, ['platform', 'url'])
+  assert.deepEqual(Object.keys(request.properties), ['platform', 'url', 'deliveryMode'])
+  assert.equal(request.properties.platform.const, 'xiaohongshu')
+  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh'])
+  assert.equal(compatibilityRequest.additionalProperties, false)
+  assert.deepEqual(compatibilityRequest.required, ['url'])
+  assert.equal(post.additionalProperties, false)
+  assert.deepEqual(Object.keys(post.properties), [
+    'id', 'externalId', 'platform', 'contentType', 'url', 'title', 'text', 'tags',
+    'author', 'metrics', 'media', 'publishedAt', 'collectedAt',
+  ])
+  assert.equal(post.properties.media.maxItems, 20)
+  assert.equal(
+    post.properties.media.items.$ref,
+    '#/components/schemas/ExternalSocialPostMedia',
+  )
+  const socialMedia = document.components.schemas.ExternalSocialPostMedia
+  assert.equal(socialMedia.properties.url.format, 'uri-reference')
+  assert.match(socialMedia.properties.url.pattern, /\/api\/v1\/data\/posts\/media/)
+  assert.match(socialMedia.properties.url.description, /never an upstream URL/i)
+  assert.match(post.properties.author.properties.avatarUrl.description, /upstream avatar URLs are never exposed/i)
+  assert.match(canonical.description, /upstream media(?: or |\/)avatar URLs/i)
+  assert.equal(envelope.properties.contractVersion.const, 'mx-insight-hub.social-post.v1')
+  assert.deepEqual(envelope.properties.data.required, ['item'])
+  assert.equal(
+    envelope.properties.data.properties.item.$ref,
+    '#/components/schemas/ExternalSocialPost',
+  )
+
+  assert.equal(media.operationId, 'getExternalSocialPostMedia')
+  assert.deepEqual(media.parameters.map(({ name }) => name), ['requestId', 'mediaIndex'])
+  assert.equal(media.parameters.every(({ required }) => required), true)
+  assert.equal(media.parameters[0].schema.format, 'uuid')
+  assert.equal(media.parameters[1].schema.minimum, 0)
+  assert.equal(media.parameters[1].schema.maximum, 19)
+  assert.deepEqual(Object.keys(media.responses[200].content).sort(), [
+    'image/jpeg', 'image/png', 'image/webp',
+  ])
+  assert.deepEqual(media['x-mx-error-codes'][429], [
+    'external_media_rate_limited', 'external_media_busy',
+  ])
+  assert.deepEqual(media['x-mx-error-codes'][502], [
+    'external_media_unavailable', 'external_media_redirect_rejected',
+    'external_media_source_throttled',
+  ])
+  assert.match(media.description, /Multiple (?:image )?reads (?:may|can) run concurrently/i)
+  assert.match(media.description, /creates no Hub usage/i)
+
+  const capabilitiesContent = document.paths['/data/capabilities'].get.responses[200]
+    .content['application/json']
+  const xiaohongshu = capabilitiesContent.example.data.platforms
+    .find(({ platform }) => platform === 'xiaohongshu')
+  assert.deepEqual(xiaohongshu.capabilities, ['post_detail'])
+  assert.equal(xiaohongshu.postDetail.contractVersion, 'mx-insight-hub.social-post.v1')
+  assert.equal(xiaohongshu.postDetail.servingMode, 'live_with_stored_fallback')
+  assert.deepEqual(xiaohongshu.postDetail.deliveryModes, [
+    'cache_only', 'cache_first', 'refresh',
+  ])
+  assert.deepEqual(
+    capabilitiesContent.example.data.capabilities.find(
+      ({ capability }) => capability === 'social.posts.resolve',
+    ),
+    { capability: 'social.posts.resolve', ready: true },
+  )
+}
+
 function assertCanonicalContextContract(document) {
   const route = document.paths['/data/canonical/items/{id}/context']?.get
   assert.ok(route)
@@ -545,7 +661,10 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
   assert.deepEqual(
     capabilitiesEnvelope.properties.data.properties.capabilities
       .items.properties.capability.enum,
-    ['nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read'],
+    [
+      'nlp.tokenize', 'public_opinion.all_ingested.read',
+      'public_opinion.diagnostics.read', 'social.posts.resolve',
+    ],
   )
 
   const chats = document.paths['/data/telegram/chats'].get
@@ -638,10 +757,12 @@ function assertNightAllPublicContract(document) {
   const telegram = capabilitiesExample.data.platforms.find(({ platform }) => platform === 'telegram')
   assert.equal(telegram.source, 'hub')
   assert.equal(telegram.servingMode, 'stored')
-  for (const platform of ['xiaohongshu', 'twitter']) {
-    const entry = capabilitiesExample.data.platforms.find((candidate) => candidate.platform === platform)
-    assert.equal(entry.capabilities, undefined)
-  }
+  const xiaohongshu = capabilitiesExample.data.platforms
+    .find((candidate) => candidate.platform === 'xiaohongshu')
+  assert.deepEqual(xiaohongshu.capabilities, ['post_detail'])
+  const twitter = capabilitiesExample.data.platforms
+    .find((candidate) => candidate.platform === 'twitter')
+  assert.equal(twitter.capabilities, undefined)
   assert.equal(
     capabilitiesExample.data.legacySearch.contractVersion,
     NIGHT_ALL_LEGACY_SEARCH_CONTRACT_VERSION,
@@ -749,7 +870,7 @@ function assertPublicOpinionContract(document) {
   ).properties.data.properties.capabilities.items.properties.capability
   assert.deepEqual(capabilities.enum, [
     'nlp.tokenize', 'public_opinion.all_ingested.read',
-    'public_opinion.diagnostics.read',
+    'public_opinion.diagnostics.read', 'social.posts.resolve',
   ])
   assert.deepEqual(
     capabilitiesExample.data.capabilities.find(
@@ -1039,7 +1160,7 @@ async function withServer(listenerMode, run) {
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
     const pagePaths = [
-      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/ecommerce-treasure-box', '/docs/xiaohongshu-note', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
@@ -1049,6 +1170,7 @@ test('public listener serves self-contained public API documentation', async () 
     const response = pages[0].response
     const html = pages.map((page) => page.html).join('\n')
     const ecommerceHtml = pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html
+    const xiaohongshuHtml = pages.find((page) => page.path === '/docs/xiaohongshu-note').html
 
     assert.ok(pages.every((page) => page.response.status === 200))
     assert.match(response.headers.get('content-type'), /^text\/html/)
@@ -1057,6 +1179,12 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/search/)
     assert.match(html, /\/api\/v1\/data\/ecommerce\/products\/search/)
     assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
+    assert.match(xiaohongshuHtml, /\/api\/v1\/data\/post/)
+    assert.match(xiaohongshuHtml, /\/api\/v1\/xiaohongshu\/app\/get_note_info/)
+    assert.match(xiaohongshuHtml, /\/api\/v1\/data\/posts\/media/)
+    assert.match(xiaohongshuHtml, /mx-insight-hub\.social-post\.v1/)
+    assert.match(xiaohongshuHtml, /data\.item/)
+    assert.match(xiaohongshuHtml, /immutable snapshot/)
     assert.match(html, /电商数据百宝箱/)
     assert.match(ecommerceHtml, /JustOne/)
     assert.match(html, /同一把 Hub Public API Key/u)
@@ -1170,7 +1298,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(sourceCatalogHtml, /export HUB_URL=/)
     assert.match(sourceCatalogHtml, /MX_INSIGHT_API_KEY/)
     assert.match(sourceCatalogHtml, /管理台的“开放能力”/)
-    assert.match(sourceCatalogHtml, /已有 API Key 不需要重新签发/)
+    assert.match(sourceCatalogHtml, /新增授权则要签发并显式选择该范围的新 Key/u)
     assert.match(sourceCatalogHtml, /\/api\/v1\/data\/capabilities/)
     assert.match(sourceCatalogHtml, /\/api\/v1\/data\/source-catalog\/metadata/)
     assert.match(sourceCatalogHtml, /SOURCE_ID/)
@@ -1193,6 +1321,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
       ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据百宝箱'],
+      ['/docs/xiaohongshu-note', 'xiaohongshu-note', '小红书笔记'],
       ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
       ['/docs/search', 'search', '通用搜索'],
       ['/docs/telegram', 'telegram', 'Telegram 会话'],
@@ -1226,6 +1355,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
     assert.match(legacyHtml, /'virtual-supermarket':'\/docs\/virtual-supermarket'/)
     assert.match(legacyHtml, /'ecommerce-treasure-box':'\/docs\/ecommerce-treasure-box'/)
+    assert.match(legacyHtml, /'xiaohongshu-note':'\/docs\/xiaohongshu-note'/)
     assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
     assert.match(legacyHtml, /class="nav-section">数据产品<\/span>/)
 
@@ -1259,6 +1389,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/ecommerce/products/media',
       '/data/ecommerce/products/search',
       '/data/mobile-commerce/items',
+      '/data/post',
+      '/data/posts/media',
       '/data/public-opinion/funnel',
       '/data/public-opinion/items/{id}',
       '/data/public-opinion/province-coverage',
@@ -1286,6 +1418,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/requests/{requestId}',
       '/tools/tokenize',
       '/usage',
+      '/xiaohongshu/app/get_note_info',
     ])
     assert.deepEqual(Object.keys(document.components.securitySchemes).sort(), ['apiKeyHeader', 'bearerKey'])
 
@@ -1330,6 +1463,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assertDataProductPublicContract(document)
     assertVirtualSupermarketContract(document)
     assertExternalCommerceContract(document)
+    assertExternalSocialPostContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -1399,6 +1533,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   })
   assertVirtualSupermarketContract(document)
   assertExternalCommerceContract(document)
+  assertExternalSocialPostContract(document)
   assertPublicDataProductMirror(PUBLIC_OPENAPI_DOCUMENT, document)
 })
 
@@ -1429,6 +1564,10 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /\/api\/v1\/data\/source-catalog\/\$\{SOURCE_ID\}/)
   assert.match(guide, /nextCursor/)
   assert.match(guide, /source_catalog_entry_not_found/)
+  assert.match(guide, /\/api\/v1\/data\/post/)
+  assert.match(guide, /\/api\/v1\/xiaohongshu\/app\/get_note_info/)
+  assert.match(guide, /\/api\/v1\/data\/posts\/media/)
+  assert.match(guide, /social\.posts\.resolve/)
 })
 
 test('external data platform public contract and internal operations guidance stay aligned', async () => {
@@ -1456,6 +1595,15 @@ test('external data platform public contract and internal operations guidance st
     for (const field of ['capturedAt', 'servedAt', 'sourceMode', 'ageSeconds']) {
       assert.match(source, new RegExp(field))
     }
+  }
+
+  for (const source of [contract, curlGuide]) {
+    assert.match(source, /\/api\/v1\/data\/post/)
+    assert.match(source, /\/api\/v1\/xiaohongshu\/app\/get_note_info/)
+    assert.match(source, /\/api\/v1\/data\/posts\/media/)
+    assert.match(source, /mx-insight-hub\.social-post\.v1/)
+    assert.match(source, /social\.posts\.resolve/)
+    assert.match(source, /data.*item/is)
   }
 
   assert.match(adr, /JustOne/)

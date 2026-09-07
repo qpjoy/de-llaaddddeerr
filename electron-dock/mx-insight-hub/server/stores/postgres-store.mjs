@@ -54,6 +54,7 @@ const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown
 const connectorSourceModes = new Set(['live', 'stale'])
 const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
 const transientHttpStatuses = new Set([502, 503, 504])
+const DERIVED_PLATFORM_USAGE_CAPABILITY = 'data.canonical-search'
 const publicOpinionDatasets = new Set([
   'public-opinion.province.v1',
 ])
@@ -734,12 +735,54 @@ function apiKey(row) {
     prefix: row.key_prefix,
     lastFour: row.last_four,
     environment: row.environment,
+    scopeMode: row.scope_mode || 'legacy_dynamic',
     status: row.status,
     effectiveStatus: expired ? 'expired' : row.status,
     createdAt: iso(row.created_at),
     expiresAt: iso(row.expires_at),
     revokedAt: iso(row.revoked_at),
     lastUsedAt: iso(row.last_used_at),
+    platforms: Array.isArray(row.platforms) ? row.platforms : [],
+    capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
+  }
+}
+
+function apiKeyPlatformEntitlement(row) {
+  return row && {
+    apiKeyId: row.api_key_id,
+    platform: row.platform,
+    maxRequests: Number(row.max_requests),
+    windowSeconds: Number(row.window_seconds),
+    maxPageSize: Number(row.max_page_size),
+    createdAt: iso(row.created_at),
+  }
+}
+
+function apiKeyCapabilityEntitlement(row) {
+  return row && {
+    apiKeyId: row.api_key_id,
+    capability: row.capability,
+    maxRequests: Number(row.max_requests),
+    windowSeconds: Number(row.window_seconds),
+    createdAt: iso(row.created_at),
+  }
+}
+
+function planRecord(row) {
+  return row && {
+    id: row.id,
+    key: row.plan_key,
+    name: row.name,
+    status: row.status,
+    versionId: row.version_id,
+    version: Number(row.version),
+    versionStatus: row.version_status,
+    limits: row.limits,
+    pricing: row.pricing,
+    publishedAt: iso(row.published_at),
+    assignedAt: iso(row.assigned_at),
+    assignedBy: row.assigned_by ?? null,
+    revision: row.revision == null ? null : Number(row.revision),
   }
 }
 
@@ -940,6 +983,23 @@ export class PostgresStore {
           [tenantId, id, capability, maxRequests, windowSeconds],
         )
       }
+      const assignment = await client.query(
+        `SELECT 1
+           FROM consumer_plan_assignments assignment
+           JOIN plan_versions plan_version_record ON plan_version_record.id = assignment.plan_version_id
+           JOIN plans plan ON plan.id = plan_version_record.plan_id
+          WHERE assignment.consumer_id = $1
+            AND plan_version_record.status = 'published'
+            AND plan.status = 'active'`,
+        [id],
+      )
+      if (assignment.rowCount !== 1) {
+        throw new AppError(
+          503,
+          'plan_assignment_unavailable',
+          'An active plan assignment is required before the consumer can be created',
+        )
+      }
       await client.query('COMMIT')
       return consumer(rows[0])
     } catch (error) {
@@ -965,20 +1025,133 @@ export class PostgresStore {
     return consumer(rows[0]) || null
   }
 
-  async createApiKey({ id, tenantId, consumerId, name, digest, prefix, lastFour, environment = 'live', status = 'active', expiresAt }) {
-    const { rows } = await this.pool.query(
-      `INSERT INTO api_keys
-         (id, tenant_id, consumer_id, name, key_digest, key_prefix, last_four, environment, status, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [id, tenantId, consumerId, name, digest, prefix, lastFour, environment, status, expiresAt],
-    )
-    return apiKey(rows[0])
+  async createApiKey({
+    id, tenantId, consumerId, name, digest, prefix, lastFour,
+    environment = 'live', status = 'active', expiresAt,
+    platformEntitlements = null, capabilityEntitlements = null,
+  }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const assignment = await client.query(
+        `SELECT 1
+           FROM consumer_plan_assignments assignment
+           JOIN plan_versions plan_version_record ON plan_version_record.id = assignment.plan_version_id
+           JOIN plans plan ON plan.id = plan_version_record.plan_id
+          WHERE assignment.consumer_id = $1
+            AND plan_version_record.status = 'published'
+            AND plan.status = 'active'`,
+        [consumerId],
+      )
+      if (assignment.rowCount !== 1) {
+        throw new AppError(
+          503,
+          'plan_assignment_unavailable',
+          'An active published plan assignment is required before an API key can be issued',
+        )
+      }
+      const explicitScopes = platformEntitlements != null || capabilityEntitlements != null
+      const { rows } = await client.query(
+        `INSERT INTO api_keys
+           (id, tenant_id, consumer_id, name, key_digest, key_prefix, last_four,
+            environment, scope_mode, status, expires_at)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+           FROM consumers owner
+          WHERE owner.id = $3 AND owner.tenant_id = $2
+         RETURNING *`,
+        [
+          id, tenantId, consumerId, name, digest, prefix, lastFour, environment,
+          explicitScopes ? 'snapshot' : 'legacy_dynamic', status, expiresAt,
+        ],
+      )
+      if (!rows[0]) {
+        throw new AppError(409, 'api_key_owner_mismatch', 'API key tenant and consumer do not match')
+      }
+      if (explicitScopes) {
+        for (const entitlement of platformEntitlements || []) {
+          await client.query(
+            `INSERT INTO api_key_platform_entitlements
+               (api_key_id, platform, max_requests, window_seconds, max_page_size)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, entitlement.platform, entitlement.maxRequests, entitlement.windowSeconds, entitlement.maxPageSize],
+          )
+        }
+        for (const entitlement of capabilityEntitlements || []) {
+          await client.query(
+            `INSERT INTO api_key_capability_entitlements
+               (api_key_id, capability, max_requests, window_seconds)
+             VALUES ($1, $2, $3, $4)`,
+            [id, entitlement.capability, entitlement.maxRequests, entitlement.windowSeconds],
+          )
+        }
+      }
+      const [platformRows, capabilityRows] = await Promise.all([
+        explicitScopes ? client.query(
+          `SELECT * FROM api_key_platform_entitlements
+            WHERE api_key_id = $1 ORDER BY platform`,
+          [id],
+        ) : client.query(
+          `SELECT platform FROM platform_grants WHERE consumer_id = $1 ORDER BY platform`,
+          [consumerId],
+        ),
+        explicitScopes ? client.query(
+          `SELECT * FROM api_key_capability_entitlements
+            WHERE api_key_id = $1 ORDER BY capability`,
+          [id],
+        ) : client.query(
+          `SELECT capability FROM capability_grants WHERE consumer_id = $1 ORDER BY capability`,
+          [consumerId],
+        ),
+      ])
+      await client.query('COMMIT')
+      return {
+        ...apiKey(rows[0]),
+        platforms: platformRows.rows.map((entry) => entry.platform),
+        capabilities: capabilityRows.rows.map((entry) => entry.capability),
+      }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async listApiKeys(consumerId) {
     const { rows } = consumerId
-      ? await this.pool.query('SELECT * FROM api_keys WHERE consumer_id = $1 ORDER BY created_at DESC', [consumerId])
-      : await this.pool.query('SELECT * FROM api_keys ORDER BY created_at DESC')
+      ? await this.pool.query(
+          `SELECT key.*,
+                  coalesce(CASE WHEN key.scope_mode = 'legacy_dynamic'
+                    THEN (SELECT jsonb_agg(scope_grant.platform ORDER BY scope_grant.platform)
+                            FROM platform_grants scope_grant WHERE scope_grant.consumer_id = key.consumer_id)
+                    ELSE (SELECT jsonb_agg(entitlement.platform ORDER BY entitlement.platform)
+                            FROM api_key_platform_entitlements entitlement
+                           WHERE entitlement.api_key_id = key.id) END, '[]'::jsonb) AS platforms,
+                  coalesce(CASE WHEN key.scope_mode = 'legacy_dynamic'
+                    THEN (SELECT jsonb_agg(scope_grant.capability ORDER BY scope_grant.capability)
+                            FROM capability_grants scope_grant WHERE scope_grant.consumer_id = key.consumer_id)
+                    ELSE (SELECT jsonb_agg(entitlement.capability ORDER BY entitlement.capability)
+                            FROM api_key_capability_entitlements entitlement
+                           WHERE entitlement.api_key_id = key.id) END, '[]'::jsonb) AS capabilities
+             FROM api_keys key WHERE key.consumer_id = $1 ORDER BY key.created_at DESC`,
+          [consumerId],
+        )
+      : await this.pool.query(
+          `SELECT key.*,
+                  coalesce(CASE WHEN key.scope_mode = 'legacy_dynamic'
+                    THEN (SELECT jsonb_agg(scope_grant.platform ORDER BY scope_grant.platform)
+                            FROM platform_grants scope_grant WHERE scope_grant.consumer_id = key.consumer_id)
+                    ELSE (SELECT jsonb_agg(entitlement.platform ORDER BY entitlement.platform)
+                            FROM api_key_platform_entitlements entitlement
+                           WHERE entitlement.api_key_id = key.id) END, '[]'::jsonb) AS platforms,
+                  coalesce(CASE WHEN key.scope_mode = 'legacy_dynamic'
+                    THEN (SELECT jsonb_agg(scope_grant.capability ORDER BY scope_grant.capability)
+                            FROM capability_grants scope_grant WHERE scope_grant.consumer_id = key.consumer_id)
+                    ELSE (SELECT jsonb_agg(entitlement.capability ORDER BY entitlement.capability)
+                            FROM api_key_capability_entitlements entitlement
+                           WHERE entitlement.api_key_id = key.id) END, '[]'::jsonb) AS capabilities
+             FROM api_keys key ORDER BY key.created_at DESC`,
+        )
     return rows.map(apiKey)
   }
 
@@ -986,6 +1159,18 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `SELECT
          k.*,
+         coalesce(CASE WHEN k.scope_mode = 'legacy_dynamic'
+           THEN (SELECT jsonb_agg(scope_grant.platform ORDER BY scope_grant.platform)
+                   FROM platform_grants scope_grant WHERE scope_grant.consumer_id = k.consumer_id)
+           ELSE (SELECT jsonb_agg(entitlement.platform ORDER BY entitlement.platform)
+                   FROM api_key_platform_entitlements entitlement
+                  WHERE entitlement.api_key_id = k.id) END, '[]'::jsonb) AS platforms,
+         coalesce(CASE WHEN k.scope_mode = 'legacy_dynamic'
+           THEN (SELECT jsonb_agg(scope_grant.capability ORDER BY scope_grant.capability)
+                   FROM capability_grants scope_grant WHERE scope_grant.consumer_id = k.consumer_id)
+           ELSE (SELECT jsonb_agg(entitlement.capability ORDER BY entitlement.capability)
+                   FROM api_key_capability_entitlements entitlement
+                  WHERE entitlement.api_key_id = k.id) END, '[]'::jsonb) AS capabilities,
          row_to_json(c) AS consumer_record,
          row_to_json(t) AS tenant_record
        FROM api_keys k
@@ -1013,6 +1198,300 @@ export class PostgresStore {
     )
     if (!rows[0]) throw new AppError(404, 'api_key_not_found', 'API key not found')
     return apiKey(rows[0])
+  }
+
+  async listApiKeyPlatformEntitlements(apiKeyId) {
+    const { rows } = await this.pool.query(
+      `SELECT api_key_record.id AS api_key_id,
+              entitlement.platform,
+              entitlement.max_requests,
+              entitlement.window_seconds,
+              entitlement.max_page_size,
+              entitlement.created_at
+         FROM api_keys api_key_record
+         JOIN api_key_platform_entitlements entitlement
+           ON entitlement.api_key_id = api_key_record.id
+        WHERE api_key_record.id = $1
+          AND api_key_record.scope_mode = 'snapshot'
+        UNION ALL
+       SELECT api_key_record.id AS api_key_id,
+              scope_grant.platform,
+              coalesce(policy.max_requests, 1000) AS max_requests,
+              coalesce(policy.window_seconds, 3600) AS window_seconds,
+              coalesce(policy.max_page_size, 100) AS max_page_size,
+              api_key_record.created_at
+         FROM api_keys api_key_record
+         JOIN platform_grants scope_grant ON scope_grant.consumer_id = api_key_record.consumer_id
+         LEFT JOIN consumer_platform_policies policy
+           ON policy.consumer_id = scope_grant.consumer_id AND policy.platform = scope_grant.platform
+        WHERE api_key_record.id = $1
+          AND api_key_record.scope_mode = 'legacy_dynamic'
+        ORDER BY platform`,
+      [apiKeyId],
+    )
+    return rows.map(apiKeyPlatformEntitlement)
+  }
+
+  async listApiKeyCapabilityEntitlements(apiKeyId) {
+    const { rows } = await this.pool.query(
+      `SELECT api_key_record.id AS api_key_id,
+              entitlement.capability,
+              entitlement.max_requests,
+              entitlement.window_seconds,
+              entitlement.created_at
+         FROM api_keys api_key_record
+         JOIN api_key_capability_entitlements entitlement
+           ON entitlement.api_key_id = api_key_record.id
+        WHERE api_key_record.id = $1
+          AND api_key_record.scope_mode = 'snapshot'
+        UNION ALL
+       SELECT api_key_record.id AS api_key_id,
+              scope_grant.capability,
+              coalesce(policy.max_requests, 1000) AS max_requests,
+              coalesce(policy.window_seconds, 3600) AS window_seconds,
+              api_key_record.created_at
+         FROM api_keys api_key_record
+         JOIN capability_grants scope_grant ON scope_grant.consumer_id = api_key_record.consumer_id
+         LEFT JOIN consumer_capability_policies policy
+           ON policy.consumer_id = scope_grant.consumer_id AND policy.capability = scope_grant.capability
+        WHERE api_key_record.id = $1
+          AND api_key_record.scope_mode = 'legacy_dynamic'
+        ORDER BY capability`,
+      [apiKeyId],
+    )
+    return rows.map(apiKeyCapabilityEntitlement)
+  }
+
+  async listEffectiveGrants(consumerId, apiKeyId) {
+    const { rows } = await this.pool.query(
+      `SELECT scope_grant.platform
+         FROM api_keys api_key_record
+         JOIN platform_grants scope_grant
+           ON scope_grant.consumer_id = api_key_record.consumer_id
+         LEFT JOIN api_key_platform_entitlements entitlement
+           ON entitlement.api_key_id = api_key_record.id
+          AND entitlement.platform = scope_grant.platform
+        WHERE api_key_record.id = $2
+          AND api_key_record.consumer_id = $1
+          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)
+        ORDER BY scope_grant.platform`,
+      [consumerId, apiKeyId],
+    )
+    return rows.map((row) => row.platform)
+  }
+
+  async listEffectiveCapabilityGrants(consumerId, apiKeyId) {
+    const { rows } = await this.pool.query(
+      `SELECT scope_grant.capability
+         FROM api_keys api_key_record
+         JOIN capability_grants scope_grant
+           ON scope_grant.consumer_id = api_key_record.consumer_id
+         LEFT JOIN api_key_capability_entitlements entitlement
+           ON entitlement.api_key_id = api_key_record.id
+          AND entitlement.capability = scope_grant.capability
+        WHERE api_key_record.id = $2
+          AND api_key_record.consumer_id = $1
+          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)
+        ORDER BY scope_grant.capability`,
+      [consumerId, apiKeyId],
+    )
+    return rows.map((row) => row.capability)
+  }
+
+  async getApiKeyPlatformEntitlement(apiKeyId, platformName) {
+    const { rows } = await this.pool.query(
+      `SELECT api_key_record.id AS api_key_id,
+              scope_grant.platform,
+              coalesce(entitlement.max_requests, policy.max_requests, 1000) AS max_requests,
+              coalesce(entitlement.window_seconds, policy.window_seconds, 3600) AS window_seconds,
+              coalesce(entitlement.max_page_size, policy.max_page_size, 100) AS max_page_size,
+              coalesce(entitlement.created_at, api_key_record.created_at) AS created_at
+         FROM api_keys api_key_record
+         JOIN platform_grants scope_grant
+           ON scope_grant.consumer_id = api_key_record.consumer_id AND scope_grant.platform = $2
+         LEFT JOIN consumer_platform_policies policy
+           ON policy.consumer_id = scope_grant.consumer_id AND policy.platform = scope_grant.platform
+         LEFT JOIN api_key_platform_entitlements entitlement
+           ON entitlement.api_key_id = api_key_record.id AND entitlement.platform = scope_grant.platform
+        WHERE api_key_record.id = $1
+          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)`,
+      [apiKeyId, platformName],
+    )
+    return apiKeyPlatformEntitlement(rows[0]) || null
+  }
+
+  async getApiKeyCapabilityEntitlement(apiKeyId, capability) {
+    const { rows } = await this.pool.query(
+      `SELECT api_key_record.id AS api_key_id,
+              scope_grant.capability,
+              coalesce(entitlement.max_requests, policy.max_requests, 1000) AS max_requests,
+              coalesce(entitlement.window_seconds, policy.window_seconds, 3600) AS window_seconds,
+              coalesce(entitlement.created_at, api_key_record.created_at) AS created_at
+         FROM api_keys api_key_record
+         JOIN capability_grants scope_grant
+           ON scope_grant.consumer_id = api_key_record.consumer_id AND scope_grant.capability = $2
+         LEFT JOIN consumer_capability_policies policy
+           ON policy.consumer_id = scope_grant.consumer_id AND policy.capability = scope_grant.capability
+         LEFT JOIN api_key_capability_entitlements entitlement
+           ON entitlement.api_key_id = api_key_record.id AND entitlement.capability = scope_grant.capability
+        WHERE api_key_record.id = $1
+          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)`,
+      [apiKeyId, capability],
+    )
+    return apiKeyCapabilityEntitlement(rows[0]) || null
+  }
+
+  async listPlans() {
+    const { rows } = await this.pool.query(
+      `SELECT plan.id, plan.plan_key, plan.name, plan.status,
+              plan_version_record.id AS version_id,
+              plan_version_record.version,
+              plan_version_record.status AS version_status,
+              plan_version_record.limits,
+              plan_version_record.pricing,
+              plan_version_record.published_at,
+              NULL::timestamptz AS assigned_at,
+              NULL::text AS assigned_by,
+              NULL::integer AS revision
+         FROM plans plan
+         JOIN LATERAL (
+           SELECT candidate.*
+             FROM plan_versions candidate
+            WHERE candidate.plan_id = plan.id
+              AND candidate.status = 'published'
+            ORDER BY candidate.version DESC
+            LIMIT 1
+         ) plan_version_record ON true
+        ORDER BY plan.name, plan.plan_key`,
+    )
+    return rows.map(planRecord)
+  }
+
+  async getConsumerPlan(consumerId) {
+    const { rows } = await this.pool.query(
+      `SELECT plan.id, plan.plan_key, plan.name, plan.status,
+              plan_version_record.id AS version_id,
+              plan_version_record.version,
+              plan_version_record.status AS version_status,
+              plan_version_record.limits,
+              plan_version_record.pricing,
+              plan_version_record.published_at,
+              assignment.assigned_at,
+              assignment.assigned_by,
+              assignment.revision
+         FROM consumer_plan_assignments assignment
+         JOIN plan_versions plan_version_record ON plan_version_record.id = assignment.plan_version_id
+         JOIN plans plan ON plan.id = plan_version_record.plan_id
+        WHERE assignment.consumer_id = $1`,
+      [consumerId],
+    )
+    return planRecord(rows[0]) || null
+  }
+
+  async replaceConsumerPlan({ consumerId, planVersionId, expectedRevision, assignedBy }) {
+    return withPgTransaction(this.pool, async (client) => {
+      const owner = await client.query(
+        'SELECT tenant_id FROM consumers WHERE id = $1',
+        [consumerId],
+      )
+      if (owner.rowCount !== 1) {
+        throw new AppError(404, 'consumer_not_found', 'Consumer not found')
+      }
+
+      // Usage reservation takes this same lock before reading the assignment.
+      // A plan change can therefore neither reset assigned_at underneath an
+      // in-flight reservation nor admit usage against a half-switched period.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `${owner.rows[0].tenant_id}:${consumerId}:plan-month`,
+      ])
+      const currentResult = await client.query(
+        `SELECT consumer_id, plan_version_id, assigned_by, assigned_at, revision
+           FROM consumer_plan_assignments
+          WHERE consumer_id = $1
+          FOR UPDATE`,
+        [consumerId],
+      )
+      const current = currentResult.rows[0]
+      if (!current) {
+        throw new AppError(
+          503,
+          'plan_assignment_unavailable',
+          'An active plan assignment is required before it can be replaced',
+        )
+      }
+      const currentRevision = Number(current.revision)
+      if (currentRevision !== expectedRevision) {
+        throw new AppError(
+          409,
+          'plan_assignment_revision_conflict',
+          'Consumer plan assignment changed; reload before saving',
+          { expectedRevision, currentRevision },
+        )
+      }
+
+      const target = await client.query(
+        `SELECT plan.id, plan.plan_key, plan.name, plan.status,
+                plan_version_record.id AS version_id,
+                plan_version_record.version,
+                plan_version_record.status AS version_status,
+                plan_version_record.limits,
+                plan_version_record.pricing,
+                plan_version_record.published_at
+           FROM plan_versions plan_version_record
+           JOIN plans plan ON plan.id = plan_version_record.plan_id
+          WHERE plan_version_record.id = $1
+            AND plan_version_record.status = 'published'
+            AND plan.status = 'active'`,
+        [planVersionId],
+      )
+      if (target.rowCount !== 1) {
+        throw new AppError(
+          409,
+          'plan_version_not_assignable',
+          'Plan version must be published and belong to an active plan',
+        )
+      }
+
+      if (current.plan_version_id.toLowerCase() === planVersionId.toLowerCase()) {
+        return planRecord({
+          ...target.rows[0],
+          assigned_at: current.assigned_at,
+          assigned_by: current.assigned_by,
+          revision: current.revision,
+        })
+      }
+      if (target.rows[0].plan_key === 'legacy-unmetered') {
+        throw new AppError(
+          409,
+          'plan_version_grandfather_only',
+          'Legacy unmetered plan is grandfather-only and cannot be newly assigned',
+        )
+      }
+
+      const updated = await client.query(
+        `UPDATE consumer_plan_assignments
+            SET plan_version_id = $2,
+                assigned_by = $3,
+                assigned_at = now(),
+                revision = revision + 1
+          WHERE consumer_id = $1 AND revision = $4
+          RETURNING assigned_by, assigned_at, revision`,
+        [consumerId, planVersionId, assignedBy, expectedRevision],
+      )
+      if (updated.rowCount !== 1) {
+        const latest = await client.query(
+          'SELECT revision FROM consumer_plan_assignments WHERE consumer_id = $1',
+          [consumerId],
+        )
+        throw new AppError(
+          409,
+          'plan_assignment_revision_conflict',
+          'Consumer plan assignment changed; reload before saving',
+          { expectedRevision, currentRevision: Number(latest.rows[0]?.revision ?? expectedRevision + 1) },
+        )
+      }
+      return planRecord({ ...target.rows[0], ...updated.rows[0] })
+    })
   }
 
   async replaceGrants(consumerId, platforms) {
@@ -1163,8 +1642,10 @@ export class PostgresStore {
 
   async getUsageRequestByIdempotencyKey(consumerId, idempotencyKey) {
     const { rows } = await this.pool.query(
-      `SELECT * FROM usage_requests
-       WHERE consumer_id = $1 AND idempotency_key = $2`,
+      `SELECT request.*
+         FROM usage_idempotency_bindings binding
+         JOIN usage_requests request ON request.id = binding.current_request_id
+        WHERE binding.consumer_id = $1 AND binding.idempotency_key = $2`,
       [consumerId, idempotencyKey],
     )
     return requestRecord(rows[0]) || null
@@ -1189,42 +1670,70 @@ export class PostgresStore {
     try {
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `${input.tenantId}:${input.consumerId}:plan-month`,
+      ])
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${input.tenantId}:${input.consumerId}:${input.capability ? `capability:${input.capability}` : `platform:${input.platform}`}`,
       ])
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `${input.consumerId}:idempotency:${input.idempotencyKey}`,
+      ])
+      const keyEntitlement = await this.#apiKeyEntitlement(client, input)
+      const quotaInput = { ...input, keyEntitlement }
       const { rows } = await client.query(
-        `SELECT * FROM usage_requests
-         WHERE consumer_id = $1 AND idempotency_key = $2 FOR UPDATE`,
+        `SELECT request.*
+           FROM usage_idempotency_bindings binding
+           JOIN usage_requests request ON request.id = binding.current_request_id
+          WHERE binding.consumer_id = $1 AND binding.idempotency_key = $2
+          FOR UPDATE OF binding`,
         [input.consumerId, input.idempotencyKey],
       )
       const existing = requestRecord(rows[0])
       if (existing) {
         let kind
-        if (existing.fingerprint !== input.fingerprint) kind = 'conflict'
+        // Keep read-only status recovery consumer-scoped, while ensuring a
+        // mutable usage row can never be rebound to a different API key.
+        if (existing.apiKeyId !== input.apiKeyId) kind = 'conflict'
+        else if (existing.fingerprint !== input.fingerprint) kind = 'conflict'
         else if (existing.status === 'committed' && !replayExpired(existing, input.replayWindowMs)) {
           kind = 'replay'
         } else if (existing.status === 'reserved') kind = 'in_progress'
         else if (existing.status === 'unknown') kind = 'unknown'
         else {
-          await this.#assertQuota(client, input)
-          const updated = await client.query(
-            `UPDATE usage_requests SET
-               status = 'reserved', api_key_id = $2, units_reserved = $3,
-               reserved_at = now(), lease_expires_at = $4,
-               units_actual = NULL, response_status = NULL, response_body = NULL,
-               upstream_latency_ms = NULL, delivery_source_mode = NULL,
-               response_captured_at = NULL, compatibility_snapshot_id = NULL,
-               completed_at = NULL, error_code = NULL
-             WHERE id = $1 RETURNING *`,
-            [existing.id, input.apiKeyId, input.unitsReserved, input.leaseExpiresAt],
+          await this.#assertQuota(client, quotaInput)
+          const inserted = await client.query(
+            `INSERT INTO usage_requests
+               (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
+                platform, capability, status, units_reserved, lease_expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10)
+             RETURNING *`,
+            [
+              input.requestId,
+              input.tenantId,
+              input.consumerId,
+              input.apiKeyId,
+              input.idempotencyKey,
+              input.fingerprint,
+              input.platform ?? null,
+              input.capability ?? null,
+              input.unitsReserved,
+              input.leaseExpiresAt,
+            ],
+          )
+          await client.query(
+            `UPDATE usage_idempotency_bindings SET
+               current_request_id = $3, updated_at = now()
+             WHERE consumer_id = $1 AND idempotency_key = $2`,
+            [input.consumerId, input.idempotencyKey, input.requestId],
           )
           await client.query('COMMIT')
-          return { kind: 'reserved', request: requestRecord(updated.rows[0]) }
+          return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
         }
         await client.query('COMMIT')
         return { kind, request: existing }
       }
 
-      await this.#assertQuota(client, input)
+      await this.#assertQuota(client, quotaInput)
       const inserted = await client.query(
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
@@ -1244,6 +1753,19 @@ export class PostgresStore {
           input.leaseExpiresAt,
         ],
       )
+      await client.query(
+        `INSERT INTO usage_idempotency_bindings
+           (tenant_id, consumer_id, idempotency_key, api_key_id, fingerprint, current_request_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          input.tenantId,
+          input.consumerId,
+          input.idempotencyKey,
+          input.apiKeyId,
+          input.fingerprint,
+          input.requestId,
+        ],
+      )
       await client.query('COMMIT')
       return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
     } catch (error) {
@@ -1255,6 +1777,8 @@ export class PostgresStore {
   }
 
   async #assertQuota(client, input) {
+    const keyEntitlement = input.keyEntitlement
+
     const { rows } = await client.query(
       `SELECT count(*)::integer AS count
        FROM usage_requests
@@ -1265,12 +1789,185 @@ export class PostgresStore {
          AND reserved_at >= $5`,
       [input.tenantId, input.consumerId, input.platform ?? null, input.capability ?? null, input.windowStart],
     )
-    if (rows[0].count >= input.maxRequests) {
+    if (Number(rows[0].count) >= input.maxRequests) {
       throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
         ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
         maxRequests: input.maxRequests,
+        limitScope: 'consumer',
       })
     }
+
+    const keyMaxRequests = Number(keyEntitlement.maxRequests ?? keyEntitlement.max_requests)
+    const keyWindowSeconds = Number(keyEntitlement.windowSeconds ?? keyEntitlement.window_seconds)
+    const keyUsage = await client.query(
+      `SELECT count(*)::integer AS count
+         FROM usage_requests
+        WHERE api_key_id = $1
+          AND platform IS NOT DISTINCT FROM $2
+          AND capability IS NOT DISTINCT FROM $3
+          AND status IN ('reserved', 'committed', 'unknown')
+          AND reserved_at >= now() - ($4::integer * interval '1 second')`,
+      [input.apiKeyId, input.platform ?? null, input.capability ?? null, keyWindowSeconds],
+    )
+    if (Number(keyUsage.rows[0].count) >= keyMaxRequests) {
+      throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
+        ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
+        maxRequests: keyMaxRequests,
+        windowSeconds: keyWindowSeconds,
+        limitScope: 'api_key',
+      })
+    }
+
+    const planResult = await client.query(
+      `SELECT plan.plan_key, plan.status AS plan_status,
+              plan_version_record.status AS version_status,
+              plan_version_record.limits, assignment.assigned_at,
+              greatest(
+                assignment.assigned_at,
+                date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+              ) AS period_start
+         FROM consumer_plan_assignments assignment
+         JOIN plan_versions plan_version_record ON plan_version_record.id = assignment.plan_version_id
+         JOIN plans plan ON plan.id = plan_version_record.plan_id
+        WHERE assignment.consumer_id = $1`,
+      [input.consumerId],
+    )
+    if (planResult.rowCount !== 1
+      || planResult.rows[0]?.plan_status !== 'active'
+      || planResult.rows[0]?.version_status !== 'published') {
+      throw new AppError(
+        503,
+        'plan_assignment_unavailable',
+        'An active published plan assignment is required before usage can be reserved',
+      )
+    }
+    const planMaxRequests = planResult.rows[0]?.limits?.maxRequests
+    const planWindowSeconds = planResult.rows[0]?.limits?.windowSeconds
+    if (Number.isInteger(planMaxRequests) && planMaxRequests > 0
+      && Number.isInteger(planWindowSeconds) && planWindowSeconds > 0) {
+      const planWindowUsage = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM usage_requests
+          WHERE consumer_id = $1
+            AND status IN ('reserved', 'committed', 'unknown')
+            AND reserved_at >= greatest(
+              $2::timestamptz,
+              now() - ($3::integer * interval '1 second')
+            )`,
+        [input.consumerId, planResult.rows[0].assigned_at, planWindowSeconds],
+      )
+      if (Number(planWindowUsage.rows[0].count) >= planMaxRequests) {
+        throw new AppError(429, 'quota_exceeded', 'Plan sliding-window quota exceeded', {
+          maxRequests: planMaxRequests,
+          windowSeconds: planWindowSeconds,
+          limitScope: 'plan_window',
+          plan: planResult.rows[0].plan_key,
+        })
+      }
+    }
+    const monthlyRequests = planResult.rows[0]?.limits?.monthlyRequests
+    if (Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
+      const monthlyUsage = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM usage_requests
+          WHERE consumer_id = $1
+            AND status IN ('reserved', 'committed', 'unknown')
+            AND reserved_at >= $2`,
+        [input.consumerId, planResult.rows[0].period_start],
+      )
+      if (Number(monthlyUsage.rows[0].count) >= monthlyRequests) {
+        throw new AppError(429, 'quota_exceeded', 'Monthly plan quota exceeded', {
+          maxRequests: monthlyRequests,
+          limitScope: 'plan_month',
+          plan: planResult.rows[0].plan_key,
+          periodStart: iso(planResult.rows[0].period_start),
+        })
+      }
+    }
+    const burstRps = planResult.rows[0]?.limits?.burstRps
+    if (Number.isInteger(burstRps) && burstRps > 0) {
+      const burstUsage = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM usage_requests
+          WHERE consumer_id = $1
+            AND status IN ('reserved', 'committed', 'unknown')
+            AND reserved_at >= now() - interval '1 second'`,
+        [input.consumerId],
+      )
+      if (Number(burstUsage.rows[0].count) >= burstRps) {
+        throw new AppError(429, 'quota_exceeded', 'Plan burst quota exceeded', {
+          maxRequests: burstRps,
+          windowSeconds: 1,
+          limitScope: 'plan_burst',
+          plan: planResult.rows[0].plan_key,
+        })
+      }
+    }
+  }
+
+  async #apiKeyEntitlement(client, input) {
+    if (input.capability === DERIVED_PLATFORM_USAGE_CAPABILITY
+      && Array.isArray(input.authorizationPlatforms)) {
+      const platforms = [...new Set(input.authorizationPlatforms)]
+      if (platforms.length === 0) {
+        throw new AppError(403, 'api_key_scope_not_granted', 'Canonical search requires at least one platform entitlement', {
+          capability: input.capability,
+        })
+      }
+      const derived = await client.query(
+        `SELECT count(*)::integer AS granted_count,
+                min(coalesce(entitlement.max_requests, policy.max_requests, 1000))::integer AS max_requests,
+                max(coalesce(entitlement.window_seconds, policy.window_seconds, 3600))::integer AS window_seconds
+           FROM api_keys api_key_record
+           CROSS JOIN unnest($4::text[]) requested(platform)
+           JOIN platform_grants scope_grant
+             ON scope_grant.consumer_id = api_key_record.consumer_id
+            AND scope_grant.platform = requested.platform
+           LEFT JOIN consumer_platform_policies policy
+             ON policy.consumer_id = scope_grant.consumer_id AND policy.platform = scope_grant.platform
+           LEFT JOIN api_key_platform_entitlements entitlement
+             ON entitlement.api_key_id = api_key_record.id AND entitlement.platform = scope_grant.platform
+          WHERE api_key_record.id = $1
+            AND api_key_record.consumer_id = $2
+            AND api_key_record.tenant_id = $3
+            AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)`,
+        [input.apiKeyId, input.consumerId, input.tenantId, platforms],
+      )
+      if (Number(derived.rows[0]?.granted_count) !== platforms.length) {
+        throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to canonical search platforms', {
+          capability: input.capability,
+        })
+      }
+      return input.apiKeyQuota || derived.rows[0]
+    }
+    const entitlementTable = input.platform
+      ? 'api_key_platform_entitlements'
+      : 'api_key_capability_entitlements'
+    const grantTable = input.platform ? 'platform_grants' : 'capability_grants'
+    const policyTable = input.platform ? 'consumer_platform_policies' : 'consumer_capability_policies'
+    const column = input.platform ? 'platform' : 'capability'
+    const { rows } = await client.query(
+      `SELECT coalesce(entitlement.max_requests, policy.max_requests, 1000) AS max_requests,
+              coalesce(entitlement.window_seconds, policy.window_seconds, 3600) AS window_seconds
+         FROM api_keys api_key_record
+         JOIN ${grantTable} scope_grant
+           ON scope_grant.consumer_id = api_key_record.consumer_id AND scope_grant.${column} = $2
+         LEFT JOIN ${policyTable} policy
+           ON policy.consumer_id = scope_grant.consumer_id AND policy.${column} = scope_grant.${column}
+         LEFT JOIN ${entitlementTable} entitlement
+           ON entitlement.api_key_id = api_key_record.id AND entitlement.${column} = scope_grant.${column}
+        WHERE api_key_record.id = $1
+          AND api_key_record.consumer_id = $3
+          AND api_key_record.tenant_id = $4
+          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)`,
+      [input.apiKeyId, input.platform || input.capability, input.consumerId, input.tenantId],
+    )
+    if (!rows[0]) {
+      throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to the requested scope', {
+        ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
+      })
+    }
+    return input.apiKeyQuota || rows[0]
   }
 
   async commitRequest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }) {
@@ -1814,12 +2511,15 @@ export class PostgresStore {
         const callTable = externalPlatformCall
           ? 'external_platform.provider_calls'
           : 'serving.connector_calls'
+        const callJoin = externalPlatformCall
+          ? 'JOIN usage_requests usage ON usage.id = call.usage_request_id'
+          : ''
         const acceptedOutcome = externalPlatformCall
           ? "call.outcome = 'succeeded'"
           : "call.outcome IN ('complete', 'partial')"
         const externalPlatformBinding = externalPlatformCall
           ? `AND $2 = 'external-platform:' || call.provider_key
-              AND $3 = split_part(call.operation, '.', 1) || '.external-platform.v1'`
+              AND $3 = usage.platform || '.external-platform.v1'`
           : ''
         const inserted = await client.query(
           `INSERT INTO ingest.ingest_runs
@@ -1827,6 +2527,7 @@ export class PostgresStore {
               ${callColumn})
            SELECT $1, $2, $3, 'api_search', $4, $5, $6
              FROM ${callTable} call
+             ${callJoin}
             WHERE call.id = $6
               AND call.usage_request_id = $4
               AND call.request_fingerprint = $5
@@ -4373,12 +5074,28 @@ export class PostgresStore {
     return typeof sourceUrl === 'string' && sourceUrl ? sourceUrl : null
   }
 
+  async getCommittedSocialPostMediaSource({ requestId, consumerId, mediaIndex }) {
+    const { rows } = await this.pool.query(
+      `SELECT response_body
+         FROM usage_requests
+        WHERE id = $1
+          AND consumer_id = $2
+          AND platform = 'xiaohongshu'
+          AND status = 'committed'
+          AND response_status = 200`,
+      [requestId, consumerId],
+    )
+    const media = rows[0]?.response_body?.data?.item?.media?.[mediaIndex]
+    return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
+  }
+
   async usage(filters = {}) {
     const values = []
     const clauses = []
     for (const [column, value] of [
       ['tenant_id', filters.tenantId],
       ['consumer_id', filters.consumerId],
+      ['api_key_id', filters.apiKeyId],
     ]) {
       if (value) {
         values.push(value)

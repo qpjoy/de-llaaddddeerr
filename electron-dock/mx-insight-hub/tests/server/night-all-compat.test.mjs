@@ -500,7 +500,12 @@ async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
     },
   }
   const service = new HubService({ store, adapter, apiKeyPepper: 'test-pepper' })
-  const context = { tenant, consumer, apiKey: { id: '00000000-0000-4000-8000-000000000001' } }
+  const issued = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Compatibility key',
+    platforms: grants,
+  })
+  const context = await service.authenticate(issued.secret)
   return {
     store,
     service,

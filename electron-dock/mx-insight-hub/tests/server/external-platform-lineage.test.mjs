@@ -58,7 +58,7 @@ test('external-platform worker contract carries gateway call lineage into canoni
   )
 
   assert.match(gateway, /kind:\s*'external-platform-result'[\s\S]*?requestId:\s*activeRequestId[\s\S]*?queryFingerprint:\s*requestFingerprint[\s\S]*?providerCallId:\s*call\.id[\s\S]*?records:\s*result\.records/u)
-  assert.match(worker, /const records = rehydrateJustOneQueuedRecords\(payload\.records\)[\s\S]*?records,/u)
+  assert.match(worker, /const records = justOne\s*\?\s*rehydrateJustOneQueuedRecords\(payload\.records\)\s*:\s*rehydrateTikHubXiaohongshuQueuedRecords\(payload\.records\)[\s\S]*?records,/u)
   assert.match(worker, /payload\?\.kind === 'external-platform-result'[\s\S]*?externalPlatformLineage:\s*\{[\s\S]*?requestId:\s*payload\.requestId\s*\?\?\s*null[\s\S]*?queryFingerprint:\s*payload\.queryFingerprint\s*\?\?\s*null[\s\S]*?providerCallId:\s*payload\.providerCallId\s*\?\?\s*null/u)
 })
 
@@ -121,7 +121,7 @@ test('PostgresStore accepts only a succeeded matching provider call and writes c
   assert.match(runInsert.sql, /call\.request_fingerprint = \$5/u)
   assert.match(runInsert.sql, /call\.outcome = 'succeeded'/u)
   assert.match(runInsert.sql, /\$2 = 'external-platform:' \|\| call\.provider_key/u)
-  assert.match(runInsert.sql, /\$3 = split_part\(call\.operation, '\.', 1\) \|\| '\.external-platform\.v1'/u)
+  assert.match(runInsert.sql, /\$3 = usage\.platform \|\| '\.external-platform\.v1'/u)
   assert.deepEqual(runInsert.values.slice(3), [requestId, FINGERPRINT, providerCallId])
 
   for (const pattern of [

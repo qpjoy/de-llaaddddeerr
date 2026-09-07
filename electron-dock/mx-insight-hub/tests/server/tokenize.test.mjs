@@ -108,6 +108,7 @@ test('generic capability grants stay separate from platform grants and policies'
       { capability: 'nlp.tokenize', ready: true },
       { capability: 'public_opinion.all_ingested.read', ready: false },
       { capability: 'public_opinion.diagnostics.read', ready: false },
+      { capability: 'social.posts.resolve', ready: false },
     ])
 
     const unsupported = await call('/internal/v1/admin/capabilities/all', {
@@ -199,6 +200,10 @@ test('Postgres creates a consumer and its default tokenize policy in one transac
         statements.push('POLICY')
         return { rows: [] }
       }
+      if (normalized.startsWith('SELECT 1 FROM consumer_plan_assignments')) {
+        statements.push('PLAN_CHECK')
+        return { rows: [{ present: 1 }], rowCount: 1 }
+      }
       assert.fail(`unexpected SQL: ${normalized}`)
     },
     release() {},
@@ -213,7 +218,9 @@ test('Postgres creates a consumer and its default tokenize policy in one transac
   })
 
   assert.equal(consumer.tenantId, tenantId)
-  assert.deepEqual(statements, ['BEGIN', 'CONSUMER', 'GRANT', 'POLICY', 'COMMIT'])
+  assert.deepEqual(statements, [
+    'BEGIN', 'CONSUMER', 'GRANT', 'POLICY', 'PLAN_CHECK', 'COMMIT',
+  ])
   assert.deepEqual(parameters[2], [consumer.id, 'nlp.tokenize'])
   assert.deepEqual(parameters[3], [tenantId, consumer.id, 'nlp.tokenize', 1_000, 3_600])
 })
@@ -595,9 +602,11 @@ test('tokenizer failure is safe and the same idempotency key can retry then repl
     const usage = await call('/api/v1/usage', {
       headers: { authorization: `Bearer ${secret}` },
     })
-    assert.equal(usage.payload.data.requests, 1)
+    // A released pre-dispatch attempt and the later real execution are two
+    // immutable audit records. Only the committed execution consumes units.
+    assert.equal(usage.payload.data.requests, 2)
     assert.equal(usage.payload.data.committed, 1)
-    assert.equal(usage.payload.data.released, 0)
+    assert.equal(usage.payload.data.released, 1)
     assert.equal(usage.payload.data.units, 2)
   })
 })

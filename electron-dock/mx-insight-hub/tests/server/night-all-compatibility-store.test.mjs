@@ -12,17 +12,37 @@ async function memoryFixture() {
   const store = new MemoryStore()
   const tenant = await store.createTenant({ name: 'Compatibility tenant' })
   const consumer = await store.createConsumer({ tenantId: tenant.id, name: 'Compatibility consumer' })
-  return { store, tenant, consumer }
+  await store.replaceGrants(consumer.id, ['telegram'])
+  await store.putPolicy({
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    platform: 'telegram',
+    maxRequests: 1_000,
+    windowSeconds: 3_600,
+    maxPageSize: 100,
+  })
+  const apiKey = await store.createApiKey({
+    id: randomUUID(),
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    name: 'Compatibility store key',
+    digest: randomUUID(),
+    prefix: 'mih_live_compat',
+    lastFour: 'test',
+    platformEntitlements: [{ platform: 'telegram', maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100 }],
+    capabilityEntitlements: [],
+  })
+  return { store, tenant, consumer, apiKey }
 }
 
-async function reserve(store, { tenant, consumer }, idempotencyKey) {
+async function reserve(store, { tenant, consumer, apiKey }, idempotencyKey) {
   return store.reserve({
     requestId: randomUUID(),
     idempotencyKey,
     fingerprint: FINGERPRINT,
     tenantId: tenant.id,
     consumerId: consumer.id,
-    apiKeyId: randomUUID(),
+    apiKeyId: apiKey.id,
     platform: 'telegram',
     unitsReserved: 1,
     leaseExpiresAt: new Date(Date.now() + 60_000),
@@ -87,7 +107,8 @@ test('PostgresStore idempotency lookup is consumer scoped and returns the full r
 
   const record = await store.getUsageRequestByIdempotencyKey(consumerId, idempotencyKey)
   assert.deepEqual(query.values, [consumerId, idempotencyKey])
-  assert.match(query.sql, /WHERE consumer_id = \$1 AND idempotency_key = \$2/)
+  assert.match(query.sql, /WHERE binding\.consumer_id = \$1 AND binding\.idempotency_key = \$2/)
+  assert.match(query.sql, /JOIN usage_requests request ON request\.id = binding\.current_request_id/)
   assert.equal(record.fingerprint, FINGERPRINT)
   assert.deepEqual(record.responseBody, responseBody)
 })
@@ -215,7 +236,7 @@ test('stale delivery accepts only transient failures and replay retains source m
     fingerprint: FINGERPRINT,
     tenantId: fixture.tenant.id,
     consumerId: fixture.consumer.id,
-    apiKeyId: randomUUID(),
+    apiKeyId: fixture.apiKey.id,
     platform: 'telegram',
     unitsReserved: 1,
     leaseExpiresAt: new Date(Date.now() + 60_000),

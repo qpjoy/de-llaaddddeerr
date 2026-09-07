@@ -2,12 +2,22 @@ import { loadCommonConfig } from '@qpjoy/mx-common'
 import { AppError } from './core/errors.mjs'
 import {
   disabledJustOneConfig,
+  disabledTikHubConfig,
   parseJustOneConfig,
+  parseTikHubConfig,
   preflightJustOneConfig,
+  preflightTikHubConfig,
 } from './external-platforms/config.mjs'
 import { parseServerFileRoots } from './ingest/external/server-files.mjs'
+import { parseExternalMediaConfig } from './external-media-config.mjs'
 
-export { parseJustOneConfig, preflightJustOneConfig }
+export {
+  parseExternalMediaConfig,
+  parseJustOneConfig,
+  parseTikHubConfig,
+  preflightJustOneConfig,
+  preflightTikHubConfig,
+}
 
 export const PRODUCT_ID = 'mx-insight-hub'
 
@@ -292,6 +302,18 @@ export function loadConfig(environment = process.env) {
     // deploy preflight still rejects it before a ConfigMap can be changed.
     justOne = disabledJustOneConfig(environment, error)
   }
+  let tikHub
+  try {
+    tikHub = parseTikHubConfig(environment, { reservationLeaseMs })
+  } catch (error) {
+    // TikHub is optional and must never become a readiness or login dependency.
+    tikHub = disabledTikHubConfig(environment, error)
+  }
+  // The Admin/login plane never consumes external media. Ignore a bad shared
+  // media-only value there so a Public tuning mistake cannot lock operators out.
+  const externalMedia = listenerMode === 'admin'
+    ? parseExternalMediaConfig({})
+    : parseExternalMediaConfig(environment)
 
   return {
     common,
@@ -323,6 +345,8 @@ export function loadConfig(environment = process.env) {
       exportToken: environment.NIGHT_ALL_EXPORT_TOKEN || null,
     },
     justOne,
+    tikHub,
+    externalMedia,
     backfill: {
       // Platforms the Hub will backfill. Restricted by default to the three
       // with normalizer hooks in server/ingest/normalizers.mjs; anything else

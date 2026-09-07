@@ -8,6 +8,8 @@ import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
 import { sourceCatalogTermNormalizedName } from '../data/source-catalog.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 
+const DERIVED_PLATFORM_USAGE_CAPABILITY = 'data.canonical-search'
+
 function nowIso() {
   return new Date().toISOString()
 }
@@ -356,6 +358,26 @@ export class MemoryStore {
     this.policies = new Map()
     this.capabilityGrants = new Map()
     this.capabilityPolicies = new Map()
+    this.apiKeyPlatformEntitlements = new Map()
+    this.apiKeyCapabilityEntitlements = new Map()
+    this.plans = [{
+      id: 'da4438fa-f15a-4cf1-94dd-4d2179f91b12',
+      key: 'launch-1m',
+      name: 'Launch 1M',
+      status: 'active',
+      versionId: 'd8dba62c-7243-48dc-a857-2b8c2672f4f7',
+      version: 1,
+      versionStatus: 'published',
+      limits: {
+        monthlyRequests: 1_000_000,
+        maxPageSize: 100,
+        burstRps: 100,
+      },
+      pricing: { currency: 'CNY', mode: 'operator_price_book' },
+      publishedAt: nowIso(),
+    }]
+    this.consumerPlans = new Map()
+    this.consumerPlanAssignmentEvents = []
     this.requests = new Map()
     this.requestsByScope = new Map()
     this.connectorCalls = new Map()
@@ -513,6 +535,23 @@ export class MemoryStore {
     // Consumer creation and its default public capability become visible in
     // the same synchronous turn; API keys are still issued separately.
     this.consumers.set(id, record)
+    const defaultAssignment = {
+      versionId: this.plans[0].versionId,
+      assignedBy: 'database-default',
+      assignedAt: createdAt,
+      revision: 1,
+    }
+    this.consumerPlans.set(id, defaultAssignment)
+    this.consumerPlanAssignmentEvents.push({
+      consumerId: id,
+      previousPlanVersionId: null,
+      planVersionId: defaultAssignment.versionId,
+      assignedBy: defaultAssignment.assignedBy,
+      assignedAt: defaultAssignment.assignedAt,
+      previousRevision: null,
+      revision: defaultAssignment.revision,
+      recordedAt: createdAt,
+    })
     if (defaultCapabilityPolicy) {
       const { capability, maxRequests, windowSeconds } = defaultCapabilityPolicy
       this.capabilityGrants.set(id, [capability])
@@ -538,19 +577,39 @@ export class MemoryStore {
     return clone(this.consumers.get(id) || null)
   }
 
-  async createApiKey({ id, tenantId, consumerId, name, digest, prefix, lastFour, environment = 'live', status = 'active', expiresAt }) {
-    if (!this.consumers.has(consumerId)) {
+  async createApiKey({
+    id, tenantId, consumerId, name, digest, prefix, lastFour,
+    environment = 'live', status = 'active', expiresAt,
+    platformEntitlements = null, capabilityEntitlements = null,
+  }) {
+    const owner = this.consumers.get(consumerId)
+    if (!owner) {
       throw new AppError(404, 'consumer_not_found', 'Consumer not found')
     }
+    const effectiveTenantId = tenantId || owner.tenantId
+    if (owner.tenantId !== effectiveTenantId) {
+      throw new AppError(409, 'api_key_owner_mismatch', 'API key tenant and consumer do not match')
+    }
+    const assignment = this.consumerPlans.get(consumerId)
+    const plan = this.plans.find((candidate) => candidate.versionId === assignment?.versionId)
+    if (!assignment || !plan || plan.status !== 'active' || plan.versionStatus !== 'published') {
+      throw new AppError(
+        503,
+        'plan_assignment_unavailable',
+        'An active plan assignment is required before an API key can be issued',
+      )
+    }
+    const explicitScopes = platformEntitlements != null || capabilityEntitlements != null
     const record = {
       id,
-      tenantId,
+      tenantId: effectiveTenantId,
       consumerId,
       name,
       digest,
       prefix,
       lastFour,
       environment,
+      scopeMode: explicitScopes ? 'snapshot' : 'legacy_dynamic',
       status,
       createdAt: nowIso(),
       expiresAt,
@@ -559,13 +618,46 @@ export class MemoryStore {
     }
     this.apiKeys.set(id, record)
     this.apiKeysByDigest.set(digest, id)
+    const platformSnapshot = platformEntitlements || []
+    const capabilitySnapshot = capabilityEntitlements || []
+    this.apiKeyPlatformEntitlements.set(id, clone(platformSnapshot))
+    this.apiKeyCapabilityEntitlements.set(id, clone(capabilitySnapshot))
     return this.#publicApiKey(record)
+  }
+
+  #dynamicPlatformEntitlements(record) {
+    return (this.grants.get(record.consumerId) || []).map((platform) => {
+      const policy = this.policies.get(`${record.consumerId}:${platform}`) || {}
+      return {
+        platform,
+        maxRequests: policy.maxRequests || 1_000,
+        windowSeconds: policy.windowSeconds || 3_600,
+        maxPageSize: policy.maxPageSize || 100,
+      }
+    })
+  }
+
+  #dynamicCapabilityEntitlements(record) {
+    return (this.capabilityGrants.get(record.consumerId) || []).map((capability) => {
+      const policy = this.capabilityPolicies.get(`${record.consumerId}:${capability}`) || {}
+      return {
+        capability,
+        maxRequests: policy.maxRequests || 1_000,
+        windowSeconds: policy.windowSeconds || 3_600,
+      }
+    })
   }
 
   #publicApiKey(record) {
     const { digest: _digest, ...safe } = record
     return clone({
       ...safe,
+      platforms: (record.scopeMode === 'legacy_dynamic'
+        ? this.#dynamicPlatformEntitlements(record)
+        : this.apiKeyPlatformEntitlements.get(record.id) || []).map((entry) => entry.platform),
+      capabilities: (record.scopeMode === 'legacy_dynamic'
+        ? this.#dynamicCapabilityEntitlements(record)
+        : this.apiKeyCapabilityEntitlements.get(record.id) || []).map((entry) => entry.capability),
       effectiveStatus: safe.status === 'active'
         && safe.expiresAt != null
         && new Date(safe.expiresAt).getTime() <= Date.now()
@@ -596,6 +688,144 @@ export class MemoryStore {
     record.status = 'revoked'
     record.revokedAt = nowIso()
     return this.#publicApiKey(record)
+  }
+
+  async listApiKeyPlatformEntitlements(apiKeyId) {
+    const record = this.apiKeys.get(apiKeyId)
+    return clone(record?.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicPlatformEntitlements(record)
+      : this.apiKeyPlatformEntitlements.get(apiKeyId) || [])
+  }
+
+  async listApiKeyCapabilityEntitlements(apiKeyId) {
+    const record = this.apiKeys.get(apiKeyId)
+    return clone(record?.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicCapabilityEntitlements(record)
+      : this.apiKeyCapabilityEntitlements.get(apiKeyId) || [])
+  }
+
+  async listEffectiveGrants(consumerId, apiKeyId) {
+    const current = new Set(this.grants.get(consumerId) || [])
+    const record = this.apiKeys.get(apiKeyId)
+    if (record?.consumerId !== consumerId) return []
+    const entitlements = record.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicPlatformEntitlements(record)
+      : this.apiKeyPlatformEntitlements.get(apiKeyId) || []
+    return entitlements
+      .map((entry) => entry.platform)
+      .filter((platform) => current.has(platform))
+      .sort()
+  }
+
+  async listEffectiveCapabilityGrants(consumerId, apiKeyId) {
+    const current = new Set(this.capabilityGrants.get(consumerId) || [])
+    const record = this.apiKeys.get(apiKeyId)
+    if (record?.consumerId !== consumerId) return []
+    const entitlements = record.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicCapabilityEntitlements(record)
+      : this.apiKeyCapabilityEntitlements.get(apiKeyId) || []
+    return entitlements
+      .map((entry) => entry.capability)
+      .filter((capability) => current.has(capability))
+      .sort()
+  }
+
+  async getApiKeyPlatformEntitlement(apiKeyId, platform) {
+    const record = this.apiKeys.get(apiKeyId)
+    const entitlements = record?.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicPlatformEntitlements(record)
+      : this.apiKeyPlatformEntitlements.get(apiKeyId) || []
+    return clone(entitlements
+      .find((entry) => entry.platform === platform) || null)
+  }
+
+  async getApiKeyCapabilityEntitlement(apiKeyId, capability) {
+    const record = this.apiKeys.get(apiKeyId)
+    const entitlements = record?.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicCapabilityEntitlements(record)
+      : this.apiKeyCapabilityEntitlements.get(apiKeyId) || []
+    return clone(entitlements
+      .find((entry) => entry.capability === capability) || null)
+  }
+
+  async listPlans() {
+    return clone(this.plans)
+  }
+
+  async getConsumerPlan(consumerId) {
+    const assignment = this.consumerPlans.get(consumerId)
+    const plan = this.plans.find((candidate) => candidate.versionId === assignment?.versionId)
+    return clone(plan ? { ...plan, ...assignment } : null)
+  }
+
+  async replaceConsumerPlan({ consumerId, planVersionId, expectedRevision, assignedBy }) {
+    if (!Number.isInteger(expectedRevision) || expectedRevision <= 0) {
+      throw new AppError(400, 'invalid_request', 'expectedRevision must be a positive integer')
+    }
+    if (typeof assignedBy !== 'string' || !assignedBy.trim()) {
+      throw new AppError(400, 'invalid_request', 'assignedBy is required')
+    }
+    if (!this.consumers.has(consumerId)) {
+      throw new AppError(404, 'consumer_not_found', 'Consumer not found')
+    }
+    const assignment = this.consumerPlans.get(consumerId)
+    if (!assignment) {
+      throw new AppError(
+        503,
+        'plan_assignment_unavailable',
+        'An active plan assignment is required before it can be replaced',
+      )
+    }
+    if (assignment.revision !== expectedRevision) {
+      throw new AppError(
+        409,
+        'plan_assignment_revision_conflict',
+        'Consumer plan assignment changed; reload before saving',
+        { expectedRevision, currentRevision: assignment.revision },
+      )
+    }
+    const plan = this.plans.find((candidate) => (
+      candidate.versionId === planVersionId
+      && candidate.status === 'active'
+      && candidate.versionStatus === 'published'
+    ))
+    if (!plan) {
+      throw new AppError(
+        409,
+        'plan_version_not_assignable',
+        'Plan version must be published and belong to an active plan',
+      )
+    }
+    if (assignment.versionId === planVersionId) {
+      return clone({ ...plan, ...assignment })
+    }
+    if (plan.key === 'legacy-unmetered') {
+      throw new AppError(
+        409,
+        'plan_version_grandfather_only',
+        'Legacy unmetered plan is grandfather-only and cannot be newly assigned',
+      )
+    }
+
+    const assignedAt = nowIso()
+    const next = {
+      versionId: planVersionId,
+      assignedBy,
+      assignedAt,
+      revision: assignment.revision + 1,
+    }
+    this.consumerPlans.set(consumerId, next)
+    this.consumerPlanAssignmentEvents.push({
+      consumerId,
+      previousPlanVersionId: assignment.versionId,
+      planVersionId,
+      assignedBy,
+      assignedAt,
+      previousRevision: assignment.revision,
+      revision: next.revision,
+      recordedAt: assignedAt,
+    })
+    return clone({ ...plan, ...next })
   }
 
   async replaceGrants(consumerId, platforms) {
@@ -719,15 +949,24 @@ export class MemoryStore {
     leaseExpiresAt,
     windowStart,
     maxRequests,
+    apiKeyQuota = null,
+    authorizationPlatforms = null,
     replayWindowMs = null,
   }) {
     if (Boolean(platform) === Boolean(capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
     }
+    this.#apiKeyEntitlement({
+      tenantId, consumerId, apiKeyId, platform, capability, apiKeyQuota, authorizationPlatforms,
+    })
     const scopeKey = `${consumerId}:${idempotencyKey}`
     const existingId = this.requestsByScope.get(scopeKey)
     if (existingId) {
       const existing = this.requests.get(existingId)
+      // Idempotency keys are consumer-scoped for lookup, but a write/replay may
+      // never move usage attribution from one customer API key to another.
+      // The caller must use a new idempotency key for that new business key.
+      if (existing.apiKeyId !== apiKeyId) return { kind: 'conflict', request: clone(existing) }
       if (existing.fingerprint !== fingerprint) return { kind: 'conflict', request: clone(existing) }
       if (existing.status === 'committed' && !replayExpired(existing, replayWindowMs)) {
         return { kind: 'replay', request: clone(existing) }
@@ -735,28 +974,45 @@ export class MemoryStore {
       if (existing.status === 'reserved') return { kind: 'in_progress', request: clone(existing) }
       if (existing.status === 'unknown') return { kind: 'unknown', request: clone(existing) }
       if (existing.status === 'released' || existing.status === 'committed') {
-        this.#assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests })
-        Object.assign(existing, {
-          status: 'reserved',
+        this.#assertQuota({
+          tenantId, consumerId, apiKeyId, platform, capability,
+          windowStart, maxRequests, apiKeyQuota, authorizationPlatforms,
+        })
+        const reservedAt = nowIso()
+        const record = {
+          id: requestId,
+          tenantId,
+          consumerId,
           apiKeyId,
+          idempotencyKey,
+          fingerprint,
+          platform: platform ?? null,
+          capability: capability ?? null,
+          status: 'reserved',
           unitsReserved,
           unitsActual: null,
           responseStatus: null,
           responseBody: null,
+          errorCode: null,
           upstreamLatencyMs: null,
           deliverySourceMode: null,
           capturedAt: null,
           snapshotId: null,
-          reservedAt: nowIso(),
+          reservedAt,
           leaseExpiresAt: new Date(leaseExpiresAt).toISOString(),
           completedAt: null,
-          errorCode: null,
-        })
-        return { kind: 'reserved', request: clone(existing) }
+          createdAt: reservedAt,
+        }
+        this.requests.set(record.id, record)
+        this.requestsByScope.set(scopeKey, record.id)
+        return { kind: 'reserved', request: clone(record) }
       }
     }
 
-    this.#assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests })
+    this.#assertQuota({
+      tenantId, consumerId, apiKeyId, platform, capability,
+      windowStart, maxRequests, apiKeyQuota, authorizationPlatforms,
+    })
     const record = {
       id: requestId,
       tenantId,
@@ -786,9 +1042,15 @@ export class MemoryStore {
     return { kind: 'reserved', request: clone(record) }
   }
 
-  #assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests }) {
-    if (!Number.isFinite(maxRequests)) return
-    const count = [...this.requests.values()].filter(
+  #assertQuota({
+    tenantId, consumerId, apiKeyId, platform, capability,
+    windowStart, maxRequests, apiKeyQuota, authorizationPlatforms,
+  }) {
+    const keyEntitlement = this.#apiKeyEntitlement({
+      tenantId, consumerId, apiKeyId, platform, capability, apiKeyQuota, authorizationPlatforms,
+    })
+    const records = [...this.requests.values()]
+    const count = records.filter(
       (record) =>
         record.tenantId === tenantId &&
         record.consumerId === consumerId &&
@@ -797,12 +1059,154 @@ export class MemoryStore {
         ['reserved', 'committed', 'unknown'].includes(record.status) &&
         new Date(record.reservedAt) >= windowStart,
     ).length
-    if (count >= maxRequests) {
+    if (Number.isFinite(maxRequests) && count >= maxRequests) {
       throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
         ...(platform ? { platform } : { capability }),
         maxRequests,
+        limitScope: 'consumer',
       })
     }
+
+    const keyWindowSeconds = Number(keyEntitlement.windowSeconds)
+    const keyMaxRequests = Number(keyEntitlement.maxRequests)
+    const keyWindowStart = new Date(Date.now() - keyWindowSeconds * 1_000)
+    const keyCount = records.filter(
+      (record) =>
+        record.apiKeyId === apiKeyId &&
+        record.platform === (platform ?? null) &&
+        record.capability === (capability ?? null) &&
+        ['reserved', 'committed', 'unknown'].includes(record.status) &&
+        new Date(record.reservedAt) >= keyWindowStart,
+    ).length
+    if (Number.isFinite(keyMaxRequests) && keyCount >= keyMaxRequests) {
+      throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
+        ...(platform ? { platform } : { capability }),
+        maxRequests: keyMaxRequests,
+        windowSeconds: keyWindowSeconds,
+        limitScope: 'api_key',
+      })
+    }
+
+    const assignment = this.consumerPlans.get(consumerId)
+    const plan = this.plans.find((candidate) => candidate.versionId === assignment?.versionId)
+    if (!assignment || !plan || plan.status !== 'active') {
+      throw new AppError(
+        503,
+        'plan_assignment_unavailable',
+        'An active plan assignment is required before usage can be reserved',
+      )
+    }
+    const planMaxRequests = plan?.limits?.maxRequests
+    const planWindowSeconds = plan?.limits?.windowSeconds
+    if (Number.isInteger(planMaxRequests) && planMaxRequests > 0
+      && Number.isInteger(planWindowSeconds) && planWindowSeconds > 0) {
+      const slidingStart = new Date(Math.max(
+        Date.now() - planWindowSeconds * 1_000,
+        new Date(assignment.assignedAt).getTime(),
+      ))
+      const planWindowCount = records.filter(
+        (record) => record.consumerId === consumerId
+          && ['reserved', 'committed', 'unknown'].includes(record.status)
+          && new Date(record.reservedAt) >= slidingStart,
+      ).length
+      if (planWindowCount >= planMaxRequests) {
+        throw new AppError(429, 'quota_exceeded', 'Plan sliding-window quota exceeded', {
+          maxRequests: planMaxRequests,
+          windowSeconds: planWindowSeconds,
+          limitScope: 'plan_window',
+          plan: plan.key,
+        })
+      }
+    }
+    const monthlyRequests = plan?.limits?.monthlyRequests
+    if (Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
+      const now = new Date()
+      const calendarMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      const assignedAt = new Date(assignment.assignedAt)
+      const monthStart = assignedAt > calendarMonthStart ? assignedAt : calendarMonthStart
+      const monthlyCount = records.filter(
+        (record) => record.consumerId === consumerId
+          && ['reserved', 'committed', 'unknown'].includes(record.status)
+          && new Date(record.reservedAt) >= monthStart,
+      ).length
+      if (monthlyCount >= monthlyRequests) {
+        throw new AppError(429, 'quota_exceeded', 'Monthly plan quota exceeded', {
+          maxRequests: monthlyRequests,
+          limitScope: 'plan_month',
+          plan: plan.key,
+          periodStart: monthStart.toISOString(),
+        })
+      }
+    }
+    const burstRps = plan?.limits?.burstRps
+    if (Number.isInteger(burstRps) && burstRps > 0) {
+      const burstStart = new Date(Date.now() - 1_000)
+      const burstCount = records.filter(
+        (record) => record.consumerId === consumerId
+          && ['reserved', 'committed', 'unknown'].includes(record.status)
+          && new Date(record.reservedAt) >= burstStart,
+      ).length
+      if (burstCount >= burstRps) {
+        throw new AppError(429, 'quota_exceeded', 'Plan burst quota exceeded', {
+          maxRequests: burstRps,
+          windowSeconds: 1,
+          limitScope: 'plan_burst',
+          plan: plan.key,
+        })
+      }
+    }
+  }
+
+  #apiKeyEntitlement({
+    tenantId, consumerId, apiKeyId, platform, capability, apiKeyQuota, authorizationPlatforms,
+  }) {
+    const apiKeyRecord = this.apiKeys.get(apiKeyId)
+    if (!apiKeyRecord || apiKeyRecord.tenantId !== tenantId || apiKeyRecord.consumerId !== consumerId) {
+      throw new AppError(403, 'api_key_scope_not_granted', 'API key does not belong to the requested usage scope')
+    }
+    const platformEntitlements = apiKeyRecord.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicPlatformEntitlements(apiKeyRecord)
+      : this.apiKeyPlatformEntitlements.get(apiKeyId) || []
+    const capabilityEntitlements = apiKeyRecord.scopeMode === 'legacy_dynamic'
+      ? this.#dynamicCapabilityEntitlements(apiKeyRecord)
+      : this.apiKeyCapabilityEntitlements.get(apiKeyId) || []
+    const currentPlatformGrants = new Set(this.grants.get(consumerId) || [])
+    const currentCapabilityGrants = new Set(this.capabilityGrants.get(consumerId) || [])
+    // Canonical search is an internal usage bucket over the platforms this key
+    // already owns; it is not a customer-facing capability. Revalidate every
+    // contributing platform at reservation time so this derived bucket cannot
+    // become an authorization bypass after a grant is revoked.
+    if (capability === DERIVED_PLATFORM_USAGE_CAPABILITY && Array.isArray(authorizationPlatforms)) {
+      const expected = [...new Set(authorizationPlatforms)]
+      const entitled = new Map(platformEntitlements.map((entry) => [entry.platform, entry]))
+      if (expected.length === 0
+        || expected.some((name) => !currentPlatformGrants.has(name) || !entitled.has(name))) {
+        throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to canonical search platforms', {
+          capability,
+        })
+      }
+      if (apiKeyQuota) return apiKeyQuota
+      const records = expected.map((name) => entitled.get(name))
+      return {
+        maxRequests: Math.min(...records.map((entry) => entry.maxRequests)),
+        windowSeconds: Math.max(...records.map((entry) => entry.windowSeconds)),
+      }
+    }
+    const grantedEntitlement = platform
+      ? platformEntitlements
+        .find((entry) => entry.platform === platform && currentPlatformGrants.has(platform))
+      : capabilityEntitlements
+        .find((entry) => entry.capability === capability && currentCapabilityGrants.has(capability))
+    if (!grantedEntitlement) {
+      throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to the requested scope', {
+        ...(platform ? { platform } : { capability }),
+      })
+    }
+    // A gateway may combine two independently verified ceilings (for example
+    // platform + capability).  That combined ceiling may only narrow an
+    // entitlement that still exists; it must never act as an authorization
+    // bypass if a grant is revoked between the pre-check and reservation.
+    return apiKeyQuota || grantedEntitlement
   }
 
   async commitRequest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }) {
@@ -1114,7 +1518,20 @@ export class MemoryStore {
     return typeof sourceUrl === 'string' && sourceUrl ? sourceUrl : null
   }
 
-  async usage({ tenantId, consumerId, from, to } = {}) {
+  async getCommittedSocialPostMediaSource({ requestId, consumerId, mediaIndex }) {
+    const record = this.requests.get(requestId)
+    if (
+      !record
+      || record.consumerId !== consumerId
+      || record.platform !== 'xiaohongshu'
+      || record.status !== 'committed'
+      || record.responseStatus !== 200
+    ) return null
+    const media = record.responseBody?.data?.item?.media?.[mediaIndex]
+    return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
+  }
+
+  async usage({ tenantId, consumerId, apiKeyId, from, to } = {}) {
     const fromDate = from ? new Date(from) : null
     const toDate = to ? new Date(to) : null
     const records = [...this.requests.values()].filter((record) => {
@@ -1122,6 +1539,7 @@ export class MemoryStore {
       return (
         (!tenantId || record.tenantId === tenantId) &&
         (!consumerId || record.consumerId === consumerId) &&
+        (!apiKeyId || record.apiKeyId === apiKeyId) &&
         (!fromDate || createdAt >= fromDate) &&
         (!toDate || createdAt < toDate)
       )

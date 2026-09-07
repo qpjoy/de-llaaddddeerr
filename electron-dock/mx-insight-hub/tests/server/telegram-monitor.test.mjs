@@ -306,10 +306,6 @@ test('Telegram search replays pre-sourceScope idempotency fingerprints on dedica
     tenantId: tenant.id,
     name: 'Fingerprint compatibility consumer',
   })
-  const apiKey = await service.createApiKey({
-    consumerId: consumer.id,
-    name: 'Fingerprint compatibility key',
-  })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -317,6 +313,10 @@ test('Telegram search replays pre-sourceScope idempotency fingerprints on dedica
     maxRequests: 20,
     windowSeconds: 3_600,
     maxPageSize: 20,
+  })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Fingerprint compatibility key',
   })
   const context = { tenant, consumer, apiKey }
   const legacyCursorBinding = createHash('sha256').update(JSON.stringify({
@@ -2163,12 +2163,12 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
   const tenantA = await service.createTenant({ name: 'Tenant A' })
   const consumerA = await service.createConsumer({ tenantId: tenantA.id, name: 'Consumer A' })
   const consumerB = await service.createConsumer({ tenantId: tenantA.id, name: 'Consumer B' })
-  const keyA = await service.createApiKey({ consumerId: consumerA.id, name: 'A' })
+  const preGrantKey = await service.createApiKey({ consumerId: consumerA.id, name: 'A before grant' })
   const keyB = await service.createApiKey({ consumerId: consumerB.id, name: 'B' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
-    const allowed = { authorization: `Bearer ${keyA.secret}` }
+    let allowed = { authorization: `Bearer ${preGrantKey.secret}` }
     const denied = { authorization: `Bearer ${keyB.secret}` }
 
     const beforeGrant = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: allowed })
@@ -2190,10 +2190,24 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     assert.equal(grant.response.status, 200)
     assert.equal(grant.payload.data.enabled, true)
 
-    const immediatelyAllowed = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: allowed })
-    assert.equal(immediatelyAllowed.response.status, 200)
-    assert.equal(immediatelyAllowed.payload.data.items.length, 1)
-    assert.equal(immediatelyAllowed.payload.data.sourceScope.selected, 'monitor')
+    const existingKeyStillForbidden = await call(
+      baseUrl,
+      '/api/v1/data/telegram/messages?pageSize=1',
+      { headers: allowed },
+    )
+    assert.equal(existingKeyStillForbidden.response.status, 403)
+    assert.equal(existingKeyStillForbidden.payload.error.code, 'platform_not_granted')
+
+    const keyA = await service.createApiKey({ consumerId: consumerA.id, name: 'A after grant' })
+    allowed = { authorization: `Bearer ${keyA.secret}` }
+    const newlyIssuedAllowed = await call(
+      baseUrl,
+      '/api/v1/data/telegram/messages?pageSize=1',
+      { headers: allowed },
+    )
+    assert.equal(newlyIssuedAllowed.response.status, 200)
+    assert.equal(newlyIssuedAllowed.payload.data.items.length, 1)
+    assert.equal(newlyIssuedAllowed.payload.data.sourceScope.selected, 'monitor')
     assert.equal(seen.at(-1).datasetId, 'telegram.monitor.messages.v1')
 
     const legacyChats = await call(baseUrl, '/api/v1/data/telegram/chats?pageSize=1', { headers: allowed })
@@ -2323,11 +2337,11 @@ test('public Telegram conversation facade exposes explicit mixed-source discover
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Conversation tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Conversation consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Conversation key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 10, windowSeconds: 3600, maxPageSize: 20,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Conversation key' })
   const app = createApp({ service, store, adapter: {}, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
@@ -2527,11 +2541,11 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER, searchQueries })
   const tenant = await service.createTenant({ name: 'Telegram tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Telegram consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Telegram key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 20, windowSeconds: 3600, maxPageSize: 20,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Telegram key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
@@ -2681,11 +2695,11 @@ test('POST Telegram search keeps an ambiguous commit unknown and never releases 
   })
   const tenant = await service.createTenant({ name: 'Ambiguous POST tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Ambiguous POST consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous POST key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 10, windowSeconds: 3600, maxPageSize: 20,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous POST key' })
 
   const commit = store.commitRequest.bind(store)
   store.commitRequest = async (...args) => {
@@ -2732,13 +2746,25 @@ test('POST Telegram search keeps an ambiguous commit unknown and never releases 
 
 test('usage request terminal states cannot transition back to committed or released', async () => {
   const store = new MemoryStore()
+  const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
+  const tenant = await service.createTenant({ name: 'Terminal-state tenant' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Terminal-state consumer' })
+  await service.putPlatformConfiguration('telegram', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+    maxPageSize: 10,
+  })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Terminal-state key' })
   const input = {
     requestId: 'terminal-request',
     idempotencyKey: 'terminal-request',
     fingerprint: 'fingerprint',
-    tenantId: 'tenant',
-    consumerId: 'consumer',
-    apiKeyId: 'key',
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    apiKeyId: key.id,
     platform: 'telegram',
     unitsReserved: 1,
     leaseExpiresAt: new Date(Date.now() + 60_000),
@@ -2771,11 +2797,11 @@ test('Telegram history enforces maxRequests and commits count-only usage evidenc
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Metered tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Metered consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Metered key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 1, windowSeconds: 3600, maxPageSize: 10,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Metered key' })
   const context = await service.authenticate(key.secret)
 
   const first = await service.telegramMonitor(context, 'messages', { pageSize: '2' })
@@ -2801,11 +2827,11 @@ test('a failed Telegram history read releases its reservation so it does not con
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Retry tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Retry consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Retry key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 1, windowSeconds: 3600, maxPageSize: 10,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Retry key' })
   const context = await service.authenticate(key.secret)
 
   await assert.rejects(() => service.telegramMonitor(context, 'messages', {}), /temporary local read failure/)
@@ -2828,11 +2854,11 @@ test('an ambiguous Telegram usage commit is retained as unknown, never released'
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Ambiguous tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Ambiguous consumer' })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous key' })
   await service.putPlatformConfiguration('telegram', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 2, windowSeconds: 3600, maxPageSize: 10,
   })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous key' })
   const context = await service.authenticate(key.secret)
 
   await assert.rejects(() => service.telegramMonitor(context, 'messages', {}), /dropped after commit/)
