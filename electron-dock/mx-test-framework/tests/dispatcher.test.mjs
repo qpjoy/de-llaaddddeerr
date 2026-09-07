@@ -15,6 +15,25 @@ const app = { id: 'tapp_1', slug: 'compass', repoUrl: 'https://example.invalid/c
 const suite = { id: 'tsuite_1', slug: 'web', engine: 'cypress', command: ['pnpm', 'e2e:run:mock'] }
 const run = { id: 'trun_1', appId: app.id, suiteId: suite.id }
 
+test('server capacity and runner resource limits are bounded by default and configurable', () => {
+  assert.equal(config.maxConcurrentServerRuns, 1)
+  assert.equal(config.runnerResources.cpuLimit, '2')
+  assert.equal(config.runnerResources.ephemeralStorageLimit, '14Gi')
+  assert.equal(config.artifactLimits.totalBytes, 20 * 1024 * 1024 * 1024)
+  assert.equal(config.artifactLimits.totalEntries, 100_000)
+  assert.equal(config.artifactLimits.minFreeBytes, 5 * 1024 * 1024 * 1024)
+  assert.equal(config.artifactLimits.minFreeInodes, 10_000)
+  assert.equal(
+    loadConfig({ MXT_STORE: 'memory', MXT_MAX_CONCURRENT_SERVER_RUNS: '3' })
+      .maxConcurrentServerRuns,
+    3,
+  )
+  assert.throws(
+    () => loadConfig({ MXT_STORE: 'memory', MXT_MAX_CONCURRENT_SERVER_RUNS: '0' }),
+    /positive integer/u,
+  )
+})
+
 // -- the suite command is not a shell string ---------------------------------
 
 test('the test team can name any framework directly', () => {
@@ -176,6 +195,12 @@ test('a working directory cannot escape the checkout', () => {
 test('the clone credential never lands in the remote URL or the process table', () => {
   const script = dispatcher().script({ apiBase: 'http://mxt' })
   assert.match(script, /credential\.helper/u)
+  assert.match(script, /git config --global --unset-all credential\.helper/u)
+  assert.match(script, /unset MXT_GIT_TOKEN/u)
+  assert.ok(
+    script.indexOf('unset MXT_GIT_TOKEN') < script.indexOf('stage install'),
+    'dependency hooks and the suite command must not inherit the clone token',
+  )
   assert.ok(
     !/https:\/\/\$MXT_GIT_TOKEN@/u.test(script),
     'a token in the remote URL would be written into .git/config',
@@ -234,7 +259,7 @@ test('a summary that will not parse becomes blocked rather than an empty pass', 
 
 // -- the workspace does not outlive the run -----------------------------------
 
-test('the checkout lives in a capped emptyDir, not on the artifacts volume', () => {
+test('checkout and artifacts use separate capped emptyDirs with hard container resources', () => {
   const manifest = dispatcher().manifest({
     run,
     suite,
@@ -246,9 +271,24 @@ test('the checkout lives in a capped emptyDir, not on the artifacts volume', () 
   const { volumes, containers } = manifest.spec.template.spec
   const workspace = volumes.find((volume) => volume.name === 'workspace')
   assert.equal(workspace.emptyDir.sizeLimit, '10Gi')
+  const artifacts = volumes.find((volume) => volume.name === 'artifacts')
+  assert.equal(artifacts.emptyDir.sizeLimit, '2Gi')
+  assert.equal(artifacts.persistentVolumeClaim, undefined)
   const mount = containers[0].volumeMounts.find((entry) => entry.name === 'workspace')
   assert.equal(mount.mountPath, '/work')
   assert.equal(containers[0].securityContext.allowPrivilegeEscalation, false)
+  assert.equal(containers[0].resources.limits.cpu, '2')
+  assert.equal(containers[0].resources.limits.memory, '8Gi')
+  assert.equal(containers[0].resources.limits['ephemeral-storage'], '14Gi')
+  assert.equal(containers[0].resources.requests['ephemeral-storage'], '2Gi')
+  assert.match(containers[0].args[0], /node \/tmp\/mxt-upload\.js \|\| blocked/u)
+  const jobEnv = Object.fromEntries(
+    containers[0].env.filter((entry) => Object.hasOwn(entry, 'value')).map((entry) => [entry.name, entry.value]),
+  )
+  assert.equal(jobEnv.MXT_API_BASE, 'http://mxt')
+  assert.equal(jobEnv.MXT_ARTIFACT_MAX_FILE_BYTES, String(512 * 1024 * 1024))
+  assert.equal(jobEnv.MXT_ARTIFACT_MAX_RUN_BYTES, String(2 * 1024 * 1024 * 1024))
+  assert.equal(jobEnv.MXT_ARTIFACT_MAX_FILES, '1000')
 })
 
 // -- a Job that died without reporting ----------------------------------------
@@ -318,12 +358,47 @@ test('a listing failure does not break the scheduler tick', async () => {
   assert.deepEqual(store.updates, [])
 })
 
+test('the next Kubernetes operation reads a rotated ServiceAccount token', async () => {
+  let token = 'token-before-rotation'
+  let caReads = 0
+  const authorizations = []
+  const d = new KubernetesDispatcher({
+    config,
+    namespace: 'mx-test-framework',
+    logger: { log() {} },
+    readFileImpl: async (path) => {
+      if (path.endsWith('/token')) return token
+      caReads += 1
+      return 'cluster-ca'
+    },
+    fetchImpl: async (_url, init) => {
+      authorizations.push(init.headers.authorization)
+      return {
+        ok: true,
+        json: async () => ({ items: [] }),
+      }
+    },
+  })
+  d.apiBase = 'https://kubernetes.test'
+
+  await d.listJobs()
+  token = 'token-after-rotation'
+  await d.dispatch({ run, suite, app, env: {}, runToken: 'mxt-run-x', apiBase: 'http://mxt' })
+
+  assert.deepEqual(authorizations, [
+    'Bearer token-before-rotation',
+    'Bearer token-after-rotation',
+  ])
+  assert.equal(caReads, 1, 'the stable cluster CA may stay cached')
+})
+
 // -- dispatch failures are visible --------------------------------------------
 
 test('a run that can never start says so instead of sitting in the queue', async () => {
   const updates = []
   const store = {
-    listRuns: async () => [{ id: 'trun_9', appId: app.id, suiteId: suite.id }],
+    listRuns: async ({ status }) =>
+      status === 'queued' ? [{ id: 'trun_9', appId: app.id, suiteId: suite.id }] : [],
     getSuite: async () => ({ ...suite, runnerKind: 'server' }),
     getApp: async () => app,
     updateRun: async (id, patch) => updates.push([id, patch]),
@@ -344,6 +419,192 @@ test('a run that can never start says so instead of sitting in the queue', async
   assert.deepEqual(dispatched, [])
   assert.equal(updates[0][1].status, 'blocked')
   assert.match(updates[0][1].blockedReason, /403/u)
+})
+
+test('the global server-run cap leaves excess work queued', async () => {
+  const runs = [
+    { ...run, id: 'trun_a', status: 'queued', runsOn: 'server' },
+    { ...run, id: 'trun_b', status: 'queued', runsOn: 'server' },
+  ]
+  const created = []
+  const store = {
+    listRuns: async ({ status, limit }) => runs.filter((entry) => entry.status === status).slice(0, limit),
+    getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+    getApp: async () => app,
+    updateRun: async (id, patch) => Object.assign(runs.find((entry) => entry.id === id), patch),
+  }
+  const dispatched = await dispatchQueued({
+    store,
+    dispatcher: {
+      available: true,
+      dispatch: async ({ run: next }) => created.push(next.id),
+    },
+    config: { ...config, maxConcurrentServerRuns: 1 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => 'mxt-run-x',
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, ['trun_a'])
+  assert.deepEqual(created, ['trun_a'])
+  assert.equal(runs[0].status, 'running')
+  assert.equal(runs[1].status, 'queued')
+})
+
+test('an already-running server Job consumes the global capacity', async () => {
+  const queued = { ...run, id: 'trun_waiting', status: 'queued', runsOn: 'server' }
+  const runs = [
+    { ...run, id: 'trun_active', status: 'running', runsOn: 'server' },
+    queued,
+  ]
+  let issueCalls = 0
+  const dispatched = await dispatchQueued({
+    store: {
+      listRuns: async ({ status, limit }) =>
+        runs.filter((entry) => entry.status === status).slice(0, limit),
+      getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+    },
+    dispatcher: { available: true, dispatch: async () => assert.fail('capacity was exceeded') },
+    config: { ...config, maxConcurrentServerRuns: 1 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => {
+      issueCalls += 1
+      return 'mxt-run-x'
+    },
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, [])
+  assert.equal(issueCalls, 0)
+  assert.equal(queued.status, 'queued')
+})
+
+test('a live Kubernetes Job keeps capacity closed even after its database run timed out', async () => {
+  const queued = { ...run, id: 'trun_after_timeout', status: 'queued', runsOn: 'server' }
+  const dispatched = await dispatchQueued({
+    store: {
+      listRuns: async ({ status }) => (status === 'queued' ? [queued] : []),
+      getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+    },
+    dispatcher: {
+      available: true,
+      listJobs: async () => [{ runId: 'trun_timed_out', failed: false, succeeded: false }],
+      dispatch: async () => assert.fail('a live Job already owns the capacity'),
+    },
+    config: { ...config, maxConcurrentServerRuns: 1 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => 'mxt-run-x',
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, [])
+  assert.equal(queued.status, 'queued')
+})
+
+test('disjoint database runs and live Jobs consume the union of server capacity', async () => {
+  const queued = { ...run, id: 'trun_waiting_union', status: 'queued', runsOn: 'server' }
+  const runs = [
+    { ...run, id: 'trun_database_only', status: 'running', runsOn: 'server' },
+    queued,
+  ]
+  const dispatched = await dispatchQueued({
+    store: {
+      listRuns: async ({ status, limit }) =>
+        runs.filter((entry) => entry.status === status).slice(0, limit),
+      getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+    },
+    dispatcher: {
+      available: true,
+      listJobs: async () => [
+        { runId: 'trun_kubernetes_only', failed: false, succeeded: false },
+      ],
+      dispatch: async () => assert.fail('the disjoint active runs fill both slots'),
+    },
+    config: { ...config, maxConcurrentServerRuns: 2 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => 'mxt-run-x',
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, [])
+  assert.equal(queued.status, 'queued')
+})
+
+test('an overlapping database run and live Job consume one server slot', async () => {
+  const queued = { ...run, id: 'trun_after_overlap', status: 'queued', runsOn: 'server' }
+  const runs = [
+    { ...run, id: 'trun_same_active', status: 'running', runsOn: 'server' },
+    queued,
+  ]
+  const created = []
+  const dispatched = await dispatchQueued({
+    store: {
+      listRuns: async ({ status, limit }) =>
+        runs.filter((entry) => entry.status === status).slice(0, limit),
+      getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+      getApp: async () => app,
+      updateRun: async (id, patch) => Object.assign(runs.find((entry) => entry.id === id), patch),
+    },
+    dispatcher: {
+      available: true,
+      listJobs: async () => [
+        { runId: 'trun_same_active', failed: false, succeeded: false },
+      ],
+      dispatch: async ({ run: next }) => created.push(next.id),
+      imageFor: () => 'runner:test',
+    },
+    config: { ...config, maxConcurrentServerRuns: 2 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => 'mxt-run-x',
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, ['trun_after_overlap'])
+  assert.deepEqual(created, ['trun_after_overlap'])
+  assert.equal(queued.status, 'running')
+})
+
+test('a live Job without a run id conservatively consumes its own server slot', async () => {
+  const queued = { ...run, id: 'trun_waiting_unknown', status: 'queued', runsOn: 'server' }
+  const runs = [
+    { ...run, id: 'trun_known_active', status: 'running', runsOn: 'server' },
+    queued,
+  ]
+  const dispatched = await dispatchQueued({
+    store: {
+      listRuns: async ({ status, limit }) =>
+        runs.filter((entry) => entry.status === status).slice(0, limit),
+      getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+    },
+    dispatcher: {
+      available: true,
+      listJobs: async () => [{ runId: null, failed: false, succeeded: false }],
+      dispatch: async () => assert.fail('an unidentified live Job may not be ignored'),
+    },
+    config: { ...config, maxConcurrentServerRuns: 2 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => 'mxt-run-x',
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, [])
+  assert.equal(queued.status, 'queued')
+})
+
+test('a local-runner execution does not consume Kubernetes server capacity', async () => {
+  const runs = [
+    { ...run, id: 'trun_local', status: 'running', runsOn: 'any-runner' },
+    { ...run, id: 'trun_server', status: 'queued', runsOn: 'server' },
+  ]
+  const store = {
+    listRuns: async ({ status, limit }) => runs.filter((entry) => entry.status === status).slice(0, limit),
+    getSuite: async () => ({ ...suite, runnerKind: 'server' }),
+    getApp: async () => app,
+    updateRun: async (id, patch) => Object.assign(runs.find((entry) => entry.id === id), patch),
+  }
+  const dispatched = await dispatchQueued({
+    store,
+    dispatcher: { available: true, dispatch: async () => {} },
+    config: { ...config, maxConcurrentServerRuns: 1 },
+    buildEnv: async () => ({}),
+    issueRunToken: async () => 'mxt-run-x',
+    logger: { error() {} },
+  })
+  assert.deepEqual(dispatched, ['trun_server'])
 })
 
 // -- the platform is not tied to one engine -----------------------------------
@@ -434,7 +695,14 @@ test('every embedded script parses the way the container will parse it', async (
   const { Script } = await import('node:vm')
   const source = dispatcher().script({ apiBase: 'http://mxt' })
 
-  for (const name of ['mxt-api.js', 'mxt-exec.js', 'mxt-progress.js', 'mxt-report.js', 'mxt-blocked.js']) {
+  for (const name of [
+    'mxt-api.js',
+    'mxt-exec.js',
+    'mxt-upload.js',
+    'mxt-progress.js',
+    'mxt-report.js',
+    'mxt-blocked.js',
+  ]) {
     const opening = `cat > /tmp/${name} <<'MXT_EOF'\n`
     assert.ok(source.includes(opening), `${name} 必须在脚本里被创建，而不只是被调用`)
     const body = source.split(opening)[1].split('\nMXT_EOF')[0]

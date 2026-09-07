@@ -43,7 +43,7 @@ queued ──┬─ 服务端 runner: 直接派 Job ──> running ─┬─> p
 
 ## Schema
 
-完整 DDL 见 [`../migrations/001_initial.sql`](../migrations/001_initial.sql)。要点：
+完整 DDL 见 [`../migrations/`](../migrations/)。要点：
 
 ### 应用与用例
 
@@ -58,8 +58,15 @@ mxt_cases(
   app_id text, case_id text,            -- primary key (app_id, case_id)
   title text, priority text, tags jsonb, tracks jsonb,
   spec_path text, suite_slug text, requirement_ref text,
+  coverage_mode text, automation_state text, prerequisites jsonb,
   first_seen_at, last_seen_at,
   retired_at timestamptz                -- 软删
+)
+
+mxt_catalogs(
+  app_id text, catalog_file text,          -- primary key (app_id, catalog_file)
+  schema_version integer, application text, surface text, suite_slug text,
+  execution_mode text, coverage jsonb, synced_at timestamptz
 )
 ```
 

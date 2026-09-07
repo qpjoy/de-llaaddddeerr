@@ -21,7 +21,16 @@ export async function createStore(config) {
 export async function createRuntime(config = loadConfig(), { schedule = true } = {}) {
   const store = await createStore(config)
   const identity = createIdentity({ store, config })
-  const artifacts = new ArtifactStore({ root: config.artifactsDir })
+  const artifacts = new ArtifactStore({
+    root: config.artifactsDir,
+    maxFileBytes: config.artifactLimits.fileBytes,
+    maxRunBytes: config.artifactLimits.runBytes,
+    maxFilesPerRun: config.artifactLimits.filesPerRun,
+    maxTotalBytes: config.artifactLimits.totalBytes,
+    maxTotalEntries: config.artifactLimits.totalEntries,
+    minFreeBytes: config.artifactLimits.minFreeBytes,
+    minFreeInodes: config.artifactLimits.minFreeInodes,
+  })
   const dispatcher = new KubernetesDispatcher({ config, namespace: config.namespace })
   // One bus per runtime rather than a module-level singleton: the test suite
   // starts several servers in one process, and a shared bus would deliver one

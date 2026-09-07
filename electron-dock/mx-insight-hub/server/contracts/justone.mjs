@@ -2,9 +2,13 @@ import { createHash } from 'node:crypto'
 
 export const JUSTONE_PROVIDER_KEY = 'justone'
 export const JUSTONE_OPERATION = 'ecommerce.products.search'
+// Unchanged endpoint descriptors stay on this baseline. Quarantine revisions
+// are endpoint-scoped so fixing one marketplace cannot unlock another.
 export const JUSTONE_CONTRACT_VERSION = 'justone.product-search.v1'
 export const ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION = 'mx-insight-hub.ecommerce-products.v1'
 export const ECOMMERCE_DELIVERY_MODES = Object.freeze(['cache_only', 'cache_first', 'refresh'])
+
+export const JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION = 'justone.product-search.v2'
 
 const MAX_QUERY_LENGTH = 200
 const MAX_CURSOR_LENGTH = 4_096
@@ -32,10 +36,18 @@ const XIANYU_SORTS = Object.freeze({
   newest: 'newest',
 })
 
-function endpoint({ endpointKey, path, itemPaths, sortMap = null, tmall = false }) {
+function endpoint({
+  endpointKey,
+  path,
+  itemPaths,
+  contractVersion = JUSTONE_CONTRACT_VERSION,
+  sortMap = null,
+  tmall = false,
+}) {
   return Object.freeze({
     endpointKey,
     endpointVersion: 'v1',
+    contractVersion,
     method: 'GET',
     path,
     itemPaths: Object.freeze(itemPaths.map((segments) => Object.freeze([...segments]))),
@@ -51,13 +63,15 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
   taobao: endpoint({
     endpointKey: 'taobao-tmall.product-search.v1',
     path: '/api/taobao/search-item-list/v1',
-    itemPaths: [['data', 'items'], ['data', 'itemList']],
+    itemPaths: [['data', 'model', 'itemList'], ['data', 'items'], ['data', 'itemList']],
+    contractVersion: JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION,
     sortMap: TAOBAO_SORTS,
   }),
   tmall: endpoint({
     endpointKey: 'taobao-tmall.product-search.v1',
     path: '/api/taobao/search-item-list/v1',
-    itemPaths: [['data', 'items'], ['data', 'itemList']],
+    itemPaths: [['data', 'model', 'itemList'], ['data', 'items'], ['data', 'itemList']],
+    contractVersion: JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION,
     sortMap: TAOBAO_SORTS,
     tmall: true,
   }),
@@ -343,6 +357,7 @@ export function normalizeJustOneProductSearchRequest(body, {
     cursorScope: scope,
     endpointKey: descriptor.endpointKey,
     endpointVersion: descriptor.endpointVersion,
+    endpointContractVersion: descriptor.contractVersion,
     endpointPath: descriptor.path,
     upstreamQuery: Object.freeze(upstreamQuery),
     maxPageSize: normalizedMaxPageSize(maxPageSize),
@@ -565,6 +580,23 @@ function explicitBoolean(raw, paths) {
     if (typeof value === 'boolean') return value
   }
   return null
+}
+
+function explicitPageHasMore(raw, request) {
+  if (!['taobao', 'tmall'].includes(request.marketplace)) return null
+  const page = valueAt(raw, ['data', 'model', 'page'])
+  if (!plainObject(page)) return null
+  const pageNo = page.pageNo
+  const totalPages = page.totalPages
+  if (
+    !Number.isInteger(pageNo)
+    || !Number.isInteger(totalPages)
+    || pageNo < 1
+    || totalPages < 1
+    || pageNo > totalPages
+    || pageNo !== request.page
+  ) return null
+  return pageNo < totalPages
 }
 
 function explicitContinuation(raw) {
@@ -791,7 +823,7 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
   const explicitHasMore = explicitBoolean(raw, [
     ['data', 'hasMore'], ['data', 'has_more'],
     ['data', 'page', 'hasMore'], ['data', 'page', 'has_more'],
-  ])
+  ]) ?? explicitPageHasMore(raw, request)
   let hasMore = extracted.items.length === 0 ? false : explicitHasMore
   let nextCursor = null
   // The provider's public OpenAPI leaves response data untyped. A non-empty

@@ -67,7 +67,10 @@ deploy/k8s/internal/
 | PVC `mx-test-framework-artifacts` | 报告、录像、截图 | **独立 PVC**，不与程序数据或任何线上数据共用 |
 
 产物 PVC 用独立的 StorageClass 或 hostPath 路径（如 `/var/lib/mx-test-framework/artifacts`），
-它被填满时不会影响数据库或其他服务。
+Runner Job 不直接挂载它，只能通过受限 API 写入。需要特别注意：hostPath 清单里的
+`capacity` 只是 Kubernetes 声明，不是文件系统配额；同一磁盘被填满仍会影响同节点
+服务。mx-auto V0 因此额外执行全局持久化上限与最低剩余空间限制，生产应使用有容量
+隔离的 CSI volume 或独立分区。
 
 ## 清理
 
@@ -94,8 +97,27 @@ MXT_ARTIFACT_RETAIN_DAYS=30
 | `MXT_DATABASE_URL` | — | `mx_test` 库连接串 |
 | `MXT_ARTIFACTS_DIR` | `/data/artifacts` | PVC 挂载点 |
 | `MXT_ARTIFACT_RETAIN_DAYS` | `30` | 产物保留天数 |
+| `MXT_ARTIFACT_MAX_FILE_BYTES` | `536870912` | 单文件持久化硬上限 |
+| `MXT_ARTIFACT_MAX_RUN_BYTES` | `2147483648` | 单 Run 全部文件硬上限 |
+| `MXT_ARTIFACT_MAX_FILES_PER_RUN` | `1000` | 单 Run 文件数硬上限 |
+| `MXT_ARTIFACT_MAX_TOTAL_BYTES` | `21474836480` | 全部 Run 持久化字节硬上限 |
+| `MXT_ARTIFACT_MAX_TOTAL_ENTRIES` | `100000` | 全部文件与目录条目硬上限（零字节文件也计数） |
+| `MXT_ARTIFACT_MIN_FREE_BYTES` | `5368709120` | artifact 文件系统必须保留的空间 |
+| `MXT_ARTIFACT_MIN_FREE_INODES` | `10000` | artifact 文件系统必须保留的 inode 数 |
+| `MXT_MAX_CONCURRENT_SERVER_RUNS` | `1` | 同时存在的 K8s server Run 上限 |
 | `MXT_LAUNCHER_URL` | — | mx-launcher 地址，用于用户登录校验 |
 | `MXT_LAUNCHER_AUDIENCE` | `mx-test-framework` | token audience |
+| `MXT_LAUNCHER_NEGATIVE_CACHE_TTL_MS` | `3000` | 明确无效 token 的短负缓存；网络/5xx 不缓存 |
+| `MXT_LAUNCHER_INTROSPECTION_WINDOW_MS` | `10000` | opaque token 校验启动额度窗口 |
+| `MXT_LAUNCHER_INTROSPECTION_MAX_STARTS` | `30` | 每窗口最多启动的 Launcher introspection 数 |
+| `MXT_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT` | `8` | 单实例同时进行的 Launcher introspection 上限 |
+| `MXT_LAUNCHER_INTROSPECTION_MAX_STARTS_PER_SOURCE` | `6` | 单一 socket 来源每窗口的 introspection 启动上限 |
+| `MXT_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT_PER_SOURCE` | `2` | 单一 socket 来源的 introspection 并发上限 |
+| `MXT_LAUNCHER_PASSWORD_LOGIN_WINDOW_MS` | `10000` | 公开密码登录的独立启动额度窗口 |
+| `MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS` | `10` | 每窗口最多启动的 Launcher OAuth 密码登录数 |
+| `MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT` | `4` | 单实例同时进行的 Launcher OAuth 密码登录上限 |
+| `MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS_PER_SOURCE` | `3` | 单一 socket 来源/用户名 digest 每窗口的密码登录上限 |
+| `MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT_PER_SOURCE` | `1` | 单一 socket 来源/用户名 digest 的密码登录并发上限 |
 | `MXT_ADMIN_TOKEN` | — | 服务级管理 token，用于运维脚本 |
 | `MXT_RUNNER_IMAGE_CYPRESS` | `cypress/included:15.0.0` | 服务端 runner 镜像 |
 | `MXT_RUNNER_IMAGE_PLAYWRIGHT` | `mcr.microsoft.com/playwright:v1.56.0-noble` | 同上 |

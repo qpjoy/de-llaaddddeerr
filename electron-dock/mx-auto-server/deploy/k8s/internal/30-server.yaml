@@ -1,0 +1,232 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-auto-server
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/name: mx-auto-server
+    app.kubernetes.io/part-of: mx-auto
+spec:
+  # The reused scheduler is process-local, so V0 intentionally stays single-replica.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-auto-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-auto-server
+        app.kubernetes.io/part-of: mx-auto
+      annotations:
+        # manage.sh replaces this with a digest of every Secret-backed setting.
+        # A Secret update therefore changes the Pod template and rolls the Pod.
+        mx-auto.qpjoy.dev/secret-checksum: __MX_AUTO_SECRET_CHECKSUM__
+        # ConfigMap env values are read only at process start, so policy
+        # changes must also produce a Pod-template change.
+        mx-auto.qpjoy.dev/resource-policy-checksum: __MX_AUTO_RESOURCE_POLICY_CHECKSUM__
+    spec:
+      serviceAccountName: mx-auto-server
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: fix-permissions
+          image: mx-auto.invalid/mx-auto-server:managed-image-required
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown -R 1000:1000 /data/artifacts"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
+      containers:
+        - name: server
+          image: mx-auto.invalid/mx-auto-server:managed-image-required
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8790
+          env:
+            - name: MX_AUTO_PORT
+              value: "8790"
+            - name: MX_AUTO_STORE
+              value: postgres
+            - name: MX_AUTO_ARTIFACTS_DIR
+              value: /data/artifacts
+            - name: MX_AUTO_NAMESPACE
+              value: mx-auto
+            - name: MX_AUTO_SELF_URL
+              value: http://mx-auto-server
+            - name: MX_AUTO_GIT_TOKEN_SECRET
+              value: mx-auto-secrets
+            - name: MX_AUTO_GIT_TOKEN_SECRET_KEY
+              value: MX_AUTO_GIT_TOKEN
+            - name: MX_AUTO_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_DATABASE_URL
+            - name: MX_AUTO_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_ADMIN_TOKEN
+            - name: MX_AUTO_LAUNCHER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_URL
+                  optional: true
+            - name: MX_AUTO_LAUNCHER_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_AUDIENCE
+            - name: MX_AUTO_LAUNCHER_NEGATIVE_CACHE_TTL_MS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_NEGATIVE_CACHE_TTL_MS
+            - name: MX_AUTO_LAUNCHER_INTROSPECTION_WINDOW_MS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_INTROSPECTION_WINDOW_MS
+            - name: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_STARTS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_STARTS
+            - name: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT
+            - name: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_STARTS_PER_SOURCE
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_STARTS_PER_SOURCE
+            - name: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT_PER_SOURCE
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT_PER_SOURCE
+            - name: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_WINDOW_MS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_WINDOW_MS
+            - name: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS
+            - name: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT
+            - name: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS_PER_SOURCE
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS_PER_SOURCE
+            - name: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT_PER_SOURCE
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT_PER_SOURCE
+            - name: MX_AUTO_PUBLIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_PUBLIC_URL
+                  optional: true
+            - name: MX_AUTO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_SECRET_KEY
+            - name: NODE_EXTRA_CA_CERTS
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          envFrom:
+            - configMapRef:
+                name: mx-auto-resource-policy
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: mx-test-framework-artifacts
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-auto-server
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/name: mx-auto-server
+    app.kubernetes.io/part-of: mx-auto
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mx-auto-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

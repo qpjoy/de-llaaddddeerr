@@ -3,9 +3,11 @@
 > **本文档描述的是 Launcher 自己的 HDOI 质量控制面**：跨 H/D/I/O 的链路测试、
 > synthetic probe 与发版门禁。它由 `mx-launcher/server` 的 test-center 承载，本文继续有效。
 >
-> 与之无关的另一件事是 `electron-dock/mx-test-framework`——一个**独立的通用 e2e 测试平台**
-> （建任务、跑 UI 用例、出报告和录像），不做门禁、不参与发版流程、不接管这里的 test-center。
-> 它只借用了本文的 run/case/step 记录结构。见
+> 与之无关的另一件事是 [MX AutoTest](../demos/mx-autotest/docs/README.md)——一个通过
+> standalone Launcher 接入、可独立安装的测试领域产品（建项目和任务、编排多种工具、
+> 产出报告与录像）。它不接管这里的 Launcher test-center，也不把自身故障带入 MX-H2I
+> 的登录或联网路径。`electron-dock/mx-test-framework` 是其设计来源之一，并暂时作为
+> `mx-auto-server` V0 的执行内核；它不再是新产品入口。历史实现说明仍见
 > [mx-test-framework/docs/](../../mx-test-framework/docs/README.md)。
 
 本文档定义 MX Launcher / HDOI 的可观测自动化测试平台。这里的 HDOI 指：

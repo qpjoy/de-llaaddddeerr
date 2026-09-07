@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mx-auto-migrate
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/name: mx-auto-migrate
+    app.kubernetes.io/part-of: mx-auto
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-auto-migrate
+        app.kubernetes.io/part-of: mx-auto
+    spec:
+      restartPolicy: Never
+      serviceAccountName: mx-auto-server
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # Deliberately non-runnable until scripts/manage.sh injects one exact
+          # local content tag or remote digest before creating this Job.
+          image: mx-auto.invalid/mx-auto-server:managed-image-required
+          imagePullPolicy: IfNotPresent
+          command: ["node", "server/migrate.mjs"]
+          env:
+            - name: MX_AUTO_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_DATABASE_URL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

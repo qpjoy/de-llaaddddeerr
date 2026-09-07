@@ -1,0 +1,19 @@
+{
+  "name": "@qpjoy/mx-auto-server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "V0 control-plane wrapper for MX Autotest, reusing the proven mx-test-framework kernel.",
+  "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "bash scripts/manage.sh dev",
+    "migrate": "node server/migrate.mjs",
+    "verify": "node scripts/verify.mjs",
+    "onboard:compass": "node scripts/onboard-compass.mjs",
+    "test": "node scripts/check-static.mjs && node --test tests/*.test.mjs",
+    "lint": "node scripts/check-static.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

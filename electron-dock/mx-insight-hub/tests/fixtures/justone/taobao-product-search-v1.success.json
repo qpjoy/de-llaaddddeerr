@@ -1,0 +1,44 @@
+{
+  "code": 0,
+  "message": null,
+  "data": {
+    "code": "SUCCESS",
+    "extraMap": {
+      "MtopCostMillis": 76
+    },
+    "model": {
+      "itemList": [
+        {
+          "itemId": 10001,
+          "itemName": "脱敏便携相机",
+          "picUrl": "i3/example/product.jpg",
+          "picUrlFull": "https://g.search.alicdn.com/img/bao/uploaded/i4/i3/example/product.jpg",
+          "picUrlList": [
+            "i3/example/product.jpg"
+          ],
+          "priceYuanDouble": 1399,
+          "priceZKYuanDouble": 1299,
+          "discntPriceYuan": 1299,
+          "orderPayUV": "860",
+          "commentCount": "144",
+          "shopId": 20001,
+          "shopName": "脱敏示例店铺",
+          "itemLoc": "浙江 杭州"
+        }
+      ],
+      "page": {
+        "nextNo": 2,
+        "pageNo": 1,
+        "pageSize": 10,
+        "prevNo": 1,
+        "showBegin": 1,
+        "showEnd": 2,
+        "totalItems": 20,
+        "totalPages": 2
+      },
+      "responseStatus": 0,
+      "success": true
+    }
+  },
+  "recordTime": null
+}

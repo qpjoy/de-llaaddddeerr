@@ -10,14 +10,20 @@ import { readFile } from 'node:fs/promises'
 const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount'
 
 export class KubernetesDispatcher {
-  #token = null
-  #ca = null
+  #ca
 
-  constructor({ config, namespace, logger = console, fetchImpl = globalThis.fetch }) {
+  constructor({
+    config,
+    namespace,
+    logger = console,
+    fetchImpl = globalThis.fetch,
+    readFileImpl = readFile,
+  }) {
     this.config = config
     this.namespace = namespace
     this.logger = logger
     this.fetchImpl = fetchImpl
+    this.readFileImpl = readFileImpl
     this.apiBase =
       process.env.KUBERNETES_SERVICE_HOST &&
       `https://${process.env.KUBERNETES_SERVICE_HOST}:${process.env.KUBERNETES_SERVICE_PORT || 443}`
@@ -28,10 +34,13 @@ export class KubernetesDispatcher {
   }
 
   async #credentials() {
-    if (this.#token) return { token: this.#token, ca: this.#ca }
-    this.#token = (await readFile(`${SA_DIR}/token`, 'utf8')).trim()
-    this.#ca = await readFile(`${SA_DIR}/ca.crt`, 'utf8').catch(() => null)
-    return { token: this.#token, ca: this.#ca }
+    // Projected ServiceAccount tokens rotate in place, so every API operation
+    // must follow the current token file rather than retaining its old value.
+    const token = (await this.readFileImpl(`${SA_DIR}/token`, 'utf8')).trim()
+    if (this.#ca === undefined) {
+      this.#ca = await this.readFileImpl(`${SA_DIR}/ca.crt`, 'utf8').catch(() => null)
+    }
+    return { token, ca: this.#ca }
   }
 
   imageFor(suite) {
@@ -380,6 +389,81 @@ async function main() {
 main()
 MXT_EOF
 
+cat > /tmp/mxt-upload.js <<'MXT_EOF'
+// A Kubernetes runner stages evidence on its own bounded emptyDir. Persist it
+// only through the run-scoped upload API; the runner never mounts the server's
+// hostPath/PVC and therefore cannot write around server-side quotas.
+const fs = require('node:fs')
+const path = require('node:path')
+
+const root = process.env.MXT_ARTIFACTS_DIR
+const maxFiles = Number(process.env.MXT_ARTIFACT_MAX_FILES)
+const maxFileBytes = Number(process.env.MXT_ARTIFACT_MAX_FILE_BYTES)
+const maxBytes = Number(process.env.MXT_ARTIFACT_MAX_RUN_BYTES)
+
+function filesUnder(dir) {
+  const files = []
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch (error) {
+    if (error.code === 'ENOENT') return files
+    throw error
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) files.push(...filesUnder(full))
+    else if (entry.isFile()) {
+      const bytes = fs.statSync(full).size
+      if (bytes > 0) files.push({ full, bytes })
+    }
+  }
+  return files
+}
+
+async function main() {
+  const files = filesUnder(root).sort((a, b) => a.full.localeCompare(b.full))
+  const bytes = files.reduce((total, file) => total + file.bytes, 0)
+  if (files.length > maxFiles) {
+    throw new Error('artifact count ' + files.length + ' exceeds ' + maxFiles)
+  }
+  if (bytes > maxBytes) {
+    throw new Error('artifact bytes ' + bytes + ' exceeds ' + maxBytes)
+  }
+  const oversized = files.find((file) => file.bytes > maxFileBytes)
+  if (oversized) {
+    throw new Error('artifact ' + path.relative(root, oversized.full) + ' exceeds ' + maxFileBytes + ' bytes')
+  }
+
+  for (const file of files) {
+    const relative = path.relative(root, file.full).split(path.sep)
+    const route = relative.map(encodeURIComponent).join('/')
+    const response = await fetch(
+      process.env.MXT_API_BASE + '/runner/v1/runs/' + process.env.MXT_RUN_ID + '/artifacts/' + route,
+      {
+        method: 'PUT',
+        headers: {
+          authorization: 'Bearer ' + process.env.MXT_RUN_TOKEN,
+          'content-length': String(file.bytes),
+        },
+        body: fs.createReadStream(file.full),
+        duplex: 'half',
+        signal: AbortSignal.timeout(600000),
+      },
+    )
+    if (!response.ok) {
+      throw new Error('upload ' + relative.join('/') + ' failed: HTTP ' + response.status)
+    }
+  }
+  console.log('[mxt] uploaded ' + files.length + ' artifacts (' + bytes + ' bytes)')
+}
+
+main().catch((error) => {
+  console.error('[mxt] artifact upload failed: ' + error.message)
+  process.exit(1)
+})
+MXT_EOF
+
 cat > /tmp/mxt-progress.js <<'MXT_EOF'
 // Best-effort progress reporting. Deliberately swallows every failure: the
 // result upload is the path that has to work, and a platform that cannot be
@@ -464,6 +548,13 @@ if [ -n "\${MXT_REPO_URL:-}" ]; then
   git checkout -q FETCH_HEAD || blocked "git checkout failed"
   MXT_SOURCE_SHA=$(git rev-parse HEAD) || blocked "cannot resolve checked out commit"
   export MXT_SOURCE_SHA
+  # The suite command is arbitrary project code. It no longer needs clone
+  # credentials, so remove both inheritance paths before dependency hooks run.
+  if [ -n "\${MXT_GIT_TOKEN:-}" ]; then
+    git config --global --unset-all credential.helper >/dev/null 2>&1 \
+      || blocked "cannot clear git credentials after checkout"
+    unset MXT_GIT_TOKEN
+  fi
   echo "[mxt] checked out $MXT_SOURCE_REF @ $MXT_SOURCE_SHA"
   stage checkout ok "$MXT_SOURCE_REF @ $MXT_SOURCE_SHA"
 else
@@ -522,6 +613,8 @@ if [ ! -f "$SUMMARY" ] && [ -z "$(ls "$MXT_ARTIFACTS_DIR"/junit/*.xml 2>/dev/nul
 fi
 
 # Only once there is something to hand over is collection a success.
+stage upload
+node /tmp/mxt-upload.js || blocked "artifact upload failed"
 stage upload ok
 
 finish "$MXT_EXIT"
@@ -555,6 +648,10 @@ finish "$MXT_EXIT"
     const jobEnv = [
       ...Object.entries(env).map(([key, value]) => ({ name: key, value: String(value) })),
       { name: 'MXT_RUN_TOKEN', value: runToken },
+      { name: 'MXT_API_BASE', value: apiBase },
+      { name: 'MXT_ARTIFACT_MAX_FILES', value: String(this.config.artifactLimits.filesPerRun) },
+      { name: 'MXT_ARTIFACT_MAX_FILE_BYTES', value: String(this.config.artifactLimits.fileBytes) },
+      { name: 'MXT_ARTIFACT_MAX_RUN_BYTES', value: String(this.config.artifactLimits.runBytes) },
       // Where the suite's own output goes while it is still running. Passed in
       // rather than derived inside the container, so there is exactly one
       // definition of the platform's address in this file.
@@ -599,7 +696,7 @@ finish "$MXT_EXIT"
       },
       spec: {
         backoffLimit: 0, // Retries are the platform's decision, not the Job's.
-        ttlSecondsAfterFinished: 3600,
+        ttlSecondsAfterFinished: 600,
         activeDeadlineSeconds: Math.floor(this.config.runLeaseMs / 1000),
         template: {
           metadata: {
@@ -619,6 +716,9 @@ finish "$MXT_EXIT"
                 args: [this.script({ apiBase })],
                 env: jobEnv,
                 volumeMounts: [
+                  // Per-run staging only. Persistence goes through the
+                  // run-scoped upload endpoint, whose aggregate quotas are
+                  // enforced by ArtifactStore.
                   { name: 'artifacts', mountPath: this.config.artifactsDir },
                   // The checkout and its node_modules live here. An emptyDir is
                   // deleted with the Pod, so a workspace can never outlive the
@@ -638,15 +738,20 @@ finish "$MXT_EXIT"
                   requests: {
                     cpu: this.config.runnerResources.cpuRequest,
                     memory: this.config.runnerResources.memoryRequest,
+                    'ephemeral-storage': this.config.runnerResources.ephemeralStorageRequest,
                   },
-                  limits: { memory: this.config.runnerResources.memoryLimit },
+                  limits: {
+                    cpu: this.config.runnerResources.cpuLimit,
+                    memory: this.config.runnerResources.memoryLimit,
+                    'ephemeral-storage': this.config.runnerResources.ephemeralStorageLimit,
+                  },
                 },
               },
             ],
             volumes: [
               {
                 name: 'artifacts',
-                persistentVolumeClaim: { claimName: 'mx-test-framework-artifacts' },
+                emptyDir: { sizeLimit: this.config.runnerArtifactSizeLimit },
               },
               {
                 name: 'workspace',
@@ -781,10 +886,46 @@ export async function dispatchQueued({
   logger = console,
 }) {
   if (!dispatcher?.available) return []
+  const maxConcurrentServerRuns = config.maxConcurrentServerRuns ?? 1
+  const activeServerRunIds = new Set()
+  let unidentifiedActiveServerRuns = 0
+  for (const running of await store.listRuns({ status: 'running', limit: 200 })) {
+    let runsOn = running.runsOn
+    if (!runsOn) {
+      const runningSuite = await store.getSuite(running.suiteId)
+      // A missing suite is counted conservatively. The run is already active,
+      // and under-counting it could breach the node budget.
+      runsOn = !runningSuite || runningSuite.runnerKind !== 'local' ? 'server' : 'any-runner'
+    }
+    if (runsOn !== 'server') continue
+    if (running.id) activeServerRunIds.add(running.id)
+    else unidentifiedActiveServerRuns += 1
+  }
+
+  // The database can time out a run just before Kubernetes has published the
+  // Job's terminal condition. Count live Jobs too so that window cannot admit
+  // a second browser onto a single shared node. If the API cannot answer, keep
+  // work queued; guessing that capacity is free defeats the cap.
+  if (typeof dispatcher.listJobs === 'function') {
+    try {
+      const liveJobs = (await dispatcher.listJobs()).filter((job) => !job.failed && !job.succeeded)
+      for (const job of liveJobs) {
+        if (job.runId) activeServerRunIds.add(job.runId)
+        else unidentifiedActiveServerRuns += 1
+      }
+    } catch (error) {
+      logger?.error?.(`[dispatcher] capacity check failed: ${error.message}`)
+      return []
+    }
+  }
+
+  let activeServerRuns = activeServerRunIds.size + unidentifiedActiveServerRuns
+  if (activeServerRuns >= maxConcurrentServerRuns) return []
   const queued = await store.listRuns({ status: 'queued', limit: 10 })
   const dispatched = []
 
   for (const run of queued) {
+    if (activeServerRuns >= maxConcurrentServerRuns) break
     const suite = await store.getSuite(run.suiteId)
     if (!suite) continue
     // The run says where it goes, not the suite. That is the whole point of
@@ -810,6 +951,7 @@ export async function dispatchQueued({
         leaseUntil: new Date(Date.now() + config.runLeaseMs).toISOString(),
       })
       dispatched.push(run.id)
+      activeServerRuns += 1
       // A server-side run is never "claimed" by anyone, so without this its
       // timeline would be empty until the container's first report — which is
       // exactly the case that reads as "执行中" and nothing else.

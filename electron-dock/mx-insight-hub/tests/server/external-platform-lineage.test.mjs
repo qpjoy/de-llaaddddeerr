@@ -17,7 +17,7 @@ function productRecord() {
     payloadSha256: 'b'.repeat(64),
     rawPayloadSha256: 'c'.repeat(64),
     rawItem: { skuId: 'sku-1', title: 'Camera' },
-    parserVersion: 'mxih-justone-product-search.v1',
+    parserVersion: 'mxih-justone-product-search.v2',
     contentType: 'product',
     url: 'https://item.jd.com/sku-1.html',
     title: 'Camera',

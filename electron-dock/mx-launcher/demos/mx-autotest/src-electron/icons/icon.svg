@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#172033"/>
+      <stop offset="1" stop-color="#090d15"/>
+    </linearGradient>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7affea"/>
+      <stop offset="1" stop-color="#20d8bd"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="22" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="grid" width="96" height="96" patternUnits="userSpaceOnUse">
+      <path d="M 96 0 L 0 0 0 96" fill="none" stroke="#7a93ff" stroke-opacity=".08" stroke-width="3"/>
+    </pattern>
+  </defs>
+  <rect x="40" y="40" width="944" height="944" rx="224" fill="url(#bg)"/>
+  <rect x="40" y="40" width="944" height="944" rx="224" fill="url(#grid)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#45617e" stroke-width="10"/>
+  <path d="M290 653V371h71l82 130 82-130h71v282h-73V485l-80 123-80-123v168z" fill="#eef4fa"/>
+  <path d="M628 371h83l52 80 52-80h83l-94 137 99 145h-84l-56-87-56 87h-84l99-145z" fill="#eef4fa"/>
+  <circle cx="781" cy="756" r="104" fill="#08120f" stroke="url(#neon)" stroke-width="20" filter="url(#glow)"/>
+  <path d="M746 704l91 52-91 52z" fill="url(#neon)"/>
+</svg>

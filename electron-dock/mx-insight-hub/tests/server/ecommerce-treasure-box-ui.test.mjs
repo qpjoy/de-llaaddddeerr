@@ -87,6 +87,16 @@ test('the v1 session ledger migrates to v2, drops damage and accepts records wit
   assert.equal(migrated.idempotencyKey, 'treasure-00000000-0000-4000-8000-000000000000')
   assert.equal('requestId' in migrated, false)
   assert.equal(normalizedStoredLiveRequest({ ...migrated, idempotencyKey: 'damaged' }), null)
+  assert.equal(normalizedStoredLiveRequest({
+    ...migrated,
+    outcome: 'resolved',
+    committedErrorCode: 'external_platform_response_unusable',
+  }).committedErrorCode, 'external_platform_response_unusable')
+  assert.equal('committedErrorCode' in normalizedStoredLiveRequest({
+    ...migrated,
+    outcome: 'ambiguous',
+    committedErrorCode: 'external_platform_response_unusable',
+  }), false)
   assert.deepEqual(liveRequestStorageDecision({ ...migrated, outcome: 'pending' }, { legacy: true }), {
     action: 'migrate',
     record: { ...migrated, migratedFromV1: true },
@@ -107,6 +117,7 @@ test('the v1 session ledger migrates to v2, drops damage and accepts records wit
   assert.match(loadSource, /decision\.action === 'remove'[\s\S]*?removeStoredLiveRequest\(storageKey\)/u)
   assert.match(loadSource, /decision\.action === 'migrate'[\s\S]*?persistLiveRequest\(decision\.record\)/u)
   assert.match(persistSource, /version: 2/u)
+  assert.match(persistSource, /committedErrorCode/u)
   assert.match(persistSource, /migratedFromV1/u)
   assert.match(persistSource, /removeStoredLiveRequest\(LEGACY_LIVE_REQUEST_STORAGE_KEY\)/u)
 })
@@ -248,7 +259,8 @@ test('live verification script preserves one recovery identity across ambiguous 
 test('one click reconciles an ambiguous refresh before one explicitly related retry', async () => {
   const [, apiSource, pageSource] = await sources()
   const runLive = pageSource.match(/const runLive = async[\s\S]*?\n  const submit =/u)?.[0] || ''
-  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\{[\s\S]*?\n  \}\n\n  const verifyResolvedReplayOwnership/u)?.[0] || ''
+  const replayOwnershipCheck = pageSource.match(/const verifyResolvedReplayOwnership = async \(\{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
   const submit = pageSource.match(/const submit = async \(event\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
   const archive = pageSource.match(/function archiveLiveRequest\(record,[\s\S]*?\n\}/u)?.[0] || ''
   const sameLogicalRequest = pageSource.match(/function sameLogicalRequestBody\(left, right\) \{[\s\S]*?\n\}/u)?.[0] || ''
@@ -269,6 +281,17 @@ test('one click reconciles an ambiguous refresh before one explicitly related re
     'the durable request record must be written before fetch',
   )
   assert.match(runLive, /if \(replay && previous\?\.outcome !== 'resolved'\)/u)
+  assert.match(runLive, /if \(replay\) \{[\s\S]*?verifyResolvedReplayOwnership\(\{ apiKey, pending: previous \}\)[\s\S]*?if \(!verifiedReplay\) return/u)
+  assert.ok(
+    runLive.indexOf('verifyResolvedReplayOwnership({ apiKey, pending: previous })')
+      < runLive.indexOf('publicDataApi.ecommerceProductsSearch'),
+    'a resolved replay must prove current-key ownership before its POST',
+  )
+  assert.match(replayOwnershipCheck, /pending\.requestId[\s\S]*?publicDataApi\.requestStatus\(apiKey, pending\.requestId\)[\s\S]*?publicDataApi\.requestByIdempotencyKey\(apiKey, pending\.idempotencyKey\)/u)
+  assert.match(replayOwnershipCheck, /status !== 'committed' \|\| platform !== 'ecommerce' \|\| !verifiedRequestId \|\| !sameRequestId/u)
+  assert.match(replayOwnershipCheck, /code: 'resolved_replay_not_verified'/u)
+  assert.match(replayOwnershipCheck, /rememberLiveRequest\(\{ \.\.\.pending, requestId: verifiedRequestId, outcome: 'resolved' \}\)/u)
+  assert.doesNotMatch(replayOwnershipCheck, /ecommerceProductsSearch|forgetLiveRequest|clearPersistedLiveRequest/u)
   assert.match(runLive, /outcome: replay \? 'resolved' : 'pending'/u)
   assert.match(runLive, /requestError\?\.requestId \? \{ requestId: requestError\.requestId \}/u)
   assert.match(statusCheck, /publicDataApi\.requestByIdempotencyKey\(apiKey, pending\.idempotencyKey\)/u)
@@ -311,6 +334,9 @@ test('one click reconciles an ambiguous refresh before one explicitly related re
   assert.doesNotMatch(statusCheck, /fingerprint !== pending\.keyFingerprint|fingerprint === pending\.keyFingerprint/u)
   assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'/u)
   assert.match(runLive, /stableCommittedFailure[\s\S]*?outcome: 'resolved'/u)
+  assert.match(runLive, /stableCommittedFailure[\s\S]*?requestError\?\.details\?\.requestId[\s\S]*?committedErrorCode: requestError\.code/u)
+  assert.match(runLive, /const priorCommittedUnusable = requestError\?\.status === 409[\s\S]*?previous\?\.committedErrorCode === 'external_platform_response_unusable'/u)
+  assert.match(runLive, /else if \(priorCommittedUnusable\)[\s\S]*?rememberLiveRequest\(previous\)/u)
   assert.match(runLive, /tracksProviderRisk[\s\S]*?rememberLiveRequest\(requestRecord, \{ failClosed: true \}\)/u)
 })
 
@@ -318,7 +344,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   const [, , pageSource] = await sources()
   const keyField = pageSource.match(/<Field label="开放能力 API Key"[\s\S]*?<\/Field>/u)?.[0] || ''
   const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
-  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\{[\s\S]*?\n  \}\n\n  const changeMarketplace/u)?.[0] || ''
+  const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\{[\s\S]*?\n  \}\n\n  const verifyResolvedReplayOwnership/u)?.[0] || ''
   const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
 
   assert.match(pageSource, /requestInFlightRef\.current/u)
@@ -369,18 +395,25 @@ test('data-product errors are localized by ownership and always retain operator 
     ['external_platform_busy', '实时请求较多，请稍后再试'],
     ['quota_exceeded', '当前调用身份的 Hub 请求额度已用完'],
     ['external_platform_rejected', '外部数据服务拒绝了本次查询'],
+    ['resolved_replay_not_verified', '当前 API Key 无法核验原请求归属'],
   ]) {
     assert.match(presentation, new RegExp(code, 'u'))
     assert.match(presentation, new RegExp(copy, 'u'))
   }
   assert.match(presentation, /error\?\.status === 409[\s\S]*?本次尝试在上游派发前停止，没有新增外部采集/u)
+  assert.match(presentation, /JustOne 响应格式隔离仍在生效[\s\S]*?没有新增 JustOne 调用或上游采购计费/u)
+  assert.match(presentation, /succeeded_unusable/u)
   assert.match(presentation, /同类实时请求仍在未决隔离期[\s\S]*?早先的请求结果仍可能未知/u)
+  assert.match(presentation, /resolved_replay_not_verified[\s\S]*?没有发送重放 POST，也没有访问 JustOne[\s\S]*?本地账本会继续保留/u)
   assert.match(errorState, /error\.code/u)
   assert.match(errorState, /error\.requestId/u)
+  assert.match(errorState, /JSON\.stringify\(error\.details\)/u)
+  assert.match(errorState, /服务端 details/u)
   assert.match(errorState, /转到零费用演示/u)
   assert.match(errorState, /查看上游运行状态/u)
   assert.doesNotMatch(errorState, /error\?\.message \|\| '数据请求失败'/u)
   assert.match(pageSource, /<section className="qp-panel mih-treasure-lab">\s*\{error \? <TreasureProductError/u)
+  assert.match(pageSource, /首次 committed-unusable 账本已保留[\s\S]*?精确重放只读取已提交错误，不会再次访问 JustOne/u)
   assert.equal(pageSource.match(/<TreasureProductError\b/gu)?.length, 1)
   assert.match(styleSource, /\.mih-treasure-lab > \.mih-treasure-product-error \{[\s\S]*?grid-column: 1 \/ -1/u)
   assert.match(pageSource, /这次没有找到商品/u)

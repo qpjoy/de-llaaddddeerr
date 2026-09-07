@@ -95,10 +95,16 @@ test('records use the ecommerce canonical shape with catalog mapping and lineage
     assert.deepEqual(record.stableFields.source, {
       connectorId: 'external-platform:justone',
       operation: 'ecommerce.products.search',
-      connectorContractVersion: 'justone.product-search.v1',
+      connectorContractVersion: request.endpointContractVersion,
       endpointKey: request.endpointKey,
       endpointVersion: 'v1',
     })
+    assert.equal(
+      record.stableFields.source.connectorContractVersion,
+      ['taobao', 'tmall'].includes(marketplace)
+        ? 'justone.product-search.v2'
+        : 'justone.product-search.v1',
+    )
     assert.match(record.rawPayloadSha256, /^[a-f0-9]{64}$/u)
     assert.match(record.payloadSha256, /^[a-f0-9]{64}$/u)
     assert.equal(normalized.archiveObjects.length, 2)

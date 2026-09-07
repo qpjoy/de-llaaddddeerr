@@ -85,6 +85,152 @@ test('an oversized upload leaves no partial file behind', async () => {
   assert.deepEqual(await store.list('trun_2'), [])
 })
 
+test('rejected deep uploads leave no empty directory ladder or zero-byte file', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'rejected-entry-budget'),
+    maxFileBytes: 1,
+    maxRunBytes: 100,
+    maxFilesPerRun: 100,
+    maxTotalBytes: 100,
+    maxTotalEntries: 20,
+  })
+  for (let index = 0; index < 25; index += 1) {
+    await assert.rejects(
+      bounded.write(
+        'trun_rejected',
+        `attempt-${index}/nested/deep/file.bin`,
+        stream('xx'),
+      ),
+      (error) => error.code === 'artifact_too_large',
+    )
+  }
+  assert.equal(await bounded.totalEntries(), 0)
+  assert.deepEqual(await bounded.list('trun_rejected'), [])
+})
+
+test('one run has hard aggregate-byte and file-count limits', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'run-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 10,
+    maxFilesPerRun: 2,
+  })
+  await bounded.write('trun_bounded', 'a.txt', stream('123456'))
+  await assert.rejects(
+    bounded.write('trun_bounded', 'b.txt', stream('12345')),
+    (error) => error.code === 'artifact_run_too_large',
+  )
+  await bounded.write('trun_bounded', 'b.txt', stream('1234'))
+  await assert.rejects(
+    bounded.write('trun_bounded', 'c.txt', stream('x')),
+    (error) => error.code === 'artifact_file_limit',
+  )
+  assert.deepEqual(
+    (await bounded.list('trun_bounded')).map(({ path, bytes }) => ({ path, bytes })),
+    [
+      { path: 'a.txt', bytes: 6 },
+      { path: 'b.txt', bytes: 4 },
+    ],
+  )
+})
+
+test('parallel uploads cannot race past the per-run byte limit', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'parallel-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 10,
+    maxFilesPerRun: 10,
+  })
+  const results = await Promise.allSettled([
+    bounded.write('trun_parallel', 'a.txt', stream('123456')),
+    bounded.write('trun_parallel', 'b.txt', stream('123456')),
+  ])
+  assert.deepEqual(
+    results.map((result) => result.status).sort(),
+    ['fulfilled', 'rejected'],
+  )
+  assert.equal(
+    (await bounded.list('trun_parallel')).reduce((total, entry) => total + entry.bytes, 0),
+    6,
+  )
+})
+
+test('parallel uploads from different runs cannot race past the persistent-volume budget', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'global-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 10,
+  })
+  const results = await Promise.allSettled([
+    bounded.write('trun_global_a', 'a.txt', stream('123456')),
+    bounded.write('trun_global_b', 'b.txt', stream('123456')),
+  ])
+  assert.deepEqual(
+    results.map((result) => result.status).sort(),
+    ['fulfilled', 'rejected'],
+  )
+  const rejection = results.find((result) => result.status === 'rejected')
+  assert.equal(rejection.reason.code, 'artifact_storage_budget')
+  assert.equal(await bounded.totalBytes(), 6)
+})
+
+test('zero-byte files and their directories consume the global entry budget', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'global-entry-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 100,
+    maxTotalEntries: 7,
+  })
+  for (let index = 0; index < 3; index += 1) {
+    await bounded.write(`trun_empty_${index}`, 'empty.bin', stream(''))
+  }
+  await assert.rejects(
+    bounded.write('trun_empty_3', 'empty.bin', stream('')),
+    (error) => error.code === 'artifact_storage_entry_budget' && error.status === 507,
+  )
+  assert.equal(await bounded.totalBytes(), 0)
+  assert.equal(await bounded.totalEntries(), 7)
+})
+
+test('the filesystem safety reserve is enforced while streaming', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'reserve-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 1_000,
+    minFreeBytes: 6,
+    statfsImpl: async () => ({ bavail: 10, bsize: 1, ffree: 100 }),
+  })
+  await assert.rejects(
+    bounded.write('trun_reserve', 'a.txt', stream('12345')),
+    (error) => error.code === 'artifact_storage_low' && error.status === 507,
+  )
+  assert.deepEqual(await bounded.list('trun_reserve'), [])
+})
+
+test('the filesystem inode reserve includes staging files and missing directories', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'inode-reserve'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 1_000,
+    maxTotalEntries: 1_000,
+    minFreeInodes: 10,
+    statfsImpl: async () => ({ bavail: 1_000, bsize: 1, ffree: 12 }),
+  })
+  await assert.rejects(
+    bounded.write('trun_inode', 'a.txt', stream('x')),
+    (error) => error.code === 'artifact_storage_inode_low' && error.status === 507,
+  )
+  assert.equal(await bounded.totalEntries(), 0)
+})
+
 test('infers the content types that matter for playback and reports', () => {
   assert.equal(store.contentType('a/b.mp4'), 'video/mp4')
   assert.equal(store.contentType('a/b.webm'), 'video/webm')

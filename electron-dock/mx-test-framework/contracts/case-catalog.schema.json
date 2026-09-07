@@ -21,6 +21,15 @@
       "type": "string",
       "maxLength": 64
     },
+    "catalogFile": {
+      "type": "string",
+      "maxLength": 240,
+      "description": "Server-side source identity supplied to catalog:sync. Repository files may omit it."
+    },
+    "_comment": {
+      "type": "string",
+      "maxLength": 1000
+    },
     "surface": {
       "enum": [
         "web",
@@ -36,6 +45,23 @@
       "type": "string",
       "maxLength": 64,
       "description": "Free-text, informational. Kept for schemaVersion 1 compatibility."
+    },
+    "coverage": {
+      "type": "object",
+      "maxProperties": 30,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "additionalProperties": {
+        "enum": [
+          "automated",
+          "manual-witness",
+          "unsupported",
+          "planned"
+        ]
+      },
+      "description": "Catalog-level capability posture. This is not a percentage and must not be collapsed into one coverage score."
     },
     "cases": {
       "type": "array",
@@ -98,6 +124,46 @@
             "type": "string",
             "maxLength": 96,
             "description": "Requirement or story id. Without it, requirement coverage cannot be computed and must not be claimed."
+          },
+          "coverageMode": {
+            "enum": [
+              "automated",
+              "automated-renderer",
+              "automated-browser",
+              "automated-api",
+              "automated-cli",
+              "manual-witness",
+              "unsupported",
+              "planned"
+            ],
+            "description": "The mechanism that provides evidence for this case."
+          },
+          "automationState": {
+            "enum": [
+              "implemented",
+              "planned",
+              "blocked-prerequisite",
+              "manual-only",
+              "unsupported"
+            ],
+            "description": "Declared implementation posture. Runtime execution remains an independently observed fact."
+          },
+          "prerequisites": {
+            "type": "array",
+            "maxItems": 30,
+            "items": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          "_steps": {
+            "type": "array",
+            "maxItems": 60,
+            "items": {
+              "type": "string",
+              "maxLength": 700
+            },
+            "description": "Human-readable export aid emitted by the platform; executable step evidence belongs to run summaries."
           },
           "retired": {
             "type": "boolean",

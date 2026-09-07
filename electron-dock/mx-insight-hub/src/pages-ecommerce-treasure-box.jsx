@@ -75,6 +75,10 @@ const AMBIGUOUS_LIVE_ERROR_CODES = new Set([
   'request_in_progress',
   'upstream_outcome_unknown',
 ])
+const COMMITTED_LIVE_ERROR_CODES = new Set([
+  'external_platform_response_unusable',
+  'external_platform_rejected',
+])
 
 const SORTS = {
   taobao: [
@@ -183,8 +187,8 @@ function ecommerceErrorPresentation(error) {
   if (code === 'external_platform_response_unusable') {
     if (error?.status === 409) {
       return {
-        title: '同类实时请求正因响应格式问题被隔离',
-        description: '本次尝试在上游派发前停止，没有新增外部采集；触发隔离的早先调用仍可能有内部采购成本。请勿连续重试，交由管理员核查并处理响应归档后再调用。',
+        title: 'JustOne 响应格式隔离仍在生效',
+        description: '这次 409 在访问 JustOne 前已被 Hub 拦截，没有新增 JustOne 调用或上游采购计费；最初触发 succeeded_unusable 隔离的调用仍可能已经计费。请查看上游运行状态并处理响应归档，不要连续重试。',
         operatorAction: true,
       }
     }
@@ -220,6 +224,13 @@ function ecommerceErrorPresentation(error) {
       title: '同一实时请求仍在处理中',
       description: '本次尝试没有新增外部采集。请等待页面按本地幂等账本做只读查询；不要 POST 原请求或并发创建新的请求标识。零费用演示不受影响。',
       operatorAction: true,
+    }
+  }
+  if (code === 'resolved_replay_not_verified') {
+    return {
+      title: '当前 API Key 无法核验原请求归属',
+      description: '页面只执行了只读状态查询；未能证明本地账本对应当前调用身份下已提交的 ecommerce 请求，因此没有发送重放 POST，也没有访问 JustOne。本地账本会继续保留。',
+      operatorAction: false,
     }
   }
   if (code === 'external_platform_not_configured') {
@@ -498,6 +509,9 @@ export function normalizedStoredLiveRequest(parsed) {
   const requestId = typeof parsed?.requestId === 'string' && REQUEST_ID_PATTERN.test(parsed.requestId.trim())
     ? parsed.requestId.trim()
     : null
+  const committedErrorCode = parsed?.outcome === 'resolved' && COMMITTED_LIVE_ERROR_CODES.has(parsed?.committedErrorCode)
+    ? parsed.committedErrorCode
+    : null
   if (
     !body
     || !/^treasure-[0-9a-f-]{36}$/u.test(parsed?.idempotencyKey || '')
@@ -509,6 +523,7 @@ export function normalizedStoredLiveRequest(parsed) {
     idempotencyKey: parsed.idempotencyKey,
     keyFingerprint,
     ...(requestId ? { requestId } : {}),
+    ...(committedErrorCode ? { committedErrorCode } : {}),
     ...(parsed?.migratedFromV1 === true ? { migratedFromV1: true } : {}),
     // A tab refresh while fetch was pending makes the outcome ambiguous.
     outcome: parsed.outcome === 'pending' ? 'ambiguous' : parsed.outcome,
@@ -588,6 +603,9 @@ function persistLiveRequest(record) {
     idempotencyKey: record.idempotencyKey,
     keyFingerprint: record.keyFingerprint,
     ...(REQUEST_ID_PATTERN.test(record.requestId || '') ? { requestId: record.requestId } : {}),
+    ...(record.outcome === 'resolved' && COMMITTED_LIVE_ERROR_CODES.has(record.committedErrorCode)
+      ? { committedErrorCode: record.committedErrorCode }
+      : {}),
     ...(record.migratedFromV1 === true ? { migratedFromV1: true } : {}),
     outcome: record.outcome,
   }))
@@ -771,6 +789,9 @@ function CallEvidence({ evidence }) {
 
 function TreasureProductError({ error, mode, onUseSafeDemo }) {
   const presentation = ecommerceErrorPresentation(error)
+  const serverDetails = error?.details == null
+    ? null
+    : typeof error.details === 'string' ? error.details : JSON.stringify(error.details)
   return (
     <section className="mih-treasure-product-error" role="alert">
       <WarningCircle size={30} weight="duotone" aria-hidden="true" />
@@ -781,6 +802,7 @@ function TreasureProductError({ error, mode, onUseSafeDemo }) {
           {error?.code ? <>错误码 <code>{error.code}</code></> : '本次操作未完成'}
           {error?.requestId ? <> · Request ID <code>{error.requestId}</code></> : null}
         </small>
+        {serverDetails ? <small>服务端 details <code>{serverDetails}</code></small> : null}
       </div>
       <div className="mih-treasure-product-error__actions">
         {mode !== 'safe_demo' ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={onUseSafeDemo}>转到零费用演示</button> : null}
@@ -1072,6 +1094,65 @@ export function EcommerceTreasureBoxPage({ notify }) {
     }
   }
 
+  const verifyResolvedReplayOwnership = async ({ apiKey, pending }) => {
+    if (requestInFlightRef.current || pending?.outcome !== 'resolved') return null
+    const epoch = beginRequest()
+    if (epoch == null) return null
+    setError(null)
+    setRecoveryStatus('replay_checking')
+    try {
+      const result = pending.requestId
+        ? await publicDataApi.requestStatus(apiKey, pending.requestId)
+        : await publicDataApi.requestByIdempotencyKey(apiKey, pending.idempotencyKey)
+      if (!finishRequest(epoch)) return null
+      setPhase('idle')
+      const status = String(result.payload?.data?.status || '').toLowerCase()
+      const platform = String(result.payload?.data?.platform || '').toLowerCase()
+      const resultRequestId = result.payload?.data?.id
+      const verifiedRequestId = typeof resultRequestId === 'string' && REQUEST_ID_PATTERN.test(resultRequestId)
+        ? resultRequestId
+        : null
+      const sameRequestId = !pending.requestId || verifiedRequestId === pending.requestId
+      if (status !== 'committed' || platform !== 'ecommerce' || !verifiedRequestId || !sameRequestId) {
+        setRecoveryStatus('replay_blocked')
+        setError({
+          status: 409,
+          code: 'resolved_replay_not_verified',
+          ...(verifiedRequestId ? { requestId: verifiedRequestId } : {}),
+          details: {
+            lookupStatus: status || 'missing',
+            lookupPlatform: platform || 'missing',
+            ...(pending.requestId ? { expectedRequestId: pending.requestId } : {}),
+            ...(verifiedRequestId ? { actualRequestId: verifiedRequestId } : {}),
+          },
+          message: '只读核验未能确认原请求属于当前 API Key 且已经 committed。',
+        })
+        return null
+      }
+      rememberLiveRequest({ ...pending, requestId: verifiedRequestId, outcome: 'resolved' })
+      setRecoveryStatus('replay_verified')
+      notify?.('原请求归属与 committed 状态已通过只读核验；正在精确读取已提交结果。', 'success')
+      return { requestId: verifiedRequestId }
+    } catch (statusError) {
+      if (!finishRequest(epoch)) return null
+      setPhase('idle')
+      setRecoveryStatus('replay_blocked')
+      setError({
+        status: statusError?.status,
+        code: 'resolved_replay_not_verified',
+        ...(statusError?.requestId ? { requestId: statusError.requestId } : {}),
+        details: {
+          ...(statusError?.details && typeof statusError.details === 'object' && !Array.isArray(statusError.details)
+            ? statusError.details
+            : {}),
+          ...(statusError?.code ? { lookupErrorCode: statusError.code } : {}),
+        },
+        message: '当前 API Key 无法只读核验原请求；本地账本已保留，本次不会发送重放 POST。',
+      })
+      return null
+    }
+  }
+
   const changeMarketplace = (value) => {
     if (semanticsLocked) return
     setMarketplace(value)
@@ -1146,6 +1227,11 @@ export function EcommerceTreasureBoxPage({ notify }) {
     if (replay && previous?.outcome !== 'resolved') {
       setError({ message: '原请求尚未确认 committed。页面只会先做零上游状态核对；reserved 或 unknown 状态不能从浏览器 POST 重放。' })
       return
+    }
+    if (replay) {
+      const verifiedReplay = await verifyResolvedReplayOwnership({ apiKey, pending: previous })
+      if (!verifiedReplay) return
+      previous = lastLiveRequestRef.current
     }
     if (!replay && providerMayRun && previous?.outcome === 'ambiguous') {
       if (!refreshRequested) {
@@ -1226,13 +1312,26 @@ export function EcommerceTreasureBoxPage({ notify }) {
         // failures may clear the local request ledger.
         const stableCommittedFailure = tracksProviderRisk
           && requestError?.status === 502
-          && ['external_platform_response_unusable', 'external_platform_rejected'].includes(requestError?.code)
+          && COMMITTED_LIVE_ERROR_CODES.has(requestError?.code)
+        const priorCommittedUnusable = requestError?.status === 409
+          && requestError?.code === 'external_platform_response_unusable'
+          && previous?.outcome === 'resolved'
+          && previous?.committedErrorCode === 'external_platform_response_unusable'
         if (stableCommittedFailure) {
+          const durableRequestId = REQUEST_ID_PATTERN.test(requestError?.details?.requestId || '')
+            ? requestError.details.requestId
+            : requestError?.requestId
           rememberLiveRequest({
             ...requestRecord,
-            ...(requestError?.requestId ? { requestId: requestError.requestId } : {}),
+            ...(durableRequestId ? { requestId: durableRequestId } : {}),
+            committedErrorCode: requestError.code,
             outcome: 'resolved',
           })
+        } else if (priorCommittedUnusable) {
+          // The fresh attempt was rejected before provider dispatch by the
+          // endpoint quarantine. Restore the first committed-unusable ledger
+          // that the temporary pending record replaced.
+          rememberLiveRequest(previous)
         } else if (
           tracksProviderRisk
           && !replay
@@ -1444,6 +1543,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
           {recoveryStatus === 'replaying' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原请求已确认 committed</strong><small>正在自动使用相同 body 与 Idempotency-Key 读取原结果；不会新增 Hub usage 或外部采集。</small></span></div> : null}
           {recoveryStatus === 'released' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原预留已确认 released</strong><small>本地未决锁已解除；本次重新采集会使用新的 Idempotency-Key。</small></span></div> : null}
           {recoveryStatus === 'orphan_cleared' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>孤儿未决账本已安全清理</strong><small>Hub 明确返回 request_not_found；这不是通用路由 404，本次重新采集可以继续。</small></span></div> : null}
+          {lastLiveRequest?.outcome === 'resolved' && lastLiveRequest.committedErrorCode === 'external_platform_response_unusable' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><Fingerprint size={17} weight="duotone" aria-hidden="true" /><span><strong>首次 committed-unusable 账本已保留</strong><small>该调用的响应无法归一化，可能已有上游采购成本；精确重放只读取已提交错误，不会再次访问 JustOne。{lastLiveRequest.requestId ? <> Request ID <code>{lastLiveRequest.requestId}</code></> : null}</small></span></div> : null}
           <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || checkingKey || providerRequestBlockedByAmbiguity}>
             {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : providerRequestBlockedByAmbiguity ? '改为重新采集或只读存量' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? (hasAmbiguousLiveRequest ? '自动核对后重新采集' : '重新采集最新数据') : '调用开放 API'}</>}
           </button>

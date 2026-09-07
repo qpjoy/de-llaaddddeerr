@@ -71,18 +71,39 @@ const statusTag = (status) =>
 function recordingFor(testCase, artifacts) {
   const videos = artifacts.filter((entry) => /\.(mp4|webm)$/iu.test(entry.path))
   if (videos.length === 0) return null
+  const declaredPaths = new Set(
+    (Array.isArray(testCase.artifacts) ? testCase.artifacts : [])
+      .filter((entry) => entry?.kind === 'video' && typeof entry.path === 'string')
+      .map((entry) => entry.path),
+  )
+  const declared = videos.find((entry) => declaredPaths.has(entry.path))
+  if (declared) return declared
+  const byCase = videos.find((entry) => entry.path.includes(testCase.caseId))
+  if (byCase) return byCase
   if (testCase.specPath) {
     const specName = testCase.specPath.split('/').pop()
     const bySpec = videos.find((entry) => entry.path.includes(specName))
     if (bySpec) return bySpec
   }
-  const byCase = videos.find((entry) => entry.path.includes(testCase.caseId))
-  return byCase ?? (videos.length === 1 ? videos[0] : null)
+  // Never infer that a run's only video belongs to every case. An unmatched
+  // recording is still downloadable from the artifact index, but presenting
+  // it beside a case would turn unrelated footage into false evidence.
+  return null
 }
 
 function renderSteps(testCase, recording, artifactBase) {
+  const player = recording
+    ? `<video class="mxt-video" controls preload="metadata" src="${artifactBase}/${encodeURI(
+        recording.path,
+      )}"></video>`
+    : '<p class="mxt-empty">这个用例没有录像。</p>'
   if (!testCase.steps?.length) {
-    return '<p class="mxt-empty">这个用例没有上报步骤。在 spec 里用 <code>step()</code> 包裹用户可见动作即可获得可点击的时间轴。</p>'
+    // JUnit normally has no step timeline. A precisely matched recording is
+    // still valid case evidence and must remain watchable.
+    return `<div class="mxt-playback">
+      ${player}
+      <p class="mxt-empty">这个用例没有上报步骤。在 spec 里用 <code>step()</code> 包裹用户可见动作即可获得可点击的时间轴。</p>
+    </div>`
   }
   const rows = testCase.steps
     .map(
@@ -105,13 +126,7 @@ function renderSteps(testCase, recording, artifactBase) {
 
   return `
     <div class="mxt-playback">
-      ${
-        recording
-          ? `<video class="mxt-video" controls preload="metadata" src="${artifactBase}/${encodeURI(
-              recording.path,
-            )}"></video>`
-          : '<p class="mxt-empty">这个用例没有录像。</p>'
-      }
+      ${player}
       <ol class="mxt-steps">${rows}</ol>
     </div>`
 }

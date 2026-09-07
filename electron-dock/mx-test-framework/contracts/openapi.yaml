@@ -54,6 +54,8 @@ paths:
       responses:
         "200": { description: 登录成功 }
         "401": { description: 账号或密码不正确 }
+        "429": { description: Launcher 密码登录或身份校验启动额度已满，请稍后重试 }
+        "503": { description: Launcher 不可达或密码登录/身份校验并发已达上限 }
   /api/v1/auth/logout:
     post: { summary: 退出并清除会话 cookie, security: [], responses: { "200": { description: OK } } }
   /api/v1/auth/me:
@@ -86,6 +88,12 @@ paths:
         登记后立刻成为目录的一部分。在有代码认领这个编号之前，它在每次执行里
         都报 `notRun`——这正是「已定义、待实现」的表达方式，不需要额外状态机。
       responses: { "201": { description: 已创建 } }
+  /api/v1/apps/{app}/catalogs:
+    parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: 已同步目录及其能力覆盖声明
+      description: 返回 catalog 文件身份、suite、执行模式与逐能力 automated/manual-witness/unsupported/planned 状态。
+      responses: { "200": { description: OK } }
   /api/v1/apps/{app}/cases/{caseId}:
     parameters:
       - { name: app, in: path, required: true, schema: { type: string } }
@@ -114,8 +122,8 @@ paths:
       summary: 从代码仓库同步用例目录（需要 operator）
       description: |
         只会退役同一个目录文件里消失的用例，因此不会动到界面登记的用例。
-        兼容 compass 现有的 schemaVersion 1。
-      responses: { "200": { description: 返回 added/updated/retired } }
+        兼容 compass 现有的 schemaVersion 1；能力覆盖、自动化状态和前置条件会持久化。
+      responses: { "200": { description: 返回 catalog 元数据与 added/updated/retired } }
 
   /api/v1/tasks:
     get: { summary: 任务列表, responses: { "200": { description: OK } } }

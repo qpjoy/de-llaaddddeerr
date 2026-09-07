@@ -13,6 +13,9 @@
     "h2o:check": "pnpm --filter @qpjoy/electron-launcher-app-h2o check",
     "luopan:dev": "pnpm --filter @qpjoy/luopan-demo dev",
     "luopan:build": "pnpm --filter @qpjoy/luopan-demo build",
-    "luopan:check": "pnpm --filter @qpjoy/luopan-demo check"
+    "luopan:check": "pnpm --filter @qpjoy/luopan-demo check",
+    "autotest:dev": "pnpm --filter @qpjoy/mx-autotest dev",
+    "autotest:build": "pnpm --filter @qpjoy/mx-autotest build",
+    "autotest:check": "pnpm --filter @qpjoy/mx-autotest check"
   }
 }

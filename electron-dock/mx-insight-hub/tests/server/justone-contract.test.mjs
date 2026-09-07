@@ -24,6 +24,10 @@ const jdProductSearchV1Fixture = JSON.parse(readFileSync(
   new URL('../fixtures/justone/jd-product-search-v1.success.json', import.meta.url),
   'utf8',
 ))
+const taobaoProductSearchV1Fixture = JSON.parse(readFileSync(
+  new URL('../fixtures/justone/taobao-product-search-v1.success.json', import.meta.url),
+  'utf8',
+))
 
 function envelope(data) {
   return {
@@ -35,7 +39,7 @@ function envelope(data) {
   }
 }
 
-test('contract pins the provider, operation and four official V1 endpoint paths', () => {
+test('contract pins the provider, operation and official V1 endpoint paths', () => {
   assert.equal(JUSTONE_PROVIDER_KEY, 'justone')
   assert.equal(JUSTONE_OPERATION, 'ecommerce.products.search')
   assert.equal(JUSTONE_CONTRACT_VERSION, 'justone.product-search.v1')
@@ -53,6 +57,18 @@ test('contract pins the provider, operation and four official V1 endpoint paths'
   assert.ok(Object.values(JUSTONE_ENDPOINTS).every((entry) => (
     entry.method === 'GET' && entry.endpointVersion === 'v1' && entry.path.startsWith('/api/')
   )))
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(JUSTONE_ENDPOINTS).map(([marketplace, value]) => (
+      [marketplace, value.contractVersion]
+    ))),
+    {
+      taobao: 'justone.product-search.v2',
+      tmall: 'justone.product-search.v2',
+      jd: 'justone.product-search.v1',
+      xiaohongshu_ec: 'justone.product-search.v1',
+      xianyu: 'justone.product-search.v1',
+    },
+  )
 })
 
 test('provider-neutral request maps only reviewed marketplace parameters', () => {
@@ -71,6 +87,7 @@ test('provider-neutral request maps only reviewed marketplace parameters', () =>
     endPrice: '99.90',
   })
   assert.equal(taobao.endpointKey, 'taobao-tmall.product-search.v1')
+  assert.equal(taobao.endpointContractVersion, 'justone.product-search.v2')
   assert.equal(taobao.fingerprintBody.page, 2)
   assert.equal(taobao.deliveryMode, 'cache_first')
   assert.deepEqual(ECOMMERCE_DELIVERY_MODES, ['cache_only', 'cache_first', 'refresh'])
@@ -90,9 +107,13 @@ test('provider-neutral request maps only reviewed marketplace parameters', () =>
   )
 
   const tmall = normalizeJustOneProductSearchRequest({ marketplace: 'tmall', query: '面霜' })
+  assert.equal(tmall.endpointContractVersion, 'justone.product-search.v2')
   assert.deepEqual(tmall.upstreamQuery, {
     keyword: '面霜', page: '1', sort: '_sale', tmall: 'true',
   })
+
+  const jd = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '手机' })
+  assert.equal(jd.endpointContractVersion, 'justone.product-search.v1')
 
   assert.throws(
     () => normalizeJustOneProductSearchRequest({
@@ -250,6 +271,63 @@ test('JD V1 accepts the reviewed data.products response shape without changing p
     nextCursor: null,
   })
   assert.equal(response.archiveObjects[1].envelopePointer, '$.data.products[0]')
+})
+
+test('Taobao model.page pagination evidence cannot issue a cursor for another marketplace', () => {
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '相机' })
+  const response = normalizeJustOneProductSearchResponse(envelope({
+    products: [{ skuId: 'jd-1', title: '示例相机' }],
+    model: { page: { pageNo: 1, totalPages: 2 } },
+  }), request, {
+    capturedAt: '2026-09-07T07:00:18Z',
+    encodeCursor: () => 'must-not-be-issued',
+  })
+
+  assert.equal(response.page.hasMore, null)
+  assert.equal(response.page.nextCursor, null)
+})
+
+test('Taobao V1 accepts the observed data.model.itemList shape and model.page pagination', () => {
+  const extracted = extractJustOneProductSearchItems(taobaoProductSearchV1Fixture, 'taobao')
+  assert.deepEqual(extracted.path, ['data', 'model', 'itemList'])
+  assert.equal(extracted.items.length, 1)
+
+  const encodedStates = []
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'taobao', query: '便携相机' })
+  const response = normalizeJustOneProductSearchResponse(taobaoProductSearchV1Fixture, request, {
+    capturedAt: '2026-09-07T07:00:18Z',
+    encodeCursor: (state) => {
+      encodedStates.push(state)
+      return 'opaque-taobao-page-2'
+    },
+  })
+
+  assert.deepEqual(response.publicBody.data.items[0], {
+    id: '10001',
+    marketplace: 'taobao',
+    title: '脱敏便携相机',
+    url: null,
+    pricing: { current: '1299', original: '1399', currency: 'CNY' },
+    shop: { id: '20001', name: '脱敏示例店铺' },
+    images: ['https://g.search.alicdn.com/img/bao/uploaded/i4/i3/example/product.jpg'],
+    signals: { sales: '860', reviewCount: '144', location: '浙江 杭州' },
+    attributes: { brand: null, category: null },
+  })
+  assert.deepEqual(response.page, {
+    page: 1,
+    returnedCount: 1,
+    discardedCount: 0,
+    hasMore: true,
+    nextCursor: 'opaque-taobao-page-2',
+  })
+  assert.deepEqual(encodedStates, [{
+    version: 1,
+    marketplace: 'taobao',
+    page: 2,
+    scope: request.cursorScope,
+    continuation: null,
+  }])
+  assert.equal(response.archiveObjects[1].envelopePointer, '$.data.model.itemList[0]')
 })
 
 test('public response projects a fixed shape and drops private provider fields', () => {

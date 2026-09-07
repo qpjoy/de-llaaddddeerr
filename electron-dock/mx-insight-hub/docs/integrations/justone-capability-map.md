@@ -3,7 +3,7 @@
 Status: five marketplace product-search mappings verified on the current single-provider JustOne runtime;
 every other listed capability is inventory only.
 
-Last reviewed: 2026-09-06.
+Last reviewed: 2026-09-07.
 
 Primary upstream references:
 
@@ -36,7 +36,7 @@ Public operation:
 POST /api/v1/data/ecommerce/products/search
 Hub contract: mx-insight-hub.ecommerce-products.v1
 Internal operation: ecommerce.products.search
-Provider adapter contract: justone.product-search.v1
+Provider adapter contracts: endpoint-scoped; see the table below
 Canonical dataset: ecommerce.products.v1
 ```
 
@@ -45,17 +45,22 @@ The four identifiers above are not synonyms. `ecommerce` is the Public authoriza
 and `justone` is an internal supplier. Granting `ecommerce` does not grant or reveal a provider account, and a
 provider name is never accepted in the Public request.
 
-| Hub marketplace | Provider endpoint descriptor | Method | Accepted item paths | Marketplace-specific request behavior | Catalog source |
-| --- | --- | --- | --- | --- | --- |
-| `taobao` | `taobao-tmall.product-search.v1` | GET | `data.items`, `data.itemList` | sort + price; default `sales_desc` | `source-catalog-0058` |
-| `tmall` | `taobao-tmall.product-search.v1` | GET | `data.items`, `data.itemList` | same endpoint with Tmall flag; sort + price | `source-catalog-0059` |
-| `jd` | `jd.product-search.v1` | GET | `data.items`, `data.list`, `data.products` | provider default ordering | `source-catalog-0060` |
-| `xiaohongshu_ec` | `xiaohongshu-ec.product-search.v1` | GET | `data.items`, `data.products` | continuation remains inside opaque Hub cursor | `source-catalog-0064` |
-| `xianyu` | `xianyu.product-search.v1` | GET | `data.items`, `data.list` | seven reviewed sort values | `source-catalog-0073` |
+| Hub marketplace | Provider endpoint descriptor | Adapter contract | Method | Accepted item paths | Marketplace-specific request behavior | Catalog source |
+| --- | --- | --- | --- | --- | --- | --- |
+| `taobao` | `taobao-tmall.product-search.v1` | `justone.product-search.v2` | GET | `data.model.itemList`, `data.items`, `data.itemList` | sort + price; default `sales_desc`; `data.model.page` becomes the opaque Hub cursor | `source-catalog-0058` |
+| `tmall` | `taobao-tmall.product-search.v1` | `justone.product-search.v2` | GET | `data.model.itemList`, `data.items`, `data.itemList` | same endpoint with Tmall flag; sort + price; `data.model.page` becomes the opaque Hub cursor | `source-catalog-0059` |
+| `jd` | `jd.product-search.v1` | `justone.product-search.v1` | GET | `data.items`, `data.list`, `data.products` | provider default ordering | `source-catalog-0060` |
+| `xiaohongshu_ec` | `xiaohongshu-ec.product-search.v1` | `justone.product-search.v1` | GET | `data.items`, `data.products` | continuation remains inside opaque Hub cursor | `source-catalog-0064` |
+| `xianyu` | `xianyu.product-search.v1` | `justone.product-search.v1` | GET | `data.items`, `data.list` | seven reviewed sort values | `source-catalog-0073` |
 
 The provider API documents response `data` broadly. Hub accepts only the item-container paths above. A new
 shape is a contract change: capture a redacted fixture, add a narrow path, run adapter/contract/ingest tests,
 and review discarded-item behavior. A permissive recursive search is not allowed.
+
+The Taobao/Tmall adapter v2 change was prompted by an observed successful Taobao response whose product list is
+`data.model.itemList` and whose pagination metadata is `data.model.page`. A `succeeded_unusable` quarantine is
+scoped to the adapter contract version: deployment of a reviewed parser version permits one controlled new
+dispatch, while another unusable response from that same version remains fail-closed during the cooldown.
 
 ### Current topology and future provider routing
 

@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-auto-artifacts-pv
+  labels:
+    app.kubernetes.io/part-of: mx-auto
+spec:
+  # Kubernetes records this capacity but hostPath does not enforce it as a
+  # filesystem quota. Runner Jobs never mount this PV; ArtifactStore instead
+  # enforces 20Gi / 100000 entries total plus 5Gi / 10000-inode filesystem
+  # reserves on API uploads.
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: mx-auto-artifacts
+  hostPath:
+    path: /var/lib/mx-auto/artifacts
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  # V0 kernel compatibility only: the server Deployment still uses this claim
+  # name. Runner Jobs do not mount it, and namespace isolation keeps it
+  # unrelated to the legacy deployment.
+  name: mx-test-framework-artifacts
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/part-of: mx-auto
+  annotations:
+    mx-auto.qpjoy.dev/v0-kernel-pvc-alias: "true"
+    mx-auto.qpjoy.dev/hostpath-capacity-is-not-a-quota: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: mx-auto-artifacts
+  resources:
+    requests:
+      storage: 50Gi

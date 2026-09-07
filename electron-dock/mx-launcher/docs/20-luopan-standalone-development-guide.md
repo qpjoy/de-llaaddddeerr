@@ -404,7 +404,10 @@ Admin → Apps → 新建应用，选 **Luopan 模板**（或通用 `Standalone 
   `10.<octet>.0.0/16`，登录段 `.0.1–.99.254`、匿名段 `.100.1–.254.254`；
   `serviceVip / internalControlIp / dnsServer / domesticGatewayIp` 四字段默认同一
   个 materialized VIP（Luopan = `10.88.100.3`）。**VIP 必须唯一**，不同产品不得
-  复用（Admin 曾有默认沿用 `10.88.100.3` 的缺陷，新建其他产品时务必检查）。
+  复用。当前代码由 ProductNetwork upsert 预检与 PostgreSQL 的全局 enabled-only
+  partial unique index 双层拒绝冲突；索引按 IPv4 四段数值比较，前导零等价写法也会冲突；
+  同产品幂等更新允许，disabled 重复记录在启用时
+  被拒绝。正式环境仍须先应用最新 migration，并人工处理迁移报告的任何历史重复值。
 - **DNS route + gateway upstream**：`luopan.mxinfo-inc.cn` A → VIP，gateway 按
   Host 反代到应用 targetUrl。
 

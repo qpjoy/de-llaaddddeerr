@@ -178,11 +178,20 @@ profile 池拿到 `leaseIp`。MX-H2I 对应的当前内置值是 VIP `10.88.100.
 Domestic `productRelayCidrs`、Internal service peer 和 gateway/DNS 没有 reconcile 证据前，
 Dashboard 不得声称该 VIP 已可达。
 
-当前服务端会在 ProductNetwork upsert 时拒绝 enabled standalone 之间重叠的 lease
-range，但还没有等价的跨产品 `serviceVip` 唯一性强校验。因此“每个 standalone
-有自己的 VIP”是正式注册契约，不是对任意手工写入记录的已证明事实。内置
-MX-H2I/Luopan 当前值相互独立；对后续产品，onboarding 和 Dashboard 应检测重复
-VIP 并标为 conflict，在服务端唯一性约束落地前不宣称隔离健康。
+当前服务端在 ProductNetwork upsert 时有两类 fail-closed 校验：enabled standalone
+之间的 lease range 不得重叠；所有 enabled、不同 `productId` 的 ProductNetwork
+（不区分 standalone/embed 或 environment）不得拥有同一个 `serviceVip`。同一产品
+保留原 VIP 的幂等更新不冲突；disabled 记录可以暂存重复值，但启用前必须先释放或改掉
+该 VIP。应用层预检覆盖 Memory/PostgreSQL 正常 upsert，PostgreSQL migration
+`LauncherProductServiceVipConstraint1760000000400` 再用全局 enabled-only partial unique
+index 与 IPv4 CHECK constraint 封住并发写、无效新值和 builtin 注册绕过窗口；builtin 启动补登记/回填在 save 前也执行同一
+VIP 预检。
+
+迁移不会替历史记录选择赢家或静默改写地址：它按四段 IPv4 数值比较，因此带前导零的
+等价写法也会冲突；若发现 enabled 重复、缺失或越界 VIP，会中止并要求运维先修复。
+因此以上是当前代码和 schema migration 的约束，不代表任意目标环境
+已经执行迁移，更不代表 VIP 已 materialize 或可达。上线仍需确认 migration 已应用、
+无历史冲突，并取得 Domestic/Internal reconcile 与 smoke 证据后才能宣称隔离健康。
 
 Internal 全量 lease inventory 的归属规则如下：
 

@@ -14,6 +14,7 @@ export class MemoryStore {
   #secrets = new Map()
   #notifications = new Map()
   #suites = new Map()
+  #catalogs = new Map() // `${appId}\u0000${catalogFile}` -> catalog metadata
   #cases = new Map() // `${appId}\u0000${caseId}` -> case
   #tasks = new Map()
   #runs = new Map()
@@ -80,6 +81,7 @@ export class MemoryStore {
     for (const runId of runIds) this.#runs.delete(runId)
     for (const [suiteId, suite] of this.#suites) if (suite.appId === id) this.#suites.delete(suiteId)
     for (const [taskId, task] of this.#tasks) if (task.appId === id) this.#tasks.delete(taskId)
+    for (const [key, entry] of this.#catalogs) if (entry.appId === id) this.#catalogs.delete(key)
     for (const [key, entry] of this.#cases) if (entry.appId === id) this.#cases.delete(key)
     for (const [secretId, secret] of this.#secrets) if (secret.appId === id) this.#secrets.delete(secretId)
     this.#runCases = this.#runCases.filter((entry) => !runIds.includes(entry.runId))
@@ -213,10 +215,25 @@ export class MemoryStore {
    * Upsert a catalog file's cases. Cases previously seen from the same file but
    * absent now are retired, not deleted: historical runs still reference them.
    */
-  async syncCatalog(appId, { catalogFile, cases }) {
+  async syncCatalog(
+    appId,
+    { catalogFile, schemaVersion, application, surface, suiteSlug, executionMode, coverage, cases },
+  ) {
     const now = new Date().toISOString()
     const incoming = new Set()
-    const result = { added: [], updated: [], retired: [] }
+    const catalog = {
+      appId,
+      catalogFile,
+      schemaVersion,
+      application,
+      surface,
+      suiteSlug,
+      executionMode,
+      coverage: coverage ?? {},
+      syncedAt: now,
+    }
+    this.#catalogs.set(`${appId}\u0000${catalogFile}`, catalog)
+    const result = { added: [], updated: [], retired: [], catalog: clone(catalog) }
 
     for (const entry of cases) {
       const key = this.#caseKey(appId, entry.caseId)
@@ -261,6 +278,14 @@ export class MemoryStore {
       }
     }
     return result
+  }
+
+  async listCatalogs(appId) {
+    return clone(
+      [...this.#catalogs.values()]
+        .filter((entry) => entry.appId === appId)
+        .sort((a, b) => a.catalogFile.localeCompare(b.catalogFile)),
+    )
   }
 
   async listCases(appId, { includeRetired = false, priority = null } = {}) {

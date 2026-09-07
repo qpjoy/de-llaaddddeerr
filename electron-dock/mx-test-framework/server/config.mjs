@@ -82,6 +82,43 @@ export function loadConfig(environment = process.env) {
     // but not act until an admin raises it.
     defaultMemberRole: environment.MXT_DEFAULT_ROLE?.trim() || 'viewer',
     artifactRetainDays: positiveInteger(environment.MXT_ARTIFACT_RETAIN_DAYS, 30, 'MXT_ARTIFACT_RETAIN_DAYS'),
+    artifactLimits: {
+      fileBytes: positiveInteger(
+        environment.MXT_ARTIFACT_MAX_FILE_BYTES,
+        512 * 1024 * 1024,
+        'MXT_ARTIFACT_MAX_FILE_BYTES',
+      ),
+      runBytes: positiveInteger(
+        environment.MXT_ARTIFACT_MAX_RUN_BYTES,
+        2 * 1024 * 1024 * 1024,
+        'MXT_ARTIFACT_MAX_RUN_BYTES',
+      ),
+      filesPerRun: positiveInteger(
+        environment.MXT_ARTIFACT_MAX_FILES_PER_RUN,
+        1_000,
+        'MXT_ARTIFACT_MAX_FILES_PER_RUN',
+      ),
+      totalBytes: positiveInteger(
+        environment.MXT_ARTIFACT_MAX_TOTAL_BYTES,
+        20 * 1024 * 1024 * 1024,
+        'MXT_ARTIFACT_MAX_TOTAL_BYTES',
+      ),
+      totalEntries: positiveInteger(
+        environment.MXT_ARTIFACT_MAX_TOTAL_ENTRIES,
+        100_000,
+        'MXT_ARTIFACT_MAX_TOTAL_ENTRIES',
+      ),
+      minFreeBytes: positiveInteger(
+        environment.MXT_ARTIFACT_MIN_FREE_BYTES,
+        5 * 1024 * 1024 * 1024,
+        'MXT_ARTIFACT_MIN_FREE_BYTES',
+      ),
+      minFreeInodes: positiveInteger(
+        environment.MXT_ARTIFACT_MIN_FREE_INODES,
+        10_000,
+        'MXT_ARTIFACT_MIN_FREE_INODES',
+      ),
+    },
     // The scheduler ticks on a timer; the lease bounds how long a claimed run may
     // go silent before it is reclaimed as `timeout`.
     schedulerIntervalMs: positiveInteger(environment.MXT_SCHEDULER_INTERVAL_MS, 60_000, 'MXT_SCHEDULER_INTERVAL_MS'),
@@ -90,6 +127,61 @@ export function loadConfig(environment = process.env) {
     launcher: {
       baseUrl: environment.MXT_LAUNCHER_URL?.trim() || null,
       audience: environment.MXT_LAUNCHER_AUDIENCE?.trim() || 'mx-test-framework',
+      negativeCacheTtlMs: positiveInteger(
+        environment.MXT_LAUNCHER_NEGATIVE_CACHE_TTL_MS,
+        3_000,
+        'MXT_LAUNCHER_NEGATIVE_CACHE_TTL_MS',
+      ),
+      rateWindowMs: positiveInteger(
+        environment.MXT_LAUNCHER_INTROSPECTION_WINDOW_MS,
+        10_000,
+        'MXT_LAUNCHER_INTROSPECTION_WINDOW_MS',
+      ),
+      maxStartsPerWindow: positiveInteger(
+        environment.MXT_LAUNCHER_INTROSPECTION_MAX_STARTS,
+        30,
+        'MXT_LAUNCHER_INTROSPECTION_MAX_STARTS',
+      ),
+      maxInFlightEntries: positiveInteger(
+        environment.MXT_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT,
+        8,
+        'MXT_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT',
+      ),
+      maxStartsPerSourcePerWindow: positiveInteger(
+        environment.MXT_LAUNCHER_INTROSPECTION_MAX_STARTS_PER_SOURCE,
+        6,
+        'MXT_LAUNCHER_INTROSPECTION_MAX_STARTS_PER_SOURCE',
+      ),
+      maxInFlightPerSource: positiveInteger(
+        environment.MXT_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT_PER_SOURCE,
+        2,
+        'MXT_LAUNCHER_INTROSPECTION_MAX_IN_FLIGHT_PER_SOURCE',
+      ),
+      passwordLoginRateWindowMs: positiveInteger(
+        environment.MXT_LAUNCHER_PASSWORD_LOGIN_WINDOW_MS,
+        10_000,
+        'MXT_LAUNCHER_PASSWORD_LOGIN_WINDOW_MS',
+      ),
+      passwordLoginMaxStartsPerWindow: positiveInteger(
+        environment.MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS,
+        10,
+        'MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS',
+      ),
+      passwordLoginMaxInFlight: positiveInteger(
+        environment.MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT,
+        4,
+        'MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT',
+      ),
+      passwordLoginMaxStartsPerSourcePerWindow: positiveInteger(
+        environment.MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS_PER_SOURCE,
+        3,
+        'MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS_PER_SOURCE',
+      ),
+      passwordLoginMaxInFlightPerSource: positiveInteger(
+        environment.MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT_PER_SOURCE,
+        1,
+        'MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT_PER_SOURCE',
+      ),
     },
     // Name of a k8s Secret holding a `token` key used to clone private repos.
     // Optional: without it, only public repositories can be checked out, and a
@@ -117,16 +209,30 @@ export function loadConfig(environment = process.env) {
     // an emptyDir, so this is what stops one runaway install from filling the
     // node's disk and taking every other Job down with it.
     workspaceSizeLimit: environment.MXT_WORKSPACE_SIZE_LIMIT?.trim() || '10Gi',
+    // Kubernetes Jobs stage artifacts on their own emptyDir and upload them
+    // through the run-scoped API. They never mount the server's persistent
+    // artifact volume directly.
+    runnerArtifactSizeLimit: environment.MXT_RUNNER_ARTIFACT_SIZE_LIMIT?.trim() || '2Gi',
+    maxConcurrentServerRuns: positiveInteger(
+      environment.MXT_MAX_CONCURRENT_SERVER_RUNS,
+      1,
+      'MXT_MAX_CONCURRENT_SERVER_RUNS',
+    ),
     // A server run does more than drive a browser: it installs the dependency
     // tree and, for a self-contained suite like `pnpm e2e:local`, runs a
     // production bundler first. 4Gi was sized for Chromium alone and a Quasar
     // build will exceed it — an OOMKill there reads as a mysterious `blocked`.
-    // No CPU limit: the build wants every core it can get and throttling it
-    // only makes the run longer without protecting anything.
+    // CPU and ephemeral-storage are bounded too: this Job can share one node
+    // with Launcher, so faster completion is not allowed to mean starvation.
     runnerResources: {
       cpuRequest: environment.MXT_RUNNER_CPU_REQUEST?.trim() || '1',
+      cpuLimit: environment.MXT_RUNNER_CPU_LIMIT?.trim() || '2',
       memoryRequest: environment.MXT_RUNNER_MEMORY_REQUEST?.trim() || '2Gi',
       memoryLimit: environment.MXT_RUNNER_MEMORY_LIMIT?.trim() || '8Gi',
+      ephemeralStorageRequest:
+        environment.MXT_RUNNER_EPHEMERAL_STORAGE_REQUEST?.trim() || '2Gi',
+      ephemeralStorageLimit:
+        environment.MXT_RUNNER_EPHEMERAL_STORAGE_LIMIT?.trim() || '14Gi',
     },
     // One default image per engine. Pinned versions, never `latest`: the image
     // is part of what a result means, and a base image that changes underneath

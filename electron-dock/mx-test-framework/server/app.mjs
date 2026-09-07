@@ -9,6 +9,7 @@ import { assertSchedulable } from './core/cron.mjs'
 import { AppError } from './core/errors.mjs'
 import {
   bearerToken,
+  directClientAddress,
   enumValue,
   gitRef,
   optionalString,
@@ -50,7 +51,9 @@ import {
   secretName,
 } from './secrets.mjs'
 import {
+  AUTOMATION_STATES,
   CASE_ID_PATTERN,
+  COVERAGE_MODES,
   PLATFORM_CATALOG,
   PRIORITIES,
   TRACKS,
@@ -69,6 +72,7 @@ import { computeNextRunAt } from './scheduler.mjs'
 import { parsePush, taskBranch, verifySignature } from './webhooks.mjs'
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/u
+const CATALOG_COVERAGE_STATES = ['automated', 'manual-witness', 'unsupported', 'planned']
 // The platform does not care what runs the tests, only that it reports through
 // the contract (JUnit XML or summary.json, exit code 0/1/2). Each entry here
 // exists to pick a default image and nothing else; `generic` covers everything
@@ -140,7 +144,31 @@ function targetUrl(body, name = 'targetUrl', { required = false } = {}) {
   return sanitizeUrl(raw)
 }
 
-function parseCatalogFile(body) {
+function parseCatalogCoverage(value) {
+  if (value == null) return {}
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError(400, 'invalid_request', 'coverage 必须是能力名到覆盖状态的对象')
+  }
+  const entries = Object.entries(value)
+  if (entries.length > 30) {
+    throw new AppError(400, 'invalid_request', 'coverage 最多声明 30 项能力')
+  }
+  return Object.fromEntries(
+    entries.map(([capability, state]) => {
+      const name = capability.trim()
+      if (!name || name.length > 80 || !CATALOG_COVERAGE_STATES.includes(state)) {
+        throw new AppError(
+          400,
+          'invalid_request',
+          `coverage.${capability} 必须是 ${CATALOG_COVERAGE_STATES.join('、')} 之一`,
+        )
+      }
+      return [name, state]
+    }),
+  )
+}
+
+function parseCatalogFile(body, { applicationFallback = null } = {}) {
   const version = Number(body?.schemaVersion)
   if (version !== 1 && version !== 2) {
     throw new AppError(400, 'invalid_request', 'schemaVersion 必须是 1 或 2')
@@ -148,6 +176,11 @@ function parseCatalogFile(body) {
   if (!Array.isArray(body.cases) || body.cases.length === 0) {
     throw new AppError(400, 'invalid_request', 'cases 必须是非空数组')
   }
+  // The repository schema requires `application`. Older API callers omitted it,
+  // so the route supplies the already-resolved app slug as a compatibility
+  // default without weakening standalone catalog validation.
+  const application = optionalString(body, 'application', { maxLength: 64 }) || applicationFallback
+  if (!application) throw new AppError(400, 'invalid_request', 'application 是必填的')
   const catalogFile = optionalString(body, 'catalogFile', { maxLength: 240 }) || 'catalog.json'
   if (catalogFile === PLATFORM_CATALOG) {
     throw new AppError(400, 'invalid_request', `catalogFile 不能是保留名 ${PLATFORM_CATALOG}`, {
@@ -155,6 +188,9 @@ function parseCatalogFile(body) {
     })
   }
   const defaultSuiteSlug = optionalString(body, 'suite', { maxLength: 96 })
+  const surface = enumValue(body, 'surface', ['web', 'electron'], null)
+  const executionMode = optionalString(body, 'executionMode', { maxLength: 64 })
+  const coverage = parseCatalogCoverage(body.coverage)
   const seen = new Set()
   const cases = []
 
@@ -181,9 +217,21 @@ function parseCatalogFile(body) {
       specPath: optionalString(entry, 'spec', { maxLength: 240 }),
       suiteSlug: optionalString(entry, 'suite', { maxLength: 96 }) || defaultSuiteSlug,
       requirementRef: optionalString(entry, 'requirementRef', { maxLength: 96 }),
+      coverageMode: enumValue(entry, 'coverageMode', COVERAGE_MODES, null),
+      automationState: enumValue(entry, 'automationState', AUTOMATION_STATES, null),
+      prerequisites: stringArray(entry.prerequisites, { maxItems: 30, maxLength: 300 }),
     })
   }
-  return { catalogFile, cases }
+  return {
+    catalogFile,
+    schemaVersion: version,
+    application,
+    surface,
+    suiteSlug: defaultSuiteSlug,
+    executionMode,
+    coverage,
+    cases,
+  }
 }
 
 export function createApp({
@@ -557,10 +605,11 @@ export function createApp({
       method: 'POST',
       pattern: '/api/v1/auth/login',
       auth: 'none',
-      handler: async ({ body }) => {
+      handler: async ({ body, request }) => {
         const result = await identity.login({
           username: requiredString(body, 'username', { maxLength: 120 }),
           password: requiredString(body, 'password', { maxLength: 200 }),
+          source: directClientAddress(request),
         })
         return {
           status: 200,
@@ -893,6 +942,14 @@ export function createApp({
     },
     {
       method: 'GET',
+      pattern: '/api/v1/apps/:app/catalogs',
+      handler: async ({ params }) => {
+        const app = await requireApp(params.app)
+        return { status: 200, body: { catalogs: await store.listCatalogs(app.id) } }
+      },
+    },
+    {
+      method: 'GET',
       pattern: '/api/v1/apps/:app/cases',
       handler: async ({ params, url }) => {
         const app = await requireApp(params.app)
@@ -1007,7 +1064,7 @@ export function createApp({
       handler: async ({ params, body, principal }) => {
         requireRole(principal, 'operator')
         const app = await requireApp(params.app)
-        const parsed = parseCatalogFile(body)
+        const parsed = parseCatalogFile(body, { applicationFallback: app.slug })
         const diff = await store.syncCatalog(app.id, parsed)
         return { status: 200, body: { catalogFile: parsed.catalogFile, ...diff } }
       },
@@ -2143,7 +2200,12 @@ export function createApp({
         if (route.auth === 'runner') context.runner = await requireRunner(request)
         else if (route.auth === 'runScope') context.run = await requireRunScope(request, params.runId)
         else if (route.auth === 'runToken') context.run = await requireRunToken(request, params.runId)
-        else if (route.auth !== 'none') context.principal = await identity.resolve(bearerToken(request))
+        else if (route.auth !== 'none') {
+          context.principal = await identity.resolve(
+            bearerToken(request),
+            directClientAddress(request),
+          )
+        }
 
         if (!route.rawBody && ['POST', 'PATCH', 'PUT'].includes(request.method)) {
           context.body = await readJson(request)
@@ -2161,7 +2223,7 @@ export function createApp({
         // Reports and artifacts stream or render HTML rather than returning
         // JSON, so they sit outside the route table — but they authenticate
         // first, before any work or any bytes.
-        await identity.resolve(bearerToken(request))
+        await identity.resolve(bearerToken(request), directClientAddress(request))
         if (await handleSpecial(request, response, url)) return
       }
 

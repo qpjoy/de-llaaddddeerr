@@ -90,6 +90,10 @@ test('imports a schemaVersion 1 catalog unchanged', async () => {
       schemaVersion: 1,
       application: 'luopan-po-frontend',
       catalogFile: 'cypress/case-catalog.frontend.json',
+      surface: 'web',
+      suite: 'web-mock',
+      executionMode: 'cypress',
+      coverage: { browserFlows: 'automated', nativeDialogs: 'unsupported' },
       cases: [
         {
           id: 'LP-FE-AUTH-001',
@@ -97,6 +101,9 @@ test('imports a schemaVersion 1 catalog unchanged', async () => {
           spec: 'cypress/e2e/smoke/auth.cy.ts',
           title: '未登录用户访问受保护页面时跳转登录并保留目标地址',
           tags: ['auth', 'route-guard'],
+          coverageMode: 'automated-browser',
+          automationState: 'implemented',
+          prerequisites: ['mock API is reachable'],
         },
         {
           id: 'LP-FE-AUTH-002',
@@ -120,6 +127,17 @@ test('imports a schemaVersion 1 catalog unchanged', async () => {
   assert.equal(cases.body.cases.length, 3)
   // Defaults filled in for a v1 catalog.
   assert.deepEqual(cases.body.cases[0].tracks, ['functional'])
+  assert.equal(cases.body.cases[0].coverageMode, 'automated-browser')
+  assert.equal(cases.body.cases[0].automationState, 'implemented')
+  assert.deepEqual(cases.body.cases[0].prerequisites, ['mock API is reachable'])
+
+  const catalogs = await api('GET', `/api/v1/apps/${appSlug}/catalogs`)
+  assert.equal(catalogs.status, 200)
+  assert.deepEqual(catalogs.body.catalogs[0].coverage, {
+    browserFlows: 'automated',
+    nativeDialogs: 'unsupported',
+  })
+  assert.equal(catalogs.body.catalogs[0].suiteSlug, 'web-mock')
 })
 
 test('rejects a case id that does not match the naming rule', async () => {

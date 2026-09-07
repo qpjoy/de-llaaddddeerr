@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: mx-auto-budget
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/part-of: mx-auto
+spec:
+  # Worst supported overlap (server + postgres + migrate + one runner):
+  # limits = 3 CPU, 9984Mi memory and 16128Mi ephemeral storage. The small
+  # remaining margin is deliberate; a second runner cannot be admitted even
+  # if the process-level concurrency guard regresses.
+  hard:
+    requests.cpu: "3"
+    limits.cpu: "4"
+    requests.memory: 4Gi
+    limits.memory: 10Gi
+    requests.ephemeral-storage: 4Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 80Gi
+    persistentvolumeclaims: "2"
+    pods: "8"
+    services: "4"
+    count/jobs.batch: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: mx-auto-container-limits
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/part-of: mx-auto
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+        ephemeral-storage: 64Mi
+      default:
+        cpu: 250m
+        memory: 512Mi
+        ephemeral-storage: 1Gi
+      max:
+        cpu: "2"
+        memory: 8Gi
+        ephemeral-storage: 14Gi
+---
+# Non-secret policy knobs. Change these values together with the ResourceQuota;
+# the server maps MX_AUTO_* to the temporary V0 kernel names at startup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mx-auto-resource-policy
+  namespace: mx-auto
+  labels:
+    app.kubernetes.io/part-of: mx-auto
+data:
+  MX_AUTO_MAX_CONCURRENT_SERVER_RUNS: "1"
+  MX_AUTO_WORKSPACE_SIZE_LIMIT: 10Gi
+  MX_AUTO_RUNNER_ARTIFACT_SIZE_LIMIT: 2Gi
+  MX_AUTO_RUNNER_CPU_REQUEST: "1"
+  MX_AUTO_RUNNER_CPU_LIMIT: "2"
+  MX_AUTO_RUNNER_MEMORY_REQUEST: 2Gi
+  MX_AUTO_RUNNER_MEMORY_LIMIT: 8Gi
+  MX_AUTO_RUNNER_EPHEMERAL_STORAGE_REQUEST: 2Gi
+  MX_AUTO_RUNNER_EPHEMERAL_STORAGE_LIMIT: 14Gi
+  MX_AUTO_ARTIFACT_MAX_FILE_BYTES: "536870912"
+  MX_AUTO_ARTIFACT_MAX_RUN_BYTES: "2147483648"
+  MX_AUTO_ARTIFACT_MAX_FILES_PER_RUN: "1000"
+  MX_AUTO_ARTIFACT_MAX_TOTAL_BYTES: "21474836480"
+  MX_AUTO_ARTIFACT_MAX_TOTAL_ENTRIES: "100000"
+  MX_AUTO_ARTIFACT_MIN_FREE_BYTES: "5368709120"
+  MX_AUTO_ARTIFACT_MIN_FREE_INODES: "10000"

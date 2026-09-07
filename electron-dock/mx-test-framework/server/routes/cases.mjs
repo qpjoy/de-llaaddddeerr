@@ -13,6 +13,23 @@ import { redactLine } from '../core/redact.mjs'
 export const CASE_ID_PATTERN = /^[A-Z0-9]{2,6}(-[A-Z0-9]+)+-\d{3}$/u
 export const PRIORITIES = ['P0', 'P1', 'P2', 'unprioritized']
 export const TRACKS = ['functional', 'demo']
+export const COVERAGE_MODES = [
+  'automated',
+  'automated-renderer',
+  'automated-browser',
+  'automated-api',
+  'automated-cli',
+  'manual-witness',
+  'unsupported',
+  'planned',
+]
+export const AUTOMATION_STATES = [
+  'implemented',
+  'planned',
+  'blocked-prerequisite',
+  'manual-only',
+  'unsupported',
+]
 
 /** Cases written in the UI carry this instead of a repository file name. */
 export const PLATFORM_CATALOG = '__platform__'
@@ -48,6 +65,22 @@ export function parseCaseInput(body, { existing = null } = {}) {
     notes: optionalString(body, 'notes', { maxLength: 2000 }),
     requirementRef: optionalString(body, 'requirementRef', { maxLength: 96 }),
     suiteSlug: optionalString(body, 'suite', { maxLength: 96 }),
+    coverageMode: enumValue(
+      body,
+      'coverageMode',
+      COVERAGE_MODES,
+      existing?.coverageMode ?? 'planned',
+    ),
+    automationState: enumValue(
+      body,
+      'automationState',
+      AUTOMATION_STATES,
+      existing?.automationState ?? 'planned',
+    ),
+    prerequisites:
+      body.prerequisites == null
+        ? existing?.prerequisites ?? []
+        : stringArray(body.prerequisites, { maxItems: 30, maxLength: 300 }),
   }
 }
 
@@ -76,6 +109,9 @@ export function exportCatalog(app, cases) {
         ...(entry.tracks?.length ? { tracks: entry.tracks } : {}),
         ...(entry.requirementRef ? { requirementRef: entry.requirementRef } : {}),
         ...(entry.specPath ? { spec: entry.specPath } : {}),
+        ...(entry.coverageMode ? { coverageMode: entry.coverageMode } : {}),
+        ...(entry.automationState ? { automationState: entry.automationState } : {}),
+        ...(entry.prerequisites?.length ? { prerequisites: entry.prerequisites } : {}),
         ...(entry.steps?.length
           ? { _steps: entry.steps.map((step) => `${step.action} → ${step.expect}`) }
           : {}),

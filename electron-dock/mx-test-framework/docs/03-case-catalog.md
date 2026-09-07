@@ -46,6 +46,10 @@ Schema 见 [`../contracts/case-catalog.schema.json`](../contracts/case-catalog.s
   "application": "compass",
   "surface": "electron",
   "suite": "compass-electron",
+  "coverage": {
+    "nativeDialogs": "manual-witness",
+    "systemPermissions": "unsupported"
+  },
   "cases": [
     {
       "id": "CPS-EL-BOOT-001",
@@ -54,7 +58,10 @@ Schema 见 [`../contracts/case-catalog.schema.json`](../contracts/case-catalog.s
       "title": "打包应用冷启动进入主窗口且不请求提权",
       "tags": ["boot", "electron", "smoke"],
       "tracks": ["functional", "demo"],
-      "requirementRef": "COMPASS-142"
+      "requirementRef": "COMPASS-142",
+      "coverageMode": "automated-renderer",
+      "automationState": "implemented",
+      "prerequisites": ["immutable packaged build"]
     }
   ]
 }
@@ -68,6 +75,10 @@ Schema 见 [`../contracts/case-catalog.schema.json`](../contracts/case-catalog.s
 | `tracks` | 该用例参与哪些轨道。**这是消除双轨代码重复的关键**，见 [05](05-tracks-and-artifacts.md) |
 | `requirementRef` | 关联需求，让"需求覆盖率"将来可算而不是靠猜 |
 | `retired` | 软删标记 |
+| 根级 `coverage` | 按能力声明 automated / manual-witness / unsupported / planned；它不是百分比 |
+| `coverageMode` | 该用例的证据机制，例如 automated-renderer 或 manual-witness |
+| `automationState` | 声明 implemented / planned / blocked-prerequisite 等实施状态；与实际运行事实分开 |
+| `prerequisites` | 可审计的运行前置条件；缺失时应报告 blocked，而不是误报产品失败 |
 
 `schemaVersion: 1` 的目录平台仍能读，缺失字段按默认值填充（`surface` 取 app 默认、
 `tracks: ["functional"]`）。compass 存量因此零改动。

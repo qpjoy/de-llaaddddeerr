@@ -64,6 +64,26 @@ const APPS = {
       'electron-dock/mx-launcher/packages/electron-launcher/dist/index.js',
       'electron-dock/mx-launcher/ui-design/dist/index.js'
     ]
+  },
+  'demos/mx-autotest': {
+    localFilters: [
+      '@qpjoy/electron-core-wireguard',
+      '@qpjoy/mx-launcher-core',
+      '@qpjoy/mx-launcher-embed-sdk',
+      '@qpjoy/mx-launcher-standalone',
+      '@qpjoy/electron-launcher',
+      '@qpjoy/ui-design-neon-void'
+    ],
+    requiredOutputs: [
+      'electron-plugin/packages/electron-core-wireguard/dist/index.js',
+      'electron-dock/mx-launcher/packages/launcher-core/dist/index.js',
+      'electron-dock/mx-launcher/packages/launcher-embed-sdk/dist/index.js',
+      'electron-dock/mx-launcher/packages/launcher-standalone/dist/index.js',
+      'electron-dock/mx-launcher/packages/electron-launcher/dist/index.js',
+      'electron-dock/mx-launcher/packages/electron-launcher/dist/standalone-data-plane.js',
+      'electron-dock/mx-launcher/packages/electron-launcher/dist/wireguard.js',
+      'electron-dock/mx-launcher/ui-design/dist/index.js'
+    ]
   }
 };
 
@@ -105,7 +125,7 @@ function isAppRef(value) {
 }
 
 if (!['local', 'npm', 'ensure'].includes(mode) || !APPS[appRef]) {
-  console.error('usage: node scripts/dev-mode.mjs <local|npm|ensure> --app <demos/mx-h2i|demos/luopan>');
+  console.error('usage: node scripts/dev-mode.mjs <local|npm|ensure> --app <demos/mx-h2i|demos/luopan|demos/mx-autotest>');
   process.exit(2);
 }
 

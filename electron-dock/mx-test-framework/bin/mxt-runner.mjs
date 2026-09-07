@@ -786,6 +786,10 @@ async function executeOnce(config) {
     // then found no summary.json.
     E2E_ARTIFACTS_DIR: artifactsRoot,
   }
+  // Provenance must come from the package bytes this runner verified for this
+  // run, never from a stale machine variable or a test-pack supplied value.
+  delete childEnv.MXT_APP_SHA256
+  delete childEnv.MX_AUTO_APP_SHA256
   const reporter = createReporter(config, runId, runToken)
   const heartbeat = setInterval(() => {
     api(config, 'POST', `/runner/v1/runs/${runId}/heartbeat`, { token: runToken }).catch(() => {})
@@ -827,6 +831,13 @@ async function executeOnce(config) {
       // What the suite gets is a launchable application, not the delivery
       // format it arrived in.
       childEnv.MXT_APP_PATH = await preparePackage(claimed.appPackage, downloaded)
+      if (claimed.appPackage.sha256) {
+        const verifiedDigest = claimed.appPackage.sha256.toLowerCase()
+        // This is the digest of the downloaded installer/package. Do not hash
+        // the extracted executable and present that as release provenance.
+        childEnv.MXT_APP_SHA256 = verifiedDigest
+        childEnv.MX_AUTO_APP_SHA256 = verifiedDigest
+      }
       reporter.stage('launch', 'ok')
     }
 

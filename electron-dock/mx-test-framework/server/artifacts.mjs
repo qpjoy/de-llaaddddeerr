@@ -1,5 +1,6 @@
-import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { lstat, mkdir, open, readdir, rename, rm, rmdir, stat, statfs } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { AppError } from './core/errors.mjs'
@@ -29,10 +30,35 @@ const CONTENT_TYPES = {
 }
 
 export const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+export const MAX_RUN_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
+export const MAX_RUN_ARTIFACT_FILES = 1_000
+export const MAX_TOTAL_ARTIFACT_BYTES = 20 * 1024 * 1024 * 1024
+export const MAX_TOTAL_ARTIFACT_ENTRIES = 100_000
+export const MIN_FREE_ARTIFACT_INODES = 10_000
 
 export class ArtifactStore {
-  constructor({ root }) {
+  #writeTail = Promise.resolve()
+
+  constructor({
+    root,
+    maxFileBytes = MAX_ARTIFACT_BYTES,
+    maxRunBytes = MAX_RUN_ARTIFACT_BYTES,
+    maxFilesPerRun = MAX_RUN_ARTIFACT_FILES,
+    maxTotalBytes = MAX_TOTAL_ARTIFACT_BYTES,
+    maxTotalEntries = MAX_TOTAL_ARTIFACT_ENTRIES,
+    minFreeBytes = 0,
+    minFreeInodes = 0,
+    statfsImpl = statfs,
+  }) {
     this.root = resolve(root)
+    this.maxFileBytes = maxFileBytes
+    this.maxRunBytes = maxRunBytes
+    this.maxFilesPerRun = maxFilesPerRun
+    this.maxTotalBytes = maxTotalBytes
+    this.maxTotalEntries = maxTotalEntries
+    this.minFreeBytes = minFreeBytes
+    this.minFreeInodes = minFreeInodes
+    this.statfsImpl = statfsImpl
   }
 
   runDir(runId) {
@@ -49,7 +75,7 @@ export class ArtifactStore {
   resolveWithin(runId, relativePath) {
     const base = this.runDir(runId)
     const target = resolve(base, relativePath)
-    if (target !== base && !target.startsWith(base + sep)) {
+    if (target === base || !target.startsWith(base + sep)) {
       throw new AppError(400, 'invalid_artifact_path', 'Artifact path escapes the run directory')
     }
     return target
@@ -59,27 +85,156 @@ export class ArtifactStore {
     return CONTENT_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
   }
 
-  /** Stream a request body to disk. Returns the byte count written. */
-  async write(runId, relativePath, readable, { limitBytes = MAX_ARTIFACT_BYTES } = {}) {
+  /**
+   * Stream a request body to disk. Returns the byte count written.
+   *
+   * All writes are serialised. Without that small lock, parallel uploads from
+   * either the same or different runs could observe the same persistent-volume
+   * budget and together cross the hard limit.
+   */
+  async write(runId, relativePath, readable, options = {}) {
+    const previous = this.#writeTail
+    let release
+    const gate = new Promise((resolveGate) => {
+      release = resolveGate
+    })
+    const tail = previous.then(() => gate)
+    this.#writeTail = tail
+    await previous
+
+    try {
+      return await this.#write(runId, relativePath, readable, options)
+    } finally {
+      release()
+    }
+  }
+
+  async #write(
+    runId,
+    relativePath,
+    readable,
+    {
+      limitBytes = this.maxFileBytes,
+      limitRunBytes = this.maxRunBytes,
+      limitFiles = this.maxFilesPerRun,
+      limitTotalBytes = this.maxTotalBytes,
+      limitTotalEntries = this.maxTotalEntries,
+      minFreeBytes = this.minFreeBytes,
+      minFreeInodes = this.minFreeInodes,
+    } = {},
+  ) {
     const target = this.resolveWithin(runId, relativePath)
-    await mkdir(dirname(target), { recursive: true })
+    await mkdir(this.root, { recursive: true })
+    const normalizedPath = relative(this.runDir(runId), target).split(sep).join('/')
+    const existing = await this.list(runId)
+    const replaced = existing.find((entry) => entry.path === normalizedPath)
+    if (!replaced && existing.length >= limitFiles) {
+      throw new AppError(
+        413,
+        'artifact_file_limit',
+        `Run artifact count exceeds ${limitFiles} files`,
+      )
+    }
+    const committedBytes = existing.reduce((total, entry) => total + entry.bytes, 0)
+    const remainingRunBytes = limitRunBytes - committedBytes + (replaced?.bytes ?? 0)
+    if (remainingRunBytes <= 0) {
+      throw new AppError(
+        413,
+        'artifact_run_too_large',
+        `Run artifacts exceed ${limitRunBytes} bytes`,
+      )
+    }
+    const storedBytes = await this.totalBytes()
+    const remainingTotalBytes = limitTotalBytes - storedBytes + (replaced?.bytes ?? 0)
+    if (remainingTotalBytes <= 0) {
+      throw new AppError(507, 'artifact_storage_budget', '产物存储已达到平台硬上限', {
+        hint: '等待保留策略清理旧产物，或由运维扩容并同步提高 MXT_ARTIFACT_MAX_TOTAL_BYTES。',
+      })
+    }
+    const missingDirectories = await this.#missingParentDirectories(target)
+    const storedEntries = await this.totalEntries()
+    // A successful new path consumes its missing parent directories and one
+    // file entry. While streaming, that file is the root-level staging entry,
+    // so the same count also describes the peak. Replacements still need one temporary
+    // inode before the atomic rename can release the old file.
+    const requiredEntries = missingDirectories.length + 1
+    if (storedEntries + requiredEntries > limitTotalEntries) {
+      throw new AppError(507, 'artifact_storage_entry_budget', '产物存储条目已达到平台硬上限', {
+        hint: '等待保留策略清理旧产物，或由运维扩容并同步提高 MXT_ARTIFACT_MAX_TOTAL_ENTRIES。',
+      })
+    }
+    const filesystem = await this.statfsImpl(this.root)
+    const availableBytes = Number(filesystem.bavail) * Number(filesystem.bsize)
+    // The previous file remains allocated while its replacement is staged, so
+    // it cannot be credited against the physical free-space reserve here.
+    const writableBeforeReserve = availableBytes - minFreeBytes
+    if (!Number.isFinite(writableBeforeReserve) || writableBeforeReserve <= 0) {
+      throw new AppError(507, 'artifact_storage_low', '产物磁盘已进入安全保留区', {
+        hint: '清理旧产物或扩容磁盘；平台不会消耗为节点保留的剩余空间。',
+      })
+    }
+    const availableInodes = Number(filesystem.ffree)
+    if (
+      !Number.isFinite(availableInodes) ||
+      availableInodes - minFreeInodes < requiredEntries
+    ) {
+      throw new AppError(507, 'artifact_storage_inode_low', '产物磁盘 inode 已进入安全保留区', {
+        hint: '清理大量小文件或扩容文件系统；平台不会消耗为节点保留的 inode。',
+      })
+    }
+    const effectiveLimit = Math.min(
+      limitBytes,
+      remainingRunBytes,
+      remainingTotalBytes,
+      writableBeforeReserve,
+    )
+    const staging = join(this.root, `.upload-${randomUUID()}.part`)
 
     let bytes = 0
     const meter = async function* (source) {
       for await (const chunk of source) {
         bytes += chunk.length
-        if (bytes > limitBytes) {
+        if (bytes > effectiveLimit) {
+          if (effectiveLimit === writableBeforeReserve) {
+            throw new AppError(507, 'artifact_storage_low', '产物磁盘将进入安全保留区')
+          }
+          if (effectiveLimit === remainingTotalBytes) {
+            throw new AppError(507, 'artifact_storage_budget', '产物存储将超过平台硬上限')
+          }
+          if (effectiveLimit === remainingRunBytes) {
+            throw new AppError(
+              413,
+              'artifact_run_too_large',
+              `Run artifacts exceed ${limitRunBytes} bytes`,
+            )
+          }
           throw new AppError(413, 'artifact_too_large', `Artifact exceeds ${limitBytes} bytes`)
         }
         yield chunk
       }
     }
 
+    let stagingHandle
     try {
-      await pipeline(readable, meter, createWriteStream(target))
+      // Stream before creating caller-controlled directory trees. A rejected
+      // upload therefore leaves neither a partial artifact nor a ladder of
+      // empty directories. Rename keeps a completed artifact atomic.
+      // Awaiting open is important: createWriteStream opens lazily, so a meter
+      // rejection can otherwise run cleanup before the file is actually
+      // created and leave a late zero-byte .part file behind.
+      stagingHandle = await open(staging, 'wx')
+      await pipeline(readable, meter, stagingHandle.createWriteStream({ autoClose: true }))
+      await mkdir(dirname(target), { recursive: true })
+      await rename(staging, target)
     } catch (error) {
       // A partial file is worse than none: it would be served as if complete.
-      await rm(target, { force: true }).catch(() => {})
+      await stagingHandle?.close().catch(() => {})
+      await rm(staging, { force: true }).catch(() => {})
+      for (const directory of [...missingDirectories].reverse()) {
+        // Only directories absent at preflight are candidates, and rmdir will
+        // refuse anything that another actor populated in the meantime.
+        await rmdir(directory).catch(() => {})
+      }
       if (error instanceof AppError) throw error
       if (error?.code === 'ENOSPC') {
         throw new AppError(507, 'artifact_storage_full', '产物存储空间已满', {
@@ -89,6 +244,77 @@ export class ArtifactStore {
       throw error
     }
     return bytes
+  }
+
+  /** Current bytes under the persistent artifact root, across every run. */
+  async totalBytes() {
+    let bytes = 0
+    const walk = async (dir) => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch (error) {
+        if (error.code === 'ENOENT') return
+        throw error
+      }
+      for (const entry of entries) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) await walk(full)
+        else if (entry.isFile()) bytes += (await stat(full)).size
+      }
+    }
+    await walk(this.root)
+    return bytes
+  }
+
+  /** Filesystem entries under the artifact root, including empty directories. */
+  async totalEntries() {
+    let count = 0
+    const walk = async (dir) => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch (error) {
+        if (error.code === 'ENOENT') return
+        throw error
+      }
+      for (const entry of entries) {
+        count += 1
+        if (entry.isDirectory()) await walk(join(dir, entry.name))
+      }
+    }
+    await walk(this.root)
+    return count
+  }
+
+  async #missingParentDirectories(target) {
+    const parent = dirname(target)
+    const parts = relative(this.root, parent).split(sep).filter(Boolean)
+    const missing = []
+    let cursor = this.root
+    let parentMissing = false
+    for (const part of parts) {
+      cursor = join(cursor, part)
+      if (parentMissing) {
+        missing.push(cursor)
+        continue
+      }
+      try {
+        const info = await lstat(cursor)
+        if (!info.isDirectory() || info.isSymbolicLink()) {
+          throw new AppError(
+            400,
+            'invalid_artifact_path',
+            'Artifact parent must be a real directory',
+          )
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        parentMissing = true
+        missing.push(cursor)
+      }
+    }
+    return missing
   }
 
   /** Every file under a run directory, as paths relative to it. */

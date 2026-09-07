@@ -1,6 +1,5 @@
 import {
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
-  JUSTONE_CONTRACT_VERSION,
   JUSTONE_OPERATION,
   JUSTONE_PROVIDER_KEY,
   normalizeJustOneProductSearchResponse,
@@ -10,7 +9,7 @@ import { canonicalJson, sha256 } from './normalizers.mjs'
 
 export const JUSTONE_DATASET_ID = 'ecommerce.products.v1'
 export const JUSTONE_CONNECTOR_ID = 'external-platform:justone'
-export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v1'
+export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v2'
 
 const QUEUED_RECORD_TIME_FIELDS = Object.freeze([
   'eventTime',
@@ -211,7 +210,7 @@ function canonicalRecord(archiveObject, request, capturedAt, secret) {
     source: {
       connectorId: JUSTONE_CONNECTOR_ID,
       operation: JUSTONE_OPERATION,
-      connectorContractVersion: JUSTONE_CONTRACT_VERSION,
+      connectorContractVersion: request.endpointContractVersion,
       endpointKey: request.endpointKey,
       endpointVersion: request.endpointVersion,
     },

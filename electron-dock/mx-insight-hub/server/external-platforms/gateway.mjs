@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
-  JUSTONE_CONTRACT_VERSION,
   JUSTONE_OPERATION,
   JustOneContractError,
   normalizeJustOneProductSearchRequest,
@@ -104,11 +103,14 @@ function withDurableRequestId(error, requestId) {
 }
 
 function failureResponseBody(error, requestId) {
+  const details = error?.details && typeof error.details === 'object' && !Array.isArray(error.details)
+    ? error.details
+    : {}
   return {
     error: {
       code: error.code,
       message: error.message,
-      details: { requestId },
+      details: { ...details, requestId },
     },
     requestId,
   }
@@ -124,7 +126,10 @@ function replayedFailure(request) {
   const message = typeof stored?.message === 'string' && stored.message
     ? stored.message
     : 'External data platform rejected the request'
-  return new AppError(status, code, message, { requestId: request.id })
+  const storedDetails = stored?.details && typeof stored.details === 'object' && !Array.isArray(stored.details)
+    ? stored.details
+    : {}
+  return new AppError(status, code, message, { ...storedDetails, requestId: request.id })
 }
 
 function publicFailure(error) {
@@ -140,6 +145,12 @@ function publicFailure(error) {
       502,
       'external_platform_response_unusable',
       'The external call was accepted but its response could not be normalized; do not retry automatically',
+      {
+        upstreamAccepted: true,
+        normalizationCode: typeof evidence.errorCode === 'string'
+          ? evidence.errorCode
+          : 'unknown_response_shape',
+      },
     )
   }
   if (evidence.outcome === 'unknown') {
@@ -540,6 +551,7 @@ export class ExternalPlatformGateway {
         operation: JUSTONE_OPERATION,
         fingerprint: requestFingerprint,
         endpointKey: normalized.endpointKey,
+        contractVersion: normalized.endpointContractVersion,
         ownerRequestId: activeRequestId,
         expiresAt: new Date(Date.now() + this.reservationLeaseMs),
         retryOfRequestId: validatedRetryOfRequestId,
@@ -613,7 +625,12 @@ export class ExternalPlatformGateway {
           throw new AppError(409, errorCode, 'A recent equal dispatch has an unknown outcome; do not retry automatically')
         }
         if (blockedOutcome === 'succeeded_unusable') {
-          throw new AppError(409, errorCode, 'A recent response could not be normalized; do not retry automatically')
+          throw new AppError(
+            409,
+            errorCode,
+            'A recent response could not be normalized; do not retry automatically',
+            { upstreamDispatched: false, blockedUntil: lease?.blockedUntil || null },
+          )
         }
         throw new AppError(409, errorCode, 'An equal external provider dispatch is already in progress')
       }
@@ -624,7 +641,7 @@ export class ExternalPlatformGateway {
         apiKeyId: context.apiKey.id,
         usageRequestId: activeRequestId,
         operation: JUSTONE_OPERATION,
-        contractVersion: JUSTONE_CONTRACT_VERSION,
+        contractVersion: normalized.endpointContractVersion,
         endpointKey: normalized.endpointKey,
         endpointVersion: normalized.endpointVersion,
         marketplace: normalized.marketplace,

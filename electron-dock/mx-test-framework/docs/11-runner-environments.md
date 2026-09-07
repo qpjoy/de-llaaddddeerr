@@ -43,19 +43,28 @@ spec:
           env: [ MXT_RUN_ID, MXT_BASE_URL, ... ]
           volumeMounts:
             - name: artifacts
-              mountPath: /artifacts
+              mountPath: /data/artifacts
+            - name: workspace
+              mountPath: /work
+          resources:
+            requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 2Gi }
+            limits: { cpu: "2", memory: 8Gi, ephemeral-storage: 14Gi }
       volumes:
         - name: artifacts
-          persistentVolumeClaim:
-            claimName: mx-test-framework-artifacts
+          emptyDir: { sizeLimit: 2Gi }
+        - name: workspace
+          emptyDir: { sizeLimit: 10Gi }
 ```
 
-产物直接写进独立 PVC,不经过网络上传。这是服务端 runner 比本地 runner 简单的地方。
+产物只在这个 Pod 的有限 emptyDir 暂存，随后使用本 Run 的 token 调上传 API；Job
+不挂平台持久化 PVC。持久化目录只有 server 能写，服务端统一执行单文件、单 Run、
+全局字节上限和宿主磁盘保留水位。
 
 ### 资源
 
-一个 Chromium 实例大约需要 1 CPU / 2GB。Job 的 requests/limits 按此设，
-并发数由平台的队列控制而不是靠 k8s 排队,这样超载时任务是"排队中"而不是 Pod Pending。
+默认 Job request 为 1 CPU / 2Gi，limit 为 2 CPU / 8Gi，同时限制 14Gi
+ephemeral-storage。并发数由平台队列的全局 cap 控制，namespace ResourceQuota 再做
+第二道硬边界；超载时任务保持“排队中”，不是无限创建 Pod。
 
 ## 桌面 e2e：不能在服务器上跑
 

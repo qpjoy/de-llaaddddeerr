@@ -120,6 +120,9 @@ function mapCase(row) {
     specPath: row.spec_path,
     suiteSlug: row.suite_slug,
     requirementRef: row.requirement_ref,
+    coverageMode: row.coverage_mode ?? null,
+    automationState: row.automation_state ?? null,
+    prerequisites: row.prerequisites ?? [],
     catalogFile: row.catalog_file,
     origin: row.origin,
     steps: row.steps ?? [],
@@ -129,6 +132,20 @@ function mapCase(row) {
     firstSeenAt: iso(row.first_seen_at),
     lastSeenAt: iso(row.last_seen_at),
     retiredAt: iso(row.retired_at),
+  }
+}
+
+function mapCatalog(row) {
+  return {
+    appId: row.app_id,
+    catalogFile: row.catalog_file,
+    schemaVersion: row.schema_version,
+    application: row.application,
+    surface: row.surface ?? null,
+    suiteSlug: row.suite_slug ?? null,
+    executionMode: row.execution_mode ?? null,
+    coverage: row.coverage ?? {},
+    syncedAt: iso(row.synced_at),
   }
 }
 
@@ -478,15 +495,48 @@ export class PostgresStore {
 
   // -- cases -----------------------------------------------------------------
 
-  async syncCatalog(appId, { catalogFile, cases }) {
+  async syncCatalog(
+    appId,
+    { catalogFile, schemaVersion, application, surface, suiteSlug, executionMode, coverage, cases },
+  ) {
     return this.#tx(async (client) => {
-      const result = { added: [], updated: [], retired: [] }
+      const { rows: catalogRows } = await client.query(
+        `INSERT INTO mxt_catalogs
+           (app_id, catalog_file, schema_version, application, surface, suite_slug,
+            execution_mode, coverage)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+         ON CONFLICT (app_id, catalog_file) DO UPDATE SET
+           schema_version = EXCLUDED.schema_version,
+           application = EXCLUDED.application,
+           surface = EXCLUDED.surface,
+           suite_slug = EXCLUDED.suite_slug,
+           execution_mode = EXCLUDED.execution_mode,
+           coverage = EXCLUDED.coverage,
+           synced_at = now()
+         RETURNING *`,
+        [
+          appId,
+          catalogFile,
+          schemaVersion,
+          application,
+          surface ?? null,
+          suiteSlug ?? null,
+          executionMode ?? null,
+          JSON.stringify(coverage ?? {}),
+        ],
+      )
+      const result = {
+        added: [],
+        updated: [],
+        retired: [],
+        catalog: mapCatalog(catalogRows[0]),
+      }
       for (const entry of cases) {
         const { rows } = await client.query(
           `INSERT INTO mxt_cases
              (app_id, case_id, title, priority, tags, tracks, spec_path, suite_slug,
-              requirement_ref, catalog_file)
-           VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10)
+              requirement_ref, catalog_file, coverage_mode, automation_state, prerequisites)
+           VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13::jsonb)
            ON CONFLICT (app_id, case_id) DO UPDATE SET
              origin = 'catalog',
              title = EXCLUDED.title,
@@ -496,6 +546,9 @@ export class PostgresStore {
              spec_path = EXCLUDED.spec_path,
              suite_slug = EXCLUDED.suite_slug,
              requirement_ref = EXCLUDED.requirement_ref,
+             coverage_mode = EXCLUDED.coverage_mode,
+             automation_state = EXCLUDED.automation_state,
+             prerequisites = EXCLUDED.prerequisites,
              catalog_file = EXCLUDED.catalog_file,
              last_seen_at = now(),
              retired_at = NULL
@@ -511,6 +564,9 @@ export class PostgresStore {
             entry.suiteSlug ?? null,
             entry.requirementRef ?? null,
             catalogFile,
+            entry.coverageMode ?? null,
+            entry.automationState ?? null,
+            JSON.stringify(entry.prerequisites ?? []),
           ],
         )
         // `xmax = 0` distinguishes an INSERT from an UPDATE inside an upsert:
@@ -533,6 +589,14 @@ export class PostgresStore {
       result.retired = retired.map((row) => row.case_id)
       return result
     })
+  }
+
+  async listCatalogs(appId) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM mxt_catalogs WHERE app_id = $1 ORDER BY catalog_file',
+      [appId],
+    )
+    return rows.map(mapCatalog)
   }
 
   async listCases(appId, { includeRetired = false, priority = null } = {}) {
@@ -1147,8 +1211,10 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `INSERT INTO mxt_cases
          (app_id, case_id, title, priority, tags, tracks, spec_path, suite_slug,
-          requirement_ref, catalog_file, origin, steps, preconditions, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15)
+          requirement_ref, catalog_file, origin, steps, preconditions, notes, created_by,
+          coverage_mode, automation_state, prerequisites)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,
+               $16,$17,$18::jsonb)
        ON CONFLICT (app_id, case_id) DO UPDATE SET
          title = EXCLUDED.title,
          priority = EXCLUDED.priority,
@@ -1157,6 +1223,9 @@ export class PostgresStore {
          spec_path = EXCLUDED.spec_path,
          suite_slug = EXCLUDED.suite_slug,
          requirement_ref = EXCLUDED.requirement_ref,
+         coverage_mode = EXCLUDED.coverage_mode,
+         automation_state = EXCLUDED.automation_state,
+         prerequisites = EXCLUDED.prerequisites,
          steps = EXCLUDED.steps,
          preconditions = EXCLUDED.preconditions,
          notes = EXCLUDED.notes,
@@ -1180,6 +1249,9 @@ export class PostgresStore {
         entry.preconditions ?? null,
         entry.notes ?? null,
         entry.createdBy ?? null,
+        entry.coverageMode ?? null,
+        entry.automationState ?? null,
+        JSON.stringify(entry.prerequisites ?? []),
       ],
     )
     return mapCase(rows[0])

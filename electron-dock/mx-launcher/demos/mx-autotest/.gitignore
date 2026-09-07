@@ -1,0 +1,9 @@
+.env
+.dev-mode.json
+.quasar/
+.electron-native/
+.vue-global-types/
+artifacts/
+dist/
+node_modules/
+pnpm-workspace.yaml

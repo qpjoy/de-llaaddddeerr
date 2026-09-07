@@ -1,0 +1,112 @@
+# Control-plane policy. Kubernetes API and Launcher are intentionally server
+# egress rules; putting them under PostgreSQL ingress would not grant access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-auto-server
+  namespace: mx-auto
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mx-auto-server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - port: 8790
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Bundled PostgreSQL.
+    - ports:
+        - port: 5432
+          protocol: TCP
+    # HTTPS APIs/webhooks and Kubernetes API variants.
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    # HTTP webhooks plus mx-launcher-internal's current service port.
+    - ports:
+        - port: 80
+          protocol: TCP
+        - port: 18090
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-auto-runner
+  namespace: mx-auto
+spec:
+  # The V0 kernel still emits its legacy component label. Namespace isolation
+  # makes this selector specific to mx-auto runner Jobs.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: runner
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Runner callbacks go only to this platform, never another MX control plane.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mx-auto-server
+      ports:
+        # Some CNIs evaluate a Service's port before DNAT, others the Pod port.
+        - port: 80
+          protocol: TCP
+        - port: 8790
+          protocol: TCP
+    # Cluster DNS implementations differ across desktop/kind distributions.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Public Git/package registries only. Private/cluster ranges stay blocked so
+    # arbitrary test code cannot reach MX-H2I, Launcher or another namespace.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-auto-postgres
+  namespace: mx-auto
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mx-auto-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: mx-auto
+      ports:
+        - port: 5432
+          protocol: TCP

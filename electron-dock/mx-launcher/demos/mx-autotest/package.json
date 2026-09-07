@@ -1,0 +1,42 @@
+{
+  "name": "@qpjoy/mx-autotest",
+  "productName": "MX AutoTest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "author": "QPJoy",
+  "description": "Standalone MX Launcher desktop shell for the MX AutoTest platform.",
+  "scripts": {
+    "setup": "node scripts/dev-mode.mjs local",
+    "setup:npm": "node scripts/dev-mode.mjs npm",
+    "dev": "node scripts/dev-mode.mjs local && quasar dev -m electron",
+    "start": "pnpm dev",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "safety": "node scripts/safety-check.mjs && node --test scripts/lease-capability-policy.test.mjs",
+    "check": "node --check src-electron/electron-bootstrap.cjs && node --check scripts/dev-mode.mjs && node --check scripts/package.mjs && pnpm run safety && pnpm run typecheck",
+    "build": "node scripts/dev-mode.mjs local && quasar build -m electron --skip-pkg",
+    "package": "node scripts/package.mjs",
+    "mode:local": "node scripts/dev-mode.mjs local",
+    "mode:npm": "node scripts/dev-mode.mjs npm",
+    "mode:status": "node scripts/dev-mode.mjs status"
+  },
+  "dependencies": {
+    "@qpjoy/electron-launcher": "workspace:*",
+    "@qpjoy/ui-design-neon-void": "workspace:*",
+    "@quasar/extras": "1.18.0",
+    "quasar": "2.20.1",
+    "vue": "3.5.39",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@quasar/app-vite": "2.4.0",
+    "@types/node": "22.19.21",
+    "dmg-builder": "25.1.8",
+    "electron": "34.5.8",
+    "electron-builder": "25.1.8",
+    "electron-builder-squirrel-windows": "25.1.8",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vue-tsc": "2.2.12"
+  }
+}

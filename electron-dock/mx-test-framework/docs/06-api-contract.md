@@ -143,7 +143,7 @@ POST /runner/v1/runs:claim            Authorization: Bearer <runner token>
 | --- | --- | --- |
 | `POST` | `/runner/v1/runs/:runId/heartbeat` | 续租；超时未续 → `timeout` |
 | `POST` | `/runner/v1/runs/:runId/steps` | 实时步骤上报（可选，用于进度） |
-| `PUT` | `/runner/v1/runs/:runId/artifacts/*` | 上传产物（本地 runner 用；服务端 runner 直接写 PVC） |
+| `PUT` | `/runner/v1/runs/:runId/artifacts/*` | 上传产物（本地与服务端 runner 共用；受文件、Run、全局磁盘预算约束） |
 | `POST` | `/runner/v1/runs/:runId:complete` | 提交 `summary.json` + 退出码，run 终结 |
 
 两级 token 的边界：**runner token 只能 claim，不能读写任何 run 的数据；

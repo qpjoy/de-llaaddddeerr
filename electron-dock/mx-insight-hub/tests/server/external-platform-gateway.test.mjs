@@ -108,6 +108,41 @@ function successfulResult(body, options) {
   }
 }
 
+test('gateway scopes dispatch lease and provider call to each endpoint contract version', async () => {
+  const adapter = {
+    async searchProducts(body, options) {
+      return successfulResult(body, options)
+    },
+  }
+  for (const [marketplace, expectedVersion] of [
+    ['taobao', 'justone.product-search.v2'],
+    ['jd', 'justone.product-search.v1'],
+  ]) {
+    const state = await fixture({ adapter })
+    const acquireDispatchLease = state.platformStore.acquireDispatchLease.bind(state.platformStore)
+    const beginProviderCall = state.platformStore.beginProviderCall.bind(state.platformStore)
+    let leaseInput = null
+    let callInput = null
+    state.platformStore.acquireDispatchLease = async (input) => {
+      leaseInput = input
+      return acquireDispatchLease(input)
+    }
+    state.platformStore.beginProviderCall = async (input) => {
+      callInput = input
+      return beginProviderCall(input)
+    }
+
+    await state.gateway.search(state.context, {
+      body: { marketplace, query: 'contract version' },
+      idempotencyKey: `contract-version-${marketplace}-01`,
+      path: '/api/v1/data/ecommerce/products/search',
+    })
+
+    assert.equal(leaseInput?.contractVersion, expectedVersion)
+    assert.equal(callInput?.contractVersion, expectedVersion)
+  }
+})
+
 test('snapshot freshness starts at accepted response capture, not dispatch start', async () => {
   let acceptedAfter = null
   let receivedDispatchTimestamp = false
@@ -550,6 +585,8 @@ test('a billed code=0 response that cannot be normalized is archived and never r
       originalRequestId = error?.details?.requestId
       return error?.status === 502
         && error?.code === 'external_platform_response_unusable'
+        && error?.details?.upstreamAccepted === true
+        && error?.details?.normalizationCode === 'invalid_upstream_items'
         && typeof originalRequestId === 'string'
     },
   )
@@ -561,6 +598,7 @@ test('a billed code=0 response that cannot be normalized is archived and never r
     }),
     (error) => error?.status === 502
       && error?.code === 'external_platform_response_unusable'
+      && error?.details?.normalizationCode === 'invalid_upstream_items'
       && error?.details?.requestId === originalRequestId,
   )
   await assert.rejects(
@@ -573,6 +611,8 @@ test('a billed code=0 response that cannot be normalized is archived and never r
     }),
     (error) => error?.status === 409
       && error?.code === 'external_platform_response_unusable'
+      && error?.details?.upstreamDispatched === false
+      && typeof error?.details?.blockedUntil === 'string'
       && typeof error.details?.requestId === 'string',
   )
 
@@ -587,6 +627,7 @@ test('a billed code=0 response that cannot be normalized is archived and never r
   assert.equal(usage.status, 'committed')
   assert.equal(usage.responseStatus, 502)
   assert.equal(usage.responseBody.error.code, 'external_platform_response_unusable')
+  assert.equal(usage.responseBody.error.details.normalizationCode, 'invalid_upstream_items')
   assert.equal(state.platformStore.requests.at(-2).sourceMode, 'idempotent_replay')
   assert.doesNotMatch(
     JSON.stringify([...state.platformStore.responseArchives.values()]),

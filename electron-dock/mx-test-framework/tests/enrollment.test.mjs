@@ -64,6 +64,12 @@ test('the install scripts and the runner they install need no credentials', asyn
   const runner = await text('/install/mxt-runner.mjs')
   assert.equal(runner.status, 200)
   assert.match(runner.body, /mxt-runner/u)
+  const staleDigestRemoval = runner.body.indexOf('delete childEnv.MXT_APP_SHA256')
+  const packageDownload = runner.body.indexOf('await downloadPackage(config, claimed.appPackage)')
+  const verifiedDigestInjection = runner.body.indexOf('childEnv.MXT_APP_SHA256 = verifiedDigest')
+  assert.ok(staleDigestRemoval !== -1 && staleDigestRemoval < packageDownload)
+  assert.ok(packageDownload < verifiedDigestInjection)
+  assert.match(runner.body, /childEnv\.MX_AUTO_APP_SHA256 = verifiedDigest/u)
 })
 
 test('the command carries the address the browser actually reached', async () => {

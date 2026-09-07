@@ -87,6 +87,7 @@ export class MemoryExternalPlatformStore {
     operation,
     fingerprint,
     endpointKey,
+    contractVersion,
     ownerRequestId,
     expiresAt,
     retryOfRequestId = null,
@@ -109,7 +110,11 @@ export class MemoryExternalPlatformStore {
                 && call.outcome === 'unknown'
                 && call.usageRequestId !== retryOfRequestId
               )
-              || (call.endpointKey === endpointKey && call.outcome === 'succeeded_unusable')
+              || (
+                call.endpointKey === endpointKey
+                && call.contractVersion === contractVersion
+                && call.outcome === 'succeeded_unusable'
+              )
             )
             && new Date(call.completedAt).getTime() + this.uncertainCooldownMs > now
           )
@@ -560,6 +565,7 @@ export class PostgresExternalPlatformStore {
     operation,
     fingerprint,
     endpointKey,
+    contractVersion,
     ownerRequestId,
     expiresAt,
     retryOfRequestId = null,
@@ -587,7 +593,11 @@ export class PostgresExternalPlatformStore {
                      AND call.outcome = 'unknown'
                      AND ($8::uuid IS NULL OR call.usage_request_id <> $8)
                    )
-                   OR (call.endpoint_key = $7 AND call.outcome = 'succeeded_unusable')
+                   OR (
+                     call.endpoint_key = $7
+                     AND call.contract_version = $9
+                     AND call.outcome = 'succeeded_unusable'
+                   )
                  )
                  AND call.completed_at > now() - make_interval(secs => $6)
                )
@@ -604,6 +614,7 @@ export class PostgresExternalPlatformStore {
         Math.ceil(this.uncertainCooldownMs / 1_000),
         endpointKey,
         retryOfRequestId,
+        contractVersion,
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
@@ -631,7 +642,11 @@ export class PostgresExternalPlatformStore {
                   AND outcome = 'unknown'
                   AND ($6::uuid IS NULL OR usage_request_id <> $6)
                 )
-                OR (endpoint_key = $5 AND outcome = 'succeeded_unusable')
+                OR (
+                  endpoint_key = $5
+                  AND contract_version = $7
+                  AND outcome = 'succeeded_unusable'
+                )
               )
               AND completed_at > now() - make_interval(secs => $4)
             )
@@ -641,6 +656,7 @@ export class PostgresExternalPlatformStore {
       [
         consumerId, operation, fingerprint,
         Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey, retryOfRequestId,
+        contractVersion,
       ],
     )
     if (blocker.rows[0]) {

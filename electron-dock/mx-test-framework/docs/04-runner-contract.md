@@ -144,7 +144,7 @@ compass 现状是手工 `pnpm e2e:login` 把登录态存进 `cypress/.auth-sessi
 | 形态 | k8s Job，官方浏览器镜像 | 使用者机器上的 `mxt-runner` CLI |
 | 身份 | Job 注入的 run token | mx-launcher 账号登录后签发的 runner token |
 | 派发 | 平台主动创建 Job | runner 主动 `claim` |
-| 产物 | 直接写 PVC | HTTP 上传 |
+| 产物 | 有限 emptyDir 暂存，再用 run token HTTP 上传 | HTTP 上传 |
 | 契约 | **完全相同** | **完全相同** |
 
 契约不区分两者——同一个 `pnpm e2e:run:mock` 在服务器容器里和在个人机器上跑，

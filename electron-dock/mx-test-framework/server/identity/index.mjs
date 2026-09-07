@@ -40,7 +40,7 @@ export function createIdentity({ store, config, logger = console }) {
       return launcher.enabled
     },
 
-    async login({ username, password }) {
+    async login({ username, password, source = null }) {
       // Without a launcher there is no account system to ask, so the service
       // admin token doubles as the sign-in secret. This is what makes local
       // development and the very first boot usable; it is not a bypass, because
@@ -61,8 +61,8 @@ export function createIdentity({ store, config, logger = console }) {
           hint: '配置 MXT_LAUNCHER_URL 后即可用 mx-launcher 账号登录。',
         })
       }
-      const { token, expiresIn } = await launcher.passwordLogin({ username, password })
-      const principal = await launcher.introspect(token)
+      const { token, expiresIn } = await launcher.passwordLogin({ username, password }, source)
+      const principal = await launcher.introspect(token, source)
       const member = await memberFor(principal)
       return { token, expiresIn, member }
     },
@@ -74,7 +74,7 @@ export function createIdentity({ store, config, logger = console }) {
      * human presenting a launcher token is resolved through introspection.
      * Which one it is matters — `kind` is recorded on everything they create.
      */
-    async resolve(token) {
+    async resolve(token, source = null) {
       if (!token) {
         throw new AppError(401, 'unauthorized', '需要登录', {
           hint: launcher.enabled
@@ -95,7 +95,7 @@ export function createIdentity({ store, config, logger = console }) {
           hint: '未配置 MXT_LAUNCHER_URL，因此只有服务 admin token 可用。',
         })
       }
-      const principal = await launcher.introspect(token)
+      const principal = await launcher.introspect(token, source)
       const member = await memberFor(principal)
       if (member.role === 'disabled') {
         throw new AppError(403, 'member_disabled', '该账号已被停用')

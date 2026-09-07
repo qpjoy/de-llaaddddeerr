@@ -320,6 +320,7 @@ test('a runner uploads a recording and completes the run', async () => {
             durationMs: 2400,
             spec: 'a.cy.ts',
             error: '期望看到订单列表，实际是空白页',
+            artifacts: [{ kind: 'video', path: 'videos/login.mp4' }],
             steps: [
               { seq: 1, label: '打开订单页', status: 'passed', offsetMs: 100 },
               { seq: 2, label: '确认列表非空', status: 'failed', offsetMs: 2100 },

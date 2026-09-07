@@ -197,6 +197,55 @@ importers:
         specifier: workspace:^
         version: link:../../../../electron-plugin/packages/tunnel-engines/win32-x64
 
+  demos/mx-autotest:
+    dependencies:
+      '@qpjoy/electron-launcher':
+        specifier: workspace:*
+        version: link:../../packages/electron-launcher
+      '@qpjoy/ui-design-neon-void':
+        specifier: workspace:*
+        version: link:../../ui-design
+      '@quasar/extras':
+        specifier: 1.18.0
+        version: 1.18.0
+      quasar:
+        specifier: 2.20.1
+        version: 2.20.1
+      vue:
+        specifier: 3.5.39
+        version: 3.5.39(typescript@5.9.3)
+      vue-router:
+        specifier: 4.6.4
+        version: 4.6.4(vue@3.5.39(typescript@5.9.3))
+    devDependencies:
+      '@quasar/app-vite':
+        specifier: 2.4.0
+        version: 2.4.0(@types/node@22.19.21)(electron-builder@25.1.8(electron-builder-squirrel-windows@25.1.8))(jiti@2.7.0)(quasar@2.20.1)(rollup@4.62.2)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.4)(typescript@5.9.3)(vue-router@4.6.4(vue@3.5.39(typescript@5.9.3)))(vue@3.5.39(typescript@5.9.3))(yaml@2.9.0)
+      '@types/node':
+        specifier: 22.19.21
+        version: 22.19.21
+      dmg-builder:
+        specifier: 25.1.8
+        version: 25.1.8(electron-builder-squirrel-windows@25.1.8)
+      electron:
+        specifier: 34.5.8
+        version: 34.5.8
+      electron-builder:
+        specifier: 25.1.8
+        version: 25.1.8(electron-builder-squirrel-windows@25.1.8)
+      electron-builder-squirrel-windows:
+        specifier: 25.1.8
+        version: 25.1.8(dmg-builder@25.1.8)
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vite:
+        specifier: 7.3.6
+        version: 7.3.6(@types/node@22.19.21)(jiti@2.7.0)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.4)(yaml@2.9.0)
+      vue-tsc:
+        specifier: 2.2.12
+        version: 2.2.12(typescript@5.9.3)
+
   demos/mx-h2i:
     dependencies:
       '@qpjoy/electron-core-mihomo':

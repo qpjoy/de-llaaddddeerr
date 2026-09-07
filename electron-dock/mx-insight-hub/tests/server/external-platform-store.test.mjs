@@ -10,7 +10,11 @@ import {
 const FINGERPRINT = 'a'.repeat(64)
 const OTHER_FINGERPRINT = 'b'.repeat(64)
 const OPERATION = 'ecommerce.products.search'
-const ENDPOINT_KEY = 'jd.product-search.v1'
+const JD_ENDPOINT_KEY = 'jd.product-search.v1'
+const TAOBAO_ENDPOINT_KEY = 'taobao-tmall.product-search.v1'
+const ENDPOINT_KEY = JD_ENDPOINT_KEY
+const CONTRACT_V1 = 'justone.product-search.v1'
+const CONTRACT_V2 = 'justone.product-search.v2'
 
 test('migration 053 adds one durable uncertain-retry edge without rewriting existing calls', async () => {
   const sql = await readFile(
@@ -144,6 +148,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
     operation: OPERATION,
     fingerprint: FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     outcome: 'succeeded_unusable',
     startedAt: new Date().toISOString(),
     completedAt: new Date().toISOString(),
@@ -154,6 +159,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
     operation: OPERATION,
     fingerprint: OTHER_FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
   })
@@ -167,6 +173,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
     operation: OPERATION,
     fingerprint: FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     outcome: 'unknown',
     startedAt: new Date().toISOString(),
     completedAt: new Date().toISOString(),
@@ -176,10 +183,65 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
     operation: OPERATION,
     fingerprint: FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
   })
   assert.deepEqual(independentConsumer, { kind: 'acquired' })
+})
+
+test('endpoint upgrade releases Taobao V1 quarantine while unchanged JD V1 stays blocked', async () => {
+  const store = new MemoryExternalPlatformStore({
+    usageStore: { requests: new Map() },
+    uncertainCooldownMs: 60_000,
+  })
+  store.calls.set('unusable-v1', {
+    id: 'unusable-v1',
+    consumerId: 'consumer-a',
+    operation: OPERATION,
+    fingerprint: FINGERPRINT,
+    endpointKey: TAOBAO_ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
+    outcome: 'succeeded_unusable',
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  })
+
+  const upgraded = await store.acquireDispatchLease({
+    consumerId: 'consumer-b',
+    operation: OPERATION,
+    fingerprint: OTHER_FINGERPRINT,
+    endpointKey: TAOBAO_ENDPOINT_KEY,
+    contractVersion: CONTRACT_V2,
+    ownerRequestId: randomUUID(),
+    expiresAt: new Date(Date.now() + 30_000),
+  })
+
+  assert.deepEqual(upgraded, { kind: 'acquired' })
+
+  store.calls.set('jd-unusable-v1', {
+    id: 'jd-unusable-v1',
+    consumerId: 'consumer-a',
+    operation: OPERATION,
+    fingerprint: FINGERPRINT,
+    endpointKey: JD_ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
+    outcome: 'succeeded_unusable',
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  })
+  const unchanged = await store.acquireDispatchLease({
+    consumerId: 'consumer-b',
+    operation: OPERATION,
+    fingerprint: FINGERPRINT,
+    endpointKey: JD_ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
+    ownerRequestId: randomUUID(),
+    expiresAt: new Date(Date.now() + 30_000),
+  })
+
+  assert.equal(unchanged.kind, 'blocked')
+  assert.equal(unchanged.reason, 'succeeded_unusable')
 })
 
 test('memory dispatch lease bypasses only the exact referenced unknown request', async () => {
@@ -191,6 +253,7 @@ test('memory dispatch lease bypasses only the exact referenced unknown request',
     operation: OPERATION,
     fingerprint: FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
     retryOfRequestId,
@@ -210,6 +273,7 @@ test('memory dispatch lease bypasses only the exact referenced unknown request',
     operation: OPERATION,
     fingerprint: FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     outcome: 'unknown',
     startedAt: completedAt,
     completedAt,
@@ -277,6 +341,7 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
     operation: OPERATION,
     fingerprint: FINGERPRINT,
     endpointKey: ENDPOINT_KEY,
+    contractVersion: CONTRACT_V1,
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
     retryOfRequestId,
@@ -285,16 +350,25 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
   assert.equal(result.kind, 'blocked')
   assert.equal(result.reason, 'unknown')
   assert.equal(queries[0].values[7], retryOfRequestId)
+  assert.equal(queries[0].values[8], CONTRACT_V1)
   assert.match(
     queries[0].sql,
     /call\.outcome = 'unknown'[\s\S]*?call\.usage_request_id <> \$8/u,
   )
   assert.match(queries[0].sql, /call\.outcome = 'pending'/u)
-  assert.match(queries[0].sql, /call\.outcome = 'succeeded_unusable'/u)
+  assert.match(
+    queries[0].sql,
+    /call\.endpoint_key = \$7[\s\S]*?call\.contract_version = \$9[\s\S]*?call\.outcome = 'succeeded_unusable'/u,
+  )
   assert.equal(queries[1].values[5], retryOfRequestId)
+  assert.equal(queries[1].values[6], CONTRACT_V1)
   assert.match(
     queries[1].sql,
     /outcome = 'unknown'[\s\S]*?usage_request_id <> \$6/u,
+  )
+  assert.match(
+    queries[1].sql,
+    /endpoint_key = \$5[\s\S]*?contract_version = \$7[\s\S]*?outcome = 'succeeded_unusable'/u,
   )
 })
 

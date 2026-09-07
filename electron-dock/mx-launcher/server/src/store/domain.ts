@@ -2587,7 +2587,7 @@ export function buildLauncherProductNetwork(
     : input.standaloneChannelProductId?.trim() || previous?.standaloneChannelProductId || MX_H2I_PRODUCT_ID;
   const standaloneChannelProductId = launcherNetworkLeaseProductId(rawStandaloneChannel || (mode === 'standalone' ? productId : MX_H2I_PRODUCT_ID));
   const updatedBy = input.requestedBy?.trim() || 'config-center';
-  const serviceVip = validIpv4OrFallback(input.serviceVip, previous?.serviceVip || defaults.serviceVip);
+  const serviceVip = canonicalIpv4OrFallback(input.serviceVip, previous?.serviceVip || defaults.serviceVip);
   const legacyFoundation = launcherNetworkProductUsesLegacyFoundation(productId);
   const inputInternalControlIp = legacyFoundation ? null : input.internalControlIp;
   const inputDomesticGatewayIp = legacyFoundation ? null : input.domesticGatewayIp;
@@ -3729,6 +3729,14 @@ function validIpv4OrFallback(value: string | null | undefined, fallback: string)
   return candidate && isIpv4(candidate) ? candidate : fallback;
 }
 
+function canonicalIpv4OrFallback(value: string | null | undefined, fallback: string): string {
+  const candidate = value?.trim();
+  const candidateNumber = candidate ? ipv4ToNumber(candidate) : null;
+  if (candidateNumber != null) return numberToIpv4(candidateNumber);
+  const fallbackNumber = ipv4ToNumber(fallback);
+  return fallbackNumber == null ? fallback : numberToIpv4(fallbackNumber);
+}
+
 function productRelayCidrs(input: string[] | null | undefined, previous: string[] | undefined): string[] {
   const candidates = input?.length ? input : previous?.length ? previous : ['10.89.0.0/16', '10.90.0.0/16'];
   const cidrs = candidates
@@ -3835,6 +3843,7 @@ export function assertLauncherProductLeaseIsolation(
   candidate: LauncherProductNetwork,
   existingProducts: LauncherProductNetwork[]
 ): void {
+  assertLauncherProductServiceVipIsolation(candidate, existingProducts);
   if (candidate.mode !== 'standalone' || candidate.enabled === false) return;
   const candidateRanges = launcherProductLeaseRanges(candidate);
   for (const existing of existingProducts) {
@@ -3853,6 +3862,26 @@ export function assertLauncherProductLeaseIsolation(
           );
         }
       }
+    }
+  }
+}
+
+export function assertLauncherProductServiceVipIsolation(
+  candidate: LauncherProductNetwork,
+  existingProducts: LauncherProductNetwork[]
+): void {
+  if (candidate.enabled === false) return;
+  const candidateServiceVip = ipv4ToNumber(candidate.serviceVip);
+  for (const existing of existingProducts) {
+    if (existing.productId === candidate.productId || existing.enabled === false) continue;
+    const existingServiceVip = ipv4ToNumber(existing.serviceVip);
+    if (
+      candidate.serviceVip === existing.serviceVip
+      || (candidateServiceVip != null && candidateServiceVip === existingServiceVip)
+    ) {
+      throw new Error(
+        `Launcher product ${candidate.productId} service VIP ${candidate.serviceVip} conflicts with ${existing.productId}`
+      );
     }
   }
 }

@@ -203,6 +203,7 @@ import {
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
   assertLauncherProductLeaseIsolation,
+  assertLauncherProductServiceVipIsolation,
   buildAwxProviderConfig,
   buildConfigSecretReference,
   buildReleaseManagementPlan,
@@ -6066,18 +6067,25 @@ export class PostgresStore implements PlatformStore {
   }
 
   private async registerBuiltinProductNetworks(): Promise<void> {
+    const saveProduct = async (product: LauncherProductNetwork): Promise<void> => {
+      assertLauncherProductServiceVipIsolation(
+        product,
+        await this.listRecords<LauncherProductNetwork>('launcher-product-network')
+      );
+      await this.saveRecord(
+        'launcher-product-network',
+        product.productId,
+        product,
+        this.config.siteId
+      );
+    };
     for (const product of builtinLauncherProductNetworks(this.config)) {
       const existing = await this.getRecord<LauncherProductNetwork>(
         'launcher-product-network',
         product.productId
       );
       if (!existing) {
-        await this.saveRecord(
-          'launcher-product-network',
-          product.productId,
-          product,
-          this.config.siteId
-        );
+        await saveProduct(product);
         continue;
       }
       const hasCompleteFeishuPool = Boolean(
@@ -6111,12 +6119,7 @@ export class PostgresStore implements PlatformStore {
             productId: existing.productId,
             requestedBy: 'builtin-anonymous-policy-backfill'
           }, existing);
-          await this.saveRecord(
-            'launcher-product-network',
-            migrated.productId,
-            migrated,
-            this.config.siteId
-          );
+          await saveProduct(migrated);
         }
         continue;
       }
@@ -6133,12 +6136,7 @@ export class PostgresStore implements PlatformStore {
         anonymousLeaseEnd: product.anonymousLeaseEnd,
         requestedBy: 'builtin-feishu-pool-migration'
       }, existing);
-      await this.saveRecord(
-        'launcher-product-network',
-        migrated.productId,
-        migrated,
-        this.config.siteId
-      );
+      await saveProduct(migrated);
     }
     const persistedProducts = await this.listRecords<LauncherProductNetwork>('launcher-product-network');
     for (const existing of persistedProducts) {
@@ -6173,12 +6171,7 @@ export class PostgresStore implements PlatformStore {
         );
         continue;
       }
-      await this.saveRecord(
-        'launcher-product-network',
-        migrated.productId,
-        migrated,
-        this.config.siteId
-      );
+      await saveProduct(migrated);
     }
   }
 

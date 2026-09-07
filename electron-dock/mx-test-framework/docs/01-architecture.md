@@ -83,7 +83,8 @@ sequenceDiagram
 见 [11-runner-environments.md](11-runner-environments.md)。要点：
 
 - **服务端 runner**：k8s Job + 官方浏览器镜像，Internal 的 RHEL 服务器上全自动跑无头
-  Web e2e。产物直接写 PVC，不走网络上传。
+  Web e2e。产物先写 per-Run 有限 emptyDir，再用 run token 通过 API 上传；Job 不挂
+  持久化 PVC。
 - **本地 runner**：使用者自己机器上的 CLI，mx-launcher 账号登录后认领任务。
   用于 Electron 打包产物这类服务器上跑不了的场景。产物通过 API 上传。
 

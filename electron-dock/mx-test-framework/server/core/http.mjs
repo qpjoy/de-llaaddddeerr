@@ -80,6 +80,12 @@ export function bearerToken(request) {
   return cookieValue(request, SESSION_COOKIE)
 }
 
+/** Direct peer address for security budgets; forwarded headers are untrusted. */
+export function directClientAddress(request) {
+  const value = request?.socket?.remoteAddress
+  return value ? String(value).slice(0, 64) : null
+}
+
 export function sessionCookie(token, { secure, maxAgeSeconds = 43_200 }) {
   const parts = [
     `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
