@@ -378,10 +378,17 @@ load_kind_image() {
 }
 
 build_local_image() {
-  local build_tag="mx-auto-server:build-$$" image_id image_hash tagged_id
+  local build_network="${1:-}" build_tag="mx-auto-server:build-$$"
+  local image_id image_hash tagged_id
+  local -a build_args=(-f "${ROOT_DIR}/Dockerfile" -t "$build_tag")
   need docker
-  say "building a content-addressed local image"
-  docker build -f "${ROOT_DIR}/Dockerfile" -t "$build_tag" "$ELECTRON_DOCK_DIR"
+  case "$build_network" in
+    '') ;;
+    host) build_args+=(--network host) ;;
+    *) die "unsupported local image build network: ${build_network}" ;;
+  esac
+  say "building a content-addressed local image${build_network:+ with host networking}"
+  docker build "${build_args[@]}" "$ELECTRON_DOCK_DIR"
   image_id="$(docker image inspect "$build_tag" --format '{{.Id}}')"
   image_hash="${image_id#sha256:}"
   [[ "$image_hash" =~ ^[0-9a-fA-F]{64}$ ]] || die "docker returned an invalid image id: ${image_id}"
@@ -420,7 +427,12 @@ resolve_image() {
         containerd://*)
           require_local_kubernetes_node
           prepare_containerd_import
-          build_local_image
+          # A kubeadm node commonly reaches registries through a host tunnel.
+          # Docker's bridge can retain a larger MTU, causing npm package bodies
+          # to stall even though registry metadata succeeds. At this point the
+          # node/host identity has been proven, so host networking is both
+          # available and scoped to this image build only.
+          build_local_image host
           import_containerd_image "$IMAGE"
           ;;
         *)

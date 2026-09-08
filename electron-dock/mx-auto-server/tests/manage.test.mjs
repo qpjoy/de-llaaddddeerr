@@ -53,7 +53,10 @@ test('image resolution builds locally for desktop and loads kind', () => {
     const local = shell(`
       source "$1"
       kubectl() { printf '${context}\\n'; }
-      build_local_image() { IMAGE='mx-auto.local/mx-auto-server:local-sha256-content'; }
+      build_local_image() {
+        test "$#" = 0
+        IMAGE='mx-auto.local/mx-auto-server:local-sha256-content'
+      }
       load_kind_image() { KIND_LOADED=1; }
       unset MX_AUTO_IMAGE
       resolve_image
@@ -71,7 +74,11 @@ test('image resolution auto-imports into a local single-node containerd cluster'
     cluster_container_runtime() { printf 'containerd://1.7.0\\n'; }
     require_local_kubernetes_node() { :; }
     prepare_containerd_import() { :; }
-    build_local_image() { IMAGE='mx-auto.local/mx-auto-server:local-sha256-content'; }
+    build_local_image() {
+      test "$#" = 1
+      test "$1" = host
+      IMAGE='mx-auto.local/mx-auto-server:local-sha256-content'
+    }
     import_containerd_image() {
       test "$1" = 'mx-auto.local/mx-auto-server:local-sha256-content'
       IMPORTED=1
@@ -124,6 +131,34 @@ test('local image name contains the complete Docker image id', () => {
     }
     build_local_image
     test "$IMAGE" = 'mx-auto.local/mx-auto-server:local-sha256-${hash}'
+  `)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('local image build applies host networking only when requested', () => {
+  const hash = 'b'.repeat(64)
+  const result = shell(`
+    source "$1"
+    docker() {
+      case "$1" in
+        build)
+          BUILD_ARGS="$*"
+          return 0
+          ;;
+        tag) return 0 ;;
+        image)
+          case "$2" in
+            inspect) printf 'sha256:${hash}\\n' ;;
+            rm) return 0 ;;
+          esac
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    build_local_image
+    [[ " $BUILD_ARGS " != *' --network host '* ]]
+    build_local_image host
+    [[ " $BUILD_ARGS " == *' --network host '* ]]
   `)
   assert.equal(result.status, 0, result.stderr)
 })

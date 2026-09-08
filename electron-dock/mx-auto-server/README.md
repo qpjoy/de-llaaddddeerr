@@ -94,6 +94,10 @@ artifact 数值时，必须同步核对 ResourceQuota、LimitRange 与宿主磁�
 构建以完整 image ID 命名的内容寻址镜像，并按当前集群自动分发：desktop 直接使用，
 kind 自动执行 `kind load docker-image`，当前主机就是唯一 K8s 节点的
 kubeadm/containerd 则自动导入 `k8s.io` image store；containerd 会去重已有内容层。
+在确认当前主机就是该 kubeadm/containerd 节点后，镜像构建会自动使用 Docker host
+network，避开隧道环境中 bridge MTU 导致的 npm 包下载卡死；该设置只作用于 build
+阶段，不改变 Pod 网络、Service 或运行时出站。desktop、kind 和显式远程镜像不使用
+这一自动切换。
 
 containerd 导入前会优先用节点 InternalIP 核对本机身份，无法枚举 IP 时才回退
 hostname，避免 kubeconfig 指向远端时误把镜像导入本机。只有 kubectl 指向另一台
