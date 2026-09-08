@@ -12,9 +12,10 @@ Admin API。生产域名会把 `/health/**` 转给 admin listener，因此外部
 生产请求链路为：调用方先到 Domestic Nginx（仅终止 TLS 和反向代理），再经
 WireGuard 回源到 Internal Nginx `10.88.88.88:80`；Internal 按路径将公共 API
 转发到本机 Hub public listener `127.0.0.1:18150`，将管理面和健康检查转发到
-`127.0.0.1:18151`。Hub 再从同一 Internal 宿主机访问 Night-All
-`127.0.0.1:13141`。Domestic 不运行 Hub 或 Night-All，排查业务 500 时应查看
-Internal Hub/Night-All 日志；Domestic 日志只用于确认 TLS、回源和最终 HTTP 状态。
+`127.0.0.1:18151`。Hub 按请求契约自行选择 Hub-native external-data connector 或
+同一 Internal 宿主机上的历史 Night-All `127.0.0.1:13141`；调用方不选择该细节。
+Domestic 不运行 Hub 或 Night-All，排查业务 500 时应先查看 Internal Hub 日志，只有
+历史兼容路径再联查 Night-All；Domestic 日志只用于确认 TLS、回源和最终 HTTP 状态。
 
 ## 1. Shell 环境
 
@@ -70,7 +71,7 @@ key 对应不同请求会返回 `409 idempotency_conflict`。POST 重试还必�
 ### `GET /health` 和 `GET /health/live`
 
 两个路径是等价的存活检查，成功时返回 `200` 和 `data.status=live`。存活不代表
-数据库、搜索服务或 Night-All 已经就绪。
+数据库、搜索服务或任一外部数据连接已经就绪。
 
 ```bash
 curl -sS -i "$HUB_URL/health"
@@ -81,8 +82,9 @@ curl -sS -i "$HUB_URL/health/live"
 
 只有 Hub 所需依赖全部正常时才返回 `200` 和 `data.status=ready`；否则返回 `503`
 和 `data.status=not_ready`。生产域名的 `/health/**` 由 Internal Nginx 转到 admin
-listener `18151`，当前可能附带 `store`、`nightAll` 等依赖状态；直连 public listener
-`18150` 时只返回摘要。客户端不能依赖这些可选明细，响应不得包含连接坐标或凭据。
+listener `18151`；ready 门禁以 Hub 必需存储为准，外部数据连接的诊断状态不再把整个
+Hub 判为 not-ready。直连 public listener `18150` 时只返回摘要。客户端不能依赖可选
+诊断明细，响应不得包含连接坐标或凭据。
 
 ```bash
 curl -sS -i "$HUB_URL/health/ready"
@@ -140,8 +142,14 @@ curl -sS "$HUB_URL/docs/openapi.json"
 `night-all.legacy-search-capabilities.v1`。矩阵由当前 Hub 发布版本固定，不会在请求时从
 Night-All `/api/v1/search/capabilities` 实时发现。选择 `HUB_PLATFORM`、调用
 `nlp.tokenize`、全国/省级 all-ingested 舆情 feed 或执行 Night-All compatibility 请求前，
-都应先读取此接口。当前 consumer 没有可用于 Night-All compatibility 的平台 grant 时，
-`legacySearch` 为 `null`，兼容路由会 fail closed。
+都应先读取此接口。当前 consumer 没有可用于 Night-All-owned 历史执行路径的平台 grant 时，
+`legacySearch` 为 `null`，该历史路径会 fail closed；`data.platforms` 中单独广告的
+Hub-native contract 不受它门禁。
+
+Direct search 只接管兼容的首屏 raw 子集，不会把小红书从 `legacySearch` 移除。对于同时
+授权小红书与 Twitter 的 consumer，`raw`、`crawl` 和 `user-info` 三项矩阵仍会在
+`supportedPlatforms`/`readyPlatforms` 中列出两个平台；小红书的非 direct 形状继续由该
+历史矩阵门禁。
 
 ```bash
 curl -sS -i \
@@ -149,7 +157,7 @@ curl -sS -i \
   "$HUB_URL/api/v1/data/capabilities"
 ```
 
-对某个 operation，平台必须同时出现在
+对某个 Night-All-owned operation，平台必须同时出现在
 `data.legacySearch.operations.<operation>.supportedPlatforms` 与 `readyPlatforms` 中才可
 dispatch。这里的 `readyPlatforms` 是兼容字段，表示当前 Hub 固定契约允许 dispatch；
 它不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。
@@ -191,6 +199,17 @@ Hub 部署有可用 adapter，不承诺下一次外部调用的网络、余额�
 若调用凭据是仍可认证的旧 `mih_test_` Key 且所属 consumer 有 ecommerce grant，该项仍会出现，
 但固定为 `ready=false`；Test 只是兼容元数据，不是可调用的 ecommerce 沙箱。读取 capabilities
 本身不创建 ecommerce usage reservation，也不调用供应方。
+
+调用小红书搜索前，应看到 `platform=xiaohongshu` 项包含 `search_posts`，并检查
+`search.ready=true`；这表示独立的首屏 rollout gate 已开启。其 `search` 子契约使用 `source=hub`、
+`servingMode=live_with_stored_fallback` 和
+`contractVersion=night-all.data-search.v1`。`post_detail` 与 `postDetail` 只在当前 Key
+还拥有独立 `social.posts.resolve` capability 时出现；拥有 `search_posts` 不会自动授权
+第 3.4 节的显式笔记详情 API。
+若 compatibility capability 已含小红书顶层项，Hub 保留它原有的 provider-neutral
+`ready`/source identity；不能把顶层 `ready` 或 `source=hub` 当成 direct readiness。
+只有嵌套 `search.ready`/`search.source` 与 `postDetail.ready`/`postDetail.source` 描述
+Hub-direct 合同。
 
 ## 3.1 数据源目录 API
 
@@ -761,7 +780,11 @@ fi
 必填 body 字段为 `platform` 和 `query`。可选字段包括 `pageSize`（`1..100`，policy
 可能进一步降低）、opaque `cursor`（最多 8192 字符）和 `type`。一次请求只能指定
 一个已授权平台，`all` 和 `*` 无效。`platform=telegram` 时搜索 Hub 已存 canonical
-message；其他平台使用受治理的 Night-All data-search 契约。
+message。`platform=xiaohongshu` 且 `pageSize` 恰好为默认值 20 时，兼容的首屏请求只有在
+独立 rollout gate 开启后才会无感使用受治理的 direct external-data connector；调用方不选择
+或获知 provider。省略 `pageSize` 等价于 20。此前由 direct traversal 签发的 opaque cursor
+仍留在同一路径，并且必须连同相同 query 和 pageSize 原样回传；历史
+cursor 或非 20 pageSize 继续使用历史兼容路径，不能跨路径交换 cursor。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
@@ -774,7 +797,21 @@ curl -sS -i -X POST \
 ```
 
 成功返回 `200`。未知 body 字段、平台 fan-out 列表、通配平台，以及调用方选择的
-provider/credential 字段都会被拒绝。Night-All 明确拒绝会映射为安全的
+provider/credential 字段都会被拒绝。小红书 direct search 会识别 UTF-16、Unicode
+code point 或 grapheme 长度恰好为 60 的正文边界，执行有界的内部详情补全，并且只接受
+严格更长的正文；未能补全时以 `status=partial` 及
+`xiaohongshu_detail_incomplete|xiaohongshu_detail_unavailable` warning 明示，不能作为完整
+正文沉淀。该质量步骤不授予调用方 `post_detail` 权限。
+
+小红书 direct 交付还会返回 `x-mx-insight-source-mode`、
+`x-mx-insight-captured-at`、`Age`，并在 `stored_fallback` 时返回 `Warning: 110`。
+新增稳定错误包括 `403 test_key_not_supported`、
+`400 invalid_page_size|cursor_scope_mismatch`、
+`409 external_platform_response_unusable`、
+`429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded`、
+`502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
+`503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`。
+历史路径上的 Night-All 明确拒绝会映射为安全的
 `502 night_all_rejected`；无法证明 dispatch 结果时返回
 `502 upstream_outcome_unknown`，此时应使用原 request ID/`Idempotency-Key` 查询，不能换新的 `Idempotency-Key`
 自动重试。
@@ -1009,13 +1046,24 @@ POST /api/v1/night-all/search/user-info
 legacy 客户端可发送 `includeRaw:false`，Hub 会在 dispatch 前移除；
 `includeRaw:true` 会被拒绝。
 
+对于小红书 `raw`，独立 rollout gate 开启后，Hub 才会让满足下列条件的首屏请求无感使用
+direct external-data connector：只提供一个 scalar `keyword` 或 `query`；有效
+`count|pageSize|limit` 恰好为 20；请求为 page 1；不提供 plural query、
+`params`、cache-age、并发、详情/评论工作量或 comment continuation 控制。
+`includeDetails:false` 与 `includeComments:false` 是可接受的 no-op 默认值；
+`disableAutoDetails:true` 可关闭 60 字符边界的自动详情检查。任一 true 详情/评论开关、
+`maxEnrichItems`、`commentLimit`、`commentCursor`、`enrichConcurrency`、非 20 页大小、
+历史 cursor，以及 `crawl`/`user-info` 都保留历史执行路径。调用方不需要改变 URL 或解析器。
+此前由 direct traversal 签发的 opaque cursor 即使在新首屏切换关闭后也继续走同一路径。
+
 客户端不要自己维护平台全集；应读取运行中 Hub 的
 `GET /api/v1/data/capabilities`。其中 `data.legacySearch` 是该 Hub 发布版本固定、再按
 当前 consumer grants 过滤的 dispatch 矩阵：
 
 | operation | 本文示例 | 支持/就绪判断字段 |
 |---|---|---|
-| `raw` | `xiaohongshu + query` | `data.legacySearch.operations.raw` |
+| `raw` direct 子集 | `xiaohongshu + 单 query + 20` | `data.platforms[xiaohongshu].capabilities` 的 `search_posts` 与 `search.ready` |
+| `raw` 历史形状 | 非 direct 条件 | `data.legacySearch.operations.raw` |
 | `crawl` | `twitter + username=openai` | `data.legacySearch.operations.crawl` |
 | `user-info` | `twitter + username=openai` | `data.legacySearch.operations["user-info"]` |
 
@@ -1024,12 +1072,13 @@ legacy 客户端可发送 `includeRaw:false`，Hub 会在 dispatch 前移除；
 Hub API。替换本文示例变量前，应同时确认 platform grant、`supportedPlatforms` 和
 `readyPlatforms`。
 
-这里的 `readyPlatforms` 仅表示 Hub 在当前固定兼容契约下允许 dispatch。它不是从
+这里的 `readyPlatforms` 仅表示 Hub 在当前固定历史兼容契约下允许 dispatch。它不是从
 Night-All 实时发现的 capability，也不证明 handler、endpoint、provider、credential
 已经配置或健康。实际可用性只能由本次 Night-All 调用结果确定；上游失败时按本节的
-exact snapshot fallback 规则处理。
+exact snapshot fallback 规则处理。它不门禁上述由 `search_posts` 广告的 Hub-native
+小红书 raw 子集。
 
-重要的数据处理契约：**此兼容层当前不会对业务数据、provider/endpoint 字段，以及
+重要的数据处理契约：**Night-All-owned 结果不会对业务数据、provider/endpoint 字段，以及
 `data.raw_info`、`data.raw_data` 中的业务内容做脱敏；live response、exact
 compatibility snapshot 和 raw ingest lineage 均保留这些上游业务字段。**
 这不构成认证凭据透传契约：API Key、access token、Authorization、cookie、password
@@ -1043,11 +1092,20 @@ timeout、billing、raw/debug、archive/fullArchive/allTweets、archive/count/pa
 参数或 workload 覆盖。
 
 每个 compatibility `Idempotency-Key` 永久标识一次可能产生 Hub 内部供应方成本的 dispatch。复用 `Idempotency-Key` 永远
-重放该结果；需要当前数据时必须使用新的 `Idempotency-Key`。complete 结果更新 exact last-good
+重放该结果；需要当前数据时必须使用新的 `Idempotency-Key`。在历史执行路径上，complete 结果更新 exact last-good
 snapshot；partial 结果会 live 返回但不替换快照。只有
 `STANDARD_PAYLOAD_EMPTY` warning 的结果是确认的 complete 空结果，会替换快照。
 
-发生 network/timeout 歧义、不可用的 HTTP 2xx content-type/JSON/envelope，或真实
+Hub-native 小红书 raw 仍将 `raw_info` 和 `raw_data` 保持为 JSON string；body
+`requestId` 与响应头 `x-mx-insight-request-id` 是同一个 durable Hub UUID，外部 correlation
+保持私有。Night-All-owned live/fallback body 则继续原样保留历史 `requestId`/`traceId`，
+当前 Hub ID 只在响应头中。
+
+Legacy transport 的 `x-mx-insight-source-mode` 始终为 `live|stale`。Hub-native cache
+和 replay 状态映射为 `live`；stored fallback 或原始状态为 stale 的 replay 映射为
+`stale`。`idempotent-replay` 与 `Age` 继续提供更细的交付证据。
+
+历史执行路径发生 network/timeout 歧义、不可用的 HTTP 2xx content-type/JSON/envelope，或真实
 非 2xx Night-All `502/503/504` 时，Hub 只能返回 consumer、operation、规范化请求
 fingerprint 完全一致且尚未过期的 complete snapshot。stale 返回状态为 `200`，并
 携带 `x-mx-insight-source-mode: stale`、`x-mx-insight-captured-at`、`Age` 和
@@ -1068,6 +1126,8 @@ dispatch。
 | `400/404/409/422/429 night_all_rejected` | Night-All 明确拒绝；Hub 保留这些可安全转发的上游 HTTP 状态 |
 | `502 night_all_rejected` | Night-All 的其他明确拒绝，且没有可用 exact snapshot |
 | `502 upstream_outcome_unknown` | dispatch 结果存在歧义且没有可用 exact snapshot；同一 key 不会重新 dispatch |
+| `429 external_platform_rate_limited` | Hub-native 小红书请求达到服务端外部调用速率门禁；没有可用 stored fallback |
+| `409/429/502/503 external_platform_*` | Hub-native 小红书的去重、容量、响应合同、结果歧义、配置或 circuit 类别；保留 durable request ID 并按具体 code 处理 |
 
 ### `POST /api/v1/night-all/search/raw`
 

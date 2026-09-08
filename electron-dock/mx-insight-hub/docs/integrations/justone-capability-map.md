@@ -15,6 +15,7 @@ Related Hub documents:
 - [External data platform gateway ADR](../adr/0013-external-data-platform-gateway.md)
 - [External platform operations](../operations/external-data-platforms.md)
 - [Ecommerce treasure-box product](../product/ecommerce-data-treasure-box.md)
+- [Xiaohongshu direct TikHub migration boundary](xiaohongshu-direct-tikhub-migration.md)
 
 ## 1. Status vocabulary
 
@@ -44,6 +45,9 @@ The four identifiers above are not synonyms. `ecommerce` is the Public authoriza
 `ecommerce.products.search` is the Hub business operation; the marketplace is a caller-visible business source;
 and `justone` is an internal supplier. Granting `ecommerce` does not grant or reveal a provider account, and a
 provider name is never accepted in the Public request.
+
+This capability remains ecommerce-only. In particular, `xiaohongshu_ec` is Xiaohongshu shop/product search;
+it is not the `xiaohongshu` social-note platform and is never a fallback for TikHub note search or detail.
 
 | Hub marketplace | Provider endpoint descriptor | Adapter contract | Method | Accepted item paths | Marketplace-specific request behavior | Catalog source |
 | --- | --- | --- | --- | --- | --- | --- |

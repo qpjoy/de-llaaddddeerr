@@ -15,25 +15,47 @@ example:
 ```json
 {
   "data": {
-    "platforms": [{
-      "platform": "public_opinion",
-      "ready": false,
-      "capabilities": [
-        "province_feed",
-        "province_coverage",
-        "region_catalog",
-        "region_feed",
-        "item_detail",
-        "stored_search",
-        "diagnostics"
-      ],
-      "source": "hub",
-      "servingMode": "stored"
-    }],
+    "platforms": [
+      {
+        "platform": "public_opinion",
+        "ready": false,
+        "capabilities": [
+          "province_feed",
+          "province_coverage",
+          "region_catalog",
+          "region_feed",
+          "item_detail",
+          "stored_search",
+          "diagnostics"
+        ],
+        "source": "hub",
+        "servingMode": "stored"
+      },
+      {
+        "platform": "xiaohongshu",
+        "ready": true,
+        "capabilities": ["search_posts", "post_detail"],
+        "search": {
+          "ready": true,
+          "source": "hub",
+          "servingMode": "live_with_stored_fallback",
+          "contractVersion": "night-all.data-search.v1"
+        },
+        "postDetail": {
+          "ready": true,
+          "source": "hub",
+          "servingMode": "live_with_stored_fallback",
+          "contractVersion": "mx-insight-hub.social-post.v1",
+          "input": "official_note_url",
+          "deliveryModes": ["cache_only", "cache_first", "refresh"]
+        }
+      }
+    ],
     "capabilities": [
       { "capability": "nlp.tokenize", "ready": true },
       { "capability": "public_opinion.all_ingested.read", "ready": true },
-      { "capability": "public_opinion.diagnostics.read", "ready": true }
+      { "capability": "public_opinion.diagnostics.read", "ready": true },
+      { "capability": "social.posts.resolve", "ready": true }
     ]
   }
 }
@@ -71,6 +93,23 @@ four freshness modes. Its `servingMode=live_with_stored_fallback` distinguishes
 it from stored-only products. `ready=true` means the deployed Hub has a usable
 adapter; it is not a promise that the external platform, quota or network is
 healthy for the next call.
+
+An explicitly granted `xiaohongshu` entry advertises `search_posts` when the
+independent first-page rollout gate for the Hub-native external-data search
+connector is enabled. Its nested `search`
+object reports `ready`, `source=hub`,
+`servingMode=live_with_stored_fallback`, and
+`contractVersion=night-all.data-search.v1`. This search authorization comes
+from the Xiaohongshu platform grant. `post_detail` and the nested `postDetail`
+contract appear only when the key also has the independent
+`social.posts.resolve` capability grant; search availability never grants the
+explicit note-detail API by implication.
+
+If the compatibility capability response already contains the Xiaohongshu
+platform row, Hub preserves that row's provider-neutral top-level readiness and
+source identity. Do not interpret top-level `ready` as direct readiness or
+assume top-level `source=hub`; only nested `search.ready`/`search.source` and
+`postDetail.ready`/`postDetail.source` describe the Hub-direct contracts.
 
 For a valid legacy `mih_test_` key whose consumer has that grant, the same
 `ecommerce` entry is returned with `ready=false` regardless of adapter readiness.
@@ -649,20 +688,49 @@ province feed, `/data/stored/search`, or `/data/canonical/search` instead.
 
 `query` must be non-blank and at most 500 characters after trimming. `cursor`, when present, must be a non-blank opaque string of at most 8,192 characters. Clients must return the cursor from the previous response unchanged rather than constructing or decoding it.
 
+For `platform=xiaohongshu`, omitting `pageSize` selects its default of 20, and
+the Hub-native direct connector is eligible only when `pageSize` is exactly 20.
+Compatible first-page requests switch only after an independent rollout gate;
+every cursor previously issued by a direct traversal remains on the same
+connector. Historical cursors and explicit non-20 page sizes stay on the
+historical compatibility path. The caller does not select or learn the
+external provider and must never move a cursor between routes, queries or page
+sizes.
+
+The direct Xiaohongshu search detects note bodies at the 60-character provider
+preview boundary using UTF-16, Unicode code-point and grapheme counts. It may
+perform a bounded internal detail lookup and replaces the search text only
+when the detail text is strictly longer. An unresolved boundary is returned as
+`status=partial` with `xiaohongshu_detail_incomplete` or
+`xiaohongshu_detail_unavailable`; it is not silently promoted to a complete
+stored body. This automatic quality step is part of `search_posts` and does not
+grant callers the independently authorized note-detail route.
+
 The server rejects or ignores internal-only fields including `businessId`, `provider`, `endpointId`, `availabilityMode`, `includeRaw`, and arbitrary provider params.
 
 Successful responses preserve the stable Night-All data-search envelope and add:
 
 - `x-request-id`: transport correlation ID;
 - `x-mx-insight-request-id`: durable Hub request ID;
-- `idempotent-replay: true|false`.
+- `idempotent-replay: true|false`;
+- for direct Xiaohongshu delivery, `x-mx-insight-source-mode`,
+  `x-mx-insight-captured-at`, `Age`, and `Warning: 110` when a stored fallback
+  is returned.
+
+Direct Xiaohongshu errors add `403 test_key_not_supported`,
+`400 invalid_page_size|cursor_scope_mismatch`,
+`409 external_platform_response_unusable`,
+`429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded`,
+`502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected`,
+and `503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`.
 
 ## Night-All legacy compatibility facade
 
-These transitional routes preserve the three existing Night-All request aliases
-and standard raw response envelope behind the Hub trust boundary:
+These transitional routes preserve the three existing request aliases and
+standard raw response envelope behind the Hub trust boundary. Hub selects the
+implementation; the caller never selects a provider:
 
-| Hub route | Private Night-All operation | Required selector | Complete snapshot window |
+| Hub route | Historical operation | Required selector | Historical complete snapshot window |
 | --- | --- | --- | ---: |
 | `POST /api/v1/night-all/search/raw` | `/api/v1/search/raw` | `keyword`, `query`, `keywords` or `queries` | 15 minutes |
 | `POST /api/v1/night-all/search/crawl` | `/api/v1/search/crawl` | a user/channel identifier | 1 hour |
@@ -714,6 +782,28 @@ count must also fit the policy work budget or the Hub returns
 `400 work_budget_exceeded`. This bounds processed item work, not the exact number
 of provider calls or their procurement cost.
 
+A Xiaohongshu `raw` first-page request uses the Hub-native direct connector only
+after an independent rollout gate and when all of the following are true: it
+has exactly one scalar `keyword` or `query`; its
+effective `count`/`pageSize`/`limit` is exactly 20; it is page one or carries an
+opaque cursor issued by the same direct traversal; and it omits plural queries,
+`params`, cache-age, concurrency, explicit detail/comment workload, and comment
+continuation controls. Explicit `includeDetails:false` and
+`includeComments:false` are accepted as no-op compatibility defaults.
+`disableAutoDetails:true` is also accepted and only turns off the automatic
+60-character preview-boundary detail lookup. A true detail/comment flag,
+`maxEnrichItems`, `commentLimit`, `commentCursor`, `enrichConcurrency`, a
+non-20 page, a historical cursor, `crawl`, or `user-info` remains on the
+historical compatibility path. Existing clients keep the same route and body;
+the switch is transparent. A previously issued direct cursor remains on the
+direct connector even while new first-page cutover is gated.
+
+Direct routing does not remove Xiaohongshu from `data.legacySearch`. For a key
+granted both Xiaohongshu and Twitter, every `raw`, `crawl`, and `user-info`
+matrix entry still includes both platforms in `supportedPlatforms` and
+`readyPlatforms`; the matrix governs Xiaohongshu requests that do not match the
+direct raw subset.
+
 The response body preserves the Night-All legacy envelope:
 
 ```json
@@ -730,38 +820,46 @@ The response body preserves the Night-All legacy envelope:
     },
     "meta": { "resultCount": 0 }
   },
-  "requestId": "night-all-request-id",
-  "traceId": "night-all-trace-id"
+  "requestId": "00000000-0000-4000-8000-000000000001"
 }
 ```
 
-`raw_info` and `raw_data` intentionally remain JSON strings. For these three
-namespaced compatibility routes Hub currently performs no response-field
-desensitization: provider, endpoint and other fields returned by Night-All remain
-in the outer envelope and in objects encoded in those strings. This is separate
+`raw_info` and `raw_data` intentionally remain JSON strings for both execution
+paths. A Hub-native Xiaohongshu projection puts the durable Hub UUID in the body
+`requestId`; it is identical to `x-mx-insight-request-id`, while external
+correlation stays private. For a Night-All-owned live response or exact fallback,
+the historical application body remains unchanged, including its existing
+`requestId`/`traceId` and unmasked provider/endpoint business fields; the current
+durable Hub request ID remains separate in the response header. This is separate
 from the request-side rule above, which still rejects caller injection of
-provider/token/credential controls. The body retains Night-All's `requestId` and
-`traceId`; the current durable Hub request ID is separate:
+provider/token/credential controls.
 
 - `x-mx-insight-request-id: <hub request UUID>`;
 - `idempotent-replay: true|false`;
 - `x-mx-insight-source-mode: live|stale`;
 - `x-mx-insight-captured-at: <RFC3339 capture time>`;
-- `Age: 0` for live delivery or the snapshot age for stale delivery;
-- `Warning: 110 - "Response is stale"` only for stale delivery.
+- `Age`: capture age when available;
+- `Warning: 110 - "Response is stale"` for `stale` delivery.
+
+The legacy transport keeps this two-value vocabulary: Hub-native cache and
+replay states project to `live`; a stored fallback, or a replay whose origin was
+stale, projects to `stale`. `idempotent-replay` and `Age` retain the additional
+delivery evidence without expanding `x-mx-insight-source-mode`.
 
 Every actual dispatch records separate Hub call evidence, including operation,
-consumer, exact fingerprint, platform, latency, HTTP/business outcome, bounded
-failure kind and Night-All correlation IDs. Night-All HTTP 200 with a substantive
+consumer, exact fingerprint, platform, latency, HTTP/business outcome and bounded
+failure kind; the historical path also retains Night-All correlation IDs privately.
+Night-All HTTP 200 with a substantive
 warning or per-result error/`success=false` is a `partial` live success: it is
 returned but never creates or replaces a compatibility snapshot. A lone
 `STANDARD_PAYLOAD_EMPTY` warning is a deterministic complete empty result and does
 replace last-good, preventing an older non-empty snapshot from resurfacing. Only
 `complete` responses write last-good.
 
-Each new `Idempotency-Key` may dispatch once; a committed live or stale delivery
-is permanently replayed by that key, and a deliberately new live call needs a
-new `Idempotency-Key`. After network/timeout ambiguity, an unusable HTTP 2xx
+Each new `Idempotency-Key` may dispatch once; any committed compatibility
+delivery is permanently replayed by that key, and a deliberately new live call
+needs a new `Idempotency-Key`. On the historical path, after network/timeout
+ambiguity, an unusable HTTP 2xx
 content-type/JSON/envelope, or a definite upstream `502`, `503` or `504`, Hub may
 return HTTP 200 from an unexpired complete snapshot for the exact consumer,
 operation and full normalized request fingerprint. The snapshot retains the same
@@ -779,6 +877,11 @@ Without that exact snapshot:
 | definite `400`, `404`, `409`, `422`, `429` | same HTTP status, safe `night_all_rejected` error |
 | other definite non-2xx HTTP rejection | `502 night_all_rejected` |
 | network error, Hub timeout, or unusable HTTP 2xx contract after dispatch | `502 upstream_outcome_unknown`; request becomes `unknown` |
+
+For an eligible Hub-native Xiaohongshu raw request, the corresponding safe
+errors use the `external_platform_*` codes documented for `/data/search`,
+including `external_platform_rate_limited`; they are not relabeled as
+`night_all_rejected`.
 
 An ambiguous request must not be automatically retried with a new `Idempotency-Key`. A
 dispatched compatibility error includes the durable Hub ID as

@@ -163,7 +163,13 @@ function publicFailure(error) {
   return new AppError(502, 'external_platform_rejected', 'External data platform rejected the request')
 }
 
-function resultFromBody(body, { requestId, replay, sourceMode, capturedAt }) {
+function resultFromBody(body, {
+  requestId,
+  replay,
+  sourceMode,
+  capturedAt,
+  originSourceMode = null,
+}) {
   const captured = asDate(capturedAt)
   return {
     status: 200,
@@ -175,6 +181,7 @@ function resultFromBody(body, { requestId, replay, sourceMode, capturedAt }) {
     staleAgeSeconds: captured
       ? Math.max(0, Math.floor((Date.now() - captured.getTime()) / 1_000))
       : null,
+    ...(originSourceMode ? { originSourceMode } : {}),
   }
 }
 
@@ -366,6 +373,7 @@ export class ExternalPlatformGateway {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: AUTHORIZATION_PLATFORM,
+      meterKey: JUSTONE_OPERATION,
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -436,6 +444,7 @@ export class ExternalPlatformGateway {
         replay: true,
         sourceMode: 'idempotent_replay',
         capturedAt,
+        originSourceMode: reservation.request.deliverySourceMode,
       })
     }
 
@@ -652,6 +661,42 @@ export class ExternalPlatformGateway {
       }
       entered = true
 
+      const rateLimit = typeof this.platformStore.acquireProviderRateLimit === 'function'
+        ? await this.platformStore.acquireProviderRateLimit({
+            limit: this.config.maxRequestsPerMinute ?? 90,
+            windowMs: 60_000,
+          })
+        : { allowed: true, retryAfterMs: 0 }
+      if (!rateLimit.allowed) {
+        if (snapshot) {
+          const responseBody = deliveryBody(snapshot.responseBody, {
+            requestId: activeRequestId,
+            sourceMode: 'stored_fallback',
+            capturedAt: snapshot.capturedAt,
+            fallbackReason: 'provider_rate_limit',
+          })
+          await this.platformStore.commitSnapshotDelivery({
+            delivery, snapshot, sourceMode: 'stored_fallback', responseBody,
+          })
+          return resultFromBody(responseBody, {
+            requestId: activeRequestId,
+            replay: false,
+            sourceMode: 'stored_fallback',
+            capturedAt: snapshot.capturedAt,
+          })
+        }
+        await this.platformStore.rejectWithoutDispatch({
+          delivery, sourceMode: 'unavailable', status: 429, errorCode: 'external_platform_rate_limited',
+        })
+        ownsReservation = false
+        throw new AppError(
+          429,
+          'external_platform_rate_limited',
+          'External product search request rate is exhausted',
+          { retryAfterMs: rateLimit.retryAfterMs },
+        )
+      }
+
       call = await this.platformStore.beginProviderCall({
         tenantId: context.tenant.id,
         consumerId: context.consumer.id,
@@ -810,6 +855,16 @@ export class ExternalPlatformGateway {
             'external_platform_persistence_unknown',
           ).catch(() => {})
         })
+      } else if (error?.code === 'external_platform_call_persistence_unknown') {
+        // A lost INSERT/COMMIT acknowledgement is not a safe pre-dispatch
+        // failure: the provider-call row may exist. Keep the usage request
+        // unknown so neither this catch nor the outer reservation cleanup can
+        // release it and authorize an accidental duplicate paid dispatch.
+        await this.usageStore.markRequestUnknown(
+          activeRequestId,
+          'external_platform_call_persistence_unknown',
+        ).catch(() => {})
+        ownsReservation = false
       } else if (!call && !(error instanceof AppError)) {
         await this.usageStore.releaseRequest(
           activeRequestId,

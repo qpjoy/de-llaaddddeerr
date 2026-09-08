@@ -3,10 +3,15 @@ import {
   XIAOHONGSHU_POST_CONTRACT_VERSION,
   XIAOHONGSHU_POST_OPERATION,
 } from '../contracts/tikhub-xiaohongshu.mjs'
+import {
+  XIAOHONGSHU_SEARCH_CONTRACT_VERSION,
+  XIAOHONGSHU_SEARCH_OPERATION,
+} from '../contracts/tikhub-xiaohongshu-search.mjs'
 
 export const TIKHUB_XIAOHONGSHU_DATASET_ID = 'social.posts.v1'
 export const TIKHUB_XIAOHONGSHU_CONNECTOR_ID = 'external-platform:tikhub'
 export const TIKHUB_XIAOHONGSHU_PARSER_VERSION = 'mxih-tikhub-xiaohongshu.v2'
+export const TIKHUB_XIAOHONGSHU_SEARCH_PARSER_VERSION = 'mxih-tikhub-xiaohongshu-search.v1'
 export const XIAOHONGSHU_SOURCE_CATALOG = Object.freeze({
   entryId: '491c69be-b20e-5677-a824-85bcebc9562a',
   sourceKey: 'source-catalog-0004',
@@ -62,7 +67,15 @@ function canonicalItem(item) {
   return sanitized
 }
 
-export function createTikHubXiaohongshuRecord(item) {
+export function createTikHubXiaohongshuRecord(item, {
+  operation = XIAOHONGSHU_POST_OPERATION,
+  connectorContractVersion = XIAOHONGSHU_POST_CONTRACT_VERSION,
+  parserVersion = TIKHUB_XIAOHONGSHU_PARSER_VERSION,
+  rank = 1,
+  sourcePointer = '$',
+  bodyCompleteness = null,
+  safetyLimited = false,
+} = {}) {
   if (!item?.externalId || item.platform !== 'xiaohongshu') {
     throw new TypeError('TikHub Xiaohongshu item is invalid')
   }
@@ -77,6 +90,7 @@ export function createTikHubXiaohongshuRecord(item) {
   const images = (Array.isArray(storedItem.media) ? storedItem.media : [])
     .filter((media) => media?.type === 'image' && typeof media.url === 'string')
     .map((media) => media.url)
+  const resolvedBodyCompleteness = safetyLimited === true ? 'safety_limited' : bodyCompleteness
   const record = {
     platform: 'xiaohongshu',
     objectType: 'post',
@@ -114,23 +128,61 @@ export function createTikHubXiaohongshuRecord(item) {
       },
       source: {
         connectorId: TIKHUB_XIAOHONGSHU_CONNECTOR_ID,
-        operation: XIAOHONGSHU_POST_OPERATION,
-        connectorContractVersion: XIAOHONGSHU_POST_CONTRACT_VERSION,
+        operation,
+        connectorContractVersion,
       },
       language: 'zh-CN',
     },
     extensions: {
       sourceCatalog: XIAOHONGSHU_SOURCE_CATALOG,
+      ...(resolvedBodyCompleteness ? { bodyCompleteness: resolvedBodyCompleteness } : {}),
     },
     metrics,
-    rank: 1,
-    parserVersion: TIKHUB_XIAOHONGSHU_PARSER_VERSION,
-    sourcePointer: '$',
+    rank,
+    parserVersion,
+    sourcePointer,
     rawItem,
     rawPayloadSha256: sha256(canonicalJson(rawItem)),
   }
   record.payloadSha256 = contentDigest(record)
   return record
+}
+
+export function createTikHubXiaohongshuSearchRecord(item, {
+  rank = 1,
+  sourcePointer = '$.data.data.items[0].note',
+  bodyCompleteness = 'unverified_complete',
+} = {}) {
+  if (!item || item.platform !== 'xiaohongshu') {
+    throw new TypeError('TikHub Xiaohongshu search item is invalid')
+  }
+  const normalized = {
+    externalId: item.externalId,
+    platform: item.platform,
+    url: item.url,
+    title: item.title,
+    text: item.text,
+    tags: [],
+    author: item.author,
+    metrics: {
+      liked: item.metrics?.likes ?? null,
+      comments: item.metrics?.comments ?? null,
+      shared: item.metrics?.shares ?? null,
+      collected: item.metrics?.bookmarks ?? null,
+    },
+    media: (Array.isArray(item.media?.images) ? item.media.images : [])
+      .map((url) => ({ type: 'image', url })),
+    publishedAt: item.publishedAt,
+    collectedAt: item.collectedAt,
+  }
+  return createTikHubXiaohongshuRecord(normalized, {
+    operation: XIAOHONGSHU_SEARCH_OPERATION,
+    connectorContractVersion: XIAOHONGSHU_SEARCH_CONTRACT_VERSION,
+    parserVersion: TIKHUB_XIAOHONGSHU_SEARCH_PARSER_VERSION,
+    rank,
+    sourcePointer,
+    bodyCompleteness,
+  })
 }
 
 export function rehydrateTikHubXiaohongshuQueuedRecords(records) {

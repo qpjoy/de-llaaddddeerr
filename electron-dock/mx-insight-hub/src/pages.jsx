@@ -201,6 +201,56 @@ function optionalNumber(value) {
   return value === null || value === undefined ? '—' : formatNumber(value)
 }
 
+function formatMoneyMinor(value, currency = 'CNY') {
+  if (value === null || value === undefined || !currency) return '—'
+  return new Intl.NumberFormat('zh-CN', {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value) / 100)
+}
+
+function decimalToMinor(value) {
+  const normalized = String(value || '').trim()
+  if (!/^(?:0|[1-9]\d{0,12})(?:\.\d{1,2})?$/u.test(normalized)) return null
+  const [whole, fraction = ''] = normalized.split('.')
+  const minor = Number(whole) * 100 + Number(fraction.padEnd(2, '0'))
+  return Number.isSafeInteger(minor) ? minor : null
+}
+
+function multiplierToPpm(value) {
+  const normalized = String(value || '').trim()
+  if (!/^(?:0|[1-9]\d{0,2})(?:\.\d{1,6})?$/u.test(normalized)) return null
+  const [whole, fraction = ''] = normalized.split('.')
+  const ppm = Number(whole) * 1_000_000 + Number(fraction.padEnd(6, '0'))
+  return Number.isSafeInteger(ppm) && ppm <= 100_000_000 ? ppm : null
+}
+
+function billingMeterLabel(meterKey) {
+  return ({
+    'social.posts.search': '小红书笔记搜索',
+    'social.posts.resolve': '小红书笔记详情',
+    'ecommerce.products.search': '电商商品搜索',
+    'nlp.tokenize': '中文分词',
+  })[meterKey] || meterKey
+}
+
+function effectivePriceMinor(unitPriceMinor, multiplierPpm = 1_000_000) {
+  if (!Number.isSafeInteger(Number(unitPriceMinor)) || !Number.isSafeInteger(Number(multiplierPpm))) return null
+  return Number((BigInt(unitPriceMinor) * BigInt(multiplierPpm) + 999_999n) / 1_000_000n)
+}
+
+function billingLedgerKindLabel(kind) {
+  return ({
+    topup: '充值入账',
+    adjustment: '人工调账',
+    hold: '请求冻结',
+    capture: '成功扣费',
+    release: '失败解冻',
+  })[kind] || kind
+}
+
 function metricDelta(current, previous, { lowerIsBetter = false, points = false } = {}) {
   const now = Number(current || 0)
   const before = Number(previous || 0)
@@ -1168,17 +1218,55 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const contextRef = useRef(requestedContext)
   contextRef.current = requestedContext
   const [assigningPlanVersionId, setAssigningPlanVersionId] = useState('')
+  const [creditOpen, setCreditOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [planOpen, setPlanOpen] = useState(false)
+  const [billingBusy, setBillingBusy] = useState('')
+  const [billingError, setBillingError] = useState(null)
+  const [creditForm, setCreditForm] = useState({ amount: '', currency: 'CNY', reason: '', externalReference: '' })
+  const [profileForm, setProfileForm] = useState({ mode: 'shadow', multiplier: '1.000000' })
+  const [planForm, setPlanForm] = useState({
+    key: '',
+    name: '',
+    priceBookKey: '',
+    currency: 'CNY',
+    defaultMultiplier: '1.000000',
+    monthlyRequests: '1000000',
+    burstRps: '100',
+    maxPageSize: '100',
+    entries: [
+      { meterKey: 'social.posts.search', price: '' },
+      { meterKey: 'social.posts.resolve', price: '' },
+      { meterKey: 'ecommerce.products.search', price: '' },
+    ],
+  })
   const load = useCallback(async () => {
     const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId)
-    if (!context.consumerId) return { ...context, plans: { catalog: [], currentPlan: null }, usage: {} }
+    const billingPromise = context.tenantId
+      ? adminApi.tenantBilling(token, context.tenantId)
+      : Promise.resolve({ profile: null, account: null, ledger: [] })
+    if (!context.consumerId) {
+      return {
+        ...context,
+        plans: { catalog: [], currentPlan: null },
+        usage: {},
+        billing: await billingPromise,
+      }
+    }
     const monthStart = new Date()
     monthStart.setUTCDate(1)
     monthStart.setUTCHours(0, 0, 0, 0)
-    const [plans, usage] = await Promise.all([
+    const [plans, usage, billing] = await Promise.all([
       adminApi.plans(token, context.consumerId),
       adminApi.usage(token, { consumerId: context.consumerId, from: monthStart.toISOString() }),
+      billingPromise,
     ])
-    return { ...context, plans: plans || { catalog: [], currentPlan: null }, usage: usage || {} }
+    return {
+      ...context,
+      plans: plans || { catalog: [], currentPlan: null },
+      usage: usage || {},
+      billing: billing || { profile: null, account: null, ledger: [] },
+    }
   }, [requestedConsumerId, requestedTenantId, token])
   const state = useRemoteData(load, onUnauthorized)
 
@@ -1198,12 +1286,148 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const monthlyUsed = Number(data.usage?.requests || 0)
   const monthlyLimit = Number(planLimits.monthlyRequests || 0)
   const monthlyRemaining = monthlyLimit > 0 ? Math.max(0, monthlyLimit - monthlyUsed) : null
+  const billing = data.billing || { profile: null, account: null, ledger: [] }
+  const account = billing.account
+  const customerBilling = data.usage?.customerBilling || {}
+  const billingCurrency = account?.currency || customerBilling.currency || currentPlan?.priceBook?.currency || 'CNY'
+  const effectiveRates = currentPlan?.customerRates || (currentPlan?.priceBook?.entries || []).map((entry) => ({
+    meterKey: entry.meterKey,
+    billingUnit: entry.billingUnit,
+    unitPriceMinor: effectivePriceMinor(
+      entry.unitPriceMinor,
+      billing.profile?.multiplierPpm ?? currentPlan.priceBook.defaultMultiplierPpm,
+    ),
+    currency: currentPlan.priceBook.currency,
+  }))
   const canAssignPlan = Boolean(
     session?.platformAdmin
     && data.consumerId
     && Number.isInteger(currentPlan?.revision)
     && currentPlan.revision > 0,
   )
+
+  const refreshCurrentContext = async () => {
+    const targetContext = contextRef.current
+    const refreshed = await load()
+    if (contextRef.current === targetContext) state.setData(refreshed)
+  }
+
+  const saveCredit = async (event) => {
+    event.preventDefault()
+    if (!session?.platformAdmin || !data.tenantId || billingBusy) return
+    const amountMinor = decimalToMinor(creditForm.amount)
+    if (!amountMinor || amountMinor <= 0) {
+      setBillingError(new Error('充值金额必须是大于 0、最多两位小数的金额。'))
+      return
+    }
+    setBillingBusy('credit')
+    setBillingError(null)
+    try {
+      await adminApi.addTenantCredit(token, data.tenantId, {
+        amountMinor,
+        currency: creditForm.currency,
+        reason: creditForm.reason,
+        ...(creditForm.externalReference.trim() ? { externalReference: creditForm.externalReference.trim() } : {}),
+      }, `credit-${crypto.randomUUID()}`)
+      await refreshCurrentContext()
+      setCreditOpen(false)
+      setCreditForm({ amount: '', currency: billingCurrency, reason: '', externalReference: '' })
+      notify?.('租户余额已通过不可变账本入账', 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setBillingError(error)
+    } finally {
+      setBillingBusy('')
+    }
+  }
+
+  const openProfile = () => {
+    setBillingError(null)
+    setProfileForm({
+      mode: billing.profile?.mode || 'disabled',
+      multiplier: billing.profile?.multiplierPpm == null
+        ? ''
+        : (Number(billing.profile.multiplierPpm) / 1_000_000).toFixed(6),
+    })
+    setProfileOpen(true)
+  }
+
+  const saveProfile = async (event) => {
+    event.preventDefault()
+    if (!session?.platformAdmin || !data.tenantId || billingBusy) return
+    const multiplierPpm = profileForm.multiplier.trim()
+      ? multiplierToPpm(profileForm.multiplier)
+      : null
+    if (profileForm.multiplier.trim() && multiplierPpm == null) {
+      setBillingError(new Error('租户倍率必须是 0–100 之间、最多六位小数的数值。'))
+      return
+    }
+    setBillingBusy('profile')
+    setBillingError(null)
+    try {
+      await adminApi.updateTenantBillingProfile(token, data.tenantId, {
+        mode: profileForm.mode,
+        multiplierPpm,
+        ...(billing.profile?.revision > 0 ? { expectedRevision: billing.profile.revision } : {}),
+      })
+      await refreshCurrentContext()
+      setProfileOpen(false)
+      notify?.('租户计费策略已更新；既有请求价格快照不会变化', 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setBillingError(error)
+    } finally {
+      setBillingBusy('')
+    }
+  }
+
+  const updatePlanEntry = (index, patch) => setPlanForm((current) => ({
+    ...current,
+    entries: current.entries.map((entry, entryIndex) => (
+      entryIndex === index ? { ...entry, ...patch } : entry
+    )),
+  }))
+
+  const publishPlan = async (event) => {
+    event.preventDefault()
+    if (!session?.platformAdmin || billingBusy) return
+    const entries = planForm.entries.map((entry) => ({
+      meterKey: entry.meterKey.trim(),
+      unitPriceMinor: decimalToMinor(entry.price),
+    })).filter((entry) => entry.meterKey && entry.unitPriceMinor != null)
+    const defaultMultiplierPpm = multiplierToPpm(planForm.defaultMultiplier)
+    if (!entries.length || defaultMultiplierPpm == null) {
+      setBillingError(new Error('至少填写一项有效接口价格，并检查默认倍率。'))
+      return
+    }
+    setBillingBusy('plan')
+    setBillingError(null)
+    try {
+      await adminApi.publishPlan(token, {
+        key: planForm.key,
+        name: planForm.name,
+        limits: {
+          monthlyRequests: Number(planForm.monthlyRequests),
+          maxPageSize: Number(planForm.maxPageSize),
+          burstRps: Number(planForm.burstRps),
+        },
+        priceBook: {
+          key: planForm.priceBookKey,
+          currency: planForm.currency,
+          defaultMultiplierPpm,
+          entries,
+        },
+      })
+      await refreshCurrentContext()
+      setPlanOpen(false)
+      notify?.('新的不可变套餐版本已发布；需显式分配后才会生效', 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setBillingError(error)
+    } finally {
+      setBillingBusy('')
+    }
+  }
 
   const assignPlan = async (plan) => {
     if (
@@ -1234,6 +1458,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   return (
     <>
       <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="套餐总额、调用者策略与 API Key 签发额度同时生效；每次请求会受其中最严格的边界约束。" loading={state.loading} onRefresh={state.refresh}>
+        {session?.platformAdmin ? <button className="qp-button qp-button--primary" type="button" onClick={() => { setBillingError(null); setCreditForm((current) => ({ ...current, currency: billingCurrency })); setCreditOpen(true) }} disabled={!data.tenantId}><Plus size={17} aria-hidden="true" />人工充值</button> : null}
+        {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={openProfile} disabled={!data.tenantId}><SlidersHorizontal size={17} aria-hidden="true" />计费策略</button> : null}
+        {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={() => { setBillingError(null); setPlanOpen(true) }}><Coins size={17} aria-hidden="true" />发布套餐版本</button> : null}
         {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理开放能力</a> : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
@@ -1255,6 +1482,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       </section>
 
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="当前套餐与配额基线">
+        <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, account.currency) : '未开户'} hint={account ? `冻结 ${formatMoneyMinor(account.heldMinor, account.currency)}` : '由平台管理员首次入账时开户'} tone="success" />
+        <MetricCard icon={ShieldCheck} label="计费状态" value={({ disabled: '未启用', shadow: '影子计价', enforced: '余额门禁' })[billing.profile?.mode] || '未启用'} hint={session?.platformAdmin && billing.profile?.multiplierPpm != null ? `租户倍率 ${(Number(billing.profile.multiplierPpm) / 1_000_000).toFixed(4)}×` : '租户只看到最终成交价'} tone={billing.profile?.mode === 'enforced' ? 'warning' : 'info'} />
+        <MetricCard icon={ChartLine} label="本月已扣" value={formatMoneyMinor(customerBilling.chargedMinor || 0, customerBilling.currency || billingCurrency)} hint={`报价 ${formatMoneyMinor(customerBilling.quotedMinor || 0, customerBilling.currency || billingCurrency)}`} tone="warning" />
+        <MetricCard icon={Timer} label="请求冻结" value={formatMoneyMinor(customerBilling.heldMinor || 0, customerBilling.currency || billingCurrency)} hint="结果未知时继续冻结，待对账后结算" tone="archetype" />
         <MetricCard icon={Coins} label="当前套餐" value={currentPlan?.name || '未分配'} hint={currentPlan ? `${currentPlan.key} · v${currentPlan.version} · 修订 ${currentPlan.revision}` : '请联系平台管理员'} />
         <MetricCard icon={Pulse} label="本月请求" value={formatNumber(monthlyUsed)} hint={monthlyRemaining == null ? '历史兼容：不设月总额' : `剩余 ${formatNumber(monthlyRemaining)} / ${formatNumber(monthlyLimit)}`} />
         <MetricCard icon={Timer} label="套餐突发边界" value={planLimits.burstRps ? `${formatNumber(planLimits.burstRps)} RPS` : '不限制'} hint={planLimits.windowSeconds ? `${formatNumber(planLimits.maxRequests)} / ${formatNumber(planLimits.windowSeconds)} 秒` : '平台与 Key 滑动窗口仍独立生效'} tone="info" />
@@ -1262,6 +1493,44 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         <MetricCard icon={Globe} label="已授权平台" value={formatNumber(grants.size)} hint="按调用者显式授权" tone="success" />
         <MetricCard icon={Brain} label="已授权通用能力" value={formatNumber(capabilityGrants.size)} hint="不隐含数据读取权" tone="info" />
       </section>
+
+      <Panel title="当前合同费率" subtitle="按 Hub 开放能力计价；供应商、采购成本与路由切换不会暴露给租户">
+        {effectiveRates.length ? (
+          <Table label="当前合同费率">
+            <thead><tr><th>开放能力</th><th>计量键</th><th>计费单位</th><th>每次成交价</th></tr></thead>
+            <tbody>{effectiveRates.map((entry) => (
+              <tr key={entry.meterKey}>
+                <td><strong>{billingMeterLabel(entry.meterKey)}</strong></td>
+                <td><code>{entry.meterKey}</code></td>
+                <td>{entry.billingUnit === 'request' ? '每次 Hub 请求' : entry.billingUnit}</td>
+                <td><strong>{formatMoneyMinor(entry.unitPriceMinor, entry.currency || billingCurrency)}</strong></td>
+              </tr>
+            ))}</tbody>
+          </Table>
+        ) : (
+          <EmptyState icon={Coins} title="当前套餐未配置逐接口费率" description="历史调用继续按原策略运行；只有发布并显式分配的新计费套餐才会产生报价。" />
+        )}
+      </Panel>
+
+      <Panel title="余额流水" subtitle="租户钱包跨调用者共享；每笔请求仍按调用者与 API Key 独立归因">
+        {billing.ledger?.length ? (
+          <Table label="租户余额流水">
+            <thead><tr><th>时间</th><th>类型</th><th>金额</th><th>可用余额变化</th><th>冻结变化</th><th>事由</th></tr></thead>
+            <tbody>{billing.ledger.map((entry) => (
+              <tr key={entry.id}>
+                <td>{formatDate(entry.createdAt)}</td>
+                <td><strong>{billingLedgerKindLabel(entry.kind)}</strong><small>{entry.usageRequestId ? `请求 ${entry.usageRequestId.slice(0, 8)}…` : '租户钱包'}</small></td>
+                <td>{formatMoneyMinor(entry.amountMinor, entry.currency)}</td>
+                <td>{entry.availableDeltaMinor > 0 ? '+' : ''}{formatMoneyMinor(entry.availableDeltaMinor, entry.currency)}<small>余额 {formatMoneyMinor(entry.availableAfterMinor, entry.currency)}</small></td>
+                <td>{entry.heldDeltaMinor > 0 ? '+' : ''}{formatMoneyMinor(entry.heldDeltaMinor, entry.currency)}<small>冻结 {formatMoneyMinor(entry.heldAfterMinor, entry.currency)}</small></td>
+                <td>{entry.reason || '自动请求结算'}</td>
+              </tr>
+            ))}</tbody>
+          </Table>
+        ) : (
+          <EmptyState icon={Coins} title={account ? '当前还没有余额变动' : '租户钱包尚未开户'} description={session?.platformAdmin ? '管理员首次人工充值后会创建钱包并留下不可变流水。' : '请联系平台管理员开通余额。'} />
+        )}
+      </Panel>
 
       <Panel title="套餐目录" subtitle="套餐版本一经发布不可原地改价；调用者绑定具体版本用于对账">
         {data.plans?.catalog?.length ? (
@@ -1275,7 +1544,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 <td>{plan.limits?.maxRequests ? `${formatNumber(plan.limits.maxRequests)} / ${formatNumber(plan.limits.windowSeconds)} 秒` : '按调用者策略'}</td>
                 <td>{plan.limits?.burstRps ? `${formatNumber(plan.limits.burstRps)} RPS` : '不限制'}</td>
                 <td>{plan.limits?.maxPageSize ? formatNumber(plan.limits.maxPageSize) : '按策略'}</td>
-                <td>{plan.pricing?.mode === 'operator_price_book' ? '待运营价目表' : '历史兼容'}</td>
+                <td>{plan.priceBook
+                  ? <><strong>{plan.priceBook.currency} · {formatNumber(plan.priceBook.entries?.length || 0)} 项</strong><small>{plan.priceBook.key} · v{plan.priceBook.version}</small></>
+                  : plan.pricing?.mode === 'operator_price_book' ? '待运营价目表' : plan.pricing?.mode === 'contract' ? '按租户合同价' : '历史兼容'}</td>
                 {session?.platformAdmin ? (
                   <td>
                     {plan.key === 'legacy-unmetered' ? (
@@ -1361,6 +1632,111 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           />
         )}
       </Panel>
+
+      {creditOpen && session?.platformAdmin ? (
+        <Modal
+          title="人工充值"
+          description="资金会先进入租户共享钱包，并以幂等键写入不可变账本；当前版本不接在线支付。"
+          busy={billingBusy === 'credit'}
+          onClose={() => !billingBusy && setCreditOpen(false)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setCreditOpen(false)} disabled={Boolean(billingBusy)}>取消</button>
+              <button className="qp-button qp-button--primary" type="submit" form="tenant-credit-form" disabled={Boolean(billingBusy)}>{billingBusy === 'credit' ? '正在入账…' : '确认入账'}</button>
+            </>
+          )}
+        >
+          <form id="tenant-credit-form" className="mih-form mih-form--grid" onSubmit={saveCredit}>
+            <Field label="充值金额" hint="使用主货币单位，最多两位小数。">
+              <input className="qp-input" type="text" inputMode="decimal" value={creditForm.amount} onChange={(event) => setCreditForm({ ...creditForm, amount: event.target.value })} placeholder="1000.00" required autoFocus />
+            </Field>
+            <Field label="币种" hint={account ? '已有钱包不能切换币种。' : '三位 ISO 币种代码。'}>
+              <input className="qp-input" value={creditForm.currency} onChange={(event) => setCreditForm({ ...creditForm, currency: event.target.value.toUpperCase() })} minLength={3} maxLength={3} disabled={Boolean(account)} required />
+            </Field>
+            <div className="mih-form__wide">
+              <Field label="入账事由">
+                <input className="qp-input" value={creditForm.reason} onChange={(event) => setCreditForm({ ...creditForm, reason: event.target.value })} maxLength={256} placeholder="例如：线下合同首充" required />
+              </Field>
+            </div>
+            <div className="mih-form__wide">
+              <Field label="外部凭证号（可选）" hint="仅管理员可见，不会向租户展示。">
+                <input className="qp-input" value={creditForm.externalReference} onChange={(event) => setCreditForm({ ...creditForm, externalReference: event.target.value })} maxLength={256} placeholder="合同、转账或工单编号" />
+              </Field>
+            </div>
+            {billingError ? <div className="mih-form__wide"><ErrorState error={billingError} /></div> : null}
+          </form>
+        </Modal>
+      ) : null}
+
+      {profileOpen && session?.platformAdmin ? (
+        <Modal
+          title="租户计费策略"
+          description="倍率只影响以后创建的价格快照；供应商变化不会改变租户已经冻结或成交的价格。"
+          busy={billingBusy === 'profile'}
+          onClose={() => !billingBusy && setProfileOpen(false)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setProfileOpen(false)} disabled={Boolean(billingBusy)}>取消</button>
+              <button className="qp-button qp-button--primary" type="submit" form="tenant-billing-profile-form" disabled={Boolean(billingBusy)}>{billingBusy === 'profile' ? '正在保存…' : '保存策略'}</button>
+            </>
+          )}
+        >
+          <form id="tenant-billing-profile-form" className="mih-form" onSubmit={saveProfile}>
+            <Field label="计费模式" hint="建议先用影子计价核对费率与 QPS，再开启余额门禁。">
+              <select className="qp-input" value={profileForm.mode} onChange={(event) => setProfileForm({ ...profileForm, mode: event.target.value })} autoFocus>
+                <option value="disabled">未启用 · 不报价不扣费</option>
+                <option value="shadow">影子计价 · 记录报价不动余额</option>
+                <option value="enforced">余额门禁 · 请求前冻结、成功后扣费</option>
+              </select>
+            </Field>
+            <Field label="租户费率倍率（可选）" hint="留空继承套餐默认倍率；例如 1.200000 表示合同价为基础费率的 1.2 倍。">
+              <input className="qp-input" type="text" inputMode="decimal" value={profileForm.multiplier} onChange={(event) => setProfileForm({ ...profileForm, multiplier: event.target.value })} placeholder="继承套餐默认倍率" />
+            </Field>
+            {billingError ? <ErrorState error={billingError} /> : null}
+          </form>
+        </Modal>
+      ) : null}
+
+      {planOpen && session?.platformAdmin ? (
+        <Modal
+          title="发布套餐版本"
+          description="发布后套餐与价目表都不可原地修改；调用者只有被显式分配此版本后才会使用它。"
+          size="large"
+          busy={billingBusy === 'plan'}
+          onClose={() => !billingBusy && setPlanOpen(false)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setPlanOpen(false)} disabled={Boolean(billingBusy)}>取消</button>
+              <button className="qp-button qp-button--primary" type="submit" form="publish-plan-form" disabled={Boolean(billingBusy)}>{billingBusy === 'plan' ? '正在发布…' : '发布不可变版本'}</button>
+            </>
+          )}
+        >
+          <form id="publish-plan-form" className="mih-form mih-form--grid" onSubmit={publishPlan}>
+            <Field label="套餐标识"><input className="qp-input" value={planForm.key} onChange={(event) => setPlanForm({ ...planForm, key: event.target.value.toLowerCase() })} placeholder="business-standard" maxLength={64} required autoFocus /></Field>
+            <Field label="套餐名称"><input className="qp-input" value={planForm.name} onChange={(event) => setPlanForm({ ...planForm, name: event.target.value })} placeholder="商务标准版" maxLength={128} required /></Field>
+            <Field label="价目表标识"><input className="qp-input" value={planForm.priceBookKey} onChange={(event) => setPlanForm({ ...planForm, priceBookKey: event.target.value.toLowerCase() })} placeholder="cn-social-standard" maxLength={64} required /></Field>
+            <Field label="币种"><input className="qp-input" value={planForm.currency} onChange={(event) => setPlanForm({ ...planForm, currency: event.target.value.toUpperCase() })} minLength={3} maxLength={3} required /></Field>
+            <Field label="默认费率倍率" hint="租户未设置专属倍率时使用。"><input className="qp-input" type="text" inputMode="decimal" value={planForm.defaultMultiplier} onChange={(event) => setPlanForm({ ...planForm, defaultMultiplier: event.target.value })} required /></Field>
+            <Field label="每月请求上限"><input className="qp-input" type="number" min="1" value={planForm.monthlyRequests} onChange={(event) => setPlanForm({ ...planForm, monthlyRequests: event.target.value })} required /></Field>
+            <Field label="突发 QPS"><input className="qp-input" type="number" min="1" value={planForm.burstRps} onChange={(event) => setPlanForm({ ...planForm, burstRps: event.target.value })} required /></Field>
+            <Field label="最大分页"><input className="qp-input" type="number" min="1" max="1000" value={planForm.maxPageSize} onChange={(event) => setPlanForm({ ...planForm, maxPageSize: event.target.value })} required /></Field>
+            <div className="mih-form__wide">
+              <Table label="逐接口价格">
+                <thead><tr><th>开放能力计量键</th><th>每次基础价格</th><th>操作</th></tr></thead>
+                <tbody>{planForm.entries.map((entry, index) => (
+                  <tr key={index}>
+                    <td><input className="qp-input" value={entry.meterKey} onChange={(event) => updatePlanEntry(index, { meterKey: event.target.value.toLowerCase() })} placeholder="social.posts.resolve" required /></td>
+                    <td><input className="qp-input" type="text" inputMode="decimal" value={entry.price} onChange={(event) => updatePlanEntry(index, { price: event.target.value })} placeholder="0.10" required /></td>
+                    <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="删除费率" disabled={planForm.entries.length <= 1} onClick={() => setPlanForm((current) => ({ ...current, entries: current.entries.filter((_, entryIndex) => entryIndex !== index) }))}><Trash size={17} aria-hidden="true" /></button></td>
+                  </tr>
+                ))}</tbody>
+              </Table>
+              <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => setPlanForm((current) => ({ ...current, entries: [...current.entries, { meterKey: '', price: '' }] }))}><Plus size={16} aria-hidden="true" />增加接口费率</button>
+            </div>
+            {billingError ? <div className="mih-form__wide"><ErrorState error={billingError} /></div> : null}
+          </form>
+        </Modal>
+      ) : null}
     </>
   )
 }
@@ -1764,10 +2140,14 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   )
 }
 
-export function UsagePage({ token, query, setQuery, onUnauthorized }) {
+export function UsagePage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const tenantId = query.get('tenantId') || ''
   const consumerId = query.get('consumerId') || ''
   const range = query.get('range') || '24h'
+  const [reconcileTarget, setReconcileTarget] = useState(null)
+  const [reconcileForm, setReconcileForm] = useState({ disposition: 'release', reason: '' })
+  const [reconcileBusy, setReconcileBusy] = useState(false)
+  const [reconcileError, setReconcileError] = useState(null)
   const load = useCallback(async () => {
     const [tenants, consumers, usage] = await Promise.all([
       adminApi.tenants(token),
@@ -1785,6 +2165,50 @@ export function UsagePage({ token, query, setQuery, onUnauthorized }) {
   const usage = data.usage || {}
   const platforms = sortedPlatforms(usage.byPlatform)
   const capabilities = sortedPlatforms(usage.byCapability)
+  const customerBilling = usage.customerBilling || {}
+  const billingMeters = sortedPlatforms(customerBilling.byMeter)
+  const recentRequests = usage.recentRequests || []
+  const consumerNames = new Map(data.consumers.map((consumer) => [consumer.id, consumer.name]))
+  const billingMoney = (minor, currency = customerBilling.currency, mixedCurrencies = customerBilling.mixedCurrencies) => (
+    mixedCurrencies || !currency
+      ? `${formatNumber(minor)} 最小货币单位`
+      : formatMoneyMinor(minor, currency)
+  )
+
+  const openReconciliation = (request) => {
+    setReconcileError(null)
+    setReconcileForm({ disposition: 'release', reason: '' })
+    setReconcileTarget({
+      request,
+      idempotencyKey: `reconcile-${crypto.randomUUID()}`,
+    })
+  }
+
+  const reconcileUnknownCharge = async (event) => {
+    event.preventDefault()
+    if (!session?.platformAdmin || !reconcileTarget || reconcileBusy) return
+    setReconcileBusy(true)
+    setReconcileError(null)
+    try {
+      await adminApi.reconcileUnknownCustomerCharge(
+        token,
+        reconcileTarget.request.id,
+        reconcileForm,
+        reconcileTarget.idempotencyKey,
+      )
+      await state.refresh()
+      setReconcileTarget(null)
+      notify?.(
+        reconcileForm.disposition === 'capture' ? '未知请求已确认扣费' : '未知请求已释放冻结余额',
+        'success',
+      )
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setReconcileError(error)
+    } finally {
+      setReconcileBusy(false)
+    }
+  }
 
   return (
     <>
@@ -1812,6 +2236,48 @@ export function UsagePage({ token, query, setQuery, onUnauthorized }) {
         <MetricCard icon={Coins} label="工作单元" value={formatNumber(usage.units)} hint="平台记录或能力结果单元" tone="warning" />
         <MetricCard icon={Timer} label="平均上游耗时" value={formatLatency(usage.averageUpstreamLatencyMs)} hint={`${formatNumber(usage.unknown)} 次结果未知`} tone="archetype" />
       </section>
+
+      <section className="mih-metric-grid mih-metric-grid--compact" aria-label="客户计费摘要">
+        <MetricCard icon={Coins} label="客户报价" value={billingMoney(customerBilling.quotedMinor || 0)} hint="按请求创建时的合同价格快照" />
+        <MetricCard icon={ShieldCheck} label="实际扣费" value={billingMoney(customerBilling.chargedMinor || 0)} hint="只统计已经成功交付的请求" tone="success" />
+        <MetricCard icon={Timer} label="待结算冻结" value={billingMoney(customerBilling.heldMinor || 0)} hint="结果未知时保留，避免重复支付" tone="warning" />
+        <MetricCard icon={ChartLine} label="影子报价" value={billingMoney(customerBilling.shadowQuotedMinor || 0)} hint="用于上线前核价，不改变租户余额" tone="info" />
+      </section>
+
+      <Panel title="最近 API 调用" subtitle="最多展示当前筛选范围内最近 50 笔；请求与客户价格按同一 request ID 对账">
+        {recentRequests.length ? (
+          <Table label="最近 API 调用">
+            <thead><tr><th>时间</th><th>调用者</th><th>开放能力</th><th>结果</th><th>工作单元 / 耗时</th><th>客户计费</th>{session?.platformAdmin ? <th>对账</th> : null}</tr></thead>
+            <tbody>{recentRequests.map((request) => {
+              const charge = request.customerCharge
+              const chargeValue = charge?.status === 'captured' ? charge.chargedMinor : charge?.quotedMinor
+              const chargeHint = !charge
+                ? '历史未计价'
+                : charge.enforcementMode === 'shadow' ? '影子报价'
+                  : ['reserved', 'unknown'].includes(charge.status) ? '已冻结待结算'
+                    : charge.status === 'released' ? '已解冻' : '已扣费'
+              return (
+                <tr key={request.id}>
+                  <td>{formatDate(request.createdAt)}<small>请求 {request.id.slice(0, 8)}…</small></td>
+                  <td><strong>{consumerNames.get(request.consumerId) || request.consumerId.slice(0, 8)}</strong><small>Key {request.apiKeyId.slice(0, 8)}…</small></td>
+                  <td><strong>{billingMeterLabel(request.billingMeterKey || request.capability || request.platform)}</strong><small>{request.billingMeterKey || request.capability || request.platform}</small></td>
+                  <td><StatusBadge status={request.status} label={({ committed: '成功', released: '已释放', unknown: '待对账', reserved: '处理中' })[request.status] || request.status} /></td>
+                  <td>{formatNumber(request.unitsActual || 0)} / {formatLatency(request.upstreamLatencyMs)}</td>
+                  <td>{charge ? <strong>{formatMoneyMinor(chargeValue || 0, charge.currency)}</strong> : '—'}<small>{chargeHint}</small></td>
+                  {session?.platformAdmin ? (
+                    <td>{request.status === 'unknown'
+                      && charge?.status === 'unknown'
+                      && charge.enforcementMode === 'enforced'
+                      && charge.quotedMinor > 0
+                      ? <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => openReconciliation(request)}>处理冻结</button>
+                      : <small>无需处理</small>}</td>
+                  ) : null}
+                </tr>
+              )
+            })}</tbody>
+          </Table>
+        ) : <EmptyState icon={Pulse} title="当前范围没有 API 调用" description="更换时间范围、租户或调用者后重试。" />}
+      </Panel>
 
       <section className="mih-chart-grid">
         <Panel title="数据平台用量" subtitle="当前筛选范围" className="mih-chart-panel">
@@ -1861,6 +2327,52 @@ export function UsagePage({ token, query, setQuery, onUnauthorized }) {
           </Table>
         ) : <EmptyState icon={Brain} title="没有通用能力调用" description="为调用者授权能力并使用 API 后，这里会出现独立计量。" />}
       </Panel>
+
+      <Panel title="客户计费明细" subtitle="按 Hub 开放能力归集；不包含供应商名称与采购成本">
+        {billingMeters.length ? (
+          <Table label="客户计费明细">
+            <thead><tr><th>开放能力</th><th>计量键</th><th>请求</th><th>报价</th><th>已扣</th><th>冻结</th></tr></thead>
+            <tbody>{billingMeters.map(([meterKey, item]) => (
+              <tr key={meterKey}>
+                <td><strong>{billingMeterLabel(meterKey)}</strong></td>
+                <td><code>{meterKey}</code></td>
+                <td>{formatNumber(item.requests)}</td>
+                <td>{billingMoney(item.quotedMinor, item.currency, item.mixedCurrencies)}</td>
+                <td>{billingMoney(item.chargedMinor, item.currency, item.mixedCurrencies)}</td>
+                <td>{billingMoney(item.heldMinor, item.currency, item.mixedCurrencies)}</td>
+              </tr>
+            ))}</tbody>
+          </Table>
+        ) : <EmptyState icon={Coins} title="当前范围没有计费记录" description="历史未计费调用不受影响；发布并分配计费套餐后才会记录客户报价。" />}
+      </Panel>
+
+      {reconcileTarget && session?.platformAdmin ? (
+        <Modal
+          title="处理未知请求冻结"
+          description={`请求 ${reconcileTarget.request.id} 的交付状态保持“未知”；这里只依据人工证据结算客户侧冻结金额。`}
+          busy={reconcileBusy}
+          onClose={() => !reconcileBusy && setReconcileTarget(null)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setReconcileTarget(null)} disabled={reconcileBusy}>取消</button>
+              <button className="qp-button qp-button--primary" type="submit" form="customer-charge-reconciliation" disabled={reconcileBusy}>{reconcileBusy ? '正在对账…' : '确认结算'}</button>
+            </>
+          )}
+        >
+          <form id="customer-charge-reconciliation" className="mih-form" onSubmit={reconcileUnknownCharge}>
+            <Field label="结算结果" hint="只有确认客户已收到有效交付时才选择扣费；否则释放冻结余额。">
+              <select className="qp-input" value={reconcileForm.disposition} onChange={(event) => setReconcileForm({ ...reconcileForm, disposition: event.target.value })} autoFocus>
+                <option value="release">释放冻结 · 未确认交付</option>
+                <option value="capture">确认扣费 · 已确认交付</option>
+              </select>
+            </Field>
+            <Field label="证据与事由" hint="会连同操作者写入不可变余额流水；重试沿用同一个幂等键。">
+              <textarea className="qp-input" rows="4" maxLength="1024" value={reconcileForm.reason} onChange={(event) => setReconcileForm({ ...reconcileForm, reason: event.target.value })} placeholder="填写上游账单、交付日志或工单结论" required />
+            </Field>
+            {reconcileError ? <ErrorState error={reconcileError} /> : null}
+          </form>
+        </Modal>
+      ) : null}
     </>
   )
 }

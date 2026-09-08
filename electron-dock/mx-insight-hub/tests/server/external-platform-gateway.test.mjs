@@ -304,6 +304,11 @@ test('cache-only serves stale Hub data while refresh explicitly reacquires it', 
     idempotencyKey: 'delivery-stored-01',
     path: '/api/v1/data/ecommerce/products/search',
   })
+  const storedReplay = await state.gateway.search(state.context, {
+    body: { ...body, deliveryMode: 'cache_only' },
+    idempotencyKey: 'delivery-stored-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
   const refreshed = await state.gateway.search(state.context, {
     body: { ...body, deliveryMode: 'refresh' },
     idempotencyKey: 'delivery-refresh-1',
@@ -312,6 +317,13 @@ test('cache-only serves stale Hub data while refresh explicitly reacquires it', 
 
   assert.equal(stored.sourceMode, 'stored_fallback')
   assert.equal(stored.body.meta.fallbackReason, 'cache_only')
+  assert.equal(storedReplay.sourceMode, 'idempotent_replay')
+  assert.equal(storedReplay.originSourceMode, 'stale')
+  assert.equal(storedReplay.replay, true)
+  assert.equal(storedReplay.body.meta.capturedAt, stored.body.meta.capturedAt)
+  const storedUsage = state.usageStore.requests.get(stored.requestId)
+  assert.equal(storedUsage.deliverySourceMode, 'stale')
+  assert.equal(storedUsage.capturedAt, stored.body.meta.capturedAt)
   assert.equal(refreshed.sourceMode, 'live')
   assert.equal(calls, 2)
 })
@@ -556,6 +568,47 @@ test('a pre-dispatch platform-store failure releases the owned usage reservation
   )
 })
 
+test('an unreconciled provider-call insert leaves usage unknown and never dispatches JustOne', async () => {
+  let dispatches = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        dispatches += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+  state.platformStore.beginProviderCall = async () => {
+    throw new AppError(
+      503,
+      'external_platform_call_persistence_unknown',
+      'Provider-call persistence could not be reconciled; do not retry automatically',
+    )
+  }
+
+  let durableRequestId
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'camera' },
+      idempotencyKey: 'call-insert-unknown-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => {
+      durableRequestId = error.details?.requestId
+      return error.status === 503
+        && error.code === 'external_platform_call_persistence_unknown'
+        && typeof durableRequestId === 'string'
+    },
+  )
+
+  assert.equal(dispatches, 0)
+  assert.equal(state.usageStore.requests.get(durableRequestId).status, 'unknown')
+  assert.equal(
+    state.usageStore.requests.get(durableRequestId).errorCode,
+    'external_platform_call_persistence_unknown',
+  )
+})
+
 test('cross-key equal requests use a dispatch lease and never create a second paid call', async () => {
   let release
   let calls = 0
@@ -749,6 +802,50 @@ test('fresh cache delivery bypasses a saturated paid-provider concurrency gate',
 
   releaseProvider()
   await blocker
+})
+
+test('provider token exhaustion rejects before a second JustOne dispatch and preserves stored fallback', async () => {
+  let calls = 0
+  const state = await fixture({
+    gatewayConfig: config({ maxRequestsPerMinute: 1 }),
+    adapter: {
+      async searchProducts(body, options) {
+        calls += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+  const path = '/api/v1/data/ecommerce/products/search'
+  const cachedBody = { marketplace: 'jd', query: 'rate-limited-cache' }
+  await state.gateway.search(state.context, {
+    body: cachedBody,
+    idempotencyKey: 'rate-limit-warm-01',
+    path,
+  })
+
+  const fallback = await state.gateway.search(state.context, {
+    body: { ...cachedBody, deliveryMode: 'refresh' },
+    idempotencyKey: 'rate-limit-refresh-01',
+    path,
+  })
+  assert.equal(fallback.status, 200)
+  assert.equal(fallback.sourceMode, 'stored_fallback')
+  assert.equal(fallback.body.meta.fallbackReason, 'provider_rate_limit')
+  assert.equal(calls, 1)
+  assert.equal(state.platformStore.calls.size, 1)
+
+  await assert.rejects(
+    state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'rate-limit-no-cache' },
+      idempotencyKey: 'rate-limit-miss-01',
+      path,
+    }),
+    (error) => error?.status === 429
+      && error?.code === 'external_platform_rate_limited'
+      && error?.details?.retryAfterMs > 0,
+  )
+  assert.equal(calls, 1)
+  assert.equal(state.platformStore.calls.size, 1)
 })
 
 test('a billed code=0 response that cannot be normalized is archived and never redispatched automatically', async () => {
@@ -1275,6 +1372,49 @@ test('admin keeps manual list-price estimates separate from actual net spend', a
   assert.equal(detail.costPlan.actualCostMinor, null)
   assert.equal(detail.costPlan.projectedPaidCalls, 0)
   assert.equal(detail.costPlan.projectedMonthlyCostMinor, 0)
+})
+
+test('admin endpoint prices override legacy unit price and keep multi-price forecasts unknown', async () => {
+  const billing = {
+    source: 'manual',
+    currency: 'CNY',
+    pricingAsOf: '2026-09-01T00:00:00.000Z',
+    freeDailyCalls: 0,
+    monthlyBudgetMinor: 10_000,
+    unitCostMinor: 5,
+    unitCostMinorByEndpoint: {
+      [ENDPOINT_KEY]: 7,
+      'jd.product-detail.v1': 11,
+    },
+  }
+  const state = await fixture({
+    adapter: null,
+    gatewayConfig: config({ billing }),
+  })
+  state.platformStore.calls.set('endpoint-priced', {
+    id: 'endpoint-priced',
+    tenantId: state.context.tenantId,
+    consumerId: state.context.consumerId,
+    operation: 'ecommerce.products.search',
+    endpointKey: ENDPOINT_KEY,
+    outcome: 'succeeded',
+    billed: true,
+    costMinor: 7,
+    costKind: 'estimated',
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  })
+  const admin = new ExternalPlatformAdminService({
+    store: state.platformStore,
+    config: state.gatewayConfig,
+  })
+
+  const detail = await admin.detail('justone', '24h')
+  assert.equal(detail.costPlan.grossEstimatedCostMinor, 7)
+  assert.equal(detail.costPlan.projectedPaidCalls, 30)
+  assert.equal(detail.costPlan.projectedMonthlyCostMinor, null)
+  assert.equal(detail.costPlan.confidence, 'low')
+  assert.match(detail.costPlan.recommendation, /各接口单价不同/u)
 })
 
 test('admin projection distinguishes contract verification from safe misconfiguration without credentials', async () => {

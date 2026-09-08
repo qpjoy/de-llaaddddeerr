@@ -5,9 +5,11 @@ MX Insight Hub is the governed data-access layer between callers and private dat
 The runtime now includes Admin-managed PostgreSQL and file sources, versioned
 source objects/mappings, canonical records/revisions/tombstones, transactional
 projection outbox, direct file import, durable pull workers and customer-safe
-Telegram history/full-text/entity APIs. Non-Telegram live search still
-dispatches to Night-All; Telegram stored search is locally served in the same
-`night-all.data-search.v1` envelope. `/shared_dir` watching, immutable
+Telegram history/full-text/entity APIs. Eligible Xiaohongshu search/detail is
+served through the Hub-owned TikHub gateway, ecommerce product search through
+the provider-neutral JustOne gateway, and unmigrated live platforms continue
+through the Night-All compatibility path. Telegram stored search is locally
+served in the same `night-all.data-search.v1` envelope. `/shared_dir` watching, immutable
 object/cloud adapters, a generic CDC connector, freshness-aware live fallback,
 BI datasets and governed Text2SQL/Data Agent tools remain later delivery gates
 rather than implied capabilities.
@@ -22,8 +24,8 @@ production analysis pipeline.
 
 It is an independently deployed product module and a sibling of `mx-launcher`, not a Night-All fork and not an embedded Launcher database/service:
 
-- **Night-All** owns providers, collection, normalization, source evidence, and upstream credentials.
-- **MX Insight Hub** owns tenants, consumers, API keys, grants, limits, request state, and customer usage.
+- **Night-All** owns its legacy/unmigrated collection, normalization, source evidence and credentials.
+- **MX Insight Hub** owns tenants, consumers, API keys, grants, limits, request state, customer usage/billing, and its direct TikHub/JustOne provider gateways.
 - **MX Launcher / MX-H2I** owns deployment orchestration, private/public connectivity, DNS, TLS edge, and the operator entrypoint.
 
 Launcher is the authority for human login and organization identity; Hub keeps

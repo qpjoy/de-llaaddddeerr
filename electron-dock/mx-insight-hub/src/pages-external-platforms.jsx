@@ -299,6 +299,10 @@ function normalizeCost(owner = {}) {
     pricingSource: optionalText(raw.pricingSource, raw.source),
     confidence: optionalText(raw.confidence),
     recommendation: optionalText(raw.recommendation, raw.plan, raw.guidance),
+    unitPrices: firstArray(raw.unitPrices, raw.endpointPrices).map((entry, index) => ({
+      endpointKey: optionalText(entry.endpointKey, entry.endpoint, entry.key) || `#${index + 1}`,
+      unitCostMinor: optionalNumber(entry.unitCostMinor, entry.priceMinor, entry.costMinor),
+    })),
   }
 }
 
@@ -1110,6 +1114,17 @@ function CostQuotaPanel({ detail }) {
         <div><dt>已使用 / 剩余</dt><dd>{formatOptionalNumber(quota.used)} / {formatOptionalNumber(quota.remaining)}</dd></div>
         <div><dt>免费额度周期</dt><dd>{quota.period || UNKNOWN}</dd></div>
       </dl>
+      {cost.unitPrices.length ? (
+        <Table label={`${detail.displayName || '外部平台'} 上游接口价目`}>
+          <thead><tr><th scope="col">上游接口</th><th scope="col">每次标价成本</th></tr></thead>
+          <tbody>{cost.unitPrices.map((entry) => (
+            <tr key={entry.endpointKey}>
+              <td className="mih-mono">{entry.endpointKey}</td>
+              <td>{formatMoneyMinor(entry.unitCostMinor, cost.currency)}</td>
+            </tr>
+          ))}</tbody>
+        </Table>
+      ) : <p className="mih-external-unknown"><WarningCircle size={16} aria-hidden="true" />尚未配置可验证的逐接口采购价目。</p>}
       {hasProgress ? (
         <div className="mih-external-quota">
           <span><strong>免费额度使用进度</strong><small>{quotaPercent.toFixed(1)}%</small></span>
@@ -1172,11 +1187,11 @@ function ProcessingChain({ stages }) {
   )
 }
 
-function CapabilityMatrix({ capabilities }) {
+function CapabilityMatrix({ capabilities, providerName }) {
   return (
-    <Panel title="能力与版本矩阵" subtitle="Hub 公共合同与 JustOne 上游接口分栏展示，避免把同名误当等价。" className="mih-external-capability-panel">
+    <Panel title="能力与版本矩阵" subtitle={`Hub 公共合同与 ${providerName} 上游接口分栏展示，避免把同名误当等价。`} className="mih-external-capability-panel">
       {capabilities.length ? (
-        <Table label="JustOne 能力与版本矩阵">
+        <Table label={`${providerName} 能力与版本矩阵`}>
           <thead>
             <tr><th scope="col">Hub 能力</th><th scope="col">公共合同</th><th scope="col">Provider 映射 / 接口</th><th scope="col">适用范围 / 版本</th><th scope="col">状态</th><th scope="col">回退</th><th scope="col">说明</th></tr>
           </thead>
@@ -1201,11 +1216,11 @@ function CapabilityMatrix({ capabilities }) {
   )
 }
 
-function TenantRanking({ tenants, currency }) {
+function TenantRanking({ tenants, currency, providerName }) {
   return (
     <Panel title="租户使用量排名" subtitle="只按当前统计窗口的服务端聚合结果排序，不在浏览器补齐租户身份。" className="mih-external-tenant-panel">
       {tenants.length ? (
-        <Table label="JustOne 租户使用量排名">
+        <Table label={`${providerName} 租户使用量排名`}>
           <thead><tr><th scope="col">排名</th><th scope="col">租户</th><th scope="col">Hub 请求</th><th scope="col">上游调用</th><th scope="col">成功率</th><th scope="col">标价成本估算</th><th scope="col">占比</th></tr></thead>
           <tbody>
             {tenants.map((row, index) => (
@@ -1313,9 +1328,9 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             <CostQuotaPanel detail={detail} />
           </section>
           <ProcessingChain stages={detail.stages} />
-          <CapabilityMatrix capabilities={detail.capabilities} />
+          <CapabilityMatrix capabilities={detail.capabilities} providerName={providerName} />
           <section className="mih-external-two-column mih-external-two-column--balanced">
-            <TenantRanking tenants={detail.tenants} currency={detail.cost.currency} />
+            <TenantRanking tenants={detail.tenants} currency={detail.cost.currency} providerName={providerName} />
             <ProtectionPanel guardrails={detail.guardrails} notes={detail.notes} />
           </section>
           {provider === 'justone' ? <DifferencePanel /> : null}

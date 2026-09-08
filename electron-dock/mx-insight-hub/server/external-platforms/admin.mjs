@@ -68,6 +68,16 @@ export const EXTERNAL_PLATFORM_CAPABILITY_MATRIX = [
 
 export const TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX = [
   {
+    capability: 'social.posts.search',
+    label: '小红书笔记搜索',
+    hubContractVersion: 'night-all.data-search.v1',
+    providerMapping: 'direct_versioned_adapter',
+    scope: 'xiaohongshu',
+    status: 'implemented',
+    fallback: 'exact_fingerprint_snapshot',
+    note: '固定 20 条分页并使用 Hub 不透明游标；60 字预览边界按预算调用详情补全。',
+  },
+  {
     capability: 'social.posts.resolve',
     label: '小红书笔记详情',
     hubContractVersion: 'mx-insight-hub.social-post.v1',
@@ -96,13 +106,13 @@ const TIKHUB_METADATA = Object.freeze({
   key: 'tikhub',
   displayName: 'TikHub',
   description: 'Hub 直连的小红书数据 Provider；客户只看 Hub 合同、授权、用量与缓存状态。',
-  capabilities: ['social.posts.resolve'],
+  capabilities: ['social.posts.search', 'social.posts.resolve'],
   capabilityMatrix: TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX,
   marketplaces: [{ key: 'xiaohongshu', label: '小红书' }],
   adapterLabel: '版本化 TikHub Adapter',
-  adapterDescription: '固定 App V2 笔记详情 endpoint，校验响应身份并区分无效笔记、容量、认证和契约漂移。',
+  adapterDescription: '固定 App V2 搜索与笔记详情 endpoint，校验响应身份并区分无效笔记、容量、认证和契约漂移。',
   billingNote: '按已核验人工价目记录上游标价；Hub 缓存命中不会重复触发上游调用。',
-  freshnessNote: '相同租户、能力和笔记指纹优先命中 24 小时新鲜快照；异常时仅在保留期内回退。',
+  freshnessNote: '搜索页与详情分别按精确指纹缓存；只有新鲜详情会参与正文补全，搜索异常时才显式回退保留期内的搜索快照。',
 })
 
 function ratio(numerator, denominator) {
@@ -159,10 +169,18 @@ function costProjection(analytics, config, range, providerName = '外部平台')
   const projectedPaidCalls = indeterminateBillingCalls > 0 || freeDaily == null
     ? null
     : Math.max(0, projectedMonthlyBilledCalls - freeDaily * 30)
-  const endpointCosts = billing.unitCostMinor == null
-    ? Object.values(billing.unitCostMinorByEndpoint || {})
-    : [billing.unitCostMinor]
+  const configuredEndpointCosts = Object.values(billing.unitCostMinorByEndpoint || {})
+  const endpointCosts = configuredEndpointCosts.length > 0
+    ? configuredEndpointCosts
+    : billing.unitCostMinor == null ? [] : [billing.unitCostMinor]
   const oneKnownPrice = endpointCosts.length === 1 ? endpointCosts[0] : null
+  const unitPrices = configuredEndpointCosts.length > 0
+    ? Object.entries(billing.unitCostMinorByEndpoint)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([endpointKey, unitCostMinor]) => ({ endpointKey, unitCostMinor }))
+    : billing.unitCostMinor == null
+      ? []
+      : [{ endpointKey: 'legacy-default', unitCostMinor: billing.unitCostMinor }]
   const incompleteCostEvidence = indeterminateBillingCalls > 0 || unknownCostCalls > 0
   const projectedMonthlyCostMinor = !incompleteCostEvidence
     && projectedPaidCalls != null
@@ -190,6 +208,7 @@ function costProjection(analytics, config, range, providerName = '外部平台')
     pricingSource: billing.source,
     pricingAsOf: billing.pricingAsOf,
     currency: billing.currency,
+    unitPrices,
     // Manual endpoint prices are list-price estimates. They are not a provider
     // bill and cannot prove the net charge after free quota or discounts.
     actualCostMinor: null,
@@ -229,6 +248,9 @@ function providerProjection(analytics, todayAnalytics, config, range, now, metad
     configured: config.configured ?? Boolean(config.token),
     configuration: {
       contractVerified: Boolean(config.contractVerified),
+      ...(typeof config.searchContractVerified === 'boolean'
+        ? { searchContractVerified: config.searchContractVerified }
+        : {}),
       dispatchEligible: Boolean(
         (config.configured ?? Boolean(config.token))
         && config.contractVerified

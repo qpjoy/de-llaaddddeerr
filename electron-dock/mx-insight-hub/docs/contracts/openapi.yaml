@@ -6,7 +6,9 @@ info:
     Stable consumer contract. Night-All and provider details are normally
     private implementation concerns; the three explicitly namespaced
     /night-all/search compatibility routes are the documented exception and
-    preserve the current upstream application payload unchanged. Idempotency
+    preserve the legacy envelope. Eligible Xiaohongshu raw calls may use a
+    Hub-native projection with the same raw_info/raw_data field types;
+    Night-All-owned application payloads remain unchanged. Idempotency
     keys are unique within a consumer, but POST replay and fresh-window
     re-execution stay bound to the Hub API key that created the usage record;
     another API key must use a new idempotency key.
@@ -1640,16 +1642,25 @@ paths:
       operationId: listCapabilities
       description: >-
         Lists granted Hub platform data surfaces and generic capabilities.
+        A Xiaohongshu entry with search_posts and search.ready=true advertises
+        the Hub-native 20-item search contract used transparently by
+        /data/search and eligible legacy raw requests. post_detail appears only
+        with the independent social.posts.resolve capability grant. When
+        Xiaohongshu already has a compatibility platform row, Hub preserves its
+        provider-neutral top-level readiness/source identity; only nested search
+        and postDetail describe Hub-direct readiness.
         data.legacySearch is the Hub-pinned, grant-filtered dispatch matrix for
-        the three Night-All compatibility operations. It is compiled into the
-        deployed Hub contract rather than discovered from Night-All at request
-        time. A platform must appear in both supportedPlatforms and
-        readyPlatforms before dispatch; a data.platforms entry alone, including
-        telegram, is not sufficient. In this pinned contract readyPlatforms
+        Night-All-owned compatibility operations. Direct search takes only the
+        compatible first-page/raw subset; Xiaohongshu remains in the legacy matrix
+        because non-direct raw shapes, crawl and user-info still use the
+        historical path. The matrix is compiled into the deployed Hub contract rather than
+        discovered from Night-All at request time. A fallback platform must
+        appear in both supportedPlatforms and readyPlatforms. In this pinned contract readyPlatforms
         means Hub dispatch eligibility; it does not prove current Night-All
         handler, endpoint, provider, credential, or upstream health.
         legacySearch is null when the consumer has no granted platform eligible
-        for Night-All compatibility; compatibility calls then fail closed. The
+        for the Night-All-owned path; historical dispatch then fails closed,
+        without disabling a Hub-native contract under data.platforms. The
         Telegram entry advertises bounded message context and the bidirectional
         live-keyset timeline per dataset under context and timeline; both ready
         flags are index-serving gates independent from the broader Telegram
@@ -1691,11 +1702,11 @@ paths:
                             source:
                               type: string
                               enum: [hub]
-                              description: Present for Hub-owned platform entries.
+                              description: Present only when the complete top-level platform entry is Hub-owned. A mixed Xiaohongshu compatibility row may omit it; use nested search/postDetail source for direct readiness.
                             servingMode:
                               type: string
                               enum: [stored, live_with_stored_fallback]
-                              description: Present for Hub-owned stored or governed live-with-fallback entries.
+                              description: Present for wholly Hub-owned stored or governed live-with-fallback entries. A mixed Xiaohongshu row may retain its existing top-level identity and publish direct serving mode only in nested search/postDetail.
                             contractVersion:
                               type: string
                               description: Stable Hub contract version when the platform exposes one.
@@ -1724,16 +1735,31 @@ paths:
                                 deliveryModes:
                                   type: array
                                   items: { type: string, enum: [cache_only, cache_first, refresh] }
+                            search:
+                              type: object
+                              additionalProperties: false
+                              required: [ready, source, servingMode, contractVersion]
+                              description: Hub-native Xiaohongshu search, advertised only after the independent first-page rollout gate is enabled; post_detail remains independently gated by social.posts.resolve.
+                              properties:
+                                ready: { type: boolean }
+                                source: { type: string, const: hub }
+                                servingMode: { type: string, const: live_with_stored_fallback }
+                                contractVersion: { type: string, const: night-all.data-search.v1 }
                             context: { $ref: "#/components/schemas/CanonicalContextCapability" }
                             timeline: { $ref: "#/components/schemas/CanonicalTimelineCapability" }
                       legacySearch:
                         description: >-
-                          Hub-pinned, grant-filtered dispatch matrix, or null when
-                          the consumer has no granted platform eligible for
-                          Night-All compatibility. It is authoritative only for
-                          Hub routing and is not a live Night-All capability or
-                          provider-readiness result. Null fails closed for every
-                          compatibility operation.
+                          Hub-pinned, grant-filtered historical dispatch matrix,
+                          or null when the consumer has no granted platform
+                          eligible for the Night-All-owned path. It is
+                          authoritative only for Hub routing on that historical path and is
+                          not a live Night-All capability or provider-readiness
+                          result. A platform may appear both here and under
+                          data.platforms: direct search takes only its compatible
+                          subset and does not remove non-direct shapes from legacy
+                          dispatch. Null fails closed for historical dispatch but
+                          does not disable a Hub-native contract advertised under
+                          data.platforms.
                         oneOf:
                           - { $ref: "#/components/schemas/NightAllLegacySearchCapabilities" }
                           - { type: "null" }
@@ -1821,7 +1847,12 @@ paths:
                       freshnessModes: [live, fresh_cache, stored_fallback, idempotent_replay]
                     - platform: xiaohongshu
                       ready: true
-                      capabilities: [post_detail]
+                      capabilities: [search_posts, post_detail]
+                      search:
+                        ready: true
+                        source: hub
+                        servingMode: live_with_stored_fallback
+                        contractVersion: night-all.data-search.v1
                       postDetail:
                         ready: true
                         source: hub
@@ -2328,24 +2359,33 @@ paths:
     post:
       operationId: searchData
       description: >-
-        Stable Night-All-v1 search facade. For platform telegram, Hub serves
+        Stable provider-neutral Night-All-v1 search facade. For platform telegram, Hub serves
         canonical local data with the same fixed item source and response meta
         labels documented by /data/telegram/search; PostgreSQL degradation is
-        represented only by warnings. Other enabled platforms use the governed
-        private Night-All adapter, except public_opinion: that Hub-local stored
-        platform is rejected here and must use the province feed,
+        represented only by warnings. For platform xiaohongshu, the default and
+        only Hub-native page size is exactly 20. Compatible first-page requests
+        use a governed direct external-data connector only after an independent
+        rollout gate; previously issued opaque direct cursors remain on that
+        connector. The response retains the same envelope; a historical cursor or non-20 pageSize remains on the
+        historical compatibility path. Callers must return cursors unchanged and
+        never move them between paths, queries or page sizes. Hub performs a
+        bounded detail check for note bodies at the 60-character provider preview
+        boundary and retains detail text only when it is strictly longer;
+        unresolved enrichment is explicit in response warnings. The caller never
+        selects a provider. public_opinion is a Hub-local stored
+        platform and is rejected here; it must use the province feed,
         /data/stored/search or /data/canonical/search. Telegram pagination follows the signed,
         query-bound cursor, PIT/keyset and sticky-mode rules documented by
         /data/telegram/search.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, unsupported_match_mode, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported]
+        "400": [invalid_request, invalid_platform, invalid_query, invalid_cursor, invalid_page_size, cursor_scope_mismatch, page_size_exceeded, unsupported_fields, unsupported_match_mode, invalid_result_type, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported]
         "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted]
-        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
+        "403": [platform_not_granted, test_key_not_supported]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "410": [search_cursor_expired]
-        "429": [quota_exceeded]
-        "502": [night_all_rejected, upstream_outcome_unknown]
-        "503": [stored_search_unavailable, search_cursor_unavailable]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded]
+        "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2365,6 +2405,16 @@ paths:
               schema: { type: string, format: uuid }
             idempotent-replay:
               schema: { type: string, enum: ["true", "false"] }
+            x-mx-insight-source-mode:
+              description: Present when Hub has delivery-path evidence.
+              schema: { type: string, enum: [live, stale, fresh_cache, stored_fallback, idempotent_replay] }
+            x-mx-insight-captured-at:
+              schema: { type: string, format: date-time }
+            Age:
+              schema: { type: integer, minimum: 0 }
+            Warning:
+              description: HTTP Warning 110 is present for stale or stored_fallback delivery.
+              schema: { type: string }
           content:
             application/json:
               schema:
@@ -2391,11 +2441,27 @@ paths:
       summary: Call one of the three Night-All legacy search operations.
       description: >-
         The Hub authenticates the consumer, enforces the platform grant and
-        policy, then checks the Hub-pinned, grant-filtered data.legacySearch
-        dispatch matrix returned by GET /data/capabilities. The selected platform
-        must appear in both supportedPlatforms and readyPlatforms; a
-        data.platforms entry alone, including telegram, does not grant a legacy
-        operation. The matrix is owned by the deployed Hub release and is not
+        policy, then selects the implementation without exposing provider
+        details. After an independent rollout gate, a compatible Xiaohongshu raw
+        first-page request uses the Hub-native direct connector only for exactly
+        one scalar keyword or query, effective page size 20, and no
+        fan-out/detail/comment workload controls; previously issued opaque direct
+        cursors remain on that connector. Explicit includeDetails=false/includeComments=false are no-op
+        defaults; disableAutoDetails=true only disables the automatic
+        preview-boundary detail check. True detail/comment flags,
+        maxEnrichItems, comment controls, params, explicit cache age,
+        concurrency, non-20 pages, plural queries, crawl and user-info remain on
+        the historical compatibility path. The direct projection keeps raw_info
+        and raw_data as JSON strings and uses the durable Hub UUID as both body
+        requestId and x-mx-insight-request-id. Night-All-owned live/fallback
+        bodies keep their application fields and correlation IDs unchanged.
+        The legacy x-mx-insight-source-mode header remains live or stale;
+        Hub-native cache and replay states map back to that vocabulary.
+        Historical dispatch checks the Hub-pinned, grant-filtered
+        data.legacySearch matrix returned by GET /data/capabilities. The selected
+        fallback platform must appear in both supportedPlatforms and
+        readyPlatforms; a data.platforms entry alone, including telegram, does
+        not grant that operation. The matrix is owned by the deployed Hub release and is not
         fetched from Night-All at request time. readyPlatforms means Hub permits
         dispatch under that pinned contract; it does not prove current Night-All
         handler, endpoint, provider, credential, or upstream health. A null or
@@ -2404,23 +2470,23 @@ paths:
         responses as exact last-good snapshots. A network or timeout ambiguity,
         an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP
         502/503/504 may return that exact snapshot. An unusable 2xx is
-        outcome-unknown because paid work may already have happened. The response
-        body retains Night-All data fields unchanged;
+        outcome-unknown because paid work may already have happened. On that
+        historical path, the response body retains Night-All data fields unchanged;
         provider, token, credential, endpoint, capability/moduleCode and timeout
         routing controls remain server-owned. Archive/fullArchive/allTweets,
         archiveLimit/totalCount, max*Pages, pageCount/chunkSize/budget/crawlDepth
         and equivalent cost-amplification controls are also rejected; they require
         a separately granted capability and server policy.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, invalid_platform, page_size_exceeded, work_budget_exceeded, unsupported_fields, business_id_mismatch, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported, night_all_rejected]
+        "400": [invalid_request, invalid_query, invalid_cursor, invalid_page_size, cursor_scope_mismatch, invalid_platform, page_size_exceeded, work_budget_exceeded, unsupported_fields, business_id_mismatch, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported, night_all_rejected]
         "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted]
+        "403": [platform_not_granted, test_key_not_supported]
         "404": [not_found, night_all_rejected]
-        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, night_all_rejected]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, night_all_rejected]
         "422": [night_all_rejected]
-        "429": [quota_exceeded, night_all_rejected]
-        "502": [night_all_rejected, upstream_outcome_unknown]
-        "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, night_all_rejected]
+        "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
       parameters:
         - name: operation
           in: path
@@ -2451,13 +2517,15 @@ paths:
       responses:
         "200":
           description: >-
-            Night-All legacy envelope, either live or the exact last-good
-            upstream application payload. The body is not masked by this route.
+            Legacy raw envelope. Eligible Xiaohongshu raw is a Hub-native
+            projection with unchanged raw_info/raw_data types; Night-All-owned
+            live and exact fallback application payloads remain unchanged.
           headers:
             x-mx-insight-request-id:
               description: Durable Hub request identifier for status lookup.
               schema: { type: string, format: uuid }
             x-mx-insight-source-mode:
+              description: Hub-native cache and replay states project to live; a stored fallback, or its replay, projects to stale.
               schema: { type: string, enum: [live, stale] }
             x-mx-insight-captured-at:
               schema: { type: string, format: date-time }
@@ -6454,19 +6522,21 @@ components:
       properties:
         platform: { type: string, pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$", description: One explicit platform; `all` (case-insensitive) and `*` are forbidden., example: xiaohongshu }
         query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
-        pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: Non-blank opaque cursor returned by the previous page; send it unchanged. Telegram cursors are signed and bound to the normalized request. }
+        pageSize: { type: integer, minimum: 1, maximum: 100, default: 20, description: Defaults to 20. Xiaohongshu uses the Hub-native connector only when this value is exactly 20. }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: "Non-blank opaque cursor returned by the previous page; send it unchanged with the same path, platform, query and pageSize." }
+        type: { type: string, enum: [fresh, stable], default: fresh }
     NightAllLegacyOperationAvailability:
       type: object
       additionalProperties: false
       required: [supportedPlatforms, readyPlatforms]
       description: >-
-        Hub-pinned, grant-filtered Night-All operation dispatch entry.
+        Hub-pinned, grant-filtered Night-All-owned operation dispatch entry.
         readyPlatforms is always a subset of supportedPlatforms and means the
-        deployed Hub contract permits dispatch. It is not populated by live
+        deployed Hub contract permits historical dispatch. It is not populated by live
         Night-All discovery and does not prove handler, endpoint, provider,
-        credential, or upstream health. A caller may dispatch only when its
-        platform appears in both arrays.
+        credential, or upstream health. A historical operation may dispatch only
+        when its platform appears in both arrays; a Hub-native contract advertised
+        under data.platforms is independent.
       properties:
         supportedPlatforms:
           type: array
@@ -6594,8 +6664,8 @@ components:
           additionalProperties: true
           required: [raw_info, raw_data, page, meta]
           properties:
-            raw_info: { type: string, contentMediaType: application/json, description: Night-All JSON-string array retained unchanged. }
-            raw_data: { type: string, contentMediaType: application/json, description: Night-All JSON-string array retained unchanged. }
+            raw_info: { type: string, contentMediaType: application/json, description: JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged. }
+            raw_data: { type: string, contentMediaType: application/json, description: JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged. }
             page: { type: object, additionalProperties: true }
             meta: { type: object, additionalProperties: true }
         requestId: { type: string }

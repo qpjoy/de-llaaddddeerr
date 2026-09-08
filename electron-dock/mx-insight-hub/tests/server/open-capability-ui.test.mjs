@@ -72,6 +72,29 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(components, /virtual_supermarket:\s*'虚拟超市'/)
 })
 
+test('scoped tenant navigation keeps self-service routes but hides authorization management', async () => {
+  const appSource = await readFile(
+    fileURLToPath(new URL('../../src/App.jsx', import.meta.url)),
+    'utf8',
+  )
+  const route = (path) => appSource.match(new RegExp(`\\{ path: '${path.replaceAll('/', '\\/')}',[^\\n]+\\}`, 'u'))?.[0] || ''
+
+  assert.match(appSource, /\(!route\.platformAdmin \|\| session\.platformAdmin\)/u)
+  assert.match(route('/platforms'), /platformAdmin: true/u)
+
+  for (const [path, capability] of [
+    ['/consumers', 'consumer.read'],
+    ['/api-keys', 'apikey.read'],
+    ['/plans', 'consumer.read'],
+    ['/usage', 'usage.read'],
+    ['/data-products/xiaohongshu-note', 'apikey.read'],
+  ]) {
+    const entry = route(path)
+    assert.ok(entry.includes(`capability: '${capability}'`), `${path} keeps ${capability}`)
+    assert.doesNotMatch(entry, /platformAdmin: true|adminTokenOnly: true/u)
+  }
+})
+
 test('a whole-block paste works in bash and zsh without exposing its key', async () => {
   const fixtureDir = await mkdtemp(join(tmpdir(), 'mx-tokenize-curl-'))
   const curlPath = join(fixtureDir, 'curl')

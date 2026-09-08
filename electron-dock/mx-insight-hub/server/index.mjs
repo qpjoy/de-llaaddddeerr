@@ -178,6 +178,7 @@ export async function createRuntime(config = loadConfig()) {
     platformStore: tikHubPlatformStore,
     adapter: tikHubAdapter,
     config: config.tikHub,
+    apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
   })
   const service = new HubService({
@@ -189,6 +190,11 @@ export async function createRuntime(config = loadConfig()) {
     segmenter,
     externalPlatformCapabilities: () => externalPlatformGateway.capabilities(),
     externalPostCapabilities: () => tikHubGateway.capabilities(),
+    externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
+    // New first pages cut over only after the verified TikHub adapter is
+    // active. Previously issued direct cursors still return through the
+    // gateway (cache/stored fallback or an explicit unavailable result).
+    externalSocialSearchEnabled: Boolean(tikHubAdapter) && config.tikHub.searchContractVerified,
     externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader({
       maxConcurrency: config.externalMedia.maxConcurrency,
       maxCacheBytes: config.externalMedia.cacheBytes,

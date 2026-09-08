@@ -1937,9 +1937,25 @@ printf 'ok - paid dispatch lease is preflighted without exposing the token\n'
 
 grep -q 'MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS.*900000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE.*90' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE.*120' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS.*20' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY.*2' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=' "$ROOT_DIR/scripts/manage.sh"
-printf 'ok - JustOne activation and unknown-outcome cooldown are wired through deployment config\n'
+grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-90}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-120}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS="${MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS:-20}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY="${MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY:-2}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q '^MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE=90$' "$ROOT_DIR/.env.example"
+grep -q '^MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE=120$' "$ROOT_DIR/.env.example"
+grep -q '^# MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0$' "$ROOT_DIR/.env.example"
+grep -q '^MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS=20$' "$ROOT_DIR/.env.example"
+grep -q '^MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY=2$' "$ROOT_DIR/.env.example"
+grep -q 'PostgreSQL token bucket shared across Hub Pods' "$ROOT_DIR/.env.example"
+printf 'ok - paid-provider activation, cooldown and shared RPM budgets are wired through deployment config\n'
 
 grep -q -- '--from-literal=MX_INSIGHT_PUBLIC_URL=' "$ROOT_DIR/scripts/manage.sh"
 grep -q 'MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150' "$ROOT_DIR/scripts/manage.sh"

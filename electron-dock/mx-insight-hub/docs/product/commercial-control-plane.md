@@ -1,248 +1,308 @@
-# 订阅、分组、Key、额度与商业控制面
+# 套餐、钱包、租户自助与商业控制面
 
-状态：分阶段实现。当前已实现 tenant/consumer、Launcher opaque-token 联邦登录、每把新 Key
-的 platform/capability entitlement snapshot、版本化 plan catalog、consumer plan assignment、
-月度套餐/突发/Key/consumer 最严边界的原子 quota、usage evidence，以及 `/plans` 控制台中的
-平台管理员 CAS 套餐分配。当前仍未实现客户自助换套餐/购买、版本化 customer price book、subscription 生命周期、
-credit ledger、invoice/payment、持久账单导出和外部 ToC 门户。
+状态：本轮代码已实现，尚未宣称部署或启用生产扣费。实现范围包括 provider-neutral
+计费 meter、不可变套餐与客户价目表、租户倍率、`disabled` / `shadow` / `enforced`
+三种计费模式、租户钱包与 append-only 流水、请求级价格快照、客户侧用量/金额视图，
+以及平台管理员的人工入账、灰度开关和未知冻结人工对账。
 
-## 1. 对象边界
+现有套餐版本没有客户价目表，继续保持不计费；仅当 consumer 被明确分配到带价目表的
+新套餐版本，且所在租户被明确切到 `shadow` 或 `enforced` 时，新计费链路才会介入。
+因此迁移和代码发布本身不会触发扣费、改变既有配额，或改变 Public Data API 合同。
+
+当前没有在线支付、自助购买、自动续费、invoice、支付回调或租户自行充值。充值入口是
+平台管理员的人工正向入账，要求幂等键并保留操作者与原因。租户成员可在受限控制台查看
+自己的最终费率、余额、流水和用量，但看不到供应商、采购价或内部倍率。
+
+## 1. 不把供应商当成客户分组
+
+“分组”不应同时承担权限、套餐、价格和 provider route。Hub 将这些维度拆为四条正交轴：
+
+| 维度 | 回答的问题 | 是否面向租户 |
+| --- | --- | --- |
+| Grant / entitlement | 这个 consumer、API Key 能调用哪些平台和能力 | 是 |
+| Plan version / quota | 月额度、窗口、突发 QPS、分页上限是什么 | 是 |
+| Customer price book / wallet | 每个 Hub 能力的最终合同价、余额和扣款是多少 | 是，只展示最终结果 |
+| Provider routing / procurement | 本次由 TikHub、JustOne 或兼容链路交付，采购成本与健康状态如何 | 否，仅平台管理员 |
+
+客户价格绑定稳定的 Hub 能力，而不是供应商名称。例如：
+
+| Meter key | 客户购买的能力 | 当前计费单位 |
+| --- | --- | --- |
+| `social.posts.search` | 社交内容搜索交付 | request |
+| `social.posts.resolve` | 单篇社交内容解析交付 | request |
+| `ecommerce.products.search` | 电商商品搜索交付 | request |
+
+因此租户不需要知道搜索由哪个上游完成。Hub 可以按健康度、QPS、成本和数据质量切换
+供应商，只要保持同一公开合同与 meter，客户套餐、API Key 和账单语义都无需变化。
+上游平台不是客户分组；需要区别客户价格时，使用套餐价目表和租户倍率。
+
+## 2. 当前对象与权威边界
 
 | 对象 | 含义 | 权威系统 |
 | --- | --- | --- |
-| Launcher account/organization | 人员登录、MFA、组织选择、全局 AppCenter scope | MX Launcher User Center |
-| Hub member/tenant membership | 人员在某 Hub tenant 内的产品角色 | Hub，绑定 Launcher principal |
-| Consumer | 调用数据 API 的业务应用/服务身份 | Hub |
-| Access group | 一组版本化 platform/capability/dataset/field entitlement | Hub |
-| Plan version | 价格、周期额度、并发、保留、SLA 和可选 group | Hub |
-| Subscription | tenant/consumer 在一段时间内订阅某个 plan version | Hub |
-| API key | consumer 的可轮换凭据，绑定环境和 entitlement snapshot | Hub |
-| Credit account/ledger | 预付、赠送、预占、结算、释放、退款和调整 | Hub |
-| Provider quota/cost | 物理上游 credential 的容量和实际采购成本；直连适配器由 Hub 记录，Night-All 兼容调用仍由 Night-All 提供来源证据 | Hub gateway / Night-All legacy |
+| Launcher account | 人员登录、MFA、组织和全局身份 | MX Launcher User Center |
+| Hub member / membership | 人员在某个 Hub tenant 内的角色与可见范围 | Hub，绑定 Launcher principal |
+| Tenant | 钱包、最终价格策略和人员边界 | Hub |
+| Consumer | 调用数据 API 的业务应用或服务身份 | Hub |
+| API Key | consumer 的可轮换凭据和 immutable entitlement snapshot | Hub |
+| Plan version | 不可变的套餐限额版本，可选择绑定一个客户价目表版本 | Hub |
+| Customer price book | provider-neutral meter 到客户基础售价的不可变映射 | Hub billing |
+| Tenant billing profile | 计费模式和租户价格倍率 | Hub billing |
+| Customer charge | 一次 Hub 请求在创建时固化的价格快照与结算状态 | Hub billing |
+| Credit account / ledger | 租户预付钱包与 append-only 余额变动事实 | Hub billing |
+| Provider call / cost evidence | 实际上游调用、endpoint、结果、采购成本估算与归档证据 | Hub external-platform gateway |
 
-外部用户只登录 Launcher；Hub 不保存第二套密码。外部程序只维护 Hub API key（未来可增加 OAuth client credential），不需要同时维护 Launcher 用户 API 和 Night-All key。
+外部人员仍使用 Launcher 登录，Hub 不保存第二套密码。外部程序只持有 Hub Public API
+Key，不需要持有 Night-All、TikHub 或 JustOne 的凭据。
 
-## 2. “分组”定义
+## 3. 套餐、价目表和租户倍率
 
-避免一个模糊 `group` 同时代表组织、角色、套餐和 provider channel。明确拆为：
+平台管理员通过一次发布操作创建新的 plan version 和 customer price-book version。发布后：
 
-- `access_group`：可使用哪些 platform/capability/dataset/field；
-- `plan`：额度、价格、并发、SLA、retention、export/agent 权限；
-- `tenant/team`：人员和业务归属；
-- `consumer`：实际调用应用；
-- `provider/channel`：只留在 Night-All，不暴露给客户。
+- plan version 和 price-book version 不原地改价；改价发布下一版本；
+- 已发布 price book 的 meter、单位、基础价、币种和默认倍率不可变；
+- consumer 仍通过带 `expectedRevision` 的 compare-and-swap 分配到具体 plan version；
+- 一次请求固化 plan、price book、price entry、meter、基础价、倍率、币种和最终报价；
+- 后续调价或修改租户倍率不回写历史 charge；
+- 旧 plan version 的 `customer_price_book_id` 为 `NULL`，这是明确的兼容不计费路径。
 
-Access group 每次发布生成不可变 `group_version`。订阅和 key 绑定具体 snapshot；“全部平台”在授权时展开为已批准模块列表，未来新增敏感平台不会自动进入旧订阅。
-
-## 3. 推荐模型
+金额使用最小货币单位的安全整数，不使用浮点数。倍率使用 parts-per-million：
 
 ```text
-hub_members
-external_identity_bindings
-tenant_memberships
-
-consumers
-access_groups
-access_group_versions
-access_group_entitlements
-
-plans
-plan_versions
-plan_limits
-price_books
-price_book_entries
-subscriptions
-subscription_entitlement_snapshots
-
-api_keys
-api_key_restrictions
-
-quota_buckets
-credit_accounts
-credit_ledger_entries
-usage_events
-usage_allocations
-invoices
-invoice_lines
-commercial_outbox
+最终单价（minor） = ceil(基础单价（minor） × multiplier_ppm / 1,000,000)
 ```
 
-关键约束：
+`1_000_000` 表示 1 倍；租户倍率为空时继承价目表默认倍率。租户接口和受限控制台只返回
+计算后的 `customerRates`，不返回基础价目表和实际倍率，避免把内部折扣策略变成公开契约。
 
-- plan/group 发布后不可原地改语义；变更创建新 version；
-- consumer 套餐分配以 `revision` 做 compare-and-swap；实际切换会记录 actor、前后版本和前后修订，
-  重复分配同一版本是 no-op，不刷新 `assignedAt`、额度周期或审计事件；
-- subscription 保存 plan/group/price-book snapshot，续费时才切版本；
-- API key 绑定一个 consumer、environment 和 subscription entitlement snapshot；
-- 金额/credit 使用定点整数和明确 currency/unit，不用 float；
-- ledger append-only，余额是 ledger projection；任何人工调整也有正反向流水和审批人；
-- usage event 有唯一 `meter_event_id`，重复投递不重复计费；
-- provider cost 与 customer price 分表，不向客户响应泄漏 provider/channel。
+本轮只支持按 request 计价。record、byte、job、Agent token、存储时长和阶梯价可以在
+后续增加为新的明确 billing unit，不能根据响应 `items.length` 或供应商 `providerCalls`
+临时推算客户价格。
 
-## 4. 角色与权限
+## 4. 三种计费模式
 
-Hub tenant 角色建议：
+租户 billing profile 由平台管理员控制，并使用 revision 做并发更新保护。
 
-| Role | 权限 |
-| --- | --- |
-| `owner` | tenant 生命周期、成员、商业配置、密钥和账单 |
-| `billing_admin` | plan/subscription/credit/invoice，不自动获得 raw 数据 |
-| `data_admin` | dataset/group/field policy、导入、质量和发布 |
-| `developer` | consumer/key、API 文档、测试环境和 usage |
-| `analyst` | 已授权 BI/保存查询/报告，无 key/账单管理 |
-| `viewer` | 只读 Dashboard/usage |
+| 模式 | 价格快照 | 钱包变化 | 对调用的影响 |
+| --- | --- | --- | --- |
+| `disabled` | 不创建 customer charge | 无 | 与历史行为一致 |
+| `shadow` | 有完整价格时创建报价；缺价时跳过 | 无 | 只观测，不因计费中断业务 |
+| `enforced` | 对带价目表的套餐必须找到已发布价格 | reserve / settle | 请求前余额门禁，余额不足返回 402；缺价返回 503 |
 
-Launcher 的全局 `insight.admin` 只允许进入 Hub；进入后还要检查 tenant membership。不得让 `mx-admin` 或 gateway admission 直接绕过 Hub tenant、field、credit 或审计策略。
+模式是租户级开关，套餐是 consumer 级绑定。因此同一租户可先让一个 canary consumer
+使用新套餐做影子计价，其他仍绑定旧套餐的 consumer 继续不计费。
 
-当前套餐分配是平台运维动作：仅 `platformAdmin` 可调用
-`PUT /internal/v1/admin/consumers/{consumerId}/plan`，body 必须恰好为
-`{"planVersionId":"<published-active-version-uuid>","expectedRevision":<current-positive-revision>}`。
-`assignedBy` 只从已认证 principal 取得，调用方不能提交；修订不匹配返回
-`409 plan_assignment_revision_conflict`，要求刷新后重新确认。
-`legacy-unmetered` 只用于保留迁移时已有绑定：同版本重放仍是 no-op，但不能新分配，服务端返回
-`409 plan_version_grandfather_only`，管理台也不提供分配按钮。
+## 5. 钱包与请求结算
 
-## 5. 订阅生命周期
+一个 tenant 当前只有一个币种固定的 credit account。第一次管理员人工入账创建账户，
+后续入账必须使用相同币种。账户显示：
+
+```text
+总余额 = available_minor + held_minor
+```
+
+`credit_ledger_entries` 是 append-only 事实，`credit_accounts` 中的余额是由流水在事务内维护
+的 projection；应用不能绕开流水直接修改余额。当前对外提供的是正向 `topup`，数据库模型
+同时为后续的 grant、refund 和 adjustment 留出受约束的流水类型，但本轮没有对应的租户
+自助或支付接口。
+
+一次 `enforced` 请求的状态流如下：
 
 ```mermaid
 stateDiagram-v2
-  [*] --> trial
-  trial --> active: activate/paid
-  active --> past_due: renewal failed
-  past_due --> active: recovered
-  active --> suspended: policy/admin
-  past_due --> suspended: grace expired
-  active --> canceled: cancel at period end
-  suspended --> active: approved restore
-  canceled --> [*]
+  [*] --> held: reserve request and funds
+  held --> captured: committed delivery
+  held --> released: safe failure / no delivery
+  held --> unknown: outcome or persistence ambiguous
+  unknown --> captured: reconciliation proves delivery
+  unknown --> released: reconciliation proves no delivery
 ```
 
-- `trial` 有明确 end time、额度和可用 group；
-- `past_due` 的数据读取/refresh 行为由 plan policy 决定，不能隐式继续产生上游费用；
-- suspension 立即阻止新 refresh/高成本任务，可按合规策略保留历史导出；
-- cancel 不删除账本、usage、dataset 或审计；数据 retention 走独立策略；
-- plan 升降级在周期边界或显式 proration transaction 生效，保存前后版本和审批证据。
+- `hold`：在任何付费上游 dispatch 前，从 available 转入 held；不足时整个 usage
+  reservation 事务失败，因此不会触达上游；
+- `capture`：Hub 成功提交客户交付后，从 held 完成扣款；
+- `release`：可证明没有完成交付时，把 held 退回 available；
+- `unknown`：结果无法证明时继续冻结，不自动免费重试，也不重复扣款；后续需要对账结论；
+- `shadow` charge 会记录报价和结算状态，但 `chargedMinor` 始终为 0，也没有钱包流水；
+- 一个 `usage_request_id` 最多一个 customer charge，hold/capture/release 各自都有唯一幂等边界。
 
-## 6. API Key 生命周期
+人工入账也要求 `Idempotency-Key`；同一租户重放相同入账不会重复增加余额。管理员必须填写
+金额、币种和原因，可选外部参考号。该能力不是支付系统：当前不验证支付订单，也不允许
+租户通过公开或自助接口为自己增发余额。
 
-发行流程：
+## 6. 客户侧计价与上游采购双账本
 
-1. 验证成员 tenant role 和 consumer/subscription 状态；
-2. 选择 `live` environment、expiry、IP/CIDR、allowed origin（若适用）；Test 仅保留为兼容元数据，
-   隔离门槛完成前不在管理台签发；
-3. 固化 entitlement snapshot 和最大 scope；
-4. 只显示一次 plaintext，PG 保存 HMAC digest、prefix、last four；
-5. audit 记录发行人、consumer、snapshot 和 reason，不保存 plaintext。
+Hub 同时维护两个相互独立的事实域：
 
-当前实现要求每把 key 都有明确到期时间：控制台和 API 默认 `180` 天，可在签发时通过
-`expiresInDays` 设置 `1–730` 天。到达 `expiresAt` 后认证立即失败，列表保留原始
-`status` 并以 `effectiveStatus=expired` 展示，不把过期误报成已撤销。升级前已存在且
-没有期限的 key 在迁移时获得新的 180 天窗口，避免发布瞬间中断现有调用；仍应按轮换
-流程逐步替换。过期和撤销都不会删除历史 usage 或审计证据。
+| 事实域 | 粒度 | 用途 | 可见范围 |
+| --- | --- | --- | --- |
+| 客户 charge + wallet ledger | 每个 Hub usage request | 报价、冻结、扣款、余额和租户对账 | 租户本身与平台管理员 |
+| Provider call + cost evidence | 每个实际上游 endpoint call | 采购消耗、供应商 QPS/成功率/成本和数据归档 | 仅平台管理员 |
 
-当前实现已经把授权分成两层：consumer grant/policy 是可随时收窄的上限；每把新 Key 在
-签发时保存所选 platform/capability 与当时额度 ceiling 的 immutable snapshot。一次请求必须
-同时通过 consumer 当前授权与 Key snapshot，且 plan、consumer policy、capability policy 和
-Key ceiling 取最严格值。consumer 撤权立即收窄所有 Key；之后新增授权或提高 ceiling 不会
-静默扩大旧 Key，必须签发明确选择新范围/上限的替代 Key。迁移前 Key 标记为
-`legacy_dynamic` 并暂时保留旧语义，运营应按 overlap 流程轮换为 snapshot Key。
+它们不是一一对应关系：一次客户请求可以完全由缓存交付而没有上游调用，也可以因为搜索
+自动补全而产生一个搜索调用和多个详情调用。客户侧仍只有一个稳定的 Hub charge；采购侧
+按每个实际 endpoint call 独立记录 `billed`、成本、币种、成功/失败/unknown 和归档证据。
 
-当前 `environment=test` 只是一项兼容元数据，尚未形成隔离沙箱，不能把 `mih_test_` 当作通用
-零费用凭据。管理台当前仅签发 Live Key。外部 ecommerce 另有 fail-closed 路由门禁：有授权的
-Test key 在 capabilities 中看到 `ecommerce.ready=false`，搜索与媒体读取均返回
-`403 test_key_not_supported`，且发生在 usage reservation、已提交结果/媒体读取和 provider dispatch
-之前。旧版遗留的 ambiguous Test 请求只保留原 body、原 `Idempotency-Key` 和指纹锁供运维核查；
-页面不验证原 secret、不发 capabilities/search/media，也不把它转换成 Live 请求。只有第 12 节
-隔离门槛全部满足后才能重新开放 Test 签发。
+“外部数据平台”页面展示采购侧的 TikHub / JustOne 等健康度、调用数和成本估算；“套餐与
+配额”“使用记录”展示客户侧最终费率、报价、已扣、冻结和按 meter 汇总。供应商单价当前
+来自经校验的人工配置，属于采购成本估算，不等同于供应商正式账单；customer charge 也
+是 Hub 预付消费事实，不应直接冒充会计收入确认或税务发票。
 
-轮换采用 overlap：先发第二把 key，验证流量，撤销旧 key。缓存鉴权必须有短 TTL 和主动失效。浏览器前端不长期保存 Admin token；公共 key 不进入 URL、日志、Kibana 或 Night-All。
+受限租户响应会移除 provider、采购成本、内部倍率、人工入账 actor 和 external reference。
+供应商切换不能改变客户 charge 快照，也不能在公开响应里暴露路由细节。
 
-## 7. 请求授权和额度顺序
+## 7. 小红书笔记画卷
+
+### 7.1 客户 meter
+
+| 对外能力 | Meter | 客户侧语义 |
+| --- | --- | --- |
+| `POST /api/v1/data/search` 的小红书 direct 请求，以及可无感直连的 `POST /api/v1/night-all/search/raw` 小红书子集 | `social.posts.search` | 每次新的 Hub 搜索交付计一个 request |
+| `POST /api/v1/data/post` 及兼容别名 `POST /api/v1/xiaohongshu/app/get_note_info` | `social.posts.resolve` | 每次新的单篇笔记交付计一个 request |
+| `GET /api/v1/data/posts/media` | 无新增笔记 meter | 只读取该 consumer 已提交结果中的媒体，不再次解析笔记 |
+
+`/api/v1/night-all/search/raw` 的公开路径、请求结构和 legacy response envelope 保持不变；
+符合 Hub-direct 子集的请求可在内部由 TikHub 完成。调用者不需要知道或选择供应商。
+
+### 7.2 Search 与自动详情
+
+一次 `social.posts.search` 客户请求在采购侧可能对应：
 
 ```text
-authenticate key
-  -> tenant/consumer/key/subscription state
-  -> route credential-class gate: external ecommerce accepts live only
-  -> entitlement snapshot: platform/capability/dataset/field
-  -> IP/environment/request constraints
-  -> concurrency + request/record/byte/job/agent-token quota
-  -> idempotency record
-  -> PG transaction reserve credits/quota
-  -> cache delivery or refresh/job
-  -> commit actual usage / release / unknown reconciliation
-  -> immutable usage + ledger + commercial outbox
+1 × TikHub search endpoint
++ 0..N × TikHub note-detail endpoint（60 字符预览边界修复/自动补全）
+= 1 × customer search charge
 ```
 
-余额不足时必须在触达 Night-All 前失败。Night-All provider quota 充足不代表客户有余额；客户有余额也不代表某 provider ready。
+搜索和详情 endpoint 使用各自的采购单价；不能再用一个全局 TikHub 单价估算混合调用。
+自动详情只影响采购调用数、数据完整性和成本，不额外生成客户 `social.posts.resolve`
+扣款。若产品未来要把 enrichment 单独售卖，必须发布新的明确 meter/price entry 和公开合同。
 
-## 8. Metering 与价格
+### 7.3 Cache、fallback 与 idempotency
 
-支持多维 meter，但每个 plan 只启用明确维度：
+- fresh cache 或允许的 stored fallback 成功交付，仍是一次新的 Hub 服务请求，按当前客户
+  search/resolve 合同计价；采购侧可以是 0 次上游调用；
+- 同一 consumer 使用同一 `Idempotency-Key` 和相同指纹重放，只返回原 usage request，
+  不创建第二个 customer charge，也不重复 dispatch 上游；
+- 同一幂等键对应不同请求指纹返回 conflict，不能借重放覆盖原价格或交付证据；
+- 并发相同上游查询通过分布式 lease / snapshot 合并时，上游只产生一次采购调用，但每个
+  不同的客户逻辑请求仍按各自交付和合同记录 usage/charge；
+- 可证明的失败释放冻结；已提交交付 capture；结果或持久化状态不确定时保留 hold 并进入
+  unknown，不换新幂等键自动重试；
+- 数据缓存、customer billing 和 provider procurement 是三个独立域，不能用“命中缓存”
+  反推免费，也不能用“发生上游调用”反推客户应付金额。
 
-- request、record、response byte、export byte；
-- refresh job、platform fan-out、live provider operation；
-- stored search/cache delivery；
-- Agent model token、tool call、wall time；
-- 人工报告/高成本 enrichment。
+## 8. 配额、QPS 与稳定性
 
-同一 refresh 被多个请求 singleflight 合并时：
+计费不替代现有授权和限流。请求顺序保持为：
 
-- Night-All provider cost event 只出现一次；
-- 每个客户 delivery usage 独立；
-- 是否对 cache hit、stale、live、failed/partial 计价由 price-book entry 明确；
-- 计费绝不从当前 `providerCalls`、HTTP 状态或 `items.length` 临时猜测；
-- 未知 upstream outcome 保留 reservation，进入 reconciliation，不自动免费重试。
+```text
+authenticate API key
+  -> tenant / consumer / key state
+  -> platform + capability entitlement snapshot
+  -> environment and request constraints
+  -> plan / consumer / capability / key quota (strictest wins)
+  -> idempotency and usage reservation
+  -> customer price snapshot + wallet hold in the same PG transaction
+  -> cache delivery or provider dispatch
+  -> usage commit / release / unknown
+  -> customer settlement + provider evidence
+```
 
-对 replay/cache delivery 引入客户计价前，每条不可变 delivery evidence 必须保存实际调用的
-API key ID，以及 consumer、subscription、entitlement 和 price-book version snapshot；或者
-合同必须明确只按 consumer 计价并在每次 delivery 固化该 consumer 的订阅快照。当前
-`usage_requests.api_key_id` 主要保留原始逻辑请求的 key，不能单独证明轮换后由哪把 key 发起了
-一次 replay，因此现阶段不得据此生成 replay 客户扣费。
+稳定性约束：
 
-## 9. 管理后台与 Launcher 集成
+- 余额不足或 `enforced` 缺价在上游之前 fail closed，避免 Hub 为无余额请求垫付采购费；
+- `shadow` 缺价不阻塞流量，用于上线前找出 meter 覆盖缺口；
+- 月度额度、窗口限额、burst RPS、分页上限、API Key ceiling 和 consumer policy 继续取最严值；
+- TikHub / JustOne 的 provider rate limit、并发门禁、circuit breaker、分布式 dispatch lease、
+  fresh/stale cache 与 unknown 防重放继续独立工作；
+- 客户 wallet 锁和 provider QPS 是不同资源，不能用充值绕过速率限制；
+- price book、charge snapshot、usage、ledger 和 provider-call evidence 都用稳定 ID 关联，
+  可从不可变事实复算，而不是依赖易漂移的页面聚合值。
 
-Hub Admin 提供：
+## 9. 租户登录与控制台可见性
 
-- tenant/member/identity binding；
-- consumer、key、rotation/revoke；
-- access group/version、dataset/field grant；
-- plan/version、subscription、quota、credit、coupon/recharge（如需要）；
-- usage、ledger、invoice/export；
-- platform/capability readiness 和 refresh/cache evidence；
-- audit、approval 和 reconciliation。
+本轮复用现有 Launcher opaque-token 联邦登录和 Hub-local tenant membership。Hub 通过
+Launcher introspection 识别人，再以 Hub membership 决定 tenant scope；没有新建密码库、
+独立 cookie、第二个 OIDC client 或新的登录 listener。
 
-Launcher AppCenter 只展示入口和 offline-safe 摘要。当前 SSO 把短期 Launcher opaque bearer
-传到 Hub Admin，由 Hub 调用 Launcher introspection 并绑定 Hub-local tenant membership；
-Launcher Server 的 service admin token 不发送到浏览器。外部客户可复用同一身份协议，但
-必须使用独立 audience/client、Hub tenant role 和入口，不能复用 MX-H2I 项目角色或会话表。
-当前管理台已支持租户委派管理，独立 ToC 自助门户及自助订阅/账单尚未实现。
+受限租户成员按角色 capability 看到必要模块：
 
-## 10. 对外接口分面
+- 调用者：查看自己的 consumer；有 `consumer.write` 时可创建；
+- API Keys：有 `apikey.read` 时查看；有 `apikey.write` 时签发、轮换或撤销；
+- 套餐与配额：查看当前套餐、最终接口费率、余额和自己的钱包流水；
+- 使用记录：查看自己的请求、报价、已扣、冻结、影子报价和按 meter 汇总；
+- 小红书笔记画卷：有 `apikey.read` 时可展示并使用已授权 Key 验证数据产品；
+- 开放能力、外部数据平台和全平台采购成本：仅平台管理员可见。
 
-- Public data API：一把 Hub Public API key、稳定 schema、consumer 级产品授权和 usage；
-- Customer self-service API：成员 token，只操作自己 tenant 的 consumer/key/subscription/usage；
-- Internal Admin API：Hub operator，高风险动作需要审批/audit；
-- Service integration API：Launcher/Night-All workload identity，精确 method/scope；
-- Billing webhook：签名、timestamp、nonce、重放保护和 idempotency。
+当前“选择展示”由服务端返回的 membership capabilities 和路由权限驱动，不依赖前端本地
+猜角色。它还不是可由租户购买/勾选产品的 storefront；产品订购、自助换套餐和审批流属于
+后续 subscription 生命周期。
 
-public/admin listener 继续物理分离。任何 public wildcard route 都不能访问 Admin、invoice mutation、provider、Credential、Kibana 或 raw artifact。
+本轮没有修改 MX-H2I 的用户登录、Domestic/Internal 网络面、DNS、WireGuard 或 Launcher
+插件。Hub 只是消费既有 Launcher 身份，并在自身 Admin API 与控制台内增加 tenant scope；
+Hub 计费不可用不应改变 MX-H2I 的登录或用户联网行为。
 
-## 11. 最小交付顺序
+## 10. 管理与租户 API 边界
 
-1. **已完成本阶段**：key entitlement snapshot 与 consumer 当前授权取交集；access-group 版本化仍待后续抽象。
-2. **部分完成**：版本化 plan catalog、默认 assignment、平台管理员 CAS assignment、月度套餐/突发/Key/consumer quota 已有；subscription 状态和客户自助变更尚未实现。`launch-1m` 的套餐层只设 1,000,000 次/月、100 RPS 和最大分页 100；具体平台与每把 Key 的滑动窗口继续独立生效，避免套餐小时窗口让月额度理论不可达。
-3. append-only credit ledger、reserve/commit/release/refund 和 reconciliation。
-4. Launcher JWKS identity binding、tenant roles 和 self-service UI。
-5. price book、invoice line/export；需要在线支付时再接支付 provider。
-6. coupon/recharge/reseller/多币种等商业能力按真实销售流程增加，不先复制 Sub2API 所有页面。
+本轮商业控制面的内部接口为：
 
-## 12. 上线门槛
+| 接口 | 权限 | 语义 |
+| --- | --- | --- |
+| `POST /internal/v1/admin/plans` | platform admin | 发布不可变套餐和客户价目表版本 |
+| `PUT /internal/v1/admin/consumers/{id}/plan` | platform admin | CAS 分配具体套餐版本 |
+| `PUT /internal/v1/admin/tenants/{id}/billing/profile` | platform admin | CAS 更新 disabled/shadow/enforced 和倍率 |
+| `POST /internal/v1/admin/tenants/{id}/billing/credits` | platform admin | 幂等人工正向入账 |
+| `GET /internal/v1/admin/tenants/{id}/billing` | tenant `usage.read` | 自己的余额、模式和流水；受限视图移除内部字段 |
+| `GET /internal/v1/admin/plans?consumerId=...` | tenant `consumer.read` | 自己当前套餐和最终 customer rates |
+| `POST /internal/v1/admin/usage/{id}/customer-charge/reconciliation` | platform admin | 用独立幂等键、操作者和证据事由对 unknown hold 做 capture/release；交付状态仍保持 unknown |
+| `GET /internal/v1/admin/usage` | tenant `usage.read` | 自己的 usage 与客户计费汇总 |
 
-- 同一 idempotency/meter event 重放不会重复扣费；
-- reserve、usage 和 ledger 在并发下守恒，余额永不由可变 aggregate 直接改写；
-- plan/group 版本更新不扩大既有 key 权限；
-- key revoke、member suspend、subscription suspend 在定义的传播 SLO 内生效；
-- 开放 Test 签发前，test/live 数据、Key、配额、账本和 provider dispatch 已隔离；
-- Launcher 登录不能绕过 Hub tenant role，Hub outage 不影响 Launcher/MX-H2I；
-- 缓存命中、stale 回退、partial/unknown 和合并 refresh 的计费均有合同测试；
-- 财务/usage/audit 导出可从 immutable evidence 复算。
+所有 mutation 都留在 internal admin listener；Public Data API 不提供充值、改价、换套餐或
+provider credential 能力。在线支付落地前不得把人工 `topup` 接口暴露给租户，也不得仅凭
+浏览器成功页生成余额。
+
+## 11. 兼容上线顺序
+
+建议按 tenant + canary consumer 灰度，不一次性启用全量强制扣费：
+
+1. 先备份并执行数据库迁移，确认历史 plan version 的 price book 仍为 `NULL`；此时无扣费变化。
+2. 发布包含新代码的 Hub，但所有未建 profile 的租户等价于 `disabled`；验证登录、现有 API、
+   QPS、cache、unknown 和 MX-H2I 独立健康。
+3. 发布一个带 provider-neutral meter 的新套餐版本，只给 canary consumer 做 CAS 分配，
+   把其 tenant 切到 `shadow`。
+4. 至少观察一个完整业务高峰：按 meter 比较客户报价、cache delivery、TikHub/JustOne
+   endpoint calls、采购成本、P95 延迟、429、失败率和 unknown hold 预期。
+5. 修齐 price entries 和合同费率后，由平台管理员人工入账，再把该 tenant CAS 切到
+   `enforced`；用小额余额验证 402 确实发生在 provider dispatch 前。
+6. 逐 tenant / consumer 扩大；供应商切换只改内部 routing，不改公开 meter、历史 charge
+   或客户响应。出现异常时先退回 `shadow`，无需回滚 Launcher 或 MX-H2I。
+
+任何一步都不把旧套餐原地加价。若需要给现有客户收费，必须发布新版本、明确分配并完成
+影子观测和充值，不能仅通过数据库迁移静默启用。
+
+## 12. 本轮未实现与后续边界
+
+- 租户在线充值、支付 provider、签名 webhook、退款 API；
+- subscription 的 trial / active / past_due / suspended / canceled 生命周期；
+- 自助购买、换套餐、proration、coupon、reseller 和多钱包/多币种；
+- invoice、税务、持久账单导出与会计收入确认；
+- unknown charge 的双人审批、自动证据关联和批量 reconciliation；当前已有管理员单笔审计化处理界面；
+- 独立外部客户门户、独立 OIDC audience/client 和独立入口；
+- record/byte/job/token 等非 request 计费单位。
+
+这些能力应在真实销售、支付、税务和租户隔离需求确定后增量实现，不复制 Sub2API 的全部
+页面。优先保持公开 API 稳定、provider 可替换、账本可复算和 MX-H2I 登录/联网零影响。
+
+## 13. 上线验收门槛
+
+- 同一 idempotency/usage request 重放不会重复 customer charge、钱包流水或 provider dispatch；
+- 并发 reserve、capture、release 后 `available + held` 与 append-only ledger 守恒；
+- `enforced` 余额不足返回 402，缺 price entry 返回 503，且两者均未触发付费上游调用；
+- `shadow` 不改变余额、不阻断无价格流量，统计可按 tenant/consumer/API Key/meter 复核；
+- XHS search 的一个客户 charge 可关联 1+N provider calls，detail endpoint 成本没有漏算；
+- fresh cache、stored fallback、idempotent replay、failed、partial 和 unknown 均有合同测试；
+- 租户看不到 provider、采购成本、内部倍率、credential、入账 actor 或外部参考号；
+- 旧 plan、旧 API Key 和原接口 response contract 在未显式迁移时保持原行为；
+- Launcher membership 撤销能收窄 Hub 页面和 API，Hub 故障不影响 MX-H2I 登录或联网；
+- 客户 charge、钱包流水、usage 和 provider evidence 能从不可变记录独立复算。

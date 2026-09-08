@@ -18,7 +18,10 @@ const MAX_TEXT_LENGTH = 50_000
 const MAX_TAGS = 100
 const MAX_TAG_LENGTH = 160
 const MAX_MEDIA = 20
-const SENSITIVE_FIELD = /(?:authorization|api[-_]?key|xsec[-_]?token|access[-_]?token|refresh[-_]?token|token|bearer|cookie|credential|password|secret|signature)/iu
+const PRIVATE_FIELD = /^(?:access[_-]?token|api[_-]?key|auth|auth[_-]?key|authorization|bearer|client[_-]?secret|cookie|credential|credentials|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)$/iu
+const PRIVATE_ASSIGNMENT = /\b(access[_-]?token|api[_-]?key|auth(?:[_-]?key)?|authorization|bearer|client[_-]?secret|cookie|credential(?:s)?|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)\s*[:=]\s*([^&;,\r\n]+)/giu
+const PRIVATE_JSON_ASSIGNMENT = /"(access[_-]?token|api[_-]?key|auth(?:[_-]?key)?|authorization|bearer|client[_-]?secret|cookie|credential(?:s)?|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)"\s*:\s*"(?:\\.|[^"\\])*"/giu
+const PRIVATE_ESCAPED_JSON_ASSIGNMENT = /\\"(access[_-]?token|api[_-]?key|auth(?:[_-]?key)?|authorization|bearer|client[_-]?secret|cookie|credential(?:s)?|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)\\"\s*:\s*\\"(?:\\\\.|[^"\\])*\\"/giu
 
 export class TikHubXiaohongshuContractError extends Error {
   constructor(code, message) {
@@ -36,9 +39,54 @@ function string(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
-function boundedString(value, maximum) {
+function boundedCodePoints(value, maximum) {
   const normalized = string(value)
-  return normalized == null ? null : normalized.slice(0, maximum)
+  if (normalized == null) return { value: null, limited: false }
+
+  const points = []
+  let limited = false
+  for (const point of normalized) {
+    if (points.length === maximum) {
+      limited = true
+      break
+    }
+    const codePoint = point.codePointAt(0)
+    // JSON permits escaped unpaired surrogates, but they are not Unicode
+    // scalar values. Replace any provider-supplied lone surrogate while also
+    // ensuring the length boundary can never split a valid surrogate pair.
+    points.push(codePoint >= 0xD800 && codePoint <= 0xDFFF ? '\uFFFD' : point)
+  }
+  return { value: points.join(''), limited }
+}
+
+function boundedString(value, maximum) {
+  return boundedCodePoints(value, maximum).value
+}
+
+function privateField(value) {
+  const text = String(value)
+  if (PRIVATE_FIELD.test(text)) return true
+  const compact = text.replace(/[^a-z0-9]/giu, '').toLowerCase()
+  return /(?:accesskey|accesstoken|apikey|authkey|authorization|bearer|cookie|credential|jwt|password|passwd|privatekey|refreshtoken|secret|sessionid|sessionkey|sessiontoken|setcookie|signature|ticket|token|xsectoken)$/u.test(compact)
+}
+
+function redactTikHubString(value) {
+  let result = value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]')
+  result = result.replace(PRIVATE_ESCAPED_JSON_ASSIGNMENT, '\\"$1\\":\\"[REDACTED]\\"')
+  result = result.replace(PRIVATE_JSON_ASSIGNMENT, '"$1":"[REDACTED]"')
+  result = result.replace(PRIVATE_ASSIGNMENT, '$1=[REDACTED]')
+  try {
+    const url = new URL(result)
+    url.username = ''
+    url.password = ''
+    url.hash = ''
+    for (const key of [...url.searchParams.keys()]) {
+      if (privateField(key)) url.searchParams.set(key, '[REDACTED]')
+    }
+    return url.toString()
+  } catch {
+    return result
+  }
 }
 
 function number(value) {
@@ -240,7 +288,7 @@ function mediaOf(note) {
     .map((url) => ({ type: 'image', url }))
 }
 
-export function normalizeTikHubXiaohongshuNote(payload, { capturedAt = new Date() } = {}) {
+export function normalizeTikHubXiaohongshuNoteResult(payload, { capturedAt = new Date() } = {}) {
   const note = noteCandidate(payload)
   if (!note) return null
   const user = note.user && typeof note.user === 'object'
@@ -254,13 +302,14 @@ export function normalizeTikHubXiaohongshuNote(payload, { capturedAt = new Date(
   const title = boundedString(note.title, MAX_TITLE_LENGTH)
     || boundedString(note.display_title, MAX_TITLE_LENGTH)
     || boundedString(note.displayTitle, MAX_TITLE_LENGTH)
-  const text = boundedString(note.desc, MAX_TEXT_LENGTH)
-    || boundedString(note.description, MAX_TEXT_LENGTH)
-    || boundedString(note.content, MAX_TEXT_LENGTH)
-    || title
+  const body = boundedCodePoints(
+    string(note.desc) || string(note.description) || string(note.content),
+    MAX_TEXT_LENGTH,
+  )
+  const text = body.value || title
   const url = `https://www.xiaohongshu.com/explore/${externalId}`
   const collectedAt = new Date(capturedAt).toISOString()
-  return {
+  const item = {
     id: `${XIAOHONGSHU_PLATFORM}:${externalId}`,
     externalId,
     platform: XIAOHONGSHU_PLATFORM,
@@ -284,6 +333,11 @@ export function normalizeTikHubXiaohongshuNote(payload, { capturedAt = new Date(
     publishedAt: timestamp(note.timestamp ?? note.time ?? note.create_time ?? note.createTime),
     collectedAt,
   }
+  return { item, safetyLimited: body.limited }
+}
+
+export function normalizeTikHubXiaohongshuNote(payload, options) {
+  return normalizeTikHubXiaohongshuNoteResult(payload, options)?.item ?? null
 }
 
 export function sha256Json(value) {
@@ -301,20 +355,12 @@ export function redactTikHubEnvelope(payload) {
   if (Array.isArray(payload)) return payload.map(redactTikHubEnvelope)
   if (typeof payload === 'string') {
     if (/^\s*bearer\s+/iu.test(payload)) return '[REDACTED]'
-    try {
-      const url = new URL(payload)
-      for (const key of [...url.searchParams.keys()]) {
-        if (SENSITIVE_FIELD.test(key)) url.searchParams.set(key, '[REDACTED]')
-      }
-      return url.toString()
-    } catch {
-      return payload
-    }
+    return redactTikHubString(payload)
   }
   if (!payload || typeof payload !== 'object') return payload
   const redacted = {}
   for (const [key, value] of Object.entries(payload)) {
-    if (key === 'cache_url' || key === 'params' || SENSITIVE_FIELD.test(key)) continue
+    if (key === 'cache_url' || key === 'params' || privateField(key)) continue
     redacted[key] = redactTikHubEnvelope(value)
   }
   return redacted

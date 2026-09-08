@@ -17,7 +17,7 @@ import { productMediaLoader } from './product-media-loader.js'
 const DELIVERY_OPTIONS = [
   { value: 'cache_first', label: '智能交付 · 缓存优先' },
   { value: 'cache_only', label: '只读 Hub 存量' },
-  { value: 'refresh', label: '重新采集 · 可能产生上游成本' },
+  { value: 'refresh', label: '重新采集 · 实时交付' },
 ]
 const PENDING_REQUEST_KEY = 'mx-insight-hub.xiaohongshu-note.pending.v1'
 const AMBIGUOUS_CODES = new Set([
@@ -206,7 +206,7 @@ export function XiaohongshuNotePage({ notify }) {
             if (recoveredItem) {
               setHistory((current) => [{ item: recoveredItem, evidence: recovered.evidence }, ...current.filter((entry) => entry.item.id !== recoveredItem.id)].slice(0, 20))
             }
-            notify?.('已安全恢复上一次请求结果，本次没有重复调用上游', 'success')
+            notify?.('已安全恢复上一次请求结果，本次没有重复计费或重新采集', 'success')
             return
           }
           if (status?.status === 'reserved') {
@@ -259,8 +259,9 @@ export function XiaohongshuNotePage({ notify }) {
       <PageHeading
         eyebrow="DATA PRODUCT / XIAOHONGSHU NOTE"
         title="小红书笔记画卷"
-        description="输入官方笔记链接，查看正文、作者、互动量与标签；API Key 仅保存在当前页面内存。"
+        description="输入官方笔记链接，查看完整正文、作者、互动量与标签；API Key 仅保存在当前页面内存。"
       >
+        <a className="qp-button qp-button--outline" href="#/plans">查看合同费率</a>
         <a className="qp-button qp-button--outline" href={publicDocsHref()} target="_blank" rel="noreferrer">查看开放 API</a>
       </PageHeading>
       <div className="mih-xhs-workbench">
@@ -272,7 +273,7 @@ export function XiaohongshuNotePage({ notify }) {
           <Field label="笔记链接">
             <div className="mih-xhs-input"><LinkSimple size={18} /><input className="qp-input" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.xiaohongshu.com/explore/…" maxLength={2048} required /></div>
           </Field>
-          <Field label="交付策略">
+          <Field label="交付策略" hint="成功展开按 1 次 social.posts.resolve 计量；缓存交付仍是一笔 Hub 服务，幂等恢复不会重复计费。">
             <select className="qp-input" value={deliveryMode} onChange={(event) => setDeliveryMode(event.target.value)}>
               {DELIVERY_OPTIONS.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}
             </select>

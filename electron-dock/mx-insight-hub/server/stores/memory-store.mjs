@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { quotedMinor, usageMeterKey } from '../billing/contracts.mjs'
 import {
   CANONICAL_CONTEXT_DATASETS,
   canonicalEventTimeCursor,
@@ -378,6 +379,11 @@ export class MemoryStore {
     }]
     this.consumerPlans = new Map()
     this.consumerPlanAssignmentEvents = []
+    this.billingProfiles = new Map()
+    this.creditAccounts = new Map()
+    this.creditLedgerEntries = []
+    this.customerCharges = new Map()
+    this.creditAdjustmentKeys = new Map()
     this.requests = new Map()
     this.requestsByScope = new Map()
     this.connectorCalls = new Map()
@@ -472,6 +478,7 @@ export class MemoryStore {
     let reaped = 0
     for (const record of this.requests.values()) {
       if (record.status === 'reserved' && record.leaseExpiresAt && new Date(record.leaseExpiresAt) <= now) {
+        this.#settleCustomerCharge(record, 'unknown')
         Object.assign(record, {
           status: 'unknown',
           errorCode: 'reservation_lease_expired',
@@ -749,7 +756,212 @@ export class MemoryStore {
   }
 
   async listPlans() {
-    return clone(this.plans)
+    const latest = new Map()
+    for (const plan of this.plans) {
+      const current = latest.get(plan.key)
+      if (!current || plan.version > current.version) latest.set(plan.key, plan)
+    }
+    return clone([...latest.values()].sort((left, right) => (
+      left.name.localeCompare(right.name) || left.key.localeCompare(right.key)
+    )))
+  }
+
+  async publishPlanVersion({ key, name, limits, priceBook, publishedBy }) {
+    const existingVersions = this.plans.filter((candidate) => candidate.key === key)
+    const existingName = existingVersions[0]?.name
+    if (existingName && existingName !== name) {
+      throw new AppError(409, 'plan_name_conflict', 'An existing plan key cannot be rebound to another name')
+    }
+    const version = Math.max(0, ...existingVersions.map((candidate) => candidate.version)) + 1
+    const bookVersion = Math.max(
+      0,
+      ...this.plans
+        .filter((candidate) => candidate.priceBook?.key === priceBook.key)
+        .map((candidate) => Number(candidate.priceBook.version || 0)),
+    ) + 1
+    const publishedAt = nowIso()
+    const record = {
+      id: existingVersions[0]?.id || randomUUID(),
+      key,
+      name: existingName || name,
+      status: 'active',
+      versionId: randomUUID(),
+      version,
+      versionStatus: 'published',
+      limits: clone(limits),
+      pricing: {
+        currency: priceBook.currency,
+        mode: 'prepaid_wallet',
+        defaultMultiplierPpm: priceBook.defaultMultiplierPpm,
+        rateCount: priceBook.entries.length,
+      },
+      priceBook: {
+        id: randomUUID(),
+        key: priceBook.key,
+        version: bookVersion,
+        currency: priceBook.currency,
+        defaultMultiplierPpm: priceBook.defaultMultiplierPpm,
+        entries: clone(priceBook.entries),
+        publishedAt,
+        publishedBy,
+      },
+      publishedAt,
+    }
+    this.plans.push(record)
+    return clone(record)
+  }
+
+  async getTenantBilling(tenantId, { ledgerLimit = 50 } = {}) {
+    if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+    const profile = this.billingProfiles.get(tenantId) || {
+      tenantId,
+      mode: 'disabled',
+      multiplierPpm: null,
+      revision: 0,
+      updatedBy: null,
+      updatedAt: null,
+    }
+    const account = this.creditAccounts.get(tenantId) || null
+    const ledger = this.creditLedgerEntries
+      .filter((entry) => entry.tenantId === tenantId)
+      .sort((left, right) => (
+        right.accountRevision - left.accountRevision
+        || right.id.localeCompare(left.id)
+      ))
+      .slice(0, ledgerLimit)
+    return {
+      profile: clone(profile),
+      account: account ? {
+        ...clone(account),
+        balanceMinor: account.availableMinor + account.heldMinor,
+      } : null,
+      ledger: clone(ledger),
+    }
+  }
+
+  async replaceTenantBillingProfile({ tenantId, mode, multiplierPpm, expectedRevision, updatedBy }) {
+    if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+    const current = this.billingProfiles.get(tenantId) || null
+    const revision = current?.revision || 0
+    if (expectedRevision != null && expectedRevision !== revision) {
+      throw new AppError(409, 'billing_profile_revision_conflict', 'Billing profile changed; reload before saving', {
+        expectedRevision,
+        currentRevision: revision,
+      })
+    }
+    const updatedAt = nowIso()
+    const next = {
+      tenantId,
+      mode,
+      multiplierPpm,
+      revision: revision + 1,
+      updatedBy,
+      updatedAt,
+    }
+    this.billingProfiles.set(tenantId, next)
+    return clone(next)
+  }
+
+  async addTenantCredit({ tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor }) {
+    if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+    const scope = `${tenantId}:${idempotencyKey}`
+    const existingId = this.creditAdjustmentKeys.get(scope)
+    if (existingId) {
+      const existing = this.creditLedgerEntries.find((entry) => entry.id === existingId)
+      if (
+        existing.amountMinor !== amountMinor
+        || existing.currency !== currency
+        || existing.reason !== reason
+        || existing.externalReference !== externalReference
+      ) throw new AppError(409, 'credit_idempotency_conflict', 'Idempotency key was used for another credit adjustment')
+      return clone(existing)
+    }
+    let account = this.creditAccounts.get(tenantId)
+    if (account && account.currency !== currency) {
+      throw new AppError(409, 'wallet_currency_conflict', 'Tenant wallet currency cannot be changed')
+    }
+    const createdAt = nowIso()
+    if (!account) {
+      account = {
+        id: randomUUID(), tenantId, currency, availableMinor: 0, heldMinor: 0,
+        status: 'active', revision: 0, updatedAt: createdAt,
+      }
+      this.creditAccounts.set(tenantId, account)
+    }
+    account.availableMinor += amountMinor
+    account.revision += 1
+    account.updatedAt = createdAt
+    const entry = {
+      id: randomUUID(), accountId: account.id, tenantId, chargeId: null,
+      usageRequestId: null, kind: 'topup', amountMinor,
+      availableDeltaMinor: amountMinor, heldDeltaMinor: 0,
+      availableAfterMinor: account.availableMinor, heldAfterMinor: account.heldMinor,
+      accountRevision: account.revision,
+      currency, idempotencyKey, externalReference, actor, reason, createdAt,
+    }
+    this.creditLedgerEntries.push(entry)
+    this.creditAdjustmentKeys.set(scope, entry.id)
+    return clone(entry)
+  }
+
+  async reconcileUnknownCustomerCharge({
+    usageRequestId, disposition, idempotencyKey, actor, reason,
+  }) {
+    const charge = this.customerCharges.get(usageRequestId)
+    if (!charge) throw new AppError(404, 'customer_charge_not_found', 'Customer charge not found')
+
+    const normalizedActor = actor.trim()
+    const normalizedReason = reason.trim()
+    const expectedStatus = disposition === 'capture' ? 'captured' : 'released'
+    const terminalEntry = this.creditLedgerEntries.find((entry) => (
+      entry.chargeId === charge.id && ['capture', 'release'].includes(entry.kind)
+    ))
+    if (charge.status === 'captured' || charge.status === 'released') {
+      if (
+        charge.status === expectedStatus
+        && terminalEntry?.kind === disposition
+        && terminalEntry.idempotencyKey === idempotencyKey
+        && terminalEntry.actor === normalizedActor
+        && terminalEntry.reason === normalizedReason
+      ) return clone(charge)
+      throw new AppError(
+        409,
+        'reconciliation_idempotency_conflict',
+        'Customer charge was already reconciled with different semantics',
+      )
+    }
+
+    const request = this.requests.get(usageRequestId)
+    if (
+      charge.status !== 'unknown'
+      || charge.enforcementMode !== 'enforced'
+      || charge.quotedMinor <= 0
+      || !charge.accountId
+      || request?.status !== 'unknown'
+      || terminalEntry
+    ) {
+      throw new AppError(
+        409,
+        'customer_charge_not_reconcilable',
+        'Only a positive enforced hold with unknown delivery may be reconciled',
+      )
+    }
+    if (this.creditLedgerEntries.some((entry) => (
+      entry.tenantId === charge.tenantId && entry.idempotencyKey === idempotencyKey
+    ))) {
+      throw new AppError(
+        409,
+        'reconciliation_idempotency_conflict',
+        'Idempotency-Key already belongs to another ledger movement',
+      )
+    }
+
+    this.#settleCustomerCharge(request, expectedStatus, {
+      idempotencyKey,
+      actor: normalizedActor,
+      reason: normalizedReason,
+    })
+    return clone(charge)
   }
 
   async getConsumerPlan(consumerId) {
@@ -936,6 +1148,130 @@ export class MemoryStore {
     return clone(record?.consumerId === consumerId ? record : null)
   }
 
+  #reserveCustomerCharge(record) {
+    const assignment = this.consumerPlans.get(record.consumerId)
+    const plan = this.plans.find((candidate) => candidate.versionId === assignment?.versionId)
+    const priceBook = plan?.priceBook
+    const profile = this.billingProfiles.get(record.tenantId)
+    if (!priceBook || !profile || profile.mode === 'disabled') return null
+
+    const entry = priceBook.entries.find((candidate) => candidate.meterKey === record.billingMeterKey)
+    if (!entry) {
+      if (profile.mode === 'enforced') {
+        throw new AppError(503, 'customer_price_unavailable', 'The assigned plan has no published price for this operation', {
+          meterKey: record.billingMeterKey,
+          plan: plan.key,
+          version: plan.version,
+        })
+      }
+      return null
+    }
+    const multiplierPpm = profile.multiplierPpm ?? priceBook.defaultMultiplierPpm
+    const quoted = quotedMinor(entry.unitPriceMinor, multiplierPpm)
+    const createdAt = nowIso()
+    const charge = {
+      id: randomUUID(),
+      usageRequestId: record.id,
+      tenantId: record.tenantId,
+      consumerId: record.consumerId,
+      apiKeyId: record.apiKeyId,
+      accountId: null,
+      meterKey: record.billingMeterKey,
+      billingUnit: entry.billingUnit,
+      priceBookId: priceBook.id,
+      priceBookKey: priceBook.key,
+      priceBookVersion: priceBook.version,
+      unitPriceMinor: entry.unitPriceMinor,
+      multiplierPpm,
+      quotedMinor: quoted,
+      chargedMinor: 0,
+      currency: priceBook.currency,
+      enforcementMode: profile.mode,
+      status: 'reserved',
+      pricingSnapshot: {
+        meterKey: record.billingMeterKey,
+        billingUnit: entry.billingUnit,
+        priceBookKey: priceBook.key,
+        priceBookVersion: priceBook.version,
+        unitPriceMinor: entry.unitPriceMinor,
+        multiplierPpm,
+        quotedMinor: quoted,
+        currency: priceBook.currency,
+      },
+      createdAt,
+      settledAt: null,
+    }
+    if (profile.mode === 'enforced' && quoted > 0) {
+      const account = this.creditAccounts.get(record.tenantId)
+      if (!account || account.status !== 'active' || account.currency !== priceBook.currency
+        || account.availableMinor < quoted) {
+        throw new AppError(402, 'insufficient_credit', 'Tenant credit is insufficient for this request', {
+          currency: priceBook.currency,
+          requiredMinor: quoted,
+          availableMinor: account?.currency === priceBook.currency ? account.availableMinor : 0,
+        })
+      }
+      account.availableMinor -= quoted
+      account.heldMinor += quoted
+      account.revision += 1
+      account.updatedAt = createdAt
+      charge.accountId = account.id
+      this.creditLedgerEntries.push({
+        id: randomUUID(), accountId: account.id, tenantId: record.tenantId,
+        chargeId: charge.id, usageRequestId: record.id, kind: 'hold',
+        amountMinor: quoted, availableDeltaMinor: -quoted, heldDeltaMinor: quoted,
+        availableAfterMinor: account.availableMinor, heldAfterMinor: account.heldMinor,
+        accountRevision: account.revision,
+        currency: account.currency, idempotencyKey: `usage:${record.id}:hold`,
+        externalReference: null, actor: 'usage-reservation', reason: null, createdAt,
+      })
+    }
+    this.customerCharges.set(record.id, charge)
+    return charge
+  }
+
+  #settleCustomerCharge(record, targetStatus, audit = {}) {
+    const charge = this.customerCharges.get(record.id)
+    if (!charge || charge.status !== 'reserved' && charge.status !== 'unknown') return
+    const settledAt = nowIso()
+    if (targetStatus === 'unknown') {
+      charge.status = 'unknown'
+      charge.settledAt = null
+      return
+    }
+    if (charge.enforcementMode === 'enforced' && charge.quotedMinor > 0) {
+      const account = this.creditAccounts.get(record.tenantId)
+      if (!account || account.id !== charge.accountId || account.heldMinor < charge.quotedMinor) {
+        throw new AppError(500, 'billing_ledger_invariant_failed', 'Customer credit hold is unavailable')
+      }
+      const capture = targetStatus === 'captured'
+      if (!capture) account.availableMinor += charge.quotedMinor
+      account.heldMinor -= charge.quotedMinor
+      account.revision += 1
+      account.updatedAt = settledAt
+      this.creditLedgerEntries.push({
+        id: randomUUID(), accountId: account.id, tenantId: record.tenantId,
+        chargeId: charge.id, usageRequestId: record.id,
+        kind: capture ? 'capture' : 'release', amountMinor: charge.quotedMinor,
+        availableDeltaMinor: capture ? 0 : charge.quotedMinor,
+        heldDeltaMinor: -charge.quotedMinor,
+        availableAfterMinor: account.availableMinor, heldAfterMinor: account.heldMinor,
+        accountRevision: account.revision,
+        currency: account.currency,
+        idempotencyKey: audit.idempotencyKey || `usage:${record.id}:${capture ? 'capture' : 'release'}`,
+        externalReference: null,
+        actor: audit.actor || 'usage-settlement',
+        reason: audit.reason ?? null,
+        createdAt: settledAt,
+      })
+    }
+    charge.status = targetStatus
+    charge.chargedMinor = targetStatus === 'captured' && charge.enforcementMode === 'enforced'
+      ? charge.quotedMinor
+      : 0
+    charge.settledAt = settledAt
+  }
+
   async reserve({
     requestId,
     idempotencyKey,
@@ -952,6 +1288,7 @@ export class MemoryStore {
     apiKeyQuota = null,
     authorizationPlatforms = null,
     replayWindowMs = null,
+    meterKey = null,
   }) {
     if (Boolean(platform) === Boolean(capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
@@ -988,6 +1325,7 @@ export class MemoryStore {
           fingerprint,
           platform: platform ?? null,
           capability: capability ?? null,
+          billingMeterKey: usageMeterKey({ meterKey, capability, platform }),
           status: 'reserved',
           unitsReserved,
           unitsActual: null,
@@ -1003,6 +1341,7 @@ export class MemoryStore {
           completedAt: null,
           createdAt: reservedAt,
         }
+        this.#reserveCustomerCharge(record)
         this.requests.set(record.id, record)
         this.requestsByScope.set(scopeKey, record.id)
         return { kind: 'reserved', request: clone(record) }
@@ -1022,6 +1361,7 @@ export class MemoryStore {
       fingerprint,
       platform: platform ?? null,
       capability: capability ?? null,
+      billingMeterKey: usageMeterKey({ meterKey, capability, platform }),
       status: 'reserved',
       unitsReserved,
       unitsActual: null,
@@ -1037,6 +1377,7 @@ export class MemoryStore {
       completedAt: null,
       createdAt: nowIso(),
     }
+    this.#reserveCustomerCharge(record)
     this.requests.set(record.id, record)
     this.requestsByScope.set(scopeKey, record.id)
     return { kind: 'reserved', request: clone(record) }
@@ -1209,14 +1550,24 @@ export class MemoryStore {
     return apiKeyQuota || grantedEntitlement
   }
 
-  async commitRequest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }) {
+  async commitRequest(id, {
+    responseStatus,
+    responseBody,
+    unitsActual,
+    upstreamLatencyMs,
+    deliverySourceMode = null,
+    capturedAt = null,
+  }) {
     const record = this.#requestInState(id, ['reserved'])
+    this.#settleCustomerCharge(record, 'captured')
     Object.assign(record, {
       status: 'committed',
       responseStatus,
       responseBody: clone(responseBody),
       unitsActual,
       upstreamLatencyMs,
+      deliverySourceMode,
+      capturedAt: capturedAt == null ? null : timestamp(capturedAt),
       completedAt: nowIso(),
     })
     return clone(record)
@@ -1381,6 +1732,7 @@ export class MemoryStore {
       nightAllTraceId,
       completedAt,
     }
+    this.#settleCustomerCharge(request, 'captured')
     this.requests.set(request.id, committedRequest)
     this.connectorCalls.set(call.id, completedCall)
     return {
@@ -1449,6 +1801,7 @@ export class MemoryStore {
       nightAllTraceId,
       completedAt: deliveredAt,
     }
+    this.#settleCustomerCharge(request, 'captured')
     this.requests.set(request.id, committedRequest)
     this.connectorCalls.set(call.id, completedCall)
     return {
@@ -1460,12 +1813,14 @@ export class MemoryStore {
 
   async releaseRequest(id, errorCode) {
     const record = this.#requestInState(id, ['reserved'])
+    this.#settleCustomerCharge(record, 'released')
     Object.assign(record, { status: 'released', errorCode, completedAt: nowIso() })
     return clone(record)
   }
 
   async markRequestUnknown(id, errorCode) {
     const record = this.#requestInState(id, ['reserved', 'committed'])
+    if (record.status === 'reserved') this.#settleCustomerCharge(record, 'unknown')
     Object.assign(record, { status: 'unknown', errorCode, completedAt: nowIso() })
     return clone(record)
   }
@@ -1544,11 +1899,11 @@ export class MemoryStore {
         (!toDate || createdAt < toDate)
       )
     })
-    return summarizeUsage(records)
+    return summarizeUsage(records, this.customerCharges)
   }
 
   async dashboard() {
-    const usage = summarizeUsage([...this.requests.values()])
+    const usage = summarizeUsage([...this.requests.values()], this.customerCharges)
     return {
       tenants: this.tenants.size,
       consumers: this.consumers.size,
@@ -2823,11 +3178,17 @@ export class MemoryStore {
   }
 }
 
-function summarizeUsage(records) {
+function summarizeUsage(records, chargeMap = new Map()) {
   const byPlatform = {}
   const byCapability = {}
   let latencyTotal = 0
   let latencyCount = 0
+  const byMeter = {}
+  const currencies = new Set()
+  let quotedMinor = 0
+  let chargedMinor = 0
+  let heldMinor = 0
+  let shadowQuotedMinor = 0
   for (const record of records) {
     const bucket = record.capability ? byCapability : byPlatform
     const scope = record.capability || record.platform
@@ -2845,6 +3206,30 @@ function summarizeUsage(records) {
       latencyTotal += record.upstreamLatencyMs
       latencyCount += 1
     }
+    const charge = chargeMap.get(record.id)
+    if (charge) {
+      currencies.add(charge.currency)
+      quotedMinor += charge.quotedMinor || 0
+      chargedMinor += charge.chargedMinor || 0
+      if (charge.enforcementMode === 'enforced' && ['reserved', 'unknown'].includes(charge.status)) {
+        heldMinor += charge.quotedMinor || 0
+      }
+      if (charge.enforcementMode === 'shadow') shadowQuotedMinor += charge.quotedMinor || 0
+      const meter = (byMeter[charge.meterKey] ||= {
+        requests: 0, quotedMinor: 0, chargedMinor: 0, heldMinor: 0,
+        currency: charge.currency, mixedCurrencies: false,
+      })
+      if (meter.currency !== charge.currency) {
+        meter.currency = null
+        meter.mixedCurrencies = true
+      }
+      meter.requests += 1
+      meter.quotedMinor += charge.quotedMinor || 0
+      meter.chargedMinor += charge.chargedMinor || 0
+      if (charge.enforcementMode === 'enforced' && ['reserved', 'unknown'].includes(charge.status)) {
+        meter.heldMinor += charge.quotedMinor || 0
+      }
+    }
   }
   return {
     requests: records.length,
@@ -2858,5 +3243,41 @@ function summarizeUsage(records) {
     averageUpstreamLatencyMs: latencyCount ? Math.round(latencyTotal / latencyCount) : null,
     byPlatform,
     byCapability,
+    recentRequests: [...records]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+      .slice(0, 50)
+      .map((record) => {
+        const charge = chargeMap.get(record.id)
+        return {
+          id: record.id,
+          tenantId: record.tenantId,
+          consumerId: record.consumerId,
+          apiKeyId: record.apiKeyId,
+          platform: record.platform,
+          capability: record.capability,
+          billingMeterKey: record.billingMeterKey,
+          status: record.status,
+          unitsActual: record.unitsActual,
+          upstreamLatencyMs: record.upstreamLatencyMs,
+          createdAt: record.createdAt,
+          completedAt: record.completedAt,
+          customerCharge: charge ? {
+            currency: charge.currency,
+            quotedMinor: charge.quotedMinor,
+            chargedMinor: charge.chargedMinor,
+            status: charge.status,
+            enforcementMode: charge.enforcementMode,
+          } : null,
+        }
+      }),
+    customerBilling: {
+      currency: currencies.size === 1 ? [...currencies][0] : null,
+      mixedCurrencies: currencies.size > 1,
+      quotedMinor,
+      chargedMinor,
+      heldMinor,
+      shadowQuotedMinor,
+      byMeter,
+    },
   }
 }

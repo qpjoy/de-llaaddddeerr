@@ -694,6 +694,25 @@ preserve_existing_tikhub_runtime_config() {
       say "preserving retained TikHub contract gate: ${existing}"
     fi
   fi
+
+  if [ "${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED+x}" != x ]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained TikHub search cutover gate; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      case "$existing" in
+        0|1) ;;
+        *) die "retained MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED must be 0 or 1" ;;
+      esac
+      MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$existing"
+      export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED
+      say "preserving retained TikHub search cutover gate: ${existing}"
+    fi
+  fi
 }
 
 # Locate the Launcher User Center in the cluster.
@@ -945,6 +964,7 @@ create_runtime_config() {
     tikhub_configured=1
   fi
   local tikhub_contract_verified="${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}"
+  local tikhub_search_contract_verified="${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED:-0}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
   if ! public_url="$(
@@ -990,6 +1010,7 @@ create_runtime_config() {
   if ! tikhub_preflight_error="$(
     MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
+    MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
     MX_INSIGHT_TIKHUB_API_KEY="$tikhub_api_key" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     node --input-type=module -e '
@@ -1010,6 +1031,11 @@ create_runtime_config() {
     say "TikHub contract gate is enabled; environment fallback is present (value hidden)."
   else
     say "TikHub contract gate is enabled; public dispatch requires the Admin-UI database credential."
+  fi
+  if [ "$tikhub_search_contract_verified" != "1" ]; then
+    say "TikHub Xiaohongshu search cutover is disabled; compatible searches remain on the historical upstream."
+  else
+    say "TikHub Xiaohongshu search cutover is enabled for compatible requests."
   fi
   local media_preflight_error=""
   if ! media_preflight_error="$(
@@ -1112,18 +1138,25 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
     --from-literal=MX_INSIGHT_JUSTONE_MAX_CONCURRENCY="${MX_INSIGHT_JUSTONE_MAX_CONCURRENCY:-32}" \
     --from-literal=MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY:-8}" \
+    --from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-90}" \
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES="${MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS="${MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS:-60000}" \
     --from-literal=MX_INSIGHT_JUSTONE_BILLING_JSON="${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" \
     --from-literal=MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     --from-literal=MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
+    --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
     --from-literal=MX_INSIGHT_TIKHUB_BASE_URL="${MX_INSIGHT_TIKHUB_BASE_URL:-https://api.tikhub.io}" \
     --from-literal=MX_INSIGHT_TIKHUB_TIMEOUT_MS="${MX_INSIGHT_TIKHUB_TIMEOUT_MS:-30000}" \
     --from-literal=MX_INSIGHT_TIKHUB_FRESH_TTL_MS="${MX_INSIGHT_TIKHUB_FRESH_TTL_MS:-86400000}" \
     --from-literal=MX_INSIGHT_TIKHUB_STALE_TTL_MS="${MX_INSIGHT_TIKHUB_STALE_TTL_MS:-2592000000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS="${MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS:-300000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS="${MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS:-86400000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS="${MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS:-20}" \
+    --from-literal=MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY="${MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY:-2}" \
     --from-literal=MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-8}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY:-8}" \
+    --from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-120}" \
     --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES="${MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS="${MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS:-60000}" \
     --from-literal=MX_INSIGHT_TIKHUB_BILLING_JSON="${MX_INSIGHT_TIKHUB_BILLING_JSON:-}" \
@@ -2165,6 +2198,8 @@ ops_action() {
   local tikhub_key_override=""
   local tikhub_contract_override_set=0
   local tikhub_contract_override=""
+  local tikhub_search_contract_override_set=0
+  local tikhub_search_contract_override=""
   local tikhub_clear_override_set=0
   local tikhub_clear_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
@@ -2193,6 +2228,10 @@ ops_action() {
     tikhub_contract_override_set=1
     tikhub_contract_override="$MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED"
   fi
+  if [ "${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED+x}" = x ]; then
+    tikhub_search_contract_override_set=1
+    tikhub_search_contract_override="$MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED"
+  fi
   if [ "${MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY+x}" = x ]; then
     tikhub_clear_override_set=1
     tikhub_clear_override="$MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY"
@@ -2220,6 +2259,10 @@ ops_action() {
   if [ "$tikhub_contract_override_set" = 1 ]; then
     MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_override"
     export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED
+  fi
+  if [ "$tikhub_search_contract_override_set" = 1 ]; then
+    MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_override"
+    export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED
   fi
   # Clearing a retained paid-provider secret is intentionally one-shot. Ignore
   # a persisted copy of this flag; it must be present in the command environment.

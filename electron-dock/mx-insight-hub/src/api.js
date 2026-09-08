@@ -101,7 +101,7 @@ async function parsePayload(response) {
 // One header carries either credential. The server compares it against the
 // admin token first and only offers a non-matching value to Launcher, so the
 // console does not need to know which kind of session it holds.
-async function request(token, path, { method = 'GET', body, query, raw, contentType } = {}) {
+async function request(token, path, { method = 'GET', body, query, raw, contentType, headers } = {}) {
   const response = await fetch(`${API_BASE}${path}${queryString(query)}`, {
     method,
     headers: {
@@ -109,6 +109,7 @@ async function request(token, path, { method = 'GET', body, query, raw, contentT
       'x-mx-insight-admin-token': token,
       ...(raw ? { 'content-type': contentType || 'application/octet-stream' } : {}),
       ...(body ? { 'content-type': 'application/json' } : {}),
+      ...(headers || {}),
     },
     body: raw || (body ? JSON.stringify(body) : undefined),
   })
@@ -294,6 +295,7 @@ export const adminApi = {
   apiKeyOverview: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/overview`),
   revokeApiKey: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
   plans: (token, consumerId) => request(token, `${ADMIN_ROOT}/plans`, { query: { consumerId } }),
+  publishPlan: (token, body) => request(token, `${ADMIN_ROOT}/plans`, { method: 'POST', body }),
   assignConsumerPlan: (token, consumerId, body) => request(
     token,
     `${ADMIN_ROOT}/consumers/${encodeURIComponent(consumerId)}/plan`,
@@ -311,6 +313,26 @@ export const adminApi = {
     { method: 'PUT', body },
   ),
   usage: (token, query) => request(token, `${ADMIN_ROOT}/usage`, { query }),
+  tenantBilling: (token, tenantId, query = {}) => request(
+    token,
+    `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing`,
+    { query },
+  ),
+  updateTenantBillingProfile: (token, tenantId, body) => request(
+    token,
+    `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing/profile`,
+    { method: 'PUT', body },
+  ),
+  addTenantCredit: (token, tenantId, body, idempotencyKey) => request(
+    token,
+    `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing/credits`,
+    { method: 'POST', body, headers: { 'idempotency-key': idempotencyKey } },
+  ),
+  reconcileUnknownCustomerCharge: (token, usageRequestId, body, idempotencyKey) => request(
+    token,
+    `${ADMIN_ROOT}/usage/${encodeURIComponent(usageRequestId)}/customer-charge/reconciliation`,
+    { method: 'POST', body, headers: { 'idempotency-key': idempotencyKey } },
+  ),
 
   // Identity. `session` is fetched first on load: the console renders itself
   // from the returned capabilities so a scoped user never sees a control they

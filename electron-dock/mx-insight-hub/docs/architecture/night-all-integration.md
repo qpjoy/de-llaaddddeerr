@@ -2,9 +2,18 @@
 
 ## Source role
 
-Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub, legacy JustOne routes, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence; and owns the credentials and quotas for those routes. The versioned JustOne ecommerce product-search capability is implemented as a separate, release-gated Hub-native connector governed by [ADR-0013](../adr/0013-external-data-platform-gateway.md).
+Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub,
+legacy JustOne routes, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence;
+and owns the credentials and quotas for those routes. Versioned JustOne ecommerce product search and TikHub
+Xiaohongshu note detail are separate, release-gated Hub-native connectors governed by
+[ADR-0013](../adr/0013-external-data-platform-gateway.md). The additional direct Xiaohongshu search/raw slice
+is a staged migration with narrower eligibility and retained Night-All ownership, documented in the
+[direct TikHub migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md).
 
-MX Insight Hub does not duplicate Night-All's remaining provider orchestration. Its Night-All adapter calls a versioned private capability contract, while its JustOne adapter owns only the pinned ecommerce product-search endpoints behind the same provider-neutral Hub boundary.
+MX Insight Hub does not duplicate Night-All's remaining provider orchestration. Its Night-All adapter calls a
+versioned private capability contract; Hub-native adapters own only explicitly pinned operation slices behind
+the same provider-neutral Hub boundary. A direct route name or compatibility projection never permits
+relabelling historical Night-All evidence.
 
 For Internal production, keep the host Night-All as the only writer and call it through a workload-authenticated host facade/private Service. A second full Docker Night-All is for isolated local snapshot testing, not a production read shortcut and never shares production PG/Redis or scheduler ownership.
 
@@ -24,6 +33,15 @@ Server-controlled additions:
 - optional `NIGHT_ALL_SERVICE_TOKEN` is injected only on the internal hop.
 
 Caller-controlled fields are currently limited to platform, query, page size and an opaque cursor when the adapter supports it. Provider names, provider endpoint IDs, debug metadata, upstream credentials, and internal accounting fields are stripped.
+
+### Audited Night-All source caveat
+
+The clean Night-All source snapshot at commit `5357917` routes `/api/v1/data/search` to
+`searchService.searchData`, but its production service assembly does not construct and inject the paged-content
+search service that owns that method. Tests instantiate the service directly, so their passing result does not prove
+the checked-in HTTP route is executable. This finding does not prove that a separately patched deployed image is
+broken; it does mean Hub rollout and rollback checks must probe the actual deployed revision and must not treat the
+source tree's route declaration as a reliable fallback signal.
 
 ## Transitional compatibility facade
 
@@ -215,12 +233,13 @@ proxied by Hub. The target is to extend the upstream data contract with
 readiness, opaque cursors and stable fields.
 
 Night-All remains the connector wherever it owns upstream routing and provider-credential/billing
-business policy. JustOne ecommerce product search is the first implemented
-operation-scoped Hub-native connector; other JustOne/TikHub routes
-remain unchanged until each is shadowed against bounded approved calls/fixtures,
-compared at legacy-envelope and canonical levels, and cut over with an explicit
-rollback policy. Provider selection stays server-side, and public compatibility
-paths, Hub Public API keys and canonical search contracts do not change.
+business policy. JustOne ecommerce product search and TikHub Xiaohongshu note detail are implemented
+operation-scoped Hub-native connectors. Direct Xiaohongshu search/raw remains governed by its staged
+[migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md); old cursors, batch queries,
+comments, crawl and user-info remain on Night-All. Other JustOne/TikHub routes remain unchanged until each is
+compared against bounded approved fixtures/calls and cut over with an explicit rollback policy. Provider
+selection stays server-side, and public compatibility paths, Hub Public API keys and canonical search contracts
+do not change.
 
 ## Night-All work that stays outside this repository
 

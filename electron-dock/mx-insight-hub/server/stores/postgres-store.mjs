@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { usageMeterKey } from '../billing/contracts.mjs'
 import { CANONICAL_CONTEXT_DATASETS } from '../data/canonical-context.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 import {
@@ -779,10 +780,129 @@ function planRecord(row) {
     versionStatus: row.version_status,
     limits: row.limits,
     pricing: row.pricing,
+    priceBook: row.price_book_id ? {
+      id: row.price_book_id,
+      key: row.price_book_key,
+      version: Number(row.price_book_version),
+      currency: row.price_book_currency,
+      defaultMultiplierPpm: Number(row.default_multiplier_ppm),
+      entries: Array.isArray(row.price_entries) ? row.price_entries.map((entry) => ({
+        meterKey: entry.meterKey,
+        billingUnit: entry.billingUnit,
+        unitPriceMinor: Number(entry.unitPriceMinor),
+      })) : [],
+      publishedAt: iso(row.price_book_published_at),
+    } : null,
     publishedAt: iso(row.published_at),
     assignedAt: iso(row.assigned_at),
     assignedBy: row.assigned_by ?? null,
     revision: row.revision == null ? null : Number(row.revision),
+  }
+}
+
+function billingProfileRecord(row, tenantId = null) {
+  return row ? {
+    tenantId: row.tenant_id,
+    mode: row.mode,
+    multiplierPpm: row.multiplier_ppm == null ? null : Number(row.multiplier_ppm),
+    revision: Number(row.revision),
+    updatedBy: row.updated_by,
+    updatedAt: iso(row.updated_at),
+  } : {
+    tenantId,
+    mode: 'disabled',
+    multiplierPpm: null,
+    revision: 0,
+    updatedBy: null,
+    updatedAt: null,
+  }
+}
+
+function creditAccountRecord(row) {
+  return row && {
+    id: row.id,
+    tenantId: row.tenant_id,
+    currency: row.currency,
+    availableMinor: Number(row.available_minor),
+    heldMinor: Number(row.held_minor),
+    balanceMinor: Number(row.available_minor) + Number(row.held_minor),
+    status: row.status,
+    revision: Number(row.revision),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function creditLedgerRecord(row) {
+  return row && {
+    id: row.id,
+    accountId: row.account_id,
+    tenantId: row.tenant_id,
+    chargeId: row.charge_id,
+    usageRequestId: row.usage_request_id,
+    kind: row.kind,
+    amountMinor: Number(row.amount_minor),
+    availableDeltaMinor: Number(row.available_delta_minor),
+    heldDeltaMinor: Number(row.held_delta_minor),
+    availableAfterMinor: Number(row.available_after_minor),
+    heldAfterMinor: Number(row.held_after_minor),
+    accountRevision: Number(row.account_revision),
+    currency: row.currency,
+    idempotencyKey: row.idempotency_key,
+    externalReference: row.external_reference,
+    actor: row.actor,
+    reason: row.reason,
+    createdAt: iso(row.created_at),
+  }
+}
+
+function customerChargeRecord(row) {
+  return row && {
+    id: row.id,
+    usageRequestId: row.usage_request_id,
+    tenantId: row.tenant_id,
+    consumerId: row.consumer_id,
+    apiKeyId: row.api_key_id,
+    accountId: row.account_id,
+    meterKey: row.meter_key,
+    billingUnit: row.billing_unit,
+    priceBookId: row.price_book_id,
+    priceBookKey: row.price_book_key,
+    priceBookVersion: Number(row.price_book_version),
+    unitPriceMinor: Number(row.unit_price_minor),
+    multiplierPpm: Number(row.multiplier_ppm),
+    quotedMinor: Number(row.quoted_minor),
+    chargedMinor: Number(row.charged_minor),
+    currency: row.currency,
+    enforcementMode: row.enforcement_mode,
+    status: row.status,
+    pricingSnapshot: row.pricing_snapshot,
+    createdAt: iso(row.created_at),
+    settledAt: iso(row.settled_at),
+  }
+}
+
+function usageRequestSummaryRecord(row) {
+  return row && {
+    id: row.id,
+    tenantId: row.tenant_id,
+    consumerId: row.consumer_id,
+    apiKeyId: row.api_key_id,
+    platform: row.platform,
+    capability: row.capability,
+    billingMeterKey: row.billing_meter_key,
+    status: row.status,
+    unitsActual: row.units_actual == null ? null : Number(row.units_actual),
+    upstreamLatencyMs: row.upstream_latency_ms == null ? null : Number(row.upstream_latency_ms),
+    createdAt: iso(row.created_at),
+    completedAt: iso(row.completed_at),
+    customerCharge: row.charge_status ? {
+      currency: row.charge_currency,
+      quotedMinor: Number(row.quoted_minor),
+      chargedMinor: Number(row.charged_minor),
+      status: row.charge_status,
+      enforcementMode: row.enforcement_mode,
+    } : null,
   }
 }
 
@@ -802,6 +922,7 @@ function requestRecord(row) {
     responseBody: row.response_body,
     errorCode: row.error_code,
     capability: row.capability,
+    billingMeterKey: row.billing_meter_key,
     upstreamLatencyMs: row.upstream_latency_ms,
     deliverySourceMode: row.delivery_source_mode,
     capturedAt: iso(row.response_captured_at),
@@ -1350,6 +1471,13 @@ export class PostgresStore {
               plan_version_record.limits,
               plan_version_record.pricing,
               plan_version_record.published_at,
+              price_book.id AS price_book_id,
+              price_book.price_book_key,
+              price_book.version AS price_book_version,
+              price_book.currency AS price_book_currency,
+              price_book.default_multiplier_ppm,
+              price_book.published_at AS price_book_published_at,
+              coalesce(price_entry.entries, '[]'::jsonb) AS price_entries,
               NULL::timestamptz AS assigned_at,
               NULL::text AS assigned_by,
               NULL::integer AS revision
@@ -1362,9 +1490,299 @@ export class PostgresStore {
             ORDER BY candidate.version DESC
             LIMIT 1
          ) plan_version_record ON true
+         LEFT JOIN billing.customer_price_books price_book
+           ON price_book.id = plan_version_record.customer_price_book_id
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(
+                    jsonb_build_object(
+                      'meterKey', entry.meter_key,
+                      'billingUnit', entry.billing_unit,
+                      'unitPriceMinor', entry.unit_price_minor
+                    ) ORDER BY entry.meter_key
+                  ) AS entries
+             FROM billing.customer_price_entries entry
+            WHERE entry.price_book_id = price_book.id
+         ) price_entry ON true
         ORDER BY plan.name, plan.plan_key`,
     )
     return rows.map(planRecord)
+  }
+
+  async publishPlanVersion({ key, name, limits, priceBook, publishedBy }) {
+    return withPgTransaction(this.pool, async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing-plan:${key}`])
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing-price-book:${priceBook.key}`])
+      const existingPlan = await client.query(
+        'SELECT id, name, status FROM plans WHERE plan_key = $1 FOR UPDATE',
+        [key],
+      )
+      if (existingPlan.rows[0] && existingPlan.rows[0].name !== name) {
+        throw new AppError(409, 'plan_name_conflict', 'An existing plan key cannot be rebound to another name')
+      }
+      if (existingPlan.rows[0]?.status !== undefined && existingPlan.rows[0].status !== 'active') {
+        throw new AppError(409, 'plan_retired', 'A retired plan cannot publish another version')
+      }
+      const planId = existingPlan.rows[0]?.id || randomUUID()
+      if (!existingPlan.rows[0]) {
+        await client.query(
+          `INSERT INTO plans (id, plan_key, name, status)
+           VALUES ($1, $2, $3, 'active')`,
+          [planId, key, name],
+        )
+      }
+      const nextPlanVersion = await client.query(
+        'SELECT coalesce(max(version), 0)::integer + 1 AS version FROM plan_versions WHERE plan_id = $1',
+        [planId],
+      )
+      const nextBookVersion = await client.query(
+        `SELECT coalesce(max(version), 0)::integer + 1 AS version
+           FROM billing.customer_price_books
+          WHERE price_book_key = $1`,
+        [priceBook.key],
+      )
+      const version = Number(nextPlanVersion.rows[0].version)
+      const bookVersion = Number(nextBookVersion.rows[0].version)
+      const priceBookId = randomUUID()
+      const versionId = randomUUID()
+      const publishedAt = new Date()
+      await client.query(
+        `INSERT INTO billing.customer_price_books
+           (id, price_book_key, version, currency, status, default_multiplier_ppm,
+            published_at, published_by)
+         VALUES ($1, $2, $3, $4, 'draft', $5, NULL, NULL)`,
+        [
+          priceBookId, priceBook.key, bookVersion, priceBook.currency,
+          priceBook.defaultMultiplierPpm,
+        ],
+      )
+      for (const entry of priceBook.entries) {
+        await client.query(
+          `INSERT INTO billing.customer_price_entries
+             (id, price_book_id, meter_key, billing_unit, unit_price_minor)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [randomUUID(), priceBookId, entry.meterKey, entry.billingUnit, entry.unitPriceMinor],
+        )
+      }
+      await client.query(
+        `UPDATE billing.customer_price_books
+            SET status = 'published', published_at = $2, published_by = $3
+          WHERE id = $1 AND status = 'draft'`,
+        [priceBookId, publishedAt, publishedBy],
+      )
+      const pricing = {
+        mode: 'prepaid_wallet',
+        currency: priceBook.currency,
+        defaultMultiplierPpm: priceBook.defaultMultiplierPpm,
+        rateCount: priceBook.entries.length,
+      }
+      await client.query(
+        `INSERT INTO plan_versions
+           (id, plan_id, version, status, limits, pricing, customer_price_book_id, published_at)
+         VALUES ($1, $2, $3, 'published', $4, $5, $6, $7)`,
+        [versionId, planId, version, limits, pricing, priceBookId, publishedAt],
+      )
+      return {
+        id: planId,
+        key,
+        name,
+        status: 'active',
+        versionId,
+        version,
+        versionStatus: 'published',
+        limits,
+        pricing,
+        priceBook: {
+          id: priceBookId,
+          key: priceBook.key,
+          version: bookVersion,
+          currency: priceBook.currency,
+          defaultMultiplierPpm: priceBook.defaultMultiplierPpm,
+          entries: priceBook.entries,
+          publishedAt: publishedAt.toISOString(),
+        },
+        publishedAt: publishedAt.toISOString(),
+        assignedAt: null,
+        assignedBy: null,
+        revision: null,
+      }
+    })
+  }
+
+  async getTenantBilling(tenantId, { ledgerLimit = 50 } = {}) {
+    const client = await this.pool.connect()
+    try {
+      // The wallet projection and its append-only ledger are one financial
+      // view. Read them from a single repeatable snapshot so the response can
+      // never combine a newer balance with older ledger rows.
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const profile = await client.query(
+        'SELECT * FROM billing.tenant_billing_profiles WHERE tenant_id = $1',
+        [tenantId],
+      )
+      const account = await client.query(
+        'SELECT * FROM billing.credit_accounts WHERE tenant_id = $1',
+        [tenantId],
+      )
+      const ledger = await client.query(
+        `SELECT * FROM billing.credit_ledger_entries
+          WHERE tenant_id = $1
+          ORDER BY account_revision DESC, id DESC
+          LIMIT $2`,
+        [tenantId, ledgerLimit],
+      )
+      await client.query('COMMIT')
+      return {
+        profile: billingProfileRecord(profile.rows[0], tenantId),
+        account: creditAccountRecord(account.rows[0]) || null,
+        ledger: ledger.rows.map(creditLedgerRecord),
+      }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async replaceTenantBillingProfile({ tenantId, mode, multiplierPpm, expectedRevision, updatedBy }) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const tenant = await client.query('SELECT id FROM tenants WHERE id = $1 FOR SHARE', [tenantId])
+        if (tenant.rowCount !== 1) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+        // Profile writers all take the row first; the table trigger then takes
+        // the tenant advisory lock. This keeps direct SQL and application
+        // writers in the same lock order while usage reservations only take
+        // the shared advisory lock and never lock the profile row.
+        const current = await client.query(
+          'SELECT * FROM billing.tenant_billing_profiles WHERE tenant_id = $1 FOR UPDATE',
+          [tenantId],
+        )
+        const currentRevision = Number(current.rows[0]?.revision || 0)
+        if ((currentRevision > 0 && expectedRevision == null) || (
+          expectedRevision != null && expectedRevision !== currentRevision
+        )) {
+          throw new AppError(409, 'billing_profile_revision_conflict', 'Billing profile changed; reload before saving', {
+            expectedRevision,
+            currentRevision,
+          })
+        }
+        const result = current.rowCount === 0
+          ? await client.query(
+              `INSERT INTO billing.tenant_billing_profiles
+                 (tenant_id, mode, multiplier_ppm, revision, updated_by)
+               VALUES ($1, $2, $3, 1, $4)
+               RETURNING *`,
+              [tenantId, mode, multiplierPpm, updatedBy],
+            )
+          : await client.query(
+              `UPDATE billing.tenant_billing_profiles
+                  SET mode = $2, multiplier_ppm = $3, revision = revision + 1,
+                      updated_by = $4, updated_at = now()
+                WHERE tenant_id = $1 AND revision = $5
+                RETURNING *`,
+              [tenantId, mode, multiplierPpm, updatedBy, currentRevision],
+            )
+        return billingProfileRecord(result.rows[0])
+      })
+    } catch (error) {
+      // Two first-time writers can both observe no profile before the insert
+      // trigger serializes them. The tenant primary key is then the optimistic
+      // revision fence for the loser, not an internal server failure.
+      if (error?.code === '23505') {
+        throw new AppError(409, 'billing_profile_revision_conflict', 'Billing profile changed; reload before saving', {
+          expectedRevision,
+        })
+      }
+      throw error
+    }
+  }
+
+  async addTenantCredit({
+    tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor,
+  }) {
+    return withPgTransaction(this.pool, async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing:tenant:${tenantId}`])
+      const existing = await client.query(
+        `SELECT * FROM billing.credit_ledger_entries
+          WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [tenantId, idempotencyKey],
+      )
+      if (existing.rows[0]) {
+        const entry = creditLedgerRecord(existing.rows[0])
+        if (
+          entry.kind !== 'topup'
+          || entry.amountMinor !== amountMinor
+          || entry.currency !== currency
+          || entry.reason !== reason
+          || entry.externalReference !== externalReference
+        ) {
+          throw new AppError(409, 'credit_idempotency_conflict', 'Idempotency key was used for another credit adjustment')
+        }
+        return entry
+      }
+      const tenant = await client.query('SELECT id FROM tenants WHERE id = $1 FOR SHARE', [tenantId])
+      if (tenant.rowCount !== 1) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+      await client.query(
+        `INSERT INTO billing.credit_accounts
+           (id, tenant_id, currency, available_minor, held_minor, status, revision)
+         VALUES ($1, $2, $3, 0, 0, 'active', 0)
+         ON CONFLICT (tenant_id) DO NOTHING`,
+        [randomUUID(), tenantId, currency],
+      )
+      const accountResult = await client.query(
+        'SELECT * FROM billing.credit_accounts WHERE tenant_id = $1 FOR UPDATE',
+        [tenantId],
+      )
+      const account = accountResult.rows[0]
+      if (!account || account.currency !== currency) {
+        throw new AppError(409, 'wallet_currency_conflict', 'Tenant wallet currency cannot be changed')
+      }
+      const entryResult = await client.query(
+        `INSERT INTO billing.credit_ledger_entries
+           (id, account_id, tenant_id, kind, amount_minor,
+            available_delta_minor, held_delta_minor, currency,
+            idempotency_key, external_reference, actor, reason)
+         VALUES ($1, $2, $3, 'topup', $4, $4, 0, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          randomUUID(), account.id, tenantId, amountMinor,
+          currency, idempotencyKey, externalReference, actor, reason,
+        ],
+      )
+      return creditLedgerRecord(entryResult.rows[0])
+    }, { outcomeUnknownCode: 'credit_adjustment_outcome_unknown' })
+  }
+
+  async reconcileUnknownCustomerCharge({
+    usageRequestId, disposition, idempotencyKey, actor, reason,
+  }) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const { rows } = await client.query(
+          `SELECT *
+             FROM billing.reconcile_unknown_customer_charge($1, $2, $3, $4, $5)`,
+          [usageRequestId, disposition, idempotencyKey, actor, reason],
+        )
+        if (!rows[0]) {
+          throw new AppError(500, 'billing_ledger_invariant_failed', 'Customer charge reconciliation returned no row')
+        }
+        return customerChargeRecord(rows[0])
+      }, { outcomeUnknownCode: 'customer_charge_reconciliation_outcome_unknown' })
+    } catch (error) {
+      if (error?.code === 'P0002' && error?.message === 'customer_charge_not_found') {
+        throw new AppError(404, 'customer_charge_not_found', 'Customer charge not found')
+      }
+      if (error?.code === 'P0001' && error?.message === 'reconciliation_idempotency_conflict') {
+        throw new AppError(409, 'reconciliation_idempotency_conflict', 'Customer charge reconciliation conflicts with prior ledger evidence')
+      }
+      if (error?.code === 'P0001' && error?.message === 'customer_charge_not_reconcilable') {
+        throw new AppError(409, 'customer_charge_not_reconcilable', 'Only an unknown enforced customer charge with an active hold may be reconciled')
+      }
+      if (error?.code === 'P0001' && ['insufficient_credit', 'billing_credit_account_unavailable'].includes(error?.message)) {
+        throw new AppError(500, 'billing_ledger_invariant_failed', 'Customer credit hold is unavailable')
+      }
+      throw error
+    }
   }
 
   async getConsumerPlan(consumerId) {
@@ -1376,12 +1794,32 @@ export class PostgresStore {
               plan_version_record.limits,
               plan_version_record.pricing,
               plan_version_record.published_at,
+              price_book.id AS price_book_id,
+              price_book.price_book_key,
+              price_book.version AS price_book_version,
+              price_book.currency AS price_book_currency,
+              price_book.default_multiplier_ppm,
+              price_book.published_at AS price_book_published_at,
+              coalesce(price_entry.entries, '[]'::jsonb) AS price_entries,
               assignment.assigned_at,
               assignment.assigned_by,
               assignment.revision
          FROM consumer_plan_assignments assignment
          JOIN plan_versions plan_version_record ON plan_version_record.id = assignment.plan_version_id
          JOIN plans plan ON plan.id = plan_version_record.plan_id
+         LEFT JOIN billing.customer_price_books price_book
+           ON price_book.id = plan_version_record.customer_price_book_id
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(
+                    jsonb_build_object(
+                      'meterKey', entry.meter_key,
+                      'billingUnit', entry.billing_unit,
+                      'unitPriceMinor', entry.unit_price_minor
+                    ) ORDER BY entry.meter_key
+                  ) AS entries
+             FROM billing.customer_price_entries entry
+            WHERE entry.price_book_id = price_book.id
+         ) price_entry ON true
         WHERE assignment.consumer_id = $1`,
       [consumerId],
     )
@@ -1436,9 +1874,29 @@ export class PostgresStore {
                 plan_version_record.status AS version_status,
                 plan_version_record.limits,
                 plan_version_record.pricing,
-                plan_version_record.published_at
+                plan_version_record.published_at,
+                price_book.id AS price_book_id,
+                price_book.price_book_key,
+                price_book.version AS price_book_version,
+                price_book.currency AS price_book_currency,
+                price_book.default_multiplier_ppm,
+                price_book.published_at AS price_book_published_at,
+                coalesce(price_entry.entries, '[]'::jsonb) AS price_entries
            FROM plan_versions plan_version_record
            JOIN plans plan ON plan.id = plan_version_record.plan_id
+           LEFT JOIN billing.customer_price_books price_book
+             ON price_book.id = plan_version_record.customer_price_book_id
+           LEFT JOIN LATERAL (
+             SELECT jsonb_agg(
+                      jsonb_build_object(
+                        'meterKey', entry.meter_key,
+                        'billingUnit', entry.billing_unit,
+                        'unitPriceMinor', entry.unit_price_minor
+                      ) ORDER BY entry.meter_key
+                    ) AS entries
+               FROM billing.customer_price_entries entry
+              WHERE entry.price_book_id = price_book.id
+           ) price_entry ON true
           WHERE plan_version_record.id = $1
             AND plan_version_record.status = 'published'
             AND plan.status = 'active'`,
@@ -1704,8 +2162,8 @@ export class PostgresStore {
           const inserted = await client.query(
             `INSERT INTO usage_requests
                (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
-                platform, capability, status, units_reserved, lease_expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10)
+                platform, capability, billing_meter_key, status, units_reserved, lease_expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $11)
              RETURNING *`,
             [
               input.requestId,
@@ -1716,6 +2174,7 @@ export class PostgresStore {
               input.fingerprint,
               input.platform ?? null,
               input.capability ?? null,
+              usageMeterKey(input),
               input.unitsReserved,
               input.leaseExpiresAt,
             ],
@@ -1737,8 +2196,8 @@ export class PostgresStore {
       const inserted = await client.query(
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
-            platform, capability, status, units_reserved, lease_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10)
+            platform, capability, billing_meter_key, status, units_reserved, lease_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $11)
          RETURNING *`,
         [
           input.requestId,
@@ -1749,6 +2208,7 @@ export class PostgresStore {
           input.fingerprint,
           input.platform ?? null,
           input.capability ?? null,
+          usageMeterKey(input),
           input.unitsReserved,
           input.leaseExpiresAt,
         ],
@@ -1770,6 +2230,12 @@ export class PostgresStore {
       return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
     } catch (error) {
       await client.query('ROLLBACK')
+      if (error?.code === 'P0001' && error?.message === 'insufficient_credit') {
+        throw new AppError(402, 'insufficient_credit', 'Tenant credit is insufficient for this request')
+      }
+      if (error?.code === 'P0001' && error?.message === 'customer_price_unavailable') {
+        throw new AppError(503, 'customer_price_unavailable', 'The assigned plan has no published price for this operation')
+      }
       throw error
     } finally {
       client.release()
@@ -5099,33 +5565,75 @@ export class PostgresStore {
     ]) {
       if (value) {
         values.push(value)
-        clauses.push(`${column} = $${values.length}`)
+        clauses.push(`request.${column} = $${values.length}`)
       }
     }
     if (filters.from) {
       values.push(filters.from)
-      clauses.push(`created_at >= $${values.length}`)
+      clauses.push(`request.created_at >= $${values.length}`)
     }
     if (filters.to) {
       values.push(filters.to)
-      clauses.push(`created_at < $${values.length}`)
+      clauses.push(`request.created_at < $${values.length}`)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const { rows } = await this.pool.query(
+    const [{ rows }, billingResult, recentResult] = await Promise.all([
+      this.pool.query(
       `SELECT
-         platform,
-         capability,
+         request.platform,
+         request.capability,
          count(*)::integer AS requests,
-         count(*) FILTER (WHERE status = 'committed')::integer AS committed,
-         count(*) FILTER (WHERE status = 'released')::integer AS released,
-         count(*) FILTER (WHERE status = 'unknown')::integer AS unknown,
-         coalesce(sum(units_actual) FILTER (WHERE status = 'committed'), 0)::integer AS units,
-         round(avg(upstream_latency_ms))::integer AS average_latency
-       FROM usage_requests ${where}
-       GROUP BY platform, capability`,
+         count(*) FILTER (WHERE request.status = 'committed')::integer AS committed,
+         count(*) FILTER (WHERE request.status = 'released')::integer AS released,
+         count(*) FILTER (WHERE request.status = 'unknown')::integer AS unknown,
+         coalesce(sum(request.units_actual) FILTER (WHERE request.status = 'committed'), 0)::integer AS units,
+         round(avg(request.upstream_latency_ms))::integer AS average_latency
+       FROM usage_requests request ${where}
+       GROUP BY request.platform, request.capability`,
       values,
-    )
-    return summarizeAggregates(rows)
+      ),
+      this.pool.query(
+        `SELECT charge.meter_key, charge.currency,
+                count(*)::integer AS requests,
+                coalesce(sum(charge.quoted_minor), 0)::bigint AS quoted_minor,
+                coalesce(sum(charge.charged_minor), 0)::bigint AS charged_minor,
+                coalesce(sum(charge.quoted_minor) FILTER (
+                  WHERE charge.enforcement_mode = 'enforced'
+                    AND charge.status IN ('reserved', 'unknown')
+                ), 0)::bigint AS held_minor,
+                coalesce(sum(charge.quoted_minor) FILTER (
+                  WHERE charge.enforcement_mode = 'shadow'
+                ), 0)::bigint AS shadow_quoted_minor
+           FROM usage_requests request
+           JOIN billing.customer_charges charge ON charge.usage_request_id = request.id
+           ${where}
+          GROUP BY charge.meter_key, charge.currency
+          ORDER BY charge.meter_key, charge.currency`,
+        values,
+      ),
+      this.pool.query(
+        `SELECT request.id, request.tenant_id, request.consumer_id,
+                request.api_key_id, request.platform, request.capability,
+                request.billing_meter_key, request.status, request.units_actual,
+                request.upstream_latency_ms, request.created_at, request.completed_at,
+                charge.currency AS charge_currency,
+                charge.quoted_minor, charge.charged_minor,
+                charge.status AS charge_status,
+                charge.enforcement_mode
+           FROM usage_requests request
+           LEFT JOIN billing.customer_charges charge
+             ON charge.usage_request_id = request.id
+           ${where}
+          ORDER BY request.created_at DESC, request.id DESC
+          LIMIT 50`,
+        values,
+      ),
+    ])
+    return {
+      ...summarizeAggregates(rows),
+      recentRequests: recentResult.rows.map(usageRequestSummaryRecord),
+      customerBilling: summarizeCustomerBilling(billingResult.rows),
+    }
   }
 
   async dashboard() {
@@ -7920,6 +8428,47 @@ function summarizeAggregates(rows) {
     averageUpstreamLatencyMs: latencyRequests ? Math.round(weightedLatency / latencyRequests) : null,
     byPlatform,
     byCapability,
+  }
+}
+
+function summarizeCustomerBilling(rows) {
+  const currencies = new Set()
+  const byMeter = {}
+  let quotedMinor = 0
+  let chargedMinor = 0
+  let heldMinor = 0
+  let shadowQuotedMinor = 0
+  for (const row of rows) {
+    currencies.add(row.currency)
+    const entry = (byMeter[row.meter_key] ||= {
+      requests: 0,
+      quotedMinor: 0,
+      chargedMinor: 0,
+      heldMinor: 0,
+      currency: row.currency,
+      mixedCurrencies: false,
+    })
+    if (entry.currency !== row.currency) {
+      entry.currency = null
+      entry.mixedCurrencies = true
+    }
+    entry.requests += Number(row.requests)
+    entry.quotedMinor += Number(row.quoted_minor)
+    entry.chargedMinor += Number(row.charged_minor)
+    entry.heldMinor += Number(row.held_minor)
+    quotedMinor += Number(row.quoted_minor)
+    chargedMinor += Number(row.charged_minor)
+    heldMinor += Number(row.held_minor)
+    shadowQuotedMinor += Number(row.shadow_quoted_minor)
+  }
+  return {
+    currency: currencies.size === 1 ? [...currencies][0] : null,
+    mixedCurrencies: currencies.size > 1,
+    quotedMinor,
+    chargedMinor,
+    heldMinor,
+    shadowQuotedMinor,
+    byMeter,
   }
 }
 

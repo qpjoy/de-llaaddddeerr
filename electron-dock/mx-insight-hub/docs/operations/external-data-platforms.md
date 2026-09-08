@@ -1,9 +1,14 @@
 # External data platform gateway operations
 
 Status: JustOne ecommerce product search and direct TikHub Xiaohongshu note acquisition implemented;
-PostgreSQL required for durable analytics, archive, snapshot, quota and canonical lineage.
+direct TikHub search/raw routing is a staged migration and is not proved active by repository presence.
+PostgreSQL is required for durable analytics, archive, snapshot, quota and canonical lineage.
 
 Related decision: [ADR-0013](../adr/0013-external-data-platform-gateway.md).
+
+Staged Xiaohongshu search eligibility, Night-All retention, multi-call accounting and rollback are governed by
+the [direct TikHub migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md). That document does
+not claim that all Night-All traffic has moved.
 
 ## 1. Operational boundary
 
@@ -14,10 +19,15 @@ procurement cost, separately from scheduled cleaning jobs. Public callers use on
 - `POST /api/v1/data/post` with both the `xiaohongshu` platform entitlement and
   `social.posts.resolve` capability entitlement. The legacy spelling
   `/api/v1/xiaohongshu/app/get_note_info` is an alias of the same canonical operation, not a second route to
-  purchase or meter independently.
+  purchase or meter independently;
+- `POST /api/v1/data/search` for an eligible Xiaohongshu page, with the `xiaohongshu` platform entitlement;
+- the eligible Xiaohongshu subset of `POST /api/v1/night-all/search/raw`, projected back into the existing
+  compatibility envelope so callers do not select or learn a physical provider.
 
 The current topology has one provider per released operation: JustOne for ecommerce search and TikHub for
-Xiaohongshu note detail. There is no multi-provider runtime router or automatic supplier failover.
+Xiaohongshu note detail. TikHub-backed Xiaohongshu search/raw is implemented behind its narrower rollout gate;
+until that gate is enabled it is staged rather than a released traffic claim. There is no multi-provider runtime
+router or automatic supplier failover.
 “Provider-neutral” describes the Public Hub contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot
 delivery modes, not evidence that another provider was called. Provider candidates shown in a catalog remain
 planning evidence until released.
@@ -45,6 +55,11 @@ cost requires an explicit operator decision.
    `054_api_key_entitlements_plans_and_tikhub.sql` are applied. Install
    `scripts/api-key-quota-indexes.sql` through the documented concurrent-index phase after migration 054.
    Do not create or patch the `external_platform` tables by hand.
+   Before enabling direct Xiaohongshu search or bounded detail enrichment, also verify
+   `055_external_platform_multi_call_rate_limit.sql` in the same database used by every Public replica. If
+   `external_platform.provider_calls` is larger than 128 MiB or the installation has latency-sensitive writers,
+   use the reviewed online preparation below before running the normal migration; migration 055 deliberately
+   fails closed when the required concurrent indexes are absent or invalid on a large table.
 2. Use PostgreSQL storage (`MX_INSIGHT_STORE=postgres` with `DATABASE_URL`). Memory mode is acceptable only
    for contract tests; it cannot be accepted as durable archive/lineage evidence.
    When bootstrap explicitly includes `xiaohongshu`, keep
@@ -109,9 +124,18 @@ preferred credential source. Command-environment values take precedence over
 The Hub adapter is pinned to TikHub's App V2 note-detail operation and accepts only an official Xiaohongshu note
 or share URL. Mainland deployments use `https://api.tikhub.dev`; deployments outside mainland China retain
 `https://api.tikhub.io`. Arbitrary provider origins fail at startup. Keep
-`MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0` until a redacted fixture from the actual account verifies the response
-shape, billing classification and one bounded live smoke. An HTTP/business success with unusable note content is
-quarantined and must not be retried automatically because the upstream call may already have been charged.
+`MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0` until a redacted fixture from the actual account verifies the note-detail
+response shape, billing classification and one bounded live smoke. Keep the narrower
+`MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0` until the search response, continuation and 60-boundary enrichment
+fixtures are independently verified. The search gate cannot be enabled unless the parent gate is also `1`. An
+HTTP/business success with unusable content is quarantined and must not be retried automatically because the
+upstream call may already have been charged.
+
+Direct search caches are controlled by `MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS` and
+`MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS`. Known 60-character previews are repaired for the full 20-item page by
+default (`MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS=20`) with two detail workers
+(`MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY=2`). The shared RPM bucket and request deadline remain authoritative;
+capacity exhaustion returns explicit partial-completeness metadata instead of labelling a preview as full text.
 
 Prefer the Hub Admin credential UI for a new key. To copy the existing Night-All credential without printing it,
 run the checked migration helper on the Internal host. It reads only
@@ -133,9 +157,96 @@ unset MX_INSIGHT_ADMIN_TOKEN NIGHT_ALL_CONFIG_PATH MX_INSIGHT_ADMIN_BASE_URL
 ```
 
 Dry-run validates the source and target revision but performs no write. After the real migration, inspect only
-safe credential metadata, persist the independently reviewed gate/base URL in the release environment, deploy
-the Hub data plane, and issue a new Live key whose immutable snapshot contains both `xiaohongshu` and
-`social.posts.resolve`. Never delete the Night-All credential until the Hub rollback window has closed.
+safe credential metadata. Deploy migration 055 and the new Hub data plane with the search gate still `0`; only
+after every Public replica is compatible should a recorded canary set both the reviewed parent gate and the
+search gate to `1`. A Live key needs an immutable `xiaohongshu` platform entitlement for direct search; the
+separate explicit note-detail API additionally requires `social.posts.resolve`. Never delete the Night-All
+credential until the Hub rollback window has closed.
+
+#### Online preparation for migration 055
+
+The normal migration owns this schema. Use the following preparation only when the table-size/latency rule above
+requires concurrent indexes, and only while migration 055 is still absent from `schema_migrations`. Run it from
+an approved Internal PostgreSQL operator session. Each `CREATE INDEX CONCURRENTLY` or `DROP INDEX CONCURRENTLY`
+must be a top-level statement; do not wrap those statements in a transaction or copy them into the migration
+file.
+
+```sql
+\set ON_ERROR_STOP on
+
+-- Must return zero rows before preparation.
+SELECT filename
+FROM schema_migrations
+WHERE filename = '055_external_platform_multi_call_rate_limit.sql';
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '5min';
+ALTER TABLE external_platform.provider_calls
+  ADD COLUMN IF NOT EXISTS call_ordinal integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS call_role text NOT NULL DEFAULT 'primary',
+  ADD COLUMN IF NOT EXISTS dispatch_fingerprint char(64);
+CREATE OR REPLACE FUNCTION external_platform.default_provider_call_dispatch_fingerprint()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+  IF NEW.dispatch_fingerprint IS NULL THEN
+    NEW.dispatch_fingerprint := NEW.request_fingerprint;
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+DROP TRIGGER IF EXISTS provider_calls_default_dispatch_fingerprint
+  ON external_platform.provider_calls;
+CREATE TRIGGER provider_calls_default_dispatch_fingerprint
+BEFORE INSERT ON external_platform.provider_calls
+FOR EACH ROW
+EXECUTE FUNCTION external_platform.default_provider_call_dispatch_fingerprint();
+COMMIT;
+
+-- Must return zero rows before creating the unique index.
+SELECT usage_request_id, call_ordinal, count(*)
+FROM external_platform.provider_calls
+GROUP BY usage_request_id, call_ordinal
+HAVING count(*) > 1
+LIMIT 1;
+
+-- A failed concurrent build leaves an invalid same-name object. Remove it and
+-- retry; migration 055 will not accept name-only evidence.
+DROP INDEX CONCURRENTLY IF EXISTS
+  external_platform.external_platform_provider_calls_usage_ordinal_idx;
+DROP INDEX CONCURRENTLY IF EXISTS
+  external_platform.external_platform_provider_calls_dispatch_fingerprint_idx;
+CREATE UNIQUE INDEX CONCURRENTLY external_platform_provider_calls_usage_ordinal_idx
+  ON external_platform.provider_calls (usage_request_id, call_ordinal);
+CREATE INDEX CONCURRENTLY external_platform_provider_calls_dispatch_fingerprint_idx
+  ON external_platform.provider_calls
+    (provider_key, consumer_id, operation, dispatch_fingerprint, completed_at DESC);
+
+SELECT index_relation.relname,
+       index_state.indisunique,
+       index_state.indisvalid,
+       index_state.indisready,
+       index_state.indislive,
+       pg_get_indexdef(index_state.indexrelid)
+FROM pg_index index_state
+JOIN pg_class index_relation ON index_relation.oid = index_state.indexrelid
+WHERE index_state.indexrelid IN (
+  to_regclass('external_platform.external_platform_provider_calls_usage_ordinal_idx'),
+  to_regclass('external_platform.external_platform_provider_calls_dispatch_fingerprint_idx')
+)
+ORDER BY index_relation.relname;
+
+-- Continue only after the query above returns exactly two valid/ready/live
+-- indexes, the usage index is unique, and both definitions match exactly.
+DROP INDEX CONCURRENTLY IF EXISTS
+  external_platform.external_platform_provider_calls_usage_idx;
+```
+
+Then run the normal Hub migration command. It installs the constraints and shared rate-bucket table, revalidates
+both index definitions from PostgreSQL catalogs, and records the migration checksum. Do not deploy a binary that
+can create enrichment ordinals until that normal migration succeeds. Historical rows intentionally keep a null
+`dispatch_fingerprint`; rolling writers receive one from the trigger, while current readers match historical
+rows through their original `request_fingerprint` without rewriting the table.
 
 Defaults are deliberately cache-heavy and bounded: exact successful note results remain fresh for 24 hours and
 eligible for stored fallback for 30 days; request-local confirmed missing notes receive a negative cache. The

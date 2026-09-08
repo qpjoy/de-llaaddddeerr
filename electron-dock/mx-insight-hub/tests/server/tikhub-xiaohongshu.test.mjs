@@ -8,6 +8,7 @@ import {
   isTikHubXiaohongshuUnavailable,
   redactTikHubEnvelope,
   TIKHUB_PROVIDER_KEY,
+  TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
   TIKHUB_XIAOHONGSHU_ENDPOINT_PATH,
   XIAOHONGSHU_POST_OPERATION,
 } from '../../server/contracts/tikhub-xiaohongshu.mjs'
@@ -40,6 +41,7 @@ function successEnvelope({
   token = 'private-response-token',
   avatarUrl = 'https://media.example.test/avatar.webp',
   mediaUrl = 'https://media.example.test/note.webp',
+  desc = '一篇完整的小红书图文笔记',
 } = {}) {
   return {
     code: 200,
@@ -50,7 +52,7 @@ function successEnvelope({
         note_list: [{
           note_id: NOTE_ID,
           title: '便携相机实拍',
-          desc: '一篇完整的小红书图文笔记',
+          desc,
           timestamp: 1_782_212_583,
           xsec_token: xsecToken,
           token,
@@ -74,6 +76,20 @@ function successEnvelope({
       }],
     },
   }
+}
+
+function hasLoneSurrogate(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xDC00 || next > 0xDFFF) return true
+      index += 1
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      return true
+    }
+  }
+  return false
 }
 
 function unavailableEnvelope() {
@@ -220,13 +236,101 @@ test('App V2 nested note_list is normalized and private xsec/token fields are re
 
   const redacted = redactTikHubEnvelope({
     token: responseToken,
-    nested: { xsec_token: xsecToken },
+    nested: {
+      xsec_token: xsecToken,
+      sign: 'nested-signature-that-must-not-leak',
+      auth_key: 'nested-auth-key-that-must-not-leak',
+      session: 'nested-session-that-must-not-leak',
+      setCookie: 'nested-cookie-that-must-not-leak',
+    },
     url: `https://media.example.test/file.webp?xsec_token=${xsecToken}&safe=1`,
+    signedUrl: 'https://cdn.example.test/a?sign=url-signature-that-must-not-leak&sig=url-sig-that-must-not-leak&safe=1#private-fragment',
+    diagnostic: [
+      'auth_key=plain-auth-key-that-must-not-leak',
+      'set-cookie=set-cookie-that-must-not-leak',
+      'cookie=cookie-that-must-not-leak',
+      'authorization=Basic authorization-that-must-not-leak',
+      'client_secret=client-secret-that-must-not-leak',
+      'password=password-that-must-not-leak',
+      'secret=secret-that-must-not-leak',
+      'status=ok',
+    ].join('; '),
+    serializedDiagnostic: 'prefix {"token":"json-token-that-must-not-leak","status":"ok"} suffix',
+    escapedSerializedDiagnostic: 'prefix {\\"client_secret\\":\\"escaped-secret-that-must-not-leak\\"} suffix',
   })
   assert.equal('token' in redacted, false)
   assert.equal('xsec_token' in redacted.nested, false)
+  assert.equal('sign' in redacted.nested, false)
+  assert.equal('auth_key' in redacted.nested, false)
+  assert.equal('session' in redacted.nested, false)
+  assert.equal('setCookie' in redacted.nested, false)
   assert.equal(new URL(redacted.url).searchParams.get('xsec_token'), '[REDACTED]')
   assert.equal(new URL(redacted.url).searchParams.get('safe'), '1')
+  assert.equal(new URL(redacted.signedUrl).searchParams.get('sign'), '[REDACTED]')
+  assert.equal(new URL(redacted.signedUrl).searchParams.get('sig'), '[REDACTED]')
+  assert.equal(new URL(redacted.signedUrl).searchParams.get('safe'), '1')
+  assert.equal(new URL(redacted.signedUrl).hash, '')
+  assert.doesNotMatch(JSON.stringify(redacted), /must-not-leak/u)
+})
+
+test('detail bodies use a 50000-code-point safety limit without splitting emoji', async () => {
+  const bodies = [
+    '汉'.repeat(50_000),
+    '汉'.repeat(50_001),
+    `${'汉'.repeat(49_999)}😀尾`,
+  ]
+  const adapter = new TikHubAdapter({
+    apiKey: PROVIDER_KEY,
+    fetchImpl: async () => jsonResponse(successEnvelope({ desc: bodies.shift() })),
+  })
+  const request = { platform: 'xiaohongshu', url: noteUrl() }
+
+  const exact = await adapter.getXiaohongshuPost(request)
+  assert.equal([...exact.publicBody.data.item.text].length, 50_000)
+  assert.equal(exact.safetyLimited, false)
+  assert.equal(exact.records[0].extensions.bodyCompleteness, undefined)
+  assert.equal('safetyLimited' in exact.publicBody.data.item, false)
+
+  const limited = await adapter.getXiaohongshuPost(request)
+  assert.equal([...limited.publicBody.data.item.text].length, 50_000)
+  assert.equal(limited.publicBody.data.item.text, '汉'.repeat(50_000))
+  assert.equal(limited.safetyLimited, true)
+  assert.equal(limited.records[0].extensions.bodyCompleteness, 'safety_limited')
+  assert.equal('safetyLimited' in limited.publicBody.data.item, false)
+
+  const emojiBoundary = await adapter.getXiaohongshuPost(request)
+  assert.equal([...emojiBoundary.publicBody.data.item.text].length, 50_000)
+  assert.equal(emojiBoundary.publicBody.data.item.text.endsWith('😀'), true)
+  assert.equal(emojiBoundary.publicBody.data.item.text.includes('尾'), false)
+  assert.equal(hasLoneSurrogate(emojiBoundary.publicBody.data.item.text), false)
+  assert.equal(emojiBoundary.safetyLimited, true)
+  assert.equal(emojiBoundary.records[0].extensions.bodyCompleteness, 'safety_limited')
+  assert.doesNotMatch(JSON.stringify(emojiBoundary.publicBody), /safetyLimited/u)
+})
+
+test('standalone detail dispatch uses its endpoint price before the legacy fallback', async () => {
+  const state = await gatewayFixture({
+    fetchImpl: async () => jsonResponse(successEnvelope()),
+    config: gatewayConfig({
+      billing: {
+        source: 'manual',
+        currency: 'CNY',
+        pricingAsOf: '2026-09-08T00:00:00.000Z',
+        unitCostMinor: 5,
+        unitCostMinorByEndpoint: { [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: 11 },
+        monthlyBudgetMinor: null,
+      },
+    }),
+  })
+
+  await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl() },
+    idempotencyKey: 'detail-endpoint-cost-01',
+    path: POST_PATH,
+  })
+
+  const [providerCall] = [...state.platformStore.calls.values()]
+  assert.equal(providerCall.costMinor, 11)
 })
 
 test('customer delivery exposes only Hub media locators while the authorized relay retains the source URL', async () => {
@@ -278,6 +382,7 @@ test('customer delivery exposes only Hub media locators while the authorized rel
   await new Promise((resolve) => setTimeout(resolve, 5))
   const fallback = await state.gateway.getPost(state.context, {
     body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
+    idempotencyKey: 'public-projection-stale-01',
     path: POST_PATH,
   })
   assert.equal(fallback.sourceMode, 'stored_fallback')
@@ -286,6 +391,15 @@ test('customer delivery exposes only Hub media locators while the authorized rel
     `/api/v1/data/posts/media?requestId=${fallback.requestId}&mediaIndex=0`,
   )
   assert.doesNotMatch(JSON.stringify(fallback.body), new RegExp(`${marker}|media\\.example\\.test`, 'u'))
+
+  const fallbackReplay = await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
+    idempotencyKey: 'public-projection-stale-01',
+    path: POST_PATH,
+  })
+  assert.equal(fallbackReplay.sourceMode, 'idempotent_replay')
+  assert.equal(fallbackReplay.originSourceMode, 'stale')
+  assert.equal(fallbackReplay.body.data.item.media[0].url, fallback.body.data.item.media[0].url)
 })
 
 test('canonical ingest strips URL queries and maps tags and bookmarks to stable fields', async () => {
@@ -348,6 +462,42 @@ test('automatic idempotency is API-key scoped while snapshots remain shared by t
     cached.body.data.item.media[0].url,
     `/api/v1/data/posts/media?requestId=${cached.requestId}&mediaIndex=0`,
   )
+})
+
+test('provider token exhaustion prevents a second TikHub dispatch and serves an exact stored fallback', async () => {
+  let upstreamCalls = 0
+  const state = await gatewayFixture({
+    config: gatewayConfig({ maxRequestsPerMinute: 1 }),
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return jsonResponse(successEnvelope())
+    },
+  })
+  await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl() },
+    idempotencyKey: 'tikhub-rate-warm-01',
+    path: POST_PATH,
+  })
+
+  const fallback = await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'refresh' },
+    idempotencyKey: 'tikhub-rate-refresh-01',
+    path: POST_PATH,
+  })
+  assert.equal(fallback.sourceMode, 'stored_fallback')
+  assert.equal(fallback.body.meta.fallbackReason, 'provider_rate_limit')
+  assert.equal(upstreamCalls, 1)
+  assert.equal(state.platformStore.calls.size, 1)
+
+  const miss = await captureError(() => state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(OTHER_NOTE_ID) },
+    idempotencyKey: 'tikhub-rate-miss-01',
+    path: POST_PATH,
+  }))
+  assert.equal(miss.status, 429)
+  assert.equal(miss.code, 'external_platform_rate_limited')
+  assert.ok(miss.details.retryAfterMs > 0)
+  assert.equal(upstreamCalls, 1)
 })
 
 test('a caller-supplied idempotency key still cannot cross API-key attribution', async () => {
@@ -483,6 +633,7 @@ test('the explicit service-error sentinel is billed once and negative-cached for
   assert.equal(providerCall.outcome, 'succeeded_unusable')
   assert.equal(providerCall.errorCode, 'upstream_note_unavailable')
   assert.equal(providerCall.billed, true)
+  assert.equal(providerCall.costMinor, 5, 'legacy unitCostMinor remains the endpoint fallback')
 
   const replay = await captureError(() => state.gateway.getPost(state.context, request))
   assert.equal(replay.status, 404)
@@ -510,6 +661,7 @@ test('legacy get_note_info and canonical post routes share one idempotency scope
         avatarUrl: `https://media.example.test/avatar.webp?signature=${marker}`,
       }))
     },
+    config: gatewayConfig({ freshTtlMs: 1 }),
   })
   const server = createServer(createApp({
     service: state.service,
@@ -521,13 +673,13 @@ test('legacy get_note_info and canonical post routes share one idempotency scope
     logger: { warn() {}, error() {} },
   }))
   const baseUrl = await listen(server)
-  const call = async (path, body) => {
+  const call = async (path, body, idempotencyKey = 'route-alias-key-01') => {
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${state.apiKey.secret}`,
         'content-type': 'application/json',
-        'idempotency-key': 'route-alias-key-01',
+        'idempotency-key': idempotencyKey,
       },
       body: JSON.stringify(body),
     })
@@ -550,6 +702,22 @@ test('legacy get_note_info and canonical post routes share one idempotency scope
     )
     assert.equal(legacy.payload.data.item.author.avatarUrl, null)
     assert.doesNotMatch(JSON.stringify([legacy.payload, canonical.payload]), new RegExp(marker, 'u'))
+
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const stale = await call(
+      POST_PATH,
+      { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
+      'route-stale-key-01',
+    )
+    const staleReplay = await call(
+      POST_PATH,
+      { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
+      'route-stale-key-01',
+    )
+    assert.equal(stale.response.headers.get('x-mx-insight-source-mode'), 'stored_fallback')
+    assert.equal(stale.response.headers.get('warning'), '110 - "Response is stale"')
+    assert.equal(staleReplay.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
+    assert.equal(staleReplay.response.headers.get('warning'), '110 - "Response is stale"')
     assert.equal(upstreamCalls, 1)
   } finally {
     await close(server)

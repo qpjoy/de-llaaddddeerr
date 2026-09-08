@@ -9,6 +9,14 @@ function positiveInteger(value, fallback, name) {
   return parsed
 }
 
+function positiveInt32(value, fallback, name) {
+  const parsed = positiveInteger(value, fallback, name)
+  if (!Number.isSafeInteger(parsed) || parsed > 2_147_483_647) {
+    throw new AppError(500, 'invalid_configuration', `${name} must not exceed 2147483647`)
+  }
+  return parsed
+}
+
 function optionalNonNegativeInteger(value, name) {
   if (value == null || value === '') return null
   const parsed = Number(value)
@@ -203,6 +211,11 @@ export function parseJustOneConfig(environment = process.env, {
     ),
     maxConcurrency,
     maxConsumerConcurrency,
+    maxRequestsPerMinute: positiveInt32(
+      environment.MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE,
+      90,
+      'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE',
+    ),
     circuitFailureThreshold: positiveInteger(
       environment.MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES,
       3,
@@ -240,6 +253,7 @@ export function disabledJustOneConfig(environment, error) {
     unknownFingerprintCooldownMs: 15 * 60_000,
     maxConcurrency: 32,
     maxConsumerConcurrency: 8,
+    maxRequestsPerMinute: 90,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: unknownJustOneBilling(),
@@ -263,6 +277,7 @@ function unknownTikHubBilling() {
     currency: null,
     pricingAsOf: null,
     unitCostMinor: null,
+    unitCostMinorByEndpoint: {},
     monthlyBudgetMinor: null,
   }
 }
@@ -276,7 +291,10 @@ function parseTikHubBilling(raw) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TIKHUB_BILLING_JSON must be an object')
   }
-  const fields = new Set(['source', 'currency', 'pricingAsOf', 'unitCostMinor', 'monthlyBudgetMinor'])
+  const fields = new Set([
+    'source', 'currency', 'pricingAsOf', 'unitCostMinor',
+    'unitCostMinorByEndpoint', 'monthlyBudgetMinor',
+  ])
   const unsupported = Object.keys(value).filter((field) => !fields.has(field))
   if (unsupported.length > 0) {
     throw new AppError(500, 'invalid_configuration', `MX_INSIGHT_TIKHUB_BILLING_JSON contains unsupported field ${unsupported[0]}`)
@@ -292,11 +310,26 @@ function parseTikHubBilling(raw) {
   if (!Number.isFinite(pricedAt.getTime())) {
     throw new AppError(500, 'invalid_configuration', 'TikHub pricingAsOf must be an ISO date')
   }
+  const costs = value.unitCostMinorByEndpoint ?? {}
+  if (!costs || typeof costs !== 'object' || Array.isArray(costs)) {
+    throw new AppError(500, 'invalid_configuration', 'TikHub unitCostMinorByEndpoint must be an object')
+  }
+  const unitCostMinorByEndpoint = {}
+  for (const [endpoint, cost] of Object.entries(costs)) {
+    if (!/^[a-z][a-z0-9._-]{0,127}$/u.test(endpoint)) {
+      throw new AppError(500, 'invalid_configuration', 'TikHub billing endpoint keys must be stable identifiers')
+    }
+    unitCostMinorByEndpoint[endpoint] = optionalNonNegativeInteger(
+      cost,
+      `TikHub unit cost for ${endpoint}`,
+    )
+  }
   return {
     source: 'manual',
     currency,
     pricingAsOf: pricedAt.toISOString(),
     unitCostMinor: optionalNonNegativeInteger(value.unitCostMinor, 'TikHub unitCostMinor'),
+    unitCostMinorByEndpoint,
     monthlyBudgetMinor: optionalNonNegativeInteger(value.monthlyBudgetMinor, 'TikHub monthlyBudgetMinor'),
   }
 }
@@ -324,10 +357,21 @@ export function parseTikHubConfig(environment = process.env, {
     environment.MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED,
     'MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED',
   )
+  const searchContractVerified = binaryFlag(
+    environment.MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED,
+    'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED',
+  )
   const configuredSignal = binaryFlag(
     environment.MX_INSIGHT_TIKHUB_CONFIGURED,
     'MX_INSIGHT_TIKHUB_CONFIGURED',
   )
+  if (searchContractVerified && !contractVerified) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED requires MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1',
+    )
+  }
   const timeoutMs = positiveInteger(
     environment.MX_INSIGHT_TIKHUB_TIMEOUT_MS,
     30_000,
@@ -356,17 +400,62 @@ export function parseTikHubConfig(environment = process.env, {
   if (staleTtlMs < freshTtlMs) {
     throw new AppError(500, 'invalid_configuration', 'TikHub stale TTL must be greater than or equal to fresh TTL')
   }
+  const searchFreshTtlMs = positiveInteger(
+    environment.MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS,
+    5 * 60_000,
+    'MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS',
+  )
+  const searchStaleTtlMs = positiveInteger(
+    environment.MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS,
+    24 * 60 * 60_000,
+    'MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS',
+  )
+  if (searchStaleTtlMs < searchFreshTtlMs) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'TikHub search stale TTL must be greater than or equal to search fresh TTL',
+    )
+  }
+  const searchMaxEnrichItems = optionalNonNegativeInteger(
+    environment.MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS,
+    'MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS',
+  ) ?? 20
+  if (searchMaxEnrichItems > 20) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS must not exceed 20',
+    )
+  }
+  const searchEnrichConcurrency = positiveInteger(
+    environment.MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY,
+    2,
+    'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY',
+  )
+  if (searchEnrichConcurrency > 5) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY must not exceed 5',
+    )
+  }
   const configured = Boolean(apiKey) || configuredSignal
   return {
     baseUrl,
     apiKey,
     configured,
     contractVerified,
+    searchContractVerified,
     dispatchEnabled: Boolean(apiKey && contractVerified),
     configurationError: null,
     timeoutMs,
     freshTtlMs,
     staleTtlMs,
+    searchFreshTtlMs,
+    searchStaleTtlMs,
+    searchMaxEnrichItems,
+    searchEnrichConcurrency,
     unknownFingerprintCooldownMs: positiveInteger(
       environment.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
       15 * 60_000,
@@ -381,6 +470,11 @@ export function parseTikHubConfig(environment = process.env, {
       environment.MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY,
       8,
       'MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY',
+    ),
+    maxRequestsPerMinute: positiveInt32(
+      environment.MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE,
+      120,
+      'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE',
     ),
     circuitFailureThreshold: positiveInteger(
       environment.MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES,
@@ -406,6 +500,7 @@ export function disabledTikHubConfig(environment, error) {
     configured: Boolean(environment.MX_INSIGHT_TIKHUB_API_KEY?.trim())
       || environment.MX_INSIGHT_TIKHUB_CONFIGURED === '1',
     contractVerified: environment.MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED === '1',
+    searchContractVerified: environment.MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED === '1',
     dispatchEnabled: false,
     configurationError: {
       code: 'invalid_configuration',
@@ -415,9 +510,14 @@ export function disabledTikHubConfig(environment, error) {
     timeoutMs: 30_000,
     freshTtlMs: 24 * 60 * 60_000,
     staleTtlMs: 30 * 24 * 60 * 60_000,
+    searchFreshTtlMs: 5 * 60_000,
+    searchStaleTtlMs: 24 * 60 * 60_000,
+    searchMaxEnrichItems: 20,
+    searchEnrichConcurrency: 2,
     unknownFingerprintCooldownMs: 15 * 60_000,
     maxConcurrency: 8,
     maxConsumerConcurrency: 8,
+    maxRequestsPerMinute: 120,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: unknownTikHubBilling(),
@@ -429,6 +529,7 @@ export function preflightTikHubConfig(environment = process.env) {
   return {
     configured: config.configured,
     contractVerified: config.contractVerified,
+    searchContractVerified: config.searchContractVerified,
     dispatchEnabled: config.dispatchEnabled,
   }
 }

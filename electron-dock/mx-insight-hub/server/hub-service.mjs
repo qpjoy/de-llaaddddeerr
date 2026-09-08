@@ -4,6 +4,12 @@ import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from 
 import { NIGHT_ALL_LEGACY_OPERATIONS } from './contracts/night-all-legacy.mjs'
 import { XIAOHONGSHU_POST_OPERATION } from './contracts/tikhub-xiaohongshu.mjs'
 import {
+  normalizeBillingProfile,
+  normalizeCreditAdjustment,
+  normalizePublishedPlan,
+} from './billing/contracts.mjs'
+import { XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH } from './contracts/tikhub-xiaohongshu-search.mjs'
+import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
   normalizeTelegramSearchQuery,
@@ -174,6 +180,9 @@ const RESULT_TYPES = new Set(['fresh', 'stable'])
 const FRESH_REPLAY_WINDOW_MS = 120_000
 const PUBLIC_OPINION_VISIBILITY_CONTRACT = 'public-opinion.publication-visibility.v1'
 const ECOMMERCE_PLATFORM = 'ecommerce'
+const XIAOHONGSHU_SEARCH_CAPABILITY = 'search_posts'
+const DIRECT_XIAOHONGSHU_PAGE_SIZE = 20
+const DIRECT_XIAOHONGSHU_CURSOR_PREFIX = 'mxec2.'
 
 function publicDataProductContract(response, contractVersion) {
   const payload = { ...response, contractVersion }
@@ -369,6 +378,52 @@ function compatibilityIdempotencyStateIsDecisive(record, fingerprint) {
     || ['committed', 'reserved', 'unknown'].includes(record.status)
 }
 
+function isDirectXiaohongshuCursor(value) {
+  return typeof value === 'string' && value.startsWith(DIRECT_XIAOHONGSHU_CURSOR_PREFIX)
+}
+
+function directXiaohongshuLegacyRawRequest(operation, normalized) {
+  if (operation !== 'raw' || normalized.platform !== 'xiaohongshu') return null
+  const body = normalized.upstreamBody
+  const singular = ['keyword', 'query'].filter((field) => (
+    typeof body[field] === 'string' && body[field].trim()
+  ))
+  if (singular.length !== 1 || body.keywords != null || body.queries != null) return null
+  // The historical facade accepts identifiers up to 2,048 characters, while
+  // the pinned direct search contract accepts 500. Preserve the older request
+  // instead of changing a formerly valid legacy shape into a direct 400.
+  if (body[singular[0]].trim().length > XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH) return null
+  if (normalized.pageSize !== DIRECT_XIAOHONGSHU_PAGE_SIZE) return null
+  if (body.cursor && !isDirectXiaohongshuCursor(body.cursor)) return null
+  if (body.page != null && (body.page !== 1 || body.cursor)) return null
+  // These shapes either fan out or carry Night-All-specific continuation and
+  // cache semantics. Keep them on the historical compatibility port until an
+  // equivalent Hub-native contract exists.
+  if (
+    body.params != null
+    || body.includeDetails === true
+    || body.includeComments === true
+    || body.commentLimit != null
+    || body.commentCursor != null
+    || body.cacheMaxAgeHours != null
+    || body.maxEnrichItems != null
+    || body.enrichConcurrency != null
+    || body.concurrency != null
+  ) return null
+  return {
+    body: {
+      platform: 'xiaohongshu',
+      query: body[singular[0]],
+      pageSize: normalized.pageSize,
+      ...(body.cursor ? { cursor: body.cursor } : {}),
+    },
+    enrichment: {
+      includeDetails: false,
+      disableAutoDetails: body.disableAutoDetails === true,
+    },
+  }
+}
+
 export class HubService {
   constructor({
     store,
@@ -381,6 +436,8 @@ export class HubService {
     segmenter = null,
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
+    externalSocialSearch = null,
+    externalSocialSearchEnabled = false,
     externalImageLoader = null,
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     logger = console,
@@ -399,6 +456,8 @@ export class HubService {
     this.segmenter = segmenter
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
+    this.externalSocialSearch = externalSocialSearch
+    this.externalSocialSearchEnabled = externalSocialSearchEnabled === true
     this.externalImageLoader = externalImageLoader
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
@@ -541,6 +600,135 @@ export class HubService {
   listPlans() {
     assert(typeof this.store.listPlans === 'function', 503, 'plan_store_unavailable', 'Plans require the current Hub database migration')
     return this.store.listPlans()
+  }
+
+  publishPlanVersion(body, publishedByInput) {
+    assert(
+      typeof this.store.publishPlanVersion === 'function',
+      503,
+      'billing_store_unavailable',
+      'Published customer pricing requires the current Hub database migration',
+    )
+    const publishedBy = requiredString(publishedByInput, 'publishedBy')
+    assert(
+      publishedBy.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(publishedBy),
+      400,
+      'invalid_request',
+      'publishedBy must be at most 256 characters and contain no control characters',
+    )
+    return this.store.publishPlanVersion({
+      ...normalizePublishedPlan(body),
+      publishedBy,
+    })
+  }
+
+  async getTenantBilling(tenantIdInput, options = {}) {
+    const tenantId = requiredUuid(tenantIdInput, 'tenantId')
+    assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
+    assert(
+      typeof this.store.getTenantBilling === 'function',
+      503,
+      'billing_store_unavailable',
+      'Tenant billing requires the current Hub database migration',
+    )
+    return this.store.getTenantBilling(tenantId, options)
+  }
+
+  async setTenantBillingProfile(tenantIdInput, body, updatedByInput) {
+    const tenantId = requiredUuid(tenantIdInput, 'tenantId')
+    assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
+    assert(
+      typeof this.store.replaceTenantBillingProfile === 'function',
+      503,
+      'billing_store_unavailable',
+      'Tenant billing requires the current Hub database migration',
+    )
+    return this.store.replaceTenantBillingProfile({
+      tenantId,
+      ...normalizeBillingProfile(body),
+      updatedBy: requiredString(updatedByInput, 'updatedBy'),
+    })
+  }
+
+  async addTenantCredit(tenantIdInput, body, { idempotencyKey, actor } = {}) {
+    const tenantId = requiredUuid(tenantIdInput, 'tenantId')
+    assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
+    assert(
+      typeof idempotencyKey === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(idempotencyKey),
+      400,
+      'invalid_idempotency_key',
+      'Idempotency-Key must contain 8-128 safe characters',
+    )
+    assert(
+      typeof this.store.addTenantCredit === 'function',
+      503,
+      'billing_store_unavailable',
+      'Tenant credit requires the current Hub database migration',
+    )
+    return this.store.addTenantCredit({
+      tenantId,
+      ...normalizeCreditAdjustment(body),
+      idempotencyKey,
+      actor: requiredString(actor, 'actor'),
+    })
+  }
+
+  async reconcileUnknownCustomerCharge(
+    usageRequestIdInput,
+    body,
+    { idempotencyKey, actor: actorInput } = {},
+  ) {
+    const usageRequestId = requiredUuid(usageRequestIdInput, 'usageRequestId')
+    assert(
+      body && typeof body === 'object' && !Array.isArray(body),
+      400,
+      'invalid_request',
+      'JSON object body is required',
+    )
+    const unsupported = Object.keys(body).filter(
+      (field) => !['disposition', 'reason'].includes(field),
+    )
+    assert(
+      unsupported.length === 0,
+      400,
+      'unsupported_fields',
+      `Unsupported customer charge reconciliation fields: ${unsupported.join(', ')}`,
+    )
+    const disposition = requiredString(body.disposition, 'disposition').toLowerCase()
+    assert(
+      disposition === 'capture' || disposition === 'release',
+      400,
+      'invalid_request',
+      'disposition must be capture or release',
+    )
+    const reason = requiredString(body.reason, 'reason')
+    assert(
+      reason.length <= 1024 && !/[\u0000-\u001f\u007f]/u.test(reason),
+      400,
+      'invalid_request',
+      'reason must be at most 1024 characters and contain no control characters',
+    )
+    const actor = requiredString(actorInput, 'actor')
+    assert(
+      actor.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(actor),
+      400,
+      'invalid_request',
+      'actor must be at most 256 characters and contain no control characters',
+    )
+    assert(
+      typeof this.store.reconcileUnknownCustomerCharge === 'function',
+      503,
+      'billing_store_unavailable',
+      'Customer charge reconciliation requires the current Hub database migration',
+    )
+    return this.store.reconcileUnknownCustomerCharge({
+      usageRequestId,
+      disposition,
+      idempotencyKey: requiredIdempotencyKey(idempotencyKey),
+      actor,
+      reason,
+    })
   }
 
   async getConsumerPlan(consumerIdInput) {
@@ -779,6 +967,9 @@ export class HubService {
       VIRTUAL_SUPERMARKET_PLATFORM,
       ECOMMERCE_PLATFORM,
     ])
+    // Xiaohongshu search is only one narrow Hub-direct operation. Keep asking
+    // the compatibility provider for its remaining raw/batch/crawl/user-info
+    // matrix, then merge the direct search/post-detail capabilities below.
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     let payload = { data: { platforms: [], legacySearch: null } }
     if (nightAllGrants.length > 0) {
@@ -982,39 +1173,61 @@ export class HubService {
     }
     const capabilityGrants = await this.#effectiveCapabilityGrants(context)
     let externalPostCapability = null
+    const hasPostDetailGrant = capabilityGrants.includes(XIAOHONGSHU_POST_OPERATION)
     if (
       canonicalGrants.includes('xiaohongshu')
-      && capabilityGrants.includes(XIAOHONGSHU_POST_OPERATION)
       && this.externalPostCapabilities
+      && (this.externalSocialSearchEnabled || hasPostDetailGrant)
     ) {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms)) {
-        const capability = await this.externalPostCapabilities()
+        let capability = null
+        try {
+          capability = await this.externalPostCapabilities()
+        } catch {
+          this.logger?.warn?.('[external-platform] TikHub capability discovery is unavailable')
+        }
         externalPostCapability = capability
         const index = platforms.findIndex((entry) => (entry?.platform || entry) === 'xiaohongshu')
-        const postDetail = {
-          ready: isTestApiKey(context.apiKey) ? false : Boolean(capability.ready),
+        const ready = !isTestApiKey(context.apiKey) && Boolean(capability?.ready)
+        const directCapabilities = [
+          ...(this.externalSocialSearchEnabled ? [XIAOHONGSHU_SEARCH_CAPABILITY] : []),
+          ...(hasPostDetailGrant ? ['post_detail'] : []),
+        ]
+        const postDetail = hasPostDetailGrant ? {
+          ready,
           source: 'hub',
-          servingMode: capability.servingMode,
-          contractVersion: capability.contractVersion,
-          input: capability.input,
-          deliveryModes: capability.deliveryModes,
-        }
+          servingMode: capability?.servingMode || 'live_with_stored_fallback',
+          contractVersion: capability?.contractVersion,
+          input: capability?.input,
+          deliveryModes: capability?.deliveryModes,
+        } : null
+        const search = this.externalSocialSearchEnabled ? {
+          ready,
+          source: 'hub',
+          servingMode: capability?.servingMode || 'live_with_stored_fallback',
+          contractVersion: 'night-all.data-search.v1',
+        } : null
         if (index < 0) {
           platforms.push({
             platform: 'xiaohongshu',
-            ready: postDetail.ready,
+            ready,
             source: 'hub',
-            servingMode: capability.servingMode,
-            capabilities: ['post_detail'],
-            postDetail,
+            servingMode: capability?.servingMode || 'live_with_stored_fallback',
+            capabilities: directCapabilities,
+            ...(search ? { search } : {}),
+            ...(postDetail ? { postDetail } : {}),
           })
         } else if (typeof platforms[index] === 'object') {
           const current = platforms[index]
           platforms[index] = {
             ...current,
-            capabilities: [...new Set([...(current.capabilities || []), ...capability.capabilities])],
-            postDetail,
+            // This top-level row may still describe Night-All-only legacy
+            // operations. Preserve its provider/readiness identity and publish
+            // direct readiness only on the nested search/postDetail fields.
+            capabilities: [...new Set([...(current.capabilities || []), ...directCapabilities])],
+            ...(search ? { search } : {}),
+            ...(postDetail ? { postDetail } : {}),
           }
         }
       }
@@ -2932,6 +3145,27 @@ export class HubService {
       canonicalizePlatform: canonicalPlatform,
       maxPageSize: policy.maxPageSize,
     })
+    const direct = directXiaohongshuLegacyRawRequest(operation, normalized)
+    if (
+      direct
+      && this.externalSocialSearch
+      && (
+        isDirectXiaohongshuCursor(direct.body.cursor)
+        || (this.externalSocialSearchEnabled && !isTestApiKey(context.apiKey))
+      )
+    ) {
+      return this.externalSocialSearch(context, {
+        ...direct,
+        idempotencyKey,
+        path,
+        responseMode: 'legacy',
+        fingerprintBody: {
+          contractVersion: 'mx-insight-hub.night-all-compat.v1',
+          ...normalized.upstreamBody,
+        },
+        replayWindowMs: null,
+      })
+    }
     const fingerprint = requestFingerprint({
       method: 'POST',
       path,
@@ -2947,6 +3181,7 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: normalized.platform,
+      meterKey: operation,
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3317,6 +3552,26 @@ export class HubService {
       // in-flight retry across a Hub upgrade replay its existing request.
       fingerprintQuery = { ...telegramQuery }
       delete fingerprintQuery.sourceScope
+    }
+    if (
+      platform === 'xiaohongshu'
+      && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
+      && this.externalSocialSearch
+      && (!cursor || isDirectXiaohongshuCursor(cursor))
+      && (
+        isDirectXiaohongshuCursor(cursor)
+        || (this.externalSocialSearchEnabled && !isTestApiKey(context.apiKey))
+      )
+    ) {
+      return this.externalSocialSearch(context, {
+        body: upstreamBody,
+        idempotencyKey,
+        path,
+        responseMode: 'modern',
+        fingerprintBody: { ...fingerprintQuery, type: resultType },
+        enrichment: {},
+        replayWindowMs: replayWindowFor(resultType),
+      })
     }
     const fingerprint = requestFingerprint({
       method: 'POST',

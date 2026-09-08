@@ -1,12 +1,203 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { AppError } from '../core/errors.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
 const number = (value) => value == null ? null : Number(value)
+const FINISHED_PROVIDER_OUTCOMES = new Set(['succeeded', 'succeeded_unusable', 'rejected', 'unknown'])
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 
-function snapshotKey({ consumerId, operation, fingerprint }) {
-  return `${consumerId}\u0000${operation}\u0000${fingerprint}`
+const snapshotFingerprint = (delivery) => delivery.snapshotFingerprint ?? delivery.fingerprint
+
+function snapshotKey(delivery) {
+  return `${delivery.consumerId}\u0000${delivery.operation}\u0000${snapshotFingerprint(delivery)}`
+}
+
+function boundedRateLimit(value, name) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
+    throw new TypeError(`${name} must be a positive safe integer`)
+  }
+  return value
+}
+
+function rateMoment({ at = new Date(), windowMs = 60_000 } = {}) {
+  const duration = boundedRateLimit(windowMs, 'windowMs')
+  if (duration < 1_000 || duration > 3_600_000) {
+    throw new TypeError('windowMs must be between 1000 and 3600000')
+  }
+  const timestamp = new Date(at).getTime()
+  if (!Number.isFinite(timestamp)) throw new TypeError('at must be a valid timestamp')
+  return { windowMs: duration, timestamp }
+}
+
+function deliveredItemCount(body) {
+  if (Array.isArray(body?.data?.items)) return body.data.items.length
+  if (body?.data?.item && typeof body.data.item === 'object') return 1
+  if (typeof body?.data?.raw_data === 'string') {
+    try {
+      const rows = JSON.parse(body.data.raw_data)
+      if (Array.isArray(rows)) return rows.length
+    } catch {
+      // Compatibility bodies are validated before storage. Treat a malformed
+      // historical snapshot conservatively as one delivered request unit.
+    }
+  }
+  return 0
+}
+
+function normalizedEvidence(input) {
+  return {
+    httpStatus: input.responseArchive?.httpStatus ?? input.httpStatus ?? null,
+    businessCode: input.responseArchive?.businessCode ?? input.businessCode ?? null,
+    upstreamRequestId: input.upstreamEvidence?.requestId ?? null,
+    upstreamRecordTime: input.upstreamEvidence?.recordTime ?? null,
+    billed: input.billed ?? null,
+    costMinor: input.costMinor ?? null,
+    costKind: input.costKind ?? 'unknown',
+    currency: input.currency ?? null,
+    latencyMs: input.latencyMs ?? null,
+    itemCount: input.itemCount ?? null,
+    errorCode: input.errorCode ?? null,
+    responseArchive: clone(input.responseArchive ?? null),
+    archiveObjects: clone(input.archiveObjects ?? []),
+  }
+}
+
+function validateStagedEvidence(input) {
+  const evidence = normalizedEvidence(input)
+  if (!evidence.responseArchive || !SHA256_PATTERN.test(evidence.responseArchive.payloadSha256 || '')) {
+    throw new TypeError('stageProviderEvidence requires a response archive with a SHA-256 payload')
+  }
+  if (!Array.isArray(evidence.archiveObjects) || evidence.archiveObjects.length === 0) {
+    throw new TypeError('stageProviderEvidence requires at least one archive object')
+  }
+  if (!evidence.archiveObjects.some((object) => (
+    object?.kind === 'response'
+    && object.payloadSha256 === evidence.responseArchive.payloadSha256
+  ))) {
+    throw new TypeError('stageProviderEvidence requires its response archive object')
+  }
+  const capturedDate = iso(evidence.responseArchive.capturedAt).slice(0, 10)
+  for (const object of evidence.archiveObjects) {
+    if (!SHA256_PATTERN.test(object?.payloadSha256 || '')) {
+      throw new TypeError('archive object payloadSha256 must be a lowercase SHA-256 fingerprint')
+    }
+    if (object.capturedDate !== capturedDate) {
+      throw new AppError(
+        500,
+        'external_platform_archive_date_invalid',
+        'External platform archive date does not match its UTC capture time',
+      )
+    }
+  }
+  return evidence
+}
+
+function memoryCallScopeMatches(call, delivery, providerKey) {
+  return call?.providerKey === providerKey
+    && call.tenantId === delivery.tenantId
+    && call.consumerId === delivery.consumerId
+    && call.usageRequestId === delivery.usageRequestId
+    && call.operation === delivery.operation
+    && call.fingerprint === delivery.fingerprint
+}
+
+function evidenceConflict() {
+  return new AppError(
+    409,
+    'external_platform_evidence_conflict',
+    'Provider-call evidence does not match the existing durable record',
+  )
+}
+
+function nullableNumber(value) {
+  return value == null ? null : Number(value)
+}
+
+function nullableTime(value) {
+  if (value == null) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : Number.NaN
+}
+
+function postgresCallScopeMatches(row, input, providerKey) {
+  const delivery = input.delivery
+  return row?.provider_key === providerKey
+    && row.tenant_id === delivery.tenantId
+    && row.consumer_id === delivery.consumerId
+    && row.usage_request_id === delivery.usageRequestId
+    && row.operation === delivery.operation
+    && row.request_fingerprint === delivery.fingerprint
+}
+
+function postgresCallEvidenceMatches(row, input, { ignoreErrorCode = false } = {}) {
+  const evidence = normalizedEvidence(input)
+  return nullableNumber(row.http_status) === nullableNumber(evidence.httpStatus)
+    && nullableNumber(row.business_code) === nullableNumber(evidence.businessCode)
+    && (row.upstream_request_id ?? null) === evidence.upstreamRequestId
+    && (row.upstream_record_time ?? null) === evidence.upstreamRecordTime
+    && (row.billed ?? null) === evidence.billed
+    && nullableNumber(row.cost_minor) === nullableNumber(evidence.costMinor)
+    && row.cost_kind === evidence.costKind
+    && (row.currency ?? null) === evidence.currency
+    && nullableNumber(row.latency_ms) === nullableNumber(evidence.latencyMs)
+    && nullableNumber(row.item_count) === nullableNumber(evidence.itemCount)
+    && (ignoreErrorCode || (row.error_code ?? null) === evidence.errorCode)
+}
+
+function postgresResponseArchiveMatches(row, archive) {
+  if (!archive) return row.response_archive_id == null
+  return row.response_archive_id != null
+    && row.archive_contract_state === (archive.contractState || 'unknown')
+    && nullableNumber(row.archive_http_status) === nullableNumber(archive.httpStatus)
+    && nullableNumber(row.archive_business_code) === nullableNumber(archive.businessCode)
+    && (row.archive_content_type ?? null) === (archive.contentType ?? null)
+    && nullableNumber(row.archive_body_size) === nullableNumber(archive.bodySize)
+    && (row.archive_payload_sha256 ?? null) === (archive.payloadSha256 ?? null)
+    && nullableTime(row.archive_captured_at) === nullableTime(archive.capturedAt)
+    && isDeepStrictEqual(row.archive_raw_payload ?? null, archive.rawPayload ?? null)
+}
+
+function postgresArchiveObjectsMatch(rows, input, providerKey) {
+  const expected = normalizedEvidence(input).archiveObjects
+  if (rows.length !== expected.length) return false
+  return rows.every((row, ordinal) => {
+    const object = expected[ordinal]
+    return Number(row.item_ordinal) === ordinal
+      && row.provider_key === providerKey
+      && row.object_kind === (object.kind === 'response' ? 'response' : 'item')
+      && row.marketplace === object.marketplace
+      && row.operation === input.delivery.operation
+      && row.endpoint_version === object.endpointVersion
+      && iso(row.captured_date).slice(0, 10) === object.capturedDate
+      && row.archive_path === object.archivePath
+      && row.response_pointer === (object.envelopePointer || '$')
+      && row.source_key === object.sourceKey
+      && row.payload_sha256 === object.payloadSha256
+      && isDeepStrictEqual(row.raw_payload, object.rawPayload)
+  })
+}
+
+function postgresSnapshotMatches(snapshot, expected, delivery, providerKey, callId) {
+  if (!expected) return snapshot == null
+  return snapshot?.providerKey === providerKey
+    && snapshot.consumerId === delivery.consumerId
+    && snapshot.operation === delivery.operation
+    && snapshot.fingerprint === snapshotFingerprint(delivery)
+    && snapshot.lastSuccessCallId === callId
+    && nullableTime(snapshot.capturedAt) === nullableTime(expected.capturedAt)
+    && nullableTime(snapshot.freshUntil) === nullableTime(expected.freshUntil)
+    && nullableTime(snapshot.staleUntil) === nullableTime(expected.staleUntil)
+    && isDeepStrictEqual(snapshot.responseBody, expected.responseBody)
+}
+
+function postgresIngestJobMatches(row, expected, defaultQueue) {
+  if (!expected) return row == null
+  return row?.queue === (expected.queue || defaultQueue)
+    && (row.dedupe_key ?? null) === (expected.dedupeKey ?? null)
+    && nullableNumber(row.priority) === nullableNumber(expected.priority ?? 100)
+    && isDeepStrictEqual(row.payload, expected.payload)
 }
 
 function requestEvent(input, overrides = {}) {
@@ -53,6 +244,8 @@ export class MemoryExternalPlatformStore {
     this.snapshots = new Map()
     this.requests = []
     this.leases = new Map()
+    this.rateBuckets = new Map()
+    this.ingestJobs = []
     this.state = {
       providerKey,
       consecutiveFailures: 0,
@@ -103,14 +296,14 @@ export class MemoryExternalPlatformStore {
         && (
           (
             call.consumerId === consumerId
-            && call.fingerprint === fingerprint
+            && call.dispatchFingerprint === fingerprint
             && call.outcome === 'pending'
           )
           || (
             (
               (
                 call.consumerId === consumerId
-                && call.fingerprint === fingerprint
+                && call.dispatchFingerprint === fingerprint
                 && call.outcome === 'unknown'
                 && call.usageRequestId !== retryOfRequestId
               )
@@ -122,7 +315,7 @@ export class MemoryExternalPlatformStore {
               )
               || (
                 call.consumerId === consumerId
-                && call.fingerprint === fingerprint
+                && call.dispatchFingerprint === fingerprint
                 && call.outcome === 'succeeded_unusable'
                 && call.errorCode === 'upstream_note_unavailable'
               )
@@ -160,6 +353,46 @@ export class MemoryExternalPlatformStore {
   async providerState(providerKey = this.providerKey) {
     if (providerKey !== this.providerKey) return null
     return clone(this.state)
+  }
+
+  async acquireProviderRateLimit({ limit, windowMs = 60_000, at = new Date() }) {
+    const maximum = boundedRateLimit(limit, 'limit')
+    const moment = rateMoment({ at, windowMs })
+    const current = this.rateBuckets.get(this.providerKey)
+    const elapsedMs = current
+      ? Math.max(0, moment.timestamp - current.refilledAtMs)
+      : 0
+    const available = current
+      ? Math.min(maximum, current.tokens + (elapsedMs * maximum / moment.windowMs))
+      : maximum
+    const refilledAtMs = current
+      ? Math.max(current.refilledAtMs, moment.timestamp)
+      : moment.timestamp
+    if (available < 1) {
+      this.rateBuckets.set(this.providerKey, {
+        capacity: maximum,
+        windowMs: moment.windowMs,
+        tokens: available,
+        refilledAtMs,
+      })
+      return {
+        allowed: false,
+        remaining: 0,
+        retryAfterMs: Math.max(1, Math.ceil((1 - available) * moment.windowMs / maximum)),
+      }
+    }
+    const remainingTokens = available - 1
+    this.rateBuckets.set(this.providerKey, {
+      capacity: maximum,
+      windowMs: moment.windowMs,
+      tokens: remainingTokens,
+      refilledAtMs,
+    })
+    return {
+      allowed: true,
+      remaining: Math.max(0, Math.floor(remainingTokens)),
+      retryAfterMs: 0,
+    }
   }
 
   async beginProviderCall(input) {
@@ -205,15 +438,32 @@ export class MemoryExternalPlatformStore {
       }
     }
     const id = input.id ?? randomUUID()
+    const callOrdinal = input.callOrdinal ?? 0
+    if (!Number.isSafeInteger(callOrdinal) || callOrdinal < 0) {
+      throw new TypeError('callOrdinal must be a non-negative safe integer')
+    }
+    const callRole = input.callRole ?? (callOrdinal === 0 ? 'primary' : 'enrichment')
+    if (!['primary', 'enrichment'].includes(callRole)) {
+      throw new TypeError('callRole must be primary or enrichment')
+    }
+    const dispatchFingerprint = input.dispatchFingerprint ?? input.fingerprint
+    if (typeof dispatchFingerprint !== 'string' || !/^[0-9a-f]{64}$/u.test(dispatchFingerprint)) {
+      throw new TypeError('dispatchFingerprint must be a lowercase SHA-256 fingerprint')
+    }
     if (
       this.calls.has(id)
-      || [...this.calls.values()].some((call) => call.usageRequestId === input.usageRequestId)
+      || [...this.calls.values()].some((call) => (
+        call.usageRequestId === input.usageRequestId && call.callOrdinal === callOrdinal
+      ))
     ) {
-      throw new AppError(409, 'external_platform_call_exists', 'Usage request already owns a provider call')
+      throw new AppError(409, 'external_platform_call_exists', 'Usage request call ordinal already exists')
     }
     const call = {
       id,
       ...clone(input),
+      callOrdinal,
+      callRole,
+      dispatchFingerprint,
       providerKey: this.providerKey,
       outcome: 'pending',
       startedAt: iso(),
@@ -222,6 +472,44 @@ export class MemoryExternalPlatformStore {
     this.calls.set(call.id, call)
     this.state.lastCallAt = call.startedAt
     return clone(call)
+  }
+
+  async stageProviderEvidence(input) {
+    const evidence = validateStagedEvidence(input)
+    const call = this.calls.get(input.callId)
+    if (!call || !memoryCallScopeMatches(call, input.delivery, this.providerKey)) {
+      throw evidenceConflict()
+    }
+    if (call.stagedEvidence) {
+      if (!isDeepStrictEqual(call.stagedEvidence, evidence)) throw evidenceConflict()
+      return {
+        staged: true,
+        reconciled: true,
+        alreadySettled: call.outcome !== 'pending',
+      }
+    }
+    if (call.outcome !== 'pending') throw evidenceConflict()
+
+    // Clone the entire receipt before mutating the call. This makes repeated
+    // staging exact-idempotent and prevents a caller from changing archived
+    // evidence after the method returns.
+    Object.assign(call, {
+      httpStatus: evidence.httpStatus,
+      businessCode: evidence.businessCode,
+      upstreamRequestId: evidence.upstreamRequestId,
+      upstreamRecordTime: evidence.upstreamRecordTime,
+      billed: evidence.billed,
+      costMinor: evidence.costMinor,
+      costKind: evidence.costKind,
+      currency: evidence.currency,
+      latencyMs: evidence.latencyMs,
+      itemCount: evidence.itemCount,
+      errorCode: evidence.errorCode,
+      archiveObjects: clone(evidence.archiveObjects),
+      stagedEvidence: clone(evidence),
+    })
+    this.responseArchives.set(input.callId, clone(evidence.responseArchive))
+    return { staged: true, reconciled: false, alreadySettled: false }
   }
 
   async commitLiveDelivery({
@@ -234,6 +522,7 @@ export class MemoryExternalPlatformStore {
     staleUntil,
     itemCount,
     latencyMs,
+    usageLatencyMs = latencyMs,
     billed,
     costMinor,
     costKind,
@@ -241,6 +530,7 @@ export class MemoryExternalPlatformStore {
     archiveObjects = [],
     responseArchive = null,
     upstreamEvidence = null,
+    ingestJob = null,
   }) {
     const call = this.calls.get(callId)
     if (!call || call.outcome !== 'pending') {
@@ -250,7 +540,9 @@ export class MemoryExternalPlatformStore {
       responseStatus: 200,
       responseBody,
       unitsActual: Math.max(1, itemCount),
-      upstreamLatencyMs: latencyMs,
+      upstreamLatencyMs: usageLatencyMs,
+      deliverySourceMode: 'live',
+      capturedAt: iso(capturedAt),
     })
     Object.assign(call, {
       outcome: 'succeeded',
@@ -274,7 +566,7 @@ export class MemoryExternalPlatformStore {
       providerKey: this.providerKey,
       consumerId: delivery.consumerId,
       operation: delivery.operation,
-      fingerprint: delivery.fingerprint,
+      fingerprint: snapshotFingerprint(delivery),
       responseBody: clone(snapshotBody),
       capturedAt: iso(capturedAt),
       freshUntil: iso(freshUntil),
@@ -291,6 +583,19 @@ export class MemoryExternalPlatformStore {
       providerCallId: callId,
       snapshotId: snapshot.id,
     }))
+    if (ingestJob) {
+      const queue = ingestJob.queue || 'mx-insight-hub:ingest'
+      if (!ingestJob.dedupeKey || !this.ingestJobs.some((job) => (
+        job.queue === queue && job.dedupeKey === ingestJob.dedupeKey
+      ))) {
+        this.ingestJobs.push(clone({
+          queue,
+          payload: ingestJob.payload,
+          dedupeKey: ingestJob.dedupeKey ?? null,
+          priority: ingestJob.priority ?? 100,
+        }))
+      }
+    }
     Object.assign(this.state, {
       consecutiveFailures: 0,
       circuitOpenUntil: null,
@@ -300,12 +605,109 @@ export class MemoryExternalPlatformStore {
     return { snapshot: clone(snapshot) }
   }
 
+  async finishProviderStep({
+    callId,
+    delivery,
+    outcome,
+    httpStatus = null,
+    businessCode = null,
+    billed = null,
+    costMinor = null,
+    costKind = 'unknown',
+    currency = null,
+    latencyMs = null,
+    itemCount = null,
+    errorCode = null,
+    affectsCircuit = true,
+    responseArchive = null,
+    upstreamEvidence = null,
+    archiveObjects = [],
+    snapshot = null,
+    ingestJob = null,
+  }) {
+    if (!FINISHED_PROVIDER_OUTCOMES.has(outcome)) {
+      throw new TypeError('outcome must be a finished provider-call outcome')
+    }
+    if (snapshot && outcome !== 'succeeded') {
+      throw new TypeError('only a succeeded provider step may write a snapshot')
+    }
+    const call = this.calls.get(callId)
+    if (!call || call.outcome !== 'pending') {
+      throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
+    }
+    Object.assign(call, {
+      outcome,
+      httpStatus: responseArchive?.httpStatus ?? httpStatus,
+      businessCode: responseArchive?.businessCode ?? businessCode,
+      upstreamRequestId: upstreamEvidence?.requestId ?? null,
+      upstreamRecordTime: upstreamEvidence?.recordTime ?? null,
+      billed,
+      costMinor,
+      costKind,
+      currency,
+      latencyMs,
+      itemCount,
+      errorCode,
+      archiveObjects: clone(archiveObjects),
+      completedAt: iso(),
+    })
+    if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
+
+    let storedSnapshot = null
+    if (snapshot) {
+      const key = snapshotKey(delivery)
+      storedSnapshot = {
+        id: this.snapshots.get(key)?.id ?? randomUUID(),
+        providerKey: this.providerKey,
+        consumerId: delivery.consumerId,
+        operation: delivery.operation,
+        fingerprint: snapshotFingerprint(delivery),
+        responseBody: clone(snapshot.responseBody),
+        capturedAt: iso(snapshot.capturedAt),
+        freshUntil: iso(snapshot.freshUntil),
+        staleUntil: iso(snapshot.staleUntil),
+        lastSuccessCallId: callId,
+      }
+      this.snapshots.set(key, storedSnapshot)
+    }
+    if (ingestJob) {
+      const queue = ingestJob.queue || 'mx-insight-hub:ingest'
+      if (!ingestJob.dedupeKey || !this.ingestJobs.some((job) => (
+        job.queue === queue && job.dedupeKey === ingestJob.dedupeKey
+      ))) {
+        this.ingestJobs.push(clone({
+          queue,
+          payload: ingestJob.payload,
+          dedupeKey: ingestJob.dedupeKey ?? null,
+          priority: ingestJob.priority ?? 100,
+        }))
+      }
+    }
+    if (outcome === 'succeeded') {
+      Object.assign(this.state, {
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+        lastSuccessAt: call.completedAt,
+        lastErrorCode: null,
+      })
+    } else if (affectsCircuit) {
+      this.#recordFailure(errorCode)
+    }
+    return { snapshot: clone(storedSnapshot) }
+  }
+
   async commitSnapshotDelivery({ delivery, snapshot, sourceMode, responseBody = snapshot.responseBody }) {
+    const current = this.snapshots.get(snapshotKey(delivery))
+    if (!current || current.id !== snapshot.id) {
+      throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')
+    }
     await this.usageStore.commitRequest(delivery.usageRequestId, {
       responseStatus: 200,
       responseBody,
-      unitsActual: Math.max(1, responseBody?.data?.items?.length || 0),
+      unitsActual: Math.max(1, deliveredItemCount(responseBody)),
       upstreamLatencyMs: 0,
+      deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live',
+      capturedAt: current.capturedAt,
     })
     this.requests.push(requestEvent({
       ...delivery,
@@ -313,7 +715,7 @@ export class MemoryExternalPlatformStore {
       sourceMode,
       succeeded: true,
       responseStatus: 200,
-      snapshotId: snapshot.id,
+      snapshotId: current.id,
     }))
   }
 
@@ -354,12 +756,18 @@ export class MemoryExternalPlatformStore {
     if (!call || call.outcome !== 'pending') {
       throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
     }
+    const currentSnapshot = snapshot ? this.snapshots.get(snapshotKey(delivery)) : null
+    if (snapshot && (!currentSnapshot || currentSnapshot.id !== snapshot.id)) {
+      throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')
+    }
     if (snapshot) {
       await this.usageStore.commitRequest(delivery.usageRequestId, {
         responseStatus: 200,
         responseBody: fallbackResponseBody,
-        unitsActual: Math.max(1, fallbackResponseBody?.data?.items?.length || 0),
+        unitsActual: Math.max(1, deliveredItemCount(fallbackResponseBody)),
         upstreamLatencyMs: latencyMs,
+        deliverySourceMode: 'stale',
+        capturedAt: currentSnapshot.capturedAt,
       })
     } else if (outcome === 'rejected' || outcome === 'succeeded_unusable') {
       await this.usageStore.commitRequest(delivery.usageRequestId, {
@@ -369,6 +777,8 @@ export class MemoryExternalPlatformStore {
         },
         unitsActual: 0,
         upstreamLatencyMs: latencyMs,
+        deliverySourceMode: 'live',
+        capturedAt: iso(responseArchive?.capturedAt ?? new Date()),
       })
     } else {
       await this.usageStore.markRequestUnknown(delivery.usageRequestId, errorCode)
@@ -398,7 +808,7 @@ export class MemoryExternalPlatformStore {
         succeeded: true,
         responseStatus: 200,
         providerCallId: callId,
-        snapshotId: snapshot.id,
+        snapshotId: currentSnapshot.id,
         errorCode,
       }))
       return
@@ -559,12 +969,17 @@ export class PostgresExternalPlatformStore {
     this.uncertainCooldownMs = uncertainCooldownMs
   }
 
-  async snapshotFor({ consumerId, operation, fingerprint }, at = new Date()) {
+  async snapshotFor(delivery, at = new Date()) {
     const { rows } = await this.pool.query(
       `SELECT * FROM external_platform.response_snapshots
         WHERE consumer_id = $1 AND operation = $2 AND request_fingerprint = $3
           AND stale_until >= $4`,
-      [consumerId, operation, fingerprint, at],
+      [
+        delivery.consumerId,
+        delivery.operation,
+        snapshotFingerprint(delivery),
+        at,
+      ],
     )
     return pgSnapshot(rows[0])
   }
@@ -608,14 +1023,20 @@ export class PostgresExternalPlatformStore {
              AND (
                (
                  call.consumer_id = $1
-                 AND call.request_fingerprint = $3
+                 AND (
+                   call.dispatch_fingerprint = $3
+                   OR (call.dispatch_fingerprint IS NULL AND call.request_fingerprint = $3)
+                 )
                  AND call.outcome = 'pending'
                )
                OR (
                  (
                    (
                      call.consumer_id = $1
-                     AND call.request_fingerprint = $3
+                     AND (
+                       call.dispatch_fingerprint = $3
+                       OR (call.dispatch_fingerprint IS NULL AND call.request_fingerprint = $3)
+                     )
                      AND call.outcome = 'unknown'
                      AND ($8::uuid IS NULL OR call.usage_request_id <> $8)
                    )
@@ -627,7 +1048,10 @@ export class PostgresExternalPlatformStore {
                    )
                    OR (
                      call.consumer_id = $1
-                     AND call.request_fingerprint = $3
+                     AND (
+                       call.dispatch_fingerprint = $3
+                       OR (call.dispatch_fingerprint IS NULL AND call.request_fingerprint = $3)
+                     )
                      AND call.outcome = 'succeeded_unusable'
                      AND call.error_code = 'upstream_note_unavailable'
                    )
@@ -665,14 +1089,20 @@ export class PostgresExternalPlatformStore {
           AND (
             (
               consumer_id = $1
-              AND request_fingerprint = $3
+              AND (
+                dispatch_fingerprint = $3
+                OR (dispatch_fingerprint IS NULL AND request_fingerprint = $3)
+              )
               AND outcome = 'pending'
             )
             OR (
               (
                 (
                   consumer_id = $1
-                  AND request_fingerprint = $3
+                  AND (
+                    dispatch_fingerprint = $3
+                    OR (dispatch_fingerprint IS NULL AND request_fingerprint = $3)
+                  )
                   AND outcome = 'unknown'
                   AND ($6::uuid IS NULL OR usage_request_id <> $6)
                 )
@@ -684,7 +1114,10 @@ export class PostgresExternalPlatformStore {
                 )
                 OR (
                   consumer_id = $1
-                  AND request_fingerprint = $3
+                  AND (
+                    dispatch_fingerprint = $3
+                    OR (dispatch_fingerprint IS NULL AND request_fingerprint = $3)
+                  )
                   AND outcome = 'succeeded_unusable'
                   AND error_code = 'upstream_note_unavailable'
                 )
@@ -750,13 +1183,101 @@ export class PostgresExternalPlatformStore {
     } : null
   }
 
+  async acquireProviderRateLimit({ limit, windowMs = 60_000 }) {
+    const maximum = boundedRateLimit(limit, 'limit')
+    const duration = boundedRateLimit(windowMs, 'windowMs')
+    if (duration < 1_000 || duration > 3_600_000) {
+      throw new TypeError('windowMs must be between 1000 and 3600000')
+    }
+    const { rows } = await this.pool.query(
+      `WITH db_clock AS MATERIALIZED (
+         SELECT clock_timestamp() AS observed_at
+       )
+       INSERT INTO external_platform.provider_rate_buckets AS bucket
+         (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at, updated_at)
+       SELECT $1, $2, $3, ($2 - 1)::double precision, true,
+              db_clock.observed_at, db_clock.observed_at
+         FROM db_clock
+       ON CONFLICT (provider_key) DO UPDATE SET
+         capacity = EXCLUDED.capacity,
+         window_ms = EXCLUDED.window_ms,
+         tokens = CASE
+           WHEN least(
+             EXCLUDED.capacity::double precision,
+             bucket.tokens + greatest(
+               0::double precision,
+               extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
+                 * 1000::double precision
+                 * EXCLUDED.capacity::double precision
+                 / EXCLUDED.window_ms::double precision
+             )
+           ) >= 1::double precision
+             THEN least(
+               EXCLUDED.capacity::double precision,
+               bucket.tokens + greatest(
+                 0::double precision,
+                 extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
+                   * 1000::double precision
+                   * EXCLUDED.capacity::double precision
+                   / EXCLUDED.window_ms::double precision
+               )
+             ) - 1::double precision
+           ELSE least(
+             EXCLUDED.capacity::double precision,
+             bucket.tokens + greatest(
+               0::double precision,
+               extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
+                 * 1000::double precision
+                 * EXCLUDED.capacity::double precision
+                 / EXCLUDED.window_ms::double precision
+             )
+           )
+         END,
+         last_admitted = least(
+           EXCLUDED.capacity::double precision,
+           bucket.tokens + greatest(
+             0::double precision,
+             extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
+               * 1000::double precision
+               * EXCLUDED.capacity::double precision
+               / EXCLUDED.window_ms::double precision
+           )
+         ) >= 1::double precision,
+         refilled_at = EXCLUDED.refilled_at,
+         updated_at = EXCLUDED.refilled_at
+       RETURNING last_admitted AS allowed,
+         floor(tokens)::bigint AS remaining,
+         CASE WHEN last_admitted THEN 0::bigint ELSE greatest(
+           1::bigint,
+           ceil((1::double precision - tokens) * window_ms::double precision
+             / capacity::double precision)::bigint
+         ) END AS retry_after_ms`,
+      [this.providerKey, maximum, duration],
+    )
+    if (!rows[0]) throw new Error('Provider rate bucket returned no state')
+    return {
+      allowed: rows[0].allowed === true,
+      remaining: Math.max(0, Number(rows[0].remaining)),
+      retryAfterMs: Math.max(0, Number(rows[0].retry_after_ms)),
+    }
+  }
+
   async beginProviderCall(input) {
     const id = input.id ?? randomUUID()
+    const callOrdinal = input.callOrdinal ?? 0
+    if (!Number.isSafeInteger(callOrdinal) || callOrdinal < 0) {
+      throw new TypeError('callOrdinal must be a non-negative safe integer')
+    }
+    const callRole = input.callRole ?? (callOrdinal === 0 ? 'primary' : 'enrichment')
+    if (!['primary', 'enrichment'].includes(callRole)) {
+      throw new TypeError('callRole must be primary or enrichment')
+    }
     const values = [
       id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
       input.operation, input.contractVersion, input.endpointKey,
       input.endpointVersion, input.marketplace, input.fingerprint,
       input.retryOfRequestId ?? null, this.providerKey, this.authorizationPlatform,
+      callOrdinal, callRole, input.dispatchFingerprint ?? input.fingerprint,
     ]
     try {
       return await transaction(this.pool, async (client) => {
@@ -792,8 +1313,10 @@ export class PostgresExternalPlatformStore {
            INSERT INTO external_platform.provider_calls
              (id, provider_key, tenant_id, consumer_id, api_key_id, usage_request_id,
               operation, contract_version, endpoint_key, endpoint_version, marketplace,
-              request_fingerprint, retry_of_usage_request_id)
-           SELECT $1, $13, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+              request_fingerprint, retry_of_usage_request_id, call_ordinal, call_role,
+              dispatch_fingerprint)
+           SELECT $1, $13, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                  $15, $16, $17
              FROM owned_request
             WHERE $12::uuid IS NULL OR EXISTS (SELECT 1 FROM retry_target)
            RETURNING id, started_at`,
@@ -822,8 +1345,10 @@ export class PostgresExternalPlatformStore {
       // A lost COMMIT acknowledgement is not evidence that the INSERT failed.
       // Reconcile by the preselected call id before allowing the caller to
       // release or reuse the usage reservation.
-      const reconciled = await this.pool.query(
-        `SELECT call.id, call.started_at
+      let reconciled
+      try {
+        reconciled = await this.pool.query(
+          `SELECT call.id, call.started_at
            FROM external_platform.provider_calls call
            JOIN usage_requests request ON request.id = call.usage_request_id
           WHERE call.id = $1
@@ -839,12 +1364,22 @@ export class PostgresExternalPlatformStore {
             AND call.marketplace = $10
             AND call.request_fingerprint = $11
             AND call.retry_of_usage_request_id IS NOT DISTINCT FROM $12::uuid
+            AND call.call_ordinal = $15
+            AND call.call_role = $16
+            AND call.dispatch_fingerprint = $17
             AND call.outcome = 'pending'
             AND request.status = 'reserved'
             AND request.platform = $14
             AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())`,
-        values,
-      ).catch(() => ({ rows: [] }))
+          values,
+        )
+      } catch {
+        throw new AppError(
+          503,
+          'external_platform_call_persistence_unknown',
+          'Provider-call persistence could not be reconciled; do not retry automatically',
+        )
+      }
       if (reconciled.rows[0]) {
         return { id, startedAt: iso(reconciled.rows[0].started_at) }
       }
@@ -858,7 +1393,220 @@ export class PostgresExternalPlatformStore {
           'The referenced uncertain request cannot authorize this retry',
         )
       }
+      if (
+        error?.code === '23505'
+        && [
+          'external_platform_provider_calls_usage_ordinal_idx',
+          'provider_calls_pkey',
+        ].includes(error?.constraint)
+      ) {
+        throw new AppError(
+          409,
+          'external_platform_call_exists',
+          'Usage request call ordinal already exists',
+        )
+      }
       throw error
+    }
+  }
+
+  async #readProviderEvidence(queryable, input, {
+    lockCall = false,
+    includeSnapshot = false,
+    includeIngestJob = false,
+  } = {}) {
+    const callResult = await queryable.query(
+      `SELECT call.*,
+              archive.id AS response_archive_id,
+              archive.contract_state AS archive_contract_state,
+              archive.http_status AS archive_http_status,
+              archive.business_code AS archive_business_code,
+              archive.content_type AS archive_content_type,
+              archive.body_size AS archive_body_size,
+              archive.payload_sha256 AS archive_payload_sha256,
+              archive.raw_payload AS archive_raw_payload,
+              archive.captured_at AS archive_captured_at
+         FROM external_platform.provider_calls call
+         LEFT JOIN external_platform.response_archives archive
+           ON archive.provider_call_id = call.id
+        WHERE call.id = $1
+          AND call.provider_key = $2
+        ${lockCall ? 'FOR UPDATE OF call' : ''}`,
+      [input.callId, this.providerKey],
+    )
+    const row = callResult.rows[0] || null
+    if (!row) return { row: null, archiveObjects: [], snapshot: null, ingestJob: null }
+    const objectResult = await queryable.query(
+      `SELECT provider_key, object_kind, marketplace, operation, endpoint_version,
+              captured_date, archive_path, response_pointer, source_key,
+              payload_sha256, raw_payload, item_ordinal
+         FROM external_platform.archive_objects
+        WHERE provider_call_id = $1
+        ORDER BY item_ordinal`,
+      [input.callId],
+    )
+    let snapshot = null
+    if (includeSnapshot && input.snapshot) {
+      const snapshotResult = await queryable.query(
+        `SELECT * FROM external_platform.response_snapshots
+          WHERE provider_key = $1 AND consumer_id = $2 AND operation = $3
+            AND request_fingerprint = $4 AND last_success_call_id = $5`,
+        [
+          this.providerKey,
+          input.delivery.consumerId,
+          input.delivery.operation,
+          snapshotFingerprint(input.delivery),
+          input.callId,
+        ],
+      )
+      snapshot = pgSnapshot(snapshotResult.rows[0])
+    }
+    let ingestJob = null
+    if (includeIngestJob && input.ingestJob) {
+      const ingestResult = await queryable.query(
+        `SELECT queue, payload, dedupe_key, priority
+           FROM mxq.jobs
+          WHERE queue = $1 AND dedupe_key IS NOT DISTINCT FROM $2
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [input.ingestJob.queue || this.queueName, input.ingestJob.dedupeKey ?? null],
+      )
+      ingestJob = ingestResult.rows[0] || null
+    }
+    return { row, archiveObjects: objectResult.rows, snapshot, ingestJob }
+  }
+
+  #providerEvidenceMatches(state, input, {
+    outcome = null,
+    includeSnapshot = false,
+    includeIngestJob = false,
+  } = {}) {
+    if (!state.row || !postgresCallScopeMatches(state.row, input, this.providerKey)) return false
+    if (outcome != null && state.row.outcome !== outcome) return false
+    if (!postgresCallEvidenceMatches(state.row, input)) return false
+    if (!postgresResponseArchiveMatches(state.row, input.responseArchive ?? null)) return false
+    if (!postgresArchiveObjectsMatch(state.archiveObjects, input, this.providerKey)) return false
+    if (includeSnapshot && !postgresSnapshotMatches(
+      state.snapshot,
+      input.snapshot ?? null,
+      input.delivery,
+      this.providerKey,
+      input.callId,
+    )) return false
+    return !includeIngestJob || postgresIngestJobMatches(
+      state.ingestJob,
+      input.ingestJob ?? null,
+      this.queueName,
+    )
+  }
+
+  #stagedProviderEvidenceMatches(state, input) {
+    if (!state.row || !postgresCallScopeMatches(state.row, input, this.providerKey)) return false
+    if (!postgresCallEvidenceMatches(state.row, input, {
+      // A later terminalizer may replace the staging error marker while all
+      // immutable provider evidence remains intact. That does not make a
+      // previously durable stage receipt disappear.
+      ignoreErrorCode: state.row.outcome !== 'pending',
+    })) return false
+    return postgresResponseArchiveMatches(state.row, input.responseArchive ?? null)
+      && postgresArchiveObjectsMatch(state.archiveObjects, input, this.providerKey)
+  }
+
+  #providerEvidenceCanBeWritten(state, input) {
+    if (!state.row || !postgresCallScopeMatches(state.row, input, this.providerKey)) return false
+    if (state.row.outcome !== 'pending') return false
+    const pristine = state.row.http_status == null
+      && state.row.business_code == null
+      && state.row.upstream_request_id == null
+      && state.row.upstream_record_time == null
+      && state.row.billed == null
+      && state.row.cost_minor == null
+      && state.row.cost_kind === 'unknown'
+      && state.row.currency == null
+      && state.row.latency_ms == null
+      && state.row.item_count == null
+      && state.row.error_code == null
+      && state.row.response_archive_id == null
+      && state.archiveObjects.length === 0
+    return pristine || this.#providerEvidenceMatches(state, input, { outcome: 'pending' })
+  }
+
+  async stageProviderEvidence(input) {
+    validateStagedEvidence(input)
+    const stageOnce = () => transaction(this.pool, async (client) => {
+      const current = await this.#readProviderEvidence(client, input, { lockCall: true })
+      if (this.#stagedProviderEvidenceMatches(current, input)) {
+        return {
+          staged: true,
+          reconciled: true,
+          alreadySettled: current.row.outcome !== 'pending',
+        }
+      }
+      if (!this.#providerEvidenceCanBeWritten(current, input)) throw evidenceConflict()
+      const evidence = normalizedEvidence(input)
+      const updated = await client.query(
+        `UPDATE external_platform.provider_calls SET
+           http_status = $2, business_code = $3,
+           upstream_request_id = $4, upstream_record_time = $5,
+           billed = $6, cost_minor = $7, cost_kind = $8, currency = $9,
+           latency_ms = $10, item_count = $11, error_code = $12
+         WHERE id = $1 AND outcome = 'pending'
+         RETURNING id`,
+        [
+          input.callId,
+          evidence.httpStatus,
+          evidence.businessCode,
+          evidence.upstreamRequestId,
+          evidence.upstreamRecordTime,
+          evidence.billed,
+          evidence.costMinor,
+          evidence.costKind,
+          evidence.currency,
+          evidence.latencyMs,
+          evidence.itemCount,
+          evidence.errorCode,
+        ],
+      )
+      if (!updated.rows[0]) throw evidenceConflict()
+      await this.#insertResponseArchive(client, input.callId, evidence.responseArchive)
+      await this.#insertArchiveObjects(client, {
+        callId: input.callId,
+        delivery: input.delivery,
+        capturedAt: evidence.responseArchive.capturedAt,
+        archiveObjects: evidence.archiveObjects,
+      })
+      const staged = await this.#readProviderEvidence(client, input)
+      if (!this.#providerEvidenceMatches(staged, input, { outcome: 'pending' })) {
+        throw evidenceConflict()
+      }
+      return { staged: true, reconciled: false, alreadySettled: false }
+    })
+
+    try {
+      return await stageOnce()
+    } catch (firstError) {
+      const reconciled = await this.#readProviderEvidence(this.pool, input).catch(() => null)
+      if (reconciled && this.#stagedProviderEvidenceMatches(reconciled, input)) {
+        return {
+          staged: true,
+          reconciled: true,
+          alreadySettled: reconciled.row.outcome !== 'pending',
+        }
+      }
+      if (!reconciled || !this.#providerEvidenceCanBeWritten(reconciled, input)) throw firstError
+      try {
+        return await stageOnce()
+      } catch (retryError) {
+        const retryReconciled = await this.#readProviderEvidence(this.pool, input).catch(() => null)
+        if (retryReconciled && this.#stagedProviderEvidenceMatches(retryReconciled, input)) {
+          return {
+            staged: true,
+            reconciled: true,
+            alreadySettled: retryReconciled.row.outcome !== 'pending',
+          }
+        }
+        throw retryError
+      }
     }
   }
 
@@ -872,6 +1620,7 @@ export class PostgresExternalPlatformStore {
     staleUntil,
     itemCount,
     latencyMs,
+    usageLatencyMs = latencyMs,
     billed,
     costMinor,
     costKind,
@@ -925,7 +1674,7 @@ export class PostgresExternalPlatformStore {
            updated_at = now()
          RETURNING *`,
         [
-          snapshotId, delivery.consumerId, delivery.operation, delivery.fingerprint,
+          snapshotId, delivery.consumerId, delivery.operation, snapshotFingerprint(delivery),
           snapshotBody, capturedAt, freshUntil, staleUntil, callId,
           this.providerKey,
         ],
@@ -947,7 +1696,7 @@ export class PostgresExternalPlatformStore {
            completed_at = now()
          WHERE id = $1 AND status = 'reserved'
          RETURNING id`,
-        [delivery.usageRequestId, responseBody, Math.max(1, itemCount), latencyMs, capturedAt],
+        [delivery.usageRequestId, responseBody, Math.max(1, itemCount), usageLatencyMs, capturedAt],
       )
       if (!usage.rows[0]) throw new AppError(409, 'usage_request_state_conflict', 'Usage request is not reserved')
 
@@ -966,23 +1715,183 @@ export class PostgresExternalPlatformStore {
          WHERE provider_key = $1`,
         [this.providerKey],
       )
-      if (ingestJob) {
-        await client.query(
-          `INSERT INTO mxq.jobs (queue, payload, dedupe_key, priority)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (queue, dedupe_key)
-             WHERE dedupe_key IS NOT NULL AND status IN ('pending','running')
-           DO NOTHING`,
-          [
-            ingestJob.queue || this.queueName,
-            ingestJob.payload,
-            ingestJob.dedupeKey,
-            ingestJob.priority ?? 100,
-          ],
-        )
-      }
+      await this.#insertIngestJob(client, ingestJob)
       return { snapshot }
     })
+  }
+
+  async finishProviderStep({
+    callId,
+    delivery,
+    outcome,
+    httpStatus = null,
+    businessCode = null,
+    billed = null,
+    costMinor = null,
+    costKind = 'unknown',
+    currency = null,
+    latencyMs = null,
+    itemCount = null,
+    errorCode = null,
+    affectsCircuit = true,
+    responseArchive = null,
+    upstreamEvidence = null,
+    archiveObjects = [],
+    snapshot = null,
+    ingestJob = null,
+  }) {
+    if (!FINISHED_PROVIDER_OUTCOMES.has(outcome)) {
+      throw new TypeError('outcome must be a finished provider-call outcome')
+    }
+    if (snapshot && outcome !== 'succeeded') {
+      throw new TypeError('only a succeeded provider step may write a snapshot')
+    }
+    const settlement = {
+      callId,
+      delivery,
+      outcome,
+      httpStatus,
+      businessCode,
+      billed,
+      costMinor,
+      costKind,
+      currency,
+      latencyMs,
+      itemCount,
+      errorCode,
+      affectsCircuit,
+      responseArchive,
+      upstreamEvidence,
+      archiveObjects,
+      snapshot,
+      ingestJob,
+    }
+    const settleOnce = () => transaction(this.pool, async (client) => {
+      const current = await this.#readProviderEvidence(client, settlement, {
+        lockCall: true,
+        includeSnapshot: true,
+        includeIngestJob: true,
+      })
+      if (this.#providerEvidenceMatches(current, settlement, {
+        outcome,
+        includeSnapshot: true,
+        includeIngestJob: true,
+      })) {
+        return { snapshot: current.snapshot, reconciled: true }
+      }
+      if (!this.#providerEvidenceCanBeWritten(current, settlement)) throw evidenceConflict()
+      const completed = await client.query(
+        `UPDATE external_platform.provider_calls SET
+           outcome = $2, http_status = $3, business_code = $4,
+           upstream_request_id = $5, upstream_record_time = $6,
+           billed = $7, cost_minor = $8, cost_kind = $9, currency = $10,
+           latency_ms = $11, item_count = $12, error_code = $13,
+           completed_at = now()
+         WHERE id = $1 AND outcome = 'pending'
+         RETURNING id`,
+        [
+          callId, outcome,
+          responseArchive?.httpStatus ?? httpStatus,
+          responseArchive?.businessCode ?? businessCode,
+          upstreamEvidence?.requestId ?? null,
+          upstreamEvidence?.recordTime ?? null,
+          billed, costMinor, costKind, currency, latencyMs, itemCount, errorCode,
+        ],
+      )
+      if (!completed.rows[0]) {
+        throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
+      }
+      await this.#insertResponseArchive(client, callId, responseArchive)
+      await this.#insertArchiveObjects(client, {
+        callId,
+        delivery,
+        capturedAt: responseArchive?.capturedAt ?? snapshot?.capturedAt ?? new Date(),
+        archiveObjects,
+      })
+
+      let storedSnapshot = null
+      if (snapshot) {
+        const snapshotId = randomUUID()
+        const snapshotResult = await client.query(
+          `INSERT INTO external_platform.response_snapshots
+             (id, provider_key, consumer_id, operation, request_fingerprint,
+              response_body, captured_at, fresh_until, stale_until, last_success_call_id)
+           VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (consumer_id, operation, request_fingerprint) DO UPDATE SET
+             provider_key = EXCLUDED.provider_key,
+             response_body = EXCLUDED.response_body,
+             captured_at = EXCLUDED.captured_at,
+             fresh_until = EXCLUDED.fresh_until,
+             stale_until = EXCLUDED.stale_until,
+             last_success_call_id = EXCLUDED.last_success_call_id,
+             updated_at = now()
+           RETURNING *`,
+          [
+            snapshotId, delivery.consumerId, delivery.operation,
+            snapshotFingerprint(delivery), snapshot.responseBody, snapshot.capturedAt,
+            snapshot.freshUntil, snapshot.staleUntil, callId, this.providerKey,
+          ],
+        )
+        storedSnapshot = pgSnapshot(snapshotResult.rows[0])
+      }
+
+      if (outcome === 'succeeded') {
+        await client.query(
+          `UPDATE external_platform.provider_state SET
+             consecutive_failures = 0, circuit_open_until = NULL,
+             last_success_at = now(), last_error_code = NULL, updated_at = now()
+           WHERE provider_key = $1`,
+          [this.providerKey],
+        )
+      } else if (affectsCircuit) {
+        await this.#advanceFailureState(client, errorCode)
+      }
+      await this.#insertIngestJob(client, ingestJob)
+      const settled = await this.#readProviderEvidence(client, settlement, {
+        includeSnapshot: true,
+        includeIngestJob: true,
+      })
+      if (!this.#providerEvidenceMatches(settled, settlement, {
+        outcome,
+        includeSnapshot: true,
+        includeIngestJob: true,
+      })) throw evidenceConflict()
+      return { snapshot: settled.snapshot ?? storedSnapshot }
+    })
+    const reconcile = async () => {
+      const state = await this.#readProviderEvidence(this.pool, settlement, {
+        includeSnapshot: true,
+        includeIngestJob: true,
+      })
+      if (this.#providerEvidenceMatches(state, settlement, {
+        outcome,
+        includeSnapshot: true,
+        includeIngestJob: true,
+      })) {
+        return { kind: 'matched', snapshot: state.snapshot }
+      }
+      if (this.#providerEvidenceCanBeWritten(state, settlement)) return { kind: 'pending' }
+      return { kind: 'conflict' }
+    }
+
+    try {
+      return await settleOnce()
+    } catch (firstError) {
+      const firstState = await reconcile().catch(() => null)
+      if (firstState?.kind === 'matched') {
+        return { snapshot: firstState.snapshot, reconciled: true }
+      }
+      if (firstState?.kind !== 'pending') throw firstError
+      try {
+        return await settleOnce()
+      } catch (retryError) {
+        const retryState = await reconcile().catch(() => null)
+        if (retryState?.kind === 'matched') {
+          return { snapshot: retryState.snapshot, reconciled: true }
+        }
+        throw retryError
+      }
+    }
   }
 
   async commitSnapshotDelivery({ delivery, snapshot, sourceMode, responseBody = snapshot.responseBody }) {
@@ -992,7 +1901,7 @@ export class PostgresExternalPlatformStore {
           WHERE id = $1 AND consumer_id = $2 AND operation = $3
             AND request_fingerprint = $4 AND stale_until >= now()
           FOR SHARE`,
-        [snapshot.id, delivery.consumerId, delivery.operation, delivery.fingerprint],
+        [snapshot.id, delivery.consumerId, delivery.operation, snapshotFingerprint(delivery)],
       )
       const current = pgSnapshot(locked.rows[0])
       if (!current) throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')
@@ -1007,7 +1916,7 @@ export class PostgresExternalPlatformStore {
         [
           delivery.usageRequestId,
           responseBody,
-          Math.max(1, responseBody?.data?.items?.length || 0),
+          Math.max(1, deliveredItemCount(responseBody)),
           sourceMode === 'stored_fallback' ? 'stale' : 'live',
           current.capturedAt,
         ],
@@ -1093,7 +2002,7 @@ export class PostgresExternalPlatformStore {
             WHERE id = $1 AND consumer_id = $2 AND operation = $3
               AND request_fingerprint = $4 AND stale_until >= now()
             FOR SHARE`,
-          [snapshot.id, delivery.consumerId, delivery.operation, delivery.fingerprint],
+          [snapshot.id, delivery.consumerId, delivery.operation, snapshotFingerprint(delivery)],
         )
         const current = pgSnapshot(locked.rows[0])
         if (!current) throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')
@@ -1108,7 +2017,7 @@ export class PostgresExternalPlatformStore {
           [
             delivery.usageRequestId,
             fallbackResponseBody,
-            Math.max(1, fallbackResponseBody?.data?.items?.length || 0),
+            Math.max(1, deliveredItemCount(fallbackResponseBody)),
             latencyMs,
             current.capturedAt,
           ],
@@ -1272,6 +2181,23 @@ export class PostgresExternalPlatformStore {
     })
   }
 
+  async #insertIngestJob(client, ingestJob) {
+    if (!ingestJob) return
+    await client.query(
+      `INSERT INTO mxq.jobs (queue, payload, dedupe_key, priority)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (queue, dedupe_key)
+         WHERE dedupe_key IS NOT NULL AND status IN ('pending','running')
+       DO NOTHING`,
+      [
+        ingestJob.queue || this.queueName,
+        ingestJob.payload,
+        ingestJob.dedupeKey,
+        ingestJob.priority ?? 100,
+      ],
+    )
+  }
+
   async #insertGatewayRequest(client, input) {
     await client.query(
       `INSERT INTO external_platform.gateway_requests
@@ -1401,24 +2327,52 @@ export class PostgresExternalPlatformStore {
             WHERE provider_key = $2 AND started_at >= $1
             GROUP BY 1
          )
-         SELECT requests.*, coalesce(calls.upstream_calls, 0)::integer AS upstream_calls,
+         SELECT coalesce(requests.bucket, calls.bucket) AS bucket,
+                coalesce(requests.hub_requests, 0)::integer AS hub_requests,
+                coalesce(requests.fresh_cache, 0)::integer AS fresh_cache,
+                coalesce(requests.stored_fallback, 0)::integer AS stored_fallback,
+                coalesce(requests.stored_fallback_without_dispatch, 0)::integer
+                  AS stored_fallback_without_dispatch,
+                coalesce(requests.idempotent_replay, 0)::integer AS idempotent_replay,
+                coalesce(requests.duplicate_suppressed, 0)::integer AS duplicate_suppressed,
+                coalesce(requests.circuit_rejected, 0)::integer AS circuit_rejected,
+                coalesce(requests.rejected, 0)::integer AS rejected,
+                coalesce(requests.succeeded, 0)::integer AS succeeded,
+                coalesce(calls.upstream_calls, 0)::integer AS upstream_calls,
                 calls.cost_minor
-           FROM requests LEFT JOIN calls USING (bucket)
+           FROM requests FULL OUTER JOIN calls USING (bucket)
           ORDER BY bucket`,
         [from, providerKey],
       ),
       this.pool.query(
-        `SELECT tenant.id, tenant.name,
-                count(request.id)::integer AS hub_requests,
-                count(request.id) FILTER (WHERE request.succeeded)::integer AS succeeded,
-                count(call.id)::integer AS upstream_calls,
-                sum(call.cost_minor) FILTER (WHERE call.cost_minor IS NOT NULL)::bigint AS cost_minor
-           FROM external_platform.gateway_requests request
-           JOIN tenants tenant ON tenant.id = request.tenant_id
-           LEFT JOIN external_platform.provider_calls call
-             ON call.id = request.provider_call_id
-          WHERE request.provider_key = $2 AND request.created_at >= $1
-          GROUP BY tenant.id, tenant.name
+        `WITH request_totals AS (
+           SELECT tenant_id,
+                  count(*)::integer AS hub_requests,
+                  count(*) FILTER (WHERE succeeded)::integer AS succeeded
+             FROM external_platform.gateway_requests
+            WHERE provider_key = $2 AND created_at >= $1
+            GROUP BY tenant_id
+         ), call_totals AS (
+           SELECT tenant_id,
+                  count(*)::integer AS upstream_calls,
+                  sum(cost_minor) FILTER (WHERE cost_minor IS NOT NULL)::bigint AS cost_minor
+             FROM external_platform.provider_calls
+            WHERE provider_key = $2 AND started_at >= $1
+            GROUP BY tenant_id
+         ), scoped_tenants AS (
+           SELECT tenant_id FROM request_totals
+           UNION
+           SELECT tenant_id FROM call_totals
+         )
+         SELECT tenant.id, tenant.name,
+                coalesce(requests.hub_requests, 0)::integer AS hub_requests,
+                coalesce(requests.succeeded, 0)::integer AS succeeded,
+                coalesce(calls.upstream_calls, 0)::integer AS upstream_calls,
+                calls.cost_minor
+           FROM scoped_tenants scope
+           JOIN tenants tenant ON tenant.id = scope.tenant_id
+           LEFT JOIN request_totals requests ON requests.tenant_id = tenant.id
+           LEFT JOIN call_totals calls ON calls.tenant_id = tenant.id
           ORDER BY hub_requests DESC, tenant.name
           LIMIT 20`,
         [from, providerKey],
@@ -1523,8 +2477,23 @@ function analyticsFromRows(requests, calls, state) {
     }
     row.hubRequests += 1
     row.successfulHubRequests += request.succeeded ? 1 : 0
-    row.upstreamCalls += request.providerCallId ? 1 : 0
     tenantMap.set(request.tenantId, row)
+  }
+  for (const call of calls) {
+    if (!call.tenantId) continue
+    const row = tenantMap.get(call.tenantId) || {
+      tenantId: call.tenantId,
+      tenantName: call.tenantName || call.tenantId,
+      hubRequests: 0,
+      successfulHubRequests: 0,
+      upstreamCalls: 0,
+      knownCostMinor: null,
+    }
+    row.upstreamCalls += 1
+    if (Number.isFinite(call.costMinor)) {
+      row.knownCostMinor = (row.knownCostMinor ?? 0) + call.costMinor
+    }
+    tenantMap.set(call.tenantId, row)
   }
   return {
     totals: {

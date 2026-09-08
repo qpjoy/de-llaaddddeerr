@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
 import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
-const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi/i
+const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
 const FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS = /tikhub|rapidapi|justone/i
 const NIGHT_ALL_COMMON_FIELDS = [
   'businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page',
@@ -45,22 +45,67 @@ const NIGHT_ALL_COMPATIBILITY_EXAMPLES = {
 }
 const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
   400: [
-    'invalid_request', 'invalid_cursor', 'invalid_platform', 'page_size_exceeded',
+    'invalid_request', 'invalid_query', 'invalid_cursor', 'invalid_page_size',
+    'cursor_scope_mismatch', 'invalid_platform', 'page_size_exceeded',
     'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch',
     'idempotency_key_required', 'invalid_idempotency_key',
     'platform_operation_unsupported', 'night_all_rejected',
   ],
   401: ['api_key_required', 'invalid_api_key'],
-  403: ['platform_not_granted'],
+  403: ['platform_not_granted', 'test_key_not_supported'],
   404: ['not_found', 'night_all_rejected'],
-  409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'night_all_rejected'],
+  409: [
+    'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
+    'external_platform_response_unusable', 'night_all_rejected',
+  ],
   422: ['night_all_rejected'],
-  429: ['quota_exceeded', 'night_all_rejected'],
-  502: ['night_all_rejected', 'upstream_outcome_unknown'],
+  429: [
+    'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+    'external_platform_capacity_exceeded', 'night_all_rejected',
+  ],
+  502: [
+    'night_all_rejected', 'upstream_outcome_unknown',
+    'external_platform_response_unusable', 'external_platform_outcome_unknown',
+    'external_platform_rejected',
+  ],
   503: [
     'platform_operation_unavailable',
     'compatibility_capabilities_unavailable',
     'compatibility_store_unavailable',
+    'external_platform_unavailable',
+    'external_platform_not_configured',
+    'external_platform_circuit_open',
+    'external_platform_capacity_unavailable',
+  ],
+}
+
+const XIAOHONGSHU_SEARCH_ERROR_CODES = {
+  400: [
+    'invalid_request', 'invalid_platform', 'invalid_query', 'invalid_cursor',
+    'invalid_page_size', 'cursor_scope_mismatch', 'page_size_exceeded',
+    'unsupported_fields', 'unsupported_match_mode', 'invalid_result_type', 'idempotency_key_required',
+    'invalid_idempotency_key', 'platform_operation_unsupported',
+  ],
+  401: ['api_key_required', 'invalid_api_key'],
+  403: ['platform_not_granted', 'test_key_not_supported'],
+  409: [
+    'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
+    'external_platform_response_unusable',
+  ],
+  410: ['search_cursor_expired'],
+  429: [
+    'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+    'external_platform_capacity_exceeded',
+  ],
+  502: [
+    'night_all_rejected', 'upstream_outcome_unknown',
+    'external_platform_response_unusable', 'external_platform_outcome_unknown',
+    'external_platform_rejected',
+  ],
+  503: [
+    'stored_search_unavailable', 'search_cursor_unavailable',
+    'external_platform_unavailable', 'external_platform_not_configured',
+    'external_platform_circuit_open', 'external_platform_capacity_unavailable',
   ],
 }
 
@@ -282,6 +327,10 @@ function assertExternalCommerceContract(document) {
 
   const capabilitiesContent = document.paths['/data/capabilities'].get.responses[200]
     .content['application/json']
+  assert.match(
+    document.paths['/data/capabilities'].get.description,
+    /Xiaohongshu remains in the legacy matrix.*non-direct raw shapes, crawl and user-info/is,
+  )
   const capabilitiesEnvelope = resolveSchema(document, capabilitiesContent.schema)
   const platformProperties = capabilitiesEnvelope.properties.data.properties.platforms.items.properties
   assert.deepEqual(platformProperties.servingMode.enum, ['stored', 'live_with_stored_fallback'])
@@ -410,7 +459,13 @@ function assertExternalSocialPostContract(document) {
     .content['application/json']
   const xiaohongshu = capabilitiesContent.example.data.platforms
     .find(({ platform }) => platform === 'xiaohongshu')
-  assert.deepEqual(xiaohongshu.capabilities, ['post_detail'])
+  assert.deepEqual(xiaohongshu.capabilities, ['search_posts', 'post_detail'])
+  assert.deepEqual(xiaohongshu.search, {
+    ready: true,
+    source: 'hub',
+    servingMode: 'live_with_stored_fallback',
+    contractVersion: 'night-all.data-search.v1',
+  })
   assert.equal(xiaohongshu.postDetail.contractVersion, 'mx-insight-hub.social-post.v1')
   assert.equal(xiaohongshu.postDetail.servingMode, 'live_with_stored_fallback')
   assert.deepEqual(xiaohongshu.postDetail.deliveryModes, [
@@ -422,6 +477,54 @@ function assertExternalSocialPostContract(document) {
     ),
     { capability: 'social.posts.resolve', ready: true },
   )
+}
+
+function assertXiaohongshuSearchContract(document) {
+  const operation = document.paths['/data/search']?.post
+  assert.ok(operation)
+  assert.deepEqual(operation['x-mx-error-codes'], XIAOHONGSHU_SEARCH_ERROR_CODES)
+  assert.match(operation.description, /xiaohongshu/i)
+  assert.match(operation.description, /exactly 20|page size is exactly 20/i)
+  assert.match(operation.description, /historical cursor/i)
+  assert.match(operation.description, /bounded detail/i)
+  assert.match(operation.description, /independent rollout gate/i)
+  assert.match(operation.description, /never selects|never.*provider/i)
+
+  const request = resolveSchema(
+    document,
+    operation.requestBody.content['application/json'].schema,
+  )
+  assert.equal(request.additionalProperties, false)
+  assert.deepEqual(request.required, ['platform', 'query'])
+  assert.equal(request.properties.pageSize.default, 20)
+  assert.match(request.properties.pageSize.description, /exactly 20/i)
+  assert.deepEqual(request.properties.type.enum, ['fresh', 'stable'])
+  assert.equal(request.properties.type.default, 'fresh')
+  assert.match(request.properties.cursor.description, /same path, platform, query and pageSize/i)
+
+  const headers = operation.responses[200].headers
+  for (const header of [
+    'x-mx-insight-request-id', 'idempotent-replay', 'x-mx-insight-source-mode',
+    'x-mx-insight-captured-at', 'Age', 'Warning',
+  ]) assert.ok(headers[header], header)
+  assert.deepEqual(headers['x-mx-insight-source-mode'].schema.enum, [
+    'live', 'stale', 'fresh_cache', 'stored_fallback', 'idempotent_replay',
+  ])
+
+  const capabilitiesContent = document.paths['/data/capabilities'].get.responses[200]
+    .content['application/json']
+  const capabilitiesEnvelope = resolveSchema(document, capabilitiesContent.schema)
+  const platformProperties = capabilitiesEnvelope.properties.data.properties.platforms.items.properties
+  assert.deepEqual(platformProperties.search.required, [
+    'ready', 'source', 'servingMode', 'contractVersion',
+  ])
+  assert.equal(platformProperties.search.properties.source.const, 'hub')
+  assert.match(platformProperties.search.description, /independent first-page rollout gate/i)
+  assert.equal(
+    platformProperties.search.properties.contractVersion.const,
+    'night-all.data-search.v1',
+  )
+  assert.match(platformProperties.search.description, /post_detail.*independently/i)
 }
 
 function assertCanonicalContextContract(document) {
@@ -708,7 +811,21 @@ function assertNightAllPublicContract(document) {
   assert.match(compatibility.description, /grant-filtered/i)
   assert.match(compatibility.description, /not fetched from Night-All at request time/i)
   assert.match(compatibility.description, /does not prove current Night-All handler, endpoint, provider, credential, or upstream health/i)
-  assert.match(compatibility.responses[200].description, /not masked|retain/i)
+  assert.match(compatibility.description, /exactly one scalar keyword or query/i)
+  assert.match(compatibility.description, /effective page size 20/i)
+  assert.match(compatibility.description, /independent rollout gate/i)
+  assert.match(compatibility.description, /includeDetails=false\/includeComments=false/i)
+  assert.match(compatibility.description, /durable Hub.*body requestId.*x-mx-insight-request-id/is)
+  assert.match(compatibility.responses[200].description, /not masked|retain|remain unchanged/i)
+  assert.deepEqual(
+    compatibility.responses[200].headers['x-mx-insight-source-mode'].schema.enum,
+    ['live', 'stale'],
+  )
+  assert.match(
+    document.components.schemas.NightAllLegacyEnvelope
+      .properties.data.properties.raw_data.description,
+    /Hub-native Xiaohongshu raw.*same type/i,
+  )
 
   assertNightAllCompatibilityRequestSchema(document.components.schemas.NightAllLegacyRequest)
   const availability = document.components.schemas.NightAllLegacyOperationAvailability
@@ -718,7 +835,7 @@ function assertNightAllPublicContract(document) {
   assert.equal(availability.properties.readyPlatforms.uniqueItems, true)
   assert.match(availability.description, /subset of supportedPlatforms/)
   assert.match(availability.description, /Hub-pinned/i)
-  assert.match(availability.description, /deployed Hub contract permits dispatch/i)
+  assert.match(availability.description, /deployed Hub contract permits historical dispatch/i)
   assert.match(availability.description, /not populated by live Night-All discovery/i)
   assert.match(availability.description, /does not prove handler, endpoint, provider, credential, or upstream health/i)
   assert.doesNotMatch(availability.description, /executable handler or endpoint candidate/i)
@@ -747,6 +864,7 @@ function assertNightAllPublicContract(document) {
   assert.match(discoveryProperty.description, /Hub-pinned/i)
   assert.match(discoveryProperty.description, /authoritative only for Hub routing/i)
   assert.match(discoveryProperty.description, /not a live Night-All capability or provider-readiness result/i)
+  assert.match(discoveryProperty.description, /does not remove non-direct shapes from legacy dispatch/i)
   assert.match(discoveryProperty.description, /Null fails closed/i)
 
   const platformProperties = dataSchema.properties.platforms.items.properties
@@ -759,7 +877,13 @@ function assertNightAllPublicContract(document) {
   assert.equal(telegram.servingMode, 'stored')
   const xiaohongshu = capabilitiesExample.data.platforms
     .find((candidate) => candidate.platform === 'xiaohongshu')
-  assert.deepEqual(xiaohongshu.capabilities, ['post_detail'])
+  assert.deepEqual(xiaohongshu.capabilities, ['search_posts', 'post_detail'])
+  assert.equal(xiaohongshu.source, undefined)
+  assert.equal(xiaohongshu.servingMode, undefined)
+  assert.equal(xiaohongshu.search.ready, true)
+  assert.equal(xiaohongshu.search.source, 'hub')
+  assert.equal(xiaohongshu.search.servingMode, 'live_with_stored_fallback')
+  assert.equal(xiaohongshu.search.contractVersion, 'night-all.data-search.v1')
   const twitter = capabilitiesExample.data.platforms
     .find((candidate) => candidate.platform === 'twitter')
   assert.equal(twitter.capabilities, undefined)
@@ -769,10 +893,12 @@ function assertNightAllPublicContract(document) {
   )
   for (const operation of ['raw', 'crawl', 'user-info']) {
     const operationExample = capabilitiesExample.data.legacySearch.operations[operation]
-    assert.ok(operationExample.supportedPlatforms.includes('twitter'))
-    assert.ok(operationExample.readyPlatforms.includes('twitter'))
+    assert.deepEqual(operationExample.supportedPlatforms, ['twitter', 'xiaohongshu'])
+    assert.deepEqual(operationExample.readyPlatforms, ['twitter', 'xiaohongshu'])
     assert.equal(operationExample.supportedPlatforms.includes('telegram'), false)
     assert.equal(operationExample.readyPlatforms.includes('telegram'), false)
+    assert.equal(operationExample.supportedPlatforms.includes('xiaohongshu'), true)
+    assert.equal(operationExample.readyPlatforms.includes('xiaohongshu'), true)
   }
 }
 
@@ -1186,7 +1312,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(xiaohongshuHtml, /data\.item/)
     assert.match(xiaohongshuHtml, /immutable snapshot/)
     assert.match(html, /电商数据百宝箱/)
-    assert.match(ecommerceHtml, /JustOne/)
+    assert.doesNotMatch(ecommerceHtml, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.match(html, /同一把 Hub Public API Key/u)
     assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
     assert.match(html, /第二个候选通过合同验证后/u)
@@ -1464,6 +1590,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assertVirtualSupermarketContract(document)
     assertExternalCommerceContract(document)
     assertExternalSocialPostContract(document)
+    assertXiaohongshuSearchContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -1534,6 +1661,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   assertVirtualSupermarketContract(document)
   assertExternalCommerceContract(document)
   assertExternalSocialPostContract(document)
+  assertXiaohongshuSearchContract(document)
   assertPublicDataProductMirror(PUBLIC_OPENAPI_DOCUMENT, document)
 })
 
@@ -1544,7 +1672,7 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   )
   assert.match(guide, /Hub-pinned/)
   assert.match(guide, /不会在请求时从\s*Night-All `\/api\/v1\/search\/capabilities` 实时发现/)
-  assert.match(guide, /readyPlatforms[^。]*仅表示 Hub 在当前固定兼容契约下允许 dispatch/)
+  assert.match(guide, /readyPlatforms[^。]*仅表示 Hub 在当前固定(?:历史)?兼容契约下允许 dispatch/)
   assert.match(guide, /不证明 handler、endpoint、provider、credential/)
   assert.doesNotMatch(guide, /默认 provider 已启用且配置了凭据/)
   assert.doesNotMatch(guide, /存在可执行 handler 或 endpoint candidate/)
@@ -1568,6 +1696,15 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /\/api\/v1\/xiaohongshu\/app\/get_note_info/)
   assert.match(guide, /\/api\/v1\/data\/posts\/media/)
   assert.match(guide, /social\.posts\.resolve/)
+  assert.match(guide, /search_posts/)
+  assert.match(guide, /search\.ready=true/)
+  assert.match(guide, /不会把小红书从 `legacySearch` 移除/)
+  assert.match(guide, /pageSize[^。]*20[^。]*direct external-data connector/)
+  assert.match(guide, /独立[^。]*rollout gate[^。]*首屏|首屏[^。]*独立 rollout gate/)
+  assert.match(guide, /长度恰好为 60[^。]*内部详情补全/)
+  assert.match(guide, /includeDetails:false[^。]*includeComments:false[^。]*no-op/)
+  assert.match(guide, /body[^。]*requestId[^。]*x-mx-insight-request-id[^。]*durable Hub UUID/)
+  assert.match(guide, /external_platform_rate_limited/)
 })
 
 test('external data platform public contract and internal operations guidance stay aligned', async () => {
@@ -1604,6 +1741,11 @@ test('external data platform public contract and internal operations guidance st
     assert.match(source, /mx-insight-hub\.social-post\.v1/)
     assert.match(source, /social\.posts\.resolve/)
     assert.match(source, /data.*item/is)
+    assert.match(source, /search_posts/)
+    assert.match(source, /night-all\.data-search\.v1/)
+    assert.match(source, /pageSize.*exactly 20|pageSize.*恰好.*20/is)
+    assert.match(source, /60-character provider\s+preview boundary|长度恰好为 60/is)
+    assert.match(source, /external_platform_rate_limited/)
   }
 
   assert.match(adr, /JustOne/)

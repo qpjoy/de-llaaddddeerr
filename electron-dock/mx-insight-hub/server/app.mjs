@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
+import { quotedMinor } from './billing/contracts.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
 import {
   PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT,
@@ -103,6 +104,25 @@ function requireNoQuery(searchParams, label) {
   }
 }
 
+function tenantPlanView(plan, multiplierPpm = null) {
+  if (!plan) return null
+  const priceBook = plan.priceBook
+  const effectiveMultiplier = multiplierPpm ?? priceBook?.defaultMultiplierPpm ?? null
+  return {
+    ...plan,
+    pricing: { mode: priceBook ? 'contract' : 'legacy_unchanged' },
+    customerRates: priceBook && effectiveMultiplier != null
+      ? priceBook.entries.map((entry) => ({
+          meterKey: entry.meterKey,
+          billingUnit: entry.billingUnit,
+          unitPriceMinor: quotedMinor(entry.unitPriceMinor, effectiveMultiplier),
+          currency: priceBook.currency,
+        }))
+      : [],
+    priceBook: null,
+  }
+}
+
 function adminCredential(request) {
   const value = request.headers['x-mx-insight-admin-token']
   return (typeof value === 'string' && value) || bearerToken(request)
@@ -120,9 +140,20 @@ function mergeUsageSummaries(summaries) {
     averageUpstreamLatencyMs: null,
     byPlatform: {},
     byCapability: {},
+    recentRequests: [],
+    customerBilling: {
+      currency: null,
+      mixedCurrencies: false,
+      quotedMinor: 0,
+      chargedMinor: 0,
+      heldMinor: 0,
+      shadowQuotedMinor: 0,
+      byMeter: {},
+    },
   }
   let weightedLatency = 0
   let latencyCommitted = 0
+  const billingCurrencies = new Set()
 
   for (const summary of summaries) {
     merged.requests += summary.requests || 0
@@ -150,11 +181,49 @@ function mergeUsageSummaries(summaries) {
           : { ...entry }
       }
     }
+
+    const billing = summary.customerBilling || {}
+    if (billing.currency) billingCurrencies.add(billing.currency)
+    if (billing.mixedCurrencies) billingCurrencies.add('__mixed__')
+    for (const field of ['quotedMinor', 'chargedMinor', 'heldMinor', 'shadowQuotedMinor']) {
+      merged.customerBilling[field] += Number(billing[field] || 0)
+    }
+    for (const [meterKey, entry] of Object.entries(billing.byMeter || {})) {
+      const current = merged.customerBilling.byMeter[meterKey] ||= {
+        requests: 0,
+        quotedMinor: 0,
+        chargedMinor: 0,
+        heldMinor: 0,
+        currency: entry.currency || billing.currency || null,
+        mixedCurrencies: false,
+      }
+      current.requests += Number(entry.requests || 0)
+      current.quotedMinor += Number(entry.quotedMinor || 0)
+      current.chargedMinor += Number(entry.chargedMinor || 0)
+      current.heldMinor += Number(entry.heldMinor || 0)
+      const entryCurrency = entry.currency || billing.currency || null
+      if ((current.currency && entryCurrency && current.currency !== entryCurrency) || entry.mixedCurrencies) {
+        current.currency = null
+        current.mixedCurrencies = true
+      } else if (!current.currency) {
+        current.currency = entryCurrency
+      }
+    }
+    merged.recentRequests.push(...(summary.recentRequests || []))
   }
 
   merged.averageUpstreamLatencyMs = latencyCommitted > 0
     ? Math.round(weightedLatency / latencyCommitted)
     : null
+  merged.customerBilling.currency = billingCurrencies.size === 1 && !billingCurrencies.has('__mixed__')
+    ? [...billingCurrencies][0]
+    : null
+  merged.customerBilling.mixedCurrencies = billingCurrencies.size > 1 || billingCurrencies.has('__mixed__')
+  merged.recentRequests.sort((left, right) => (
+    String(right.createdAt || '').localeCompare(String(left.createdAt || ''))
+      || String(right.id || '').localeCompare(String(left.id || ''))
+  ))
+  merged.recentRequests = merged.recentRequests.slice(0, 50)
   return merged
 }
 
@@ -1850,6 +1919,67 @@ export function createApp({
         sendJson(response, 201, { data: await service.createTenant(await readJson(request)), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing')
+      if (request.method === 'GET' && params) {
+        requireTenantCapability(principal, params.id, 'usage.read')
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'ledgerLimit')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported billing query fields: ${unsupported.join(', ')}`)
+        }
+        const ledgerLimit = searchParams.get('ledgerLimit') == null
+          ? 50
+          : Number(searchParams.get('ledgerLimit'))
+        if (!Number.isInteger(ledgerLimit) || ledgerLimit < 1 || ledgerLimit > 200) {
+          throw new AppError(400, 'invalid_request', 'ledgerLimit must be an integer between 1 and 200')
+        }
+        const billing = await service.getTenantBilling(params.id, { ledgerLimit })
+        const data = principal.platformAdmin ? billing : {
+          ...billing,
+          profile: billing.profile ? {
+            tenantId: billing.profile.tenantId,
+            mode: billing.profile.mode,
+            revision: billing.profile.revision,
+            updatedAt: billing.profile.updatedAt,
+          } : null,
+          ledger: (billing.ledger || []).map((entry) => {
+            const { actor: _actor, externalReference: _externalReference, ...safe } = entry
+            return safe
+          }),
+        }
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing/profile')
+      if (request.method === 'PUT' && params) {
+        requirePlatformAdmin(principal)
+        requireNoQuery(searchParams, 'tenant billing profile')
+        sendJson(response, 200, {
+          data: await service.setTenantBillingProfile(
+            params.id,
+            await readJson(request, 16 * 1024),
+            principal.memberId || principal.kind || 'admin-token',
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing/credits')
+      if (request.method === 'POST' && params) {
+        requirePlatformAdmin(principal)
+        requireNoQuery(searchParams, 'tenant credit adjustment')
+        sendJson(response, 201, {
+          data: await service.addTenantCredit(
+            params.id,
+            await readJson(request, 16 * 1024),
+            {
+              idempotencyKey: request.headers['idempotency-key'],
+              actor: principal.memberId || principal.kind || 'admin-token',
+            },
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/tenants/:id')
       if (request.method === 'PUT' && params) {
         requireTenantCapability(principal, params.id, 'tenant.write')
@@ -1925,11 +2055,37 @@ export function createApp({
         const consumerId = searchParams.get('consumerId') || null
         if (consumerId) await assertConsumerCapability(principal, consumerId, 'consumer.read')
         else scopeTenantCapability(principal, null, 'consumer.read')
+        const currentPlan = consumerId ? await service.getConsumerPlan(consumerId) : null
+        let scopedCurrentPlan = currentPlan
+        if (!principal.platformAdmin && currentPlan) {
+          if (currentPlan.priceBook && consumerId) {
+            const consumer = await store.getConsumer(consumerId)
+            const billing = consumer ? await service.getTenantBilling(consumer.tenantId, { ledgerLimit: 1 }) : null
+            scopedCurrentPlan = tenantPlanView(currentPlan, billing?.profile?.multiplierPpm)
+          } else {
+            scopedCurrentPlan = tenantPlanView(currentPlan)
+          }
+        }
+        const catalog = principal.platformAdmin
+          ? await service.listPlans()
+          : scopedCurrentPlan ? [scopedCurrentPlan] : []
         sendJson(response, 200, {
           data: {
-            catalog: await service.listPlans(),
-            currentPlan: consumerId ? await service.getConsumerPlan(consumerId) : null,
+            catalog,
+            currentPlan: principal.platformAdmin ? currentPlan : scopedCurrentPlan,
           },
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/plans') {
+        requirePlatformAdmin(principal)
+        requireNoQuery(searchParams, 'plan publication')
+        sendJson(response, 201, {
+          data: await service.publishPlanVersion(
+            await readJson(request, 128 * 1024),
+            principal.memberId || principal.kind || 'admin-token',
+          ),
           requestId,
         })
         return
@@ -1969,6 +2125,23 @@ export function createApp({
         if (filters.apiKeyId) await assertApiKeyCapability(principal, filters.apiKeyId, 'usage.read')
         sendJson(response, 200, {
           data: await scopedUsageFor(principal, filters),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/usage/:id/customer-charge/reconciliation')
+      if (request.method === 'POST' && params) {
+        requirePlatformAdmin(principal)
+        requireNoQuery(searchParams, 'customer charge reconciliation')
+        sendJson(response, 200, {
+          data: await service.reconcileUnknownCustomerCharge(
+            params.id,
+            await readJson(request, 16 * 1024),
+            {
+              idempotencyKey: request.headers['idempotency-key'],
+              actor: principal.memberId || principal.kind || 'admin-token',
+            },
+          ),
           requestId,
         })
         return
@@ -4292,7 +4465,11 @@ export function createApp({
           'x-mx-insight-source-mode': result.sourceMode,
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
-          ...(result.sourceMode === 'stored_fallback' ? { warning: '110 - "Response is stale"' } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            || (result.sourceMode === 'idempotent_replay'
+              && ['stale', 'stored_fallback'].includes(result.originSourceMode))
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
         })
         return
       }
@@ -4325,6 +4502,8 @@ export function createApp({
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
           ...(result.sourceMode === 'stored_fallback'
+            || (result.sourceMode === 'idempotent_replay'
+              && ['stale', 'stored_fallback'].includes(result.originSourceMode))
             ? { warning: '110 - "Response is stale"' }
             : {}),
         })
@@ -4395,15 +4574,26 @@ export function createApp({
           idempotencyKey: request.headers['idempotency-key'],
           path: pathname,
         })
-        // Keep Night-All's own requestId and legacy envelope in the body. The
-        // Hub request id is transport metadata exposed by the response header.
+        // Night-All-owned responses retain their original compatibility body.
+        // A Hub-direct projection uses the durable Hub ID in both the legacy
+        // field and transport header; provider correlation stays private.
+        const compatibilitySourceMode = result.sourceMode === 'stale'
+          || result.sourceMode === 'stored_fallback'
+          || (result.sourceMode === 'idempotent_replay'
+            && ['stale', 'stored_fallback'].includes(result.originSourceMode))
+          ? 'stale'
+          : 'live'
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
-          'x-mx-insight-source-mode': result.sourceMode,
+          // Keep the legacy transport vocabulary stable. Cache/replay detail
+          // remains observable through the existing replay header and age.
+          'x-mx-insight-source-mode': compatibilitySourceMode,
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
-          ...(result.sourceMode === 'stale' ? { warning: '110 - "Response is stale"' } : {}),
+          ...(compatibilitySourceMode === 'stale'
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
         })
         return
       }
@@ -4649,6 +4839,14 @@ export function createApp({
         sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
+          ...(result.sourceMode ? { 'x-mx-insight-source-mode': result.sourceMode } : {}),
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            || (result.sourceMode === 'idempotent_replay'
+              && ['stale', 'stored_fallback'].includes(result.originSourceMode))
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
         })
         return
       }
