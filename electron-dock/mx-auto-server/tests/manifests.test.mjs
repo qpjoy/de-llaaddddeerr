@@ -108,6 +108,14 @@ test('server receives bounded Launcher identity settings from managed configurat
   }
 })
 
+test('server receives the optional HTTP cookie override from its managed Secret', async () => {
+  const server = await read('deploy/k8s/internal/30-server.yaml')
+  assert.match(
+    server,
+    /name: MX_AUTO_INSECURE_COOKIES\b[\s\S]*?key: MX_AUTO_INSECURE_COOKIES\b[\s\S]*?optional: true/u
+  )
+})
+
 test('the single-node NodePort preserves direct peer addresses without a CIDR allowlist', async () => {
   const service = await read('deploy/k8s/internal/35-nodeport.yaml')
   assert.match(service, /externalTrafficPolicy: Local/u)

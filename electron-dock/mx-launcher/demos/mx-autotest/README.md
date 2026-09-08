@@ -54,11 +54,13 @@ pnpm autotest:check
 pnpm autotest:dev
 ```
 
-The local `MX_AUTOTEST_SERVER_URL` can point to `mx-auto-server` on loopback.
-Formal bearer transport is restricted to HTTPS, loopback, or the currently
-verified product VIP. Account passwords, Launcher access tokens, lease
-capabilities and the WireGuard private key never cross the main/preload boundary
-into the renderer.
+`MX_AUTOTEST_SERVER_URL` is the desktop client's mx-auto-server API address; it
+is separate from the server-side `MX_AUTO_PUBLIC_URL`. Both HTTP and HTTPS are
+accepted, including an operator-selected LAN address. HTTP no longer has a
+client-side transport block, but it carries the User Center bearer token without
+TLS and should therefore be limited to a trusted network. Account passwords,
+Launcher access tokens, lease capabilities and the WireGuard private key never
+cross the main/preload boundary into the renderer.
 
 Build the unpackaged Electron application with:
 
@@ -78,8 +80,14 @@ From the repository root, the control plane has its own lifecycle:
 
 ```sh
 bash electron-dock/mx-auto-server/scripts/manage.sh test
-bash electron-dock/mx-auto-server/scripts/manage.sh dev
+bash electron-dock/mx-auto-server/scripts/manage.sh deploy
 ```
+
+The standard single-node deployment needs no `.env`: it automatically builds
+and distributes the server image, discovers the same-cluster Launcher Service,
+and generates persistent secrets. Use `dev` instead of `deploy` only for the
+local in-memory server. Advanced overrides are documented in
+`mx-auto-server/.env.example`.
 
 After the service is ready, `mx-auto-server/scripts/onboard-compass.mjs`
 idempotently registers the existing Compass `public` Cypress baseline. It does

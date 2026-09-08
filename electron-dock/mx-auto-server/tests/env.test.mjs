@@ -9,6 +9,8 @@ test('MX_AUTO variables override the corresponding V0 kernel variables', () => {
     {
       MX_AUTO_PORT: '8790',
       MX_AUTO_ADMIN_TOKEN: 'secret',
+      MX_AUTO_PUBLIC_URL: 'http://10.88.88.88:30880',
+      MX_AUTO_LAUNCHER_URL: 'http://10.88.88.88:18090',
       MX_AUTO_LAUNCHER_AUDIENCE: 'mx-sdk',
       MX_AUTO_LAUNCHER_INTROSPECTION_MAX_STARTS: '42',
       MX_AUTO_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS: '7',
@@ -18,6 +20,8 @@ test('MX_AUTO variables override the corresponding V0 kernel variables', () => {
   )
   assert.equal(target.MXT_PORT, '8790')
   assert.equal(target.MXT_ADMIN_TOKEN, 'secret')
+  assert.equal(target.MXT_PUBLIC_URL, 'http://10.88.88.88:30880')
+  assert.equal(target.MXT_LAUNCHER_URL, 'http://10.88.88.88:18090')
   assert.equal(target.MXT_LAUNCHER_AUDIENCE, 'mx-sdk')
   assert.equal(target.MXT_LAUNCHER_INTROSPECTION_MAX_STARTS, '42')
   assert.equal(target.MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS, '7')
@@ -69,7 +73,38 @@ test('safe mx-auto defaults are applied at the compatibility boundary', () => {
   assert.equal(target.MXT_LAUNCHER_PASSWORD_LOGIN_MAX_IN_FLIGHT_PER_SOURCE, '1')
   assert.equal(target.MXT_GIT_TOKEN_SECRET, 'mx-auto-secrets')
   assert.equal(target.MXT_GIT_TOKEN_SECRET_KEY, 'MX_AUTO_GIT_TOKEN')
+  assert.equal(target.MXT_INSECURE_COOKIES, 'true')
   assert.equal(target.MXT_ADMIN_TOKEN, undefined)
+})
+
+test('blank optional URLs keep direct HTTP login usable without enabling Launcher identity', () => {
+  const target = {
+    MXT_PUBLIC_URL: 'https://stale.example',
+    MXT_LAUNCHER_URL: 'https://stale-launcher.example',
+    MXT_INSECURE_COOKIES: 'false'
+  }
+  mapExternalEnvironment(
+    {
+      MX_AUTO_PUBLIC_URL: '',
+      MX_AUTO_LAUNCHER_URL: ''
+    },
+    target
+  )
+  assert.equal(target.MXT_PUBLIC_URL, '')
+  assert.equal(target.MXT_LAUNCHER_URL, '')
+  assert.equal(target.MXT_INSECURE_COOKIES, 'true')
+})
+
+test('an explicit cookie policy still wins when the public URL is blank', () => {
+  const target = {}
+  mapExternalEnvironment(
+    {
+      MX_AUTO_PUBLIC_URL: '',
+      MX_AUTO_INSECURE_COOKIES: 'false'
+    },
+    target
+  )
+  assert.equal(target.MXT_INSECURE_COOKIES, 'false')
 })
 
 test('kernel root can be redirected without changing the preserved source tree', () => {

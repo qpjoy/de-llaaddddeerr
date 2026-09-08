@@ -10737,6 +10737,7 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
   const draft = {
     appId: normalizedAppId,
     displayName: app?.displayName || '',
+    packageName: app?.packageName || '',
     category: app?.category || 'custom',
     version: app?.version || '0.1.0',
     description: app?.description || '',
@@ -11734,6 +11735,7 @@ async function saveAppCenterAppFromEditor(root) {
         ? `${app.displayName || app.appId} saved with DNS route ${savedDnsRoute.host}.`
         : `${app.displayName || app.appId} saved.`
     };
+    await refreshAppCenterNetwork();
   } catch (error) {
     state.appCatalogFeedback = { kind: 'error', message: error.message };
   } finally {

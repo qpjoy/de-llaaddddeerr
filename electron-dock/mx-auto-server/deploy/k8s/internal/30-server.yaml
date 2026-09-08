@@ -165,6 +165,12 @@ spec:
                   name: mx-auto-secrets
                   key: MX_AUTO_PUBLIC_URL
                   optional: true
+            - name: MX_AUTO_INSECURE_COOKIES
+              valueFrom:
+                secretKeyRef:
+                  name: mx-auto-secrets
+                  key: MX_AUTO_INSECURE_COOKIES
+                  optional: true
             - name: MX_AUTO_SECRET_KEY
               valueFrom:
                 secretKeyRef:

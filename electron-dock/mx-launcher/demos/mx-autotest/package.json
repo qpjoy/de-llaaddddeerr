@@ -12,7 +12,7 @@
     "dev": "node scripts/dev-mode.mjs local && quasar dev -m electron",
     "start": "pnpm dev",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
-    "safety": "node scripts/safety-check.mjs && node --test scripts/lease-capability-policy.test.mjs",
+    "safety": "node scripts/safety-check.mjs && node --test scripts/*.test.mjs",
     "check": "node --check src-electron/electron-bootstrap.cjs && node --check scripts/dev-mode.mjs && node --check scripts/package.mjs && pnpm run safety && pnpm run typecheck",
     "build": "node scripts/dev-mode.mjs local && quasar build -m electron --skip-pkg",
     "package": "node scripts/package.mjs",

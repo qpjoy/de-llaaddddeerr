@@ -91,5 +91,13 @@ export function mapExternalEnvironment(source = process.env, target = process.en
   for (const [kernelName, value] of Object.entries(DEFAULTS)) {
     if (!target[kernelName]?.trim()) target[kernelName] = value
   }
+  // MX Auto is exposed directly over plain HTTP by its local server and the
+  // bundled NodePort. When no advertised URL was supplied, the legacy kernel
+  // cannot infer that scheme and would otherwise emit a Secure session cookie
+  // that browsers silently drop. An explicit cookie setting or public URL
+  // continues to win.
+  if (!target.MXT_INSECURE_COOKIES?.trim() && !target.MXT_PUBLIC_URL?.trim()) {
+    target.MXT_INSECURE_COOKIES = 'true'
+  }
   return target
 }

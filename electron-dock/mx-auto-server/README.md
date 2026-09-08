@@ -14,6 +14,15 @@ V0 暂时通过动态 import 复用相邻的 `mx-test-framework` 已验证内核
 - 对外配置只使用 `MX_AUTO_*`；wrapper 在进程内映射为旧内核读取的 `MXT_*`。
 - Launcher audience 默认是 `mx-sdk`，用于复用 standalone launcher/桌面登录
   token；Launcher 只负责认证，Autotest 权限仍保存在自己的数据库。
+- `MX_AUTO_LAUNCHER_URL` 是服务端调用 Launcher OAuth/introspection 的基地址，
+  不是本服务自身地址。Kubernetes deploy 会自动发现同集群标准 Service
+  `mx-internal-shadow/mx-launcher-internal`；显式配置只用于覆盖自定义或集群外地址。
+  未配置且未发现 Launcher 时服务仍照常启动、admin token 与任务/Runner API 照常
+  可用，只关闭 Launcher 账号密码登录和 Launcher bearer token 校验。
+- `MX_AUTO_PUBLIC_URL` 只用于通知/安装命令中的外部链接，并辅助选择 session cookie
+  属性，不参与监听或健康检查。它可以留空；标准 deploy 会尽力推导 NodePort 地址，
+  直接启动则从当前请求 Host 生成链接。留空时 wrapper 默认兼容直接 HTTP 登录；若实际
+  只提供 HTTPS，可显式设置 HTTPS public URL 或 `MX_AUTO_INSECURE_COOKIES=false`。
 - opaque token 只以 SHA-256 digest 作为内存缓存/并发表的 key；明确失效结论默认
   负缓存 3 秒，同 token 的并发校验合并为一次。unique token 的 introspection
   每来源默认 6 次/10 秒、2 并发，全局 emergency ceiling 为 30 次/10 秒、8 并发；
@@ -36,7 +45,6 @@ V0 暂时通过动态 import 复用相邻的 `mx-test-framework` 已验证内核
 
 ```bash
 npm --prefix ../mx-test-framework install
-cp .env.example .env
 bash scripts/manage.sh dev
 ```
 
@@ -82,26 +90,49 @@ artifact 数值时，必须同步核对 ResourceQuota、LimitRange 与宿主磁�
 `deploy/k8s/internal/08-resource-policy.yaml`；其摘要进入 server Pod template，修改后
 执行 deploy 会触发新 Pod 读取配置。
 
-所有模式需要 `kubectl` 与 `openssl`；本地镜像模式还需要 Docker，kind 模式另外
-需要 `kind` CLI。远程 digest 模式不在本机构建镜像。
+所有模式需要 `kubectl` 与 `openssl`。通常不配置 `MX_AUTO_IMAGE`：deploy 会用 Docker
+构建以完整 image ID 命名的内容寻址镜像，并按当前集群自动分发：desktop 直接使用，
+kind 自动执行 `kind load docker-image`，当前主机就是唯一 K8s 节点的
+kubeadm/containerd 则自动导入 `k8s.io` image store；containerd 会去重已有内容层。
 
-本地 desktop context 会构建按 Docker image ID 命名的不可变标签；kind 还会自动
-执行 `kind load docker-image`。其他 context 不会猜测镜像如何分发，必须提供集群
-可拉取的 digest：
+containerd 导入前会优先用节点 InternalIP 核对本机身份，无法枚举 IP 时才回退
+hostname，避免 kubeconfig 指向远端时误把镜像导入本机。只有 kubectl 指向另一台
+机器，或目标使用 CRI-O 等当前无法本地导入的 runtime，才需要显式提供集群可拉取的不可变
+`registry/repository@sha256:<digest>`。本地自动构建需要 Docker；kubeadm/containerd
+导入还需要 `ctr` 以及 root 或免密 sudo，kind 另外需要 `kind` CLI。
 
 ```bash
-cp .env.example .env
-# 至少修改 MX_AUTO_ADMIN_TOKEN；接入 Launcher 时再设置 MX_AUTO_LAUNCHER_URL
-# 远程集群还需：MX_AUTO_IMAGE=registry.example/mx-auto-server@sha256:<digest>
 bash scripts/manage.sh deploy
 ```
+
+标准部署不需要创建 `.env`：服务镜像、Launcher 地址、公开 NodePort 地址、管理员
+token、PostgreSQL 密码和凭据加密 key 都会自动准备。生成的 secret 会保存在
+`mx-auto/mx-auto-secrets`，后续 deploy 复用而不会静默轮换。只有集群外 Launcher、
+远程镜像仓库、私有 Git token 或其他高级覆盖才需要 `.env`；示例见 `.env.example`。
+
+需要调用管理员 API 时再显式读取 token，不会在 deploy 日志中泄露：
+
+```bash
+export MX_AUTO_ADMIN_TOKEN="$(bash scripts/manage.sh admin-token)"
+```
+
+deploy 会查询标准 Service `mx-internal-shadow/mx-launcher-internal` 的 `http` 端口，
+发现后自动写入实际的集群 DNS 地址，不需要在 `.env` 重复配置。只有 Launcher 位于
+其他集群、namespace 或使用非标准 Service 时，才显式覆盖：
+
+```dotenv
+MX_AUTO_LAUNCHER_URL=http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
+```
+
+部署后 namespace、Service 和 Pod 存在，才能执行
+`kubectl -n mx-auto port-forward service/mx-auto-server 8790:80`。
 
 kind 默认不把 NodePort 映射到宿主机；除非创建集群时已经配置 `extraPortMappings`，
 请另开终端执行 `kubectl -n mx-auto port-forward service/mx-auto-server 8790:80`，
 再访问 `http://127.0.0.1:8790`。也可以显式设置实际可访问的
 `MX_AUTO_PUBLIC_URL`。
 
-`deploy` 的固定顺序是：验证单节点与镜像分发 → 创建 namespace → 复用/生成 Secret
+`deploy` 的固定顺序是：验证单节点并自动构建/分发镜像 → 创建 namespace → 复用/生成 Secret
 → 启动独立 PostgreSQL → 用同一不可变镜像执行迁移 Job → 启动服务 → readiness 与
 鉴权验证。数据库 PVC 一旦存在，集群 Secret 中的 PostgreSQL 密码和凭据加密 key
 就是事实源；普通 deploy 遇到 `.env` 中不同的值会拒绝继续，不会静默轮换或使旧
@@ -128,6 +159,7 @@ bash scripts/manage.sh test
 bash scripts/manage.sh migrate
 bash scripts/manage.sh deploy
 bash scripts/manage.sh verify
+bash scripts/manage.sh admin-token
 bash scripts/manage.sh status
 bash scripts/manage.sh logs [server|migrate|postgres]
 bash scripts/manage.sh down

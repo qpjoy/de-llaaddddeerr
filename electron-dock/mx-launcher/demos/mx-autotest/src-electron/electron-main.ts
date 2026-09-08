@@ -39,6 +39,7 @@ import {
   isLeaseCapability,
   mintLeaseCapability
 } from './lease-capability-policy.mjs';
+import { assertHttpBearerTransport } from './http-transport-policy.mjs';
 
 type ConnectionStatus =
   | 'idle'
@@ -596,7 +597,7 @@ async function connectInternalLocked(): Promise<boolean> {
     } else {
       const resolution = await ensureBootstrapResolved(true);
       controlBaseUrl = requiredString(resolution.baseUrl, 'bootstrap base URL');
-      if (loggedIn) await assertBearerTransportAllowed(controlBaseUrl);
+      if (loggedIn) assertHttpBearerTransport(controlBaseUrl);
     }
 
     const launcher = launcherClient(controlBaseUrl);
@@ -1081,7 +1082,7 @@ async function platformRequest(method: 'GET' | 'POST', pathname: string, body?: 
   }
   const accessToken = requiredString(credentialVault.accessToken, 'User Center access token');
   const baseUrl = requiredString(state.config.platformServerUrl, 'MX_AUTOTEST_SERVER_URL');
-  await assertBearerTransportAllowed(baseUrl);
+  assertHttpBearerTransport(baseUrl);
   const serialized = body === undefined ? undefined : JSON.stringify(body);
   if (serialized && Buffer.byteLength(serialized) > MAX_PLATFORM_BODY_BYTES) {
     throw new Error('Platform request body exceeds the desktop bridge limit');
@@ -1104,20 +1105,6 @@ async function platformRequest(method: 'GET' | 'POST', pathname: string, body?: 
     broadcastRuntime();
   }
   return redactSecrets(await readJsonResponse(response, MAX_PLATFORM_RESPONSE_BYTES, 'MX AutoTest platform'));
-}
-
-async function assertBearerTransportAllowed(baseUrl: string): Promise<void> {
-  const parsed = new URL(baseUrl);
-  if (parsed.protocol === 'https:') return;
-  if (parsed.protocol !== 'http:') throw new Error('Bearer transport must use HTTP(S)');
-  if (isLoopbackHost(parsed.hostname)) return;
-  const state = requireRuntime();
-  if (
-    state.connection.status === 'network-ready'
-    && parsed.hostname === state.connection.serviceVip
-    && await probeOwnServiceVip(false)
-  ) return;
-  throw new Error('Bearer transport requires validated HTTPS, loopback, or the verified MX AutoTest service VIP');
 }
 
 async function readJsonResponse(response: Response, maxBytes: number, label: string): Promise<unknown> {
@@ -1405,10 +1392,6 @@ function redactSecrets(value: unknown, depth = 0): unknown {
       : redactSecrets(item, depth + 1);
   }
   return output;
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
 function safeErrorMessage(error: unknown): string {
