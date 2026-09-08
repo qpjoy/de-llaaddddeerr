@@ -33,6 +33,15 @@ The current profile still uses local images with `imagePullPolicy: Never`, so
 the Hub image into `k8s.io` containerd. Move to a signed registry and reviewed
 multi-node storage/networking before adding nodes.
 
+This one-Pod, host-network profile is not evidence of 1000-QPS capacity. Its
+fixed public port prevents a second Public Pod on the same node, and every
+public request still performs authenticated PostgreSQL accounting. Keep
+Launcher and MX-H2I untouched; qualify aggregate retained/cache throughput in
+an isolated environment before changing this deployment to ordinary Pod
+networking, RollingUpdate and multiple replicas. Night-All must first have an
+authenticated, cluster-routable endpoint (or route-local readiness), because
+the current Public readiness contract still includes that dependency.
+
 ## Secret preparation
 
 Create `.env.internal` with mode `0600`:
@@ -52,6 +61,11 @@ NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
 # Environment fallback only; normally omit/leave blank when database-managed.
 # MX_INSIGHT_JUSTONE_TOKEN=<justone-api-key>
+# Live acquisition is intentionally separate from cached Hub delivery. These
+# defaults admit the current six-request customer burst without attempting to
+# drive the paid provider at the future Hub cache-egress QPS target.
+MX_INSIGHT_JUSTONE_MAX_CONCURRENCY=32
+MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY=8
 
 # Optional: mx-common otherwise generates and retains the Hub database password.
 MX_INSIGHT_POSTGRES_PASSWORD=<explicit-url-safe-password-if-pinning-is-required>

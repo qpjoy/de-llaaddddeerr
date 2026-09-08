@@ -128,6 +128,28 @@ test('verified database-only configuration enforces the provider timeout lease m
   )
 })
 
+test('JustOne defaults admit current consumer bursts while preserving a bounded provider budget', () => {
+  const config = loadConfig(BASE)
+  assert.equal(config.justOne.maxConcurrency, 32)
+  assert.equal(config.justOne.maxConsumerConcurrency, 8)
+})
+
+test('JustOne rejects a per-consumer concurrency budget above the global budget', () => {
+  const environment = {
+    ...BASE,
+    MX_INSIGHT_JUSTONE_MAX_CONCURRENCY: '4',
+    MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY: '8',
+  }
+  const config = loadConfig(environment)
+  assert.equal(config.justOne.dispatchEnabled, false)
+  assert.equal(config.justOne.configurationError?.code, 'invalid_configuration')
+  assert.throws(
+    () => preflightJustOneConfig(environment),
+    (error) => error?.code === 'invalid_configuration'
+      && /must not exceed/u.test(error.message),
+  )
+})
+
 test('bad optional-provider configuration keeps unrelated runtime services available', async () => {
   const runtime = await runtimeFor({
     ...BASE,

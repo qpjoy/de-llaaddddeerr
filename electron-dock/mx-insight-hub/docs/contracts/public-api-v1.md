@@ -370,8 +370,10 @@ Use the same `Idempotency-Key` only when retrying the exact same
 path and page body. The key permanently binds that request; reusing it with a
 different body returns `409 idempotency_conflict`. Every continuation has a
 different body and **must use a new Idempotency-Key**. When the header is
-omitted, Hub derives a short-lived freshness-bucket key from the normalized
-request; clients must not rely on that generated key for durable replay.
+omitted, Hub derives a short-lived key from the active API-key identity,
+freshness bucket and normalized request. This keeps rotated keys independently
+accountable while their consumer can still share an exact snapshot; clients
+must not rely on the generated key for durable replay.
 
 The response is provider-neutral:
 

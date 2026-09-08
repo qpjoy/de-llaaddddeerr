@@ -21,8 +21,8 @@ function gatewayConfig() {
     freshTtlMs: 300_000,
     staleTtlMs: 86_400_000,
     unknownFingerprintCooldownMs: 900_000,
-    maxConcurrency: 8,
-    maxConsumerConcurrency: 2,
+    maxConcurrency: 32,
+    maxConsumerConcurrency: 8,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: {

@@ -41,22 +41,31 @@ export function createIdentity({ store, config, logger = console }) {
     },
 
     async login({ username, password, source = null }) {
+      // Keep the break-glass service administrator usable after Launcher is
+      // enabled. Check it locally before OAuth so this secret is never sent to
+      // another service as though it were a person's password.
+      const usesAdminToken = Boolean(
+        config.adminToken && secureEqual(password, config.adminToken),
+      )
+      if (usesAdminToken && launcher.enabled && username?.trim() !== 'admin') {
+        throw new AppError(401, 'invalid_credentials', '服务 admin token 只能与账号 admin 一起使用')
+      }
+      if (usesAdminToken && (username?.trim() === 'admin' || !launcher.enabled)) {
+        return {
+          token: config.adminToken,
+          expiresIn: null,
+          member: {
+            principalId: 'service-admin',
+            displayName: '服务管理员',
+            role: 'admin',
+          },
+        }
+      }
       // Without a launcher there is no account system to ask, so the service
       // admin token doubles as the sign-in secret. This is what makes local
       // development and the very first boot usable; it is not a bypass, because
       // holding that token already grants full API access.
       if (!launcher.enabled) {
-        if (config.adminToken && secureEqual(password, config.adminToken)) {
-          return {
-            token: config.adminToken,
-            expiresIn: null,
-            member: {
-              principalId: 'service-admin',
-              displayName: username || '服务管理员',
-              role: 'admin',
-            },
-          }
-        }
         throw new AppError(401, 'invalid_credentials', '未接入 mx-launcher，请用服务 admin token 作为密码登录', {
           hint: '配置 MXT_LAUNCHER_URL 后即可用 mx-launcher 账号登录。',
         })

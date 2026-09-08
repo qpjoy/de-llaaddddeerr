@@ -313,11 +313,29 @@ export class LauncherIdentityClient {
         throw new AppError(401, 'invalid_credentials', '账号或密码不正确')
       }
       const payload = await response.json().catch(() => ({}))
-      const token = payload.access_token || payload.token || payload.accessToken
+      const record = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
+      const tokenRecord =
+        record.token && typeof record.token === 'object' && !Array.isArray(record.token)
+          ? record.token
+          : record
+      const tokenCandidates = [
+        tokenRecord.access_token,
+        tokenRecord.accessToken,
+        ...(tokenRecord === record ? [record.token] : []),
+      ]
+      const token = tokenCandidates.find(
+        (candidate) => typeof candidate === 'string' && candidate.trim().length > 0,
+      )
       if (!token) {
         throw new AppError(502, 'launcher_contract', 'mx-launcher returned no access token')
       }
-      return { token, expiresIn: payload.expires_in ?? null }
+      return {
+        token: token.trim(),
+        expiresIn:
+          tokenRecord.expires_in ??
+          tokenRecord.expiresIn ??
+          (tokenRecord === record ? null : record.expires_in ?? record.expiresIn ?? null),
+      }
     } finally {
       releaseBudget()
     }
@@ -355,7 +373,7 @@ export class LauncherIdentityClient {
   async #introspectUncached(token, key) {
     let response
     try {
-      response = await this.#post('/internal/v1/user-center/token/introspect', {
+      response = await this.#post('/internal/v1/sdk/identity/introspect', {
         token,
         audience: this.audience,
       })
@@ -379,9 +397,16 @@ export class LauncherIdentityClient {
       throw this.#unauthorized('audience')
     }
 
+    const principalId =
+      introspection.principal.principalId ??
+      introspection.principal.userId ??
+      introspection.subject
+    if (typeof principalId !== 'string' || !principalId.trim()) {
+      throw new AppError(502, 'launcher_contract', 'mx-launcher returned no principal id')
+    }
     const principal = {
       kind: 'user',
-      id: String(introspection.principal.principalId ?? introspection.subject),
+      id: principalId.trim(),
       subject: introspection.subject ?? null,
       displayName:
         introspection.principal.displayName ||

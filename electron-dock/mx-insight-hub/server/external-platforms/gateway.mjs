@@ -355,7 +355,7 @@ export class ExternalPlatformGateway {
     const cacheBucket = Math.floor(Date.now() / this.config.freshTtlMs)
     const effectiveKey = suppliedKey
       ? idempotencyKey
-      : `auto:${cacheBucket}:${requestFingerprint.slice(0, 48)}`
+      : `auto:${context.apiKey.id}:${cacheBucket}:${requestFingerprint.slice(0, 48)}`
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     const reservation = await this.usageStore.reserve({
@@ -522,37 +522,8 @@ export class ExternalPlatformGateway {
       throw new AppError(503, errorCode, 'External product search is unavailable')
     }
 
-    if (!this.#enter(context.consumer.id)) {
-      if (snapshot) {
-        const responseBody = deliveryBody(snapshot.responseBody, {
-          requestId: activeRequestId,
-          sourceMode: 'stored_fallback',
-          capturedAt: snapshot.capturedAt,
-          fallbackReason: 'concurrency_guard',
-        })
-        await this.platformStore.commitSnapshotDelivery({
-          delivery,
-          snapshot,
-          sourceMode: 'stored_fallback',
-          responseBody,
-        })
-        return resultFromBody(responseBody, {
-          requestId: activeRequestId,
-          replay: false,
-          sourceMode: 'stored_fallback',
-          capturedAt: snapshot.capturedAt,
-        })
-      }
-      await this.platformStore.rejectWithoutDispatch({
-        delivery,
-        sourceMode: 'unavailable',
-        status: 429,
-        errorCode: 'external_platform_busy',
-      })
-      throw new AppError(429, 'external_platform_busy', 'External product search concurrency is exhausted')
-    }
-
     let ownsLease = false
+    let entered = false
     let call = null
     let callSettled = false
     let lastDispatchEvidence = null
@@ -645,6 +616,41 @@ export class ExternalPlatformGateway {
         }
         throw new AppError(409, errorCode, 'An equal external provider dispatch is already in progress')
       }
+
+      // Only a dispatch-lease owner consumes scarce provider concurrency.
+      // Equal requests suppressed by the shared lease must not crowd out a
+      // different customer query before they return their 409/cache result.
+      if (!this.#enter(context.consumer.id)) {
+        if (snapshot) {
+          const responseBody = deliveryBody(snapshot.responseBody, {
+            requestId: activeRequestId,
+            sourceMode: 'stored_fallback',
+            capturedAt: snapshot.capturedAt,
+            fallbackReason: 'concurrency_guard',
+          })
+          await this.platformStore.commitSnapshotDelivery({
+            delivery,
+            snapshot,
+            sourceMode: 'stored_fallback',
+            responseBody,
+          })
+          return resultFromBody(responseBody, {
+            requestId: activeRequestId,
+            replay: false,
+            sourceMode: 'stored_fallback',
+            capturedAt: snapshot.capturedAt,
+          })
+        }
+        await this.platformStore.rejectWithoutDispatch({
+          delivery,
+          sourceMode: 'unavailable',
+          status: 429,
+          errorCode: 'external_platform_busy',
+        })
+        ownsReservation = false
+        throw new AppError(429, 'external_platform_busy', 'External product search concurrency is exhausted')
+      }
+      entered = true
 
       call = await this.platformStore.beginProviderCall({
         tenantId: context.tenant.id,
@@ -822,7 +828,7 @@ export class ExternalPlatformGateway {
           this.logger?.warn?.(`[external-platform] dispatch lease release failed: ${error.message}`)
         })
       }
-      this.#leave(context.consumer.id)
+      if (entered) this.#leave(context.consumer.id)
     }
     } catch (error) {
       if (ownsReservation && durableRequestId) {

@@ -1121,14 +1121,21 @@ async function pageApps(main) {
     <div class="mxt-head">
       <div><h1 class="qp-heading-1">应用与用例</h1>
         <p class="qp-body-2 qp-muted">先有应用，再有用例。用例可以在这里直接写，不需要会写代码。</p></div>
-      ${admin ? '<div class="mxt-actions"><button class="qp-button qp-button--primary" data-new-app>注册应用</button></div>' : ''}
+      ${
+        admin
+          ? `<div class="mxt-actions">
+               <button class="qp-button qp-button--outline" data-onboard-compass>接入 / 对齐 Compass</button>
+               <button class="qp-button qp-button--primary" data-new-app>注册应用</button>
+             </div>`
+          : ''
+      }
     </div>
     ${
       state.apps.length === 0
         ? `<div class="mxt-guide"><div class="mxt-guide__body">
              <h3>还没有应用</h3>
              <p>「应用」就是要测的那个系统，比如罗盘。注册后就能在它下面登记用例、建测试任务。</p>
-             ${admin ? '<p>点右上角「注册应用」开始。</p>' : '<p>这一步需要管理员权限，找管理员开一个即可。</p>'}
+             ${admin ? '<p>可以直接点右上角「接入 / 对齐 Compass」，或手动注册其他应用。</p>' : '<p>这一步需要管理员权限，找管理员开一个即可。</p>'}
            </div></div>`
         : `<div class="mxt-panel"><div class="mxt-table__wrap"><table class="mxt-table">
         <thead><tr><th>应用</th><th>标识</th><th>形态</th><th></th></tr></thead>
@@ -1170,6 +1177,95 @@ async function pageApps(main) {
         render()
       }),
     ),
+  )
+
+  main.querySelector('[data-onboard-compass]')?.addEventListener(
+    'click',
+    () => {
+      const body = $(`
+        <form class="mxt-form">
+          <div class="mxt-banner mxt-banner--info">
+            <b>使用平台审核过的固定测试模板。</b>
+            <p class="qp-body-2">这里只选代码来源，不会接收自定义命令或 Runner 镜像，也不会自动开始测试。</p>
+          </div>
+          ${field(
+            'Web 代码仓库',
+            '<input class="qp-input" name="webRepoUrl" value="https://github.com/mingxiinfo/po-frontend" required>',
+            '用于 Compass Web 的 Cypress functional 和 demo 套件。',
+          )}
+          ${field(
+            'Web 分支',
+            '<input class="qp-input" name="webBranch" value="public" required>',
+          )}
+          ${field(
+            'Electron QA Git 仓库（可选）',
+            '<input class="qp-input" name="electronQaRepoUrl" placeholder="https://github.com/example/compass-qa.git">',
+            '留空时只对齐 Web。请填测试团队维护的 Git 仓库，不是本机目录。',
+          )}
+          <div class="mxt-form__row" data-electron-settings>
+            ${field(
+              'Electron QA 分支',
+              '<input class="qp-input" name="electronBranch" value="main">',
+            )}
+            ${field(
+              '仓库内目录',
+              '<input class="qp-input" name="electronWorkingDir" value=".">',
+              '独立 QA 仓库填 .；monorepo 填测试包的相对目录。',
+            )}
+          </div>
+          <div data-electron-settings>
+            ${field(
+              'Electron 执行系统',
+              `<select class="qp-select" name="electronOs">
+                 <option value="windows">Windows</option>
+                 <option value="macos">macOS</option>
+               </select>`,
+            )}
+          </div>
+        </form>`)
+      const electronRepo = body.querySelector('[name=electronQaRepoUrl]')
+      const electronSettings = [
+        ...body.querySelectorAll('[data-electron-settings] input, [data-electron-settings] select'),
+      ]
+      const syncElectronSettings = () => {
+        const enabled = Boolean(electronRepo.value.trim())
+        for (const control of electronSettings) control.disabled = !enabled
+      }
+      electronRepo.addEventListener('input', syncElectronSettings)
+      syncElectronSettings()
+
+      modal({
+        title: '接入 / 对齐 Compass',
+        body,
+        confirmLabel: '对齐配置',
+        onConfirm: async (close) => {
+          const data = Object.fromEntries(new FormData(body))
+          const payload = {
+            webRepoUrl: data.webRepoUrl,
+            webBranch: data.webBranch,
+          }
+          const qaRepo = electronRepo.value.trim()
+          if (qaRepo) {
+            payload.electronQaRepoUrl = qaRepo
+            payload.electronBranch = data.electronBranch
+            payload.electronWorkingDir = data.electronWorkingDir
+            payload.electronOs = data.electronOs
+          }
+          const result = await api('POST', '/api/v1/onboarding/compass:reconcile', payload)
+          state.apps = (await api('GET', '/api/v1/apps')).apps
+          toast(
+            typeof result?.summary === 'string'
+              ? result.summary
+              : result?.message ||
+                  (qaRepo
+                    ? 'Compass Web 与 Electron 测试配置已接入并对齐。'
+                    : 'Compass Web 已接入并对齐：2 个测试套件、2 个测试任务。'),
+          )
+          close()
+          go('/apps')
+        },
+      })
+    },
   )
 
   main.querySelector('[data-new-app]')?.addEventListener('click', () => {
@@ -1565,7 +1661,7 @@ async function pageMembers(main) {
         <tr>
           <td><b>${esc(member.displayName)}</b><div class="qp-caption qp-muted mxt-mono">${esc(member.principalId)}</div></td>
           <td>
-            <select class="qp-select" data-role="${esc(member.principalId)}" style="max-width:220px">
+            <select class="qp-select" data-role="${esc(member.principalId)}" data-current-role="${esc(member.role)}" style="max-width:220px">
               <option value="viewer" ${member.role === 'viewer' ? 'selected' : ''}>只读 —— 只能看</option>
               <option value="operator" ${member.role === 'operator' ? 'selected' : ''}>测试工程师 —— 写用例、建任务、跑测试</option>
               <option value="admin" ${member.role === 'admin' ? 'selected' : ''}>管理员 —— 还能注册应用和套件</option>
@@ -1580,8 +1676,24 @@ async function pageMembers(main) {
     select.addEventListener(
       'change',
       guard(async () => {
-        await api('PATCH', `/api/v1/members/${select.dataset.role}`, { role: select.value })
-        toast('权限已更新')
+        const previousRole = select.dataset.currentRole
+        select.disabled = true
+        try {
+          await api('PATCH', `/api/v1/members/${select.dataset.role}`, { role: select.value })
+          select.dataset.currentRole = select.value
+          toast('权限已更新')
+          if (select.dataset.role === (state.me?.id ?? state.me?.principalId)) {
+            // A Launcher administrator may lower their own local role. Refresh
+            // immediately so Admin-only navigation never lingers until reload.
+            history.pushState({}, '', '/')
+            await boot()
+          }
+        } catch (error) {
+          select.value = previousRole
+          throw error
+        } finally {
+          select.disabled = false
+        }
       }),
     ),
   )
@@ -1631,14 +1743,14 @@ function renderLogin(root) {
       <div class="mxt-login__card">
         <div class="mxt-brand" style="margin-bottom:20px">
           <div class="mxt-brand__mark">MX</div>
-          <div><div class="qp-heading-2">测试平台</div><div class="qp-caption qp-muted">用 mx-launcher 账号登录</div></div>
+          <div><div class="qp-heading-2">测试平台</div><div class="qp-caption qp-muted">Launcher 用户或服务管理员登录</div></div>
         </div>
         <form class="mxt-form">
           ${field('账号', '<input class="qp-input" name="username" autocomplete="username" required>')}
           ${field('密码', '<input class="qp-input" type="password" name="password" autocomplete="current-password" required>')}
           <button class="qp-button qp-button--primary qp-button--block" type="submit">登录</button>
         </form>
-        <p class="mxt-hint" style="margin-top:16px">没有账号？用你平时登录 MX 的那一个即可。首次登录会自动开通只读权限。</p>
+        <p class="mxt-hint" style="margin-top:16px">日常用户使用平时登录 MX 的账号，首次登录会自动开通只读权限。服务管理员使用账号 <code>admin</code>，密码填写部署生成的 admin token。</p>
       </div>
     </div>`)
   const form = card.querySelector('form')

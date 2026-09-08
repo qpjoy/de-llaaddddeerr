@@ -64,6 +64,109 @@ test('security budgets trust only the direct socket peer, never X-Forwarded-For'
   assert.equal(directClientAddress({ headers: { 'x-forwarded-for': '203.0.113.9' } }), null)
 })
 
+test('password login accepts nested and legacy flat Launcher token envelopes', async () => {
+  for (const [payload, expected] of [
+    [{ token: { access_token: 'nested-token', expires_in: 61 } }, ['nested-token', 61]],
+    [{ access_token: 'flat-token', expires_in: 62 }, ['flat-token', 62]],
+  ]) {
+    const client = new LauncherIdentityClient({
+      baseUrl: 'http://launcher.test',
+      audience: 'mx-sdk',
+      fetchImpl: async (url) => {
+        assert.match(url, /\/internal\/v1\/sdk\/oauth\/token$/u)
+        return json(payload)
+      },
+    })
+
+    const login = await client.passwordLogin({ username: 'legal-user', password: 'correct' })
+    assert.deepEqual([login.token, login.expiresIn], expected)
+  }
+})
+
+test('password login rejects a malformed nested token as a Launcher contract error', async () => {
+  const client = new LauncherIdentityClient({
+    baseUrl: 'http://launcher.test',
+    audience: 'mx-sdk',
+    fetchImpl: async () => json({ token: { access_token: { value: 'not-a-string' } } }),
+  })
+
+  await assert.rejects(
+    client.passwordLogin({ username: 'legal-user', password: 'correct' }),
+    (error) => error?.status === 502 && error?.code === 'launcher_contract',
+  )
+})
+
+test('SDK introspection uses Launcher userId as the local principalId', async () => {
+  const client = new LauncherIdentityClient({
+    baseUrl: 'http://launcher.test',
+    audience: 'mx-sdk',
+    fetchImpl: async () =>
+      json({
+        introspection: {
+          active: true,
+          audience: 'mx-sdk',
+          subject: 'user:usr-launcher-1',
+          principal: { kind: 'user', userId: 'usr-launcher-1', roles: ['mx-user'] },
+        },
+      }),
+  })
+
+  const principal = await client.introspect('issued-token')
+  assert.equal(principal.id, 'usr-launcher-1')
+  assert.equal(principal.subject, 'user:usr-launcher-1')
+})
+
+test('service admin login stays local when Launcher identity is enabled', async () => {
+  const adminToken = 'service-admin-token-that-never-leaves-mx-auto'
+  let launcherCalls = 0
+  const config = loadConfig({
+    MXT_STORE: 'memory',
+    MXT_ADMIN_TOKEN: adminToken,
+    MXT_LAUNCHER_URL: 'http://launcher.test',
+    MXT_LAUNCHER_AUDIENCE: 'mx-sdk',
+  })
+  config.launcher.fetchImpl = async () => {
+    launcherCalls += 1
+    throw new Error('service admin credentials must not reach Launcher')
+  }
+  const identity = createIdentity({ store: {}, config, logger: null })
+
+  const login = await identity.login({ username: 'admin', password: adminToken })
+
+  assert.deepEqual(login, {
+    token: adminToken,
+    expiresIn: null,
+    member: {
+      principalId: 'service-admin',
+      displayName: '服务管理员',
+      role: 'admin',
+    },
+  })
+  assert.equal(launcherCalls, 0)
+})
+
+test('service admin token is never forwarded when the admin username is wrong', async () => {
+  const adminToken = 'service-admin-token-that-never-leaves-mx-auto'
+  let launcherCalls = 0
+  const config = loadConfig({
+    MXT_STORE: 'memory',
+    MXT_ADMIN_TOKEN: adminToken,
+    MXT_LAUNCHER_URL: 'http://launcher.test',
+    MXT_LAUNCHER_AUDIENCE: 'mx-sdk',
+  })
+  config.launcher.fetchImpl = async () => {
+    launcherCalls += 1
+    throw new Error('service admin credentials must not reach Launcher')
+  }
+  const identity = createIdentity({ store: {}, config, logger: null })
+
+  await assert.rejects(
+    identity.login({ username: 'Admin', password: adminToken }),
+    (error) => error?.status === 401 && error?.code === 'invalid_credentials',
+  )
+  assert.equal(launcherCalls, 0)
+})
+
 test('one hostile source cannot starve a different source password login', async () => {
   let calls = 0
   const client = new LauncherIdentityClient({
@@ -264,11 +367,13 @@ test('one legal login has independent OAuth and introspection budgets', async ()
     MXT_LAUNCHER_PASSWORD_LOGIN_MAX_STARTS: '1',
     MXT_LAUNCHER_INTROSPECTION_MAX_STARTS: '1',
   })
-  config.launcher.fetchImpl = async (url) => {
+  config.launcher.fetchImpl = async (url, init) => {
     if (url.endsWith('/internal/v1/sdk/oauth/token')) {
       oauthCalls += 1
-      return json({ access_token: 'issued-token', expires_in: 60 })
+      return json({ token: { access_token: 'issued-token', expires_in: 60 } })
     }
+    assert.match(url, /\/internal\/v1\/sdk\/identity\/introspect$/u)
+    assert.deepEqual(JSON.parse(init.body), { token: 'issued-token', audience: 'mx-sdk' })
     introspectionCalls += 1
     return active('legal-user')
   }
@@ -292,6 +397,7 @@ test('one legal login has independent OAuth and introspection budgets', async ()
     source: '10.0.2.1',
   })
   assert.equal(login.token, 'issued-token')
+  assert.equal(login.expiresIn, 60)
   assert.equal(login.member.role, 'viewer')
   assert.equal(oauthCalls, 1)
   assert.equal(introspectionCalls, 1)

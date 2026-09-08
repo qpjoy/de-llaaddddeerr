@@ -41,6 +41,7 @@ import { enqueueForRun } from './notify/dispatch.mjs'
 import { NOTIFY_EVENTS } from './notify/events.mjs'
 import { catalogSubsetFor, parseCaseFilter, resolveCaseFilter } from './ingest/case-filter.mjs'
 import { compareWithCatalog, normalizeSourceRef, normalizeSummary } from './ingest/summary.mjs'
+import { buildCompassPlan, DEFAULT_COMPASS_REPO } from './onboarding/compass.mjs'
 import { renderReport } from './report.mjs'
 import {
   decryptSecret,
@@ -94,6 +95,7 @@ const TARGET_MODES = ['external', 'self']
 // that adding it later does not mean backfilling every stored suite.
 const SUITE_KINDS = ['test', 'build']
 const PROFILES = ['mock', 'real']
+const RUNNER_OPERATING_SYSTEMS = ['windows', 'macos', 'linux']
 
 const webRoot = resolve(fileURLToPath(new URL('../web', import.meta.url)))
 
@@ -142,6 +144,31 @@ function targetUrl(body, name = 'targetUrl', { required = false } = {}) {
     })
   }
   return sanitizeUrl(raw)
+}
+
+function gitRemote(body, name, { required = false, fallback = null } = {}) {
+  const value = optionalString(body, name, { maxLength: 500 }) ?? fallback
+  if (!value) {
+    if (required) throw new AppError(400, 'invalid_request', `${name} is required`)
+    return null
+  }
+
+  if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/u.test(value)) return value
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new AppError(400, 'invalid_request', `${name} 必须是远程 Git 地址`)
+  }
+  if (!['http:', 'https:', 'ssh:', 'git:'].includes(parsed.protocol) || !parsed.hostname) {
+    throw new AppError(400, 'invalid_request', `${name} 必须是 http(s)、ssh 或 git 远程地址`)
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new AppError(400, 'invalid_request', `${name} 不能包含账号、token、查询参数或锚点`, {
+      hint: '私有仓库凭据应由平台的只写 Secret 管理，不要放进仓库 URL。',
+    })
+  }
+  return value
 }
 
 function parseCatalogCoverage(value) {
@@ -243,6 +270,219 @@ export function createApp({
   runEvents = new RunEventBus(),
 }) {
   const recordRunEvents = createRunEventRecorder({ store, bus: runEvents })
+  let compassReconcileInFlight = false
+
+  const sameValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+
+  function changedFields(current, desired, fields) {
+    return Object.fromEntries(
+      fields
+        .filter((field) => !sameValue(current[field] ?? null, desired[field] ?? null))
+        .map((field) => [field, desired[field] ?? null]),
+    )
+  }
+
+  async function reconcileCompass(plan, principal) {
+    const summary = {
+      created: [],
+      updated: [],
+      unchanged: [],
+      warnings: [],
+      catalogs: { added: 0, updated: 0, retired: 0 },
+    }
+
+    let app = await store.getAppBySlug(plan.app.slug)
+    // Detect task/suite relationship conflicts before changing the app,
+    // suites, or catalog. A 409 must not leave a half-reconciled project that
+    // looks as though the Admin action failed cleanly.
+    if (app) {
+      const currentSuites = new Map(
+        (await store.listSuites(app.id)).map((suite) => [suite.slug, suite]),
+      )
+      const currentTasks = await store.listTasks({ appId: app.id })
+      for (const desired of plan.tasks) {
+        const current = currentTasks.find((task) => task.name === desired.name)
+        if (!current) continue
+        const desiredSuite = currentSuites.get(desired.suiteSlug)
+        if (!desiredSuite || current.suiteId !== desiredSuite.id) {
+          throw new AppError(409, 'onboarding_conflict', `任务「${desired.name}」已指向另一个套件`, {
+            hint: '为保护历史记录，平台不会自动改写任务与套件的关系。请先在 Admin 中确认现有配置。',
+          })
+        }
+      }
+    }
+    if (!app) {
+      try {
+        app = await store.createApp(plan.app)
+        summary.created.push(`app:${plan.app.slug}`)
+      } catch (error) {
+        if (error?.code !== 'app_exists') throw error
+        app = await store.getAppBySlug(plan.app.slug)
+      }
+    }
+    if (!app) throw new AppError(500, 'onboarding_failed', 'Compass 应用创建后无法读取')
+    if (!summary.created.includes(`app:${plan.app.slug}`)) {
+      summary.unchanged.push(`app:${plan.app.slug}`)
+      if (app.repoUrl !== plan.app.repoUrl || app.defaultBranch !== plan.app.defaultBranch) {
+        summary.warnings.push(
+          `应用已有代码来源 ${app.repoUrl || '未设置'}@${app.defaultBranch || '未设置'}，为保护现有配置没有覆盖。`,
+        )
+      }
+    }
+    const webSource = {
+      repoUrl: app.repoUrl || plan.app.repoUrl,
+      defaultBranch: app.defaultBranch || plan.app.defaultBranch,
+    }
+
+    const suiteFields = [
+      'displayName',
+      'engine',
+      'surface',
+      'runnerKind',
+      'runnerImage',
+      'workingDir',
+      'targetMode',
+      'kind',
+      'repoUrl',
+      'defaultBranch',
+      'artifactPath',
+      'requirements',
+      'command',
+      'retryPolicy',
+      'secretRefs',
+      'writesData',
+    ]
+    const suites = new Map((await store.listSuites(app.id)).map((suite) => [suite.slug, suite]))
+    for (const desired of plan.suites) {
+      const normalized = {
+        ...desired,
+        appId: app.id,
+        runnerImage: desired.runnerImage ?? null,
+        workingDir: desired.workingDir === '.' ? null : (desired.workingDir ?? null),
+        targetMode: desired.targetMode ?? 'external',
+        kind: desired.kind ?? 'test',
+        repoUrl: desired.repoUrl ?? null,
+        defaultBranch: desired.defaultBranch ?? null,
+        artifactPath: desired.artifactPath ?? null,
+        requirements: desired.requirements ?? {},
+        command: desired.command ?? [],
+        retryPolicy: desired.retryPolicy ?? {},
+        secretRefs: desired.secretRefs ?? [],
+        writesData: Boolean(desired.writesData),
+        ...(desired.surface === 'web' ? webSource : {}),
+      }
+      let current = suites.get(desired.slug)
+      if (!current) {
+        try {
+          current = await store.createSuite(normalized)
+          summary.created.push(`suite:${desired.slug}`)
+        } catch (error) {
+          if (error?.code !== 'suite_exists') throw error
+          current = (await store.listSuites(app.id)).find((suite) => suite.slug === desired.slug)
+        }
+      } else {
+        const patch = changedFields(current, normalized, suiteFields)
+        if (Object.keys(patch).length > 0) {
+          current = await store.updateSuite(current.id, patch)
+          summary.updated.push(`suite:${desired.slug}`)
+        } else {
+          summary.unchanged.push(`suite:${desired.slug}`)
+        }
+      }
+      if (!current) throw new AppError(500, 'onboarding_failed', `套件 ${desired.slug} 创建后无法读取`)
+      suites.set(desired.slug, current)
+    }
+
+    for (const sourceCatalog of plan.catalogs) {
+      const catalog = parseCatalogFile(
+        { ...sourceCatalog, application: plan.app.slug },
+        { applicationFallback: plan.app.slug },
+      )
+      const diff = await store.syncCatalog(app.id, catalog)
+      summary.catalogs.added += diff.added?.length ?? 0
+      summary.catalogs.updated += diff.updated?.length ?? 0
+      summary.catalogs.retired += diff.retired?.length ?? 0
+    }
+
+    const taskFields = [
+      'name',
+      'profile',
+      'track',
+      'targetUrl',
+      'scheduleKind',
+      'cronExpr',
+      'runAt',
+      'timezone',
+      'claimWindowMinutes',
+      'runsOn',
+      'runnerId',
+      'caseFilter',
+      'enabled',
+    ]
+    const tasks = await store.listTasks({ appId: app.id })
+    const reconciledTasks = []
+    for (const desired of plan.tasks) {
+      const suite = suites.get(desired.suiteSlug)
+      if (!suite) throw new AppError(500, 'onboarding_failed', `套件 ${desired.suiteSlug} 未就绪`)
+      const schedule = desired.schedule ?? { kind: 'manual' }
+      const timezone = schedule.timezone || config.defaultTimezone
+      if (schedule.kind === 'cron') assertSchedulable(schedule.cronExpr, timezone)
+      const normalized = {
+        appId: app.id,
+        suiteId: suite.id,
+        name: desired.name,
+        profile: desired.profile ?? 'mock',
+        track: desired.track ?? 'functional',
+        targetUrl: null,
+        scheduleKind: schedule.kind ?? 'manual',
+        cronExpr: schedule.kind === 'cron' ? schedule.cronExpr : null,
+        runAt: schedule.kind === 'once' ? schedule.runAt : null,
+        timezone,
+        claimWindowMinutes: 720,
+        runsOn: desired.runsOn ?? null,
+        runnerId: null,
+        caseFilter: desired.caseFilter ?? null,
+        enabled: true,
+        createdBy: principal.id,
+      }
+      normalized.nextRunAt = computeNextRunAt(normalized)
+
+      let current = tasks.find((task) => task.name === desired.name)
+      if (!current) {
+        current = await store.createTask(normalized)
+        tasks.push(current)
+        summary.created.push(`task:${desired.name}`)
+      } else {
+        if (current.suiteId !== suite.id) {
+          throw new AppError(409, 'onboarding_conflict', `任务「${desired.name}」已指向另一个套件`, {
+            hint: '为保护历史记录，平台不会自动改写任务与套件的关系。请先在 Admin 中确认现有配置。',
+          })
+        }
+        const patch = changedFields(current, normalized, taskFields)
+        if (Object.keys(patch).length > 0) {
+          patch.nextRunAt = computeNextRunAt({ ...current, ...patch })
+          current = await store.updateTask(current.id, patch)
+          summary.updated.push(`task:${desired.name}`)
+        } else {
+          summary.unchanged.push(`task:${desired.name}`)
+        }
+      }
+      reconciledTasks.push(current)
+    }
+
+    const changed = summary.created.length + summary.updated.length
+    const message = changed
+      ? `Compass 已对齐：新建 ${summary.created.length} 项，更新 ${summary.updated.length} 项；未启动测试。`
+      : 'Compass 配置已经是最新；未启动测试。'
+    return {
+      app,
+      suites: plan.suites.map((suite) => suites.get(suite.slug)),
+      tasks: reconciledTasks,
+      electronConfigured: plan.electronConfigured,
+      summary,
+      message,
+    }
+  }
 
   async function requireApp(appSlug) {
     const app = await store.getAppBySlug(appSlug)
@@ -251,7 +491,7 @@ export function createApp({
       throw new AppError(404, 'app_not_found', `找不到应用 "${appSlug}"`, {
         hint: existing.length
           ? `现有应用：${existing.join('、')}`
-          : '还没有注册任何应用。在「应用」页面新建一个，或运行 manage.sh seed 灌入示例数据。',
+          : '还没有注册任何应用。管理员可在「应用与用例」页面接入 Compass 或注册其他应用。',
       })
     }
     return app
@@ -586,10 +826,12 @@ export function createApp({
             apps: apps.map((entry) => ({ slug: entry.slug, name: entry.displayName })),
             nextStep: apps.length
               ? '打开界面创建任务，或 GET /api/v1/tasks 查看已有任务。'
-              : '还没有应用。运行 `manage.sh seed` 灌入示例数据，或在界面「应用」页面新建。',
+              : '还没有应用。管理员请在「应用与用例」中接入 Compass 或注册其他应用。',
             endpoints: {
               apps: '/api/v1/apps',
               cases: '/api/v1/apps/:app/cases',
+              compassOnboarding: '/api/v1/onboarding/compass:reconcile',
+              members: '/api/v1/members',
               tasks: '/api/v1/tasks',
               runs: '/api/v1/runs',
               report: '/api/v1/runs/:runId/report',
@@ -662,6 +904,80 @@ export function createApp({
           after: { role: member.role },
         })
         return { status: 200, body: { member } }
+      },
+    },
+    {
+      method: 'POST',
+      pattern: '/api/v1/onboarding/compass:reconcile',
+      handler: async ({ principal, body, request }) => {
+        requireRole(principal, 'admin')
+        const allowed = new Set([
+          'webRepoUrl',
+          'webBranch',
+          'electronQaRepoUrl',
+          'electronBranch',
+          'electronWorkingDir',
+          'electronOs',
+        ])
+        const unknown = Object.keys(body ?? {}).filter((key) => !allowed.has(key))
+        if (unknown.length > 0) {
+          throw new AppError(400, 'invalid_request', `不支持的 Compass 配置项：${unknown.join('、')}`, {
+            hint: 'Admin 入口只允许选择代码来源、分支和 Electron 执行系统；命令与镜像由审核模板固定。',
+          })
+        }
+
+        const electronQaRepoUrl = gitRemote(body, 'electronQaRepoUrl')
+        const plan = buildCompassPlan({
+          webRepoUrl: gitRemote(body, 'webRepoUrl', { fallback: DEFAULT_COMPASS_REPO }),
+          webBranch: gitRef(body, 'webBranch') || 'public',
+          electronQaRepoUrl,
+          electronBranch: electronQaRepoUrl ? gitRef(body, 'electronBranch') || 'main' : null,
+          electronWorkingDir: electronQaRepoUrl
+            ? relativeDir(body, 'electronWorkingDir')
+            : null,
+          electronOs: electronQaRepoUrl
+            ? enumValue(body, 'electronOs', RUNNER_OPERATING_SYSTEMS, 'windows')
+            : null,
+        })
+
+        if (compassReconcileInFlight) {
+          throw new AppError(409, 'onboarding_busy', 'Compass 正在由另一位管理员对齐，请稍后重试')
+        }
+        compassReconcileInFlight = true
+        try {
+          const result = await reconcileCompass(plan, principal)
+          const electronSuite = plan.suites.find(
+            (suite) => suite.slug === 'compass-electron-smoke',
+          )
+          await recordAudit(store, {
+            principal,
+            request,
+            action: 'onboarding.compass_reconcile',
+            resourceType: 'onboarding',
+            resourceId: result.app.id,
+            appId: result.app.id,
+            after: {
+              // Record what is actually effective. Existing app source is
+              // deliberately preserved, so the request can differ from the
+              // state produced by this action.
+              webRepoUrl: result.app.repoUrl,
+              webBranch: result.app.defaultBranch,
+              electronConfigured: result.electronConfigured,
+              ...(result.electronConfigured
+                ? {
+                    electronQaRepoUrl: electronSuite?.repoUrl,
+                    electronBranch: electronSuite?.defaultBranch,
+                    electronWorkingDir: electronSuite?.workingDir,
+                    electronOs: electronSuite?.requirements?.os,
+                  }
+                : {}),
+              summary: result.summary,
+            },
+          })
+          return { status: 200, body: result }
+        } finally {
+          compassReconcileInFlight = false
+        }
       },
     },
 

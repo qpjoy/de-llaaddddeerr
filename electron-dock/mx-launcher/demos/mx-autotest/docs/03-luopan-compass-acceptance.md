@@ -86,6 +86,9 @@
 ## Gate B：Project、Catalog 与源码冻结
 
 在平台创建一个 Luopan / Compass Project，至少包含 web 和 electron 两个 surface。
+首次接入由管理员登录 AutoTest Web，在「应用与用例」点击「接入 / 对齐 Compass」完成；
+不得把登录 Internal 节点运行登记脚本作为产品流程。Launcher 用户首次登录后，管理员也在
+同一 Web 的「成员」页面把其角色从只读改为测试工程师，无需复制 `principalId`。
 
 验收：
 

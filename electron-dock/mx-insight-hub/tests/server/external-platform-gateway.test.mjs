@@ -24,8 +24,8 @@ function config(overrides = {}) {
     freshTtlMs: 60_000,
     staleTtlMs: 86_400_000,
     unknownFingerprintCooldownMs: 900_000,
-    maxConcurrency: 8,
-    maxConsumerConcurrency: 2,
+    maxConcurrency: 32,
+    maxConsumerConcurrency: 8,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: {
@@ -74,7 +74,7 @@ async function fixture({ adapter, gatewayConfig = config() } = {}) {
     reservationLeaseMs: 150_000,
     logger: { warn() {} },
   })
-  return { usageStore, platformStore, gateway, context, gatewayConfig }
+  return { usageStore, platformStore, gateway, context, gatewayConfig, hub, consumer }
 }
 
 function successfulResult(body, options) {
@@ -213,6 +213,36 @@ test('live, fresh-cache and idempotent replay are separate delivery modes and on
   assert.equal(analytics.totals.freshCache, 1)
   assert.equal(analytics.totals.idempotentReplay, 1)
   assert.equal(analytics.totals.knownCostMinor, 5)
+})
+
+test('generated idempotency is API-key scoped while the consumer snapshot remains shared', async () => {
+  let calls = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        calls += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+  const secondKey = await state.hub.createApiKey({
+    consumerId: state.consumer.id,
+    name: 'Rotated Key',
+  })
+  const secondContext = await state.hub.authenticate(secondKey.secret)
+  const input = {
+    body: { marketplace: 'jd', query: 'shared generated idempotency' },
+    path: '/api/v1/data/ecommerce/products/search',
+  }
+
+  const live = await state.gateway.search(state.context, input)
+  const cached = await state.gateway.search(secondContext, input)
+
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(cached.sourceMode, 'fresh_cache')
+  assert.notEqual(live.requestId, cached.requestId)
+  assert.equal(calls, 1)
+  assert.equal(state.usageStore.requests.size, 2)
 })
 
 test('cache-only never dispatches and reports an exact miss without consuming usage', async () => {
@@ -552,6 +582,173 @@ test('cross-key equal requests use a dispatch lease and never create a second pa
   release()
   await leader
   assert.equal(calls, 1)
+})
+
+test('one consumer can run six distinct live acquisitions without a local busy response', async () => {
+  let active = 0
+  let maxActive = 0
+  let admitted = 0
+  let releaseProvider
+  let resolveAllAdmitted
+  const providerGate = new Promise((resolve) => { releaseProvider = resolve })
+  const allAdmitted = new Promise((resolve) => { resolveAllAdmitted = resolve })
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        admitted += 1
+        if (admitted === 6) resolveAllAdmitted()
+        try {
+          await providerGate
+          return successfulResult(body, options)
+        } finally {
+          active -= 1
+        }
+      },
+    },
+  })
+
+  const requests = Array.from({ length: 6 }, (_, index) => state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: `concurrent-camera-${index}` },
+    idempotencyKey: `six-concurrent-${index}`,
+    path: '/api/v1/data/ecommerce/products/search',
+  }))
+  const settledRequest = Promise.allSettled(requests)
+  const reachedSix = await Promise.race([
+    allAdmitted.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+  ])
+  releaseProvider()
+  const settled = await settledRequest
+
+  assert.equal(reachedSix, true, 'all six calls must reach the fake provider concurrently')
+  assert.equal(maxActive, 6)
+  assert.equal(active, 0)
+  assert.equal(settled.every((entry) => entry.status === 'fulfilled'), true)
+  assert.equal(state.platformStore.calls.size, 6)
+  assert.equal(
+    [...state.usageStore.requests.values()].every((request) => request.status === 'committed'),
+    true,
+  )
+})
+
+test('a duplicate dispatch-lease follower does not consume a provider concurrency slot', async () => {
+  let releaseProvider
+  let resolveUnrelatedStarted
+  const providerGate = new Promise((resolve) => { releaseProvider = resolve })
+  const unrelatedStarted = new Promise((resolve) => { resolveUnrelatedStarted = resolve })
+  const calls = []
+  const state = await fixture({
+    gatewayConfig: config({ maxConcurrency: 2, maxConsumerConcurrency: 2 }),
+    adapter: {
+      async searchProducts(body, options) {
+        calls.push(body.query)
+        if (body.query === 'unrelated') resolveUnrelatedStarted()
+        await providerGate
+        return successfulResult(body, options)
+      },
+    },
+  })
+
+  const acquire = state.platformStore.acquireDispatchLease.bind(state.platformStore)
+  let leaseAttempts = 0
+  let releaseFollowerLeaseCheck
+  let resolveFollowerLeaseCheck
+  const followerLeaseGate = new Promise((resolve) => { releaseFollowerLeaseCheck = resolve })
+  const followerLeaseChecked = new Promise((resolve) => { resolveFollowerLeaseCheck = resolve })
+  state.platformStore.acquireDispatchLease = async (input) => {
+    leaseAttempts += 1
+    const result = await acquire(input)
+    if (leaseAttempts === 2) {
+      resolveFollowerLeaseCheck()
+      await followerLeaseGate
+    }
+    return result
+  }
+
+  const search = (query, idempotencyKey) => state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query },
+    idempotencyKey,
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  const leader = search('same-query', 'lease-owner-0001')
+  while (calls.length === 0) await new Promise((resolve) => setImmediate(resolve))
+  const follower = search('same-query', 'lease-follower-01').catch((error) => error)
+  await followerLeaseChecked
+  const unrelated = search('unrelated', 'lease-unrelated-01')
+  const unrelatedWasAdmitted = await Promise.race([
+    unrelatedStarted.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+  ])
+
+  releaseFollowerLeaseCheck()
+  releaseProvider()
+  const [leaderResult, followerError, unrelatedResult] = await Promise.all([
+    leader,
+    follower,
+    unrelated,
+  ])
+
+  assert.equal(unrelatedWasAdmitted, true)
+  assert.equal(leaderResult.status, 200)
+  assert.equal(unrelatedResult.status, 200)
+  assert.equal(followerError.code, 'request_in_progress')
+  assert.deepEqual(calls.sort(), ['same-query', 'unrelated'])
+  assert.equal(state.platformStore.calls.size, 2)
+})
+
+test('fresh cache delivery bypasses a saturated paid-provider concurrency gate', async () => {
+  let calls = 0
+  const state = await fixture({
+    gatewayConfig: config({ maxConcurrency: 1, maxConsumerConcurrency: 1 }),
+    adapter: {
+      async searchProducts(body, options) {
+        calls += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+  const path = '/api/v1/data/ecommerce/products/search'
+  const cachedBody = { marketplace: 'jd', query: 'warm-cache' }
+  await state.gateway.search(state.context, {
+    body: cachedBody,
+    idempotencyKey: 'warm-cache-live-01',
+    path,
+  })
+
+  let releaseProvider
+  let resolveProviderStarted
+  const providerGate = new Promise((resolve) => { releaseProvider = resolve })
+  const providerStarted = new Promise((resolve) => { resolveProviderStarted = resolve })
+  state.gateway.adapter = {
+    async searchProducts(body, options) {
+      calls += 1
+      resolveProviderStarted()
+      await providerGate
+      return successfulResult(body, options)
+    },
+  }
+  const blocker = state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: 'occupy-provider-slot', deliveryMode: 'refresh' },
+    idempotencyKey: 'provider-slot-blocker',
+    path,
+  })
+  await providerStarted
+
+  const cached = await Promise.all(Array.from({ length: 32 }, (_, index) => (
+    state.gateway.search(state.context, {
+      body: cachedBody,
+      idempotencyKey: `cache-egress-${String(index).padStart(3, '0')}`,
+      path,
+    })
+  )))
+  assert.equal(cached.every((entry) => entry.status === 200), true)
+  assert.equal(cached.every((entry) => entry.sourceMode === 'fresh_cache'), true)
+  assert.equal(calls, 2, 'cache egress does not create paid-provider calls')
+
+  releaseProvider()
+  await blocker
 })
 
 test('a billed code=0 response that cannot be normalized is archived and never redispatched automatically', async () => {

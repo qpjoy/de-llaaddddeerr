@@ -50,6 +50,9 @@ test('Electron is added only for an explicit QA repo or Git test-pack', () => {
 
 test('the onboarding catalog cannot drift from the external Electron pack', () => {
   const serverCatalog = JSON.parse(readFileSync(new URL('../catalogs/compass-electron.json', import.meta.url), 'utf8'))
+  const sharedCatalog = buildCompassPlan({
+    MX_AUTO_COMPASS_QA_REPO: 'https://example.test/qa/compass-test-pack.git'
+  }).catalogs[0]
   const packCatalog = JSON.parse(readFileSync(new URL(
     '../../mx-launcher/demos/mx-autotest/test-packs/compass-electron/case-catalog.electron.json',
     import.meta.url
@@ -65,7 +68,9 @@ test('the onboarding catalog cannot drift from the external Electron pack', () =
     automationState,
     prerequisites
   })
+  assert.deepEqual(sharedCatalog.cases.map(stableFields), serverCatalog.cases.map(stableFields))
   assert.deepEqual(serverCatalog.cases.map(stableFields), packCatalog.cases.map(stableFields))
+  assert.equal(sharedCatalog.suite, serverCatalog.suite)
   assert.equal(serverCatalog.suite, packCatalog.suite)
   assert.equal(serverCatalog.schemaVersion, 2)
   assert.equal(catalogDigest(serverCatalog), catalogDigest(packCatalog))

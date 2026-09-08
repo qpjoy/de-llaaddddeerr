@@ -39,7 +39,11 @@ paths:
 
   /api/v1/auth/login:
     post:
-      summary: 用 mx-launcher 账号登录，返回 token 并设置会话 cookie
+      summary: 用 mx-launcher 账号，或 admin + 服务 admin token 登录
+      description: |
+        Launcher 用户首次成功登录后以 viewer 加入本平台。部署管理员可使用固定账号
+        `admin`，并把部署生成的服务 admin token 作为密码；该 token 只在本服务内
+        比较，不会转发给 Launcher。
       security: []
       requestBody:
         required: true
@@ -68,6 +72,32 @@ paths:
       summary: 调整成员权限（需要 admin）
       parameters: [{ name: principalId, in: path, required: true, schema: { type: string } }]
       responses: { "200": { description: OK } }
+
+  /api/v1/onboarding/compass:reconcile:
+    post:
+      summary: 在 Admin 控制面幂等接入或对齐 Compass（需要 admin）
+      description: |
+        创建或对齐 Compass 应用、Cypress Web 套件与任务；提供审核过的 Electron QA
+        Git 地址时还会接入固定 Playwright Electron 模板和用例目录。不会触发执行，
+        也不接受任意 command 或 runner image。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                webRepoUrl: { type: string, format: uri, default: "https://github.com/mingxiinfo/po-frontend" }
+                webBranch: { type: string, default: public }
+                electronQaRepoUrl: { type: string, format: uri }
+                electronBranch: { type: string, default: main }
+                electronWorkingDir: { type: string, default: "." }
+                electronOs: { type: string, enum: [windows, macos, linux], default: windows }
+      responses:
+        "200": { description: 已创建或对齐；响应明确说明未启动测试 }
+        "403": { description: 只有 admin 可操作 }
+        "409": { description: 正在对齐，或已有任务指向冲突套件 }
 
   /api/v1/apps:
     get: { summary: 应用列表, responses: { "200": { description: OK } } }

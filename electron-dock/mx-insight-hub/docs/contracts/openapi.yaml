@@ -1954,7 +1954,8 @@ paths:
             Reuse it only
             for a transport retry of the exact same page request. Every next-page
             request changes the body and must use a new Idempotency-Key. When omitted, Hub
-            derives a short-lived freshness-bucket key for the normalized request.
+            derives a short-lived key from the active API-key identity, freshness bucket,
+            and normalized request; exact snapshots remain consumer-scoped.
           schema:
             type: string
             minLength: 8

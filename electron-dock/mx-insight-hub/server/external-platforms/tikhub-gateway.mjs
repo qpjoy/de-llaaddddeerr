@@ -426,23 +426,8 @@ export class TikHubGateway {
         throw new AppError(503, errorCode, 'External Xiaohongshu acquisition is unavailable')
       }
 
-      if (!this.#enter(context.consumer.id)) {
-        if (snapshot) {
-          const responseBody = deliveryBody(snapshot.responseBody, {
-            requestId: activeRequestId, sourceMode: 'stored_fallback',
-            capturedAt: snapshot.capturedAt, fallbackReason: 'concurrency_guard',
-          })
-          await this.platformStore.commitSnapshotDelivery({ delivery, snapshot, sourceMode: 'stored_fallback', responseBody })
-          return result(responseBody, activeRequestId, false, 'stored_fallback', snapshot.capturedAt)
-        }
-        await this.platformStore.rejectWithoutDispatch({
-          delivery, sourceMode: 'unavailable', status: 429, errorCode: 'external_platform_busy',
-        })
-        ownsReservation = false
-        throw new AppError(429, 'external_platform_busy', 'External Xiaohongshu concurrency is exhausted')
-      }
-
       let ownsLease = false
+      let entered = false
       let call = null
       let callSettled = false
       let dispatchEvidence = null
@@ -514,6 +499,26 @@ export class TikHubGateway {
             ...(lease?.blockedUntil ? { blockedUntil: lease.blockedUntil } : {}),
           })
         }
+
+        // A request suppressed by the shared dispatch lease never consumes a
+        // local provider slot. This keeps duplicate note lookups from starving
+        // unrelated customer acquisitions.
+        if (!this.#enter(context.consumer.id)) {
+          if (snapshot) {
+            const responseBody = deliveryBody(snapshot.responseBody, {
+              requestId: activeRequestId, sourceMode: 'stored_fallback',
+              capturedAt: snapshot.capturedAt, fallbackReason: 'concurrency_guard',
+            })
+            await this.platformStore.commitSnapshotDelivery({ delivery, snapshot, sourceMode: 'stored_fallback', responseBody })
+            return result(responseBody, activeRequestId, false, 'stored_fallback', snapshot.capturedAt)
+          }
+          await this.platformStore.rejectWithoutDispatch({
+            delivery, sourceMode: 'unavailable', status: 429, errorCode: 'external_platform_busy',
+          })
+          ownsReservation = false
+          throw new AppError(429, 'external_platform_busy', 'External Xiaohongshu concurrency is exhausted')
+        }
+        entered = true
 
         call = await this.platformStore.beginProviderCall({
           tenantId: context.tenant.id,
@@ -634,7 +639,7 @@ export class TikHubGateway {
             ownerRequestId: activeRequestId,
           }).catch(() => {})
         }
-        this.#leave(context.consumer.id)
+        if (entered) this.#leave(context.consumer.id)
       }
     } catch (error) {
       if (ownsReservation && durableRequestId) {

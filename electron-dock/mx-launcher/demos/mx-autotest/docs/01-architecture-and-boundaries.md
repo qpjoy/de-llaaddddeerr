@@ -46,18 +46,22 @@ MX-H2I、Luopan 或任何 embed/standalone 产品的 `/32`。Launcher 当前代�
 
 这不意味着把 mx-auto-server 放进 mx-launcher 的进程或 deployment。桌面集成与服务部署是两条独立边界。
 
-## Internal 是唯一配置真相源
+## Launcher Internal 与 AutoTest Admin 各管自己的配置
 
-这里的“真相源”同时约束操作入口和持久化责任：组织级、跨应用的配置必须由 Internal 管理；Project、Suite、Task 等测试领域对象虽然由 mx-auto-server 的独立数据库持久化，但只能通过 Internal 授权的服务合同和操作面创建或修改。桌面应用只是客户端和本机 runner，不拥有另一份组织配置。
+Launcher Internal 仍是账号、应用注册、网络与跨应用策略的真相源；它不登记 AutoTest
+的 Project、Suite、Task 或测试凭据。测试领域对象由 mx-auto-server 的独立数据库持久化，
+并统一在 AutoTest Web Admin 中创建或修改。不能要求管理员登录 Internal 节点执行脚本，
+也不能让桌面客户端保存另一份组织配置。
 
-这并不要求 mx-auto-server 与 launcher 共库。Internal 是操作面与配置权威，mx-auto-server 是测试领域数据服务；二者通过受版本管理的合同连接。
+这不要求 mx-auto-server 与 launcher 共库。两者通过受版本管理的身份合同连接；AutoTest
+Admin 只持有 AutoTest 本地角色与测试配置权限，不获得 Launcher Internal 运维权限。
 
 | 配置 | 权威位置 | 本地行为 |
 | --- | --- | --- |
 | 应用注册、可见性、入口 | Internal | 可缓存，带版本与过期时间 |
 | 用户身份和组织信息 | Internal identity contract | 只持有短期会话，不复制账号 |
 | audience、服务地址、策略 | Internal | 本地不得永久覆盖生产值 |
-| 项目、套件、任务、目录策略 | Internal 授权的 mx-auto-server | 独立持久化；所有组织级修改经 Internal 操作面 |
+| 项目、套件、任务、目录策略 | AutoTest Web Admin / mx-auto-server | 独立持久化；不在 Launcher Internal 登记 |
 | run、case result、artifact index | mx-auto-server | 执行事实，不允许桌面离线篡改 |
 | runner 本机路径、缓存容量 | 本机设置 | 只影响该 runner，不成为组织配置 |
 | Domestic 用户、DNS、网络状态 | launcher 现有控制面 | MX Autotest 不写、不迁移、不接管 |

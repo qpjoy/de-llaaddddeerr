@@ -76,8 +76,8 @@ cost requires an explicit operator decision.
    | `MX_INSIGHT_JUSTONE_TIMEOUT_MS` | 120000 | One dispatch deadline; maximum 120000 ms. |
    | `MX_INSIGHT_JUSTONE_FRESH_TTL_MS` | 60000 | Exact successful snapshot can avoid another call. |
    | `MX_INSIGHT_JUSTONE_STALE_TTL_MS` | 604800000 | Exact last-good fallback deadline. Keep at least the fresh TTL. |
-   | `MX_INSIGHT_JUSTONE_MAX_CONCURRENCY` | 8 | Global in-process dispatch ceiling. |
-   | `MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY` | 2 | Per-consumer dispatch ceiling. |
+   | `MX_INSIGHT_JUSTONE_MAX_CONCURRENCY` | 32 | Global in-process **live provider dispatch** ceiling. This is not a Hub cache-read QPS limit. |
+   | `MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY` | 8 | Per-consumer live provider dispatch ceiling; it must not exceed the global ceiling. |
    | `MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES` | 3 | Consecutive failure threshold. |
    | `MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS` | 60000 | Open-circuit cooldown. |
 
@@ -460,6 +460,29 @@ Monitor per tenant and endpoint for:
 Do not invent a universal alert threshold before observing a normal baseline. When abuse is credible, first
 reduce the affected consumer's `ecommerce` quota/concurrency policy or revoke its grant through the governed
 admin workflow. Do not change global login/network settings and do not add an automatic provider retry that may multiply procurement cost.
+
+### Capacity boundary and the 1000-QPS target
+
+The paid acquisition path and the Hub data-egress path have different capacity contracts. An exact fresh
+`cache_first` hit, `cache_only` delivery and idempotent replay complete before the JustOne concurrency guard and
+never create a provider call. A cold, distinct query is live acquisition and is deliberately bounded to 32
+in-process calls globally and 8 per consumer by default. The shared dispatch lease is acquired before a local
+slot, so an equal suppressed request cannot consume a slot needed by an unrelated query.
+
+`external_platform_busy` therefore means the Hub rejected a request before provider dispatch. A client may
+retry that same request and Idempotency-Key with bounded backoff. It must not treat
+`external_platform_capacity_exceeded` or an unknown outcome the same way: those errors follow an attempted
+provider call and must not be automatically retried. Raising live-acquisition limits requires provider contract,
+cost and error-rate evidence; never set them to 1000 merely because Hub-owned reads target 1000 QPS.
+
+The aggregate 1000-QPS number is a future production acceptance target for retained/cache delivery, not a
+claim made by this release. The current Internal Public deployment is one host-network Pod and the PostgreSQL
+usage path still performs synchronous accounting. Certify the target only in an isolated production-like test
+with multiple consumers, shared PostgreSQL/cache/object storage, at least two ordinary-network Public replicas,
+and measured p95/p99 latency, zero quota overshoot, database lock/pool pressure and one-Pod failure. Do not run
+that load test on the node serving Launcher or MX-H2I. The published `launch-1m` plan currently bounds one
+consumer at 100 requests per second, so 1000 QPS is an aggregate multi-consumer target unless a separately
+reviewed plan revision explicitly changes that customer boundary.
 
 The Admin product never loads an upstream `images[]` URL directly. Visible live items use
 `GET /api/v1/data/ecommerce/products/media` with the same `mih_live_` Hub Public API Key plus the committed search `requestId`,

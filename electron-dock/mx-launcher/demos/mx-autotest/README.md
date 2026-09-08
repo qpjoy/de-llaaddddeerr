@@ -74,7 +74,7 @@ packages, checks the app, packages it, and restores local-workspace mode even
 when packaging fails. `mode:local`, `mode:npm` and `mode:status` expose the same
 switch explicitly for diagnosis.
 
-## Independent service and Compass seed
+## Independent service and Compass onboarding
 
 From the repository root, the control plane has its own lifecycle:
 
@@ -89,10 +89,12 @@ and generates persistent secrets. Use `dev` instead of `deploy` only for the
 local in-memory server. Advanced overrides are documented in
 `mx-auto-server/.env.example`.
 
-After the service is ready, `mx-auto-server/scripts/onboard-compass.mjs`
-idempotently registers the existing Compass `public` Cypress baseline. It does
-not start a test. The demo/video task is always manual; an Electron suite is
-created only when a real QA Git source is explicitly supplied.
+After the service is ready, sign in to its Web Admin with username `admin` and
+the deployment-generated admin token. “应用与用例” → “接入 / 对齐 Compass”
+idempotently registers the existing Compass `public` Cypress baseline without
+starting a test. The demo/video task is always manual; an Electron suite is
+created only when an Admin supplies a real QA Git source in that dialog. No
+Internal-node shell step is part of product onboarding.
 
 The bundled [Compass Electron Playwright pack](test-packs/compass-electron/README.md)
 is an initial QA-owned spike. A missing packaged executable exits as `blocked`

@@ -165,6 +165,23 @@ export function parseJustOneConfig(environment = process.env, {
     )
   }
   const configured = Boolean(token) || configuredSignal
+  const maxConcurrency = positiveInteger(
+    environment.MX_INSIGHT_JUSTONE_MAX_CONCURRENCY,
+    32,
+    'MX_INSIGHT_JUSTONE_MAX_CONCURRENCY',
+  )
+  const maxConsumerConcurrency = positiveInteger(
+    environment.MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY,
+    8,
+    'MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY',
+  )
+  if (maxConsumerConcurrency > maxConcurrency) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY must not exceed MX_INSIGHT_JUSTONE_MAX_CONCURRENCY',
+    )
+  }
   return {
     // The provider host and endpoint paths are compiled into the adapter.
     // Keeping them out of env prevents this paid connector from becoming an
@@ -184,16 +201,8 @@ export function parseJustOneConfig(environment = process.env, {
       15 * 60_000,
       'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS',
     ),
-    maxConcurrency: positiveInteger(
-      environment.MX_INSIGHT_JUSTONE_MAX_CONCURRENCY,
-      8,
-      'MX_INSIGHT_JUSTONE_MAX_CONCURRENCY',
-    ),
-    maxConsumerConcurrency: positiveInteger(
-      environment.MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY,
-      2,
-      'MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY',
-    ),
+    maxConcurrency,
+    maxConsumerConcurrency,
     circuitFailureThreshold: positiveInteger(
       environment.MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES,
       3,
@@ -229,8 +238,8 @@ export function disabledJustOneConfig(environment, error) {
     freshTtlMs: 60_000,
     staleTtlMs: 7 * 86_400_000,
     unknownFingerprintCooldownMs: 15 * 60_000,
-    maxConcurrency: 8,
-    maxConsumerConcurrency: 2,
+    maxConcurrency: 32,
+    maxConsumerConcurrency: 8,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: unknownJustOneBilling(),

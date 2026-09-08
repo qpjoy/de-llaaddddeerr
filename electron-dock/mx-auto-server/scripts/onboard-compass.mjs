@@ -1,12 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync, realpathSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-
-const DEFAULT_REPO = 'https://github.com/mingxiinfo/po-frontend'
-const ELECTRON_CATALOG = JSON.parse(
-  readFileSync(new URL('../catalogs/compass-electron.json', import.meta.url), 'utf8')
-)
+import { buildCompassPlan as buildSharedCompassPlan } from '../../mx-test-framework/server/onboarding/compass.mjs'
 
 function nonEmpty(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
@@ -45,138 +41,22 @@ function electronSource(value) {
 }
 
 export function buildCompassPlan(environment = process.env) {
-  const appSlug = nonEmpty(environment.MX_AUTO_COMPASS_APP_SLUG) || 'luopan'
-  const branch = nonEmpty(environment.MX_AUTO_COMPASS_BRANCH) || 'public'
-  const repo = nonEmpty(environment.MX_AUTO_COMPASS_REPO) || DEFAULT_REPO
   const electronRepo = electronSource(
     nonEmpty(environment.MX_AUTO_COMPASS_QA_REPO) ||
       nonEmpty(environment.MX_AUTO_COMPASS_TEST_PACK)
   )
-  const functionalCron = nonEmpty(environment.MX_AUTO_COMPASS_FUNCTIONAL_CRON)
-  const timezone = nonEmpty(environment.MX_AUTO_COMPASS_TIMEZONE) || 'Asia/Shanghai'
-
-  const suites = [
-    {
-      slug: 'web-functional',
-      displayName: 'Compass Web · Functional',
-      engine: 'cypress',
-      surface: 'web',
-      runnerKind: 'server',
-      runnerImage: 'cypress/included:15.19.0',
-      repoUrl: repo,
-      defaultBranch: branch,
-      workingDir: 'po-frontend',
-      targetMode: 'self',
-      command: ['pnpm', 'e2e:local'],
-      retryPolicy: { maxAttempts: 1 },
-      writesData: false
-    },
-    {
-      slug: 'web-demo',
-      displayName: 'Compass Web · Demo 视频',
-      engine: 'cypress',
-      surface: 'web',
-      // The reused kernel disables video for server Jobs. A local runner both
-      // records the human-speed track and uploads it only after completion.
-      runnerKind: 'local',
-      runnerImage: 'cypress/included:15.19.0',
-      repoUrl: repo,
-      defaultBranch: branch,
-      workingDir: 'po-frontend',
-      targetMode: 'self',
-      command: ['pnpm', 'e2e:local'],
-      retryPolicy: { maxAttempts: 1 },
-      writesData: false
-    }
-  ]
-
-  const tasks = [
-    {
-      suiteSlug: 'web-functional',
-      name: 'Compass Web · Functional',
-      profile: 'mock',
-      track: 'functional',
-      runsOn: 'server',
-      schedule: functionalCron
-        ? { kind: 'cron', cronExpr: functionalCron, timezone }
-        : { kind: 'manual' }
-    },
-    {
-      suiteSlug: 'web-demo',
-      name: 'Compass Web · Demo（人工观看）',
-      profile: 'mock',
-      track: 'demo',
-      runsOn: 'any-runner',
-      // Demo is intentionally never scheduled by this script.
-      schedule: { kind: 'manual' }
-    }
-  ]
-  const catalogs = []
-
-  if (electronRepo) {
-    suites.push({
-      slug: 'compass-electron-smoke',
-      displayName: 'Compass Electron · Playwright',
-      engine: 'playwright-electron',
-      surface: 'electron',
-      runnerKind: 'local',
-      repoUrl: electronRepo,
-      defaultBranch: nonEmpty(environment.MX_AUTO_COMPASS_ELECTRON_BRANCH) || 'main',
-      workingDir: nonEmpty(environment.MX_AUTO_COMPASS_ELECTRON_WORKING_DIR) || '.',
-      targetMode: 'self',
-      requirements: {
-        os: (nonEmpty(environment.MX_AUTO_COMPASS_ELECTRON_OS) || 'windows')
-          .split(',')
-          .map((value) => value.trim())
-          .filter(Boolean)
-      },
-      command: electronCommand(environment),
-      // V0 secrets are declared at Suite scope because the legacy kernel has
-      // no Task/lane-level secret contract. The bootstrap wrapper removes
-      // these values before it starts Playwright or the target Electron app.
-      secretRefs: ['COMPASS_E2E_ACCOUNT', 'COMPASS_E2E_PASSWORD'],
-      retryPolicy: { maxAttempts: 1 },
-      writesData: false
-    })
-    tasks.push(
-      {
-        suiteSlug: 'compass-electron-smoke',
-        name: 'Compass Electron · 启动冒烟',
-        profile: 'mock',
-        track: 'functional',
-        runsOn: 'any-runner',
-        caseFilter: 'CPS-EL-BOOT-001,CPS-EL-BOOT-002',
-        schedule: { kind: 'manual' }
-      },
-      {
-        suiteSlug: 'compass-electron-smoke',
-        name: 'Compass Electron · 正式登录验收',
-        // The test-pack maps the platform's valid `real` profile to its auth
-        // lane. Both tasks intentionally keep the suite's single `pnpm test`
-        // command; mutating a suite between runs would destroy reproducibility.
-        profile: 'real',
-        track: 'functional',
-        runsOn: 'any-runner',
-        caseFilter: 'CPS-EL-AUTH-001',
-        schedule: { kind: 'manual' }
-      }
-    )
-    catalogs.push(structuredClone(ELECTRON_CATALOG))
-  }
-
-  return {
-    app: {
-      slug: appSlug,
-      displayName: '罗盘 Compass (po-frontend)',
-      repoUrl: repo,
-      defaultBranch: branch,
-      surfaces: ['web', 'electron']
-    },
-    suites,
-    tasks,
-    catalogs,
-    electronConfigured: Boolean(electronRepo)
-  }
+  return buildSharedCompassPlan({
+    appSlug: nonEmpty(environment.MX_AUTO_COMPASS_APP_SLUG) || 'luopan',
+    webBranch: nonEmpty(environment.MX_AUTO_COMPASS_BRANCH) || 'public',
+    webRepoUrl: nonEmpty(environment.MX_AUTO_COMPASS_REPO),
+    functionalCron: nonEmpty(environment.MX_AUTO_COMPASS_FUNCTIONAL_CRON),
+    timezone: nonEmpty(environment.MX_AUTO_COMPASS_TIMEZONE) || 'Asia/Shanghai',
+    electronQaRepoUrl: electronRepo,
+    electronBranch: nonEmpty(environment.MX_AUTO_COMPASS_ELECTRON_BRANCH) || 'main',
+    electronWorkingDir: nonEmpty(environment.MX_AUTO_COMPASS_ELECTRON_WORKING_DIR) || '.',
+    electronOs: nonEmpty(environment.MX_AUTO_COMPASS_ELECTRON_OS) || 'windows',
+    electronCommand: electronRepo ? electronCommand(environment) : undefined
+  })
 }
 
 async function syncCatalogs(client, appSlug, catalogs) {

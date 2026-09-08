@@ -172,33 +172,29 @@ bash scripts/manage.sh down
 `down` 只把服务缩到零；PostgreSQL、历史记录、Secret 和 PVC 会保留。真正删除
 数据必须由运维人员显式处理。
 
-### 幂等接入 Compass
+### 在 Admin 中接入 Compass
 
-下面的命令只登记配置，不会触发执行：
+不需要、也不应登录 Internal 节点执行登记脚本。打开 MX AutoTest Web，使用账号
+`admin`、密码为部署生成的 admin token 登录，然后进入「应用与用例」，点击
+「接入 / 对齐 Compass」。这个动作只登记或对齐配置，不会触发执行。
 
-```bash
-MX_AUTO_BASE_URL=http://127.0.0.1:30880 \
-MX_AUTO_TOKEN="$MX_AUTO_ADMIN_TOKEN" \
-node scripts/onboard-compass.mjs
-```
-
-它登记显式 `public` 分支、`workingDir=po-frontend`、
+界面默认登记 `public` 分支、`workingDir=po-frontend`、
 `cypress/included:15.19.0` 的 Cypress functional/demo
 套件和任务。Functional 在 K8s 静默执行；demo 由本地 Runner 录制视频、结束后
-上传，且始终为手动。Functional 默认也是手动，只有显式设置
-`MX_AUTO_COMPASS_FUNCTIONAL_CRON` 才会变为 cron。脚本会更新同 slug 的 Suite
-和同名 Task，因此可以重复执行。
+上传，两者初次接入均为手动。服务端会更新同 slug 的 Suite 和同名 Task，因此按钮
+可以重复点击；已有应用的 repo/branch 不会被静默覆盖，结果会在界面提示。
 
-Electron 不使用虚构 URL。只有设置真实的 `MX_AUTO_COMPASS_QA_REPO`，或将
-`MX_AUTO_COMPASS_TEST_PACK` 指向一个 **Git checkout 根目录**，脚本才登记
-Playwright Electron Suite 和手动 Task；普通子目录会被拒绝。本地路径不会被平台
-上传到执行机，只有路径确实由目标机器共享时才可用，因此优先使用 Git remote。
-Electron test-pack 默认命令是 `pnpm test`，可用
-`MX_AUTO_COMPASS_ELECTRON_COMMAND_JSON='["pnpm","test:e2e"]'` 显式覆盖。仓库内置测试包应保持
-`["pnpm","test"]`：同一个 `compass-electron-smoke` Suite 会创建 `profile=mock` 的启动冒烟
+Electron 不使用虚构 URL。在同一个弹窗中填写测试团队维护的真实 Electron QA Git
+仓库、分支、仓库内测试包目录和执行系统后，平台才登记 Playwright Electron Suite、
+用例目录和手动 Task。独立 QA 仓库的目录填 `.`；monorepo 必须填写相对目录。
+浏览器不能提交任意 command 或 Runner image；审核模板固定使用 `pnpm test`。同一个
+`compass-electron-smoke` Suite 会创建 `profile=mock` 的启动冒烟
 与 `profile=real` 的正式登录两个 manual Task，由测试包按 Profile 选择 lane，不能在两次 Run
-之间临时修改 Suite command。脚本会先同步 Electron Catalog，再将两个 Task 的 `caseFilter`
+之间临时修改 Suite command。平台会先同步 Electron Catalog，再将两个 Task 的 `caseFilter`
 分别固定为两个启动 Case 和一个登录 Case，避免另一条 lane 被错误计入 `notRun`。
+
+`scripts/onboard-compass.mjs` 仅保留给自动化迁移和兼容旧流程，不是日常部署或首次接入
+步骤；Web Admin 与它复用同一份受控模板。
 
 V0 内核只能在 Suite 级声明密钥，因此该 Suite 会声明
 `COMPASS_E2E_ACCOUNT` 与 `COMPASS_E2E_PASSWORD`：平台会向 mock 与 real 两条 Task
@@ -228,19 +224,11 @@ manual-witness 混进一个笼统的“覆盖率”百分比。
 ### 首次登录与执行权限
 
 Launcher 账号第一次登录会以 `viewer` 加入 MX AutoTest：可以查看任务、Runner 和报告，
-但不能在真实执行机上发起任务。这是独立于 Launcher 全局身份的本地授权边界。管理员先
-查看成员并明确提升到 `operator`，桌面端的“运行”按钮才会启用：
-
-```bash
-curl -fsS "$MX_AUTO_BASE_URL/api/v1/members" \
-  -H "authorization: Bearer $MX_AUTO_ADMIN_TOKEN"
-curl -fsS -X PATCH "$MX_AUTO_BASE_URL/api/v1/members/<principalId>" \
-  -H "authorization: Bearer $MX_AUTO_ADMIN_TOKEN" \
-  -H 'content-type: application/json' \
-  -d '{"role":"operator"}'
-```
-
-请从第一条命令的结果复制准确的 `principalId`；不要把 service admin token 配进桌面端。
+但不能在真实执行机上发起任务。这是独立于 Launcher 全局身份的本地授权边界。该用户
+必须先成功登录一次，平台才会取得 Launcher `userId` 并创建成员记录；不需要手工填写或
+复制 `principalId`。管理员随后用 `admin` + admin token 登录，在「成员」页面直接把权限
+下拉框改为「测试工程师」即可。权限变化会审计，用户下一次请求立即生效。不要把 service
+admin token 配进桌面端或发给普通测试人员。
 
 ### 执行机与 Electron 安装包前置
 
