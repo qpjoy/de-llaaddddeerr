@@ -851,6 +851,14 @@ export class DatabaseSourcePuller {
 
   async withSourceLocks(sourceKeys, operation) {
     const keys = [...new Set(sourceKeys)].sort()
+    // PostgreSQL can hold every per-source advisory lock on one session. Use
+    // that batch primitive when available: recursively checking out one pooled
+    // client per key self-deadlocks as soon as a fixed pipeline contains more
+    // sources than the Hub pool (the saved-records pipeline has 13; default max
+    // is 10). Test doubles and MemoryStore retain the in-process fallback.
+    if (typeof this.store.withExternalSourceLocks === 'function') {
+      return this.store.withExternalSourceLocks(keys, operation)
+    }
     const acquire = (index, guards, sessionClients) => index >= keys.length
       ? operation(async () => {
           for (const assertOwned of guards) await assertOwned()

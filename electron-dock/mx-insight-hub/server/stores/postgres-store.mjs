@@ -6968,39 +6968,57 @@ export class PostgresStore {
    * behind a long upstream query with no visible progress.
    */
   async withExternalSourceLock(sourceKey, operation) {
+    return this.withExternalSourceLocks(
+      [sourceKey],
+      (assertOwned, sessionClients) => operation(assertOwned, sessionClients[0]),
+    )
+  }
+
+  /**
+   * Hold several source advisory locks on one PostgreSQL session.
+   *
+   * One session may own any number of advisory locks. Sharing it here preserves
+   * the exact per-source exclusion contract without consuming one pooled
+   * connection per source and deadlocking pipelines larger than the pool.
+   */
+  async withExternalSourceLocks(sourceKeys, operation) {
+    const keys = [...new Set(sourceKeys)].sort()
+    if (keys.length === 0) return operation(async () => {}, [])
     const client = await this.pool.connect()
-    const lockName = `mx-insight-hub:external-source:${sourceKey}`
-    let locked = false
+    const lockedNames = []
     let lockLost = false
     const markLockLost = () => { lockLost = true }
     client.once?.('error', markLockLost)
     client.once?.('end', markLockLost)
     const assertOwned = async () => {
       if (lockLost) {
-        throw new AppError(409, 'source_lock_lost', `External source lock was lost: ${sourceKey}`)
+        throw new AppError(409, 'source_lock_lost', 'External source lock session was lost')
       }
       try {
         await client.query('SELECT 1')
       } catch {
         lockLost = true
-        throw new AppError(409, 'source_lock_lost', `External source lock was lost: ${sourceKey}`)
+        throw new AppError(409, 'source_lock_lost', 'External source lock session was lost')
       }
       if (lockLost) {
-        throw new AppError(409, 'source_lock_lost', `External source lock was lost: ${sourceKey}`)
+        throw new AppError(409, 'source_lock_lost', 'External source lock session was lost')
       }
     }
     try {
-      const { rows } = await client.query(
-        'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked',
-        [lockName],
-      )
-      locked = rows[0]?.locked === true
-      if (!locked) {
-        throw new AppError(409, 'source_busy', `External source is currently being synchronized: ${sourceKey}`)
+      for (const sourceKey of keys) {
+        const lockName = `mx-insight-hub:external-source:${sourceKey}`
+        const { rows } = await client.query(
+          'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked',
+          [lockName],
+        )
+        if (rows[0]?.locked !== true) {
+          throw new AppError(409, 'source_busy', `External source is currently being synchronized: ${sourceKey}`)
+        }
+        lockedNames.push(lockName)
       }
-      return await operation(assertOwned, client)
+      return await operation(assertOwned, keys.map(() => client))
     } finally {
-      if (locked) {
+      for (const lockName of lockedNames.reverse()) {
         await client.query(
           'SELECT pg_advisory_unlock(hashtextextended($1, 0))',
           [lockName],

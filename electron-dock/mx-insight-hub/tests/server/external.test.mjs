@@ -2816,6 +2816,33 @@ test('source lock helpers expose deterministic multi-source serialization', asyn
   assert.deepEqual(acquired, ['a-source', 'z-source'])
 })
 
+test('database source multi-locks use the store batch session when available', async () => {
+  const calls = []
+  const sessionClient = { query: async () => ({ rows: [] }) }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      async withExternalSourceLocks(keys, operation) {
+        calls.push(keys)
+        return operation(async () => {}, keys.map(() => sessionClient))
+      },
+      async withExternalSourceLock() {
+        throw new Error('single-source recursion must not run when batch locking is available')
+      },
+    },
+    queue: null,
+  })
+
+  const result = await puller.withSourceLocks(
+    ['source-12', 'source-01', 'source-12'],
+    async (_assertOwned, sessionClients) => {
+      assert.deepEqual(sessionClients, [sessionClient, sessionClient])
+      return 'done'
+    },
+  )
+  assert.equal(result, 'done')
+  assert.deepEqual(calls, [['source-01', 'source-12']])
+})
+
 test('a lost source lock after reading a page prevents canonical ingest and cursor advancement', async () => {
   const source = {
     id: 'source-lock-loss', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',

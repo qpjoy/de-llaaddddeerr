@@ -321,6 +321,85 @@ test('PostgresStore uses a session advisory lock for source pull and reset opera
   )
 })
 
+test('PostgresStore holds a thirteen-source pipeline lock on one pooled session', async () => {
+  const queries = []
+  let connectCount = 0
+  let released = false
+  const client = {
+    async query(sql, values) {
+      queries.push({ sql, values })
+      if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked: true }] }
+      if (/pg_advisory_unlock/.test(sql)) return { rows: [{ pg_advisory_unlock: true }] }
+      return { rows: [{ '?column?': 1 }] }
+    },
+    release() { released = true },
+  }
+  const store = new PostgresStore({
+    async connect() {
+      connectCount += 1
+      if (connectCount > 1) throw new Error('batch lock exhausted the pool')
+      return client
+    },
+  })
+  const keys = Array.from({ length: 13 }, (_, index) => `saved-records-${String(index).padStart(2, '0')}`)
+    .reverse()
+
+  const result = await store.withExternalSourceLocks(keys, async (assertOwned, sessionClients) => {
+    assert.equal(sessionClients.length, 13)
+    assert.equal(sessionClients.every((candidate) => candidate === client), true)
+    await assertOwned()
+    return 'configured'
+  })
+
+  assert.equal(result, 'configured')
+  assert.equal(connectCount, 1)
+  assert.equal(released, true)
+  const acquired = queries.filter(({ sql }) => /pg_try_advisory_lock/.test(sql))
+  const releasedLocks = queries.filter(({ sql }) => /pg_advisory_unlock/.test(sql))
+  assert.equal(acquired.length, 13)
+  assert.equal(releasedLocks.length, 13)
+  assert.deepEqual(
+    acquired.map(({ values }) => values[0]),
+    [...keys].sort().map((key) => `mx-insight-hub:external-source:${key}`),
+  )
+  assert.deepEqual(
+    releasedLocks.map(({ values }) => values[0]),
+    acquired.map(({ values }) => values[0]).reverse(),
+  )
+})
+
+test('PostgresStore releases earlier batch locks when a later source is busy', async () => {
+  const queries = []
+  const client = {
+    async query(sql, values) {
+      queries.push({ sql, values })
+      if (/pg_try_advisory_lock/.test(sql)) {
+        return { rows: [{ locked: !values[0].endsWith(':source-c') }] }
+      }
+      return { rows: [{ pg_advisory_unlock: true }] }
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+
+  await assert.rejects(
+    () => store.withExternalSourceLocks(
+      ['source-c', 'source-a', 'source-b'],
+      async () => 'never',
+    ),
+    (error) => error?.status === 409
+      && error?.code === 'source_busy'
+      && /source-c/.test(error.message),
+  )
+  assert.deepEqual(
+    queries.filter(({ sql }) => /pg_advisory_unlock/.test(sql)).map(({ values }) => values[0]),
+    [
+      'mx-insight-hub:external-source:source-b',
+      'mx-insight-hub:external-source:source-a',
+    ],
+  )
+})
+
 test('a disconnected source-lock session is destroyed and a later caller can retry', async () => {
   let endHandler
   let lostReleaseError
