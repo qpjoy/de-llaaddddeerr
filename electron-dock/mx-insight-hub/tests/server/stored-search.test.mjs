@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { createApp } from '../../server/app.mjs'
-import { normalizeStoredSearchQuery, storedSearchResponse } from '../../server/data/stored-search.mjs'
+import {
+  CRAWLER_PUBLICATION_VISIBILITY_CONTRACT,
+  normalizeStoredSearchQuery,
+  storedSearchResponse,
+} from '../../server/data/stored-search.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
@@ -10,6 +14,7 @@ const ADMIN_TOKEN = 'stored-search-admin-token'
 const PEPPER = 'stored-search-test-pepper-with-enough-entropy'
 const FIRST_ID = '11111111-1111-4111-8111-111111111111'
 const SECOND_ID = '22222222-2222-4222-8222-222222222222'
+const CRAWLER_PLATFORM = 'data_center_saved_records_news'
 
 async function withServer(app, run) {
   const server = createServer(app)
@@ -195,6 +200,14 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
     windowSeconds: 3_600,
     maxPageSize: 2,
   })
+  await service.putPlatformConfiguration(CRAWLER_PLATFORM, {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+    maxPageSize: 2,
+  })
   await service.putCapabilityConfiguration('social.posts.search', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -205,7 +218,7 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
   const key = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Stored search key',
-    platforms: ['xiaohongshu', 'public_opinion'],
+    platforms: ['xiaohongshu', 'public_opinion', CRAWLER_PLATFORM],
     capabilities: ['social.posts.search'],
   })
   const app = createApp({
@@ -360,6 +373,27 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
     assert.equal(generic.response.status, 200)
     assert.equal(upstreamCalls.length, 1)
     assert.equal(contentCalls.length, 2)
+
+    const crawlerStored = await call(baseUrl, '/api/v1/data/stored/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'stored-crawler-candidate-only' },
+      body: { platform: CRAWLER_PLATFORM, query: 'agent', pageSize: 1 },
+    })
+    assert.equal(crawlerStored.response.status, 200)
+    assert.deepEqual(contentCalls.at(-1).options.crawlerPublicationVisibility, {
+      contractVersion: CRAWLER_PUBLICATION_VISIBILITY_CONTRACT,
+      eligibility: 'candidate',
+    })
+    assert.equal(upstreamCalls.length, 1)
+
+    const crawlerLegacy = await call(baseUrl, '/api/v1/data/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'legacy-crawler-fails-closed' },
+      body: { platform: CRAWLER_PLATFORM, query: 'agent', pageSize: 1 },
+    })
+    assert.equal(crawlerLegacy.response.status, 400)
+    assert.equal(crawlerLegacy.payload.error.code, 'platform_operation_unsupported')
+    assert.equal(upstreamCalls.length, 1)
 
     const candidate = await call(baseUrl, '/api/v1/data/stored/search', {
       method: 'POST',

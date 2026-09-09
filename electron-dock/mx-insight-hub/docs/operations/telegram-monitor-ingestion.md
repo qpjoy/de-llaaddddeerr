@@ -488,10 +488,11 @@ need real ES types:
   arrays;
 - metrics and event/edited/collection times.
 
-The current content v5 schema preserves all of those Telegram fields and
-profiles unchanged. Its additional typed `publication` object is owned by the
-public-opinion pipeline; Telegram documents do not acquire candidate state or
-new public response fields.
+The current content v6 schema preserves all of those Telegram fields and
+profiles unchanged. Its additional typed public-opinion `publication` object
+and crawler publication eligibility are owned by their respective pipelines;
+Telegram documents do not acquire candidate state or new public response
+fields.
 
 The mapping stays `dynamic: strict`; extra source JSON remains in PostgreSQL
 raw/canonical extensions instead of creating arbitrary ES fields. An ordinary

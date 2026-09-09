@@ -30,11 +30,13 @@ import {
   telegramStoredDatasetIds,
 } from './data/telegram-monitor.mjs'
 import {
+  CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX,
   canonicalSearchResponse,
   normalizeCanonicalSearchQuery,
   normalizeStoredSearchQuery,
   storedSearchResponse,
 } from './data/stored-search.mjs'
+import { CRAWLER_SOURCES } from './ingest/crawler/source-contract.mjs'
 import {
   canonicalContextCapability,
   canonicalContextResponse,
@@ -1178,6 +1180,27 @@ export class HubService {
             'diagnostics',
           ],
         })
+      }
+    }
+    const crawlerGrants = CRAWLER_SOURCES.filter((source) => canonicalGrants.includes(source.platform))
+    if (crawlerGrants.length > 0) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms)) {
+        const sources = await Promise.all(crawlerGrants.map((source) => (
+          typeof this.store.getExternalSource === 'function'
+            ? this.store.getExternalSource(source.sourceKey)
+            : null
+        )))
+        for (const [index, spec] of crawlerGrants.entries()) {
+          if (platforms.some((entry) => (entry?.platform || entry) === spec.platform)) continue
+          platforms.push({
+            platform: spec.platform,
+            ready: sources[index]?.status === 'active' && Boolean(this.searchQueries?.searchContent),
+            source: 'hub',
+            servingMode: 'stored',
+            capabilities: ['stored_search', 'canonical_search'],
+          })
+        }
       }
     }
     if (
@@ -2666,6 +2689,9 @@ export class HubService {
           mode: query.publicOpinionVisibility.candidateMode,
         },
       } : {}),
+      ...(query.crawlerPublicationVisibility ? {
+        crawlerPublicationVisibility: query.crawlerPublicationVisibility,
+      } : {}),
       ...(query.publicOpinionVisibility.explicit ? {
         includeCandidates: query.publicOpinionVisibility.candidateMode === 'formal'
           ? false
@@ -2732,6 +2758,9 @@ export class HubService {
         cursor: query.cursor,
         ...(query.platform === PUBLIC_OPINION_PLATFORM
           ? { publicOpinionVisibility: query.publicOpinionVisibility }
+          : {}),
+        ...(query.crawlerPublicationVisibility
+          ? { crawlerPublicationVisibility: query.crawlerPublicationVisibility }
           : {}),
       })
       const responseBody = {
@@ -2825,6 +2854,9 @@ export class HubService {
           mode: query.publicOpinionVisibility.candidateMode,
         },
       } : {}),
+      ...(query.crawlerPublicationVisibility ? {
+        crawlerPublicationVisibility: query.crawlerPublicationVisibility,
+      } : {}),
       ...(query.publicOpinionVisibility.explicit ? {
         includeCandidates: query.publicOpinionVisibility.candidateMode === 'formal'
           ? false
@@ -2897,6 +2929,9 @@ export class HubService {
         trackTotalHits: true,
         ...(query.platforms.includes(PUBLIC_OPINION_PLATFORM)
           ? { publicOpinionVisibility: query.publicOpinionVisibility }
+          : {}),
+        ...(query.crawlerPublicationVisibility
+          ? { crawlerPublicationVisibility: query.crawlerPublicationVisibility }
           : {}),
       })
       const responseBody = {
@@ -3670,6 +3705,12 @@ export class HubService {
     assert(query.length <= 500, 400, 'invalid_request', 'query must not exceed 500 characters')
     const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
+    assert(
+      !platform.startsWith(CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX),
+      400,
+      'platform_operation_unsupported',
+      'Data Center crawler corpora are Hub-stored; use canonical stored search',
+    )
     if (platform === 'xiaohongshu') {
       const capabilityGrants = await this.#effectiveCapabilityGrants(context)
       assert(

@@ -1694,7 +1694,14 @@ paths:
         both an active fixed ingestion
         source and both valid Hub serving indexes; it is not an additional grant
         or a guarantee of freshness, and an inactive source may still have
-        previously indexed records available. For a valid legacy test key whose
+        previously indexed records available. Each granted
+        data_center_saved_records_<source_type> entry is Hub-owned with
+        source=hub, servingMode=stored and capabilities stored_search plus
+        canonical_search.
+        Its ready flag requires that exact fixed leaf source to be active and the
+        search layer to be configured; a paused leaf may still retain stored rows,
+        and readiness is not a publication grant or freshness guarantee. These
+        platforms never enter data.legacySearch. For a valid legacy test key whose
         consumer has the ecommerce grant, the ecommerce entry remains visible
         but ready is forced to false. Test is compatibility metadata, not an
         external ecommerce sandbox. Capability discovery itself creates no
@@ -1846,6 +1853,11 @@ paths:
                     - platform: public_opinion
                       ready: false
                       capabilities: [province_feed, province_coverage, region_catalog, region_feed, item_detail, stored_search, diagnostics]
+                      source: hub
+                      servingMode: stored
+                    - platform: data_center_saved_records_news
+                      ready: false
+                      capabilities: [stored_search, canonical_search]
                       source: hub
                       servingMode: stored
                     - platform: source_catalog
@@ -2636,9 +2648,9 @@ paths:
         bounded detail check for note bodies at the 60-character provider preview
         boundary and retains detail text only when it is strictly longer;
         unresolved enrichment is explicit in response warnings. The caller never
-        selects a provider. public_opinion is a Hub-local stored
-        platform and is rejected here; it must use the province feed,
-        /data/stored/search or /data/canonical/search. Telegram pagination follows the signed,
+        selects a provider. public_opinion and every data_center_saved_records_* platform are
+        Hub-local stored corpora and are rejected here; they must use the
+        province feed, /data/stored/search or /data/canonical/search. Telegram pagination follows the signed,
         query-bound cursor, PIT/keyset and sticky-mode rules documented by
         /data/telegram/search.
       x-mx-error-codes:
@@ -2856,25 +2868,34 @@ paths:
   /data/stored/search:
     post:
       operationId: searchStoredData
-      summary: Search Hub canonical data without calling Night-All.
+      summary: Search Hub canonical data without calling an upstream source.
       description: >-
         Requires the API key's explicit platform grant. datasetId and objectType
         are exact logical filters, not separate authorization grants: every
         consumer granted a platform can search the complete Hub canonical corpus
-        for that platform. Elasticsearch is the preferred ranked projection; a
-        transport failure on the first page falls back to PostgreSQL and is
-        reported explicitly. The strict request body does not accept a physical
+        for that platform. Every data_center_saved_records_* platform is candidate-only:
+        internal, missing or unknown crawler publication eligibility never
+        passes the public search boundary. Elasticsearch content-v6 is the
+        preferred ranked projection; an older projection or a transport failure
+        on the first page falls back to the same PostgreSQL visibility gate. A
+        pre-visibility crawler cursor has an obsolete HMAC query binding and
+        returns 400 invalid_cursor; restart from a cursor-less first page with a
+        new Idempotency-Key. A current-contract Elasticsearch cursor never
+        changes backend: if its content-v6 projection is unavailable, Hub returns
+        503 search_cursor_unavailable and callers retry the same cursor later.
+        The strict request body does not accept a physical
         database, index, SQL, Elasticsearch DSL/script or provider parameters.
         Response and item source are always hub; connector lineage, raw payloads
         and provider coordinates are excluded. The opaque cursor is HMAC-signed
-        and bound to the normalized query, filters and page size. For
+        and bound to the normalized query, filters, page size and every
+        applicable publication-visibility contract. For
         platform=public_opinion the default is formal-only. Candidate and exact
         geography/time controls require explicit platform=public_opinion;
         includeCandidates=all requires from, to and at least one of province,
         countryCode or location. Other platforms are unaffected. Explicit
         candidate results expose only bounded Hub quality/location metadata and
         omit candidate author/contentType and upstream source identity. The
-        publication-visibility contract is part of the idempotency fingerprint;
+        applicable publication-visibility contract is part of the idempotency fingerprint;
         after upgrading to this contract, use a new Idempotency-Key instead of
         reusing a pre-upgrade key.
       x-mx-error-codes:
@@ -2924,28 +2945,37 @@ paths:
         never fans out to source APIs. Omitting platform searches the current
         consumer's complete granted-platform scope; platform, datasetId and
         objectType only narrow that scope. The server always applies the sorted
-        grant set as an authorization filter. Elasticsearch uses one PIT and a
+        grant set as an authorization filter. Elasticsearch content-v6 uses one PIT and a
         score/event-time/id plus PIT `_shard_doc` ordering; PostgreSQL is the explicit degradation
         path. The balanced profile uses HanLP/pre-segmented terms only while
         query analysis is healthy; degraded Jieba/bigram terms switch the
         applied profile to raw phrase. The signed cursor is bound to the query,
-        filters, page size, resolved versioned search profile, platform scope
+        filters, page size, resolved versioned search profile, platform scope,
+        applicable publication-visibility contracts
         and bounded first-page analysis state, so later pages do not re-segment. searchProfile
         selects a server-owned query policy; arbitrary analyzers, tokenizers,
         filters and Elasticsearch DSL are rejected. Its independent usage bucket always applies the
         strictest limits across the consumer's complete current platform-grant
         set. Public items use an allowlist and exclude raw payloads, extensions,
-        credentials and provider coordinates. In a mixed-platform result, only
-        the public_opinion branch is formal-only by default; every other
-        platform is unchanged. Candidate and exact geography/time controls
+        credentials and provider coordinates. In a mixed-platform result, the
+        public_opinion branch is formal-only by default, while every
+        data_center_saved_records_* crawler branch returns only records whose
+        crawler publication eligibility is candidate; other platforms are
+        unchanged. Candidate and exact geography/time controls
         require explicit platform=public_opinion; includeCandidates=all requires
         from, to and at least one of province, countryCode or location. Explicit
         candidate results expose only bounded Hub quality/location metadata and
         omit candidate author/contentType and upstream source identity. The
-        publication-visibility contract is part of the idempotency fingerprint
-        whenever the authorized scope can include public_opinion; after
-        upgrading to this contract, use a new Idempotency-Key instead of reusing
-        a pre-upgrade key.
+        applicable publication-visibility contracts are part of the idempotency
+        fingerprint whenever the authorized scope can include public_opinion or
+        data_center_saved_records_*; after upgrading a contract, use a new
+        Idempotency-Key instead of reusing a pre-upgrade key. Before content-v6
+        cutover, crawler-visible first pages fall back to the same PostgreSQL
+        gate. A pre-visibility crawler cursor returns 400 invalid_cursor and must
+        restart without a cursor and with a new Idempotency-Key. A
+        current-contract Elasticsearch cursor never changes backend; if its
+        content-v6 projection is unavailable, Hub returns 503
+        search_cursor_unavailable and callers retry the same cursor later.
       x-mx-error-codes:
         "400": [invalid_request, invalid_cursor, invalid_platform, invalid_province, candidate_scope_required, invalid_search_profile, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
@@ -7114,7 +7144,14 @@ components:
         from: { type: string, format: date-time, description: Inclusive lower bound. Formal uses eventTime; an explicit candidate falls back to collectedAt when eventTime is absent. }
         to: { type: string, format: date-time, description: Inclusive upper bound; it must not be earlier than from. }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to the normalized query and filters; explicit public_opinion candidate controls join the binding. }
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: >-
+            HMAC-signed opaque cursor bound to query, platform, datasetId,
+            objectType, page size and every applicable public_opinion or
+            data_center_saved_records_* publication-visibility contract.
         type:
           type: string
           enum: [fresh, stable]
@@ -7145,7 +7182,16 @@ components:
           default: canonical.balanced.v1
           description: Versioned server-owned search policy. The balanced default uses raw phrase OR all healthy HanLP/pre-segmented terms; degraded Jieba/bigram query terms cause an explicit phrase-only applied profile. Callers cannot supply arbitrary analysis settings or ES DSL.
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, filters, page size, resolved search profile, sort, sorted authorized platform scope and bounded first-page analysis state; explicit public_opinion candidate controls join the binding. }
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: >-
+            HMAC-signed opaque cursor bound to query, filters, page size,
+            resolved search profile, sort, sorted authorized platform scope and
+            bounded first-page analysis state. Applicable public_opinion and
+            data_center_saved_records_* publication-visibility contracts join
+            the binding.
         sort:
           type: string
           enum: [newest, oldest, relevance]

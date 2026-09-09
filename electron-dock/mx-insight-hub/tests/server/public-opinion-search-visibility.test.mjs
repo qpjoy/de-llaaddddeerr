@@ -33,7 +33,7 @@ function elasticsearchCapture() {
     searches,
     client: {
       async getAlias() {
-        return { 'mx-insight-hub-content-v5-current': { aliases: { [READ_ALIAS]: {} } } }
+        return { 'mx-insight-hub-content-v6-current': { aliases: { [READ_ALIAS]: {} } } }
       },
       async request(method, path, body) {
         if (path.includes('/_pit?')) return { id: `pit-${searches.length + 1}` }
@@ -112,7 +112,7 @@ test('public-opinion exact filters are scoped, normalized and preserve the legac
   assert.equal(overseas.publicOpinionVisibility.location, '南苏丹')
 })
 
-test('public-opinion cursors round-trip their content-v5 PIT provenance without changing the query binding', () => {
+test('public-opinion cursors round-trip their content-v6 PIT provenance without changing the query binding', () => {
   const query = normalizeStoredSearchQuery({
     platform: 'public_opinion', query: '处置', pageSize: 1,
   }, 100, PEPPER)
@@ -123,7 +123,7 @@ test('public-opinion cursors round-trip their content-v5 PIT provenance without 
       hasMore: true,
       nextCursor: {
         mode: 'elasticsearch',
-        pitId: 'content-v5-pit',
+        pitId: 'content-v6-pit',
         searchAfter: [1, '2026-08-24T00:00:00.000Z', '11111111-1111-4111-8111-111111111111', 7],
         analysisState: {
           v: 1,
@@ -132,7 +132,7 @@ test('public-opinion cursors round-trip their content-v5 PIT provenance without 
           backendUsed: 'hanlp',
           degraded: false,
           errorCode: null,
-          indexSchema: 'content-v5',
+          indexSchema: 'content-v6',
         },
       },
       items: [{
@@ -149,10 +149,10 @@ test('public-opinion cursors round-trip their content-v5 PIT provenance without 
     cursor: response.data.pageInfo.nextCursor,
   }, 100, PEPPER)
   assert.equal(continued.cursorBinding, query.cursorBinding)
-  assert.equal(continued.cursor.analysisState.indexSchema, 'content-v5')
+  assert.equal(continued.cursor.analysisState.indexSchema, 'content-v6')
 })
 
-test('content v5 maps publication state as typed fields and the public item allowlist hides it', () => {
+test('content v6 maps publication state as typed fields and the public item allowlist hides it', () => {
   const publication = contentIndex().mappings.properties.publication.properties
   assert.equal(publication.stage.type, 'keyword')
   assert.equal(publication.status.type, 'keyword')
@@ -318,7 +318,7 @@ test('PostgreSQL page and exact count share the revision-fenced visibility predi
   assert.doesNotMatch(adminSql, /public_opinion_current_state|publication\.source_stage/)
 })
 
-test('visibility falls back before v5 cutover and never replays an unmarked Elasticsearch PIT', async () => {
+test('visibility falls back before v6 cutover and never replays an unmarked Elasticsearch PIT', async () => {
   const sqlCalls = []
   const pool = {
     async query(sql) {
@@ -331,11 +331,11 @@ test('visibility falls back before v5 cutover and never replays an unmarked Elas
     pool,
     client: {
       async getAlias() {
-        return { 'mx-insight-hub-content-v4-current': { aliases: { [READ_ALIAS]: {} } } }
+        return { 'mx-insight-hub-content-v5-current': { aliases: { [READ_ALIAS]: {} } } }
       },
       async request() {
         elasticsearchCalls += 1
-        throw new Error('Elasticsearch must not be queried before content-v5 is active')
+        throw new Error('Elasticsearch must not be queried before content-v6 is active')
       },
     },
   })
@@ -354,7 +354,7 @@ test('visibility falls back before v5 cutover and never replays an unmarked Elas
     pool,
     client: {
       async getAlias() {
-        return { 'mx-insight-hub-content-v5-current': { aliases: { [READ_ALIAS]: {} } } }
+        return { 'mx-insight-hub-content-v6-current': { aliases: { [READ_ALIAS]: {} } } }
       },
       async request() {
         elasticsearchCalls += 1
@@ -367,7 +367,7 @@ test('visibility falls back before v5 cutover and never replays an unmarked Elas
       platform: 'public_opinion',
       publicOpinionVisibility: visibility,
       cursor: {
-        mode: 'elasticsearch', pitId: 'legacy-v4-pit', searchAfter: [1, null, 'id', 1],
+        mode: 'elasticsearch', pitId: 'legacy-v5-pit', searchAfter: [1, null, 'id', 1],
         analysisState: {
           v: 1, appliedProfile: 'canonical.balanced.v1', tokens: ['处置'],
           backendUsed: 'hanlp', degraded: false, errorCode: null,

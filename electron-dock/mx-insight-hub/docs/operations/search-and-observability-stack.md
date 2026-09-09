@@ -179,22 +179,42 @@ PG 中已有的 outbox dead 或 `projection_failed_at` quarantine 清零。该�
 projector、ingest、Launcher、MX-H2I 登录或联网链路。执行前仍应在低峰期确认 ES
 磁盘和 PG 读取余量。
 
-### 4.2 content v5 与搜索 profile 变更手册
+### 4.2 content v6 与搜索 profile 变更手册
 
-仓库最新 mapping 声明 content v5。v4 仍是既有 named profile 的最低版本：v3 已有 raw `standard` 与 HanLP
-coarse 预分词字段，姓名/username 另有 prefix、CJK bigram 和 identifier
-substring；v4 新增 `title.cjk`、`body.cjk` 和 `title.prefix`。它的目标是让
-相关性实验优先成为查询变更，而不是每次都改 mapping。v5 在此基础上增加
-revision-fenced typed `publication` 状态、质量、地理位置与候选 effective time，
-用于公共 public-opinion visibility 与精确候选过滤；Admin 未传 visibility 时仍按
-原查询执行。
+仓库当前 mapping 声明 `content-v6`。v4 仍是既有 named profile 的最低版本：v3
+已有 raw `standard` 与 HanLP coarse 预分词字段，姓名/username 另有 prefix、CJK
+bigram 和 identifier substring；v4 新增 `title.cjk`、`body.cjk` 和
+`title.prefix`。它的目标是让相关性实验优先成为查询变更，而不是每次都改
+mapping。历史 `content-v5` 里程碑在此基础上增加 revision-fenced typed
+`publication` 状态、质量、地理位置与候选 effective time，用于公共
+public-opinion visibility 与精确候选过滤。当前 v6 保留这些字段，并新增 typed
+`crawlerPublicationEligibility`，投影
+`stable_fields.crawler.publication.eligibility`（对象字段写法为
+`stableFields.crawler.publication.eligibility`）；Admin 未传 visibility 时仍按原查询
+执行。
 
-v5 同时给所有会命中 `public_opinion` 的 stored/canonical search 幂等指纹加入
-publication visibility contract marker，包括默认 formal 模式。这是安全边界：旧
-`type=stable` 响应可能在 gate 前包含候选，不能跨部署原样 replay。升级后调用方
-必须换用新的 `Idempotency-Key`；复用旧 key 将按既有规则返回 `409
-idempotency_conflict`。签名 cursor 的默认 query binding 保持兼容，但旧 v4 PIT
-因缺少 `content-v5` provenance 会返回 `503 search_cursor_unavailable`。
+对于 provider-neutral 的 `data_center_saved_records_<source_type>` 平台及对应
+`data-center.saved-records.<source_type>.v1` dataset，public stored search 与 public
+canonical search 在 PostgreSQL 和 Elasticsearch `content-v6` 都只返回 eligibility
+精确为 `candidate` 的 crawler 记录。混合平台查询只过滤
+`data_center_saved_records_*` 分支，其他
+平台保持原有可见性。上游 cleaner 只有在 `record_type` 为 `news` 或
+`news.article`，且 canonical title 或 body 至少一项 trim 后非空时才写入
+`candidate`；仅有 URL 的记录仍是 `internal`。`Night-All` 只用于内部 source/pipeline
+命名，不出现在 Public API dataset 或 platform identifier 中。Admin 与其他内部搜索
+保持不变。
+
+历史 v5 已给所有会命中 `public_opinion` 的 stored/canonical search 幂等指纹加入
+publication visibility contract marker，包括默认 formal 模式；当前 v6 继续该边界，
+并对包含 `data_center_saved_records_*` 的公开请求把 crawler publication contract
+同时绑定到规范化
+查询、签名 cursor 和幂等指纹。这样 gate 前的 `type=stable` 响应不能跨部署原样
+replay；受影响的调用方必须换用新的 `Idempotency-Key`，复用旧 key 按既有规则返回
+`409 idempotency_conflict`。不包含 public-opinion 或
+`data_center_saved_records_*` visibility 的
+请求保持既有指纹和 cursor binding。无游标的首次请求若仍解析到旧 v5 index，会回退
+PostgreSQL；绑定旧 v5 PIT 的 cursor 则返回 `503 search_cursor_unavailable`，不会在
+缺少当前 v6 crawler visibility provenance 的 PIT 上继续翻页。
 
 服务端 profile registry 只接受以下不可变、带版本的 allowlist：
 
@@ -242,15 +262,16 @@ IK `max_word` index / `smart` search 的职责分离在 MX 中对应为“索引
 | 新增 CJK、edge-ngram、delimiter、html-strip、stem 等 multi-field | 是 | mapping 即使可原位新增，历史文档也不会自动有 postings；按新 schema 重建 |
 | 只更新 field 的默认 `search_analyzer` | 文档无需重建 | 仍优先新增 profile；避免 close/reopen 或 alias 下 analyzer 不一致 |
 
-content v5 发布时，先让代码声明新的 `mx-insight-hub-content-v5-current`，再执行
-本节 4.1 的严格命令。strict reconciler 使用部署所要求的同一 tokenizer 对 PG
-current truth 做第一遍扫描；只有完整成功后才把 content 的 read/兼容 write aliases
-从 v4 原子切到 v5，然后做 content catch-up；catch-up 同时按 canonical
-`last_seen_at` 与 publication `updated_at` 捕获切换窗口内的变化。若启用了 chunk 投影，content 完成后
-chunk 再独立构建和切换；两者不共同原子。不要在 v4 原位修改 mapping，
-也不要把只覆盖新写入的 multi-field 当作迁移完成。mapping conflict、HanLP busy/
-timeout、意外 jieba/bigram fallback 或 degraded provenance 都必须让命令非零退出；
-旧 v4 索引保留到 count/hash、代表性查询、磁盘和延迟验收完成，供 alias 回滚。
+发布当前 `content-v6` 时，先让代码声明新的
+`mx-insight-hub-content-v6-current`，再执行本节 4.1 的严格命令。strict reconciler
+使用部署所要求的同一 tokenizer 从 PostgreSQL current truth 做完整第一遍扫描；只有
+完整成功后才把 content 的 read/兼容 write aliases 从 v5 原子切到 v6，然后做
+content catch-up。catch-up 同时按 canonical `last_seen_at` 与 publication
+`updated_at` 捕获切换窗口内的变化。若启用了 chunk 投影，content 完成后 chunk 再
+独立构建和切换；两者不共同原子。不要在 v5 原位修改 mapping，也不要把只覆盖新写入
+记录的 typed field 当作迁移完成。mapping conflict、HanLP busy/timeout、意外
+jieba/bigram fallback 或 degraded provenance 都必须让命令非零退出；旧 v5 索引保留
+到 count/hash、公开 candidate-only 混合查询、磁盘和延迟验收完成，供 alias 回滚。
 
 附件中的 analyzer 只能作为实验素材，不能直接复制到正文：
 

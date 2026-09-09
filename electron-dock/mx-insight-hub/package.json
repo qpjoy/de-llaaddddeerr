@@ -17,6 +17,7 @@
     "classifier": "node server/workers/classifier.mjs",
     "migrate": "node server/migrate.mjs",
     "generate:source-catalog": "node scripts/generate-source-catalog-seed.mjs",
+    "ops:night-all-saved-records-hub-indexes": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f scripts/night-all-saved-records-hub-indexes.sql",
     "ops:province-opinion-indexes": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f scripts/province-opinion-serving-indexes.sql",
     "ops:api-key-quota-indexes": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f scripts/api-key-quota-indexes.sql",
     "migrate:external-platform-credentials": "node scripts/migrate-tikhub-credential.mjs --all",

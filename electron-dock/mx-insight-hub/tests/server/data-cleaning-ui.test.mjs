@@ -78,6 +78,36 @@ test('mobile-commerce task plan exposes the fixed stored-only contract and guard
   assert.match(apiSource, /pipelines\/mobile-commerce\/checkpoint\/reset/u)
 })
 
+test('Night-All saved-records plan exposes 13 isolated leaf tasks and activation gates', async () => {
+  const [, apiSource, pageSource] = await frontendSources()
+
+  for (const sourceType of [
+    'automotive', 'finance', 'forum', 'hotspot', 'local_news', 'media', 'news',
+    'other', 'recruitment', 'research', 'social', 'technology', 'web',
+  ]) {
+    assert.match(pageSource, new RegExp(`night-all-saved-records-${sourceType.replaceAll('_', '-')}`, 'u'))
+  }
+  for (const evidence of [
+    '(last_seen_at, id)',
+    'agent_data_crawler_platform',
+    'scripts/night-all-saved-records-source-indexes.sql',
+    'POST /api/v1/data/canonical/search',
+    '按 source_type 独立授权',
+    'writer、提交顺序与删除合同',
+  ]) assert.match(pageSource, new RegExp(evidence.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
+
+  assert.match(pageSource, /updateNightAllSavedRecordsPipelineStatus/u)
+  assert.match(apiSource, /writerContractAttestation/u)
+  assert.match(apiSource, /selector && Object\.prototype\.hasOwnProperty\.call\(selector, 'sourceType'\)/u)
+  assert.match(apiSource, /\{ sourceType: selector\.sourceType \}/u)
+  assert.match(pageSource, /changeStatus\(taskActive \? 'paused' : 'active', sourceType\)/u)
+  assert.match(pageSource, /taskRunning \|\| !configured \|\| !writerContractConfirmed \|\| progress\.loading \|\| !diagnostic \|\| issues\.length > 0/u)
+  assert.match(pageSource, /taskActive \? '暂停此分区' : '启用此分区'/u)
+  assert.match(pageSource, /runNightAllSavedRecordsPipeline/u)
+  assert.match(pageSource, /resetNightAllSavedRecordsPipelineCheckpoints/u)
+  assert.match(apiSource, /pipelines\/night-all-saved-records\/checkpoints\/reset/u)
+})
+
 test('every scheduled cleaning plan saves its runtime interval independently from connection changes', async () => {
   const [, , pageSource] = await frontendSources()
   const section = (start, end) => {
@@ -88,11 +118,12 @@ test('every scheduled cleaning plan saves its runtime interval independently fro
     return pageSource.slice(from, to)
   }
 
-  assert.equal([...pageSource.matchAll(/<RuntimeSyncIntervalControl\b/gu)].length, 5)
+  assert.equal([...pageSource.matchAll(/<RuntimeSyncIntervalControl\b/gu)].length, 6)
   assert.match(pageSource, /const SYNC_INTERVAL_APPLY_MESSAGE = '当前批次不变，下一次调度检查按新间隔重新计算'/u)
   assert.match(pageSource, /'保存同步间隔'/u)
 
   for (const call of [
+    /updateNightAllSavedRecordsPipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
     /updateMobileCommercePipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
     /updateProvinceOpinionPipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
     /updateTelegramSqlitePipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
@@ -101,6 +132,7 @@ test('every scheduled cleaning plan saves its runtime interval independently fro
   ]) assert.match(pageSource, call)
 
   for (const [start, end] of [
+    ['function NightAllSavedRecordsPipelineModal', 'function mobileCommerceRunning'],
     ['function MobileCommercePipelineModal', 'function ProvinceOpinionPipelineModal'],
     ['function ProvinceOpinionPipelineModal', 'function TelegramSqlitePipelineModal'],
     ['function TelegramSqlitePipelineModal', 'function TelegramSqliteTaskCard'],

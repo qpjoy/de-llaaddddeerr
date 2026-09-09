@@ -27,6 +27,14 @@ import {
   isMobileCommerceSourceKey,
   mobileCommerceSourceContractIssues,
 } from '../mobile-commerce/source-contract.mjs'
+import {
+  CRAWLER_PIPELINE_KEY,
+  CRAWLER_SOURCES,
+  CRAWLER_WRITER_CONTRACT_DIGEST,
+  CRAWLER_WRITER_CONTRACT_VERSION,
+  crawlerSourceContractIssues,
+  isCrawlerSourceKey,
+} from '../crawler/source-contract.mjs'
 import { sqliteApiDailyWindowAt } from './sqlite-api-source.mjs'
 
 const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
@@ -89,6 +97,21 @@ const MOBILE_COMMERCE_SCHEDULE_ERRORS = Object.freeze({
   },
 })
 
+const CRAWLER_SCHEDULE_ERRORS = Object.freeze({
+  unavailable: {
+    code: 'crawler_schedule_unavailable',
+    message: 'Crawler scheduling requires the PostgreSQL queue',
+  },
+  failed: {
+    code: 'crawler_schedule_failed',
+    message: 'No crawler task was scheduled',
+  },
+  outcomeUnknown: {
+    code: 'crawler_schedule_outcome_unknown',
+    message: 'The crawler scheduling outcome is unknown',
+  },
+})
+
 function isDue(source, cursor, now) {
   if (cursor && cursor.status !== 'idle') return false
   const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
@@ -132,6 +155,7 @@ export async function scheduleActiveDatabaseSources({
       isTelegramMonitorSourceKey(source.sourceKey)
       || isProvinceOpinionSourceKey(source.sourceKey)
       || isMobileCommerceSourceKey(source.sourceKey)
+      || isCrawlerSourceKey(source.sourceKey)
     ) continue
     const cursor = await queue.getCursor(`external:${source.sourceKey}`)
     // A running continuation owns this source. Failed cursors require an
@@ -211,6 +235,40 @@ export async function scheduleActiveDatabaseSources({
           queue,
           [scheduledJob(MOBILE_COMMERCE_SOURCE_KEY, batchSize)],
           MOBILE_COMMERCE_SCHEDULE_ERRORS,
+        )
+        enqueued += jobIds.filter((jobId) => jobId != null).length
+      }
+    }
+  }
+
+  const crawlerSources = CRAWLER_SOURCES.map((spec) => ({
+    spec,
+    source: sources.find((candidate) => candidate.sourceKey === spec.sourceKey),
+  }))
+  if (crawlerSources.some(({ source }) => source?.status === 'active')) {
+    const attestation = await store.getLatestPipelineWriterContractAttestation?.(CRAWLER_PIPELINE_KEY)
+    const attested = attestation?.contractVersion === CRAWLER_WRITER_CONTRACT_VERSION
+      && attestation?.contractDigest === CRAWLER_WRITER_CONTRACT_DIGEST
+    if (attested) {
+      const dueSources = []
+      for (const { spec, source } of crawlerSources) {
+        if (
+          source?.sourceKind !== 'database'
+          || source.status !== 'active'
+          || crawlerSourceContractIssues(source, spec).length > 0
+        ) continue
+        try {
+          const cursor = await queue.getCursor(`external:${source.sourceKey}`)
+          if (isDue(source, cursor, now)) dueSources.push(source)
+        } catch (error) {
+          logger.warn?.(`[external] crawler schedule skipped ${source.sourceKey}: ${error?.message || 'cursor unavailable'}`)
+        }
+      }
+      if (dueSources.length > 0) {
+        const jobIds = await enqueueJobsAtomically(
+          queue,
+          dueSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
+          CRAWLER_SCHEDULE_ERRORS,
         )
         enqueued += jobIds.filter((jobId) => jobId != null).length
       }

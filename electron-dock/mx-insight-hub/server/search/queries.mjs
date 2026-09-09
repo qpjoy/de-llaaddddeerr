@@ -36,6 +36,7 @@ const SEARCH_ANALYSIS_STATE_VERSION = 1
 const SEARCH_BACKENDS = new Set(['hanlp', 'jieba', 'bigram'])
 const SEGMENTATION_DEGRADED_PROFILE = 'canonical.phrase.v1'
 const PUBLIC_OPINION_PLATFORM = 'public_opinion'
+const CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX = 'data_center_saved_records_'
 export const SEARCH_SORTS = Object.freeze(['relevance', 'newest', 'oldest'])
 
 /**
@@ -130,6 +131,30 @@ function publicOpinionVisibilityFilter(visibility) {
   }
 }
 
+function crawlerPublicationVisibilityFilter(visibility) {
+  if (!visibility) return null
+  return {
+    bool: {
+      should: [
+        {
+          bool: {
+            must_not: [{ prefix: { platform: CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX } }],
+          },
+        },
+        {
+          bool: {
+            filter: [
+              { prefix: { platform: CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX } },
+              { term: { crawlerPublicationEligibility: visibility.eligibility } },
+            ],
+          },
+        },
+      ],
+      minimum_should_match: 1,
+    },
+  }
+}
+
 function postgresPublicationPredicate(visibility, parameter) {
   if (!visibility) return 'TRUE'
   const formalTime = `(($${parameter}::jsonb ->> 'from') IS NULL
@@ -162,6 +187,12 @@ function postgresPublicationPredicate(visibility, parameter) {
             AND (($${parameter}::jsonb ->> 'location') IS NULL
                  OR publication.location_label = ($${parameter}::jsonb ->> 'location'))
           ))`
+}
+
+function postgresCrawlerPublicationPredicate(visibility) {
+  if (!visibility) return 'TRUE'
+  return `(platform !~ '^${CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX}'
+           OR stable_fields #>> '{crawler,publication,eligibility}' = 'candidate')`
 }
 
 function wildcardSubstring(term) {
@@ -476,7 +507,7 @@ export class SearchQueries {
     }
   }
 
-  async #publicOpinionVisibilityIndexReady() {
+  async #publicationVisibilityIndexReady() {
     const activeIndexSchema = await this.#activeContentIndexSchema()
     return activeIndexSchema === CONTENT_INDEX_SCHEMA
   }
@@ -718,6 +749,7 @@ export class SearchQueries {
     oneShot = false,
     sort = 'relevance',
     publicOpinionVisibility = null,
+    crawlerPublicationVisibility = null,
   } = {}) {
     const limit = clampSize(size)
     const normalizedOffset = normalizeOffset(offset)
@@ -744,13 +776,17 @@ export class SearchQueries {
         includeTotal: trackTotalHits || normalizedOffset != null,
         requestedProfile,
         publicOpinionVisibility,
+        crawlerPublicationVisibility,
       })
       return oneShot ? { ...result, nextCursor: null } : result
     }
     let pitId = cursor?.pitId ?? null
     try {
-      if (publicOpinionVisibility && (
-        !await this.#publicOpinionVisibilityIndexReady() ||
+      const requiresPublicationVisibility = Boolean(
+        publicOpinionVisibility || crawlerPublicationVisibility,
+      )
+      if (requiresPublicationVisibility && (
+        !await this.#publicationVisibilityIndexReady() ||
         (cursor?.mode === 'elasticsearch' && cursor.analysisState?.indexSchema !== CONTENT_INDEX_SCHEMA)
       )) {
         if (cursor?.mode === 'elasticsearch') {
@@ -761,7 +797,7 @@ export class SearchQueries {
           )
         }
         this.logger?.warn?.(
-          `[search] ${CONTENT_INDEX_SCHEMA} is not active; using PostgreSQL public-opinion visibility`,
+          `[search] ${CONTENT_INDEX_SCHEMA} is not active; using PostgreSQL publication visibility`,
         )
         const result = await this.#searchContentPostgres(query, {
           platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
@@ -769,6 +805,7 @@ export class SearchQueries {
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
           publicOpinionVisibility,
+          crawlerPublicationVisibility,
         })
         return oneShot ? { ...result, nextCursor: null } : result
       }
@@ -811,7 +848,7 @@ export class SearchQueries {
         appliedProfile,
         tokens,
         queryAnalysis,
-        indexSchema: publicOpinionVisibility ? CONTENT_INDEX_SCHEMA : null,
+        indexSchema: requiresPublicationVisibility ? CONTENT_INDEX_SCHEMA : null,
       })
       const segmented = toPresegmentedText(tokens)
       const plan = buildContentSearchPlan({ profile: appliedProfile, query, segmented })
@@ -824,6 +861,9 @@ export class SearchQueries {
         if (!pitId) throw new Error('Elasticsearch did not return a point-in-time id')
       }
       const publicationFilter = publicOpinionVisibilityFilter(publicOpinionVisibility)
+      const crawlerPublicationFilter = crawlerPublicationVisibilityFilter(
+        crawlerPublicationVisibility,
+      )
       const filter = [
         ...(platform ? [{ term: { platform } }] : []),
         ...(Array.isArray(platforms) && platforms.length > 0 ? [{ terms: { platform: platforms } }] : []),
@@ -840,6 +880,7 @@ export class SearchQueries {
             },
           },
         }] : []),
+        ...(crawlerPublicationFilter ? [crawlerPublicationFilter] : []),
         ...(publicationFilter ? [publicationFilter] : []),
       ]
       const response = await this.client.request('POST', '/_search', {
@@ -922,6 +963,7 @@ export class SearchQueries {
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
           publicOpinionVisibility,
+          crawlerPublicationVisibility,
         })
         return oneShot ? { ...result, nextCursor: null } : result
       }
@@ -1026,6 +1068,7 @@ export class SearchQueries {
     includeTotal,
     requestedProfile,
     publicOpinionVisibility,
+    crawlerPublicationVisibility,
   }) {
     const publicationJoin = publicOpinionVisibility
       ? `LEFT JOIN core.public_opinion_current_state publication
@@ -1046,6 +1089,9 @@ export class SearchQueries {
     const visibilityParameter = offset == null ? 14 : 15
     const publicationPredicate = publicOpinionVisibility
       ? `AND ${postgresPublicationPredicate(publicOpinionVisibility, visibilityParameter)}`
+      : ''
+    const crawlerPublicationPredicate = crawlerPublicationVisibility
+      ? `AND ${postgresCrawlerPublicationPredicate(crawlerPublicationVisibility)}`
       : ''
     const { rows } = await this.pool.query(
       `WITH matching AS (
@@ -1071,6 +1117,7 @@ export class SearchQueries {
             AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
             AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
             AND ($12::text[] IS NULL OR platform = ANY($12::text[]))
+            ${crawlerPublicationPredicate}
             ${publicationPredicate}
        )
        SELECT *
@@ -1111,6 +1158,7 @@ export class SearchQueries {
             platform, platforms, datasetId, datasetIds, objectType,
             authorExternalId, chatId, fromTime, toTime,
             publicOpinionVisibility,
+            crawlerPublicationVisibility,
           })
     }
     const pageRows = rows.slice(0, limit)
@@ -1188,6 +1236,7 @@ export class SearchQueries {
     fromTime,
     toTime,
     publicOpinionVisibility,
+    crawlerPublicationVisibility,
   }) {
     const publicationJoin = publicOpinionVisibility
       ? `LEFT JOIN core.public_opinion_current_state publication
@@ -1196,6 +1245,9 @@ export class SearchQueries {
       : ''
     const publicationPredicate = publicOpinionVisibility
       ? `AND ${postgresPublicationPredicate(publicOpinionVisibility, 11)}`
+      : ''
+    const crawlerPublicationPredicate = crawlerPublicationVisibility
+      ? `AND ${postgresCrawlerPublicationPredicate(crawlerPublicationVisibility)}`
       : ''
     const { rows } = await this.pool.query(
       `SELECT count(*)::bigint AS total_count
@@ -1216,6 +1268,7 @@ export class SearchQueries {
           AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
           AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
           AND ($10::text[] IS NULL OR platform = ANY($10::text[]))
+          ${crawlerPublicationPredicate}
           ${publicationPredicate}`,
       [
         query, platform, datasetId, datasetIds, objectType, authorExternalId,

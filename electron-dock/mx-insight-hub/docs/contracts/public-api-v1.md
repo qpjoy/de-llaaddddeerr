@@ -32,6 +32,13 @@ example:
         "servingMode": "stored"
       },
       {
+        "platform": "data_center_saved_records_news",
+        "ready": false,
+        "capabilities": ["stored_search", "canonical_search"],
+        "source": "hub",
+        "servingMode": "stored"
+      },
+      {
         "platform": "xiaohongshu",
         "ready": true,
         "capabilities": ["search_posts", "post_detail"],
@@ -72,6 +79,13 @@ decision or a freshness guarantee. An initially unconfigured or paused source
 may report `ready=false`, while previously indexed records can still be
 available through read APIs whose own serving gates are ready. The platform is
 local to Hub and is never added to the Night-All legacy dispatch matrix.
+
+Each explicitly granted `data_center_saved_records_<source_type>` entry is also
+Hub-owned and stored-only. It advertises `stored_search` and
+`canonical_search`; `ready=true` requires that exact fixed leaf source to be
+active and the search layer to be configured. A paused leaf may still retain
+stored rows, so readiness is neither a publication grant nor a freshness
+guarantee. These platform names never enter `data.legacySearch`.
 
 `public_opinion.all_ingested.read` is a separate, non-default step-up
 capability. It never grants the `public_opinion` platform by itself. The P1
@@ -698,6 +712,8 @@ fan-out.
 `public_opinion` is a Hub-local stored platform and is deliberately unsupported
 on this live-compatible route (`400 platform_operation_unsupported`). Use the
 province feed, `/data/stored/search`, or `/data/canonical/search` instead.
+Every `data_center_saved_records_*` platform is likewise Hub-local and rejected
+by this live route; use `/data/stored/search` or `/data/canonical/search`.
 
 `query` must be non-blank and at most 500 characters after trimming. `cursor`, when present, must be a non-blank opaque string of at most 8,192 characters. Clients must return the cursor from the previous response unchanged rather than constructing or decoding it.
 
@@ -1053,6 +1069,20 @@ and page size; a later page requires a new idempotency key. Grant, policy, quota
 idempotency replay and usage evidence use the same per-platform ledger as
 `POST /api/v1/data/search`.
 
+For every `data_center_saved_records_*` platform, both the Elasticsearch and
+PostgreSQL paths return only records whose governed crawler publication
+eligibility is exactly `candidate`; internal, missing or malformed eligibility
+never passes. Elasticsearch `content-v6` is preferred. A first-page request on
+an older projection or after an Elasticsearch transport failure falls back to
+PostgreSQL with the same visibility predicate. A crawler cursor signed before
+the visibility contract has an obsolete HMAC binding and returns `400
+invalid_cursor`; restart without a cursor and use a new `Idempotency-Key`. A
+current-contract Elasticsearch cursor never changes backend; if its
+`content-v6` projection is unavailable, Hub returns `503
+search_cursor_unavailable` and callers retry the same cursor later. The crawler
+visibility contract is bound to both the signed cursor and idempotency
+fingerprint, so a contract upgrade requires a new `Idempotency-Key`.
+
 ## Unified canonical search
 
 ```http
@@ -1100,6 +1130,13 @@ gives all matching datasets one BM25 scoring context, one deterministic
 is not an implicit relevance boost. Records intentionally preserved in separate
 datasets remain separate results even if they share an external ID; the search
 layer does not guess a cross-dataset survivor rule.
+In a mixed-platform search, only each `data_center_saved_records_*` branch is
+restricted to exact `candidate` eligibility; other platform branches keep their
+own visibility contract. The same `content-v6`/PostgreSQL first-page fallback,
+pre-visibility `400 invalid_cursor` restart, and current-contract Elasticsearch
+cursor `503 search_cursor_unavailable` behavior described for stored search
+applies here. The resolved crawler visibility contract is part of the cursor
+and idempotency fingerprint.
 If Elasticsearch is unavailable on the first page, the same authorized filters
 are applied to the PostgreSQL canonical table and the response reports
 `search_projection_degraded`, `search_profile_degraded`, and

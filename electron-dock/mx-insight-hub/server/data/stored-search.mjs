@@ -8,6 +8,8 @@ import {
 } from '../search/profiles.mjs'
 
 const PUBLIC_OPINION_PLATFORM = 'public_opinion'
+export const CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX = 'data_center_saved_records_'
+export const CRAWLER_PUBLICATION_VISIBILITY_CONTRACT = 'crawler.publication-visibility.v1'
 const PUBLIC_OPINION_SEARCH_FIELDS = [
   'countryCode', 'from', 'includeCandidates', 'location', 'minQualityScore', 'province', 'to',
 ]
@@ -186,6 +188,9 @@ function queryBinding(query) {
       datasetId: query.datasetId,
       objectType: query.objectType,
       pageSize: query.pageSize,
+      ...(query.crawlerPublicationVisibility ? {
+        crawlerPublicationVisibility: query.crawlerPublicationVisibility,
+      } : {}),
     }, query.publicOpinionVisibility)))
     .digest('base64url')
 }
@@ -206,8 +211,20 @@ function canonicalQueryBinding(query) {
       // let a caller flip the order and keep paging from a position computed
       // under the previous one, silently skipping and repeating rows.
       requestedSort: query.sort,
+      ...(query.crawlerPublicationVisibility ? {
+        crawlerPublicationVisibility: query.crawlerPublicationVisibility,
+      } : {}),
     }, query.publicOpinionVisibility)))
     .digest('base64url')
+}
+
+function crawlerPublicationVisibility(platforms) {
+  return platforms.some((platform) => platform.startsWith(CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX))
+    ? {
+        contractVersion: CRAWLER_PUBLICATION_VISIBILITY_CONTRACT,
+        eligibility: 'candidate',
+      }
+    : null
 }
 
 /**
@@ -385,6 +402,7 @@ export function normalizeStoredSearchQuery(input, maxPageSize = 100, cursorSecre
     objectType: stringValue(input.objectType, 'objectType', 100),
     pageSize: pageSizeValue(input.pageSize, Math.min(100, validPolicyMax)),
     publicOpinionVisibility: publicOpinionVisibility(input, platform),
+    crawlerPublicationVisibility: crawlerPublicationVisibility([platform]),
   }
   const cursorBinding = queryBinding(normalized)
   const cursorToken = stringValue(input.cursor, 'cursor', 8_192)
@@ -434,6 +452,7 @@ export function normalizeCanonicalSearchQuery(input, {
     ).id,
     sort: sortValue(input.sort),
     publicOpinionVisibility: publicOpinionVisibility(input, platform),
+    crawlerPublicationVisibility: crawlerPublicationVisibility(platform ? [platform] : platformScope),
   }
   const cursorBinding = canonicalQueryBinding(normalized)
   const cursorToken = stringValue(input.cursor, 'cursor', 8_192)

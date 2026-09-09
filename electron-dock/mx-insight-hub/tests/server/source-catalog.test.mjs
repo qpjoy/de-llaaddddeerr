@@ -983,6 +983,8 @@ test('Postgres related-data queries bind the reviewed marketplace entry ID acros
   assert.equal(calls.length, 4)
   for (const { sql, values } of calls) {
     assert.match(sql, /stable_fields #>> '\{commerce,marketplace,entryId\}' = \$2/u)
+    assert.match(sql, /stable_fields #>> '\{sourceCatalog,publisher,entryId\}' = \$2/u)
+    assert.match(sql, /stable_fields #>> '\{sourceCatalog,collector,entryId\}' = \$2/u)
     assert.deepEqual(values.slice(0, 2), [
       ['快手小店', 'kuaishou shop'],
       entry.id,
@@ -991,6 +993,7 @@ test('Postgres related-data queries bind the reviewed marketplace entry ID acros
   const sourceQuery = calls.find(({ sql }) => sql.includes('FROM catalog.external_sources'))
   assert.ok(sourceQuery)
   assert.match(sourceQuery.sql, /source_key = 'mobile-commerce-collected-items'/u)
+  assert.match(sourceQuery.sql, /record\.dataset_id = source\.dataset_id/u)
   assert.match(sourceQuery.sql, /record\.deleted_at IS NULL/u)
   assert.deepEqual(related.stats, {
     datasetCount: 0,
@@ -1003,6 +1006,68 @@ test('Postgres related-data queries bind the reviewed marketplace entry ID acros
     embeddedChunkCount: 0,
     projectedChunkCount: 0,
   })
+})
+
+test('MemoryStore related data follows governed crawler publisher and collector facets', async () => {
+  const store = new MemoryStore()
+  const target = (await store.listSourceCatalogEntries())
+    .find((entry) => entry.canonicalName === '腾讯新闻')
+  assert.ok(target)
+
+  const publisherRecordId = randomUUID()
+  const collectorRecordId = randomUUID()
+  const base = {
+    datasetId: 'data-center.saved-records.news.v1',
+    platform: 'night_all_landing',
+    objectType: 'saved_record',
+    contentType: 'news.article',
+    currentRevision: 1,
+    collectedAt: '2026-09-09T09:40:00.000Z',
+    deletedAt: null,
+  }
+  store.canonicalRecords.set(publisherRecordId, {
+    ...base,
+    id: publisherRecordId,
+    externalId: 'publisher-record',
+    title: '发布者目录归类',
+    stableFields: {
+      sourceCatalog: { publisher: { entryId: target.id } },
+    },
+  })
+  store.canonicalRecords.set(collectorRecordId, {
+    ...base,
+    id: collectorRecordId,
+    externalId: 'collector-record',
+    title: '采集源目录归类',
+    stable_fields: {
+      sourceCatalog: { collector: { entryId: target.id } },
+    },
+  })
+  await store.createExternalSource({
+    sourceKey: 'night-all-saved-records-news',
+    displayName: 'Night-All 新闻资讯',
+    sourceKind: 'database',
+    datasetId: base.datasetId,
+    platform: base.platform,
+    objectType: base.objectType,
+    status: 'paused',
+    connection: {
+      schema: 'public',
+      table: 'saved_records_news',
+      cursorColumn: 'last_seen_at',
+      idColumn: 'id',
+    },
+    syncIntervalSeconds: 300,
+  })
+
+  const related = await store.sourceCatalogRelatedData(target)
+  assert.equal(related.stats.recordCount, 2)
+  assert.equal(related.stats.externalSourceCount, 1)
+  assert.deepEqual(related.recentRecords.map((record) => record.id).sort(), [
+    publisherRecordId,
+    collectorRecordId,
+  ].sort())
+  assert.equal(related.externalSources[0].sourceKey, 'night-all-saved-records-news')
 })
 
 test('source catalog remains Hub Admin Token-only for anonymous, Launcher user, and Launcher admin callers', async () => {

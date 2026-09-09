@@ -202,6 +202,14 @@ export async function buildContentDocument(row, { segmenter }) {
   const entities = entitiesOf(stableFields)
   const location = locationOf(row)
   const publication = publicationOf(row)
+  const rawCrawlerPublicationEligibility = stableFields.crawler?.publication?.eligibility
+  // PostgreSQL public search requires an exact JSON string match. Keep the
+  // Elasticsearch projection equally fail-closed: do not trim or stringify
+  // malformed values such as " candidate " or ["candidate"].
+  const crawlerPublicationEligibility = (
+    typeof rawCrawlerPublicationEligibility === 'string'
+    && ['candidate', 'internal'].includes(rawCrawlerPublicationEligibility)
+  ) ? rawCrawlerPublicationEligibility : null
 
   return {
     id: row.id,
@@ -259,6 +267,7 @@ export async function buildContentDocument(row, { segmenter }) {
     admin1Code: row.admin1_code,
     admin2Code: row.admin2_code,
     ...(publication ? { publication } : {}),
+    ...(crawlerPublicationEligibility ? { crawlerPublicationEligibility } : {}),
 
     eventTime: row.event_time,
     editedAt: stableFields.editedAt ?? null,

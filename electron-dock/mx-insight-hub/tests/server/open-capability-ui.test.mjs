@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from '../../src/open-capabilities.js'
 import { selectVisibleTenantId } from '../../src/tenant-scope.js'
+import { CRAWLER_SOURCES } from '../../server/ingest/crawler/source-contract.mjs'
 
 test('tenant deep links accept only visible tenant IDs and preserve intentional aggregate views', () => {
   const tenants = [{ id: 'tenant-a' }, { id: 'tenant-b' }]
@@ -123,6 +124,14 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(components, /source_catalog:\s*'数据源目录'/)
   assert.match(components, /mobile_commerce:\s*'手机电商采集'/)
   assert.match(components, /virtual_supermarket:\s*'虚拟超市'/)
+  for (const source of CRAWLER_SOURCES) {
+    assert.ok(pages.includes(`'${source.platform}'`), `${source.platform} is selectable`)
+    assert.match(
+      components,
+      new RegExp(`${source.platform}:\\s*'数据中心`, 'u'),
+      `${source.platform} has an operator label`,
+    )
+  }
 })
 
 test('scoped tenant navigation exposes provider-neutral self-service and capability read/write by membership', async () => {

@@ -1247,6 +1247,25 @@ function assertPublicOpinionContract(document) {
 }
 
 function assertPublicOpinionSearchContract(document) {
+  const capabilitiesOperation = document.paths['/data/capabilities'].get
+  assert.match(
+    capabilitiesOperation.description,
+    /data_center_saved_records_<source_type>.*source=hub.*servingMode=stored.*stored_search.*canonical_search/is,
+  )
+  assert.match(
+    capabilitiesOperation.description,
+    /exact fixed leaf source.*active.*search layer.*configured.*never enter data\.legacySearch/is,
+  )
+  const crawlerCapability = capabilitiesOperation.responses[200].content['application/json']
+    .example.data.platforms.find(({ platform }) => platform === 'data_center_saved_records_news')
+  assert.deepEqual(crawlerCapability, {
+    platform: 'data_center_saved_records_news',
+    ready: false,
+    capabilities: ['stored_search', 'canonical_search'],
+    source: 'hub',
+    servingMode: 'stored',
+  })
+
   const requestFields = [
     'includeCandidates', 'minQualityScore', 'province', 'countryCode', 'location', 'from', 'to',
   ]
@@ -1262,6 +1281,25 @@ function assertPublicOpinionSearchContract(document) {
     assert.equal(properties.to.format, 'date-time')
     assert.deepEqual(properties.type.enum, ['fresh', 'stable'])
   }
+  const storedCursor = document.components.schemas.StoredSearchRequest.properties.cursor
+  assert.deepEqual(
+    Object.keys(storedCursor).sort(),
+    ['description', 'maxLength', 'minLength', 'type'],
+  )
+  assert.match(storedCursor.description, /page size/i)
+  assert.match(
+    storedCursor.description,
+    /data_center_saved_records_\* publication-visibility contract/i,
+  )
+  const canonicalCursor = document.components.schemas.CanonicalSearchRequest.properties.cursor
+  assert.deepEqual(
+    Object.keys(canonicalCursor).sort(),
+    ['description', 'maxLength', 'minLength', 'type'],
+  )
+  assert.match(
+    canonicalCursor.description,
+    /data_center_saved_records_\* publication-visibility contract/i,
+  )
   assert.deepEqual(
     document.components.schemas.CanonicalSearchRequest.properties.sort.enum,
     ['newest', 'oldest', 'relevance'],
@@ -1274,8 +1312,19 @@ function assertPublicOpinionSearchContract(document) {
     assert.match(operation.description, /includeCandidates=all.*from.*to.*province.*countryCode.*location/i)
     assert.match(operation.description, /new Idempotency-Key/i)
     assert.match(operation.description, /candidate author\/contentType/i)
+    assert.match(operation.description, /data_center_saved_records_\*.*candidate/i)
+    assert.match(operation.description, /content-v6.*PostgreSQL/i)
+    assert.match(operation.description, /pre-visibility crawler cursor.*400 invalid_cursor.*restart/i)
+    assert.match(
+      operation.description,
+      /current-contract Elasticsearch cursor.*503 search_cursor_unavailable.*retry/i,
+    )
   }
-  assert.match(canonical.description, /every other platform is unchanged/i)
+  assert.match(canonical.description, /other platform.*unchanged/i)
+  assert.match(
+    document.paths['/data/search'].post.description,
+    /data_center_saved_records_\*.*rejected.*\/data\/stored\/search.*\/data\/canonical\/search/i,
+  )
 
   for (const envelopeName of ['StoredSearchEnvelope', 'CanonicalSearchEnvelope']) {
     const filters = document.components.schemas[envelopeName]
@@ -1981,6 +2030,20 @@ test('public curl guide hides deployment topology and documents the Xiaohongshu 
   assert.match(guide, /复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`/)
   assert.match(guide, /App V2-compatible GET[^。]*独立兼容合同与幂等域/)
   assert.match(guide, /不能跨 endpoint 复用 key/)
+})
+
+test('crawler public contract guide mirrors discovery and visibility boundaries', async () => {
+  const contract = await readFile(
+    fileURLToPath(new URL('../../docs/contracts/public-api-v1.md', import.meta.url)),
+    'utf8',
+  )
+
+  assert.match(contract, /data_center_saved_records_news[\s\S]*stored_search[\s\S]*canonical_search/u)
+  assert.match(contract, /data_center_saved_records_<source_type>[\s\S]*never enter `data\.legacySearch`/u)
+  assert.match(contract, /data_center_saved_records_\*[\s\S]*rejected[\s\S]*\/data\/stored\/search/u)
+  assert.match(contract, /publication[\s\S]*exactly `candidate`/u)
+  assert.match(contract, /content-v6[\s\S]*400[\s\S]*invalid_cursor[\s\S]*503[\s\S]*search_cursor_unavailable/u)
+  assert.match(contract, /visibility contract[\s\S]*idempotency fingerprint/u)
 })
 
 test('external data platform public contract and internal operations guidance stay aligned', async () => {

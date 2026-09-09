@@ -5,7 +5,7 @@ export const PRODUCT_ID = 'mx-insight-hub'
 // Bump for incompatible mappings and whenever a new searchable multi-field
 // must be populated for existing documents. Elasticsearch can add a mapping in
 // place, but it cannot retroactively analyze old `_source` into that field.
-export const CONTENT_SCHEMA_VERSION = 5
+export const CONTENT_SCHEMA_VERSION = 6
 export const CHUNK_SCHEMA_VERSION = 1
 
 // Human names arrive as raw source text. Keep that raw value in `_source` and
@@ -172,6 +172,11 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
           countryCode: { type: 'keyword' },
         },
       },
+      // Crawler publication eligibility is an independent, typed projection
+      // of stable_fields.crawler.publication.eligibility. Public canonical
+      // search uses it to exclude internal-only crawler records without
+      // exposing the private crawler lineage in response documents.
+      crawlerPublicationEligibility: { type: 'keyword' },
 
       eventTime: { type: 'date' },
       editedAt: { type: 'date' },

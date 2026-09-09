@@ -452,8 +452,8 @@ Completing the repository work does not authorize any of the following:
 - change MX-H2I login/networking or restart Launcher components.
 
 The operator may consider onboarding only after Hub migration 035 and the
-formal-only list/detail/search gates are deployed, content-v5 is rebuilt, then
-Night-All 042/043 are executed and
+formal-only list/detail/search gates are deployed, the current content-v6 is
+fully rebuilt, then Night-All 042/043 are executed and
 verified in the target database, the source owner supplies writer-path evidence,
 the current Hub contract digest is attested, the public field allowlist is
 reviewed, the online Hub indexes are separately installed and a deployment is
@@ -463,6 +463,12 @@ tests and explicit pipeline activation; none is implied by applying migrations
 034/035. Candidate writing must be enabled only after all Night-All readers have
 been upgraded; a rolling old/new reader mix or a direct code rollback can expose
 candidate rows as legacy formal results.
+
+content-v5 was the original typed public-opinion publication milestone; it is
+historical context, not the current serving target. The current content-v6 keeps
+that publication projection and adds the crawler publication gate. While a read
+alias still serves v5, publication-gated public search starts on the PostgreSQL
+fallback, and a v5 Elasticsearch PIT cannot continue under the v6 contract.
 
 ## Related decisions
 

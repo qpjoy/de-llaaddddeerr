@@ -1030,6 +1030,19 @@ export function platformLabel(platform) {
     mobile_commerce: '手机电商采集',
     virtual_supermarket: '虚拟超市',
     ecommerce: '电商商品数据',
+    data_center_saved_records_automotive: '数据中心 · 汽车',
+    data_center_saved_records_finance: '数据中心 · 财经',
+    data_center_saved_records_forum: '数据中心 · 论坛',
+    data_center_saved_records_hotspot: '数据中心 · 热点',
+    data_center_saved_records_local_news: '数据中心 · 本地新闻',
+    data_center_saved_records_media: '数据中心 · 媒体',
+    data_center_saved_records_news: '数据中心 · 新闻资讯',
+    data_center_saved_records_other: '数据中心 · 其他',
+    data_center_saved_records_recruitment: '数据中心 · 招聘',
+    data_center_saved_records_research: '数据中心 · 研究',
+    data_center_saved_records_social: '数据中心 · 社交',
+    data_center_saved_records_technology: '数据中心 · 科技',
+    data_center_saved_records_web: '数据中心 · 网页',
   }
   return labels[platform] || platform
 }

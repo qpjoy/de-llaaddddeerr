@@ -627,7 +627,7 @@ test('explicit relaxed relevance remains available while strict relevance is the
 
 test('search profile registry exposes a bounded public allowlist and keeps diagnostics admin-only', () => {
   const publicCapabilities = searchCapabilities()
-  assert.equal(publicCapabilities.indexSchema, 'content-v5')
+  assert.equal(publicCapabilities.indexSchema, 'content-v6')
   assert.equal(publicCapabilities.defaultProfile, DEFAULT_SEARCH_PROFILE)
   assert.deepEqual(publicCapabilities.profiles.map((entry) => entry.id), [
     'canonical.balanced.v1',
@@ -722,7 +722,7 @@ test('named content profiles compile to fixed fields and operators', async () =>
   )
 })
 
-test('v4 profile features remain available during the content-v5 publication rollout', async () => {
+test('v4 profile features remain available during the content-v6 crawler visibility rollout', async () => {
   let backing = 'mx-insight-hub-content-v3-current'
   const client = {
     async getAlias(alias) {
@@ -758,14 +758,14 @@ test('v4 profile features remain available during the content-v5 publication rol
   backing = 'mx-insight-hub-content-v4-current'
   const duringRollout = await queries.searchCapabilities({ audience: 'admin' })
   assert.equal(duringRollout.activeIndexSchema, 'content-v4')
-  assert.equal(duringRollout.ready, false, 'publication visibility still requires content-v5')
+  assert.equal(duringRollout.ready, false, 'publication visibility still requires content-v6')
   assert.equal(duringRollout.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, true)
   const result = await queries.searchContent('人工智能', { searchProfile: 'canonical.title-prefix.v1' })
   assert.equal(result.searchExecution.appliedProfile, 'canonical.title-prefix.v1')
 
-  backing = 'mx-insight-hub-content-v5-current'
+  backing = 'mx-insight-hub-content-v6-current'
   const after = await queries.searchCapabilities({ audience: 'admin' })
-  assert.equal(after.activeIndexSchema, 'content-v5')
+  assert.equal(after.activeIndexSchema, 'content-v6')
   assert.equal(after.ready, true)
   assert.equal(after.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, true)
 })
@@ -1256,8 +1256,8 @@ test('an expired PIT is reported as an expired cursor instead of restarting on P
 test('content index derives read alias, write alias and bootstrap index', () => {
   const definition = contentIndex()
   assert.equal(definition.readAlias, 'mx-insight-hub-content')
-  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v5')
-  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v5-current')
+  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v6')
+  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v6-current')
   assert.equal(definition.bootstrapIndex, definition.currentIndex)
   assert.equal(definition.settings['index.lifecycle.name'], undefined)
   assert.equal(definition.settings['index.lifecycle.rollover_alias'], undefined)
@@ -1420,17 +1420,19 @@ function currentSnapshotPool(matchSql, rows, {
   }
 }
 
-test('content current index atomically replaces v1-v4 read memberships with v5 PostgreSQL truth', async () => {
+test('content current index atomically replaces v1-v5 read memberships with v6 PostgreSQL truth', async () => {
   const indexSet = contentIndex()
   const oldV1 = 'mx-insight-hub-content-v1-000001'
   const oldV2 = 'mx-insight-hub-content-v2-000001'
   const oldV3 = 'mx-insight-hub-content-v3-current'
   const oldV4 = 'mx-insight-hub-content-v4-current'
+  const oldV5 = 'mx-insight-hub-content-v5-current'
   const harness = currentIndexHarness(indexSet, {
     [oldV1]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v1': { is_write_index: true } },
     [oldV2]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v2': { is_write_index: true } },
     [oldV3]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v3': { is_write_index: true } },
     [oldV4]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v4': { is_write_index: true } },
+    [oldV5]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v5': { is_write_index: true } },
   })
   const live = canonicalRow({
     dataset_id: 'public-opinion.province.v1',
@@ -1469,7 +1471,7 @@ test('content current index atomically replaces v1-v4 read memberships with v5 P
   })
 
   assert.equal(result.rebuilt, true)
-  assert.equal(result.currentIndex, 'mx-insight-hub-content-v5-current')
+  assert.equal(result.currentIndex, 'mx-insight-hub-content-v6-current')
   assert.equal(harness.calls.templates.length, 1)
   assert.equal(harness.calls.templates[0].body.template.aliases, undefined, 'partial rebuild is never exposed by a template alias')
   assert.equal(harness.calls.templates[0].body.template.settings['index.lifecycle.name'], undefined)
@@ -1490,8 +1492,8 @@ test('content current index atomically replaces v1-v4 read memberships with v5 P
   )
   assert.deepEqual(
     harness.calls.readAliasesDuringBulk[0],
-    [oldV1, oldV2, oldV3, oldV4],
-    'v1-v4 remain readable until the first complete v5 snapshot has succeeded',
+    [oldV1, oldV2, oldV3, oldV4, oldV5],
+    'v1-v5 remain readable until the first complete v6 snapshot has succeeded',
   )
   assert.deepEqual(harness.calls.readAliasesDuringBulk[1], [indexSet.currentIndex])
   assert.deepEqual(harness.calls.bulks[1][1].publication, {
@@ -1515,6 +1517,7 @@ test('content current index atomically replaces v1-v4 read memberships with v5 P
   assert.ok(actions.some(({ remove }) => remove?.index === oldV2 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ remove }) => remove?.index === oldV3 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ remove }) => remove?.index === oldV4 && remove.alias === indexSet.readAlias))
+  assert.ok(actions.some(({ remove }) => remove?.index === oldV5 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ add }) => add?.index === indexSet.currentIndex && add.alias === 'mx-insight-hub-content-v1'))
   assert.ok(actions.some(({ add }) => add?.index === indexSet.currentIndex && add.alias === 'mx-insight-hub-content-v3'))
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [indexSet.currentIndex])
@@ -2435,6 +2438,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     'mx-insight-hub-content-v3-current',
     'mx-insight-hub-content-v4-current',
     'mx-insight-hub-content-v5-current',
+    'mx-insight-hub-content-v6-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -2456,7 +2460,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v5') {
+        if (alias === 'mx-insight-hub-content-v6') {
           return {
             [backingIndices.at(-1)]: {
               aliases: { [alias]: { is_write_index: true } },
@@ -2487,7 +2491,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
   assert.equal(result.failed, 0)
   assert.deepEqual(delivered, [[8]])
   assert.equal(cleanupRequest.method, 'POST')
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current,mx-insight-hub-content-v4-current\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current,mx-insight-hub-content-v4-current,mx-insight-hub-content-v5-current\/_delete_by_query/)
   assert.deepEqual(
     cleanupRequest.body.query.bool.should[0].bool.filter,
     [
@@ -2504,7 +2508,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     ],
   )
   assert.equal(bulkBody.length, 1)
-  assert.equal(bulkBody[0].delete._index, 'mx-insight-hub-content-v5')
+  assert.equal(bulkBody[0].delete._index, 'mx-insight-hub-content-v6')
   assert.equal(bulkBody[0].delete.version, 4, 'the tombstone uses current PostgreSQL state')
   assert.equal(bulkBody[0].delete.version_type, 'external_gte')
 })
@@ -2517,6 +2521,7 @@ test('projector turns a stale delete into the current restored document', async 
     'mx-insight-hub-content-v3-current',
     'mx-insight-hub-content-v4-current',
     'mx-insight-hub-content-v5-current',
+    'mx-insight-hub-content-v6-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -2535,7 +2540,7 @@ test('projector turns a stale delete into the current restored document', async 
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v5') {
+        if (alias === 'mx-insight-hub-content-v6') {
           return {
             [backingIndices.at(-1)]: {
               aliases: { [alias]: { is_write_index: true } },
@@ -2558,9 +2563,9 @@ test('projector turns a stale delete into the current restored document', async 
   const result = await projector.projectBatch()
   assert.equal(result.delivered, 1)
   assert.equal(result.failed, 0)
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current,mx-insight-hub-content-v4-current\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current,mx-insight-hub-content-v4-current,mx-insight-hub-content-v5-current\/_delete_by_query/)
   assert.equal(bulkBody.length, 2)
-  assert.equal(bulkBody[0].index._index, 'mx-insight-hub-content-v5')
+  assert.equal(bulkBody[0].index._index, 'mx-insight-hub-content-v6')
   assert.equal(bulkBody[0].index.version, 5)
   assert.equal(bulkBody[0].index.version_type, 'external')
   assert.equal(bulkBody[1].id, row.id)

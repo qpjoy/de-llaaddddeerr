@@ -10,6 +10,7 @@ import {
   DatabaseSourcePuller,
   validateDatabaseConnection,
 } from '../../server/ingest/external/database-source.mjs'
+import { CRAWLER_SOURCES } from '../../server/ingest/crawler/source-contract.mjs'
 import {
   TELEGRAM_MONITOR_INPUTS,
   TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
@@ -1734,6 +1735,26 @@ test('admin-token direct source routes preflight credentials and return the stor
       assert.equal(tested.length, 0)
       assert.equal(createCalls, 0)
     }
+    const reservedCrawlerScope = CRAWLER_SOURCES.find((item) => item.sourceType === 'news')
+    for (const [field, value] of [
+      ['datasetId', reservedCrawlerScope.datasetId],
+      ['platform', reservedCrawlerScope.platform],
+    ]) {
+      const reserved = await call(baseUrl, '/internal/v1/admin/sources', {
+        method: 'POST', headers,
+        body: {
+          sourceKey: `reserved-${field.toLowerCase()}`,
+          displayName: 'Reserved scope',
+          sourceKind: 'database',
+          [field]: value,
+          connection: direct,
+        },
+      })
+      assert.equal(reserved.response.status, 409)
+      assert.equal(reserved.payload.error.code, 'pipeline_managed_scope')
+      assert.equal(tested.length, 0, 'reserved scope is rejected before remote I/O')
+      assert.equal(createCalls, 0)
+    }
     const failedCreate = await call(baseUrl, '/internal/v1/admin/sources', {
       method: 'POST', headers,
       body: {
@@ -1749,7 +1770,9 @@ test('admin-token direct source routes preflight credentials and return the stor
       method: 'POST', headers,
       body: {
         sourceKey: 'warehouse-events', displayName: 'Warehouse events', sourceKind: 'database',
-        datasetId: 'external.warehouse-events.v1', platform: 'external', objectType: 'record', connection: direct,
+        datasetId: `${reservedCrawlerScope.datasetId}.archive`,
+        platform: `${reservedCrawlerScope.platform}_archive`,
+        objectType: 'record', connection: direct,
       },
     })
     assert.equal(created.response.status, 201)

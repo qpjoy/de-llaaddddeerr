@@ -78,6 +78,15 @@ import {
   MobileCommercePipeline,
 } from './ingest/mobile-commerce/pipeline.mjs'
 import {
+  CrawlerSavedRecordsPipeline,
+  isCrawlerSourceKey,
+} from './ingest/crawler/pipeline.mjs'
+import {
+  CRAWLER_SOURCES,
+  CRAWLER_SOURCE_TYPES,
+  crawlerReservedScopeIssue,
+} from './ingest/crawler/source-contract.mjs'
+import {
   isMobileCommerceSourceKey,
 } from './ingest/mobile-commerce/source-contract.mjs'
 import {
@@ -556,18 +565,40 @@ function assertGenericSourceMutable(sourceKey) {
     && !isTelegramSQLiteSourceKey(sourceKey)
     && !isProvinceOpinionSourceKey(sourceKey)
     && !isMobileCommerceSourceKey(sourceKey)
+    && !isCrawlerSourceKey(sourceKey)
   ) return
   const pipeline = isTelegramSQLiteSourceKey(sourceKey)
     ? 'telegram-sqlite'
-    : isProvinceOpinionSourceKey(sourceKey)
-      ? 'province-opinion'
-      : isMobileCommerceSourceKey(sourceKey)
-        ? 'mobile-commerce'
-        : 'telegram-monitor'
+    : isCrawlerSourceKey(sourceKey)
+      ? 'night-all-saved-records'
+      : isProvinceOpinionSourceKey(sourceKey)
+        ? 'province-opinion'
+        : isMobileCommerceSourceKey(sourceKey)
+          ? 'mobile-commerce'
+          : 'telegram-monitor'
   throw new AppError(
     409,
     'pipeline_managed_source',
     `This fixed source is managed through /internal/v1/admin/pipelines/${pipeline}`,
+  )
+}
+
+function assertGenericSourceScopeAvailable(scope) {
+  const issue = crawlerReservedScopeIssue(scope)
+  if (!issue) return
+  throw new AppError(
+    409,
+    'pipeline_managed_scope',
+    `The crawler pipeline reserves ${issue.field} ${issue.value}`,
+    {
+      field: issue.field,
+      value: issue.value,
+      pipelineKey: 'night-all-saved-records',
+      reservedSources: CRAWLER_SOURCES.map((source) => ({
+        datasetId: source.datasetId,
+        platform: source.platform,
+      })),
+    },
   )
 }
 
@@ -734,6 +765,11 @@ export function createApp({
     segmenterConfig,
   })
   const mobileCommercePipeline = new MobileCommercePipeline({
+    store,
+    queue,
+    databasePuller,
+  })
+  const crawlerSavedRecordsPipeline = new CrawlerSavedRecordsPipeline({
     store,
     queue,
     databasePuller,
@@ -2762,6 +2798,111 @@ export function createApp({
         return
       }
 
+      if (pathname === '/internal/v1/admin/pipelines/night-all-saved-records') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        if (request.method === 'GET') {
+          sendJson(response, 200, { data: await crawlerSavedRecordsPipeline.get(), requestId })
+          return
+        }
+        if (request.method === 'PUT') {
+          sendJson(response, 200, {
+            data: await crawlerSavedRecordsPipeline.configure(await readJson(request)),
+            requestId,
+          })
+          return
+        }
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/status'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter(
+          (field) => !['status', 'writerContractAttestation', 'sourceType'].includes(field),
+        )
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported status fields: ${unsupported.join(', ')}`)
+        }
+        if (
+          Object.prototype.hasOwnProperty.call(body || {}, 'sourceType')
+          && (
+            typeof body.sourceType !== 'string'
+            || !CRAWLER_SOURCE_TYPES.includes(body.sourceType)
+          )
+        ) {
+          throw new AppError(
+            400,
+            'invalid_source_type',
+            `sourceType must be one of: ${CRAWLER_SOURCE_TYPES.join(', ')}`,
+          )
+        }
+        sendJson(response, 200, {
+          data: await crawlerSavedRecordsPipeline.setStatus(body?.status, {
+            sourceType: body?.sourceType ?? null,
+            approvedBy: principal.memberId || 'admin-token',
+            writerContractAttestation: body?.writerContractAttestation ?? null,
+          }),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/sync'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 202, {
+          data: await crawlerSavedRecordsPipeline.sync(await readJson(request)),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/progress'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, {
+          data: await crawlerSavedRecordsPipeline.progress(),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/resume'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, {
+          data: await crawlerSavedRecordsPipeline.resumeFailedTasks(),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/checkpoints/reset'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'confirmPipelineKey')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported checkpoint reset fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await crawlerSavedRecordsPipeline.resetCheckpoints(body?.confirmPipelineKey),
+          requestId,
+        })
+        return
+      }
+
       if (pathname === '/internal/v1/admin/pipelines/mobile-commerce') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
@@ -3238,6 +3379,11 @@ export function createApp({
         const body = await readJson(request)
         const sourceKey = requiredSourceKey(body)
         assertGenericSourceMutable(sourceKey)
+        // Reject an exact reserved scope before any remote connection probe.
+        assertGenericSourceScopeAvailable({
+          datasetId: body.datasetId,
+          platform: body.platform,
+        })
         if (await store.getExternalSource?.(sourceKey)) {
           throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
         }
@@ -3318,6 +3464,9 @@ export function createApp({
             ? detectedProfile.objectType
             : body.objectType)
           || 'record'
+        // File rules and detection may derive the final scope after the first
+        // check, so enforce the reservation again on the effective values.
+        assertGenericSourceScopeAvailable({ datasetId, platform })
         const created = await withSourceLocks([sourceKey], async () => {
           if (await store.getExternalSource?.(sourceKey)) {
             throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')

@@ -2,7 +2,7 @@ import { AppError } from '../core/errors.mjs'
 
 export const DEFAULT_SEARCH_PROFILE = 'canonical.balanced.v1'
 export const POSTGRES_SEARCH_PROFILE = 'postgres.substring.v1'
-export const CONTENT_INDEX_SCHEMA = 'content-v5'
+export const CONTENT_INDEX_SCHEMA = 'content-v6'
 const CONTENT_PROFILE_MIN_INDEX_SCHEMA = 'content-v4'
 
 function indexSchemaVersion(value) {

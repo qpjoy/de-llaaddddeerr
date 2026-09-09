@@ -3010,13 +3010,17 @@ export class MemoryStore {
       .map(sourceCatalogTermNormalizedName)
       .filter(Boolean))]
     const matches = (value) => matchKeys.includes(sourceCatalogTermNormalizedName(value))
-    const marketplaceEntryId = (record) => (
-      record?.stableFields?.commerce?.marketplace?.entryId
-      ?? record?.stable_fields?.commerce?.marketplace?.entryId
-      ?? null
-    )
+    const catalogEntryIds = (record) => {
+      const stable = record?.stableFields ?? record?.stable_fields ?? {}
+      return [
+        stable?.commerce?.marketplace?.entryId,
+        stable?.sourceCatalog?.publisher?.entryId,
+        stable?.sourceCatalog?.collector?.entryId,
+      ].filter(Boolean)
+    }
+    const hasCatalogEntry = (record) => catalogEntryIds(record).includes(entry.id)
     const records = [...this.canonicalRecords.values()]
-      .filter((record) => matches(record.platform) || marketplaceEntryId(record) === entry.id)
+      .filter((record) => matches(record.platform) || hasCatalogEntry(record))
       .sort((left, right) => String(
         right.eventTime || right.collectedAt || right.lastSeenAt || right.firstSeenAt || '',
       ).localeCompare(String(
@@ -3024,13 +3028,13 @@ export class MemoryStore {
       )))
     const recordIds = new Set(records.filter((record) => !record.deletedAt).map((record) => record.id))
     const chunks = [...this.recordChunks.values()].filter((chunk) => recordIds.has(chunk.recordId))
-    const hasActiveMarketplaceRecord = records.some((record) => (
-      !record.deletedAt && marketplaceEntryId(record) === entry.id
-    ))
+    const activeCatalogDatasets = new Set(records
+      .filter((record) => !record.deletedAt && hasCatalogEntry(record))
+      .map((record) => record.datasetId))
     const externalSources = [...this.externalSources.values()]
       .filter((source) => (
         matches(source.platform)
-        || (source.sourceKey === 'mobile-commerce-collected-items' && hasActiveMarketplaceRecord)
+        || activeCatalogDatasets.has(source.datasetId)
       ))
       .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
       .map((source) => ({

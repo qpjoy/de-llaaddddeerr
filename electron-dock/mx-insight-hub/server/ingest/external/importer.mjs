@@ -7,6 +7,10 @@ import {
   detectExternalFile,
   recognizeBuiltinFormatRule,
 } from './builtin-format-rules.mjs'
+import {
+  crawlerReservedScopeIssue,
+  isCrawlerSourceKey,
+} from '../crawler/source-contract.mjs'
 
 // Orchestrates one external import: parse -> map -> write, with the rejected
 // rows and the run record kept as evidence either way.
@@ -199,6 +203,14 @@ export class ExternalImporter {
   }) {
     const source = await this.store.getExternalSource(sourceKey)
     if (!source) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+    const reservedScopeIssue = crawlerReservedScopeIssue(source)
+    if (reservedScopeIssue && !isCrawlerSourceKey(sourceKey)) {
+      throw new AppError(
+        409,
+        'pipeline_managed_scope',
+        `Generic sources cannot use crawler-reserved ${reservedScopeIssue.field} ${reservedScopeIssue.value}`,
+      )
+    }
     if (source.status !== 'active') {
       throw new AppError(409, 'source_paused', 'This source is paused')
     }

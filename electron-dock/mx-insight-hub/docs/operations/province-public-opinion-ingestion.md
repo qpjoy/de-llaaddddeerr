@@ -21,7 +21,7 @@ provider 配置见 [Agent provider settings](agent-provider-settings.md)，全�
 | raw revision | migration 034 增加 append-only `ingest.source_object_revisions`；新 ingest 按 semantic raw SHA-256 独立于 canonical hash 产出 payload-change source revision，传输水位 `updated_at` 单独保留但不触发重分析 | migration 之前不存在的 raw 历史已被恢复 |
 | 分类任务 | migration 034 注册默认暂停的 `province-geography-v1`，ingest 与当前记录 materializer 都能幂等创建任务 | pipeline 已启用、模型已配置或任务已跑完 |
 | 分类 worker | `npm run classifier`、Compose service 和独立 K8s Deployment 已接线；单飞、租约、心跳、重试和 stale-input fence 已实现 | 任一环境已成功 rollout、拥有可用 Chat provider，或暂停的 pipeline 已启用 |
-| 发布态 | Hub migration 035 增加 revision-fenced current state；formal 保持公开，candidate 从 pending 经质量/地理分析变为 qualified/rejected/failed，并触发 content-v5 重投影 | pipeline 已启用、候选已评估或任一环境已完成 content-v5 重建 |
+| 发布态 | Hub migration 035 增加 revision-fenced current state；formal 保持公开，candidate 从 pending 经质量/地理分析变为 qualified/rejected/failed。该能力在历史 `content-v5` 里程碑引入；仓库当前投影契约为 `content-v6` | pipeline 已启用、候选已评估或任一环境已完成 `content-v6` 重建 |
 | 审核证据 | assertion schema、计数和只读列表已实现；source/rule/agent/manual 状态模型已保留，原始 evidence/provider 仅限内部 | 已有人工 accept/reject 产品流程或模型 proposal 已成为 canonical 事实 |
 | HanLP | 省份固定源激活/调度要求显式 `MX_COMMON_SEGMENTER=hanlp` 和 HanLP URL；常驻 content/chunk writer 与全量重建都使用严格、带 provenance 的分词包装；查询仍 fail-soft | 某环境的 HanLP、ES 或 content alias 已经健康并完成重建 |
 
@@ -58,7 +58,8 @@ province hot/latest/detail ─────────────────�
   增加分类 backlog。
 - Elasticsearch/HanLP 故障不回滚 PostgreSQL ingest，也不要求重置源 checkpoint。
 - 分类 assertion 不写 Night-All，不改 canonical identity、`admin1_code`、游标或授权；
-  它只更新 Hub 自有 publication state，并通过 outbox 刷新有界 content-v5 投影。
+  它只更新 Hub 自有 publication state，并通过 outbox 刷新当前的有界
+  `content-v6` 投影。
 - 省份热门、最新与详情读取 PostgreSQL；严格 HanLP 影响全文/切片检索的新鲜度，不是
   这些省份接口的可用性前置。
 
@@ -179,15 +180,23 @@ probe；只有本次 GET 的 configuration issues 为空，才能提交本次返
 发布顺序是安全边界，而不是可互换的操作清单：
 
 1. 先在 Hub 应用 migration 035，部署 formal-only 的 list/detail/search gate、publication
-   state 和 content-v5 代码；保持固定源与分类 pipeline 为 `paused`。
+   state 和当前 `content-v6` 代码；`content-v5` 只是引入这组 publication 字段的历史
+   里程碑。保持固定源与分类 pipeline 为 `paused`。
 2. 先用历史 formal 数据验证默认 API、索引回退和 MX-H2I 登录/联网 smoke。此时不应有
    Night-All candidate writer。
 3. 再在 Night-All 数据库先应用并验证 042/043；两者是 additive，旧代码仍把历史/新增行
    当作原 formal 结果。保持 candidate writer gate 为 false，随后滚动升级所有 Night-All
    API/worker，使每个 reader 都具备 formal-only 条件并等待旧实例完全退出。
-4. 重新 probe、提交当前 writer attestation，完成首次导入和 content-v5 全量重建。只有
-   Hub 默认隐藏 candidate、显式查询及 PostgreSQL/Elasticsearch 结果一致后，才启用
-   Night-All candidate writer；质量 pipeline 仍需单独的模型/成本审批后启用。
+4. 重新 probe、提交当前 writer attestation 并完成首次导入；随后从 PostgreSQL current
+   truth 严格全量构建 `content-v6`，完整成功后才把 content aliases 从 v5 切到 v6。
+   只有 Hub 默认隐藏 candidate、显式查询及 PostgreSQL/Elasticsearch 结果一致后，才
+   启用 Night-All candidate writer；质量 pipeline 仍需单独的模型/成本审批后启用。
+
+`content-v6` 是当前部署要求，不得把仅升级代码或只投影新写入记录视为完成。滚动升级
+期间，无游标的 public stored/canonical search 若仍解析到旧 v5，会回退 PostgreSQL；
+绑定旧 v5 PIT 的 cursor 返回 `503 search_cursor_unavailable`，不会在缺少当前 schema
+provenance 的 PIT 上继续翻页。完成完整 v6 rebuild、alias 切换及一致性验收之前，保持
+旧 v5 供受控回滚，但不得把上述回退当作迁移完成。Admin 和内部搜索语义不变。
 
 新 ingest 不再把缺失、空值或未知 `source_stage` 猜成 `formal`：这些行会以
 `invalid_public_opinion_source_stage` 明确失败并回滚本批。migration 035 对已经进入 Hub 的

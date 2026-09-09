@@ -17,6 +17,9 @@ import {
   observationHash,
   streamId,
 } from '../ingest/normalizers.mjs'
+import { CRAWLER_SOURCES } from '../ingest/crawler/source-contract.mjs'
+
+const CRAWLER_SOURCE_KEYS = Object.freeze(CRAWLER_SOURCES.map((source) => source.sourceKey))
 
 function iso(value) {
   if (value == null) return null
@@ -6778,13 +6781,32 @@ export class PostgresStore {
     const matchKeys = [...new Set([entry.canonicalName, ...(entry.aliases || [])]
       .map((value) => String(value).normalize('NFKC').trim().toLocaleLowerCase('zh-CN'))
       .filter(Boolean))]
-    const [datasetResult, recordResult, sourceResult, chunkResult] = await Promise.all([
-      this.pool.query(
-         `WITH matched_records AS (
-           SELECT *
+    // Keep the four independently indexed match paths as UNION arms. A single
+    // OR lets one unselective arm force a canonical_records sequential scan,
+    // which becomes prohibitive after the crawler backfill.
+    const matchedRecordIdsSql = `
+           SELECT id
              FROM core.canonical_records
             WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
-               OR stable_fields #>> '{commerce,marketplace,entryId}' = $2
+           UNION
+           SELECT id
+             FROM core.canonical_records
+            WHERE stable_fields #>> '{commerce,marketplace,entryId}' = $2
+           UNION
+           SELECT id
+             FROM core.canonical_records
+            WHERE stable_fields #>> '{sourceCatalog,publisher,entryId}' = $2
+           UNION
+           SELECT id
+             FROM core.canonical_records
+            WHERE stable_fields #>> '{sourceCatalog,collector,entryId}' = $2`
+    const [datasetResult, recordResult, sourceResult, chunkResult] = await Promise.all([
+      this.pool.query(
+         `WITH matched_record_ids AS (${matchedRecordIdsSql}
+         ), matched_records AS (
+           SELECT record.*
+             FROM core.canonical_records record
+             JOIN matched_record_ids matched ON matched.id = record.id
          ), record_stats AS (
            SELECT record.dataset_id,
                   array_agg(DISTINCT record.platform ORDER BY record.platform) AS platforms,
@@ -6819,21 +6841,26 @@ export class PostgresStore {
         [matchKeys, entry.id],
       ),
       this.pool.query(
-        `SELECT id, dataset_id, platform, object_type, content_type, external_id,
+        `WITH matched_record_ids AS (${matchedRecordIdsSql}
+         )
+         SELECT record.id, record.dataset_id, record.platform, record.object_type,
+                record.content_type, record.external_id,
                 title, current_revision, event_time, collected_at, deleted_at
-           FROM core.canonical_records
-          WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
-             OR stable_fields #>> '{commerce,marketplace,entryId}' = $2
-          ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC
+           FROM core.canonical_records record
+           JOIN matched_record_ids matched ON matched.id = record.id
+          ORDER BY coalesce(record.event_time, record.collected_at, record.last_seen_at, record.first_seen_at) DESC,
+                   record.id DESC
           LIMIT $3`,
         [matchKeys, entry.id, pageSize + 1],
       ),
       this.pool.query(
-        `SELECT *
-          FROM catalog.external_sources
-          WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+        `WITH matched_record_ids AS (${matchedRecordIdsSql}
+         )
+         SELECT source.*
+          FROM catalog.external_sources source
+          WHERE lower(btrim(normalize(source.platform, NFKC))) = ANY($1::text[])
              OR (
-               source_key = 'mobile-commerce-collected-items'
+               source.source_key = 'mobile-commerce-collected-items'
                AND EXISTS (
                  SELECT 1
                    FROM core.canonical_records record
@@ -6841,21 +6868,39 @@ export class PostgresStore {
                     AND record.stable_fields #>> '{commerce,marketplace,entryId}' = $2
                )
              )
-          ORDER BY updated_at DESC, source_key`,
-        [matchKeys, entry.id],
+             OR (
+               source.source_key = ANY($3::text[])
+               AND EXISTS (
+                 SELECT 1
+                   FROM core.canonical_records record
+                  WHERE record.deleted_at IS NULL
+                    AND record.dataset_id = source.dataset_id
+                    AND record.id IN (
+                      SELECT id
+                        FROM core.canonical_records
+                       WHERE stable_fields #>> '{sourceCatalog,publisher,entryId}' = $2
+                      UNION
+                      SELECT id
+                        FROM core.canonical_records
+                       WHERE stable_fields #>> '{sourceCatalog,collector,entryId}' = $2
+                    )
+               )
+             )
+          ORDER BY source.updated_at DESC, source.source_key`,
+        [matchKeys, entry.id, CRAWLER_SOURCE_KEYS],
       ),
       this.pool.query(
-        `SELECT count(*)::integer AS chunk_count,
+        `WITH matched_record_ids AS (${matchedRecordIdsSql}
+         )
+         SELECT count(*)::integer AS chunk_count,
                 count(*) FILTER (WHERE chunk.embedded_at IS NOT NULL)::integer AS embedded_chunk_count,
                 count(*) FILTER (WHERE chunk.projected_at IS NOT NULL)::integer AS projected_chunk_count,
                 count(DISTINCT chunk.record_id)::integer AS records_with_chunks
            FROM core.record_chunks chunk
            JOIN core.canonical_records record ON record.id = chunk.record_id
+           JOIN matched_record_ids matched ON matched.id = record.id
           WHERE record.deleted_at IS NULL
-            AND (
-              lower(btrim(normalize(record.platform, NFKC))) = ANY($1::text[])
-              OR record.stable_fields #>> '{commerce,marketplace,entryId}' = $2
-            )`,
+          `,
         [matchKeys, entry.id],
       ),
     ])

@@ -278,6 +278,11 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   const provinceOpinionPipeline = useRemoteData(loadProvinceOpinionPipeline, onUnauthorized)
   const loadMobileCommercePipeline = useCallback(() => adminApi.mobileCommercePipeline(token), [token])
   const mobileCommercePipeline = useRemoteData(loadMobileCommercePipeline, onUnauthorized)
+  const loadNightAllSavedRecordsPipeline = useCallback(
+    () => adminApi.nightAllSavedRecordsPipeline(token),
+    [token],
+  )
+  const nightAllSavedRecordsPipeline = useRemoteData(loadNightAllSavedRecordsPipeline, onUnauthorized)
   const loadDatabaseConnections = useCallback(() => adminApi.databaseConnections(token), [token])
   const databaseConnections = useRemoteData(loadDatabaseConnections, onUnauthorized)
   const [selected, setSelected] = useState(null)
@@ -286,6 +291,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   const [telegramSqliteOpen, setTelegramSqliteOpen] = useState(false)
   const [provinceOpinionOpen, setProvinceOpinionOpen] = useState(false)
   const [mobileCommerceOpen, setMobileCommerceOpen] = useState(false)
+  const [nightAllSavedRecordsOpen, setNightAllSavedRecordsOpen] = useState(false)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载外部数据源" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -359,11 +365,19 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         onRetry={mobileCommercePipeline.refresh}
       />
 
+      <NightAllSavedRecordsPipelineCard
+        pipeline={nightAllSavedRecordsPipeline.data}
+        loading={nightAllSavedRecordsPipeline.loading}
+        error={nightAllSavedRecordsPipeline.error}
+        onOpen={() => setNightAllSavedRecordsOpen(true)}
+        onRetry={nightAllSavedRecordsPipeline.refresh}
+      />
+
       {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor、SQLite API、全国省份舆情与手机电商采集已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor、SQLite API、全国省份舆情、手机电商与 Night-All saved records 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">
@@ -480,6 +494,23 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           databaseConnections={databaseConnections}
         />
       ) : null}
+      {nightAllSavedRecordsOpen && nightAllSavedRecordsPipeline.data ? (
+        <NightAllSavedRecordsPipelineModal
+          token={token}
+          pipeline={nightAllSavedRecordsPipeline.data}
+          loading={nightAllSavedRecordsPipeline.loading}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+          onClose={() => setNightAllSavedRecordsOpen(false)}
+          onRefresh={nightAllSavedRecordsPipeline.refresh}
+          onPipelineChanged={(updated) => {
+            if (updated?.tasks || updated?.status) nightAllSavedRecordsPipeline.setData(updated)
+            nightAllSavedRecordsPipeline.refresh()
+            state.refresh()
+          }}
+          databaseConnections={databaseConnections}
+        />
+      ) : null}
       {selected ? (
         <SourceDetailModal
           token={token}
@@ -502,6 +533,19 @@ const PIPELINE_MANAGED_SOURCE_KEYS = new Set([
   'telegram-sqlite-api-messages',
   'province-opinion-results',
   'mobile-commerce-collected-items',
+  'night-all-saved-records-automotive',
+  'night-all-saved-records-finance',
+  'night-all-saved-records-forum',
+  'night-all-saved-records-hotspot',
+  'night-all-saved-records-local-news',
+  'night-all-saved-records-media',
+  'night-all-saved-records-news',
+  'night-all-saved-records-other',
+  'night-all-saved-records-recruitment',
+  'night-all-saved-records-research',
+  'night-all-saved-records-social',
+  'night-all-saved-records-technology',
+  'night-all-saved-records-web',
 ])
 
 const TELEGRAM_TASK_META = {
@@ -882,6 +926,430 @@ const MOBILE_COMMERCE_FIELDS = [
   'device_serial',
   'is_reported',
 ]
+
+const NIGHT_ALL_SAVED_RECORD_TYPES = [
+  ['automotive', '汽车'],
+  ['finance', '财经'],
+  ['forum', '论坛'],
+  ['hotspot', '热点'],
+  ['local_news', '本地新闻'],
+  ['media', '媒体'],
+  ['news', '新闻资讯'],
+  ['other', '其他'],
+  ['recruitment', '招聘'],
+  ['research', '研究'],
+  ['social', '社交'],
+  ['technology', '科技'],
+  ['web', '网页'],
+]
+
+function nightAllSavedRecordTaskType(task) {
+  const sourceKey = telegramTaskSourceKey(task)
+  return task?.sourceType
+    || task?.spec?.sourceType
+    || NIGHT_ALL_SAVED_RECORD_TYPES.find(([type]) => sourceKey.endsWith(`-${type.replaceAll('_', '-')}`))?.[0]
+    || 'unknown'
+}
+
+function nightAllSavedRecordTypeLabel(type) {
+  return NIGHT_ALL_SAVED_RECORD_TYPES.find(([candidate]) => candidate === type)?.[1] || type
+}
+
+function nightAllSavedRecordsRunning(pipeline) {
+  return asList(pipeline?.tasks).some((task) => ['running', 'draining'].includes(String(
+    task?.cursor?.status || task?.latestRun?.status || '',
+  ).toLowerCase()))
+}
+
+function nightAllSavedRecordsStatus(pipeline) {
+  const tasks = asList(pipeline?.tasks)
+  if (tasks.some(telegramTaskStuck)) return { status: 'down', label: '存在需恢复任务' }
+  if (nightAllSavedRecordsRunning(pipeline)) return { status: 'warning', label: '正在运行' }
+  if (pipeline?.status === 'active') return { status: 'active', label: '已启用' }
+  if (pipeline?.status === 'mixed') return { status: 'warning', label: '分区状态不一致' }
+  return { status: 'disabled', label: pipeline?.configured ? '已暂停' : '待配置' }
+}
+
+function NightAllSavedRecordsPipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
+  const tasks = asList(pipeline?.tasks)
+  const status = nightAllSavedRecordsStatus(pipeline)
+  const sourceConnection = pipeline?.databaseConnection || pipeline?.connection
+  const latestRunAt = tasks
+    .map((task) => task.latestRun?.finishedAt || task.latestRun?.startedAt || task.latestRun?.createdAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1)
+  const mapped = tasks.filter((task) => task.activeMapping || task.mapping?.activeVersion).length
+
+  return (
+    <section className="qp-panel mih-telegram-card" aria-labelledby="night-all-saved-records-title">
+      <div className="mih-telegram-card__identity">
+        <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
+        <div>
+          <p className="qp-kicker">BUSINESS PIPELINE / NIGHT-ALL SAVED RECORDS</p>
+          <h2 id="night-all-saved-records-title">Night-All 数据中心清洗任务</h2>
+          <p>13 个 saved_records 叶分区独立拉取与故障隔离，统一清洗、目录归类并写入 Canonical 数据中心。</p>
+        </div>
+      </div>
+      {error && !pipeline ? (
+        <div className="mih-telegram-card__error"><ErrorState error={error} onRetry={onRetry} /></div>
+      ) : (
+        <>
+          <dl className="mih-telegram-card__facts">
+            <div><dt>运行状态</dt><dd><StatusBadge status={status.status} label={status.label} /></dd></div>
+            <div><dt>源库</dt><dd><code>{pipeline?.configured ? `${sourceConnection?.host || '共享数据库配置'}:${sourceConnection?.port || 5432}` : '尚未配置'}</code></dd></div>
+            <div><dt>输入任务</dt><dd>{tasks.length || 13} 个叶分区</dd></div>
+            <div><dt>可靠水位</dt><dd><code>(last_seen_at, id)</code></dd></div>
+            <div><dt>固定映射</dt><dd>{mapped}/{tasks.length || 13} 已批准</dd></div>
+            <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
+            <div><dt>公开边界</dt><dd>按 source_type 独立授权</dd></div>
+            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+          </dl>
+          <div className="mih-telegram-card__actions">
+            <span className="mih-source-label">默认暂停 · 源库索引、writer 与删除合同通过后才能启用</span>
+            <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
+              {loading ? '正在刷新…' : '打开任务控制'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function NightAllSavedRecordsPipelineModal({
+  token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged,
+  databaseConnections,
+}) {
+  const tasks = asList(pipeline.tasks)
+  const connection = pipeline.connection || {}
+  const configured = Boolean(pipeline.configured)
+  const running = nightAllSavedRecordsRunning(pipeline)
+  const status = nightAllSavedRecordsStatus(pipeline)
+  const writerContract = pipeline.writerContract || {}
+  const writerContractVersion = writerContract.contractVersion || writerContract.version
+  const writerContractDigest = writerContract.contractDigest || writerContract.digest
+  const latestWriterAttestation = pipeline.contractAttestation || writerContract.latestAttestation || null
+  const writerContractCurrent = Boolean(
+    latestWriterAttestation
+    && latestWriterAttestation.confirmed !== false
+    && latestWriterAttestation.contractVersion === writerContractVersion
+    && latestWriterAttestation.contractDigest === writerContractDigest,
+  )
+  const [form, setForm] = useState(() => ({
+    databaseConnectionId: pipeline.databaseConnectionId || INLINE_DATABASE_CONNECTION,
+    host: connection.host || '',
+    port: String(connection.port || 5432),
+    database: connection.database || '',
+    username: connection.username || '',
+    password: '',
+    sslMode: connection.sslMode || 'require',
+    syncIntervalSeconds: String(pipeline.syncIntervalSeconds || 300),
+  }))
+  const [busyAction, setBusyAction] = useState(null)
+  const [actionError, setActionError] = useState(null)
+  const [writerContractConfirmed, setWriterContractConfirmed] = useState(false)
+  const [resetConfirmation, setResetConfirmation] = useState('')
+  const loadProgress = useCallback(
+    () => configured
+      ? adminApi.nightAllSavedRecordsPipelineProgress(token)
+      : Promise.resolve(null),
+    [configured, token],
+  )
+  const progress = useRemoteData(loadProgress, onUnauthorized)
+  const progressTasks = asList(progress.data?.tasks)
+  const configurationIssues = sqlitePipelineIssueMessages(pipeline.configurationIssues)
+  const progressIssues = progressTasks.flatMap((task) => sqlitePipelineIssueMessages(
+    task.error, task.blocker, task.issues, task.configurationIssues,
+  ))
+  const stuck = tasks.some(telegramTaskStuck)
+
+  useEffect(() => {
+    if (!running || loading) return undefined
+    const timer = window.setTimeout(onRefresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [loading, onRefresh, running])
+
+  const mutate = async (action, request, successMessage) => {
+    setBusyAction(action)
+    setActionError(null)
+    try {
+      const updated = await request()
+      if (updated?.tasks || updated?.status) onPipelineChanged(updated)
+      else onRefresh()
+      progress.refresh()
+      notify?.(successMessage, 'success')
+      return updated
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      setActionError(error)
+      notify?.(error.message, 'error')
+      return null
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const save = (event) => {
+    event.preventDefault()
+    mutate(
+      'save',
+      () => adminApi.updateNightAllSavedRecordsPipeline(token, {
+        ...(form.databaseConnectionId
+          ? { databaseConnectionId: form.databaseConnectionId }
+          : {
+              connection: {
+                host: form.host.trim(),
+                port: Number(form.port),
+                database: form.database.trim(),
+                username: form.username.trim(),
+                sslMode: form.sslMode,
+                ...(form.password ? { password: form.password } : {}),
+              },
+            }),
+      }),
+      'Night-All 共享源库连接已验证并保存；13 个分区仍保持暂停',
+    )
+  }
+
+  const saveSyncInterval = () => mutate(
+    'save-sync-interval',
+    () => adminApi.updateNightAllSavedRecordsPipeline(token, {
+      syncIntervalSeconds: Number(form.syncIntervalSeconds),
+    }),
+    SYNC_INTERVAL_SAVED_MESSAGE,
+  )
+
+  const changeStatus = (nextStatus, sourceType = null) => mutate(
+    sourceType ? `status-${sourceType}-${nextStatus}` : `status-${nextStatus}`,
+    () => adminApi.updateNightAllSavedRecordsPipelineStatus(
+      token,
+      nextStatus,
+      nextStatus === 'active' ? {
+        confirmed: writerContractConfirmed,
+        contractVersion: writerContractVersion,
+        contractDigest: writerContractDigest,
+      } : null,
+      sourceType ? { sourceType } : null,
+    ),
+    sourceType
+      ? `${nightAllSavedRecordTypeLabel(sourceType)}分区已${nextStatus === 'active' ? '启用' : '暂停'}`
+      : nextStatus === 'active'
+        ? 'Night-All 13 分区清洗任务已启用'
+        : '已安全暂停 Night-All 清洗任务',
+  )
+
+  const runSync = (sourceType = null) => mutate(
+    sourceType ? `sync-${sourceType}` : 'sync',
+    () => adminApi.runNightAllSavedRecordsPipeline(token, {
+      batchSize: 500,
+      ...(sourceType ? { sourceType } : {}),
+    }),
+    sourceType ? `${nightAllSavedRecordTypeLabel(sourceType)}分区同步已提交` : '13 个分区同步已分别提交',
+  )
+
+  const resumeFailed = () => mutate(
+    'resume',
+    () => adminApi.resumeNightAllSavedRecordsPipeline(token),
+    '失败任务已从各自 checkpoint 恢复，未重置已提交批次',
+  )
+
+  const resetCheckpoints = (event) => {
+    event.preventDefault()
+    if (resetConfirmation !== 'night-all-saved-records') return
+    mutate(
+      'reset',
+      async () => {
+        const updated = await adminApi.resetNightAllSavedRecordsPipelineCheckpoints(token, {
+          confirmPipelineKey: resetConfirmation,
+        })
+        setResetConfirmation('')
+        return updated
+      },
+      '13 个 checkpoint 已准备全量重扫；Canonical 仍按来源身份幂等',
+    )
+  }
+
+  return (
+    <Modal
+      title={pipeline.displayName || 'Night-All saved records 清洗任务'}
+      description="13 个 PostgreSQL LIST 叶分区 · 独立 checkpoint 与失败隔离 · Internal 全量落地，公开授权按 source_type 隔离"
+      size="xlarge"
+      onClose={onClose}
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}
+    >
+      <div className="mih-telegram-toolbar">
+        <div>
+          <StatusBadge status={status.status} label={status.label} />
+          <code>{pipeline.pipelineKey || 'night-all-saved-records'}</code>
+          <span className="mih-telegram-toolbar__warning"><Warning size={15} />三项启用门禁未通过前保持暂停</span>
+        </div>
+        <div className="mih-page-actions">
+          {['active', 'mixed', 'draining'].includes(pipeline.status) ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={() => changeStatus('paused')}>
+              <Pause size={16} />{busyAction === 'status-paused' ? '安全暂停中…' : '安全暂停'}
+            </button>
+          ) : (
+            <button className="qp-button qp-button--ghost" type="button"
+              disabled={Boolean(busyAction) || !configured || running || !writerContractConfirmed || progress.loading || progressIssues.length > 0}
+              title={!configured ? '先验证并保存源库连接' : !writerContractConfirmed ? '先确认 writer 与删除合同' : progressIssues.length > 0 ? '仍有叶分区未通过源表门禁' : ''}
+              onClick={() => changeStatus('active')}>
+              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用 13 个任务'}
+            </button>
+          )}
+          {stuck ? <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={resumeFailed}>
+            <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复失败任务'}
+          </button> : null}
+          <button className="qp-button" type="button"
+            disabled={Boolean(busyAction) || pipeline.status !== 'active' || !writerContractCurrent}
+            title={!writerContractCurrent ? '当前 writer 合同尚未确认' : ''}
+            onClick={() => runSync()}>
+            <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步全部'}
+          </button>
+        </div>
+      </div>
+
+      {actionError ? <div className="mih-telegram-card__error"><ErrorState error={actionError} /></div> : null}
+
+      <Panel title="只读源库与调度" subtitle="只配置一次传输凭据；13 个表名、Dataset、平台授权域和游标由业务版本固定">
+        <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
+          <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
+            onChange={(databaseConnectionId) => setForm({ ...form, databaseConnectionId })} />
+          {!form.databaseConnectionId ? <>
+            <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
+            <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
+            <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="agent_data_crawler_platform" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
+            <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+            <Field label="密码" hint={connection.passwordConfigured ? '已配置；留空保留当前密码' : '保存前验证只读连接'}><input className="qp-input" type="password" required={!connection.passwordConfigured} autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+            <DropdownField label="SSL 模式" value={form.sslMode} onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
+          </> : null}
+          <div className="mih-page-actions mih-form__wide">
+            <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}>
+              {busyAction === 'save' ? '正在验证并保存…' : '验证并保存共享连接'}
+            </button>
+          </div>
+        </form>
+        <RuntimeSyncIntervalControl value={form.syncIntervalSeconds}
+          onChange={(syncIntervalSeconds) => setForm({ ...form, syncIntervalSeconds })}
+          onSave={saveSyncInterval} busy={Boolean(busyAction)} saving={busyAction === 'save-sync-interval'} />
+        {configurationIssues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
+          {configurationIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+        </ul> : null}
+      </Panel>
+
+      <Panel title="启用门禁" subtitle="索引只证明可排序；Schema 不能证明更新、提交顺序和删除语义">
+        <div className="mih-telegram-capabilities">
+          <div><strong>源库唯一游标索引</strong><p>每个叶表必须有 ready、非 partial 的唯一 B-tree <code>(last_seen_at, id)</code>。<br /><code>scripts/night-all-saved-records-source-indexes.sql</code></p></div>
+          <div><strong>Writer 合同</strong><p>每次实质更新都推进 <code>last_seen_at</code>，时间不倒退，迟提交不能落在已越过 checkpoint 后。</p></div>
+          <div><strong>删除合同</strong><p>禁止不可观察的硬删除；若上游无法保证，必须先改用 tombstone、change journal 或 CDC。</p></div>
+          <div><strong>字段清洗</strong><p><code>published_at</code> 由固定 Asia/Shanghai 解析器处理；日期精度和异常值保留 provenance，不伪造精确时刻。</p></div>
+          <div><strong>目录归类</strong><p>采集源与实际发布者分别映射权威数据源目录；未知项标记 unresolved，不按标题猜测。</p></div>
+          <div><strong>对外接口</strong><p><code>POST /api/v1/data/canonical/search</code>；每个 source_type 使用独立 platform grant，类型审查前不发放公开授权。</p></div>
+        </div>
+        {progress.loading && !progress.data ? <LoadingState label="正在核对 13 个叶分区" /> : null}
+        {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
+        {progressIssues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
+          {progressIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+        </ul> : null}
+        <label className="mih-agent-consent">
+          <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
+            onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
+          <span>
+            <strong>我已逐项验证 13 个分区的 writer、提交顺序与删除合同</strong>
+            <small>合同 {writerContractVersion || '待加载'} · 摘要 {writerContractDigest?.slice(0, 12) || '待加载'}… · 确认会写入审计记录</small>
+          </span>
+        </label>
+      </Panel>
+
+      <Panel title="13 个独立输入任务" subtitle="父表不直接读取；一个分区失败不会回滚或阻塞其他分区"
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />重新核对</button>}>
+        <div className="mih-telegram-task-grid">
+          {(tasks.length ? tasks : NIGHT_ALL_SAVED_RECORD_TYPES.map(([sourceType]) => ({ sourceType }))).map((task) => {
+            const sourceType = nightAllSavedRecordTaskType(task)
+            const source = typeof task.source === 'object' ? task.source : {}
+            const spec = task.spec || task.fixedInput || {}
+            const sourceKey = telegramTaskSourceKey(task) || `night-all-saved-records-${sourceType.replaceAll('_', '-')}`
+            const diagnostic = progressTasks.find((item) => nightAllSavedRecordTaskType(item) === sourceType)
+            const issues = sqlitePipelineIssueMessages(
+              diagnostic?.error,
+              diagnostic?.issues,
+              diagnostic?.blocker,
+              task.configurationIssues,
+            )
+            const mappingVersion = task.activeMapping?.version || task.mapping?.activeVersion || '—'
+            const taskStatus = source.status || 'paused'
+            const taskActive = taskStatus === 'active'
+            const taskCursorStatus = String(task.cursor?.status || task.latestRun?.status || '').toLowerCase()
+            const taskRunning = ['running', 'draining'].includes(taskCursorStatus)
+            const taskFailed = taskCursorStatus === 'failed'
+            const taskStatusAction = `status-${sourceType}-${taskActive ? 'paused' : 'active'}`
+            return (
+              <article className="mih-telegram-task" key={sourceKey}>
+                <header>
+                  <div><span className="mih-telegram-task__role">{nightAllSavedRecordTypeLabel(sourceType)}</span><code>{sourceKey}</code></div>
+                  <StatusBadge status={taskFailed ? 'down' : taskRunning ? 'warning' : taskStatus}
+                    label={taskFailed ? '需恢复' : taskRunning ? '运行中' : undefined} />
+                </header>
+                <dl className="mih-telegram-task__definition">
+                  <div><dt>固定表</dt><dd><code>{spec.schema || source.connection?.schema || 'public'}.{spec.table || source.connection?.table || `saved_records_${sourceType}`}</code></dd></div>
+                  <div><dt>Dataset</dt><dd><code>{spec.datasetId || source.datasetId || `data-center.saved-records.${sourceType}.v1`}</code></dd></div>
+                  <div><dt>授权平台</dt><dd><code>{spec.platform || source.platform || `data_center_saved_records_${sourceType}`}</code></dd></div>
+                  <div><dt>映射</dt><dd>{mappingVersion === '—' ? '固定映射待批准' : `固定 v${mappingVersion}`}</dd></div>
+                  <div><dt>Checkpoint</dt><dd><code>{compactCheckpoint(task.cursor?.position)}</code></dd></div>
+                  <div><dt>最近运行</dt><dd>{formatDate(task.latestRun?.finishedAt || task.latestRun?.startedAt)}</dd></div>
+                </dl>
+                {issues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
+                  {issues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+                </ul> : null}
+                <footer>
+                  <span>{taskActive ? '已加入调度' : '独立暂停，不影响其他分区'}</span>
+                  <div className="mih-page-actions">
+                    <button className="qp-button qp-button--ghost" type="button"
+                      disabled={Boolean(busyAction) || (!taskActive && (
+                        taskRunning || !configured || !writerContractConfirmed || progress.loading || !diagnostic || issues.length > 0
+                      ))}
+                      title={!taskActive && !writerContractConfirmed ? '先确认当前 writer 与删除合同' : !taskActive && issues.length > 0 ? '此分区仍未通过源表门禁' : ''}
+                      onClick={() => changeStatus(taskActive ? 'paused' : 'active', sourceType)}>
+                      {taskActive ? <Pause size={16} /> : <Play size={16} />}
+                      {busyAction === taskStatusAction ? (taskActive ? '暂停中…' : '启用中…') : (taskActive ? '暂停此分区' : '启用此分区')}
+                    </button>
+                    <button className="qp-button qp-button--ghost" type="button"
+                      disabled={Boolean(busyAction) || !taskActive || !writerContractCurrent}
+                      onClick={() => runSync(sourceType)}>
+                      {busyAction === `sync-${sourceType}` ? '正在提交…' : '仅同步此分区'}
+                    </button>
+                  </div>
+                </footer>
+              </article>
+            )
+          })}
+        </div>
+      </Panel>
+
+      {pipeline.status === 'paused' && !running ? (
+        <section className="mih-source-danger" aria-labelledby="night-all-saved-records-reset-title">
+          <div className="mih-source-danger__copy">
+            <Warning size={24} weight="duotone" aria-hidden="true" />
+            <div>
+              <h3 id="night-all-saved-records-reset-title">一次性全量对齐</h3>
+              <p>统一重置 13 个 checkpoint 后会重扫全部叶表；源端缺席不会被推断为删除，Canonical 仍按 record_key 幂等。</p>
+            </div>
+          </div>
+          <form className="mih-source-danger__form" onSubmit={resetCheckpoints}>
+            <Field label="输入业务标识以确认" hint={<code>night-all-saved-records</code>}>
+              <input className="qp-input" value={resetConfirmation} autoComplete="off" spellCheck="false"
+                onChange={(event) => setResetConfirmation(event.target.value)} />
+            </Field>
+            <button className="qp-button qp-button--danger" type="submit"
+              disabled={Boolean(busyAction) || resetConfirmation !== 'night-all-saved-records'}>
+              {busyAction === 'reset' ? '正在准备全量对齐…' : '准备一次性全量对齐'}
+            </button>
+          </form>
+        </section>
+      ) : null}
+    </Modal>
+  )
+}
 
 function mobileCommerceRunning(pipeline) {
   return ['running', 'draining'].includes(String(

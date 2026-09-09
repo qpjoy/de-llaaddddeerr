@@ -19,6 +19,24 @@ import {
   enrichMobileCommerceRecord,
 } from '../mobile-commerce/record.mjs'
 import {
+  createCrawlerCatalogClassifier,
+  enrichCrawlerRecord,
+} from '../crawler/record.mjs'
+import {
+  CRAWLER_PIPELINE_KEY,
+  CRAWLER_WRITER_CONTRACT_DIGEST,
+  CRAWLER_WRITER_CONTRACT_VERSION,
+  crawlerColumnIssues,
+  crawlerCursorIndexIssues,
+  crawlerCursorIsFinite,
+  crawlerLeafPartitionIssues,
+  crawlerReservedScopeIssue,
+  crawlerSourceContractIssues,
+  crawlerSourceRowIssues,
+  crawlerSourceSpecForKey,
+  isCrawlerSourceKey,
+} from '../crawler/source-contract.mjs'
+import {
   MOBILE_COMMERCE_SOURCE_KEY,
   MOBILE_COMMERCE_SOURCE_LOCATOR,
   MOBILE_COMMERCE_WRITER_REQUIRED_COLUMNS,
@@ -567,6 +585,14 @@ export class DatabaseSourcePuller {
   async #source(sourceKey, { requireMapping = false, mappingOverride = undefined } = {}) {
     const persistedSource = await this.store.getExternalSource(sourceKey)
     if (!persistedSource) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+    const reservedScopeIssue = crawlerReservedScopeIssue(persistedSource)
+    if (reservedScopeIssue && !isCrawlerSourceKey(sourceKey)) {
+      throw new AppError(
+        409,
+        'pipeline_managed_scope',
+        `Generic sources cannot use crawler-reserved ${reservedScopeIssue.field} ${reservedScopeIssue.value}`,
+      )
+    }
     if (persistedSource.sourceKind !== 'database') {
       throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
     }
@@ -868,7 +894,26 @@ export class DatabaseSourcePuller {
     const { source, mapping } = await this.#source(sourceKey, { requireMapping: true, mappingOverride })
     const contractHash = sourceContractHash(source, mapping)
     const cursor = await this.queue.getCursor(`external:${sourceKey}`)
-    this.#assertCheckpoint(cursor?.position ?? {}, {
+    const position = cursor?.position ?? {}
+    if (crawlerSourceSpecForKey(sourceKey) && incompleteTupleCheckpoint(position)) {
+      throw new AppError(
+        409,
+        'source_contract_mismatch',
+        'Crawler checkpoint must contain both cursor and lastId; reset it before resuming',
+      )
+    }
+    if (
+      crawlerSourceSpecForKey(sourceKey)
+      && position.cursor != null
+      && !crawlerCursorIsFinite(position.cursor)
+    ) {
+      throw new AppError(
+        409,
+        'source_contract_mismatch',
+        'Crawler checkpoint contains a non-finite last_seen_at watermark',
+      )
+    }
+    this.#assertCheckpoint(position, {
       contractHash,
       mappingVersion: mapping.version,
       sourceContractId: source.connection?.sourceContractId ?? null,
@@ -998,26 +1043,169 @@ export class DatabaseSourcePuller {
     ]
   }
 
-  async #metadata(pool, connection) {
+  async #crawlerPhysicalContractIssues(pool, connection, spec) {
     const schema = safeIdentifier(connection.schema || 'public', 'schema')
     const table = safeIdentifier(connection.table, 'table')
+    const [relationResult, indexResult] = await Promise.all([
+      pool.query(
+        `SELECT c.relkind AS relation_kind,
+                c.relispartition AS is_partition,
+                NOT EXISTS (
+                  SELECT 1 FROM pg_inherits child WHERE child.inhparent = c.oid
+                ) AS is_leaf,
+                parent_namespace.nspname AS parent_schema,
+                parent.relname AS parent_table,
+                parent.relkind AS parent_relation_kind,
+                pg_get_partkeydef(parent.oid) AS parent_partition_key,
+                pg_get_expr(c.relpartbound, c.oid, true) AS partition_bound
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           LEFT JOIN pg_inherits inheritance ON inheritance.inhrelid = c.oid
+           LEFT JOIN pg_class parent ON parent.oid = inheritance.inhparent
+           LEFT JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent.relnamespace
+          WHERE n.nspname = $1 AND c.relname = $2`,
+        [schema, table],
+      ),
+      pool.query(
+        `SELECT i.indisvalid AS valid,
+                i.indisready AS ready,
+                i.indislive AS live,
+                i.indisunique AS unique_index,
+                am.amname AS access_method,
+                i.indexprs IS NULL AS no_expressions,
+                i.indpred IS NULL AS no_predicate,
+                i.indnkeyatts AS key_count,
+                i.indnatts AS total_columns,
+                pg_get_indexdef(i.indexrelid, 1, true) AS first_key,
+                pg_get_indexdef(i.indexrelid, 2, true) AS second_key,
+                i.indoption[0] AS first_option,
+                i.indoption[1] AS second_option
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           JOIN pg_class index_class ON index_class.oid = i.indexrelid
+           JOIN pg_am am ON am.oid = index_class.relam
+          WHERE n.nspname = $1 AND c.relname = $2`,
+        [schema, table],
+      ),
+    ])
+    const relationRow = relationResult.rows[0]
+    const relation = relationRow
+      ? {
+          relationKind: relationRow.relation_kind,
+          isPartition: relationRow.is_partition,
+          isLeaf: relationRow.is_leaf,
+          parentSchema: relationRow.parent_schema,
+          parentTable: relationRow.parent_table,
+          parentRelationKind: relationRow.parent_relation_kind,
+          parentPartitionKey: relationRow.parent_partition_key,
+          partitionBound: relationRow.partition_bound,
+        }
+      : null
+    const indexes = indexResult.rows.map((index) => ({
+      valid: index.valid,
+      ready: index.ready,
+      live: index.live,
+      unique: index.unique_index,
+      accessMethod: index.access_method,
+      noExpressions: index.no_expressions,
+      noPredicate: index.no_predicate,
+      keyCount: index.key_count,
+      totalColumns: index.total_columns,
+      firstKey: index.first_key,
+      secondKey: index.second_key,
+      firstOption: index.first_option,
+      secondOption: index.second_option,
+    }))
+    return [
+      ...crawlerLeafPartitionIssues(relation, spec),
+      ...crawlerCursorIndexIssues(indexes, spec),
+    ]
+  }
+
+  async #crawlerWatermarkEndpointIssues(pool, connection, spec) {
+    const table = qualifiedTable(connection)
+    const cursorColumn = quotedIdentifier(spec.locator.cursorColumn, 'crawler cursorColumn')
+    const idColumn = quotedIdentifier(spec.locator.idColumn, 'crawler idColumn')
+    const { rows } = await pool.query(
+      `SELECT (
+                SELECT ${cursorColumn}::text
+                  FROM ${table}
+                 ORDER BY ${cursorColumn}, ${idColumn}
+                 LIMIT 1
+              ) AS minimum_cursor,
+              (
+                SELECT ${cursorColumn}::text
+                  FROM ${table}
+                 ORDER BY ${cursorColumn} DESC, ${idColumn} DESC
+                 LIMIT 1
+              ) AS maximum_cursor`,
+    )
+    const endpoints = rows[0] || {}
+    return [
+      ...(endpoints.minimum_cursor != null && !crawlerCursorIsFinite(endpoints.minimum_cursor)
+        ? ['crawler source minimum last_seen_at watermark is non-finite']
+        : []),
+      ...(endpoints.maximum_cursor != null && !crawlerCursorIsFinite(endpoints.maximum_cursor)
+        ? ['crawler source maximum last_seen_at watermark is non-finite']
+        : []),
+    ]
+  }
+
+  async #metadata(pool, connection, { crawlerSpec = null } = {}) {
+    const schema = safeIdentifier(connection.schema || 'public', 'schema')
+    const table = safeIdentifier(connection.table, 'table')
+    const crawlerRelationProjection = crawlerSpec
+      ? `, c.relkind AS relation_kind,
+                c.relispartition AS is_partition,
+                NOT EXISTS (
+                  SELECT 1 FROM pg_inherits child WHERE child.inhparent = c.oid
+                ) AS is_leaf,
+                parent_namespace.nspname AS parent_schema,
+                parent.relname AS parent_table,
+                parent.relkind AS parent_relation_kind,
+                pg_get_partkeydef(parent.oid) AS parent_partition_key,
+                pg_get_expr(c.relpartbound, c.oid, true) AS partition_bound`
+      : ''
+    const crawlerRelationJoins = crawlerSpec
+      ? `LEFT JOIN pg_inherits inheritance ON inheritance.inhrelid = c.oid
+           LEFT JOIN pg_class parent ON parent.oid = inheritance.inhparent
+           LEFT JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent.relnamespace`
+      : ''
+    const crawlerIndexProjection = crawlerSpec
+      ? `, i.indislive AS live, i.indisunique AS unique_index,
+                am.amname AS access_method,
+                i.indexprs IS NULL AS no_expressions,
+                i.indpred IS NULL AS no_predicate,
+                i.indnkeyatts AS key_count,
+                i.indnatts AS total_columns,
+                pg_get_indexdef(i.indexrelid, 1, true) AS first_key,
+                pg_get_indexdef(i.indexrelid, 2, true) AS second_key,
+                i.indoption[0] AS first_option,
+                i.indoption[1] AS second_option`
+      : ''
+    const crawlerIndexJoin = crawlerSpec ? 'JOIN pg_am am ON am.oid = ci.relam' : ''
     const [relationResult, indexResult, constraintResult, triggerResult] = await Promise.all([
       pool.query(
         `SELECT greatest(c.reltuples, 0)::bigint AS estimated_rows,
                 pg_total_relation_size(c.oid)::bigint AS total_bytes
+                ${crawlerRelationProjection}
            FROM pg_class c
            JOIN pg_namespace n ON n.oid = c.relnamespace
+           ${crawlerRelationJoins}
           WHERE n.nspname = $1 AND c.relname = $2`,
         [schema, table],
       ),
       pool.query(
         `SELECT p.indexname AS name, p.indexdef AS definition,
                 i.indisvalid AS valid, i.indisready AS ready
+                ${crawlerIndexProjection}
            FROM pg_indexes p
            JOIN pg_namespace n ON n.nspname = p.schemaname
            JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = p.tablename
            JOIN pg_class ci ON ci.relnamespace = n.oid AND ci.relname = p.indexname
            JOIN pg_index i ON i.indrelid = t.oid AND i.indexrelid = ci.oid
+           ${crawlerIndexJoin}
           WHERE p.schemaname = $1 AND p.tablename = $2
           ORDER BY p.indexname`,
         [schema, table],
@@ -1043,6 +1231,31 @@ export class DatabaseSourcePuller {
       ),
     ])
     const relation = relationResult.rows[0] || {}
+    const crawlerRelation = {
+      relationKind: relation.relation_kind,
+      isPartition: relation.is_partition,
+      isLeaf: relation.is_leaf,
+      parentSchema: relation.parent_schema,
+      parentTable: relation.parent_table,
+      parentRelationKind: relation.parent_relation_kind,
+      parentPartitionKey: relation.parent_partition_key,
+      partitionBound: relation.partition_bound,
+    }
+    const crawlerIndexes = indexResult.rows.map((index) => ({
+      valid: index.valid,
+      ready: index.ready,
+      live: index.live,
+      unique: index.unique_index,
+      accessMethod: index.access_method,
+      noExpressions: index.no_expressions,
+      noPredicate: index.no_predicate,
+      keyCount: index.key_count,
+      totalColumns: index.total_columns,
+      firstKey: index.first_key,
+      secondKey: index.second_key,
+      firstOption: index.first_option,
+      secondOption: index.second_option,
+    }))
     return {
       estimatedRows: relation.estimated_rows == null ? null : Number(relation.estimated_rows),
       totalBytes: relation.total_bytes == null ? null : Number(relation.total_bytes),
@@ -1062,19 +1275,27 @@ export class DatabaseSourcePuller {
       triggers: triggerResult.rows.map((row) => ({
         name: row.name, event: row.event, timing: row.timing, statement: row.statement,
       })),
+      crawlerContractIssues: crawlerSpec
+        ? [
+            ...crawlerLeafPartitionIssues(crawlerRelation, crawlerSpec),
+            ...crawlerCursorIndexIssues(crawlerIndexes, crawlerSpec),
+          ]
+        : [],
     }
   }
 
   /** Inspect a registered source without returning its DSN or any row values. */
   async describe(sourceKey, { mappingOverride = undefined } = {}) {
     const { source, mapping, connection } = await this.#source(sourceKey, { mappingOverride })
+    const crawlerSpec = crawlerSourceSpecForKey(sourceKey)
     let pool = null
     try {
       pool = await this.#pool(connection, 'mx-insight-hub-external-describe')
       const [columns, metadata] = await Promise.all([
         this.#columns(pool, connection),
-        this.#metadata(pool, connection),
+        this.#metadata(pool, connection, { crawlerSpec }),
       ])
+      const { crawlerContractIssues, ...publicMetadata } = metadata
       const names = new Set(columns.map((column) => column.name))
       const cursorColumn = connection.cursorColumn == null
         ? null
@@ -1123,7 +1344,7 @@ export class DatabaseSourcePuller {
       return {
         source: safeSource(source),
         columns,
-        ...metadata,
+        ...publicMetadata,
         cursor: { cursorColumn, idColumn },
         mappingVersion: mapping?.version ?? null,
         issues: [
@@ -1155,6 +1376,9 @@ export class DatabaseSourcePuller {
           ...(mobileCommerceSource && idColumn != null && !hasUniqueIdentity
             ? [`no unique index proves ${idColumn} is a stable capture identity`]
             : []),
+          ...(crawlerSpec ? crawlerSourceContractIssues(source, crawlerSpec) : []),
+          ...(crawlerSpec ? crawlerColumnIssues(columns) : []),
+          ...crawlerContractIssues,
           ...undefinedRequiredMappings,
           ...missingMappings.filter((entry) => requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
         ],
@@ -1289,11 +1513,33 @@ export class DatabaseSourcePuller {
   async progress(sourceKey) {
     const { source, connection } = await this.#source(sourceKey)
     const mobileCommerceSource = source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+    const crawlerSpec = crawlerSourceSpecForKey(sourceKey)
     const table = qualifiedTable(connection)
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue?.getCursor?.(cursorId) ?? null
     const position = saved?.position ?? {}
     const hasConfiguredCursor = Boolean(connection.cursorColumn && connection.idColumn)
+    const crawlerBlocked = (issues) => ({
+      totalRows: null,
+      completedRows: null,
+      remainingRows: null,
+      percent: null,
+      cursor: saved,
+      blocker: 'source_contract_mismatch',
+      issues,
+    })
+    if (crawlerSpec) {
+      const issues = [
+        ...crawlerSourceContractIssues(source, crawlerSpec),
+        ...(incompleteTupleCheckpoint(position)
+          ? ['crawler checkpoint must contain both cursor and lastId; reset it before resuming']
+          : []),
+        ...(position.cursor != null && !crawlerCursorIsFinite(position.cursor)
+          ? ['crawler checkpoint contains a non-finite last_seen_at watermark']
+          : []),
+      ]
+      if (issues.length > 0) return crawlerBlocked(issues)
+    }
     let pool = null
     try {
       pool = await this.#pool(connection, 'mx-insight-hub-external-progress')
@@ -1324,6 +1570,9 @@ export class DatabaseSourcePuller {
       const mobileCommerceTextCursor = mobileCommerceSource
         && isMobileCommerceTextCursorType(cursorDefinition?.databaseType)
       const warnings = mobileCommerceSource ? mobileCommerceColumnWarnings(columns) : []
+      const crawlerPhysicalIssues = crawlerSpec
+        ? await this.#crawlerPhysicalContractIssues(pool, connection, crawlerSpec)
+        : []
       const issues = [
         ...(!cursorDefinition ? [`cursor column ${cursorName} is missing`] : []),
         ...(!idDefinition ? [`id column ${idName} is missing`] : []),
@@ -1338,6 +1587,8 @@ export class DatabaseSourcePuller {
           ? [`id column ${idName} has unsupported type`]
           : []),
         ...(mobileCommerceSource ? mobileCommerceColumnIssues(columns) : []),
+        ...(crawlerSpec ? crawlerColumnIssues(columns) : []),
+        ...crawlerPhysicalIssues,
         ...(mobileCommerceSource && incompleteTupleCheckpoint(position)
           ? ['saved mobile-commerce checkpoint must contain both cursor and lastId; reset the checkpoint before resuming']
           : []),
@@ -1347,29 +1598,36 @@ export class DatabaseSourcePuller {
           ? ['saved mobile-commerce textual checkpoint does not match YYYY-MM-DD HH:mm:ss; reset the checkpoint before resuming']
           : []),
       ]
-      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues, warnings)
+      if (issues.length > 0) {
+        return crawlerSpec
+          ? crawlerBlocked(issues)
+          : await totalOnly('source_cursor_unsafe', issues, warnings)
+      }
 
-      const schema = safeIdentifier(connection.schema || 'public', 'schema')
-      const sourceTable = safeIdentifier(connection.table, 'table')
-      const indexResult = await pool.query(
-        `SELECT p.indexdef AS definition, i.indisvalid AS valid, i.indisready AS ready
-           FROM pg_indexes p
-           JOIN pg_namespace n ON n.nspname = p.schemaname
-           JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = p.tablename
-           JOIN pg_class ci ON ci.relnamespace = n.oid AND ci.relname = p.indexname
-           JOIN pg_index i ON i.indrelid = t.oid AND i.indexrelid = ci.oid
-          WHERE p.schemaname = $1 AND p.tablename = $2`,
-        [schema, sourceTable],
-      )
-      const definitions = indexResult.rows
-        .filter((row) => row.valid !== false && row.ready !== false)
-        .map((row) => row.definition)
-      if (!definitions.some((definition) => indexStartsWith(definition, cursorName, idName))) {
-        const issue = `no index begins with (${cursorName}, ${idName})`
-        if (mobileCommerceSource && !mobileCommerceTextCursor) {
-          warnings.push(`${issue}; incremental results remain correct but the source query may scan or sort until the upstream adds this performance index`)
-        } else if (!mobileCommerceSource) {
-          issues.push(issue)
+      let definitions = []
+      if (!crawlerSpec) {
+        const schema = safeIdentifier(connection.schema || 'public', 'schema')
+        const sourceTable = safeIdentifier(connection.table, 'table')
+        const indexResult = await pool.query(
+          `SELECT p.indexdef AS definition, i.indisvalid AS valid, i.indisready AS ready
+             FROM pg_indexes p
+             JOIN pg_namespace n ON n.nspname = p.schemaname
+             JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = p.tablename
+             JOIN pg_class ci ON ci.relnamespace = n.oid AND ci.relname = p.indexname
+             JOIN pg_index i ON i.indrelid = t.oid AND i.indexrelid = ci.oid
+            WHERE p.schemaname = $1 AND p.tablename = $2`,
+          [schema, sourceTable],
+        )
+        definitions = indexResult.rows
+          .filter((row) => row.valid !== false && row.ready !== false)
+          .map((row) => row.definition)
+        if (!definitions.some((definition) => indexStartsWith(definition, cursorName, idName))) {
+          const issue = `no index begins with (${cursorName}, ${idName})`
+          if (mobileCommerceSource && !mobileCommerceTextCursor) {
+            warnings.push(`${issue}; incremental results remain correct but the source query may scan or sort until the upstream adds this performance index`)
+          } else if (!mobileCommerceSource) {
+            issues.push(issue)
+          }
         }
       }
       if (
@@ -1382,7 +1640,11 @@ export class DatabaseSourcePuller {
       }
       if (mobileCommerceSource && !definitions.some((definition) => uniqueIndexProvesIdentity(definition, idName))) {
         issues.push(`no unique index proves ${idName} is a stable capture identity`)
-      } else if (!mobileCommerceSource && !definitions.some((definition) => uniqueIndexProvesOrder(definition, cursorName, idName))) {
+      } else if (
+        !mobileCommerceSource
+        && !crawlerSpec
+        && !definitions.some((definition) => uniqueIndexProvesOrder(definition, cursorName, idName))
+      ) {
         issues.push(`no unique index proves (${cursorName}, ${idName}) is a total order`)
       }
       if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues, warnings)
@@ -1468,6 +1730,63 @@ export class DatabaseSourcePuller {
           blocker: null,
           issues: [],
           warnings,
+        }
+      }
+      if (crawlerSpec) {
+        const hasPosition = position.cursor != null && position.lastId != null
+        const sourceTypeParameter = hasPosition ? '$3' : '$1'
+        const remainingSelection = hasPosition
+          ? `, count(*) FILTER (
+                WHERE (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})
+              )::bigint AS remaining_rows`
+          : ''
+        const parameters = hasPosition
+          ? [position.cursor, position.lastId, crawlerSpec.sourceType]
+          : [crawlerSpec.sourceType]
+        const { rows } = await pool.query(
+          `SELECT count(*)::bigint AS total_rows,
+                  count(*) FILTER (WHERE NOT isfinite(${cursorColumn}))::bigint AS invalid_cursor_rows,
+                  count(*) FILTER (
+                    WHERE "source_type"::text IS DISTINCT FROM ${sourceTypeParameter}::text
+                  )::bigint AS invalid_source_type_rows
+                  ${remainingSelection}
+             FROM ${table}`,
+          parameters,
+        )
+        const row = rows[0] || {}
+        const totalRows = Number(row.total_rows ?? 0)
+        const runtimeIssues = [
+          ...(Number(row.invalid_cursor_rows ?? 0) > 0
+            ? ['crawler source contains a non-finite last_seen_at watermark']
+            : []),
+          ...(Number(row.invalid_source_type_rows ?? 0) > 0
+            ? [`crawler source contains rows outside source_type ${crawlerSpec.sourceType}`]
+            : []),
+        ]
+        if (runtimeIssues.length > 0) {
+          return { ...crawlerBlocked(runtimeIssues), totalRows }
+        }
+        if (!hasPosition) {
+          return {
+            totalRows,
+            completedRows: null,
+            remainingRows: null,
+            percent: null,
+            cursor: saved,
+            blocker: null,
+            issues: [],
+          }
+        }
+        const remainingRows = Number(row.remaining_rows ?? 0)
+        const completedRows = Math.max(0, totalRows - remainingRows)
+        return {
+          totalRows,
+          completedRows,
+          remainingRows,
+          percent: totalRows === 0 ? 100 : Math.round((completedRows / totalRows) * 10_000) / 100,
+          cursor: saved,
+          blocker: null,
+          issues: [],
         }
       }
       if (position.cursor == null || position.lastId == null) {
@@ -1623,6 +1942,22 @@ export class DatabaseSourcePuller {
     if (!cursorEnd || typeof cursorEnd !== 'object') {
       throw new AppError(500, 'import_batch_cursor_missing', 'A committed import batch has no cursor end')
     }
+    if (crawlerSourceSpecForKey(sourceKey)) {
+      if (incompleteTupleCheckpoint(cursorEnd)) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Crawler import evidence must contain both cursor and lastId',
+        )
+      }
+      if (cursorEnd.cursor != null && !crawlerCursorIsFinite(cursorEnd.cursor)) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Crawler import evidence contains a non-finite last_seen_at watermark',
+        )
+      }
+    }
     const latestSource = await this.store.getExternalSource(sourceKey)
     const paused = latestSource?.status === 'paused'
     const done = paused || rowCount < limit
@@ -1727,6 +2062,32 @@ export class DatabaseSourcePuller {
     const { source, mapping, connection } = await this.#source(sourceKey, { requireMapping: true })
     if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
 
+    const crawlerSpec = crawlerSourceSpecForKey(sourceKey)
+    if (crawlerSpec) {
+      const sourceIssues = crawlerSourceContractIssues(source, crawlerSpec)
+      if (sourceIssues.length > 0) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Crawler source contract changed; pause and re-probe before resuming',
+          { issues: sourceIssues },
+        )
+      }
+      const attestation = await this.store.getLatestPipelineWriterContractAttestation?.(
+        CRAWLER_PIPELINE_KEY,
+      )
+      if (
+        attestation?.contractVersion !== CRAWLER_WRITER_CONTRACT_VERSION
+        || attestation?.contractDigest !== CRAWLER_WRITER_CONTRACT_DIGEST
+      ) {
+        throw new AppError(
+          409,
+          'writer_contract_attestation_required',
+          'Crawler pull requires the current source-writer contract attestation',
+        )
+      }
+    }
+
     const table = qualifiedTable(connection)
     if (!connection.cursorColumn || !connection.idColumn) {
       throw new AppError(409, 'source_cursor_unconfigured', 'Configure verified cursorColumn and idColumn values before sync')
@@ -1744,6 +2105,13 @@ export class DatabaseSourcePuller {
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue.getCursor(cursorId)
     const position = saved?.position ?? {}
+    if (crawlerSpec && incompleteTupleCheckpoint(position)) {
+      throw new AppError(
+        409,
+        'source_contract_mismatch',
+        'Crawler checkpoint must contain both cursor and lastId; reset it before resuming',
+      )
+    }
     if (sourceKey === MOBILE_COMMERCE_SOURCE_KEY && incompleteTupleCheckpoint(position)) {
       throw new AppError(
         409,
@@ -1764,6 +2132,9 @@ export class DatabaseSourcePuller {
       && !mobileCommerceCursorIsFinite(position.cursor)
     ) {
       throw new AppError(409, 'source_contract_mismatch', 'Mobile-commerce checkpoint contains a non-finite watermark')
+    }
+    if (crawlerSpec && position.cursor != null && !crawlerCursorIsFinite(position.cursor)) {
+      throw new AppError(409, 'source_contract_mismatch', 'Crawler checkpoint contains a non-finite last_seen_at watermark')
     }
     const contractHash = sourceContractHash(source, mapping)
     this.#assertCheckpoint(position, {
@@ -1873,6 +2244,33 @@ export class DatabaseSourcePuller {
     try {
       await this.#assertManagedSourceContract(pool, connection)
       const columns = await this.#columns(pool, connection)
+      if (crawlerSpec) {
+        const contractIssues = [
+          ...crawlerColumnIssues(columns),
+          ...await this.#crawlerPhysicalContractIssues(pool, connection, crawlerSpec),
+        ]
+        if (contractIssues.length > 0) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Crawler source schema, partition, or cursor index changed; pause and re-probe before resuming',
+            { issues: contractIssues },
+          )
+        }
+        const watermarkIssues = await this.#crawlerWatermarkEndpointIssues(
+          pool,
+          connection,
+          crawlerSpec,
+        )
+        if (watermarkIssues.length > 0) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Crawler source contains a non-finite last_seen_at endpoint; correct the upstream row before resuming',
+            { issues: watermarkIssues },
+          )
+        }
+      }
       if (sourceKey === PROVINCE_OPINION_SOURCE_KEY) {
         const contractIssues = [
           ...provinceOpinionSourceContractIssues(source),
@@ -1987,6 +2385,24 @@ export class DatabaseSourcePuller {
         replaceCursorValue: sourceKey === MOBILE_COMMERCE_SOURCE_KEY
           && cursorDefinition?.databaseType === 'timestamp',
       })
+      if (crawlerSpec) {
+        const rowIssues = crawlerSourceRowIssues(rows, crawlerSpec)
+        if (rowIssues.length > 0) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Crawler source returned rows outside its fixed leaf partition contract',
+            { issues: rowIssues },
+          )
+        }
+        if (exactCursors.some((cursor) => !crawlerCursorIsFinite(cursor))) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Crawler source returned a non-finite last_seen_at watermark',
+          )
+        }
+      }
       if (
         sourceKey === PROVINCE_OPINION_SOURCE_KEY
         && exactCursors.some((cursor) => !provinceOpinionCursorIsFinite(cursor))
@@ -2041,6 +2457,20 @@ export class DatabaseSourcePuller {
         // batch consistent even if an administrator edits the catalog later.
         const catalogEntries = await this.store.listSourceCatalogEntries({ includeArchived: false })
         classifyMobileMarketplace = createMobileMarketplaceClassifier(catalogEntries)
+      }
+      let classifyCrawlerCatalog = null
+      if (isCrawlerSourceKey(sourceKey)) {
+        if (typeof this.store.listSourceCatalogEntries !== 'function') {
+          throw new AppError(
+            503,
+            'source_catalog_unavailable',
+            'Crawler classification requires the governed source catalog',
+          )
+        }
+        // Publisher and collector facets must use the same authoritative
+        // snapshot for every row in this page.
+        const catalogEntries = await this.store.listSourceCatalogEntries({ includeArchived: false })
+        classifyCrawlerCatalog = createCrawlerCatalogClassifier(catalogEntries)
       }
 
       if (!run) {
@@ -2108,6 +2538,9 @@ export class DatabaseSourcePuller {
           }
         }
         enrichMobileCommerceRecord(record, raw, source, { classifyMarketplace: classifyMobileMarketplace })
+        if (isCrawlerSourceKey(sourceKey)) {
+          enrichCrawlerRecord(record, raw, source, { classifyCatalog: classifyCrawlerCatalog })
+        }
         refreshMappedPayloadSha256(record)
         record.parserVersion = `${CHUNKER_VERSION}:map${mapping.version}`
         mapped.push(record)

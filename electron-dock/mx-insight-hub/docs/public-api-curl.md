@@ -182,6 +182,12 @@ revision-fenced display-province 索引均已通过精确合同校验。
 `public_opinion` platform grant 同时存在时才能查看漏斗和未展示记录。
 `source_catalog` 平台项使用 Hub stored 数据面，能力包括
 `catalog_entries`、`catalog_metadata`、`catalog_detail` 和 `filtered_browse`。
+每个已授权的 `data_center_saved_records_<source_type>` 也会独立出现在
+`data.platforms[]`，固定为 `source=hub`、`servingMode=stored`，并广告
+`capabilities=[stored_search, canonical_search]`。只有对应固定叶分区 source 为
+`active` 且搜索层已配置时才会 `ready=true`；暂停的 source 可以仍保留历史数据，
+所以 `ready` 不是新鲜度证明或额外授权。这些 Hub-stored 平台不会进入
+`data.legacySearch`。
 `virtual_supermarket` 是独立的 Hub stored 发布产品授权；它不由
 `mobile_commerce` 或 `source_catalog` 授权推导。当平台项 `ready=true`
 时，应包含 metadata、products、product_detail、stored_search 和已实现的语义
@@ -848,6 +854,9 @@ message。`platform=xiaohongshu` 且 `pageSize` 恰好为默认值 20 时，兼�
 执行路径改为发放 Hub 加密的 `mxnc1` cursor，最多走到第 15 页。升级前的裸 provider
 cursor 无法证明页数，会返回 `400 invalid_cursor`；删除 cursor、换新的
 `Idempotency-Key` 并从首页重启。非 20 pageSize 继续使用历史兼容路径，不能跨路径交换 cursor。
+`public_opinion` 与 `data_center_saved_records_*` 是 Hub-stored 数据平台，在此兼容路径固定返回
+`400 platform_operation_unsupported`；应改用 stored/canonical search，且不会进入历史
+外部 dispatch。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
@@ -892,6 +901,12 @@ scope 和下一页，provider cursor 仅存在于密文内部。每个下一页�
 数据范围，不是独立授权。还可使用 `pageSize`、`cursor` 和 `type`。不接受物理数据库/
 索引名称、SQL 或 Elasticsearch DSL。
 
+`platform=data_center_saved_records_<source_type>` 固定只返回
+`crawler.publication.eligibility=candidate` 的记录；`internal`、缺失或未知 eligibility
+均不会通过公共边界。该约束同时绑定 cursor 与幂等指纹。content-v6 尚未切换或
+Elasticsearch 首次请求不可用时，Hub 会带着同一 gate 回退 PostgreSQL；旧 ES PIT
+返回 `503 search_cursor_unavailable`，不能继续读取升级前的结果窗口。
+
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
 curl -sS -i -X POST \
@@ -928,6 +943,12 @@ curl -sS -i -X POST \
 元数据和 `searchMode`。当前 consumer 至少需要一个平台授权。Elasticsearch PIT
 cursor 过期时返回 `410`；应移除 cursor、换新的 `Idempotency-Key` 并从第一页重新开始。
 
+若 scope 含任一 `data_center_saved_records_*` 平台，该平台分支只返回 Hub 清洗后
+`crawler.publication.eligibility=candidate` 的记录；`internal`、缺失或未知 eligibility
+都不会公开。这个条件只作用于 crawler 分支，混合搜索中的 Telegram 等其他平台保持
+原语义。该 gate 同时存在于 content-v6 Elasticsearch 投影和 PostgreSQL 降级查询；
+content-v6 尚未切换或 Elasticsearch 不可用时，第一页会 fail-closed 地回退 PostgreSQL。
+
 ### stored/canonical 中的 `public_opinion` 可见性
 
 只要 stored/canonical 搜索范围可能包含 `public_opinion`，该平台分支默认只返回
@@ -953,10 +974,12 @@ curl -sS -i -X POST \
   "$HUB_URL/api/v1/data/canonical/search"
 ```
 
-publication visibility 是幂等指纹的一部分。升级到该契约后，首次请求必须使用新的
+适用于当前 scope 的 publication visibility 是幂等指纹的一部分，其中也包括上述
+crawler candidate-only 契约。升级到该契约后，首次请求必须使用新的
 `Idempotency-Key`；复用升级前的 key 会返回 `409 idempotency_conflict`，不会回放
-升级前可能未门禁的响应。默认请求的 cursor binding 保持兼容，但升级前创建的
-Elasticsearch PIT 若不是 content-v5 会返回 `503 search_cursor_unavailable`，应移除
+升级前可能未门禁的响应。不含 crawler 与 `public_opinion` 的请求保持原指纹与 cursor
+binding；包含 crawler 的 cursor 会绑定 candidate-only 契约。升级前创建的
+Elasticsearch PIT 若不是 content-v6 会返回 `503 search_cursor_unavailable`，应移除
 cursor、换新的 `Idempotency-Key` 并从第一页重新搜索。
 
 ## 5. 全国与省级 all-ingested 舆情 API

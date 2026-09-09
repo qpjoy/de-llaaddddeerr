@@ -30,6 +30,12 @@ import {
 import { runExternalPullJob } from '../../server/ingest/external/sync-job.mjs'
 import { scheduleActiveDatabaseSources } from '../../server/ingest/external/scheduler.mjs'
 import {
+  CRAWLER_PIPELINE_KEY,
+  CRAWLER_SOURCES,
+  CRAWLER_WRITER_CONTRACT_DIGEST,
+  CRAWLER_WRITER_CONTRACT_VERSION,
+} from '../../server/ingest/crawler/source-contract.mjs'
+import {
   MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
   MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
 } from '../../server/ingest/mobile-commerce/pipeline.mjs'
@@ -3362,6 +3368,101 @@ test('periodic mobile-commerce scheduling excludes the fixed source from generic
   ])
   assert.equal(enqueues[0][2].dedupeKey, `external-pull:${MOBILE_COMMERCE_SOURCE_KEY}:0`)
   assert.equal(enqueues[0][2].priority, 220)
+})
+
+test('periodic crawler scheduling requires current attestation and isolates each fixed leaf', async () => {
+  const fixedSource = (spec, overrides = {}) => ({
+    sourceKey: spec.sourceKey,
+    sourceKind: 'database',
+    datasetId: spec.datasetId,
+    platform: spec.platform,
+    objectType: spec.objectType,
+    status: 'active',
+    connection: { ...spec.locator },
+    syncIntervalSeconds: 300,
+    ...overrides,
+  })
+  const [cursorFailureSpec, dueSpec, driftedSpec, pausedSpec] = CRAWLER_SOURCES
+  const sources = [
+    fixedSource(cursorFailureSpec),
+    fixedSource(dueSpec),
+    fixedSource(driftedSpec, { platform: 'drifted-platform' }),
+    fixedSource(pausedSpec, { status: 'paused' }),
+  ]
+  let attestation = null
+  const cursorKeys = []
+  const enqueues = []
+  const statements = []
+  const warnings = []
+  const client = {
+    async query(sql) {
+      statements.push(sql)
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const store = {
+    listExternalSources: async () => sources,
+    getLatestPipelineWriterContractAttestation: async (pipelineKey) => {
+      assert.equal(pipelineKey, CRAWLER_PIPELINE_KEY)
+      return attestation
+    },
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    async getCursor(cursorKey) {
+      cursorKeys.push(cursorKey)
+      if (cursorKey === `external:${cursorFailureSpec.sourceKey}`) {
+        throw new Error('isolated cursor outage')
+      }
+      return { status: 'idle', updatedAt: '2026-09-10T07:50:00.000Z' }
+    },
+    async enqueue(name, payload, options) {
+      assert.equal(options.client, client)
+      enqueues.push([name, payload, options])
+      return enqueues.length
+    },
+  }
+  const schedule = () => scheduleActiveDatabaseSources({
+    store,
+    queue,
+    now: new Date('2026-09-10T08:00:00.000Z'),
+    batchSize: 750,
+    logger: { warn(message) { warnings.push(message) } },
+  })
+
+  assert.deepEqual(await schedule(), { active: 3, enqueued: 0 })
+  assert.deepEqual(cursorKeys, [], 'an unattested crawler must not enter the generic scheduler')
+  attestation = {
+    contractVersion: CRAWLER_WRITER_CONTRACT_VERSION,
+    contractDigest: 'stale-digest',
+  }
+  assert.deepEqual(await schedule(), { active: 3, enqueued: 0 })
+  assert.deepEqual(cursorKeys, [])
+
+  attestation = {
+    contractVersion: CRAWLER_WRITER_CONTRACT_VERSION,
+    contractDigest: CRAWLER_WRITER_CONTRACT_DIGEST,
+  }
+  assert.deepEqual(await schedule(), { active: 3, enqueued: 1 })
+  assert.deepEqual(cursorKeys, [
+    `external:${cursorFailureSpec.sourceKey}`,
+    `external:${dueSpec.sourceKey}`,
+  ])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], new RegExp(cursorFailureSpec.sourceKey, 'u'))
+  assert.deepEqual(statements, ['BEGIN', 'COMMIT'])
+  assert.equal(enqueues.length, 1)
+  assert.deepEqual(enqueues[0].slice(0, 2), [
+    'external-pull',
+    {
+      sourceKey: dueSpec.sourceKey,
+      batchSize: 750,
+      trigger: 'schedule',
+      chunk: 0,
+    },
+  ])
+  assert.equal(enqueues[0][2].dedupeKey, `external-pull:${dueSpec.sourceKey}:0`)
 })
 
 test('periodic Telegram scheduling waits for both inputs and commits the due pair together', async () => {

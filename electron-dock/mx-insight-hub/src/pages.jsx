@@ -76,6 +76,19 @@ const PLATFORM_CATALOG = [
   'mobile_commerce',
   'virtual_supermarket',
   'ecommerce',
+  'data_center_saved_records_automotive',
+  'data_center_saved_records_finance',
+  'data_center_saved_records_forum',
+  'data_center_saved_records_hotspot',
+  'data_center_saved_records_local_news',
+  'data_center_saved_records_media',
+  'data_center_saved_records_news',
+  'data_center_saved_records_other',
+  'data_center_saved_records_recruitment',
+  'data_center_saved_records_research',
+  'data_center_saved_records_social',
+  'data_center_saved_records_technology',
+  'data_center_saved_records_web',
 ]
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }

@@ -700,6 +700,40 @@ export const adminApi = {
   resetProvinceOpinionPipelineCheckpoint: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/province-opinion/checkpoint/reset`, { method: 'POST', body },
   ),
+  nightAllSavedRecordsPipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records`,
+  ),
+  updateNightAllSavedRecordsPipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records`, { method: 'PUT', body },
+  ),
+  updateNightAllSavedRecordsPipelineStatus: (
+    token, status, writerContractAttestation = null, selector = null,
+  ) => request(
+    token,
+    `${ADMIN_ROOT}/pipelines/night-all-saved-records/status`,
+    {
+      method: 'POST',
+      body: {
+        status,
+        ...(writerContractAttestation ? { writerContractAttestation } : {}),
+        ...(selector && Object.prototype.hasOwnProperty.call(selector, 'sourceType')
+          ? { sourceType: selector.sourceType }
+          : {}),
+      },
+    },
+  ),
+  runNightAllSavedRecordsPipeline: (token, body = {}) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/sync`, { method: 'POST', body },
+  ),
+  nightAllSavedRecordsPipelineProgress: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/progress`,
+  ),
+  resumeNightAllSavedRecordsPipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/resume`, { method: 'POST' },
+  ),
+  resetNightAllSavedRecordsPipelineCheckpoints: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/checkpoints/reset`, { method: 'POST', body },
+  ),
   mobileCommercePipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/mobile-commerce`),
   updateMobileCommercePipeline: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/mobile-commerce`, { method: 'PUT', body },
