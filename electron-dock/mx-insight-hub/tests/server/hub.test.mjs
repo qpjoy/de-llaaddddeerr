@@ -722,7 +722,10 @@ test('health reports liveness and dependencies', async () => {
   assert.equal(live.payload.data.status, 'live')
   const ready = await call('/health/ready')
   assert.equal(ready.response.status, 200)
-  assert.equal(ready.payload.data.dependencies.nightAll.status, 'up')
+  assert.deepEqual(ready.payload.data.dependencies, {
+    store: { status: 'up' },
+    dataService: { status: 'up' },
+  })
 })
 
 test('listener modes fail closed across public and admin planes', async () => {

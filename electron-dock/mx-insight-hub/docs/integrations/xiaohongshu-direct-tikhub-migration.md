@@ -4,7 +4,7 @@ Status: staged release contract. This document defines the traffic that may move
 Hub-owned TikHub connector and the controls required before activation. Repository code, a database migration,
 or this document alone is not proof that a target environment has enabled direct routing.
 
-Last reviewed: 2026-09-08.
+Last reviewed: 2026-09-09.
 
 Related documents:
 
@@ -28,6 +28,25 @@ TikHub endpoint contract: xiaohongshu.app-v2.search-notes.v1
 Canonical dataset:        social.posts.v1
 Canonical connector:      external-platform:tikhub
 ```
+
+The released note-detail mapping is intentionally separate:
+
+```text
+Hub-owned public path:    POST /api/v1/xiaohongshu/app/get_note_info (JSON link input)
+Compatibility read path: GET /api/v1/xiaohongshu/app/get_note_info (note_id/share_text)
+Hub operation:            social.posts.resolve
+TikHub endpoint contract: xiaohongshu.image-note-detail.v2
+TikHub physical path:     /api/v1/xiaohongshu/app_v2/get_image_note_detail
+Canonical dataset:        social.posts.v1
+```
+
+TikHub App V1 and its old physical `/app/get_note_info` operation were permanently retired on 2026-06-17
+per the [TikHub Xiaohongshu App V2 migration guide](https://blog.tikhub.io/zh/article/7).
+The Hub public path keeps a useful customer-facing spelling but never dispatches to that retired operation.
+The JSON POST is preferred for links so temporary link parameters do not enter request-target logs; GET
+`share_text`/`note_id` inputs remain compatible. All are normalized and the current adapter calls only the
+reviewed App V2 detail contract.
+The Public response remains Hub-owned and provider-neutral.
 
 `social.posts.search` is distinct from the existing `social.posts.resolve` note-detail capability. A direct
 search requires the effective `xiaohongshu` platform grant and an active Live Hub Public API key; it does not
@@ -57,6 +76,8 @@ A request may use direct TikHub only when all of the following are true:
   contract for the same consumer, query and page size;
 - it carries a valid non-Test Hub Public API key, the effective `xiaohongshu` grant and a valid
   `Idempotency-Key`;
+- when `MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS` is non-empty, its consumer UUID is in that
+  allowlist; an empty value preserves the global search-gate behavior;
 - the direct contract gate, TikHub credential, PostgreSQL ledger and provider admission controls are ready in
   that environment.
 
@@ -179,6 +200,7 @@ Provider admission is separate from the customer plan's request/RPS quota:
 
 | Control | Repository default / bound | Scope |
 | --- | ---: | --- |
+| `MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS` | empty | Optional comma-separated consumer UUID allowlist for new direct first pages and capability advertisement. Empty means the search contract gate is global. |
 | `MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE` | 120 | PostgreSQL-clock token bucket shared by all Hub replicas and all TikHub search/detail dispatches. |
 | `MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS` | 20, maximum 20 | Maximum known preview-boundary notes considered per search page. |
 | `MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY` | 2, maximum 5 | Detail workers within one search request. |
@@ -261,6 +283,11 @@ Direct traffic may be enabled only after all of the following are true in the ta
 Roll out the application and migration first with
 `MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0`. Confirm that every Public replica understands direct cursors,
 multi-call evidence and the shared provider-rate bucket before changing the search gate to `1` for a canary.
+For the first live request, set `MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS` to one dedicated consumer UUID
+before opening the search gate. A non-empty allowlist sends every other eligible first page to Night-All and
+hides direct-search capability advertisement from those consumers. Removing a consumer from the allowlist or
+closing the gate does not reroute a previously issued direct cursor; its continuation stays on TikHub so a
+single pagination chain cannot change providers midstream.
 The parent gate may remain enabled for the already released explicit note-detail operation while the narrower
 search gate stays closed. Do not infer search activation from the presence of a credential, migration or
 `search_posts` source code alone; the running capability response must advertise nested `search.ready=true`.

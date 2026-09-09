@@ -79,6 +79,42 @@ Key，不需要持有 Night-All、TikHub 或 JustOne 的凭据。
 后续增加为新的明确 billing unit，不能根据响应 `items.length` 或供应商 `providerCalls`
 临时推算客户价格。
 
+### 3.1 首版运营价目表建议（待人工发布）
+
+截至 2026-09-09，TikHub 的[小红书公开价目](https://tikhub.io/xiaohongshu-api)为
+USD 0.01 / 上游请求。按规划汇率 7.5 CNY/USD，一次自动补全最坏路径的搜索会产生
+`1 search + 20 detail`，采购成本上限约为 CNY 1.575；单篇详情采购成本约为 CNY 0.075。
+据此建议首个 provider-neutral 客户价目表采用“按成功交付固定价”，而不是把供应商调用数
+直接转嫁给租户：
+
+| Meter | 标准基础价 | 交付口径 | 最坏路径采购毛利率（未计税费/存储/运维） |
+| --- | ---: | --- | ---: |
+| `social.posts.search` | CNY 3.20 / Hub request | 最多 20 条，包含必要的正文补全 | 约 50.8% |
+| `social.posts.resolve` | CNY 0.20 / Hub request | 一篇成功交付的完整笔记 | 约 62.5% |
+
+租户不需要知道 TikHub、Night-All 或其他供应商。差异合同通过租户倍率表达，首版建议为：
+
+| 商务层级 | 建议倍率 | 前提 |
+| --- | ---: | --- |
+| 标准 | 1.00× | 无月承诺 |
+| 月预付 | 0.90× | 单租户月预付不低于 CNY 3,000 |
+| 企业 | 0.80× | 单租户月预付不低于 CNY 10,000，且先完成上游容量扩展 |
+
+`0.80×` 是当前成本假设下的建议折扣底线，不是写死在代码里的自动折扣。公开表价、汇率、
+失败率或 P95 自动补全数发生变化时，运营必须重新核算并发布新的不可变版本。JustOne 的
+逐接口采购价尚未核验，因此首个建议价目表不包含 `ecommerce.products.search`，也不能把
+测试 fixture 中的金额当成运营价格。
+
+`launch-1m` 的 1,000,000 次/月和 100 RPS 只是 Hub 商业上限，不是 TikHub 容量保证。
+以当前 120 provider calls/minute、预留 30% 稳定性余量计算，运营容量约束应满足：
+
+```text
+search_rpm × (1 + P95_detail_enrichment_count) + resolve_rpm <= 84
+```
+
+在最坏每次搜索补全 20 条时，未经上游扩容的完整搜索应限制在约 4 次/分钟。该供应商容量
+门禁继续独立于套餐 QPS，不能因为租户余额或套餐额度充足而被绕过。
+
 ## 4. 三种计费模式
 
 租户 billing profile 由平台管理员控制，并使用 revision 做并发更新保护。
@@ -143,9 +179,10 @@ Hub 同时维护两个相互独立的事实域：
 自动补全而产生一个搜索调用和多个详情调用。客户侧仍只有一个稳定的 Hub charge；采购侧
 按每个实际 endpoint call 独立记录 `billed`、成本、币种、成功/失败/unknown 和归档证据。
 
-“外部数据平台”页面展示采购侧的 TikHub / JustOne 等健康度、调用数和成本估算；“套餐与
-配额”“使用记录”展示客户侧最终费率、报价、已扣、冻结和按 meter 汇总。供应商单价当前
-来自经校验的人工配置，属于采购成本估算，不等同于供应商正式账单；customer charge 也
+采购侧的供应商健康度、调用数和成本估算仅通过 Admin-token API 查看；已标记为隐藏的
+付费供应商（包括 TikHub）不出现在任何 Hub 界面或租户响应中。“套餐与配额”“使用记录”
+只展示客户侧最终费率、报价、已扣、冻结和按 meter 汇总。供应商单价当前来自经校验的人工
+配置，属于采购成本估算，不等同于供应商正式账单；customer charge 也
 是 Hub 预付消费事实，不应直接冒充会计收入确认或税务发票。
 
 受限租户响应会移除 provider、采购成本、内部倍率、人工入账 actor 和 external reference。
@@ -158,7 +195,7 @@ Hub 同时维护两个相互独立的事实域：
 | 对外能力 | Meter | 客户侧语义 |
 | --- | --- | --- |
 | `POST /api/v1/data/search` 的小红书 direct 请求，以及可无感直连的 `POST /api/v1/night-all/search/raw` 小红书子集 | `social.posts.search` | 每次新的 Hub 搜索交付计一个 request |
-| `POST /api/v1/data/post` 及兼容别名 `POST /api/v1/xiaohongshu/app/get_note_info` | `social.posts.resolve` | 每次新的单篇笔记交付计一个 request |
+| `POST /api/v1/xiaohongshu/app/get_note_info`，以及同一逻辑操作的 GET 兼容形式 / `POST /api/v1/data/post` | `social.posts.resolve` | 每次新的单篇笔记交付计一个 request |
 | `GET /api/v1/data/posts/media` | 无新增笔记 meter | 只读取该 consumer 已提交结果中的媒体，不再次解析笔记 |
 
 `/api/v1/night-all/search/raw` 的公开路径、请求结构和 legacy response envelope 保持不变；
@@ -233,7 +270,9 @@ Launcher introspection 识别人，再以 Hub membership 决定 tenant scope；�
 - 套餐与配额：查看当前套餐、最终接口费率、余额和自己的钱包流水；
 - 使用记录：查看自己的请求、报价、已扣、冻结、影子报价和按 meter 汇总；
 - 小红书笔记画卷：有 `apikey.read` 时可展示并使用已授权 Key 验证数据产品；
-- 开放能力、外部数据平台和全平台采购成本：仅平台管理员可见。
+- 开放能力：租户有 `consumer.read` 时可查看自己的 provider-neutral 授权，只有具备
+  `platform.write` 的租户角色才能管理自己的授权；
+- 外部供应商身份、凭据、路由和全平台采购成本：仅 Admin-token API 可读写，不在 Hub 界面中展示隐藏供应商。
 
 当前“选择展示”由服务端返回的 membership capabilities 和路由权限驱动，不依赖前端本地
 猜角色。它还不是可由租户购买/勾选产品的 storefront；产品订购、自助换套餐和审批流属于

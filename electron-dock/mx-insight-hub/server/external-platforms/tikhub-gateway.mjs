@@ -942,7 +942,7 @@ export class TikHubGateway {
       const detailFingerprint = fingerprint({
         method: 'POST',
         path: SOCIAL_POST_PATH,
-        body: detailRequest.fingerprintBody,
+        body: detailRequest.noteFingerprintBody,
       })
       const detailDelivery = {
         ...delivery,
@@ -1240,6 +1240,7 @@ export class TikHubGateway {
         throw error
       }
       const requestFingerprint = fingerprint({ method: 'POST', path, body: normalized.fingerprintBody })
+      const noteFingerprint = fingerprint({ method: 'POST', path, body: normalized.noteFingerprintBody })
       const suppliedKey = idempotencyKey != null && idempotencyKey !== ''
       if (suppliedKey && (typeof idempotencyKey !== 'string' || !IDEMPOTENCY_PATTERN.test(idempotencyKey))) {
         throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8-128 safe characters')
@@ -1258,8 +1259,16 @@ export class TikHubGateway {
         }
         const candidate = retryOfRequestId.trim()
         const previous = await this.usageStore.getUsageRequestForRetry(candidate, context.consumer.id)
+        const retryableFingerprints = new Set([
+          noteFingerprint,
+          ...['cache_first', 'refresh'].map((deliveryMode) => fingerprint({
+            method: 'POST',
+            path,
+            body: { ...normalized.noteFingerprintBody, deliveryMode },
+          })),
+        ])
         if (!previous || previous.status !== 'unknown' || previous.platform !== XIAOHONGSHU_PLATFORM
-          || previous.fingerprint !== requestFingerprint || previous.idempotencyKey === idempotencyKey) {
+          || !retryableFingerprints.has(previous.fingerprint) || previous.idempotencyKey === idempotencyKey) {
           throw new AppError(409, 'uncertain_retry_not_allowed', 'The referenced uncertain request cannot authorize this retry')
         }
         validatedRetryId = candidate
@@ -1304,6 +1313,7 @@ export class TikHubGateway {
         usageRequestId: reservation.request.id,
         operation: XIAOHONGSHU_POST_OPERATION,
         fingerprint: requestFingerprint,
+        snapshotFingerprint: noteFingerprint,
       }
       if (reservation.kind === 'in_progress') {
         await this.platformStore.recordGatewayAttempt({
@@ -1354,7 +1364,7 @@ export class TikHubGateway {
       let snapshot = await this.platformStore.snapshotFor({
         consumerId: context.consumer.id,
         operation: XIAOHONGSHU_POST_OPERATION,
-        fingerprint: requestFingerprint,
+        fingerprint: noteFingerprint,
       }, now)
       const fresh = snapshot && new Date(snapshot.freshUntil) >= now
       if (snapshot && (normalized.deliveryMode === 'cache_only'
@@ -1406,7 +1416,7 @@ export class TikHubGateway {
         const lease = await this.platformStore.acquireDispatchLease({
           consumerId: context.consumer.id,
           operation: XIAOHONGSHU_POST_OPERATION,
-          fingerprint: requestFingerprint,
+          fingerprint: noteFingerprint,
           endpointKey: TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
           contractVersion: XIAOHONGSHU_POST_CONTRACT_VERSION,
           ownerRequestId: activeRequestId,
@@ -1418,7 +1428,7 @@ export class TikHubGateway {
           snapshot = await this.platformStore.snapshotFor({
             consumerId: context.consumer.id,
             operation: XIAOHONGSHU_POST_OPERATION,
-            fingerprint: requestFingerprint,
+            fingerprint: noteFingerprint,
           }, new Date())
           if (snapshot) {
             const stillFresh = new Date(snapshot.freshUntil) >= new Date()
@@ -1533,6 +1543,7 @@ export class TikHubGateway {
           endpointVersion: TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION,
           marketplace: XIAOHONGSHU_PLATFORM,
           fingerprint: requestFingerprint,
+          dispatchFingerprint: noteFingerprint,
           retryOfRequestId: validatedRetryId,
         })
         const startedAt = performance.now()
@@ -1639,7 +1650,7 @@ export class TikHubGateway {
           await this.platformStore.releaseDispatchLease({
             consumerId: context.consumer.id,
             operation: XIAOHONGSHU_POST_OPERATION,
-            fingerprint: requestFingerprint,
+            fingerprint: noteFingerprint,
             ownerRequestId: activeRequestId,
           }).catch(() => {})
         }

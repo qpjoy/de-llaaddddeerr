@@ -145,6 +145,32 @@ if grep -Fq 'retained-provider-token-must-not-be-printed' "$justone_preserve_out
 fi
 rm -f -- "$justone_preserve_marker" "$justone_preserve_output"
 
+tikhub_canary_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tikhub-canary.XXXXXX")"
+rm -f -- "$tikhub_canary_marker"
+TIKHUB_CANARY_MARKER="$tikhub_canary_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_TIKHUB_API_KEY="test-only-placeholder"
+  export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1
+  export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=1
+  unset MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS
+  kubectl() {
+    case " $* " in
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS"*)
+        printf "675d277d-0000-4000-8000-000000000655"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  preserve_existing_tikhub_runtime_config
+  printf "%s" "$MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS" >"$TIKHUB_CANARY_MARKER"
+' _ "$ROOT_DIR"
+assert_eq \
+  '675d277d-0000-4000-8000-000000000655' \
+  "$(cat "$tikhub_canary_marker")" \
+  'omitted TikHub canary allowlist inherits the retained Kubernetes state'
+rm -f -- "$tikhub_canary_marker"
+
 justone_blank_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-blank.XXXXXX")"
 rm -f -- "$justone_blank_marker"
 JUSTONE_BLANK_MARKER="$justone_blank_marker" bash -c '
@@ -1940,6 +1966,7 @@ grep -q 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS.*900000' "$ROOT_DIR/
 grep -q 'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE.*90' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE.*120' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS.*:-}' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS.*20' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY.*2' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
@@ -1947,11 +1974,13 @@ grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=' 
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-90}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-120}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS="${MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS:-20}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY="${MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY:-2}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q '^MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE=90$' "$ROOT_DIR/.env.example"
 grep -q '^MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE=120$' "$ROOT_DIR/.env.example"
 grep -q '^# MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0$' "$ROOT_DIR/.env.example"
+grep -q '^# MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=$' "$ROOT_DIR/.env.example"
 grep -q '^MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS=20$' "$ROOT_DIR/.env.example"
 grep -q '^MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY=2$' "$ROOT_DIR/.env.example"
 grep -q 'PostgreSQL token bucket shared across Hub Pods' "$ROOT_DIR/.env.example"

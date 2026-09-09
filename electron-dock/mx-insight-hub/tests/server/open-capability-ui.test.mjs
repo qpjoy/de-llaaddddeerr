@@ -6,6 +6,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from '../../src/open-capabilities.js'
+import { selectVisibleTenantId } from '../../src/tenant-scope.js'
+
+test('tenant deep links accept only visible tenant IDs and preserve intentional aggregate views', () => {
+  const tenants = [{ id: 'tenant-a' }, { id: 'tenant-b' }]
+  assert.equal(selectVisibleTenantId(tenants, 'tenant-b'), 'tenant-b')
+  assert.equal(selectVisibleTenantId(tenants, 'tenant-hidden'), 'tenant-a')
+  assert.equal(selectVisibleTenantId(tenants, ''), 'tenant-a')
+  assert.equal(selectVisibleTenantId(tenants, '', { aggregateWhenEmpty: true }), '')
+  assert.equal(selectVisibleTenantId([], 'tenant-hidden'), '')
+})
 
 test('tokenize curl is paste-ready without putting an API key in history or argv', async () => {
   assert.match(TOKENIZE_CURL_TEMPLATE, /^\(\n/)
@@ -37,15 +47,20 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(pages, /tenantId: issuedSecret\.tenantId, consumerId: issuedSecret\.consumerId/)
   assert.match(pages, /扩大范围请签发新 Key/)
   assert.match(pages, /套餐总额、调用者策略与 API Key 签发额度同时生效/)
-  assert.match(pages, /未来客户费率通过版本化订阅 \/ price book 生效/)
+  assert.match(pages, /供应商选择、健康、采购成本与游标绑定均由 Hub 内部治理/)
+  assert.match(pages, /租户只看开放能力、合同费率与交付结果/)
   assert.match(pages, /查看该身份 API Key/)
   assert.match(pages, /ROUTING BOUNDARY[\s\S]*?Hub 内部路由/)
-  assert.match(pages, /当前运行时只有 JustOne 单候选，没有多供应商故障转移/)
-  assert.match(pages, /第二家通过合同验证后[\s\S]*?派发前确定性选路/)
   assert.match(pages, /启用即允许该调用身份请求电商数据/)
   assert.match(pages, /可归一化的商品检索统一授权[\s\S]*?ecommerce/)
   assert.match(pages, /平台身份本身就是接口语义/)
   assert.match(pages, /内部可聚合多个供应方/)
+  const plansQuotasPage = pages.match(/export function PlansQuotasPage[\s\S]*?\nexport function PlatformsPage/u)?.[0] || ''
+  assert.match(plansQuotasPage, /尚未配置费率/u)
+  assert.match(plansQuotasPage, /当前不计费/u)
+  assert.match(plansQuotasPage, /配置费率并发布/u)
+  assert.match(plansQuotasPage, /\{ meterKey: 'social\.posts\.search', price: '3\.20' \}/u)
+  assert.match(plansQuotasPage, /\{ meterKey: 'social\.posts\.resolve', price: '0\.20' \}/u)
   const providerNeutralAuthorization = pages.match(/const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = \{[\s\S]*?\n\}/u)?.[0] || ''
   assert.match(providerNeutralAuthorization, /ecommerce/u)
   assert.doesNotMatch(providerNeutralAuthorization, /JustOne/u)
@@ -56,6 +71,12 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(apiKeysPage, /非沙箱；外部电商接口拒绝使用/u)
   assert.doesNotMatch(apiKeysPage, /<DropdownField label="环境"/u)
   assert.doesNotMatch(apiKeysPage, /value: 'test', label: 'Test'/u)
+  assert.match(apiKeysPage, /签发替代 Key/u)
+  assert.match(apiKeysPage, /environment: key\.environment === 'test' \|\| key\.prefix\?\.startsWith\('mih_test_'\) \? 'test' : 'live'/u)
+  assert.match(apiKeysPage, /旧 Key 保持有效[\s\S]*?再撤销旧 Key/u)
+  assert.match(apiKeysPage, /requestedScopes[\s\S]*?scopes\.platforms\.filter[\s\S]*?requestedScopes\.platforms/u)
+  assert.match(apiKeysPage, /scopeMode !== 'legacy_dynamic'[\s\S]*?!rotationSource\.platforms\?\.includes/u)
+  assert.match(apiKeysPage, /已切换并验证，撤销旧 Key/u)
   const platformsPage = pages.match(/export function PlatformsPage[\s\S]*?\nexport function UsagePage/u)?.[0] || ''
   assert.match(platformsPage, /session\?\.platformAdmin && session\?\.kind === 'admin-token'[\s\S]*?管理内部上游/u)
   assert.doesNotMatch(platformsPage, /provider=justone/u)
@@ -72,7 +93,7 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(components, /virtual_supermarket:\s*'虚拟超市'/)
 })
 
-test('scoped tenant navigation keeps self-service routes but hides authorization management', async () => {
+test('scoped tenant navigation exposes provider-neutral self-service and capability read/write by membership', async () => {
   const appSource = await readFile(
     fileURLToPath(new URL('../../src/App.jsx', import.meta.url)),
     'utf8',
@@ -80,12 +101,12 @@ test('scoped tenant navigation keeps self-service routes but hides authorization
   const route = (path) => appSource.match(new RegExp(`\\{ path: '${path.replaceAll('/', '\\/')}',[^\\n]+\\}`, 'u'))?.[0] || ''
 
   assert.match(appSource, /\(!route\.platformAdmin \|\| session\.platformAdmin\)/u)
-  assert.match(route('/platforms'), /platformAdmin: true/u)
 
   for (const [path, capability] of [
     ['/consumers', 'consumer.read'],
     ['/api-keys', 'apikey.read'],
     ['/plans', 'consumer.read'],
+    ['/platforms', 'consumer.read'],
     ['/usage', 'usage.read'],
     ['/data-products/xiaohongshu-note', 'apikey.read'],
   ]) {
@@ -93,6 +114,28 @@ test('scoped tenant navigation keeps self-service routes but hides authorization
     assert.ok(entry.includes(`capability: '${capability}'`), `${path} keeps ${capability}`)
     assert.doesNotMatch(entry, /platformAdmin: true|adminTokenOnly: true/u)
   }
+
+  const externalRoute = route('/external-platforms')
+  assert.match(externalRoute, /platformAdmin: true/u)
+  assert.match(externalRoute, /adminTokenOnly: true/u)
+
+  const pages = await readFile(
+    fileURLToPath(new URL('../../src/pages.jsx', import.meta.url)),
+    'utf8',
+  )
+  const consumersPage = pages.match(/export function ConsumersPage[\s\S]*?\nexport function ApiKeysPage/u)?.[0] || ''
+  assert.match(consumersPage, /filter\(\(tenant\) => \([\s\S]*?tenantAllows\(session, tenant\.id, 'consumer\.read'\)/u)
+  assert.match(consumersPage, /selectVisibleTenantId\(tenants, tenantId, \{ aggregateWhenEmpty: true \}\)/u)
+  assert.match(consumersPage, /tenantId !== state\.data\.selectedTenantId[\s\S]*?setQuery\(\{ tenantId: state\.data\.selectedTenantId \|\| null \}\)/u)
+  assert.match(consumersPage, /session\?\.platformAdmin \? <th>兼容业务 ID<\/th> : null/u)
+  assert.match(consumersPage, /session\?\.platformAdmin && form\.businessId\.trim\(\)/u)
+
+  const platformsPage = pages.match(/export function PlatformsPage[\s\S]*?\nexport function UsagePage/u)?.[0] || ''
+  assert.match(platformsPage, /const hasPlatformWrite = tenantAllows\(session, selectedConsumer\?\.tenantId, 'platform\.write'\)/u)
+  assert.match(platformsPage, /hasPlatformWrite \? \(/u)
+  assert.match(platformsPage, /调用方只持有同一把 Hub API Key，不会看到或指定供应方/u)
+  assert.match(pages, /const tenantId = selectVisibleTenantId\(safeTenants, requestedTenantId\)/u)
+  assert.equal([...pages.matchAll(/tenantMismatch \|\| consumerMismatch/gu)].length, 2)
 })
 
 test('a whole-block paste works in bash and zsh without exposing its key', async () => {

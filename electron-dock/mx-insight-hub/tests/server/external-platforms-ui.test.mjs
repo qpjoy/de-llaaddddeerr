@@ -60,7 +60,7 @@ test('JustOne credential UI keeps normal DTOs secret-free and requires step-up r
   assert.match(pageSource, /ExternalPlatformsPage\(\{ token, query, setQuery, onUnauthorized, notify \}\)/u)
 })
 
-test('external-platform page supports JustOne detail without changing session gating', async () => {
+test('external-platform page exposes only JustOne while keeping admin-token session gating', async () => {
   const [appSource, , pageSource] = await sources()
   const route = appSource.match(/\{ path: '\/external-platforms',[^\n]+\}/u)?.[0] || ''
 
@@ -69,7 +69,10 @@ test('external-platform page supports JustOne detail without changing session ga
   assert.match(route, /platformAdmin: true/u)
   assert.match(route, /adminTokenOnly: true/u)
   assert.match(pageSource, /query\.get\('provider'\)/u)
-  assert.match(pageSource, /const SUPPORTED_PROVIDERS = new Set\(\['justone', 'tikhub'\]\)[\s\S]*?provider && !SUPPORTED_PROVIDERS\.has\(provider\)/u)
+  assert.match(pageSource, /const SUPPORTED_PROVIDERS = new Set\(\['justone'\]\)/u)
+  assert.doesNotMatch(pageSource, /tikhub|TikHub/iu)
+  assert.match(pageSource, /filter\(\(item\) => SUPPORTED_PROVIDERS\.has\(item\.key\)\)/u)
+  assert.match(pageSource, /unsupportedProvider[\s\S]*?setQuery\(\{ provider: null, range \}\)/u)
   assert.match(pageSource, /adminApi\.externalPlatform\(token, provider, \{ range \}\)/u)
   assert.doesNotMatch(pageSource, /<select\b/iu)
   assert.match(pageSource, /<DropdownField/u)

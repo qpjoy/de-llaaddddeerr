@@ -359,18 +359,23 @@ function assertExternalCommerceContract(document) {
 
 function assertExternalSocialPostContract(document) {
   const canonical = document.paths['/data/post']?.post
-  const compatibility = document.paths['/xiaohongshu/app/get_note_info']?.post
+  const compatibilityGet = document.paths['/xiaohongshu/app/get_note_info']?.get
+  const platformPost = document.paths['/xiaohongshu/app/get_note_info']?.post
   const media = document.paths['/data/posts/media']?.get
   assert.ok(canonical)
-  assert.ok(compatibility)
+  assert.ok(compatibilityGet)
+  assert.ok(platformPost)
   assert.ok(media)
   assert.equal(canonical.operationId, 'resolveExternalSocialPost')
-  assert.equal(compatibility.operationId, 'getXiaohongshuNoteInfoCompatibility')
-  assert.equal(compatibility.deprecated, true)
+  assert.equal(compatibilityGet.operationId, 'getXiaohongshuNoteInfoCompatibility')
+  assert.equal(platformPost.operationId, 'getXiaohongshuNoteInfo')
+  assert.equal(compatibilityGet.deprecated, undefined)
+  assert.equal(platformPost.deprecated, undefined)
   assert.equal(canonical['x-mx-canonical-operation'], '/data/post')
-  assert.equal(compatibility['x-mx-canonical-operation'], '/data/post')
+  assert.equal(compatibilityGet['x-mx-canonical-operation'], '/data/post')
+  assert.equal(platformPost['x-mx-canonical-operation'], '/data/post')
   assert.doesNotMatch(
-    JSON.stringify({ canonical, compatibility, media }),
+    JSON.stringify({ canonical, compatibilityGet, platformPost, media }),
     FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS,
   )
   assert.deepEqual(canonical['x-mx-error-codes'][403], [
@@ -379,19 +384,28 @@ function assertExternalSocialPostContract(document) {
   assert.deepEqual(canonical['x-mx-error-codes'][429], [
     'quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded',
   ])
-  assert.deepEqual(compatibility['x-mx-error-codes'], canonical['x-mx-error-codes'])
+  assert.deepEqual(compatibilityGet['x-mx-error-codes'], canonical['x-mx-error-codes'])
+  assert.deepEqual(platformPost['x-mx-error-codes'], canonical['x-mx-error-codes'])
   assert.equal(
     canonical.requestBody.content['application/json'].schema.$ref,
     '#/components/schemas/XiaohongshuPostRequest',
   )
   assert.equal(
-    compatibility.requestBody.content['application/json'].schema.$ref,
+    platformPost.requestBody.content['application/json'].schema.$ref,
     '#/components/schemas/XiaohongshuPostCompatibilityRequest',
   )
-  for (const operation of [canonical, compatibility]) {
+  assert.equal(compatibilityGet.requestBody, undefined)
+  assert.deepEqual(compatibilityGet.parameters.map(({ name }) => name), [
+    'note_id', 'share_text', 'delivery_mode', 'Idempotency-Key', 'X-MX-Insight-Retry-Of',
+  ])
+  assert.match(compatibilityGet.parameters[0].schema.pattern, /\{24\}/u)
+  assert.deepEqual(compatibilityGet.parameters[2].schema.enum, ['cache_only', 'cache_first', 'refresh'])
+  for (const operation of [canonical, platformPost]) {
     assert.deepEqual(operation.parameters.map(({ name }) => name), [
       'Idempotency-Key', 'X-MX-Insight-Retry-Of',
     ])
+  }
+  for (const operation of [canonical, compatibilityGet, platformPost]) {
     assert.equal(
       operation.responses[200].content['application/json'].schema.$ref,
       '#/components/schemas/ExternalSocialPostEnvelope',
@@ -1307,10 +1321,16 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
     assert.match(xiaohongshuHtml, /\/api\/v1\/data\/post/)
     assert.match(xiaohongshuHtml, /\/api\/v1\/xiaohongshu\/app\/get_note_info/)
+    assert.match(xiaohongshuHtml, /GET[\s\S]*?share_text/u)
+    assert.match(xiaohongshuHtml, /note_id[\s\S]*?优先/u)
     assert.match(xiaohongshuHtml, /\/api\/v1\/data\/posts\/media/)
     assert.match(xiaohongshuHtml, /mx-insight-hub\.social-post\.v1/)
     assert.match(xiaohongshuHtml, /data\.item/)
     assert.match(xiaohongshuHtml, /immutable snapshot/)
+    assert.match(xiaohongshuHtml, /tenant[\s\S]*?consumer[\s\S]*?membership/u)
+    assert.match(xiaohongshuHtml, /Launcher 会话[\s\S]*?API Keys[\s\S]*?Live Key/u)
+    assert.match(xiaohongshuHtml, /套餐与配额[\s\S]*?余额[\s\S]*?扣费/u)
+    assert.doesNotMatch(xiaohongshuHtml, /deprecated alias/iu)
     assert.match(html, /电商数据百宝箱/)
     assert.doesNotMatch(ecommerceHtml, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.match(html, /同一把 Hub Public API Key/u)
@@ -1705,6 +1725,24 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /includeDetails:false[^。]*includeComments:false[^。]*no-op/)
   assert.match(guide, /body[^。]*requestId[^。]*x-mx-insight-request-id[^。]*durable Hub UUID/)
   assert.match(guide, /external_platform_rate_limited/)
+})
+
+test('public curl guide hides deployment topology and documents the Xiaohongshu canonical idempotency exception', async () => {
+  const guide = await readFile(
+    fileURLToPath(new URL('../../docs/public-api-curl.md', import.meta.url)),
+    'utf8',
+  )
+  const introduction = guide.slice(0, guide.indexOf('## 1. Shell 环境'))
+
+  assert.match(introduction, /\$HUB_URL/)
+  assert.match(introduction, /内部路由、部署拓扑与供应方选择不属于公开合同/)
+  assert.doesNotMatch(
+    guide,
+    /Domestic Nginx|WireGuard|Internal Nginx|10\.88\.88\.88|127\.0\.0\.1:(?:18150|18151|13141)|public listener `18150`|admin listener/,
+  )
+  assert.match(guide, /三个入口共享一个 canonical 幂等 namespace/)
+  assert.match(guide, /不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`/)
+  assert.match(guide, /复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`/)
 })
 
 test('external data platform public contract and internal operations guidance stay aligned', async () => {

@@ -448,6 +448,61 @@ test('public source catalog redacts credentials accidentally pasted into governe
   })
 })
 
+test('public source catalog hides upstream provider identity while the raw Admin-token API preserves lineage', async () => {
+  await withFixture(async ({ baseUrl, store, key, first }) => {
+    await store.updateSourceCatalogEntry(first.id, {
+      connectorHints: ['tikhub'],
+      notes: 'tikhub',
+    }, { expectedRevision: 1, actor: 'test' })
+
+    const publicHeaders = { authorization: `Bearer ${key.secret}` }
+    const page = await call(
+      baseUrl,
+      '/api/v1/data/source-catalog?query=%E5%85%AC%E5%85%B1%E5%B9%B3%E5%8F%B0%20A&pageSize=2',
+      { headers: publicHeaders },
+    )
+    assert.equal(page.response.status, 200)
+    const item = page.payload.data.items.find((entry) => entry.id === first.id)
+    assert.deepEqual(item.connectorHints, [])
+    assert.equal(item.notes, null)
+    assert.deepEqual(item.redactedFields, ['connectorHints', 'notes'])
+
+    const detail = await call(baseUrl, `/api/v1/data/source-catalog/${first.id}`, {
+      headers: publicHeaders,
+    })
+    assert.equal(detail.response.status, 200)
+    assert.deepEqual(detail.payload.data.item, item)
+
+    const providerSearch = await call(
+      baseUrl,
+      '/api/v1/data/source-catalog?query=tikhub&pageSize=2',
+      { headers: publicHeaders },
+    )
+    assert.equal(providerSearch.response.status, 200)
+    assert.deepEqual(providerSearch.payload.data.items, [])
+
+    const metadata = await call(baseUrl, '/api/v1/data/source-catalog/metadata', {
+      headers: publicHeaders,
+    })
+    assert.equal(metadata.response.status, 200)
+    assert.equal(/tikhub/iu.test(JSON.stringify([page.payload, detail.payload, metadata.payload])), false)
+
+    const safeAdmin = await call(baseUrl, '/internal/v1/admin/source-catalog?presentation=safe', {
+      headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
+    })
+    assert.equal(safeAdmin.response.status, 200)
+    assert.equal(/tikhub/iu.test(JSON.stringify(safeAdmin.payload)), false)
+
+    const rawAdmin = await call(baseUrl, '/internal/v1/admin/source-catalog', {
+      headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
+    })
+    assert.equal(rawAdmin.response.status, 200)
+    const rawItem = rawAdmin.payload.data.items.find((entry) => entry.id === first.id)
+    assert.deepEqual(rawItem.connectorHints, ['tikhub'])
+    assert.equal(rawItem.notes, 'tikhub')
+  })
+})
+
 test('public source catalog GETs share the consumer platform quota', async () => {
   await withFixture(async ({ baseUrl, key, first: firstEntry }) => {
     const headers = { authorization: `Bearer ${key.secret}` }

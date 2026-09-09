@@ -313,7 +313,7 @@ const ROUTES = [
   { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
-  { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read', platformAdmin: true },
+  { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },

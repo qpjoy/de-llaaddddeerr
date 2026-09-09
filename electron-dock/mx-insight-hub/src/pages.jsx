@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowClockwise,
   ArrowRight,
   Brain,
   Buildings,
@@ -27,6 +28,7 @@ import {
 } from '@phosphor-icons/react'
 import { adminApi, publicDocsHref } from './api.js'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from './open-capabilities.js'
+import { selectVisibleTenantId } from './tenant-scope.js'
 import {
   DropdownField,
   EmptyState,
@@ -628,12 +630,26 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
   const [tenantError, setTenantError] = useState(null)
 
   const load = useCallback(async () => {
-    const [tenants, consumers] = await Promise.all([adminApi.tenants(token), adminApi.consumers(token, tenantId)])
-    return { tenants: tenants || [], consumers: consumers || [] }
-  }, [tenantId, token])
+    const allTenants = (await adminApi.tenants(token)) || []
+    const tenants = allTenants.filter((tenant) => tenantAllows(session, tenant.id, 'consumer.read'))
+    const selectedTenantId = selectVisibleTenantId(tenants, tenantId, { aggregateWhenEmpty: true })
+    const consumers = await adminApi.consumers(token, selectedTenantId)
+    return { tenants, consumers: consumers || [], selectedTenantId }
+  }, [session, tenantId, token])
   const state = useRemoteData(load, onUnauthorized)
-  const tenants = state.data?.tenants || []
-  const consumers = state.data?.consumers || []
+  useEffect(() => {
+    if (!state.loading && state.data && tenantId && tenantId !== state.data.selectedTenantId) {
+      setQuery({ tenantId: state.data.selectedTenantId || null })
+    }
+  }, [setQuery, state.data, state.loading, tenantId])
+  const tenants = (state.data?.tenants || []).filter((tenant) => (
+    tenantAllows(session, tenant.id, 'consumer.read')
+  ))
+  const visibleTenantIds = new Set(tenants.map((tenant) => tenant.id))
+  const consumers = (state.data?.consumers || []).filter((consumer) => (
+    visibleTenantIds.has(consumer.tenantId)
+  ))
+  const selectedTenantId = state.data?.selectedTenantId || ''
   const visibleConsumers = consumers.filter((consumer) => consumer.name.toLowerCase().includes(search.trim().toLowerCase()))
   const tenantNames = new Map(tenants.map((tenant) => [tenant.id, tenant.name]))
   const consumerTenants = tenants.filter((tenant) => tenantAllows(session, tenant.id, 'consumer.write'))
@@ -641,10 +657,10 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
   const canCreateTenant = Boolean(session?.platformAdmin)
 
   const showCreate = () => {
-    const selectedTenantId = consumerTenants.some((tenant) => tenant.id === tenantId)
-      ? tenantId
+    const targetTenantId = consumerTenants.some((tenant) => tenant.id === selectedTenantId)
+      ? selectedTenantId
       : consumerTenants[0]?.id || ''
-    setForm({ tenantId: selectedTenantId, tenantName: '', name: '', businessId: '' })
+    setForm({ tenantId: targetTenantId, tenantName: '', name: '', businessId: '' })
     setFormError(null)
     setOpen(true)
   }
@@ -689,10 +705,10 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
       await adminApi.createConsumer(token, {
         tenantId: targetTenantId,
         name: form.name,
-        ...(form.businessId.trim() ? { businessId: form.businessId.trim() } : {}),
+        ...(session?.platformAdmin && form.businessId.trim() ? { businessId: form.businessId.trim() } : {}),
       })
       setOpen(false)
-      if (targetTenantId !== tenantId) setQuery({ tenantId: targetTenantId })
+      if (targetTenantId !== selectedTenantId) setQuery({ tenantId: targetTenantId })
       else state.refresh()
       notify('调用者已创建', 'success')
     } catch (error) {
@@ -708,7 +724,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
 
   return (
     <>
-      <PageHeading eyebrow="IDENTITY / TENANCY" title="调用者管理" description="调用者是 API Key、平台授权和用量归属的最小业务主体。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="IDENTITY / TENANCY" title={session?.platformAdmin ? '调用者管理' : '我的调用身份'} description="调用者是 API Key、开放能力和用量归属的最小业务主体。" loading={state.loading} onRefresh={state.refresh}>
         {canCreateConsumer ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
             <UserPlus size={17} aria-hidden="true" />新建调用者
@@ -758,7 +774,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
       <section className="qp-panel mih-filterbar">
         <FilterSelect
           label="租户"
-          value={tenantId}
+          value={selectedTenantId}
           onChange={(value) => setQuery({ tenantId: value || null })}
           options={tenants.map((tenant) => ({ value: tenant.id, label: tenant.name }))}
         />
@@ -772,13 +788,13 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
       <Panel title="调用者" subtitle={`${visibleConsumers.length} 条记录`}>
         {visibleConsumers.length ? (
           <Table label="调用者列表">
-            <thead><tr><th>名称</th><th>租户</th><th>Night-All Business ID</th><th>状态</th><th>创建时间</th><th>Consumer ID</th></tr></thead>
+            <thead><tr><th>名称</th><th>租户</th>{session?.platformAdmin ? <th>兼容业务 ID</th> : null}<th>状态</th><th>创建时间</th><th>Consumer ID</th></tr></thead>
             <tbody>
               {visibleConsumers.map((consumer) => (
                 <tr key={consumer.id}>
                   <td><strong>{consumer.name}</strong><small>独立权限与用量归属</small></td>
                   <td>{tenantNames.get(consumer.tenantId) || consumer.tenantId}</td>
-                  <td><code className="mih-mono">{consumer.businessId}</code></td>
+                  {session?.platformAdmin ? <td><code className="mih-mono">{consumer.businessId}</code></td> : null}
                   <td><StatusBadge status={consumer.status} /></td>
                   <td>{formatDate(consumer.createdAt)}</td>
                   <td><code className="mih-mono">{consumer.id}</code></td>
@@ -822,9 +838,11 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
             <Field label="调用者名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：市场研究团队" required />
             </Field>
-            <Field label="Night-All Business ID（可选）" hint="迁移旧调用方时填写原 businessId；创建后作为不可变调用归属。留空则由 Hub 自动生成。">
-              <input className="qp-input" value={form.businessId} onChange={(event) => setForm({ ...form, businessId: event.target.value })} maxLength={128} placeholder="例如：risk-console" />
-            </Field>
+            {session?.platformAdmin ? (
+              <Field label="兼容业务 ID（可选）" hint="仅迁移旧调用方时填写；创建后作为不可变调用归属。留空则由 Hub 自动生成。">
+                <input className="qp-input" value={form.businessId} onChange={(event) => setForm({ ...form, businessId: event.target.value })} maxLength={128} placeholder="例如：risk-console" />
+              </Field>
+            ) : null}
             {formError ? <ErrorState error={formError} /> : null}
           </form>
         </Modal>
@@ -864,6 +882,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const [scopeLoading, setScopeLoading] = useState(false)
   const scopeRequestRef = useRef(0)
   const [issuedSecret, setIssuedSecret] = useState(null)
+  const [rotationSource, setRotationSource] = useState(null)
   const [revokeTarget, setRevokeTarget] = useState(null)
   const [revoking, setRevoking] = useState(false)
   const [overviewTarget, setOverviewTarget] = useState(null)
@@ -875,9 +894,19 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     const consumers = allConsumers.filter((consumer) => tenantAllows(session, consumer.tenantId, 'apikey.read'))
     const selectedConsumerId = consumers.some((consumer) => consumer.id === consumerId) ? consumerId : ''
     const keys = consumers.length ? await adminApi.apiKeys(token, selectedConsumerId) : []
-    return { consumers, keys: keys || [], selectedConsumerId }
+    const visibleConsumerIds = new Set(consumers.map((consumer) => consumer.id))
+    return {
+      consumers,
+      keys: (keys || []).filter((key) => visibleConsumerIds.has(key.consumerId)),
+      selectedConsumerId,
+    }
   }, [consumerId, session, token])
   const state = useRemoteData(load, onUnauthorized)
+  useEffect(() => {
+    if (!state.loading && state.data && consumerId && consumerId !== state.data.selectedConsumerId) {
+      setQuery({ consumerId: state.data.selectedConsumerId || null })
+    }
+  }, [consumerId, setQuery, state.data, state.loading])
   const consumers = state.data?.consumers || []
   const keys = state.data?.keys || []
   const selectedConsumerId = state.data?.selectedConsumerId || ''
@@ -885,7 +914,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const canIssueKey = writableConsumers.length > 0
   const consumerNames = new Map(consumers.map((consumer) => [consumer.id, consumer.name]))
 
-  const applyScopes = async (targetConsumerId) => {
+  const applyScopes = async (targetConsumerId, requestedScopes = null) => {
     const generation = ++scopeRequestRef.current
     setScopeOptions({ platforms: [], capabilities: [] })
     setScopeLoading(true)
@@ -902,8 +931,12 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         capabilities: [...(configuration?.capabilityGrants || [])].sort(),
       }
       setScopeOptions(scopes)
+      const selectedScopes = requestedScopes ? {
+        platforms: scopes.platforms.filter((value) => requestedScopes.platforms?.includes(value)),
+        capabilities: scopes.capabilities.filter((value) => requestedScopes.capabilities?.includes(value)),
+      } : scopes
       setForm((current) => current.consumerId === targetConsumerId
-        ? { ...current, platforms: scopes.platforms, capabilities: scopes.capabilities }
+        ? { ...current, platforms: selectedScopes.platforms, capabilities: selectedScopes.capabilities }
         : current)
     } catch (error) {
       if (scopeRequestRef.current !== generation) return
@@ -920,9 +953,30 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       : writableConsumers[0]?.id || ''
     setForm({ consumerId: targetConsumerId, name: '', environment: 'live', expiresInDays: 180, platforms: [], capabilities: [] })
     setScopeOptions({ platforms: [], capabilities: [] })
+    setRotationSource(null)
     setFormError(null)
     setOpen(true)
     await applyScopes(targetConsumerId)
+  }
+
+  const showRotate = async (key) => {
+    if (key.status !== 'active' || !writableConsumers.some((consumer) => consumer.id === key.consumerId)) return
+    setForm({
+      consumerId: key.consumerId,
+      name: `${key.name} · 替代`.slice(0, 128),
+      environment: key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? 'test' : 'live',
+      expiresInDays: 180,
+      platforms: [],
+      capabilities: [],
+    })
+    setScopeOptions({ platforms: [], capabilities: [] })
+    setRotationSource(key)
+    setFormError(null)
+    setOpen(true)
+    await applyScopes(key.consumerId, key.scopeMode === 'legacy_dynamic' ? null : {
+      platforms: key.platforms || [],
+      capabilities: key.capabilities || [],
+    })
   }
 
   const changeFormConsumer = async (targetConsumerId) => {
@@ -950,7 +1004,9 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         expiresAt: key.expiresAt,
         tenantId: key.tenantId,
         consumerId: key.consumerId,
+        replaces: rotationSource,
       })
+      setRotationSource(null)
       state.refresh()
       notify('API Key 已签发', 'success')
     } catch (error) {
@@ -1044,9 +1100,14 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                       </a>
                     ) : null}
                     {tenantAllows(session, key.tenantId, 'apikey.write') ? (
-                      <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`撤销 ${key.name}`} disabled={key.status !== 'active'} onClick={() => setRevokeTarget(key)}>
-                        <Trash size={17} aria-hidden="true" />
-                      </button>
+                      <>
+                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={key.status !== 'active'} onClick={() => showRotate(key)}>
+                          <ArrowClockwise size={15} aria-hidden="true" />签发替代 Key
+                        </button>
+                        <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`撤销 ${key.name}`} disabled={key.status !== 'active'} onClick={() => setRevokeTarget(key)}>
+                          <Trash size={17} aria-hidden="true" />
+                        </button>
+                      </>
                     ) : null}
                   </td>
                 </tr>
@@ -1065,18 +1126,21 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
       {open ? (
         <Modal
-          title="签发 API Key"
-          description="先选择调用者，再从其当前授权中勾选这把 Key 的不可变范围；完整 secret 只显示一次。"
+          title={rotationSource ? '签发替代 API Key' : '签发 API Key'}
+          description={rotationSource
+            ? '先签发不超过旧 Key 有效范围的替代 Key；安全保存并完成客户端切换后，再显式撤销旧 Key。'
+            : '先选择调用者，再从其当前授权中勾选这把 Key 的不可变范围；完整 secret 只显示一次。'}
           onClose={() => {
             if (!saving) {
               scopeRequestRef.current += 1
               setOpen(false)
+              setRotationSource(null)
             }
           }}
           footer={(
             <>
               <button className="qp-button qp-button--ghost" type="button" onClick={() => setOpen(false)} disabled={saving}>取消</button>
-              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading || (form.platforms.length === 0 && form.capabilities.length === 0)}>{saving ? '正在签发' : '签发密钥'}</button>
+              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading || (form.platforms.length === 0 && form.capabilities.length === 0)}>{saving ? '正在签发' : rotationSource ? '签发替代 Key' : '签发密钥'}</button>
             </>
           )}
         >
@@ -1084,7 +1148,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <DropdownField label="调用者" value={form.consumerId}
               onChange={changeFormConsumer}
               options={writableConsumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
-              disabled={scopeLoading}
+              disabled={scopeLoading || Boolean(rotationSource)}
               required autoFocus />
             <Field label="密钥名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
@@ -1092,7 +1156,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <Field label="平台范围" hint="只展示调用者当前已授权的平台；扩大范围需要签发新 Key。">
               <div className="mih-key-scopes">
                 {scopeOptions.platforms.map((platform) => (
-                  <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
+                  <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.platforms?.includes(platform))} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
                 ))}
                 {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权，请先到“开放能力”配置。</small> : null}
               </div>
@@ -1100,7 +1164,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <Field label="能力范围" hint="产生外部费用的操作采用独立能力授权，不随平台授权自动开启。">
               <div className="mih-key-scopes">
                 {scopeOptions.capabilities.map((capability) => (
-                  <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
+                  <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
                 ))}
                 {!scopeLoading && scopeOptions.capabilities.length === 0 ? <small>暂无通用能力授权。</small> : null}
               </div>
@@ -1124,19 +1188,27 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
       {issuedSecret ? (
         <Modal
-          title="API Key 已签发"
-          description={`这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用签发时勾选、且调用者当前仍允许的范围。`}
+          title={issuedSecret.replaces ? '替代 API Key 已签发' : 'API Key 已签发'}
+          description={issuedSecret.replaces
+            ? `这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。旧 Key 保持有效，请先安全保存、更新客户端并验证，再撤销旧 Key。`
+            : `这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用签发时勾选、且调用者当前仍允许的范围。`}
           onClose={() => setIssuedSecret(null)}
           footer={(
             <>
-              <button className="qp-button qp-button--ghost" type="button" onClick={() => setIssuedSecret(null)}>我已安全保存</button>
-              <a
-                className="qp-button qp-button--primary"
-                href={`#/platforms?${new URLSearchParams({ tenantId: issuedSecret.tenantId, consumerId: issuedSecret.consumerId })}`}
-                onClick={() => setIssuedSecret(null)}
-              >
-                我已保存，配置开放能力
-              </a>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setIssuedSecret(null)}>{issuedSecret.replaces ? '先保留旧 Key' : '我已安全保存'}</button>
+              {issuedSecret.replaces ? (
+                <button className="qp-button qp-button--danger" type="button" onClick={() => { setRevokeTarget(issuedSecret.replaces); setIssuedSecret(null) }}>已切换并验证，撤销旧 Key</button>
+              ) : tenantAllows(session, issuedSecret.tenantId, 'platform.write') ? (
+                <a
+                  className="qp-button qp-button--primary"
+                  href={`#/platforms?${new URLSearchParams({ tenantId: issuedSecret.tenantId, consumerId: issuedSecret.consumerId })}`}
+                  onClick={() => setIssuedSecret(null)}
+                >
+                  我已保存，配置开放能力
+                </a>
+              ) : (
+                <a className="qp-button qp-button--primary" href="#/plans" onClick={() => setIssuedSecret(null)}>查看套餐、余额与用量</a>
+              )}
             </>
           )}
         >
@@ -1196,11 +1268,12 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   )
 }
 
-async function loadConfigurationContext(token, requestedTenantId, requestedConsumerId) {
+async function loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session) {
   const [tenants, allConsumers] = await Promise.all([adminApi.tenants(token), adminApi.consumers(token)])
-  const safeTenants = tenants || []
-  const safeConsumers = allConsumers || []
-  const tenantId = requestedTenantId || safeTenants[0]?.id || ''
+  const safeTenants = (tenants || []).filter((tenant) => tenantAllows(session, tenant.id, 'consumer.read'))
+  const visibleTenantIds = new Set(safeTenants.map((tenant) => tenant.id))
+  const safeConsumers = (allConsumers || []).filter((consumer) => visibleTenantIds.has(consumer.tenantId))
+  const tenantId = selectVisibleTenantId(safeTenants, requestedTenantId)
   const consumers = safeConsumers.filter((consumer) => !tenantId || consumer.tenantId === tenantId)
   const consumerId = consumers.some((consumer) => consumer.id === requestedConsumerId)
     ? requestedConsumerId
@@ -1212,6 +1285,10 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
 }
 
 export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+  const recommendedXhsEntries = [
+    { meterKey: 'social.posts.search', price: '3.20' },
+    { meterKey: 'social.posts.resolve', price: '0.20' },
+  ]
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
   const requestedContext = `${requestedTenantId}\u0000${requestedConsumerId}`
@@ -1221,6 +1298,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const [creditOpen, setCreditOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [planOpen, setPlanOpen] = useState(false)
+  const [planDraftKind, setPlanDraftKind] = useState('recommended')
   const [billingBusy, setBillingBusy] = useState('')
   const [billingError, setBillingError] = useState(null)
   const [creditForm, setCreditForm] = useState({ amount: '', currency: 'CNY', reason: '', externalReference: '' })
@@ -1234,14 +1312,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     monthlyRequests: '1000000',
     burstRps: '100',
     maxPageSize: '100',
-    entries: [
-      { meterKey: 'social.posts.search', price: '' },
-      { meterKey: 'social.posts.resolve', price: '' },
-      { meterKey: 'ecommerce.products.search', price: '' },
-    ],
+    entries: recommendedXhsEntries,
   })
   const load = useCallback(async () => {
-    const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId)
+    const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session)
     const billingPromise = context.tenantId
       ? adminApi.tenantBilling(token, context.tenantId)
       : Promise.resolve({ profile: null, account: null, ledger: [] })
@@ -1267,8 +1341,16 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       usage: usage || {},
       billing: billing || { profile: null, account: null, ledger: [] },
     }
-  }, [requestedConsumerId, requestedTenantId, token])
+  }, [requestedConsumerId, requestedTenantId, session, token])
   const state = useRemoteData(load, onUnauthorized)
+  useEffect(() => {
+    if (state.loading || !state.data) return
+    const tenantMismatch = requestedTenantId && requestedTenantId !== state.data.tenantId
+    const consumerMismatch = requestedConsumerId && requestedConsumerId !== state.data.consumerId
+    if (tenantMismatch || consumerMismatch) {
+      setQuery({ tenantId: state.data.tenantId || null, consumerId: state.data.consumerId || null })
+    }
+  }, [requestedConsumerId, requestedTenantId, setQuery, state.data, state.loading])
 
   if (state.loading && !state.data) return <LoadingState label="正在加载配额策略" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -1299,12 +1381,38 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     ),
     currency: currentPlan.priceBook.currency,
   }))
+  const newerPricedVersion = (data.plans?.catalog || []).find((plan) => (
+    plan.key === currentPlan?.key
+    && Number(plan.version) > Number(currentPlan?.version || 0)
+    && Boolean(plan.priceBook)
+  )) || null
   const canAssignPlan = Boolean(
     session?.platformAdmin
     && data.consumerId
     && Number.isInteger(currentPlan?.revision)
     && currentPlan.revision > 0,
   )
+
+  const openPlanPublisher = (sourcePlan = currentPlan, { recommended = false } = {}) => {
+    const reusablePlan = sourcePlan?.key === 'legacy-unmetered' ? null : sourcePlan
+    const planKey = reusablePlan?.key || ''
+    setBillingError(null)
+    setPlanDraftKind(recommended ? 'recommended' : 'custom')
+    setPlanForm({
+      key: planKey,
+      name: reusablePlan?.name || '',
+      priceBookKey: planKey ? `${planKey.slice(0, 60)}-cny` : '',
+      currency: 'CNY',
+      defaultMultiplier: '1.000000',
+      monthlyRequests: String(reusablePlan?.limits?.monthlyRequests || 1000000),
+      burstRps: String(reusablePlan?.limits?.burstRps || 100),
+      maxPageSize: String(reusablePlan?.limits?.maxPageSize || 100),
+      entries: recommended
+        ? recommendedXhsEntries.map((entry) => ({ ...entry }))
+        : [{ meterKey: '', price: '' }],
+    })
+    setPlanOpen(true)
+  }
 
   const refreshCurrentContext = async () => {
     const targetContext = contextRef.current
@@ -1460,7 +1568,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="套餐总额、调用者策略与 API Key 签发额度同时生效；每次请求会受其中最严格的边界约束。" loading={state.loading} onRefresh={state.refresh}>
         {session?.platformAdmin ? <button className="qp-button qp-button--primary" type="button" onClick={() => { setBillingError(null); setCreditForm((current) => ({ ...current, currency: billingCurrency })); setCreditOpen(true) }} disabled={!data.tenantId}><Plus size={17} aria-hidden="true" />人工充值</button> : null}
         {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={openProfile} disabled={!data.tenantId}><SlidersHorizontal size={17} aria-hidden="true" />计费策略</button> : null}
-        {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={() => { setBillingError(null); setPlanOpen(true) }}><Coins size={17} aria-hidden="true" />发布套餐版本</button> : null}
+        {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={() => openPlanPublisher()}><Coins size={17} aria-hidden="true" />发布套餐版本</button> : null}
         {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理开放能力</a> : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
@@ -1494,6 +1602,29 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         <MetricCard icon={Brain} label="已授权通用能力" value={formatNumber(capabilityGrants.size)} hint="不隐含数据读取权" tone="info" />
       </section>
 
+      {session?.platformAdmin && currentPlan?.pricing?.mode === 'operator_price_book' && !currentPlan?.priceBook && !newerPricedVersion ? (
+        <Panel
+          title="运营定价建议"
+          subtitle="当前套餐尚未配置费率，因此现在只限制配额、不向租户扣费；下方是可编辑草案，发布后也不会自动分配。"
+          action={(
+            <div className="mih-page-actions">
+              <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan, { recommended: true })}><Coins size={16} aria-hidden="true" />采用建议草案</button>
+              <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan)}><SlidersHorizontal size={16} aria-hidden="true" />自定义费率</button>
+            </div>
+          )}
+        >
+          <Table label="小红书质量保障定价草案">
+            <thead><tr><th>开放能力</th><th>计量键</th><th>建议基础价</th><th>交付口径</th></tr></thead>
+            <tbody>
+              <tr><td><strong>小红书笔记搜索</strong></td><td><code>social.posts.search</code></td><td><strong>¥3.20 / 次</strong></td><td>每页最多 20 条，包含必要的正文补全</td></tr>
+              <tr><td><strong>小红书笔记详情</strong></td><td><code>social.posts.resolve</code></td><td><strong>¥0.20 / 次</strong></td><td>按成功交付的一篇完整笔记计价</td></tr>
+              <tr><td><strong>租户合同倍率</strong></td><td><code>customer multiplier</code></td><td><strong>1.00× / 0.90× / 0.80×</strong></td><td>运营建议档位，需按合同人工设置，不会自动生效</td></tr>
+            </tbody>
+          </Table>
+          <p className="mih-inline-warning"><WarningCircle size={17} aria-hidden="true" /><span>成本假设：上游公开表价 USD 0.01 / 调用，规划汇率 7.5；一次完整搜索最多产生 1 次搜索与 20 次详情采购。套餐里的 100 RPS 是 Hub 突发上限，不是上游容量承诺；外部平台限流仍单独生效。</span></p>
+        </Panel>
+      ) : null}
+
       <Panel title="当前合同费率" subtitle="按 Hub 开放能力计价；供应商、采购成本与路由切换不会暴露给租户">
         {effectiveRates.length ? (
           <Table label="当前合同费率">
@@ -1508,7 +1639,14 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
             ))}</tbody>
           </Table>
         ) : (
-          <EmptyState icon={Coins} title="当前套餐未配置逐接口费率" description="历史调用继续按原策略运行；只有发布并显式分配的新计费套餐才会产生报价。" />
+          <EmptyState
+            icon={Coins}
+            title="当前套餐尚未配置费率 · 当前不计费"
+            description="历史调用继续按原策略运行；只有发布并显式分配的新计费套餐才会产生报价。"
+            action={session?.platformAdmin && newerPricedVersion
+              ? <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={!canAssignPlan || Boolean(assigningPlanVersionId)} onClick={() => assignPlan(newerPricedVersion)}>分配已发布 v{newerPricedVersion.version}</button>
+              : session?.platformAdmin && currentPlan?.pricing?.mode === 'operator_price_book' ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan, { recommended: true })}>配置费率并发布新版本</button> : null}
+          />
         )}
       </Panel>
 
@@ -1546,11 +1684,13 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 <td>{plan.limits?.maxPageSize ? formatNumber(plan.limits.maxPageSize) : '按策略'}</td>
                 <td>{plan.priceBook
                   ? <><strong>{plan.priceBook.currency} · {formatNumber(plan.priceBook.entries?.length || 0)} 项</strong><small>{plan.priceBook.key} · v{plan.priceBook.version}</small></>
-                  : plan.pricing?.mode === 'operator_price_book' ? '待运营价目表' : plan.pricing?.mode === 'contract' ? '按租户合同价' : '历史兼容'}</td>
+                  : plan.pricing?.mode === 'operator_price_book' ? <><strong>尚未配置费率</strong><small>当前不计费</small></> : plan.pricing?.mode === 'contract' ? '按租户合同价' : '历史兼容'}</td>
                 {session?.platformAdmin ? (
                   <td>
                     {plan.key === 'legacy-unmetered' ? (
                       <small>{plan.versionId === currentPlan?.versionId ? '当前历史绑定' : '仅保留现有绑定'}</small>
+                    ) : !plan.priceBook && plan.pricing?.mode === 'operator_price_book' ? (
+                      <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(plan, { recommended: true })}>配置费率并发布</button>
                     ) : (
                       <button
                         className="qp-button qp-button--ghost qp-button--sm"
@@ -1700,7 +1840,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       {planOpen && session?.platformAdmin ? (
         <Modal
           title="发布套餐版本"
-          description="发布后套餐与价目表都不可原地修改；调用者只有被显式分配此版本后才会使用它。"
+          description={planDraftKind === 'recommended'
+            ? '已填入小红书质量保障定价草案；请核对后发布。新版本不会自动分配，也不会改变现有调用者。'
+            : '发布后套餐与价目表都不可原地修改；调用者只有被显式分配此版本后才会使用它。'}
           size="large"
           busy={billingBusy === 'plan'}
           onClose={() => !billingBusy && setPlanOpen(false)}
@@ -1712,6 +1854,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           )}
         >
           <form id="publish-plan-form" className="mih-form mih-form--grid" onSubmit={publishPlan}>
+            {planDraftKind === 'recommended' ? <p className="mih-inline-warning mih-form__wide"><WarningCircle size={17} aria-hidden="true" /><span>建议草案：搜索 ¥3.20 / 次、详情 ¥0.20 / 次，默认倍率 1.00×。电商费率尚无已核验采购合同，因此没有混入本版本。</span></p> : null}
             <Field label="套餐标识"><input className="qp-input" value={planForm.key} onChange={(event) => setPlanForm({ ...planForm, key: event.target.value.toLowerCase() })} placeholder="business-standard" maxLength={64} required autoFocus /></Field>
             <Field label="套餐名称"><input className="qp-input" value={planForm.name} onChange={(event) => setPlanForm({ ...planForm, name: event.target.value })} placeholder="商务标准版" maxLength={128} required /></Field>
             <Field label="价目表标识"><input className="qp-input" value={planForm.priceBookKey} onChange={(event) => setPlanForm({ ...planForm, priceBookKey: event.target.value.toLowerCase() })} placeholder="cn-social-standard" maxLength={64} required /></Field>
@@ -1755,10 +1898,18 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   const [capabilityPolicyForm, setCapabilityPolicyForm] = useState(DEFAULT_POLICY)
   const [formError, setFormError] = useState(null)
   const load = useCallback(
-    () => loadConfigurationContext(token, requestedTenantId, requestedConsumerId),
-    [requestedConsumerId, requestedTenantId, token],
+    () => loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session),
+    [requestedConsumerId, requestedTenantId, session, token],
   )
   const state = useRemoteData(load, onUnauthorized)
+  useEffect(() => {
+    if (state.loading || !state.data) return
+    const tenantMismatch = requestedTenantId && requestedTenantId !== state.data.tenantId
+    const consumerMismatch = requestedConsumerId && requestedConsumerId !== state.data.consumerId
+    if (tenantMismatch || consumerMismatch) {
+      setQuery({ tenantId: state.data.tenantId || null, consumerId: state.data.consumerId || null })
+    }
+  }, [requestedConsumerId, requestedTenantId, setQuery, state.data, state.loading])
 
   useEffect(() => {
     setConfigureTarget(null)
@@ -1964,7 +2115,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           <span><small>ROUTING BOUNDARY</small><strong>Hub 内部路由</strong></span>
         </div>
         <footer>
-          <span>当前运行时只有 JustOne 单候选，没有多供应商故障转移。第二家通过合同验证后，Hub 才会按 marketplace、版本、健康、配额 / 成本与租户策略在派发前确定性选路，并把 cursor 固定到已选适配器；客户仍使用同一把 Key。未来客户费率通过版本化订阅 / price book 生效。</span>
+          <span>供应商选择、健康、采购成本与游标绑定均由 Hub 内部治理；租户只看开放能力、合同费率与交付结果。客户始终使用同一把 Hub API Key。</span>
           {session?.platformAdmin && session?.kind === 'admin-token' ? <a className="qp-button qp-button--ghost qp-button--sm" href="#/external-platforms?range=24h">管理内部上游<ArrowRight size={15} aria-hidden="true" /></a> : null}
         </footer>
       </section>
@@ -2385,25 +2536,25 @@ export function RuntimePage({ token, onUnauthorized }) {
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const runtime = state.data || {}
-  const dependencies = runtime.dependencies?.data || runtime.ready?.data?.dependencies || {}
-  const liveStatus = runtime.live?.data?.status || (runtime.live?.ok ? 'live' : 'down')
-  const readyStatus = runtime.ready?.data?.status || (runtime.ready?.ok ? 'ready' : 'not_ready')
+  const dependencies = runtime.dependencies || {}
+  const liveStatus = runtime.status?.live || 'unknown'
+  const readyStatus = runtime.status?.ready || 'unknown'
   const services = [
-    { name: 'MX Insight API', role: '进程健康', status: liveStatus, detail: runtime.live?.status ? `HTTP ${runtime.live.status}` : runtime.live?.error?.message },
-    { name: 'Readiness', role: '依赖就绪', status: readyStatus, detail: runtime.ready?.status ? `HTTP ${runtime.ready.status}` : runtime.ready?.error?.message },
-    { name: 'Store', role: '用量与权限存储', status: dependencies.store?.status || 'unknown', detail: dependencies.store?.detail || '持久化状态检查' },
-    { name: 'Night-All', role: '内部数据源', status: dependencies.nightAll?.status || 'unknown', detail: dependencies.nightAll?.detail || '数据能力就绪检查' },
+    { name: 'MX Insight API', role: '进程健康', status: liveStatus, detail: '当前管理接口可达' },
+    { name: 'Readiness', role: '依赖就绪', status: readyStatus, detail: '核心依赖综合状态' },
+    { name: 'Store', role: '用量与权限存储', status: dependencies.store?.status || 'unknown', detail: '持久化状态检查' },
+    { name: '数据服务', role: '数据能力', status: dependencies.dataService?.status || 'unknown', detail: '数据能力就绪检查' },
   ]
 
   return (
     <>
-      <PageHeading eyebrow="HEALTH / DEPENDENCIES / RECOVERY" title="运行状态" description="分别观察进程存活、存储就绪和 Night-All 内部依赖，故障不会被聚合状态掩盖。" loading={state.loading} onRefresh={state.refresh} />
+      <PageHeading eyebrow="HEALTH / DEPENDENCIES / RECOVERY" title="运行状态" description="分别观察进程存活、存储和数据服务就绪状态，故障不会被聚合状态掩盖。" loading={state.loading} onRefresh={state.refresh} />
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="mih-runtime-grid">
         {services.map((service) => (
           <article className="qp-panel mih-runtime-card" key={service.name}>
             <span className="mih-runtime-card__icon">
-              {service.name === 'Store' ? <Database size={23} weight="duotone" aria-hidden="true" /> : service.name === 'Night-All' ? <Cloud size={23} weight="duotone" aria-hidden="true" /> : <Pulse size={23} weight="duotone" aria-hidden="true" />}
+              {service.name === 'Store' ? <Database size={23} weight="duotone" aria-hidden="true" /> : service.name === '数据服务' ? <Cloud size={23} weight="duotone" aria-hidden="true" /> : <Pulse size={23} weight="duotone" aria-hidden="true" />}
             </span>
             <div>
               <h2>{service.name}</h2>
@@ -2417,8 +2568,8 @@ export function RuntimePage({ token, onUnauthorized }) {
       <Panel title="运行边界" subtitle="MX Launcher 管部署入口，MX Insight Hub 管业务网关状态">
         <div className="mih-boundary-list">
           <div><strong>公开流量</strong><p>仅进入公开 Data API；Admin 与内部路径不对外暴露。</p></div>
-          <div><strong>管理流量</strong><p>使用 session-only Admin Token，并由 MX Launcher 提供人工运维入口。</p></div>
-          <div><strong>数据来源</strong><p>Night-All 作为内部一手来源，调用者不会看到其凭证和内部端点。</p></div>
+          <div><strong>管理流量</strong><p>使用受保护的 Hub 会话，并由 MX Launcher 提供人工运维入口。</p></div>
+          <div><strong>数据来源</strong><p>Hub 统一交付数据能力；调用者不会看到供应方身份、凭证和内部端点。</p></div>
         </div>
       </Panel>
     </>

@@ -16,10 +16,11 @@ This gateway handles provider-backed realtime external acquisition, which may co
 procurement cost, separately from scheduled cleaning jobs. Public callers use only Hub-owned contracts:
 
 - `POST /api/v1/data/ecommerce/products/search` with the `ecommerce` platform entitlement;
-- `POST /api/v1/data/post` with both the `xiaohongshu` platform entitlement and
-  `social.posts.resolve` capability entitlement. The legacy spelling
-  `/api/v1/xiaohongshu/app/get_note_info` is an alias of the same canonical operation, not a second route to
-  purchase or meter independently;
+- `POST /api/v1/xiaohongshu/app/get_note_info` with a JSON note link, plus both the `xiaohongshu` platform
+  entitlement and `social.posts.resolve` capability entitlement. Hub also retains GET `share_text`/`note_id`
+  and the provider-neutral `POST /api/v1/data/post`; all three share one canonical operation, note identity,
+  snapshots and external-dispatch suppression rather than being purchased or metered independently. Exact
+  idempotency additionally binds the delivery mode;
 - `POST /api/v1/data/search` for an eligible Xiaohongshu page, with the `xiaohongshu` platform entitlement;
 - the eligible Xiaohongshu subset of `POST /api/v1/night-all/search/raw`, projected back into the existing
   compatibility envelope so callers do not select or learn a physical provider.
@@ -31,6 +32,11 @@ router or automatic supplier failover.
 “Provider-neutral” describes the Public Hub contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot
 delivery modes, not evidence that another provider was called. Provider candidates shown in a catalog remain
 planning evidence until released.
+
+The Hub-owned public spelling `/xiaohongshu/app/get_note_info` does **not** call TikHub App V1. That provider
+operation was permanently retired; the adapter remains pinned to the reviewed App V2 image-note-detail contract,
+which can return both image-note and video-note metadata without promising a video playback URL. The public
+spelling is only a customer migration surface and always returns the Hub stable schema.
 
 The same public search accepts a provider-neutral `deliveryMode`: `cache_only` forbids provider dispatch,
 `cache_first` preserves the compatible fresh-cache-first behavior, and `refresh` explicitly permits one new

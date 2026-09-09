@@ -172,16 +172,22 @@ export function normalizeXiaohongshuPostRequest(input) {
     upstreamQuery = { note_id: noteId }
   }
 
+  const noteFingerprintBody = {
+    contractVersion: XIAOHONGSHU_POST_CONTRACT_VERSION,
+    platform: XIAOHONGSHU_PLATFORM,
+    ...identity,
+  }
+
   return {
     platform: XIAOHONGSHU_PLATFORM,
     deliveryMode,
     identity,
     upstreamQuery,
     fingerprintBody: {
-      contractVersion: XIAOHONGSHU_POST_CONTRACT_VERSION,
-      platform: XIAOHONGSHU_PLATFORM,
-      ...identity,
+      ...noteFingerprintBody,
+      deliveryMode,
     },
+    noteFingerprintBody,
   }
 }
 

@@ -195,6 +195,7 @@ export async function createRuntime(config = loadConfig()) {
     // active. Previously issued direct cursors still return through the
     // gateway (cache/stored fallback or an explicit unavailable result).
     externalSocialSearchEnabled: Boolean(tikHubAdapter) && config.tikHub.searchContractVerified,
+    externalSocialSearchCanaryConsumerIds: config.tikHub.searchCanaryConsumerIds,
     externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader({
       maxConcurrency: config.externalMedia.maxConcurrency,
       maxCacheBytes: config.externalMedia.cacheBytes,

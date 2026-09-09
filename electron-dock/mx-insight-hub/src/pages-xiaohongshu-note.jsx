@@ -259,14 +259,16 @@ export function XiaohongshuNotePage({ notify }) {
       <PageHeading
         eyebrow="DATA PRODUCT / XIAOHONGSHU NOTE"
         title="小红书笔记画卷"
-        description="输入官方笔记链接，查看完整正文、作者、互动量与标签；API Key 仅保存在当前页面内存。"
+        description="输入官方笔记链接，通过 Hub 稳定 JSON POST 合同查看完整正文、作者、互动量与标签；API Key 仅保存在当前页面内存。"
       >
+        <a className="qp-button qp-button--outline" href="#/api-keys">签发 / 轮换 API Key</a>
+        <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a>
         <a className="qp-button qp-button--outline" href="#/plans">查看合同费率</a>
-        <a className="qp-button qp-button--outline" href={publicDocsHref()} target="_blank" rel="noreferrer">查看开放 API</a>
+        <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')} target="_blank" rel="noreferrer">查看开放 API / 文档</a>
       </PageHeading>
       <div className="mih-xhs-workbench">
         <form className="qp-panel mih-xhs-controls" onSubmit={submit}>
-          <div className="mih-xhs-panel-title"><Sparkle size={19} /><div><strong>展开一篇笔记</strong><small>平台与能力必须同时授权</small></div></div>
+          <div className="mih-xhs-panel-title"><Sparkle size={19} /><div><strong>展开一篇笔记</strong><small><code>POST /api/v1/xiaohongshu/app/get_note_info</code> · JSON body · 平台与能力必须同时授权</small></div></div>
           <Field label="开放能力 API Key" hint="需要 xiaohongshu 与 social.posts.resolve；不会写入浏览器存储。">
             <input className="qp-input" type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="mih_live_…" required />
           </Field>

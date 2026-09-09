@@ -344,7 +344,7 @@ function SourceCatalogOverview({ snapshot, onOpenCatalog }) {
       tone: 'warning',
       icon: UserCircle,
       title: `${formatNumber(summary.unassigned)} 条目录没有负责人`,
-      detail: '负责人字段与供应商/连接器严格分离，当前不会把 tikhub 等误识别为人员。',
+      detail: '负责人字段与供应商/连接器严格分离，当前不会把接入系统误识别为人员。',
       view: 'unassigned',
     },
     {
@@ -1119,6 +1119,24 @@ function emptyForm(entry) {
   }
 }
 
+function catalogFormPayload(form) {
+  const { owner: ownerText, ownerId, ...catalogFields } = form
+  return {
+    ...catalogFields,
+    ...(ownerId ? { ownerId } : ownerText.trim() ? { owner: ownerText.trim() } : { ownerId: null }),
+    complianceBoundary: form.complianceBoundary.trim() || null,
+    notes: form.notes.trim() || null,
+  }
+}
+
+export function sourceCatalogChangedFields(entry, form) {
+  const initial = catalogFormPayload(emptyForm(entry))
+  const desired = catalogFormPayload(form)
+  return Object.fromEntries(Object.entries(desired).filter(([field, value]) => (
+    JSON.stringify(value) !== JSON.stringify(initial[field])
+  )))
+}
+
 function relatedNumber(value, fallback = 0) {
   const number = Number(value)
   return Number.isFinite(number) ? number : fallback
@@ -1303,12 +1321,13 @@ function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets
         if (!next || !Array.isArray(current[field]) || current[field].includes(next)) return current
         return { ...current, [field]: [...current[field], next] }
       }, { ...form })
-      const { owner: ownerText, ownerId, ...catalogFields } = committedForm
-      const payload = {
-        ...catalogFields,
-        ...(ownerId ? { ownerId } : ownerText.trim() ? { owner: ownerText.trim() } : { ownerId: null }),
-        complianceBoundary: committedForm.complianceBoundary.trim() || null,
-        notes: committedForm.notes.trim() || null,
+      const payload = entry
+        ? sourceCatalogChangedFields(entry, committedForm)
+        : catalogFormPayload(committedForm)
+      if (entry && Object.keys(payload).length === 0) {
+        notify?.('未检测到目录变更', 'success')
+        onClose()
+        return
       }
       if (entry) await adminApi.updateSourceCatalogEntry(token, entry.id, { ...payload, revision: entry.revision })
       else await adminApi.createSourceCatalogEntry(token, payload)
@@ -1425,7 +1444,7 @@ function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets
                   }}
                 />
                 <button className="mih-owner-assignment__create" type="button" onClick={() => { setOwnerCreating((current) => !current); setOwnerError(null) }}><Plus size={13} aria-hidden="true" />新增负责人</button>
-                <span className="qp-field__hint">负责人是人员或团队，不是 tikhub / justone 等接入供应商。</span>
+                <span className="qp-field__hint">负责人是人员或团队，不是任何接入供应商或连接器。</span>
                 {ownerCreating ? (
                   <div className="mih-owner-quick-create">
                     <input

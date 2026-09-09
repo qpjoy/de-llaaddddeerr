@@ -1,21 +1,11 @@
 # MX Insight Hub Public API curl 使用指南
 
-本文覆盖 Hub public listener 暴露的全部路由：健康检查、公开文档、需要认证的
-数据/工具 API，以及当前 consumer 自己的请求证据。不包括 `/internal/v1/*` 或
-Admin API。生产域名会把 `/health/**` 转给 admin listener，因此外部域名上的
-`GET /health/dependencies` 当前可读；若直连 public listener `18150`，该路径则返回
-`404 not_found`。
+本文覆盖以 `$HUB_URL` 为 origin 暴露的健康检查、公开文档、需要认证的数据/工具 API，
+以及当前 consumer 自己的请求证据。调用方只需使用部署方提供的 HTTPS `$HUB_URL`；
+未在公开 OpenAPI 声明的路由，以及 Hub 内部路由、部署拓扑与供应方选择不属于公开合同。
 
 实现所维护的机器可读契约位于 `GET /docs/openapi.json`。如果本文与该文档不一致，
 在发送可能付费或改变状态的请求前，应先停止调用并核对部署版本。
-
-生产请求链路为：调用方先到 Domestic Nginx（仅终止 TLS 和反向代理），再经
-WireGuard 回源到 Internal Nginx `10.88.88.88:80`；Internal 按路径将公共 API
-转发到本机 Hub public listener `127.0.0.1:18150`，将管理面和健康检查转发到
-`127.0.0.1:18151`。Hub 按请求契约自行选择 Hub-native external-data connector 或
-同一 Internal 宿主机上的历史 Night-All `127.0.0.1:13141`；调用方不选择该细节。
-Domestic 不运行 Hub 或 Night-All，排查业务 500 时应先查看 Internal Hub 日志，只有
-历史兼容路径再联查 Night-All；Domestic 日志只用于确认 TLS、回源和最终 HTTP 状态。
 
 ## 1. Shell 环境
 
@@ -42,11 +32,15 @@ new_idempotency_key() {
 需要认证的示例使用 `Authorization: Bearer $HUB_KEY`。也可以改用
 `x-api-key: $HUB_KEY`，但不要同时发送两种认证头。
 
-下文每个 POST 都会生成格式合法且新的 `Idempotency-Key`。如果只是重试
+下文每个 POST 都会生成格式合法且新的 `Idempotency-Key`。默认情况下，如果只是重试
 **相同路径和完全相同的规范化 body**，应复用已有的 `IDEMPOTENCY_KEY`，不要再次
-执行 `new_idempotency_key`。更换 body、路径或 cursor 页面必须使用新的 `Idempotency-Key`。同一个
-key 对应不同请求会返回 `409 idempotency_conflict`。POST 重试还必须继续使用创建该 usage
-记录的同一把 Hub API Key；同一 consumer 的另一把 Key 只能执行只读状态查询，不能接管旧记录，
+执行 `new_idempotency_key`；更换 body、路径或 cursor 页面必须使用新的 `Idempotency-Key`。
+第 3.4 节的小红书正文解析是明确例外：GET 平台路径、POST 平台路径和
+`POST /api/v1/data/post` 三个入口共享一个 canonical 幂等 namespace。同一次逻辑请求的重试
+不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`，且应保持规范化笔记标识和
+`deliveryMode` 不变；复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`。
+同一个 key 对应其他不同请求也会返回 `409 idempotency_conflict`。POST 重试还必须继续使用创建该
+usage 记录的同一把 Hub API Key；同一 consumer 的另一把 Key 只能执行只读状态查询，不能接管旧记录，
 需要发起新业务请求时应使用新的 `Idempotency-Key`。
 
 所有 JSON 错误均采用稳定结构：
@@ -81,10 +75,9 @@ curl -sS -i "$HUB_URL/health/live"
 ### `GET /health/ready`
 
 只有 Hub 所需依赖全部正常时才返回 `200` 和 `data.status=ready`；否则返回 `503`
-和 `data.status=not_ready`。生产域名的 `/health/**` 由 Internal Nginx 转到 admin
-listener `18151`；ready 门禁以 Hub 必需存储为准，外部数据连接的诊断状态不再把整个
-Hub 判为 not-ready。直连 public listener `18150` 时只返回摘要。客户端不能依赖可选
-诊断明细，响应不得包含连接坐标或凭据。
+和 `data.status=not_ready`。ready 门禁以 Hub 必需存储为准，外部数据连接的诊断状态
+不把整个 Hub 判为 not-ready。`$HUB_URL` 的部署策略可能只返回摘要；客户端不能依赖
+可选诊断明细，响应不得包含连接坐标或凭据。
 
 ```bash
 curl -sS -i "$HUB_URL/health/ready"
@@ -92,9 +85,9 @@ curl -sS -i "$HUB_URL/health/ready"
 
 ### `GET /health/dependencies`
 
-生产域名当前通过 Internal Nginx 将该路径转到 admin listener，返回 `store` 和
-`nightAll` 的安全状态摘要；无需 API Key。它只适合运维诊断，业务调用方不能把它
-当作稳定数据 API。直连 public listener `18150` 时该路径返回 `404`。
+该路径属于部署方可选的安全依赖摘要，可能在客户 `$HUB_URL` 上不可用并返回 `404`；
+无需 API Key。它只适合运维诊断，业务调用方不能把它当作稳定数据 API，也不能依赖
+某个具体依赖名称一定出现。
 
 ```bash
 curl -sS -i "$HUB_URL/health/dependencies"
@@ -690,33 +683,51 @@ Hub usage、供应方采购成本与 Hub 客户计价是三个相互独立的计
 
 ## 3.4 小红书笔记 API
 
-### `POST /api/v1/data/post`
+### `POST /api/v1/xiaohongshu/app/get_note_info`
 
-本接口把官方笔记链接归一化为稳定的
+这是 Hub-owned 的平台命名入口，把官方笔记链接归一化为稳定的
 `mx-insight-hub.social-post.v1`，要求当前 Key 的 immutable snapshot 和 consumer
 当前授权同时包含 `xiaohongshu` 与 `social.posts.resolve`。供应方身份、上游密钥、原始
 envelope 和成本都不会出现在公开响应中。
 
 ```bash
-XHS_BODY='{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/0123456789abcdef01234567","deliveryMode":"cache_first"}'
+XHS_NOTE_URL='https://www.xiaohongshu.com/explore/0123456789abcdef01234567'
 XHS_KEY="xhs-note-$(uuidgen)"
+XHS_BODY=$(jq -cn --arg url "$XHS_NOTE_URL" '{url:$url,deliveryMode:"cache_first"}')
 
 XHS_RESULT=$(curl -sS -D /tmp/mxih-xhs.headers -X POST \
   -H "Authorization: Bearer $HUB_KEY" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $XHS_KEY" \
   -d "$XHS_BODY" \
-  "$HUB_URL/api/v1/data/post")
+  "$HUB_URL/api/v1/xiaohongshu/app/get_note_info")
 
 printf '%s\n' "$XHS_RESULT" \
   | jq '{contractVersion,data:{item:{id:.data.item.id,title:.data.item.title,text:.data.item.text,tags:.data.item.tags,author:.data.item.author,metrics:.data.item.metrics,media:.data.item.media}},meta,requestId}'
 ```
 
-兼容旧客户的 `POST /api/v1/xiaohongshu/app/get_note_info` 接受相同 body，并在缺失
-`platform` 时默认小红书。两个 URL 共享同一个规范化 fingerprint/幂等域；新客户应使用
-`/data/post`，不要为了重试在两个 URL 间切换。输入只接受官方
+平台命名的 POST 是链接输入的推荐形式；body 只接受 `platform`、`url` 和 `deliveryMode`，
+并在缺失 `platform` 时默认小红书。`GET /api/v1/xiaohongshu/app/get_note_info` 继续兼容
+`share_text` 和 24 位十六进制 `note_id`，两者同时出现时 `note_id` 优先。等价输入会尽可能归一到
+同一个规范化笔记身份。输入只接受官方
 `xiaohongshu.com` 笔记 URL 或 `xhslink.com` / `xhslink.cn` 分享 URL；不接受任意网页、
 上游参数或凭据。
+
+GET 会把链接放在 request-target 中。如果分享链接带 `xsec_token` 等临时查询参数，它可能被客户端、
+反向代理或 APM 的访问日志记录。此时应优先传 `note_id`，或改用下方 POST JSON 形式；不要在
+公共 URL、截图或日志中保留临时参数。
+
+Hub 自定义数据产品入口 `POST /api/v1/data/post` 继续接受
+`{"platform":"xiaohongshu","url":"...","deliveryMode":"cache_first"}`。GET 和两个 POST 入口共享
+同一个笔记身份、快照与外采去重域；幂等绑定还包含交付策略，所以同一
+`Idempotency-Key` 改变 `deliveryMode` 会返回冲突。不要为了重试
+切换 URL、method 或参数写法。
+
+租户端完整开通路径是：平台方建立 tenant、consumer、`xiaohongshu` 和
+`social.posts.resolve` grants 与 membership；租户成员通过 Launcher 会话登录 Internal Hub，
+在“API Keys”签发只显示一次完整 secret 的 Live Key；客户后端用该 Key 调用上面的 POST；
+租户再从套餐、余额和用量视图检查调用与扣费。Public 文档和响应始终不显示外部平台凭据、
+采购成本或内部归档位置。
 
 `cache_only|cache_first|refresh` 的交付证据与 3.3 节一致。`refresh` 必须有调用方生成的
 `Idempotency-Key`。完全相同的传输重试复用原 body/key；`409 reserved/unknown` 或

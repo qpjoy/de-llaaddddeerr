@@ -596,18 +596,17 @@ const externalSocialPostMediaResponse = {
   description: 'One bounded image retained by the same consumer\'s committed social-post response. This read creates no Hub usage and dispatches no post-detail request.',
 }
 
-function externalSocialPostOperation({ compatibilityAlias = false } = {}) {
+function externalSocialPostOperation({ platformShaped = false } = {}) {
   return {
     tags: ['External Data'],
-    operationId: compatibilityAlias ? 'getXiaohongshuNoteInfoCompatibility' : 'resolveExternalSocialPost',
-    summary: compatibilityAlias
-      ? 'Compatibility alias for resolving one Xiaohongshu note link'
+    operationId: platformShaped ? 'getXiaohongshuNoteInfo' : 'resolveExternalSocialPost',
+    summary: platformShaped
+      ? 'Resolve one Xiaohongshu note link using the recommended platform-shaped JSON contract'
       : 'Resolve one Xiaohongshu note link through the governed external data gateway',
-    ...(compatibilityAlias ? { deprecated: true } : {}),
-    description: `${compatibilityAlias
-      ? 'Compatibility spelling for existing clients. A missing platform defaults to xiaohongshu. New clients should use /data/post. '
+    description: `${platformShaped
+      ? 'Recommended JSON-body form of the platform-shaped route. A missing platform defaults to xiaohongshu. '
       : 'Canonical provider-neutral social-post route. platform must be xiaohongshu. '
-    }The request accepts only an official Xiaohongshu note or share URL plus deliveryMode. It requires a Live Hub Public API key whose immutable platform and capability snapshots include xiaohongshu and social.posts.resolve, while those consumer grants remain active. cache_only never dispatches external acquisition; cache_first is the default; refresh requires Idempotency-Key. Both route spellings share one canonical fingerprint and idempotency namespace. The response never exposes external platform identity, credentials, endpoint coordinates, upstream media or avatar URLs, raw envelopes, diagnostic cache URLs, procurement price or customer invoice. media[].url is an authenticated same-origin Hub relay locator bound to this response requestId and media index. An accepted but unavailable note may consume external capacity, so a verified request-local miss is negative-cached and is never retried automatically.`,
+    }The request accepts only an official Xiaohongshu note or share URL plus deliveryMode. It requires a Live Hub Public API key whose immutable platform and capability snapshots include xiaohongshu and social.posts.resolve, while those consumer grants remain active. cache_only never dispatches external acquisition; cache_first is the default; refresh requires Idempotency-Key. All supported route and method forms share one normalized note identity, snapshot, external-dispatch suppression boundary and idempotency namespace; the immutable idempotency request binding additionally includes deliveryMode, so changing that policy conflicts instead of replaying or dispatching. The response never exposes external platform identity, credentials, endpoint coordinates, upstream media or avatar URLs, raw envelopes, diagnostic cache URLs, procurement price or customer invoice. media[].url is an authenticated same-origin Hub relay locator bound to this response requestId and media index. An accepted but unavailable note may consume external capacity, so a verified request-local miss is negative-cached and is never retried automatically.`,
     'x-mx-canonical-operation': '/data/post',
     'x-mx-error-codes': {
       400: [
@@ -639,12 +638,12 @@ function externalSocialPostOperation({ compatibilityAlias = false } = {}) {
       content: {
         'application/json': {
           schema: {
-            $ref: compatibilityAlias
+            $ref: platformShaped
               ? '#/components/schemas/XiaohongshuPostCompatibilityRequest'
               : '#/components/schemas/XiaohongshuPostRequest',
           },
           example: {
-            ...(compatibilityAlias ? {} : { platform: 'xiaohongshu' }),
+            ...(platformShaped ? {} : { platform: 'xiaohongshu' }),
             url: 'https://www.xiaohongshu.com/explore/0123456789abcdef01234567',
             deliveryMode: 'cache_first',
           },
@@ -663,6 +662,34 @@ function externalSocialPostOperation({ compatibilityAlias = false } = {}) {
       502: errorResponse,
       503: errorResponse,
     },
+  }
+}
+
+function platformShapedExternalSocialPostGetOperation() {
+  const { requestBody: _requestBody, ...operation } = externalSocialPostOperation({ platformShaped: true })
+  return {
+    ...operation,
+    operationId: 'getXiaohongshuNoteInfoCompatibility',
+    summary: 'Resolve one Xiaohongshu note using the compatibility GET contract',
+    description: 'This Hub-owned platform-shaped GET path accepts note_id or one official note/share link in share_text; note_id takes precedence when both are present. delivery_mode is an optional Hub policy. It returns the same stable Hub social-post contract as /data/post and the JSON-body form of this path. Authentication, authorization, quota, cache, archive and response semantics are identical. Equivalent note_id and long-link inputs share one canonical note identity, snapshot and external-dispatch suppression; the idempotency binding additionally includes delivery mode, so reusing a key after changing that policy conflicts. Changing route, method or parameter spelling does not authorize another external dispatch. The public response does not expose external provider identity, credentials, endpoint coordinates or raw envelopes. Because GET places share_text in the request target, prefer note_id or a JSON POST form when a link contains temporary query parameters such as xsec_token that could be retained by access logs.',
+    parameters: [
+      {
+        name: 'note_id', in: 'query', required: false,
+        description: 'A 24-character Xiaohongshu note ID. Either note_id or share_text is required; note_id takes precedence when both are present.',
+        schema: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
+      },
+      {
+        name: 'share_text', in: 'query', required: false,
+        description: 'Exactly one official xiaohongshu.com note URL or xhslink.com/xhslink.cn share URL. Either share_text or note_id is required. Plain text, arbitrary pages, credentials, ports and fragments are rejected. Prefer note_id or JSON POST when temporary query parameters must not enter access logs.',
+        schema: { type: 'string', format: 'uri', minLength: 1, maxLength: 2048 },
+      },
+      {
+        name: 'delivery_mode', in: 'query', required: false,
+        description: 'Hub delivery policy. refresh permits one new acquisition and requires Idempotency-Key.',
+        schema: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'], default: 'cache_first' },
+      },
+      ...operation.parameters,
+    ],
   }
 }
 
@@ -1154,7 +1181,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       post: externalSocialPostOperation(),
     },
     '/xiaohongshu/app/get_note_info': {
-      post: externalSocialPostOperation({ compatibilityAlias: true }),
+      get: platformShapedExternalSocialPostGetOperation(),
+      post: externalSocialPostOperation({ platformShaped: true }),
     },
     '/data/posts/media': {
       get: {
@@ -4791,8 +4819,30 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
 
     <section class="doc-page" data-doc-page="xiaohongshu-note">
     <h2 id="xiaohongshu-note">小红书笔记</h2>
-    <div class="notice">生产接入使用 <code>POST /api/v1/data/post</code>。它需要 Live Hub Public API Key 的 immutable snapshot 同时包含 <code>xiaohongshu</code> 和 <code>social.posts.resolve</code>，且 consumer 当前仍保留两项授权。</div>
+    <div class="notice">平台命名的生产入口是 Hub-owned <code>POST /api/v1/xiaohongshu/app/get_note_info</code>；笔记链接放在 JSON body 中。Hub 自定义数据产品入口 <code>POST /api/v1/data/post</code> 也继续受支持。它们都需要 Live Hub Public API Key 的 immutable snapshot 同时包含 <code>xiaohongshu</code> 和 <code>social.posts.resolve</code>，且 consumer 当前仍保留两项授权。</div>
     <h3>1. 输入链接，获取正文与标签</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/xiaohongshu/app/get_note_info</code></div><p>推荐把官方笔记链接放入 JSON body，可选 <code>deliveryMode=cache_only|cache_first|refresh</code>。</p></div>
+    <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
+NOTE_URL='https://www.xiaohongshu.com/explore/0123456789abcdef01234567'
+XHS_BODY=$(jq -cn --arg url "$NOTE_URL" '{url:$url,deliveryMode:"cache_first"}')
+curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $XHS_KEY" \
+  -d "$XHS_BODY" \
+  | tee /tmp/mxih-xhs.json \
+  | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
+    <p>这是 Hub 自己维护的兼容路径，不是对任何外部平台响应的透明转发。返回固定为 <code>mx-insight-hub.social-post.v1</code>；正文与标签分别位于 <code>data.item.text</code> 和 <code>data.item.tags</code>。</p>
+    <p><code>GET /api/v1/xiaohongshu/app/get_note_info</code> 继续兼容 <code>note_id</code> 和 <code>share_text</code>，两者同时出现时 <code>note_id</code> 优先。GET 会把 <code>share_text</code> 放在 request-target 中；带 <code>xsec_token</code> 等临时查询参数的链接可能进入客户端、反向代理或 APM 访问日志，因此链接输入优先使用上面的 POST，GET 优先只传 <code>note_id</code>。</p>
+    <h3>2. 从租户开通到首次调用</h3>
+    <ol>
+      <li>平台运营方准备 tenant、consumer、<code>xiaohongshu</code> 与 <code>social.posts.resolve</code> grants，并给租户成员建立 membership。</li>
+      <li>租户成员使用 Launcher 会话登录 Internal Hub，只看到已授权模块。</li>
+      <li>租户在“API Keys”签发同时包含两项 scope 的 Live Key；完整 secret 只显示一次。</li>
+      <li>客户后端用该 Key 调用上面的 POST，把自己的笔记链接放入 JSON <code>url</code>，再用稳定的 <code>text</code>/<code>tags</code> 构建自己的产品展示。</li>
+      <li>租户从“套餐与配额”和自己的用量视图查看余额、调用与扣费；外部采购凭据和成本证据始终只属于管理域。</li>
+    </ol>
+    <h3>3. Hub JSON 入口</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/post</code></div><p>body 只接受 <code>platform</code>、<code>url</code>、<code>deliveryMode</code>；只允许官方小红书笔记或分享链接。</p></div>
     <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
 XHS_BODY='{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/0123456789abcdef01234567","deliveryMode":"cache_first"}'
@@ -4804,9 +4854,8 @@ curl -sS -D /tmp/mxih-xhs.headers -X POST "$HUB_URL/api/v1/data/post" \
   | tee /tmp/mxih-xhs.json \
   | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
     <p>返回合同固定为 <code>mx-insight-hub.social-post.v1</code>。正文、标题、标签、作者、互动量、图片引用、发布时间与采集时间都在 <code>data.item</code>；<code>meta.sourceMode</code> 是 <code>live|fresh_cache|stored_fallback|idempotent_replay</code>。每个 <code>media[].url</code> 已投影为绑定本次 requestId/index 的同源 Hub 中继 locator，作者头像暂返回 null；公开响应不包含任何上游媒体 URL、外部平台身份、上游密钥、endpoint、raw envelope、诊断缓存 URL、采购价格或客户账单。</p>
-    <h3>2. 历史兼容 URL</h3>
-    <p><code>POST /api/v1/xiaohongshu/app/get_note_info</code> 是 deprecated alias：接受同样的严格 body，并在未传 platform 时默认 <code>xiaohongshu</code>。两个 URL 共享同一规范化 fingerprint 和幂等域；切换 URL 不是第二次付费调用的授权。新客户始终使用 <code>/data/post</code>。</p>
-    <h3>3. 并发读取图片</h3>
+    <p>平台命名的 POST 在未传 platform 时默认 <code>xiaohongshu</code>。GET、两个 POST 入口共享笔记身份、快照与外采去重；幂等绑定还包含交付策略，因此同一 <code>Idempotency-Key</code> 改变 delivery mode 会返回冲突。切换 URL、method 或参数写法不是第二次付费调用的授权。</p>
+    <h3>4. 并发读取图片</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/posts/media?requestId=...&amp;mediaIndex=0</code></div><p>只读取当前 consumer 已提交响应中的一张图片；不接受任意源 URL、不创建 note usage、不再次派发笔记请求。</p></div>
     <pre><code>REQUEST_ID=$(jq -r '.requestId' /tmp/mxih-xhs.json)
 curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
@@ -4815,7 +4864,7 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
   --data-urlencode 'mediaIndex=0' \
   -o /tmp/mxih-xhs-0.img</code></pre>
     <p><code>requestId</code> 与 <code>mediaIndex</code> 必须各出现一次，index 为 <code>0..19</code>。响应中的 <code>media[].url</code> 就是该路径的同源 locator；客户端须带同一 consumer 的 Live Key 拉取为 Blob。可以在服务端的 consumer/global 并发护栏内并发加载多图；单图失败显示本地占位符，绝不能猜测或回退到上游 URL。返回只允许 JPEG、PNG、WebP，且带 <code>Cache-Control: private, no-store</code>。</p>
-    <h3>4. 缓存、429 与重试</h3>
+    <h3>5. 缓存、429 与重试</h3>
     <p><code>cache_only</code> 绝不外采；<code>cache_first</code> 默认先读同 consumer 的精确新鲜快照；<code>refresh</code> 绕过新鲜快照并强制调用方提供 Idempotency-Key。无效或失效笔记也可能被外部平台接受并消耗容量，所以 request-local miss 会短时 negative-cache，客户端不得自动换 key 重试。</p>
     <table><thead><tr><th>错误</th><th>处理</th></tr></thead><tbody>
       <tr><td><code>400 invalid_post_url / unsupported_fields</code></td><td>只提交官方链接与三个允许字段。</td></tr>

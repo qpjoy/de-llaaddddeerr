@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
@@ -142,6 +143,105 @@ test('MemoryStore exposes an empty authoritative catalog', async () => {
   assert.deepEqual(await store.dataCenterRecords(), {
     items: [], total: 0, hasMore: false, nextCursor: null,
   })
+})
+
+test('Data Center safe presentation hides provider lineage while default Admin-token responses stay raw', async () => {
+  const rawRecord = {
+    id: 'record-provider-lineage',
+    datasetId: 'social.posts.v1',
+    platform: 'xiaohongshu',
+    objectType: 'note',
+    title: '可见标题',
+    stableFields: {
+      source: {
+        sourceKey: 'visible-source',
+        connectorId: 'external-platform:tikhub',
+        parserVersion: 'mxih-tikhub-xiaohongshu-v1',
+      },
+    },
+    extensions: {
+      nested: [{ provider: 'TikHub', raw_data: { secret: 'must-not-reach-the-renderer' } }],
+    },
+    rawPayload: { providerKey: 'tikhub', token: 'must-not-reach-the-renderer' },
+    lineage: {
+      parserVersion: 'mxih-tikhub-xiaohongshu-v1',
+      latestObservation: {
+        connectorId: 'external-platform:tikhub',
+        connectorCallId: 'connector-call-1',
+        externalPlatformCallId: 'provider-call-1',
+        externalPlatform: {
+          providerKey: 'tikhub',
+          operation: 'social.posts.resolve',
+          billed: true,
+          archivePath: 'external/tikhub/xiaohongshu/2026-09-09/response.json',
+        },
+      },
+    },
+  }
+  const store = {
+    async dataCenter({ pageSize }) {
+      return {
+        stats: { datasetCount: 1, activeRecordCount: 1, revisionCount: 1, deletedRecordCount: 0 },
+        datasets: [], records: [rawRecord], pageSize,
+      }
+    },
+    async dataCenterRecords() {
+      return { items: [rawRecord], total: 1, hasMore: false, nextCursor: null }
+    },
+  }
+
+  await withApp({ store }, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const rawResponse = await fetch(`${baseUrl}/internal/v1/admin/data-center/records`, { headers })
+    assert.equal(rawResponse.status, 200)
+    const raw = (await rawResponse.json()).data.items[0]
+    assert.equal(raw.rawPayload.providerKey, 'tikhub')
+    assert.equal(raw.lineage.latestObservation.connectorId, 'external-platform:tikhub')
+    assert.equal(raw.lineage.latestObservation.externalPlatform.providerKey, 'tikhub')
+    assert.match(raw.lineage.latestObservation.externalPlatform.archivePath, /tikhub/iu)
+
+    const safeResponse = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?presentation=safe`,
+      { headers },
+    )
+    assert.equal(safeResponse.status, 200)
+    const safe = (await safeResponse.json()).data.items[0]
+    assert.equal(safe.title, '可见标题')
+    assert.equal(safe.stableFields.source.sourceKey, 'visible-source')
+    assert.equal(Object.hasOwn(safe, 'rawPayload'), false)
+    assert.equal(Object.hasOwn(safe.stableFields.source, 'connectorId'), false)
+    assert.equal(Object.hasOwn(safe.lineage.latestObservation, 'connectorId'), false)
+    assert.equal(Object.hasOwn(safe.lineage.latestObservation, 'connectorCallId'), false)
+    assert.equal(Object.hasOwn(safe.lineage.latestObservation.externalPlatform, 'providerKey'), false)
+    assert.equal(Object.hasOwn(safe.lineage.latestObservation.externalPlatform, 'archivePath'), false)
+    assert.equal(safe.lineage.latestObservation.externalPlatform.operation, 'social.posts.resolve')
+    assert.equal(safe.lineage.latestObservation.externalPlatform.billed, true)
+    assert.doesNotMatch(JSON.stringify(safe), /tik[\s._-]*hub/iu)
+    assert.doesNotMatch(JSON.stringify(safe), /must-not-reach-the-renderer/iu)
+
+    const safeLegacy = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center?presentation=safe`,
+      { headers },
+    )
+    assert.equal(safeLegacy.status, 200)
+    assert.doesNotMatch(JSON.stringify((await safeLegacy.json()).data), /tik[\s._-]*hub/iu)
+
+    for (const path of ['data-center', 'data-center/records']) {
+      const invalid = await fetch(
+        `${baseUrl}/internal/v1/admin/${path}?presentation=raw`,
+        { headers },
+      )
+      assert.equal(invalid.status, 400)
+      assert.equal((await invalid.json()).error.code, 'invalid_data_center_presentation')
+    }
+  })
+
+  const apiSource = await readFile(new URL('../../src/api.js', import.meta.url), 'utf8')
+  for (const methodName of ['dataCenter', 'dataCenterRecords']) {
+    const method = apiSource.match(new RegExp(`${methodName}: \\(token,[\\s\\S]*?\\n  \\)\\),`, 'u'))?.[0] || ''
+    assert.match(method, /presentation: 'safe'/u)
+    assert.match(method, /visibleDataCenterResponse\(request\(/u)
+  }
 })
 
 test('Data Center record browser pages PostgreSQL and searches the ES projection', async () => {

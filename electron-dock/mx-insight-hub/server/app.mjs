@@ -37,6 +37,14 @@ import {
   sourceCatalogTermId,
   sourceCatalogTermSnapshot,
 } from './data/source-catalog.mjs'
+import {
+  dataCenterVisibleProjection,
+  sourceCatalogVisibleProjection,
+} from '../shared/source-catalog-visibility.mjs'
+import {
+  runtimeVisibleDependencies,
+  runtimeVisibleProjection,
+} from './runtime-visibility.mjs'
 
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
@@ -1182,7 +1190,7 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/health/dependencies') {
         if (listenerMode === 'public') throw new AppError(404, 'not_found', 'Route not found')
         const data = await dependencies()
-        sendJson(response, 200, { data, requestId })
+        sendJson(response, 200, { data: runtimeVisibleDependencies(data), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/health/ready') {
@@ -1191,7 +1199,7 @@ export function createApp({
         const ready = requiredDependencies.every((entry) => entry.status === 'up')
         const readiness = {
           status: ready ? 'ready' : 'not_ready',
-          ...(listenerMode === 'public' ? {} : { dependencies: data }),
+          ...(listenerMode === 'public' ? {} : { dependencies: runtimeVisibleDependencies(data) }),
         }
         sendJson(response, ready ? 200 : 503, { data: readiness, requestId })
         return
@@ -1286,14 +1294,24 @@ export function createApp({
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/runtime') {
+        const presentation = searchParams.get('presentation')
+        if (presentation && presentation !== 'safe') {
+          throw new AppError(400, 'invalid_runtime_presentation', 'presentation must be safe when supplied')
+        }
+        const runtime = { listenerMode, dependencies: await dependencies() }
+        const safe = presentation === 'safe' || principal.kind !== 'admin-token'
         sendJson(response, 200, {
-          data: { listenerMode, dependencies: await dependencies() },
+          data: safe ? runtimeVisibleProjection(runtime) : runtime,
           requestId,
         })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center') {
         requireSourceAdmin(principal)
+        const presentation = searchParams.get('presentation')
+        if (presentation && presentation !== 'safe') {
+          throw new AppError(400, 'invalid_data_center_presentation', 'presentation must be safe when supplied')
+        }
         const rawPageSize = searchParams.get('pageSize')
         const pageSize = rawPageSize == null || rawPageSize === '' ? 50 : Number(rawPageSize)
         if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
@@ -1312,11 +1330,12 @@ export function createApp({
               ...searchCapabilities({ audience: 'admin', activeIndexSchema: null }),
               readinessError: 'search_projection_unavailable',
             }
+        const data = {
+          ...catalog,
+          searchCapabilities: capabilities,
+        }
         sendJson(response, 200, {
-          data: {
-            ...catalog,
-            searchCapabilities: capabilities,
-          },
+          data: presentation === 'safe' ? dataCenterVisibleProjection(data) : data,
           requestId,
         })
         return
@@ -1665,6 +1684,10 @@ export function createApp({
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center/records') {
         requireSourceAdmin(principal)
+        const presentation = searchParams.get('presentation')
+        if (presentation && presentation !== 'safe') {
+          throw new AppError(400, 'invalid_data_center_presentation', 'presentation must be safe when supplied')
+        }
         const rawPageSize = searchParams.get('pageSize')
         const pageSize = rawPageSize == null || rawPageSize === '' ? 50 : Number(rawPageSize)
         if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
@@ -1813,7 +1836,7 @@ export function createApp({
           }
           sendJson(response, 200, {
             data: {
-              items,
+              items: presentation === 'safe' ? dataCenterVisibleProjection(items) : items,
               mode: result.mode,
               searchExecution: {
                 ...execution,
@@ -1874,7 +1897,9 @@ export function createApp({
         const total = dataCenterTotal(result.total)
         sendJson(response, 200, {
           data: {
-            items: result.items,
+            items: presentation === 'safe'
+              ? dataCenterVisibleProjection(result.items)
+              : result.items,
             mode: relatedProvince ? 'postgres-related' : 'postgres',
             ...(relatedProvince ? {
               provinceFilter: {
@@ -2661,13 +2686,21 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/internal/v1/admin/source-catalog') {
         requireSourceAdmin(principal)
         const includeArchived = url.searchParams.get('includeArchived') === 'true'
+        const presentation = url.searchParams.get('presentation')
+        if (presentation && presentation !== 'safe') {
+          throw new AppError(400, 'invalid_source_catalog_presentation', 'presentation must be safe when supplied')
+        }
         const [items, taxonomyTerms] = await Promise.all([
           store.listSourceCatalogEntries({ includeArchived }),
           typeof store.listSourceCatalogTerms === 'function'
             ? store.listSourceCatalogTerms({ includeArchived: false })
             : [],
         ])
-        sendJson(response, 200, { data: sourceCatalogSnapshot(items, taxonomyTerms), requestId })
+        const snapshot = sourceCatalogSnapshot(items, taxonomyTerms)
+        sendJson(response, 200, {
+          data: presentation === 'safe' ? sourceCatalogVisibleProjection(snapshot) : snapshot,
+          requestId,
+        })
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/source-catalog') {
@@ -4439,24 +4472,60 @@ export function createApp({
         response.end(media.body)
         return
       }
-      if (request.method === 'POST' && (
+      const platformShapedXiaohongshuGet = request.method === 'GET'
+        && pathname === '/api/v1/xiaohongshu/app/get_note_info'
+      if (platformShapedXiaohongshuGet || (request.method === 'POST' && (
         pathname === '/api/v1/data/post'
         || pathname === '/api/v1/xiaohongshu/app/get_note_info'
-      )) {
+      ))) {
         const context = await requirePublic(request)
         if (!tikHubGateway) {
           throw new AppError(503, 'external_platform_unavailable', 'External post acquisition is unavailable')
         }
-        const rawBody = await readJson(request, 16 * 1024)
-        const body = pathname === '/api/v1/xiaohongshu/app/get_note_info'
-          ? { ...rawBody, platform: rawBody?.platform || 'xiaohongshu' }
-          : rawBody
+        let body
+        if (platformShapedXiaohongshuGet) {
+          const allowedQueryFields = new Set(['note_id', 'share_text', 'delivery_mode'])
+          for (const field of searchParams.keys()) {
+            if (!allowedQueryFields.has(field)) {
+              throw new AppError(400, 'unsupported_fields', `${field} query parameter is not allowed`)
+            }
+          }
+          for (const field of allowedQueryFields) {
+            if (searchParams.getAll(field).length > 1) {
+              throw new AppError(400, 'invalid_request', `${field} query parameter may appear at most once`)
+            }
+          }
+          const noteId = searchParams.get('note_id')?.trim()
+          const shareText = searchParams.get('share_text')?.trim()
+          if (!noteId && !shareText) {
+            throw new AppError(400, 'invalid_request', 'note_id or share_text query parameter is required')
+          }
+          if (noteId && !/^[0-9a-f]{24}$/iu.test(noteId)) {
+            throw new AppError(400, 'invalid_post_url', 'note_id must be exactly 24 hexadecimal characters')
+          }
+          body = {
+            platform: 'xiaohongshu',
+            // Match the platform contract: note_id wins when both are given.
+            // A canonical note URL then enters the same strict validator and
+            // paid-operation fingerprint as every other Hub route spelling.
+            url: noteId
+              ? `https://www.xiaohongshu.com/explore/${noteId}`
+              : shareText,
+            deliveryMode: searchParams.get('delivery_mode') || 'cache_first',
+          }
+        } else {
+          const rawBody = await readJson(request, 16 * 1024)
+          body = pathname === '/api/v1/xiaohongshu/app/get_note_info'
+            ? { ...rawBody, platform: rawBody?.platform || 'xiaohongshu' }
+            : rawBody
+        }
         const result = await tikHubGateway.getPost(context, {
           body,
           idempotencyKey: request.headers['idempotency-key'],
           retryOfRequestId: request.headers['x-mx-insight-retry-of'],
-          // Both public spellings name the same paid operation. Keeping one
-          // fingerprint path prevents duplicate upstream charges across aliases.
+          // All public spellings name the same paid operation. Keeping one
+          // fingerprint path prevents duplicate external charges across route,
+          // method and note_id-versus-link aliases.
           path: '/api/v1/data/post',
         })
         sendJson(response, result.status, result.body, {

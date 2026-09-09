@@ -210,9 +210,10 @@ contract_version, last_verified_at, evidence_ids[]
 - `manual`：只有说明/evidence，没有可运行 connector；
 - `planned`：目标接入方式，明确尚未实现。
 
-TikHub、JustOne、Rapid、Apify、真机和自建可以作为 `provider_label` 或规划标签，但 provider
-选择、fallback、endpoint 与凭据仍由 Night-All 或对应 connector owner 管理。目录普通页面
-只显示 `credentialConfigured`、contract/readiness 和受控说明，不返回 secret、DSN 或任意 header。
+TikHub、JustOne、Rapid、Apify、真机和自建可以作为内部 `provider_label` 或规划标签，但 provider
+选择、fallback、endpoint 与凭据仍由 Hub 对应 connector owner 管理。普通目录页面及租户/Public
+API 不显示隐藏供应方身份，也不返回 secret、DSN、任意 header 或内部 lineage；只有 Admin-token
+原始管理 API 可以查看该身份。可见页面只展示 Hub 能力、contract/readiness 与受控说明。
 
 ### 4.5 负责人和协作
 

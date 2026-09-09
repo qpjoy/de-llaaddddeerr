@@ -23,7 +23,7 @@ const PROVIDER_KEY = 'provider-key-used-only-by-the-fake-fetch'
 const NOTE_ID = '697c0eee000000000a03c308'
 const OTHER_NOTE_ID = '697c0eee000000000a03c309'
 const POST_PATH = '/api/v1/data/post'
-const LEGACY_POST_PATH = '/api/v1/xiaohongshu/app/get_note_info'
+const PLATFORM_PATH = '/api/v1/xiaohongshu/app/get_note_info'
 
 function noteUrl(noteId = NOTE_ID) {
   return `https://www.xiaohongshu.com/explore/${noteId}`
@@ -523,6 +523,98 @@ test('a caller-supplied idempotency key still cannot cross API-key attribution',
   assert.equal(upstreamCalls, 1)
 })
 
+test('delivery mode is idempotency-bound while every mode shares one note snapshot', async () => {
+  let upstreamCalls = 0
+  const state = await gatewayFixture({
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return jsonResponse(successEnvelope())
+    },
+  })
+  const cacheFirst = {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_first' },
+    idempotencyKey: 'delivery-mode-binding-01',
+    path: POST_PATH,
+  }
+
+  const initial = await state.gateway.getPost(state.context, cacheFirst)
+  const conflict = await captureError(() => state.gateway.getPost(state.context, {
+    ...cacheFirst,
+    body: { ...cacheFirst.body, deliveryMode: 'refresh' },
+  }))
+
+  assert.equal(initial.sourceMode, 'live')
+  assert.equal(conflict.status, 409)
+  assert.equal(conflict.code, 'idempotency_conflict')
+  assert.equal(upstreamCalls, 1, 'a changed delivery intent must not reuse or dispatch under the old key')
+
+  const refreshed = await state.gateway.getPost(state.context, {
+    body: { ...cacheFirst.body, deliveryMode: 'refresh' },
+    idempotencyKey: 'delivery-mode-binding-02',
+    path: POST_PATH,
+  })
+  const cached = await state.gateway.getPost(state.context, {
+    body: { ...cacheFirst.body, deliveryMode: 'cache_only' },
+    idempotencyKey: 'delivery-mode-binding-03',
+    path: POST_PATH,
+  })
+
+  assert.equal(refreshed.sourceMode, 'live')
+  assert.equal(cached.sourceMode, 'fresh_cache')
+  assert.equal(upstreamCalls, 2)
+  assert.equal(state.platformStore.calls.size, 2)
+  const [initialCall, refreshCall] = [...state.platformStore.calls.values()]
+  assert.notEqual(
+    initialCall.fingerprint,
+    refreshCall.fingerprint,
+    'provider-call request fingerprints must bind the delivery intent',
+  )
+  assert.equal(
+    initialCall.dispatchFingerprint,
+    refreshCall.dispatchFingerprint,
+    'provider dispatches must retain one note-identity fingerprint across delivery intents',
+  )
+  assert.equal(state.platformStore.snapshots.size, 1, 'delivery modes must share the note-identity snapshot')
+})
+
+test('concurrent cache_first and refresh intents share the note dispatch lease', async () => {
+  let releaseDispatch
+  let markStarted
+  let upstreamCalls = 0
+  const dispatchStarted = new Promise((resolve) => { markStarted = resolve })
+  const dispatchRelease = new Promise((resolve) => { releaseDispatch = resolve })
+  const state = await gatewayFixture({
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      markStarted()
+      await dispatchRelease
+      return jsonResponse(successEnvelope())
+    },
+  })
+  const first = state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_first' },
+    idempotencyKey: 'shared-note-lease-01',
+    path: POST_PATH,
+  })
+
+  try {
+    await dispatchStarted
+    const blocked = await captureError(() => state.gateway.getPost(state.context, {
+      body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'refresh' },
+      idempotencyKey: 'shared-note-lease-02',
+      path: POST_PATH,
+    }))
+    assert.equal(blocked.status, 409)
+    assert.equal(blocked.code, 'request_in_progress')
+    assert.equal(upstreamCalls, 1)
+  } finally {
+    releaseDispatch()
+  }
+
+  assert.equal((await first).sourceMode, 'live')
+  assert.equal(state.platformStore.calls.size, 1)
+})
+
 test('HTTP 401 HTML and HTTP 429 oversized bodies retain status-first classifications', async () => {
   const cases = [
     {
@@ -650,7 +742,7 @@ test('the explicit service-error sentinel is billed once and negative-cached for
   assert.equal(upstreamCalls, 1, 'replay and negative-cache hit must not call TikHub again')
 })
 
-test('legacy get_note_info and canonical post routes share one idempotency scope', async () => {
+test('platform-shaped GET, JSON POST, and canonical routes share one idempotency scope', async () => {
   let upstreamCalls = 0
   const marker = 'http-response-source-marker'
   const state = await gatewayFixture({
@@ -673,7 +765,7 @@ test('legacy get_note_info and canonical post routes share one idempotency scope
     logger: { warn() {}, error() {} },
   }))
   const baseUrl = await listen(server)
-  const call = async (path, body, idempotencyKey = 'route-alias-key-01') => {
+  const post = async (path, body, idempotencyKey = 'route-alias-key-01') => {
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
       headers: {
@@ -685,31 +777,56 @@ test('legacy get_note_info and canonical post routes share one idempotency scope
     })
     return { response, payload: await response.json() }
   }
+  const get = async ({ shareText = null, noteId = null }, idempotencyKey = 'route-alias-key-01') => {
+    const url = new URL(PLATFORM_PATH, baseUrl)
+    if (shareText != null) url.searchParams.set('share_text', shareText)
+    if (noteId != null) url.searchParams.set('note_id', noteId)
+    const response = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${state.apiKey.secret}`,
+        'idempotency-key': idempotencyKey,
+      },
+    })
+    return { response, payload: await response.json() }
+  }
 
   try {
-    const legacy = await call(LEGACY_POST_PATH, { url: noteUrl() })
-    const canonical = await call(POST_PATH, { platform: 'xiaohongshu', url: noteUrl() })
+    const platformGet = await get({ shareText: noteUrl() })
+    const noteIdPrecedence = await get({ shareText: noteUrl(OTHER_NOTE_ID), noteId: NOTE_ID })
+    const platformPost = await post(PLATFORM_PATH, { url: noteUrl() })
+    const canonical = await post(POST_PATH, { platform: 'xiaohongshu', url: noteUrl() })
 
-    assert.equal(legacy.response.status, 200)
+    assert.equal(platformGet.response.status, 200)
+    assert.equal(noteIdPrecedence.response.status, 200)
+    assert.equal(platformPost.response.status, 200)
     assert.equal(canonical.response.status, 200)
-    assert.equal(legacy.response.headers.get('x-mx-insight-source-mode'), 'live')
+    assert.equal(platformGet.response.headers.get('x-mx-insight-source-mode'), 'live')
+    assert.equal(noteIdPrecedence.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
+    assert.equal(platformPost.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
     assert.equal(canonical.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
     assert.equal(canonical.response.headers.get('idempotent-replay'), 'true')
-    assert.equal(canonical.payload.requestId, legacy.payload.requestId)
+    assert.equal(noteIdPrecedence.payload.requestId, platformGet.payload.requestId)
+    assert.equal(platformPost.payload.requestId, platformGet.payload.requestId)
+    assert.equal(canonical.payload.requestId, platformGet.payload.requestId)
+    assert.equal(platformGet.payload.data.item.text, '一篇完整的小红书图文笔记')
+    assert.deepEqual(platformGet.payload.data.item.tags, ['摄影', '便携相机'])
     assert.equal(
-      legacy.payload.data.item.media[0].url,
-      `/api/v1/data/posts/media?requestId=${legacy.payload.requestId}&mediaIndex=0`,
+      platformGet.payload.data.item.media[0].url,
+      `/api/v1/data/posts/media?requestId=${platformGet.payload.requestId}&mediaIndex=0`,
     )
-    assert.equal(legacy.payload.data.item.author.avatarUrl, null)
-    assert.doesNotMatch(JSON.stringify([legacy.payload, canonical.payload]), new RegExp(marker, 'u'))
+    assert.equal(platformGet.payload.data.item.author.avatarUrl, null)
+    assert.doesNotMatch(
+      JSON.stringify([platformGet.payload, noteIdPrecedence.payload, platformPost.payload, canonical.payload]),
+      new RegExp(marker, 'u'),
+    )
 
     await new Promise((resolve) => setTimeout(resolve, 5))
-    const stale = await call(
+    const stale = await post(
       POST_PATH,
       { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
       'route-stale-key-01',
     )
-    const staleReplay = await call(
+    const staleReplay = await post(
       POST_PATH,
       { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
       'route-stale-key-01',
@@ -719,6 +836,108 @@ test('legacy get_note_info and canonical post routes share one idempotency scope
     assert.equal(staleReplay.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
     assert.equal(staleReplay.response.headers.get('warning'), '110 - "Response is stale"')
     assert.equal(upstreamCalls, 1)
+  } finally {
+    await close(server)
+  }
+})
+
+test('platform-shaped GET rejects missing auth, Test keys, missing grants, and invalid links before dispatch', async () => {
+  let upstreamCalls = 0
+  const state = await gatewayFixture({
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return jsonResponse(successEnvelope())
+    },
+  })
+  const testApiKey = await state.service.createApiKey({
+    consumerId: state.context.consumer.id,
+    name: 'TikHub Test Key',
+    environment: 'test',
+  })
+  const ungrantedConsumer = await state.service.createConsumer({
+    tenantId: state.context.tenant.id,
+    name: 'TikHub Ungranted Consumer',
+  })
+  const ungrantedApiKey = await state.service.createApiKey({
+    consumerId: ungrantedConsumer.id,
+    name: 'TikHub Ungranted Key',
+  })
+  const platformOnlyConsumer = await state.service.createConsumer({
+    tenantId: state.context.tenant.id,
+    name: 'TikHub Platform-only Consumer',
+  })
+  await state.service.putPlatformConfiguration('xiaohongshu', {
+    tenantId: state.context.tenant.id,
+    consumerId: platformOnlyConsumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+    maxPageSize: 1,
+  })
+  const platformOnlyApiKey = await state.service.createApiKey({
+    consumerId: platformOnlyConsumer.id,
+    name: 'TikHub Platform-only Key',
+  })
+  const server = createServer(createApp({
+    service: state.service,
+    store: state.usageStore,
+    adapter: {},
+    adminToken: null,
+    tikHubGateway: state.gateway,
+    listenerMode: 'public',
+    logger: { warn() {}, error() {} },
+  }))
+  const baseUrl = await listen(server)
+  const call = async ({ secret = null, shareText = noteUrl(), extra = {} } = {}) => {
+    const url = new URL(PLATFORM_PATH, baseUrl)
+    url.searchParams.set('share_text', shareText)
+    for (const [key, value] of Object.entries(extra)) url.searchParams.set(key, value)
+    const response = await fetch(url, {
+      headers: secret ? { authorization: `Bearer ${secret}` } : {},
+    })
+    return { response, payload: await response.json() }
+  }
+
+  try {
+    const missingAuth = await call()
+    assert.equal(missingAuth.response.status, 401)
+    assert.equal(missingAuth.payload.error.code, 'api_key_required')
+
+    const rejectedTest = await call({ secret: testApiKey.secret })
+    assert.equal(rejectedTest.response.status, 403)
+    assert.equal(rejectedTest.payload.error.code, 'test_key_not_supported')
+
+    const missingGrant = await call({ secret: ungrantedApiKey.secret })
+    assert.equal(missingGrant.response.status, 403)
+    assert.equal(missingGrant.payload.error.code, 'platform_not_granted')
+
+    const missingCapability = await call({ secret: platformOnlyApiKey.secret })
+    assert.equal(missingCapability.response.status, 403)
+    assert.equal(missingCapability.payload.error.code, 'capability_not_granted')
+
+    const invalidLink = await call({
+      secret: state.apiKey.secret,
+      shareText: 'https://example.com/not-a-xiaohongshu-note',
+    })
+    assert.equal(invalidLink.response.status, 400)
+    assert.equal(invalidLink.payload.error.code, 'invalid_post_url')
+
+    const invalidNoteIdUrl = new URL(PLATFORM_PATH, baseUrl)
+    invalidNoteIdUrl.searchParams.set('note_id', `${NOTE_ID}?unexpected=1`)
+    const invalidNoteIdResponse = await fetch(invalidNoteIdUrl, {
+      headers: { authorization: `Bearer ${state.apiKey.secret}` },
+    })
+    assert.equal(invalidNoteIdResponse.status, 400)
+    assert.equal((await invalidNoteIdResponse.json()).error.code, 'invalid_post_url')
+
+    const unsupported = await call({ secret: state.apiKey.secret, extra: { token: 'must-not-route' } })
+    assert.equal(unsupported.response.status, 400)
+    assert.equal(unsupported.payload.error.code, 'unsupported_fields')
+
+    assert.equal(upstreamCalls, 0)
+    assert.equal(state.platformStore.calls.size, 0)
+    const usage = await state.usageStore.usage({ consumerId: state.context.consumer.id })
+    assert.equal(usage.requests, 0)
   } finally {
     await close(server)
   }

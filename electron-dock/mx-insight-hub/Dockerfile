@@ -74,6 +74,7 @@ COPY --from=production-dependencies /mx-common /mx-common
 COPY --from=build /workspace/mx-insight-hub/package.json ./package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /workspace/mx-insight-hub/agent-market ./agent-market
+COPY --from=build /workspace/mx-insight-hub/shared ./shared
 COPY --from=build /workspace/mx-insight-hub/server ./server
 COPY --from=build /workspace/mx-insight-hub/migrations ./migrations
 COPY --from=build /workspace/mx-insight-hub/dist ./dist

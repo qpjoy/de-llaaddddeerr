@@ -11,6 +11,7 @@ import {
   sourceCatalogSnapshot,
   sourceCatalogTermNormalizedName,
 } from './source-catalog.mjs'
+import { containsHiddenProviderIdentity } from '../../shared/source-catalog-visibility.mjs'
 
 export const SOURCE_CATALOG_PLATFORM = 'source_catalog'
 export const PUBLIC_SOURCE_CATALOG_CONTRACT = 'source-catalog.public.v1'
@@ -78,7 +79,8 @@ export const PUBLIC_SOURCE_CATALOG_FIELDS = Object.freeze([
 ])
 
 function containsPrivateText(value) {
-  return typeof value === 'string' && PRIVATE_TEXT.some((pattern) => pattern.test(value))
+  return typeof value === 'string'
+    && (containsHiddenProviderIdentity(value) || PRIVATE_TEXT.some((pattern) => pattern.test(value)))
 }
 
 function publicText(value, field, redacted, { required = false } = {}) {

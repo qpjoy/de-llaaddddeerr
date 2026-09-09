@@ -2149,8 +2149,8 @@ paths:
         xiaohongshu and social.posts.resolve entitlements while both consumer
         grants remain active. cache_only never dispatches external acquisition;
         cache_first is the default; refresh requires Idempotency-Key. This path
-        and the compatibility alias share one canonical fingerprint and
-        idempotency namespace. Public responses omit external platform identity,
+        and the platform-shaped GET/POST forms share one canonical fingerprint
+        and idempotency namespace. Public responses omit external platform identity,
         credentials, endpoint coordinates, upstream media/avatar URLs, raw
         envelopes, diagnostic cache URLs, procurement price and customer
         invoice. Each media url is an authenticated same-origin Hub relay
@@ -2173,7 +2173,8 @@ paths:
           description: >-
             Optional for cache_only and cache_first, but required for refresh.
             Reuse it only for a transport retry of the exact same normalized
-            note URL. Both route spellings share one idempotency namespace. A
+            note URL. All supported route and method forms share one
+            idempotency namespace. A
             supplied key is consumer-scoped and bound to its first API key.
             When omitted, Hub derives an API-key-scoped freshness-bucket key;
             separate API keys keep separate usage while sharing consumer
@@ -2223,16 +2224,100 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /xiaohongshu/app/get_note_info:
-    post:
+    get:
       operationId: getXiaohongshuNoteInfoCompatibility
-      summary: Compatibility alias for resolving one Xiaohongshu note link.
-      deprecated: true
+      summary: Resolve one Xiaohongshu note using the compatibility GET contract.
       description: >-
-        Compatibility spelling for existing clients; a missing platform
-        defaults to xiaohongshu. New clients use /data/post. It has the same
+        Accepts note_id or one official note/share link in share_text; note_id
+        takes precedence when both are present. delivery_mode is an optional
+        Hub policy. This route returns the stable Hub social-post contract and
+        has the same authentication, authorization, quota, cache, archive and
+        response semantics as /data/post. Equivalent note_id and long-link
+        inputs share one canonical note identity, snapshot and external-dispatch
+        suppression; the idempotency binding additionally includes delivery
+        mode, so reusing a key after changing that policy conflicts. Changing
+        route, method or parameter spelling does not authorize another external
+        dispatch. Public responses do not expose
+        external provider identity, credentials, endpoint coordinates or raw
+        envelopes. Because GET places share_text in the request target, prefer
+        note_id or a JSON POST form when a share link contains temporary query
+        parameters such as xsec_token that could be retained by access logs.
+      x-mx-canonical-operation: /data/post
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_json, invalid_platform, invalid_post_url, unsupported_fields, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
+        "404": [post_not_found, stored_snapshot_not_found]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
+        "413": [payload_too_large]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+      parameters:
+        - name: note_id
+          in: query
+          required: false
+          description: A 24-character Xiaohongshu note ID. Either note_id or share_text is required; note_id takes precedence.
+          schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" }
+        - name: share_text
+          in: query
+          required: false
+          description: One official Xiaohongshu note/share URL. Either share_text or note_id is required. Prefer note_id or JSON POST for links containing temporary query parameters that must not enter access logs.
+          schema: { type: string, format: uri, minLength: 1, maxLength: 2048 }
+        - name: delivery_mode
+          in: query
+          required: false
+          description: Hub delivery policy. refresh permits one new acquisition and requires Idempotency-Key.
+          schema: { type: string, enum: [cache_only, cache_first, refresh], default: cache_first }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >-
+            Optional for cache_only and cache_first, but required for refresh.
+            Reuse only for a transport retry of the exact normalized note. A
+            supplied key is consumer-scoped and bound to its first API key.
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+        - name: X-MX-Insight-Retry-Of
+          in: header
+          required: false
+          description: >-
+            Matching prior same-consumer request UUID whose durable outcome is
+            unknown. Requires refresh and a different new Idempotency-Key.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: >-
+            A normalized social post plus Hub freshness evidence. Media URLs
+            are same-origin authenticated Hub relay locators; upstream media
+            and avatar URLs are not exposed.
+          headers:
+            x-mx-insight-request-id: { schema: { type: string, format: uuid } }
+            idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
+            x-mx-insight-source-mode: { schema: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] } }
+            x-mx-insight-captured-at: { schema: { type: string, format: date-time } }
+            Age: { schema: { type: integer, minimum: 0 } }
+            Warning: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalSocialPostEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: getXiaohongshuNoteInfo
+      summary: Resolve one Xiaohongshu note using the recommended platform-shaped JSON contract.
+      description: >-
+        Recommended JSON-body form of the platform-shaped route; a missing
+        platform defaults to xiaohongshu. It has the same
         authorization, quota, cache, response, error and idempotency semantics
-        as the canonical route, and never creates a separate dispatch merely
-        because the URL spelling changed.
+        as the canonical route, and never creates a separate dispatch because
+        the route or method spelling changed.
       x-mx-canonical-operation: /data/post
       x-mx-error-codes:
         "400": [invalid_request, invalid_json, invalid_platform, invalid_post_url, unsupported_fields, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]

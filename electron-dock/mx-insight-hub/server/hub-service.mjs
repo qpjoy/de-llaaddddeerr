@@ -438,6 +438,7 @@ export class HubService {
     externalPostCapabilities = null,
     externalSocialSearch = null,
     externalSocialSearchEnabled = false,
+    externalSocialSearchCanaryConsumerIds = [],
     externalImageLoader = null,
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     logger = console,
@@ -458,6 +459,9 @@ export class HubService {
     this.externalPostCapabilities = externalPostCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalSocialSearchEnabled = externalSocialSearchEnabled === true
+    this.externalSocialSearchCanaryConsumerIds = new Set(
+      externalSocialSearchCanaryConsumerIds.map((consumerId) => String(consumerId).toLowerCase()),
+    )
     this.externalImageLoader = externalImageLoader
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
@@ -809,6 +813,14 @@ export class HubService {
       return this.store.listEffectiveGrants(context.consumer.id, context.apiKey.id)
     }
     return this.store.listGrants(context.consumer.id)
+  }
+
+  #externalSocialSearchEnabledFor(context) {
+    if (!this.externalSocialSearchEnabled) return false
+    if (this.externalSocialSearchCanaryConsumerIds.size === 0) return true
+    return this.externalSocialSearchCanaryConsumerIds.has(
+      String(context?.consumer?.id || '').toLowerCase(),
+    )
   }
 
   async #effectiveCapabilityGrants(context) {
@@ -1174,10 +1186,11 @@ export class HubService {
     const capabilityGrants = await this.#effectiveCapabilityGrants(context)
     let externalPostCapability = null
     const hasPostDetailGrant = capabilityGrants.includes(XIAOHONGSHU_POST_OPERATION)
+    const externalSocialSearchEnabled = this.#externalSocialSearchEnabledFor(context)
     if (
       canonicalGrants.includes('xiaohongshu')
       && this.externalPostCapabilities
-      && (this.externalSocialSearchEnabled || hasPostDetailGrant)
+      && (externalSocialSearchEnabled || hasPostDetailGrant)
     ) {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms)) {
@@ -1191,7 +1204,7 @@ export class HubService {
         const index = platforms.findIndex((entry) => (entry?.platform || entry) === 'xiaohongshu')
         const ready = !isTestApiKey(context.apiKey) && Boolean(capability?.ready)
         const directCapabilities = [
-          ...(this.externalSocialSearchEnabled ? [XIAOHONGSHU_SEARCH_CAPABILITY] : []),
+          ...(externalSocialSearchEnabled ? [XIAOHONGSHU_SEARCH_CAPABILITY] : []),
           ...(hasPostDetailGrant ? ['post_detail'] : []),
         ]
         const postDetail = hasPostDetailGrant ? {
@@ -1202,7 +1215,7 @@ export class HubService {
           input: capability?.input,
           deliveryModes: capability?.deliveryModes,
         } : null
-        const search = this.externalSocialSearchEnabled ? {
+        const search = externalSocialSearchEnabled ? {
           ready,
           source: 'hub',
           servingMode: capability?.servingMode || 'live_with_stored_fallback',
@@ -3151,7 +3164,7 @@ export class HubService {
       && this.externalSocialSearch
       && (
         isDirectXiaohongshuCursor(direct.body.cursor)
-        || (this.externalSocialSearchEnabled && !isTestApiKey(context.apiKey))
+        || (this.#externalSocialSearchEnabledFor(context) && !isTestApiKey(context.apiKey))
       )
     ) {
       return this.externalSocialSearch(context, {
@@ -3560,7 +3573,7 @@ export class HubService {
       && (!cursor || isDirectXiaohongshuCursor(cursor))
       && (
         isDirectXiaohongshuCursor(cursor)
-        || (this.externalSocialSearchEnabled && !isTestApiKey(context.apiKey))
+        || (this.#externalSocialSearchEnabledFor(context) && !isTestApiKey(context.apiKey))
       )
     ) {
       return this.externalSocialSearch(context, {

@@ -60,11 +60,11 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub'])
+const SUPPORTED_PROVIDERS = new Set(['justone'])
 const UNKNOWN = '未知'
 
 function providerDisplayName(provider) {
-  return provider === 'tikhub' ? 'TikHub' : provider === 'justone' ? 'JustOne' : provider || '外部平台'
+  return provider === 'justone' ? 'JustOne' : provider || '外部平台'
 }
 
 const PROCESSING_STAGES = [
@@ -356,12 +356,15 @@ function collectionFrom(payload) {
 }
 
 function normalizeOverview(payload) {
-  const root = firstRecord(payload)
+  const items = collectionFrom(payload)
+    .map((item) => normalizePlatform(item))
+    .filter((item) => SUPPORTED_PROVIDERS.has(item.key))
+  const primary = items[0]
   return {
-    items: collectionFrom(payload).map((item) => normalizePlatform(item)),
-    summary: normalizeSummary(firstRecord(root.summary, root.totals, root.metrics)),
-    cost: normalizeCost(firstRecord(root.summary, root)),
-    lastObservedAt: optionalText(root.lastObservedAt, root.generatedAt, root.observedAt, root.updatedAt),
+    items,
+    summary: primary?.summary || normalizeSummary({}),
+    cost: primary?.cost || normalizeCost({}),
+    lastObservedAt: primary?.lastObservedAt || null,
   }
 }
 
@@ -1347,7 +1350,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
   )
 }
 
-function UnsupportedProvider({ provider, range }) {
+function UnsupportedProvider({ range }) {
   return (
     <>
       <PageHeading
@@ -1358,7 +1361,7 @@ function UnsupportedProvider({ provider, range }) {
       <EmptyState
         icon={WarningCircle}
         title="无法识别外部平台"
-        description={`provider=${provider} 尚未登记为可打开的详情页。`}
+        description="该平台不在可见的管理目录中。"
         action={<a className="qp-button qp-button--outline" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />返回平台总览</a>}
       />
     </>
@@ -1369,8 +1372,13 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   const rawRange = query.get('range') || '24h'
   const range = VALID_RANGES.has(rawRange) ? rawRange : '24h'
   const provider = (query.get('provider') || '').trim().toLowerCase()
+  const unsupportedProvider = Boolean(provider && !SUPPORTED_PROVIDERS.has(provider))
 
-  if (provider && !SUPPORTED_PROVIDERS.has(provider)) return <UnsupportedProvider provider={provider} range={range} />
+  useEffect(() => {
+    if (unsupportedProvider) setQuery({ provider: null, range })
+  }, [range, setQuery, unsupportedProvider])
+
+  if (unsupportedProvider) return <UnsupportedProvider range={range} />
   if (provider) {
     return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   }

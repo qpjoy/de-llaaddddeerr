@@ -178,6 +178,38 @@ test('JustOne defaults admit current consumer bursts while preserving a bounded 
   assert.equal(config.tikHub.searchStaleTtlMs, 86_400_000)
   assert.equal(config.tikHub.searchMaxEnrichItems, 20)
   assert.equal(config.tikHub.searchEnrichConcurrency, 2)
+  assert.deepEqual(config.tikHub.searchCanaryConsumerIds, [])
+})
+
+test('TikHub search canary consumer IDs are normalized, deduplicated and fail closed', () => {
+  const first = '675d277d-0000-4000-8000-000000000655'
+  const second = 'a9ed1c90-0000-4000-8000-0000001001ec'
+  const configured = loadConfig({
+    ...BASE,
+    MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS: ` ${first.toUpperCase()}, ${second},${first} `,
+  })
+  assert.deepEqual(configured.tikHub.searchCanaryConsumerIds, [first, second])
+
+  for (const value of [',', `${first},`, 'not-a-consumer-uuid']) {
+    assert.throws(
+      () => preflightTikHubConfig({
+        ...BASE,
+        MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS: value,
+      }),
+      (error) => error?.code === 'invalid_configuration'
+        && /comma-separated list of consumer UUIDs/u.test(error.message),
+    )
+  }
+
+  const invalid = loadConfig({
+    ...BASE,
+    MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS: ',',
+  })
+  assert.equal(invalid.tikHub.dispatchEnabled, false)
+  assert.equal(invalid.tikHub.configurationError?.code, 'invalid_configuration')
+  assert.deepEqual(invalid.tikHub.searchCanaryConsumerIds, [])
 })
 
 test('TikHub search quality controls are bounded and stale retention cannot precede freshness', () => {

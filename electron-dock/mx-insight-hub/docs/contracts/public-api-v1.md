@@ -1887,7 +1887,34 @@ retry is a new request.
 ## Xiaohongshu note detail
 
 The first implemented social-post resolver accepts an official Xiaohongshu note
-link and returns a provider-neutral Hub contract:
+link and returns a provider-neutral Hub contract. The recommended
+platform-shaped, Hub-owned link-input entry point is:
+
+```http
+POST /api/v1/xiaohongshu/app/get_note_info
+Authorization: Bearer <Hub Public API key>
+Content-Type: application/json
+Idempotency-Key: xhs-note-20260907-0001
+
+{
+  "url": "https://www.xiaohongshu.com/explore/0123456789abcdef01234567",
+  "deliveryMode": "cache_first"
+}
+```
+
+The JSON body accepts `url` directly and defaults a missing `platform` to
+`xiaohongshu`. The GET form remains available with `share_text` or `note_id`;
+at least one is required and `note_id` takes precedence when both occur. Only
+one instance of each query field is accepted. `delivery_mode` is
+`cache_only|cache_first|refresh` and defaults to `cache_first`.
+
+Because GET places `share_text` in the request target, links containing
+temporary query parameters such as `xsec_token` can be retained by client,
+reverse-proxy, ingress, or APM access logs. Prefer `note_id`, or use either JSON
+POST form below for such links. Never publish the temporary parameters in URLs,
+screenshots, or logs.
+
+The provider-neutral Hub data-product form remains available:
 
 ```http
 POST /api/v1/data/post
@@ -1902,19 +1929,24 @@ Idempotency-Key: xhs-note-20260907-0001
 }
 ```
 
-For clients migrating from the historical spelling, the following alias accepts
-the same strict body and defaults a missing `platform` to `xiaohongshu`:
+The platform-shaped JSON-body form shown above defaults a missing `platform` to
+`xiaohongshu`:
 
 ```http
 POST /api/v1/xiaohongshu/app/get_note_info
 ```
 
-Both paths are one logical paid operation and use the same canonical
-fingerprint/idempotency namespace, so switching path spellings cannot create a
-second dispatch for an otherwise identical request. New integrations should
-use `/data/post`.
+The GET and both POST forms are one logical paid operation and use the same
+canonical note identity, snapshot and dispatch-suppression namespace. The
+idempotency binding additionally includes the delivery mode, so reusing one
+`Idempotency-Key` after changing `cache_first` to `refresh` returns a conflict.
+Equivalent `note_id` and long-link inputs still normalize to the same note
+identity, so switching route, method or parameter spelling cannot create a
+second dispatch for an otherwise identical request. This compatibility name is
+owned by Hub; the public result remains the stable Hub schema rather than a
+transparent external-platform envelope.
 
-The body accepts only `platform`, `url`, and `deliveryMode`. `platform` must be
+The POST body accepts only `platform`, `url`, and `deliveryMode`. `platform` must be
 `xiaohongshu` on the canonical path. `url` must be an official
 `xiaohongshu.com` explore/discovery link containing a 24-character note ID, or
 an `xhslink.com` / `xhslink.cn` share link. Arbitrary URLs, credentials, ports,
@@ -1938,6 +1970,15 @@ Authorization requires all of the following:
   `social.posts.resolve`, and the consumer still has that capability;
 - the active plan, key ceilings, platform policy, and capability policy all
   allow the request. The most restrictive applicable limit wins.
+
+The end-to-end onboarding boundary is: the platform operator creates the
+tenant and consumer, grants `xiaohongshu` plus `social.posts.resolve`, and adds
+the tenant membership; the member signs in to Internal Hub with the Launcher
+session and issues a scoped Live Key whose complete secret is shown once; the
+customer backend sends the note link in the platform-shaped JSON POST; and the tenant reviews
+its balance, charges and request usage in the plan/usage surfaces. Provider
+credentials and procurement evidence never enter that tenant workflow or this
+Public contract.
 
 The success contract is `mx-insight-hub.social-post.v1`:
 

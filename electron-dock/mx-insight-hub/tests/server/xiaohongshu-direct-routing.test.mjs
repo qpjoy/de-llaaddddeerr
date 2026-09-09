@@ -99,7 +99,7 @@ function legacyCapabilities() {
   }
 }
 
-async function routingFixture({ directEnabled = true } = {}) {
+async function routingFixture({ directEnabled = true, canary = 'global' } = {}) {
   const store = new MemoryStore()
   const directCalls = []
   const searchCalls = []
@@ -156,6 +156,17 @@ async function routingFixture({ directEnabled = true } = {}) {
       contractVersion: 'mx-insight-hub.xiaohongshu-post.v1',
     }
   }
+  const tenant = await store.createTenant({ name: 'Routing tenant' })
+  const consumer = await store.createConsumer({
+    tenantId: tenant.id,
+    name: 'Routing consumer',
+    businessId: 'xiaohongshu-routing-consumer',
+  })
+  const externalSocialSearchCanaryConsumerIds = canary === 'global'
+    ? []
+    : canary === 'allowed'
+      ? [consumer.id]
+      : ['00000000-0000-4000-8000-000000000001']
   const service = new HubService({
     store,
     adapter,
@@ -163,13 +174,8 @@ async function routingFixture({ directEnabled = true } = {}) {
     externalPostCapabilities,
     externalSocialSearch,
     externalSocialSearchEnabled: directEnabled,
+    externalSocialSearchCanaryConsumerIds,
     logger: { warn() {} },
-  })
-  const tenant = await service.createTenant({ name: 'Routing tenant' })
-  const consumer = await service.createConsumer({
-    tenantId: tenant.id,
-    name: 'Routing consumer',
-    businessId: 'xiaohongshu-routing-consumer',
   })
   await store.setPlatformGrant(consumer.id, 'xiaohongshu', true)
   await store.putPolicy({
@@ -295,6 +301,48 @@ test('modern Xiaohongshu routing sends only the fixed first page and Hub cursor 
     },
     businessId: state.consumer.businessId,
   }])
+})
+
+test('consumer canary advertises and opens modern/legacy direct search only for allowed consumers', async () => {
+  const allowed = await routingFixture({ canary: 'allowed' })
+  const denied = await routingFixture({ canary: 'denied' })
+
+  await modernSearch(allowed, 'canary-allowed-modern', {
+    platform: 'xiaohongshu', query: 'allowed modern',
+  })
+  await legacySearch(allowed, 'canary-allowed-legacy', 'raw', {
+    platform: 'xiaohongshu', query: 'allowed legacy',
+  })
+  await modernSearch(denied, 'canary-denied-modern', {
+    platform: 'xiaohongshu', query: 'denied modern',
+  })
+  await legacySearch(denied, 'canary-denied-legacy', 'raw', {
+    platform: 'xiaohongshu', query: 'denied legacy',
+  })
+
+  assert.deepEqual(allowed.directCalls.map((call) => call.responseMode), ['modern', 'legacy'])
+  assert.equal(allowed.searchCalls.length, 0)
+  assert.equal(allowed.legacyCalls.length, 0)
+  assert.equal(denied.directCalls.length, 0)
+  assert.equal(denied.searchCalls.length, 1)
+  assert.equal(denied.legacyCalls.length, 1)
+
+  const allowedCapabilities = await allowed.service.capabilities(allowed.liveContext)
+  const deniedCapabilities = await denied.service.capabilities(denied.liveContext)
+  assert.equal(allowedCapabilities.data.platforms[0].search.ready, true)
+  assert.deepEqual(allowedCapabilities.data.platforms[0].capabilities, ['search_posts'])
+  assert.equal(Object.hasOwn(deniedCapabilities.data.platforms[0], 'search'), false)
+  assert.equal(Object.hasOwn(deniedCapabilities.data.platforms[0], 'capabilities'), false)
+  assert.equal(denied.postCapabilityCalls.length, 0)
+
+  await modernSearch(denied, 'canary-issued-cursor', {
+    platform: 'xiaohongshu', query: 'existing continuation', cursor: denied.cursor,
+  })
+  await legacySearch(denied, 'canary-issued-legacy-cursor', 'raw', {
+    platform: 'xiaohongshu', query: 'existing legacy continuation', cursor: denied.cursor,
+  })
+  assert.deepEqual(denied.directCalls.map((call) => call.responseMode), ['modern', 'legacy'])
+  assert.equal(denied.directCalls.every((call) => call.body.cursor === denied.cursor), true)
 })
 
 test('test keys keep new Xiaohongshu searches on the historical path while issued direct cursors stay pinned', async () => {

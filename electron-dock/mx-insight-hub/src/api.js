@@ -1,3 +1,8 @@
+import {
+  dataCenterVisibleProjection,
+  sourceCatalogVisibleProjection,
+} from '../shared/source-catalog-visibility.mjs'
+
 const API_BASE = (import.meta.env.VITE_MX_INSIGHT_API_BASE || '').replace(/\/$/, '')
 const ADMIN_ROOT = '/internal/v1/admin'
 
@@ -43,6 +48,9 @@ const FALLBACK_PUBLIC_API_BASE = (() => {
 })()
 
 let runtimePublicApiBase = ''
+
+const visibleDataCenterResponse = (responsePromise) => responsePromise.then(dataCenterVisibleProjection)
+const visibleSourceCatalogResponse = (responsePromise) => responsePromise.then(sourceCatalogVisibleProjection)
 
 export function configurePublicApiBase(value) {
   runtimePublicApiBase = httpOrigin(value)
@@ -212,7 +220,7 @@ export const publicDataApi = {
   ),
   xiaohongshuNote: (apiKey, body, { idempotencyKey, retryOfRequestId, signal } = {}) => publicDataRequest(
     apiKey,
-    '/api/v1/data/post',
+    '/api/v1/xiaohongshu/app/get_note_info',
     { method: 'POST', body, idempotencyKey, retryOfRequestId, signal },
   ),
   ecommerceProductImage: (apiKey, { requestId, itemId, imageIndex = 0 }, { signal } = {}) => publicDataImage(
@@ -227,28 +235,6 @@ export const publicDataApi = {
     { requestId, mediaIndex },
     { signal },
   ),
-}
-
-async function health(token, path) {
-  try {
-    const response = await fetch(`${API_BASE}${path}`, {
-      headers: { accept: 'application/json', 'x-mx-insight-admin-token': token },
-    })
-    const payload = await parsePayload(response)
-    return {
-      ok: response.ok,
-      status: response.status,
-      data: payload?.data,
-      error: payload?.error,
-      requestId: payload?.requestId || response.headers.get('x-request-id'),
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      status: 0,
-      error: { code: 'network_error', message: error instanceof Error ? error.message : 'Network error' },
-    }
-  }
 }
 
 /**
@@ -375,8 +361,16 @@ export const adminApi = {
   ),
   fileFormatRules: (token) => request(token, `${ADMIN_ROOT}/file-format-rules`),
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
-  dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
-  dataCenterRecords: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center/records`, { query }),
+  dataCenter: (token, query = {}) => visibleDataCenterResponse(request(
+    token,
+    `${ADMIN_ROOT}/data-center`,
+    { query: { ...query, presentation: 'safe' } },
+  )),
+  dataCenterRecords: (token, query = {}) => visibleDataCenterResponse(request(
+    token,
+    `${ADMIN_ROOT}/data-center/records`,
+    { query: { ...query, presentation: 'safe' } },
+  )),
   searchReindex: (token) => request(token, `${ADMIN_ROOT}/search/reindex`),
   cancelSearchReindex: (token) => request(
     token, `${ADMIN_ROOT}/search/reindex/cancel`, { method: 'POST' },
@@ -399,11 +393,11 @@ export const adminApi = {
       },
     },
   ),
-  sourceCatalog: (token, { includeArchived = false } = {}) => request(
+  sourceCatalog: (token, { includeArchived = false } = {}) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog`,
-    { query: { includeArchived: includeArchived || undefined } },
-  ),
+    { query: { includeArchived: includeArchived || undefined, presentation: 'safe' } },
+  )),
   createSourceCatalogEntry: (token, body) => request(
     token, `${ADMIN_ROOT}/source-catalog`, { method: 'POST', body },
   ),
@@ -420,21 +414,21 @@ export const adminApi = {
     `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/restore`,
     { method: 'POST', body: { revision } },
   ),
-  sourceCatalogEvents: (token, id, limit = 50) => request(
+  sourceCatalogEvents: (token, id, limit = 50) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/events`,
     { query: { limit } },
-  ),
-  sourceCatalogRelatedData: (token, id, { pageSize = 20 } = {}) => request(
+  )),
+  sourceCatalogRelatedData: (token, id, { pageSize = 20 } = {}) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/related-data`,
     { query: { pageSize } },
-  ),
-  sourceCatalogTaxonomy: (token, { includeArchived = false, kind } = {}) => request(
+  )),
+  sourceCatalogTaxonomy: (token, { includeArchived = false, kind } = {}) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog/taxonomy`,
     { query: { includeArchived: includeArchived || undefined, kind } },
-  ),
+  )),
   createSourceCatalogTaxonomyTerm: (token, body) => request(
     token,
     `${ADMIN_ROOT}/source-catalog/taxonomy`,
@@ -455,14 +449,14 @@ export const adminApi = {
     `${ADMIN_ROOT}/source-catalog/taxonomy/${encodeURIComponent(id)}/restore`,
     { method: 'POST', body: { revision } },
   ),
-  sourceCatalogOwners: (token, { includeArchived = false } = {}) => request(
+  sourceCatalogOwners: (token, { includeArchived = false } = {}) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog/owners`,
     { query: { includeArchived: includeArchived || undefined } },
-  ),
-  createSourceCatalogOwner: (token, body) => request(
+  )),
+  createSourceCatalogOwner: (token, body) => visibleSourceCatalogResponse(request(
     token, `${ADMIN_ROOT}/source-catalog/owners`, { method: 'POST', body },
-  ),
+  )),
   updateSourceCatalogOwner: (token, id, body) => request(
     token, `${ADMIN_ROOT}/source-catalog/owners/${encodeURIComponent(id)}`, { method: 'PUT', body },
   ),
@@ -476,11 +470,11 @@ export const adminApi = {
     `${ADMIN_ROOT}/source-catalog/owners/${encodeURIComponent(id)}/restore`,
     { method: 'POST', body: { revision } },
   ),
-  sourceCatalogOwnerEvents: (token, id, limit = 50) => request(
+  sourceCatalogOwnerEvents: (token, id, limit = 50) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog/owners/${encodeURIComponent(id)}/events`,
     { query: { limit } },
-  ),
+  )),
 
   // Read-only business presentations. These routes deliberately use the
   // admin session rather than borrowing a Hub Public API key, so inspecting a
@@ -881,9 +875,9 @@ export const adminApi = {
   ),
   retrieval: (token) => request(token, `${ADMIN_ROOT}/retrieval`),
   semanticSearch: (token, body) => request(token, `${ADMIN_ROOT}/retrieval/search`, { method: 'POST', body }),
-  runtime: (token) => Promise.all([
-    health(token, '/health/live'),
-    health(token, '/health/ready'),
-    health(token, '/health/dependencies'),
-  ]).then(([live, ready, dependencies]) => ({ live, ready, dependencies })),
+  runtime: (token) => request(
+    token,
+    `${ADMIN_ROOT}/runtime`,
+    { query: { presentation: 'safe' } },
+  ),
 }

@@ -713,6 +713,21 @@ preserve_existing_tikhub_runtime_config() {
       say "preserving retained TikHub search cutover gate: ${existing}"
     fi
   fi
+
+  if [ "${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS+x}" != x ]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained TikHub search canary allowlist; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$existing"
+      export MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS
+      say "preserving retained TikHub search canary allowlist"
+    fi
+  fi
 }
 
 # Locate the Launcher User Center in the cluster.
@@ -965,6 +980,7 @@ create_runtime_config() {
   fi
   local tikhub_contract_verified="${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}"
   local tikhub_search_contract_verified="${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED:-0}"
+  local tikhub_search_canary_consumer_ids="${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS:-}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
   if ! public_url="$(
@@ -1011,6 +1027,7 @@ create_runtime_config() {
     MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
     MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
+    MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_consumer_ids" \
     MX_INSIGHT_TIKHUB_API_KEY="$tikhub_api_key" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     node --input-type=module -e '
@@ -1034,6 +1051,8 @@ create_runtime_config() {
   fi
   if [ "$tikhub_search_contract_verified" != "1" ]; then
     say "TikHub Xiaohongshu search cutover is disabled; compatible searches remain on the historical upstream."
+  elif [ -n "$tikhub_search_canary_consumer_ids" ]; then
+    say "TikHub Xiaohongshu search cutover is enabled only for the configured consumer canary allowlist."
   else
     say "TikHub Xiaohongshu search cutover is enabled for compatible requests."
   fi
@@ -1145,6 +1164,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     --from-literal=MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
+    --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_consumer_ids" \
     --from-literal=MX_INSIGHT_TIKHUB_BASE_URL="${MX_INSIGHT_TIKHUB_BASE_URL:-https://api.tikhub.io}" \
     --from-literal=MX_INSIGHT_TIKHUB_TIMEOUT_MS="${MX_INSIGHT_TIKHUB_TIMEOUT_MS:-30000}" \
     --from-literal=MX_INSIGHT_TIKHUB_FRESH_TTL_MS="${MX_INSIGHT_TIKHUB_FRESH_TTL_MS:-86400000}" \
@@ -2200,6 +2220,8 @@ ops_action() {
   local tikhub_contract_override=""
   local tikhub_search_contract_override_set=0
   local tikhub_search_contract_override=""
+  local tikhub_search_canary_override_set=0
+  local tikhub_search_canary_override=""
   local tikhub_clear_override_set=0
   local tikhub_clear_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
@@ -2232,6 +2254,10 @@ ops_action() {
     tikhub_search_contract_override_set=1
     tikhub_search_contract_override="$MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED"
   fi
+  if [ "${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS+x}" = x ]; then
+    tikhub_search_canary_override_set=1
+    tikhub_search_canary_override="$MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS"
+  fi
   if [ "${MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY+x}" = x ]; then
     tikhub_clear_override_set=1
     tikhub_clear_override="$MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY"
@@ -2263,6 +2289,10 @@ ops_action() {
   if [ "$tikhub_search_contract_override_set" = 1 ]; then
     MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_override"
     export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED
+  fi
+  if [ "$tikhub_search_canary_override_set" = 1 ]; then
+    MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_override"
+    export MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS
   fi
   # Clearing a retained paid-provider secret is intentionally one-shot. Ignore
   # a persisted copy of this flag; it must be present in the command environment.

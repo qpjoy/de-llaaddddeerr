@@ -1,5 +1,7 @@
 import { AppError } from '../core/errors.mjs'
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+
 function positiveInteger(value, fallback, name) {
   if (value == null || value === '') return fallback
   const parsed = Number(value)
@@ -32,6 +34,15 @@ function binaryFlag(value, name) {
     throw new AppError(500, 'invalid_configuration', `${name} must be 0 or 1`)
   }
   return value === '1'
+}
+
+function commaSeparatedUuidList(value, name) {
+  if (value == null || String(value).trim() === '') return []
+  const entries = String(value).split(',').map((entry) => entry.trim())
+  if (entries.some((entry) => !entry || !UUID_PATTERN.test(entry))) {
+    throw new AppError(500, 'invalid_configuration', `${name} must be a comma-separated list of consumer UUIDs`)
+  }
+  return [...new Set(entries.map((entry) => entry.toLowerCase()))]
 }
 
 function unknownJustOneBilling() {
@@ -361,6 +372,10 @@ export function parseTikHubConfig(environment = process.env, {
     environment.MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED,
     'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED',
   )
+  const searchCanaryConsumerIds = commaSeparatedUuidList(
+    environment.MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS,
+    'MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS',
+  )
   const configuredSignal = binaryFlag(
     environment.MX_INSIGHT_TIKHUB_CONFIGURED,
     'MX_INSIGHT_TIKHUB_CONFIGURED',
@@ -447,6 +462,7 @@ export function parseTikHubConfig(environment = process.env, {
     configured,
     contractVerified,
     searchContractVerified,
+    searchCanaryConsumerIds,
     dispatchEnabled: Boolean(apiKey && contractVerified),
     configurationError: null,
     timeoutMs,
@@ -501,6 +517,7 @@ export function disabledTikHubConfig(environment, error) {
       || environment.MX_INSIGHT_TIKHUB_CONFIGURED === '1',
     contractVerified: environment.MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED === '1',
     searchContractVerified: environment.MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED === '1',
+    searchCanaryConsumerIds: [],
     dispatchEnabled: false,
     configurationError: {
       code: 'invalid_configuration',
