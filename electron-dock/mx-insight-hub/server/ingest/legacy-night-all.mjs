@@ -63,9 +63,9 @@ function parsedStringArray(value) {
   }
 }
 
-function decorate(record, raw, kind) {
-  record.parserVersion = NIGHT_ALL_COMPAT_PARSER_VERSION
-  record.stableFields.connectorId = NIGHT_ALL_COMPAT_CONNECTOR_ID
+function decorate(record, raw, kind, { connectorId, parserVersion }) {
+  record.parserVersion = parserVersion
+  record.stableFields.connectorId = connectorId
 
   if (kind === 'content') {
     const images = parsedStringArray(raw.image_urls ?? raw.images)
@@ -105,7 +105,7 @@ function mapItems(items, fieldMap, options) {
       skipped += 1
       continue
     }
-    records.push(decorate(record, raw, options.kind))
+    records.push(decorate(record, raw, options.kind, options))
   }
   return { records, skipped }
 }
@@ -115,18 +115,24 @@ function mapItems(items, fieldMap, options) {
  * by managed sources. Embedded prev/current/next Telegram context remains raw
  * evidence; it is intentionally not indexed as duplicate message content.
  */
-export function normalizeNightAllLegacyPayload(payload, platform, _operation) {
+export function normalizeNightAllLegacyPayload(payload, platform, _operation, options = {}) {
+  const lineage = {
+    connectorId: options.connectorId || NIGHT_ALL_COMPAT_CONNECTOR_ID,
+    parserVersion: options.parserVersion || NIGHT_ALL_COMPAT_PARSER_VERSION,
+  }
   const rawInfo = parseNightAllLegacyArray(payload?.data?.raw_info) || []
   const rawData = parseNightAllLegacyArray(payload?.data?.raw_data) || []
   const profiles = mapItems(rawInfo, PROFILE_FIELD_MAP, {
     platform,
     objectType: 'profile',
     kind: 'profile',
+    ...lineage,
   })
   const content = mapItems(rawData, CONTENT_FIELD_MAP, {
     platform,
     objectType: 'post',
     kind: 'content',
+    ...lineage,
   })
 
   const unique = new Map()

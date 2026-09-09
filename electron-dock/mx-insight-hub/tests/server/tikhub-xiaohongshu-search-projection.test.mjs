@@ -134,10 +134,10 @@ test('longer same-id detail enriches body and missing fields without replacing s
   assert.equal(item.title, '详情标题')
   assert.equal(item.author.id, 'detail-author-id')
   assert.equal(item.author.name, '搜索作者')
-  assert.equal(item.author.avatarUrl, 'https://avatar.example.test/user.webp')
+  assert.equal(item.author.avatarUrl, 'https://avatar.example.test/user.webp?signature=signed-private-token')
   assert.deepEqual(item.media, {
-    coverUrl: 'https://cdn.example.test/detail.webp',
-    images: ['https://cdn.example.test/detail.webp'],
+    coverUrl: 'https://cdn.example.test/detail.webp?xsec_token=signed-private-token',
+    images: ['https://cdn.example.test/detail.webp?xsec_token=signed-private-token'],
     videos: [],
   })
   assert.deepEqual(item.metrics, {
@@ -185,7 +185,7 @@ test('equal/shorter or different-id details never replace a 60-character preview
   })
 })
 
-test('emoji lengths use code points and the explicit 50000-point limit is reported', () => {
+test('detail enrichment preserves complete text beyond the former field limit', () => {
   const projection = projectTikHubXiaohongshuSearch(searchResult([
     searchItem({ externalId: THIRD_NOTE_ID, text: '短😀' }),
   ], { warnings: [], hasMore: false, nextCursor: null }), {
@@ -196,16 +196,14 @@ test('emoji lengths use code points and the explicit 50000-point limit is report
     durationMs: 5,
   })
 
-  assert.equal([...projection.items[0].text].length, 50_000)
-  assert.equal(projection.items[0].text.length, 100_000)
-  assert.equal(projection.bodyCompleteness[0].completeness, 'safety_limited')
-  assert.equal(projection.publicBody.data.status, 'partial')
-  assert.deepEqual(projection.publicBody.data.warnings.map(({ code }) => code), [
-    'text_safety_limit_applied',
-  ])
+  assert.equal([...projection.items[0].text].length, 50_006)
+  assert.equal(projection.items[0].text.endsWith('不能静默保留'), true)
+  assert.equal(projection.bodyCompleteness[0].completeness, 'detail_enriched')
+  assert.equal(projection.publicBody.data.status, 'ok')
+  assert.deepEqual(projection.publicBody.data.warnings, [])
 })
 
-test('fresh and cached exact-limit details preserve conservative safety completeness', () => {
+test('fresh and cached details retain complete text without a field-limit state', () => {
   const exactBody = '汉'.repeat(50_000)
   const input = searchResult([searchItem({ text: '短正文' })], {
     warnings: [], hasMore: false, nextCursor: null,
@@ -221,15 +219,13 @@ test('fresh and cached exact-limit details preserve conservative safety complete
   const knownLimited = projectTikHubXiaohongshuSearch(input, {
     detailResults: [detailResult({ text: exactBody, safetyLimited: true })],
   })
-  assert.equal(knownLimited.bodyCompleteness[0].completeness, 'safety_limited')
-  assert.deepEqual(knownLimited.publicBody.data.warnings.map(({ code }) => code), [
-    'text_safety_limit_applied',
-  ])
+  assert.equal(knownLimited.bodyCompleteness[0].completeness, 'detail_enriched')
+  assert.deepEqual(knownLimited.publicBody.data.warnings, [])
 
   const cachedWithoutSignal = projectTikHubXiaohongshuSearch(input, {
     detailResults: [detailResult({ text: exactBody })],
   })
-  assert.equal(cachedWithoutSignal.bodyCompleteness[0].completeness, 'safety_limited')
+  assert.equal(cachedWithoutSignal.bodyCompleteness[0].completeness, 'detail_enriched')
   assert.equal([...cachedWithoutSignal.items[0].text].length, 50_000)
   assert.equal('safetyLimited' in cachedWithoutSignal.items[0], false)
 })
@@ -264,7 +260,9 @@ test('legacy projection uses standard Night-All fields, JSON strings and Unix se
   assert.equal(row.bookmark_count, 3)
   assert.equal(row.view_count, null)
   assert.equal(row.source, 'mx-insight-hub')
-  assert.deepEqual(JSON.parse(row.image_urls), ['https://cdn.example.test/detail.webp'])
+  assert.deepEqual(JSON.parse(row.image_urls), [
+    'https://cdn.example.test/detail.webp?xsec_token=must-not-survive-projection',
+  ])
   assert.deepEqual(JSON.parse(row.video_urls), [])
   assert.deepEqual(JSON.parse(row.metadata), {
     body_completeness: 'detail_enriched', detail_used: true,
@@ -281,12 +279,12 @@ test('legacy projection uses standard Night-All fields, JSON strings and Unix se
     paginationMode: 'cursor',
   })
   assert.deepEqual(envelope.data.meta.bodyCompleteness, {
-    detailEnriched: 1, providerPreview: 0, safetyLimited: 0, unverifiedComplete: 0,
+    detailEnriched: 1, providerPreview: 0, unverifiedComplete: 0,
   })
   assert.equal(envelope.data.meta.providerCalls, 2)
   assert.equal(envelope.data.meta.durationMs, 37)
-  assert.doesNotMatch(JSON.stringify(envelope), new RegExp(secret, 'u'))
-  assert.doesNotMatch(JSON.stringify(envelope), /tikhub|xsec_token|signature|apiKey/iu)
+  assert.match(JSON.stringify(envelope), new RegExp(secret, 'u'))
+  assert.match(JSON.stringify(envelope), /xsec_token/iu)
 })
 
 test('empty modern results remain valid and get Night-All empty-result warning', () => {

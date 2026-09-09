@@ -3102,6 +3102,25 @@ export class PostgresStore {
 
       const sourceRunColumn = apiLineage ? 'ingest_run_id' : 'external_import_run_id'
       const sourceRunId = apiLineage ? ingestRunId : importRunId
+      if (externalPlatformCall && platform === 'xiaohongshu') {
+        // Search previews and their paid detail repairs are separate queue jobs.
+        // Lock every overlapping identity in a stable order so concurrent
+        // workers cannot let a later 60-character preview win after a longer
+        // detail record has committed. Sorting also avoids cross-batch lock
+        // inversions when two search pages contain the same notes.
+        const identityLocks = [...new Set(records.map((record) => JSON.stringify([
+          datasetId,
+          platform,
+          record.objectType,
+          record.externalId,
+        ])))].sort()
+        for (const identityLock of identityLocks) {
+          await client.query(
+            'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+            [identityLock],
+          )
+        }
+      }
       for (const record of records) {
         if (record.deletedAt != null) deleted += 1
         const rawPayloadSha256 = record.rawPayloadSha256 || record.payloadSha256
@@ -3172,7 +3191,42 @@ export class PostgresStore {
         // Re-project only those bounded cases when a newer observation moves
         // freshness forward; generic batch re-imports must not churn ES.
         const refreshCollectedAtProjection = externalPlatformCall || sourceStage === 'candidate'
-        const upserted = await client.query(
+        let upserted = null
+        let preservedCanonical = false
+        if (
+          externalPlatformCall
+          && platform === 'xiaohongshu'
+          && record.extensions?.bodyCompleteness === 'provider_preview'
+        ) {
+          const current = await client.query(
+            `SELECT id, current_revision, projection_revision,
+                    char_length(coalesce(body, '')) AS body_code_points
+               FROM core.canonical_records
+              WHERE dataset_id = $1 AND platform = $2
+                AND object_type = $3 AND external_id = $4
+              FOR UPDATE`,
+            [datasetId, platform, record.objectType, record.externalId],
+          )
+          const currentBodyCodePoints = Number(current.rows[0]?.body_code_points ?? 0)
+          const previewBodyCodePoints = typeof record.body === 'string'
+            ? [...record.body].length
+            : 0
+          if (current.rows[0] && currentBodyCodePoints > previewBodyCodePoints) {
+            // Keep the complete canonical projection and its payload hash, but
+            // still persist this search call below as raw/source revision and
+            // observation evidence. Reusing the current projection revision
+            // also prevents a stale preview from reaching Elasticsearch.
+            upserted = await client.query(
+              `UPDATE core.canonical_records
+                  SET last_seen_at = now()
+                WHERE id = $1
+                RETURNING id, current_revision, projection_revision`,
+              [current.rows[0].id],
+            )
+            preservedCanonical = true
+          }
+        }
+        upserted ??= await client.query(
           `INSERT INTO core.canonical_records
              (id, dataset_id, platform, object_type, external_id, schema_version,
               payload_sha256, content_type, url, title, body,
@@ -3233,14 +3287,16 @@ export class PostgresStore {
         const { id, current_revision: revision } = upserted.rows[0]
         let projection = upserted.rows[0].projection_revision
 
-        const revisionInsert = await client.query(
-          `INSERT INTO core.record_revisions
-             (record_id, revision, payload_sha256, normalized_payload, parser_version, ${sourceRunColumn})
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (record_id, revision) DO NOTHING`,
-          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, sourceRunId],
-        )
-        if (revisionInsert.rowCount > 0) changed += 1
+        if (!preservedCanonical) {
+          const revisionInsert = await client.query(
+            `INSERT INTO core.record_revisions
+               (record_id, revision, payload_sha256, normalized_payload, parser_version, ${sourceRunColumn})
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (record_id, revision) DO NOTHING`,
+            [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, sourceRunId],
+          )
+          if (revisionInsert.rowCount > 0) changed += 1
+        }
 
         const sourceRevisionId = sourceRevisionResult.rows[0]?.id
         if (sourceStage) {

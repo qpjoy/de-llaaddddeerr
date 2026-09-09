@@ -8,6 +8,7 @@ import { JustOneAdapter } from './adapters/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { createApp } from './app.mjs'
 import { loadConfig } from './config.mjs'
+import { AppError } from './core/errors.mjs'
 import { HubService } from './hub-service.mjs'
 import {
   ExternalPlatformAdminService,
@@ -15,6 +16,7 @@ import {
 } from './external-platforms/admin.mjs'
 import { ExternalPlatformGateway } from './external-platforms/gateway.mjs'
 import { TikHubGateway } from './external-platforms/tikhub-gateway.mjs'
+import { TikHubUserInfoGateway } from './external-platforms/tikhub-user-info-gateway.mjs'
 import { createExternalImageLoader } from './external-platforms/media.mjs'
 import { createExternalPlatformCredentialStore } from './external-platforms/credentials-store.mjs'
 import { createExternalPlatformStore } from './external-platforms/store.mjs'
@@ -38,7 +40,21 @@ import { createPostgresStore } from './stores/postgres-store.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
+function assertDurablePaidProviderRuntime(config) {
+  if (config.listenerMode === 'admin' || config.storeDriver === 'postgres') return
+  const activePaidContract = [config.justOne, config.tikHub].some((provider) => (
+    provider?.contractVerified === true && !provider.configurationError
+  ))
+  if (!activePaidContract) return
+  throw new AppError(
+    500,
+    'invalid_configuration',
+    'Paid external provider contracts require MX_INSIGHT_STORE=postgres on public or combined listeners',
+  )
+}
+
 export async function createRuntime(config = loadConfig()) {
+  assertDurablePaidProviderRuntime(config)
   const store = config.storeDriver === 'postgres'
     ? await createPostgresStore({ connectionString: config.databaseUrl })
     : new MemoryStore()
@@ -181,6 +197,33 @@ export async function createRuntime(config = loadConfig()) {
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
   })
+  const tikHubUserInfoGateway = new TikHubUserInfoGateway({
+    usageStore: store,
+    platformStore: tikHubPlatformStore,
+    adapter: tikHubAdapter,
+    config: config.tikHub,
+    apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: config.reservationLeaseMs,
+  })
+  // The split Admin listener deliberately has no provider adapter or secret.
+  // Its readiness indicator therefore uses only safe, shared credential
+  // metadata; Public/combined listeners continue to verify the live resolver.
+  const externalPostCapabilities = config.listenerMode === 'admin'
+    ? async () => {
+        try {
+          const credential = await tikHubCredentialStore.describeCredential('tikhub')
+          return {
+            ready: Boolean(
+              config.tikHub.contractVerified
+              && !config.tikHub.configurationError
+              && credential.credentialConfigured
+            ),
+          }
+        } catch {
+          return { ready: false }
+        }
+      }
+    : () => tikHubGateway.capabilities()
   const service = new HubService({
     store,
     adapter,
@@ -189,13 +232,18 @@ export async function createRuntime(config = loadConfig()) {
     searchQueries: search?.queries ?? null,
     segmenter,
     externalPlatformCapabilities: () => externalPlatformGateway.capabilities(),
-    externalPostCapabilities: () => tikHubGateway.capabilities(),
+    externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     // New first pages cut over only after the verified TikHub adapter is
     // active. Previously issued direct cursors still return through the
     // gateway (cache/stored fallback or an explicit unavailable result).
     externalSocialSearchEnabled: Boolean(tikHubAdapter) && config.tikHub.searchContractVerified,
     externalSocialSearchCanaryConsumerIds: config.tikHub.searchCanaryConsumerIds,
+    externalSocialUserActivity: (context, input) => input.operation === 'crawl'
+      ? tikHubUserInfoGateway.legacyCrawl(context, input)
+      : tikHubUserInfoGateway.legacyUserInfo(context, input),
+    externalSocialUserActivityEnabled:
+      Boolean(tikHubAdapter) && config.tikHub.userActivityContractVerified,
     externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader({
       maxConcurrency: config.externalMedia.maxConcurrency,
       maxCacheBytes: config.externalMedia.cacheBytes,
@@ -252,7 +300,7 @@ export async function createRuntime(config = loadConfig()) {
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
-    tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubAdapter,
+    tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
   }
 }
 

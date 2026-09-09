@@ -28,6 +28,15 @@ function optionalNonNegativeInteger(value, name) {
   return parsed
 }
 
+function optionalPositiveInteger(value, name) {
+  if (value == null || value === '') return null
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new AppError(500, 'invalid_configuration', `${name} must be a positive safe integer`)
+  }
+  return parsed
+}
+
 function binaryFlag(value, name) {
   if (value == null || value === '') return false
   if (value !== '0' && value !== '1') {
@@ -52,7 +61,66 @@ function unknownJustOneBilling() {
     pricingAsOf: null,
     freeDailyCalls: null,
     monthlyBudgetMinor: null,
+    monthlySubsidyBudgetMinor: null,
     unitCostMinorByEndpoint: {},
+  }
+}
+
+function requirePaidProviderCostControl(billing, providerName, {
+  endpointKeys = [],
+  requireAnyEndpoint = false,
+  requireExplicitEndpoints = false,
+} = {}) {
+  if (billing.source !== 'manual' || !billing.currency || !billing.pricingAsOf) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      `${providerName} contract activation requires reviewed cost control evidence`,
+    )
+  }
+  if (billing.monthlyBudgetMinor == null) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      `${providerName} contract activation requires an explicit monthly budget`,
+    )
+  }
+  if (billing.monthlySubsidyBudgetMinor == null) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      `${providerName} contract activation requires an explicit monthly subsidy budget`,
+    )
+  }
+  const costs = billing.unitCostMinorByEndpoint || {}
+  if (requireAnyEndpoint && Object.keys(costs).length === 0) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      `${providerName} contract activation requires reviewed endpoint cost control`,
+    )
+  }
+  const reviewedEndpointKeys = requireAnyEndpoint
+    ? [...new Set([...endpointKeys, ...Object.keys(costs)])]
+    : endpointKeys
+  for (const endpointKey of reviewedEndpointKeys) {
+    if (requireExplicitEndpoints && !Object.hasOwn(costs, endpointKey)) {
+      throw new AppError(
+        500,
+        'invalid_configuration',
+        `${providerName} contract activation requires explicit cost control for ${endpointKey}`,
+      )
+    }
+    const unitCostMinor = Object.hasOwn(costs, endpointKey)
+      ? costs[endpointKey]
+      : billing.unitCostMinor
+    if (!Number.isSafeInteger(unitCostMinor) || unitCostMinor <= 0) {
+      throw new AppError(
+        500,
+        'invalid_configuration',
+        `${providerName} contract activation requires positive reviewed cost control for ${endpointKey}`,
+      )
+    }
   }
 }
 
@@ -69,7 +137,7 @@ function parseJustOneBilling(raw) {
   }
   const supported = new Set([
     'source', 'currency', 'pricingAsOf', 'freeDailyCalls',
-    'monthlyBudgetMinor', 'unitCostMinorByEndpoint',
+    'monthlyBudgetMinor', 'monthlySubsidyBudgetMinor', 'unitCostMinorByEndpoint',
   ])
   const unknown = Object.keys(value).filter((key) => !supported.has(key))
   if (unknown.length > 0) {
@@ -99,7 +167,7 @@ function parseJustOneBilling(raw) {
     if (!/^[a-z][a-z0-9._-]{0,127}$/.test(endpoint)) {
       throw new AppError(500, 'invalid_configuration', 'JustOne billing endpoint keys must be stable identifiers')
     }
-    unitCostMinorByEndpoint[endpoint] = optionalNonNegativeInteger(
+    unitCostMinorByEndpoint[endpoint] = optionalPositiveInteger(
       cost,
       `JustOne unit cost for ${endpoint}`,
     )
@@ -119,6 +187,10 @@ function parseJustOneBilling(raw) {
     monthlyBudgetMinor: optionalNonNegativeInteger(
       value.monthlyBudgetMinor,
       'JustOne monthlyBudgetMinor',
+    ),
+    monthlySubsidyBudgetMinor: optionalNonNegativeInteger(
+      value.monthlySubsidyBudgetMinor,
+      'JustOne monthlySubsidyBudgetMinor',
     ),
     unitCostMinorByEndpoint,
   }
@@ -184,6 +256,10 @@ export function parseJustOneConfig(environment = process.env, {
     )
   }
   const configured = Boolean(token) || configuredSignal
+  const billing = parseJustOneBilling(environment.MX_INSIGHT_JUSTONE_BILLING_JSON)
+  if (contractVerified) {
+    requirePaidProviderCostControl(billing, 'JustOne', { requireAnyEndpoint: true })
+  }
   const maxConcurrency = positiveInteger(
     environment.MX_INSIGHT_JUSTONE_MAX_CONCURRENCY,
     32,
@@ -237,7 +313,7 @@ export function parseJustOneConfig(environment = process.env, {
       60_000,
       'MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS',
     ),
-    billing: parseJustOneBilling(environment.MX_INSIGHT_JUSTONE_BILLING_JSON),
+    billing,
   }
 }
 
@@ -290,6 +366,7 @@ function unknownTikHubBilling() {
     unitCostMinor: null,
     unitCostMinorByEndpoint: {},
     monthlyBudgetMinor: null,
+    monthlySubsidyBudgetMinor: null,
   }
 }
 
@@ -304,7 +381,7 @@ function parseTikHubBilling(raw) {
   }
   const fields = new Set([
     'source', 'currency', 'pricingAsOf', 'unitCostMinor',
-    'unitCostMinorByEndpoint', 'monthlyBudgetMinor',
+    'unitCostMinorByEndpoint', 'monthlyBudgetMinor', 'monthlySubsidyBudgetMinor',
   ])
   const unsupported = Object.keys(value).filter((field) => !fields.has(field))
   if (unsupported.length > 0) {
@@ -330,7 +407,7 @@ function parseTikHubBilling(raw) {
     if (!/^[a-z][a-z0-9._-]{0,127}$/u.test(endpoint)) {
       throw new AppError(500, 'invalid_configuration', 'TikHub billing endpoint keys must be stable identifiers')
     }
-    unitCostMinorByEndpoint[endpoint] = optionalNonNegativeInteger(
+    unitCostMinorByEndpoint[endpoint] = optionalPositiveInteger(
       cost,
       `TikHub unit cost for ${endpoint}`,
     )
@@ -339,9 +416,13 @@ function parseTikHubBilling(raw) {
     source: 'manual',
     currency,
     pricingAsOf: pricedAt.toISOString(),
-    unitCostMinor: optionalNonNegativeInteger(value.unitCostMinor, 'TikHub unitCostMinor'),
+    unitCostMinor: optionalPositiveInteger(value.unitCostMinor, 'TikHub unitCostMinor'),
     unitCostMinorByEndpoint,
     monthlyBudgetMinor: optionalNonNegativeInteger(value.monthlyBudgetMinor, 'TikHub monthlyBudgetMinor'),
+    monthlySubsidyBudgetMinor: optionalNonNegativeInteger(
+      value.monthlySubsidyBudgetMinor,
+      'TikHub monthlySubsidyBudgetMinor',
+    ),
   }
 }
 
@@ -372,6 +453,10 @@ export function parseTikHubConfig(environment = process.env, {
     environment.MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED,
     'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED',
   )
+  const userActivityContractVerified = binaryFlag(
+    environment.MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED,
+    'MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED',
+  )
   const searchCanaryConsumerIds = commaSeparatedUuidList(
     environment.MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS,
     'MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS',
@@ -387,6 +472,13 @@ export function parseTikHubConfig(environment = process.env, {
       'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED requires MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1',
     )
   }
+  if (userActivityContractVerified && !contractVerified) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED requires MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1',
+    )
+  }
   const timeoutMs = positiveInteger(
     environment.MX_INSIGHT_TIKHUB_TIMEOUT_MS,
     30_000,
@@ -395,11 +487,16 @@ export function parseTikHubConfig(environment = process.env, {
   if (timeoutMs > 120_000) {
     throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TIKHUB_TIMEOUT_MS must not exceed 120000')
   }
-  if (contractVerified && reservationLeaseMs < timeoutMs + 30_000) {
+  const requiredDispatchWindowMs = userActivityContractVerified
+    ? (3 * timeoutMs) + 30_000
+    : timeoutMs + 30_000
+  if (contractVerified && reservationLeaseMs < requiredDispatchWindowMs) {
     throw new AppError(
       500,
       'invalid_configuration',
-      'MX_INSIGHT_RESERVATION_LEASE_MS must be at least MX_INSIGHT_TIKHUB_TIMEOUT_MS plus 30000 when the TikHub contract is verified',
+      userActivityContractVerified
+        ? 'MX_INSIGHT_RESERVATION_LEASE_MS must cover three TikHub calls plus 30000 when user activity is verified'
+        : 'MX_INSIGHT_RESERVATION_LEASE_MS must be at least MX_INSIGHT_TIKHUB_TIMEOUT_MS plus 30000 when the TikHub contract is verified',
     )
   }
   const freshTtlMs = positiveInteger(
@@ -455,13 +552,45 @@ export function parseTikHubConfig(environment = process.env, {
       'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY must not exceed 5',
     )
   }
+  const maxRequestsPerMinute = positiveInt32(
+    environment.MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE,
+    120,
+    'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE',
+  )
+  if (userActivityContractVerified && maxRequestsPerMinute < 3) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE must be at least 3 when TikHub user activity is verified',
+    )
+  }
   const configured = Boolean(apiKey) || configuredSignal
+  const billing = parseTikHubBilling(environment.MX_INSIGHT_TIKHUB_BILLING_JSON)
+  if (contractVerified) {
+    requirePaidProviderCostControl(billing, 'TikHub', {
+      endpointKeys: [
+        'xiaohongshu.image-note-detail.v2',
+        ...(searchContractVerified ? ['xiaohongshu.app-v2.search-notes.v1'] : []),
+      ],
+    })
+    if (userActivityContractVerified) {
+      requirePaidProviderCostControl(billing, 'TikHub user activity', {
+        endpointKeys: [
+          'xiaohongshu.app-v2.search-users.v1',
+          'xiaohongshu.app-v2.get-user-info.v1',
+          'xiaohongshu.app-v2.get-user-posted-notes.v1',
+        ],
+        requireExplicitEndpoints: true,
+      })
+    }
+  }
   return {
     baseUrl,
     apiKey,
     configured,
     contractVerified,
     searchContractVerified,
+    userActivityContractVerified,
     searchCanaryConsumerIds,
     dispatchEnabled: Boolean(apiKey && contractVerified),
     configurationError: null,
@@ -487,11 +616,7 @@ export function parseTikHubConfig(environment = process.env, {
       8,
       'MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY',
     ),
-    maxRequestsPerMinute: positiveInt32(
-      environment.MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE,
-      120,
-      'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE',
-    ),
+    maxRequestsPerMinute,
     circuitFailureThreshold: positiveInteger(
       environment.MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES,
       3,
@@ -502,7 +627,7 @@ export function parseTikHubConfig(environment = process.env, {
       60_000,
       'MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS',
     ),
-    billing: parseTikHubBilling(environment.MX_INSIGHT_TIKHUB_BILLING_JSON),
+    billing,
   }
 }
 
@@ -517,6 +642,8 @@ export function disabledTikHubConfig(environment, error) {
       || environment.MX_INSIGHT_TIKHUB_CONFIGURED === '1',
     contractVerified: environment.MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED === '1',
     searchContractVerified: environment.MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED === '1',
+    userActivityContractVerified:
+      environment.MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED === '1',
     searchCanaryConsumerIds: [],
     dispatchEnabled: false,
     configurationError: {
@@ -547,6 +674,7 @@ export function preflightTikHubConfig(environment = process.env) {
     configured: config.configured,
     contractVerified: config.contractVerified,
     searchContractVerified: config.searchContractVerified,
+    userActivityContractVerified: config.userActivityContractVerified,
     dispatchEnabled: config.dispatchEnabled,
   }
 }

@@ -11,6 +11,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VALID_JUSTONE_BILLING_JSON='{"source":"manual","currency":"CNY","pricingAsOf":"2026-09-08T00:00:00Z","monthlyBudgetMinor":100000,"monthlySubsidyBudgetMinor":100000,"unitCostMinorByEndpoint":{"jd.product-search.v1":5}}'
 # shellcheck source=../scripts/manage.sh
 source "${ROOT_DIR}/scripts/manage.sh"
 
@@ -112,7 +113,8 @@ rm -f -- "$justone_preserve_marker"
 if ! JUSTONE_PRESERVE_MARKER="$justone_preserve_marker" bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  unset MX_INSIGHT_JUSTONE_TOKEN MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
+  unset MX_INSIGHT_JUSTONE_TOKEN MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED \
+    MX_INSIGHT_JUSTONE_BILLING_JSON
   retained_token="retained-provider-token-must-not-be-printed"
   retained_encoded="$(encoded_secret_value "$retained_token")"
   kubectl() {
@@ -123,20 +125,24 @@ if ! JUSTONE_PRESERVE_MARKER="$justone_preserve_marker" bash -c '
       *" get configmap mx-insight-hub-config "*"MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED"*)
         printf "1"
         ;;
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_JUSTONE_BILLING_JSON"*)
+        printf "%s" "{\"source\":\"manual\",\"monthlySubsidyBudgetMinor\":0}"
+        ;;
       *) return 1 ;;
     esac
   }
   preserve_existing_justone_runtime_config
-  printf "token=%s\ncontract=%s\n" \
+  printf "token=%s\ncontract=%s\nbilling=%s\n" \
     "$MX_INSIGHT_JUSTONE_TOKEN" \
-    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" >"$JUSTONE_PRESERVE_MARKER"
+    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" \
+    "$MX_INSIGHT_JUSTONE_BILLING_JSON" >"$JUSTONE_PRESERVE_MARKER"
 ' _ "$ROOT_DIR" >"$justone_preserve_output" 2>&1; then
   printf 'not ok - omitted JustOne deployment values were not preserved\n' >&2
   cat "$justone_preserve_output" >&2
   exit 1
 fi
 assert_eq \
-  $'token=retained-provider-token-must-not-be-printed\ncontract=1' \
+  $'token=retained-provider-token-must-not-be-printed\ncontract=1\nbilling={"source":"manual","monthlySubsidyBudgetMinor":0}' \
   "$(cat "$justone_preserve_marker")" \
   'omitted JustOne values inherit the retained Kubernetes state'
 if grep -Fq 'retained-provider-token-must-not-be-printed' "$justone_preserve_output"; then
@@ -153,20 +159,30 @@ TIKHUB_CANARY_MARKER="$tikhub_canary_marker" bash -c '
   export MX_INSIGHT_TIKHUB_API_KEY="test-only-placeholder"
   export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1
   export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=1
-  unset MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS
+  unset MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED \
+    MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS MX_INSIGHT_TIKHUB_BILLING_JSON
   kubectl() {
     case " $* " in
       *" get configmap mx-insight-hub-config "*"MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS"*)
         printf "675d277d-0000-4000-8000-000000000655"
         ;;
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED"*)
+        printf "1"
+        ;;
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_TIKHUB_BILLING_JSON"*)
+        printf "%s" "{\"source\":\"manual\",\"monthlySubsidyBudgetMinor\":0}"
+        ;;
       *) return 1 ;;
     esac
   }
   preserve_existing_tikhub_runtime_config
-  printf "%s" "$MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS" >"$TIKHUB_CANARY_MARKER"
+  printf "userActivity=%s\ncanary=%s\nbilling=%s\n" \
+    "$MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED" \
+    "$MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS" \
+    "$MX_INSIGHT_TIKHUB_BILLING_JSON" >"$TIKHUB_CANARY_MARKER"
 ' _ "$ROOT_DIR"
 assert_eq \
-  '675d277d-0000-4000-8000-000000000655' \
+  $'userActivity=1\ncanary=675d277d-0000-4000-8000-000000000655\nbilling={"source":"manual","monthlySubsidyBudgetMinor":0}' \
   "$(cat "$tikhub_canary_marker")" \
   'omitted TikHub canary allowlist inherits the retained Kubernetes state'
 rm -f -- "$tikhub_canary_marker"
@@ -1685,7 +1701,9 @@ if [ -e "$clean_preflight_root/node_modules" ] || [ -e "$clean_preflight_root/pa
   rm -rf -- "$clean_preflight_root"
   exit 1
 fi
-if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" bash -c '
+if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" \
+  MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
+  bash -c '
   set -euo pipefail
   cd "$1"
   source "$1/scripts/manage.sh"
@@ -1741,6 +1759,7 @@ RUNTIME_SECRET_PATHS="$runtime_secret_paths" \
 RUNTIME_CONFIG_ORDER="$runtime_config_order" \
 MX_INSIGHT_JUSTONE_TOKEN="$runtime_secret_value" \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
 bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
@@ -1804,6 +1823,7 @@ rm -f -- "$failed_secret_config_marker"
 if FAILED_SECRET_CONFIG_MARKER="$failed_secret_config_marker" \
   MX_INSIGHT_JUSTONE_TOKEN="new-provider-token" \
   MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+  MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
   bash -c '
     set -euo pipefail
     source "$1/scripts/manage.sh"
@@ -1845,6 +1865,7 @@ rm -f -- "$whitespace_marker"
 WHITESPACE_MARKER="$whitespace_marker" \
 MX_INSIGHT_JUSTONE_TOKEN=$' \t ' \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
 bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
@@ -1934,6 +1955,7 @@ justone_secret='justone-secret-must-never-appear'
 if INVALID_JUSTONE_KUBECTL_MARKER="$invalid_justone_kubectl_marker" \
   MX_INSIGHT_JUSTONE_TOKEN="$justone_secret" \
   MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+  MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
   MX_INSIGHT_JUSTONE_TIMEOUT_MS=120000 \
   MX_INSIGHT_RESERVATION_LEASE_MS=149999 \
   bash -c '
@@ -1966,6 +1988,7 @@ grep -q 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS.*900000' "$ROOT_DIR/
 grep -q 'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE.*90' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE.*120' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS.*:-}' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS.*20' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY.*2' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -1974,12 +1997,14 @@ grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=' 
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-90}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-120}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS="${MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS:-20}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY="${MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY:-2}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q '^MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE=90$' "$ROOT_DIR/.env.example"
 grep -q '^MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE=120$' "$ROOT_DIR/.env.example"
 grep -q '^# MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0$' "$ROOT_DIR/.env.example"
+grep -q '^# MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=0$' "$ROOT_DIR/.env.example"
 grep -q '^# MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=$' "$ROOT_DIR/.env.example"
 grep -q '^MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS=20$' "$ROOT_DIR/.env.example"
 grep -q '^MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY=2$' "$ROOT_DIR/.env.example"
@@ -2121,6 +2146,63 @@ fi
 rm -f -- "$tg_marker" "$tg_output"
 printf 'ok - optional Telegram reader is Secret-wired without output exposure\n'
 
+# The projector may only consume the outbox after the one-shot index bootstrap
+# has completed successfully. Exercise the command ordering without starting
+# Docker or making an HTTP request.
+search_lifecycle_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-search-lifecycle.XXXXXX")"
+(
+  unset MX_COMMON_ELASTICSEARCH_URL
+  load_env_file() { :; }
+  need() { :; }
+  wait_http() { printf 'wait_http=%s|%s\n' "$1" "${2:-60}" >>"$search_lifecycle_marker"; }
+  search_compose() {
+    printf 'search_compose=%s\n' "$*" >>"$search_lifecycle_marker"
+    if [ "$*" = 'ps --all -q search-setup' ]; then printf 'search-setup-id\n'; fi
+  }
+  docker() {
+    printf 'docker=%s\n' "$*" >>"$search_lifecycle_marker"
+    if [ "${1:-}" = inspect ]; then printf 'exited 0\n'; return 0; fi
+    return 1
+  }
+  compose() { printf 'compose=%s\n' "$*" >>"$search_lifecycle_marker"; }
+  sleep() { :; }
+  say() { :; }
+  search_action up
+)
+assert_eq \
+  $'wait_http=http://127.0.0.1:18180/health/live|1\nsearch_compose=up -d\nwait_http=http://127.0.0.1:19200|120\nsearch_compose=ps --all -q search-setup\ndocker=inspect --format {{.State.Status}} {{.State.ExitCode}} search-setup-id\ncompose=--profile search up -d --no-deps projector\nsearch_compose=ps\ncompose=--profile search ps projector' \
+  "$(cat "$search_lifecycle_marker")" \
+  'search setup succeeds before the optional projector starts'
+rm -f -- "$search_lifecycle_marker"
+
+failed_search_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-search-failure.XXXXXX")"
+failed_search_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-search-failure-output.XXXXXX")"
+if (
+  load_env_file() { :; }
+  need() { :; }
+  wait_http() { :; }
+  search_compose() {
+    if [ "$*" = 'ps --all -q search-setup' ]; then printf 'search-setup-id\n'; fi
+  }
+  docker() {
+    if [ "${1:-}" = inspect ]; then printf 'exited 23\n'; return 0; fi
+    return 1
+  }
+  compose() { printf '%s\n' "$*" >>"$failed_search_marker"; }
+  sleep() { :; }
+  search_action up
+) >"$failed_search_output" 2>&1; then
+  printf 'not ok - failed search bootstrap did not stop search up\n' >&2
+  exit 1
+fi
+grep -q 'search-setup exited with status 23' "$failed_search_output"
+if grep -q projector "$failed_search_marker"; then
+  printf 'not ok - projector started after failed search bootstrap\n' >&2
+  exit 1
+fi
+rm -f -- "$failed_search_marker" "$failed_search_output"
+printf 'ok - failed search bootstrap prevents projector startup\n'
+
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS.*60000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -2128,6 +2210,12 @@ grep -q 'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS.*2000' "$ROOT_DIR/deploy/compose/dock
 grep -q 'mx_common: ../../../mx-common' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q '^  ingest:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'server/workers/ingest.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q '^  projector:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'profiles: \["search"\]' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_COMMON_ELASTICSEARCH_URL:.*MX_COMMON_ELASTICSEARCH_URL' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'server/workers/projector.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'compose --profile search up -d --no-deps projector' "$ROOT_DIR/scripts/manage.sh"
+grep -q 'compose --profile search stop projector' "$ROOT_DIR/scripts/manage.sh"
 grep -q '^  classifier:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'server/workers/classifier.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'server/workers/classifier.mjs' "$ROOT_DIR/deploy/k8s/internal/34-classifier.yaml"
@@ -2142,6 +2230,7 @@ if rg -q 'supplementalGroups|server-files|/shared_dir' \
 fi
 printf 'ok - server-file read group and mount stay scoped to Admin\n'
 printf 'ok - local Compose wires the periodic external-pull worker\n'
+printf 'ok - optional local search lifecycle wires the outbox projector without coupling API startup\n'
 printf 'ok - local Compose supplies the mx-common named build context\n'
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"

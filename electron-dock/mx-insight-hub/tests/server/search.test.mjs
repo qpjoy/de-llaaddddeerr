@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { getEventListeners } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { fallbackSegment } from '@qpjoy/mx-common/segmenter'
@@ -2269,6 +2270,33 @@ test('projector loop reclaims an expired startup lease while pending backlog sta
   assert.equal(batches, 4)
   assert.equal(expiredLeaseReclaimed, true)
   assert.deepEqual(reclaimTimes, [0, 80])
+})
+
+test('projector idle loop removes settled abort listeners', async () => {
+  const controller = new AbortController()
+  const keepAlive = setInterval(() => {}, 1_000)
+  let batches = 0
+  const projector = {
+    async reclaimExpired() { return 0 },
+    async projectBatch() {
+      batches += 1
+      if (batches === 4) controller.abort()
+      return { claimed: 0, delivered: 0, failed: 0 }
+    },
+  }
+
+  try {
+    await runProjectorLoop(projector, {
+      idleDelayMs: 1,
+      signal: controller.signal,
+      logger: { log() {}, warn() {}, error() {} },
+    })
+  } finally {
+    clearInterval(keepAlive)
+  }
+
+  assert.equal(batches, 4)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
 })
 
 test('projector heartbeats a long-running live claim with the same owner and lease', async () => {

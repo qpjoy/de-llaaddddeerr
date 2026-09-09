@@ -692,10 +692,14 @@ For `platform=xiaohongshu`, omitting `pageSize` selects its default of 20, and
 the Hub-native direct connector is eligible only when `pageSize` is exactly 20.
 Compatible first-page requests switch only after an independent rollout gate;
 every cursor previously issued by a direct traversal remains on the same
-connector. Historical cursors and explicit non-20 page sizes stay on the
-historical compatibility path. The caller does not select or learn the
-external provider and must never move a cursor between routes, queries or page
-sizes.
+connector. Existing direct cursors use the `mxec2` domain. A request assigned to
+the historical compatibility path receives a Hub-encrypted `mxnc1` cursor rather
+than Night-All's provider cursor, and that traversal terminates after page 15.
+An older bare provider cursor cannot prove its page and returns
+`400 invalid_cursor`; restart without a cursor and use a new `Idempotency-Key`.
+Explicit non-20 page sizes remain on the historical compatibility path. The
+caller does not select or learn the external provider and must never move a
+cursor between routes, queries or page sizes.
 
 The direct Xiaohongshu search detects note bodies at the 60-character provider
 preview boundary using UTF-16, Unicode code-point and grapheme counts. It may
@@ -724,6 +728,16 @@ Direct Xiaohongshu errors add `403 test_key_not_supported`,
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected`,
 and `503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`.
 
+When this route uses the historical path, `mxnc1` is authenticated-encrypted and
+bound to the consumer, operation (`data-search`), platform, stable query scope
+and next page. Each next-page request is a distinct business request and must
+use a new `Idempotency-Key`; only a byte-for-byte transport retry of that page
+reuses its key. Page 15 returns `hasMore=false`, `nextCursor=null` and
+`cursorType=none`. A pre-wrapper bare Night-All/provider cursor returns
+`400 invalid_cursor` and must be abandoned; restart from page 1 without a cursor
+and with a new key. This rule does not reinterpret an `mxec2` direct cursor,
+which remains on the direct Xiaohongshu connector.
+
 ## Night-All legacy compatibility facade
 
 These transitional routes preserve the three existing request aliases and
@@ -735,6 +749,11 @@ implementation; the caller never selects a provider:
 | `POST /api/v1/night-all/search/raw` | `/api/v1/search/raw` | `keyword`, `query`, `keywords` or `queries` | 15 minutes |
 | `POST /api/v1/night-all/search/crawl` | `/api/v1/search/crawl` | a user/channel identifier | 1 hour |
 | `POST /api/v1/night-all/search/user-info` | `/api/v1/search/user-info` | a user identifier | 1 hour |
+
+The three historical operation spellings in the second column are also active
+Hub route aliases. Each alias and its `/night-all/search/*` spelling enter the
+same service and paid-operation fingerprint; changing only the route cannot
+authorize or purchase a second upstream dispatch.
 
 All three require `Authorization: Bearer <mx key>` (or `x-api-key`), an
 `Idempotency-Key` of 8–128 safe characters, one explicit platform, and that
@@ -765,7 +784,9 @@ The body has an operation-specific allowlist. `raw` accepts the documented
 keyword/query aliases and detail/comment flags; `crawl` accepts documented
 user/channel aliases, activity types and `cacheMaxAgeHours`; `user-info` accepts
 documented user aliases. Common pagination aliases are retained. `params` may
-carry safe platform continuation values, but provider, credential, endpoint,
+carry allowlisted non-continuation platform values, and a composite next page
+uses only the Hub-emitted `params.cursor=mxnc1...`; raw provider continuation
+values are rejected. Provider, credential, endpoint,
 capability/moduleCode, business identity, availability, billing, token/auth,
 timeout, debug and similar controls are rejected recursively. Legacy
 `includeRaw:false` is accepted and removed before dispatch; `includeRaw:true` is
@@ -777,32 +798,71 @@ also require a separate granted capability/policy and are rejected. Unknown
 top-level fields are rejected.
 The effective page size must not exceed the consumer's platform policy; the
 upstream reference contract additionally caps `crawl` and `user-info` at 100.
+Every compatibility operation rejects a numeric `page` greater than 15.
 Raw query count × page size and crawl identity count × page size × activity-type
 count must also fit the policy work budget or the Hub returns
 `400 work_budget_exceeded`. This bounds processed item work, not the exact number
 of provider calls or their procurement cost.
+
+Historical Night-All cursor, composite, page and offset pagination is exposed
+only through an authenticated-encrypted Hub cursor beginning `mxnc1.`. Its state
+binds the authenticated consumer, operation, platform, stable query/account
+scope and next page. Provider cursor/`nextParams` material is encrypted inside
+that value. Cursor/page responses expose it in `nextCursor` and use public
+`paginationMode=cursor`; composite/offset responses expose only
+`nextParams.cursor` and use public `paginationMode=composite`. The caller returns
+the Hub cursor unchanged in the route's normal `cursor` field, or returns the
+emitted `nextParams.cursor` inside `params` for a composite response. Each next
+page requires a new `Idempotency-Key`, while an
+exact transport retry of the same page reuses that page's key. Page 15 clears all
+continuation controls (`nextCursor`, `providerCursor`, `nextParams`, `nextPage`)
+and reports `hasMore=false`; `page_limit_reached` is added when the upstream had
+advertised more work.
+
+Bare provider cursors and raw provider continuation values inside `params` that
+predate this wrapper are deliberately rejected with `400 invalid_cursor`: their
+page count cannot be authenticated, so accepting them could bypass the 15-page
+limit. Such a client must remove both cursor and continuation params, use a new
+`Idempotency-Key`, and restart at page 1. A cursor cannot cross consumers,
+operations, platforms or stable query/account scope.
 
 A Xiaohongshu `raw` first-page request uses the Hub-native direct connector only
 after an independent rollout gate and when all of the following are true: it
 has exactly one scalar `keyword` or `query`; its
 effective `count`/`pageSize`/`limit` is exactly 20; it is page one or carries an
 opaque cursor issued by the same direct traversal; and it omits plural queries,
-`params`, cache-age, concurrency, explicit detail/comment workload, and comment
+`params`, cache-age, request-specific concurrency, comment workload, and comment
 continuation controls. Explicit `includeDetails:false` and
 `includeComments:false` are accepted as no-op compatibility defaults.
 `disableAutoDetails:true` is also accepted and only turns off the automatic
-60-character preview-boundary detail lookup. A true detail/comment flag,
-`maxEnrichItems`, `commentLimit`, `commentCursor`, `enrichConcurrency`, a
-non-20 page, a historical cursor, `crawl`, or `user-info` remains on the
-historical compatibility path. Existing clients keep the same route and body;
-the switch is transparent. A previously issued direct cursor remains on the
-direct connector even while new first-page cutover is gated.
+60-character preview-boundary detail lookup. `includeDetails:true` selects full
+detail enrichment and `maxEnrichItems=1..20` bounds that existing atomic,
+cost-governed Hub-native workflow; `includeDetails` takes precedence over
+`disableAutoDetails`. A true comment flag, `commentLimit`, `commentCursor`, `enrichConcurrency`, a
+non-20 page or a historical cursor remains on the historical compatibility
+path for `raw`. Existing clients keep the same route and body; the switch is
+transparent. A previously issued direct cursor remains on the direct connector
+even while new first-page cutover is gated.
+
+A separately gated Xiaohongshu user-activity slice is also Hub-native. `crawl`
+must resolve to exactly one user identity, page size 20, posts-only activity and
+concurrency 1; page 1 has no cursor and subsequent pages accept only the
+Hub-issued direct `mxec2` cursor (including its sole `params.cursor` legacy
+spelling). `user-info` must resolve to exactly one username, 24-hex user ID or
+official profile URL on page 1 and accepts no continuation, custom params or
+concurrency control. New first pages use this slice only when the parent
+external-platform contract gate and the independent user-activity gate are active. Historical
+`mxnc1` cursors, batches/multiple identities, channel forms, non-post activity,
+non-20 crawl pages, custom cache/params controls and every unsupported shape
+remain on Night-All. An existing direct crawl cursor remains pinned to the
+Hub-native connector when the first-page gate is later closed.
 
 Direct routing does not remove Xiaohongshu from `data.legacySearch`. For a key
 granted both Xiaohongshu and Twitter, every `raw`, `crawl`, and `user-info`
 matrix entry still includes both platforms in `supportedPlatforms` and
-`readyPlatforms`; the matrix governs Xiaohongshu requests that do not match the
-direct raw subset.
+`readyPlatforms`; the matrix governs historical/unmigrated Xiaohongshu request
+shapes, not the independently gated native raw, crawl or user-info slices. Its
+presence is not proof that either native rollout gate is active or ready.
 
 The response body preserves the Night-All legacy envelope:
 
@@ -828,11 +888,23 @@ The response body preserves the Night-All legacy envelope:
 paths. A Hub-native Xiaohongshu projection puts the durable Hub UUID in the body
 `requestId`; it is identical to `x-mx-insight-request-id`, while external
 correlation stays private. For a Night-All-owned live response or exact fallback,
-the historical application body remains unchanged, including its existing
-`requestId`/`traceId` and unmasked provider/endpoint business fields; the current
+the historical application business body remains unchanged, including its
+existing `requestId`/`traceId` and unmasked provider/endpoint business fields;
+only pagination controls use the `mxnc1` projection described above. The current
 durable Hub request ID remains separate in the response header. This is separate
 from the request-side rule above, which still rejects caller injection of
 provider/token/credential controls.
+
+For a historical Night-All delivery, the pagination controls described above
+are the only response fields Hub rewrites. Hub does not desensitize, filter,
+truncate or otherwise change business content, including long note text,
+`raw_info`, `raw_data`, provider/endpoint business fields or upstream correlation
+values. The compatibility snapshot stores the governed body delivered to the
+client. The historical Night-All hop retains the complete parsed JSON payload
+and legacy raw strings, including the original provider continuation, but does
+not claim byte-for-byte HTTP response capture. Hub-native provider calls
+separately retain exact upstream response text/bytes plus hash in restricted raw
+storage.
 
 - `x-mx-insight-request-id: <hub request UUID>`;
 - `idempotent-replay: true|false`;
@@ -874,6 +946,7 @@ Without that exact snapshot:
 
 | Upstream result | Public result |
 | --- | --- |
+| bare provider cursor/continuation params, tampered `mxnc1`, or scope mismatch | `400 invalid_cursor`; remove continuation, use a new key and restart page 1 |
 | definite `400`, `404`, `409`, `422`, `429` | same HTTP status, safe `night_all_rejected` error |
 | other definite non-2xx HTTP rejection | `502 night_all_rejected` |
 | network error, Hub timeout, or unusable HTTP 2xx contract after dispatch | `502 upstream_outcome_unknown`; request becomes `unknown` |
@@ -895,8 +968,11 @@ This facade is distinct from `/api/v1/data/search` and from canonical stored
 search. Its complete/partial live payloads also enter the governed
 `night-all.compat.v1` ingest dataset asynchronously in their original,
 non-desensitized form, but ingest/search state never changes the already-delivered
-legacy response. Response, exact snapshot and raw ingest therefore retain the same
-unmasked source evidence in this compatibility slice. See
+legacy response. Business fields remain unmasked in response and snapshot;
+historical raw lineage retains the complete parsed payload and legacy raw strings
+before the sole pagination-control rewrite. Exact upstream response text/bytes
+plus hash is an additional restricted-archive guarantee for Hub-native provider
+calls, not for the historical Night-All HTTP hop. See
 [ADR-0010](../adr/0010-night-all-compatibility-facade.md).
 
 Future Hub desensitization must be a separate versioned processing/projection and
@@ -1903,9 +1979,9 @@ Idempotency-Key: xhs-note-20260907-0001
 ```
 
 The JSON body accepts `url` directly and defaults a missing `platform` to
-`xiaohongshu`. The GET form remains available with `share_text` or `note_id`;
-at least one is required and `note_id` takes precedence when both occur. Only
-one instance of each query field is accepted. `delivery_mode` is
+`xiaohongshu`. The legacy allowlisted GET spelling
+`/api/v1/xiaohongshu/app/get_note_info` accepts `share_text` or `note_id` and
+returns the same stable Hub projection. Its optional `delivery_mode` is
 `cache_only|cache_first|refresh` and defaults to `cache_first`.
 
 Because GET places `share_text` in the request target, links containing
@@ -1936,15 +2012,42 @@ The platform-shaped JSON-body form shown above defaults a missing `platform` to
 POST /api/v1/xiaohongshu/app/get_note_info
 ```
 
-The GET and both POST forms are one logical paid operation and use the same
-canonical note identity, snapshot and dispatch-suppression namespace. The
+The legacy GET and both POST forms are one logical paid operation and use the
+same canonical note identity, snapshot and dispatch-suppression namespace. The
 idempotency binding additionally includes the delivery mode, so reusing one
 `Idempotency-Key` after changing `cache_first` to `refresh` returns a conflict.
 Equivalent `note_id` and long-link inputs still normalize to the same note
 identity, so switching route, method or parameter spelling cannot create a
 second dispatch for an otherwise identical request. This compatibility name is
-owned by Hub; the public result remains the stable Hub schema rather than a
-transparent external-platform envelope.
+owned by Hub; the public result remains the stable Hub schema.
+
+Five separate App V2-compatible GET surfaces preserve the acquired business
+envelope instead of returning that Hub projection:
+
+- `/api/v1/xiaohongshu/app_v2/get_image_note_detail` — `note_id|share_text`;
+- `/api/v1/xiaohongshu/app_v2/search_notes` — `keyword`, `page`, `sort_type`,
+  `note_type`, `time_filter`, `search_id`, `search_session_id`, `source`, `ai_mode`;
+- `/api/v1/xiaohongshu/app_v2/search_users` — `keyword`, `page`, `search_id`, `source`;
+- `/api/v1/xiaohongshu/app_v2/get_user_info` — `user_id|share_text`;
+- `/api/v1/xiaohongshu/app_v2/get_user_posted_notes` —
+  `user_id|share_text`, plus the preceding Hub-issued opaque `cursor`.
+
+`search_notes` accepts only the documented App V2 filters: `sort_type` is one of
+`general|time_descending|popularity_descending|comment_descending|collect_descending|english_preferred`;
+`note_type` is one of `不限|视频笔记|普通笔记|直播笔记`; and `time_filter` is
+one of `不限|一天内|一周内|半年内`. Invalid values fail before any paid
+provider dispatch.
+
+These routes still enforce Hub Live-Key authorization, immutable grants, quota,
+provider cost admission, idempotency, exact restricted archive and canonical
+ingest/outbox. `page` is limited to `1..15`; user-post traversal terminates at
+page 15. The response preserves text, tags, interactions, signed media URLs,
+`params`, `search_id` and `search_session_id`; Hub applies no field-level text
+ceiling. Search may contain an official preview, so callers use the detail route
+for complete note text. Only an exact active Hub-to-upstream credential is
+removed if echoed; request Authorization, Cookie and API-key headers are never
+copied into the response. `Idempotency-Key` is optional on these GETs because
+Hub can derive an API-key-scoped freshness-bucket key.
 
 The POST body accepts only `platform`, `url`, and `deliveryMode`. `platform` must be
 `xiaohongshu` on the canonical path. `url` must be an official

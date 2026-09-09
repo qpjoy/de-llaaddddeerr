@@ -28,6 +28,29 @@ function fingerprint(value) {
   return createHash('sha256').update(canonicalJson(value)).digest('hex')
 }
 
+function providerCostControl(config, endpointKey) {
+  const billing = config?.billing || {}
+  const costMinor = billing.unitCostMinorByEndpoint?.[endpointKey]
+  if (!Number.isSafeInteger(costMinor) || costMinor <= 0
+    || !Number.isSafeInteger(billing.monthlyBudgetMinor) || billing.monthlyBudgetMinor < 0
+    || !Number.isSafeInteger(billing.monthlySubsidyBudgetMinor)
+    || billing.monthlySubsidyBudgetMinor < 0
+    || !/^[A-Z]{3}$/u.test(billing.currency || '')) {
+    throw new AppError(
+      503,
+      'external_platform_cost_control_unavailable',
+      'External data cost control is unavailable; paid dispatch is disabled',
+    )
+  }
+  return {
+    costMinor,
+    costKind: 'estimated',
+    currency: billing.currency,
+    monthlyBudgetMinor: billing.monthlyBudgetMinor,
+    monthlySubsidyBudgetMinor: billing.monthlySubsidyBudgetMinor,
+  }
+}
+
 function persistedCallEvidence(source) {
   const responseObject = source?.archiveObjects?.find?.((object) => object?.kind === 'response') || null
   const rawPayload = responseObject?.rawPayload ?? responseObject?.rawItem ?? null
@@ -46,7 +69,11 @@ function persistedCallEvidence(source) {
     requestId: responseObject.upstreamRequestId ?? response?.requestId ?? null,
     recordTime: responseObject.upstreamRecordTime ?? response?.recordTime ?? null,
   } : null)
-  return { responseArchive, upstreamEvidence }
+  return {
+    responseArchive,
+    upstreamEvidence,
+    restrictedResponseArchive: source?.restrictedResponseArchive ?? null,
+  }
 }
 
 function asDate(value) {
@@ -295,6 +322,10 @@ export class ExternalPlatformGateway {
         ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
         : consumerPolicy.maxPageSize,
     }
+    const apiKeyQuota = keyEntitlement ? {
+      maxRequests: keyEntitlement.maxRequests,
+      windowSeconds: keyEntitlement.windowSeconds,
+    } : null
     const codec = createExternalPlatformCursorCodec(this.apiKeyPepper, context.consumer.id)
     let normalized
     try {
@@ -378,6 +409,7 @@ export class ExternalPlatformGateway {
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
+      ...(apiKeyQuota ? { apiKeyQuota } : {}),
       // A caller-supplied key names one immutable delivery attempt. Generated
       // keys rotate with the freshness bucket, so neither form needs row reuse.
       replayWindowMs: null,
@@ -536,6 +568,7 @@ export class ExternalPlatformGateway {
     let call = null
     let callSettled = false
     let lastDispatchEvidence = null
+    let costReservation = null
     try {
       const lease = await this.platformStore.acquireDispatchLease({
         consumerId: context.consumer.id,
@@ -661,6 +694,23 @@ export class ExternalPlatformGateway {
       }
       entered = true
 
+      const costControl = providerCostControl(this.config, normalized.endpointKey)
+      if (typeof this.platformStore.reserveProviderCostWorkflow !== 'function') {
+        throw new AppError(
+          503,
+          'external_platform_cost_control_unavailable',
+          'Provider cost reservation is unavailable',
+        )
+      }
+      costReservation = await this.platformStore.reserveProviderCostWorkflow({
+        tenantId: context.tenant.id,
+        consumerId: context.consumer.id,
+        apiKeyId: context.apiKey.id,
+        usageRequestId: activeRequestId,
+        fingerprint: requestFingerprint,
+        costControls: [costControl],
+      })
+
       const rateLimit = typeof this.platformStore.acquireProviderRateLimit === 'function'
         ? await this.platformStore.acquireProviderRateLimit({
             limit: this.config.maxRequestsPerMinute ?? 90,
@@ -709,7 +759,15 @@ export class ExternalPlatformGateway {
         marketplace: normalized.marketplace,
         fingerprint: requestFingerprint,
         retryOfRequestId: validatedRetryOfRequestId,
+        costControl,
+        costReservationId: costReservation.id,
       })
+      lastDispatchEvidence = {
+        billed: null,
+        costMinor: costControl.costMinor,
+        costKind: costControl.costKind,
+        currency: costControl.currency,
+      }
       const startedAt = performance.now()
       try {
         const result = await this.adapter.searchProducts(body, {
@@ -722,7 +780,7 @@ export class ExternalPlatformGateway {
         })
         const persistedEvidence = persistedCallEvidence(result)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
-        const unitCost = this.config.billing.unitCostMinorByEndpoint?.[normalized.endpointKey] ?? null
+        const unitCost = costControl.costMinor
         lastDispatchEvidence = {
           billed: true,
           costMinor: unitCost,
@@ -731,6 +789,7 @@ export class ExternalPlatformGateway {
           latencyMs,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
+          restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           archiveObjects: result.archiveObjects,
         }
         const capturedAt = acceptedCaptureTime(result)
@@ -759,6 +818,7 @@ export class ExternalPlatformGateway {
           archiveObjects: result.archiveObjects,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
+          restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           ingestJob: {
             payload: {
               kind: 'external-platform-result',
@@ -788,9 +848,7 @@ export class ExternalPlatformGateway {
         const mappedError = publicFailure(error)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
         const billed = evidence.billed ?? null
-        const unitCost = billed === true
-          ? this.config.billing.unitCostMinorByEndpoint?.[normalized.endpointKey] ?? null
-          : null
+        const unitCost = costControl.costMinor
         lastDispatchEvidence = {
           billed,
           costMinor: unitCost,
@@ -799,6 +857,7 @@ export class ExternalPlatformGateway {
           latencyMs,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
+          restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           archiveObjects: error.archiveObjects,
         }
         const fallbackBody = snapshot
@@ -828,6 +887,7 @@ export class ExternalPlatformGateway {
           affectsCircuit: evidence.affectsCircuit !== false,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
+          restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           archiveObjects: error.archiveObjects,
           snapshot,
           fallbackResponseBody: fallbackBody,
@@ -873,6 +933,14 @@ export class ExternalPlatformGateway {
       }
       throw error
     } finally {
+      if (costReservation) {
+        await this.platformStore.releaseProviderCostWorkflow({
+          reservationId: costReservation.id,
+          usageRequestId: activeRequestId,
+        }).catch((error) => {
+          this.logger?.warn?.(`[external-platform] cost reservation release failed: ${error.message}`)
+        })
+      }
       if (ownsLease) {
         await this.platformStore.releaseDispatchLease({
           consumerId: context.consumer.id,

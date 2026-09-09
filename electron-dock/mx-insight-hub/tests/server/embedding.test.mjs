@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { getEventListeners } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { CHUNKER_VERSION, chunkRecord, chunkText, estimateTokens } from '../../server/embedding/chunker.mjs'
 import { buildChunkDocument } from '../../server/embedding/document.mjs'
-import { EmbeddingPipeline } from '../../server/embedding/pipeline.mjs'
+import { EmbeddingPipeline, runEmbeddingLoop } from '../../server/embedding/pipeline.mjs'
 import { reciprocalRankFusion } from '../../server/search/queries.mjs'
 import { requireSegmenterBackend } from '../../server/search/reindex-integrity.mjs'
 
@@ -752,6 +753,32 @@ test('embedding status exposes the durable deletion backlog', async () => {
   assert.equal(status.chunks_projection_failed, 2)
   assert.equal(status.mixedEmbeddingModels, false)
   assert.match(pool.client.queries[0].sql, /core\.chunk_projection_deletes WHERE projected_at IS NULL/)
+})
+
+test('embedding idle loop removes settled abort listeners', async () => {
+  const controller = new AbortController()
+  const keepAlive = setInterval(() => {}, 1_000)
+  let cycles = 0
+  const pipeline = {
+    async runOnce() {
+      cycles += 1
+      if (cycles === 4) controller.abort()
+      return { idle: true }
+    },
+  }
+
+  try {
+    await runEmbeddingLoop(pipeline, {
+      idleDelayMs: 1,
+      signal: controller.signal,
+      logger: quiet,
+    })
+  } finally {
+    clearInterval(keepAlive)
+  }
+
+  assert.equal(cycles, 4)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
 })
 
 // ---------------------------------------------------------------------------

@@ -1,11 +1,11 @@
 import { toPresegmentedText } from '@qpjoy/mx-common/segmenter'
+import { JUSTONE_DATASET_ID } from '../ingest/justone.mjs'
 import { DATASET_ID } from '../ingest/normalizers.mjs'
 
-// Fields the projection must never carry into a customer-facing index. The
-// canonical row keeps provider lineage under `extensions` as ingest evidence
-// (see adapters/night-all.mjs `keepRaw`); the search projection is customer
-// facing, so that evidence is stripped again here rather than relying on it
-// having been stripped upstream.
+// Legacy ingest paths may keep provider lineage and unverified credential-like
+// fields under `extensions`; their customer-facing search projection strips
+// those fields here. JustOne is handled separately below because its ingest
+// contract removes the exact request credential while retaining business data.
 const LINEAGE_KEY = /(provider|credential|upstream|endpoint|business.?id|availability|billing|token|secret|password|auth)/i
 const COLLECTOR_OPERATION_KEYS = new Set([
   'account_alias', 'account_phone', 'first_seen_account_id',
@@ -38,6 +38,15 @@ function safeExtensions(extensions) {
     result[key] = safeValue && typeof safeValue === 'object' ? JSON.stringify(safeValue) : safeValue
   }
   return result
+}
+
+function justOneBusinessExtensions(extensions) {
+  if (!extensions || typeof extensions !== 'object') return {}
+  // The JustOne ingest contract has already replaced the exact request
+  // credential. Retain its remaining provider business fields in the ES
+  // `_source`; `flattened` accepts this open-ended JSON without a dynamic
+  // mapping explosion.
+  return structuredClone(extensions)
 }
 
 function publicationOf(row) {
@@ -268,6 +277,8 @@ export async function buildContentDocument(row, { segmenter }) {
       sourceKey: row.external_id,
       payloadSha256: row.payload_sha256,
     },
-    extensions: safeExtensions(row.extensions),
+    extensions: row.dataset_id === JUSTONE_DATASET_ID
+      ? justOneBusinessExtensions(row.extensions)
+      : safeExtensions(row.extensions),
   }
 }

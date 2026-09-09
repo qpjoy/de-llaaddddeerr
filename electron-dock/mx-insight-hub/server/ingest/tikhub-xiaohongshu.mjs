@@ -41,14 +41,14 @@ function contentDigest(record) {
   return sha256(canonicalJson(content))
 }
 
-function urlWithoutQuery(value) {
+function businessHttpsUrl(value) {
   if (typeof value !== 'string' || !value) return null
   try {
     const url = new URL(value)
-    if (url.protocol !== 'https:' || url.username || url.password) return null
-    url.search = ''
-    url.hash = ''
-    return url.toString()
+    if (!['http:', 'https:'].includes(url.protocol)) return null
+    // Canonical storage is not a fetch allowlist. Preserve the acquired URL
+    // byte-for-byte; public projections apply their own transport policy.
+    return value
   } catch {
     return null
   }
@@ -56,13 +56,13 @@ function urlWithoutQuery(value) {
 
 function canonicalItem(item) {
   const sanitized = structuredClone(item)
-  sanitized.url = urlWithoutQuery(item.url)
+  sanitized.url = businessHttpsUrl(item.url)
   if (sanitized.author && typeof sanitized.author === 'object' && !Array.isArray(sanitized.author)) {
-    sanitized.author.avatarUrl = urlWithoutQuery(item.author?.avatarUrl)
+    sanitized.author.avatarUrl = businessHttpsUrl(item.author?.avatarUrl)
   }
   sanitized.media = (Array.isArray(item.media) ? item.media : [])
-    .filter((media) => media?.type === 'image')
-    .map((media) => ({ type: 'image', url: urlWithoutQuery(media.url) }))
+    .filter((media) => media && typeof media === 'object' && !Array.isArray(media))
+    .map((media) => ({ ...structuredClone(media), url: businessHttpsUrl(media.url) }))
     .filter((media) => media.url)
   return sanitized
 }
@@ -74,7 +74,6 @@ export function createTikHubXiaohongshuRecord(item, {
   rank = 1,
   sourcePointer = '$',
   bodyCompleteness = null,
-  safetyLimited = false,
 } = {}) {
   if (!item?.externalId || item.platform !== 'xiaohongshu') {
     throw new TypeError('TikHub Xiaohongshu item is invalid')
@@ -90,7 +89,12 @@ export function createTikHubXiaohongshuRecord(item, {
   const images = (Array.isArray(storedItem.media) ? storedItem.media : [])
     .filter((media) => media?.type === 'image' && typeof media.url === 'string')
     .map((media) => media.url)
-  const resolvedBodyCompleteness = safetyLimited === true ? 'safety_limited' : bodyCompleteness
+  const videos = (Array.isArray(storedItem.media) ? storedItem.media : [])
+    .filter((media) => media?.type === 'video' && typeof media.url === 'string')
+    .map((media) => media.url)
+  const audio = (Array.isArray(storedItem.media) ? storedItem.media : [])
+    .filter((media) => media?.type === 'audio' && typeof media.url === 'string')
+    .map((media) => media.url)
   const record = {
     platform: 'xiaohongshu',
     objectType: 'post',
@@ -116,7 +120,12 @@ export function createTikHubXiaohongshuRecord(item, {
         name: storedItem.author?.name || null,
         avatarUrl: storedItem.author?.avatarUrl || null,
       },
-      media: { images },
+      media: {
+        images,
+        videos,
+        audio,
+        items: structuredClone(storedItem.media),
+      },
       entities: [],
       links: storedItem.url ? [storedItem.url] : [],
       tags: Array.isArray(storedItem.tags) ? [...storedItem.tags] : [],
@@ -135,7 +144,7 @@ export function createTikHubXiaohongshuRecord(item, {
     },
     extensions: {
       sourceCatalog: XIAOHONGSHU_SOURCE_CATALOG,
-      ...(resolvedBodyCompleteness ? { bodyCompleteness: resolvedBodyCompleteness } : {}),
+      ...(bodyCompleteness ? { bodyCompleteness } : {}),
     },
     metrics,
     rank,

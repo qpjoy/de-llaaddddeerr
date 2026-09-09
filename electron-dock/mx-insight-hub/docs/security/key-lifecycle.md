@@ -73,10 +73,16 @@ lookups remain blocked.
 
 Database-mode external-platform/model credentials and source passwords make
 PostgreSQL dumps, WAL, replicas and restore artifacts secret-bearing. The
-current shared Hub database owner cannot enforce workload-level `SELECT`
-isolation; splitting
-migration, Agent writer/runtime and ordinary workload roles remains required
-before treating the database as a least-privilege credential store.
+restricted exact provider-response table may also contain signed bearer-style
+media URLs even though request credentials and request URLs are never archived.
+Migration 059 explicitly revokes `PUBLIC` privileges from the external-platform
+credential and setting tables. This is table-permission hardening, not at-rest
+encryption: the current shared Hub database owner can still read them and cannot
+enforce workload-level `SELECT` isolation. Splitting migration, credentialed
+runtime and ordinary workload roles remains required before treating the
+database as a least-privilege credential store. Storage-volume, backup, WAL and
+replica encryption must be enforced and audited by the deployment environment;
+the application does not currently provide column-level credential encryption.
 
 Development defaults in Compose are intentionally local-only. Internal
 production requires an explicit Admin token and API-key pepper in

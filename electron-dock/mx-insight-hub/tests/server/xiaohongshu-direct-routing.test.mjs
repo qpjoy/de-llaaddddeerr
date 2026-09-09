@@ -99,7 +99,13 @@ function legacyCapabilities() {
   }
 }
 
-async function routingFixture({ directEnabled = true, canary = 'global' } = {}) {
+async function routingFixture({
+  directEnabled = true,
+  canary = 'global',
+  historicalSearchResponder = null,
+  captureHistoricalIngest = false,
+  additionalPlatforms = [],
+} = {}) {
   const store = new MemoryStore()
   const directCalls = []
   const searchCalls = []
@@ -108,11 +114,21 @@ async function routingFixture({ directEnabled = true, canary = 'global' } = {}) 
   const legacyCapabilityCalls = []
   const postCapabilityCalls = []
   const reserveCalls = []
+  const historicalIngestCommits = []
+
+  if (captureHistoricalIngest) {
+    store.commitRequestAndEnqueueIngest = async (requestId, commit, job) => {
+      historicalIngestCommits.push(structuredClone({ requestId, commit, job }))
+      return store.commitRequest(requestId, commit)
+    }
+  }
 
   const adapter = {
     async search({ body, businessId }) {
       searchCalls.push({ body: structuredClone(body), businessId })
-      const payload = modernEnvelope(body)
+      const payload = historicalSearchResponder
+        ? await historicalSearchResponder(structuredClone(body), searchCalls.length)
+        : modernEnvelope(body)
       return { payload, raw: structuredClone(payload) }
     },
     async legacySearch({ operation, body, businessId }) {
@@ -177,26 +193,29 @@ async function routingFixture({ directEnabled = true, canary = 'global' } = {}) 
     externalSocialSearchCanaryConsumerIds,
     logger: { warn() {} },
   })
-  await store.setPlatformGrant(consumer.id, 'xiaohongshu', true)
-  await store.putPolicy({
-    tenantId: tenant.id,
-    consumerId: consumer.id,
-    platform: 'xiaohongshu',
-    maxRequests: 1_000,
-    windowSeconds: 3_600,
-    maxPageSize: 100,
-  })
+  const grantedPlatforms = [...new Set(['xiaohongshu', ...additionalPlatforms])]
+  for (const platform of grantedPlatforms) {
+    await store.setPlatformGrant(consumer.id, platform, true)
+    await store.putPolicy({
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      platform,
+      maxRequests: 1_000,
+      windowSeconds: 3_600,
+      maxPageSize: 100,
+    })
+  }
   const liveKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Routing live key',
     environment: 'live',
-    platforms: ['xiaohongshu'],
+    platforms: grantedPlatforms,
   })
   const testKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Routing test key',
     environment: 'test',
-    platforms: ['xiaohongshu'],
+    platforms: grantedPlatforms,
   })
   const liveContext = await service.authenticate(liveKey.secret)
   const testContext = await service.authenticate(testKey.secret)
@@ -228,6 +247,7 @@ async function routingFixture({ directEnabled = true, canary = 'global' } = {}) 
     legacyCapabilityCalls,
     postCapabilityCalls,
     reserveCalls,
+    historicalIngestCommits,
   }
 }
 
@@ -260,11 +280,16 @@ test('modern Xiaohongshu routing sends only the fixed first page and Hub cursor 
     query: 'continued page',
     cursor: state.cursor,
   })
-  await modernSearch(state, 'modern-nightall-cursor', {
-    platform: 'xiaohongshu',
-    query: 'old cursor',
-    cursor: 'night-all-next-cursor',
-  })
+  await assert.rejects(
+    modernSearch(state, 'modern-nightall-cursor', {
+      platform: 'xiaohongshu',
+      query: 'old cursor',
+      cursor: 'night-all-next-cursor',
+    }),
+    (error) => error?.status === 400
+      && error?.code === 'invalid_cursor'
+      && /restart from page 1/u.test(error.message),
+  )
   await modernSearch(state, 'modern-nightall-size', {
     platform: 'xiaohongshu',
     query: 'different page size',
@@ -286,14 +311,6 @@ test('modern Xiaohongshu routing sends only the fixed first page and Hub cursor 
   assert.equal(state.directCalls.every((call) => call.responseMode === 'modern'), true)
 
   assert.deepEqual(state.searchCalls, [{
-    body: {
-      platform: 'xiaohongshu',
-      query: 'old cursor',
-      pageSize: 20,
-      cursor: 'night-all-next-cursor',
-    },
-    businessId: state.consumer.businessId,
-  }, {
     body: {
       platform: 'xiaohongshu',
       query: 'different page size',
@@ -412,19 +429,38 @@ test('legacy routing limits direct TikHub to a single raw query and its own cont
     keyword: 'continued query',
     cursor: state.cursor,
   })
+  await legacySearch(state, 'legacy-direct-details', 'raw', {
+    platform: 'xiaohongshu',
+    query: 'complete details',
+    includeDetails: true,
+    maxEnrichItems: 12,
+  })
+  await legacySearch(state, 'legacy-direct-enrichment-limit', 'raw', {
+    platform: 'xiaohongshu',
+    query: 'preview boundary limit',
+    includeDetails: false,
+    maxEnrichItems: 7,
+  })
+  await legacySearch(state, 'legacy-direct-details-disabled', 'raw', {
+    platform: 'xiaohongshu',
+    query: 'details disabled',
+    includeDetails: false,
+    disableAutoDetails: true,
+  })
+
+  await assert.rejects(
+    legacySearch(state, 'legacy-old-cursor', 'raw', {
+      platform: 'xiaohongshu', query: 'old cursor', cursor: 'night-all-next-cursor',
+    }),
+    (error) => error?.status === 400
+      && error?.code === 'invalid_cursor'
+      && /restart from page 1/u.test(error.message),
+  )
 
   const fallbackCases = [{
-    key: 'legacy-old-cursor',
-    operation: 'raw',
-    body: { platform: 'xiaohongshu', query: 'old cursor', cursor: 'night-all-next-cursor' },
-  }, {
     key: 'legacy-batch-query',
     operation: 'raw',
     body: { platform: 'xiaohongshu', queries: ['one', 'two'] },
-  }, {
-    key: 'legacy-details-on',
-    operation: 'raw',
-    body: { platform: 'xiaohongshu', query: 'details', includeDetails: true },
   }, {
     key: 'legacy-comments-on',
     operation: 'raw',
@@ -446,7 +482,7 @@ test('legacy routing limits direct TikHub to a single raw query and its own cont
     await legacySearch(state, candidate.key, candidate.operation, candidate.body)
   }
 
-  assert.equal(state.directCalls.length, 2)
+  assert.equal(state.directCalls.length, 5)
   assert.deepEqual(state.directCalls[0], {
     body: { platform: 'xiaohongshu', query: 'single query', pageSize: 20 },
     enrichment: { includeDetails: false, disableAutoDetails: false },
@@ -466,10 +502,34 @@ test('legacy routing limits direct TikHub to a single raw query and its own cont
     pageSize: 20,
     cursor: state.cursor,
   })
+  assert.deepEqual(state.directCalls[2], {
+    body: { platform: 'xiaohongshu', query: 'complete details', pageSize: 20 },
+    enrichment: { includeDetails: true, disableAutoDetails: false, maxEnrichItems: 12 },
+    idempotencyKey: 'legacy-direct-details',
+    path: LEGACY_PATHS.raw,
+    responseMode: 'legacy',
+    fingerprintBody: {
+      contractVersion: 'mx-insight-hub.night-all-compat.v1',
+      platform: 'xiaohongshu',
+      query: 'complete details',
+      includeDetails: true,
+      maxEnrichItems: 12,
+    },
+    replayWindowMs: null,
+  })
+  assert.deepEqual(state.directCalls[3].enrichment, {
+    includeDetails: false,
+    disableAutoDetails: false,
+    maxEnrichItems: 7,
+  })
+  assert.deepEqual(state.directCalls[4].enrichment, {
+    includeDetails: false,
+    disableAutoDetails: true,
+  })
   assert.equal(state.legacyCalls.length, fallbackCases.length)
   assert.deepEqual(state.legacyCalls.map((call) => call.operation), fallbackCases.map((entry) => entry.operation))
   assert.equal(state.legacyCalls.every((call) => call.businessId === state.consumer.businessId), true)
-  assert.equal(state.legacyCapabilityCalls.length, fallbackCases.length)
+  assert.equal(state.legacyCapabilityCalls.length, 0)
 })
 
 test('direct and fallback routes preserve replay windows and historical fingerprint bodies', async () => {
@@ -491,7 +551,7 @@ test('direct and fallback routes preserve replay windows and historical fingerpr
   await modernSearch(state, 'fingerprint-fresh-fallback', {
     platform: 'xiaohongshu',
     query: 'fresh fallback',
-    cursor: 'night-all-next-cursor',
+    pageSize: 10,
   })
   await modernSearch(state, 'fingerprint-stable-fallback', {
     platform: 'xiaohongshu',
@@ -502,7 +562,7 @@ test('direct and fallback routes preserve replay windows and historical fingerpr
   await legacySearch(state, 'fingerprint-legacy-fallback', 'raw', {
     platform: 'xiaohongshu',
     query: 'legacy fallback',
-    cursor: 'night-all-next-cursor',
+    pageSize: 10,
   })
 
   const [freshDirect, stableDirect, legacyDirect] = state.directCalls
@@ -537,8 +597,7 @@ test('direct and fallback routes preserve replay windows and historical fingerpr
     body: {
       platform: 'xiaohongshu',
       query: 'fresh fallback',
-      pageSize: 20,
-      cursor: 'night-all-next-cursor',
+      pageSize: 10,
       type: 'fresh',
     },
   }))
@@ -561,24 +620,163 @@ test('direct and fallback routes preserve replay windows and historical fingerpr
       contractVersion: 'mx-insight-hub.night-all-compat.v1',
       platform: 'xiaohongshu',
       query: 'legacy fallback',
-      cursor: 'night-all-next-cursor',
+      pageSize: 10,
     },
   }))
   assert.equal(state.searchCalls.every((call) => call.body.type === undefined), true)
 })
 
-test('direct-enabled capabilities merge search_posts without hiding Night-All-only XHS operations', async () => {
+test('historical Xiaohongshu data-search cursors are Hub-wrapped and stop after page 15', async () => {
+  const providerCursors = []
+  const state = await routingFixture({
+    captureHistoricalIngest: true,
+    historicalSearchResponder(body, callNumber) {
+      providerCursors.push(body.cursor ?? null)
+      const payload = modernEnvelope({ ...body, pageSize: 10 })
+      payload.data.items[0].text = `完整业务正文-${callNumber}-`.repeat(12)
+      payload.data.pageInfo = {
+        pageIndex: callNumber,
+        pageSize: 10,
+        returnedCount: 1,
+        hasMore: true,
+        nextCursor: `provider-page-${callNumber + 1}`,
+        cursorType: 'opaque',
+      }
+      return payload
+    },
+  })
+
+  let cursor = null
+  for (let page = 1; page <= 15; page += 1) {
+    const response = await modernSearch(state, `historical-data-page-${String(page).padStart(2, '0')}`, {
+      platform: 'xiaohongshu',
+      query: 'bounded historical traversal',
+      pageSize: 10,
+      ...(cursor ? { cursor } : {}),
+    })
+    assert.equal(response.body.data.items[0].text, `完整业务正文-${page}-`.repeat(12))
+    if (page < 15) {
+      cursor = response.body.data.pageInfo.nextCursor
+      assert.equal(cursor.startsWith('mxnc1.'), true)
+      assert.equal(cursor.includes(`provider-page-${page + 1}`), false)
+    } else {
+      assert.equal(response.body.data.pageInfo.hasMore, false)
+      assert.equal(response.body.data.pageInfo.nextCursor, null)
+      assert.equal(response.body.data.pageInfo.cursorType, 'none')
+      assert.equal(response.body.data.warnings.at(-1).code, 'page_limit_reached')
+    }
+  }
+
+  assert.deepEqual(providerCursors, [
+    null,
+    ...Array.from({ length: 14 }, (_, index) => `provider-page-${index + 2}`),
+  ])
+  assert.equal(state.searchCalls.length, 15)
+  const lastIngest = state.historicalIngestCommits.at(-1)
+  assert.equal(lastIngest.commit.responseBody.data.pageInfo.nextCursor, null)
+  assert.equal(lastIngest.job.payload.rawPayload.data.pageInfo.hasMore, true)
+  assert.equal(lastIngest.job.payload.rawPayload.data.pageInfo.nextCursor, 'provider-page-16')
+  assert.equal(lastIngest.job.payload.rawPayload.data.items[0].text, '完整业务正文-15-'.repeat(12))
+})
+
+test('every non-local historical data-search traversal uses a scoped Hub cursor and the 15-page cap', async () => {
+  const providerCursors = []
+  const state = await routingFixture({
+    additionalPlatforms: ['douyin'],
+    captureHistoricalIngest: true,
+    historicalSearchResponder(body, callNumber) {
+      providerCursors.push(body.cursor ?? null)
+      const payload = modernEnvelope({ ...body, platform: 'douyin', pageSize: 7 })
+      payload.data.items[0].text = `抖音完整业务正文-${callNumber}-`.repeat(10)
+      payload.data.pageInfo = {
+        pageIndex: callNumber,
+        pageSize: 7,
+        returnedCount: 1,
+        hasMore: true,
+        nextCursor: `douyin-provider-page-${callNumber + 1}`,
+        cursorType: 'opaque',
+      }
+      return payload
+    },
+  })
+
+  await assert.rejects(
+    modernSearch(state, 'douyin-raw-provider-cursor', {
+      platform: 'douyin',
+      query: '全平台分页上限',
+      pageSize: 7,
+      cursor: 'unwrapped-douyin-provider-cursor',
+    }),
+    (error) => error?.status === 400
+      && error?.code === 'invalid_cursor'
+      && /restart from page 1/u.test(error.message),
+  )
+  assert.equal(state.searchCalls.length, 0, 'invalid provider cursors must fail before dispatch')
+
+  let cursor = null
+  for (let page = 1; page <= 15; page += 1) {
+    const response = await modernSearch(state, `douyin-historical-page-${String(page).padStart(2, '0')}`, {
+      platform: 'douyin',
+      query: '全平台分页上限',
+      pageSize: 7,
+      ...(cursor ? { cursor } : {}),
+    })
+    assert.equal(response.body.data.items[0].text, `抖音完整业务正文-${page}-`.repeat(10))
+    assert.deepEqual(Object.keys(response.body.data.pageInfo), [
+      'pageIndex',
+      'pageSize',
+      'returnedCount',
+      'hasMore',
+      'nextCursor',
+      'cursorType',
+    ])
+    if (page < 15) {
+      cursor = response.body.data.pageInfo.nextCursor
+      assert.equal(cursor.startsWith('mxnc1.'), true)
+      assert.equal(cursor.includes(`douyin-provider-page-${page + 1}`), false)
+    } else {
+      assert.deepEqual(response.body.data.pageInfo, {
+        pageIndex: 15,
+        pageSize: 7,
+        returnedCount: 1,
+        hasMore: false,
+        nextCursor: null,
+        cursorType: 'none',
+      })
+      assert.equal(response.body.data.warnings.at(-1).code, 'page_limit_reached')
+    }
+  }
+
+  assert.deepEqual(providerCursors, [
+    null,
+    ...Array.from({ length: 14 }, (_, index) => `douyin-provider-page-${index + 2}`),
+  ])
+  const lastIngest = state.historicalIngestCommits.at(-1)
+  assert.equal(lastIngest.commit.responseBody.data.pageInfo.nextCursor, null)
+  assert.equal(lastIngest.job.payload.rawPayload.data.pageInfo.nextCursor, 'douyin-provider-page-16')
+
+  await modernSearch(state, 'xiaohongshu-mxec2-remains-direct', {
+    platform: 'xiaohongshu',
+    query: '小红书直连续页',
+    cursor: state.cursor,
+  })
+  assert.equal(state.directCalls.length, 1)
+  assert.equal(state.directCalls[0].body.cursor, state.cursor)
+  assert.equal(state.searchCalls.length, 15)
+})
+
+test('direct-enabled capabilities merge search_posts into locally compiled compatibility capabilities', async () => {
   const state = await routingFixture()
 
   const live = await state.service.capabilities(state.liveContext)
   const testKey = await state.service.capabilities(state.testContext)
 
-  assert.deepEqual(state.capabilityCalls, [['xiaohongshu'], ['xiaohongshu']])
+  assert.deepEqual(state.capabilityCalls, [])
   assert.deepEqual(state.legacyCapabilityCalls, [])
   assert.equal(state.postCapabilityCalls.length, 2)
   assert.deepEqual(live.data.platforms, [{
     platform: 'xiaohongshu',
-    ready: true,
+    ready: false,
     capabilities: ['search_posts'],
     search: {
       ready: true,
@@ -589,7 +787,7 @@ test('direct-enabled capabilities merge search_posts without hiding Night-All-on
   }])
   assert.deepEqual(testKey.data.platforms, [{
     platform: 'xiaohongshu',
-    ready: true,
+    ready: false,
     capabilities: ['search_posts'],
     search: {
       ready: false,
@@ -602,7 +800,7 @@ test('direct-enabled capabilities merge search_posts without hiding Night-All-on
   assert.deepEqual(testKey.data.legacySearch, legacyCapabilities())
 })
 
-test('legacy HTTP route keeps live/stale source-mode vocabulary across direct cache and replay modes', async () => {
+test('legacy HTTP aliases share one canonical paid path and keep source-mode vocabulary', async () => {
   const cases = [{ sourceMode: 'live', expected: 'live' }, {
     sourceMode: 'fresh_cache', expected: 'live',
   }, {
@@ -611,9 +809,11 @@ test('legacy HTTP route keeps live/stale source-mode vocabulary across direct ca
     sourceMode: 'idempotent_replay', originSourceMode: 'stored_fallback', expected: 'stale', replay: true,
   }]
   let index = 0
+  const compatibilityCalls = []
   const service = {
     async authenticate() { return { tenant: {}, consumer: {}, apiKey: {} } },
-    async nightAllCompatibilitySearch() {
+    async nightAllCompatibilitySearch(_context, input) {
+      compatibilityCalls.push(structuredClone(input))
       const candidate = cases[index++]
       return {
         status: 200,
@@ -641,8 +841,9 @@ test('legacy HTTP route keeps live/stale source-mode vocabulary across direct ca
   })
   try {
     for (const [caseIndex, candidate] of cases.entries()) {
+      const route = caseIndex % 2 === 0 ? LEGACY_PATHS.raw : '/api/v1/search/raw'
       const response = await fetch(
-        `http://127.0.0.1:${server.address().port}${LEGACY_PATHS.raw}`,
+        `http://127.0.0.1:${server.address().port}${route}`,
         {
           method: 'POST',
           headers: {
@@ -660,6 +861,10 @@ test('legacy HTTP route keeps live/stale source-mode vocabulary across direct ca
       assert.equal(response.headers.get('age'), '60')
       await response.arrayBuffer()
     }
+    assert.deepEqual(
+      compatibilityCalls.map(({ operation, path }) => ({ operation, path })),
+      cases.map(() => ({ operation: 'raw', path: LEGACY_PATHS.raw })),
+    )
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }

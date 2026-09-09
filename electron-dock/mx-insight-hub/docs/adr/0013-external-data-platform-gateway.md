@@ -90,9 +90,14 @@ justone/{marketplace}/product-search/{endpointVersion}/{YYYY-MM-DD}/{responses|i
 
 It is queryable today in PostgreSQL and may later become an object-store prefix without changing lineage.
 The SHA-256 content key supports duplicate detection; `provider_call_id`, response pointer, marketplace,
-endpoint version, source-catalog key and capture date preserve provenance. Raw observations are redacted of
-tokens, credential-bearing fields and private URL parameters before persistence, but remain sensitive
-internal evidence and are never a Public API response.
+endpoint version, source-catalog key and capture date preserve provenance. Hub persists two deliberately
+different records for the same provider call. The restricted raw-response record keeps the exact bounded
+HTTP response bytes, a decoded text view and lossless parsed JSON when applicable, including complete
+business content, pagination and media fields;
+Hub does not truncate, filter or rewrite those fields. The ordinary operational response/archive record is
+a separately derived secret-free projection suitable for routine diagnostics. Request credentials,
+Authorization/Cookie headers and API keys are never part of either response body record, and the restricted
+raw record is never returned by a Public API or ordinary UI/log path.
 
 Canonical identity is `marketplace + native product id`, not query, page or rank. Repeating a search can add
 an observation or revision without manufacturing a second product identity. The canonical dataset is

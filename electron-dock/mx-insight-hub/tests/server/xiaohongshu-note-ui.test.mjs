@@ -27,4 +27,19 @@ test('Xiaohongshu note gallery uses the governed concurrent relay and stable fai
   assert.match(page, /const \[apiKey, setApiKey\] = useState\(''\)/u)
   assert.doesNotMatch(page, /(?:localStorage|sessionStorage)\.setItem\([^\n]*apiKey/iu)
   assert.doesNotMatch(page, /tikhub|TikHub/iu)
+  assert.doesNotMatch(page, /<select\b/iu)
+  assert.match(page, /<DropdownField[\s\S]*?label="交付策略"[\s\S]*?options=\{DELIVERY_OPTIONS\}/u)
+})
+
+test('Xiaohongshu note body renders text beyond 60 characters without a UI clamp', async () => {
+  const [page, styles] = await Promise.all([
+    readFile(new URL('../../src/pages-xiaohongshu-note.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/styles.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(page, /<p className="mih-xhs-body">\{item\.text \|\|/u)
+  assert.doesNotMatch(page, /item\.text\s*\.(?:slice|substring)\(/u)
+  const bodyRule = styles.match(/\.mih-xhs-body \{[^}]+\}/u)?.[0] || ''
+  assert.match(bodyRule, /white-space:\s*pre-wrap/u)
+  assert.doesNotMatch(bodyRule, /line-clamp|max-height|overflow:\s*hidden|text-overflow/u)
 })

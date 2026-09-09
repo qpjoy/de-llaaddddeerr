@@ -507,11 +507,18 @@ export async function runProjectorLoop(projector, {
 
 function delay(ms, signal) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    timer.unref?.()
-    signal?.addEventListener('abort', () => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
       resolve()
-    }, { once: true })
+    }
+    const onAbort = () => finish()
+    const timer = setTimeout(finish, ms)
+    timer.unref?.()
+    if (signal?.aborted) finish()
+    else signal?.addEventListener('abort', onAbort, { once: true })
   })
 }

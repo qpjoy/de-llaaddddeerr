@@ -11,7 +11,7 @@ import {
   User,
 } from '@phosphor-icons/react'
 import { publicDataApi, publicDocsHref } from './api.js'
-import { ErrorState, Field, PageHeading } from './components.jsx'
+import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 
 const DELIVERY_OPTIONS = [
@@ -275,11 +275,13 @@ export function XiaohongshuNotePage({ notify }) {
           <Field label="笔记链接">
             <div className="mih-xhs-input"><LinkSimple size={18} /><input className="qp-input" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.xiaohongshu.com/explore/…" maxLength={2048} required /></div>
           </Field>
-          <Field label="交付策略" hint="成功展开按 1 次 social.posts.resolve 计量；缓存交付仍是一笔 Hub 服务，幂等恢复不会重复计费。">
-            <select className="qp-input" value={deliveryMode} onChange={(event) => setDeliveryMode(event.target.value)}>
-              {DELIVERY_OPTIONS.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}
-            </select>
-          </Field>
+          <DropdownField
+            label="交付策略"
+            hint="成功展开按 1 次 social.posts.resolve 计量；缓存交付仍是一笔 Hub 服务，幂等恢复不会重复计费。"
+            value={deliveryMode}
+            options={DELIVERY_OPTIONS}
+            onChange={setDeliveryMode}
+          />
           <button className="qp-button qp-button--primary mih-xhs-submit" type="submit" disabled={busy || !apiKey.trim() || !url.trim()}>
             {busy ? <SpinnerGap className="mih-spin" size={18} /> : <Scroll size={18} />}
             {busy ? '正在展开画卷' : '获取笔记内容'}

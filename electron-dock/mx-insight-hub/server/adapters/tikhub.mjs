@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto'
+import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
+import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
+
 import {
   isTikHubXiaohongshuUnavailable,
   normalizeTikHubXiaohongshuNoteResult,
@@ -14,7 +18,25 @@ import {
   buildXiaohongshuSearchDispatch,
   normalizeTikHubXiaohongshuSearchResponse,
   TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY,
+  TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH,
+  TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_VERSION,
 } from '../contracts/tikhub-xiaohongshu-search.mjs'
+import {
+  normalizeTikHubXiaohongshuSearchUsersResponse,
+  normalizeTikHubXiaohongshuUserInfoResponse,
+  TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_KEY,
+  TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_PATH,
+  TIKHUB_XIAOHONGSHU_USER_ENDPOINT_VERSION,
+  TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_KEY,
+  TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_PATH,
+} from '../contracts/tikhub-xiaohongshu-user-info.mjs'
+import {
+  normalizeTikHubXiaohongshuUserPostsResponse,
+  TikHubXiaohongshuUserPostsContractError,
+  TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_KEY,
+  TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_PATH,
+  TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_VERSION,
+} from '../contracts/tikhub-xiaohongshu-user-posts.mjs'
 import {
   createTikHubXiaohongshuRecord,
   createTikHubXiaohongshuSearchRecord,
@@ -28,12 +50,74 @@ export const TIKHUB_MAX_TIMEOUT_MS = 120_000
 export const TIKHUB_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 export const TIKHUB_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
+const OFFICIAL_APP_V2_ENDPOINTS = Object.freeze({
+  [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: Object.freeze({
+    path: TIKHUB_XIAOHONGSHU_ENDPOINT_PATH,
+    version: TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION,
+    fields: Object.freeze(['note_id', 'share_text']),
+  }),
+  [TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY]: Object.freeze({
+    path: TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH,
+    version: TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_VERSION,
+    fields: Object.freeze([
+      'keyword', 'page', 'sort_type', 'note_type', 'time_filter',
+      'search_id', 'search_session_id', 'source', 'ai_mode',
+    ]),
+  }),
+  [TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_KEY]: Object.freeze({
+    path: TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_PATH,
+    version: TIKHUB_XIAOHONGSHU_USER_ENDPOINT_VERSION,
+    fields: Object.freeze(['keyword', 'page', 'search_id', 'source']),
+  }),
+  [TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_KEY]: Object.freeze({
+    path: TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_PATH,
+    version: TIKHUB_XIAOHONGSHU_USER_ENDPOINT_VERSION,
+    fields: Object.freeze(['user_id', 'share_text']),
+  }),
+  [TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_KEY]: Object.freeze({
+    path: TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_PATH,
+    version: TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_VERSION,
+    fields: Object.freeze(['user_id', 'share_text', 'cursor']),
+  }),
+})
+
 function credential(value) {
   if (value == null || value === '') return null
   if (typeof value !== 'string' || !value.trim() || value.length > 4_096) {
     throw new TypeError('apiKey must be a non-empty string of at most 4096 characters')
   }
   return value.trim()
+}
+
+function providerCredentialSafePayload(value, resolvedCredential) {
+  const scrub = createCredentialEchoRedactor(resolvedCredential)
+  if (!value || typeof value !== 'object') return scrub(value)
+  const output = Array.isArray(value) ? [] : {}
+  const pending = [{ source: value, target: output }]
+  while (pending.length > 0) {
+    const { source, target } = pending.pop()
+    for (const [key, child] of Object.entries(source)) {
+      const safeKey = Array.isArray(target) ? key : scrub(key)
+      let safeChild
+      if (child && typeof child === 'object') {
+        safeChild = Array.isArray(child) ? [] : {}
+        pending.push({ source: child, target: safeChild })
+      } else {
+        safeChild = scrub(child)
+      }
+      Object.defineProperty(target, safeKey, {
+        value: safeChild,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+    }
+  }
+  return output
+}
+
+function postgresSafeText(value) {
+  return isPostgresSafeText(value) ? value : null
 }
 
 function boundedInteger(value, fallback, maximum, name) {
@@ -52,18 +136,26 @@ class BodyLimitError extends Error {
 }
 
 class BodyEncodingError extends Error {
-  constructor(size) {
+  constructor(bytes) {
     super('response_invalid_utf8')
-    this.size = Number.isSafeInteger(size) ? size : null
+    this.bodyBytes = Buffer.from(bytes)
+    this.size = this.bodyBytes.byteLength
   }
 }
 
 function decodeUtf8(bytes) {
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    // Keep an initial UTF-8 BOM in the restricted text view. JSON parsing may
+    // ignore that marker, but the exact body/hash must still represent the
+    // provider bytes rather than a decoder-normalized string.
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
   } catch {
-    throw new BodyEncodingError(bytes.byteLength)
+    throw new BodyEncodingError(bytes)
   }
+}
+
+function parseJsonText(text) {
+  return JSON.parse(text.codePointAt(0) === 0xFEFF ? text.slice(1) : text)
 }
 
 async function boundedBody(response, maximum, controller) {
@@ -78,6 +170,7 @@ async function boundedBody(response, maximum, controller) {
     return {
       text: decodeUtf8(bytes),
       size: bytes.byteLength,
+      bytes: Buffer.from(bytes),
     }
   }
   const reader = response.body.getReader()
@@ -106,20 +199,52 @@ async function boundedBody(response, maximum, controller) {
   return {
     text: decodeUtf8(bytes),
     size: bytes.byteLength,
+    bytes: Buffer.from(bytes),
   }
 }
 
 function archiveEvidence({
   raw,
+  providerCredential = null,
   capturedAt,
   httpStatus,
   contentType,
   bodySize,
+  bodyBytes = null,
   state,
   endpointVersion = TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION,
 }) {
-  const sanitized = raw == null ? null : redactTikHubEnvelope(raw)
-  const payloadHash = sanitized == null ? null : sha256Json(sanitized)
+  let sanitized = null
+  let payloadHash = Buffer.isBuffer(bodyBytes)
+    ? createHash('sha256').update(bodyBytes).digest('hex')
+    : null
+  let operationalPayload = null
+  if (raw != null) {
+    try {
+      sanitized = redactTikHubEnvelope(providerCredentialSafePayload(raw, providerCredential))
+      if (isPostgresSafeJsonValue(sanitized)) {
+        payloadHash = sha256Json(sanitized)
+        try {
+          // The store intentionally uses structuredClone at its trust boundary.
+          // Keep the secret-free operational projection only when it can cross
+          // that boundary; exact restricted bytes remain authoritative.
+          operationalPayload = structuredClone(sanitized)
+        } catch {
+          operationalPayload = null
+        }
+      }
+    } catch {
+      // Exact bounded response bytes are persisted in the restricted archive.
+      // A pathologically deep, but valid, JSON value may exceed the JS clone
+      // stack; omit only this optional secret-free JSON projection rather than
+      // losing post-dispatch evidence or risking credential exposure.
+      sanitized = null
+      // Keep the exact-byte fingerprint initialized above. It is the durable
+      // identity for this paid response even when the optional operational
+      // projection cannot be constructed.
+      operationalPayload = null
+    }
+  }
   return {
     responseArchive: {
       contractState: state,
@@ -128,14 +253,14 @@ function archiveEvidence({
       contentType,
       bodySize,
       payloadSha256: payloadHash,
-      rawPayload: sanitized,
+      rawPayload: operationalPayload,
       capturedAt,
     },
     upstreamEvidence: {
-      requestId: typeof raw?.request_id === 'string' ? raw.request_id : null,
+      requestId: postgresSafeText(raw?.request_id),
       recordTime: null,
     },
-    archiveObjects: sanitized == null ? [] : [{
+    archiveObjects: payloadHash == null ? [] : [{
       kind: 'response',
       marketplace: XIAOHONGSHU_PLATFORM,
       endpointVersion,
@@ -144,13 +269,56 @@ function archiveEvidence({
       envelopePointer: '$',
       sourceKey: payloadHash,
       payloadSha256: payloadHash,
-      rawPayload: sanitized,
+      rawPayload: operationalPayload,
       contractState: state,
       contentType,
       bodySize,
-      upstreamRequestId: typeof raw?.request_id === 'string' ? raw.request_id : null,
+      upstreamRequestId: postgresSafeText(raw?.request_id),
     }],
   }
+}
+
+function restrictedArchiveEvidence({
+  raw,
+  bodyText,
+  bodyBytes,
+  jsonParsed,
+  capturedAt,
+  httpStatus,
+  contentType,
+  state,
+}) {
+  if ((bodyText !== null && typeof bodyText !== 'string') || !Buffer.isBuffer(bodyBytes)) return null
+  let parsedPayload = null
+  if (jsonParsed === true && isPostgresSafeJsonValue(raw)) {
+    try {
+      parsedPayload = structuredClone(raw)
+    } catch {
+      // bodyBytes/bodySha256 are the exact source of truth. parsedPayload is a
+      // convenience JSONB projection and may be absent for excessive depth.
+      parsedPayload = null
+    }
+  }
+  return Object.freeze({
+    state,
+    capturedAt: new Date(capturedAt).toISOString(),
+    httpStatus,
+    contentType,
+    bodySize: bodyBytes.byteLength,
+    bodySha256: createHash('sha256').update(bodyBytes).digest('hex'),
+    bodyBytes: Buffer.from(bodyBytes),
+    bodyText: isPostgresSafeText(bodyText) ? bodyText : null,
+    jsonParsed: jsonParsed === true,
+    parsedPayload,
+  })
+}
+
+function securedProviderResult(value, persistence) {
+  Object.defineProperty(value, 'restrictedResponseArchive', {
+    value: persistence?.restrictedResponseArchive || null,
+    enumerable: false,
+  })
+  return Object.freeze(value)
 }
 
 function evidence({ outcome, httpStatus, businessCode = null, billed, errorCode, affectsCircuit = true }) {
@@ -174,6 +342,10 @@ export class TikHubUpstreamError extends Error {
       archiveObjects: { value: Object.freeze([...(persistenceEvidence.archiveObjects || [])]), enumerable: false },
       responseArchive: { value: persistenceEvidence.responseArchive || null, enumerable: false },
       upstreamEvidence: { value: persistenceEvidence.upstreamEvidence || null, enumerable: false },
+      restrictedResponseArchive: {
+        value: persistenceEvidence.restrictedResponseArchive || null,
+        enumerable: false,
+      },
     })
   }
 }
@@ -243,13 +415,27 @@ async function requestTikHubJson(
     if (!response.ok) {
       let raw = null
       let bodySize = null
+      let bodyText = null
+      let bodyBytes = null
+      let jsonParsed = false
       let archiveState = 'provider_rejected'
       try {
         const body = await boundedBody(response, adapter.maxResponseBytes, controller)
         bodySize = body.size
-        try { raw = JSON.parse(body.text) } catch { archiveState = 'provider_rejected_invalid_json' }
+        bodyText = body.text
+        bodyBytes = body.bytes
+        try {
+          raw = parseJsonText(body.text)
+          jsonParsed = true
+        } catch {
+          archiveState = 'provider_rejected_invalid_json'
+        }
       } catch (error) {
         bodySize = error instanceof BodyLimitError ? error.size : null
+        if (error instanceof BodyEncodingError) {
+          bodySize = error.size
+          bodyBytes = error.bodyBytes
+        }
         archiveState = error instanceof BodyLimitError
           ? 'provider_rejected_response_too_large'
           : 'provider_rejected_body_unreadable'
@@ -257,15 +443,23 @@ async function requestTikHubJson(
       throw upstreamError(
         'TikHub rejected the request',
         httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null),
-        archiveEvidence({
-          raw,
-          capturedAt: attemptedAt,
-          httpStatus,
-          contentType,
-          bodySize,
-          state: archiveState,
-          endpointVersion,
-        }),
+        {
+          ...archiveEvidence({
+            raw,
+            providerCredential: resolvedCredential,
+            capturedAt: attemptedAt,
+            httpStatus,
+            contentType,
+            bodySize,
+            bodyBytes,
+            state: archiveState,
+            endpointVersion,
+          }),
+          restrictedResponseArchive: restrictedArchiveEvidence({
+            raw, bodyText, bodyBytes, jsonParsed,
+            capturedAt: attemptedAt, httpStatus, contentType, state: archiveState,
+          }),
+        },
       )
     }
 
@@ -281,31 +475,70 @@ async function requestTikHubJson(
           : error instanceof BodyEncodingError ? 'invalid_upstream_encoding'
             : controller.signal.aborted ? 'upstream_deadline_exceeded' : 'upstream_body_read_failed',
         affectsCircuit: true,
-      })
+      }, error instanceof BodyEncodingError ? {
+        ...archiveEvidence({
+          raw: null,
+          providerCredential: resolvedCredential,
+          capturedAt: attemptedAt,
+          httpStatus,
+          contentType,
+          bodySize: error.size,
+          bodyBytes: error.bodyBytes,
+          state: 'invalid_encoding',
+          endpointVersion,
+        }),
+        restrictedResponseArchive: restrictedArchiveEvidence({
+          raw: null,
+          bodyText: null,
+          bodyBytes: error.bodyBytes,
+          jsonParsed: false,
+          capturedAt: attemptedAt,
+          httpStatus,
+          contentType,
+          state: 'invalid_encoding',
+        }),
+      } : {})
     }
     let raw
-    try { raw = JSON.parse(body.text) } catch {
+    try { raw = parseJsonText(body.text) } catch {
       throw upstreamError('TikHub returned invalid JSON', {
         outcome: 'succeeded_unusable', httpStatus, billed: null,
         errorCode: 'invalid_upstream_json', affectsCircuit: true,
-      }, archiveEvidence({
-        raw: null,
-        capturedAt: attemptedAt,
+      }, {
+        ...archiveEvidence({
+          raw: null,
+          providerCredential: resolvedCredential,
+          capturedAt: attemptedAt,
+          httpStatus,
+          contentType,
+          bodySize: body.size,
+          bodyBytes: body.bytes,
+          state: 'invalid_json',
+          endpointVersion,
+        }),
+        restrictedResponseArchive: restrictedArchiveEvidence({
+          raw: null, bodyText: body.text, bodyBytes: body.bytes, jsonParsed: false,
+          capturedAt: attemptedAt,
+          httpStatus, contentType, state: 'invalid_json',
+        }),
+      })
+    }
+    const persisted = (state, at = attemptedAt) => ({
+      ...archiveEvidence({
+        raw,
+        providerCredential: resolvedCredential,
+        capturedAt: at,
         httpStatus,
         contentType,
         bodySize: body.size,
-        state: 'invalid_json',
+        bodyBytes: body.bytes,
+        state,
         endpointVersion,
-      }))
-    }
-    const persisted = (state, at = attemptedAt) => archiveEvidence({
-      raw,
-      capturedAt: at,
-      httpStatus,
-      contentType,
-      bodySize: body.size,
-      state,
-      endpointVersion,
+      }),
+      restrictedResponseArchive: restrictedArchiveEvidence({
+        raw, bodyText: body.text, bodyBytes: body.bytes, jsonParsed: true,
+        capturedAt: at, httpStatus, contentType, state,
+      }),
     })
     if (!Number.isInteger(raw?.code)) {
       throw upstreamError('TikHub response omitted its business status', {
@@ -338,11 +571,22 @@ async function requestTikHubJson(
         billed: true, errorCode: 'invalid_upstream_content_type', affectsCircuit: true,
       }, persisted('invalid_content_type'))
     }
+    if (!isPostgresSafeJsonValue(raw)) {
+      throw upstreamError('TikHub returned JSON that cannot be represented in PostgreSQL', {
+        outcome: 'succeeded_unusable', httpStatus, businessCode: 200,
+        billed: true, errorCode: 'upstream_payload_unrepresentable', affectsCircuit: true,
+      }, persisted('succeeded_unusable'))
+    }
     return {
       raw,
       httpStatus,
       acceptedAt: capturedAt || new Date(),
       persisted,
+      restrictedResponseArchive: restrictedArchiveEvidence({
+        raw, bodyText: body.text, bodyBytes: body.bytes, jsonParsed: true,
+        capturedAt: capturedAt || attemptedAt,
+        httpStatus, contentType, state: 'accepted',
+      }),
     }
   } finally {
     clearTimeout(timer)
@@ -389,6 +633,47 @@ export class TikHubAdapter {
     return credential(dynamic) || this.#fallbackCredential
   }
 
+  async getXiaohongshuAppV2(endpointKey, query, {
+    capturedAt = null,
+    credential: suppliedCredential,
+  } = {}) {
+    const endpoint = OFFICIAL_APP_V2_ENDPOINTS[endpointKey]
+    if (!endpoint) throw new TypeError('endpointKey is not an approved Xiaohongshu App V2 endpoint')
+    if (!query || typeof query !== 'object' || Array.isArray(query)) {
+      throw new TypeError('query must be an object')
+    }
+    const allowed = new Set(endpoint.fields)
+    const normalizedQuery = {}
+    for (const [key, value] of Object.entries(query)) {
+      if (!allowed.has(key)) throw new TypeError(`${key} is not allowed for this endpoint`)
+      if (typeof value !== 'string' || !value || value.length > 8_192) {
+        throw new TypeError(`${key} must be a non-empty string of at most 8192 characters`)
+      }
+      normalizedQuery[key] = value
+    }
+    const resolvedCredential = suppliedCredential === undefined
+      ? await this.resolveCredential()
+      : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const exchange = await requestTikHubJson(
+      this,
+      endpoint.path,
+      normalizedQuery,
+      resolvedCredential,
+      capturedAt,
+      endpoint.version,
+    )
+    const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+    return securedProviderResult({
+      payload: providerCredentialSafePayload(exchange.raw, resolvedCredential),
+      archiveObjects: persistence.archiveObjects,
+      responseArchive: persistence.responseArchive,
+      upstreamEvidence: persistence.upstreamEvidence,
+      endpointKey,
+      capturedAt: exchange.acceptedAt,
+    }, persistence)
+  }
+
   async searchXiaohongshuNotes(input, {
     capturedAt = null,
     credential: suppliedCredential,
@@ -413,6 +698,7 @@ export class TikHubAdapter {
       const normalized = normalizeTikHubXiaohongshuSearchResponse(exchange.raw, dispatch.request, {
         encodeCursor,
         capturedAt: exchange.acceptedAt,
+        providerCredential: resolvedCredential,
       })
       const persistence = exchange.persisted('accepted', exchange.acceptedAt)
       const records = normalized.items.map((item, index) => createTikHubXiaohongshuSearchRecord(item, {
@@ -434,7 +720,7 @@ export class TikHubAdapter {
           rawPayload: record.rawItem,
         })
       }
-      return Object.freeze({
+      return securedProviderResult({
         request: dispatch.request,
         payload: normalized.publicBody,
         publicBody: normalized.publicBody,
@@ -445,12 +731,202 @@ export class TikHubAdapter {
         responseArchive: persistence.responseArchive,
         upstreamEvidence: persistence.upstreamEvidence,
         endpointKey: TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY,
-      })
+      }, persistence)
     } catch (error) {
       if (error instanceof TikHubUpstreamError) throw error
       throw upstreamError('TikHub response did not match the verified search contract', {
         outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,
         billed: true, errorCode: error?.code || 'invalid_upstream_contract', affectsCircuit: true,
+      }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
+    }
+  }
+
+  async searchXiaohongshuUsers(username, {
+    capturedAt = null,
+    credential: suppliedCredential,
+  } = {}) {
+    const normalizedUsername = typeof username === 'string' ? username.trim().replace(/^@+/u, '') : ''
+    if (!normalizedUsername || normalizedUsername.length > 2_048) {
+      throw new TypeError('username must be a non-empty string of at most 2048 characters')
+    }
+    const resolvedCredential = suppliedCredential === undefined
+      ? await this.resolveCredential()
+      : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const exchange = await requestTikHubJson(
+      this,
+      TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_PATH,
+      { keyword: normalizedUsername, page: '1' },
+      resolvedCredential,
+      capturedAt,
+      TIKHUB_XIAOHONGSHU_USER_ENDPOINT_VERSION,
+    )
+    try {
+      const user = normalizeTikHubXiaohongshuSearchUsersResponse(exchange.raw, normalizedUsername, {
+        providerCredential: resolvedCredential,
+      })
+      const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+      return securedProviderResult({
+        user,
+        archiveObjects: persistence.archiveObjects,
+        responseArchive: persistence.responseArchive,
+        upstreamEvidence: persistence.upstreamEvidence,
+        endpointKey: TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_KEY,
+        capturedAt: exchange.acceptedAt,
+      }, persistence)
+    } catch (error) {
+      if (error instanceof TikHubUpstreamError) throw error
+      throw upstreamError('TikHub response did not match the verified search-users contract', {
+        outcome: 'succeeded_unusable',
+        httpStatus: exchange.httpStatus,
+        businessCode: 200,
+        billed: true,
+        errorCode: error?.code || 'invalid_upstream_contract',
+        affectsCircuit: error?.code !== 'upstream_user_unavailable',
+      }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
+    }
+  }
+
+  async getXiaohongshuUserInfo(input, {
+    capturedAt = null,
+    credential: suppliedCredential,
+  } = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new TypeError('Xiaohongshu user info input must be an object')
+    }
+    const keys = Object.keys(input)
+    const userId = typeof input.user_id === 'string' ? input.user_id.trim() : ''
+    const shareText = typeof input.share_text === 'string' ? input.share_text.trim() : ''
+    if (keys.some((key) => !['user_id', 'share_text'].includes(key)) || (!userId && !shareText)) {
+      throw new TypeError('user_id or share_text is required')
+    }
+    const query = userId ? { user_id: userId } : { share_text: shareText }
+    const resolvedCredential = suppliedCredential === undefined
+      ? await this.resolveCredential()
+      : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const exchange = await requestTikHubJson(
+      this,
+      TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_PATH,
+      query,
+      resolvedCredential,
+      capturedAt,
+      TIKHUB_XIAOHONGSHU_USER_ENDPOINT_VERSION,
+    )
+    try {
+      const profile = normalizeTikHubXiaohongshuUserInfoResponse(exchange.raw, {
+        expectedUserId: userId || null,
+        capturedAt: exchange.acceptedAt,
+        providerCredential: resolvedCredential,
+      })
+      const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+      const profileHash = sha256Json(profile)
+      persistence.archiveObjects.push({
+        kind: 'item',
+        marketplace: XIAOHONGSHU_PLATFORM,
+        endpointVersion: TIKHUB_XIAOHONGSHU_USER_ENDPOINT_VERSION,
+        capturedDate: new Date(exchange.acceptedAt).toISOString().slice(0, 10),
+        archivePath: `external/tikhub/xiaohongshu/${new Date(exchange.acceptedAt).toISOString().slice(0, 10)}/profiles/${profileHash}.json`,
+        envelopePointer: '$.data',
+        sourceKey: profile.user_id,
+        payloadSha256: profileHash,
+        rawPayload: profile,
+      })
+      return securedProviderResult({
+        profile,
+        archiveObjects: persistence.archiveObjects,
+        responseArchive: persistence.responseArchive,
+        upstreamEvidence: persistence.upstreamEvidence,
+        endpointKey: TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_KEY,
+        capturedAt: exchange.acceptedAt,
+      }, persistence)
+    } catch (error) {
+      if (error instanceof TikHubUpstreamError) throw error
+      throw upstreamError('TikHub response did not match the verified user-info contract', {
+        outcome: 'succeeded_unusable',
+        httpStatus: exchange.httpStatus,
+        businessCode: 200,
+        billed: true,
+        errorCode: error?.code || 'invalid_upstream_contract',
+        affectsCircuit: true,
+      }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
+    }
+  }
+
+  async getXiaohongshuUserPostedNotes(input, request, {
+    capturedAt = null,
+    credential: suppliedCredential,
+    encodeCursor,
+  } = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new TypeError('Xiaohongshu user posts input must be an object')
+    }
+    const keys = Object.keys(input)
+    const userId = typeof input.user_id === 'string' ? input.user_id.trim() : ''
+    const shareText = typeof input.share_text === 'string' ? input.share_text.trim() : ''
+    const cursor = typeof input.cursor === 'string' ? input.cursor.trim() : ''
+    if (
+      keys.some((key) => !['user_id', 'share_text', 'cursor'].includes(key))
+      || (!userId && !shareText)
+      || (input.cursor != null && !cursor)
+    ) throw new TypeError('user_id or share_text and an optional non-empty cursor are required')
+    const query = {
+      ...(userId ? { user_id: userId } : { share_text: shareText }),
+      ...(cursor ? { cursor } : {}),
+    }
+    const resolvedCredential = suppliedCredential === undefined
+      ? await this.resolveCredential()
+      : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const exchange = await requestTikHubJson(
+      this,
+      TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_PATH,
+      query,
+      resolvedCredential,
+      capturedAt,
+      TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_VERSION,
+    )
+    try {
+      const posts = normalizeTikHubXiaohongshuUserPostsResponse(exchange.raw, request, {
+        capturedAt: exchange.acceptedAt,
+        encodeCursor,
+        resolvedUserId: userId || request?.resolvedUserId,
+        providerCredential: resolvedCredential,
+      })
+      const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+      for (const [index, item] of posts.items.entries()) {
+        const itemHash = sha256Json(item)
+        persistence.archiveObjects.push({
+          kind: 'item',
+          marketplace: XIAOHONGSHU_PLATFORM,
+          endpointVersion: TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_VERSION,
+          capturedDate: new Date(exchange.acceptedAt).toISOString().slice(0, 10),
+          archivePath: `external/tikhub/xiaohongshu/${new Date(exchange.acceptedAt).toISOString().slice(0, 10)}/user-posts/${itemHash}.json`,
+          envelopePointer: `$.data.data.notes[${index}]`,
+          sourceKey: item.externalId,
+          payloadSha256: itemHash,
+          rawPayload: item,
+        })
+      }
+      return securedProviderResult({
+        posts,
+        archiveObjects: persistence.archiveObjects,
+        responseArchive: persistence.responseArchive,
+        upstreamEvidence: persistence.upstreamEvidence,
+        endpointKey: TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_KEY,
+        capturedAt: exchange.acceptedAt,
+      }, persistence)
+    } catch (error) {
+      if (error instanceof TikHubUpstreamError) throw error
+      const code = error instanceof TikHubXiaohongshuUserPostsContractError
+        ? error.code : 'invalid_upstream_contract'
+      throw upstreamError('TikHub response did not match the verified user-posts contract', {
+        outcome: 'succeeded_unusable',
+        httpStatus: exchange.httpStatus,
+        businessCode: 200,
+        billed: true,
+        errorCode: code,
+        affectsCircuit: true,
       }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
     }
   }
@@ -494,17 +970,27 @@ export class TikHubAdapter {
       if (!response.ok) {
         let raw = null
         let bodySize = null
+        let bodyText = null
+        let bodyBytes = null
+        let jsonParsed = false
         let archiveState = 'provider_rejected'
         try {
           const body = await boundedBody(response, this.maxResponseBytes, controller)
           bodySize = body.size
+          bodyText = body.text
+          bodyBytes = body.bytes
           try {
-            raw = JSON.parse(body.text)
+            raw = parseJsonText(body.text)
+            jsonParsed = true
           } catch {
             archiveState = 'provider_rejected_invalid_json'
           }
         } catch (error) {
           bodySize = error instanceof BodyLimitError ? error.size : null
+          if (error instanceof BodyEncodingError) {
+            bodySize = error.size
+            bodyBytes = error.bodyBytes
+          }
           archiveState = error instanceof BodyLimitError
             ? 'provider_rejected_response_too_large'
             : 'provider_rejected_body_unreadable'
@@ -512,14 +998,22 @@ export class TikHubAdapter {
         throw upstreamError(
           'TikHub rejected the request',
           httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null),
-          archiveEvidence({
-            raw,
-            capturedAt: attemptedAt,
-            httpStatus,
-            contentType,
-            bodySize,
-            state: archiveState,
-          }),
+          {
+            ...archiveEvidence({
+              raw,
+              providerCredential: resolvedCredential,
+              capturedAt: attemptedAt,
+              httpStatus,
+              contentType,
+              bodySize,
+              bodyBytes,
+              state: archiveState,
+            }),
+            restrictedResponseArchive: restrictedArchiveEvidence({
+              raw, bodyText, bodyBytes, jsonParsed,
+              capturedAt: attemptedAt, httpStatus, contentType, state: archiveState,
+            }),
+          },
         )
       }
 
@@ -535,21 +1029,57 @@ export class TikHubAdapter {
             : error instanceof BodyEncodingError ? 'invalid_upstream_encoding'
               : controller.signal.aborted ? 'upstream_deadline_exceeded' : 'upstream_body_read_failed',
           affectsCircuit: true,
-        })
+        }, error instanceof BodyEncodingError ? {
+          ...archiveEvidence({
+            raw: null,
+            providerCredential: resolvedCredential,
+            capturedAt: attemptedAt,
+            httpStatus,
+            contentType,
+            bodySize: error.size,
+            bodyBytes: error.bodyBytes,
+            state: 'invalid_encoding',
+          }),
+          restrictedResponseArchive: restrictedArchiveEvidence({
+            raw: null,
+            bodyText: null,
+            bodyBytes: error.bodyBytes,
+            jsonParsed: false,
+            capturedAt: attemptedAt,
+            httpStatus,
+            contentType,
+            state: 'invalid_encoding',
+          }),
+        } : {})
       }
       let raw
-      try { raw = JSON.parse(body.text) } catch {
+      try { raw = parseJsonText(body.text) } catch {
         throw upstreamError('TikHub returned invalid JSON', {
           outcome: 'succeeded_unusable', httpStatus, billed: null,
           errorCode: 'invalid_upstream_json', affectsCircuit: true,
-        }, archiveEvidence({
-          raw: null, capturedAt: attemptedAt, httpStatus, contentType,
-          bodySize: body.size, state: 'invalid_json',
-        }))
+        }, {
+          ...archiveEvidence({
+            raw: null, providerCredential: resolvedCredential,
+            capturedAt: attemptedAt, httpStatus, contentType,
+            bodySize: body.size, bodyBytes: body.bytes, state: 'invalid_json',
+          }),
+          restrictedResponseArchive: restrictedArchiveEvidence({
+            raw: null, bodyText: body.text, bodyBytes: body.bytes, jsonParsed: false,
+            capturedAt: attemptedAt,
+            httpStatus, contentType, state: 'invalid_json',
+          }),
+        })
       }
-      const persisted = (state, at = attemptedAt) => archiveEvidence({
-        raw, capturedAt: at, httpStatus, contentType,
-        bodySize: body.size, state,
+      const persisted = (state, at = attemptedAt) => ({
+        ...archiveEvidence({
+          raw, providerCredential: resolvedCredential,
+          capturedAt: at, httpStatus, contentType,
+          bodySize: body.size, bodyBytes: body.bytes, state,
+        }),
+        restrictedResponseArchive: restrictedArchiveEvidence({
+          raw, bodyText: body.text, bodyBytes: body.bytes, jsonParsed: true,
+          capturedAt: at, httpStatus, contentType, state,
+        }),
       })
       if (!Number.isInteger(raw?.code)) {
         // A successful HTTP exchange without TikHub's numeric business code is
@@ -593,10 +1123,19 @@ export class TikHubAdapter {
           affectsCircuit: true,
         }, persisted('invalid_content_type'))
       }
+      if (!isPostgresSafeJsonValue(raw)) {
+        throw upstreamError('TikHub returned JSON that cannot be represented in PostgreSQL', {
+          outcome: 'succeeded_unusable', httpStatus, businessCode: 200,
+          billed: true, errorCode: 'upstream_payload_unrepresentable', affectsCircuit: true,
+        }, persisted('succeeded_unusable'))
+      }
 
       const acceptedAt = capturedAt || new Date()
       try {
-        const normalized = normalizeTikHubXiaohongshuNoteResult(raw, { capturedAt: acceptedAt })
+        const normalized = normalizeTikHubXiaohongshuNoteResult(raw, {
+          capturedAt: acceptedAt,
+          providerCredential: resolvedCredential,
+        })
         const item = normalized?.item
         if (!item) {
           if (!isTikHubXiaohongshuUnavailable(raw)) {
@@ -625,12 +1164,7 @@ export class TikHubAdapter {
           meta: { capturedAt: new Date(acceptedAt).toISOString() },
         }
         const persistence = persisted('accepted', acceptedAt)
-        const record = createTikHubXiaohongshuRecord(item, {
-          safetyLimited: normalized.safetyLimited,
-        })
-        // A signed media locator is retained only in the access-controlled
-        // delivery snapshot used by the relay. Generic archive/canonical rows
-        // must remain stable and secret-free across CDN signature rotations.
+        const record = createTikHubXiaohongshuRecord(item)
         const archivedItem = record.rawItem
         const itemHash = sha256Json(archivedItem)
         persistence.archiveObjects.push({
@@ -644,7 +1178,7 @@ export class TikHubAdapter {
           payloadSha256: itemHash,
           rawPayload: archivedItem,
         })
-        return Object.freeze({
+        return securedProviderResult({
           request,
           publicBody,
           records: [record],
@@ -652,8 +1186,7 @@ export class TikHubAdapter {
           responseArchive: persistence.responseArchive,
           upstreamEvidence: persistence.upstreamEvidence,
           endpointKey: TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
-          safetyLimited: normalized.safetyLimited,
-        })
+        }, persistence)
       } catch (error) {
         if (error instanceof TikHubUpstreamError) throw error
         throw upstreamError('TikHub response did not match the verified note contract', {

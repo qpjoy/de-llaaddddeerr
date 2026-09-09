@@ -6,10 +6,8 @@ import {
 } from './tikhub-xiaohongshu-search.mjs'
 
 const PLATFORM = 'xiaohongshu'
-const MAX_BODY_CODE_POINTS = 50_000
 const NOTE_ID_PATTERN = /^[0-9a-f]{24}$/iu
 const DETAIL_REQUIRED_WARNING = 'xiaohongshu_detail_required'
-const SAFETY_LIMIT_WARNING = 'text_safety_limit_applied'
 
 export class TikHubXiaohongshuSearchProjectionError extends Error {
   constructor(code, message) {
@@ -50,7 +48,7 @@ function publicBodyOf(value) {
 }
 
 function stableHttpsUrl(value) {
-  if (typeof value !== 'string' || !value || value.length > 2_048) return null
+  if (typeof value !== 'string' || !value) return null
   try {
     const url = new URL(value)
     const hostname = url.hostname.toLowerCase()
@@ -67,8 +65,6 @@ function stableHttpsUrl(value) {
       || hostname.endsWith('.svc')
     ) return null
     url.hostname = hostname
-    url.search = ''
-    url.hash = ''
     return url.toString()
   } catch {
     return null
@@ -83,22 +79,9 @@ function uniqueUrls(values) {
 
 function boundedBody(value) {
   if (typeof value !== 'string') {
-    return { text: null, safetyLimited: false }
+    return { text: null }
   }
-  const points = []
-  let safetyLimited = false
-  for (const point of value) {
-    if (points.length === MAX_BODY_CODE_POINTS) {
-      safetyLimited = true
-      break
-    }
-    const codePoint = point.codePointAt(0)
-    points.push(codePoint >= 0xD800 && codePoint <= 0xDFFF ? '\uFFFD' : point)
-  }
-  return {
-    text: points.join(''),
-    safetyLimited,
-  }
+  return { text: value }
 }
 
 function detailItemOf(result) {
@@ -115,10 +98,7 @@ function detailItemOf(result) {
   ) {
     invalid('invalid_detail_result', 'each successful detail result must contain a normalized Xiaohongshu item')
   }
-  return {
-    item,
-    safetyLimited: typeof result?.safetyLimited === 'boolean' ? result.safetyLimited : null,
-  }
+  return { item }
 }
 
 function canonicalSearchItem(item) {
@@ -144,11 +124,10 @@ function canonicalSearchItem(item) {
     metrics: { ...item.metrics },
     media: { coverUrl, images, videos },
     source: { provider: null, endpointId: null },
-    safetyLimited: bounded.safetyLimited,
   }
 }
 
-function detailFields({ item, safetyLimited }) {
+function detailFields({ item }) {
   const bounded = boundedBody(item.text)
   const images = uniqueUrls((Array.isArray(item.media) ? item.media : [])
     .filter((entry) => entry?.type === 'image')
@@ -165,13 +144,6 @@ function detailFields({ item, safetyLimited }) {
       avatarUrl: stableHttpsUrl(item.author?.avatarUrl),
     },
     images,
-    // Fresh adapter results carry an authoritative internal signal. Snapshots
-    // intentionally persist only the public schema, so an exact-limit cached
-    // body is conservatively treated as having reached the safety boundary.
-    safetyLimited: bounded.safetyLimited
-      || safetyLimited === true
-      || (safetyLimited == null
-        && xiaohongshuBodyLengths(bounded.text).codePoints === MAX_BODY_CODE_POINTS),
   }
 }
 
@@ -187,7 +159,7 @@ function mergeLongerDetail(searchItem, detail) {
   const searchLength = xiaohongshuBodyLengths(searchItem.text).codePoints
   const detailLength = xiaohongshuBodyLengths(detail.text).codePoints
   if (!detail.text || detailLength <= searchLength) {
-    return { item: searchItem, detailUsed: false, detailSafetyLimited: false }
+    return { item: searchItem, detailUsed: false }
   }
 
   const images = searchItem.media.images.length > 0
@@ -215,15 +187,12 @@ function mergeLongerDetail(searchItem, detail) {
       },
     },
     detailUsed: true,
-    detailSafetyLimited: detail.safetyLimited,
   }
 }
 
-function initialState(searchResult, item, index, searchSafetyLimited) {
+function initialState(searchResult, item, index) {
   const supplied = Array.isArray(searchResult?.bodyStates) ? searchResult.bodyStates[index] : null
   return {
-    safetyLimited: searchSafetyLimited || supplied?.safetyLimited === true
-      || supplied?.completeness === 'safety_limited',
     detailRequired: supplied?.detailRequired === true || needsXiaohongshuDetail(item.text),
   }
 }
@@ -273,7 +242,7 @@ export function projectTikHubXiaohongshuSearch(searchResult, {
   const bodyCompleteness = []
   for (const [index, sourceItem] of sourceData.items.entries()) {
     const canonical = canonicalSearchItem(sourceItem)
-    const state = initialState(searchResult, sourceItem, index, canonical.safetyLimited)
+    const state = initialState(searchResult, sourceItem, index)
     const detail = typeof canonical.externalId === 'string'
       ? detailByExternalId.get(canonical.externalId.toLowerCase())
       : null
@@ -281,17 +250,14 @@ export function projectTikHubXiaohongshuSearch(searchResult, {
     const merged = detail ? mergeLongerDetail(canonical, detail) : {
       item: canonical,
       detailUsed: false,
-      detailSafetyLimited: false,
     }
     if (merged.detailUsed) enrichedCount += 1
 
-    const finalSafetyLimited = state.safetyLimited || merged.detailSafetyLimited
     const unresolvedPreview = state.detailRequired && !merged.detailUsed
-    const completeness = finalSafetyLimited
-      ? 'safety_limited'
-      : merged.detailUsed ? 'detail_enriched'
-        : unresolvedPreview ? 'provider_preview' : 'unverified_complete'
-    const { safetyLimited: _safetyLimited, ...item } = merged.item
+    const completeness = merged.detailUsed
+      ? 'detail_enriched'
+      : unresolvedPreview ? 'provider_preview' : 'unverified_complete'
+    const item = merged.item
     items.push(item)
     bodyCompleteness.push({
       externalId: item.externalId,
@@ -304,10 +270,8 @@ export function projectTikHubXiaohongshuSearch(searchResult, {
 
   const unresolvedCount = bodyCompleteness
     .filter((state) => state.completeness === 'provider_preview').length
-  const safetyLimitedCount = bodyCompleteness
-    .filter((state) => state.completeness === 'safety_limited').length
   const warnings = sourceData.warnings
-    .filter((entry) => ![DETAIL_REQUIRED_WARNING, SAFETY_LIMIT_WARNING].includes(entry.code))
+    .filter((entry) => entry.code !== DETAIL_REQUIRED_WARNING)
     .map((entry) => ({ ...entry }))
   if (unresolvedCount > 0) warnings.push(warning(
     'xiaohongshu_detail_incomplete',
@@ -316,10 +280,6 @@ export function projectTikHubXiaohongshuSearch(searchResult, {
   if (detailFailureCount > 0) warnings.push(warning(
     'xiaohongshu_detail_unavailable',
     `${detailFailureCount} note detail candidates were not expanded within the bounded budget or available evidence`,
-  ))
-  if (safetyLimitedCount > 0) warnings.push(warning(
-    SAFETY_LIMIT_WARNING,
-    `${safetyLimitedCount} note bodies reached the 50000-code-point safety limit`,
   ))
 
   const status = sourceData.status === 'failed'
@@ -434,14 +394,12 @@ function completenessSummary(items, states) {
   const summary = {
     detailEnriched: 0,
     providerPreview: 0,
-    safetyLimited: 0,
     unverifiedComplete: 0,
   }
   for (const item of items) {
     const state = states.get(item.externalId)?.completeness || 'unverified_complete'
     if (state === 'detail_enriched') summary.detailEnriched += 1
     else if (state === 'provider_preview') summary.providerPreview += 1
-    else if (state === 'safety_limited') summary.safetyLimited += 1
     else summary.unverifiedComplete += 1
   }
   return summary

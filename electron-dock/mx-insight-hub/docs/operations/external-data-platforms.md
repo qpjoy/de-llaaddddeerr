@@ -1,7 +1,8 @@
 # External data platform gateway operations
 
 Status: JustOne ecommerce product search and direct TikHub Xiaohongshu note acquisition implemented;
-direct TikHub search/raw routing is a staged migration and is not proved active by repository presence.
+direct TikHub search/raw and narrow single-user crawl/user-info routing are staged migrations and are not
+proved active by repository presence.
 PostgreSQL is required for durable analytics, archive, snapshot, quota and canonical lineage.
 
 Related decision: [ADR-0013](../adr/0013-external-data-platform-gateway.md).
@@ -18,17 +19,26 @@ procurement cost, separately from scheduled cleaning jobs. Public callers use on
 - `POST /api/v1/data/ecommerce/products/search` with the `ecommerce` platform entitlement;
 - `POST /api/v1/xiaohongshu/app/get_note_info` with a JSON note link, plus both the `xiaohongshu` platform
   entitlement and `social.posts.resolve` capability entitlement. Hub also retains GET `share_text`/`note_id`
-  and the provider-neutral `POST /api/v1/data/post`; all three share one canonical operation, note identity,
+  at both `/api/v1/xiaohongshu/app/get_note_info` and the official-shaped
+  `/api/v1/xiaohongshu/app_v2/get_image_note_detail`, plus the provider-neutral `POST /api/v1/data/post`;
+  all four share one canonical operation, note identity,
   snapshots and external-dispatch suppression rather than being purchased or metered independently. Exact
   idempotency additionally binds the delivery mode;
 - `POST /api/v1/data/search` for an eligible Xiaohongshu page, with the `xiaohongshu` platform entitlement;
 - the eligible Xiaohongshu subset of `POST /api/v1/night-all/search/raw`, projected back into the existing
-  compatibility envelope so callers do not select or learn a physical provider.
+  compatibility envelope so callers do not select or learn a physical provider;
+- the separately gated eligible Xiaohongshu subsets of `POST /api/v1/night-all/search/crawl` and
+  `/api/v1/night-all/search/user-info`: crawl is one user, posts-only, page size 20 and concurrency 1;
+  user-info is one supported user identifier on page 1 with no continuation/custom params/concurrency. The
+  `/api/v1/search/raw|crawl|user-info` spellings remain exact aliases of their `/night-all/search/*`
+  counterparts and use the same paid-operation fingerprint.
 
 The current topology has one provider per released operation: JustOne for ecommerce search and TikHub for
-Xiaohongshu note detail. TikHub-backed Xiaohongshu search/raw is implemented behind its narrower rollout gate;
-until that gate is enabled it is staged rather than a released traffic claim. There is no multi-provider runtime
-router or automatic supplier failover.
+Xiaohongshu note detail. TikHub-backed Xiaohongshu search/raw and user activity are implemented behind separate
+rollout gates; until the relevant gate is enabled they are staged rather than a released traffic claim.
+Historical `mxnc1` traversals, batches/multiple identities, channel/non-post shapes, non-20 crawl pages and
+other unsupported compatibility forms remain on Night-All. There is no multi-provider runtime router or
+automatic supplier failover.
 “Provider-neutral” describes the Public Hub contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot
 delivery modes, not evidence that another provider was called. Provider candidates shown in a catalog remain
 planning evidence until released.
@@ -56,9 +66,8 @@ cost requires an explicit operator decision.
 
 ## 2. Activation checklist
 
-1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql`,
-   `052_external_platform_credentials.sql`, `053_external_platform_uncertain_retry.sql` and
-   `054_api_key_entitlements_plans_and_tikhub.sql` are applied. Install
+1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql` through
+   `059_external_platform_credential_privileges.sql` are applied. Install
    `scripts/api-key-quota-indexes.sql` through the documented concurrent-index phase after migration 054.
    Do not create or patch the `external_platform` tables by hand.
    Before enabling direct Xiaohongshu search or bounded detail enrichment, also verify
@@ -67,7 +76,10 @@ cost requires an explicit operator decision.
    use the reviewed online preparation below before running the normal migration; migration 055 deliberately
    fails closed when the required concurrent indexes are absent or invalid on a large table.
 2. Use PostgreSQL storage (`MX_INSIGHT_STORE=postgres` with `DATABASE_URL`). Memory mode is acceptable only
-   for contract tests; it cannot be accepted as durable archive/lineage evidence.
+   for contract tests. A Public or combined runtime refuses to start when any valid paid-provider contract is
+   active with memory storage, because restart/replica-local cost holds, dispatch leases and idempotency cannot
+   be accepted as durable archive, billing or lineage evidence. The secretless Admin-only listener remains
+   available for login and configuration repair.
    When bootstrap explicitly includes `xiaohongshu`, keep
    `MX_INSIGHT_BOOTSTRAP_PLAN_KEY=launch-1m` (the default). Provisioning resolves that key to the current
    active published version and CAS-reconciles an existing consumer before any API key is minted. Reusing a
@@ -88,8 +100,11 @@ cost requires an explicit operator decision.
    Re-entering the key in the UI deliberately migrates authority to the shared Hub credential store, which
    lets split public listeners resolve rotations on the next dispatch without a restart.
 5. Treat PostgreSQL, WAL, logical dumps and restored copies as secret-bearing after UI-managed credentials
-   are enabled. The key is isolated from routinely queried analytics tables, never belongs in source catalog
-   notes, billing JSON, logs, curl files or browser storage, and is never returned by overview/detail APIs.
+   are enabled. Migration 059 revokes `PUBLIC` access to the credential/settings tables, but this is not
+   column-level encryption and the shared database owner remains able to read them. Require deployment-level
+   volume/backup/WAL/replica encryption and audited database access. The key is isolated from routinely queried
+   analytics tables, never belongs in source catalog notes, billing JSON, logs, curl files or browser storage,
+   and is never returned by overview/detail APIs.
 6. Review the bounded defaults before rollout:
 
    | Setting | Default | Purpose |
@@ -109,21 +124,30 @@ cost requires an explicit operator decision.
    its entitlement snapshot is immutable and a later consumer grant does not widen it. Consumer revocation or
    plan reduction still narrows effective access immediately. Keys migrated as `legacy_dynamic` retain only
    bounded compatibility behavior and should be replaced deliberately, not treated as the model for new keys.
-8. Leave `MX_INSIGHT_JUSTONE_BILLING_JSON` absent until a price book is reviewed. Current configuration
-   accepts only `source=manual`; price records require a three-letter currency and `pricingAsOf`. A missing
-   price, balance or free quota must remain null/unknown, not zero.
+8. Keep the contract gate at `0` until `MX_INSIGHT_JUSTONE_BILLING_JSON` is reviewed. Activation accepts only
+   `source=manual` and requires a three-letter currency, `pricingAsOf`, a positive endpoint gross cost,
+   `monthlyBudgetMinor`, and `monthlySubsidyBudgetMinor`. A missing price, balance or free quota remains
+   null/unknown, never zero. `monthlySubsidyBudgetMinor=0` is a safe closed default while downstream pricing
+   is unset; it does not claim that acquisition is free.
 9. Start with one approved marketplace/query and one page. Verify public delivery, provider-call evidence,
    archive objects and the linked canonical ingest before widening grants or concurrency.
 
 On routine Internal deploys, an omitted/blank `MX_INSIGHT_JUSTONE_TOKEN` and an
-omitted `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` preserve their current Kubernetes
-values. An explicit gate value of `0` disables dispatch. Clearing the retained
+omitted `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` preserve their current Kubernetes values. When the retained gate
+is `1`, an omitted billing JSON also preserves its current Kubernetes value; a lookup failure stops before
+ConfigMap mutation. An explicit gate value of `0` disables dispatch. Clearing the retained
 environment fallback requires the one-shot command prefix
 `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`; never persist that flag in an env file.
 A first deployment still defaults to no environment key and a closed gate. The
 UI-managed database key is retained independently in PostgreSQL and remains the
 preferred credential source. Command-environment values take precedence over
 `.env.internal` for an intentional activation or emergency stop.
+
+Use this rollout order for either paid provider: deploy migrations and code with its contract gate `0`; write
+and preflight the reviewed billing JSON while the gate remains `0`; then change the gate to `1` in a recorded
+canary release. Strict deploy preflight stops before Secret/ConfigMap mutation when an enabled provider lacks
+cost evidence. Runtime parsing remains fail-soft for optional providers: an out-of-band bad provider value
+disables only that provider's dispatch and does not stop Hub Admin, login, stored reads, or workers.
 
 ### Direct TikHub / Xiaohongshu activation
 
@@ -137,33 +161,57 @@ fixtures are independently verified. The search gate cannot be enabled unless th
 HTTP/business success with unusable content is quarantined and must not be retried automatically because the
 upstream call may already have been charged.
 
+Keep `MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=0` until single-identity crawl/user-info projections,
+the posts-only page-size-20 crawl cursor, username resolution and complete multi-call cost reservation have
+passed target-environment fixtures. This gate also requires the parent TikHub gate. Closing it stops new direct
+first pages; an existing direct `mxec2` crawl cursor remains pinned to the Hub-native connector and is never
+reinterpreted as a historical `mxnc1` traversal.
+
+Before any TikHub paid-operation gate is opened, configure reviewed `MX_INSIGHT_TIKHUB_BILLING_JSON` with `source=manual`,
+currency, `pricingAsOf`, a positive gross cost for every enabled TikHub endpoint, a gross monthly procurement
+budget, and an explicit monthly subsidy budget. The repository example records the currently reviewed
+one-US-cent-per-call evidence as an example only; operators must verify the target account and effective date.
+Do not infer a downstream selling price or an exchange rate from that upstream cost. Routine deploys retain the
+existing TikHub billing JSON whenever a retained parent gate is `1` and no replacement is supplied.
+
 Direct search caches are controlled by `MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS` and
 `MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS`. Known 60-character previews are repaired for the full 20-item page by
 default (`MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS=20`) with two detail workers
 (`MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY=2`). The shared RPM bucket and request deadline remain authoritative;
 capacity exhaustion returns explicit partial-completeness metadata instead of labelling a preview as full text.
 
-Prefer the Hub Admin credential UI for a new key. To copy the existing Night-All credential without printing it,
-run the checked migration helper on the Internal host. It reads only
-`crawlerProviders.tikhub.apiKey`, rejects symlinks or group/world-readable configuration, uses optimistic
-credential revision, never logs plaintext and never removes or rewrites the Night-All source file:
+Prefer the Hub Admin credential UI for a new key. To copy the existing Night-All credentials without printing
+them, run the checked migration helper on the Internal host. The combined command reads only
+`crawlerProviders.tikhub.apiKey` and `crawlerProviders.justOne.apiKey`. It opens the source without following a
+symlink, verifies that the file is a private regular file owned by the current operating-system user, uses an
+optimistic credential revision for each provider, never logs plaintext and never removes or rewrites the
+Night-All source file:
 
 ```bash
 cd electron-dock/mx-insight-hub
 export NIGHT_ALL_CONFIG_PATH='/Users/qpjoy/workspace/mingxi/Night-All/config.json'
+chmod 600 "$NIGHT_ALL_CONFIG_PATH"
 export MX_INSIGHT_ADMIN_BASE_URL='http://127.0.0.1:18151'
 read -rsp 'Hub Admin Token: ' MX_INSIGHT_ADMIN_TOKEN
 printf '\n'
 export MX_INSIGHT_ADMIN_TOKEN
 
-MX_INSIGHT_TIKHUB_MIGRATION_DRY_RUN=1 npm run migrate:tikhub-credential
-npm run migrate:tikhub-credential
+MX_INSIGHT_EXTERNAL_CREDENTIAL_MIGRATION_DRY_RUN=1 npm run migrate:external-platform-credentials
+npm run migrate:external-platform-credentials
 
-unset MX_INSIGHT_ADMIN_TOKEN NIGHT_ALL_CONFIG_PATH MX_INSIGHT_ADMIN_BASE_URL
+unset MX_INSIGHT_ADMIN_TOKEN NIGHT_ALL_CONFIG_PATH MX_INSIGHT_ADMIN_BASE_URL \
+  MX_INSIGHT_EXTERNAL_CREDENTIAL_MIGRATION_DRY_RUN
 ```
 
-Dry-run validates the source and target revision but performs no write. After the real migration, inspect only
-safe credential metadata. Deploy migration 055 and the new Hub data plane with the search gate still `0`; only
+Dry-run validates both source keys and both target revisions before any write. Successful output contains only
+the provider, migration status, an eight-hex-character SHA-256 fingerprint tail, source and revision; use the
+fingerprint tail only as an operator comparison hint. The two Admin writes use independent optimistic revisions,
+so they are not a cross-provider database transaction. If the second write fails, inspect safe Admin metadata and
+rerun deliberately; never use the credential reveal endpoint as part of migration automation.
+
+The existing `npm run migrate:tikhub-credential` command remains available for a TikHub-only migration and still
+honours `MX_INSIGHT_TIKHUB_MIGRATION_DRY_RUN=1`. After the real migration, inspect only safe credential metadata.
+Deploy migration 055 and the new Hub data plane with the search gate still `0`; only
 after every Public replica is compatible should a recorded canary set both the reviewed parent gate and the
 search gate to `1`. A Live key needs an immutable `xiaohongshu` platform entitlement for direct search; the
 separate explicit note-detail API additionally requires `social.posts.resolve`. Never delete the Night-All
@@ -533,6 +581,31 @@ count may be zero. `payload_sha256` is content evidence, while `(provider_call_i
 per-call uniqueness boundary. Do not infer missing data from a zero item count without inspecting the
 response contract state and call outcome.
 
+`external_platform.response_archives` and `external_platform.archive_objects` remain secret-free operational
+evidence. The exact bounded UTF-8 provider body is stored separately in
+`control.external_platform_restricted_raw_responses`; it preserves all business and pagination fields without
+field-name or string rewriting. Query that table only from an approved restricted database session, never copy
+its `body_text` or `parsed_payload` into tickets/chat, and never expose it through Public, tenant, ordinary
+Admin, UI, logs or Elasticsearch. Request URLs and request Authorization/Cookie/credential material are not
+stored in that table. `body_bytes` and `body_sha256` are authoritative. The convenience `body_text` or
+`parsed_payload` may be null without losing the exact body. Hub rejects U+0000 and lone UTF-16 surrogates from
+the JSONB convenience projection; a valid surrogate pair remains supported. It also rejects non-finite
+JavaScript numbers (including a JSON `1e400` parsed as `Infinity`) and negative zero because Node JSON
+serialization would silently rewrite them to `null` or `0`. The representability check walks nested
+plain arrays/objects iteratively, rejects sparse/accessor/`toJSON` shapes that would be rewritten, and therefore
+does not introduce a JavaScript recursion limit. A pathologically deep value may still exceed a downstream
+optional clone/driver projection boundary; in that case `parsed_payload`
+stays null while the stable operational hash and restricted exact bytes remain available. `body_text` may still
+be retained when the unsafe value appeared as an ASCII JSON escape; `body_bytes` and `body_sha256` remain
+authoritative in every case. A successful provider envelope outside this optional projection boundary is
+settled as unusable rather than silently filtering or rewriting its business value.
+
+“Secret-free” here does not mean business-data desensitization. Hub does not filter, mask or truncate acquired
+content, tags, engagement, author or media fields. It protects request credentials and prevents them from
+entering responses, ordinary archives, UI and logs. Historical Night-All compatibility lineage retains the
+complete parsed JSON payload and legacy raw strings but does not promise byte-for-byte HTTP capture; Hub-native
+provider calls retain the exact bounded response bytes and hash in the restricted table above.
+
 Canonical ingestion for a successful normalized call uses dataset `ecommerce.products.v1`, platform
 `ecommerce`, object type `product`, and identity `{marketplace}:{nativeProductId}`. It queues an ingest job
 bound to the provider call; the database uniqueness fence permits at most one linked ingest run. Expect that
@@ -633,6 +706,42 @@ weighted calculation. An unknown forecast is preferable to telling operators to 
 precision. Cost optimization order is: stop faulty demand, improve exact reuse, keep pagination bounded,
 then evaluate quota plan or recharge.
 
+The runtime enforces two different provider-currency limits before network dispatch:
+
+- `monthlyBudgetMinor` caps gross reviewed procurement estimates for that provider. Every actual call keeps
+  the estimate even if the provider later reports `billed=false` or billing status remains unknown; those
+  states do not rewrite procurement evidence to zero.
+- `monthlySubsidyBudgetMinor` caps the part of that procurement not covered by a same-currency, positive,
+  enforced customer wallet hold or captured charge. Legacy-unbilled, disabled/unpriced, zero-price, shadow,
+  and cross-currency deliveries consume subsidy at the full known upstream cost. Hub performs no implicit FX
+  conversion. A provider budget is therefore not a substitute for a margin/subsidy guard.
+
+For a direct Xiaohongshu search page the worst-case admitted gross cost is
+`search endpoint cost + N × detail endpoint cost`, where `N` is the uncached selected detail count and is at
+most 20. Hub looks up exact detail snapshots first, then atomically holds cost and subsidy for every remaining
+detail before the first enrichment dispatch. Concurrent workflows cannot each spend the same remaining
+headroom; a rejected workflow creates no fake provider-call row. If detail admission is unavailable after a
+paid primary search, Hub returns that primary result with explicit partial-completeness state and performs no
+detail call. Crawl/user-info pagination is different: each Public POST obtains one provider page and owns one
+usage/cost hold; the signed cursor stops after page 15. A username first page reserves its complete three-call
+sequence, while direct-ID and continuation pages reserve their complete two-call sequence before call one.
+
+Customer prices remain operator-entered immutable price-book versions. Do not derive them from upstream cost,
+the subsidy budget, free quota, or a guessed exchange rate. A positive enforced `reserved` charge is counted as
+coverage because migration 056 has already moved the same-currency amount from available funds into an
+immutable wallet hold; `unknown` keeps that hold. If an authorized reconciliation later releases an unknown
+charge after provider cost was incurred, that cost immediately becomes subsidy exposure and later dispatches
+fail closed. The release cannot undo already-paid upstream spend and can put the month over its subsidy cap, so
+the operator must compare the proposed release with remaining subsidy headroom before approving it.
+
+Rows created before cost control may have `cost_kind=unknown` and no amount. Hub never converts those rows to
+zero and never guesses a historical price. To avoid breaking an already-running provider for the rest of the
+month without defensible backfill, they remain outside the guarded cohort; any historical row with a known
+amount is included, and any guarded row that loses its amount fails closed. For the first guarded month,
+configure `monthlyBudgetMinor` as the remaining allowance only after manually reconciling pre-guard spend. If
+that remaining allowance cannot be established, close the provider gate or set the budget/subsidy limit to
+zero until the next UTC month.
+
 ## 8. Incident matrix
 
 | Symptom / code | Meaning | Operator action |
@@ -646,7 +755,10 @@ then evaluate quota plan or recharge.
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
-| `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
+| `external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | A paid endpoint lacks a positive reviewed unit cost, budget/currency evidence, or the guarded ledger is inconsistent. No new paid dispatch is allowed. | Keep the provider gate closed, correct the reviewed billing JSON or reconcile ledger evidence. Never enter zero for an unknown cost. |
+| `external_platform_cost_budget_exhausted` | The provider's concurrency-safe gross monthly procurement limit has no room for the complete admitted call/workflow. | Do not retry with a new key. Reconcile provider evidence and approve a recorded budget change or wait for the next UTC month. |
+| `external_platform_subsidy_budget_exhausted` | Unpriced/legacy/shadow/cross-currency delivery, or released customer coverage, would exceed the explicit subsidy limit. | Publish and assign an operator-approved customer price in the same currency, approve an explicit subsidy change, or keep paid dispatch closed. Do not invent a selling rate or FX conversion. |
+| `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence first; use the restricted exact response only from an approved database session, then add a fixture and review the adapter before any change. |
 | `external_media_source_throttled` | The retained image origin/CDN returned HTTP 429; this is not a Hub consumer quota or relay-concurrency limit. | Do not retry automatically or run another paid data request. Inspect the retained host and origin policy, then wait or serve a durable Hub-owned asset once materialization is enabled. |
 | `external_media_unavailable` | A retained product image reached the media relay, but its upstream host returned a non-200 response or the TLS/transport request failed. | Reuse the committed search request while checking the retained image hostname and CDN response; do not run another paid search. Known legacy Alibaba `g.search[1-3].alicdn.com` names are mapped to their TLS-valid `g-search1-3.alicdn.com` aliases without disabling certificate validation. |
 | `invalid_uncertain_retry` | Retry-of is malformed or is not paired with `refresh`. | Do not hand-edit the UUID. Let the workbench obtain it through the status GET and construct the header. |

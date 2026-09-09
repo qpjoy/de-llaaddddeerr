@@ -28,6 +28,7 @@ const HIGH_COST_PARAMETER = /^(archive|full.?archive|all.?tweets|archive.?limit|
 const WORKLOAD_PARAMETER = /^(count|limit|page.?size|page|page.?number|page.?no|concurrency|include.?details|include.?comments|disable.?auto.?details|comment.?limit|max.?enrich.?items|enrich.?concurrency|cache.?max.?age.?hours)$/iu
 const MAX_MULTI_VALUE_COUNT = 100
 const MAX_UPSTREAM_JOBS_PER_REQUEST = 50
+export const NIGHT_ALL_COMPATIBILITY_MAX_PAGE = 15
 const MAX_IDENTIFIER_LENGTH = 2_048
 const FALLBACK_WINDOWS_MS = {
   raw: 15 * 60 * 1_000,
@@ -188,7 +189,12 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
   const effectivePageSizeLimit = Math.min(maxPageSize, OPERATION_PAGE_SIZE_LIMIT[operation])
   assert(pageSize <= effectivePageSizeLimit, 400, 'page_size_exceeded', `Page size must not exceed ${effectivePageSizeLimit}`)
   if (upstreamBody.page != null) {
-    upstreamBody.page = normalizedInteger(upstreamBody.page, 'page', 1, 1_000)
+    upstreamBody.page = normalizedInteger(
+      upstreamBody.page,
+      'page',
+      1,
+      NIGHT_ALL_COMPATIBILITY_MAX_PAGE,
+    )
   }
   if (upstreamBody.concurrency != null) {
     upstreamBody.concurrency = normalizedInteger(upstreamBody.concurrency, 'concurrency', 1, 20)

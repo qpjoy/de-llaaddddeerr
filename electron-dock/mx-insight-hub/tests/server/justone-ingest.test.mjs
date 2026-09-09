@@ -3,12 +3,14 @@ import { test } from 'node:test'
 import { normalizeJustOneProductSearchRequest } from '../../server/contracts/justone.mjs'
 import { canonicalJson, observationHash, sha256 } from '../../server/ingest/normalizers.mjs'
 import {
+  JUSTONE_DATASET_ID,
   JUSTONE_MARKETPLACE_CATALOG,
   JUSTONE_PARSER_VERSION,
   normalizeJustOneProductSearchPayload,
   prepareJustOneArchiveObjects,
   rehydrateJustOneQueuedRecords,
 } from '../../server/ingest/justone.mjs'
+import { buildContentDocument } from '../../server/search/document.mjs'
 
 function envelope(items, extra = {}) {
   return {
@@ -167,37 +169,111 @@ test('archive capturedDate and directory date are derived in UTC', () => {
   assert.match(archive.archivePath, /\/2026-09-02\/responses\//u)
 })
 
-test('raw evidence is secret-free and its digest verifies the archived object', () => {
+test('canonical, PG-bound and ES projections retain JustOne business fields but not the request credential', async () => {
   const secret = 'top-secret-token'
   const request = normalizeJustOneProductSearchRequest({ marketplace: 'xianyu', query: '相机' })
-  const normalized = normalizeJustOneProductSearchPayload(envelope([{
+  const raw = envelope([{
+    ...product('xy-1'),
+    itemUrl: 'https://example.invalid/items/xy-1?signature=business-signature&search_id=business-search#session_id=business-session',
+    signature: 'business-signature',
+    search_id: 'business-search',
+    session_id: 'business-session',
+    token: secret,
+    provider: 'justone-business-source',
+    billing: { units: 1 },
+    nested: {
+      credential: secret,
+      callback: `https://example.invalid/callback?signature=business-signature&token=${secret}#business-fragment`,
+    },
+  }], {
+    search_id: 'response-business-search',
+    search_session_id: 'response-business-session',
+    signedUrl: 'https://example.invalid/next?signature=response-business-signature#response-fragment',
+    token: secret,
+  })
+  raw.provider = 'justone-response-source'
+  raw.billing = { units: 2 }
+  const normalized = normalizeJustOneProductSearchPayload(raw, request, { secret })
+  const record = normalized.records[0]
+  const serialized = JSON.stringify(record)
+  assert.doesNotMatch(serialized, /top-secret-token/u)
+  assert.equal(record.url, 'https://example.invalid/items/xy-1?signature=business-signature&search_id=business-search#session_id=business-session')
+  assert.equal(record.rawItem.signature, 'business-signature')
+  assert.equal(record.rawItem.search_id, 'business-search')
+  assert.equal(record.rawItem.session_id, 'business-session')
+  assert.equal(record.rawItem.token, '[REDACTED]')
+  assert.equal(record.rawItem.nested.credential, '[REDACTED]')
+  assert.equal(
+    record.rawItem.nested.callback,
+    'https://example.invalid/callback?signature=business-signature&token=[REDACTED]#business-fragment',
+  )
+  // `extensions` is the value passed unchanged to PostgreSQL's canonical row.
+  assert.deepEqual(record.extensions.sourceItem, record.rawItem)
+  assert.equal(record.extensions.sourceItem.provider, 'justone-business-source')
+  assert.deepEqual(record.extensions.sourceItem.billing, { units: 1 })
+  assert.equal(record.extensions.sourceResponse.provider, 'justone-response-source')
+  assert.deepEqual(record.extensions.sourceResponse.billing, { units: 2 })
+  assert.equal(record.extensions.sourceResponse.data.search_id, 'response-business-search')
+  assert.equal(record.extensions.sourceResponse.data.search_session_id, 'response-business-session')
+  assert.deepEqual(record.extensions.sourceResponse.data.items, [])
+  assert.equal(record.extensions.sourceResponse.data.token, '[REDACTED]')
+  assert.equal(
+    record.rawPayloadSha256,
+    sha256(canonicalJson(record.rawItem)),
+  )
+
+  const document = await buildContentDocument({
+    id: 'justone-record-1',
+    dataset_id: JUSTONE_DATASET_ID,
+    schema_version: 'external.v1',
+    current_revision: 1,
+    projection_revision: 1,
+    payload_sha256: record.payloadSha256,
+    platform: record.platform,
+    object_type: record.objectType,
+    external_id: record.externalId,
+    content_type: record.contentType,
+    url: record.url,
+    title: record.title,
+    body: record.body,
+    author_external_id: record.authorExternalId,
+    author_name: record.authorName,
+    event_time: record.eventTime,
+    collected_at: record.collectedAt,
+    country_code: record.countryCode,
+    admin1_code: record.admin1Code,
+    admin2_code: record.admin2Code,
+    stable_fields: record.stableFields,
+    extensions: record.extensions,
+  }, {
+    segmenter: { segment: async (text) => text ? [text] : [] },
+  })
+  assert.equal(document.extensions.sourceItem.signature, 'business-signature')
+  assert.equal(document.extensions.sourceItem.search_id, 'business-search')
+  assert.equal(document.extensions.sourceItem.session_id, 'business-session')
+  assert.equal(document.extensions.sourceItem.provider, 'justone-business-source')
+  assert.deepEqual(document.extensions.sourceItem.billing, { units: 1 })
+  assert.equal(document.extensions.sourceResponse.data.search_id, 'response-business-search')
+  assert.equal(document.extensions.sourceResponse.data.search_session_id, 'response-business-session')
+  assert.match(document.extensions.sourceResponse.data.signedUrl, /#response-fragment$/u)
+  assert.equal(document.extensions.sourceResponse.data.token, '[REDACTED]')
+  assert.match(document.extensions.sourceItem.itemUrl, /signature=business-signature/u)
+  assert.match(document.extensions.sourceItem.itemUrl, /#session_id=business-session$/u)
+  assert.equal(document.extensions.sourceItem.token, '[REDACTED]')
+  assert.doesNotMatch(JSON.stringify(document), /top-secret-token/u)
+
+  const changedBusinessEvidence = normalizeJustOneProductSearchPayload(envelope([{
     ...product('xy-1'),
     token: secret,
-    provider: 'private-provider',
-    endpointId: 'private-endpoint',
+    provider: 'different-business-source',
+    signature: 'different-business-signature',
     nested: {
       credential: secret,
       callback: `https://example.invalid/callback?token=${secret}`,
     },
-  }]), request, { secret })
-  const serialized = JSON.stringify(normalized.records[0].rawItem)
-  assert.doesNotMatch(serialized, /top-secret-token|private-provider|private-endpoint/iu)
-  assert.match(serialized, /REDACTED/u)
-  assert.equal(
-    normalized.records[0].rawPayloadSha256,
-    sha256(canonicalJson(normalized.records[0].rawItem)),
-  )
-  const changedPrivateEvidence = normalizeJustOneProductSearchPayload(envelope([{
-    ...product('xy-1'),
-    token: secret,
-    provider: 'different-private-provider',
-    endpointId: 'another-private-endpoint',
-    nested: {
-      credential: 'another-private-credential',
-      callback: `https://example.invalid/callback?token=${secret}`,
-    },
   }]), request, { secret }).records[0]
-  assert.equal(normalized.records[0].rawPayloadSha256, changedPrivateEvidence.rawPayloadSha256)
+  assert.notEqual(record.rawPayloadSha256, changedBusinessEvidence.rawPayloadSha256)
+  assert.notEqual(record.payloadSha256, changedBusinessEvidence.payloadSha256)
 })
 
 test('content and raw hashes change when the product itself changes', () => {

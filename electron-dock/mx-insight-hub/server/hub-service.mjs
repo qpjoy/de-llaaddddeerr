@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
-import { NIGHT_ALL_LEGACY_OPERATIONS } from './contracts/night-all-legacy.mjs'
+import {
+  buildNightAllLegacySearchCapabilities,
+  NIGHT_ALL_LEGACY_OPERATIONS,
+} from './contracts/night-all-legacy.mjs'
 import { XIAOHONGSHU_POST_OPERATION } from './contracts/tikhub-xiaohongshu.mjs'
 import {
   normalizeBillingProfile,
@@ -129,6 +132,12 @@ import {
   normalizeNightAllCompatibilityRequest,
   staleSnapshotAgeSeconds,
 } from './data/night-all-compat.mjs'
+import {
+  capNightAllCompatibilityTraversal,
+  capNightAllDataSearchTraversal,
+  prepareNightAllCompatibilityTraversal,
+} from './data/night-all-pagination.mjs'
+import { createNightAllCompatibilityCursorCodec } from './external-platforms/cursor.mjs'
 
 const DEFAULT_POLICY = Object.freeze({
   maxRequests: 1_000,
@@ -347,31 +356,6 @@ function compatibilityPublicStatus(error) {
   return 502
 }
 
-function compatibilityOperationState(matrix, operation, platform) {
-  if (
-    matrix?.contractVersion !== 'night-all.legacy-search-capabilities.v1'
-    || !matrix.operations
-    || typeof matrix.operations !== 'object'
-    || Array.isArray(matrix.operations)
-  ) return 'invalid'
-  for (const requiredOperation of NIGHT_ALL_LEGACY_OPERATIONS) {
-    if (matrix.operations[requiredOperation] == null) return 'invalid'
-  }
-  const capability = matrix.operations[operation]
-  if (
-    !capability
-    || typeof capability !== 'object'
-    || !Array.isArray(capability.supportedPlatforms)
-    || !Array.isArray(capability.readyPlatforms)
-    || capability.supportedPlatforms.some((entry) => typeof entry !== 'string')
-    || capability.readyPlatforms.some((entry) => typeof entry !== 'string')
-  ) return 'invalid'
-  const supported = new Set(capability.supportedPlatforms)
-  if (capability.readyPlatforms.some((entry) => !supported.has(entry))) return 'invalid'
-  if (!supported.has(platform)) return 'unsupported'
-  return capability.readyPlatforms.includes(platform) ? 'ready' : 'unavailable'
-}
-
 function compatibilityIdempotencyStateIsDecisive(record, fingerprint) {
   if (!record) return false
   return record.fingerprint !== fingerprint
@@ -396,17 +380,16 @@ function directXiaohongshuLegacyRawRequest(operation, normalized) {
   if (normalized.pageSize !== DIRECT_XIAOHONGSHU_PAGE_SIZE) return null
   if (body.cursor && !isDirectXiaohongshuCursor(body.cursor)) return null
   if (body.page != null && (body.page !== 1 || body.cursor)) return null
-  // These shapes either fan out or carry Night-All-specific continuation and
-  // cache semantics. Keep them on the historical compatibility port until an
+  // Detail enrichment is already an atomic, cost-governed Hub-native search
+  // workflow. Shapes that fan out or carry Night-All-specific comment,
+  // continuation, cache, or concurrency semantics stay historical until an
   // equivalent Hub-native contract exists.
   if (
     body.params != null
-    || body.includeDetails === true
     || body.includeComments === true
     || body.commentLimit != null
     || body.commentCursor != null
     || body.cacheMaxAgeHours != null
-    || body.maxEnrichItems != null
     || body.enrichConcurrency != null
     || body.concurrency != null
   ) return null
@@ -418,10 +401,57 @@ function directXiaohongshuLegacyRawRequest(operation, normalized) {
       ...(body.cursor ? { cursor: body.cursor } : {}),
     },
     enrichment: {
-      includeDetails: false,
+      includeDetails: body.includeDetails === true,
       disableAutoDetails: body.disableAutoDetails === true,
+      ...(body.maxEnrichItems != null ? { maxEnrichItems: body.maxEnrichItems } : {}),
     },
   }
+}
+
+function directXiaohongshuLegacyUserActivityRequest(operation, normalized) {
+  if (!['crawl', 'user-info'].includes(operation) || normalized.platform !== 'xiaohongshu') return null
+  const body = normalized.upstreamBody
+  const identifierFields = operation === 'crawl'
+    ? ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'urls']
+    : ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'profileUrl', 'profile_url', 'urls']
+  const allowed = new Set([
+    'platform', ...identifierFields, 'count', 'limit', 'pageSize', 'page',
+    ...(operation === 'crawl' ? ['cursor', 'params', 'activityTypes', 'concurrency'] : []),
+  ])
+  if (Object.keys(body).some((field) => !allowed.has(field))) return null
+  const supplied = identifierFields.filter((field) => body[field] != null && body[field] !== '')
+  const arrays = new Set(['usernames', 'userIds', 'urls'])
+  const count = supplied.reduce((sum, field) => (
+    sum + (arrays.has(field) && Array.isArray(body[field]) ? body[field].length : 1)
+  ), 0)
+  if (count !== 1) return null
+  const userIdField = supplied.find((field) => ['userId', 'userIds', 'user_id', 'uid'].includes(field))
+  if (userIdField) {
+    const value = arrays.has(userIdField) ? body[userIdField][0] : body[userIdField]
+    if (!/^[0-9a-f]{24}$/iu.test(String(value))) return null
+  }
+  if (operation === 'user-info') {
+    if (body.page != null && body.page !== 1) return null
+    return { body }
+  }
+  if (normalized.pageSize !== DIRECT_XIAOHONGSHU_PAGE_SIZE) return null
+  if (body.activityTypes != null && (
+    !Array.isArray(body.activityTypes)
+    || body.activityTypes.length !== 1
+    || body.activityTypes[0] !== 'posts'
+  )) return null
+  if (body.concurrency != null && body.concurrency !== 1) return null
+  const directCursor = body.cursor || body.params?.cursor || null
+  if (body.params != null && (
+    !body.params
+    || typeof body.params !== 'object'
+    || Array.isArray(body.params)
+    || Object.keys(body.params).some((field) => field !== 'cursor')
+  )) return null
+  if (directCursor && !isDirectXiaohongshuCursor(directCursor)) return null
+  if (!directCursor && body.page != null && body.page !== 1) return null
+  if (body.cursor && body.params?.cursor && body.cursor !== body.params.cursor) return null
+  return { body }
 }
 
 export class HubService {
@@ -439,6 +469,8 @@ export class HubService {
     externalSocialSearch = null,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
+    externalSocialUserActivity = null,
+    externalSocialUserActivityEnabled = false,
     externalImageLoader = null,
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     logger = console,
@@ -462,6 +494,8 @@ export class HubService {
     this.externalSocialSearchCanaryConsumerIds = new Set(
       externalSocialSearchCanaryConsumerIds.map((consumerId) => String(consumerId).toLowerCase()),
     )
+    this.externalSocialUserActivity = externalSocialUserActivity
+    this.externalSocialUserActivityEnabled = externalSocialUserActivityEnabled === true
     this.externalImageLoader = externalImageLoader
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
@@ -971,30 +1005,20 @@ export class HubService {
   async capabilities(context) {
     const grants = await this.#effectivePlatformGrants(context)
     const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
-    const localStoredPlatforms = new Set([
-      'telegram',
-      PUBLIC_OPINION_PLATFORM,
-      SOURCE_CATALOG_PLATFORM,
-      MOBILE_COMMERCE_PLATFORM,
-      VIRTUAL_SUPERMARKET_PLATFORM,
-      ECOMMERCE_PLATFORM,
-    ])
-    // Xiaohongshu search is only one narrow Hub-direct operation. Keep asking
-    // the compatibility provider for its remaining raw/batch/crawl/user-info
-    // matrix, then merge the direct search/post-detail capabilities below.
-    const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
-    let payload = { data: { platforms: [], legacySearch: null } }
-    if (nightAllGrants.length > 0) {
-      try {
-        const upstream = await this.adapter.capabilities(nightAllGrants)
-        if (upstream?.data && Array.isArray(upstream.data.platforms)) payload = upstream
-        else this.logger?.warn?.('[night-all] capability response is unavailable or malformed')
-      } catch {
-        // Capability discovery is a composition of independent providers.  A
-        // Night-All outage must not hide Hub-native or direct TikHub abilities,
-        // nor should it log a potentially secret-bearing transport error.
-        this.logger?.warn?.('[night-all] capability discovery is unavailable')
-      }
+    // Historical compatibility support is a Hub-pinned routing contract, not
+    // a live provider-health result. Compile it locally so capability discovery
+    // never depends on Night-All. Conservative top-level readiness stays false
+    // until a Hub-native capability below can publish its own nested readiness.
+    const legacySearch = buildNightAllLegacySearchCapabilities(canonicalGrants)
+    const legacyPlatforms = new Set(Object.values(legacySearch.operations)
+      .flatMap(({ supportedPlatforms }) => supportedPlatforms))
+    const payload = {
+      data: {
+        platforms: canonicalGrants
+          .filter((platform) => legacyPlatforms.has(platform))
+          .map((platform) => ({ platform, ready: false })),
+        legacySearch: legacyPlatforms.size > 0 ? legacySearch : null,
+      },
     }
     if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
@@ -3158,6 +3182,25 @@ export class HubService {
       canonicalizePlatform: canonicalPlatform,
       maxPageSize: policy.maxPageSize,
     })
+    const directUserActivity = directXiaohongshuLegacyUserActivityRequest(operation, normalized)
+    if (
+      directUserActivity
+      && this.externalSocialUserActivity
+      && (
+        (operation === 'crawl' && (
+          isDirectXiaohongshuCursor(directUserActivity.body.cursor)
+          || isDirectXiaohongshuCursor(directUserActivity.body.params?.cursor)
+        ))
+        || (this.externalSocialUserActivityEnabled && !isTestApiKey(context.apiKey))
+      )
+    ) {
+      return this.externalSocialUserActivity(context, {
+        operation,
+        body: directUserActivity.body,
+        idempotencyKey,
+        path,
+      })
+    }
     const direct = directXiaohongshuLegacyRawRequest(operation, normalized)
     if (
       direct
@@ -3179,10 +3222,20 @@ export class HubService {
         replayWindowMs: null,
       })
     }
+    const compatibilityCursorCodec = createNightAllCompatibilityCursorCodec(
+      this.apiKeyPepper,
+      context.consumer.id,
+    )
+    const traversal = prepareNightAllCompatibilityTraversal({
+      operation,
+      platform: normalized.platform,
+      upstreamBody: normalized.upstreamBody,
+      codec: compatibilityCursorCodec,
+    })
     const fingerprint = requestFingerprint({
       method: 'POST',
       path,
-      body: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...normalized.upstreamBody },
+      body: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...traversal.upstreamBody },
     })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -3214,51 +3267,15 @@ export class HubService {
     if (compatibilityIdempotencyStateIsDecisive(existing, fingerprint)) {
       reservation = await this.store.reserve(reservationInput)
     } else {
-      let precheckError = null
-      let compatibilityCapabilities
-      try {
-        compatibilityCapabilities = await this.adapter.legacySearchCapabilities([normalized.platform])
-      } catch (_error) {
-        precheckError = new AppError(
-          503,
-          'compatibility_capabilities_unavailable',
-          'Night-All compatibility capabilities are unavailable',
+      const pinnedCapability = buildNightAllLegacySearchCapabilities([normalized.platform])
+        .operations[operation]
+      if (!pinnedCapability.supportedPlatforms.includes(normalized.platform)) {
+        throw new AppError(
+          400,
+          'platform_operation_unsupported',
+          'The platform does not support this Night-All compatibility operation',
+          { platform: normalized.platform, operation },
         )
-      }
-      if (!precheckError) {
-        const operationState = compatibilityOperationState(
-          compatibilityCapabilities,
-          operation,
-          normalized.platform,
-        )
-        if (operationState === 'invalid') {
-          precheckError = new AppError(
-            503,
-            'compatibility_capabilities_unavailable',
-            'Night-All compatibility capabilities are unavailable',
-          )
-        } else if (operationState === 'unsupported') {
-          precheckError = new AppError(
-            400,
-            'platform_operation_unsupported',
-            'The platform does not support this Night-All compatibility operation',
-            { platform: normalized.platform, operation },
-          )
-        } else if (operationState === 'unavailable') {
-          precheckError = new AppError(
-            503,
-            'platform_operation_unavailable',
-            'The platform operation is not currently ready in Night-All',
-            { platform: normalized.platform, operation },
-          )
-        }
-      }
-      if (precheckError) {
-        const raced = await this.store.getUsageRequestByIdempotencyKey(
-          context.consumer.id,
-          idempotencyKey,
-        )
-        if (!compatibilityIdempotencyStateIsDecisive(raced, fingerprint)) throw precheckError
       }
       reservation = await this.store.reserve(reservationInput)
     }
@@ -3314,14 +3331,22 @@ export class HubService {
     try {
       const upstream = await this.adapter.legacySearch({
         operation,
-        body: normalized.upstreamBody,
+        body: traversal.upstreamBody,
         businessId: context.consumer.businessId,
       })
-      const businessOutcome = nightAllCompatibilityBusinessOutcome(upstream.payload)
+      const responseBody = capNightAllCompatibilityTraversal(upstream.payload, {
+        operation,
+        platform: normalized.platform,
+        page: traversal.page,
+        scope: traversal.scope,
+        codec: compatibilityCursorCodec,
+        upstreamBody: traversal.upstreamBody,
+      })
+      const businessOutcome = nightAllCompatibilityBusinessOutcome(responseBody)
       const capturedAt = new Date()
       const staleUntil = new Date(capturedAt.getTime() + nightAllCompatibilityFallbackWindowMs(operation))
       const upstreamLatencyMs = Math.round(performance.now() - startedAt)
-      const unitsActual = nightAllCompatibilityItemCount(upstream.payload)
+      const unitsActual = nightAllCompatibilityItemCount(responseBody)
       commitEvidence = {
         outcome: businessOutcome,
         httpStatus: 200,
@@ -3337,7 +3362,7 @@ export class HubService {
       await this.store.commitCompatibilityLiveDelivery(call.id, {
         ...commitEvidence,
         responseStatus: 200,
-        responseBody: upstream.payload,
+        responseBody,
         unitsActual,
         capturedAt,
         staleUntil,
@@ -3361,7 +3386,7 @@ export class HubService {
       })
       return {
         status: 200,
-        body: upstream.payload,
+        body: responseBody,
         requestId: activeRequestId,
         replay: false,
         sourceMode: 'live',
@@ -3586,6 +3611,24 @@ export class HubService {
         replayWindowMs: replayWindowFor(resultType),
       })
     }
+    // Every non-local request below is served by the historical compatibility
+    // adapter. Keep its opaque continuation inside a Hub-authenticated cursor
+    // so no provider can bypass the shared 15-page acquisition boundary.
+    // Telegram remains entirely local, while Xiaohongshu mxec2 cursors have
+    // already returned through the Hub-native branch above.
+    const historicalCompatibilityCursorCodec = platform === 'telegram'
+      ? null
+      : createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)
+    const historicalCompatibilityTraversal = historicalCompatibilityCursorCodec
+      ? prepareNightAllCompatibilityTraversal({
+          operation: 'data-search',
+          platform,
+          upstreamBody,
+          codec: historicalCompatibilityCursorCodec,
+        })
+      : null
+    const historicalUpstreamBody = historicalCompatibilityTraversal?.upstreamBody ?? upstreamBody
+    if (historicalCompatibilityTraversal) fingerprintQuery = historicalUpstreamBody
     const fingerprint = requestFingerprint({
       method: 'POST',
       path,
@@ -3639,12 +3682,19 @@ export class HubService {
       const upstream = localTelegram
         ? null
         : await this.adapter.search({
-            body: upstreamBody,
+            body: historicalUpstreamBody,
             businessId: context.consumer.businessId,
           })
       const responseBody = localTelegram
         ? await this.#searchStoredTelegram(telegramQuery, startedAt)
-        : upstream.payload
+        : historicalCompatibilityTraversal
+          ? capNightAllDataSearchTraversal(upstream.payload, {
+              platform,
+              page: historicalCompatibilityTraversal.page,
+              scope: historicalCompatibilityTraversal.scope,
+              codec: historicalCompatibilityCursorCodec,
+            })
+          : upstream.payload
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
       const commit = {
         responseStatus: 200,

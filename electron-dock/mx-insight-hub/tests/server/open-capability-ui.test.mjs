@@ -59,8 +59,10 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(plansQuotasPage, /尚未配置费率/u)
   assert.match(plansQuotasPage, /当前不计费/u)
   assert.match(plansQuotasPage, /配置费率并发布/u)
-  assert.match(plansQuotasPage, /\{ meterKey: 'social\.posts\.search', price: '3\.20' \}/u)
-  assert.match(plansQuotasPage, /\{ meterKey: 'social\.posts\.resolve', price: '0\.20' \}/u)
+  assert.match(plansQuotasPage, /下游费率尚未确定/u)
+  assert.match(plansQuotasPage, /待运营定价/u)
+  assert.match(plansQuotasPage, /未知成本不能当作 0/u)
+  assert.doesNotMatch(plansQuotasPage, /¥3\.20|¥0\.20|上游公开表价/u)
   const providerNeutralAuthorization = pages.match(/const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = \{[\s\S]*?\n\}/u)?.[0] || ''
   assert.match(providerNeutralAuthorization, /ecommerce/u)
   assert.doesNotMatch(providerNeutralAuthorization, /JustOne/u)

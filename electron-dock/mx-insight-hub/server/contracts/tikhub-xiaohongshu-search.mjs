@@ -14,10 +14,9 @@ export const TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH = '/api/v1/xiaohongshu/app_
 
 const REQUEST_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor'])
 export const XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH = 500
+export const XIAOHONGSHU_SEARCH_MAX_PAGES = 15
 const MAX_CURSOR_LENGTH = 8_192
-const MAX_PAGE = 10_000
 const MAX_PAGE_SIZE = 100
-const MAX_TEXT_CODE_POINTS = 50_000
 const NOTE_ID_PATTERN = /^[0-9a-f]{24}$/iu
 
 export class TikHubXiaohongshuSearchContractError extends Error {
@@ -93,7 +92,7 @@ function decodedCursor(cursor, decodeCursor) {
     || state.platform !== XIAOHONGSHU_PLATFORM
     || !Number.isInteger(state.page)
     || state.page < 2
-    || state.page > MAX_PAGE
+    || state.page > XIAOHONGSHU_SEARCH_MAX_PAGES
     || typeof state.scope !== 'string'
     || (state.searchId !== null && typeof state.searchId !== 'string')
     || (state.searchSessionId !== null && typeof state.searchSessionId !== 'string')
@@ -192,20 +191,144 @@ function continuation(value, field) {
   return value
 }
 
+function ownValues(record, names) {
+  if (!isRecord(record)) return []
+  return names.flatMap((name) => (
+    Object.prototype.hasOwnProperty.call(record, name) ? [record[name]] : []
+  ))
+}
+
+function consistentField(layers, names, normalize, field, { ignoreNull = false } = {}) {
+  const rawValues = layers.flatMap((layer) => ownValues(layer, names))
+  if (rawValues.length === 0) return Object.freeze({ present: false, value: null })
+  const normalized = rawValues.map((value) => normalize(value, field))
+  const comparable = ignoreNull ? normalized.filter((value) => value !== null) : normalized
+  if (new Set(comparable).size > 1) {
+    invalidResponse(
+      'invalid_upstream_pagination',
+      `TikHub returned conflicting ${field} values`,
+    )
+  }
+  return Object.freeze({
+    present: true,
+    value: comparable[0] ?? null,
+  })
+}
+
+function responsePage(value, field) {
+  const normalized = typeof value === 'string' && /^[0-9]+$/u.test(value)
+    ? Number(value)
+    : value
+  if (
+    !Number.isInteger(normalized)
+    || normalized < 1
+    || normalized > XIAOHONGSHU_SEARCH_MAX_PAGES
+  ) {
+    invalidResponse('invalid_upstream_pagination', `TikHub returned an invalid ${field}`)
+  }
+  return normalized
+}
+
+function responseNextPage(value, field, requestPage) {
+  if (value == null || value === '' || value === false || value === 0 || value === '0') return null
+  if (value === true) return requestPage + 1
+  const normalized = typeof value === 'string' && /^[0-9]+$/u.test(value)
+    ? Number(value)
+    : value
+  if (!Number.isInteger(normalized) || normalized !== requestPage + 1) {
+    invalidResponse('invalid_upstream_pagination', `TikHub returned an invalid ${field}`)
+  }
+  return normalized
+}
+
+function responseHasMore(value, field) {
+  const normalized = explicitBoolean(value)
+  if (normalized == null) {
+    invalidResponse('invalid_upstream_pagination', `TikHub returned an invalid ${field}`)
+  }
+  return normalized
+}
+
+function searchPagination(responseData, itemData, request) {
+  const layers = [responseData, itemData]
+  const currentPage = consistentField(layers, ['page'], responsePage, 'page')
+  if (currentPage.present && currentPage.value !== request.page) {
+    invalidResponse(
+      'invalid_upstream_pagination',
+      'TikHub returned a page that does not match the requested page',
+    )
+  }
+  const nextPage = consistentField(
+    layers,
+    ['next_page', 'nextPage'],
+    (value, field) => responseNextPage(value, field, request.page),
+    'next_page',
+  )
+  const hasMore = consistentField(layers, ['has_more', 'hasMore'], responseHasMore, 'has_more')
+  const inferredHasMore = nextPage.present ? nextPage.value !== null : hasMore.value
+  if (nextPage.present && hasMore.present && inferredHasMore !== hasMore.value) {
+    invalidResponse(
+      'invalid_upstream_pagination',
+      'TikHub returned conflicting next_page and has_more values',
+    )
+  }
+  if (!nextPage.present && !hasMore.present && itemData.items.length > 0) {
+    invalidResponse(
+      'invalid_upstream_pagination',
+      'TikHub response omitted both next_page and has_more',
+    )
+  }
+  if (itemData.items.length === 0 && inferredHasMore) {
+    invalidResponse(
+      'invalid_upstream_pagination',
+      'TikHub returned an empty page with another page advertised',
+    )
+  }
+  const providerHasMore = itemData.items.length > 0 && Boolean(inferredHasMore)
+  const searchId = consistentField(
+    layers,
+    ['search_id', 'searchId'],
+    continuation,
+    'search_id',
+    { ignoreNull: true },
+  ).value
+  const searchSessionId = consistentField(
+    layers,
+    ['search_session_id', 'searchSessionId'],
+    continuation,
+    'search_session_id',
+    { ignoreNull: true },
+  ).value
+  return Object.freeze({
+    providerHasMore,
+    limitReached: providerHasMore && request.page >= XIAOHONGSHU_SEARCH_MAX_PAGES,
+    nextPage: nextPage.value ?? (providerHasMore ? request.page + 1 : null),
+    searchId,
+    searchSessionId,
+  })
+}
+
 function codePointBounded(value) {
   const normalized = responseText(value)
-  if (!normalized) return { value: null, limited: false }
-  const points = []
-  let limited = false
-  for (const point of normalized) {
-    if (points.length === MAX_TEXT_CODE_POINTS) {
-      limited = true
-      break
+  if (!normalized) return { value: null }
+  let scalar = ''
+  for (let index = 0; index < normalized.length; index += 1) {
+    const code = normalized.charCodeAt(index)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = normalized.charCodeAt(index + 1)
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        scalar += normalized[index] + normalized[index + 1]
+        index += 1
+      } else {
+        scalar += '\uFFFD'
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      scalar += '\uFFFD'
+    } else {
+      scalar += normalized[index]
     }
-    const codePoint = point.codePointAt(0)
-    points.push(codePoint >= 0xD800 && codePoint <= 0xDFFF ? '\uFFFD' : point)
   }
-  return { value: points.join(''), limited }
+  return { value: scalar }
 }
 
 function stableHttpsUrl(value) {
@@ -213,8 +336,6 @@ function stableHttpsUrl(value) {
   try {
     const url = new URL(value)
     if (url.protocol !== 'https:' || url.username || url.password) return null
-    url.search = ''
-    url.hash = ''
     return url.toString()
   } catch {
     return null
@@ -236,8 +357,11 @@ export function needsXiaohongshuDetail(value) {
   return Object.values(lengths).includes(60)
 }
 
-function publicItem(note, capturedAt) {
-  const providerItem = normalizeTikHubXiaohongshuNote({ data: note }, { capturedAt })
+function publicItem(note, capturedAt, providerCredential) {
+  const providerItem = normalizeTikHubXiaohongshuNote(
+    { data: note },
+    { capturedAt, providerCredential },
+  )
   if (!providerItem || !NOTE_ID_PATTERN.test(providerItem.externalId)) {
     invalidResponse('invalid_upstream_item', 'TikHub returned an invalid Xiaohongshu note item')
   }
@@ -246,7 +370,7 @@ function publicItem(note, capturedAt) {
   )
   const text = body.value
   const lengths = xiaohongshuBodyLengths(text)
-  const detailRequired = !body.limited && needsXiaohongshuDetail(text)
+  const detailRequired = needsXiaohongshuDetail(text)
   const images = providerItem.media
     .filter((entry) => entry.type === 'image')
     .map((entry) => stableHttpsUrl(entry.url))
@@ -290,28 +414,24 @@ function publicItem(note, capturedAt) {
     }),
     normalized,
     bodyState: Object.freeze({
-      completeness: body.limited ? 'safety_limited' : detailRequired ? 'provider_preview' : 'unverified_complete',
+      completeness: detailRequired ? 'provider_preview' : 'unverified_complete',
       lengths,
       detailRequired,
-      safetyLimited: body.limited,
     }),
   }
 }
 
-function encodeNextCursor(request, data, encodeCursor) {
+function encodeNextCursor(request, pagination, encodeCursor) {
   if (typeof encodeCursor !== 'function') {
     invalidResponse('cursor_codec_required', 'a trusted cursor encoder is required')
   }
   const state = Object.freeze({
     version: 1,
     platform: XIAOHONGSHU_PLATFORM,
-    page: request.page + 1,
+    page: pagination.nextPage,
     scope: request.cursorScope,
-    searchId: continuation(data.search_id ?? data.searchId, 'search_id'),
-    searchSessionId: continuation(
-      data.search_session_id ?? data.searchSessionId,
-      'search_session_id',
-    ),
+    searchId: pagination.searchId,
+    searchSessionId: pagination.searchSessionId,
   })
   let cursor
   try {
@@ -328,6 +448,7 @@ function encodeNextCursor(request, data, encodeCursor) {
 export function normalizeTikHubXiaohongshuSearchResponse(raw, request, {
   encodeCursor,
   capturedAt = new Date(),
+  providerCredential = null,
 } = {}) {
   if (!request || request.contractVersion !== XIAOHONGSHU_SEARCH_CONTRACT_VERSION) {
     invalidResponse('invalid_normalized_request', 'a normalized Xiaohongshu search request is required')
@@ -335,7 +456,8 @@ export function normalizeTikHubXiaohongshuSearchResponse(raw, request, {
   if (!isRecord(raw) || raw.code !== 200 || !isRecord(raw.data) || !isRecord(raw.data.data)) {
     invalidResponse('invalid_upstream_contract', 'TikHub response did not match data.data.items[].note')
   }
-  const data = raw.data.data
+  const responseData = raw.data
+  const data = responseData.data
   if (!Array.isArray(data.items)) {
     invalidResponse('invalid_upstream_contract', 'TikHub response did not match data.data.items[].note')
   }
@@ -350,15 +472,11 @@ export function normalizeTikHubXiaohongshuSearchResponse(raw, request, {
     if (!isRecord(wrapper) || wrapper.model_type !== 'note' || !isRecord(wrapper.note)) {
       invalidResponse('invalid_upstream_contract', 'TikHub response did not match data.data.items[].note')
     }
-    return publicItem(wrapper.note, capturedAtIso)
+    return publicItem(wrapper.note, capturedAtIso, providerCredential)
   })
-  const hasMoreValue = explicitBoolean(data.has_more ?? data.hasMore)
-  if (hasMoreValue == null && data.items.length > 0) {
-    invalidResponse('invalid_upstream_pagination', 'TikHub response omitted an explicit has_more value')
-  }
-  const hasMore = data.items.length === 0 ? false : hasMoreValue
-  const nextCursor = hasMore && request.page < MAX_PAGE
-    ? encodeNextCursor(request, data, encodeCursor)
+  const pagination = searchPagination(responseData, data, request)
+  const nextCursor = pagination.providerHasMore && !pagination.limitReached
+    ? encodeNextCursor(request, pagination, encodeCursor)
     : null
   const detailCandidates = normalized.flatMap(({ publicItem: item, bodyState }) => (
     bodyState.detailRequired ? [{
@@ -367,15 +485,14 @@ export function normalizeTikHubXiaohongshuSearchResponse(raw, request, {
       lengths: bodyState.lengths,
     }] : []
   ))
-  const safetyLimited = normalized.filter(({ bodyState }) => bodyState.safetyLimited).length
   const warnings = []
   if (detailCandidates.length > 0) warnings.push(Object.freeze({
     code: 'xiaohongshu_detail_required',
     message: `${detailCandidates.length} note bodies match the provider preview boundary`,
   }))
-  if (safetyLimited > 0) warnings.push(Object.freeze({
-    code: 'text_safety_limit_applied',
-    message: `${safetyLimited} note bodies exceeded the 50000-code-point safety limit`,
+  if (pagination.limitReached) warnings.push(Object.freeze({
+    code: 'page_limit_reached',
+    message: `Search pagination is limited to ${XIAOHONGSHU_SEARCH_MAX_PAGES} pages`,
   }))
   const publicBody = Object.freeze({
     data: Object.freeze({

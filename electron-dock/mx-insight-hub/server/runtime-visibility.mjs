@@ -6,8 +6,8 @@ function visibleStatus(entry) {
 
 /**
  * Health probes and tenant-facing Runtime views expose only aggregate service
- * state. Provider names, endpoint details and internal failure strings remain
- * available from the raw Admin-token Runtime API.
+ * state. External acquisition is deliberately not probed by these endpoints;
+ * older raw dependency shapes are still projected without provider details.
  */
 export function runtimeVisibleDependencies(dependencies) {
   const source = dependencies && typeof dependencies === 'object' && !Array.isArray(dependencies)
@@ -24,9 +24,11 @@ export function runtimeVisibleProjection(runtime) {
     && !Array.isArray(runtime.dependencies)
     ? runtime.dependencies
     : {}
-  const requiredDependencies = runtime?.listenerMode === 'admin'
-    ? [source.store]
-    : Object.values(source)
+  // Provider-backed data services are optional capability dependencies. Their
+  // aggregate state may be unknown because Runtime does not probe them, and it
+  // must not make the Hub API, Admin sign-in or stored data products unready.
+  // PostgreSQL is the only dependency shared by every supported listener mode.
+  const requiredDependencies = [source.store]
 
   return {
     status: {

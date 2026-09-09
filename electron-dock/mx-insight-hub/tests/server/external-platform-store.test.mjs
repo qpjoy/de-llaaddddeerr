@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
@@ -44,6 +44,20 @@ test('migration 055 preserves rolling writers and adds multi-call and shared rat
   assert.doesNotMatch(sql, /provider_rate_windows/u)
 })
 
+test('migration 057 reserves workflow cost without fabricating provider-call evidence', async () => {
+  const sql = await readFile(
+    new URL('../../migrations/057_external_platform_cost_reservations.sql', import.meta.url),
+    'utf8',
+  )
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS external_platform\.provider_cost_reservations/u)
+  assert.match(sql, /reserved_cost_minor bigint NOT NULL CHECK \(reserved_cost_minor > 0\)/u)
+  assert.match(sql, /reserved_subsidy_minor bigint NOT NULL/u)
+  assert.match(sql, /monthly_subsidy_budget_minor bigint NOT NULL/u)
+  assert.match(sql, /WHERE status = 'active'/u)
+  assert.match(sql, /never provider-call evidence/u)
+  assert.doesNotMatch(sql, /INSERT INTO external_platform\.provider_calls/u)
+})
+
 function callInput(overrides = {}) {
   return {
     id: randomUUID(),
@@ -81,6 +95,8 @@ function stagedEvidence(input, overrides = {}) {
   const responseHash = 'd'.repeat(64)
   const itemHash = 'e'.repeat(64)
   const rawPayload = { code: 200, request_id: 'provider-request-1', data: { items: [{ id: 'item-1' }] } }
+  const exactBodyText = JSON.stringify(rawPayload)
+  const exactBodyBytes = Buffer.from(exactBodyText, 'utf8')
   return {
     callId: input.id,
     delivery: { ...input },
@@ -101,6 +117,16 @@ function stagedEvidence(input, overrides = {}) {
       bodySize: 123,
       payloadSha256: responseHash,
       rawPayload,
+      capturedAt,
+    },
+    restrictedResponseArchive: {
+      contentType: 'application/json',
+      bodySize: exactBodyBytes.byteLength,
+      bodySha256: createHash('sha256').update(exactBodyBytes).digest('hex'),
+      bodyBytes: exactBodyBytes,
+      bodyText: exactBodyText,
+      jsonParsed: true,
+      parsedPayload: rawPayload,
       capturedAt,
     },
     upstreamEvidence: { requestId: 'provider-request-1', recordTime: '1700000000' },
@@ -159,6 +185,17 @@ function providerCallRow(input, evidence = null, outcome = 'pending') {
     archive_payload_sha256: evidence?.responseArchive?.payloadSha256 ?? null,
     archive_raw_payload: evidence?.responseArchive?.rawPayload ?? null,
     archive_captured_at: evidence?.responseArchive?.capturedAt ?? null,
+    restricted_response_id: evidence?.restrictedResponseArchive ? 'restricted-response-1' : null,
+    restricted_content_type: evidence?.restrictedResponseArchive?.contentType ?? null,
+    restricted_body_size: evidence?.restrictedResponseArchive?.bodySize ?? null,
+    restricted_body_sha256: evidence?.restrictedResponseArchive?.bodySha256 ?? null,
+    restricted_body_bytes: evidence?.restrictedResponseArchive?.bodyBytes
+      ? Buffer.from(evidence.restrictedResponseArchive.bodyBytes)
+      : null,
+    restricted_body_text: evidence?.restrictedResponseArchive?.bodyText ?? null,
+    restricted_json_parsed: evidence?.restrictedResponseArchive?.jsonParsed ?? null,
+    restricted_parsed_payload: evidence?.restrictedResponseArchive?.parsedPayload ?? null,
+    restricted_captured_at: evidence?.restrictedResponseArchive?.capturedAt ?? null,
   }
 }
 
@@ -208,6 +245,23 @@ test('memory provider token bucket refills continuously instead of resetting at 
   assert.equal(refilled.retryAfterMs, 0)
 })
 
+test('memory provider token bucket admits a multi-call workflow atomically', async () => {
+  const store = new MemoryExternalPlatformStore({ usageStore: { requests: new Map() } })
+  const at = new Date('2026-09-08T00:00:00.000Z')
+
+  assert.deepEqual(await store.acquireProviderRateLimit({
+    limit: 3, tokens: 2, windowMs: 60_000, at,
+  }), { allowed: true, remaining: 1, retryAfterMs: 0 })
+  const rejected = await store.acquireProviderRateLimit({
+    limit: 3, tokens: 2, windowMs: 60_000, at,
+  })
+  assert.equal(rejected.allowed, false)
+  assert.equal(rejected.remaining, 0)
+  assert.equal((await store.acquireProviderRateLimit({
+    limit: 3, tokens: 1, windowMs: 60_000, at,
+  })).allowed, true, 'a rejected multi-token admission must not consume the remaining token')
+})
+
 test('Postgres provider token bucket is one atomic PostgreSQL-clock-driven admission', async () => {
   let statement
   const store = new PostgresExternalPlatformStore({
@@ -224,7 +278,7 @@ test('Postgres provider token bucket is one atomic PostgreSQL-clock-driven admis
     remaining: 0,
     retryAfterMs: 1234,
   })
-  assert.deepEqual(statement.values, ['justone', 90, 60_000])
+  assert.deepEqual(statement.values, ['justone', 90, 60_000, 1])
   assert.match(statement.sql, /SELECT clock_timestamp\(\) AS observed_at/u)
   assert.match(statement.sql, /INSERT INTO external_platform\.provider_rate_buckets/u)
   assert.match(statement.sql, /ON CONFLICT \(provider_key\) DO UPDATE/u)
@@ -298,6 +352,354 @@ test('memory beginProviderCall requires one live owned ecommerce reservation', a
   )
 })
 
+test('memory provider-call admission atomically reserves reviewed monthly cost and fails closed', async () => {
+  const first = callInput()
+  const second = callInput({
+    tenantId: first.tenantId,
+    consumerId: first.consumerId,
+    apiKeyId: first.apiKeyId,
+  })
+  const usageStore = {
+    requests: new Map([
+      [first.usageRequestId, reservedUsage(first)],
+      [second.usageRequestId, reservedUsage(second)],
+    ]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  const costControl = {
+    costMinor: 6,
+    costKind: 'estimated',
+    currency: 'USD',
+    monthlyBudgetMinor: 10,
+    monthlySubsidyBudgetMinor: 10,
+  }
+
+  const admitted = await store.beginProviderCall({ ...first, costControl })
+  assert.equal(admitted.costMinor, 6)
+  assert.equal(admitted.costKind, 'estimated')
+  assert.equal(admitted.currency, 'USD')
+
+  await assert.rejects(
+    store.beginProviderCall({ ...second, costControl }),
+    (error) => error?.status === 429
+      && error?.code === 'external_platform_cost_budget_exhausted',
+  )
+  assert.equal(store.calls.size, 1)
+})
+
+test('provider cost admission rejects zero as a stand-in for unknown gross cost', async () => {
+  const input = callInput()
+  const usageStore = {
+    requests: new Map([[input.usageRequestId, reservedUsage(input)]]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  await assert.rejects(
+    store.beginProviderCall({
+      ...input,
+      costControl: {
+        costMinor: 0,
+        costKind: 'estimated',
+        currency: 'USD',
+        monthlyBudgetMinor: 100,
+        monthlySubsidyBudgetMinor: 100,
+      },
+    }),
+    (error) => error instanceof TypeError && /positive safe integer/u.test(error.message),
+  )
+  assert.equal(store.calls.size, 0)
+})
+
+test('memory workflow admission reserves every planned call atomically without fake call rows', async () => {
+  const first = callInput()
+  const competitor = callInput({
+    tenantId: first.tenantId,
+    consumerId: first.consumerId,
+    apiKeyId: first.apiKeyId,
+  })
+  const usageStore = {
+    requests: new Map([
+      [first.usageRequestId, reservedUsage(first)],
+      [competitor.usageRequestId, reservedUsage(competitor)],
+    ]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  const costControl = {
+    costMinor: 6,
+    costKind: 'estimated',
+    currency: 'USD',
+    monthlyBudgetMinor: 12,
+    monthlySubsidyBudgetMinor: 12,
+  }
+
+  const [admitted, competing] = await Promise.allSettled([
+    store.reserveProviderCostWorkflow({
+      tenantId: first.tenantId,
+      consumerId: first.consumerId,
+      apiKeyId: first.apiKeyId,
+      usageRequestId: first.usageRequestId,
+      fingerprint: first.fingerprint,
+      costControls: [costControl, costControl],
+    }),
+    store.reserveProviderCostWorkflow({
+      tenantId: competitor.tenantId,
+      consumerId: competitor.consumerId,
+      apiKeyId: competitor.apiKeyId,
+      usageRequestId: competitor.usageRequestId,
+      fingerprint: competitor.fingerprint,
+      costControls: [costControl, costControl],
+    }),
+  ])
+  assert.equal(admitted.status, 'fulfilled')
+  assert.equal(competing.status, 'rejected')
+  assert.equal(competing.reason?.code, 'external_platform_cost_budget_exhausted')
+  const reservation = admitted.value
+  assert.equal(reservation.reservedCostMinor, 12)
+  assert.equal(reservation.reservedSubsidyMinor, 12)
+  assert.equal(store.calls.size, 0, 'a cost hold must never claim that a provider was called')
+  assert.equal(store.costReservations.size, 1, 'failed admission must not leave a partial hold')
+  assert.equal(store.calls.size, 0)
+
+  await store.beginProviderCall({
+    ...first,
+    costControl,
+    costReservationId: reservation.id,
+  })
+  await store.beginProviderCall({
+    ...first,
+    id: randomUUID(),
+    callOrdinal: 1,
+    callRole: 'enrichment',
+    costControl,
+    costReservationId: reservation.id,
+  })
+  assert.equal(store.calls.size, 2)
+  assert.equal(await store.releaseProviderCostWorkflow({
+    reservationId: reservation.id,
+    usageRequestId: first.usageRequestId,
+  }), true)
+  assert.equal(await store.releaseProviderCostWorkflow({
+    reservationId: reservation.id,
+    usageRequestId: first.usageRequestId,
+  }), true, 'release is idempotent')
+})
+
+test('memory workflow cost reservation rejects mismatched calls and insufficient subsidy atomically', async () => {
+  const input = callInput()
+  const usageStore = { requests: new Map([[input.usageRequestId, reservedUsage(input)]]) }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  const insufficientSubsidy = {
+    costMinor: 6,
+    costKind: 'estimated',
+    currency: 'USD',
+    monthlyBudgetMinor: 100,
+    monthlySubsidyBudgetMinor: 11,
+  }
+  await assert.rejects(
+    store.reserveProviderCostWorkflow({
+      tenantId: input.tenantId,
+      consumerId: input.consumerId,
+      apiKeyId: input.apiKeyId,
+      usageRequestId: input.usageRequestId,
+      fingerprint: input.fingerprint,
+      costControls: [insufficientSubsidy, insufficientSubsidy],
+    }),
+    (error) => error?.code === 'external_platform_subsidy_budget_exhausted',
+  )
+  assert.equal(store.costReservations.size, 0)
+  assert.equal(store.calls.size, 0)
+
+  const costControl = { ...insufficientSubsidy, monthlySubsidyBudgetMinor: 12 }
+  const reservation = await store.reserveProviderCostWorkflow({
+    tenantId: input.tenantId,
+    consumerId: input.consumerId,
+    apiKeyId: input.apiKeyId,
+    usageRequestId: input.usageRequestId,
+    fingerprint: input.fingerprint,
+    costControls: [costControl, costControl],
+  })
+  await assert.rejects(
+    store.beginProviderCall({
+      ...input,
+      costControl: { ...costControl, monthlyBudgetMinor: 101 },
+      costReservationId: reservation.id,
+    }),
+    (error) => error?.code === 'external_platform_cost_reservation_mismatch',
+  )
+  assert.equal(store.calls.size, 0)
+})
+
+test('memory provider-call budget ignores legacy unknown rows but refuses incomplete controlled cost', async () => {
+  const input = callInput()
+  const blocked = callInput({
+    tenantId: input.tenantId,
+    consumerId: input.consumerId,
+    apiKeyId: input.apiKeyId,
+  })
+  const usageStore = {
+    requests: new Map([
+      [input.usageRequestId, reservedUsage(input)],
+      [blocked.usageRequestId, reservedUsage(blocked)],
+    ]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  store.calls.set('legacy-unknown-cost', {
+    id: 'legacy-unknown-cost',
+    providerKey: 'justone',
+    startedAt: new Date().toISOString(),
+    costMinor: null,
+    costKind: 'unknown',
+    outcome: 'unknown',
+  })
+
+  const costControl = {
+    costMinor: 5,
+    costKind: 'estimated',
+    currency: 'CNY',
+    monthlyBudgetMinor: 10_000,
+    monthlySubsidyBudgetMinor: 10_000,
+  }
+  await store.beginProviderCall({ ...input, costControl })
+
+  // A guarded row may never lose its reserved estimate. Simulate corruption
+  // explicitly so admission fails closed without treating pre-guard history as
+  // part of the guarded cohort.
+  const controlled = store.calls.get(input.id)
+  controlled.costMinor = 0
+
+  await assert.rejects(
+    store.beginProviderCall({
+      ...blocked,
+      costControl,
+    }),
+    (error) => error?.status === 503
+      && error?.code === 'external_platform_cost_evidence_incomplete',
+  )
+})
+
+test('memory customer-price coverage and explicit subsidy jointly bound multi-call procurement', async () => {
+  const input = callInput()
+  const usageStore = {
+    requests: new Map([[input.usageRequestId, reservedUsage(input)]]),
+    customerCharges: new Map([[input.usageRequestId, {
+      enforcementMode: 'enforced',
+      status: 'reserved',
+      quotedMinor: 7,
+      currency: 'CNY',
+    }]]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  const costControl = {
+    costMinor: 5,
+    costKind: 'estimated',
+    currency: 'CNY',
+    monthlyBudgetMinor: 100,
+    monthlySubsidyBudgetMinor: 3,
+  }
+
+  await store.beginProviderCall({ ...input, costControl })
+  await store.beginProviderCall({
+    ...input,
+    id: randomUUID(),
+    callOrdinal: 1,
+    callRole: 'enrichment',
+    costControl,
+  })
+  await assert.rejects(
+    store.beginProviderCall({
+      ...input,
+      id: randomUUID(),
+      callOrdinal: 2,
+      callRole: 'enrichment',
+      costControl,
+    }),
+    (error) => error?.status === 429
+      && error?.code === 'external_platform_subsidy_budget_exhausted',
+  )
+  assert.equal(store.calls.size, 2)
+})
+
+test('memory unpriced, free, shadow, and cross-currency customers require explicit subsidy', async () => {
+  for (const charge of [
+    null,
+    { enforcementMode: 'enforced', status: 'reserved', quotedMinor: 0, currency: 'CNY' },
+    { enforcementMode: 'shadow', status: 'reserved', quotedMinor: 50, currency: 'CNY' },
+    { enforcementMode: 'enforced', status: 'reserved', quotedMinor: 50, currency: 'USD' },
+  ]) {
+    const input = callInput()
+    const usageStore = {
+      requests: new Map([[input.usageRequestId, reservedUsage(input)]]),
+      customerCharges: new Map(charge ? [[input.usageRequestId, charge]] : []),
+    }
+    const store = new MemoryExternalPlatformStore({ usageStore })
+    await assert.rejects(
+      store.beginProviderCall({
+        ...input,
+        costControl: {
+          costMinor: 5,
+          costKind: 'estimated',
+          currency: 'CNY',
+          monthlyBudgetMinor: 100,
+          monthlySubsidyBudgetMinor: 0,
+        },
+      }),
+      (error) => error?.code === 'external_platform_subsidy_budget_exhausted',
+    )
+    assert.equal(store.calls.size, 0)
+  }
+})
+
+test('released unknown customer revenue becomes subsidy exposure before any later dispatch', async () => {
+  const uncertain = callInput()
+  const whileHeld = callInput({
+    tenantId: uncertain.tenantId,
+    consumerId: uncertain.consumerId,
+    apiKeyId: uncertain.apiKeyId,
+  })
+  const afterRelease = callInput({
+    tenantId: uncertain.tenantId,
+    consumerId: uncertain.consumerId,
+    apiKeyId: uncertain.apiKeyId,
+  })
+  const usageStore = {
+    requests: new Map([
+      [uncertain.usageRequestId, reservedUsage(uncertain)],
+      [whileHeld.usageRequestId, reservedUsage(whileHeld)],
+      [afterRelease.usageRequestId, reservedUsage(afterRelease)],
+    ]),
+    customerCharges: new Map([
+      [uncertain.usageRequestId, {
+        enforcementMode: 'enforced', status: 'reserved', quotedMinor: 5, currency: 'USD',
+      }],
+      [whileHeld.usageRequestId, {
+        enforcementMode: 'enforced', status: 'reserved', quotedMinor: 5, currency: 'USD',
+      }],
+      [afterRelease.usageRequestId, {
+        enforcementMode: 'enforced', status: 'reserved', quotedMinor: 5, currency: 'USD',
+      }],
+    ]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  const costControl = {
+    costMinor: 5,
+    costKind: 'estimated',
+    currency: 'USD',
+    monthlyBudgetMinor: 100,
+    monthlySubsidyBudgetMinor: 0,
+  }
+
+  await store.beginProviderCall({ ...uncertain, costControl })
+  usageStore.requests.get(uncertain.usageRequestId).status = 'unknown'
+  usageStore.customerCharges.get(uncertain.usageRequestId).status = 'unknown'
+  await store.beginProviderCall({ ...whileHeld, costControl })
+
+  usageStore.customerCharges.get(uncertain.usageRequestId).status = 'released'
+  await assert.rejects(
+    store.beginProviderCall({ ...afterRelease, costControl }),
+    (error) => error?.code === 'external_platform_subsidy_budget_exhausted',
+  )
+  assert.equal(store.calls.size, 2)
+})
+
 test('memory stages paid provider evidence exactly once without settling usage or derived state', async () => {
   const input = callInput()
   const usage = reservedUsage(input)
@@ -323,14 +725,24 @@ test('memory stages paid provider evidence exactly once without settling usage o
   assert.equal(call.httpStatus, 200)
   assert.equal(call.itemCount, 1)
   assert.equal(store.responseArchives.size, 1)
+  assert.equal(store.restrictedResponseArchives.size, 1)
+  assert.deepEqual(
+    store.restrictedResponseArchives.get(input.id).bodyBytes,
+    Buffer.from(exactReplay.restrictedResponseArchive.bodyBytes),
+  )
   assert.equal(store.snapshots.size, 0)
   assert.equal(store.ingestJobs.length, 0)
   assert.equal(store.requests.length, 0)
   assert.equal(usage.status, 'reserved')
 
   evidence.archiveObjects[0].rawPayload.code = 500
+  evidence.restrictedResponseArchive.bodyBytes.fill(0)
   assert.equal(store.responseArchives.get(input.id).rawPayload.code, 200)
   assert.equal(call.archiveObjects[0].rawPayload.code, 200)
+  assert.deepEqual(
+    store.restrictedResponseArchives.get(input.id).bodyBytes,
+    Buffer.from(exactReplay.restrictedResponseArchive.bodyBytes),
+  )
   await assert.rejects(
     store.stageProviderEvidence({ ...exactReplay, costMinor: 6 }),
     (error) => error?.status === 409 && error?.code === 'external_platform_evidence_conflict',
@@ -360,6 +772,67 @@ test('memory stages paid provider evidence exactly once without settling usage o
   assert.equal((await store.stageProviderEvidence(exactReplay)).alreadySettled, true)
 })
 
+test('restricted exact-byte evidence accepts an omitted optional parsed JSON projection', async () => {
+  const input = callInput()
+  const usageStore = {
+    requests: new Map([[input.usageRequestId, reservedUsage(input)]]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  await store.beginProviderCall(input)
+  const evidence = stagedEvidence(input)
+  evidence.restrictedResponseArchive.parsedPayload = null
+
+  await store.stageProviderEvidence(evidence)
+
+  const archived = store.restrictedResponseArchives.get(input.id)
+  assert.equal(archived.jsonParsed, true)
+  assert.equal(archived.parsedPayload, null)
+  assert.deepEqual(archived.bodyBytes, evidence.restrictedResponseArchive.bodyBytes)
+})
+
+test('restricted exact-byte evidence keeps PostgreSQL-unsafe NUL projections optional', async () => {
+  const cases = [
+    {
+      bodyText: '{"text":"\\u0000"}',
+      storedBodyText: '{"text":"\\u0000"}',
+      jsonParsed: true,
+    },
+    {
+      bodyText: '{"text":"literal\0nul"}',
+      storedBodyText: null,
+      jsonParsed: false,
+    },
+  ]
+
+  for (const expected of cases) {
+    const input = callInput()
+    const usageStore = {
+      requests: new Map([[input.usageRequestId, reservedUsage(input)]]),
+    }
+    const store = new MemoryExternalPlatformStore({ usageStore })
+    await store.beginProviderCall(input)
+    const evidence = stagedEvidence(input)
+    const bodyBytes = Buffer.from(expected.bodyText, 'utf8')
+    evidence.restrictedResponseArchive = {
+      ...evidence.restrictedResponseArchive,
+      bodySize: bodyBytes.byteLength,
+      bodySha256: createHash('sha256').update(bodyBytes).digest('hex'),
+      bodyBytes,
+      bodyText: expected.storedBodyText,
+      jsonParsed: expected.jsonParsed,
+      parsedPayload: null,
+    }
+
+    await store.stageProviderEvidence(evidence)
+
+    const archived = store.restrictedResponseArchives.get(input.id)
+    assert.equal(archived.bodyText, expected.storedBodyText)
+    assert.equal(archived.jsonParsed, expected.jsonParsed)
+    assert.equal(archived.parsedPayload, null)
+    assert.deepEqual(archived.bodyBytes, bodyBytes)
+  }
+})
+
 test('memory validates a complete stage receipt before mutating a provider call', async () => {
   const input = callInput()
   const usageStore = {
@@ -379,6 +852,28 @@ test('memory validates a complete stage receipt before mutating a provider call'
   assert.equal(call.billed, undefined)
   assert.equal(call.stagedEvidence, undefined)
   assert.equal(store.responseArchives.size, 0)
+  assert.equal(store.restrictedResponseArchives.size, 0)
+
+  invalid.archiveObjects[1].capturedDate = invalid.responseArchive.capturedAt.slice(0, 10)
+  invalid.restrictedResponseArchive.bodySha256 = 'f'.repeat(64)
+  await assert.rejects(
+    store.stageProviderEvidence(invalid),
+    /bodySha256 does not match bodyBytes/u,
+  )
+  assert.equal(call.stagedEvidence, undefined)
+  assert.equal(store.restrictedResponseArchives.size, 0)
+
+  invalid.restrictedResponseArchive.bodySha256 = createHash('sha256')
+    .update(invalid.restrictedResponseArchive.bodyBytes)
+    .digest('hex')
+  invalid.restrictedResponseArchive.bodyText = JSON.stringify({ forged: true })
+  invalid.restrictedResponseArchive.parsedPayload = { forged: true }
+  await assert.rejects(
+    store.stageProviderEvidence(invalid),
+    /bodyText does not match bodyBytes/u,
+  )
+  assert.equal(call.stagedEvidence, undefined)
+  assert.equal(store.restrictedResponseArchives.size, 0)
 })
 
 test('memory provider-call audit records an unknown retry target only once and in scope', async () => {
@@ -724,6 +1219,309 @@ test('Postgres beginProviderCall locks and inserts only its owned reservation', 
   assert.equal(releasedWith, null)
 })
 
+test('Postgres workflow admission serializes and inserts only a cost hold', async () => {
+  const input = callInput()
+  const statements = []
+  const createdAt = new Date('2026-09-08T00:00:00.000Z')
+  const client = {
+    async query(sql, values) {
+      statements.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (/^\s*SELECT request\.id/u.test(sql)) return { rows: [{ id: input.usageRequestId }] }
+      if (/AS known_cost_minor/u.test(sql)) {
+        return { rows: [{
+          known_cost_minor: '0',
+          unknown_cost_calls: 0,
+          subsidy_cost_minor: '0',
+          reserved_cost_minor: '0',
+          reserved_subsidy_minor: '0',
+          mixed_reservation_count: 0,
+          usage_cost_minor: '0',
+          customer_coverage_minor: null,
+          reservation_id: null,
+        }] }
+      }
+      if (/INSERT INTO external_platform\.provider_cost_reservations/u.test(sql)) {
+        return { rows: [{ created_at: createdAt }] }
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresExternalPlatformStore({
+    pool: {
+      async connect() { return client },
+      async query() { throw new Error('reconciliation must not run') },
+    },
+  })
+  const costControl = {
+    costMinor: 6,
+    costKind: 'estimated',
+    currency: 'USD',
+    monthlyBudgetMinor: 20,
+    monthlySubsidyBudgetMinor: 20,
+  }
+
+  const reservation = await store.reserveProviderCostWorkflow({
+    tenantId: input.tenantId,
+    consumerId: input.consumerId,
+    apiKeyId: input.apiKeyId,
+    usageRequestId: input.usageRequestId,
+    fingerprint: input.fingerprint,
+    costControls: [costControl, costControl],
+  })
+
+  assert.equal(reservation.reservedCostMinor, 12)
+  assert.equal(reservation.reservedSubsidyMinor, 12)
+  assert.equal(statements.filter(({ sql }) => /pg_advisory_xact_lock/u.test(sql)).length, 2)
+  const usageLock = statements.find(({ sql }) => /^\s*SELECT request\.id/u.test(sql))
+  assert.match(usageLock.sql, /request\.status = 'reserved'[\s\S]*FOR UPDATE/u)
+  const inserted = statements.find(
+    ({ sql }) => /INSERT INTO external_platform\.provider_cost_reservations/u.test(sql),
+  )
+  assert.ok(inserted)
+  assert.equal(inserted.values[5], 12)
+  assert.equal(inserted.values[6], 12)
+  assert.equal(
+    statements.some(({ sql }) => /INSERT INTO external_platform\.provider_calls/u.test(sql)),
+    false,
+  )
+})
+
+test('Postgres rejected workflow admission leaves no reservation or provider call', async () => {
+  const input = callInput()
+  const statements = []
+  const client = {
+    async query(sql, values) {
+      statements.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] }
+      if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (/^\s*SELECT request\.id/u.test(sql)) return { rows: [{ id: input.usageRequestId }] }
+      if (/AS known_cost_minor/u.test(sql)) {
+        return { rows: [{
+          known_cost_minor: '0',
+          unknown_cost_calls: 0,
+          subsidy_cost_minor: '0',
+          reserved_cost_minor: '12',
+          reserved_subsidy_minor: '12',
+          mixed_reservation_count: 0,
+          usage_cost_minor: '0',
+          customer_coverage_minor: null,
+          reservation_id: null,
+        }] }
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresExternalPlatformStore({
+    pool: {
+      async connect() { return client },
+      async query() { return { rows: [] } },
+    },
+  })
+  const costControl = {
+    costMinor: 6,
+    costKind: 'estimated',
+    currency: 'USD',
+    monthlyBudgetMinor: 12,
+    monthlySubsidyBudgetMinor: 12,
+  }
+
+  await assert.rejects(
+    store.reserveProviderCostWorkflow({
+      tenantId: input.tenantId,
+      consumerId: input.consumerId,
+      apiKeyId: input.apiKeyId,
+      usageRequestId: input.usageRequestId,
+      fingerprint: input.fingerprint,
+      costControls: [costControl, costControl],
+    }),
+    (error) => error?.code === 'external_platform_cost_budget_exhausted',
+  )
+  assert.equal(
+    statements.some(({ sql }) => /INSERT INTO external_platform\.(?:provider_cost_reservations|provider_calls)/u.test(sql)),
+    false,
+  )
+  assert.equal(statements.at(-1).sql, 'ROLLBACK')
+})
+
+test('Postgres reserved workflow begins real calls from held headroom without double-counting it', async () => {
+  const reservationId = randomUUID()
+  const input = callInput({
+    costReservationId: reservationId,
+    costControl: {
+      costMinor: 6,
+      costKind: 'estimated',
+      currency: 'USD',
+      monthlyBudgetMinor: 12,
+      monthlySubsidyBudgetMinor: 12,
+    },
+  })
+  const statements = []
+  const client = {
+    async query(sql, values) {
+      statements.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (/AS known_cost_minor/u.test(sql)) {
+        return { rows: [{
+          known_cost_minor: '6',
+          unknown_cost_calls: 0,
+          subsidy_cost_minor: '6',
+          reserved_cost_minor: '6',
+          reserved_subsidy_minor: '6',
+          mixed_reservation_count: 0,
+          usage_cost_minor: '6',
+          customer_coverage_minor: null,
+          reservation_id: reservationId,
+          reservation_usage_request_id: input.usageRequestId,
+          reservation_currency: 'USD',
+          reservation_base_cost_minor: '0',
+          reservation_cost_minor: '12',
+          reservation_subsidy_minor: '12',
+          reservation_monthly_budget_minor: '12',
+          reservation_monthly_subsidy_budget_minor: '12',
+        }] }
+      }
+      if (/WITH owned_request AS MATERIALIZED/u.test(sql)) {
+        return { rows: [{ id: input.id, started_at: new Date() }] }
+      }
+      if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresExternalPlatformStore({
+    pool: {
+      async connect() { return client },
+      async query() { throw new Error('reconciliation must not run') },
+    },
+  })
+
+  await store.beginProviderCall(input)
+
+  const budget = statements.find(({ sql }) => /AS known_cost_minor/u.test(sql))
+  assert.deepEqual(budget.values, ['justone', 'USD', input.usageRequestId, reservationId])
+  assert.ok(statements.some(({ sql }) => /INSERT INTO external_platform\.provider_calls/u.test(sql)))
+})
+
+test('Postgres provider-call cost admission locks and checks the UTC monthly ledger before insert', async () => {
+  const input = callInput({
+    costControl: {
+      costMinor: 5,
+      costKind: 'estimated',
+      currency: 'USD',
+      monthlyBudgetMinor: 100,
+      monthlySubsidyBudgetMinor: 100,
+    },
+  })
+  const statements = []
+  const startedAt = new Date('2026-09-08T00:00:00.000Z')
+  const client = {
+    async query(sql, values) {
+      statements.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [{ pg_advisory_xact_lock: null }] }
+      if (/AS known_cost_minor/u.test(sql)) {
+        return { rows: [{
+          known_cost_minor: '90',
+          unknown_cost_calls: 0,
+          subsidy_cost_minor: '90',
+          reserved_cost_minor: '0',
+          reserved_subsidy_minor: '0',
+          mixed_reservation_count: 0,
+          usage_cost_minor: '0',
+          customer_coverage_minor: null,
+          reservation_id: null,
+        }] }
+      }
+      if (/WITH owned_request AS MATERIALIZED/u.test(sql)) {
+        return { rows: [{ id: input.id, started_at: startedAt }] }
+      }
+      if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresExternalPlatformStore({
+    pool: {
+      async connect() { return client },
+      async query() { throw new Error('reconciliation must not run') },
+    },
+  })
+
+  await store.beginProviderCall(input)
+
+  const lock = statements.find(({ sql }) => /pg_advisory_xact_lock/u.test(sql))
+  assert.deepEqual(lock.values, ['external-platform-cost:justone'])
+  const budget = statements.find(({ sql }) => /AS known_cost_minor/u.test(sql))
+  assert.deepEqual(budget.values, ['justone', 'USD', input.usageRequestId, null])
+  assert.match(budget.sql, /date_trunc\('month', now\(\) AT TIME ZONE 'UTC'\)/u)
+  assert.match(budget.sql, /cost_kind <> 'unknown'/u)
+  assert.match(budget.sql, /cost_minor IS NULL OR cost_minor <= 0/u)
+  assert.match(budget.sql, /cost_minor IS NOT NULL AND currency IS DISTINCT FROM \$2/u)
+  const inserted = statements.find(({ sql }) => /WITH owned_request AS MATERIALIZED/u.test(sql))
+  assert.equal(inserted.values[17], 5)
+  assert.equal(inserted.values[18], 'estimated')
+  assert.equal(inserted.values[19], 'USD')
+  assert.match(inserted.sql, /cost_minor, cost_kind, currency/u)
+})
+
+test('Postgres provider-call cost admission refuses unknown or over-budget exposure', async () => {
+  for (const [row, expectedCode] of [
+    [{
+      known_cost_minor: '0', unknown_cost_calls: 1, subsidy_cost_minor: '0',
+      reserved_cost_minor: '0', reserved_subsidy_minor: '0', mixed_reservation_count: 0,
+      usage_cost_minor: '0', customer_coverage_minor: null,
+      reservation_id: null,
+    }, 'external_platform_cost_evidence_incomplete'],
+    [{
+      known_cost_minor: '96', unknown_cost_calls: 0, subsidy_cost_minor: '96',
+      reserved_cost_minor: '0', reserved_subsidy_minor: '0', mixed_reservation_count: 0,
+      usage_cost_minor: '0', customer_coverage_minor: null,
+      reservation_id: null,
+    }, 'external_platform_cost_budget_exhausted'],
+    [{
+      known_cost_minor: '50', unknown_cost_calls: 0, subsidy_cost_minor: '100',
+      reserved_cost_minor: '0', reserved_subsidy_minor: '0', mixed_reservation_count: 0,
+      usage_cost_minor: '0', customer_coverage_minor: null,
+      reservation_id: null,
+    }, 'external_platform_subsidy_budget_exhausted'],
+  ]) {
+    const input = callInput({
+      costControl: {
+        costMinor: 5,
+        costKind: 'estimated',
+        currency: 'USD',
+        monthlyBudgetMinor: 100,
+        monthlySubsidyBudgetMinor: 100,
+      },
+    })
+    const client = {
+      async query(sql) {
+        if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] }
+        if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+        if (/AS known_cost_minor/u.test(sql)) return { rows: [row] }
+        throw new Error(`unexpected SQL: ${sql}`)
+      },
+      release() {},
+    }
+    const store = new PostgresExternalPlatformStore({
+      pool: {
+        async connect() { return client },
+        async query() { return { rows: [] } },
+      },
+    })
+
+    await assert.rejects(
+      store.beginProviderCall(input),
+      (error) => error?.code === expectedCode,
+    )
+  }
+})
+
 test('Postgres provider-call insert validates and persists uncertain retry lineage', async () => {
   const input = callInput({ retryOfRequestId: randomUUID() })
   let inserted
@@ -938,7 +1736,7 @@ test('Postgres stageProviderEvidence reconciles a lost COMMIT without duplicatin
         workingEvidence = structuredClone(evidence)
         return { rows: [{ id: input.id }] }
       }
-      if (/INSERT INTO external_platform\.(?:response_archives|archive_objects)/u.test(sql)) {
+      if (/INSERT INTO (?:external_platform\.(?:response_archives|archive_objects)|control\.external_platform_restricted_raw_responses)/u.test(sql)) {
         return { rows: [] }
       }
       throw new Error(`unexpected SQL: ${sql}`)
@@ -966,6 +1764,13 @@ test('Postgres stageProviderEvidence reconciles a lost COMMIT without duplicatin
   assert.equal(statements.some(({ sql }) => sql === 'ROLLBACK'), false)
   assert.equal(poolReads, 2)
   assert.equal(statements.filter(({ sql }) => /INSERT INTO external_platform\.response_archives/u.test(sql)).length, 1)
+  assert.equal(statements.filter(({ sql }) => /INSERT INTO control\.external_platform_restricted_raw_responses/u.test(sql)).length, 1)
+  const restrictedInsert = statements.find(
+    ({ sql }) => /INSERT INTO control\.external_platform_restricted_raw_responses/u.test(sql),
+  )
+  assert.equal(restrictedInsert.values[4], evidence.restrictedResponseArchive.bodySha256)
+  assert.deepEqual(restrictedInsert.values[5], evidence.restrictedResponseArchive.bodyBytes)
+  assert.equal(restrictedInsert.values[6], evidence.restrictedResponseArchive.bodyText)
   assert.equal(statements.filter(({ sql }) => /INSERT INTO external_platform\.archive_objects/u.test(sql)).length, 2)
   for (const forbidden of [/usage_requests/u, /gateway_requests/u, /response_snapshots/u, /mxq\.jobs/u]) {
     assert.equal(statements.some(({ sql }) => forbidden.test(sql)), false)
@@ -1436,7 +2241,7 @@ test('Postgres finishProviderStep can terminalize staged detail evidence as unkn
         terminal = true
         return { rows: [{ id: input.id }] }
       }
-      if (/INSERT INTO external_platform\.(?:response_archives|archive_objects)/u.test(sql)) {
+      if (/INSERT INTO (?:external_platform\.(?:response_archives|archive_objects)|control\.external_platform_restricted_raw_responses)/u.test(sql)) {
         return { rows: [] }
       }
       throw new Error(`unexpected SQL: ${sql}`)
@@ -1532,7 +2337,7 @@ test('Postgres finishProviderStep reconciles a committed terminal step after its
         workingSettled = true
         return { rows: [{ id: input.id }] }
       }
-      if (/INSERT INTO external_platform\.(?:response_archives|archive_objects)/u.test(sql)) {
+      if (/INSERT INTO (?:external_platform\.(?:response_archives|archive_objects)|control\.external_platform_restricted_raw_responses)/u.test(sql)) {
         return { rows: [] }
       }
       if (/INSERT INTO external_platform\.response_snapshots/u.test(sql)) {

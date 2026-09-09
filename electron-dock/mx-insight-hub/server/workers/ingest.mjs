@@ -82,7 +82,8 @@ async function main() {
         && payload.datasetId === 'ecommerce.products.v1'
         && payload.platform === 'ecommerce'
       const tikHubXiaohongshu = payload.providerKey === 'tikhub'
-        && payload.datasetId === TIKHUB_XIAOHONGSHU_DATASET_ID
+        && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID]
+          .includes(payload.datasetId)
         && payload.platform === 'xiaohongshu'
       if ((!justOne && !tikHubXiaohongshu) || !Array.isArray(payload.records)) {
         throw new Error('external-platform ingest payload does not match the pinned contract')

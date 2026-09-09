@@ -10,13 +10,22 @@ const CONNECTOR_ID = 'external-platform:justone'
 const FINGERPRINT = 'a'.repeat(64)
 
 function productRecord() {
+  const sourceItem = {
+    skuId: 'sku-1',
+    title: 'Camera',
+    signature: 'business-signature',
+    search_id: 'business-search',
+    session_id: 'business-session',
+    itemUrl: 'https://item.jd.com/sku-1.html?signature=business-signature#business-fragment',
+    token: '[REDACTED]',
+  }
   return {
     platform: PLATFORM,
     objectType: 'product',
     externalId: 'jd:sku-1',
     payloadSha256: 'b'.repeat(64),
     rawPayloadSha256: 'c'.repeat(64),
-    rawItem: { skuId: 'sku-1', title: 'Camera' },
+    rawItem: sourceItem,
     parserVersion: 'mxih-justone-product-search.v2',
     contentType: 'product',
     url: 'https://item.jd.com/sku-1.html',
@@ -32,7 +41,7 @@ function productRecord() {
     admin1Code: null,
     admin2Code: null,
     stableFields: { commerce: { product: { goodsId: 'sku-1' } } },
-    extensions: {},
+    extensions: { sourceItem },
     metrics: { comments: 3 },
     rank: 1,
     deletedAt: null,
@@ -151,9 +160,128 @@ test('PostgresStore accepts only a succeeded matching provider call and writes c
   assert.match(canonical.sql, /collected_at = GREATEST\(\s*core\.canonical_records\.collected_at,\s*EXCLUDED\.collected_at\s*\)/u)
   assert.match(canonical.sql, /projection_revision[\s\S]*?\$25::boolean[\s\S]*?IS DISTINCT FROM GREATEST\(/u)
   assert.equal(canonical.values[24], true)
+  const sourceObject = queries.find(({ sql }) => /INSERT INTO ingest\.source_objects/u.test(sql))
+  assert.equal(sourceObject.values[6].signature, 'business-signature')
+  assert.equal(sourceObject.values[6].search_id, 'business-search')
+  assert.equal(sourceObject.values[6].session_id, 'business-session')
+  assert.match(sourceObject.values[6].itemUrl, /#business-fragment$/u)
+  assert.equal(sourceObject.values[6].token, '[REDACTED]')
+  assert.deepEqual(canonical.values[21].sourceItem, sourceObject.values[6])
   const runUpdate = queries.find(({ sql }) => /UPDATE ingest\.ingest_runs/u.test(sql))
   assert.deepEqual(runUpdate.values, [runId, 1])
   assert.match(runUpdate.sql, /RETURNING id/u)
+})
+
+test('a Xiaohongshu provider preview cannot replace a longer canonical detail body', async () => {
+  const queries = []
+  const requestId = randomUUID()
+  const providerCallId = randomUUID()
+  const runId = randomUUID()
+  const sourceObjectId = randomUUID()
+  const sourceRevisionId = randomUUID()
+  const recordId = randomUUID()
+  const preview = '预'.repeat(60)
+  const record = {
+    platform: 'xiaohongshu',
+    objectType: 'post',
+    externalId: '675d277d000000000600e655',
+    payloadSha256: 'd'.repeat(64),
+    rawPayloadSha256: 'e'.repeat(64),
+    rawItem: { desc: preview },
+    parserVersion: 'mxih-tikhub-xiaohongshu-search.v1',
+    contentType: 'note',
+    url: 'https://www.xiaohongshu.com/explore/675d277d000000000600e655',
+    title: '预览标题',
+    body: preview,
+    authorExternalId: 'author-1',
+    authorName: 'Alice',
+    eventTime: null,
+    collectedAt: new Date('2026-09-09T00:00:00.000Z'),
+    latitude: null,
+    longitude: null,
+    countryCode: 'CN',
+    admin1Code: null,
+    admin2Code: null,
+    stableFields: { metrics: { likes: 2 } },
+    extensions: { bodyCompleteness: 'provider_preview' },
+    metrics: { likes: 2 },
+    rank: 1,
+    deletedAt: null,
+  }
+  const client = {
+    async query(sql, values) {
+      queries.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [{}], rowCount: 1 }
+      if (/INSERT INTO ingest\.ingest_runs/u.test(sql)) return { rows: [{ id: runId }], rowCount: 1 }
+      if (/INSERT INTO ingest\.source_objects/u.test(sql)) {
+        return { rows: [{ id: sourceObjectId, current_revision: 2 }], rowCount: 1 }
+      }
+      if (/INSERT INTO ingest\.source_object_revisions/u.test(sql)) {
+        return { rows: [{ id: sourceRevisionId }], rowCount: 1 }
+      }
+      if (/SELECT id, current_revision, projection_revision,[\s\S]*?body_code_points[\s\S]*?FROM core\.canonical_records/u.test(sql)) {
+        return {
+          rows: [{ id: recordId, current_revision: 7, projection_revision: 9, body_code_points: 248 }],
+          rowCount: 1,
+        }
+      }
+      if (/UPDATE core\.canonical_records[\s\S]*?SET last_seen_at = now\(\)/u.test(sql)) {
+        return { rows: [{ id: recordId, current_revision: 7, projection_revision: 9 }], rowCount: 1 }
+      }
+      if (/INSERT INTO core\.canonical_records/u.test(sql)) {
+        throw new Error('the shorter provider preview must not upsert canonical content')
+      }
+      if (/INSERT INTO core\.record_revisions/u.test(sql)) {
+        throw new Error('the shorter provider preview must not create a canonical revision')
+      }
+      if (/INSERT INTO core\.observations/u.test(sql)) return { rows: [], rowCount: 1 }
+      if (/INSERT INTO outbox\.projection_events/u.test(sql)) return { rows: [], rowCount: 0 }
+      if (/UPDATE ingest\.ingest_runs/u.test(sql)) return { rows: [], rowCount: 1 }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+
+  const result = await store.ingestExternalRecords({
+    datasetId: 'social.posts.v1',
+    platform: 'xiaohongshu',
+    records: [record],
+    importRunId: null,
+    connectorId: 'external-platform:tikhub',
+    externalPlatformLineage: lineage(requestId, providerCallId),
+  })
+
+  assert.equal(result.changed, 0)
+  assert.equal(result.ingested, 1)
+  assert.equal(queries.filter(({ sql }) => /pg_advisory_xact_lock/u.test(sql)).length, 1)
+  assert.equal(
+    queries.some(({ sql }) => /INSERT INTO core\.canonical_records/u.test(sql)),
+    false,
+  )
+  assert.equal(
+    queries.some(({ sql }) => /INSERT INTO core\.record_revisions/u.test(sql)),
+    false,
+    'preserving the complete canonical body must not materialize a preview revision',
+  )
+  assert.equal(
+    queries.some(({ sql }) => /INSERT INTO ingest\.source_object_revisions/u.test(sql)),
+    true,
+    'the paid preview remains immutable raw/source evidence',
+  )
+  assert.equal(
+    queries.some(({ sql }) => /INSERT INTO core\.observations/u.test(sql)),
+    true,
+    'the search rank and metrics remain query observation evidence',
+  )
+  const outbox = queries.find(({ sql }) => /INSERT INTO outbox\.projection_events/u.test(sql))
+  assert.deepEqual(outbox.values, [
+    recordId,
+    9,
+    'upsert',
+    { datasetId: 'social.posts.v1', platform: 'xiaohongshu', objectType: 'post' },
+  ], 'the projector re-reads the preserved canonical body at its existing projection revision')
 })
 
 test('PostgresStore rejects external lineage when no succeeded matching provider call exists', async () => {

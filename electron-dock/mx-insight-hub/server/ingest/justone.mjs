@@ -239,6 +239,12 @@ function canonicalRecord(archiveObject, request, capturedAt, secret) {
     extensions: {
       brand: item.attributes.brand,
       category: item.attributes.category,
+      // JustOne leaves marketplace response items open-ended. Preserve the
+      // provider's business fields in the canonical/PG projection so signed
+      // URLs, pagination/session identifiers and future fields are not lost.
+      // `rawItem` has only the exact request credential replaced upstream.
+      sourceItem: rawItem,
+      sourceResponse: structuredClone(archiveObject.responseBusinessContext || {}),
     },
     metrics,
     rank: archiveObject.rank,

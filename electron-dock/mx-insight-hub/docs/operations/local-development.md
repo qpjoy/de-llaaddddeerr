@@ -49,16 +49,23 @@ Hub does not stop or mutate host Night-All.
 
 ## Optional search development stack
 
-The Elasticsearch/Kibana sample is independent and is not required for the current Hub API:
+The Elasticsearch/Kibana sample is optional and is not required for the Hub API or login. Start the normal
+Hub first; enabling search then starts a separate Compose-profile projector without recreating the running
+API container:
 
 ```bash
 cp deploy/compose/search/.env.example deploy/compose/search/.env
+bash scripts/manage.sh local up
 bash scripts/manage.sh search plan
 bash scripts/manage.sh search up
 bash scripts/manage.sh search status
 ```
 
-It binds only to loopback and must not be treated as a production deployment. See [Search and observability stack](search-and-observability-stack.md).
+`search up` waits for loopback Elasticsearch and then starts `server/workers/projector.mjs`. The existing
+ingest worker commits canonical records and outbox events in PostgreSQL; the projector is the only process
+that consumes those events into Elasticsearch. `search down` stops the projector before Elasticsearch, while
+preserving the PostgreSQL outbox and Elasticsearch volumes for a later catch-up. It binds only to loopback
+and must not be treated as a production deployment. See [Search and observability stack](search-and-observability-stack.md).
 
 ## When a Night-All snapshot is actually needed
 

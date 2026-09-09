@@ -262,3 +262,62 @@ networking, users or DNS.
   versioned contracts.
 - Telegram neighbor reconstruction requires a later schema/projector version and
   stable conversation identity; the current v1 projection remains unchanged.
+
+## Amendment: Hub-encrypted historical pagination (2026-09-09)
+
+This amendment narrows, but does not erase, the historical decision above.
+Night-All still owns the explicitly unmigrated platform/operation shapes, and the
+three public paths and response business envelope remain compatible. The earlier
+references to preserving an upstream response “exactly” now mean exact business
+fields and correlation values; pagination control has one deliberate governance
+projection so the Hub can enforce a hard acquisition boundary.
+
+For `raw`, `crawl`, `user-info`, and every non-Telegram Night-All-backed
+`POST /api/v1/data/search` traversal, Hub encrypts provider cursor,
+composite/offset params, or page-number continuation state into an opaque cursor
+with prefix `mxnc1.`. Its authenticated payload binds
+consumer, operation, platform, stable query/account scope and next page. It may
+be returned as `data.page.nextCursor`, as `data.page.nextParams.cursor` for a
+composite/offset continuation, or as `/data/search`'s
+`data.pageInfo.nextCursor`. Public page mode becomes cursor mode and public
+offset mode becomes composite mode; raw `nextPage` and offset are cleared. A
+caller returns that value unchanged and uses a new `Idempotency-Key` for each
+next-page request; only a transport retry of the exact same page reuses its key.
+
+No historical traversal may exceed 15 pages. Page 15 sets `hasMore=false` and
+clears the applicable continuation controls; when the upstream had advertised
+more work, Hub adds a bounded `page_limit_reached` warning. A provider cursor or
+provider continuation params issued before `mxnc1` carry no authenticated page
+count and therefore fail closed with `400 invalid_cursor`. They cannot be
+migrated in place: the client removes cursor/continuation params, creates a new
+idempotency key and restarts at page 1. Tampered or cross-consumer,
+cross-operation, cross-platform or cross-query-scope cursors fail the same way.
+
+This pagination-control projection is the only compatibility response rewrite.
+Hub does not desensitize, filter or truncate acquired business data: long note
+bodies, `raw_info`, `raw_data`, provider/endpoint business fields and Night-All
+request/trace correlation stay intact. A compatibility snapshot stores the
+governed body actually delivered to the client; historical raw lineage retains
+the complete parsed JSON payload and legacy raw strings, including the
+pre-wrapper provider continuation. The historical Night-All HTTP hop does not
+claim byte-for-byte response capture. Exact upstream response text/bytes plus
+hash is a separate restricted-archive guarantee for Hub-native provider calls.
+Restricted evidence is not exposed through Public, tenant, ordinary-Admin, UI,
+logs or search projections.
+
+The route namespace no longer implies that every eligible Xiaohongshu request
+uses Night-All. In addition to the separately gated raw/search slice, a distinct
+user-activity gate may route a narrow `crawl` (one user, posts only, page size
+20, concurrency 1) or `user-info` (one supported user identifier, page 1, no
+continuation/custom params/concurrency) request through the Hub-native TikHub
+workflow. Historical `mxnc1` traversals, batches/multiple identities, channel or
+non-post forms, non-20 crawl pages and other unsupported shapes remain on
+Night-All. An `mxec2` direct crawl continuation remains pinned to its original
+connector. These code paths do not prove that either rollout gate is active or
+live-ready in a deployed environment.
+
+`mxnc1` is separate from the authenticated-encrypted `mxec2` domain used by the
+Hub-native Xiaohongshu connector. An existing `mxec2` cursor remains pinned to
+that direct connector and is never decoded as, or routed through, Night-All.
+This amendment does not claim that Night-All has exited all platforms or request
+shapes; it governs only the historical paths that still exist.

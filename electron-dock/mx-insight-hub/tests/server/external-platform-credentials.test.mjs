@@ -18,6 +18,14 @@ function justOneConfig(configured = true) {
   return parseJustOneConfig({
     MX_INSIGHT_JUSTONE_CONFIGURED: configured ? '1' : '0',
     MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_JUSTONE_BILLING_JSON: JSON.stringify({
+      source: 'manual',
+      currency: 'CNY',
+      pricingAsOf: '2026-09-08T00:00:00Z',
+      monthlyBudgetMinor: 100_000,
+      monthlySubsidyBudgetMinor: 0,
+      unitCostMinorByEndpoint: { 'jd.product-search.v1': 5 },
+    }),
   })
 }
 
@@ -52,6 +60,25 @@ test('migration 052 isolates external-platform plaintext credentials from analyt
   assert.match(sql, /length\(api_key\) <= 4096/u)
   assert.match(sql, /VALUES \('justone', 'environment', 0\)/u)
   assert.doesNotMatch(sql, /ALTER TABLE external_platform\.|INSERT INTO external_platform\./u)
+})
+
+test('migration 059 revokes PUBLIC access without claiming at-rest encryption', async () => {
+  const sql = await readFile(
+    new URL('../../migrations/059_external_platform_credential_privileges.sql', import.meta.url),
+    'utf8',
+  )
+  assert.match(
+    sql,
+    /REVOKE ALL ON TABLE control\.external_platform_provider_credentials FROM PUBLIC/u,
+  )
+  assert.match(
+    sql,
+    /REVOKE ALL ON TABLE control\.external_platform_provider_settings FROM PUBLIC/u,
+  )
+  assert.match(sql, /Plaintext external-platform credentials/u)
+  assert.match(sql, /not application-level encryption/u)
+  assert.doesNotMatch(sql, /GRANT\s+(?:SELECT|ALL)/iu)
+  assert.doesNotMatch(sql, /pgp_sym_encrypt|aes|ciphertext/iu)
 })
 
 test('memory credential store reports only safe state and fences rotations by revision', async () => {

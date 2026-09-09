@@ -34,7 +34,13 @@ function config(overrides = {}) {
       pricingAsOf: '2026-09-01T00:00:00.000Z',
       freeDailyCalls: null,
       monthlyBudgetMinor: 10_000,
-      unitCostMinorByEndpoint: { 'jd.product-search.v1': 5 },
+      monthlySubsidyBudgetMinor: 10_000,
+      unitCostMinorByEndpoint: {
+        'taobao-tmall.product-search.v1': 5,
+        'jd.product-search.v1': 5,
+        'xiaohongshu-ec.product-search.v1': 5,
+        'xianyu.product-search.v1': 5,
+      },
     },
     ...overrides,
   }
@@ -107,6 +113,79 @@ function successfulResult(body, options) {
     records: [],
   }
 }
+
+test('gateway binds the immutable API-key quota to the JustOne usage reservation', async () => {
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        return successfulResult(body, options)
+      },
+    },
+  })
+  const reserve = state.usageStore.reserve.bind(state.usageStore)
+  let reservationInput = null
+  state.usageStore.reserve = async (input) => {
+    reservationInput = input
+    return reserve(input)
+  }
+
+  await state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: 'key quota binding' },
+    idempotencyKey: 'key-quota-binding-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+
+  assert.deepEqual(reservationInput?.apiKeyQuota, {
+    maxRequests: 1_000,
+    windowSeconds: 3_600,
+  })
+})
+
+test('cost rejection happens before provider RPM admission and creates no provider call', async () => {
+  let providerDispatches = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        providerDispatches += 1
+        return successfulResult(body, options)
+      },
+    },
+    gatewayConfig: config({
+      billing: {
+        ...config().billing,
+        monthlyBudgetMinor: 0,
+      },
+    }),
+  })
+  const acquireProviderRateLimit = state.platformStore.acquireProviderRateLimit
+    .bind(state.platformStore)
+  let rateLimitAdmissions = 0
+  state.platformStore.acquireProviderRateLimit = async (input) => {
+    rateLimitAdmissions += 1
+    return acquireProviderRateLimit(input)
+  }
+
+  let requestId = null
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'budget exhausted before rpm' },
+      idempotencyKey: 'cost-before-rpm-0001',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => {
+      requestId = error?.details?.requestId
+      return error instanceof AppError
+        && error.status === 429
+        && error.code === 'external_platform_cost_budget_exhausted'
+        && typeof requestId === 'string'
+    },
+  )
+
+  assert.equal(rateLimitAdmissions, 0)
+  assert.equal(providerDispatches, 0)
+  assert.equal(state.platformStore.calls.size, 0)
+  assert.equal(state.usageStore.requests.get(requestId)?.status, 'released')
+})
 
 test('gateway scopes dispatch lease and provider call to each endpoint contract version', async () => {
   const adapter = {
@@ -1162,7 +1241,8 @@ test('admin projection keeps unknown price/quota distinct from zero and reports 
       dispatchEnabled: false,
       billing: {
         source: 'unknown', currency: null, pricingAsOf: null, freeDailyCalls: null,
-        monthlyBudgetMinor: null, unitCostMinorByEndpoint: {},
+        monthlyBudgetMinor: null, monthlySubsidyBudgetMinor: null,
+        unitCostMinorByEndpoint: {},
       },
     }),
   })

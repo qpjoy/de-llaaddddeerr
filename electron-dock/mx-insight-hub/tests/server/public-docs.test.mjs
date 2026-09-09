@@ -61,7 +61,8 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
   422: ['night_all_rejected'],
   429: [
     'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
-    'external_platform_capacity_exceeded', 'night_all_rejected',
+    'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted',
+    'external_platform_subsidy_budget_exhausted', 'night_all_rejected',
   ],
   502: [
     'night_all_rejected', 'upstream_outcome_unknown',
@@ -74,8 +75,11 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
     'compatibility_store_unavailable',
     'external_platform_unavailable',
     'external_platform_not_configured',
+    'external_platform_contract_unverified',
     'external_platform_circuit_open',
     'external_platform_capacity_unavailable',
+    'external_platform_cost_control_unavailable',
+    'external_platform_cost_evidence_incomplete',
   ],
 }
 
@@ -95,7 +99,8 @@ const XIAOHONGSHU_SEARCH_ERROR_CODES = {
   410: ['search_cursor_expired'],
   429: [
     'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
-    'external_platform_capacity_exceeded',
+    'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted',
+    'external_platform_subsidy_budget_exhausted',
   ],
   502: [
     'night_all_rejected', 'upstream_outcome_unknown',
@@ -105,7 +110,9 @@ const XIAOHONGSHU_SEARCH_ERROR_CODES = {
   503: [
     'stored_search_unavailable', 'search_cursor_unavailable',
     'external_platform_unavailable', 'external_platform_not_configured',
-    'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+    'external_platform_contract_unverified', 'external_platform_circuit_open',
+    'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable',
+    'external_platform_cost_evidence_incomplete',
   ],
 }
 
@@ -156,6 +163,9 @@ function assertNightAllCompatibilityRequestSchema(schema) {
   assert.equal(schema.properties.commentLimit.oneOf[0].maximum, 100)
   assert.match('100', new RegExp(schema.properties.commentLimit.oneOf[1].pattern))
   assert.doesNotMatch('101', new RegExp(schema.properties.commentLimit.oneOf[1].pattern))
+  assert.equal(schema.properties.page.oneOf[0].maximum, 15)
+  assert.match('15', new RegExp(schema.properties.page.oneOf[1].pattern))
+  assert.doesNotMatch('16', new RegExp(schema.properties.page.oneOf[1].pattern))
   assert.equal(schema.properties.cacheMaxAgeHours.minimum, 0)
   assert.equal(schema.properties.cacheMaxAgeHours.maximum, 720)
   assert.equal(schema.properties.maxEnrichItems.oneOf[0].maximum, 20)
@@ -189,7 +199,10 @@ function assertExternalCommerceContract(document) {
       'external_platform_response_unusable', 'uncertain_retry_not_allowed',
     ],
     413: ['payload_too_large'],
-    429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+    429: [
+      'quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded',
+      'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted',
+    ],
     502: [
       'external_platform_response_unusable', 'external_platform_outcome_unknown',
       'external_platform_rejected',
@@ -197,6 +210,7 @@ function assertExternalCommerceContract(document) {
     503: [
       'external_platform_unavailable', 'external_platform_not_configured',
       'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+      'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete',
     ],
   })
   assert.deepEqual(
@@ -329,7 +343,7 @@ function assertExternalCommerceContract(document) {
     .content['application/json']
   assert.match(
     document.paths['/data/capabilities'].get.description,
-    /Xiaohongshu remains in the legacy matrix.*non-direct raw shapes, crawl and user-info/is,
+    /Xiaohongshu remains in the legacy matrix.*multi-query.*multi-identifier/is,
   )
   const capabilitiesEnvelope = resolveSchema(document, capabilitiesContent.schema)
   const platformProperties = capabilitiesEnvelope.properties.data.properties.platforms.items.properties
@@ -360,19 +374,31 @@ function assertExternalCommerceContract(document) {
 function assertExternalSocialPostContract(document) {
   const canonical = document.paths['/data/post']?.post
   const compatibilityGet = document.paths['/xiaohongshu/app/get_note_info']?.get
+  const appV2 = Object.fromEntries([
+    'get_image_note_detail', 'search_notes', 'search_users',
+    'get_user_info', 'get_user_posted_notes',
+  ].map((name) => [name, document.paths[`/xiaohongshu/app_v2/${name}`]?.get]))
+  const appV2Get = appV2.get_image_note_detail
   const platformPost = document.paths['/xiaohongshu/app/get_note_info']?.post
   const media = document.paths['/data/posts/media']?.get
   assert.ok(canonical)
   assert.ok(compatibilityGet)
+  assert.ok(appV2Get)
   assert.ok(platformPost)
   assert.ok(media)
   assert.equal(canonical.operationId, 'resolveExternalSocialPost')
   assert.equal(compatibilityGet.operationId, 'getXiaohongshuNoteInfoCompatibility')
+  assert.equal(appV2Get.operationId, 'getXiaohongshuImageNoteDetailOfficial')
+  assert.equal(appV2.search_notes.operationId, 'searchXiaohongshuNotesOfficial')
+  assert.equal(appV2.search_users.operationId, 'searchXiaohongshuUsersOfficial')
+  assert.equal(appV2.get_user_info.operationId, 'getXiaohongshuUserInfoOfficial')
+  assert.equal(appV2.get_user_posted_notes.operationId, 'getXiaohongshuUserPostedNotesOfficial')
   assert.equal(platformPost.operationId, 'getXiaohongshuNoteInfo')
   assert.equal(compatibilityGet.deprecated, undefined)
   assert.equal(platformPost.deprecated, undefined)
   assert.equal(canonical['x-mx-canonical-operation'], '/data/post')
   assert.equal(compatibilityGet['x-mx-canonical-operation'], '/data/post')
+  assert.equal(appV2Get['x-mx-canonical-operation'], undefined)
   assert.equal(platformPost['x-mx-canonical-operation'], '/data/post')
   assert.doesNotMatch(
     JSON.stringify({ canonical, compatibilityGet, platformPost, media }),
@@ -383,6 +409,7 @@ function assertExternalSocialPostContract(document) {
   ])
   assert.deepEqual(canonical['x-mx-error-codes'][429], [
     'quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded',
+    'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted',
   ])
   assert.deepEqual(compatibilityGet['x-mx-error-codes'], canonical['x-mx-error-codes'])
   assert.deepEqual(platformPost['x-mx-error-codes'], canonical['x-mx-error-codes'])
@@ -395,9 +422,42 @@ function assertExternalSocialPostContract(document) {
     '#/components/schemas/XiaohongshuPostCompatibilityRequest',
   )
   assert.equal(compatibilityGet.requestBody, undefined)
+  assert.equal(appV2Get.requestBody, undefined)
   assert.deepEqual(compatibilityGet.parameters.map(({ name }) => name), [
     'note_id', 'share_text', 'delivery_mode', 'Idempotency-Key', 'X-MX-Insight-Retry-Of',
   ])
+  assert.deepEqual(appV2Get.parameters.map(({ name }) => name), [
+    'note_id', 'share_text', 'Idempotency-Key',
+  ])
+  assert.deepEqual(appV2.search_notes.parameters.map(({ name }) => name), [
+    'keyword', 'page', 'sort_type', 'note_type', 'time_filter', 'search_id',
+    'search_session_id', 'source', 'ai_mode', 'Idempotency-Key',
+  ])
+  assert.deepEqual(appV2.search_users.parameters.map(({ name }) => name), [
+    'keyword', 'page', 'search_id', 'source', 'Idempotency-Key',
+  ])
+  assert.deepEqual(appV2.get_user_info.parameters.map(({ name }) => name), [
+    'user_id', 'share_text', 'Idempotency-Key',
+  ])
+  assert.deepEqual(appV2.get_user_posted_notes.parameters.map(({ name }) => name), [
+    'user_id', 'share_text', 'cursor', 'Idempotency-Key',
+  ])
+  assert.equal(appV2.search_notes.parameters[1].schema.maximum, 15)
+  assert.equal(appV2.search_users.parameters[1].schema.maximum, 15)
+  assert.match(appV2.get_user_posted_notes.parameters[2].description, /opaque Hub cursor|不透明 Hub cursor/i)
+  for (const operation of Object.values(appV2)) {
+    assert.ok(operation)
+    assert.equal(operation.parameters.at(-1).name, 'Idempotency-Key')
+    assert.equal(operation.parameters.at(-1).required, false)
+    assert.equal(operation.responses[200].content['application/json'].schema.type, 'object')
+    assert.equal(operation.responses[200].content['application/json'].schema.additionalProperties, true)
+    assert.match(operation.description, /15/)
+    assert.match(operation.description, /business fields remain intact|Business fields.*intact/i)
+    assert.ok(operation['x-mx-error-codes'][429].includes('external_platform_cost_budget_exhausted'))
+    assert.ok(operation['x-mx-error-codes'][503].includes('external_platform_cost_control_unavailable'))
+  }
+  assert.ok(appV2Get['x-mx-error-codes'][403].includes('capability_not_granted'))
+  assert.equal(appV2.search_users['x-mx-error-codes'][403].includes('capability_not_granted'), false)
   assert.match(compatibilityGet.parameters[0].schema.pattern, /\{24\}/u)
   assert.deepEqual(compatibilityGet.parameters[2].schema.enum, ['cache_only', 'cache_first', 'refresh'])
   for (const operation of [canonical, platformPost]) {
@@ -813,10 +873,17 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
 
 function assertNightAllPublicContract(document) {
   const compatibility = document.paths['/night-all/search/{operation}'].post
+  const historicalAlias = document.paths['/search/{operation}'].post
   const compatibilityContent = compatibility.requestBody.content['application/json']
   assert.equal(compatibilityContent.schema.$ref, '#/components/schemas/NightAllLegacyRequest')
   assert.deepEqual(compatibilityContent.examples, NIGHT_ALL_COMPATIBILITY_EXAMPLES)
   assert.deepEqual(compatibility['x-mx-error-codes'], NIGHT_ALL_COMPATIBILITY_ERROR_CODES)
+  assert.equal(historicalAlias['x-mx-canonical-operation'], '/night-all/search/{operation}')
+  assert.deepEqual(historicalAlias['x-mx-error-codes'], compatibility['x-mx-error-codes'])
+  assert.deepEqual(historicalAlias.parameters, compatibility.parameters)
+  assert.deepEqual(historicalAlias.requestBody, compatibility.requestBody)
+  assert.deepEqual(historicalAlias.responses, compatibility.responses)
+  assert.match(historicalAlias.description, /same Hub service and paid-operation fingerprint/i)
   assert.ok(compatibility.responses[422])
   assert.ok(compatibility.responses[503])
   assert.match(compatibility.description, /data\.legacySearch/)
@@ -1562,9 +1629,15 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/night-all/search/{operation}',
       '/requests/by-idempotency-key',
       '/requests/{requestId}',
+      '/search/{operation}',
       '/tools/tokenize',
       '/usage',
       '/xiaohongshu/app/get_note_info',
+      '/xiaohongshu/app_v2/get_image_note_detail',
+      '/xiaohongshu/app_v2/get_user_info',
+      '/xiaohongshu/app_v2/get_user_posted_notes',
+      '/xiaohongshu/app_v2/search_notes',
+      '/xiaohongshu/app_v2/search_users',
     ])
     assert.deepEqual(Object.keys(document.components.securitySchemes).sort(), ['apiKeyHeader', 'bearerKey'])
 
@@ -1740,7 +1813,7 @@ test('public curl guide hides deployment topology and documents the Xiaohongshu 
     guide,
     /Domestic Nginx|WireGuard|Internal Nginx|10\.88\.88\.88|127\.0\.0\.1:(?:18150|18151|13141)|public listener `18150`|admin listener/,
   )
-  assert.match(guide, /三个入口共享一个 canonical 幂等 namespace/)
+  assert.match(guide, /四个入口共享一个 canonical 幂等 namespace/)
   assert.match(guide, /不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`/)
   assert.match(guide, /复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`/)
 })

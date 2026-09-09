@@ -45,6 +45,9 @@ import {
   runtimeVisibleDependencies,
   runtimeVisibleProjection,
 } from './runtime-visibility.mjs'
+import {
+  TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINT_BY_PATH,
+} from './contracts/tikhub-xiaohongshu-official.mjs'
 
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
@@ -1082,16 +1085,22 @@ export function createApp({
     })
   }
 
-  async function dependencies() {
-    const result = { store: { status: 'down' }, nightAll: { status: 'down' } }
+  async function storeDependency() {
     try {
       await store.ping()
-      result.store = { status: 'up' }
+      return { status: 'up' }
     } catch (error) {
-      result.store = { status: 'down', detail: error.name }
+      return { status: 'down', detail: error.name }
     }
-    result.nightAll = await adapter.dependencies()
-    return result
+  }
+
+  async function dependencies() {
+    return {
+      store: await storeDependency(),
+      // External acquisition is capability-scoped and deliberately not probed
+      // by runtime/health endpoints. Unknown is not a claim of provider health.
+      dataService: { status: 'unknown' },
+    }
   }
 
   return async function app(request, response) {
@@ -1194,12 +1203,18 @@ export function createApp({
         return
       }
       if (request.method === 'GET' && pathname === '/health/ready') {
-        const data = await dependencies()
-        const requiredDependencies = listenerMode === 'admin' ? [data.store] : Object.values(data)
-        const ready = requiredDependencies.every((entry) => entry.status === 'up')
+        // External acquisition providers are capability-scoped and keep their
+        // own fail-closed readiness/circuit handling. Do not even await their
+        // diagnostic probes here: a hung Night-All/provider dependency must not
+        // exceed the Kubernetes readiness timeout and remove login/Hub-native
+        // traffic from service.
+        const storeStatus = await storeDependency()
+        const ready = storeStatus.status === 'up'
         const readiness = {
           status: ready ? 'ready' : 'not_ready',
-          ...(listenerMode === 'public' ? {} : { dependencies: runtimeVisibleDependencies(data) }),
+          ...(listenerMode === 'public' ? {} : {
+            dependencies: { store: { status: storeStatus.status } },
+          }),
         }
         sendJson(response, ready ? 200 : 503, { data: readiness, requestId })
         return
@@ -4472,6 +4487,47 @@ export function createApp({
         response.end(media.body)
         return
       }
+      const officialXiaohongshuEndpoint = request.method === 'GET'
+        ? TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINT_BY_PATH[pathname]
+        : null
+      if (officialXiaohongshuEndpoint) {
+        const context = await requirePublic(request)
+        if (!tikHubGateway || typeof tikHubGateway.officialXiaohongshu !== 'function') {
+          throw new AppError(503, 'external_platform_unavailable', 'External Xiaohongshu acquisition is unavailable')
+        }
+        const allowedQueryFields = new Set(officialXiaohongshuEndpoint.fields)
+        for (const field of searchParams.keys()) {
+          if (!allowedQueryFields.has(field)) {
+            throw new AppError(400, 'unsupported_fields', `${field} query parameter is not allowed`)
+          }
+          if (searchParams.getAll(field).length > 1) {
+            throw new AppError(400, 'invalid_request', `${field} query parameter may appear at most once`)
+          }
+        }
+        const query = Object.fromEntries([...allowedQueryFields]
+          .filter((field) => searchParams.has(field))
+          .map((field) => [field, searchParams.get(field)]))
+        const result = await tikHubGateway.officialXiaohongshu(context, {
+          endpointName: officialXiaohongshuEndpoint.name,
+          query,
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, result.body, {
+          'cache-control': 'private, no-store',
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            || (result.sourceMode === 'idempotent_replay'
+              && ['stale', 'stored_fallback'].includes(result.originSourceMode))
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
+        })
+        return
+      }
       const platformShapedXiaohongshuGet = request.method === 'GET'
         && pathname === '/api/v1/xiaohongshu/app/get_note_info'
       if (platformShapedXiaohongshuGet || (request.method === 'POST' && (
@@ -4635,13 +4691,17 @@ export function createApp({
         return
       }
       params = routeMatch(pathname, '/api/v1/night-all/search/:operation')
+        || routeMatch(pathname, '/api/v1/search/:operation')
       if (request.method === 'POST' && params) {
         const context = await requirePublic(request)
         const result = await service.nightAllCompatibilitySearch(context, {
           operation: params.operation,
           body: await readJson(request),
           idempotencyKey: request.headers['idempotency-key'],
-          path: pathname,
+          // Both public spellings name the same logical paid operation. A
+          // canonical fingerprint path prevents a caller from purchasing the
+          // same upstream work twice by switching between route aliases.
+          path: `/api/v1/night-all/search/${params.operation}`,
         })
         // Night-All-owned responses retain their original compatibility body.
         // A Hub-direct projection uses the durable Hub ID in both the legacy

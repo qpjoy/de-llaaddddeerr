@@ -1285,10 +1285,6 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
 }
 
 export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized, notify }) {
-  const recommendedXhsEntries = [
-    { meterKey: 'social.posts.search', price: '3.20' },
-    { meterKey: 'social.posts.resolve', price: '0.20' },
-  ]
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
   const requestedContext = `${requestedTenantId}\u0000${requestedConsumerId}`
@@ -1298,7 +1294,6 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const [creditOpen, setCreditOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [planOpen, setPlanOpen] = useState(false)
-  const [planDraftKind, setPlanDraftKind] = useState('recommended')
   const [billingBusy, setBillingBusy] = useState('')
   const [billingError, setBillingError] = useState(null)
   const [creditForm, setCreditForm] = useState({ amount: '', currency: 'CNY', reason: '', externalReference: '' })
@@ -1312,7 +1307,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     monthlyRequests: '1000000',
     burstRps: '100',
     maxPageSize: '100',
-    entries: recommendedXhsEntries,
+    entries: [{ meterKey: '', price: '' }],
   })
   const load = useCallback(async () => {
     const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session)
@@ -1393,11 +1388,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     && currentPlan.revision > 0,
   )
 
-  const openPlanPublisher = (sourcePlan = currentPlan, { recommended = false } = {}) => {
+  const openPlanPublisher = (sourcePlan = currentPlan) => {
     const reusablePlan = sourcePlan?.key === 'legacy-unmetered' ? null : sourcePlan
     const planKey = reusablePlan?.key || ''
     setBillingError(null)
-    setPlanDraftKind(recommended ? 'recommended' : 'custom')
     setPlanForm({
       key: planKey,
       name: reusablePlan?.name || '',
@@ -1407,9 +1401,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       monthlyRequests: String(reusablePlan?.limits?.monthlyRequests || 1000000),
       burstRps: String(reusablePlan?.limits?.burstRps || 100),
       maxPageSize: String(reusablePlan?.limits?.maxPageSize || 100),
-      entries: recommended
-        ? recommendedXhsEntries.map((entry) => ({ ...entry }))
-        : [{ meterKey: '', price: '' }],
+      entries: [{ meterKey: '', price: '' }],
     })
     setPlanOpen(true)
   }
@@ -1604,24 +1596,23 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 
       {session?.platformAdmin && currentPlan?.pricing?.mode === 'operator_price_book' && !currentPlan?.priceBook && !newerPricedVersion ? (
         <Panel
-          title="运营定价建议"
-          subtitle="当前套餐尚未配置费率，因此现在只限制配额、不向租户扣费；下方是可编辑草案，发布后也不会自动分配。"
+          title="费率尚未配置"
+          subtitle="当前套餐只限制配额、不向租户扣费。下游费率尚未确定，需运营方核对上游成本、目标毛利与客户合同后显式录入；发布后也不会自动分配。"
           action={(
             <div className="mih-page-actions">
-              <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan, { recommended: true })}><Coins size={16} aria-hidden="true" />采用建议草案</button>
-              <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan)}><SlidersHorizontal size={16} aria-hidden="true" />自定义费率</button>
+              <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan)}><Coins size={16} aria-hidden="true" />录入费率草案</button>
             </div>
           )}
         >
-          <Table label="小红书质量保障定价草案">
-            <thead><tr><th>开放能力</th><th>计量键</th><th>建议基础价</th><th>交付口径</th></tr></thead>
+          <Table label="小红书待定价能力">
+            <thead><tr><th>开放能力</th><th>计量键</th><th>当前费率</th><th>交付口径</th></tr></thead>
             <tbody>
-              <tr><td><strong>小红书笔记搜索</strong></td><td><code>social.posts.search</code></td><td><strong>¥3.20 / 次</strong></td><td>每页最多 20 条，包含必要的正文补全</td></tr>
-              <tr><td><strong>小红书笔记详情</strong></td><td><code>social.posts.resolve</code></td><td><strong>¥0.20 / 次</strong></td><td>按成功交付的一篇完整笔记计价</td></tr>
-              <tr><td><strong>租户合同倍率</strong></td><td><code>customer multiplier</code></td><td><strong>1.00× / 0.90× / 0.80×</strong></td><td>运营建议档位，需按合同人工设置，不会自动生效</td></tr>
+              <tr><td><strong>小红书笔记搜索</strong></td><td><code>social.posts.search</code></td><td><strong>待运营定价</strong></td><td>每页最多 20 条，包含必要的正文补全</td></tr>
+              <tr><td><strong>小红书笔记详情</strong></td><td><code>social.posts.resolve</code></td><td><strong>待运营定价</strong></td><td>按成功交付的一篇完整笔记计价</td></tr>
+              <tr><td><strong>租户合同倍率</strong></td><td><code>customer multiplier</code></td><td><strong>由合同确定</strong></td><td>需按合同人工设置，不会自动生效</td></tr>
             </tbody>
           </Table>
-          <p className="mih-inline-warning"><WarningCircle size={17} aria-hidden="true" /><span>成本假设：上游公开表价 USD 0.01 / 调用，规划汇率 7.5；一次完整搜索最多产生 1 次搜索与 20 次详情采购。套餐里的 100 RPS 是 Hub 突发上限，不是上游容量承诺；外部平台限流仍单独生效。</span></p>
+          <p className="mih-inline-warning"><WarningCircle size={17} aria-hidden="true" /><span>上游价目、免费额度或账单证据不完整时，未知成本不能当作 0。只有运营方显式录入、发布并分配新版本后才会产生客户报价。</span></p>
         </Panel>
       ) : null}
 
@@ -1645,7 +1636,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
             description="历史调用继续按原策略运行；只有发布并显式分配的新计费套餐才会产生报价。"
             action={session?.platformAdmin && newerPricedVersion
               ? <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={!canAssignPlan || Boolean(assigningPlanVersionId)} onClick={() => assignPlan(newerPricedVersion)}>分配已发布 v{newerPricedVersion.version}</button>
-              : session?.platformAdmin && currentPlan?.pricing?.mode === 'operator_price_book' ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan, { recommended: true })}>配置费率并发布新版本</button> : null}
+              : session?.platformAdmin && currentPlan?.pricing?.mode === 'operator_price_book' ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan)}>配置费率并发布新版本</button> : null}
           />
         )}
       </Panel>
@@ -1690,7 +1681,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                     {plan.key === 'legacy-unmetered' ? (
                       <small>{plan.versionId === currentPlan?.versionId ? '当前历史绑定' : '仅保留现有绑定'}</small>
                     ) : !plan.priceBook && plan.pricing?.mode === 'operator_price_book' ? (
-                      <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(plan, { recommended: true })}>配置费率并发布</button>
+                      <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => openPlanPublisher(plan)}>配置费率并发布</button>
                     ) : (
                       <button
                         className="qp-button qp-button--ghost qp-button--sm"
@@ -1840,9 +1831,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       {planOpen && session?.platformAdmin ? (
         <Modal
           title="发布套餐版本"
-          description={planDraftKind === 'recommended'
-            ? '已填入小红书质量保障定价草案；请核对后发布。新版本不会自动分配，也不会改变现有调用者。'
-            : '发布后套餐与价目表都不可原地修改；调用者只有被显式分配此版本后才会使用它。'}
+          description="请由运营方根据已核验的上游成本、目标毛利与客户合同显式输入费率。发布后套餐与价目表都不可原地修改；新版本不会自动分配。"
           size="large"
           busy={billingBusy === 'plan'}
           onClose={() => !billingBusy && setPlanOpen(false)}
@@ -1854,7 +1843,6 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           )}
         >
           <form id="publish-plan-form" className="mih-form mih-form--grid" onSubmit={publishPlan}>
-            {planDraftKind === 'recommended' ? <p className="mih-inline-warning mih-form__wide"><WarningCircle size={17} aria-hidden="true" /><span>建议草案：搜索 ¥3.20 / 次、详情 ¥0.20 / 次，默认倍率 1.00×。电商费率尚无已核验采购合同，因此没有混入本版本。</span></p> : null}
             <Field label="套餐标识"><input className="qp-input" value={planForm.key} onChange={(event) => setPlanForm({ ...planForm, key: event.target.value.toLowerCase() })} placeholder="business-standard" maxLength={64} required autoFocus /></Field>
             <Field label="套餐名称"><input className="qp-input" value={planForm.name} onChange={(event) => setPlanForm({ ...planForm, name: event.target.value })} placeholder="商务标准版" maxLength={128} required /></Field>
             <Field label="价目表标识"><input className="qp-input" value={planForm.priceBookKey} onChange={(event) => setPlanForm({ ...planForm, priceBookKey: event.target.value.toLowerCase() })} placeholder="cn-social-standard" maxLength={64} required /></Field>
@@ -1869,7 +1857,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 <tbody>{planForm.entries.map((entry, index) => (
                   <tr key={index}>
                     <td><input className="qp-input" value={entry.meterKey} onChange={(event) => updatePlanEntry(index, { meterKey: event.target.value.toLowerCase() })} placeholder="social.posts.resolve" required /></td>
-                    <td><input className="qp-input" type="text" inputMode="decimal" value={entry.price} onChange={(event) => updatePlanEntry(index, { price: event.target.value })} placeholder="0.10" required /></td>
+                    <td><input className="qp-input" type="text" inputMode="decimal" value={entry.price} onChange={(event) => updatePlanEntry(index, { price: event.target.value })} placeholder="输入合同价格" required /></td>
                     <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="删除费率" disabled={planForm.entries.length <= 1} onClick={() => setPlanForm((current) => ({ ...current, entries: current.entries.filter((_, entryIndex) => entryIndex !== index) }))}><Trash size={17} aria-hidden="true" /></button></td>
                   </tr>
                 ))}</tbody>

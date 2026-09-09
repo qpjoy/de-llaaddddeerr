@@ -329,6 +329,38 @@ wait_http() {
   return 1
 }
 
+wait_search_setup_success() {
+  local attempts="${1:-180}"
+  local container_id state status exit_code index
+  for index in $(seq 1 "$attempts"); do
+    # `search-setup` is a one-shot service. A successful container is already
+    # exited by the time we inspect it, so Compose must include stopped state.
+    if container_id="$(search_compose ps --all -q search-setup 2>/dev/null)"; then
+      # A Compose service has exactly one current container. Ignore any stale
+      # IDs emitted by older Compose versions after the first line.
+      container_id="${container_id%%$'\n'*}"
+      if [ -n "$container_id" ] \
+        && state="$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$container_id" 2>/dev/null)"; then
+        read -r status exit_code <<<"$state"
+        case "$status" in
+          exited)
+            if [ "$exit_code" = 0 ]; then return 0; fi
+            say "ERROR: search-setup exited with status ${exit_code}" >&2
+            return 1
+            ;;
+          dead)
+            say "ERROR: search-setup entered the dead state" >&2
+            return 1
+            ;;
+        esac
+      fi
+    fi
+    sleep 1
+  done
+  say "ERROR: Timed out waiting for search-setup to complete" >&2
+  return 1
+}
+
 local_action() {
   local action="${1:-}"
   load_env_file "${ROOT_DIR}/.env"
@@ -376,6 +408,7 @@ local_action() {
 
 search_action() {
   local action="${1:-}"
+  load_env_file "${ROOT_DIR}/.env"
   load_env_file "${SEARCH_COMPOSE_DIR}/.env"
   need docker
   case "$action" in
@@ -383,20 +416,36 @@ search_action() {
       search_compose config
       ;;
     up)
+      wait_http "http://127.0.0.1:18180/health/live" 1 \
+        || die "Local Hub must be healthy before its optional search projector is enabled"
       search_compose up -d
+      wait_http "http://127.0.0.1:${MX_INSIGHT_ELASTICSEARCH_PORT:-19200}" 120
+      wait_search_setup_success 180 \
+        || die "Search bootstrap must succeed before its projector is enabled"
+      if [ -z "${MX_COMMON_ELASTICSEARCH_URL:-}" ]; then
+        MX_COMMON_ELASTICSEARCH_URL="http://host.docker.internal:${MX_INSIGHT_ELASTICSEARCH_PORT:-19200}"
+        export MX_COMMON_ELASTICSEARCH_URL
+      fi
+      # The Hub is already healthy, so do not recreate its API/login services
+      # while attaching this independently restartable outbox consumer.
+      compose --profile search up -d --no-deps projector
       search_compose ps
+      compose --profile search ps projector
       say "Local Elasticsearch: http://127.0.0.1:${MX_INSIGHT_ELASTICSEARCH_PORT:-19200}"
       say "Local Kibana: http://127.0.0.1:${MX_INSIGHT_KIBANA_PORT:-15601}"
       ;;
     status)
       search_compose ps --all
+      compose --profile search ps --all projector
       ;;
     logs)
       search_compose logs --tail=250 elasticsearch search-setup kibana
+      compose --profile search logs --tail=250 projector
       ;;
     down)
+      compose --profile search stop projector
       search_compose down
-      say "Search containers stopped; Elasticsearch and snapshot volumes were preserved."
+      say "Search projector and containers stopped; PostgreSQL outbox and Elasticsearch volumes were preserved."
       ;;
     *) usage; exit 2 ;;
   esac
@@ -639,6 +688,26 @@ preserve_existing_justone_runtime_config() {
       say "preserving retained JustOne contract gate: ${existing}"
     fi
   fi
+
+  # A reviewed cost policy is part of an open paid-dispatch gate. Routine
+  # deploys must not replace it with an empty ConfigMap value merely because
+  # the operator did not repeat the JSON in the current shell.
+  if [ "${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}" = "1" ] \
+    && { [ "${MX_INSIGHT_JUSTONE_BILLING_JSON+x}" != x ] \
+      || [[ ! "${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" =~ [^[:space:]] ]]; }; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_JUSTONE_BILLING_JSON']}" 2>/dev/null
+    )"; then
+      die "could not inspect retained JustOne billing policy; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      MX_INSIGHT_JUSTONE_BILLING_JSON="$existing"
+      export MX_INSIGHT_JUSTONE_BILLING_JSON
+      say "preserving retained JustOne billing policy (value hidden)"
+    fi
+  fi
 }
 
 # TikHub has its own secret and contract gate. Keep both stable across routine
@@ -714,6 +783,25 @@ preserve_existing_tikhub_runtime_config() {
     fi
   fi
 
+  if [ "${MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED+x}" != x ]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained TikHub user-activity cutover gate; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      case "$existing" in
+        0|1) ;;
+        *) die "retained MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED must be 0 or 1" ;;
+      esac
+      MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED="$existing"
+      export MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED
+      say "preserving retained TikHub user-activity cutover gate: ${existing}"
+    fi
+  fi
+
   if [ "${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS+x}" != x ]; then
     if ! existing="$(
       kubectl -n "$namespace" get configmap mx-insight-hub-config \
@@ -726,6 +814,23 @@ preserve_existing_tikhub_runtime_config() {
       MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$existing"
       export MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS
       say "preserving retained TikHub search canary allowlist"
+    fi
+  fi
+
+  if [ "${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}" = "1" ] \
+    && { [ "${MX_INSIGHT_TIKHUB_BILLING_JSON+x}" != x ] \
+      || [[ ! "${MX_INSIGHT_TIKHUB_BILLING_JSON:-}" =~ [^[:space:]] ]]; }; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_TIKHUB_BILLING_JSON']}" 2>/dev/null
+    )"; then
+      die "could not inspect retained TikHub billing policy; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      MX_INSIGHT_TIKHUB_BILLING_JSON="$existing"
+      export MX_INSIGHT_TIKHUB_BILLING_JSON
+      say "preserving retained TikHub billing policy (value hidden)"
     fi
   fi
 }
@@ -980,6 +1085,7 @@ create_runtime_config() {
   fi
   local tikhub_contract_verified="${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}"
   local tikhub_search_contract_verified="${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED:-0}"
+  local tikhub_user_activity_contract_verified="${MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED:-0}"
   local tikhub_search_canary_consumer_ids="${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS:-}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
@@ -1027,6 +1133,7 @@ create_runtime_config() {
     MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
     MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
+    MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED="$tikhub_user_activity_contract_verified" \
     MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_consumer_ids" \
     MX_INSIGHT_TIKHUB_API_KEY="$tikhub_api_key" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
@@ -1164,6 +1271,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     --from-literal=MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
+    --from-literal=MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED="$tikhub_user_activity_contract_verified" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_consumer_ids" \
     --from-literal=MX_INSIGHT_TIKHUB_BASE_URL="${MX_INSIGHT_TIKHUB_BASE_URL:-https://api.tikhub.io}" \
     --from-literal=MX_INSIGHT_TIKHUB_TIMEOUT_MS="${MX_INSIGHT_TIKHUB_TIMEOUT_MS:-30000}" \
@@ -2220,6 +2328,8 @@ ops_action() {
   local tikhub_contract_override=""
   local tikhub_search_contract_override_set=0
   local tikhub_search_contract_override=""
+  local tikhub_user_activity_contract_override_set=0
+  local tikhub_user_activity_contract_override=""
   local tikhub_search_canary_override_set=0
   local tikhub_search_canary_override=""
   local tikhub_clear_override_set=0
@@ -2253,6 +2363,10 @@ ops_action() {
   if [ "${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED+x}" = x ]; then
     tikhub_search_contract_override_set=1
     tikhub_search_contract_override="$MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED"
+  fi
+  if [ "${MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED+x}" = x ]; then
+    tikhub_user_activity_contract_override_set=1
+    tikhub_user_activity_contract_override="$MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED"
   fi
   if [ "${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS+x}" = x ]; then
     tikhub_search_canary_override_set=1
@@ -2289,6 +2403,10 @@ ops_action() {
   if [ "$tikhub_search_contract_override_set" = 1 ]; then
     MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_override"
     export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED
+  fi
+  if [ "$tikhub_user_activity_contract_override_set" = 1 ]; then
+    MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED="$tikhub_user_activity_contract_override"
+    export MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED
   fi
   if [ "$tikhub_search_canary_override_set" = 1 ]; then
     MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_override"

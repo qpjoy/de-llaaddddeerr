@@ -6,6 +6,7 @@ import { TikHubAdapter, TikHubUpstreamError } from '../../server/adapters/tikhub
 import { createApp } from '../../server/app.mjs'
 import {
   isTikHubXiaohongshuUnavailable,
+  normalizeTikHubXiaohongshuNoteResult,
   redactTikHubEnvelope,
   TIKHUB_PROVIDER_KEY,
   TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
@@ -78,20 +79,6 @@ function successEnvelope({
   }
 }
 
-function hasLoneSurrogate(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index)
-    if (unit >= 0xD800 && unit <= 0xDBFF) {
-      const next = value.charCodeAt(index + 1)
-      if (next < 0xDC00 || next > 0xDFFF) return true
-      index += 1
-    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
-      return true
-    }
-  }
-  return false
-}
-
 function unavailableEnvelope() {
   return {
     code: 200,
@@ -119,7 +106,8 @@ function gatewayConfig(overrides = {}) {
       currency: 'CNY',
       pricingAsOf: '2026-09-07T00:00:00.000Z',
       unitCostMinor: 5,
-      monthlyBudgetMinor: null,
+      monthlyBudgetMinor: 100_000,
+      monthlySubsidyBudgetMinor: 100_000,
     },
     ...overrides,
   }
@@ -201,15 +189,19 @@ async function captureError(operation) {
   assert.fail('operation must reject')
 }
 
-test('App V2 nested note_list is normalized and private xsec/token fields are redacted', async () => {
-  const xsecToken = 'xsec-value-that-must-not-leak'
-  const responseToken = 'response-token-that-must-not-leak'
+test('App V2 preserves provider business fields while isolating the active provider credential', async () => {
+  const xsecToken = 'signed-business-xsec-token'
+  const responseToken = 'provider-business-response-token'
   let dispatched
   const adapter = new TikHubAdapter({
     apiKey: PROVIDER_KEY,
     fetchImpl: async (url, options) => {
       dispatched = { url: new URL(url), options }
-      return jsonResponse(successEnvelope({ xsecToken, token: responseToken }))
+      return jsonResponse(successEnvelope({
+        xsecToken,
+        token: responseToken,
+        mediaUrl: `https://media.example.test/note.webp?xsec_token=${xsecToken}`,
+      }))
     },
   })
 
@@ -227,14 +219,14 @@ test('App V2 nested note_list is normalized and private xsec/token fields are re
   assert.deepEqual(result.publicBody.data.item.tags, ['摄影', '便携相机'])
   assert.deepEqual(result.publicBody.data.item.media, [{
     type: 'image',
-    url: 'https://media.example.test/note.webp',
+    url: `https://media.example.test/note.webp?xsec_token=${xsecToken}`,
   }])
   assert.equal(result.records[0].externalId, NOTE_ID)
   assert.equal(result.responseArchive.contractState, 'accepted')
   assert.equal(result.responseArchive.businessCode, 200)
-  assert.doesNotMatch(JSON.stringify(result), new RegExp(`${xsecToken}|${responseToken}`, 'u'))
+  assert.match(JSON.stringify(result), new RegExp(`${xsecToken}|${responseToken}`, 'u'))
 
-  const redacted = redactTikHubEnvelope({
+  const businessEnvelope = {
     token: responseToken,
     nested: {
       xsec_token: xsecToken,
@@ -257,23 +249,74 @@ test('App V2 nested note_list is normalized and private xsec/token fields are re
     ].join('; '),
     serializedDiagnostic: 'prefix {"token":"json-token-that-must-not-leak","status":"ok"} suffix',
     escapedSerializedDiagnostic: 'prefix {\\"client_secret\\":\\"escaped-secret-that-must-not-leak\\"} suffix',
-  })
-  assert.equal('token' in redacted, false)
-  assert.equal('xsec_token' in redacted.nested, false)
-  assert.equal('sign' in redacted.nested, false)
-  assert.equal('auth_key' in redacted.nested, false)
-  assert.equal('session' in redacted.nested, false)
-  assert.equal('setCookie' in redacted.nested, false)
-  assert.equal(new URL(redacted.url).searchParams.get('xsec_token'), '[REDACTED]')
-  assert.equal(new URL(redacted.url).searchParams.get('safe'), '1')
-  assert.equal(new URL(redacted.signedUrl).searchParams.get('sign'), '[REDACTED]')
-  assert.equal(new URL(redacted.signedUrl).searchParams.get('sig'), '[REDACTED]')
-  assert.equal(new URL(redacted.signedUrl).searchParams.get('safe'), '1')
-  assert.equal(new URL(redacted.signedUrl).hash, '')
-  assert.doesNotMatch(JSON.stringify(redacted), /must-not-leak/u)
+  }
+  assert.deepEqual(redactTikHubEnvelope(businessEnvelope), businessEnvelope)
 })
 
-test('detail bodies use a 50000-code-point safety limit without splitting emoji', async () => {
+test('App V2 removes equivalent encoded provider credentials from public and operational payloads', async () => {
+  const providerCredential = "Tik/key+space ?&=!*'()"
+  const lowerPercentHex = (value) => value.replace(
+    /%[0-9A-F]{2}/gu,
+    (escape) => escape.toLowerCase(),
+  )
+  const innerLowerThenDoubleEncoded = encodeURIComponent(
+    lowerPercentHex(encodeURIComponent(providerCredential)),
+  )
+  const strictEncoded = lowerPercentHex(encodeURIComponent(providerCredential).replace(
+    /[!'()*]/gu,
+    (character) => `%${character.codePointAt(0).toString(16).toUpperCase()}`,
+  ))
+  const raw = {
+    code: 200,
+    data: {
+      echoed: `before-${innerLowerThenDoubleEncoded}-after`,
+      strictEchoed: `before-${strictEncoded}-after`,
+      [innerLowerThenDoubleEncoded]: 'credential-in-key',
+    },
+  }
+  const adapter = new TikHubAdapter({
+    apiKey: providerCredential,
+    fetchImpl: async () => jsonResponse(raw),
+  })
+
+  const result = await adapter.getXiaohongshuAppV2(
+    TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
+    { note_id: NOTE_ID },
+  )
+  const ordinary = JSON.stringify({
+    payload: result.payload,
+    responseArchive: result.responseArchive,
+    archiveObjects: result.archiveObjects,
+  })
+
+  assert.equal(ordinary.includes(providerCredential), false)
+  assert.equal(ordinary.includes(innerLowerThenDoubleEncoded), false)
+  assert.equal(ordinary.includes(strictEncoded), false)
+  assert.match(ordinary, /\[REDACTED\]/u)
+  assert.equal(result.restrictedResponseArchive.bodyText.includes(innerLowerThenDoubleEncoded), true)
+})
+
+test('detail URL projection removes a nested percent-encoded provider credential only', () => {
+  const providerCredential = 'Tik/key+space ?&'
+  const lowerInner = encodeURIComponent(providerCredential).replace(
+    /%[0-9A-F]{2}/gu,
+    (escape) => escape.toLowerCase(),
+  )
+  const reflected = encodeURIComponent(lowerInner)
+  const businessToken = 'signed-business-token'
+  const normalized = normalizeTikHubXiaohongshuNoteResult(successEnvelope({
+    avatarUrl: `https://avatar.example.test/u.webp?credential=${reflected}&xsec_token=${businessToken}`,
+    mediaUrl: `https://media.example.test/note.webp?credential=${reflected}&xsec_token=${businessToken}`,
+  }), { providerCredential })
+  const serialized = JSON.stringify(normalized)
+
+  assert.equal(serialized.includes(providerCredential), false)
+  assert.equal(serialized.includes(reflected), false)
+  assert.match(serialized, /REDACTED/u)
+  assert.match(serialized, new RegExp(businessToken, 'u'))
+})
+
+test('detail bodies preserve complete acquired text beyond the former field limit', async () => {
   const bodies = [
     '汉'.repeat(50_000),
     '汉'.repeat(50_001),
@@ -287,24 +330,22 @@ test('detail bodies use a 50000-code-point safety limit without splitting emoji'
 
   const exact = await adapter.getXiaohongshuPost(request)
   assert.equal([...exact.publicBody.data.item.text].length, 50_000)
-  assert.equal(exact.safetyLimited, false)
+  assert.equal('safetyLimited' in exact, false)
   assert.equal(exact.records[0].extensions.bodyCompleteness, undefined)
   assert.equal('safetyLimited' in exact.publicBody.data.item, false)
 
   const limited = await adapter.getXiaohongshuPost(request)
-  assert.equal([...limited.publicBody.data.item.text].length, 50_000)
-  assert.equal(limited.publicBody.data.item.text, '汉'.repeat(50_000))
-  assert.equal(limited.safetyLimited, true)
-  assert.equal(limited.records[0].extensions.bodyCompleteness, 'safety_limited')
+  assert.equal([...limited.publicBody.data.item.text].length, 50_001)
+  assert.equal(limited.publicBody.data.item.text, '汉'.repeat(50_001))
+  assert.equal('safetyLimited' in limited, false)
+  assert.equal(limited.records[0].extensions.bodyCompleteness, undefined)
   assert.equal('safetyLimited' in limited.publicBody.data.item, false)
 
   const emojiBoundary = await adapter.getXiaohongshuPost(request)
-  assert.equal([...emojiBoundary.publicBody.data.item.text].length, 50_000)
-  assert.equal(emojiBoundary.publicBody.data.item.text.endsWith('😀'), true)
-  assert.equal(emojiBoundary.publicBody.data.item.text.includes('尾'), false)
-  assert.equal(hasLoneSurrogate(emojiBoundary.publicBody.data.item.text), false)
-  assert.equal(emojiBoundary.safetyLimited, true)
-  assert.equal(emojiBoundary.records[0].extensions.bodyCompleteness, 'safety_limited')
+  assert.equal([...emojiBoundary.publicBody.data.item.text].length, 50_001)
+  assert.equal(emojiBoundary.publicBody.data.item.text.endsWith('😀尾'), true)
+  assert.equal('safetyLimited' in emojiBoundary, false)
+  assert.equal(emojiBoundary.records[0].extensions.bodyCompleteness, undefined)
   assert.doesNotMatch(JSON.stringify(emojiBoundary.publicBody), /safetyLimited/u)
 })
 
@@ -318,7 +359,8 @@ test('standalone detail dispatch uses its endpoint price before the legacy fallb
         pricingAsOf: '2026-09-08T00:00:00.000Z',
         unitCostMinor: 5,
         unitCostMinorByEndpoint: { [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: 11 },
-        monthlyBudgetMinor: null,
+        monthlyBudgetMinor: 100_000,
+        monthlySubsidyBudgetMinor: 100_000,
       },
     }),
   })
@@ -331,6 +373,43 @@ test('standalone detail dispatch uses its endpoint price before the legacy fallb
 
   const [providerCall] = [...state.platformStore.calls.values()]
   assert.equal(providerCall.costMinor, 11)
+})
+
+test('standalone detail budget rejection occurs before consuming provider RPM or dispatching', async () => {
+  let fetchCalls = 0
+  const state = await gatewayFixture({
+    fetchImpl: async () => {
+      fetchCalls += 1
+      return jsonResponse(successEnvelope())
+    },
+    config: gatewayConfig({
+      billing: {
+        source: 'manual',
+        currency: 'CNY',
+        pricingAsOf: '2026-09-08T00:00:00.000Z',
+        unitCostMinor: 5,
+        monthlyBudgetMinor: 0,
+        monthlySubsidyBudgetMinor: 100_000,
+      },
+    }),
+  })
+  const acquireRateLimit = state.platformStore.acquireProviderRateLimit.bind(state.platformStore)
+  let providerRateAdmissions = 0
+  state.platformStore.acquireProviderRateLimit = async (input) => {
+    providerRateAdmissions += 1
+    return acquireRateLimit(input)
+  }
+
+  const error = await captureError(() => state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl() },
+    idempotencyKey: 'detail-budget-exhausted-01',
+    path: POST_PATH,
+  }))
+
+  assert.equal(error?.code, 'external_platform_cost_budget_exhausted')
+  assert.equal(providerRateAdmissions, 0)
+  assert.equal(fetchCalls, 0)
+  assert.equal(state.platformStore.calls.size, 0)
 })
 
 test('customer delivery exposes only Hub media locators while the authorized relay retains the source URL', async () => {
@@ -402,7 +481,7 @@ test('customer delivery exposes only Hub media locators while the authorized rel
   assert.equal(fallbackReplay.body.data.item.media[0].url, fallback.body.data.item.media[0].url)
 })
 
-test('canonical ingest strips URL queries and maps tags and bookmarks to stable fields', async () => {
+test('canonical ingest preserves business URL queries and maps tags and bookmarks to stable fields', async () => {
   const marker = 'canonical-secret-query-marker'
   const adapter = new TikHubAdapter({
     apiKey: PROVIDER_KEY,
@@ -423,13 +502,15 @@ test('canonical ingest strips URL queries and maps tags and bookmarks to stable 
   assert.equal(record.extensions.tags, undefined)
   assert.deepEqual(record.metrics, { likes: 123, comments: 6, shares: 7, bookmarks: 45 })
   assert.deepEqual(record.stableFields.metrics, record.metrics)
-  assert.equal(record.stableFields.author.avatarUrl, 'https://media.example.test/avatar.webp')
-  assert.deepEqual(record.stableFields.media.images, ['https://media.example.test/note.webp'])
-  assert.doesNotMatch(JSON.stringify(record), new RegExp(marker, 'u'))
-  assert.doesNotMatch(JSON.stringify(result.archiveObjects), new RegExp(marker, 'u'))
+  assert.equal(record.stableFields.author.avatarUrl, `https://media.example.test/avatar.webp?signature=${marker}`)
+  assert.deepEqual(record.stableFields.media.images, [
+    `https://media.example.test/note.webp?xsec_token=${marker}&width=1080`,
+  ])
+  assert.match(JSON.stringify(record), new RegExp(marker, 'u'))
+  assert.match(JSON.stringify(result.archiveObjects), new RegExp(marker, 'u'))
   assert.equal(
     result.archiveObjects.find((archive) => archive.kind === 'item')?.rawPayload?.media?.[0]?.url,
-    'https://media.example.test/note.webp',
+    `https://media.example.test/note.webp?xsec_token=${marker}&width=1080`,
   )
 })
 
@@ -664,6 +745,127 @@ test('HTTP 401 HTML and HTTP 429 oversized bodies retain status-first classifica
   }
 })
 
+test('deep valid JSON still retains exact restricted TikHub response bytes', async () => {
+  const depth = 12_000
+  const bodyText = `{"code":400,"data":${'{"nested":'.repeat(depth)}null${'}'.repeat(depth)}}`
+  const bodyBytes = Buffer.from(bodyText, 'utf8')
+  const adapter = new TikHubAdapter({
+    apiKey: PROVIDER_KEY,
+    fetchImpl: async () => new Response(bodyBytes, {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }),
+  })
+
+  const error = await captureError(() => adapter.getXiaohongshuPost({
+    platform: 'xiaohongshu',
+    url: noteUrl(),
+  }))
+
+  assert.ok(error instanceof TikHubUpstreamError)
+  assert.equal(error.responseArchive.rawPayload, null)
+  assert.match(error.responseArchive.payloadSha256, /^[a-f0-9]{64}$/u)
+  assert.equal(error.archiveObjects.length, 1)
+  assert.equal(error.archiveObjects[0].rawPayload, null)
+  assert.equal(error.archiveObjects[0].payloadSha256, error.responseArchive.payloadSha256)
+  assert.equal(error.restrictedResponseArchive.bodyBytes.equals(bodyBytes), true)
+  assert.equal(error.restrictedResponseArchive.bodyText, bodyText)
+  assert.equal(error.restrictedResponseArchive.jsonParsed, true)
+  assert.equal(error.restrictedResponseArchive.parsedPayload, null)
+})
+
+test('official App V2 scrubs a deep public payload without losing exact evidence', async () => {
+  const depth = 12_000
+  const bodyText = `{"code":200,"data":${'{"nested":'.repeat(depth)}"terminal"${'}'.repeat(depth)}}`
+  const bodyBytes = Buffer.from(bodyText, 'utf8')
+  const adapter = new TikHubAdapter({
+    apiKey: PROVIDER_KEY,
+    fetchImpl: async () => new Response(bodyBytes, {
+      headers: { 'content-type': 'application/json' },
+    }),
+  })
+
+  const result = await adapter.getXiaohongshuAppV2(
+    TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
+    { note_id: NOTE_ID },
+  )
+
+  assert.equal(result.payload.code, 200)
+  let nested = result.payload.data
+  for (let index = 0; index < depth; index += 1) nested = nested.nested
+  assert.equal(nested, 'terminal')
+  assert.equal(result.responseArchive.rawPayload, null)
+  assert.match(result.responseArchive.payloadSha256, /^[a-f0-9]{64}$/u)
+  assert.equal(result.archiveObjects.length, 1)
+  assert.equal(result.archiveObjects[0].rawPayload, null)
+  assert.equal(result.archiveObjects[0].payloadSha256, result.responseArchive.payloadSha256)
+  assert.equal(result.restrictedResponseArchive.bodyBytes.equals(bodyBytes), true)
+  assert.equal(result.restrictedResponseArchive.bodyText, bodyText)
+  assert.equal(result.restrictedResponseArchive.jsonParsed, true)
+  assert.equal(result.restrictedResponseArchive.parsedPayload, null)
+})
+
+test('TikHub PostgreSQL-unsafe payloads keep exact bytes while optional projections stay null', async () => {
+  const cases = [
+    {
+      bodyText: '{"code":200,"data":{"text":"\\u0000"}}',
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      expectedBodyText: '{"code":200,"data":{"text":"\\u0000"}}',
+    },
+    {
+      bodyText: '{"code":200,"data":{"text":"\\ud800"}}',
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      expectedBodyText: '{"code":200,"data":{"text":"\\ud800"}}',
+    },
+    {
+      bodyText: '{"code":200,"data":{"value":1e400}}',
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      expectedBodyText: '{"code":200,"data":{"value":1e400}}',
+    },
+    {
+      bodyText: '{"code":200,"data":{"value":-0}}',
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      expectedBodyText: '{"code":200,"data":{"value":-0}}',
+    },
+    {
+      bodyText: '{"code":200,"data":"literal\0nul"}',
+      expectedCode: 'invalid_upstream_json',
+      expectedJsonParsed: false,
+      expectedBodyText: null,
+    },
+  ]
+
+  for (const expected of cases) {
+    const bodyBytes = Buffer.from(expected.bodyText, 'utf8')
+    const adapter = new TikHubAdapter({
+      apiKey: PROVIDER_KEY,
+      fetchImpl: async () => new Response(bodyBytes, {
+        headers: { 'content-type': 'application/json' },
+      }),
+    })
+
+    const error = await captureError(() => adapter.getXiaohongshuAppV2(
+      TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
+      { note_id: NOTE_ID },
+    ))
+
+    assert.ok(error instanceof TikHubUpstreamError)
+    assert.equal(error.evidence.errorCode, expected.expectedCode)
+    assert.match(error.responseArchive.payloadSha256, /^[a-f0-9]{64}$/u)
+    assert.equal(error.responseArchive.rawPayload, null)
+    assert.equal(error.archiveObjects.length, 1)
+    assert.equal(error.archiveObjects[0].rawPayload, null)
+    assert.equal(error.restrictedResponseArchive.bodyBytes.equals(bodyBytes), true)
+    assert.equal(error.restrictedResponseArchive.bodyText, expected.expectedBodyText)
+    assert.equal(error.restrictedResponseArchive.jsonParsed, expected.expectedJsonParsed)
+    assert.equal(error.restrictedResponseArchive.parsedPayload, null)
+  }
+})
+
 test('an unknown HTTP 200 envelope quarantines the endpoint contract across fingerprints', async () => {
   let upstreamCalls = 0
   const state = await gatewayFixture({
@@ -742,7 +944,7 @@ test('the explicit service-error sentinel is billed once and negative-cached for
   assert.equal(upstreamCalls, 1, 'replay and negative-cache hit must not call TikHub again')
 })
 
-test('platform-shaped GET, JSON POST, and canonical routes share one idempotency scope', async () => {
+test('Hub-projected platform GET, JSON POST, and canonical routes share one idempotency scope', async () => {
   let upstreamCalls = 0
   const marker = 'http-response-source-marker'
   const state = await gatewayFixture({
@@ -777,8 +979,11 @@ test('platform-shaped GET, JSON POST, and canonical routes share one idempotency
     })
     return { response, payload: await response.json() }
   }
-  const get = async ({ shareText = null, noteId = null }, idempotencyKey = 'route-alias-key-01') => {
-    const url = new URL(PLATFORM_PATH, baseUrl)
+  const get = async (
+    { shareText = null, noteId = null, path = PLATFORM_PATH },
+    idempotencyKey = 'route-alias-key-01',
+  ) => {
+    const url = new URL(path, baseUrl)
     if (shareText != null) url.searchParams.set('share_text', shareText)
     if (noteId != null) url.searchParams.set('note_id', noteId)
     const response = await fetch(url, {
@@ -816,7 +1021,12 @@ test('platform-shaped GET, JSON POST, and canonical routes share one idempotency
     )
     assert.equal(platformGet.payload.data.item.author.avatarUrl, null)
     assert.doesNotMatch(
-      JSON.stringify([platformGet.payload, noteIdPrecedence.payload, platformPost.payload, canonical.payload]),
+      JSON.stringify([
+        platformGet.payload,
+        noteIdPrecedence.payload,
+        platformPost.payload,
+        canonical.payload,
+      ]),
       new RegExp(marker, 'u'),
     )
 

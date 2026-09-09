@@ -30,7 +30,8 @@ function gatewayConfig() {
       currency: 'CNY',
       pricingAsOf: '2026-09-01T00:00:00.000Z',
       freeDailyCalls: null,
-      monthlyBudgetMinor: null,
+      monthlyBudgetMinor: 10_000,
+      monthlySubsidyBudgetMinor: 10_000,
       unitCostMinorByEndpoint: { 'jd.product-search.v1': 5 },
     },
   }

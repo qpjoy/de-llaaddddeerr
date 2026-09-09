@@ -1643,17 +1643,18 @@ paths:
       description: >-
         Lists granted Hub platform data surfaces and generic capabilities.
         A Xiaohongshu entry with search_posts and search.ready=true advertises
-        the Hub-native 20-item search contract used transparently by
-        /data/search and eligible legacy raw requests. post_detail appears only
+        the Hub-native 20-item search contract used by /data/search and
+        eligible legacy raw requests. Eligible single-identifier crawl and
+        user-info requests are also Hub-native after their independent gate. post_detail appears only
         with the independent social.posts.resolve capability grant. When
         Xiaohongshu already has a compatibility platform row, Hub preserves its
         provider-neutral top-level readiness/source identity; only nested search
         and postDetail describe Hub-direct readiness.
         data.legacySearch is the Hub-pinned, grant-filtered dispatch matrix for
-        Night-All-owned compatibility operations. Direct search takes only the
-        compatible first-page/raw subset; Xiaohongshu remains in the legacy matrix
-        because non-direct raw shapes, crawl and user-info still use the
-        historical path. The matrix is compiled into the deployed Hub contract rather than
+        Night-All-owned compatibility operations. Direct routing takes only its
+        compatible fixed raw/crawl/user-info slices; Xiaohongshu remains in the legacy matrix
+        because unsupported multi-query, multi-identifier, channel, non-post,
+        non-20-page and custom-params shapes still use the historical path. The matrix is compiled into the deployed Hub contract rather than
         discovered from Night-All at request time. A fallback platform must
         appear in both supportedPlatforms and readyPlatforms. In this pinned contract readyPlatforms
         means Hub dispatch eligibility; it does not prove current Night-All
@@ -1973,9 +1974,9 @@ paths:
         "404": [stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2163,9 +2164,9 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2224,7 +2225,7 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /xiaohongshu/app/get_note_info:
-    get:
+    get: &xiaohongshuNoteDetailGet
       operationId: getXiaohongshuNoteInfoCompatibility
       summary: Resolve one Xiaohongshu note using the compatibility GET contract.
       description: >-
@@ -2250,9 +2251,9 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
       parameters:
         - name: note_id
           in: query
@@ -2326,9 +2327,9 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2381,6 +2382,130 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /xiaohongshu/app_v2/get_image_note_detail:
+    get:
+      operationId: getXiaohongshuImageNoteDetailOfficial
+      summary: Get one image-note detail with the App V2-compatible contract.
+      x-mx-strict-query: true
+      description: &xiaohongshuOfficialDescription >-
+        A Hub-governed App V2-compatible GET, not an unmetered proxy. It uses a
+        Live Hub Public API key, one-unit customer metering, provider cost
+        admission, idempotency, exact restricted raw archive and canonical
+        ingest/outbox. Business fields, text, tags, pagination identifiers and
+        signed media URLs remain intact. Only an exact active Hub-to-upstream
+        credential is removed if the upstream echoes it. Explicit pages and
+        the opaque user-post cursor are capped at 15; this governance limit
+        does not truncate content. Idempotency-Key is optional because Hub can
+        derive an API-key-scoped freshness-bucket key.
+      x-mx-error-codes: &xiaohongshuOfficialErrors
+        "400": [invalid_request, unsupported_fields, invalid_page, invalid_ai_mode, invalid_cursor, invalid_upstream_pagination, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
+        "404": [not_found, post_not_found]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+      parameters:
+        - { name: note_id, in: query, required: false, schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
+        - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
+        - &xiaohongshuOfficialIdempotency
+          name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional; when omitted Hub derives a replay-safe API-key-scoped freshness-bucket key.
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      responses: &xiaohongshuOfficialResponses
+        "200":
+          description: App V2-compatible acquired business envelope.
+          headers:
+            x-mx-insight-request-id: { schema: { type: string, format: uuid } }
+            idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
+            x-mx-insight-source-mode: { schema: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] } }
+            x-mx-insight-captured-at: { schema: { type: string, format: date-time } }
+            Age: { schema: { type: integer, minimum: 0 } }
+            Warning: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /xiaohongshu/app_v2/search_notes:
+    get:
+      operationId: searchXiaohongshuNotesOfficial
+      summary: Search notes with the App V2-compatible contract.
+      x-mx-strict-query: true
+      description: *xiaohongshuOfficialDescription
+      x-mx-error-codes:
+        <<: *xiaohongshuOfficialErrors
+        "403": [platform_not_granted, test_key_not_supported]
+      parameters:
+        - { name: keyword, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 500 } }
+        - { name: page, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 15, default: 1 } }
+        - { name: sort_type, in: query, required: false, schema: { type: string, enum: [general, time_descending, popularity_descending, comment_descending, collect_descending, english_preferred], default: general } }
+        - { name: note_type, in: query, required: false, schema: { type: string, enum: [不限, 视频笔记, 普通笔记, 直播笔记], default: 不限 } }
+        - { name: time_filter, in: query, required: false, schema: { type: string, enum: [不限, 一天内, 一周内, 半年内], default: 不限 } }
+        - { name: search_id, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - { name: search_session_id, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - { name: ai_mode, in: query, required: false, schema: { type: string, enum: ["0", "1"], default: "0" } }
+        - *xiaohongshuOfficialIdempotency
+      responses: *xiaohongshuOfficialResponses
+  /xiaohongshu/app_v2/search_users:
+    get:
+      operationId: searchXiaohongshuUsersOfficial
+      summary: Search users with the App V2-compatible contract.
+      x-mx-strict-query: true
+      description: *xiaohongshuOfficialDescription
+      x-mx-error-codes:
+        <<: *xiaohongshuOfficialErrors
+        "403": [platform_not_granted, test_key_not_supported]
+      parameters:
+        - { name: keyword, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 500 } }
+        - { name: page, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 15, default: 1 } }
+        - { name: search_id, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - *xiaohongshuOfficialIdempotency
+      responses: *xiaohongshuOfficialResponses
+  /xiaohongshu/app_v2/get_user_info:
+    get:
+      operationId: getXiaohongshuUserInfoOfficial
+      summary: Get one user profile with the App V2-compatible contract.
+      x-mx-strict-query: true
+      description: *xiaohongshuOfficialDescription
+      x-mx-error-codes:
+        <<: *xiaohongshuOfficialErrors
+        "403": [platform_not_granted, test_key_not_supported]
+      parameters:
+        - { name: user_id, in: query, required: false, schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
+        - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
+        - *xiaohongshuOfficialIdempotency
+      responses: *xiaohongshuOfficialResponses
+  /xiaohongshu/app_v2/get_user_posted_notes:
+    get:
+      operationId: getXiaohongshuUserPostedNotesOfficial
+      summary: Get one user's posted notes with the App V2-compatible contract.
+      x-mx-strict-query: true
+      description: *xiaohongshuOfficialDescription
+      x-mx-error-codes:
+        <<: *xiaohongshuOfficialErrors
+        "403": [platform_not_granted, test_key_not_supported]
+      parameters:
+        - { name: user_id, in: query, required: false, schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
+        - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque Hub cursor from the preceding page; bound to this user and capped at page 15.
+          schema: { type: string, minLength: 1, maxLength: 8192 }
+        - *xiaohongshuOfficialIdempotency
+      responses: *xiaohongshuOfficialResponses
   /data/posts/media:
     get:
       operationId: getExternalSocialPostMedia
@@ -2450,10 +2575,14 @@ paths:
         represented only by warnings. For platform xiaohongshu, the default and
         only Hub-native page size is exactly 20. Compatible first-page requests
         use a governed direct external-data connector only after an independent
-        rollout gate; previously issued opaque direct cursors remain on that
-        connector. The response retains the same envelope; a historical cursor or non-20 pageSize remains on the
-        historical compatibility path. Callers must return cursors unchanged and
-        never move them between paths, queries or page sizes. Hub performs a
+        rollout gate; previously issued opaque mxec2 direct cursors remain on that
+        connector. The response retains the same envelope; a non-20 pageSize remains on the
+        historical compatibility path. For Xiaohongshu, that path exposes only a
+        Hub-encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and stops
+        after page 15. A pre-migration raw historical cursor returns 400
+        invalid_cursor and must restart from a cursor-less first page. Callers
+        return Hub cursors unchanged with a new Idempotency-Key per page and never
+        move them between paths, queries or page sizes. Hub performs a
         bounded detail check for note bodies at the 60-character provider preview
         boundary and retains detail text only when it is strictly longer;
         unresolved enrichment is explicit in response warnings. The caller never
@@ -2468,9 +2597,9 @@ paths:
         "403": [platform_not_granted, test_key_not_supported]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "410": [search_cursor_expired]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+        "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2521,7 +2650,7 @@ paths:
         "503":
           $ref: "#/components/responses/Error"
   /night-all/search/{operation}:
-    post:
+    post: &nightAllCompatibilityPost
       operationId: searchNightAllCompatibility
       summary: Call one of the three Night-All legacy search operations.
       description: >-
@@ -2530,16 +2659,32 @@ paths:
         details. After an independent rollout gate, a compatible Xiaohongshu raw
         first-page request uses the Hub-native direct connector only for exactly
         one scalar keyword or query, effective page size 20, and no
-        fan-out/detail/comment workload controls; previously issued opaque direct
+        batch/comment/request-specific-concurrency controls; previously issued opaque direct
         cursors remain on that connector. Explicit includeDetails=false/includeComments=false are no-op
         defaults; disableAutoDetails=true only disables the automatic
-        preview-boundary detail check. True detail/comment flags,
-        maxEnrichItems, comment controls, params, explicit cache age,
-        concurrency, non-20 pages, plural queries, crawl and user-info remain on
-        the historical compatibility path. The direct projection keeps raw_info
+        preview-boundary detail check. includeDetails=true and maxEnrichItems=1..20
+        use the existing atomically cost-reserved Hub-native detail workflow.
+        Eligible single-identifier Xiaohongshu
+        crawl/user-info requests are also Hub-native: crawl is posts-only with
+        page size 20, concurrency 1, an opaque Hub cursor and a 15-page cap.
+        True comment flags, multi-identifier/channel/non-post forms,
+        comment controls, params, explicit cache age,
+        concurrency, non-20 pages and plural queries remain on
+        the historical compatibility path. That path replaces provider cursor,
+        composite, page or offset continuation controls with a consumer/operation/
+        platform/query-scoped encrypted mxnc1 cursor carrying the next page
+        number. Public page mode becomes cursor mode, public offset mode becomes
+        composite mode, and page 15 is terminal. Pre-migration raw provider
+        cursors/continuation params return
+        400 invalid_cursor and must restart without a cursor and with a new
+        Idempotency-Key. The direct projection keeps raw_info
         and raw_data as JSON strings and uses the durable Hub UUID as both body
         requestId and x-mx-insight-request-id. Night-All-owned live/fallback
-        bodies keep their application fields and correlation IDs unchanged.
+        bodies keep their business fields and correlation IDs unchanged; only
+        pagination controls are governed. Historical ingestion retains the
+        complete pre-projection parsed JSON and legacy raw strings; Hub-native
+        provider calls additionally retain exact response bytes in restricted
+        storage.
         The legacy x-mx-insight-source-mode header remains live or stale;
         Hub-native cache and replay states map back to that vocabulary.
         Historical dispatch checks the Hub-pinned, grant-filtered
@@ -2552,11 +2697,12 @@ paths:
         handler, endpoint, provider, credential, or upstream health. A null or
         invalid matrix fails closed before dispatch. The Hub injects its owned businessId,
         records the upstream attempt, and stores complete
-        responses as exact last-good snapshots. A network or timeout ambiguity,
+            responses as governed last-good snapshots. A network or timeout ambiguity,
         an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP
         502/503/504 may return that exact snapshot. An unusable 2xx is
         outcome-unknown because paid work may already have happened. On that
-        historical path, the response body retains Night-All data fields unchanged;
+        historical path, the response body retains Night-All business fields unchanged;
+        only the pagination-control projection described above may differ;
         provider, token, credential, endpoint, capability/moduleCode and timeout
         routing controls remain server-owned. Archive/fullArchive/allTweets,
         archiveLimit/totalCount, max*Pages, pageCount/chunkSize/budget/crawlDepth
@@ -2569,9 +2715,9 @@ paths:
         "404": [not_found, night_all_rejected]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, night_all_rejected]
         "422": [night_all_rejected]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, night_all_rejected]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted, night_all_rejected]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+        "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
       parameters:
         - name: operation
           in: path
@@ -2602,9 +2748,12 @@ paths:
       responses:
         "200":
           description: >-
-            Legacy raw envelope. Eligible Xiaohongshu raw is a Hub-native
-            projection with unchanged raw_info/raw_data types; Night-All-owned
-            live and exact fallback application payloads remain unchanged.
+            Legacy envelope. Eligible Xiaohongshu raw and single-identifier
+            crawl/user-info are Hub-native projections with unchanged
+            raw_info/raw_data types; unsupported historical shapes retain their
+            business payloads while Hub governs only pagination controls.
+            Historical ingestion retains complete parsed JSON; Hub-native calls
+            additionally retain exact response bytes in restricted storage.
           headers:
             x-mx-insight-request-id:
               description: Durable Hub request identifier for status lookup.
@@ -2633,6 +2782,18 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /search/{operation}:
+    post:
+      <<: *nightAllCompatibilityPost
+      operationId: searchHistoricalCompatibilityAlias
+      summary: Call a legacy search operation through its historical route alias.
+      description: >-
+        This historical /search spelling is an exact alias of
+        /night-all/search: both enter the same Hub service and paid-operation
+        fingerprint, so changing the route cannot authorize or purchase a
+        second upstream dispatch. Request, response and error semantics are
+        otherwise identical.
+      x-mx-canonical-operation: /night-all/search/{operation}
   /data/stored/search:
     post:
       operationId: searchStoredData
@@ -6542,7 +6703,7 @@ components:
         contentType: { type: string, const: post }
         url: { type: string, format: uri, maxLength: 2048 }
         title: { type: [string, "null"], maxLength: 500 }
-        text: { type: [string, "null"], maxLength: 50000 }
+        text: { type: [string, "null"] }
         tags:
           type: array
           maxItems: 100
@@ -6657,7 +6818,9 @@ components:
         profile URLs in url, profileUrl, profile_url, or urls; company URLs and bare
         slugs are rejected. Canonical decimal strings are
         accepted for the integer fields normalized by runtime. Server-owned routing and credential
-        controls are rejected, including when nested in params.
+        controls are rejected, including when nested in params. Continuation is
+        accepted only through a Hub-issued opaque cursor; old raw provider cursor
+        material fails closed and must restart from page one.
       x-mx-common-fields: [businessId, business_id, platform, count, pageSize, limit, page, cursor, concurrency, params, includeRaw]
       x-mx-operation-fields:
         raw: [keyword, query, keywords, queries, disableAutoDetails, includeDetails, includeComments, commentLimit, cacheMaxAgeHours, maxEnrichItems, commentCursor, enrichConcurrency]
@@ -6713,9 +6876,9 @@ components:
             - { type: string, pattern: "^[1-9][0-9]*$" }
         page:
           oneOf:
-            - { type: integer, minimum: 1, maximum: 1000 }
-            - { type: string, pattern: "^(?:[1-9]|[1-9][0-9]{1,2}|1000)$" }
-        cursor: { type: string, minLength: 1, maxLength: 8192 }
+            - { type: integer, minimum: 1, maximum: 15 }
+            - { type: string, pattern: "^(?:[1-9]|1[0-5])$" }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: "Opaque Hub cursor returned by the preceding page. Historical raw provider cursors return invalid_cursor; restart without cursor and use a new Idempotency-Key." }
         concurrency:
           oneOf:
             - { type: integer, minimum: 1, maximum: 20 }
@@ -6738,7 +6901,7 @@ components:
             - { type: integer, minimum: 1, maximum: 5 }
             - { type: string, pattern: "^[1-5]$" }
         activityTypes: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
-        params: { type: object, additionalProperties: true, description: Platform continuation values only. Rejected keys and workload overrides are listed by x-mx-rejected-params; nested strings are at most 8192 characters and arrays are bounded by the consumer effective platform maxPageSize. }
+        params: { type: object, additionalProperties: true, description: "Safe non-continuation platform values are accepted on page one. For continuation, return the exact Hub-issued nextParams object (currently {cursor: mxnc1...}); raw provider continuation material fails closed. Rejected keys and workload overrides are listed by x-mx-rejected-params." }
     NightAllLegacyEnvelope:
       type: object
       additionalProperties: true
@@ -6751,7 +6914,7 @@ components:
           properties:
             raw_info: { type: string, contentMediaType: application/json, description: JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged. }
             raw_data: { type: string, contentMediaType: application/json, description: JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged. }
-            page: { type: object, additionalProperties: true }
+            page: { type: object, additionalProperties: true, description: "Business-neutral pagination controls. Historical provider continuation is replaced by an encrypted mxnc1 Hub cursor and page 15 is terminal; no content field is filtered or truncated." }
             meta: { type: object, additionalProperties: true }
         requestId: { type: string }
         traceId: { type: string }

@@ -1,10 +1,16 @@
-import { lstat, readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { constants as fsConstants } from 'node:fs'
+import { lstat, open } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
 const DEFAULT_NIGHT_ALL_CONFIG = '/Users/qpjoy/workspace/mingxi/Night-All/config.json'
 const DEFAULT_ADMIN_BASE = 'http://127.0.0.1:18151'
 const MAX_CONFIG_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 4_096
+const PROVIDERS = Object.freeze([
+  { provider: 'tikhub', configKey: 'tikhub' },
+  { provider: 'justone', configKey: 'justOne' },
+])
 
 function migrationError(message) {
   const error = new Error(message)
@@ -28,28 +34,86 @@ export function normalizeAdminBase(value) {
   return parsed.origin
 }
 
-export async function readNightAllTikHubCredential(configPath, {
-  allowInsecurePermissions = false,
-} = {}) {
-  const info = await lstat(configPath).catch(() => null)
-  if (!info?.isFile() || info.isSymbolicLink()) {
+async function readPrivateJson(configPath) {
+  const pathInfo = await lstat(configPath).catch(() => null)
+  if (!pathInfo?.isFile() || pathInfo.isSymbolicLink()) {
     throw migrationError('Night-All config must be an existing regular file, not a symlink')
   }
-  if (!allowInsecurePermissions && (info.mode & 0o077) !== 0) {
-    throw migrationError('Night-All config permissions must exclude group and other access (for example chmod 600)')
+
+  if (!Number.isInteger(fsConstants.O_NOFOLLOW)) {
+    throw migrationError('This runtime cannot safely open the Night-All config without following symlinks')
   }
-  if (info.size <= 0 || info.size > MAX_CONFIG_BYTES) {
-    throw migrationError(`Night-All config must be between 1 and ${MAX_CONFIG_BYTES} bytes`)
+
+  let handle
+  try {
+    handle = await open(configPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  } catch {
+    throw migrationError('Night-All config could not be opened safely without following symlinks')
   }
-  let parsed
-  try { parsed = JSON.parse(await readFile(configPath, 'utf8')) } catch {
-    throw migrationError('Night-All config is not valid JSON')
+
+  try {
+    const info = await handle.stat()
+    if (!info.isFile() || info.dev !== pathInfo.dev || info.ino !== pathInfo.ino) {
+      throw migrationError('Night-All config changed during security validation')
+    }
+    if ((info.mode & 0o077) !== 0) {
+      throw migrationError('Night-All config permissions must exclude group and other access (for example chmod 600)')
+    }
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+      throw migrationError('Night-All config must be owned by the current operating-system user')
+    }
+    if (info.size <= 0 || info.size > MAX_CONFIG_BYTES) {
+      throw migrationError(`Night-All config must be between 1 and ${MAX_CONFIG_BYTES} bytes`)
+    }
+
+    const raw = await handle.readFile()
+    const afterRead = await handle.stat()
+    if (raw.byteLength !== info.size || afterRead.size !== info.size) {
+      throw migrationError('Night-All config changed while it was being read')
+    }
+    try {
+      return JSON.parse(raw.toString('utf8'))
+    } catch {
+      throw migrationError('Night-All config is not valid JSON')
+    }
+  } finally {
+    await handle.close()
   }
-  const apiKey = parsed?.crawlerProviders?.tikhub?.apiKey
+}
+
+function readProviderApiKey(parsed, { configKey }) {
+  const apiKey = parsed?.crawlerProviders?.[configKey]?.apiKey
   if (typeof apiKey !== 'string' || !apiKey.trim() || Buffer.byteLength(apiKey.trim()) > MAX_API_KEY_BYTES) {
-    throw migrationError('Night-All crawlerProviders.tikhub.apiKey is missing or invalid')
+    throw migrationError(`Night-All crawlerProviders.${configKey}.apiKey is missing or invalid`)
   }
   return apiKey.trim()
+}
+
+export async function readNightAllExternalPlatformCredentials(configPath, {
+  providers = PROVIDERS.map(({ provider }) => provider),
+} = {}) {
+  const requested = providers.map((provider) => {
+    const definition = PROVIDERS.find((candidate) => candidate.provider === provider)
+    if (!definition) throw migrationError(`Unsupported external-platform credential ${provider}`)
+    return definition
+  })
+  const parsed = await readPrivateJson(configPath)
+  return Object.fromEntries(requested.map((definition) => [
+    definition.provider,
+    readProviderApiKey(parsed, definition),
+  ]))
+}
+
+export async function readNightAllTikHubCredential(configPath, options = {}) {
+  const credentials = await readNightAllExternalPlatformCredentials(configPath, {
+    ...options,
+    providers: ['tikhub'],
+  })
+  return credentials.tikhub
+}
+
+export function credentialFingerprintTail(apiKey) {
+  return createHash('sha256').update(apiKey, 'utf8').digest('hex').slice(-8)
 }
 
 async function adminRequest(base, adminToken, method, path, body) {
@@ -70,50 +134,101 @@ async function adminRequest(base, adminToken, method, path, body) {
 }
 
 export async function migrateTikHubCredential(environment = process.env) {
+  const result = await migrateExternalPlatformCredentials(environment, { providers: ['tikhub'] })
+  const tikhub = result.providers[0]
+  if (result.dryRun) {
+    return { dryRun: true, source: 'night-all-config', expectedRevision: tikhub.expectedRevision }
+  }
+  return { dryRun: false, source: tikhub.source, revision: tikhub.revision }
+}
+
+export async function migrateExternalPlatformCredentials(environment = process.env, {
+  providers = PROVIDERS.map(({ provider }) => provider),
+} = {}) {
   const configPath = environment.NIGHT_ALL_CONFIG_PATH || DEFAULT_NIGHT_ALL_CONFIG
   const adminToken = environment.MX_INSIGHT_ADMIN_TOKEN
   if (typeof adminToken !== 'string' || adminToken.length < 32 || /[\r\n]/u.test(adminToken)) {
     throw migrationError('MX_INSIGHT_ADMIN_TOKEN must be present and at least 32 characters')
   }
   const base = normalizeAdminBase(environment.MX_INSIGHT_ADMIN_BASE_URL)
-  const apiKey = await readNightAllTikHubCredential(configPath, {
-    allowInsecurePermissions: environment.MX_INSIGHT_ALLOW_INSECURE_NIGHT_ALL_CONFIG === '1',
+  const credentials = await readNightAllExternalPlatformCredentials(configPath, {
+    providers,
   })
-  const detail = await adminRequest(
-    base,
-    adminToken,
-    'GET',
-    '/internal/v1/admin/external-platforms/tikhub?range=24h',
-  )
-  const expectedRevision = detail?.credential?.revision
-  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-    throw migrationError('Hub Admin did not return a valid TikHub credential revision')
+
+  // Resolve every target revision before the first write so invalid source or
+  // target configuration cannot produce an avoidable partial migration.
+  const targets = await Promise.all(providers.map(async (provider) => {
+    const detail = await adminRequest(
+      base,
+      adminToken,
+      'GET',
+      `/internal/v1/admin/external-platforms/${provider}?range=24h`,
+    )
+    const expectedRevision = detail?.credential?.revision
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw migrationError(`Hub Admin did not return a valid ${provider} credential revision`)
+    }
+    return {
+      provider,
+      apiKey: credentials[provider],
+      expectedRevision,
+      fingerprintTail: credentialFingerprintTail(credentials[provider]),
+    }
+  }))
+
+  const dryRun = environment.MX_INSIGHT_EXTERNAL_CREDENTIAL_MIGRATION_DRY_RUN === '1'
+    || environment.MX_INSIGHT_TIKHUB_MIGRATION_DRY_RUN === '1'
+  if (dryRun) {
+    return {
+      dryRun: true,
+      providers: targets.map(({ provider, expectedRevision, fingerprintTail }) => ({
+        provider,
+        status: 'validated',
+        source: 'night-all-config',
+        expectedRevision,
+        fingerprintTail,
+      })),
+    }
   }
-  if (environment.MX_INSIGHT_TIKHUB_MIGRATION_DRY_RUN === '1') {
-    return { dryRun: true, source: 'night-all-config', expectedRevision }
+
+  const migrated = []
+  for (const target of targets) {
+    const updated = await adminRequest(
+      base,
+      adminToken,
+      'PUT',
+      `/internal/v1/admin/external-platforms/${target.provider}/credential`,
+      { apiKey: target.apiKey, expectedRevision: target.expectedRevision },
+    )
+    if (updated?.source !== 'database'
+      || updated?.credentialConfigured !== true
+      || updated?.revision !== target.expectedRevision + 1) {
+      throw migrationError(`Hub Admin did not confirm the expected ${target.provider} database credential revision`)
+    }
+    migrated.push({
+      provider: target.provider,
+      status: 'migrated',
+      source: updated.source,
+      revision: updated.revision,
+      fingerprintTail: target.fingerprintTail,
+    })
   }
-  const updated = await adminRequest(
-    base,
-    adminToken,
-    'PUT',
-    '/internal/v1/admin/external-platforms/tikhub/credential',
-    { apiKey, expectedRevision },
-  )
-  if (updated?.source !== 'database'
-    || updated?.credentialConfigured !== true
-    || updated?.revision !== expectedRevision + 1) {
-    throw migrationError('Hub Admin did not confirm the expected database credential revision')
-  }
-  return { dryRun: false, source: updated.source, revision: updated.revision }
+  return { dryRun: false, providers: migrated }
+}
+
+export function formatMigrationResults(result) {
+  return result.providers.map((provider) => {
+    const revision = result.dryRun ? provider.expectedRevision : provider.revision
+    return `provider=${provider.provider} status=${provider.status} fingerprintTail=${provider.fingerprintTail} source=${provider.source} revision=${revision}`
+  }).join('\n')
 }
 
 async function main() {
-  const result = await migrateTikHubCredential()
-  if (result.dryRun) {
-    process.stdout.write(`TikHub credential migration preflight passed at revision ${result.expectedRevision}; plaintext withheld.\n`)
-    return
-  }
-  process.stdout.write(`TikHub credential migrated into the Hub database at revision ${result.revision}; plaintext withheld.\n`)
+  const providers = process.argv.includes('--all')
+    ? PROVIDERS.map(({ provider }) => provider)
+    : ['tikhub']
+  const result = await migrateExternalPlatformCredentials(process.env, { providers })
+  process.stdout.write(`${formatMigrationResults(result)}\n`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

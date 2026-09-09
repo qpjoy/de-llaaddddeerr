@@ -34,16 +34,22 @@ function note(id, text, extras = {}) {
   }
 }
 
-function searchEnvelope(notes, { hasMore = false, searchId = null, searchSessionId = null } = {}) {
+function searchEnvelope(notes, {
+  hasMore = false,
+  page = 1,
+  searchId = null,
+  searchSessionId = null,
+} = {}) {
   return {
     code: 200,
     request_id: 'tikhub-search-upstream-request',
     data: {
+      page,
+      next_page: hasMore ? page + 1 : null,
+      ...(searchId ? { search_id: searchId } : {}),
+      ...(searchSessionId ? { search_session_id: searchSessionId } : {}),
       data: {
         items: notes.map((item) => ({ model_type: 'note', note: item })),
-        has_more: hasMore,
-        ...(searchId ? { search_id: searchId } : {}),
-        ...(searchSessionId ? { search_session_id: searchSessionId } : {}),
       },
     },
   }
@@ -220,6 +226,10 @@ class PlatformStoreMock {
     this.finishProviderStepFailures = []
     this.persistenceUnknown = []
     this.events = []
+    this.costReservations = []
+    this.releasedCostReservations = []
+    this.costReservationError = null
+    this.providerRateAdmissions = 0
   }
 
   #snapshotKey(operation, fingerprint) { return `${operation}:${fingerprint}` }
@@ -238,7 +248,21 @@ class PlatformStoreMock {
 
   async releaseDispatchLease() {}
 
-  async acquireProviderRateLimit() { return { allowed: true, retryAfterMs: 0 } }
+  async acquireProviderRateLimit() {
+    this.providerRateAdmissions += 1
+    return { allowed: true, retryAfterMs: 0 }
+  }
+
+  async reserveProviderCostWorkflow(input) {
+    this.costReservations.push(structuredClone(input))
+    if (this.costReservationError) throw this.costReservationError
+    return { id: `cost-reservation-${this.costReservations.length}` }
+  }
+
+  async releaseProviderCostWorkflow(input) {
+    this.releasedCostReservations.push(structuredClone(input))
+    return true
+  }
 
   async beginProviderCall(input) {
     const call = { id: `provider-call-${this.nextCall++}`, ...structuredClone(input) }
@@ -295,6 +319,7 @@ class PlatformStoreMock {
 
 function config(overrides = {}) {
   return {
+    searchContractVerified: true,
     maxConcurrency: 8,
     maxConsumerConcurrency: 4,
     maxRequestsPerMinute: 120,
@@ -303,7 +328,12 @@ function config(overrides = {}) {
     searchFreshTtlMs: 60_000,
     searchStaleTtlMs: 86_400_000,
     searchMaxEnrichItems: 20,
-    billing: { unitCostMinor: 5, currency: 'CNY' },
+    billing: {
+      unitCostMinor: 5,
+      currency: 'CNY',
+      monthlyBudgetMinor: 100_000,
+      monthlySubsidyBudgetMinor: 100_000,
+    },
     ...overrides,
   }
 }
@@ -384,6 +414,8 @@ test('search and detail dispatches use their endpoint prices before the legacy f
         [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: 11,
       },
       currency: 'CNY',
+      monthlyBudgetMinor: 100_000,
+      monthlySubsidyBudgetMinor: 100_000,
     },
   })
 
@@ -400,6 +432,44 @@ test('search and detail dispatches use their endpoint prices before the legacy f
   )
   assert.equal(state.platformStore.providerSteps[0].costMinor, 11)
   assert.equal(state.platformStore.liveCommits[0].costMinor, 7)
+  assert.deepEqual(state.platformStore.costReservations.map(({ costControls }) => costControls), [[{
+    costMinor: 7,
+    costKind: 'estimated',
+    currency: 'CNY',
+    monthlyBudgetMinor: 100_000,
+    monthlySubsidyBudgetMinor: 100_000,
+  }], [{
+    costMinor: 11,
+    costKind: 'estimated',
+    currency: 'CNY',
+    monthlyBudgetMinor: 100_000,
+    monthlySubsidyBudgetMinor: 100_000,
+  }]])
+  assert.equal(state.platformStore.providerCalls[0].costReservationId, 'cost-reservation-1')
+  assert.equal(state.platformStore.providerCalls[1].costReservationId, 'cost-reservation-2')
+  assert.equal(state.platformStore.releasedCostReservations.length, 2)
+})
+
+test('primary search budget rejection occurs before consuming provider RPM or creating a provider call', async () => {
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '不会调用上游')] })
+  const state = fixture(adapter)
+  state.platformStore.costReservationError = new AppError(
+    429,
+    'external_platform_cost_budget_exhausted',
+    'Procurement budget exhausted',
+  )
+
+  await assert.rejects(
+    state.gateway.searchNotes(state.context, request({
+      idempotencyKey: 'direct-primary-budget-exhausted-01',
+    })),
+    (error) => error?.code === 'external_platform_cost_budget_exhausted',
+  )
+
+  assert.equal(state.platformStore.providerRateAdmissions, 0)
+  assert.equal(state.platformStore.providerCalls.length, 0)
+  assert.equal(adapter.calls.search.length, 0)
+  assert.equal(state.usageStore.released.length, 1)
 })
 
 test('an irrecoverable primary evidence-stage failure stops before detail enrichment and retains paid evidence', async () => {
@@ -562,8 +632,11 @@ test('UTF-16 length 60 candidate is enriched, while an equal-length detail canno
   ])
 })
 
-test('the default quality budget repairs every 60-character preview in a search page', async () => {
-  const ids = Array.from({ length: 6 }, (_, index) => `675d277d000000000600e65${index}`)
+test('the default quality budget repairs all twelve 60-character previews in a real search page', async () => {
+  const ids = Array.from(
+    { length: 12 },
+    (_, index) => `675d277d000000000600e6${index.toString(16).padStart(2, '0')}`,
+  )
   const preview = '预'.repeat(60)
   const adapter = adapterFor({
     notes: ids.map((id) => note(id, preview)),
@@ -575,11 +648,11 @@ test('the default quality budget repairs every 60-character preview in a search 
   const state = fixture(adapter)
 
   const response = await state.gateway.searchNotes(state.context, request({
-    body: { platform: 'xiaohongshu', query: '六条边界正文', pageSize: 6 },
+    body: { platform: 'xiaohongshu', query: '十二条边界正文', pageSize: 12 },
   }))
 
-  assert.equal(adapter.calls.detail.length, 6)
-  assert.equal(response.body.data.meta.providerCalls, 7)
+  assert.equal(adapter.calls.detail.length, 12)
+  assert.equal(response.body.data.meta.providerCalls, 13)
   assert.deepEqual(
     response.body.data.items.map((item) => item.text),
     ids.map((_id, index) => `${preview}完整正文-${index}`),
@@ -594,6 +667,19 @@ test('detail failure keeps the usable 60-character snippet and returns a partial
     notes: [note(FIRST_NOTE_ID, snippet)],
     failingDetailIds: new Set([FIRST_NOTE_ID]),
   })
+  const search = adapter.searchXiaohongshuNotes.bind(adapter)
+  adapter.searchXiaohongshuNotes = async (...args) => {
+    const result = await search(...args)
+    return {
+      ...result,
+      records: [{
+        id: `xiaohongshu:${FIRST_NOTE_ID}`,
+        externalId: FIRST_NOTE_ID,
+        body: snippet,
+        extensions: { bodyCompleteness: 'provider_preview' },
+      }],
+    }
+  }
   const state = fixture(adapter)
   const response = await state.gateway.searchNotes(state.context, request())
 
@@ -608,6 +694,48 @@ test('detail failure keeps the usable 60-character snippet and returns a partial
   assert.equal(state.platformStore.providerSteps.length, 1)
   assert.equal(state.platformStore.providerSteps[0].outcome, 'rejected')
   assert.equal(state.platformStore.liveCommits.length, 1, 'search result remains commit-worthy')
+  assert.equal(
+    state.platformStore.liveCommits[0].ingestJob.payload.records[0].extensions.bodyCompleteness,
+    'provider_preview',
+    'failed detail repair must not drop the paid preview from PG/outbox/ES ingest',
+  )
+})
+
+test('detail subsidy exhaustion returns the paid primary result without any partial fan-out', async () => {
+  const snippet = '补'.repeat(60)
+  const adapter = adapterFor({
+    notes: [note(FIRST_NOTE_ID, snippet)],
+    detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, `${snippet}完整正文`)]]),
+  })
+  const state = fixture(adapter)
+  const reserveCost = state.platformStore.reserveProviderCostWorkflow.bind(state.platformStore)
+  let costAdmissions = 0
+  state.platformStore.reserveProviderCostWorkflow = async (input) => {
+    costAdmissions += 1
+    if (costAdmissions === 2) {
+      throw new AppError(
+        429,
+        'external_platform_subsidy_budget_exhausted',
+        'Subsidy budget exhausted',
+      )
+    }
+    return reserveCost(input)
+  }
+
+  const response = await state.gateway.searchNotes(state.context, request({
+    idempotencyKey: 'direct-detail-subsidy-exhausted-01',
+  }))
+
+  assert.equal(response.status, 200)
+  assert.equal(response.body.data.items[0].text, snippet)
+  assert.equal(response.body.data.status, 'partial')
+  assert.equal(response.body.data.meta.providerCalls, 1)
+  assert.equal(adapter.calls.search.length, 1)
+  assert.equal(adapter.calls.detail.length, 0)
+  assert.equal(state.platformStore.providerCalls.length, 1)
+  assert.equal(state.platformStore.costReservations.length, 1)
+  assert.equal(state.platformStore.releasedCostReservations.length, 1)
+  assert.equal(state.platformStore.liveCommits.length, 1)
 })
 
 test('a staged detail with an unconfirmed settlement closes unknown with identical evidence and no redispatch', async () => {
@@ -748,7 +876,7 @@ test('legacy direct pagination accepts its opaque cursor and keeps the second pa
             searchId: 'provider-search-id-secret',
             searchSessionId: 'provider-session-id-secret',
           })
-        : searchEnvelope([secondNote], { hasMore: false })
+        : searchEnvelope([secondNote], { hasMore: false, page: searchRequest.page })
     },
   })
   const state = fixture(adapter)
@@ -796,6 +924,51 @@ test('legacy direct pagination accepts its opaque cursor and keeps the second pa
   }, {
     operation: 'social.posts.search', callRole: 'primary',
   }])
+})
+
+test('turning off the search contract blocks an issued cursor before credential, cost, RPM, or provider dispatch', async () => {
+  const firstNote = note(FIRST_NOTE_ID, '第一页完整正文')
+  const adapter = adapterFor({
+    notes: [firstNote],
+    searchEnvelopeForRequest(searchRequest) {
+      return searchEnvelope([firstNote], {
+        hasMore: searchRequest.page === 1,
+        page: searchRequest.page,
+        searchId: 'disabled-rollout-provider-search',
+      })
+    },
+  })
+  const state = fixture(adapter)
+  const first = await state.gateway.searchNotes(state.context, request({
+    idempotencyKey: 'direct-rollout-page-one-01',
+    path: RAW_SEARCH_PATH,
+    responseMode: 'legacy',
+  }))
+  const cursor = first.body.data.page.nextCursor
+  assert.match(cursor, /^mxec2\./u)
+
+  state.gateway.config.searchContractVerified = false
+  await assert.rejects(
+    state.gateway.searchNotes(state.context, request({
+      idempotencyKey: 'direct-rollout-page-two-01',
+      path: RAW_SEARCH_PATH,
+      responseMode: 'legacy',
+      body: {
+        platform: 'xiaohongshu',
+        query: '便携相机',
+        pageSize: 1,
+        cursor,
+      },
+    })),
+    (error) => error?.status === 503
+      && error?.code === 'external_platform_contract_unverified',
+  )
+
+  assert.equal(adapter.calls.credential, 1)
+  assert.equal(adapter.calls.search.length, 1)
+  assert.equal(state.platformStore.costReservations.length, 1)
+  assert.equal(state.platformStore.providerRateAdmissions, 1)
+  assert.equal(state.platformStore.providerCalls.length, 1)
 })
 
 test('modern and legacy cursors are route-bound even when both projections share one snapshot', async () => {

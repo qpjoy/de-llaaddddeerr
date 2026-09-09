@@ -1,12 +1,99 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AppError } from '../core/errors.mjs'
+import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
 const number = (value) => value == null ? null : Number(value)
 const FINISHED_PROVIDER_OUTCOMES = new Set(['succeeded', 'succeeded_unusable', 'rejected', 'unknown'])
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+
+function normalizedRestrictedResponseArchive(value) {
+  if (value == null) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('restrictedResponseArchive must be an object')
+  }
+  if (!Buffer.isBuffer(value.bodyBytes) && !(value.bodyBytes instanceof Uint8Array)) {
+    throw new TypeError('restrictedResponseArchive.bodyBytes must contain exact response bytes')
+  }
+  const bodyBytes = Buffer.from(value.bodyBytes)
+  if (!Number.isSafeInteger(value.bodySize) || value.bodySize < 0) {
+    throw new TypeError('restrictedResponseArchive.bodySize must be a non-negative safe integer')
+  }
+  if (value.bodySize !== bodyBytes.byteLength) {
+    throw new TypeError('restrictedResponseArchive.bodySize does not match bodyBytes')
+  }
+  if (!SHA256_PATTERN.test(value.bodySha256 || '')) {
+    throw new TypeError('restrictedResponseArchive.bodySha256 must be a lowercase SHA-256 fingerprint')
+  }
+  const actualSha256 = createHash('sha256').update(bodyBytes).digest('hex')
+  if (actualSha256 !== value.bodySha256) {
+    throw new TypeError('restrictedResponseArchive.bodySha256 does not match bodyBytes')
+  }
+  if (value.bodyText != null && typeof value.bodyText !== 'string') {
+    throw new TypeError('restrictedResponseArchive.bodyText must be a string or null')
+  }
+  let decodedBodyText = null
+  try {
+    // Match the adapters' exact-text view: fatal UTF-8 validation while
+    // preserving an initial BOM. Bytes/hash remain the source of truth.
+    decodedBodyText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bodyBytes)
+  } catch {
+    if (value.bodyText != null) {
+      throw new TypeError('restrictedResponseArchive.bodyBytes are not valid UTF-8')
+    }
+  }
+  const postgresBodyText = isPostgresSafeText(decodedBodyText) ? decodedBodyText : null
+  if (postgresBodyText !== (value.bodyText ?? null)) {
+    throw new TypeError('restrictedResponseArchive.bodyText does not match bodyBytes')
+  }
+  if (typeof value.jsonParsed !== 'boolean') {
+    throw new TypeError('restrictedResponseArchive.jsonParsed must be a boolean')
+  }
+  const bodyText = value.bodyText ?? null
+  const parsedPayload = value.jsonParsed
+    && value.parsedPayload != null
+    && isPostgresSafeJsonValue(value.parsedPayload)
+    ? clone(value.parsedPayload)
+    : null
+  if (!value.jsonParsed && value.parsedPayload != null) {
+    throw new TypeError('restrictedResponseArchive.parsedPayload requires jsonParsed=true')
+  }
+  if (value.jsonParsed) {
+    if (bodyText == null) {
+      if (parsedPayload != null) {
+        throw new TypeError('restrictedResponseArchive.parsedPayload requires a text projection')
+      }
+    } else {
+      let parsed
+      try {
+        parsed = JSON.parse(bodyText.replace(/^\uFEFF/u, ''))
+      } catch {
+        throw new TypeError('restrictedResponseArchive.bodyText is not valid JSON')
+      }
+      if (parsedPayload != null && !isDeepStrictEqual(parsed, parsedPayload)) {
+        throw new TypeError('restrictedResponseArchive.parsedPayload does not match bodyText')
+      }
+    }
+  }
+  let capturedAt
+  try {
+    capturedAt = iso(value.capturedAt)
+  } catch {
+    throw new TypeError('restrictedResponseArchive.capturedAt must be a valid timestamp')
+  }
+  return {
+    contentType: value.contentType ?? null,
+    bodySize: value.bodySize,
+    bodySha256: value.bodySha256,
+    bodyBytes,
+    bodyText,
+    jsonParsed: value.jsonParsed,
+    parsedPayload,
+    capturedAt,
+  }
+}
 
 const snapshotFingerprint = (delivery) => delivery.snapshotFingerprint ?? delivery.fingerprint
 
@@ -19,6 +106,47 @@ function boundedRateLimit(value, name) {
     throw new TypeError(`${name} must be a positive safe integer`)
   }
   return value
+}
+
+function normalizedCostControl(value) {
+  if (value == null) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('costControl must be an object')
+  }
+  const supported = new Set([
+    'costMinor', 'costKind', 'currency', 'monthlyBudgetMinor',
+    'monthlySubsidyBudgetMinor',
+  ])
+  if (Object.keys(value).some((field) => !supported.has(field))) {
+    throw new TypeError('costControl contains unsupported fields')
+  }
+  if (!Number.isSafeInteger(value.costMinor) || value.costMinor <= 0) {
+    throw new TypeError('costControl.costMinor must be a positive safe integer')
+  }
+  if (!['estimated', 'provider_reported'].includes(value.costKind)) {
+    throw new TypeError('costControl.costKind must be estimated or provider_reported')
+  }
+  const currency = String(value.currency || '').toUpperCase()
+  if (!/^[A-Z]{3}$/u.test(currency)) {
+    throw new TypeError('costControl.currency must be a three-letter code')
+  }
+  if (!Number.isSafeInteger(value.monthlyBudgetMinor) || value.monthlyBudgetMinor < 0) {
+    throw new TypeError('costControl.monthlyBudgetMinor must be a non-negative safe integer')
+  }
+  if (!Number.isSafeInteger(value.monthlySubsidyBudgetMinor)
+    || value.monthlySubsidyBudgetMinor < 0) {
+    throw new TypeError('costControl.monthlySubsidyBudgetMinor must be a non-negative safe integer')
+  }
+  return { ...value, currency }
+}
+
+function utcMonthBounds(at = new Date()) {
+  const date = new Date(at)
+  const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)
+  return {
+    start,
+    end: Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
+  }
 }
 
 function rateMoment({ at = new Date(), windowMs = 60_000 } = {}) {
@@ -60,7 +188,19 @@ function normalizedEvidence(input) {
     itemCount: input.itemCount ?? null,
     errorCode: input.errorCode ?? null,
     responseArchive: clone(input.responseArchive ?? null),
+    restrictedResponseArchive: normalizedRestrictedResponseArchive(
+      input.restrictedResponseArchive ?? null,
+    ),
     archiveObjects: clone(input.archiveObjects ?? []),
+  }
+}
+
+function cloneNormalizedEvidence(evidence) {
+  return {
+    ...clone(evidence),
+    restrictedResponseArchive: normalizedRestrictedResponseArchive(
+      evidence.restrictedResponseArchive ?? null,
+    ),
   }
 }
 
@@ -68,6 +208,9 @@ function validateStagedEvidence(input) {
   const evidence = normalizedEvidence(input)
   if (!evidence.responseArchive || !SHA256_PATTERN.test(evidence.responseArchive.payloadSha256 || '')) {
     throw new TypeError('stageProviderEvidence requires a response archive with a SHA-256 payload')
+  }
+  if (!evidence.restrictedResponseArchive) {
+    throw new TypeError('stageProviderEvidence requires the exact restricted response bytes')
   }
   if (!Array.isArray(evidence.archiveObjects) || evidence.archiveObjects.length === 0) {
     throw new TypeError('stageProviderEvidence requires at least one archive object')
@@ -159,6 +302,21 @@ function postgresResponseArchiveMatches(row, archive) {
     && isDeepStrictEqual(row.archive_raw_payload ?? null, archive.rawPayload ?? null)
 }
 
+function postgresRestrictedResponseArchiveMatches(row, input) {
+  const archive = normalizedRestrictedResponseArchive(input ?? null)
+  if (!archive) return row.restricted_response_id == null
+  return row.restricted_response_id != null
+    && (row.restricted_content_type ?? null) === archive.contentType
+    && nullableNumber(row.restricted_body_size) === archive.bodySize
+    && row.restricted_body_sha256 === archive.bodySha256
+    && Buffer.isBuffer(row.restricted_body_bytes)
+    && row.restricted_body_bytes.equals(archive.bodyBytes)
+    && (row.restricted_body_text ?? null) === archive.bodyText
+    && row.restricted_json_parsed === archive.jsonParsed
+    && isDeepStrictEqual(row.restricted_parsed_payload ?? null, archive.parsedPayload)
+    && nullableTime(row.restricted_captured_at) === nullableTime(archive.capturedAt)
+}
+
 function postgresArchiveObjectsMatch(rows, input, providerKey) {
   const expected = normalizedEvidence(input).archiveObjects
   if (rows.length !== expected.length) return false
@@ -240,7 +398,9 @@ export class MemoryExternalPlatformStore {
     this.circuitOpenMs = circuitOpenMs
     this.uncertainCooldownMs = uncertainCooldownMs
     this.calls = new Map()
+    this.costReservations = new Map()
     this.responseArchives = new Map()
+    this.restrictedResponseArchives = new Map()
     this.snapshots = new Map()
     this.requests = []
     this.leases = new Map()
@@ -355,8 +515,10 @@ export class MemoryExternalPlatformStore {
     return clone(this.state)
   }
 
-  async acquireProviderRateLimit({ limit, windowMs = 60_000, at = new Date() }) {
+  async acquireProviderRateLimit({ limit, tokens = 1, windowMs = 60_000, at = new Date() }) {
     const maximum = boundedRateLimit(limit, 'limit')
+    const requested = boundedRateLimit(tokens, 'tokens')
+    if (requested > maximum) throw new TypeError('tokens must not exceed limit')
     const moment = rateMoment({ at, windowMs })
     const current = this.rateBuckets.get(this.providerKey)
     const elapsedMs = current
@@ -368,7 +530,7 @@ export class MemoryExternalPlatformStore {
     const refilledAtMs = current
       ? Math.max(current.refilledAtMs, moment.timestamp)
       : moment.timestamp
-    if (available < 1) {
+    if (available < requested) {
       this.rateBuckets.set(this.providerKey, {
         capacity: maximum,
         windowMs: moment.windowMs,
@@ -378,10 +540,10 @@ export class MemoryExternalPlatformStore {
       return {
         allowed: false,
         remaining: 0,
-        retryAfterMs: Math.max(1, Math.ceil((1 - available) * moment.windowMs / maximum)),
+        retryAfterMs: Math.max(1, Math.ceil((requested - available) * moment.windowMs / maximum)),
       }
     }
-    const remainingTokens = available - 1
+    const remainingTokens = available - requested
     this.rateBuckets.set(this.providerKey, {
       capacity: maximum,
       windowMs: moment.windowMs,
@@ -393,6 +555,230 @@ export class MemoryExternalPlatformStore {
       remaining: Math.max(0, Math.floor(remainingTokens)),
       retryAfterMs: 0,
     }
+  }
+
+  #costState(costControl) {
+    const month = utcMonthBounds()
+    const calls = [...this.calls.values()].filter((call) => {
+      const startedAt = new Date(call.startedAt).getTime()
+      return call.providerKey === this.providerKey
+        && Number.isFinite(startedAt)
+        && startedAt >= month.start
+        && startedAt < month.end
+    })
+    const knownCalls = calls.filter((call) => (
+      Number.isSafeInteger(call.costMinor) && call.costMinor >= 0
+    ))
+    const incompleteControlledCost = calls.some((call) => (
+      call.costKind !== 'unknown'
+      && call.costKind != null
+      && (!Number.isSafeInteger(call.costMinor) || call.costMinor <= 0)
+    ))
+    const mixedCurrencyCost = knownCalls.some(
+      (call) => call.currency !== costControl.currency,
+    )
+    const activeReservations = [...this.costReservations.values()].filter((reservation) => {
+      const createdAt = new Date(reservation.createdAt).getTime()
+      const usage = this.usageStore?.requests?.get(reservation.usageRequestId)
+      const leaseExpiresAt = usage?.leaseExpiresAt == null
+        ? null
+        : new Date(usage.leaseExpiresAt).getTime()
+      return reservation.providerKey === this.providerKey
+        && reservation.status === 'active'
+        && usage?.status === 'reserved'
+        && (leaseExpiresAt == null || (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()))
+        && Number.isFinite(createdAt)
+        && createdAt >= month.start
+        && createdAt < month.end
+    })
+    const mixedReservation = activeReservations.some((reservation) => (
+      reservation.currency !== costControl.currency
+      || !Number.isSafeInteger(reservation.baseCostMinor)
+      || reservation.baseCostMinor < 0
+      || !Number.isSafeInteger(reservation.reservedCostMinor)
+      || reservation.reservedCostMinor <= 0
+      || !Number.isSafeInteger(reservation.reservedSubsidyMinor)
+      || reservation.reservedSubsidyMinor < 0
+    ))
+    if (incompleteControlledCost || mixedCurrencyCost || mixedReservation) {
+      throw new AppError(
+        503,
+        'external_platform_cost_evidence_incomplete',
+        'External data cost evidence is incomplete; paid dispatch is disabled',
+      )
+    }
+    // Pre-guard rows with cost_kind=unknown and no amount are intentionally
+    // outside the guarded cohort: blocking on those rows would break an
+    // existing provider for the rest of the month with no safe backfill.
+    // Any known historical amount is still included, and a guarded estimate
+    // (cost_kind != unknown) that loses its amount fails closed above.
+    const knownCostMinor = knownCalls.reduce((sum, call) => sum + call.costMinor, 0)
+    const costsByUsage = new Map()
+    for (const known of knownCalls) {
+      const total = (costsByUsage.get(known.usageRequestId) || 0) + known.costMinor
+      if (!Number.isSafeInteger(total)) {
+        throw new AppError(
+          503,
+          'external_platform_cost_evidence_incomplete',
+          'External data cost evidence is incomplete; paid dispatch is disabled',
+        )
+      }
+      costsByUsage.set(known.usageRequestId, total)
+    }
+    const coveredMinor = (usageRequestId) => {
+      const charge = this.usageStore?.customerCharges?.get?.(usageRequestId)
+      if (!charge
+        || charge.enforcementMode !== 'enforced'
+        || !['reserved', 'captured', 'unknown'].includes(charge.status)
+        || charge.currency !== costControl.currency
+        || !Number.isSafeInteger(charge.quotedMinor)
+        || charge.quotedMinor < 0) return 0
+      return charge.quotedMinor
+    }
+    let subsidyCostMinor = 0
+    for (const [usageRequestId, costMinor] of costsByUsage) {
+      subsidyCostMinor += Math.max(0, costMinor - coveredMinor(usageRequestId))
+    }
+    let reservedCostMinor = 0
+    let reservedSubsidyMinor = 0
+    for (const reservation of activeReservations) {
+      const usageCostMinor = costsByUsage.get(reservation.usageRequestId) || 0
+      if (usageCostMinor < reservation.baseCostMinor) {
+        throw new AppError(
+          503,
+          'external_platform_cost_evidence_incomplete',
+          'External data cost evidence is incomplete; paid dispatch is disabled',
+        )
+      }
+      const consumedCostMinor = usageCostMinor - reservation.baseCostMinor
+      reservedCostMinor += Math.max(0, reservation.reservedCostMinor - consumedCostMinor)
+      const coverageMinor = coveredMinor(reservation.usageRequestId)
+      const baseSubsidyMinor = Math.max(0, reservation.baseCostMinor - coverageMinor)
+      const currentSubsidyMinor = Math.max(0, usageCostMinor - coverageMinor)
+      const consumedSubsidyMinor = Math.max(0, currentSubsidyMinor - baseSubsidyMinor)
+      reservedSubsidyMinor += Math.max(
+        0,
+        reservation.reservedSubsidyMinor - consumedSubsidyMinor,
+      )
+    }
+    if (![knownCostMinor, reservedCostMinor, reservedSubsidyMinor, subsidyCostMinor]
+      .every(Number.isSafeInteger)) {
+      throw new AppError(
+        503,
+        'external_platform_cost_evidence_incomplete',
+        'External data cost evidence is incomplete; paid dispatch is disabled',
+      )
+    }
+    return {
+      activeReservations,
+      costsByUsage,
+      coveredMinor,
+      knownCostMinor,
+      reservedCostMinor,
+      reservedSubsidyMinor,
+      subsidyCostMinor,
+    }
+  }
+
+  async reserveProviderCostWorkflow(input) {
+    const usage = this.usageStore?.requests?.get(input.usageRequestId)
+    const leaseExpiresAt = usage?.leaseExpiresAt == null
+      ? null
+      : new Date(usage.leaseExpiresAt).getTime()
+    if (!usage
+      || usage.status !== 'reserved'
+      || usage.tenantId !== input.tenantId
+      || usage.consumerId !== input.consumerId
+      || usage.apiKeyId !== input.apiKeyId
+      || usage.fingerprint !== input.fingerprint
+      || usage.platform !== this.authorizationPlatform
+      || (leaseExpiresAt != null && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.now()))) {
+      throw new AppError(
+        409,
+        'external_platform_usage_scope_mismatch',
+        'Cost reservation does not match its reserved usage request',
+      )
+    }
+    if (!Array.isArray(input.costControls) || input.costControls.length < 1
+      || input.costControls.length > 64) {
+      throw new TypeError('costControls must contain 1-64 provider dispatch costs')
+    }
+    const controls = input.costControls.map(normalizedCostControl)
+    const policy = controls[0]
+    if (controls.some((control) => (
+      control.currency !== policy.currency
+      || control.monthlyBudgetMinor !== policy.monthlyBudgetMinor
+      || control.monthlySubsidyBudgetMinor !== policy.monthlySubsidyBudgetMinor
+    ))) {
+      throw new TypeError('workflow costs must share one currency and budget policy')
+    }
+    const costMinor = controls.reduce((sum, control) => sum + control.costMinor, 0)
+    if (!Number.isSafeInteger(costMinor)) {
+      throw new TypeError('workflow cost exceeds the safe-integer range')
+    }
+    const state = this.#costState(policy)
+    if (state.activeReservations.some(
+      (reservation) => reservation.usageRequestId === input.usageRequestId,
+    )) {
+      throw new AppError(
+        409,
+        'external_platform_cost_reservation_exists',
+        'Usage request already has an active provider cost reservation',
+      )
+    }
+    if (state.knownCostMinor + state.reservedCostMinor + costMinor > policy.monthlyBudgetMinor) {
+      throw new AppError(
+        429,
+        'external_platform_cost_budget_exhausted',
+        'External data monthly procurement budget is exhausted',
+      )
+    }
+    const baseCostMinor = state.costsByUsage.get(input.usageRequestId) || 0
+    const coverageMinor = state.coveredMinor(input.usageRequestId)
+    const subsidyMinor = Math.max(0, baseCostMinor + costMinor - coverageMinor)
+      - Math.max(0, baseCostMinor - coverageMinor)
+    if (state.subsidyCostMinor + state.reservedSubsidyMinor + subsidyMinor
+      > policy.monthlySubsidyBudgetMinor) {
+      throw new AppError(
+        429,
+        'external_platform_subsidy_budget_exhausted',
+        'External data customer-price coverage or subsidy budget is exhausted',
+      )
+    }
+    const reservation = {
+      id: input.id ?? randomUUID(),
+      providerKey: this.providerKey,
+      tenantId: input.tenantId,
+      consumerId: input.consumerId,
+      apiKeyId: input.apiKeyId,
+      usageRequestId: input.usageRequestId,
+      fingerprint: input.fingerprint,
+      currency: policy.currency,
+      baseCostMinor,
+      reservedCostMinor: costMinor,
+      reservedSubsidyMinor: subsidyMinor,
+      monthlyBudgetMinor: policy.monthlyBudgetMinor,
+      monthlySubsidyBudgetMinor: policy.monthlySubsidyBudgetMinor,
+      status: 'active',
+      createdAt: iso(),
+      releasedAt: null,
+    }
+    if (this.costReservations.has(reservation.id)) {
+      throw new AppError(409, 'external_platform_cost_reservation_exists', 'Cost reservation already exists')
+    }
+    this.costReservations.set(reservation.id, reservation)
+    return clone(reservation)
+  }
+
+  async releaseProviderCostWorkflow({ reservationId, usageRequestId }) {
+    const reservation = this.costReservations.get(reservationId)
+    if (!reservation
+      || reservation.providerKey !== this.providerKey
+      || reservation.usageRequestId !== usageRequestId) return false
+    if (reservation.status === 'released') return true
+    reservation.status = 'released'
+    reservation.releasedAt = iso()
+    return true
   }
 
   async beginProviderCall(input) {
@@ -437,6 +823,71 @@ export class MemoryExternalPlatformStore {
         )
       }
     }
+    const costControl = normalizedCostControl(input.costControl)
+    if (costControl) {
+      const state = this.#costState(costControl)
+      const existingUsageCostMinor = state.costsByUsage.get(input.usageRequestId) || 0
+      const customerCoverageMinor = state.coveredMinor(input.usageRequestId)
+      const reservation = input.costReservationId == null
+        ? null
+        : state.activeReservations.find((candidate) => candidate.id === input.costReservationId)
+      if (input.costReservationId != null) {
+        if (!reservation
+          || reservation.usageRequestId !== input.usageRequestId
+          || reservation.tenantId !== input.tenantId
+          || reservation.consumerId !== input.consumerId
+          || reservation.apiKeyId !== input.apiKeyId
+          || reservation.fingerprint !== input.fingerprint
+          || reservation.currency !== costControl.currency
+          || reservation.monthlyBudgetMinor !== costControl.monthlyBudgetMinor
+          || reservation.monthlySubsidyBudgetMinor !== costControl.monthlySubsidyBudgetMinor
+          || existingUsageCostMinor + costControl.costMinor
+            > reservation.baseCostMinor + reservation.reservedCostMinor) {
+          throw new AppError(
+            409,
+            'external_platform_cost_reservation_mismatch',
+            'Provider call does not match its active cost reservation',
+          )
+        }
+        const baseSubsidyMinor = Math.max(
+          0,
+          reservation.baseCostMinor - customerCoverageMinor,
+        )
+        const projectedSubsidyMinor = Math.max(
+          0,
+          existingUsageCostMinor + costControl.costMinor - customerCoverageMinor,
+        )
+        if (projectedSubsidyMinor
+          > baseSubsidyMinor + reservation.reservedSubsidyMinor) {
+          throw new AppError(
+            409,
+            'external_platform_cost_reservation_mismatch',
+            'Provider call exceeds its reserved subsidy exposure',
+          )
+        }
+      } else {
+        if (state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
+          > costControl.monthlyBudgetMinor) {
+          throw new AppError(
+            429,
+            'external_platform_cost_budget_exhausted',
+            'External data monthly procurement budget is exhausted',
+          )
+        }
+        const incrementalSubsidyMinor = Math.max(
+          0,
+          existingUsageCostMinor + costControl.costMinor - customerCoverageMinor,
+        ) - Math.max(0, existingUsageCostMinor - customerCoverageMinor)
+        if (state.subsidyCostMinor + state.reservedSubsidyMinor + incrementalSubsidyMinor
+          > costControl.monthlySubsidyBudgetMinor) {
+          throw new AppError(
+            429,
+            'external_platform_subsidy_budget_exhausted',
+            'External data customer-price coverage or subsidy budget is exhausted',
+          )
+        }
+      }
+    }
     const id = input.id ?? randomUUID()
     const callOrdinal = input.callOrdinal ?? 0
     if (!Number.isSafeInteger(callOrdinal) || callOrdinal < 0) {
@@ -458,14 +909,24 @@ export class MemoryExternalPlatformStore {
     ) {
       throw new AppError(409, 'external_platform_call_exists', 'Usage request call ordinal already exists')
     }
+    const {
+      costControl: _costControl,
+      costReservationId: _costReservationId,
+      ...callInput
+    } = input
     const call = {
       id,
-      ...clone(input),
+      ...clone(callInput),
       callOrdinal,
       callRole,
       dispatchFingerprint,
       providerKey: this.providerKey,
       outcome: 'pending',
+      ...(costControl ? {
+        costMinor: costControl.costMinor,
+        costKind: costControl.costKind,
+        currency: costControl.currency,
+      } : {}),
       startedAt: iso(),
       completedAt: null,
     }
@@ -506,9 +967,15 @@ export class MemoryExternalPlatformStore {
       itemCount: evidence.itemCount,
       errorCode: evidence.errorCode,
       archiveObjects: clone(evidence.archiveObjects),
-      stagedEvidence: clone(evidence),
+      stagedEvidence: cloneNormalizedEvidence(evidence),
     })
     this.responseArchives.set(input.callId, clone(evidence.responseArchive))
+    if (evidence.restrictedResponseArchive) {
+      this.restrictedResponseArchives.set(
+        input.callId,
+        normalizedRestrictedResponseArchive(evidence.restrictedResponseArchive),
+      )
+    }
     return { staged: true, reconciled: false, alreadySettled: false }
   }
 
@@ -523,15 +990,18 @@ export class MemoryExternalPlatformStore {
     itemCount,
     latencyMs,
     usageLatencyMs = latencyMs,
+    usageUnitsActual = Math.max(1, itemCount),
     billed,
     costMinor,
     costKind,
     currency,
     archiveObjects = [],
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     ingestJob = null,
   }) {
+    const exactArchive = normalizedRestrictedResponseArchive(restrictedResponseArchive)
     const call = this.calls.get(callId)
     if (!call || call.outcome !== 'pending') {
       throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
@@ -539,7 +1009,7 @@ export class MemoryExternalPlatformStore {
     await this.usageStore.commitRequest(delivery.usageRequestId, {
       responseStatus: 200,
       responseBody,
-      unitsActual: Math.max(1, itemCount),
+      unitsActual: Math.max(1, usageUnitsActual),
       upstreamLatencyMs: usageLatencyMs,
       deliverySourceMode: 'live',
       capturedAt: iso(capturedAt),
@@ -560,6 +1030,7 @@ export class MemoryExternalPlatformStore {
       completedAt: iso(),
     })
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
+    if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
     const key = snapshotKey(delivery)
     const snapshot = {
       id: this.snapshots.get(key)?.id ?? randomUUID(),
@@ -620,11 +1091,13 @@ export class MemoryExternalPlatformStore {
     errorCode = null,
     affectsCircuit = true,
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     archiveObjects = [],
     snapshot = null,
     ingestJob = null,
   }) {
+    const exactArchive = normalizedRestrictedResponseArchive(restrictedResponseArchive)
     if (!FINISHED_PROVIDER_OUTCOMES.has(outcome)) {
       throw new TypeError('outcome must be a finished provider-call outcome')
     }
@@ -652,6 +1125,7 @@ export class MemoryExternalPlatformStore {
       completedAt: iso(),
     })
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
+    if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
 
     let storedSnapshot = null
     if (snapshot) {
@@ -696,7 +1170,13 @@ export class MemoryExternalPlatformStore {
     return { snapshot: clone(storedSnapshot) }
   }
 
-  async commitSnapshotDelivery({ delivery, snapshot, sourceMode, responseBody = snapshot.responseBody }) {
+  async commitSnapshotDelivery({
+    delivery,
+    snapshot,
+    sourceMode,
+    responseBody = snapshot.responseBody,
+    usageUnitsActual = Math.max(1, deliveredItemCount(responseBody)),
+  }) {
     const current = this.snapshots.get(snapshotKey(delivery))
     if (!current || current.id !== snapshot.id) {
       throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')
@@ -704,7 +1184,7 @@ export class MemoryExternalPlatformStore {
     await this.usageStore.commitRequest(delivery.usageRequestId, {
       responseStatus: 200,
       responseBody,
-      unitsActual: Math.max(1, deliveredItemCount(responseBody)),
+      unitsActual: Math.max(1, usageUnitsActual),
       upstreamLatencyMs: 0,
       deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live',
       capturedAt: current.capturedAt,
@@ -747,11 +1227,14 @@ export class MemoryExternalPlatformStore {
     failureResponseBody = null,
     affectsCircuit = true,
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     archiveObjects = [],
     snapshot = null,
     fallbackResponseBody = snapshot?.responseBody,
+    usageUnitsActual = Math.max(1, deliveredItemCount(fallbackResponseBody)),
   }) {
+    const exactArchive = normalizedRestrictedResponseArchive(restrictedResponseArchive)
     const call = this.calls.get(callId)
     if (!call || call.outcome !== 'pending') {
       throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
@@ -764,7 +1247,7 @@ export class MemoryExternalPlatformStore {
       await this.usageStore.commitRequest(delivery.usageRequestId, {
         responseStatus: 200,
         responseBody: fallbackResponseBody,
-        unitsActual: Math.max(1, deliveredItemCount(fallbackResponseBody)),
+        unitsActual: Math.max(1, usageUnitsActual),
         upstreamLatencyMs: latencyMs,
         deliverySourceMode: 'stale',
         capturedAt: currentSnapshot.capturedAt,
@@ -799,6 +1282,7 @@ export class MemoryExternalPlatformStore {
       completedAt: iso(),
     })
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
+    if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
     if (affectsCircuit) this.#recordFailure(errorCode)
     if (snapshot) {
       this.requests.push(requestEvent({
@@ -845,10 +1329,12 @@ export class MemoryExternalPlatformStore {
     currency = null,
     latencyMs = null,
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     archiveObjects = [],
     errorCode = 'external_platform_persistence_unknown',
   }) {
+    const exactArchive = normalizedRestrictedResponseArchive(restrictedResponseArchive)
     const call = this.calls.get(callId)
     if (!call || call.outcome !== 'pending') return false
     await this.usageStore.markRequestUnknown(delivery.usageRequestId, errorCode)
@@ -866,6 +1352,7 @@ export class MemoryExternalPlatformStore {
       completedAt: iso(),
     })
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
+    if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
     this.requests.push(requestEvent({
       ...delivery,
       providerKey: this.providerKey,
@@ -931,6 +1418,205 @@ async function transaction(pool, operation) {
     throw error
   } finally {
     client.release(releaseError)
+  }
+}
+
+async function postgresProviderCostState(client, {
+  providerKey,
+  usageRequestId,
+  currency,
+  reservationId = null,
+}) {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+    `external-platform-cost:${providerKey}`,
+  ])
+  const exposure = await client.query(
+    `WITH monthly_calls AS MATERIALIZED (
+       SELECT usage_request_id, cost_minor, cost_kind, currency
+         FROM external_platform.provider_calls
+        WHERE provider_key = $1
+          AND started_at >= (
+            date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+          )
+          AND started_at < (
+            (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month')
+              AT TIME ZONE 'UTC'
+          )
+     ), usage_costs AS MATERIALIZED (
+       SELECT usage_request_id, sum(cost_minor)::bigint AS cost_minor
+         FROM monthly_calls
+        WHERE cost_minor IS NOT NULL AND currency = $2
+        GROUP BY usage_request_id
+     ), subsidy_exposure AS (
+       SELECT coalesce(sum(greatest(
+                usage_cost.cost_minor - CASE
+                  WHEN charge.enforcement_mode = 'enforced'
+                   AND charge.status IN ('reserved', 'captured', 'unknown')
+                   AND charge.currency = $2
+                  THEN charge.quoted_minor
+                  ELSE 0
+                END,
+                0
+              )), 0)::bigint AS cost_minor
+         FROM usage_costs usage_cost
+         LEFT JOIN billing.customer_charges charge
+           ON charge.usage_request_id = usage_cost.usage_request_id
+     ), active_reservations AS MATERIALIZED (
+       SELECT reservation.*,
+              coalesce(usage_cost.cost_minor, 0)::bigint AS current_usage_cost_minor,
+              CASE
+                WHEN charge.enforcement_mode = 'enforced'
+                 AND charge.status IN ('reserved', 'captured', 'unknown')
+                 AND charge.currency = $2
+                THEN charge.quoted_minor
+                ELSE 0
+              END::bigint AS customer_coverage_minor
+         FROM external_platform.provider_cost_reservations reservation
+         JOIN usage_requests request ON request.id = reservation.usage_request_id
+         LEFT JOIN usage_costs usage_cost
+           ON usage_cost.usage_request_id = reservation.usage_request_id
+         LEFT JOIN billing.customer_charges charge
+           ON charge.usage_request_id = reservation.usage_request_id
+        WHERE reservation.provider_key = $1
+          AND reservation.status = 'active'
+          AND request.status = 'reserved'
+          AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())
+          AND reservation.created_at >= (
+            date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+          )
+          AND reservation.created_at < (
+            (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month')
+              AT TIME ZONE 'UTC'
+          )
+     )
+     SELECT (
+              SELECT coalesce(sum(cost_minor), 0)::bigint
+                FROM monthly_calls
+               WHERE cost_minor IS NOT NULL AND currency = $2
+            ) AS known_cost_minor,
+            (
+              SELECT count(*)::integer
+                FROM monthly_calls
+               WHERE (cost_kind <> 'unknown' AND (cost_minor IS NULL OR cost_minor <= 0))
+                  OR (cost_minor IS NOT NULL AND currency IS DISTINCT FROM $2)
+            ) AS unknown_cost_calls,
+            (SELECT cost_minor FROM subsidy_exposure) AS subsidy_cost_minor,
+            (
+              SELECT coalesce(sum(greatest(
+                       reserved_cost_minor
+                         - greatest(current_usage_cost_minor - base_cost_minor, 0),
+                       0
+                     )), 0)::bigint
+                FROM active_reservations WHERE currency = $2
+            ) AS reserved_cost_minor,
+            (
+              SELECT coalesce(sum(greatest(
+                       reserved_subsidy_minor - greatest(
+                         greatest(current_usage_cost_minor - customer_coverage_minor, 0)
+                           - greatest(base_cost_minor - customer_coverage_minor, 0),
+                         0
+                       ),
+                       0
+                     )), 0)::bigint
+                FROM active_reservations WHERE currency = $2
+            ) AS reserved_subsidy_minor,
+            (
+              SELECT count(*)::integer
+                FROM active_reservations
+               WHERE currency <> $2
+                  OR reserved_cost_minor <= 0
+                  OR current_usage_cost_minor < base_cost_minor
+            ) AS mixed_reservation_count,
+            coalesce((
+              SELECT cost_minor FROM usage_costs WHERE usage_request_id = $3
+            ), 0)::bigint AS usage_cost_minor,
+            (
+              SELECT quoted_minor FROM billing.customer_charges
+               WHERE usage_request_id = $3
+                 AND enforcement_mode = 'enforced'
+                 AND status IN ('reserved', 'captured', 'unknown')
+                 AND currency = $2
+            ) AS customer_coverage_minor,
+            (SELECT id FROM active_reservations WHERE id = $4) AS reservation_id,
+            (
+              SELECT usage_request_id FROM active_reservations WHERE id = $4
+            ) AS reservation_usage_request_id,
+            (SELECT currency FROM active_reservations WHERE id = $4) AS reservation_currency,
+            (
+              SELECT base_cost_minor FROM active_reservations WHERE id = $4
+            ) AS reservation_base_cost_minor,
+            (
+              SELECT reserved_cost_minor FROM active_reservations WHERE id = $4
+            ) AS reservation_cost_minor,
+            (
+              SELECT reserved_subsidy_minor FROM active_reservations WHERE id = $4
+            ) AS reservation_subsidy_minor,
+            (
+              SELECT monthly_budget_minor FROM active_reservations WHERE id = $4
+            ) AS reservation_monthly_budget_minor,
+            (
+              SELECT monthly_subsidy_budget_minor FROM active_reservations WHERE id = $4
+            ) AS reservation_monthly_subsidy_budget_minor`,
+    [providerKey, currency, usageRequestId, reservationId],
+  )
+  const row = exposure.rows[0] || {}
+  const knownCostMinor = Number(exposure.rows[0]?.known_cost_minor)
+  if (Number(exposure.rows[0]?.unknown_cost_calls) > 0
+    || Number(exposure.rows[0]?.mixed_reservation_count) > 0
+    || !Number.isSafeInteger(knownCostMinor)
+    || knownCostMinor < 0) {
+    throw new AppError(
+      503,
+      'external_platform_cost_evidence_incomplete',
+      'External data cost evidence is incomplete; paid dispatch is disabled',
+    )
+  }
+  const subsidyCostMinor = Number(exposure.rows[0]?.subsidy_cost_minor)
+  const reservedCostMinor = Number(exposure.rows[0]?.reserved_cost_minor)
+  const reservedSubsidyMinor = Number(exposure.rows[0]?.reserved_subsidy_minor)
+  const usageCostMinor = Number(exposure.rows[0]?.usage_cost_minor)
+  const customerCoverageMinor = exposure.rows[0]?.customer_coverage_minor == null
+    ? 0
+    : Number(exposure.rows[0].customer_coverage_minor)
+  if ([subsidyCostMinor, reservedCostMinor, reservedSubsidyMinor,
+    usageCostMinor, customerCoverageMinor].some((value) => (
+    !Number.isSafeInteger(value) || value < 0
+  ))) {
+    throw new AppError(
+      503,
+      'external_platform_cost_evidence_incomplete',
+      'External data cost evidence is incomplete; paid dispatch is disabled',
+    )
+  }
+  const reservation = row.reservation_id == null ? null : {
+    id: row.reservation_id,
+    usageRequestId: row.reservation_usage_request_id,
+    currency: row.reservation_currency,
+    baseCostMinor: Number(row.reservation_base_cost_minor),
+    reservedCostMinor: Number(row.reservation_cost_minor),
+    reservedSubsidyMinor: Number(row.reservation_subsidy_minor),
+    monthlyBudgetMinor: Number(row.reservation_monthly_budget_minor),
+    monthlySubsidyBudgetMinor: Number(row.reservation_monthly_subsidy_budget_minor),
+  }
+  if (reservation && [reservation.baseCostMinor, reservation.reservedCostMinor,
+    reservation.reservedSubsidyMinor, reservation.monthlyBudgetMinor,
+    reservation.monthlySubsidyBudgetMinor].some((value) => (
+    !Number.isSafeInteger(value) || value < 0
+  ))) {
+    throw new AppError(
+      503,
+      'external_platform_cost_evidence_incomplete',
+      'External data cost evidence is incomplete; paid dispatch is disabled',
+    )
+  }
+  return {
+    knownCostMinor,
+    subsidyCostMinor,
+    reservedCostMinor,
+    reservedSubsidyMinor,
+    usageCostMinor,
+    customerCoverageMinor,
+    reservation,
   }
 }
 
@@ -1183,8 +1869,10 @@ export class PostgresExternalPlatformStore {
     } : null
   }
 
-  async acquireProviderRateLimit({ limit, windowMs = 60_000 }) {
+  async acquireProviderRateLimit({ limit, tokens = 1, windowMs = 60_000 }) {
     const maximum = boundedRateLimit(limit, 'limit')
+    const requested = boundedRateLimit(tokens, 'tokens')
+    if (requested > maximum) throw new TypeError('tokens must not exceed limit')
     const duration = boundedRateLimit(windowMs, 'windowMs')
     if (duration < 1_000 || duration > 3_600_000) {
       throw new TypeError('windowMs must be between 1000 and 3600000')
@@ -1195,7 +1883,7 @@ export class PostgresExternalPlatformStore {
        )
        INSERT INTO external_platform.provider_rate_buckets AS bucket
          (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at, updated_at)
-       SELECT $1, $2, $3, ($2 - 1)::double precision, true,
+       SELECT $1, $2, $3, ($2 - $4)::double precision, true,
               db_clock.observed_at, db_clock.observed_at
          FROM db_clock
        ON CONFLICT (provider_key) DO UPDATE SET
@@ -1211,7 +1899,7 @@ export class PostgresExternalPlatformStore {
                  * EXCLUDED.capacity::double precision
                  / EXCLUDED.window_ms::double precision
              )
-           ) >= 1::double precision
+           ) >= $4::double precision
              THEN least(
                EXCLUDED.capacity::double precision,
                bucket.tokens + greatest(
@@ -1221,7 +1909,7 @@ export class PostgresExternalPlatformStore {
                    * EXCLUDED.capacity::double precision
                    / EXCLUDED.window_ms::double precision
                )
-             ) - 1::double precision
+             ) - $4::double precision
            ELSE least(
              EXCLUDED.capacity::double precision,
              bucket.tokens + greatest(
@@ -1242,17 +1930,17 @@ export class PostgresExternalPlatformStore {
                * EXCLUDED.capacity::double precision
                / EXCLUDED.window_ms::double precision
            )
-         ) >= 1::double precision,
+         ) >= $4::double precision,
          refilled_at = EXCLUDED.refilled_at,
          updated_at = EXCLUDED.refilled_at
        RETURNING last_admitted AS allowed,
          floor(tokens)::bigint AS remaining,
          CASE WHEN last_admitted THEN 0::bigint ELSE greatest(
            1::bigint,
-           ceil((1::double precision - tokens) * window_ms::double precision
+           ceil(($4::double precision - tokens) * window_ms::double precision
              / capacity::double precision)::bigint
          ) END AS retry_after_ms`,
-      [this.providerKey, maximum, duration],
+      [this.providerKey, maximum, duration, requested],
     )
     if (!rows[0]) throw new Error('Provider rate bucket returned no state')
     return {
@@ -1260,6 +1948,238 @@ export class PostgresExternalPlatformStore {
       remaining: Math.max(0, Number(rows[0].remaining)),
       retryAfterMs: Math.max(0, Number(rows[0].retry_after_ms)),
     }
+  }
+
+  async reserveProviderCostWorkflow(input) {
+    if (!Array.isArray(input.costControls) || input.costControls.length < 1
+      || input.costControls.length > 64) {
+      throw new TypeError('costControls must contain 1-64 provider dispatch costs')
+    }
+    const controls = input.costControls.map((control) => {
+      const normalized = normalizedCostControl(control)
+      if (!normalized) throw new TypeError('workflow costs require costControl')
+      return normalized
+    })
+    const policy = controls[0]
+    if (controls.some((control) => (
+      control.currency !== policy.currency
+      || control.monthlyBudgetMinor !== policy.monthlyBudgetMinor
+      || control.monthlySubsidyBudgetMinor !== policy.monthlySubsidyBudgetMinor
+    ))) {
+      throw new TypeError('workflow costs must share one currency and budget policy')
+    }
+    const reservedCostMinor = controls.reduce(
+      (sum, control) => sum + control.costMinor,
+      0,
+    )
+    if (!Number.isSafeInteger(reservedCostMinor)) {
+      throw new TypeError('workflow cost exceeds the safe-integer range')
+    }
+    const id = input.id ?? randomUUID()
+    let expectedBaseCostMinor = null
+    let expectedReservedSubsidyMinor = null
+    let expected
+    try {
+      expected = await transaction(this.pool, async (client) => {
+        // Provider lock order is shared with beginProviderCall: provider first,
+        // then the usage row. This prevents a workflow reservation racing a
+        // standalone call or a usage release on another Hub replica.
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          `external-platform-cost:${this.providerKey}`,
+        ])
+        const owned = await client.query(
+          `SELECT request.id
+             FROM usage_requests request
+            WHERE request.id = $1
+              AND request.status = 'reserved'
+              AND request.tenant_id = $2
+              AND request.consumer_id = $3
+              AND request.api_key_id = $4
+              AND request.fingerprint = $5
+              AND request.platform = $6
+              AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())
+            FOR UPDATE`,
+          [
+            input.usageRequestId,
+            input.tenantId,
+            input.consumerId,
+            input.apiKeyId,
+            input.fingerprint,
+            this.authorizationPlatform,
+          ],
+        )
+        if (!owned.rows[0]) {
+          throw new AppError(
+            409,
+            'external_platform_usage_scope_mismatch',
+            'Cost reservation does not match its reserved usage request',
+          )
+        }
+        const state = await postgresProviderCostState(client, {
+          providerKey: this.providerKey,
+          usageRequestId: input.usageRequestId,
+          currency: policy.currency,
+        })
+        if (state.knownCostMinor + state.reservedCostMinor + reservedCostMinor
+          > policy.monthlyBudgetMinor) {
+          throw new AppError(
+            429,
+            'external_platform_cost_budget_exhausted',
+            'External data monthly procurement budget is exhausted',
+          )
+        }
+        const reservedSubsidyMinor = Math.max(
+          0,
+          state.usageCostMinor + reservedCostMinor - state.customerCoverageMinor,
+        ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
+        if (state.subsidyCostMinor + state.reservedSubsidyMinor + reservedSubsidyMinor
+          > policy.monthlySubsidyBudgetMinor) {
+          throw new AppError(
+            429,
+            'external_platform_subsidy_budget_exhausted',
+            'External data customer-price coverage or subsidy budget is exhausted',
+          )
+        }
+        expectedBaseCostMinor = state.usageCostMinor
+        expectedReservedSubsidyMinor = reservedSubsidyMinor
+        const reservation = {
+          id,
+          providerKey: this.providerKey,
+          usageRequestId: input.usageRequestId,
+          currency: policy.currency,
+          baseCostMinor: expectedBaseCostMinor,
+          reservedCostMinor,
+          reservedSubsidyMinor,
+          monthlyBudgetMinor: policy.monthlyBudgetMinor,
+          monthlySubsidyBudgetMinor: policy.monthlySubsidyBudgetMinor,
+        }
+        const inserted = await client.query(
+          `INSERT INTO external_platform.provider_cost_reservations
+             (id, provider_key, usage_request_id, currency, base_cost_minor,
+              reserved_cost_minor, reserved_subsidy_minor, monthly_budget_minor,
+              monthly_subsidy_budget_minor)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING created_at`,
+          [
+            reservation.id,
+            reservation.providerKey,
+            reservation.usageRequestId,
+            reservation.currency,
+            reservation.baseCostMinor,
+            reservation.reservedCostMinor,
+            reservation.reservedSubsidyMinor,
+            reservation.monthlyBudgetMinor,
+            reservation.monthlySubsidyBudgetMinor,
+          ],
+        )
+        return {
+          ...reservation,
+          status: 'active',
+          createdAt: iso(inserted.rows[0].created_at),
+          releasedAt: null,
+        }
+      })
+      return expected
+    } catch (error) {
+      if (error instanceof AppError) throw error
+      let reconciled
+      try {
+        reconciled = await this.pool.query(
+          `SELECT id, provider_key, usage_request_id, currency, base_cost_minor,
+                  reserved_cost_minor, reserved_subsidy_minor, monthly_budget_minor,
+                  monthly_subsidy_budget_minor, status, created_at, released_at
+             FROM external_platform.provider_cost_reservations
+            WHERE id = $1
+              AND provider_key = $2
+              AND usage_request_id = $3
+              AND currency = $4
+              AND base_cost_minor = $5
+              AND reserved_cost_minor = $6
+              AND reserved_subsidy_minor = $7
+              AND monthly_budget_minor = $8
+              AND monthly_subsidy_budget_minor = $9
+              AND status = 'active'`,
+          [
+            id,
+            this.providerKey,
+            input.usageRequestId,
+            policy.currency,
+            expectedBaseCostMinor ?? -1,
+            reservedCostMinor,
+            expectedReservedSubsidyMinor ?? -1,
+            policy.monthlyBudgetMinor,
+            policy.monthlySubsidyBudgetMinor,
+          ],
+        )
+      } catch {
+        throw new AppError(
+          503,
+          'external_platform_cost_reservation_persistence_unknown',
+          'Provider cost reservation could not be reconciled; do not dispatch',
+        )
+      }
+      if (reconciled.rows[0]) {
+        const row = reconciled.rows[0]
+        return {
+          id: row.id,
+          providerKey: row.provider_key,
+          usageRequestId: row.usage_request_id,
+          currency: row.currency,
+          baseCostMinor: Number(row.base_cost_minor),
+          reservedCostMinor: Number(row.reserved_cost_minor),
+          reservedSubsidyMinor: Number(row.reserved_subsidy_minor),
+          monthlyBudgetMinor: Number(row.monthly_budget_minor),
+          monthlySubsidyBudgetMinor: Number(row.monthly_subsidy_budget_minor),
+          status: row.status,
+          createdAt: iso(row.created_at),
+          releasedAt: row.released_at ? iso(row.released_at) : null,
+        }
+      }
+      if (error?.code === '23505' && [
+        'external_platform_provider_cost_reservations_active_usage_idx',
+        'provider_cost_reservations_pkey',
+      ].includes(error?.constraint)) {
+        throw new AppError(
+          409,
+          'external_platform_cost_reservation_exists',
+          'Usage request already has an active provider cost reservation',
+        )
+      }
+      throw new AppError(
+        503,
+        'external_platform_cost_reservation_persistence_unknown',
+        'Provider cost reservation could not be proven; do not dispatch',
+      )
+    }
+  }
+
+  async releaseProviderCostWorkflow({ reservationId, usageRequestId }) {
+    return transaction(this.pool, async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `external-platform-cost:${this.providerKey}`,
+      ])
+      const released = await client.query(
+        `UPDATE external_platform.provider_cost_reservations
+            SET status = 'released', released_at = now()
+          WHERE id = $1
+            AND provider_key = $2
+            AND usage_request_id = $3
+            AND status = 'active'
+          RETURNING id`,
+        [reservationId, this.providerKey, usageRequestId],
+      )
+      if (released.rows[0]) return true
+      const existing = await client.query(
+        `SELECT id
+           FROM external_platform.provider_cost_reservations
+          WHERE id = $1
+            AND provider_key = $2
+            AND usage_request_id = $3
+            AND status = 'released'`,
+        [reservationId, this.providerKey, usageRequestId],
+      )
+      return Boolean(existing.rows[0])
+    })
   }
 
   async beginProviderCall(input) {
@@ -1272,15 +2192,79 @@ export class PostgresExternalPlatformStore {
     if (!['primary', 'enrichment'].includes(callRole)) {
       throw new TypeError('callRole must be primary or enrichment')
     }
+    const costControl = normalizedCostControl(input.costControl)
     const values = [
       id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
       input.operation, input.contractVersion, input.endpointKey,
       input.endpointVersion, input.marketplace, input.fingerprint,
       input.retryOfRequestId ?? null, this.providerKey, this.authorizationPlatform,
       callOrdinal, callRole, input.dispatchFingerprint ?? input.fingerprint,
+      ...(costControl ? [costControl.costMinor, costControl.costKind, costControl.currency] : []),
     ]
     try {
       return await transaction(this.pool, async (client) => {
+        if (costControl) {
+          const state = await postgresProviderCostState(client, {
+            providerKey: this.providerKey,
+            usageRequestId: input.usageRequestId,
+            currency: costControl.currency,
+            reservationId: input.costReservationId ?? null,
+          })
+          if (input.costReservationId != null) {
+            const reservation = state.reservation
+            if (!reservation
+              || reservation.usageRequestId !== input.usageRequestId
+              || reservation.currency !== costControl.currency
+              || reservation.monthlyBudgetMinor !== costControl.monthlyBudgetMinor
+              || reservation.monthlySubsidyBudgetMinor
+                !== costControl.monthlySubsidyBudgetMinor
+              || state.usageCostMinor + costControl.costMinor
+                > reservation.baseCostMinor + reservation.reservedCostMinor) {
+              throw new AppError(
+                409,
+                'external_platform_cost_reservation_mismatch',
+                'Provider call does not match its active cost reservation',
+              )
+            }
+            const baseSubsidyMinor = Math.max(
+              0,
+              reservation.baseCostMinor - state.customerCoverageMinor,
+            )
+            const projectedSubsidyMinor = Math.max(
+              0,
+              state.usageCostMinor + costControl.costMinor - state.customerCoverageMinor,
+            )
+            if (projectedSubsidyMinor
+              > baseSubsidyMinor + reservation.reservedSubsidyMinor) {
+              throw new AppError(
+                409,
+                'external_platform_cost_reservation_mismatch',
+                'Provider call exceeds its reserved subsidy exposure',
+              )
+            }
+          } else {
+            if (state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
+              > costControl.monthlyBudgetMinor) {
+              throw new AppError(
+                429,
+                'external_platform_cost_budget_exhausted',
+                'External data monthly procurement budget is exhausted',
+              )
+            }
+            const incrementalSubsidyMinor = Math.max(
+              0,
+              state.usageCostMinor + costControl.costMinor - state.customerCoverageMinor,
+            ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
+            if (state.subsidyCostMinor + state.reservedSubsidyMinor
+              + incrementalSubsidyMinor > costControl.monthlySubsidyBudgetMinor) {
+              throw new AppError(
+                429,
+                'external_platform_subsidy_budget_exhausted',
+                'External data customer-price coverage or subsidy budget is exhausted',
+              )
+            }
+          }
+        }
         const { rows } = await client.query(
           `WITH owned_request AS MATERIALIZED (
              SELECT request.id
@@ -1314,9 +2298,9 @@ export class PostgresExternalPlatformStore {
              (id, provider_key, tenant_id, consumer_id, api_key_id, usage_request_id,
               operation, contract_version, endpoint_key, endpoint_version, marketplace,
               request_fingerprint, retry_of_usage_request_id, call_ordinal, call_role,
-              dispatch_fingerprint)
+              dispatch_fingerprint${costControl ? ', cost_minor, cost_kind, currency' : ''})
            SELECT $1, $13, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                  $15, $16, $17
+                  $15, $16, $17${costControl ? ', $18, $19, $20' : ''}
              FROM owned_request
             WHERE $12::uuid IS NULL OR EXISTS (SELECT 1 FROM retry_target)
            RETURNING id, started_at`,
@@ -1342,6 +2326,14 @@ export class PostgresExternalPlatformStore {
         return { id, startedAt: iso(rows[0].started_at) }
       })
     } catch (error) {
+      if (error instanceof AppError && [
+        'external_platform_cost_evidence_incomplete',
+        'external_platform_cost_budget_exhausted',
+        'external_platform_subsidy_budget_exhausted',
+        'external_platform_cost_reservation_mismatch',
+      ].includes(error.code)) {
+        throw error
+      }
       // A lost COMMIT acknowledgement is not evidence that the INSERT failed.
       // Reconcile by the preselected call id before allowing the caller to
       // release or reuse the usage reservation.
@@ -1367,6 +2359,9 @@ export class PostgresExternalPlatformStore {
             AND call.call_ordinal = $15
             AND call.call_role = $16
             AND call.dispatch_fingerprint = $17
+            ${costControl ? `AND call.cost_minor = $18
+            AND call.cost_kind = $19
+            AND call.currency = $20` : ''}
             AND call.outcome = 'pending'
             AND request.status = 'reserved'
             AND request.platform = $14
@@ -1425,10 +2420,21 @@ export class PostgresExternalPlatformStore {
               archive.body_size AS archive_body_size,
               archive.payload_sha256 AS archive_payload_sha256,
               archive.raw_payload AS archive_raw_payload,
-              archive.captured_at AS archive_captured_at
+              archive.captured_at AS archive_captured_at,
+              restricted.id AS restricted_response_id,
+              restricted.content_type AS restricted_content_type,
+              restricted.body_size AS restricted_body_size,
+              restricted.body_sha256 AS restricted_body_sha256,
+              restricted.body_bytes AS restricted_body_bytes,
+              restricted.body_text AS restricted_body_text,
+              restricted.json_parsed AS restricted_json_parsed,
+              restricted.parsed_payload AS restricted_parsed_payload,
+              restricted.captured_at AS restricted_captured_at
          FROM external_platform.provider_calls call
          LEFT JOIN external_platform.response_archives archive
            ON archive.provider_call_id = call.id
+         LEFT JOIN control.external_platform_restricted_raw_responses restricted
+           ON restricted.provider_call_id = call.id
         WHERE call.id = $1
           AND call.provider_key = $2
         ${lockCall ? 'FOR UPDATE OF call' : ''}`,
@@ -1485,6 +2491,10 @@ export class PostgresExternalPlatformStore {
     if (outcome != null && state.row.outcome !== outcome) return false
     if (!postgresCallEvidenceMatches(state.row, input)) return false
     if (!postgresResponseArchiveMatches(state.row, input.responseArchive ?? null)) return false
+    if (!postgresRestrictedResponseArchiveMatches(
+      state.row,
+      input.restrictedResponseArchive ?? null,
+    )) return false
     if (!postgresArchiveObjectsMatch(state.archiveObjects, input, this.providerKey)) return false
     if (includeSnapshot && !postgresSnapshotMatches(
       state.snapshot,
@@ -1509,26 +2519,40 @@ export class PostgresExternalPlatformStore {
       ignoreErrorCode: state.row.outcome !== 'pending',
     })) return false
     return postgresResponseArchiveMatches(state.row, input.responseArchive ?? null)
+      && postgresRestrictedResponseArchiveMatches(
+        state.row,
+        input.restrictedResponseArchive ?? null,
+      )
       && postgresArchiveObjectsMatch(state.archiveObjects, input, this.providerKey)
   }
 
   #providerEvidenceCanBeWritten(state, input) {
     if (!state.row || !postgresCallScopeMatches(state.row, input, this.providerKey)) return false
     if (state.row.outcome !== 'pending') return false
-    const pristine = state.row.http_status == null
+    const costOnly = state.row.http_status == null
       && state.row.business_code == null
       && state.row.upstream_request_id == null
       && state.row.upstream_record_time == null
       && state.row.billed == null
-      && state.row.cost_minor == null
-      && state.row.cost_kind === 'unknown'
-      && state.row.currency == null
+      && (
+        (
+          state.row.cost_minor == null
+          && state.row.cost_kind === 'unknown'
+          && state.row.currency == null
+        )
+        || (
+          nullableNumber(state.row.cost_minor) === nullableNumber(input.costMinor)
+          && state.row.cost_kind === input.costKind
+          && state.row.currency === input.currency
+        )
+      )
       && state.row.latency_ms == null
       && state.row.item_count == null
       && state.row.error_code == null
       && state.row.response_archive_id == null
+      && state.row.restricted_response_id == null
       && state.archiveObjects.length === 0
-    return pristine || this.#providerEvidenceMatches(state, input, { outcome: 'pending' })
+    return costOnly || this.#providerEvidenceMatches(state, input, { outcome: 'pending' })
   }
 
   async stageProviderEvidence(input) {
@@ -1569,6 +2593,11 @@ export class PostgresExternalPlatformStore {
       )
       if (!updated.rows[0]) throw evidenceConflict()
       await this.#insertResponseArchive(client, input.callId, evidence.responseArchive)
+      await this.#insertRestrictedResponseArchive(
+        client,
+        input.callId,
+        evidence.restrictedResponseArchive,
+      )
       await this.#insertArchiveObjects(client, {
         callId: input.callId,
         delivery: input.delivery,
@@ -1621,12 +2650,14 @@ export class PostgresExternalPlatformStore {
     itemCount,
     latencyMs,
     usageLatencyMs = latencyMs,
+    usageUnitsActual = Math.max(1, itemCount),
     billed,
     costMinor,
     costKind,
     currency,
     archiveObjects = [],
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     ingestJob = null,
   }) {
@@ -1657,6 +2688,7 @@ export class PostgresExternalPlatformStore {
         throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
       }
       await this.#insertResponseArchive(client, callId, responseArchive)
+      await this.#insertRestrictedResponseArchive(client, callId, restrictedResponseArchive)
 
       const snapshotId = randomUUID()
       const snapshotResult = await client.query(
@@ -1696,7 +2728,13 @@ export class PostgresExternalPlatformStore {
            completed_at = now()
          WHERE id = $1 AND status = 'reserved'
          RETURNING id`,
-        [delivery.usageRequestId, responseBody, Math.max(1, itemCount), usageLatencyMs, capturedAt],
+        [
+          delivery.usageRequestId,
+          responseBody,
+          Math.max(1, usageUnitsActual),
+          usageLatencyMs,
+          capturedAt,
+        ],
       )
       if (!usage.rows[0]) throw new AppError(409, 'usage_request_state_conflict', 'Usage request is not reserved')
 
@@ -1735,6 +2773,7 @@ export class PostgresExternalPlatformStore {
     errorCode = null,
     affectsCircuit = true,
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     archiveObjects = [],
     snapshot = null,
@@ -1761,6 +2800,7 @@ export class PostgresExternalPlatformStore {
       errorCode,
       affectsCircuit,
       responseArchive,
+      restrictedResponseArchive,
       upstreamEvidence,
       archiveObjects,
       snapshot,
@@ -1802,6 +2842,7 @@ export class PostgresExternalPlatformStore {
         throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
       }
       await this.#insertResponseArchive(client, callId, responseArchive)
+      await this.#insertRestrictedResponseArchive(client, callId, restrictedResponseArchive)
       await this.#insertArchiveObjects(client, {
         callId,
         delivery,
@@ -1894,7 +2935,13 @@ export class PostgresExternalPlatformStore {
     }
   }
 
-  async commitSnapshotDelivery({ delivery, snapshot, sourceMode, responseBody = snapshot.responseBody }) {
+  async commitSnapshotDelivery({
+    delivery,
+    snapshot,
+    sourceMode,
+    responseBody = snapshot.responseBody,
+    usageUnitsActual = Math.max(1, deliveredItemCount(responseBody)),
+  }) {
     return transaction(this.pool, async (client) => {
       const locked = await client.query(
         `SELECT * FROM external_platform.response_snapshots
@@ -1916,7 +2963,7 @@ export class PostgresExternalPlatformStore {
         [
           delivery.usageRequestId,
           responseBody,
-          Math.max(1, deliveredItemCount(responseBody)),
+          Math.max(1, usageUnitsActual),
           sourceMode === 'stored_fallback' ? 'stale' : 'live',
           current.capturedAt,
         ],
@@ -1963,10 +3010,12 @@ export class PostgresExternalPlatformStore {
     failureResponseBody = null,
     affectsCircuit = true,
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     archiveObjects = [],
     snapshot = null,
     fallbackResponseBody = snapshot?.responseBody,
+    usageUnitsActual = Math.max(1, deliveredItemCount(fallbackResponseBody)),
   }) {
     return transaction(this.pool, async (client) => {
       const completed = await client.query(
@@ -1987,6 +3036,7 @@ export class PostgresExternalPlatformStore {
         throw new AppError(409, 'external_platform_call_state_conflict', 'Provider call is not pending')
       }
       await this.#insertResponseArchive(client, callId, responseArchive)
+      await this.#insertRestrictedResponseArchive(client, callId, restrictedResponseArchive)
       await this.#insertArchiveObjects(client, {
         callId,
         delivery,
@@ -2017,7 +3067,7 @@ export class PostgresExternalPlatformStore {
           [
             delivery.usageRequestId,
             fallbackResponseBody,
-            Math.max(1, deliveredItemCount(fallbackResponseBody)),
+            Math.max(1, usageUnitsActual),
             latencyMs,
             current.capturedAt,
           ],
@@ -2106,6 +3156,7 @@ export class PostgresExternalPlatformStore {
     currency = null,
     latencyMs = null,
     responseArchive = null,
+    restrictedResponseArchive = null,
     upstreamEvidence = null,
     archiveObjects = [],
     errorCode = 'external_platform_persistence_unknown',
@@ -2128,6 +3179,7 @@ export class PostgresExternalPlatformStore {
       // succeeded. In that case its non-pending row is authoritative.
       if (!updated.rows[0]) return false
       await this.#insertResponseArchive(client, callId, responseArchive)
+      await this.#insertRestrictedResponseArchive(client, callId, restrictedResponseArchive)
       await this.#insertArchiveObjects(client, {
         callId,
         delivery,
@@ -2227,6 +3279,23 @@ export class PostgresExternalPlatformStore {
         archive.businessCode ?? null, archive.contentType ?? null,
         archive.bodySize ?? null, archive.payloadSha256 ?? null,
         archive.rawPayload ?? null, archive.capturedAt ?? new Date(),
+      ],
+    )
+  }
+
+  async #insertRestrictedResponseArchive(client, callId, input) {
+    const archive = normalizedRestrictedResponseArchive(input)
+    if (!archive) return
+    await client.query(
+      `INSERT INTO control.external_platform_restricted_raw_responses
+         (id, provider_call_id, content_type, body_size, body_sha256,
+          body_bytes, body_text, json_parsed, parsed_payload, captured_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (provider_call_id) DO NOTHING`,
+      [
+        randomUUID(), callId, archive.contentType, archive.bodySize,
+        archive.bodySha256, archive.bodyBytes, archive.bodyText,
+        archive.jsonParsed, archive.parsedPayload, archive.capturedAt,
       ],
     )
   }

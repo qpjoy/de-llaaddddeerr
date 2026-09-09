@@ -32,7 +32,7 @@ Server-controlled additions:
 - the upstream timeout is bounded by `NIGHT_ALL_TIMEOUT_MS`.
 - optional `NIGHT_ALL_SERVICE_TOKEN` is injected only on the internal hop.
 
-Caller-controlled fields are currently limited to platform, query, page size and an opaque cursor when the adapter supports it. Provider names, provider endpoint IDs, debug metadata, upstream credentials, and internal accounting fields are stripped.
+Caller-controlled fields are currently limited to platform, query, page size and an opaque cursor when the adapter supports it. On the historical path the only accepted continuation is the Hub-encrypted `mxnc1` cursor; provider names, provider endpoint IDs, raw provider cursors, debug metadata, upstream credentials, and internal accounting fields are rejected or stripped before dispatch.
 
 ### Audited Night-All source caveat
 
@@ -69,13 +69,49 @@ the JSON-string `raw_info` and `raw_data` fields) while applying the Hub boundar
   max*Pages, pageCount/chunkSize/budget/crawlDepth and equivalent cost-amplification
   controls require a separate granted capability/policy and are also rejected;
 - inject the optional Night-All service token only on the internal hop;
-- preserve the complete structurally valid Night-All response, including provider
-  or endpoint fields and fields encoded inside `raw_info`/`raw_data`; this
-  compatibility response is not currently desensitized by Hub;
+- preserve the complete structurally valid Night-All business response, including
+  provider or endpoint business fields and fields encoded inside
+  `raw_info`/`raw_data`; this compatibility response is not desensitized,
+  filtered or truncated by Hub, although its pagination-control fields are
+  replaced by the governed continuation described below;
 - preserve Night-All's top-level `requestId`/`traceId` in the compatibility body,
   return the current durable Hub request ID in `x-mx-insight-request-id` on
   successful live/stale delivery, and
   retain both correlation domains as internal call evidence.
+
+### Hub-owned historical pagination boundary
+
+The three compatibility operations and every non-Telegram Night-All-backed
+`POST /api/v1/data/search` traversal never expose or accept a bare provider continuation.
+After page 1, Hub encrypts the complete cursor, composite/offset `nextParams`, or
+next page number inside an `mxnc1` cursor. Authenticated state binds the consumer,
+operation, platform, stable query/account scope and next page, so it cannot cross
+any of those boundaries. Page continuations are publicly projected as cursor
+mode; offset continuations as composite mode, so no bare `nextPage` or offset
+leaves Hub. `/data/search` uses operation `data-search`; the three compatibility
+routes use their respective `raw`, `crawl` or `user-info` operation.
+
+Each next page is a new business request and uses a new `Idempotency-Key`; an
+exact transport retry of the same page reuses that page's key. Page 15 is
+terminal: Hub sets `hasMore=false`, removes every continuation field and adds a
+`page_limit_reached` warning when the upstream still advertises more work.
+Pre-wrapper provider cursors or provider continuation params return
+`400 invalid_cursor`; the only recovery is to remove them, use a new key and
+restart from page 1. This fail-closed migration is necessary because a bare
+provider token carries no authenticated page count.
+
+Pagination control is the sole response governance rewrite. Long bodies,
+`raw_info`, `raw_data`, provider/endpoint business fields and upstream
+correlation values stay unchanged in the public compatibility body. The
+compatibility snapshot stores that governed delivered body, while historical raw
+lineage retains the complete parsed JSON payload and legacy raw strings—including
+the original provider continuation—before the wrapper is applied. The historical
+Night-All HTTP hop does not claim byte-for-byte response capture; exact upstream
+response text/bytes plus hash is a separate restricted-storage guarantee for
+Hub-native provider calls. Restricted evidence is not a Public, tenant,
+ordinary-Admin, UI or search-projection source. An existing
+`mxec2` Xiaohongshu direct cursor is a separate domain and remains pinned to the
+Hub-native connector.
 
 Every dispatch creates a separate connector-call evidence row. HTTP status,
 business outcome (`complete`, `partial`, `failed` or `unknown`), failure kind, bounded error
@@ -83,13 +119,14 @@ code, latency, delivery source and Night-All correlation IDs are retained even
 when the caller ultimately receives a stale snapshot. Substantive warnings or a
 per-result error/`success=false` make an HTTP 200 response `partial`; it is returned
 and its original, non-desensitized payload is ingested, but it never creates or
-replaces a compatibility snapshot. Complete responses use that same unmasked
-payload for the live response, exact snapshot and raw ingest evidence. A lone
+replaces a compatibility snapshot. Complete responses keep the same unmasked
+business payload in the live response, compatibility snapshot and raw ingest
+evidence; only the delivered/snapshot pagination controls use `mxnc1`. A lone
 `STANDARD_PAYLOAD_EMPTY` warning is a deterministic successful empty result, so it
 is `complete` and replaces last-good instead of allowing an older non-empty result
 to reappear during an outage. Only a structurally valid `complete` response is
 snapshot material, and the snapshot keeps the same upstream fields for exact
-replay.
+replay except for the intentional `mxnc1` pagination-control projection above.
 
 The facade always attempts live Night-All first for a new `Idempotency-Key`.
 Once a live or stale delivery commits, that `Idempotency-Key` permanently replays
@@ -235,8 +272,9 @@ readiness, opaque cursors and stable fields.
 Night-All remains the connector wherever it owns upstream routing and provider-credential/billing
 business policy. JustOne ecommerce product search and TikHub Xiaohongshu note detail are implemented
 operation-scoped Hub-native connectors. Direct Xiaohongshu search/raw remains governed by its staged
-[migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md); old cursors, batch queries,
-comments, crawl and user-info remain on Night-All. Other JustOne/TikHub routes remain unchanged until each is
+[migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md). Eligible single-identifier
+Xiaohongshu crawl/user-info is also Hub-native; historical `mxnc1` traversals, batch/multi-identifier queries, channel forms,
+comments, non-post activity, non-20 pages and custom params remain on Night-All. Other provider routes remain unchanged until each is
 compared against bounded approved fixtures/calls and cut over with an explicit rollback policy. Provider
 selection stays server-side, and public compatibility paths, Hub Public API keys and canonical search contracts
 do not change.

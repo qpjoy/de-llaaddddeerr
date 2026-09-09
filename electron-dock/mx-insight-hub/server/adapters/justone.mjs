@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import {
   classifyJustOneBusinessCode,
   createJustOneCallArchiveObject,
@@ -81,7 +82,7 @@ function evidence({
 }
 
 export class JustOneUpstreamError extends Error {
-  constructor(name, message, errorEvidence, archiveObjects = []) {
+  constructor(name, message, errorEvidence, archiveObjects = [], restrictedResponseArchive = null) {
     super(message)
     this.name = name
     this.evidence = Object.freeze({ ...errorEvidence })
@@ -91,28 +92,45 @@ export class JustOneUpstreamError extends Error {
       value: Object.freeze([...archiveObjects]),
       enumerable: false,
     })
+    Object.defineProperty(this, 'restrictedResponseArchive', {
+      value: restrictedResponseArchive,
+      enumerable: false,
+    })
   }
 }
 
 export class JustOneRejectedError extends JustOneUpstreamError {
-  constructor(errorEvidence, archiveObjects) {
-    super('JustOneRejectedError', 'Upstream rejected the product search request', errorEvidence, archiveObjects)
+  constructor(errorEvidence, archiveObjects, restrictedResponseArchive = null) {
+    super(
+      'JustOneRejectedError',
+      'Upstream rejected the product search request',
+      errorEvidence,
+      archiveObjects,
+      restrictedResponseArchive,
+    )
   }
 }
 
 export class JustOneAmbiguousError extends JustOneUpstreamError {
-  constructor(errorEvidence, archiveObjects) {
-    super('JustOneAmbiguousError', 'Upstream product search outcome is unknown', errorEvidence, archiveObjects)
+  constructor(errorEvidence, archiveObjects, restrictedResponseArchive = null) {
+    super(
+      'JustOneAmbiguousError',
+      'Upstream product search outcome is unknown',
+      errorEvidence,
+      archiveObjects,
+      restrictedResponseArchive,
+    )
   }
 }
 
 export class JustOneSucceededUnusableError extends JustOneUpstreamError {
-  constructor(errorEvidence, archiveObjects) {
+  constructor(errorEvidence, archiveObjects, restrictedResponseArchive = null) {
     super(
       'JustOneSucceededUnusableError',
       'Upstream charged a successful result that the Hub could not safely use',
       errorEvidence,
       archiveObjects,
+      restrictedResponseArchive,
     )
   }
 }
@@ -135,7 +153,7 @@ async function readBoundedBody(response, maxBytes, controller) {
     const bytes = new Uint8Array(await response.arrayBuffer())
     if (bytes.byteLength > maxBytes) throw new BodyLimitError(bytes.byteLength)
     return {
-      text: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+      bytes: Buffer.from(bytes),
       bodySize: bytes.byteLength,
     }
   }
@@ -164,13 +182,40 @@ async function readBoundedBody(response, maxBytes, controller) {
     offset += chunk.byteLength
   }
   return {
-    text: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+    bytes: Buffer.from(bytes),
     bodySize: bytes.byteLength,
   }
 }
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function restrictedResponseArchive(context) {
+  if (!Buffer.isBuffer(context?.bodyBytes)) return null
+  const jsonParsed = context.jsonParsed === true
+  let parsedPayload = null
+  if (jsonParsed && isPostgresSafeJsonValue(context.raw)) {
+    try {
+      parsedPayload = structuredClone(context.raw)
+    } catch {
+      // Exact bytes remain authoritative. The JSONB convenience projection is
+      // optional when a valid, byte-bounded response is too deep to clone.
+      parsedPayload = null
+    }
+  }
+  return Object.freeze({
+    capturedAt: new Date(context.capturedAt).toISOString(),
+    contentType: context.contentType ?? null,
+    bodySize: context.bodyBytes.byteLength,
+    bodySha256: sha256(context.bodyBytes),
+    bodyBytes: Buffer.from(context.bodyBytes),
+    bodyText: isPostgresSafeText(context.bodyText)
+      ? context.bodyText
+      : null,
+    jsonParsed,
+    parsedPayload,
+  })
 }
 
 function archiveObjects({
@@ -221,6 +266,7 @@ function rejected(httpStatus, businessCode, errorCode, context) {
       ...errorEvidence,
       contractState: context?.contractState || 'provider_rejected',
     }),
+    restrictedResponseArchive(context),
   )
 }
 
@@ -235,6 +281,7 @@ function ambiguous(httpStatus, errorCode, context) {
   return new JustOneAmbiguousError(
     errorEvidence,
     archiveObjects({ ...context, ...errorEvidence, contractState: context?.contractState || 'unknown' }),
+    restrictedResponseArchive(context),
   )
 }
 
@@ -255,6 +302,7 @@ function succeededUnusable(httpStatus, errorCode, context) {
       ...errorEvidence,
       contractState: context?.contractState || 'succeeded_unusable',
     }),
+    restrictedResponseArchive(context),
   )
 }
 
@@ -376,24 +424,38 @@ export class JustOneAdapter {
           context,
         )
       }
-      const { text, bodySize } = bodyResult
-      const bodySha256 = sha256(text)
+      const { bytes, bodySize } = bodyResult
+      const bodySha256 = sha256(bytes)
       const responseContext = {
         ...baseArchiveContext,
         httpStatus,
         contentType,
         bodySize,
         bodySha256,
+        bodyBytes: bytes,
+        bodyText: null,
+        jsonParsed: false,
       }
+
+      let text
+      try {
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      } catch {
+        throw ambiguous(httpStatus, 'upstream_body_read_failed', {
+          ...responseContext,
+          contractState: 'body_unreadable',
+        })
+      }
+      responseContext.bodyText = text
 
       let raw
       try {
-        raw = JSON.parse(text)
+        raw = JSON.parse(text.codePointAt(0) === 0xfeff ? text.slice(1) : text)
       } catch {
         const context = { ...responseContext, contractState: 'invalid_json' }
         throw ambiguous(httpStatus, 'invalid_upstream_json', context)
       }
-      const parsedContext = { ...responseContext, raw }
+      const parsedContext = { ...responseContext, raw, jsonParsed: true }
       if (!contentType.includes('application/json') && !contentType.includes('+json')) {
         const context = { ...parsedContext, contractState: 'invalid_content_type' }
         if (!response.ok) {
@@ -450,6 +512,13 @@ export class JustOneAdapter {
         )
       }
 
+      if (!isPostgresSafeJsonValue(raw)) {
+        throw succeededUnusable(httpStatus, 'upstream_payload_unrepresentable', {
+          ...parsedContext,
+          contractState: 'succeeded_unusable',
+        })
+      }
+
       const acceptedCapturedAt = capturedAt ?? new Date()
       let normalized
       try {
@@ -483,6 +552,13 @@ export class JustOneAdapter {
       // Gateway orchestration can inspect the normalized dispatch, while an
       // accidental JSON spread cannot expose an upstream continuation field.
       Object.defineProperty(result, 'request', { value: request, enumerable: false })
+      Object.defineProperty(result, 'restrictedResponseArchive', {
+        value: restrictedResponseArchive({
+          ...parsedContext,
+          capturedAt: acceptedCapturedAt,
+        }),
+        enumerable: false,
+      })
       return Object.freeze(result)
     } finally {
       clearTimeout(timer)

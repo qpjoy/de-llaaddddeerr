@@ -56,6 +56,7 @@ services:
       MX_INSIGHT_TIKHUB_API_KEY: ${MX_INSIGHT_TIKHUB_API_KEY:-}
       MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: ${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}
       MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED: ${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED:-0}
+      MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED: ${MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED:-0}
       MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS: ${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS:-}
       MX_INSIGHT_TIKHUB_BASE_URL: ${MX_INSIGHT_TIKHUB_BASE_URL:-https://api.tikhub.io}
       MX_INSIGHT_TIKHUB_TIMEOUT_MS: ${MX_INSIGHT_TIKHUB_TIMEOUT_MS:-30000}
@@ -134,6 +135,40 @@ services:
       app:
         condition: service_healthy
     command: ["node", "server/workers/ingest.mjs"]
+    restart: unless-stopped
+
+  # Optional local outbox -> Elasticsearch worker. It is kept behind an
+  # explicit profile so the default Hub/login lifecycle never depends on
+  # Elasticsearch. `scripts/manage.sh search up` enables this profile only
+  # after the loopback search stack is reachable.
+  projector:
+    profiles: ["search"]
+    image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
+    environment:
+      MX_INSIGHT_LISTENER_MODE: public
+      MX_INSIGHT_STORE: postgres
+      DATABASE_URL: postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}@postgres:5432/mx_insight_hub
+      MX_INSIGHT_API_KEY_PEPPER: ${MX_INSIGHT_API_KEY_PEPPER:-local-pepper-change-me-at-least-32-bytes}
+      MX_COMMON_ELASTICSEARCH_URL: ${MX_COMMON_ELASTICSEARCH_URL:-}
+      MX_COMMON_ELASTICSEARCH_TIMEOUT_MS: ${MX_COMMON_ELASTICSEARCH_TIMEOUT_MS:-10000}
+      MX_COMMON_ELASTICSEARCH_REPLICAS: ${MX_COMMON_ELASTICSEARCH_REPLICAS:-0}
+      MX_COMMON_SEGMENTER: ${MX_COMMON_SEGMENTER:-}
+      MX_COMMON_HANLP_URL: ${MX_COMMON_HANLP_URL:-}
+      MX_COMMON_HANLP_TOKEN: ${MX_COMMON_HANLP_TOKEN:-}
+      MX_COMMON_HANLP_TIMEOUT_MS: ${MX_COMMON_HANLP_TIMEOUT_MS:-5000}
+      MX_COMMON_HANLP_BATCH_TIMEOUT_MS: ${MX_COMMON_HANLP_BATCH_TIMEOUT_MS:-60000}
+      MX_COMMON_SEGMENTER_CONCURRENCY: ${MX_COMMON_SEGMENTER_CONCURRENCY:-2}
+      MX_COMMON_SEGMENTER_BATCH_SIZE: ${MX_COMMON_SEGMENTER_BATCH_SIZE:-16}
+      MX_INSIGHT_EMBEDDING_DIMENSIONS: ${MX_INSIGHT_EMBEDDING_DIMENSIONS:-}
+      MX_INSIGHT_EMBEDDING_MODEL: ${MX_INSIGHT_EMBEDDING_MODEL:-}
+      MX_INSIGHT_AGENT_PROVIDERS: ${MX_INSIGHT_AGENT_PROVIDERS:-}
+      MX_INSIGHT_EMBEDDING_PROVIDERS: ${MX_INSIGHT_EMBEDDING_PROVIDERS:-}
+      MX_INSIGHT_AGENT_AUTO_MIGRATE: ${MX_INSIGHT_AGENT_AUTO_MIGRATE:-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["node", "server/workers/projector.mjs"]
     restart: unless-stopped
 
   classifier:

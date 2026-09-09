@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { redactCredentialEcho } from '../core/credential-redaction.mjs'
 
 export const XIAOHONGSHU_PLATFORM = 'xiaohongshu'
 export const TIKHUB_PROVIDER_KEY = 'tikhub'
@@ -13,15 +14,6 @@ const DELIVERY_MODES = new Set(['cache_only', 'cache_first', 'refresh'])
 const NOTE_ID_PATTERN = /^[0-9a-f]{24}$/iu
 const LONG_HOSTS = new Set(['xiaohongshu.com', 'www.xiaohongshu.com'])
 const SHORT_HOSTS = new Set(['xhslink.com', 'www.xhslink.com', 'xhslink.cn', 'www.xhslink.cn'])
-const MAX_TITLE_LENGTH = 500
-const MAX_TEXT_LENGTH = 50_000
-const MAX_TAGS = 100
-const MAX_TAG_LENGTH = 160
-const MAX_MEDIA = 20
-const PRIVATE_FIELD = /^(?:access[_-]?token|api[_-]?key|auth|auth[_-]?key|authorization|bearer|client[_-]?secret|cookie|credential|credentials|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)$/iu
-const PRIVATE_ASSIGNMENT = /\b(access[_-]?token|api[_-]?key|auth(?:[_-]?key)?|authorization|bearer|client[_-]?secret|cookie|credential(?:s)?|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)\s*[:=]\s*([^&;,\r\n]+)/giu
-const PRIVATE_JSON_ASSIGNMENT = /"(access[_-]?token|api[_-]?key|auth(?:[_-]?key)?|authorization|bearer|client[_-]?secret|cookie|credential(?:s)?|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)"\s*:\s*"(?:\\.|[^"\\])*"/giu
-const PRIVATE_ESCAPED_JSON_ASSIGNMENT = /\\"(access[_-]?token|api[_-]?key|auth(?:[_-]?key)?|authorization|bearer|client[_-]?secret|cookie|credential(?:s)?|jwt|key|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|xsec[_-]?token)\\"\s*:\s*\\"(?:\\\\.|[^"\\])*\\"/giu
 
 export class TikHubXiaohongshuContractError extends Error {
   constructor(code, message) {
@@ -39,54 +31,39 @@ function string(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
-function boundedCodePoints(value, maximum) {
-  const normalized = string(value)
-  if (normalized == null) return { value: null, limited: false }
-
-  const points = []
-  let limited = false
-  for (const point of normalized) {
-    if (points.length === maximum) {
-      limited = true
-      break
+function scalarSafe(value) {
+  let result = ''
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1)
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        result += value[index] + value[index + 1]
+        index += 1
+      } else {
+        result += '\uFFFD'
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      result += '\uFFFD'
+    } else {
+      result += value[index]
     }
-    const codePoint = point.codePointAt(0)
-    // JSON permits escaped unpaired surrogates, but they are not Unicode
-    // scalar values. Replace any provider-supplied lone surrogate while also
-    // ensuring the length boundary can never split a valid surrogate pair.
-    points.push(codePoint >= 0xD800 && codePoint <= 0xDFFF ? '\uFFFD' : point)
   }
-  return { value: points.join(''), limited }
+  return result
+}
+
+function boundedCodePoints(value, _maximum) {
+  const normalized = string(value)
+  if (normalized == null) return { value: null }
+  // The complete HTTP response is already bounded by the adapter. A second
+  // field-level ceiling would destroy valid acquired business content.
+  // Repair only impossible Unicode scalar sequences before JSONB/ES ingest;
+  // this does not trim or redact valid provider business content.
+  return { value: scalarSafe(normalized) }
 }
 
 function boundedString(value, maximum) {
   return boundedCodePoints(value, maximum).value
-}
-
-function privateField(value) {
-  const text = String(value)
-  if (PRIVATE_FIELD.test(text)) return true
-  const compact = text.replace(/[^a-z0-9]/giu, '').toLowerCase()
-  return /(?:accesskey|accesstoken|apikey|authkey|authorization|bearer|cookie|credential|jwt|password|passwd|privatekey|refreshtoken|secret|sessionid|sessionkey|sessiontoken|setcookie|signature|ticket|token|xsectoken)$/u.test(compact)
-}
-
-function redactTikHubString(value) {
-  let result = value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]')
-  result = result.replace(PRIVATE_ESCAPED_JSON_ASSIGNMENT, '\\"$1\\":\\"[REDACTED]\\"')
-  result = result.replace(PRIVATE_JSON_ASSIGNMENT, '"$1":"[REDACTED]"')
-  result = result.replace(PRIVATE_ASSIGNMENT, '$1=[REDACTED]')
-  try {
-    const url = new URL(result)
-    url.username = ''
-    url.password = ''
-    url.hash = ''
-    for (const key of [...url.searchParams.keys()]) {
-      if (privateField(key)) url.searchParams.set(key, '[REDACTED]')
-    }
-    return url.toString()
-  } catch {
-    return result
-  }
 }
 
 function number(value) {
@@ -229,10 +206,11 @@ function noteCandidate(payload) {
   return candidates[0] || null
 }
 
-// TikHub documents that an accepted bad/missing note carries an upstream
-// "service error" in data. Until a sanitized live fixture pins a richer shape,
-// recognize only that direct bounded phrase. Generic schema examples use
-// `data: null`, so null alone is not evidence of a request-local miss.
+// TikHub documents that accepted bad/missing note and user identity lookups
+// carry an upstream "service error" in data. Until a sanitized live fixture
+// pins a richer shape, recognize only that direct bounded phrase. Generic
+// schema examples use `data: null`, so null alone is not evidence of a
+// request-local miss.
 export function isTikHubXiaohongshuUnavailable(payload) {
   if (!isRecord(payload) || payload.code !== 200 || typeof payload.data !== 'string') return false
   const message = payload.data.trim()
@@ -240,11 +218,12 @@ export function isTikHubXiaohongshuUnavailable(payload) {
     && /(?:服务异常|service\s+error)/iu.test(message)
 }
 
-function safeHttpsUrl(value, { official = false } = {}) {
+function safeHttpsUrl(value, { official = false, providerCredential = null } = {}) {
   const normalized = string(value)
-  if (!normalized || normalized.length > 2_048) return null
+  if (!normalized) return null
   try {
-    const url = new URL(normalized)
+    const credentialSafe = redactCredentialEcho(normalized, providerCredential)
+    const url = new URL(credentialSafe)
     const hostname = url.hostname.toLowerCase()
     if (
       url.protocol !== 'https:'
@@ -260,41 +239,45 @@ function safeHttpsUrl(value, { official = false } = {}) {
       || (official && !LONG_HOSTS.has(hostname) && !SHORT_HOSTS.has(hostname))
     ) return null
     url.hostname = hostname
-    url.hash = ''
+    // Signed media query strings are acquired business data and often make the
+    // URL usable. They are not the Hub-to-provider API credential.
     return url.toString()
   } catch {
     return null
   }
 }
 
-function imageUrl(image) {
-  if (typeof image === 'string') return safeHttpsUrl(image)
+function imageUrl(image, options) {
+  if (typeof image === 'string') return safeHttpsUrl(image, options)
   if (!image || typeof image !== 'object') return null
   const info = Array.isArray(image.info_list) ? image.info_list : image.infoList
-  return safeHttpsUrl(image.url_default) || safeHttpsUrl(image.urlDefault) || safeHttpsUrl(image.url_pre)
-    || safeHttpsUrl(image.urlPre) || safeHttpsUrl(image.url)
-    || (Array.isArray(info) ? info.map((entry) => safeHttpsUrl(entry?.url)).find(Boolean) : null)
+  return safeHttpsUrl(image.url_default, options) || safeHttpsUrl(image.urlDefault, options)
+    || safeHttpsUrl(image.url_pre, options) || safeHttpsUrl(image.urlPre, options)
+    || safeHttpsUrl(image.url, options)
+    || (Array.isArray(info) ? info.map((entry) => safeHttpsUrl(entry?.url, options)).find(Boolean) : null)
 }
 
 function tagsOf(note) {
   const values = [note.tag_list, note.tagList, note.tags, note.topics, note.topic_list]
     .find(Array.isArray) || []
   return [...new Set(values.map((tag) => (
-    boundedString(tag?.name, MAX_TAG_LENGTH) || boundedString(tag?.title, MAX_TAG_LENGTH)
-      || boundedString(tag?.tag_name, MAX_TAG_LENGTH) || boundedString(tag?.tagName, MAX_TAG_LENGTH)
-      || boundedString(tag, MAX_TAG_LENGTH)
-  )).filter(Boolean))].slice(0, MAX_TAGS)
+    boundedString(tag?.name) || boundedString(tag?.title)
+      || boundedString(tag?.tag_name) || boundedString(tag?.tagName)
+      || boundedString(tag)
+  )).filter(Boolean))]
 }
 
-function mediaOf(note) {
+function mediaOf(note, options) {
   const images = [note.image_list, note.imageList, note.images]
     .find(Array.isArray) || []
-  return [...new Set(images.map(imageUrl).filter(Boolean))]
-    .slice(0, MAX_MEDIA)
+  return [...new Set(images.map((image) => imageUrl(image, options)).filter(Boolean))]
     .map((url) => ({ type: 'image', url }))
 }
 
-export function normalizeTikHubXiaohongshuNoteResult(payload, { capturedAt = new Date() } = {}) {
+export function normalizeTikHubXiaohongshuNoteResult(payload, {
+  capturedAt = new Date(),
+  providerCredential = null,
+} = {}) {
   const note = noteCandidate(payload)
   if (!note) return null
   const user = note.user && typeof note.user === 'object'
@@ -305,12 +288,11 @@ export function normalizeTikHubXiaohongshuNoteResult(payload, { capturedAt = new
     : note.interactInfo && typeof note.interactInfo === 'object' ? note.interactInfo : {}
   const externalId = (string(note.note_id) || string(note.noteId) || string(note.id))?.toLowerCase()
   if (!externalId || !NOTE_ID_PATTERN.test(externalId)) return null
-  const title = boundedString(note.title, MAX_TITLE_LENGTH)
-    || boundedString(note.display_title, MAX_TITLE_LENGTH)
-    || boundedString(note.displayTitle, MAX_TITLE_LENGTH)
+  const title = boundedString(note.title)
+    || boundedString(note.display_title)
+    || boundedString(note.displayTitle)
   const body = boundedCodePoints(
     string(note.desc) || string(note.description) || string(note.content),
-    MAX_TEXT_LENGTH,
   )
   const text = body.value || title
   const url = `https://www.xiaohongshu.com/explore/${externalId}`
@@ -325,9 +307,11 @@ export function normalizeTikHubXiaohongshuNoteResult(payload, { capturedAt = new
     text,
     tags: tagsOf(note),
     author: {
-      id: boundedString(user.user_id, 128) || boundedString(user.userId, 128) || boundedString(user.id, 128),
-      name: boundedString(user.nickname, 256) || boundedString(user.nick_name, 256) || boundedString(user.name, 256),
-      avatarUrl: safeHttpsUrl(user.avatar) || safeHttpsUrl(user.avatar_url) || safeHttpsUrl(user.image),
+      id: boundedString(user.user_id) || boundedString(user.userId) || boundedString(user.id),
+      name: boundedString(user.nickname) || boundedString(user.nick_name) || boundedString(user.name),
+      avatarUrl: safeHttpsUrl(user.avatar, { providerCredential })
+        || safeHttpsUrl(user.avatar_url, { providerCredential })
+        || safeHttpsUrl(user.image, { providerCredential }),
     },
     metrics: {
       liked: number(interactions.liked_count ?? interactions.likedCount ?? note.liked_count),
@@ -335,11 +319,11 @@ export function normalizeTikHubXiaohongshuNoteResult(payload, { capturedAt = new
       comments: number(interactions.comment_count ?? interactions.commentCount ?? note.comment_count),
       shared: number(interactions.share_count ?? interactions.shareCount ?? note.share_count),
     },
-    media: mediaOf(note),
+    media: mediaOf(note, { providerCredential }),
     publishedAt: timestamp(note.timestamp ?? note.time ?? note.create_time ?? note.createTime),
     collectedAt,
   }
-  return { item, safetyLimited: body.limited }
+  return { item }
 }
 
 export function normalizeTikHubXiaohongshuNote(payload, options) {
@@ -347,27 +331,66 @@ export function normalizeTikHubXiaohongshuNote(payload, options) {
 }
 
 export function sha256Json(value) {
-  const canonical = (candidate) => {
-    if (Array.isArray(candidate)) return `[${candidate.map(canonical).join(',')}]`
-    if (candidate && typeof candidate === 'object') {
-      return `{${Object.keys(candidate).sort().map((key) => `${JSON.stringify(key)}:${canonical(candidate[key])}`).join(',')}}`
+  const hash = createHash('sha256')
+  const pending = [{ kind: 'value', value }]
+  while (pending.length > 0) {
+    const entry = pending.pop()
+    if (entry.kind === 'token') {
+      hash.update(entry.value)
+      continue
     }
-    return JSON.stringify(candidate === undefined ? null : candidate)
+    const candidate = entry.value
+    if (Array.isArray(candidate)) {
+      pending.push({ kind: 'token', value: ']' })
+      for (let index = candidate.length - 1; index >= 0; index -= 1) {
+        if (index < candidate.length - 1) pending.push({ kind: 'token', value: ',' })
+        pending.push({ kind: 'value', value: candidate[index] })
+      }
+      pending.push({ kind: 'token', value: '[' })
+      continue
+    }
+    if (candidate && typeof candidate === 'object') {
+      const keys = Object.keys(candidate).sort()
+      pending.push({ kind: 'token', value: '}' })
+      for (let index = keys.length - 1; index >= 0; index -= 1) {
+        if (index < keys.length - 1) pending.push({ kind: 'token', value: ',' })
+        const key = keys[index]
+        pending.push({ kind: 'value', value: candidate[key] })
+        pending.push({ kind: 'token', value: ':' })
+        pending.push({ kind: 'token', value: JSON.stringify(key) })
+      }
+      pending.push({ kind: 'token', value: '{' })
+      continue
+    }
+    hash.update(JSON.stringify(candidate === undefined ? null : candidate))
   }
-  return createHash('sha256').update(canonical(value)).digest('hex')
+  return hash.digest('hex')
 }
 
 export function redactTikHubEnvelope(payload) {
-  if (Array.isArray(payload)) return payload.map(redactTikHubEnvelope)
-  if (typeof payload === 'string') {
-    if (/^\s*bearer\s+/iu.test(payload)) return '[REDACTED]'
-    return redactTikHubString(payload)
-  }
+  // Provider field names such as token, signature, params and cache_url are
+  // legitimate acquired business data. Credential isolation is value-bound in
+  // the adapter, where the exact active Hub-to-TikHub credential is known.
   if (!payload || typeof payload !== 'object') return payload
-  const redacted = {}
-  for (const [key, value] of Object.entries(payload)) {
-    if (key === 'cache_url' || key === 'params' || privateField(key)) continue
-    redacted[key] = redactTikHubEnvelope(value)
+  const cloned = Array.isArray(payload) ? [] : {}
+  const pending = [{ source: payload, target: cloned }]
+  while (pending.length > 0) {
+    const { source, target } = pending.pop()
+    for (const [key, child] of Object.entries(source)) {
+      let copied
+      if (child && typeof child === 'object') {
+        copied = Array.isArray(child) ? [] : {}
+        pending.push({ source: child, target: copied })
+      } else {
+        copied = child
+      }
+      Object.defineProperty(target, key, {
+        value: copied,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+    }
   }
-  return redacted
+  return cloned
 }

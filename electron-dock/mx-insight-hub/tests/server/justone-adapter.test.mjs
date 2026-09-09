@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
@@ -65,8 +66,15 @@ test('adapter uses the pinned HTTPS path and injects token only into query', asy
   assert.equal(call.options.headers['x-api-key'], undefined)
   assert.equal(result.payload.data.items[0].id, 'tb-1')
   assert.equal(result.payload.data.items[0].title, '商品一 [REDACTED]')
-  assert.equal(result.payload.data.items[0].url, 'https://item.example.invalid/tb-1?campaign=safe')
+  assert.equal(
+    result.payload.data.items[0].url,
+    'https://item.example.invalid/tb-1?token=[REDACTED]&campaign=safe',
+  )
   assert.equal(result.records[0].externalId, 'taobao:tb-1')
+  assert.equal(result.records[0].rawItem.provider, 'private-provider')
+  assert.equal(result.records[0].rawItem.token, '[REDACTED]')
+  assert.equal(result.restrictedResponseArchive.parsedPayload.data.items[0].token, secret)
+  assert.match(result.restrictedResponseArchive.bodyText, new RegExp(secret, 'u'))
   assert.doesNotMatch(JSON.stringify(result), new RegExp(secret, 'u'))
   assert.doesNotMatch(JSON.stringify(result.payload), /provider|endpoint|billing|credential/iu)
   const responseArchive = result.archiveObjects[0]
@@ -82,6 +90,221 @@ test('adapter uses the pinned HTTPS path and injects token only into query', asy
   assert.match(responseArchive.rawPayload.response.bodySha256, /^[a-f0-9]{64}$/u)
   assert.match(responseArchive.archivePath, /\/responses\/[a-f0-9]{64}\.json$/u)
   assert.equal(result.archiveObjects[1].kind, 'item')
+})
+
+test('adapter removes the exact URLSearchParams credential encoding from public and operational data', async () => {
+  const secret = 'api/key+space ?&'
+  let reflectedToken
+  let lowerCaseToken
+  let doubleEncodedToken
+  const adapter = new JustOneAdapter({
+    token: secret,
+    fetchImpl: async (url) => {
+      const query = new URL(url).searchParams.toString()
+      reflectedToken = /^token=([^&]*)/u.exec(query)?.[1]
+      lowerCaseToken = reflectedToken.replace(
+        /%[0-9A-F]{2}/gu,
+        (escape) => escape.toLowerCase(),
+      )
+      const nestedQuery = new URLSearchParams()
+      nestedQuery.set('token', lowerCaseToken)
+      doubleEncodedToken = nestedQuery.toString().slice('token='.length).replace(
+        /%[0-9A-F]{2}/gu,
+        (escape) => escape.toLowerCase(),
+      )
+      return response(envelope({
+        items: [{
+          itemId: 'encoded-secret-item',
+          title: `provider echo ${lowerCaseToken}`,
+          itemUrl: `https://item.example.invalid/encoded-secret-item?token=${doubleEncodedToken}`,
+          debugUrl: `https://api.example.invalid/debug?token=${reflectedToken}`,
+        }],
+        hasMore: false,
+      }))
+    },
+  })
+
+  const result = await adapter.searchProducts({ marketplace: 'taobao', query: 'encoded token' })
+  const serialized = JSON.stringify(result)
+  const operationalArchives = JSON.stringify(result.archiveObjects)
+
+  assert.equal(reflectedToken, 'api%2Fkey%2Bspace+%3F%26')
+  assert.equal(result.payload.data.items[0].url.includes('[REDACTED]'), true)
+  for (const encoded of [reflectedToken, lowerCaseToken, doubleEncodedToken]) {
+    assert.equal(serialized.includes(encoded), false)
+    assert.equal(operationalArchives.includes(encoded), false)
+  }
+  assert.equal(serialized.includes(secret), false)
+  assert.equal(operationalArchives.includes(secret), false)
+  assert.equal(result.restrictedResponseArchive.bodyText.includes(reflectedToken), true)
+})
+
+test('adapter keeps JustOne business fields in ordinary evidence and exact bytes in restricted evidence', async () => {
+  const raw = {
+    ...envelope({
+      items: [{
+        skuId: 'sku-raw-1',
+        title: '正文中的 token=业务术语不能被改写',
+        itemUrl: 'https://item.example.invalid/sku-raw-1',
+      }],
+      hasMore: false,
+      search_id: 'business-pagination-search-id',
+      params: { source: 'XIAOHONGSHU', page: 1 },
+      signedUrl: 'https://media.example.invalid/a?signature=business-signature#business-fragment',
+    }),
+    provider: 'justone',
+    billing: { units: 1 },
+  }
+  const bodyText = JSON.stringify(raw)
+  const adapter = new JustOneAdapter({
+    token: 'request-only-secret',
+    fetchImpl: async () => new Response(bodyText, {
+      headers: { 'content-type': 'application/json' },
+    }),
+  })
+
+  const result = await adapter.searchProducts({ marketplace: 'jd', query: 'raw archive' }, {
+    capturedAt: '2026-09-03T00:00:00Z',
+  })
+
+  assert.equal(Object.prototype.propertyIsEnumerable.call(result, 'restrictedResponseArchive'), false)
+  assert.equal(result.restrictedResponseArchive.bodyText, bodyText)
+  assert.deepEqual(result.restrictedResponseArchive.bodyBytes, Buffer.from(bodyText, 'utf8'))
+  assert.equal(result.restrictedResponseArchive.bodySize, Buffer.byteLength(bodyText, 'utf8'))
+  assert.match(result.restrictedResponseArchive.bodySha256, /^[a-f0-9]{64}$/u)
+  assert.equal(result.restrictedResponseArchive.jsonParsed, true)
+  assert.deepEqual(result.restrictedResponseArchive.parsedPayload, raw)
+  assert.equal(result.restrictedResponseArchive.parsedPayload.data.search_id, 'business-pagination-search-id')
+  assert.equal(result.restrictedResponseArchive.parsedPayload.data.params.source, 'XIAOHONGSHU')
+  assert.match(result.restrictedResponseArchive.parsedPayload.data.items[0].title, /token=业务术语/u)
+  assert.match(result.restrictedResponseArchive.parsedPayload.data.signedUrl, /signature=business-signature/u)
+  assert.equal(result.archiveObjects[0].rawPayload.response.envelope.provider, 'justone')
+  assert.deepEqual(result.archiveObjects[0].rawPayload.response.envelope.billing, { units: 1 })
+  assert.equal(
+    result.archiveObjects[0].rawPayload.response.envelope.data.search_id,
+    'business-pagination-search-id',
+  )
+  assert.equal(JSON.stringify(result).includes('business-pagination-search-id'), true)
+  assert.doesNotMatch(JSON.stringify(result), /request-only-secret/u)
+})
+
+test('restricted evidence hashes and preserves the original response bytes including a UTF-8 BOM', async () => {
+  const raw = envelope({ items: [{ skuId: 'sku-bom', title: '正文保持原样' }], hasMore: false })
+  const bodyBytes = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(JSON.stringify(raw), 'utf8'),
+  ])
+  const adapter = new JustOneAdapter({
+    token: 'request-only-secret',
+    fetchImpl: async () => new Response(bodyBytes, {
+      headers: { 'content-type': 'application/json' },
+    }),
+  })
+
+  const result = await adapter.searchProducts({ marketplace: 'jd', query: 'bom' })
+
+  assert.deepEqual(result.restrictedResponseArchive.bodyBytes, bodyBytes)
+  assert.equal(result.restrictedResponseArchive.bodyText.codePointAt(0), 0xfeff)
+  assert.equal(result.restrictedResponseArchive.bodySize, bodyBytes.byteLength)
+  assert.equal(
+    result.restrictedResponseArchive.bodySha256,
+    createHash('sha256').update(bodyBytes).digest('hex'),
+  )
+  assert.equal(result.restrictedResponseArchive.jsonParsed, true)
+  assert.deepEqual(result.restrictedResponseArchive.parsedPayload, raw)
+})
+
+test('deep valid JSON still retains exact restricted JustOne response bytes', async () => {
+  const depth = 12_000
+  const bodyText = `{"code":400,"message":"invalid request","recordTime":"2026-09-03T00:00:00Z","requestId":"deep-response","data":${'{"nested":'.repeat(depth)}null${'}'.repeat(depth)}}`
+  const bodyBytes = Buffer.from(bodyText, 'utf8')
+  const adapter = new JustOneAdapter({
+    token: 'request-only-secret',
+    fetchImpl: async () => new Response(bodyBytes, {
+      headers: { 'content-type': 'application/json' },
+    }),
+  })
+
+  await assert.rejects(
+    () => adapter.searchProducts({ marketplace: 'jd', query: 'deep response' }),
+    (error) => {
+      assert.ok(error instanceof JustOneRejectedError)
+      assert.equal(error.archiveObjects[0].rawPayload.response.envelope, null)
+      assert.equal(error.restrictedResponseArchive.bodyBytes.equals(bodyBytes), true)
+      assert.equal(error.restrictedResponseArchive.bodyText, bodyText)
+      assert.equal(error.restrictedResponseArchive.jsonParsed, true)
+      assert.equal(error.restrictedResponseArchive.parsedPayload, null)
+      return true
+    },
+  )
+})
+
+test('JustOne PostgreSQL-unsafe payloads keep exact bytes while optional projections stay null', async () => {
+  const cases = [
+    {
+      bodyText: '{"code":0,"message":null,"recordTime":"2026-09-03T00:00:00Z","requestId":"nul-json","data":{"text":"\\u0000"}}',
+      ErrorClass: JustOneSucceededUnusableError,
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      retainsText: true,
+    },
+    {
+      bodyText: '{"code":0,"message":null,"recordTime":"2026-09-03T00:00:00Z","requestId":"surrogate-json","data":{"text":"\\ud800"}}',
+      ErrorClass: JustOneSucceededUnusableError,
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      retainsText: true,
+    },
+    {
+      bodyText: '{"code":0,"message":null,"recordTime":"2026-09-03T00:00:00Z","requestId":"infinity-json","data":{"value":1e400}}',
+      ErrorClass: JustOneSucceededUnusableError,
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      retainsText: true,
+    },
+    {
+      bodyText: '{"code":0,"message":null,"recordTime":"2026-09-03T00:00:00Z","requestId":"negative-zero-json","data":{"value":-0}}',
+      ErrorClass: JustOneSucceededUnusableError,
+      expectedCode: 'upstream_payload_unrepresentable',
+      expectedJsonParsed: true,
+      retainsText: true,
+    },
+    {
+      bodyText: '{"code":0,"message":"literal\0nul","recordTime":null,"data":null}',
+      ErrorClass: JustOneAmbiguousError,
+      expectedCode: 'invalid_upstream_json',
+      expectedJsonParsed: false,
+      retainsText: false,
+    },
+  ]
+
+  for (const expected of cases) {
+    const bodyBytes = Buffer.from(expected.bodyText, 'utf8')
+    const adapter = new JustOneAdapter({
+      token: 'request-only-secret',
+      fetchImpl: async () => new Response(bodyBytes, {
+        headers: { 'content-type': 'application/json' },
+      }),
+    })
+
+    await assert.rejects(
+      () => adapter.searchProducts({ marketplace: 'jd', query: 'nul response' }),
+      (error) => {
+        assert.ok(error instanceof expected.ErrorClass)
+        assert.equal(error.evidence.errorCode, expected.expectedCode)
+        assert.equal(error.archiveObjects.length, 1)
+        assert.equal(error.archiveObjects[0].rawPayload.response.envelope, null)
+        assert.equal(error.restrictedResponseArchive.bodyBytes.equals(bodyBytes), true)
+        assert.equal(
+          error.restrictedResponseArchive.bodyText,
+          expected.retainsText ? expected.bodyText : null,
+        )
+        assert.equal(error.restrictedResponseArchive.jsonParsed, expected.expectedJsonParsed)
+        assert.equal(error.restrictedResponseArchive.parsedPayload, null)
+        return true
+      },
+    )
+  }
 })
 
 test('adapter resolves one dynamic credential per dispatch and uses it consistently for redaction', async () => {
@@ -420,9 +643,9 @@ test('a valid code=0 response that Hub cannot map is billed and marked succeeded
       assert.equal(archive.rawPayload.response.businessCode, 0)
       assert.equal(archive.rawPayload.response.billed, true)
       assert.equal(archive.rawPayload.response.envelope.code, 0)
-      assert.equal(archive.rawPayload.response.envelope.data.session, undefined)
+      assert.equal(archive.rawPayload.response.envelope.data.session, 'private-session')
       assert.match(archive.payloadSha256, /^[a-f0-9]{64}$/u)
-      assert.doesNotMatch(JSON.stringify(error), /top-secret-token|private-session/iu)
+      assert.doesNotMatch(JSON.stringify(error), /top-secret-token/u)
       return true
     },
   )

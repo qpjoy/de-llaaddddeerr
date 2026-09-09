@@ -326,6 +326,15 @@ test('compatibility request keeps legacy aliases but enforces the Hub trust boun
   assert.equal(coerced.upstreamBody.count, 20)
   assert.equal(coerced.upstreamBody.page, 2)
   assert.equal(coerced.upstreamBody.concurrency, 3)
+  assert.equal(normalizeNightAllCompatibilityRequest('raw', {
+    platform: 'xhs', keyword: 'AI', page: 15,
+  }, options).upstreamBody.page, 15)
+  assert.throws(
+    () => normalizeNightAllCompatibilityRequest('raw', {
+      platform: 'xhs', keyword: 'AI', page: 16,
+    }, options),
+    (error) => error?.code === 'invalid_request' && /between 1 and 15/u.test(error.message),
+  )
 
   for (const field of ['url', 'profileUrl', 'profile_url']) {
     const profileUrl = `https://www.linkedin.com/in/${field}`
@@ -465,14 +474,11 @@ async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
 
   let mode = 'complete'
   let calls = 0
-  let compatibilityCapabilities = legacySearchCapabilities()
-  let compatibilityCapabilitiesError = null
   let capabilityCalls = 0
   const adapter = {
     async legacySearchCapabilities() {
       capabilityCalls += 1
-      if (compatibilityCapabilitiesError) throw compatibilityCapabilitiesError
-      return structuredClone(compatibilityCapabilities)
+      assert.fail('Compatibility dispatch must use the Hub-pinned local matrix')
     },
     async legacySearch({ body, businessId }) {
       calls += 1
@@ -511,58 +517,34 @@ async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
     service,
     context,
     setMode(value) { mode = value },
-    setCompatibilityCapabilities(value) { compatibilityCapabilities = value },
-    setCompatibilityCapabilitiesError(value) { compatibilityCapabilitiesError = value },
     capabilityCalls() { return capabilityCalls },
     calls() { return calls },
     jobs,
   }
 }
 
-test('compatibility rejects unsupported and unavailable platform operations before durable dispatch', async () => {
-  const fixture = await compatibilityFixture()
-  fixture.setCompatibilityCapabilities(legacySearchCapabilities({ rawSupported: [], rawReady: [] }))
+test('compatibility uses the local pinned matrix and rejects unsupported operations before reservation or dispatch', async () => {
+  const fixture = await compatibilityFixture({ grants: ['bilibili'] })
   await assert.rejects(
-    () => compatibilityCall(fixture, 'compat-unsupported-001'),
-    (error) => error?.status === 400 && error?.code === 'platform_operation_unsupported',
+    () => fixture.service.nightAllCompatibilitySearch(fixture.context, {
+      operation: 'crawl',
+      path: '/api/v1/night-all/search/crawl',
+      idempotencyKey: 'compat-unsupported-001',
+      body: { platform: 'bilibili', username: 'alice', count: 20 },
+    }),
+    (error) => error?.status === 400
+      && error?.code === 'platform_operation_unsupported'
+      && error?.details?.platform === 'bilibili'
+      && error?.details?.operation === 'crawl',
   )
-  assert.equal(fixture.calls(), 0)
-  assert.equal(fixture.store.requests.size, 0)
-  assert.equal(fixture.store.connectorCalls.size, 0)
-
-  fixture.setCompatibilityCapabilities(legacySearchCapabilities({ rawReady: [] }))
-  await assert.rejects(
-    () => compatibilityCall(fixture, 'compat-unavailable-001'),
-    (error) => error?.status === 503 && error?.code === 'platform_operation_unavailable',
-  )
+  assert.equal(fixture.capabilityCalls(), 0)
   assert.equal(fixture.calls(), 0)
   assert.equal(fixture.store.requests.size, 0)
   assert.equal(fixture.store.connectorCalls.size, 0)
 })
 
-test('compatibility fails closed on a missing matrix and never redirects local Telegram to stored search', async () => {
-  const missing = await compatibilityFixture()
-  missing.setCompatibilityCapabilities(null)
-  await assert.rejects(
-    () => compatibilityCall(missing, 'compat-matrix-missing-001'),
-    (error) => error?.status === 503 && error?.code === 'compatibility_capabilities_unavailable',
-  )
-  assert.equal(missing.calls(), 0)
-  assert.equal(missing.store.requests.size, 0)
-
-  const incomplete = await compatibilityFixture()
-  const incompleteMatrix = legacySearchCapabilities()
-  delete incompleteMatrix.operations.crawl
-  incomplete.setCompatibilityCapabilities(incompleteMatrix)
-  await assert.rejects(
-    () => compatibilityCall(incomplete, 'compat-matrix-incomplete-001'),
-    (error) => error?.status === 503 && error?.code === 'compatibility_capabilities_unavailable',
-  )
-  assert.equal(incomplete.calls(), 0)
-  assert.equal(incomplete.store.requests.size, 0)
-
+test('compatibility never redirects local Telegram to stored search', async () => {
   const telegram = await compatibilityFixture({ grants: ['telegram'] })
-  telegram.setCompatibilityCapabilities(legacySearchCapabilities())
   await assert.rejects(
     () => telegram.service.nightAllCompatibilitySearch(telegram.context, {
       operation: 'raw',
@@ -573,6 +555,7 @@ test('compatibility fails closed on a missing matrix and never redirects local T
     (error) => error?.status === 400 && error?.code === 'platform_operation_unsupported',
   )
   assert.equal(telegram.calls(), 0)
+  assert.equal(telegram.capabilityCalls(), 0)
   assert.equal(telegram.store.requests.size, 0)
   assert.equal(telegram.store.connectorCalls.size, 0)
 })
@@ -603,24 +586,21 @@ test('public capabilities identify Hub-local Telegram without adding it to Night
   assert.equal(payload.data.legacySearch, null)
 })
 
-test('public capabilities canonicalize platform grant aliases before Night-All filtering', async () => {
-  let allowedPlatforms
+test('public capabilities compile canonicalized legacy grants without calling Night-All', async () => {
   const service = new HubService({
     store: {
       async listGrants() { return ['xhs'] },
       async listCapabilityGrants() { return [] },
     },
     adapter: {
-      async capabilities(allowed) {
-        allowedPlatforms = allowed
-        return { data: { platforms: [], legacySearch: legacySearchCapabilities() } }
-      },
+      async capabilities() { assert.fail('Capability discovery must not call Night-All') },
     },
     apiKeyPepper: 'test-pepper',
   })
 
-  await service.capabilities({ consumer: { id: 'consumer-1' } })
-  assert.deepEqual(allowedPlatforms, ['xiaohongshu'])
+  const payload = await service.capabilities({ consumer: { id: 'consumer-1' } })
+  assert.deepEqual(payload.data.platforms, [{ platform: 'xiaohongshu', ready: false }])
+  assert.deepEqual(payload.data.legacySearch, legacySearchCapabilities())
 })
 
 function compatibilityCall(fixture, idempotencyKey, query = 'AI') {
@@ -666,69 +646,44 @@ test('a compatibility idempotency key permanently replays its one paid dispatch'
   const [request] = fixture.store.requests.values()
   request.completedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString()
   fixture.setMode('unavailable')
-  fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
 
   const replay = await compatibilityCall(fixture, 'compat-permanent-replay')
   assert.equal(replay.replay, true)
   assert.deepEqual(replay.body, live.body)
   assert.equal(replay.sourceMode, live.sourceMode)
   assert.equal(replay.capturedAt, live.capturedAt)
-  assert.equal(fixture.capabilityCalls(), 1)
+  assert.equal(fixture.capabilityCalls(), 0)
   assert.equal(fixture.calls(), 1)
   assert.equal(fixture.store.connectorCalls.size, 1)
 })
 
-test('a capability failure rechecks an idempotency key inserted after the initial lookup', async () => {
+test('a released compatibility key redispatches without a capabilities network precheck', async () => {
   const fixture = await compatibilityFixture()
-  const live = await compatibilityCall(fixture, 'compat-raced-replay')
-  const lookup = fixture.store.getUsageRequestByIdempotencyKey.bind(fixture.store)
-  let lookups = 0
-  fixture.store.getUsageRequestByIdempotencyKey = async (...args) => {
-    lookups += 1
-    if (lookups === 1) return null
-    return lookup(...args)
-  }
-  fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
-
-  const replay = await compatibilityCall(fixture, 'compat-raced-replay')
-  assert.equal(lookups, 2)
-  assert.equal(replay.replay, true)
-  assert.deepEqual(replay.body, live.body)
+  fixture.setMode('unavailable')
+  await assert.rejects(
+    () => compatibilityCall(fixture, 'compat-released-local-matrix'),
+    (error) => error?.code === 'night_all_rejected',
+  )
+  const [request] = fixture.store.requests.values()
+  assert.equal(request.status, 'released')
   assert.equal(fixture.calls(), 1)
+
+  fixture.setMode('complete')
+  const result = await compatibilityCall(fixture, 'compat-released-local-matrix')
+  assert.equal(result.sourceMode, 'live')
+  assert.equal(
+    (await fixture.store.getUsageRequestByIdempotencyKey(
+      fixture.context.consumer.id,
+      'compat-released-local-matrix',
+    )).status,
+    'committed',
+  )
+  assert.equal(fixture.calls(), 2)
+  assert.equal(fixture.store.connectorCalls.size, 2)
+  assert.equal(fixture.capabilityCalls(), 0)
 })
 
-test('a released compatibility key must pass capability precheck before redispatch', async () => {
-  for (const capabilityMode of ['down', 'unsupported']) {
-    const fixture = await compatibilityFixture()
-    fixture.setMode('unavailable')
-    await assert.rejects(
-      () => compatibilityCall(fixture, `compat-released-${capabilityMode}`),
-      (error) => error?.code === 'night_all_rejected',
-    )
-    const [request] = fixture.store.requests.values()
-    assert.equal(request.status, 'released')
-    assert.equal(fixture.calls(), 1)
-
-    fixture.setMode('complete')
-    if (capabilityMode === 'down') {
-      fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
-    } else {
-      fixture.setCompatibilityCapabilities(legacySearchCapabilities({ rawSupported: [], rawReady: [] }))
-    }
-    await assert.rejects(
-      () => compatibilityCall(fixture, `compat-released-${capabilityMode}`),
-      (error) => capabilityMode === 'down'
-        ? error?.code === 'compatibility_capabilities_unavailable'
-        : error?.code === 'platform_operation_unsupported',
-    )
-    assert.equal(request.status, 'released')
-    assert.equal(fixture.calls(), 1)
-    assert.equal(fixture.store.connectorCalls.size, 1)
-    assert.equal(fixture.capabilityCalls(), 2)
-  }
-})
-
-test('decisive idempotency states remain independent of capability availability', async () => {
+test('decisive idempotency states remain unchanged without capabilities network probes', async () => {
   for (const [status, code] of [
     ['reserved', 'request_in_progress'],
     ['unknown', 'request_outcome_unknown'],
@@ -737,24 +692,41 @@ test('decisive idempotency states remain independent of capability availability'
     await compatibilityCall(fixture, `compat-existing-${status}`)
     const [request] = fixture.store.requests.values()
     request.status = status
-    fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
     await assert.rejects(
       () => compatibilityCall(fixture, `compat-existing-${status}`),
       (error) => error?.code === code,
     )
-    assert.equal(fixture.capabilityCalls(), 1)
+    assert.equal(fixture.capabilityCalls(), 0)
     assert.equal(fixture.calls(), 1)
   }
 
   const conflict = await compatibilityFixture()
   await compatibilityCall(conflict, 'compat-existing-conflict', 'first')
-  conflict.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
   await assert.rejects(
     () => compatibilityCall(conflict, 'compat-existing-conflict', 'different'),
     (error) => error?.code === 'idempotency_conflict',
   )
-  assert.equal(conflict.capabilityCalls(), 1)
+  assert.equal(conflict.capabilityCalls(), 0)
   assert.equal(conflict.calls(), 1)
+
+  const unsupportedConflict = await compatibilityFixture({ grants: ['bilibili'] })
+  await unsupportedConflict.service.nightAllCompatibilitySearch(unsupportedConflict.context, {
+    operation: 'raw',
+    path: '/api/v1/night-all/search/raw',
+    idempotencyKey: 'compat-operation-conflict',
+    body: { platform: 'bilibili', query: 'first', count: 20 },
+  })
+  await assert.rejects(
+    () => unsupportedConflict.service.nightAllCompatibilitySearch(unsupportedConflict.context, {
+      operation: 'crawl',
+      path: '/api/v1/night-all/search/crawl',
+      idempotencyKey: 'compat-operation-conflict',
+      body: { platform: 'bilibili', username: 'alice', count: 20 },
+    }),
+    (error) => error?.code === 'idempotency_conflict',
+  )
+  assert.equal(unsupportedConflict.capabilityCalls(), 0)
+  assert.equal(unsupportedConflict.calls(), 1)
 })
 
 test('an invalid HTTP 2xx envelope is unknown and cannot redispatch the same key', async () => {

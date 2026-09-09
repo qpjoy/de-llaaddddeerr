@@ -622,7 +622,7 @@ function externalSocialPostOperation({ platformShaped = false } = {}) {
         'external_platform_response_unusable', 'uncertain_retry_not_allowed',
       ],
       413: ['payload_too_large'],
-      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
       502: [
         'external_platform_response_unusable', 'external_platform_outcome_unknown',
         'external_platform_rejected',
@@ -630,6 +630,7 @@ function externalSocialPostOperation({ platformShaped = false } = {}) {
       503: [
         'external_platform_unavailable', 'external_platform_not_configured',
         'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+        'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete',
       ],
     },
     parameters: [externalPostIdempotencyParameter, externalPostUncertainRepeatParameter],
@@ -693,8 +694,180 @@ function platformShapedExternalSocialPostGetOperation() {
   }
 }
 
+const officialXiaohongshuIdempotencyParameter = {
+  name: 'Idempotency-Key', in: 'header', required: false,
+  description: 'Optional for App V2-compatible GETs. When supplied it is bound to this exact endpoint and normalized query; when omitted Hub derives an API-key-scoped freshness-bucket key so normal official clients remain replay-safe.',
+  schema: { type: 'string', minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$' },
+}
+
+const officialXiaohongshuResponse = {
+  description: 'The acquired App V2 business envelope. Hub preserves business fields, text, tags, pagination identifiers and signed media URLs. Only an exact active Hub-to-upstream credential is removed if the upstream echoes it; request Authorization, Cookie and API-key headers are never copied into the response.',
+  headers: {
+    'x-mx-insight-request-id': {
+      description: 'Durable Hub request identifier.',
+      schema: { type: 'string', format: 'uuid' },
+    },
+    'idempotent-replay': { schema: { type: 'string', enum: ['true', 'false'] } },
+    'x-mx-insight-source-mode': {
+      schema: { type: 'string', enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'] },
+    },
+    'x-mx-insight-captured-at': { schema: { type: 'string', format: 'date-time' } },
+    Age: { schema: { type: 'integer', minimum: 0 } },
+    Warning: { schema: { type: 'string' } },
+  },
+  content: {
+    'application/json': {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        description: 'Upstream-compatible business envelope governed and archived by Hub.',
+      },
+    },
+  },
+}
+
+function officialXiaohongshuOperation(endpointName) {
+  const definitions = {
+    get_image_note_detail: {
+      operationId: 'getXiaohongshuImageNoteDetailOfficial',
+      summary: 'Get one image-note detail with the App V2-compatible contract',
+      capability: true,
+      parameters: [
+        {
+          name: 'note_id', in: 'query', required: false,
+          description: 'A 24-character Xiaohongshu note ID. Either note_id or share_text is required.',
+          schema: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
+        },
+        {
+          name: 'share_text', in: 'query', required: false,
+          description: 'Provider-bound share text or URL. Business query parameters are preserved for the upstream request.',
+          schema: { type: 'string', minLength: 1, maxLength: 8192 },
+        },
+      ],
+    },
+    search_notes: {
+      operationId: 'searchXiaohongshuNotesOfficial',
+      summary: 'Search notes with the App V2-compatible contract',
+      parameters: [
+        { name: 'keyword', in: 'query', required: true, schema: { type: 'string', minLength: 1, maxLength: 500 } },
+        { name: 'page', in: 'query', required: false, description: 'Explicit page, governed to 1..15.', schema: { type: 'integer', minimum: 1, maximum: 15, default: 1 } },
+        ...['sort_type', 'note_type', 'time_filter', 'search_id', 'search_session_id', 'source']
+          .map((name) => ({ name, in: 'query', required: false, schema: { type: 'string', minLength: 1, maxLength: 2048 } })),
+        { name: 'ai_mode', in: 'query', required: false, schema: { type: 'string', enum: ['0', '1'], default: '0' } },
+      ],
+    },
+    search_users: {
+      operationId: 'searchXiaohongshuUsersOfficial',
+      summary: 'Search users with the App V2-compatible contract',
+      parameters: [
+        { name: 'keyword', in: 'query', required: true, schema: { type: 'string', minLength: 1, maxLength: 500 } },
+        { name: 'page', in: 'query', required: false, description: 'Explicit page, governed to 1..15.', schema: { type: 'integer', minimum: 1, maximum: 15, default: 1 } },
+        ...['search_id', 'source'].map((name) => ({ name, in: 'query', required: false, schema: { type: 'string', minLength: 1, maxLength: 2048 } })),
+      ],
+    },
+    get_user_info: {
+      operationId: 'getXiaohongshuUserInfoOfficial',
+      summary: 'Get one user profile with the App V2-compatible contract',
+      parameters: [
+        { name: 'user_id', in: 'query', required: false, description: 'A 24-character Xiaohongshu user ID. Either user_id or share_text is required.', schema: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' } },
+        { name: 'share_text', in: 'query', required: false, schema: { type: 'string', minLength: 1, maxLength: 8192 } },
+      ],
+    },
+    get_user_posted_notes: {
+      operationId: 'getXiaohongshuUserPostedNotesOfficial',
+      summary: 'Get one user\'s posted notes with the App V2-compatible contract',
+      parameters: [
+        { name: 'user_id', in: 'query', required: false, description: 'A 24-character Xiaohongshu user ID. Either user_id or share_text is required.', schema: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' } },
+        { name: 'share_text', in: 'query', required: false, schema: { type: 'string', minLength: 1, maxLength: 8192 } },
+        { name: 'cursor', in: 'query', required: false, description: 'Opaque Hub cursor returned by the preceding page. It wraps the provider cursor, binds the user scope and terminates after page 15.', schema: { type: 'string', minLength: 1, maxLength: 8192 } },
+      ],
+    },
+  }
+  const definition = definitions[endpointName]
+  return {
+    tags: ['External Data'],
+    operationId: definition.operationId,
+    summary: definition.summary,
+    'x-mx-strict-query': true,
+    description: `A Hub-governed App V2-compatible GET, not an unmetered proxy. It uses a Live Hub Public API key, immutable Xiaohongshu authorization${definition.capability ? ' and the social.posts.resolve capability' : ''}, one-unit customer metering, provider cost admission, idempotency, response archive and canonical ingest/outbox. Provider business fields remain intact. Explicit page traversal and the opaque user-post cursor are capped at 15 pages; this governance limit does not truncate content. Search responses may contain provider previews; use the detail endpoint for the complete note while every preview is still stored with provider_preview completeness.`,
+    'x-mx-error-codes': {
+      400: ['invalid_request', 'unsupported_fields', 'invalid_page', 'invalid_ai_mode', 'invalid_cursor', 'invalid_upstream_pagination', 'invalid_idempotency_key'],
+      401: ['api_key_required', 'invalid_api_key'],
+      403: ['platform_not_granted', ...(definition.capability ? ['capability_not_granted'] : []), 'test_key_not_supported'],
+      404: ['not_found', 'post_not_found'],
+      409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable'],
+      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
+      502: ['external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
+      503: ['external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete'],
+    },
+    parameters: [...definition.parameters, officialXiaohongshuIdempotencyParameter],
+    responses: {
+      200: officialXiaohongshuResponse,
+      400: errorResponse,
+      401: errorResponse,
+      403: errorResponse,
+      404: errorResponse,
+      409: errorResponse,
+      429: errorResponse,
+      502: errorResponse,
+      503: errorResponse,
+    },
+  }
+}
+
+function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
+  const aliasDescription = historicalAlias
+    ? 'This historical /search spelling is an exact alias of /night-all/search: both enter the same Hub service and paid-operation fingerprint, so changing the route cannot authorize or purchase a second upstream dispatch. '
+    : ''
+  return {
+    tags: ['Compatibility'],
+    operationId: historicalAlias
+      ? 'searchHistoricalCompatibilityAlias'
+      : 'searchNightAllCompatibility',
+    summary: historicalAlias
+      ? 'Call a legacy search operation through its historical route alias'
+      : 'Call one of the three Night-All legacy search operations',
+    description: `${aliasDescription}The Hub authenticates and authorizes the platform, then selects the implementation without exposing provider credentials. After independent rollout gates, a compatible Xiaohongshu raw first-page request uses the Hub-native direct connector when it has exactly one scalar keyword or query, effective page size 20, and no fan-out/detail/comment workload controls. Explicit includeDetails=false/includeComments=false remain harmless compatibility defaults. Xiaohongshu crawl and user-info also use Hub-native acquisition for one username, userId, uid or official profile URL; crawl additionally requires posts-only activity, effective page size 20, concurrency 1 and either no cursor or its Hub-issued opaque cursor. These migrated shapes retain the historical legacy envelope and one customer usage unit while all provider calls are cost-admitted atomically. Unsupported multi-identifier/channel/non-post/non-20/custom-params shapes continue on the historical compatibility path until migrated. Previously issued direct cursors stay on their owning connector. Historical Night-All cursor/composite/page/offset continuations are replaced at the public boundary by a consumer/operation/platform/query-scoped encrypted mxnc1 cursor carrying the next page number; public page mode becomes cursor mode, public offset mode becomes composite mode, and page 15 is terminal. Pre-migration raw provider cursors or continuation params return 400 invalid_cursor and must restart without a cursor and with a new Idempotency-Key. The direct projection keeps raw_info and raw_data as JSON strings and puts the durable Hub request UUID in both the body requestId and x-mx-insight-request-id header. Night-All-owned live/fallback bodies keep their original business fields and correlation IDs unchanged; only pagination-control fields are governed. Historical ingestion retains the complete pre-projection parsed JSON and legacy raw strings; Hub-native provider calls additionally retain exact response bytes in restricted storage. The legacy x-mx-insight-source-mode header remains live or stale; Hub-native cache/replay states map back to that vocabulary. Historical dispatch is governed by the Hub-pinned, grant-filtered data.legacySearch matrix returned by GET /data/capabilities; its selected platform must appear in both supportedPlatforms and readyPlatforms. A data.platforms entry alone, including telegram, does not grant a historical operation. The matrix is owned by the deployed Hub release and is not fetched from Night-All at request time. readyPlatforms does not prove current Night-All handler, endpoint, provider, credential, or upstream health. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return the exact governed snapshot. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy.`,
+    ...(historicalAlias
+      ? { 'x-mx-canonical-operation': '/night-all/search/{operation}' }
+      : {}),
+    'x-mx-error-codes': {
+      400: ['invalid_request', 'invalid_query', 'invalid_cursor', 'invalid_page_size', 'cursor_scope_mismatch', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported', 'night_all_rejected'],
+      401: ['api_key_required', 'invalid_api_key'],
+      403: ['platform_not_granted', 'test_key_not_supported'],
+      404: ['not_found', 'night_all_rejected'],
+      409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable', 'night_all_rejected'],
+      422: ['night_all_rejected'],
+      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted', 'night_all_rejected'],
+      502: ['night_all_rejected', 'upstream_outcome_unknown', 'external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
+      503: ['platform_operation_unavailable', 'compatibility_capabilities_unavailable', 'compatibility_store_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete'],
+    },
+    parameters: [
+      {
+        name: 'operation', in: 'path', required: true,
+        schema: { type: 'string', enum: ['raw', 'crawl', 'user-info'] },
+      },
+      nightAllCompatibilityIdempotencyParameter,
+    ],
+    requestBody: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: { $ref: '#/components/schemas/NightAllLegacyRequest' },
+          examples: {
+            raw: { value: { platform: 'xiaohongshu', keyword: 'AI Agent', count: 20 } },
+            crawl: { value: { platform: 'twitter', username: 'openai', count: 20 } },
+            userInfo: { value: { platform: 'twitter', username: 'openai' } },
+          },
+        },
+      },
+    },
+    responses: { 200: nightAllCompatibilityResponse, ...publicErrors, 422: errorResponse },
+  }
+}
+
 const nightAllCompatibilityResponse = {
-  description: 'Legacy raw envelope. After the independent search rollout gate, an eligible Xiaohongshu raw first-page request is projected by a Hub-native connector without changing raw_info/raw_data types; previously issued direct cursors remain on that connector. Other requests and their exact fallback snapshots retain the Night-All-owned application fields unchanged.',
+  description: 'Legacy envelope. After independent rollout gates, eligible single-query Xiaohongshu raw and eligible single-identifier Xiaohongshu crawl/user-info requests use Hub-native acquisition without changing raw_info/raw_data types. Hub-issued cursors remain on their owning connector. Historical Night-All continuations are exposed only as encrypted mxnc1 Hub cursors and every traversal stops after page 15. Business fields remain unchanged; only pagination controls are governed. Historical ingestion retains complete parsed JSON; Hub-native calls additionally retain exact response bytes in restricted storage.',
   headers: {
     'x-mx-insight-request-id': {
       description: 'Durable Hub request identifier for status lookup.',
@@ -883,7 +1056,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. A Xiaohongshu entry with search_posts and search.ready=true advertises the Hub-native 20-item search contract used transparently by /data/search and eligible legacy raw requests. When Xiaohongshu already has a compatibility platform row, Hub preserves its provider-neutral top-level readiness/source identity; only nested search and postDetail describe Hub-direct readiness. post_detail is advertised only when the same key also has the independent social.posts.resolve capability grant. Telegram bounded message context and bidirectional live-keyset timeline are advertised per dataset under platform.context and platform.timeline; their ready flags are index-serving gates independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for Night-All-owned compatibility operations and is compiled into the deployed Hub contract rather than discovered from Night-All at request time. Direct search takes only the compatible first-page/raw subset; Xiaohongshu remains in the legacy matrix because non-direct raw shapes, crawl and user-info still use the historical path. An operation governed by that matrix requires its platform in both supportedPlatforms and readyPlatforms. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for that historical compatibility path.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. A Xiaohongshu entry with search_posts and search.ready=true advertises the Hub-native 20-item search contract used by /data/search and eligible legacy raw requests. Eligible single-identifier Xiaohongshu crawl/user-info requests are also Hub-native after their independent rollout gate. When Xiaohongshu already has a compatibility platform row, Hub preserves its provider-neutral top-level readiness/source identity; only nested search and postDetail describe Hub-direct readiness. post_detail is advertised only when the same key also has the independent social.posts.resolve capability grant. Telegram bounded message context and bidirectional live-keyset timeline are advertised per dataset under platform.context and platform.timeline; their ready flags are index-serving gates independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for historical compatibility operations and is compiled into the deployed Hub contract rather than discovered at request time. Xiaohongshu remains in the legacy matrix because unsupported multi-query, multi-identifier, channel, non-post, non-20-page and custom-params shapes have not yet migrated. An operation governed by that matrix requires its platform in both supportedPlatforms and readyPlatforms. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove the current historical handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for that historical compatibility path.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -1073,7 +1246,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             'external_platform_response_unusable', 'uncertain_retry_not_allowed',
           ],
           413: ['payload_too_large'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
           502: [
             'external_platform_response_unusable', 'external_platform_outcome_unknown',
             'external_platform_rejected',
@@ -1081,6 +1254,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           503: [
             'external_platform_unavailable', 'external_platform_not_configured',
             'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+            'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete',
           ],
         },
         parameters: [externalCommerceIdempotencyParameter, externalCommerceUncertainRepeatParameter],
@@ -1184,6 +1358,21 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       get: platformShapedExternalSocialPostGetOperation(),
       post: externalSocialPostOperation({ platformShaped: true }),
     },
+    '/xiaohongshu/app_v2/get_image_note_detail': {
+      get: officialXiaohongshuOperation('get_image_note_detail'),
+    },
+    '/xiaohongshu/app_v2/search_notes': {
+      get: officialXiaohongshuOperation('search_notes'),
+    },
+    '/xiaohongshu/app_v2/search_users': {
+      get: officialXiaohongshuOperation('search_users'),
+    },
+    '/xiaohongshu/app_v2/get_user_info': {
+      get: officialXiaohongshuOperation('get_user_info'),
+    },
+    '/xiaohongshu/app_v2/get_user_posted_notes': {
+      get: officialXiaohongshuOperation('get_user_posted_notes'),
+    },
     '/data/posts/media': {
       get: {
         tags: ['External Data'],
@@ -1237,16 +1426,16 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Search'],
         operationId: 'searchData',
         summary: 'Search one explicitly selected platform',
-        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the default and only Hub-native page size is exactly 20. Compatible first-page requests use the governed direct external-data connector only after an independent rollout gate; previously issued opaque direct cursors remain on that connector. The response keeps the night-all.data-search.v1 envelope. A historical cursor or a non-20 pageSize stays on the historical compatibility path, so callers must return every cursor unchanged and must not move cursors between paths, queries or page sizes. Hub automatically attempts bounded detail enrichment only for note bodies at the provider preview boundary; it keeps a detail body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion is Hub-local and is deliberately rejected by this live-compatible route; use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external provider. Each page uses its own Idempotency-Key; replay the same body with the same Idempotency-Key.',
+        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the default and only Hub-native page size is exactly 20. Compatible first-page requests use the governed direct external-data connector only after an independent rollout gate; previously issued opaque mxec2 direct cursors remain on that connector. The response keeps the night-all.data-search.v1 envelope. A non-20 pageSize stays on the historical compatibility path; that path now returns an encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and terminates after page 15. Return that cursor unchanged with a new Idempotency-Key for each page. A pre-migration raw historical cursor returns 400 invalid_cursor and must restart from a cursor-less first page. Hub automatically attempts bounded detail enrichment only for note bodies at the provider preview boundary; it keeps a detail body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion is Hub-local and is deliberately rejected by this live-compatible route; use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external provider; cursors cannot move between paths, queries or page sizes. Replay the same body with the same Idempotency-Key.',
         'x-mx-error-codes': {
           400: ['invalid_request', 'invalid_platform', 'invalid_query', 'invalid_cursor', 'invalid_page_size', 'cursor_scope_mismatch', 'page_size_exceeded', 'unsupported_fields', 'unsupported_match_mode', 'invalid_result_type', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'test_key_not_supported'],
           409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable'],
           410: ['search_cursor_expired'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded'],
+          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
           502: ['night_all_rejected', 'upstream_outcome_unknown', 'external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
-          503: ['stored_search_unavailable', 'search_cursor_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_capacity_unavailable'],
+          503: ['stored_search_unavailable', 'search_cursor_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete'],
         },
         parameters: [idempotencyParameter],
         requestBody: {
@@ -1271,44 +1460,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       },
     },
     '/night-all/search/{operation}': {
-      post: {
-        tags: ['Compatibility'],
-        operationId: 'searchNightAllCompatibility',
-        summary: 'Call one of the three Night-All legacy search operations',
-        description: 'The Hub authenticates and authorizes the platform, then selects the implementation without exposing provider details. After an independent rollout gate, a compatible Xiaohongshu raw first-page request uses the Hub-native direct connector when it has exactly one scalar keyword or query, effective page size 20, and no fan-out/detail/comment workload controls; previously issued opaque direct cursors remain on that connector. Explicit includeDetails=false/includeComments=false remain harmless compatibility defaults, and disableAutoDetails=true only disables the automatic preview-boundary detail check; true detail/comment flags, maxEnrichItems, comment cursors/limits, enrichment concurrency, params, explicit cache age, non-20 pages, plural queries, crawl and user-info stay on the historical compatibility path. The direct projection keeps raw_info and raw_data as JSON strings and puts the durable Hub request UUID in both the body requestId and x-mx-insight-request-id header. Night-All-owned live/fallback bodies keep their original application fields and correlation IDs unchanged. The legacy x-mx-insight-source-mode header remains live or stale; Hub-native cache/replay states map back to that vocabulary. Historical dispatch is governed by the Hub-pinned, grant-filtered data.legacySearch matrix returned by GET /data/capabilities; its selected platform must appear in both supportedPlatforms and readyPlatforms. A data.platforms entry alone, including telegram, does not grant a historical operation. The matrix is owned by the deployed Hub release and is not fetched from Night-All at request time. readyPlatforms does not prove current Night-All handler, endpoint, provider, credential, or upstream health. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return the exact compatible snapshot. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy.',
-        'x-mx-error-codes': {
-          400: ['invalid_request', 'invalid_query', 'invalid_cursor', 'invalid_page_size', 'cursor_scope_mismatch', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported', 'night_all_rejected'],
-          401: ['api_key_required', 'invalid_api_key'],
-          403: ['platform_not_granted', 'test_key_not_supported'],
-          404: ['not_found', 'night_all_rejected'],
-          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable', 'night_all_rejected'],
-          422: ['night_all_rejected'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'night_all_rejected'],
-          502: ['night_all_rejected', 'upstream_outcome_unknown', 'external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
-          503: ['platform_operation_unavailable', 'compatibility_capabilities_unavailable', 'compatibility_store_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_capacity_unavailable'],
-        },
-        parameters: [
-          {
-            name: 'operation', in: 'path', required: true,
-            schema: { type: 'string', enum: ['raw', 'crawl', 'user-info'] },
-          },
-          nightAllCompatibilityIdempotencyParameter,
-        ],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/NightAllLegacyRequest' },
-              examples: {
-                raw: { value: { platform: 'xiaohongshu', keyword: 'AI Agent', count: 20 } },
-                crawl: { value: { platform: 'twitter', username: 'openai', count: 20 } },
-                userInfo: { value: { platform: 'twitter', username: 'openai' } },
-              },
-            },
-          },
-        },
-        responses: { 200: nightAllCompatibilityResponse, ...publicErrors, 422: errorResponse },
-      },
+      post: nightAllCompatibilityOperation(),
+    },
+    '/search/{operation}': {
+      post: nightAllCompatibilityOperation({ historicalAlias: true }),
     },
     '/data/stored/search': {
       post: {
@@ -2373,7 +2528,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           contentType: { type: 'string', const: 'post' },
           url: { type: 'string', format: 'uri', maxLength: 2048 },
           title: { type: ['string', 'null'], maxLength: 500 },
-          text: { type: ['string', 'null'], maxLength: 50000 },
+          text: { type: ['string', 'null'] },
           tags: {
             type: 'array', maxItems: 100, uniqueItems: true,
             items: { type: 'string', minLength: 1, maxLength: 160 },
@@ -2485,8 +2640,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           count: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
           pageSize: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
           limit: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
-          page: { oneOf: [{ type: 'integer', minimum: 1, maximum: 1000 }, { type: 'string', pattern: '^(?:[1-9]|[1-9][0-9]{1,2}|1000)$' }] },
-          cursor: { type: 'string', minLength: 1, maxLength: 8192 },
+          page: { oneOf: [{ type: 'integer', minimum: 1, maximum: 15 }, { type: 'string', pattern: '^(?:[1-9]|1[0-5])$' }] },
+          cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Only an opaque Hub cursor returned by the preceding page is accepted. Historical raw provider cursors fail closed with invalid_cursor; restart without cursor and use a new Idempotency-Key.' },
           concurrency: { oneOf: [{ type: 'integer', minimum: 1, maximum: 20 }, { type: 'string', pattern: '^(?:[1-9]|1[0-9]|20)$' }] },
           cacheMaxAgeHours: { type: 'number', minimum: 0, maximum: 720, description: 'raw and crawl only.' },
           disableAutoDetails: { type: 'boolean' },
@@ -2497,7 +2652,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           commentCursor: { type: 'string', minLength: 1, maxLength: 8192 },
           enrichConcurrency: { oneOf: [{ type: 'integer', minimum: 1, maximum: 5 }, { type: 'string', pattern: '^[1-5]$' }] },
           activityTypes: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 128 } },
-          params: { type: 'object', additionalProperties: true, description: 'Platform continuation values only. Rejected keys and workload overrides are listed by x-mx-rejected-params; nested strings are at most 8192 characters and arrays are bounded by the consumer effective platform maxPageSize.' },
+          params: { type: 'object', additionalProperties: true, description: 'Safe non-continuation platform values are accepted on the first page. For continuation, return the exact Hub-issued nextParams object (currently {cursor: mxnc1...}); raw provider continuation values fail closed. Rejected keys and workload overrides are listed by x-mx-rejected-params.' },
         },
       },
       StoredSearchRequest: {
@@ -2653,7 +2808,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             properties: {
               raw_info: { type: 'string', contentMediaType: 'application/json', description: 'JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged.' },
               raw_data: { type: 'string', contentMediaType: 'application/json', description: 'JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged.' },
-              page: { type: 'object', additionalProperties: true },
+              page: { type: 'object', additionalProperties: true, description: 'Business-neutral pagination controls. Historical provider continuation is replaced by an encrypted mxnc1 Hub cursor and page 15 is terminal; content fields are not filtered or truncated.' },
               meta: { type: 'object', additionalProperties: true },
             },
           },
@@ -4807,7 +4962,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
       <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后以原 requestId 调用只读状态 GET；不要 POST 原请求或换键形成第二次派发。</td></tr>
       <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable / uncertain_retry_not_allowed</code></td><td>默认防重复策略挡住了本次尝试。停止自动重试；主按钮会自动查询旧状态。仅在服务器明确返回 <code>unknown</code> 且操作者确认新 <code>refresh</code> 的潜在重复成本时，才发送 <code>X-MX-Insight-Retry-Of</code>。不存在、跨 consumer、非 unknown、operation/fingerprint 不匹配均不会泄露为可覆盖状态。</td></tr>
       <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和可用的 requestId，页面自动调用状态 GET。无需查找 UUID、费用复选框或人工核查 consumer。<code>committed</code> 精确重放；<code>reserved</code> 继续阻止采集；只有明确 <code>unknown</code> 可在用户再次选择 <code>refresh</code> 并点击重采后发起带专用请求头的新采集。</td></tr>
-      <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId 并检查脱敏归档。</td></tr>
+      <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId，并分别检查普通 credential-safe 证据与受限原始响应归档。</td></tr>
       <tr><td>429 <code>quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
       <tr><td>429 external platform busy / capacity</td><td>Hub 并发保护和外部容量是不同原因；按响应退避，不要自动生成另一把幂等键。</td></tr>
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
@@ -4819,7 +4974,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
 
     <section class="doc-page" data-doc-page="xiaohongshu-note">
     <h2 id="xiaohongshu-note">小红书笔记</h2>
-    <div class="notice">平台命名的生产入口是 Hub-owned <code>POST /api/v1/xiaohongshu/app/get_note_info</code>；笔记链接放在 JSON body 中。Hub 自定义数据产品入口 <code>POST /api/v1/data/post</code> 也继续受支持。它们都需要 Live Hub Public API Key 的 immutable snapshot 同时包含 <code>xiaohongshu</code> 和 <code>social.posts.resolve</code>，且 consumer 当前仍保留两项授权。</div>
+    <div class="notice">Hub 提供两类明确分离的合同：<code>POST /api/v1/xiaohongshu/app/get_note_info</code> 与 <code>POST /api/v1/data/post</code> 返回稳定的 Hub 数据产品投影；五个 <code>GET /api/v1/xiaohongshu/app_v2/*</code> 入口接受官方字段并返回已采集的 App V2 兼容业务 envelope。两类入口都使用 Live Hub Public API Key、用量/成本准入、幂等、归档和 canonical 入库，不是无治理的裸代理。</div>
     <h3>1. 输入链接，获取正文与标签</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/xiaohongshu/app/get_note_info</code></div><p>推荐把官方笔记链接放入 JSON body，可选 <code>deliveryMode=cache_only|cache_first|refresh</code>。</p></div>
     <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
@@ -4833,8 +4988,10 @@ curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
   | tee /tmp/mxih-xhs.json \
   | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
     <p>这是 Hub 自己维护的兼容路径，不是对任何外部平台响应的透明转发。返回固定为 <code>mx-insight-hub.social-post.v1</code>；正文与标签分别位于 <code>data.item.text</code> 和 <code>data.item.tags</code>。</p>
-    <p><code>GET /api/v1/xiaohongshu/app/get_note_info</code> 继续兼容 <code>note_id</code> 和 <code>share_text</code>，两者同时出现时 <code>note_id</code> 优先。GET 会把 <code>share_text</code> 放在 request-target 中；带 <code>xsec_token</code> 等临时查询参数的链接可能进入客户端、反向代理或 APM 访问日志，因此链接输入优先使用上面的 POST，GET 优先只传 <code>note_id</code>。</p>
-    <h3>2. 从租户开通到首次调用</h3>
+    <h3>2. App V2 兼容 GET</h3>
+    <p>提供 <code>get_image_note_detail(note_id|share_text)</code>、<code>search_notes(keyword,page,sort_type,note_type,time_filter,search_id,search_session_id,source,ai_mode)</code>、<code>search_users(keyword,page,search_id,source)</code>、<code>get_user_info(user_id|share_text)</code> 和 <code>get_user_posted_notes(user_id|share_text,cursor)</code>。详情请求同时给出 <code>note_id</code> 和 <code>share_text</code> 时以 <code>note_id</code> 优先。完整路径均位于 <code>/api/v1/xiaohongshu/app_v2/</code>。<code>page</code> 只允许 1..15；用户笔记翻页必须原样返回 Hub 签发的不透明 <code>cursor</code>，第 15 页强制终止。</p>
+    <p>响应保留正文、标题、作者、标签、互动、媒体签名 URL、<code>params</code>、<code>search_id</code> 和 <code>search_session_id</code> 等上游业务字段。Hub 不做字段级长度截断；搜索接口自身可能返回官方预览，调用详情接口获取完整正文。只有上游意外回显的当前 Hub→上游 credential 会按精确值移除；请求的 Authorization、Cookie 或 API key 不会复制到响应。受限 raw archive 保存原始响应字节。<code>Idempotency-Key</code> 可选；省略时 Hub 自动生成与 API key、查询和短时 freshness bucket 绑定的有效 key。</p>
+    <h3>3. 从租户开通到首次调用</h3>
     <ol>
       <li>平台运营方准备 tenant、consumer、<code>xiaohongshu</code> 与 <code>social.posts.resolve</code> grants，并给租户成员建立 membership。</li>
       <li>租户成员使用 Launcher 会话登录 Internal Hub，只看到已授权模块。</li>
@@ -4842,7 +4999,7 @@ curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
       <li>客户后端用该 Key 调用上面的 POST，把自己的笔记链接放入 JSON <code>url</code>，再用稳定的 <code>text</code>/<code>tags</code> 构建自己的产品展示。</li>
       <li>租户从“套餐与配额”和自己的用量视图查看余额、调用与扣费；外部采购凭据和成本证据始终只属于管理域。</li>
     </ol>
-    <h3>3. Hub JSON 入口</h3>
+    <h3>4. Hub JSON 入口</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/post</code></div><p>body 只接受 <code>platform</code>、<code>url</code>、<code>deliveryMode</code>；只允许官方小红书笔记或分享链接。</p></div>
     <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
 XHS_BODY='{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/0123456789abcdef01234567","deliveryMode":"cache_first"}'
@@ -4854,8 +5011,8 @@ curl -sS -D /tmp/mxih-xhs.headers -X POST "$HUB_URL/api/v1/data/post" \
   | tee /tmp/mxih-xhs.json \
   | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
     <p>返回合同固定为 <code>mx-insight-hub.social-post.v1</code>。正文、标题、标签、作者、互动量、图片引用、发布时间与采集时间都在 <code>data.item</code>；<code>meta.sourceMode</code> 是 <code>live|fresh_cache|stored_fallback|idempotent_replay</code>。每个 <code>media[].url</code> 已投影为绑定本次 requestId/index 的同源 Hub 中继 locator，作者头像暂返回 null；公开响应不包含任何上游媒体 URL、外部平台身份、上游密钥、endpoint、raw envelope、诊断缓存 URL、采购价格或客户账单。</p>
-    <p>平台命名的 POST 在未传 platform 时默认 <code>xiaohongshu</code>。GET、两个 POST 入口共享笔记身份、快照与外采去重；幂等绑定还包含交付策略，因此同一 <code>Idempotency-Key</code> 改变 delivery mode 会返回冲突。切换 URL、method 或参数写法不是第二次付费调用的授权。</p>
-    <h3>4. 并发读取图片</h3>
+    <p>平台命名的 POST 在未传 platform 时默认 <code>xiaohongshu</code>。GET、两个 POST 入口共享笔记身份、immutable snapshot（不可变快照）与外采去重；幂等绑定还包含交付策略，因此同一 <code>Idempotency-Key</code> 改变 delivery mode 会返回冲突。切换 URL、method 或参数写法不是第二次付费调用的授权。</p>
+    <h3>5. 并发读取图片</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/posts/media?requestId=...&amp;mediaIndex=0</code></div><p>只读取当前 consumer 已提交响应中的一张图片；不接受任意源 URL、不创建 note usage、不再次派发笔记请求。</p></div>
     <pre><code>REQUEST_ID=$(jq -r '.requestId' /tmp/mxih-xhs.json)
 curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
@@ -4864,16 +5021,16 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
   --data-urlencode 'mediaIndex=0' \
   -o /tmp/mxih-xhs-0.img</code></pre>
     <p><code>requestId</code> 与 <code>mediaIndex</code> 必须各出现一次，index 为 <code>0..19</code>。响应中的 <code>media[].url</code> 就是该路径的同源 locator；客户端须带同一 consumer 的 Live Key 拉取为 Blob。可以在服务端的 consumer/global 并发护栏内并发加载多图；单图失败显示本地占位符，绝不能猜测或回退到上游 URL。返回只允许 JPEG、PNG、WebP，且带 <code>Cache-Control: private, no-store</code>。</p>
-    <h3>5. 缓存、429 与重试</h3>
+    <h3>6. 缓存、429 与重试</h3>
     <p><code>cache_only</code> 绝不外采；<code>cache_first</code> 默认先读同 consumer 的精确新鲜快照；<code>refresh</code> 绕过新鲜快照并强制调用方提供 Idempotency-Key。无效或失效笔记也可能被外部平台接受并消耗容量，所以 request-local miss 会短时 negative-cache，客户端不得自动换 key 重试。</p>
     <table><thead><tr><th>错误</th><th>处理</th></tr></thead><tbody>
       <tr><td><code>400 invalid_post_url / unsupported_fields</code></td><td>只提交官方链接与三个允许字段。</td></tr>
       <tr><td><code>403 platform_not_granted / capability_not_granted</code></td><td>为 consumer 授权后签发同时包含两项 scope 的新 Key。</td></tr>
       <tr><td><code>404 post_not_found / stored_snapshot_not_found</code></td><td>前者是已严格识别的笔记不可用；后者只是 cache_only 未命中。</td></tr>
       <tr><td><code>429 quota_exceeded</code></td><td>Hub 套餐/Key/consumer 限额；等待窗口或由管理员调整。</td></tr>
-      <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded</code></td><td>Hub 并发或外部容量类别；按响应退避，不能据此断言 IP 或域名封禁。</td></tr>
+      <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded / external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>Hub 并发、外部容量、供应商预算或未覆盖成本补贴预算不足；按响应退避，不能换 Key 绕过。</td></tr>
       <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>
-      <tr><td><code>503 not_configured / circuit_open / capacity_unavailable</code></td><td>稍后用相同意图重试，或由 operator 检查内部平台状态。</td></tr>
+      <tr><td><code>503 not_configured / contract_unverified / circuit_open / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>稍后用相同意图重试，或由 operator 检查发布门禁、内部平台状态和计费证据。</td></tr>
     </tbody></table>
     </section>
 
@@ -5061,7 +5218,9 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <section class="doc-page" data-doc-page="night-all">
     <h2 id="night-all">Night-All 兼容层</h2>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
-    <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。小红书平台项包含 <code>search_posts</code> 且 <code>search.ready=true</code> 表示独立的首屏 rollout gate 已开启；此时单 scalar query、有效页大小 20 的 page 1 请求会由 Hub-native connector 无感处理，已签发的 direct traversal cursor 则继续走同一路径。<code>post_detail</code> 仍需独立 <code>social.posts.resolve</code> grant。<code>data.legacySearch</code> 是由当前 Hub 发布版本固定（<code>Hub-pinned</code>）、再按 consumer grants 过滤的历史 operation dispatch 矩阵，contractVersion 固定为 <code>night-all.legacy-search-capabilities.v1</code>。Direct 只接管兼容的首屏 raw 子集，不会把小红书从该矩阵移除：非 direct raw 形状、crawl 和 user-info 仍依赖历史路径。矩阵不会在请求时从 Night-All 的 capability 接口实时发现。历史执行路径要求平台同时出现在相应 operation 的 <code>supportedPlatforms</code> 和 <code>readyPlatforms</code> 中；这里的 <code>readyPlatforms</code> 仅表示 Hub 在固定契约下允许 dispatch，不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。</p>
+    <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。小红书平台项包含 <code>search_posts</code> 且 <code>search.ready=true</code> 表示独立的首屏 rollout gate 已开启；此时单 scalar query、有效页大小 20 的 page 1 raw 请求由 Hub-native connector 处理，已签发的 <code>mxec2</code> direct traversal cursor 继续走同一路径。独立 user-activity gate 开启后，单个 <code>username|userId|uid|profileUrl</code> 的 user-info，以及 posts-only、页大小 20、concurrency 1 的 crawl 也由 Hub-native connector 处理；crawl 只接受并返回 Hub 不透明 cursor，最多 15 页。<code>data.legacySearch</code> 仍保留小红书，因为 multi-identifier、channel、非 posts、非 20 页和自定义 params 等尚未迁移形态继续走历史路径。矩阵不会在请求时从 Night-All 的 capability 接口实时发现。</p>
+    <p><code>data.legacySearch.contractVersion</code> 固定为 <code>night-all.legacy-search-capabilities.v1</code>。这是 Hub-pinned 的 operation dispatch 策略：目标平台必须同时出现在对应 operation 的 <code>supportedPlatforms</code> 与 <code>readyPlatforms</code>；它不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。</p>
+    <p><code>/api/v1/search/raw|crawl|user-info</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
     <table><thead><tr><th>operation</th><th>示例</th><th>运行时判断字段</th></tr></thead><tbody>
       <tr><td><code>raw</code> direct 子集</td><td><code>xiaohongshu + 单 query + 20</code></td><td><code>data.platforms[xiaohongshu].search</code></td></tr>
       <tr><td><code>raw</code> 历史形状</td><td>非 direct 条件</td><td><code>data.legacySearch.operations.raw</code></td></tr>
@@ -5086,8 +5245,9 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: night-all-user-info-$(uuidgen)" \\
   -d '{"platform":"twitter","username":"openai"}'</code></pre>
-    <p>Hub-native 小红书 raw 保持 <code>raw_info</code>/<code>raw_data</code> 为 JSON string，并让 body <code>requestId</code> 与响应头使用同一个 durable Hub UUID。Night-All-owned live/fallback body 继续原样保留历史业务字段和 correlation ID。Legacy transport 的 <code>x-mx-insight-source-mode</code> 始终只返回 <code>live|stale</code>：direct cache/replay 状态映射回 <code>live</code>，stored fallback 及其重放映射为 <code>stale</code>。历史路径遇到网络/超时、不可用的 2xx content-type/JSON/envelope，或真实非 2xx 的 502/503/504 时才会回放完全相同请求的 last-good 快照。</p>
-    <p><code>Idempotency-Key</code> 永久绑定一次可能产生供应方采购成本的 live dispatch；重用永远回放该结果，新鲜调用必须换新的 <code>Idempotency-Key</code>。legacy <code>includeRaw:false</code> 可接受但会在 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。未来脱敏应通过独立、版本化的 Hub projection/API 提供。</p>
+    <p>历史 Night-All 路径不会向调用方暴露 provider continuation：首屏返回的 cursor、composite/offset params 或页码会被替换成 consumer、operation、platform、查询范围和页码绑定的加密 <code>mxnc1</code> cursor。page 对外改为 cursor mode，offset 对外改为 composite mode；下一页只回传 Hub 给出的 <code>nextCursor</code> 或完整 <code>nextParams</code>，并使用新的 <code>Idempotency-Key</code>；第 15 页强制结束。升级前保存的裸 provider cursor/continuation params 返回 <code>400 invalid_cursor</code>，需去掉 cursor、换新 Key 从首页重启。</p>
+    <p>Hub-native 小红书 raw 保持 <code>raw_info</code>/<code>raw_data</code> 为 JSON string，并让 body <code>requestId</code> 与响应头使用同一个 durable Hub UUID。Night-All-owned live/fallback body 的业务字段、长正文和 correlation ID 保持原样；唯一治理改写是上述分页控制。历史路径入库保留完整的解析 JSON 与 legacy raw string；Hub-native provider 调用另有 exact response bytes 受限归档。Legacy transport 的 <code>x-mx-insight-source-mode</code> 始终只返回 <code>live|stale</code>：direct cache/replay 状态映射回 <code>live</code>，stored fallback 及其重放映射为 <code>stale</code>。历史路径遇到网络/超时、不可用的 2xx content-type/JSON/envelope，或真实非 2xx 的 502/503/504 时才会回放相同查询范围的受治理 last-good 快照。</p>
+    <p><code>Idempotency-Key</code> 永久绑定一次可能产生供应方采购成本的 live dispatch；重用永远回放该结果，新鲜调用必须换新的 <code>Idempotency-Key</code>。legacy <code>includeRaw:false</code> 可接受但会在 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。Hub 不过滤、截断或改写已采集的业务数据；普通响应与日志只隔离真实请求凭据。</p>
     <table><thead><tr><th>HTTP / code</th><th>含义</th></tr></thead><tbody>
       <tr><td><code>400 platform_operation_unsupported</code></td><td>平台不在该 operation 的 <code>supportedPlatforms</code>；Telegram 会走此分支。</td></tr>
       <tr><td><code>503 platform_operation_unavailable</code></td><td>平台在固定支持集内，但当前 Hub dispatch 矩阵未将其列入 <code>readyPlatforms</code>；这不是 provider 健康状态。</td></tr>

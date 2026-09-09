@@ -35,8 +35,8 @@ new_idempotency_key() {
 下文每个 POST 都会生成格式合法且新的 `Idempotency-Key`。默认情况下，如果只是重试
 **相同路径和完全相同的规范化 body**，应复用已有的 `IDEMPOTENCY_KEY`，不要再次
 执行 `new_idempotency_key`；更换 body、路径或 cursor 页面必须使用新的 `Idempotency-Key`。
-第 3.4 节的小红书正文解析是明确例外：GET 平台路径、POST 平台路径和
-`POST /api/v1/data/post` 三个入口共享一个 canonical 幂等 namespace。同一次逻辑请求的重试
+第 3.4 节的小红书正文解析是明确例外：两个 GET 平台路径、POST 平台路径和
+`POST /api/v1/data/post` 四个入口共享一个 canonical 幂等 namespace。同一次逻辑请求的重试
 不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`，且应保持规范化笔记标识和
 `deliveryMode` 不变；复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`。
 同一个 key 对应其他不同请求也会返回 `409 idempotency_conflict`。POST 重试还必须继续使用创建该
@@ -139,10 +139,11 @@ Night-All `/api/v1/search/capabilities` 实时发现。选择 `HUB_PLATFORM`、�
 `legacySearch` 为 `null`，该历史路径会 fail closed；`data.platforms` 中单独广告的
 Hub-native contract 不受它门禁。
 
-Direct search 只接管兼容的首屏 raw 子集，不会把小红书从 `legacySearch` 移除。对于同时
+Hub-native direct slices 只接管满足固定条件的小红书 raw、crawl 和 user-info 请求。这不会把小红书从 `legacySearch` 移除。对于同时
 授权小红书与 Twitter 的 consumer，`raw`、`crawl` 和 `user-info` 三项矩阵仍会在
-`supportedPlatforms`/`readyPlatforms` 中列出两个平台；小红书的非 direct 形状继续由该
-历史矩阵门禁。
+`supportedPlatforms`/`readyPlatforms` 中列出两个平台；小红书的历史 `mxnc1`、batch/channel/
+non-post 和其他非 direct 形状继续由该历史矩阵门禁。矩阵 presence 不证明 direct rollout gate
+在当前部署中已开启或 live-ready。
 
 ```bash
 curl -sS -i \
@@ -664,10 +665,11 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
 | 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |
 | 429 | `external_platform_busy`, `external_platform_capacity_exceeded` | Hub 并发保护或外部容量不足；按响应退避，不要并发放大。 |
+| 429 | `external_platform_cost_budget_exhausted`, `external_platform_subsidy_budget_exhausted` | 当前完整调用或多调用工作流无法同时满足已审核供应商月预算与未覆盖成本补贴预算；不要换 Key 重试。运营方应审核成本证据、同币种客户价格/钱包 hold 和显式补贴额度，不能由客户端推导售价或汇率。 |
 | 502 | `external_platform_response_unusable` | 上游成功 envelope 无法映射。该稳定错误会随同一 `Idempotency-Key` 重放且不再次派发；保存 requestId 作为证据，不得使用 uncertain-repeat 通道。 |
 | 502 | `external_platform_outcome_unknown` | 结果可能已经产生外部调用；保存 requestId 和原幂等键，禁止自动换键重试。只有只读状态 GET 明确返回 `unknown`，才可用一次新的 `refresh`、新 Key 和 `X-MX-Insight-Retry-Of`；这可能形成第二笔供应方成本。 |
 | 502 | `external_platform_rejected` | 上游已确定拒绝；检查请求条件，避免连续自动重试。 |
-| 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable` | 若没有 exact fallback，按运维窗口退避。 |
+| 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable`, `external_platform_cost_control_unavailable`, `external_platform_cost_evidence_incomplete` | 若没有 exact fallback，按运维窗口退避。后两个错误表示正的已审核上游单价、币种、月预算或账本证据不完整；未知成本不能填 `0`。 |
 | 200 | `data.items=[]` | 正常空结果，不是接口故障；可调整关键词或平台。空结果不能证明上游成本为零。 |
 
 `external_platform_not_configured` intentionally does not expose whether a
@@ -708,7 +710,8 @@ printf '%s\n' "$XHS_RESULT" \
 
 平台命名的 POST 是链接输入的推荐形式；body 只接受 `platform`、`url` 和 `deliveryMode`，
 并在缺失 `platform` 时默认小红书。`GET /api/v1/xiaohongshu/app/get_note_info` 继续兼容
-`share_text` 和 24 位十六进制 `note_id`，两者同时出现时 `note_id` 优先。等价输入会尽可能归一到
+`share_text` 和 24 位十六进制 `note_id`，并返回相同 Hub 稳定投影。两者同时出现时
+`note_id` 优先。等价输入会尽可能归一到
 同一个规范化笔记身份。输入只接受官方
 `xiaohongshu.com` 笔记 URL 或 `xhslink.com` / `xhslink.cn` 分享 URL；不接受任意网页、
 上游参数或凭据。
@@ -718,10 +721,30 @@ GET 会把链接放在 request-target 中。如果分享链接带 `xsec_token` �
 公共 URL、截图或日志中保留临时参数。
 
 Hub 自定义数据产品入口 `POST /api/v1/data/post` 继续接受
-`{"platform":"xiaohongshu","url":"...","deliveryMode":"cache_first"}`。GET 和两个 POST 入口共享
+`{"platform":"xiaohongshu","url":"...","deliveryMode":"cache_first"}`。legacy GET 和两个 POST 入口共享
 同一个笔记身份、快照与外采去重域；幂等绑定还包含交付策略，所以同一
 `Idempotency-Key` 改变 `deliveryMode` 会返回冲突。不要为了重试
 切换 URL、method 或参数写法。
+
+另外提供五个 App V2-compatible GET，它们返回已采集的业务 envelope，而不是上述 Hub 投影：
+
+- `/api/v1/xiaohongshu/app_v2/get_image_note_detail?note_id=...`；
+- `/api/v1/xiaohongshu/app_v2/search_notes?keyword=...&page=1`；
+- `/api/v1/xiaohongshu/app_v2/search_users?keyword=...&page=1`；
+- `/api/v1/xiaohongshu/app_v2/get_user_info?user_id=...`；
+- `/api/v1/xiaohongshu/app_v2/get_user_posted_notes?user_id=...&cursor=...`。
+
+`search_notes` 还接受 `sort_type,note_type,time_filter,search_id,search_session_id,source,ai_mode`。
+其中 `sort_type` 仅支持
+`general|time_descending|popularity_descending|comment_descending|collect_descending|english_preferred`，
+`note_type` 仅支持 `不限|视频笔记|普通笔记|直播笔记`，`time_filter` 仅支持
+`不限|一天内|一周内|半年内`；其他值会在计费调用前拒绝；
+`search_users` 接受 `search_id,source`。显式 `page` 只允许 1..15；user-posts 的 `cursor` 是
+Hub 对 provider cursor 与用户 scope 的不透明封装，第 15 页终止。响应正文、标签、互动、签名媒体
+URL、`params/search_id/search_session_id` 等业务字段保持原样且没有字段级长度截断。搜索结果本身
+可能是官方预览，需要完整正文时调用详情。请求的 Authorization/Cookie/API key 不会进入响应；
+只有上游意外回显的当前 Hub→上游 credential 会按精确值移除。`Idempotency-Key` 可选，省略时
+Hub 会按 API key、endpoint、query 和短时 freshness bucket 生成安全的 effective key。
 
 租户端完整开通路径是：平台方建立 tenant、consumer、`xiaohongshu` 和
 `social.posts.resolve` grants 与 membership；租户成员通过 Launcher 会话登录 Internal Hub，
@@ -771,9 +794,9 @@ fi
 常见错误：`400 invalid_post_url|invalid_platform|unsupported_fields`、
 `403 platform_not_granted|capability_not_granted|test_key_not_supported`、
 `404 post_not_found|stored_snapshot_not_found|external_media_not_found`、
-`429 quota_exceeded|external_platform_busy|external_platform_capacity_exceeded|external_media_busy`、
+`429 quota_exceeded|external_platform_busy|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted|external_media_busy`、
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
-`503 external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`。
+`503 external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete`。
 429 是 Hub 额度/并发或外部平台容量类别，不是域名封禁的证据；保留 requestId 后按错误码处理。
 
 ## 4. 搜索 API
@@ -794,8 +817,10 @@ fi
 message。`platform=xiaohongshu` 且 `pageSize` 恰好为默认值 20 时，兼容的首屏请求只有在
 独立 rollout gate 开启后才会无感使用受治理的 direct external-data connector；调用方不选择
 或获知 provider。省略 `pageSize` 等价于 20。此前由 direct traversal 签发的 opaque cursor
-仍留在同一路径，并且必须连同相同 query 和 pageSize 原样回传；历史
-cursor 或非 20 pageSize 继续使用历史兼容路径，不能跨路径交换 cursor。
+使用 `mxec2` 域，仍留在同一路径，并且必须连同相同 query 和 pageSize 原样回传；历史
+执行路径改为发放 Hub 加密的 `mxnc1` cursor，最多走到第 15 页。升级前的裸 provider
+cursor 无法证明页数，会返回 `400 invalid_cursor`；删除 cursor、换新的
+`Idempotency-Key` 并从首页重启。非 20 pageSize 继续使用历史兼容路径，不能跨路径交换 cursor。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
@@ -819,13 +844,19 @@ code point 或 grapheme 长度恰好为 60 的正文边界，执行有界的内�
 新增稳定错误包括 `403 test_key_not_supported`、
 `400 invalid_page_size|cursor_scope_mismatch`、
 `409 external_platform_response_unusable`、
-`429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded`、
+`429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted`、
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
-`503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`。
+`503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete`。
 历史路径上的 Night-All 明确拒绝会映射为安全的
 `502 night_all_rejected`；无法证明 dispatch 结果时返回
 `502 upstream_outcome_unknown`，此时应使用原 request ID/`Idempotency-Key` 查询，不能换新的 `Idempotency-Key`
 自动重试。
+
+历史 fallback 的 `mxnc1` 绑定 consumer、`data-search` operation、platform、稳定 query
+scope 和下一页，provider cursor 仅存在于密文内部。每个下一页都是新的业务请求，必须调用
+`new_idempotency_key`；只有同一页完全相同的传输重试才复用该页的 Key。第 15 页固定返回
+`hasMore=false`、`nextCursor=null`、`cursorType=none`。已有 `mxec2` direct cursor 不受此规则
+重解释，仍由 Hub-native 小红书直连处理。
 
 ### `POST /api/v1/data/stored/search`
 
@@ -1044,13 +1075,17 @@ missing_event_time|outside_window|missing_heat` 定位漏斗原因，再用返�
 
 ## 6. Night-All 兼容层
 
-公开的 legacy Night-All 路由仅有：
+公开的 legacy search operation 仅有：
 
 ```text
 POST /api/v1/night-all/search/raw
 POST /api/v1/night-all/search/crawl
 POST /api/v1/night-all/search/user-info
 ```
+
+旧客户端也可继续调用对应的 `/api/v1/search/raw|crawl|user-info`。每个旧路径与
+`/api/v1/night-all/search/*` 对应路径进入同一个服务和 paid fingerprint；仅切换路径不会
+获得第二次外部派发，也不应生成新的 `Idempotency-Key`。
 
 每条路由都要求一个明确授权的 `platform`。`businessId` 由已认证 consumer 派生，
 调用方应省略；如果发送 `businessId`/`business_id`，值必须与 consumer 完全一致。
@@ -1059,13 +1094,39 @@ legacy 客户端可发送 `includeRaw:false`，Hub 会在 dispatch 前移除；
 
 对于小红书 `raw`，独立 rollout gate 开启后，Hub 才会让满足下列条件的首屏请求无感使用
 direct external-data connector：只提供一个 scalar `keyword` 或 `query`；有效
-`count|pageSize|limit` 恰好为 20；请求为 page 1；不提供 plural query、
-`params`、cache-age、并发、详情/评论工作量或 comment continuation 控制。
+`count|pageSize|limit` 恰好为 20；请求为 page 1 或携带同一 direct traversal 的
+`mxec2` cursor；不提供 plural query、`params`、cache-age、评论工作量、请求级并发或
+comment continuation 控制。
 `includeDetails:false` 与 `includeComments:false` 是可接受的 no-op 默认值；
-`disableAutoDetails:true` 可关闭 60 字符边界的自动详情检查。任一 true 详情/评论开关、
-`maxEnrichItems`、`commentLimit`、`commentCursor`、`enrichConcurrency`、非 20 页大小、
-历史 cursor，以及 `crawl`/`user-info` 都保留历史执行路径。调用方不需要改变 URL 或解析器。
+`disableAutoDetails:true` 可关闭 60 字符边界的自动详情检查。`includeDetails:true` 与
+`maxEnrichItems=1..20` 使用同一个先做完整成本预留的 Hub-native 详情补全工作流；前者优先于
+`disableAutoDetails`。`includeComments:true`、`commentLimit`、`commentCursor`、
+`enrichConcurrency`、非 20 页大小、
+`mxnc1` 历史 cursor 都会让该 `raw` 请求保留历史执行路径。调用方不需要改变 URL 或解析器。
 此前由 direct traversal 签发的 opaque cursor 即使在新首屏切换关闭后也继续走同一路径。
+
+小红书 `crawl`/`user-info` 另有独立的 Hub-native user-activity gate。`crawl` 只接管“恰好一个
+用户标识 + `activityTypes=["posts"]`（或省略）+ 有效页大小 20 + `concurrency=1`（或省略）”的
+形状；首屏不带 cursor，续页只接受此前签发的 direct `mxec2` cursor，`params` 如存在只能承载
+同一个 cursor。`user-info` 只接管 page 1 的单一 username、24 位十六进制 user ID 或官方 profile
+URL，并且不接受 continuation、自定义 `params` 或 concurrency。新首屏还要求 parent
+external-platform contract gate 和独立 user-activity rollout gate 同时开启；代码、credential 或
+capability 条目存在都不能证明目标环境已就绪。历史 `mxnc1`、批量/多标识、channel、非 posts、非 20 的
+crawl 页、自定义 cache/params 及其他不支持形状继续走 Night-All。已有 direct crawl cursor 在关闸后
+仍固定由 Hub-native connector 处理，不会改道 Night-All。
+
+三条历史执行路径的 cursor/composite/page/offset continuation 统一由 Hub 加密包装为 `mxnc1`，并绑定
+consumer、operation、platform、稳定 query/account scope 和下一页。cursor/page 响应把密文放在
+`data.page.nextCursor` 并对外标记为 cursor mode；composite/offset 响应放在
+`data.page.nextParams.cursor` 并对外标记为 composite mode。裸 `nextPage` 和 offset 不会暴露。调用方只原样回传这个
+Hub cursor，不得解码或把 Night-All/provider continuation 拼回 `params`。每个下一页必须生成
+新的 `Idempotency-Key`；同一页的完全相同传输重试才复用原 Key。
+
+所有遍历最多 15 页。第 15 页将 `hasMore` 置为 `false`，并清空 `nextCursor`、
+`providerCursor`、`nextParams` 和 `nextPage`；如果上游仍声称有下一页，会追加
+`page_limit_reached` warning。升级前的裸 provider cursor 或包含 cursor/token/offset 等
+continuation 的旧 `params` 返回 `400 invalid_cursor`。恢复方式是删除 cursor 与 continuation
+params、生成新 Key，并从 page 1 发起新查询；旧 continuation 不能原地迁移。
 
 客户端不要自己维护平台全集；应读取运行中 Hub 的
 `GET /api/v1/data/capabilities`。其中 `data.legacySearch` 是该 Hub 发布版本固定、再按
@@ -1075,8 +1136,10 @@ direct external-data connector：只提供一个 scalar `keyword` 或 `query`；
 |---|---|---|
 | `raw` direct 子集 | `xiaohongshu + 单 query + 20` | `data.platforms[xiaohongshu].capabilities` 的 `search_posts` 与 `search.ready` |
 | `raw` 历史形状 | 非 direct 条件 | `data.legacySearch.operations.raw` |
-| `crawl` | `twitter + username=openai` | `data.legacySearch.operations.crawl` |
-| `user-info` | `twitter + username=openai` | `data.legacySearch.operations["user-info"]` |
+| `crawl` Hub-native 子集 | `xiaohongshu + 单用户 + posts + 20 + concurrency 1` | 独立 user-activity gate；公共 capability presence 不是 live-ready 证明 |
+| `crawl` 历史形状 | `twitter` 或不满足上述 direct 条件 | `data.legacySearch.operations.crawl` |
+| `user-info` Hub-native 子集 | `xiaohongshu + 单用户 + page 1` | 独立 user-activity gate；公共 capability presence 不是 live-ready 证明 |
+| `user-info` 历史形状 | `twitter`、批量或其他不支持形状 | `data.legacySearch.operations["user-info"]` |
 
 **Telegram 不支持这三条 compatibility route。** 第 4 节的
 `HUB_PLATFORM=telegram` 只用于 Hub 搜索；Telegram 已存数据应使用第 7 节的专用
@@ -1086,16 +1149,24 @@ Hub API。替换本文示例变量前，应同时确认 platform grant、`suppor
 这里的 `readyPlatforms` 仅表示 Hub 在当前固定历史兼容契约下允许 dispatch。它不是从
 Night-All 实时发现的 capability，也不证明 handler、endpoint、provider、credential
 已经配置或健康。实际可用性只能由本次 Night-All 调用结果确定；上游失败时按本节的
-exact snapshot fallback 规则处理。它不门禁上述由 `search_posts` 广告的 Hub-native
-小红书 raw 子集。
+exact snapshot fallback 规则处理。它不门禁上述 Hub-native 小红书固定子集：raw/search
+readiness 由其嵌套合同描述，crawl/user-info 仍需独立 user-activity rollout gate；两者不能
+由历史矩阵 presence 推断。
 
 重要的数据处理契约：**Night-All-owned 结果不会对业务数据、provider/endpoint 字段，以及
 `data.raw_info`、`data.raw_data` 中的业务内容做脱敏；live response、exact
 compatibility snapshot 和 raw ingest lineage 均保留这些上游业务字段。**
 这不构成认证凭据透传契约：API Key、access token、Authorization、cookie、password
 等认证凭据不属于业务响应，Night-All 和 Hub 均不得将其作为响应返回或记录。如果
-响应中意外出现认证凭据，应按安全事件处理，而不能把它视为兼容行为。未来的脱敏
-产品必须使用独立、版本化的 projection/API，不能静默改写这三条接口或其快照。
+响应中意外出现认证凭据，应按安全事件处理，而不能把它视为兼容行为。当前 Hub 不提供
+业务数据脱敏、过滤或截断；任何将来的独立 projection/API 也不能静默改写这三条接口或其快照。
+
+分页控制是唯一的治理改写：公开响应和 compatibility snapshot 使用 Hub `mxnc1` 并在第 15 页
+终止，但长正文、`raw_info`、`raw_data`、provider/endpoint 业务字段和上游 correlation 均保持
+原样。历史 Night-All hop 保存完整解析后的 JSON payload 与 legacy raw strings（含包装前
+continuation），但不宣称保存 HTTP response exact bytes。只有 Hub-native provider call
+另行在 restricted raw archive 保存 exact upstream response text/bytes 与 hash。受限证据不对
+Public、tenant、普通 Admin、UI 或搜索投影开放。
 
 请求侧信任边界仍然严格：调用方不能通过 body 或嵌套 `params` 注入 provider、
 endpoint、credential、token/auth、proxy、header/cookie、capability/moduleCode、
@@ -1134,10 +1205,13 @@ dispatch。
 | `503 platform_operation_unavailable` | 平台在固定支持集内，但 Hub dispatch 矩阵未将其列入 `readyPlatforms`；不是 provider 健康状态，尚未 dispatch |
 | `503 compatibility_capabilities_unavailable` | Hub-pinned `legacySearch` dispatch 矩阵缺失或无效，Hub fail closed，尚未 dispatch |
 | `503 compatibility_store_unavailable` | fallback 所需的 Hub compatibility store 暂不可用 |
+| `400 invalid_cursor` | 裸 provider cursor/continuation params、被篡改或跨 consumer/operation/platform/query scope 的 `mxnc1`；删除 continuation，换新 Key，从 page 1 重启 |
 | `400/404/409/422/429 night_all_rejected` | Night-All 明确拒绝；Hub 保留这些可安全转发的上游 HTTP 状态 |
 | `502 night_all_rejected` | Night-All 的其他明确拒绝，且没有可用 exact snapshot |
 | `502 upstream_outcome_unknown` | dispatch 结果存在歧义且没有可用 exact snapshot；同一 key 不会重新 dispatch |
 | `429 external_platform_rate_limited` | Hub-native 小红书请求达到服务端外部调用速率门禁；没有可用 stored fallback |
+| `429 external_platform_cost_budget_exhausted` / `external_platform_subsidy_budget_exhausted` | 完整 Hub-native 外采工作流无法在供应商月预算或显式未覆盖成本补贴预算内原子准入；没有发生部分 fan-out，客户端不得换 Key 重试 |
+| `503 external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | 已审核正单价、币种、预算或受控账本证据不完整，付费 dispatch fail closed；未知成本不能用 `0` 代替 |
 | `409/429/502/503 external_platform_*` | Hub-native 小红书的去重、容量、响应合同、结果歧义、配置或 circuit 类别；保留 durable request ID 并按具体 code 处理 |
 
 ### `POST /api/v1/night-all/search/raw`
@@ -1160,7 +1234,7 @@ curl -sS -i -X POST \
   "$HUB_URL/api/v1/night-all/search/raw"
 ```
 
-路由自身的 page 上限为 1000，但 consumer policy 可以更低。校验或 work-budget
+路由自身的 `page` 上限为 15，但 consumer policy 可以更低。校验或 work-budget
 失败返回 `400`；平台未授权返回 `403`。
 
 ### `POST /api/v1/night-all/search/crawl`
@@ -1170,7 +1244,7 @@ curl -sS -i -X POST \
 可选 `activityTypes` 是非空 string array；`cacheMaxAgeHours` 范围为 `0..720`。
 通用分页别名同样适用。一次请求最多让 50 个 identifier 产生工作，并且
 `identifierCount × effectivePageSize × activityTypeCount` 不得超过 consumer work
-budget。路由自身的 page 上限为 100。
+budget。路由自身的 `page` 上限同样为 15。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
@@ -1182,7 +1256,8 @@ curl -sS -i -X POST \
   "$HUB_URL/api/v1/night-all/search/crawl"
 ```
 
-成功响应原样保留 `raw_info`、`raw_data`、`page`、`meta` 和上游 correlation 字段。
+成功响应原样保留 `raw_info`、`raw_data`、`meta` 和上游 correlation 字段；`page` 中只有
+continuation 控制会按本节的 `mxnc1`/15 页规则改写。
 selector/page/work 无效时返回 `400`；上游与 fallback 语义遵循本节的共享规则。
 
 ### `POST /api/v1/night-all/search/user-info`
@@ -1191,7 +1266,7 @@ selector/page/work 无效时返回 `400`；上游与 fallback 语义遵循本节
 之一。LinkedIn 必须提供完整的 `/in/` 个人 profile URL；公司 URL 和裸 slug 会被拒绝。
 通用分页别名适用；
 identifier collection 仍然有界，但此 operation 不使用 raw 或 crawl 的乘法预算规则。
-路由自身的 page 上限为 100。
+路由自身的 `page` 上限为 15。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"

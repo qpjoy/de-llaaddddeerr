@@ -361,7 +361,7 @@ test('public response projects a fixed shape and drops private provider fields',
   })
 })
 
-test('every successful response has one full, secret-free call archive even for an empty page', () => {
+test('every successful response keeps business evidence and removes only the exact request credential', () => {
   const secret = 'private-token'
   const raw = envelope({
     items: [],
@@ -397,24 +397,96 @@ test('every successful response has one full, secret-free call archive even for 
   assert.equal(archive.rawPayload.response.businessCode, 0)
   assert.equal(archive.rawPayload.response.billed, true)
   assert.equal(archive.rawPayload.response.bodySha256, 'a'.repeat(64))
+  assert.equal(archive.rawPayload.response.envelope.data.token, '[REDACTED]')
+  assert.equal(archive.rawPayload.response.envelope.data.sessionId, 'private-session')
+  assert.equal(archive.rawPayload.response.envelope.data.sid, 'private-sid')
+  assert.equal(archive.rawPayload.response.envelope.data.sign, 'private-signature')
+  assert.equal(
+    archive.rawPayload.response.envelope.data.callback,
+    'https://user:pass@example.invalid/callback?session=private-session&safe=1#token=[REDACTED]',
+  )
   const serialized = JSON.stringify(archive)
-  assert.doesNotMatch(serialized, /private-token|private-session|private-sid|private-signature|user:pass/iu)
+  assert.doesNotMatch(serialized, /private-token/u)
+  assert.match(serialized, /private-session|private-sid|private-signature|user:pass/iu)
   assert.match(serialized, /provider_call_evidence/u)
 })
 
-test('private scrub covers credential-like object keys, URL query, fragments, and bearer strings', () => {
+test('credential scrub preserves business field names, signed URL query/hash and bearer-shaped data', () => {
+  const secret = 'hub-request-credential'
   const scrubbed = redactJustOnePrivateFields({
     session: 'session-value',
     sid: 'sid-value',
     signature: 'signature-value',
     cookie: 'cookie-value',
+    search_id: 'search-value',
+    search_session_id: 'search-session-value',
     nested: {
       authorization: 'Bearer abc.def.ghi',
       url: 'https://user:pass@example.invalid/item?X-Amz-Signature=signature-value&safe=1#sid=sid-value',
+      echoedCredential: `prefix-${secret}-suffix`,
     },
-  })
+    [secret]: 'credential-in-key',
+  }, { secret })
   assert.deepEqual(scrubbed, {
-    nested: { url: 'https://example.invalid/item?X-Amz-Signature=%5BREDACTED%5D&safe=1' },
+    session: 'session-value',
+    sid: 'sid-value',
+    signature: 'signature-value',
+    cookie: 'cookie-value',
+    search_id: 'search-value',
+    search_session_id: 'search-session-value',
+    nested: {
+      authorization: 'Bearer abc.def.ghi',
+      url: 'https://user:pass@example.invalid/item?X-Amz-Signature=signature-value&safe=1#sid=sid-value',
+      echoedCredential: 'prefix-[REDACTED]-suffix',
+    },
+    '[REDACTED]': 'credential-in-key',
+  })
+  assert.doesNotMatch(JSON.stringify(scrubbed), new RegExp(secret, 'u'))
+})
+
+test('credential scrub removes case-varied percent escapes and double URL encoding', () => {
+  const secret = "prov/key+value space?&=!*'()"
+  const formEncode = (value) => {
+    const query = new URLSearchParams()
+    query.set('token', value)
+    return query.toString().slice('token='.length)
+  }
+  const lowerPercentHex = (value) => value.replace(
+    /%[0-9A-F]{2}/gu,
+    (escape) => escape.toLowerCase(),
+  )
+  const uriEncoded = lowerPercentHex(encodeURIComponent(secret))
+  const formEncoded = lowerPercentHex(formEncode(secret))
+  const doubleUriEncoded = lowerPercentHex(encodeURIComponent(encodeURIComponent(secret)))
+  const doubleFormEncoded = lowerPercentHex(formEncode(formEncode(secret)))
+  const innerLowerThenUriEncoded = encodeURIComponent(lowerPercentHex(encodeURIComponent(secret)))
+  const innerLowerThenFormEncoded = formEncode(lowerPercentHex(formEncode(secret)))
+  const strictEncoded = lowerPercentHex(encodeURIComponent(secret).replace(
+    /[!'()*]/gu,
+    (character) => `%${character.codePointAt(0).toString(16).toUpperCase()}`,
+  ))
+  const scrubbed = redactJustOnePrivateFields({
+    uriEncoded: `before-${uriEncoded}-after`,
+    formEncoded: `before-${formEncoded}-after`,
+    doubleUriEncoded: `before-${doubleUriEncoded}-after`,
+    doubleFormEncoded: `before-${doubleFormEncoded}-after`,
+    innerLowerThenUriEncoded: `before-${innerLowerThenUriEncoded}-after`,
+    innerLowerThenFormEncoded: `before-${innerLowerThenFormEncoded}-after`,
+    strictEncoded: `before-${strictEncoded}-after`,
+    [doubleUriEncoded]: 'credential-in-key',
+    unrelatedBusinessValue: 'https://example.invalid/item?path=%2fpublic%2Bbusiness',
+  }, { secret })
+
+  assert.deepEqual(scrubbed, {
+    uriEncoded: 'before-[REDACTED]-after',
+    formEncoded: 'before-[REDACTED]-after',
+    doubleUriEncoded: 'before-[REDACTED]-after',
+    doubleFormEncoded: 'before-[REDACTED]-after',
+    innerLowerThenUriEncoded: 'before-[REDACTED]-after',
+    innerLowerThenFormEncoded: 'before-[REDACTED]-after',
+    strictEncoded: 'before-[REDACTED]-after',
+    '[REDACTED]': 'credential-in-key',
+    unrelatedBusinessValue: 'https://example.invalid/item?path=%2fpublic%2Bbusiness',
   })
 })
 

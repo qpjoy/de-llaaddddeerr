@@ -238,6 +238,8 @@ test('optional external-platform configuration keeps credentials off the admin p
       currency: 'CNY',
       pricingAsOf: '2026-09-03T00:00:00Z',
       freeDailyCalls: 100,
+      monthlyBudgetMinor: 10_000,
+      monthlySubsidyBudgetMinor: 0,
       unitCostMinorByEndpoint: { 'jd.product-search.v1': 5 },
     }),
   })
@@ -724,7 +726,6 @@ test('health reports liveness and dependencies', async () => {
   assert.equal(ready.response.status, 200)
   assert.deepEqual(ready.payload.data.dependencies, {
     store: { status: 'up' },
-    dataService: { status: 'up' },
   })
 })
 
@@ -867,7 +868,15 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
 
   const publicHeaders = { authorization: `Bearer ${secret}` }
   const capabilities = await call('/api/v1/data/capabilities', { headers: publicHeaders })
-  assert.deepEqual(capabilities.payload.data.platforms, [{ platform: 'xiaohongshu', ready: true }])
+  // Capability discovery is now compiled locally and deliberately does not
+  // probe Night-All. Top-level `ready` remains a live-health signal, so the
+  // unprobed compatibility platform is conservative while the fixed routing
+  // matrix below still advertises its supported operation.
+  assert.deepEqual(capabilities.payload.data.platforms, [{ platform: 'xiaohongshu', ready: false }])
+  assert.deepEqual(
+    capabilities.payload.data.legacySearch.operations.raw.readyPlatforms,
+    ['xiaohongshu'],
+  )
   assert.equal(capabilities.payload.data.provider, undefined)
 
   const missingIdempotency = await call('/api/v1/data/search', {

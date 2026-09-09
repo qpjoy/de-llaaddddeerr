@@ -12,11 +12,15 @@ const ADMIN_TOKEN = 'runtime-admin-token-with-enough-entropy'
 const LAUNCHER_TOKEN = 'launcher-runtime-session'
 const PRIVATE_DETAIL = 'Night-All via TikHub at http://provider.internal/api/v1/health'
 
-async function withRuntimeServer(operation) {
+async function withRuntimeServer(operation, { adapterDependencies = null } = {}) {
   const app = createApp({
     service: {},
     store: { async ping() {} },
-    adapter: { async dependencies() { return { status: 'up', detail: PRIVATE_DETAIL } } },
+    adapter: {
+      dependencies: adapterDependencies || (async () => {
+        assert.fail('Runtime and health endpoints must not probe Night-All')
+      }),
+    },
     adminToken: ADMIN_TOKEN,
     identity: {
       enabled: true,
@@ -63,7 +67,7 @@ function assertProviderNeutral(value) {
   assert.equal(Object.hasOwn(dependencies?.store || {}, 'detail'), false)
 }
 
-test('safe Runtime readiness preserves the listener dependency boundary', () => {
+test('safe Runtime readiness treats external data services as diagnostic-only dependencies', () => {
   const dependencies = {
     store: { status: 'up' },
     nightAll: { status: 'down', detail: PRIVATE_DETAIL },
@@ -73,17 +77,21 @@ test('safe Runtime readiness preserves the listener dependency boundary', () => 
   const combined = runtimeVisibleProjection({ listenerMode: 'combined', dependencies })
 
   assert.equal(admin.status.ready, 'ready')
-  assert.equal(combined.status.ready, 'not_ready')
+  assert.equal(combined.status.ready, 'ready')
+  assert.equal(combined.dependencies.dataService.status, 'down')
   assertProviderNeutral(admin)
   assertProviderNeutral(combined)
 })
 
-test('Runtime keeps raw dependency evidence Admin-token-only and forces launcher sessions safe', async () => {
+test('Runtime reports unprobed provider-neutral data service state and forces launcher sessions safe', async () => {
   await withRuntimeServer(async (baseUrl) => {
     const raw = await call(baseUrl, '/internal/v1/admin/runtime', ADMIN_TOKEN)
     assert.equal(raw.response.status, 200)
     assert.equal(raw.payload.data.listenerMode, 'combined')
-    assert.equal(raw.payload.data.dependencies.nightAll.detail, PRIVATE_DETAIL)
+    assert.deepEqual(raw.payload.data.dependencies, {
+      store: { status: 'up' },
+      dataService: { status: 'unknown' },
+    })
 
     const adminSafe = await call(baseUrl, '/internal/v1/admin/runtime?presentation=safe', ADMIN_TOKEN)
     assert.equal(adminSafe.response.status, 200)
@@ -91,7 +99,7 @@ test('Runtime keeps raw dependency evidence Admin-token-only and forces launcher
       status: { live: 'live', ready: 'ready' },
       dependencies: {
         store: { status: 'up' },
-        dataService: { status: 'up' },
+        dataService: { status: 'unknown' },
       },
     })
     assertProviderNeutral(adminSafe.payload.data)
@@ -107,20 +115,49 @@ test('Runtime keeps raw dependency evidence Admin-token-only and forces launcher
   })
 })
 
-test('unauthenticated health responses cannot bypass the Runtime safe projection', async () => {
+test('unauthenticated dependency health does not probe optional external data services', async () => {
+  let optionalProbeCalls = 0
   await withRuntimeServer(async (baseUrl) => {
     const dependencies = await call(baseUrl, '/health/dependencies')
     assert.equal(dependencies.response.status, 200)
     assertProviderNeutral(dependencies.payload.data)
     assert.deepEqual(dependencies.payload.data, {
       store: { status: 'up' },
-      dataService: { status: 'up' },
+      dataService: { status: 'unknown' },
     })
 
     const ready = await call(baseUrl, '/health/ready')
     assert.equal(ready.response.status, 200)
     assert.equal(ready.payload.data.status, 'ready')
+    assert.deepEqual(ready.payload.data.dependencies, { store: { status: 'up' } })
     assertProviderNeutral({ dependencies: ready.payload.data.dependencies })
+    assert.equal(optionalProbeCalls, 0)
+  }, {
+    adapterDependencies: async () => {
+      optionalProbeCalls += 1
+      return { status: 'down', detail: PRIVATE_DETAIL }
+    },
+  })
+})
+
+test('readiness never starts the optional data-service probe', async () => {
+  let optionalProbeCalls = 0
+  await withRuntimeServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health/ready`, {
+      signal: AbortSignal.timeout(1_000),
+    })
+    const payload = await response.json()
+    assert.equal(response.status, 200)
+    assert.deepEqual(payload.data, {
+      status: 'ready',
+      dependencies: { store: { status: 'up' } },
+    })
+    assert.equal(optionalProbeCalls, 0)
+  }, {
+    adapterDependencies: async () => {
+      optionalProbeCalls += 1
+      return new Promise(() => {})
+    },
   })
 })
 

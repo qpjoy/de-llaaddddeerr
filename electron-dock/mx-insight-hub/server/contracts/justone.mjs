@@ -1,4 +1,9 @@
 import { createHash } from 'node:crypto'
+import {
+  createCredentialEchoRedactor,
+  redactCredentialEcho,
+} from '../core/credential-redaction.mjs'
+import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 
 export const JUSTONE_PROVIDER_KEY = 'justone'
 export const JUSTONE_OPERATION = 'ecommerce.products.search'
@@ -472,44 +477,39 @@ function firstObject(object, keys) {
   return null
 }
 
-function safeUrl(value) {
-  const text = scalarText(value, 2_048)
-  if (!text) return null
+function safeUrl(value, secret = null) {
+  if (typeof value !== 'string' || !value || value.length > 2_048) return null
   try {
-    const url = new URL(text)
+    const url = new URL(value)
     if (!['http:', 'https:'].includes(url.protocol)) return null
-    url.username = ''
-    url.password = ''
-    url.hash = ''
-    for (const key of [...url.searchParams.keys()]) {
-      if (privateKey(key)) {
-        url.searchParams.delete(key)
-      }
-    }
-    const normalized = url.toString()
-    return normalized.length <= 2_048 ? normalized : null
+    if (url.toString().length > 2_048) return null
+    // Signed query parameters and fragments are provider business data. Keep
+    // the URL byte-for-byte unless it actually echoes the credential used by
+    // this Hub request; field names such as signature/token are not secrets by
+    // themselves.
+    return redactCredentialEcho(value, secret)
   } catch {
     return null
   }
 }
 
-function firstUrl(object, keys) {
+function firstUrl(object, keys, secret = null) {
   if (!plainObject(object)) return null
   for (const key of keys) {
     if (!own(object, key)) continue
-    const url = safeUrl(object[key])
+    const url = safeUrl(object[key], secret)
     if (url) return url
   }
   return null
 }
 
-function imageUrls(item) {
+function imageUrls(item, secret = null) {
   const result = []
   const seen = new Set()
   const add = (value) => {
     const candidate = plainObject(value)
-      ? firstUrl(value, ['url', 'imageUrl', 'image_url', 'src'])
-      : safeUrl(value)
+      ? firstUrl(value, ['url', 'imageUrl', 'image_url', 'src'], secret)
+      : safeUrl(value, secret)
     if (!candidate || seen.has(candidate)) return
     seen.add(candidate)
     result.push(candidate)
@@ -533,7 +533,7 @@ const PRODUCT_ID_FIELDS = Object.freeze({
   xianyu: ['itemId', 'item_id', 'productId', 'product_id', 'goodsId', 'goods_id', 'id'],
 })
 
-export function normalizeJustOneProductItem(rawItem, marketplace) {
+export function normalizeJustOneProductItem(rawItem, marketplace, { secret = null } = {}) {
   if (!plainObject(rawItem) || !JUSTONE_ENDPOINTS[marketplace]) return null
   const id = firstScalar(rawItem, PRODUCT_ID_FIELDS[marketplace], 256)
   if (!id) return null
@@ -554,14 +554,18 @@ export function normalizeJustOneProductItem(rawItem, marketplace) {
     id,
     marketplace,
     title: firstScalar(rawItem, ['itemName', 'item_name', 'title', 'name', 'productName'], 4_096),
-    url: firstUrl(rawItem, ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl']),
+    url: firstUrl(
+      rawItem,
+      ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl'],
+      secret,
+    ),
     pricing: Object.freeze({
       current: currentPrice,
       original: originalPrice,
       currency: firstScalar(rawItem, ['currency', 'currencyCode'], 16) || 'CNY',
     }),
     shop: Object.freeze({ id: shopId, name: shopName }),
-    images: Object.freeze(imageUrls(rawItem)),
+    images: Object.freeze(imageUrls(rawItem, secret)),
     signals: Object.freeze({
       sales: firstScalar(rawItem, ['orderPayUV', 'sales', 'saleCount', 'soldCount', 'volume'], 128),
       reviewCount: firstScalar(rawItem, ['commentCount', 'comment_count', 'reviewCount'], 128),
@@ -643,53 +647,61 @@ function encodeNextCursor(request, continuation, encodeCursor) {
   return encoded
 }
 
-const PRIVATE_KEY = /^(?:access[_-]?token|api[_-]?key|auth|authorization|bearer|billing|client[_-]?secret|cookie|credential|credentials|endpoint[_-]?id|jwt|key|password|passwd|provider|provider[_-]?id|provider[_-]?metadata|search[_-]?id|secret|session(?:[_-]?(?:id|key|token))?|sid|sig|sign|signature|set[_-]?cookie|ticket|token|upstream[_-]?url)$/iu
-
-function privateKey(value) {
-  const text = String(value)
-  if (PRIVATE_KEY.test(text)) return true
-  const compact = text.replace(/[^a-z0-9]/giu, '').toLowerCase()
-  return /(?:apikey|authorization|cookie|credential|jwt|password|passwd|secret|sessionid|sessionkey|signature|token)$/u.test(compact)
-}
-
-function sanitizedString(value, secret) {
-  let result = value
-  if (secret) result = result.split(secret).join('[REDACTED]')
-  result = result.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]')
-  result = result.replace(
-    /\b(token|api[_-]?key|session(?:[_-]?id)?|sid|sign(?:ature)?|sig|cookie|secret|password)=([^\s&;,]+)/giu,
-    '$1=[REDACTED]',
-  )
-  if (!/^https?:\/\//iu.test(result)) return result
-  try {
-    const url = new URL(result)
-    url.username = ''
-    url.password = ''
-    url.hash = ''
-    for (const key of [...url.searchParams.keys()]) {
-      if (privateKey(key)) url.searchParams.set(key, '[REDACTED]')
-    }
-    return url.toString()
-  } catch {
-    return result
-  }
-}
-
-function redactPrivateFields(value, secret, depth) {
-  if (depth > MAX_JSON_DEPTH) return '[REDACTED_DEPTH]'
-  if (typeof value === 'string') return sanitizedString(value, secret)
-  if (Array.isArray(value)) return value.map((entry) => redactPrivateFields(entry, secret, depth + 1))
-  if (!plainObject(value)) return value
-  const entries = []
-  for (const [key, nested] of Object.entries(value)) {
-    if (privateKey(key)) continue
-    entries.push([key, redactPrivateFields(nested, secret, depth + 1)])
-  }
-  return Object.fromEntries(entries)
-}
-
 export function redactJustOnePrivateFields(value, { secret = null } = {}) {
-  return redactPrivateFields(value, secret, 0)
+  if (!isPostgresSafeJsonValue(value)) return null
+  let cloned
+  try {
+    cloned = structuredClone(value)
+  } catch {
+    // Never retain an unredacted operational projection when cloning a deeply
+    // nested provider payload is unsafe. The adapter separately preserves the
+    // exact bounded response bytes in restricted storage.
+    return null
+  }
+  if (typeof secret !== 'string' || !secret) return cloned
+  const scrub = createCredentialEchoRedactor(secret)
+  if (typeof cloned === 'string') return scrub(cloned)
+  if (!cloned || typeof cloned !== 'object') return cloned
+
+  // Iterate instead of recursing so a deeply nested but byte-bounded provider
+  // response cannot exhaust the JavaScript stack. No business key is removed:
+  // only the exact request credential is replaced wherever it was echoed.
+  const pending = [cloned]
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (Array.isArray(current)) {
+      for (let index = 0; index < current.length; index += 1) {
+        const nested = current[index]
+        if (typeof nested === 'string') current[index] = scrub(nested)
+        else if (nested && typeof nested === 'object') pending.push(nested)
+      }
+      continue
+    }
+    for (const [key, nested] of Object.entries(current)) {
+      const safeKey = scrub(key)
+      if (safeKey !== key) {
+        delete current[key]
+        current[safeKey] = nested
+      }
+      if (typeof nested === 'string') current[safeKey] = scrub(nested)
+      else if (nested && typeof nested === 'object') pending.push(nested)
+    }
+  }
+  return cloned
+}
+
+function responseBusinessContext(raw, itemPath, secret) {
+  const context = redactJustOnePrivateFields(raw, { secret })
+  let parent = context
+  for (const segment of itemPath.slice(0, -1)) parent = parent?.[segment]
+  const itemKey = itemPath.at(-1)
+  if (plainObject(parent) && Array.isArray(parent[itemKey])) {
+    // Each item is preserved separately in sourceItem. Avoid copying the whole
+    // result set into every canonical record while retaining all call-level
+    // business fields, including pagination and session identifiers.
+    parent[itemKey] = []
+  }
+  return context
 }
 
 /**
@@ -795,11 +807,12 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
     contractState,
     secret,
   })]
+  const businessContext = responseBusinessContext(raw, extracted.path, secret)
   const items = []
   let discardedCount = 0
   for (const [index, rawItem] of extracted.items.entries()) {
     assertBoundedJson(rawItem)
-    const projectedItem = normalizeJustOneProductItem(rawItem, request.marketplace)
+    const projectedItem = normalizeJustOneProductItem(rawItem, request.marketplace, { secret })
     const normalizedItem = projectedItem
       ? redactJustOnePrivateFields(projectedItem, { secret })
       : null
@@ -815,6 +828,7 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
       rawItem: archivedRawItem,
       rawPayload: archivedRawItem,
       normalizedItem,
+      responseBusinessContext: businessContext,
     }))
     if (normalizedItem) items.push(normalizedItem)
     else discardedCount += 1

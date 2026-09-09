@@ -13,6 +13,22 @@ const BASE = {
   MX_INSIGHT_STORE: 'memory',
   MX_INSIGHT_API_KEY_PEPPER: 'external-platform-config-test-pepper-with-entropy',
   MX_INSIGHT_JUSTONE_TOKEN: 'provider-token',
+  MX_INSIGHT_JUSTONE_BILLING_JSON: JSON.stringify({
+    source: 'manual',
+    currency: 'CNY',
+    pricingAsOf: '2026-09-08T00:00:00Z',
+    monthlyBudgetMinor: 10_000,
+    monthlySubsidyBudgetMinor: 10_000,
+    unitCostMinorByEndpoint: { 'jd.product-search.v1': 5 },
+  }),
+  MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+    source: 'manual',
+    currency: 'USD',
+    pricingAsOf: '2026-09-08T00:00:00Z',
+    unitCostMinor: 1,
+    monthlyBudgetMinor: 10_000,
+    monthlySubsidyBudgetMinor: 10_000,
+  }),
 }
 
 async function runtimeFor(environment) {
@@ -25,7 +41,7 @@ async function closeRuntime(runtime) {
   await runtime.pool?.end()
 }
 
-test('runtime constructs the paid adapter only after explicit contract verification', async () => {
+test('public memory runtime fails closed when a valid paid provider contract is active', async () => {
   const awaiting = await runtimeFor(BASE)
   try {
     assert.equal(awaiting.justOneAdapter, null)
@@ -34,45 +50,63 @@ test('runtime constructs the paid adapter only after explicit contract verificat
     await closeRuntime(awaiting)
   }
 
-  const verified = await runtimeFor({
-    ...BASE,
-    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
-    MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '12345',
-  })
-  try {
-    assert.ok(verified.justOneAdapter)
-    assert.equal((await verified.externalPlatformGateway.capabilities()).ready, true)
-    assert.equal(verified.externalPlatformStore.uncertainCooldownMs, 12345)
-  } finally {
-    await closeRuntime(verified)
+  for (const gate of [
+    { MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1' },
+    {
+      MX_INSIGHT_TIKHUB_API_KEY: 'tikhub-provider-key',
+      MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+    },
+  ]) {
+    await assert.rejects(
+      runtimeFor({ ...BASE, ...gate }),
+      (error) => error?.code === 'invalid_configuration'
+        && /require MX_INSIGHT_STORE=postgres/u.test(error.message),
+    )
   }
 })
 
-test('Xiaohongshu search cutover requires its own gate after the shared TikHub contract gate', async () => {
-  const detailOnly = await runtimeFor({
+test('combined memory runtime fails closed when a valid paid provider contract is active', async () => {
+  const development = await runtimeFor({
+    ...BASE,
+    MX_INSIGHT_LISTENER_MODE: 'combined',
+    MX_INSIGHT_ADMIN_TOKEN: 'admin-token-with-enough-entropy',
+  })
+  try {
+    assert.equal(development.justOneAdapter, null)
+    assert.equal(development.tikHubAdapter, null)
+  } finally {
+    await closeRuntime(development)
+  }
+
+  await assert.rejects(
+    runtimeFor({
+      ...BASE,
+      MX_INSIGHT_LISTENER_MODE: 'combined',
+      MX_INSIGHT_ADMIN_TOKEN: 'admin-token-with-enough-entropy',
+      MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /require MX_INSIGHT_STORE=postgres/u.test(error.message),
+  )
+})
+
+test('Xiaohongshu search cutover requires its own gate after the shared TikHub contract gate', () => {
+  const detailOnly = loadConfig({
     ...BASE,
     MX_INSIGHT_TIKHUB_API_KEY: 'tikhub-provider-key',
     MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
   })
-  try {
-    assert.ok(detailOnly.tikHubAdapter)
-    assert.equal(detailOnly.service.externalSocialSearchEnabled, false)
-  } finally {
-    await closeRuntime(detailOnly)
-  }
+  assert.equal(detailOnly.tikHub.contractVerified, true)
+  assert.equal(detailOnly.tikHub.searchContractVerified, false)
 
-  const searchEnabled = await runtimeFor({
+  const searchEnabled = loadConfig({
     ...BASE,
     MX_INSIGHT_TIKHUB_API_KEY: 'tikhub-provider-key',
     MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
     MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED: '1',
   })
-  try {
-    assert.ok(searchEnabled.tikHubAdapter)
-    assert.equal(searchEnabled.service.externalSocialSearchEnabled, true)
-  } finally {
-    await closeRuntime(searchEnabled)
-  }
+  assert.equal(searchEnabled.tikHub.contractVerified, true)
+  assert.equal(searchEnabled.tikHub.searchContractVerified, true)
 
   assert.throws(
     () => preflightTikHubConfig({
@@ -84,44 +118,143 @@ test('Xiaohongshu search cutover requires its own gate after the shared TikHub c
   )
 })
 
-test('verified public runtime hot-loads a database-only credential without restart', async () => {
+test('Xiaohongshu crawl and user-info cutover has an independent priced workflow gate', () => {
+  const endpointCosts = {
+    'xiaohongshu.app-v2.search-users.v1': 7,
+    'xiaohongshu.app-v2.get-user-info.v1': 11,
+    'xiaohongshu.app-v2.get-user-posted-notes.v1': 13,
+  }
+  const config = loadConfig({
+    ...BASE,
+    MX_INSIGHT_TIKHUB_API_KEY: 'tikhub-provider-key',
+    MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+      source: 'manual',
+      currency: 'USD',
+      pricingAsOf: '2026-09-08T00:00:00Z',
+      unitCostMinor: 1,
+      unitCostMinorByEndpoint: endpointCosts,
+      monthlyBudgetMinor: 10_000,
+      monthlySubsidyBudgetMinor: 10_000,
+    }),
+  })
+  assert.equal(config.tikHub.contractVerified, true)
+  assert.equal(config.tikHub.userActivityContractVerified, true)
+
+  assert.throws(
+    () => preflightTikHubConfig({
+      ...BASE,
+      MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED: '1',
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /requires MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1/u.test(error.message),
+  )
+  assert.throws(
+    () => preflightTikHubConfig({
+      ...BASE,
+      MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+      MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED: '1',
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /explicit cost control/u.test(error.message),
+  )
+  assert.throws(
+    () => preflightTikHubConfig({
+      ...BASE,
+      MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+      MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED: '1',
+      MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE: '2',
+      MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+        source: 'manual',
+        currency: 'USD',
+        pricingAsOf: '2026-09-08T00:00:00Z',
+        unitCostMinor: 1,
+        unitCostMinorByEndpoint: endpointCosts,
+        monthlyBudgetMinor: 10_000,
+        monthlySubsidyBudgetMinor: 10_000,
+      }),
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /must be at least 3/u.test(error.message),
+  )
+})
+
+test('public memory runtime cannot arm a database-only paid-provider contract', async () => {
+  await assert.rejects(
+    runtimeFor({
+      ...BASE,
+      MX_INSIGHT_JUSTONE_TOKEN: '',
+      MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /require MX_INSIGHT_STORE=postgres/u.test(error.message),
+  )
+})
+
+test('admin runtime keeps provider adapters secretless and reports TikHub readiness from safe metadata', async () => {
   const runtime = await runtimeFor({
     ...BASE,
+    MX_INSIGHT_LISTENER_MODE: 'admin',
+    MX_INSIGHT_ADMIN_TOKEN: 'admin-token-with-enough-entropy',
     MX_INSIGHT_JUSTONE_TOKEN: '',
+    MX_INSIGHT_JUSTONE_CONFIGURED: '1',
     MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_TIKHUB_CONFIGURED: '1',
+    MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
   })
   try {
-    assert.equal(runtime.justOneAdapter != null, true)
+    assert.equal(runtime.justOneAdapter, null)
+    assert.equal(runtime.tikHubAdapter, null)
     assert.equal((await runtime.externalPlatformGateway.capabilities()).ready, false)
+    assert.equal((await runtime.tikHubGateway.capabilities()).ready, false)
+    assert.deepEqual(
+      (await runtime.externalPlatformAdmin.overview('24h')).providers.map(({ key }) => key),
+      ['justone', 'tikhub'],
+    )
 
-    const first = await runtime.externalPlatformCredentialStore.updateCredential('justone', {
-      apiKey: 'database-token-one',
-      expectedRevision: 0,
-    })
-    assert.equal(first.revision, 1)
-    assert.equal((await runtime.externalPlatformGateway.capabilities()).ready, true)
-    assert.equal(await runtime.justOneAdapter.resolveCredential(), 'database-token-one')
-
-    await runtime.externalPlatformCredentialStore.updateCredential('justone', {
-      apiKey: 'database-token-two',
-      expectedRevision: first.revision,
-    })
-    assert.equal(await runtime.justOneAdapter.resolveCredential(), 'database-token-two')
+    let secretRead = false
+    runtime.tikHubCredentialStore.readCredential = async () => {
+      secretRead = true
+      throw new Error('Admin readiness must not read the provider secret')
+    }
+    const configuration = await runtime.service.getPlatformConfiguration({})
+    assert.equal(
+      configuration.availableCapabilities
+        .find(({ capability }) => capability === 'social.posts.resolve')?.ready,
+      true,
+    )
+    assert.equal(secretRead, false)
   } finally {
     await closeRuntime(runtime)
   }
 })
 
-test('admin runtime never constructs a credentialed JustOne adapter', async () => {
+test('database TikHub credential makes social.posts.resolve ready without exposing it to Admin readiness', async () => {
   const runtime = await runtimeFor({
     ...BASE,
     MX_INSIGHT_LISTENER_MODE: 'admin',
     MX_INSIGHT_ADMIN_TOKEN: 'admin-token-with-enough-entropy',
-    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+    MX_INSIGHT_TIKHUB_API_KEY: '',
+    MX_INSIGHT_TIKHUB_CONFIGURED: '0',
+    MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
   })
   try {
-    assert.equal(runtime.justOneAdapter, null)
-    assert.equal((await runtime.externalPlatformGateway.capabilities()).ready, false)
+    const readiness = async () => (
+      (await runtime.service.getPlatformConfiguration({})).availableCapabilities
+        .find(({ capability }) => capability === 'social.posts.resolve')?.ready
+    )
+    assert.equal(await readiness(), false)
+
+    await runtime.tikHubCredentialStore.updateCredential('tikhub', {
+      apiKey: 'database-tikhub-key-not-for-output',
+      expectedRevision: 0,
+    })
+    runtime.tikHubCredentialStore.readCredential = async () => {
+      throw new Error('Admin readiness must never select the provider credential')
+    }
+
+    assert.equal(await readiness(), true)
   } finally {
     await closeRuntime(runtime)
   }
@@ -263,6 +396,7 @@ test('TikHub billing supports endpoint prices while retaining the legacy unit-co
   for (const unitCostMinorByEndpoint of [
     [],
     { 'Not A Stable Endpoint': 1 },
+    { 'xiaohongshu.image-note-detail.v2': 0 },
     { 'xiaohongshu.image-note-detail.v2': -1 },
   ]) {
     assert.throws(
@@ -276,6 +410,125 @@ test('TikHub billing supports endpoint prices while retaining the legacy unit-co
         }),
       }),
       (error) => error?.code === 'invalid_configuration',
+    )
+  }
+})
+
+test('paid provider contract activation fails closed without reviewed cost and monthly budget evidence', () => {
+  for (const [name, preflight, environment] of [
+    [
+      'JustOne',
+      preflightJustOneConfig,
+      {
+        ...BASE,
+        MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+        MX_INSIGHT_JUSTONE_BILLING_JSON: '',
+      },
+    ],
+    [
+      'TikHub detail',
+      preflightTikHubConfig,
+      {
+        ...BASE,
+        MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+        MX_INSIGHT_TIKHUB_BILLING_JSON: '',
+      },
+    ],
+    [
+      'TikHub search',
+      preflightTikHubConfig,
+      {
+        ...BASE,
+        MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+        MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED: '1',
+        MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+          source: 'manual',
+          currency: 'USD',
+          pricingAsOf: '2026-09-08T00:00:00Z',
+          monthlyBudgetMinor: 10_000,
+          monthlySubsidyBudgetMinor: 10_000,
+          unitCostMinorByEndpoint: { 'xiaohongshu.image-note-detail.v2': 1 },
+        }),
+      },
+    ],
+  ]) {
+    assert.throws(
+      () => preflight(environment),
+      (error) => error?.code === 'invalid_configuration'
+        && /cost control/u.test(error.message),
+      name,
+    )
+  }
+
+  assert.throws(
+    () => preflightTikHubConfig({
+      ...BASE,
+      MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+      MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+        source: 'manual',
+        currency: 'USD',
+        pricingAsOf: '2026-09-08T00:00:00Z',
+        unitCostMinor: 1,
+        monthlySubsidyBudgetMinor: 10_000,
+      }),
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /monthly budget/u.test(error.message),
+  )
+
+  assert.throws(
+    () => preflightTikHubConfig({
+      ...BASE,
+      MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+      MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+        source: 'manual',
+        currency: 'USD',
+        pricingAsOf: '2026-09-08T00:00:00Z',
+        unitCostMinor: 1,
+        monthlyBudgetMinor: 10_000,
+      }),
+    }),
+    (error) => error?.code === 'invalid_configuration'
+      && /subsidy budget/u.test(error.message),
+  )
+
+  for (const [preflight, environment] of [
+    [
+      preflightJustOneConfig,
+      {
+        ...BASE,
+        MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1',
+        MX_INSIGHT_JUSTONE_BILLING_JSON: JSON.stringify({
+          source: 'manual',
+          currency: 'CNY',
+          pricingAsOf: '2026-09-08T00:00:00Z',
+          monthlyBudgetMinor: 10_000,
+          monthlySubsidyBudgetMinor: 10_000,
+          unitCostMinorByEndpoint: { 'jd.product-search.v1': 0 },
+        }),
+      },
+    ],
+    [
+      preflightTikHubConfig,
+      {
+        ...BASE,
+        MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED: '1',
+        MX_INSIGHT_TIKHUB_BILLING_JSON: JSON.stringify({
+          source: 'manual',
+          currency: 'USD',
+          pricingAsOf: '2026-09-08T00:00:00Z',
+          unitCostMinor: 0,
+          monthlyBudgetMinor: 10_000,
+          monthlySubsidyBudgetMinor: 10_000,
+        }),
+      },
+    ],
+  ]) {
+    assert.throws(
+      () => preflight(environment),
+      (error) => error?.code === 'invalid_configuration'
+        && /positive/u.test(error.message),
+      'zero cannot represent unknown paid-provider cost',
     )
   }
 })

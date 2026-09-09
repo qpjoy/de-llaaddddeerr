@@ -28,6 +28,7 @@
 ```bash
 cd electron-dock/mx-insight-hub
 cp deploy/compose/search/.env.example deploy/compose/search/.env
+bash scripts/manage.sh local up
 bash scripts/manage.sh search plan
 bash scripts/manage.sh search up
 bash scripts/manage.sh search status
@@ -38,13 +39,21 @@ bash scripts/manage.sh search status
 - Elasticsearch `127.0.0.1:19200`
 - Kibana `127.0.0.1:15601`
 
+`search up` requires the local Hub health probe to be ready, waits for Elasticsearch, and then enables the
+main Compose file's explicit `search` profile. That profile runs the independent
+`server/workers/projector.mjs` process against the same PostgreSQL database and the loopback-published
+Elasticsearch node. It does not recreate the API/login container and is not an API readiness dependency.
+Changing `MX_INSIGHT_ELASTICSEARCH_PORT` also changes the projector target; an explicitly configured
+`MX_COMMON_ELASTICSEARCH_URL` remains authoritative.
+
 停止：
 
 ```bash
 bash scripts/manage.sh search down
 ```
 
-`down` 保留 named volumes。删除 volume 不是普通生命周期操作，也不写进一键命令。
+`down` 先停止 projector，再停止搜索容器，并保留 PostgreSQL outbox 与 Elasticsearch named volumes。
+因此停机期间的新 canonical 变更仍可在下次 `search up` 后补投影。删除 volume 不是普通生命周期操作，也不写进一键命令。
 
 样板安装：
 

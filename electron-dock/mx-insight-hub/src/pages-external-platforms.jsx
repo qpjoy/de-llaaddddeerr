@@ -60,11 +60,11 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['justone'])
+const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub'])
 const UNKNOWN = '未知'
 
 function providerDisplayName(provider) {
-  return provider === 'justone' ? 'JustOne' : provider || '外部平台'
+  return ({ justone: 'JustOne', tikhub: 'TikHub' })[provider] || provider || '外部平台'
 }
 
 const PROCESSING_STAGES = [
@@ -325,7 +325,7 @@ function normalizePlatform(raw = {}, fallbackKey = null) {
   return {
     raw,
     key,
-    displayName: optionalText(raw.displayName, raw.name, raw.label) || (key === 'justone' ? 'JustOne' : key) || UNKNOWN,
+    displayName: optionalText(raw.displayName, raw.name, raw.label) || (key ? providerDisplayName(key) : UNKNOWN),
     description: optionalText(raw.description, raw.summaryText),
     status: optionalText(raw.status, raw.health, raw.state) || 'unknown',
     summary: normalizeSummary(raw),
@@ -360,10 +360,11 @@ function normalizeOverview(payload) {
     .map((item) => normalizePlatform(item))
     .filter((item) => SUPPORTED_PROVIDERS.has(item.key))
   const primary = items[0]
+  const hasAggregateSummary = isRecord(payload?.summary)
   return {
     items,
-    summary: primary?.summary || normalizeSummary({}),
-    cost: primary?.cost || normalizeCost({}),
+    summary: hasAggregateSummary ? normalizeSummary(payload) : primary?.summary || normalizeSummary({}),
+    cost: hasAggregateSummary ? normalizeCost({ billing: payload.summary }) : primary?.cost || normalizeCost({}),
     lastObservedAt: primary?.lastObservedAt || null,
   }
 }

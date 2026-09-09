@@ -5,10 +5,13 @@ MX Insight Hub is the governed data-access layer between callers and private dat
 The runtime now includes Admin-managed PostgreSQL and file sources, versioned
 source objects/mappings, canonical records/revisions/tombstones, transactional
 projection outbox, direct file import, durable pull workers and customer-safe
-Telegram history/full-text/entity APIs. Eligible Xiaohongshu search/detail is
-served through the Hub-owned TikHub gateway, ecommerce product search through
-the provider-neutral JustOne gateway, and unmigrated live platforms continue
-through the Night-All compatibility path. Telegram stored search is locally
+Telegram history/full-text/entity APIs. Eligible Xiaohongshu search/detail and
+narrow single-user crawl/user-info shapes can be served through separately gated
+Hub-owned TikHub workflows, ecommerce product search through the provider-neutral
+JustOne gateway, and unmigrated live platforms/shapes continue through the Night-All
+compatibility path. Historical `mxnc1`, batch/channel/non-post and other unsupported
+Xiaohongshu shapes remain Night-All-owned; repository code alone does not prove a
+direct rollout gate is active. Telegram stored search is locally
 served in the same `night-all.data-search.v1` envelope. `/shared_dir` watching, immutable
 object/cloud adapters, a generic CDC connector, freshness-aware live fallback,
 BI datasets and governed Text2SQL/Data Agent tools remain later delivery gates
@@ -27,6 +30,14 @@ It is an independently deployed product module and a sibling of `mx-launcher`, n
 - **Night-All** owns its legacy/unmigrated collection, normalization, source evidence and credentials.
 - **MX Insight Hub** owns tenants, consumers, API keys, grants, limits, request state, customer usage/billing, and its direct TikHub/JustOne provider gateways.
 - **MX Launcher / MX-H2I** owns deployment orchestration, private/public connectivity, DNS, TLS edge, and the operator entrypoint.
+
+Compatibility acquisition preserves upstream business content, tags, engagement,
+author and media fields without Hub desensitization, filtering or field-level
+truncation. Only governed pagination controls may be rewritten. Historical
+Night-All lineage retains complete parsed JSON and legacy raw strings; Hub-native
+provider calls additionally archive exact bounded response bytes in restricted
+storage. API keys, Authorization/Cookie material and other request secrets are
+kept out of business responses, ordinary UI and logs.
 
 Launcher is the authority for human login and organization identity; Hub keeps
 its own tenant membership, consumer applications, API keys, product grants,
