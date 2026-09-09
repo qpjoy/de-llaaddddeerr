@@ -519,7 +519,8 @@ Repeating the same body with the same `Idempotency-Key` produces `idempotent_rep
 neither a Hub usage request nor an external call or provider-cost event. The
 gateway audit trail may record delivery of the replay, but that delivery is not
 a new Hub usage or provider procurement-cost event. That fact does not decide
-whether a future Hub customer price book prices replay delivery.
+another customer charge: the current request-priced ledger keys a charge uniquely
+to `usage_request_id`, so an idempotent replay is never charged twice.
 
 A `cache_only` hit is still a new authenticated Hub delivery and therefore a
 new Hub usage record, while creating no provider call. A `cache_only` miss
@@ -527,12 +528,12 @@ releases its usage reservation and returns 404. This distinction is deliberate:
 provider procurement cost, Hub operational usage and future customer billing
 are separate ledgers.
 
-Hub operational usage and provider cost are separate ledgers. Neither is a
-customer invoice. A future versioned Hub price book may decide whether a live,
-cached, fallback, or replayed delivery is customer-billable; it must not infer
-that decision by copying the provider's call cost. Provider rates, balances,
-free quota and procurement evidence remain Internal-only and never appear in
-Public capability, search or media responses.
+Hub operational usage, provider cost and customer billing are separate ledgers.
+Migration 056's versioned Hub price book can price a new logical live, cached or
+fallback delivery by its stable meter; it never prices an idempotent replay twice
+and must not infer a customer price by copying provider-call cost. Provider rates,
+balances, free quota and procurement evidence remain Internal-only and never
+appear in Public capability, search or media responses.
 
 Every success also returns `x-mx-insight-request-id`,
 `x-mx-insight-source-mode`, `x-mx-insight-captured-at`, `Age`, and
@@ -2202,6 +2203,21 @@ GET /api/v1/usage?from=2026-08-01T00:00:00Z&to=2026-08-04T00:00:00Z
 
 Returns only the authenticated consumer’s usage. Existing data usage remains
 under `byPlatform`; generic tools are reported separately under `byCapability`.
+`requestMetering.byMeter` counts accepted logical Hub requests by stable meter
+even when no customer price is published. It separates committed, reserved,
+released and unknown states. A same-key idempotent replay does not create another
+logical usage row or charge; one logical request may still fan out to several
+Internal-only provider calls.
+
+`customerBilling` separately reports pricing-record counts and positive enforced
+`capturedRequests`, `heldRequests` (reserved plus unknown), `releasedRequests` and
+`shadowRequests`. `byCurrency` is the authoritative money view. If more than one
+currency is present, top-level money fields are `null`; Hub never adds different
+minor units or applies an implicit exchange rate. A current request with a strictly
+matched positive enforced wallet hold is not rejected by Hub monthly procurement
+or subsidy financial thresholds. Current endpoint/request cost evidence and all
+quota, provider-rate, concurrency, circuit, contract, credential, idempotency and
+pagination protections still apply.
 
 ## Error semantics
 

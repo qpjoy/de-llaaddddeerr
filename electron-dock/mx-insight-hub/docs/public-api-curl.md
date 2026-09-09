@@ -665,11 +665,11 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
 | 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |
 | 429 | `external_platform_busy`, `external_platform_capacity_exceeded` | Hub 并发保护或外部容量不足；按响应退避，不要并发放大。 |
-| 429 | `external_platform_cost_budget_exhausted`, `external_platform_subsidy_budget_exhausted` | 当前完整调用或多调用工作流无法同时满足已审核供应商月预算与未覆盖成本补贴预算；不要换 Key 重试。运营方应审核成本证据、同币种客户价格/钱包 hold 和显式补贴额度，不能由客户端推导售价或汇率。 |
+| 429 | `external_platform_cost_budget_exhausted`, `external_platform_subsidy_budget_exhausted` | 仅表示本次请求没有形成正价 `enforced` 按次钱包 hold，且未计价/补贴工作流越过了 Hub 月度财务线；不要换 Key 重试。已有严格匹配且已冻结下游资金的请求不会因这两条财务线被拒；运营方仍须分别审核上下游原币种账本。 |
 | 502 | `external_platform_response_unusable` | 上游成功 envelope 无法映射。该稳定错误会随同一 `Idempotency-Key` 重放且不再次派发；保存 requestId 作为证据，不得使用 uncertain-repeat 通道。 |
 | 502 | `external_platform_outcome_unknown` | 结果可能已经产生外部调用；保存 requestId 和原幂等键，禁止自动换键重试。只有只读状态 GET 明确返回 `unknown`，才可用一次新的 `refresh`、新 Key 和 `X-MX-Insight-Retry-Of`；这可能形成第二笔供应方成本。 |
 | 502 | `external_platform_rejected` | 上游已确定拒绝；检查请求条件，避免连续自动重试。 |
-| 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable`, `external_platform_cost_control_unavailable`, `external_platform_cost_evidence_incomplete` | 若没有 exact fallback，按运维窗口退避。后两个错误表示正的已审核上游单价、币种、月预算或账本证据不完整；未知成本不能填 `0`。 |
+| 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable`, `external_platform_cost_control_unavailable`, `external_platform_cost_evidence_incomplete` | 若没有 exact fallback，按运维窗口退避。后两个错误表示当前 endpoint 的正数已审核成本配置或本次请求自身的成本证据不完整；即使下游已冻结资金也不能跳过，未知成本不能填 `0`。无关历史异常不会阻断 paid-ready 请求。 |
 | 200 | `data.items=[]` | 正常空结果，不是接口故障；可调整关键词或平台。空结果不能证明上游成本为零。 |
 
 `external_platform_not_configured` intentionally does not expose whether a
@@ -679,9 +679,10 @@ the `Idempotency-Key` to probe or retry. Operators distinguish those causes thro
 the Admin-only external-platform runbook without probing the live acquisition route.
 
 公开响应不返回供应方费率、余额、免费额度、采购成本或客户账单；未知费用不会冒充为 0。
-Hub usage、供应方采购成本与 Hub 客户计价是三个相互独立的计量/计价域。当前前两者已有
-运行证据；客户计价待独立、版本化的 Hub price book 落地，并继续作用于同一 consumer，
-无需更换 API Key，也不能从 `sourceMode` 或供应方成本直接推导。
+Hub usage、供应方采购成本与 Hub 客户计价是三个相互独立的计量/计价域。Migration 056
+已经提供版本化 Hub price book 和按逻辑请求唯一的 customer charge；未发布费率时仍由
+`usage_requests.billing_meter_key` 精确计数。新费率只通过新的不可变 plan/price-book version
+作用于明确分配的 consumer，无需更换 API Key，也不能从 `sourceMode` 或供应方成本直接推导。
 
 ## 3.4 小红书笔记 API
 
@@ -1210,8 +1211,8 @@ dispatch。
 | `502 night_all_rejected` | Night-All 的其他明确拒绝，且没有可用 exact snapshot |
 | `502 upstream_outcome_unknown` | dispatch 结果存在歧义且没有可用 exact snapshot；同一 key 不会重新 dispatch |
 | `429 external_platform_rate_limited` | Hub-native 小红书请求达到服务端外部调用速率门禁；没有可用 stored fallback |
-| `429 external_platform_cost_budget_exhausted` / `external_platform_subsidy_budget_exhausted` | 完整 Hub-native 外采工作流无法在供应商月预算或显式未覆盖成本补贴预算内原子准入；没有发生部分 fan-out，客户端不得换 Key 重试 |
-| `503 external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | 已审核正单价、币种、预算或受控账本证据不完整，付费 dispatch fail closed；未知成本不能用 `0` 代替 |
+| `429 external_platform_cost_budget_exhausted` / `external_platform_subsidy_budget_exhausted` | 只适用于没有正价 `enforced` 钱包 hold 的未计价/补贴请求；严格匹配且资金已冻结的按次计费请求不因 Hub 月度财务线停止，客户端仍不得换 Key 重试 |
+| `503 external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | 当前 endpoint 的已审核正数成本配置或本次请求自身的受控账本证据不完整；即使 paid-ready 也 fail closed，未知成本不能用 `0` 代替 |
 | `409/429/502/503 external_platform_*` | Hub-native 小红书的去重、容量、响应合同、结果歧义、配置或 circuit 类别；保留 durable request ID 并按具体 code 处理 |
 
 ### `POST /api/v1/night-all/search/raw`
@@ -1553,6 +1554,9 @@ curl -sS -i --get \
 ```
 
 成功返回 `200`，包含 requests、committed、released、unknown、units、latency、
-`byPlatform` 和 `byCapability` 汇总。**当前实现对日期解析及 `from <= to` 仍存在
+`byPlatform`、`byCapability` 和与售价无关的 `requestMetering.byMeter` 精确逻辑请求汇总。
+`customerBilling` 把计价记录、成功扣费、冻结、释放和影子次数与金额分开；金额以
+`byCurrency` 为准，多币种时顶层金额为 `null`，不会换汇或相加。同一幂等请求重放不增加
+逻辑请求、customer charge 或上游调用。**当前实现对日期解析及 `from <= to` 仍存在
 校验缺口**；无效日期或反向区间的行为不是稳定公开契约，客户端不能依赖它一定
 返回 `400`。认证缺失或无效时返回 `401`。

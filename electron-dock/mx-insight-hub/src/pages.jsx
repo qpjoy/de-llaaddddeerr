@@ -233,6 +233,8 @@ function billingMeterLabel(meterKey) {
   return ({
     'social.posts.search': '小红书笔记搜索',
     'social.posts.resolve': '小红书笔记详情',
+    'social.users.resolve': '小红书用户资料',
+    'social.users.posts': '小红书用户笔记',
     'ecommerce.products.search': '电商商品搜索',
     'nlp.tokenize': '中文分词',
   })[meterKey] || meterKey
@@ -1597,7 +1599,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       {session?.platformAdmin && currentPlan?.pricing?.mode === 'operator_price_book' && !currentPlan?.priceBook && !newerPricedVersion ? (
         <Panel
           title="费率尚未配置"
-          subtitle="当前套餐只限制配额、不向租户扣费。下游费率尚未确定，需运营方核对上游成本、目标毛利与客户合同后显式录入；发布后也不会自动分配。"
+          subtitle="当前套餐只限制配额、不向租户扣费。下游费率尚未确定，需运营方核对上游成本、目标毛利与客户合同后显式录入；计费单位是一次被 Hub 接受的逻辑请求，不按实际上游调用次数累加。成功交付才扣费，安全失败释放，发布后也不会自动分配。"
           action={(
             <div className="mih-page-actions">
               <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => openPlanPublisher(currentPlan)}><Coins size={16} aria-hidden="true" />录入费率草案</button>
@@ -1607,8 +1609,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           <Table label="小红书待定价能力">
             <thead><tr><th>开放能力</th><th>计量键</th><th>当前费率</th><th>交付口径</th></tr></thead>
             <tbody>
-              <tr><td><strong>小红书笔记搜索</strong></td><td><code>social.posts.search</code></td><td><strong>待运营定价</strong></td><td>每页最多 20 条，包含必要的正文补全</td></tr>
-              <tr><td><strong>小红书笔记详情</strong></td><td><code>social.posts.resolve</code></td><td><strong>待运营定价</strong></td><td>按成功交付的一篇完整笔记计价</td></tr>
+              <tr><td><strong>小红书笔记搜索</strong></td><td><code>social.posts.search</code></td><td><strong>待运营定价</strong></td><td>每个 Hub 搜索逻辑请求产生 1 条计价记录；成功交付扣费，正文补全和上游调用不另计</td></tr>
+              <tr><td><strong>小红书笔记详情</strong></td><td><code>social.posts.resolve</code></td><td><strong>待运营定价</strong></td><td>每个 Hub 笔记详情逻辑请求产生 1 条计价记录；成功交付扣费，上游调用不另计</td></tr>
+              <tr><td><strong>小红书用户资料</strong></td><td><code>social.users.resolve</code></td><td><strong>待运营定价</strong></td><td>每个 Hub 用户资料逻辑请求产生 1 条计价记录；成功交付扣费，账号解析和上游调用不另计</td></tr>
+              <tr><td><strong>小红书用户笔记</strong></td><td><code>social.users.posts</code></td><td><strong>待运营定价</strong></td><td>每个 Hub 用户笔记逻辑请求产生 1 条计价记录；成功交付扣费，账号解析、资料与笔记抓取等上游调用不另计</td></tr>
               <tr><td><strong>租户合同倍率</strong></td><td><code>customer multiplier</code></td><td><strong>由合同确定</strong></td><td>需按合同人工设置，不会自动生效</td></tr>
             </tbody>
           </Table>
@@ -1624,7 +1628,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
               <tr key={entry.meterKey}>
                 <td><strong>{billingMeterLabel(entry.meterKey)}</strong></td>
                 <td><code>{entry.meterKey}</code></td>
-                <td>{entry.billingUnit === 'request' ? '每次 Hub 请求' : entry.billingUnit}</td>
+                <td>{entry.billingUnit === 'request' ? '每个 Hub 逻辑请求（成功交付扣费）' : entry.billingUnit}</td>
                 <td><strong>{formatMoneyMinor(entry.unitPriceMinor, entry.currency || billingCurrency)}</strong></td>
               </tr>
             ))}</tbody>
@@ -2304,14 +2308,18 @@ export function UsagePage({ token, session, query, setQuery, onUnauthorized, not
   const usage = data.usage || {}
   const platforms = sortedPlatforms(usage.byPlatform)
   const capabilities = sortedPlatforms(usage.byCapability)
+  const requestMeters = sortedPlatforms(usage.requestMetering?.byMeter)
   const customerBilling = usage.customerBilling || {}
+  const billingCurrencies = sortedPlatforms(customerBilling.byCurrency)
   const billingMeters = sortedPlatforms(customerBilling.byMeter)
   const recentRequests = usage.recentRequests || []
   const consumerNames = new Map(data.consumers.map((consumer) => [consumer.id, consumer.name]))
   const billingMoney = (minor, currency = customerBilling.currency, mixedCurrencies = customerBilling.mixedCurrencies) => (
-    mixedCurrencies || !currency
-      ? `${formatNumber(minor)} 最小货币单位`
-      : formatMoneyMinor(minor, currency)
+    mixedCurrencies
+      ? '多币种，见按币种汇总'
+      : !currency
+        ? `${formatNumber(minor ?? 0)} 最小货币单位`
+        : formatMoneyMinor(minor ?? 0, currency)
   )
 
   const openReconciliation = (request) => {
@@ -2377,10 +2385,10 @@ export function UsagePage({ token, session, query, setQuery, onUnauthorized, not
       </section>
 
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="客户计费摘要">
-        <MetricCard icon={Coins} label="客户报价" value={billingMoney(customerBilling.quotedMinor || 0)} hint="按请求创建时的合同价格快照" />
-        <MetricCard icon={ShieldCheck} label="实际扣费" value={billingMoney(customerBilling.chargedMinor || 0)} hint="只统计已经成功交付的请求" tone="success" />
-        <MetricCard icon={Timer} label="待结算冻结" value={billingMoney(customerBilling.heldMinor || 0)} hint="结果未知时保留，避免重复支付" tone="warning" />
-        <MetricCard icon={ChartLine} label="影子报价" value={billingMoney(customerBilling.shadowQuotedMinor || 0)} hint="用于上线前核价，不改变租户余额" tone="info" />
+        <MetricCard icon={Coins} label="客户报价" value={billingMoney(customerBilling.quotedMinor)} hint={`${formatNumber(customerBilling.requests)} 条计价记录；${formatNumber(customerBilling.releasedRequests)} 次安全失败已释放`} />
+        <MetricCard icon={ShieldCheck} label="实际扣费" value={billingMoney(customerBilling.chargedMinor)} hint={`${formatNumber(customerBilling.capturedRequests)} 次成功扣费`} tone="success" />
+        <MetricCard icon={Timer} label="待结算冻结" value={billingMoney(customerBilling.heldMinor)} hint={`${formatNumber(customerBilling.heldRequests)} 次冻结；结果未知时保留`} tone="warning" />
+        <MetricCard icon={ChartLine} label="影子报价" value={billingMoney(customerBilling.shadowQuotedMinor)} hint={`${formatNumber(customerBilling.shadowRequests)} 次影子计价；不改变余额`} tone="info" />
       </section>
 
       <Panel title="最近 API 调用" subtitle="最多展示当前筛选范围内最近 50 笔；请求与客户价格按同一 request ID 对账">
@@ -2467,15 +2475,61 @@ export function UsagePage({ token, session, query, setQuery, onUnauthorized, not
         ) : <EmptyState icon={Brain} title="没有通用能力调用" description="为调用者授权能力并使用 API 后，这里会出现独立计量。" />}
       </Panel>
 
-      <Panel title="客户计费明细" subtitle="按 Hub 开放能力归集；不包含供应商名称与采购成本">
+      <Panel title="按 Hub 计量键" subtitle="逻辑用量请求精确计数；不依赖价目表、客户扣费或上游调用数">
+        {requestMeters.length ? (
+          <Table label="按 Hub 计量键的请求明细">
+            <thead><tr><th>开放能力</th><th>计量键</th><th>请求</th><th>成功</th><th>处理中</th><th>已释放</th><th>结果未知</th><th>工作单元</th></tr></thead>
+            <tbody>{requestMeters.map(([meterKey, item]) => (
+              <tr key={meterKey}>
+                <td><strong>{billingMeterLabel(meterKey)}</strong></td>
+                <td><code>{meterKey}</code></td>
+                <td>{formatNumber(item.requests)}</td>
+                <td>{formatNumber(item.committed)}</td>
+                <td>{formatNumber(item.reserved)}</td>
+                <td>{formatNumber(item.released)}</td>
+                <td>{formatNumber(item.unknown)}</td>
+                <td>{formatNumber(item.units)}</td>
+              </tr>
+            ))}</tbody>
+          </Table>
+        ) : <EmptyState icon={Pulse} title="当前范围没有可计量请求" description="请求一旦进入 Hub 逻辑用量账本，即使尚未定价也会在这里计数。" />}
+      </Panel>
+
+      <Panel title="客户计费按币种" subtitle="每种币种独立对账；跨币种不换汇、不相加，顶层仅汇总请求与计费状态次数">
+        {billingCurrencies.length ? (
+          <Table label="客户计费按币种汇总">
+            <thead><tr><th>币种</th><th>计价记录</th><th>成功扣费次数</th><th>冻结次数</th><th>释放次数</th><th>影子次数</th><th>报价金额</th><th>已扣金额</th><th>冻结金额</th><th>影子报价</th></tr></thead>
+            <tbody>{billingCurrencies.map(([currency, item]) => (
+              <tr key={currency}>
+                <td><strong>{currency}</strong></td>
+                <td>{formatNumber(item.requests)}</td>
+                <td>{formatNumber(item.capturedRequests)}</td>
+                <td>{formatNumber(item.heldRequests)}</td>
+                <td>{formatNumber(item.releasedRequests)}</td>
+                <td>{formatNumber(item.shadowRequests)}</td>
+                <td>{formatMoneyMinor(item.quotedMinor, currency)}</td>
+                <td>{formatMoneyMinor(item.chargedMinor, currency)}</td>
+                <td>{formatMoneyMinor(item.heldMinor, currency)}</td>
+                <td>{formatMoneyMinor(item.shadowQuotedMinor, currency)}</td>
+              </tr>
+            ))}</tbody>
+          </Table>
+        ) : <EmptyState icon={Coins} title="当前范围没有按币种计费记录" description="计费记录产生后，会按原币种展示可独立核对的次数与金额。" />}
+      </Panel>
+
+      <Panel title="客户计费明细" subtitle="按 Hub 开放能力归集；计费状态次数与金额分别统计，不包含供应商名称、采购成本或上游调用次数">
         {billingMeters.length ? (
           <Table label="客户计费明细">
-            <thead><tr><th>开放能力</th><th>计量键</th><th>请求</th><th>报价</th><th>已扣</th><th>冻结</th></tr></thead>
+            <thead><tr><th>开放能力</th><th>计量键</th><th>计价记录</th><th>成功扣费次数</th><th>冻结次数</th><th>释放次数</th><th>影子次数</th><th>报价金额</th><th>已扣金额</th><th>冻结金额</th></tr></thead>
             <tbody>{billingMeters.map(([meterKey, item]) => (
               <tr key={meterKey}>
                 <td><strong>{billingMeterLabel(meterKey)}</strong></td>
                 <td><code>{meterKey}</code></td>
                 <td>{formatNumber(item.requests)}</td>
+                <td>{formatNumber(item.capturedRequests)}</td>
+                <td>{formatNumber(item.heldRequests)}</td>
+                <td>{formatNumber(item.releasedRequests)}</td>
+                <td>{formatNumber(item.shadowRequests)}</td>
                 <td>{billingMoney(item.quotedMinor, item.currency, item.mixedCurrencies)}</td>
                 <td>{billingMoney(item.chargedMinor, item.currency, item.mixedCurrencies)}</td>
                 <td>{billingMoney(item.heldMinor, item.currency, item.mixedCurrencies)}</td>

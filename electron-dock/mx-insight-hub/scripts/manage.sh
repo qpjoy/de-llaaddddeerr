@@ -689,12 +689,11 @@ preserve_existing_justone_runtime_config() {
     fi
   fi
 
-  # A reviewed cost policy is part of an open paid-dispatch gate. Routine
-  # deploys must not replace it with an empty ConfigMap value merely because
-  # the operator did not repeat the JSON in the current shell.
-  if [ "${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}" = "1" ] \
-    && { [ "${MX_INSIGHT_JUSTONE_BILLING_JSON+x}" != x ] \
-      || [[ ! "${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" =~ [^[:space:]] ]]; }; then
+  # A reviewed cost policy survives a temporary gate closure. Routine and
+  # migration-first deploys must not replace it with an empty ConfigMap value
+  # merely because the operator did not repeat the JSON in the current shell.
+  if [ "${MX_INSIGHT_JUSTONE_BILLING_JSON+x}" != x ] \
+    || [[ ! "${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" =~ [^[:space:]] ]]; then
     if ! existing="$(
       kubectl -n "$namespace" get configmap mx-insight-hub-config \
         --ignore-not-found \
@@ -817,9 +816,10 @@ preserve_existing_tikhub_runtime_config() {
     fi
   fi
 
-  if [ "${MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED:-0}" = "1" ] \
-    && { [ "${MX_INSIGHT_TIKHUB_BILLING_JSON+x}" != x ] \
-      || [[ ! "${MX_INSIGHT_TIKHUB_BILLING_JSON:-}" =~ [^[:space:]] ]]; }; then
+  # As with JustOne, closing the parent dispatch gate does not erase reviewed
+  # procurement evidence. A non-empty explicit JSON value is the replacement.
+  if [ "${MX_INSIGHT_TIKHUB_BILLING_JSON+x}" != x ] \
+    || [[ ! "${MX_INSIGHT_TIKHUB_BILLING_JSON:-}" =~ [^[:space:]] ]]; then
     if ! existing="$(
       kubectl -n "$namespace" get configmap mx-insight-hub-config \
         --ignore-not-found \
@@ -1075,6 +1075,7 @@ create_runtime_config() {
     justone_configured=1
   fi
   local justone_contract_verified="${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}"
+  local justone_billing_json="${MX_INSIGHT_JUSTONE_BILLING_JSON:-}"
   local tikhub_api_key="${MX_INSIGHT_TIKHUB_API_KEY:-}"
   if [[ ! "$tikhub_api_key" =~ [^[:space:]] ]]; then
     tikhub_api_key=""
@@ -1087,6 +1088,7 @@ create_runtime_config() {
   local tikhub_search_contract_verified="${MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED:-0}"
   local tikhub_user_activity_contract_verified="${MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED:-0}"
   local tikhub_search_canary_consumer_ids="${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS:-}"
+  local tikhub_billing_json="${MX_INSIGHT_TIKHUB_BILLING_JSON:-}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
   if ! public_url="$(
@@ -1108,6 +1110,7 @@ create_runtime_config() {
     MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
     MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_verified" \
     MX_INSIGHT_JUSTONE_TOKEN="$justone_token" \
+    MX_INSIGHT_JUSTONE_BILLING_JSON="$justone_billing_json" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     node --input-type=module -e '
       try {
@@ -1119,6 +1122,9 @@ create_runtime_config() {
       }
     ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
   )"; then
+    if [[ "$justone_preflight_error" == *"contract activation requires"* ]]; then
+      die "JustOne preflight failed: ${justone_preflight_error}. For an independent migration-first deploy with unreviewed upstream pricing, explicitly set MX_INSIGHT_SYNC_LAUNCHER=0 and MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0; migration 056 request metering remains enabled."
+    fi
     die "JustOne preflight failed: ${justone_preflight_error}"
   fi
   if [ "$justone_contract_verified" != "1" ]; then
@@ -1136,6 +1142,7 @@ create_runtime_config() {
     MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED="$tikhub_user_activity_contract_verified" \
     MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_consumer_ids" \
     MX_INSIGHT_TIKHUB_API_KEY="$tikhub_api_key" \
+    MX_INSIGHT_TIKHUB_BILLING_JSON="$tikhub_billing_json" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     node --input-type=module -e '
       try {
@@ -1147,6 +1154,9 @@ create_runtime_config() {
       }
     ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
   )"; then
+    if [[ "$tikhub_preflight_error" == *"contract activation requires"* ]]; then
+      die "TikHub preflight failed: ${tikhub_preflight_error}. For an independent migration-first deploy with unreviewed upstream pricing, explicitly set MX_INSIGHT_SYNC_LAUNCHER=0 and the TikHub parent, search and user-activity contract gates to 0; migration 056 request metering remains enabled."
+    fi
     die "TikHub preflight failed: ${tikhub_preflight_error}"
   fi
   if [ "$tikhub_contract_verified" != "1" ]; then
@@ -1267,7 +1277,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-90}" \
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES="${MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS="${MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS:-60000}" \
-    --from-literal=MX_INSIGHT_JUSTONE_BILLING_JSON="${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" \
+    --from-literal=MX_INSIGHT_JUSTONE_BILLING_JSON="$justone_billing_json" \
     --from-literal=MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     --from-literal=MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
@@ -1287,7 +1297,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-120}" \
     --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES="${MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS="${MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS:-60000}" \
-    --from-literal=MX_INSIGHT_TIKHUB_BILLING_JSON="${MX_INSIGHT_TIKHUB_BILLING_JSON:-}" \
+    --from-literal=MX_INSIGHT_TIKHUB_BILLING_JSON="$tikhub_billing_json" \
     --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_MAX_REQUESTS="${MX_INSIGHT_EXTERNAL_MEDIA_MAX_REQUESTS:-1200}" \
     --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_WINDOW_MS="${MX_INSIGHT_EXTERNAL_MEDIA_WINDOW_MS:-60000}" \
     --from-literal=MX_INSIGHT_EXTERNAL_MEDIA_CONSUMER_CONCURRENCY="${MX_INSIGHT_EXTERNAL_MEDIA_CONSUMER_CONCURRENCY:-16}" \
@@ -2320,6 +2330,8 @@ ops_action() {
   local justone_token_override=""
   local justone_contract_override_set=0
   local justone_contract_override=""
+  local justone_billing_override_set=0
+  local justone_billing_override=""
   local justone_clear_override_set=0
   local justone_clear_override=""
   local tikhub_key_override_set=0
@@ -2332,6 +2344,8 @@ ops_action() {
   local tikhub_user_activity_contract_override=""
   local tikhub_search_canary_override_set=0
   local tikhub_search_canary_override=""
+  local tikhub_billing_override_set=0
+  local tikhub_billing_override=""
   local tikhub_clear_override_set=0
   local tikhub_clear_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
@@ -2347,6 +2361,10 @@ ops_action() {
   if [ "${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED+x}" = x ]; then
     justone_contract_override_set=1
     justone_contract_override="$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED"
+  fi
+  if [ "${MX_INSIGHT_JUSTONE_BILLING_JSON+x}" = x ]; then
+    justone_billing_override_set=1
+    justone_billing_override="$MX_INSIGHT_JUSTONE_BILLING_JSON"
   fi
   if [ "${MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN+x}" = x ]; then
     justone_clear_override_set=1
@@ -2372,6 +2390,10 @@ ops_action() {
     tikhub_search_canary_override_set=1
     tikhub_search_canary_override="$MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS"
   fi
+  if [ "${MX_INSIGHT_TIKHUB_BILLING_JSON+x}" = x ]; then
+    tikhub_billing_override_set=1
+    tikhub_billing_override="$MX_INSIGHT_TIKHUB_BILLING_JSON"
+  fi
   if [ "${MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY+x}" = x ]; then
     tikhub_clear_override_set=1
     tikhub_clear_override="$MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY"
@@ -2392,6 +2414,10 @@ ops_action() {
     MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_override"
     export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
   fi
+  if [ "$justone_billing_override_set" = 1 ]; then
+    MX_INSIGHT_JUSTONE_BILLING_JSON="$justone_billing_override"
+    export MX_INSIGHT_JUSTONE_BILLING_JSON
+  fi
   if [ "$tikhub_key_override_set" = 1 ]; then
     MX_INSIGHT_TIKHUB_API_KEY="$tikhub_key_override"
     export MX_INSIGHT_TIKHUB_API_KEY
@@ -2411,6 +2437,24 @@ ops_action() {
   if [ "$tikhub_search_canary_override_set" = 1 ]; then
     MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS="$tikhub_search_canary_override"
     export MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS
+  fi
+  if [ "$tikhub_billing_override_set" = 1 ]; then
+    MX_INSIGHT_TIKHUB_BILLING_JSON="$tikhub_billing_override"
+    export MX_INSIGHT_TIKHUB_BILLING_JSON
+  fi
+  # An explicit parent-gate emergency stop must also beat narrower gates that
+  # were merely inherited from .env.internal. Explicit contradictory child
+  # overrides are left intact so strict preflight can reject the bad command.
+  if [ "$tikhub_contract_override_set" = 1 ] \
+    && [ "$tikhub_contract_override" = 0 ]; then
+    if [ "$tikhub_search_contract_override_set" != 1 ]; then
+      MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0
+      export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED
+    fi
+    if [ "$tikhub_user_activity_contract_override_set" != 1 ]; then
+      MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=0
+      export MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED
+    fi
   fi
   # Clearing a retained paid-provider secret is intentionally one-shot. Ignore
   # a persisted copy of this flag; it must be present in the command environment.

@@ -180,10 +180,41 @@ jq '.data | {
 ```
 
 
-# justone
+# JustOne/TikHub：先关闭 gate 完成迁移，再分别启用计费明确的上下游
 ```bash
 # .env.internal
-MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
+
+# 若旧集群还保留了未配成本证据的 TikHub 开关，首次升级也显式关闭。
+# 这只停止新的付费上游 dispatch，不影响 Hub migration、存量读取、
+# Launcher/MX-H2I 登录或用户联网。
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_SYNC_LAUNCHER=0 \
+  bash scripts/manage.sh ops internal-production deploy
+
+# 部署参数中的 MX_INSIGHT_JUSTONE_BILLING_JSON 和
+# MX_INSIGHT_TIKHUB_BILLING_JSON 未设置或传空字符串时，语义都是保留集群
+# ConfigMap 中已有的经审核策略，不会清空已有值。要停用付费上游，必须显式把
+# 对应的 *_CONTRACT_VERIFIED gate 设为 0；不能用 *_BILLING_JSON="" 代替。
+
+# 上述部署会执行 migration 056：复用版本化 customer_price_books / entries，
+# billing_unit=request。usage_requests 精确记录新的逻辑 Hub 请求；同一个
+# Idempotency-Key 的安全重放不重复创建 usage/customer charge。
+
+# 不要用 0 或猜测价格发布下游“临时”价目表。费率确认后，在套餐与配额页面发布
+# 新的不可变 price-book/plan version，先将 canary tenant 设为 shadow，核对
+# request meter 数量，再充值并切 enforced。只影响之后明确分配到新版本的请求。
+
+# JustOne gate 只有在 MX_INSIGHT_JUSTONE_BILLING_JSON 已包含经审核的币种、
+# pricingAsOf、正数 endpoint 成本以及两个非负月度成本线后才能改为 1；成本线可设为 0，
+# 让未计价/影子流量保持关闭。对同一 usage request 已完成正数 enforced 钱包冻结的
+# 下游请求，这两个 Hub 财务线只告警、不拒绝上游 dispatch；真实 provider rate/quota、
+# 并发、熔断、合同、凭据和当前请求成本证据仍然生效。
+# 客户价目表是下游售价，不能替代上游采购成本证据，也不能用猜测汇率混算两本账。
+
 # 检查启用状态
 kubectl -n mx-insight-hub get configmap mx-insight-hub-config -o json \
   | jq '.data | {
@@ -192,7 +223,7 @@ kubectl -n mx-insight-hub get configmap mx-insight-hub-config -o json \
     }'
 ```
 ```bash
-# 零费用检查
+# 零上游调用的能力检查
 curl -fsS \
   -H "Authorization: Bearer $HUB_API_KEY" \
   "$HUB_PUBLIC_URL/api/v1/data/capabilities" \

@@ -3181,14 +3181,17 @@ export class MemoryStore {
 function summarizeUsage(records, chargeMap = new Map()) {
   const byPlatform = {}
   const byCapability = {}
+  const requestMeters = {}
   let latencyTotal = 0
   let latencyCount = 0
-  const byMeter = {}
+  const billingMeters = {}
+  const billingByCurrency = {}
   const currencies = new Set()
-  let quotedMinor = 0
-  let chargedMinor = 0
-  let heldMinor = 0
-  let shadowQuotedMinor = 0
+  let billingRequests = 0
+  let capturedRequests = 0
+  let heldRequests = 0
+  let releasedRequests = 0
+  let shadowRequests = 0
   for (const record of records) {
     const bucket = record.capability ? byCapability : byPlatform
     const scope = record.capability || record.platform
@@ -3202,35 +3205,91 @@ function summarizeUsage(records, chargeMap = new Map()) {
     entry.requests += 1
     if (record.status in entry) entry[record.status] += 1
     if (record.status === 'committed') entry.units += record.unitsActual || 0
+    const meterKey = record.billingMeterKey || record.capability || record.platform
+    if (meterKey) {
+      const meter = (requestMeters[meterKey] ||= {
+        requests: 0,
+        committed: 0,
+        released: 0,
+        unknown: 0,
+        reserved: 0,
+        units: 0,
+      })
+      meter.requests += 1
+      if (record.status in meter) meter[record.status] += 1
+      if (record.status === 'committed') meter.units += record.unitsActual || 0
+    }
     if (record.upstreamLatencyMs != null) {
       latencyTotal += record.upstreamLatencyMs
       latencyCount += 1
     }
     const charge = chargeMap.get(record.id)
     if (charge) {
+      const positiveEnforced = charge.enforcementMode === 'enforced'
+        && Number.isSafeInteger(charge.quotedMinor)
+        && charge.quotedMinor > 0
+      const captured = positiveEnforced && charge.status === 'captured'
+      const held = positiveEnforced && ['reserved', 'unknown'].includes(charge.status)
+      const releasedCharge = positiveEnforced && charge.status === 'released'
+      const shadow = charge.enforcementMode === 'shadow'
       currencies.add(charge.currency)
-      quotedMinor += charge.quotedMinor || 0
-      chargedMinor += charge.chargedMinor || 0
-      if (charge.enforcementMode === 'enforced' && ['reserved', 'unknown'].includes(charge.status)) {
-        heldMinor += charge.quotedMinor || 0
-      }
-      if (charge.enforcementMode === 'shadow') shadowQuotedMinor += charge.quotedMinor || 0
-      const meter = (byMeter[charge.meterKey] ||= {
-        requests: 0, quotedMinor: 0, chargedMinor: 0, heldMinor: 0,
+      billingRequests += 1
+      if (captured) capturedRequests += 1
+      if (held) heldRequests += 1
+      if (releasedCharge) releasedRequests += 1
+      if (shadow) shadowRequests += 1
+      const currencyEntry = (billingByCurrency[charge.currency] ||= {
+        requests: 0,
+        capturedRequests: 0,
+        heldRequests: 0,
+        releasedRequests: 0,
+        shadowRequests: 0,
+        quotedMinor: 0,
+        chargedMinor: 0,
+        heldMinor: 0,
+        shadowQuotedMinor: 0,
+      })
+      currencyEntry.requests += 1
+      if (captured) currencyEntry.capturedRequests += 1
+      if (held) currencyEntry.heldRequests += 1
+      if (releasedCharge) currencyEntry.releasedRequests += 1
+      if (shadow) currencyEntry.shadowRequests += 1
+      currencyEntry.quotedMinor += charge.quotedMinor || 0
+      currencyEntry.chargedMinor += charge.chargedMinor || 0
+      if (held) currencyEntry.heldMinor += charge.quotedMinor || 0
+      if (shadow) currencyEntry.shadowQuotedMinor += charge.quotedMinor || 0
+      const meter = (billingMeters[charge.meterKey] ||= {
+        requests: 0,
+        capturedRequests: 0,
+        heldRequests: 0,
+        releasedRequests: 0,
+        shadowRequests: 0,
+        quotedMinor: 0,
+        chargedMinor: 0,
+        heldMinor: 0,
         currency: charge.currency, mixedCurrencies: false,
       })
       if (meter.currency !== charge.currency) {
         meter.currency = null
         meter.mixedCurrencies = true
+        meter.quotedMinor = null
+        meter.chargedMinor = null
+        meter.heldMinor = null
       }
       meter.requests += 1
-      meter.quotedMinor += charge.quotedMinor || 0
-      meter.chargedMinor += charge.chargedMinor || 0
-      if (charge.enforcementMode === 'enforced' && ['reserved', 'unknown'].includes(charge.status)) {
-        meter.heldMinor += charge.quotedMinor || 0
+      if (captured) meter.capturedRequests += 1
+      if (held) meter.heldRequests += 1
+      if (releasedCharge) meter.releasedRequests += 1
+      if (shadow) meter.shadowRequests += 1
+      if (!meter.mixedCurrencies) {
+        meter.quotedMinor += charge.quotedMinor || 0
+        meter.chargedMinor += charge.chargedMinor || 0
+        if (held) meter.heldMinor += charge.quotedMinor || 0
       }
     }
   }
+  const mixedCurrencies = currencies.size > 1
+  const singleCurrencyBilling = mixedCurrencies ? null : Object.values(billingByCurrency)[0]
   return {
     requests: records.length,
     committed: records.filter((record) => record.status === 'committed').length,
@@ -3243,6 +3302,7 @@ function summarizeUsage(records, chargeMap = new Map()) {
     averageUpstreamLatencyMs: latencyCount ? Math.round(latencyTotal / latencyCount) : null,
     byPlatform,
     byCapability,
+    requestMetering: { byMeter: requestMeters },
     recentRequests: [...records]
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
       .slice(0, 50)
@@ -3272,12 +3332,18 @@ function summarizeUsage(records, chargeMap = new Map()) {
       }),
     customerBilling: {
       currency: currencies.size === 1 ? [...currencies][0] : null,
-      mixedCurrencies: currencies.size > 1,
-      quotedMinor,
-      chargedMinor,
-      heldMinor,
-      shadowQuotedMinor,
-      byMeter,
+      mixedCurrencies,
+      requests: billingRequests,
+      quotedMinor: mixedCurrencies ? null : singleCurrencyBilling?.quotedMinor || 0,
+      chargedMinor: mixedCurrencies ? null : singleCurrencyBilling?.chargedMinor || 0,
+      heldMinor: mixedCurrencies ? null : singleCurrencyBilling?.heldMinor || 0,
+      shadowQuotedMinor: mixedCurrencies ? null : singleCurrencyBilling?.shadowQuotedMinor || 0,
+      capturedRequests,
+      heldRequests,
+      releasedRequests,
+      shadowRequests,
+      byCurrency: billingByCurrency,
+      byMeter: billingMeters,
     },
   }
 }

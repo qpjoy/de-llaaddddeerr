@@ -892,14 +892,18 @@ function usageRequestSummaryRecord(row) {
     capability: row.capability,
     billingMeterKey: row.billing_meter_key,
     status: row.status,
-    unitsActual: row.units_actual == null ? null : Number(row.units_actual),
-    upstreamLatencyMs: row.upstream_latency_ms == null ? null : Number(row.upstream_latency_ms),
+    unitsActual: row.units_actual == null
+      ? null
+      : usageAggregateInteger(row.units_actual, `recentRequests.${row.id}.unitsActual`),
+    upstreamLatencyMs: row.upstream_latency_ms == null
+      ? null
+      : usageAggregateInteger(row.upstream_latency_ms, `recentRequests.${row.id}.upstreamLatencyMs`),
     createdAt: iso(row.created_at),
     completedAt: iso(row.completed_at),
     customerCharge: row.charge_status ? {
       currency: row.charge_currency,
-      quotedMinor: Number(row.quoted_minor),
-      chargedMinor: Number(row.charged_minor),
+      quotedMinor: usageAggregateInteger(row.quoted_minor, `recentRequests.${row.id}.quotedMinor`),
+      chargedMinor: usageAggregateInteger(row.charged_minor, `recentRequests.${row.id}.chargedMinor`),
       status: row.charge_status,
       enforcementMode: row.enforcement_mode,
     } : null,
@@ -5633,24 +5637,59 @@ export class PostgresStore {
       clauses.push(`request.created_at < $${values.length}`)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const [{ rows }, billingResult, recentResult] = await Promise.all([
-      this.pool.query(
-      `SELECT
-         request.platform,
-         request.capability,
-         count(*)::integer AS requests,
-         count(*) FILTER (WHERE request.status = 'committed')::integer AS committed,
-         count(*) FILTER (WHERE request.status = 'released')::integer AS released,
-         count(*) FILTER (WHERE request.status = 'unknown')::integer AS unknown,
-         coalesce(sum(request.units_actual) FILTER (WHERE request.status = 'committed'), 0)::integer AS units,
-         round(avg(request.upstream_latency_ms))::integer AS average_latency
-       FROM usage_requests request ${where}
-       GROUP BY request.platform, request.capability`,
-      values,
-      ),
-      this.pool.query(
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const aggregateResult = await client.query(
+        `SELECT
+           request.platform,
+           request.capability,
+           count(*)::bigint AS requests,
+           count(*) FILTER (WHERE request.status = 'committed')::bigint AS committed,
+           count(*) FILTER (WHERE request.status = 'released')::bigint AS released,
+           count(*) FILTER (WHERE request.status = 'unknown')::bigint AS unknown,
+           coalesce(sum(request.units_actual) FILTER (WHERE request.status = 'committed'), 0)::bigint AS units,
+           round(avg(request.upstream_latency_ms))::integer AS average_latency
+         FROM usage_requests request ${where}
+         GROUP BY request.platform, request.capability`,
+        values,
+      )
+      const meterResult = await client.query(
+        `SELECT coalesce(request.billing_meter_key, request.capability, request.platform) AS meter_key,
+                count(*)::bigint AS requests,
+                count(*) FILTER (WHERE request.status = 'committed')::bigint AS committed,
+                count(*) FILTER (WHERE request.status = 'released')::bigint AS released,
+                count(*) FILTER (WHERE request.status = 'unknown')::bigint AS unknown,
+                count(*) FILTER (WHERE request.status = 'reserved')::bigint AS reserved,
+                coalesce(sum(request.units_actual) FILTER (
+                  WHERE request.status = 'committed'
+                ), 0)::bigint AS units
+           FROM usage_requests request ${where}
+          GROUP BY coalesce(request.billing_meter_key, request.capability, request.platform)
+          ORDER BY meter_key`,
+        values,
+      )
+      const billingResult = await client.query(
         `SELECT charge.meter_key, charge.currency,
-                count(*)::integer AS requests,
+                count(*)::bigint AS requests,
+                count(*) FILTER (
+                  WHERE charge.enforcement_mode = 'enforced'
+                    AND charge.status = 'captured'
+                    AND charge.quoted_minor > 0
+                )::bigint AS captured_requests,
+                count(*) FILTER (
+                  WHERE charge.enforcement_mode = 'enforced'
+                    AND charge.status IN ('reserved', 'unknown')
+                    AND charge.quoted_minor > 0
+                )::bigint AS held_requests,
+                count(*) FILTER (
+                  WHERE charge.enforcement_mode = 'enforced'
+                    AND charge.status = 'released'
+                    AND charge.quoted_minor > 0
+                )::bigint AS released_requests,
+                count(*) FILTER (
+                  WHERE charge.enforcement_mode = 'shadow'
+                )::bigint AS shadow_requests,
                 coalesce(sum(charge.quoted_minor), 0)::bigint AS quoted_minor,
                 coalesce(sum(charge.charged_minor), 0)::bigint AS charged_minor,
                 coalesce(sum(charge.quoted_minor) FILTER (
@@ -5666,8 +5705,8 @@ export class PostgresStore {
           GROUP BY charge.meter_key, charge.currency
           ORDER BY charge.meter_key, charge.currency`,
         values,
-      ),
-      this.pool.query(
+      )
+      const recentResult = await client.query(
         `SELECT request.id, request.tenant_id, request.consumer_id,
                 request.api_key_id, request.platform, request.capability,
                 request.billing_meter_key, request.status, request.units_actual,
@@ -5683,12 +5722,20 @@ export class PostgresStore {
           ORDER BY request.created_at DESC, request.id DESC
           LIMIT 50`,
         values,
-      ),
-    ])
-    return {
-      ...summarizeAggregates(rows),
-      recentRequests: recentResult.rows.map(usageRequestSummaryRecord),
-      customerBilling: summarizeCustomerBilling(billingResult.rows),
+      )
+      const result = {
+        ...summarizeAggregates(aggregateResult.rows),
+        requestMetering: summarizeRequestMetering(meterResult.rows),
+        recentRequests: recentResult.rows.map(usageRequestSummaryRecord),
+        customerBilling: summarizeCustomerBilling(billingResult.rows),
+      }
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
     }
   }
 
@@ -8445,6 +8492,30 @@ async function withPgTransaction(pool, fn, {
   }
 }
 
+function usageAggregateInteger(value, field) {
+  if (typeof value === 'number') {
+    if (Number.isSafeInteger(value)) return value
+  } else if (typeof value === 'bigint') {
+    if (value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)) {
+      return Number(value)
+    }
+  } else if (typeof value === 'string' && /^-?\d+$/u.test(value)) {
+    const exact = BigInt(value)
+    if (exact <= BigInt(Number.MAX_SAFE_INTEGER) && exact >= BigInt(Number.MIN_SAFE_INTEGER)) {
+      return Number(exact)
+    }
+  }
+  throw new AppError(
+    500,
+    'usage_aggregate_out_of_range',
+    `Usage aggregate ${field} exceeds the JavaScript safe integer range`,
+  )
+}
+
+function addUsageAggregate(left, right, field) {
+  return usageAggregateInteger(BigInt(left) + BigInt(right), field)
+}
+
 function summarizeAggregates(rows) {
   const byPlatform = {}
   const byCapability = {}
@@ -8453,26 +8524,27 @@ function summarizeAggregates(rows) {
   let released = 0
   let unknown = 0
   let units = 0
-  let weightedLatency = 0
-  let latencyRequests = 0
+  let weightedLatency = 0n
+  let latencyRequests = 0n
   for (const row of rows) {
     const entry = {
-      requests: row.requests,
-      committed: row.committed,
-      released: row.released,
-      unknown: row.unknown,
-      units: row.units,
+      requests: usageAggregateInteger(row.requests, 'requests'),
+      committed: usageAggregateInteger(row.committed, 'committed'),
+      released: usageAggregateInteger(row.released, 'released'),
+      unknown: usageAggregateInteger(row.unknown, 'unknown'),
+      units: usageAggregateInteger(row.units, 'units'),
     }
     if (row.capability) byCapability[row.capability] = entry
     else byPlatform[row.platform] = entry
-    requests += row.requests
-    committed += row.committed
-    released += row.released
-    unknown += row.unknown
-    units += row.units
-    if (row.average_latency != null && row.committed > 0) {
-      weightedLatency += row.average_latency * row.committed
-      latencyRequests += row.committed
+    requests = addUsageAggregate(requests, entry.requests, 'requests')
+    committed = addUsageAggregate(committed, entry.committed, 'committed')
+    released = addUsageAggregate(released, entry.released, 'released')
+    unknown = addUsageAggregate(unknown, entry.unknown, 'unknown')
+    units = addUsageAggregate(units, entry.units, 'units')
+    if (row.average_latency != null && entry.committed > 0) {
+      const averageLatency = usageAggregateInteger(row.average_latency, 'averageUpstreamLatencyMs')
+      weightedLatency += BigInt(averageLatency) * BigInt(entry.committed)
+      latencyRequests += BigInt(entry.committed)
     }
   }
   return {
@@ -8481,7 +8553,12 @@ function summarizeAggregates(rows) {
     released,
     unknown,
     units,
-    averageUpstreamLatencyMs: latencyRequests ? Math.round(weightedLatency / latencyRequests) : null,
+    averageUpstreamLatencyMs: latencyRequests
+      ? usageAggregateInteger(
+          (weightedLatency + latencyRequests / 2n) / latencyRequests,
+          'averageUpstreamLatencyMs',
+        )
+      : null,
     byPlatform,
     byCapability,
   }
@@ -8489,15 +8566,74 @@ function summarizeAggregates(rows) {
 
 function summarizeCustomerBilling(rows) {
   const currencies = new Set()
+  const byCurrency = {}
   const byMeter = {}
-  let quotedMinor = 0
-  let chargedMinor = 0
-  let heldMinor = 0
-  let shadowQuotedMinor = 0
+  let requests = 0
+  let capturedRequests = 0
+  let heldRequests = 0
+  let releasedRequests = 0
+  let shadowRequests = 0
   for (const row of rows) {
     currencies.add(row.currency)
+    const meterKey = row.meter_key
+    const rowRequests = usageAggregateInteger(row.requests, `customerBilling.${meterKey}.requests`)
+    const rowQuotedMinor = usageAggregateInteger(row.quoted_minor, `customerBilling.${meterKey}.quotedMinor`)
+    const rowChargedMinor = usageAggregateInteger(row.charged_minor, `customerBilling.${meterKey}.chargedMinor`)
+    const rowHeldMinor = usageAggregateInteger(row.held_minor, `customerBilling.${meterKey}.heldMinor`)
+    const rowShadowQuotedMinor = usageAggregateInteger(
+      row.shadow_quoted_minor,
+      `customerBilling.${meterKey}.shadowQuotedMinor`,
+    )
+    const rowCapturedRequests = usageAggregateInteger(
+      row.captured_requests,
+      `customerBilling.${meterKey}.capturedRequests`,
+    )
+    const rowHeldRequests = usageAggregateInteger(
+      row.held_requests,
+      `customerBilling.${meterKey}.heldRequests`,
+    )
+    const rowReleasedRequests = usageAggregateInteger(
+      row.released_requests,
+      `customerBilling.${meterKey}.releasedRequests`,
+    )
+    const rowShadowRequests = usageAggregateInteger(
+      row.shadow_requests,
+      `customerBilling.${meterKey}.shadowRequests`,
+    )
+    const currencyEntry = (byCurrency[row.currency] ||= {
+      requests: 0,
+      capturedRequests: 0,
+      heldRequests: 0,
+      releasedRequests: 0,
+      shadowRequests: 0,
+      quotedMinor: 0,
+      chargedMinor: 0,
+      heldMinor: 0,
+      shadowQuotedMinor: 0,
+    })
+    for (const [field, value] of [
+      ['requests', rowRequests],
+      ['capturedRequests', rowCapturedRequests],
+      ['heldRequests', rowHeldRequests],
+      ['releasedRequests', rowReleasedRequests],
+      ['shadowRequests', rowShadowRequests],
+      ['quotedMinor', rowQuotedMinor],
+      ['chargedMinor', rowChargedMinor],
+      ['heldMinor', rowHeldMinor],
+      ['shadowQuotedMinor', rowShadowQuotedMinor],
+    ]) {
+      currencyEntry[field] = addUsageAggregate(
+        currencyEntry[field],
+        value,
+        `customerBilling.byCurrency.${row.currency}.${field}`,
+      )
+    }
     const entry = (byMeter[row.meter_key] ||= {
       requests: 0,
+      capturedRequests: 0,
+      heldRequests: 0,
+      releasedRequests: 0,
+      shadowRequests: 0,
       quotedMinor: 0,
       chargedMinor: 0,
       heldMinor: 0,
@@ -8507,25 +8643,92 @@ function summarizeCustomerBilling(rows) {
     if (entry.currency !== row.currency) {
       entry.currency = null
       entry.mixedCurrencies = true
+      entry.quotedMinor = null
+      entry.chargedMinor = null
+      entry.heldMinor = null
     }
-    entry.requests += Number(row.requests)
-    entry.quotedMinor += Number(row.quoted_minor)
-    entry.chargedMinor += Number(row.charged_minor)
-    entry.heldMinor += Number(row.held_minor)
-    quotedMinor += Number(row.quoted_minor)
-    chargedMinor += Number(row.charged_minor)
-    heldMinor += Number(row.held_minor)
-    shadowQuotedMinor += Number(row.shadow_quoted_minor)
+    entry.requests = addUsageAggregate(entry.requests, rowRequests, `customerBilling.${meterKey}.requests`)
+    entry.capturedRequests = addUsageAggregate(
+      entry.capturedRequests,
+      rowCapturedRequests,
+      `customerBilling.${meterKey}.capturedRequests`,
+    )
+    entry.heldRequests = addUsageAggregate(
+      entry.heldRequests,
+      rowHeldRequests,
+      `customerBilling.${meterKey}.heldRequests`,
+    )
+    entry.releasedRequests = addUsageAggregate(
+      entry.releasedRequests,
+      rowReleasedRequests,
+      `customerBilling.${meterKey}.releasedRequests`,
+    )
+    entry.shadowRequests = addUsageAggregate(
+      entry.shadowRequests,
+      rowShadowRequests,
+      `customerBilling.${meterKey}.shadowRequests`,
+    )
+    if (!entry.mixedCurrencies) {
+      entry.quotedMinor = addUsageAggregate(entry.quotedMinor, rowQuotedMinor, `customerBilling.${meterKey}.quotedMinor`)
+      entry.chargedMinor = addUsageAggregate(entry.chargedMinor, rowChargedMinor, `customerBilling.${meterKey}.chargedMinor`)
+      entry.heldMinor = addUsageAggregate(entry.heldMinor, rowHeldMinor, `customerBilling.${meterKey}.heldMinor`)
+    }
+    requests = addUsageAggregate(requests, rowRequests, 'customerBilling.requests')
+    capturedRequests = addUsageAggregate(
+      capturedRequests,
+      rowCapturedRequests,
+      'customerBilling.capturedRequests',
+    )
+    heldRequests = addUsageAggregate(
+      heldRequests,
+      rowHeldRequests,
+      'customerBilling.heldRequests',
+    )
+    releasedRequests = addUsageAggregate(
+      releasedRequests,
+      rowReleasedRequests,
+      'customerBilling.releasedRequests',
+    )
+    shadowRequests = addUsageAggregate(
+      shadowRequests,
+      rowShadowRequests,
+      'customerBilling.shadowRequests',
+    )
   }
+  const mixedCurrencies = currencies.size > 1
+  const singleCurrencyBilling = mixedCurrencies ? null : Object.values(byCurrency)[0]
   return {
     currency: currencies.size === 1 ? [...currencies][0] : null,
-    mixedCurrencies: currencies.size > 1,
-    quotedMinor,
-    chargedMinor,
-    heldMinor,
-    shadowQuotedMinor,
+    mixedCurrencies,
+    requests,
+    quotedMinor: mixedCurrencies ? null : singleCurrencyBilling?.quotedMinor || 0,
+    chargedMinor: mixedCurrencies ? null : singleCurrencyBilling?.chargedMinor || 0,
+    heldMinor: mixedCurrencies ? null : singleCurrencyBilling?.heldMinor || 0,
+    shadowQuotedMinor: mixedCurrencies ? null : singleCurrencyBilling?.shadowQuotedMinor || 0,
+    capturedRequests,
+    heldRequests,
+    releasedRequests,
+    shadowRequests,
+    byCurrency,
     byMeter,
   }
+}
+
+function summarizeRequestMetering(rows) {
+  const byMeter = {}
+  for (const row of rows) {
+    if (!row.meter_key) continue
+    const field = `requestMetering.${row.meter_key}`
+    byMeter[row.meter_key] = {
+      requests: usageAggregateInteger(row.requests, `${field}.requests`),
+      committed: usageAggregateInteger(row.committed, `${field}.committed`),
+      released: usageAggregateInteger(row.released, `${field}.released`),
+      unknown: usageAggregateInteger(row.unknown, `${field}.unknown`),
+      reserved: usageAggregateInteger(row.reserved, `${field}.reserved`),
+      units: usageAggregateInteger(row.units, `${field}.units`),
+    }
+  }
+  return { byMeter }
 }
 
 export async function createPostgresStore(options) {

@@ -12,6 +12,26 @@ info:
     keys are unique within a consumer, but POST replay and fresh-window
     re-execution stay bound to the Hub API key that created the usage record;
     another API key must use a new idempotency key.
+x-mx-external-platform-admission:
+  paidReady:
+    definition: The current usage request has a positive enforced per-request customer charge and its wallet hold was successfully reserved.
+    rejectedByHubMonthlyProcurementOrSubsidyCaps: false
+  subsidizedTraffic:
+    definition: Traffic without that positive enforced per-request wallet hold, including unpriced, shadow-priced and zero-price requests.
+    possibleFinancialCapErrors:
+      - external_platform_cost_budget_exhausted
+      - external_platform_subsidy_budget_exhausted
+  procurementEvidence:
+    currentEndpointAndRequestRequiredForPaidReady: true
+    unrelatedHistoricalAnomaliesRejectPaidReady: false
+  technicalProtections:
+    applyToPaidReady: true
+    controls:
+      - api_key_and_plan_quota
+      - shared_provider_rate_limit
+      - global_and_consumer_concurrency
+      - circuit_breaker
+      - contract_credential_idempotency_and_dispatch_safety
 servers:
   - url: /api/v1
 security:
@@ -4206,6 +4226,81 @@ paths:
                       units: { type: integer }
                       byPlatform: { type: object, additionalProperties: true }
                       byCapability: { type: object, additionalProperties: true }
+                      requestMetering:
+                        type: object
+                        description: Exact logical Hub request counts by stable billing meter. This is independent of customer price-book assignment and provider-call fan-out; an idempotent replay does not create another logical request.
+                        properties:
+                          byMeter:
+                            type: object
+                            additionalProperties:
+                              type: object
+                              required: [requests, committed, reserved, released, unknown, units]
+                              properties:
+                                requests: { type: integer }
+                                committed: { type: integer }
+                                reserved: { type: integer }
+                                released: { type: integer }
+                                unknown: { type: integer }
+                                units: { type: integer }
+                      customerBilling:
+                        type: object
+                        description: Customer-side per-request pricing records. Request and lifecycle counts are additive across currencies. Monetary minor-unit fields are only additive within one currency; when mixedCurrencies is true the top-level monetary fields are null and byCurrency is the authoritative reconciliation view. Hub does not apply an implicit FX rate.
+                        required: [currency, mixedCurrencies, requests, capturedRequests, heldRequests, releasedRequests, shadowRequests, quotedMinor, chargedMinor, heldMinor, shadowQuotedMinor, byCurrency, byMeter]
+                        properties:
+                          currency:
+                            type: [string, "null"]
+                            description: The sole currency represented, or null when there are no priced records or multiple currencies.
+                          mixedCurrencies: { type: boolean }
+                          requests: { type: integer }
+                          capturedRequests:
+                            type: integer
+                            description: Positive enforced charges captured after successful delivery.
+                          heldRequests:
+                            type: integer
+                            description: Positive enforced charges still reserved or awaiting reconciliation.
+                          releasedRequests:
+                            type: integer
+                            description: Positive enforced charges released without capture.
+                          shadowRequests:
+                            type: integer
+                            description: Shadow pricing records that did not change a wallet balance.
+                          quotedMinor: { type: [integer, "null"] }
+                          chargedMinor: { type: [integer, "null"] }
+                          heldMinor: { type: [integer, "null"] }
+                          shadowQuotedMinor: { type: [integer, "null"] }
+                          byCurrency:
+                            type: object
+                            description: Reconciliation-safe customer amounts and counts keyed by their original ISO 4217 currency code.
+                            additionalProperties:
+                              type: object
+                              required: [requests, capturedRequests, heldRequests, releasedRequests, shadowRequests, quotedMinor, chargedMinor, heldMinor, shadowQuotedMinor]
+                              properties:
+                                requests: { type: integer }
+                                capturedRequests: { type: integer }
+                                heldRequests: { type: integer }
+                                releasedRequests: { type: integer }
+                                shadowRequests: { type: integer }
+                                quotedMinor: { type: integer }
+                                chargedMinor: { type: integer }
+                                heldMinor: { type: integer }
+                                shadowQuotedMinor: { type: integer }
+                          byMeter:
+                            type: object
+                            description: Customer pricing records grouped by Hub billing meter. Counts remain additive when a meter spans currencies; that meter's monetary fields are null and mixedCurrencies is true.
+                            additionalProperties:
+                              type: object
+                              required: [currency, mixedCurrencies, requests, capturedRequests, heldRequests, releasedRequests, shadowRequests, quotedMinor, chargedMinor, heldMinor]
+                              properties:
+                                currency: { type: [string, "null"] }
+                                mixedCurrencies: { type: boolean }
+                                requests: { type: integer }
+                                capturedRequests: { type: integer }
+                                heldRequests: { type: integer }
+                                releasedRequests: { type: integer }
+                                shadowRequests: { type: integer }
+                                quotedMinor: { type: [integer, "null"] }
+                                chargedMinor: { type: [integer, "null"] }
+                                heldMinor: { type: [integer, "null"] }
 components:
   securitySchemes:
     adminToken:

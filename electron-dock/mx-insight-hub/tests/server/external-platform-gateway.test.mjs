@@ -187,6 +187,86 @@ test('cost rejection happens before provider RPM admission and creates no provid
   assert.equal(state.usageStore.requests.get(requestId)?.status, 'released')
 })
 
+test('paid gateway request bypasses zero cost caps and replays without another charge or call', async () => {
+  let providerDispatches = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        providerDispatches += 1
+        return successfulResult(body, options)
+      },
+    },
+    gatewayConfig: config({
+      billing: {
+        ...config().billing,
+        monthlyBudgetMinor: 0,
+        monthlySubsidyBudgetMinor: 0,
+      },
+    }),
+  })
+  const plan = await state.hub.publishPlanVersion({
+    key: `gateway-paid-${randomUUID()}`,
+    name: 'Gateway paid request plan',
+    limits: { monthlyRequests: 10_000, maxPageSize: 100, burstRps: 100 },
+    priceBook: {
+      key: `gateway-paid-${randomUUID()}`,
+      currency: 'CNY',
+      defaultMultiplierPpm: 1_000_000,
+      entries: [{
+        meterKey: 'ecommerce.products.search',
+        billingUnit: 'request',
+        unitPriceMinor: 7,
+      }],
+    },
+  }, 'test-admin')
+  const currentPlan = await state.hub.getConsumerPlan(state.consumer.id)
+  await state.hub.assignConsumerPlan(state.consumer.id, {
+    planVersionId: plan.versionId,
+    expectedRevision: currentPlan.revision,
+  }, 'test-admin')
+  await state.hub.setTenantBillingProfile(state.context.tenant.id, {
+    mode: 'enforced',
+    multiplierPpm: 1_000_000,
+  }, 'test-admin')
+  await state.hub.addTenantCredit(state.context.tenant.id, {
+    amountMinor: 100,
+    currency: 'CNY',
+    reason: 'Gateway paid request test credit',
+  }, {
+    idempotencyKey: `gateway-credit:${randomUUID()}`,
+    actor: 'test-admin',
+  })
+  const input = {
+    body: { marketplace: 'jd', query: 'paid request ignores internal caps' },
+    idempotencyKey: 'gateway-paid-zero-caps-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  }
+
+  const live = await state.gateway.search(state.context, input)
+  const [capturedCharge] = [...state.usageStore.customerCharges.values()]
+  const [providerCall] = [...state.platformStore.calls.values()]
+  const replay = await state.gateway.search(state.context, input)
+
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(replay.sourceMode, 'idempotent_replay')
+  assert.equal(replay.requestId, live.requestId)
+  assert.equal(providerDispatches, 1)
+  assert.equal(state.usageStore.customerCharges.size, 1)
+  assert.equal(capturedCharge.usageRequestId, live.requestId)
+  assert.equal(capturedCharge.billingUnit, 'request')
+  assert.equal(capturedCharge.enforcementMode, 'enforced')
+  assert.equal(capturedCharge.quotedMinor, 7)
+  assert.equal(capturedCharge.chargedMinor, 7)
+  assert.equal(capturedCharge.status, 'captured')
+  assert.ok(capturedCharge.accountId)
+  assert.equal(
+    state.usageStore.creditLedgerEntries.filter((entry) => entry.kind === 'capture').length,
+    1,
+  )
+  assert.equal(state.platformStore.calls.size, 1)
+  assert.equal([...state.platformStore.calls.values()][0].id, providerCall.id)
+})
+
 test('gateway scopes dispatch lease and provider call to each endpoint contract version', async () => {
   const adapter = {
     async searchProducts(body, options) {

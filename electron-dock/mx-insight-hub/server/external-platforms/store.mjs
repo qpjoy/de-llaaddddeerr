@@ -140,6 +140,56 @@ function normalizedCostControl(value) {
   return { ...value, currency }
 }
 
+function hasMatchingCustomerHold(usageStore, usage, charge) {
+  return Array.isArray(usageStore?.creditLedgerEntries)
+    && usageStore.creditLedgerEntries.some((entry) => (
+      entry.chargeId === charge.id
+      && entry.usageRequestId === usage.id
+      && entry.accountId === charge.accountId
+      && entry.tenantId === usage.tenantId
+      && entry.kind === 'hold'
+      && entry.amountMinor === charge.quotedMinor
+      && entry.availableDeltaMinor === -charge.quotedMinor
+      && entry.heldDeltaMinor === charge.quotedMinor
+      && entry.currency === charge.currency
+    ))
+}
+
+function hasTerminalCustomerHoldEntry(usageStore, charge) {
+  return Array.isArray(usageStore?.creditLedgerEntries)
+    && usageStore.creditLedgerEntries.some((entry) => (
+      entry.chargeId === charge.id
+      && ['capture', 'release'].includes(entry.kind)
+    ))
+}
+
+function isCustomerChargeBackedByHold(usageStore, usage, charge, allowedStatuses) {
+  return Boolean(
+    usage
+    && charge
+    && typeof charge.id === 'string'
+    && charge.id.length > 0
+    && charge.usageRequestId === usage.id
+    && charge.tenantId === usage.tenantId
+    && charge.consumerId === usage.consumerId
+    && charge.apiKeyId === usage.apiKeyId
+    && charge.meterKey === usage.billingMeterKey
+    && charge.enforcementMode === 'enforced'
+    && allowedStatuses.includes(charge.status)
+    && charge.billingUnit === 'request'
+    && Number.isSafeInteger(charge.quotedMinor)
+    && charge.quotedMinor > 0
+    && typeof charge.accountId === 'string'
+    && charge.accountId.length > 0
+    && hasMatchingCustomerHold(usageStore, usage, charge)
+  )
+}
+
+function isReservedCustomerBilledRequest(usageStore, usage, charge) {
+  return isCustomerChargeBackedByHold(usageStore, usage, charge, ['reserved'])
+    && !hasTerminalCustomerHoldEntry(usageStore, charge)
+}
+
 function utcMonthBounds(at = new Date()) {
   const date = new Date(at)
   const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)
@@ -557,23 +607,33 @@ export class MemoryExternalPlatformStore {
     }
   }
 
-  #costState(costControl) {
+  #costState(costControl, { customerBilled = false, usageRequestId = null } = {}) {
     const month = utcMonthBounds()
-    const calls = [...this.calls.values()].filter((call) => {
+    const monthlyCalls = [...this.calls.values()].filter((call) => {
       const startedAt = new Date(call.startedAt).getTime()
       return call.providerKey === this.providerKey
         && Number.isFinite(startedAt)
         && startedAt >= month.start
         && startedAt < month.end
     })
+    // A positive enforced per-request hold makes aggregate financial caps
+    // observe-only for this request. Scope the integrity check to this request
+    // as well, so unrelated historical bookkeeping cannot turn paid traffic
+    // into an apparent provider outage. The current request's own cost evidence
+    // remains mandatory and is still persisted for every real dispatch.
+    const calls = customerBilled
+      ? monthlyCalls.filter((call) => call.usageRequestId === usageRequestId)
+      : monthlyCalls
     const knownCalls = calls.filter((call) => (
       Number.isSafeInteger(call.costMinor) && call.costMinor >= 0
     ))
-    const incompleteControlledCost = calls.some((call) => (
-      call.costKind !== 'unknown'
-      && call.costKind != null
-      && (!Number.isSafeInteger(call.costMinor) || call.costMinor <= 0)
-    ))
+    const incompleteControlledCost = calls.some((call) => customerBilled
+      ? !Number.isSafeInteger(call.costMinor)
+        || call.costMinor <= 0
+        || !['estimated', 'provider_reported'].includes(call.costKind)
+      : call.costKind !== 'unknown'
+        && call.costKind != null
+        && (!Number.isSafeInteger(call.costMinor) || call.costMinor <= 0))
     const mixedCurrencyCost = knownCalls.some(
       (call) => call.currency !== costControl.currency,
     )
@@ -584,6 +644,7 @@ export class MemoryExternalPlatformStore {
         ? null
         : new Date(usage.leaseExpiresAt).getTime()
       return reservation.providerKey === this.providerKey
+        && (!customerBilled || reservation.usageRequestId === usageRequestId)
         && reservation.status === 'active'
         && usage?.status === 'reserved'
         && (leaseExpiresAt == null || (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()))
@@ -599,6 +660,12 @@ export class MemoryExternalPlatformStore {
       || reservation.reservedCostMinor <= 0
       || !Number.isSafeInteger(reservation.reservedSubsidyMinor)
       || reservation.reservedSubsidyMinor < 0
+      || (customerBilled && (
+        !Number.isSafeInteger(reservation.monthlyBudgetMinor)
+        || reservation.monthlyBudgetMinor < 0
+        || !Number.isSafeInteger(reservation.monthlySubsidyBudgetMinor)
+        || reservation.monthlySubsidyBudgetMinor < 0
+      ))
     ))
     if (incompleteControlledCost || mixedCurrencyCost || mixedReservation) {
       throw new AppError(
@@ -626,13 +693,16 @@ export class MemoryExternalPlatformStore {
       costsByUsage.set(known.usageRequestId, total)
     }
     const coveredMinor = (usageRequestId) => {
+      const usage = this.usageStore?.requests?.get?.(usageRequestId)
       const charge = this.usageStore?.customerCharges?.get?.(usageRequestId)
-      if (!charge
-        || charge.enforcementMode !== 'enforced'
-        || !['reserved', 'captured', 'unknown'].includes(charge.status)
+      if (!isCustomerChargeBackedByHold(
+        this.usageStore,
+        usage,
+        charge,
+        ['reserved', 'captured', 'unknown'],
+      )
         || charge.currency !== costControl.currency
-        || !Number.isSafeInteger(charge.quotedMinor)
-        || charge.quotedMinor < 0) return 0
+      ) return 0
       return charge.quotedMinor
     }
     let subsidyCostMinor = 0
@@ -680,6 +750,12 @@ export class MemoryExternalPlatformStore {
     }
   }
 
+  #isCustomerBilledRequest(usageRequestId) {
+    const usage = this.usageStore?.requests?.get?.(usageRequestId)
+    const charge = this.usageStore?.customerCharges?.get?.(usageRequestId)
+    return isReservedCustomerBilledRequest(this.usageStore, usage, charge)
+  }
+
   async reserveProviderCostWorkflow(input) {
     const usage = this.usageStore?.requests?.get(input.usageRequestId)
     const leaseExpiresAt = usage?.leaseExpiresAt == null
@@ -716,7 +792,11 @@ export class MemoryExternalPlatformStore {
     if (!Number.isSafeInteger(costMinor)) {
       throw new TypeError('workflow cost exceeds the safe-integer range')
     }
-    const state = this.#costState(policy)
+    const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
+    const state = this.#costState(policy, {
+      customerBilled,
+      usageRequestId: input.usageRequestId,
+    })
     if (state.activeReservations.some(
       (reservation) => reservation.usageRequestId === input.usageRequestId,
     )) {
@@ -726,7 +806,8 @@ export class MemoryExternalPlatformStore {
         'Usage request already has an active provider cost reservation',
       )
     }
-    if (state.knownCostMinor + state.reservedCostMinor + costMinor > policy.monthlyBudgetMinor) {
+    if (!customerBilled
+      && state.knownCostMinor + state.reservedCostMinor + costMinor > policy.monthlyBudgetMinor) {
       throw new AppError(
         429,
         'external_platform_cost_budget_exhausted',
@@ -737,7 +818,8 @@ export class MemoryExternalPlatformStore {
     const coverageMinor = state.coveredMinor(input.usageRequestId)
     const subsidyMinor = Math.max(0, baseCostMinor + costMinor - coverageMinor)
       - Math.max(0, baseCostMinor - coverageMinor)
-    if (state.subsidyCostMinor + state.reservedSubsidyMinor + subsidyMinor
+    if (!customerBilled
+      && state.subsidyCostMinor + state.reservedSubsidyMinor + subsidyMinor
       > policy.monthlySubsidyBudgetMinor) {
       throw new AppError(
         429,
@@ -825,7 +907,11 @@ export class MemoryExternalPlatformStore {
     }
     const costControl = normalizedCostControl(input.costControl)
     if (costControl) {
-      const state = this.#costState(costControl)
+      const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
+      const state = this.#costState(costControl, {
+        customerBilled,
+        usageRequestId: input.usageRequestId,
+      })
       const existingUsageCostMinor = state.costsByUsage.get(input.usageRequestId) || 0
       const customerCoverageMinor = state.coveredMinor(input.usageRequestId)
       const reservation = input.costReservationId == null
@@ -866,7 +952,8 @@ export class MemoryExternalPlatformStore {
           )
         }
       } else {
-        if (state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
+        if (!customerBilled
+          && state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
           > costControl.monthlyBudgetMinor) {
           throw new AppError(
             429,
@@ -878,7 +965,8 @@ export class MemoryExternalPlatformStore {
           0,
           existingUsageCostMinor + costControl.costMinor - customerCoverageMinor,
         ) - Math.max(0, existingUsageCostMinor - customerCoverageMinor)
-        if (state.subsidyCostMinor + state.reservedSubsidyMinor + incrementalSubsidyMinor
+        if (!customerBilled
+          && state.subsidyCostMinor + state.reservedSubsidyMinor + incrementalSubsidyMinor
           > costControl.monthlySubsidyBudgetMinor) {
           throw new AppError(
             429,
@@ -1500,6 +1588,18 @@ async function postgresProviderCostState(client, {
                WHERE (cost_kind <> 'unknown' AND (cost_minor IS NULL OR cost_minor <= 0))
                   OR (cost_minor IS NOT NULL AND currency IS DISTINCT FROM $2)
             ) AS unknown_cost_calls,
+            (
+              SELECT count(*)::integer
+                FROM monthly_calls
+               WHERE usage_request_id = $3
+                 AND (
+                   cost_kind IS NULL
+                   OR cost_kind NOT IN ('estimated', 'provider_reported')
+                   OR cost_minor IS NULL
+                   OR cost_minor <= 0
+                   OR currency IS DISTINCT FROM $2
+                 )
+            ) AS current_unknown_cost_calls,
             (SELECT cost_minor FROM subsidy_exposure) AS subsidy_cost_minor,
             (
               SELECT coalesce(sum(greatest(
@@ -1527,6 +1627,20 @@ async function postgresProviderCostState(client, {
                   OR reserved_cost_minor <= 0
                   OR current_usage_cost_minor < base_cost_minor
             ) AS mixed_reservation_count,
+            (
+              SELECT count(*)::integer
+                FROM active_reservations
+               WHERE usage_request_id = $3
+                 AND (
+                   currency IS DISTINCT FROM $2
+                   OR base_cost_minor < 0
+                   OR reserved_cost_minor <= 0
+                   OR reserved_subsidy_minor < 0
+                   OR monthly_budget_minor < 0
+                   OR monthly_subsidy_budget_minor < 0
+                   OR current_usage_cost_minor < base_cost_minor
+                 )
+            ) AS current_mixed_reservation_count,
             coalesce((
               SELECT cost_minor FROM usage_costs WHERE usage_request_id = $3
             ), 0)::bigint AS usage_cost_minor,
@@ -1537,6 +1651,39 @@ async function postgresProviderCostState(client, {
                  AND status IN ('reserved', 'captured', 'unknown')
                  AND currency = $2
             ) AS customer_coverage_minor,
+            EXISTS (
+              SELECT 1
+                FROM billing.customer_charges current_charge
+                JOIN usage_requests current_request
+                  ON current_request.id = current_charge.usage_request_id
+                JOIN billing.credit_ledger_entries current_hold
+                  ON current_hold.charge_id = current_charge.id
+                 AND current_hold.usage_request_id = current_charge.usage_request_id
+                 AND current_hold.account_id = current_charge.account_id
+                 AND current_hold.tenant_id = current_charge.tenant_id
+                 AND current_hold.kind = 'hold'
+                 AND current_hold.amount_minor = current_charge.quoted_minor
+                 AND current_hold.available_delta_minor = -current_charge.quoted_minor
+                 AND current_hold.held_delta_minor = current_charge.quoted_minor
+                 AND current_hold.currency = current_charge.currency
+               WHERE current_charge.usage_request_id = $3
+                 AND current_request.status = 'reserved'
+                 AND current_charge.tenant_id = current_request.tenant_id
+                 AND current_charge.consumer_id = current_request.consumer_id
+                 AND current_charge.api_key_id = current_request.api_key_id
+                 AND current_charge.meter_key = current_request.billing_meter_key
+                 AND current_charge.enforcement_mode = 'enforced'
+                 AND current_charge.status = 'reserved'
+                 AND current_charge.billing_unit = 'request'
+                 AND current_charge.quoted_minor > 0
+                 AND current_charge.account_id IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                     FROM billing.credit_ledger_entries terminal_hold
+                    WHERE terminal_hold.charge_id = current_charge.id
+                      AND terminal_hold.kind IN ('capture', 'release')
+                 )
+            ) AS customer_billed,
             (SELECT id FROM active_reservations WHERE id = $4) AS reservation_id,
             (
               SELECT usage_request_id FROM active_reservations WHERE id = $4
@@ -1560,9 +1707,22 @@ async function postgresProviderCostState(client, {
     [providerKey, currency, usageRequestId, reservationId],
   )
   const row = exposure.rows[0] || {}
-  const knownCostMinor = Number(exposure.rows[0]?.known_cost_minor)
-  if (Number(exposure.rows[0]?.unknown_cost_calls) > 0
-    || Number(exposure.rows[0]?.mixed_reservation_count) > 0
+  const customerBilled = row.customer_billed === true
+  const knownCostMinor = customerBilled ? 0 : Number(row.known_cost_minor)
+  const unknownCostCallsRaw = customerBilled
+    ? row.current_unknown_cost_calls
+    : row.unknown_cost_calls
+  const mixedReservationCountRaw = customerBilled
+    ? row.current_mixed_reservation_count
+    : row.mixed_reservation_count
+  const unknownCostCalls = unknownCostCallsRaw == null ? Number.NaN : Number(unknownCostCallsRaw)
+  const mixedReservationCount = mixedReservationCountRaw == null
+    ? Number.NaN
+    : Number(mixedReservationCountRaw)
+  const evidenceAnomalyCount = unknownCostCalls + mixedReservationCount
+  if (![unknownCostCalls, mixedReservationCount, evidenceAnomalyCount]
+    .every((value) => Number.isSafeInteger(value) && value >= 0)
+    || evidenceAnomalyCount > 0
     || !Number.isSafeInteger(knownCostMinor)
     || knownCostMinor < 0) {
     throw new AppError(
@@ -1571,13 +1731,13 @@ async function postgresProviderCostState(client, {
       'External data cost evidence is incomplete; paid dispatch is disabled',
     )
   }
-  const subsidyCostMinor = Number(exposure.rows[0]?.subsidy_cost_minor)
-  const reservedCostMinor = Number(exposure.rows[0]?.reserved_cost_minor)
-  const reservedSubsidyMinor = Number(exposure.rows[0]?.reserved_subsidy_minor)
-  const usageCostMinor = Number(exposure.rows[0]?.usage_cost_minor)
-  const customerCoverageMinor = exposure.rows[0]?.customer_coverage_minor == null
+  const subsidyCostMinor = customerBilled ? 0 : Number(row.subsidy_cost_minor)
+  const reservedCostMinor = customerBilled ? 0 : Number(row.reserved_cost_minor)
+  const reservedSubsidyMinor = customerBilled ? 0 : Number(row.reserved_subsidy_minor)
+  const usageCostMinor = Number(row.usage_cost_minor)
+  const customerCoverageMinor = row.customer_coverage_minor == null
     ? 0
-    : Number(exposure.rows[0].customer_coverage_minor)
+    : Number(row.customer_coverage_minor)
   if ([subsidyCostMinor, reservedCostMinor, reservedSubsidyMinor,
     usageCostMinor, customerCoverageMinor].some((value) => (
     !Number.isSafeInteger(value) || value < 0
@@ -1616,6 +1776,7 @@ async function postgresProviderCostState(client, {
     reservedSubsidyMinor,
     usageCostMinor,
     customerCoverageMinor,
+    customerBilled,
     reservation,
   }
 }
@@ -2020,7 +2181,8 @@ export class PostgresExternalPlatformStore {
           usageRequestId: input.usageRequestId,
           currency: policy.currency,
         })
-        if (state.knownCostMinor + state.reservedCostMinor + reservedCostMinor
+        if (!state.customerBilled
+          && state.knownCostMinor + state.reservedCostMinor + reservedCostMinor
           > policy.monthlyBudgetMinor) {
           throw new AppError(
             429,
@@ -2032,7 +2194,8 @@ export class PostgresExternalPlatformStore {
           0,
           state.usageCostMinor + reservedCostMinor - state.customerCoverageMinor,
         ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
-        if (state.subsidyCostMinor + state.reservedSubsidyMinor + reservedSubsidyMinor
+        if (!state.customerBilled
+          && state.subsidyCostMinor + state.reservedSubsidyMinor + reservedSubsidyMinor
           > policy.monthlySubsidyBudgetMinor) {
           throw new AppError(
             429,
@@ -2243,7 +2406,8 @@ export class PostgresExternalPlatformStore {
               )
             }
           } else {
-            if (state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
+            if (!state.customerBilled
+              && state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
               > costControl.monthlyBudgetMinor) {
               throw new AppError(
                 429,
@@ -2255,7 +2419,8 @@ export class PostgresExternalPlatformStore {
               0,
               state.usageCostMinor + costControl.costMinor - state.customerCoverageMinor,
             ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
-            if (state.subsidyCostMinor + state.reservedSubsidyMinor
+            if (!state.customerBilled
+              && state.subsidyCostMinor + state.reservedSubsidyMinor
               + incrementalSubsidyMinor > costControl.monthlySubsidyBudgetMinor) {
               throw new AppError(
                 429,

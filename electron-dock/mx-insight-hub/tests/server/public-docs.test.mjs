@@ -1378,6 +1378,7 @@ test('public listener serves self-contained public API documentation', async () 
     const html = pages.map((page) => page.html).join('\n')
     const ecommerceHtml = pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html
     const xiaohongshuHtml = pages.find((page) => page.path === '/docs/xiaohongshu-note').html
+    const errorsHtml = pages.find((page) => page.path === '/docs/errors').html
 
     assert.ok(pages.every((page) => page.response.status === 200))
     assert.match(response.headers.get('content-type'), /^text\/html/)
@@ -1397,6 +1398,11 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(xiaohongshuHtml, /tenant[\s\S]*?consumer[\s\S]*?membership/u)
     assert.match(xiaohongshuHtml, /Launcher 会话[\s\S]*?API Keys[\s\S]*?Live Key/u)
     assert.match(xiaohongshuHtml, /套餐与配额[\s\S]*?余额[\s\S]*?扣费/u)
+    assert.match(errorsHtml, /正价 enforced 按次计费 wallet hold/u)
+    assert.match(errorsHtml, /paid-ready 请求不会因 Hub 月度采购或补贴上限被拒/u)
+    assert.match(errorsHtml, /共享供应方限流[\s\S]*?全局与单 consumer 并发[\s\S]*?熔断/u)
+    assert.match(errorsHtml, /external_platform_cost_budget_exhausted/u)
+    assert.match(errorsHtml, /external_platform_subsidy_budget_exhausted/u)
     assert.doesNotMatch(xiaohongshuHtml, /deprecated alias/iu)
     assert.match(html, /电商数据百宝箱/)
     assert.doesNotMatch(ecommerceHtml, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
@@ -1724,6 +1730,29 @@ test('public OpenAPI document contains only implemented Open API paths', async (
   })
 })
 
+test('public OpenAPI documents paid-ready financial bypass and retained technical protections once', () => {
+  const policy = PUBLIC_OPENAPI_DOCUMENT['x-mx-external-platform-admission']
+
+  assert.match(policy.paidReady.definition, /positive enforced per-request customer charge/u)
+  assert.match(policy.paidReady.definition, /wallet hold was successfully reserved/u)
+  assert.equal(policy.paidReady.rejectedByHubMonthlyProcurementOrSubsidyCaps, false)
+  assert.deepEqual(policy.subsidizedTraffic.possibleFinancialCapErrors, [
+    'external_platform_cost_budget_exhausted',
+    'external_platform_subsidy_budget_exhausted',
+  ])
+  assert.match(policy.subsidizedTraffic.definition, /without that positive enforced per-request wallet hold/u)
+  assert.equal(policy.procurementEvidence.currentEndpointAndRequestRequiredForPaidReady, true)
+  assert.equal(policy.procurementEvidence.unrelatedHistoricalAnomaliesRejectPaidReady, false)
+  assert.equal(policy.technicalProtections.applyToPaidReady, true)
+  assert.deepEqual(policy.technicalProtections.controls, [
+    'api_key_and_plan_quota',
+    'shared_provider_rate_limit',
+    'global_and_consumer_concurrency',
+    'circuit_breaker',
+    'contract_credential_idempotency_and_dispatch_safety',
+  ])
+})
+
 test('static OpenAPI YAML mirrors dynamic Night-All and public data-product contracts', async () => {
   const source = await readFile(
     fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)),
@@ -1741,6 +1770,10 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   assert.equal(parsed.status, 0, parsed.stderr)
   const document = JSON.parse(parsed.stdout)
   assert.equal(document.openapi, '3.1.0')
+  assert.deepEqual(
+    document['x-mx-external-platform-admission'],
+    PUBLIC_OPENAPI_DOCUMENT['x-mx-external-platform-admission'],
+  )
   assertNightAllPublicContract(document)
   assertPublicOpinionContract(document)
   assertPublicOpinionSearchContract(document)

@@ -103,7 +103,7 @@ const PROTECTION_DEFINITIONS = [
     key: 'quota-gate',
     aliases: ['quota-gate', 'quotaGate', 'quota', 'budget'],
     label: '额度与调用门禁',
-    description: '在上游调用前执行租户授权、窗口额度与并发限制；成本预算单独预测。',
+    description: '在上游调用前执行租户授权、窗口额度与并发限制；成本单独预测，月度财务线只拦截未形成正价钱包 hold 的流量。',
   },
   {
     key: 'idempotency',
@@ -1093,7 +1093,7 @@ function DetailMetricRail({ detail }) {
       <MetricCard icon={FlowArrow} label="实际上游调用" value={formatOptionalNumber(detail.summary.upstreamCalls)} hint="真实调用证据" tone="archetype" />
       <MetricCard icon={CheckCircle} label="Hub 成功率" value={formatPercent(detail.summary.successRate)} hint="按 Hub 结果口径" tone="success" />
       <MetricCard icon={ShieldCheck} label="避免调用" value={formatOptionalNumber(detail.summary.avoidedCalls)} hint="重放、缓存或保护" tone="primary" />
-      <MetricCard icon={Coins} label="已计费 / 计费待定" value={`${formatOptionalNumber(detail.summary.billedCalls)} / ${formatOptionalNumber(detail.summary.indeterminateBillingCalls)}`} hint={`上游成功但 Hub 不可用 ${formatOptionalNumber(detail.summary.unusableSuccesses)}`} tone="warning" />
+      <MetricCard icon={Coins} label="上游已计费 / 状态待定" value={`${formatOptionalNumber(detail.summary.billedCalls)} / ${formatOptionalNumber(detail.summary.indeterminateBillingCalls)}`} hint={`上游成功但 Hub 不可用 ${formatOptionalNumber(detail.summary.unusableSuccesses)}`} tone="warning" />
       <MetricCard icon={Coins} label="实际净支出" value={formatMoneyMinor(detail.cost.actualMinor, detail.cost.currency)} hint="无上游账单证据时未知" tone="warning" />
       <MetricCard icon={CirclesThree} label="免费额度剩余" value={quotaDisplay} hint={detail.quota.period || '额度周期未知'} tone="primary" />
     </section>
@@ -1105,12 +1105,12 @@ function CostQuotaPanel({ detail }) {
   const hasProgress = quota.used !== null && quota.freeLimit !== null && quota.freeLimit > 0
   const quotaPercent = hasProgress ? Math.max(0, Math.min(100, (quota.used / quota.freeLimit) * 100)) : null
   return (
-    <Panel title="成本与免费额度" subtitle="金额只展示上游或 Hub 计费证据，不从调用量猜测单价。" className="mih-external-cost-panel">
+    <Panel title="上游成本与免费额度" subtitle="这里只展示供应商采购证据；下游按次价格与扣费在套餐、调用方和用量账本中单独核对。" className="mih-external-cost-panel">
       <dl className="mih-external-facts">
         <div><dt>窗口实际净支出</dt><dd>{formatMoneyMinor(cost.actualMinor, cost.currency)}</dd></div>
         <div><dt>免费额度 / 折扣前标价估算</dt><dd>{formatMoneyMinor(cost.grossEstimatedMinor, cost.currency)}</dd></div>
         <div><dt>预计月度成本</dt><dd>{formatMoneyMinor(cost.projectedMonthMinor, cost.currency)}</dd></div>
-        <div><dt>月度预算</dt><dd>{formatMoneyMinor(cost.monthlyBudgetMinor, cost.currency)}</dd></div>
+        <div><dt>上游月度成本线</dt><dd>{formatMoneyMinor(cost.monthlyBudgetMinor, cost.currency)}</dd></div>
         <div><dt>单价未知的已计费调用</dt><dd>{formatOptionalNumber(cost.unknownCostCalls)}</dd></div>
         <div><dt>计费状态未确定的调用</dt><dd>{formatOptionalNumber(cost.indeterminateBillingCalls)}</dd></div>
         <div><dt>预计月调用 / 付费调用</dt><dd>{formatOptionalNumber(cost.projectedMonthlyCalls)} / {formatOptionalNumber(cost.projectedPaidCalls)}</dd></div>
@@ -1144,6 +1144,7 @@ function CostQuotaPanel({ detail }) {
           定价证据：{displayDate(cost.pricingAsOf)} · 定价来源：{cost.pricingSource || UNKNOWN} · 预测置信度：{cost.confidence || UNKNOWN}
         </small>
         <small>额度重置：{displayDate(quota.resetAt)} · 额度来源：{quota.source || UNKNOWN}{quota.note ? ` · ${quota.note}` : ''}</small>
+        <small>该成本线只限制未形成正价 enforced 钱包预占的补贴流量；已明确按次计费的 Key 继续调用并逐次记录上游成本。</small>
       </div>
     </Panel>
   )

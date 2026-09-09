@@ -240,18 +240,21 @@ billed state, estimated cost, latency and archive evidence. A cache hit does not
 The customer usage reservation is committed once with the final delivery; pre-dispatch failure can release it,
 but an ambiguous or possibly billed provider step cannot be erased by releasing or relabelling the group.
 
-Migration 057 adds a separate short-lived procurement hold; it is not call evidence. After exact detail-cache
-lookup and before the first live enrichment call, Hub atomically reserves the sum of every remaining detail
-cost and its uncovered subsidy exposure. With `N <= 20` uncached candidates, gross page procurement is the
-already-admitted search cost plus `N × detail endpoint cost`. If the complete detail hold does not fit the
-provider monthly budget or explicit subsidy budget, Hub sends zero detail calls and returns the paid primary
-search as explicitly partial. Two concurrent workflows cannot spend the same remaining headroom.
+Migration 057 adds a separate short-lived procurement forecast/hold; it is not call evidence. After exact
+detail-cache lookup and before the first live enrichment call, Hub atomically records the sum of every remaining
+detail cost and its uncovered subsidy exposure. With `N <= 20` uncached candidates, gross page procurement is
+the already-admitted search cost plus `N × detail endpoint cost`. For traffic without a positive `enforced`
+per-request wallet hold, a workflow that does not fit the provider monthly/subsidy thresholds sends zero detail
+calls and returns the paid primary search as explicitly partial. A paid-ready request records the same cost
+forecast but does not stop at those Hub financial thresholds. Two subsidized workflows cannot spend the same
+remaining headroom.
 
 Every enabled endpoint cost must be a positive reviewed amount in the provider billing currency. `0` cannot
 stand for unknown, and `billed=false` or an unknown billed result does not erase the admitted gross estimate.
-Legacy-unpriced, shadow, zero-price and cross-currency customer deliveries consume explicit subsidy; Hub does
-not assume an exchange rate. Downstream prices remain operator-entered immutable price-book versions and are
-never derived from TikHub cost or from a desired margin.
+Legacy-unpriced, shadow and zero-price deliveries consume explicit subsidy. A strictly matched positive
+`enforced` wallet hold makes the Hub financial thresholds warning-only even when provider and customer ledgers
+use different currencies; amounts remain separate and Hub does not assume an exchange rate. Downstream prices
+remain operator-entered immutable price-book versions and are never derived from TikHub cost or desired margin.
 
 Provider admission is separate from the customer plan's request/RPS quota:
 

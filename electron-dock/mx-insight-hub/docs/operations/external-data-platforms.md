@@ -133,9 +133,10 @@ cost requires an explicit operator decision.
    archive objects and the linked canonical ingest before widening grants or concurrency.
 
 On routine Internal deploys, an omitted/blank `MX_INSIGHT_JUSTONE_TOKEN` and an
-omitted `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` preserve their current Kubernetes values. When the retained gate
-is `1`, an omitted billing JSON also preserves its current Kubernetes value; a lookup failure stops before
-ConfigMap mutation. An explicit gate value of `0` disables dispatch. Clearing the retained
+omitted `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` preserve their current Kubernetes values. An omitted or blank
+billing JSON preserves its current Kubernetes value even while the gate is `0`, so a migration-first deploy
+does not erase reviewed evidence; a lookup failure stops before ConfigMap mutation. An explicit gate value of
+`0` disables dispatch. Clearing the retained
 environment fallback requires the one-shot command prefix
 `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`; never persist that flag in an env file.
 A first deployment still defaults to no environment key and a closed gate. The
@@ -143,11 +144,14 @@ UI-managed database key is retained independently in PostgreSQL and remains the
 preferred credential source. Command-environment values take precedence over
 `.env.internal` for an intentional activation or emergency stop.
 
-Use this rollout order for either paid provider: deploy migrations and code with its contract gate `0`; write
-and preflight the reviewed billing JSON while the gate remains `0`; then change the gate to `1` in a recorded
-canary release. Strict deploy preflight stops before Secret/ConfigMap mutation when an enabled provider lacks
-cost evidence. Runtime parsing remains fail-soft for optional providers: an out-of-band bad provider value
-disables only that provider's dispatch and does not stop Hub Admin, login, stored reads, or workers.
+Use this rollout order for either paid provider: deploy migrations and code with its contract gate `0`; verify
+the endpoint, credential, response and idempotency contract; record reviewed procurement prices for every
+enabled paid endpoint; then change the gate to `1` in a recorded canary release. An enabled gate still requires
+valid billing evidence including both non-negative monthly threshold fields; set both thresholds to `0` when
+only positive enforced downstream requests should dispatch. Those fields are warning-only for a request with
+its own positive wallet hold, but keep unpriced/subsidized traffic closed. Runtime parsing remains
+fail-soft for optional providers: an out-of-band bad provider value disables only that provider's dispatch and
+does not stop Hub Admin, login, stored reads, or workers.
 
 ### Direct TikHub / Xiaohongshu activation
 
@@ -167,12 +171,16 @@ passed target-environment fixtures. This gate also requires the parent TikHub ga
 first pages; an existing direct `mxec2` crawl cursor remains pinned to the Hub-native connector and is never
 reinterpreted as a historical `mxnc1` traversal.
 
-Before any TikHub paid-operation gate is opened, configure reviewed `MX_INSIGHT_TIKHUB_BILLING_JSON` with `source=manual`,
-currency, `pricingAsOf`, a positive gross cost for every enabled TikHub endpoint, a gross monthly procurement
-budget, and an explicit monthly subsidy budget. The repository example records the currently reviewed
-one-US-cent-per-call evidence as an example only; operators must verify the target account and effective date.
-Do not infer a downstream selling price or an exchange rate from that upstream cost. Routine deploys retain the
-existing TikHub billing JSON whenever a retained parent gate is `1` and no replacement is supplied.
+Before any TikHub paid-operation gate is opened, verify the enabled endpoints against the target account and
+record reviewed `MX_INSIGHT_TIKHUB_BILLING_JSON` evidence (`source=manual`, currency, `pricingAsOf`, positive
+costs for every enabled endpoint, and both non-negative monthly threshold fields). A missing or unknown
+procurement price remains explicitly unknown; it is never entered as zero and the corresponding gate remains
+closed. `monthlyBudgetMinor` and `monthlySubsidyBudgetMinor` are operator cost-warning thresholds, not
+technical-contract evidence and not admission limits for a downstream request that already has a positive
+enforced wallet hold. The repository example records one-US-cent-per-call evidence as an example only; operators
+must verify the target account and effective date. Do not infer a downstream selling price or an exchange rate
+from upstream cost. Routine and migration-first deploys retain the existing TikHub billing JSON when no
+non-empty replacement is supplied, regardless of the parent gate state.
 
 Direct search caches are controlled by `MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS` and
 `MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS`. Known 60-character previews are repaired for the full 20-item page by
@@ -706,41 +714,53 @@ weighted calculation. An unknown forecast is preferable to telling operators to 
 precision. Cost optimization order is: stop faulty demand, improve exact reuse, keep pagination bounded,
 then evaluate quota plan or recharge.
 
-The runtime enforces two different provider-currency limits before network dispatch:
+The runtime maintains two different provider-currency thresholds:
 
-- `monthlyBudgetMinor` caps gross reviewed procurement estimates for that provider. Every actual call keeps
-  the estimate even if the provider later reports `billed=false` or billing status remains unknown; those
-  states do not rewrite procurement evidence to zero.
-- `monthlySubsidyBudgetMinor` caps the part of that procurement not covered by a same-currency, positive,
-  enforced customer wallet hold or captured charge. Legacy-unbilled, disabled/unpriced, zero-price, shadow,
-  and cross-currency deliveries consume subsidy at the full known upstream cost. Hub performs no implicit FX
-  conversion. A provider budget is therefore not a substitute for a margin/subsidy guard.
+- `monthlyBudgetMinor` is a gross reviewed-procurement warning line. Every actual call keeps its known estimate
+  even if the provider later reports `billed=false` or billing status remains unknown; those states do not
+  rewrite procurement evidence to zero.
+- `monthlySubsidyBudgetMinor` can remain a hard admission limit for legacy-unbilled, disabled/unpriced,
+  zero-price or shadow traffic. It is only a forecast/warning for a request that already has a positive
+  enforced customer wallet hold. Hub performs no implicit FX conversion: upstream and downstream amounts in
+  different currencies stay in separate ledgers and are not presented as a calculated margin.
 
-For a direct Xiaohongshu search page the worst-case admitted gross cost is
+A request is customer-billed for this decision only when its exact `usage_request_id` has an `enforced`,
+positive, request-unit customer charge in `reserved` state, attributed to the same tenant, consumer, API Key
+and billing meter, with the wallet hold created before provider dispatch. Merely possessing an API Key,
+publishing a price book, using `shadow`, or assigning a zero price is not sufficient. Once that condition is
+true, aggregate gross-cost/subsidy lines and unrelated historical evidence anomalies never reject the provider
+dispatch. The current endpoint must still have reviewed positive cost configuration, and the current request's
+own cost reservation/evidence must remain internally consistent. Contract, credential, rate, concurrency,
+circuit-breaker and provider-capacity protections remain authoritative.
+
+For a direct Xiaohongshu search page the worst-case forecast gross cost is
 `search endpoint cost + N × detail endpoint cost`, where `N` is the uncached selected detail count and is at
-most 20. Hub looks up exact detail snapshots first, then atomically holds cost and subsidy for every remaining
-detail before the first enrichment dispatch. Concurrent workflows cannot each spend the same remaining
-headroom; a rejected workflow creates no fake provider-call row. If detail admission is unavailable after a
-paid primary search, Hub returns that primary result with explicit partial-completeness state and performs no
-detail call. Crawl/user-info pagination is different: each Public POST obtains one provider page and owns one
-usage/cost hold; the signed cursor stops after page 15. A username first page reserves its complete three-call
-sequence, while direct-ID and continuation pages reserve their complete two-call sequence before call one.
+most 20. Hub looks up exact detail snapshots first, then records a workflow cost forecast for every remaining
+detail before the first enrichment dispatch. For subsidized traffic, concurrent workflows cannot each spend
+the same remaining subsidy headroom; a rejected workflow creates no fake provider-call row. For a customer-
+billed request, crossing a financial warning line does not suppress detail enrichment; technical capacity may
+still produce explicit partial-completeness state. Crawl/user-info pagination is different: each Public POST
+obtains one provider page and owns one usage/charge lifecycle; the signed cursor stops after page 15. A username
+first page forecasts its complete three-call sequence, while direct-ID and continuation pages forecast their
+complete two-call sequence before call one. In every case, one accepted Hub request is charged at most once;
+provider-call fan-out is accounted separately and never multiplies the downstream charge.
 
 Customer prices remain operator-entered immutable price-book versions. Do not derive them from upstream cost,
 the subsidy budget, free quota, or a guessed exchange rate. A positive enforced `reserved` charge is counted as
-coverage because migration 056 has already moved the same-currency amount from available funds into an
-immutable wallet hold; `unknown` keeps that hold. If an authorized reconciliation later releases an unknown
-charge after provider cost was incurred, that cost immediately becomes subsidy exposure and later dispatches
-fail closed. The release cannot undo already-paid upstream spend and can put the month over its subsidy cap, so
-the operator must compare the proposed release with remaining subsidy headroom before approving it.
+customer-billed because migration 056 has already moved the exact downstream amount from available funds into
+an immutable wallet hold; `unknown` keeps that hold. This dispatch decision does not require the provider and
+customer ledgers to use the same currency. If an authorized reconciliation later releases an unknown charge
+after provider cost was incurred, that cost becomes unfunded exposure. It may stop later subsidized traffic,
+but it must not stop a different request that has its own positive enforced hold. The release cannot undo
+already-paid upstream spend, so the operator must review that exposure before approving it.
 
 Rows created before cost control may have `cost_kind=unknown` and no amount. Hub never converts those rows to
-zero and never guesses a historical price. To avoid breaking an already-running provider for the rest of the
-month without defensible backfill, they remain outside the guarded cohort; any historical row with a known
-amount is included, and any guarded row that loses its amount fails closed. For the first guarded month,
-configure `monthlyBudgetMinor` as the remaining allowance only after manually reconciling pre-guard spend. If
-that remaining allowance cannot be established, close the provider gate or set the budget/subsidy limit to
-zero until the next UTC month.
+zero and never guesses a historical price. Historical mixed-currency, missing or inconsistent evidence is an
+Admin reconciliation alert; it does not convert a customer-billed request into a Public 503. Any historical row
+with a known amount remains included in its own currency totals, and an unknown amount remains unknown. For
+subsidized traffic the operator may keep financial admission closed until evidence or an explicit subsidy limit
+is reviewed. Closing a provider's technical contract gate is reserved for an actual contract, credential or
+response-shape problem, not for crossing a cost-warning threshold.
 
 ## 8. Incident matrix
 
@@ -755,9 +775,9 @@ zero until the next UTC month.
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
-| `external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | A paid endpoint lacks a positive reviewed unit cost, budget/currency evidence, or the guarded ledger is inconsistent. No new paid dispatch is allowed. | Keep the provider gate closed, correct the reviewed billing JSON or reconcile ledger evidence. Never enter zero for an unknown cost. |
-| `external_platform_cost_budget_exhausted` | The provider's concurrency-safe gross monthly procurement limit has no room for the complete admitted call/workflow. | Do not retry with a new key. Reconcile provider evidence and approve a recorded budget change or wait for the next UTC month. |
-| `external_platform_subsidy_budget_exhausted` | Unpriced/legacy/shadow/cross-currency delivery, or released customer coverage, would exceed the explicit subsidy limit. | Publish and assign an operator-approved customer price in the same currency, approve an explicit subsidy change, or keep paid dispatch closed. Do not invent a selling rate or FX conversion. |
+| `external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | Current endpoint cost configuration is absent, or the applicable cost evidence is inconsistent. A paid-ready request ignores unrelated historical anomalies but still fails closed for its own missing/invalid endpoint cost or current-request evidence. | Keep unknown amounts unknown; correct the reviewed endpoint configuration or current request evidence. Do not report this as a provider transport outage. |
+| `external_platform_cost_budget_exhausted` | An unpriced/subsidized workflow crossed the configured gross procurement threshold. The same threshold is warning-only for a customer-billed request. | Do not retry with a new key. Reconcile provider evidence and decide whether to price/fund the downstream key or approve a recorded threshold change. |
+| `external_platform_subsidy_budget_exhausted` | A legacy-unbilled, disabled/unpriced, zero-price or shadow workflow would exceed the explicit subsidy limit. Cross-currency amounts remain separate, but a positive enforced downstream hold still permits dispatch. | Publish and assign an operator-approved customer price, fund and enforce the downstream wallet, or approve an explicit subsidy change. Do not invent a selling rate or FX conversion. |
 | `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence first; use the restricted exact response only from an approved database session, then add a fixture and review the adapter before any change. |
 | `external_media_source_throttled` | The retained image origin/CDN returned HTTP 429; this is not a Hub consumer quota or relay-concurrency limit. | Do not retry automatically or run another paid data request. Inspect the retained host and origin policy, then wait or serve a durable Hub-owned asset once materialization is enabled. |
 | `external_media_unavailable` | A retained product image reached the media relay, but its upstream host returned a non-200 response or the TLS/transport request failed. | Reuse the committed search request while checking the retained image hostname and CDN response; do not run another paid search. Known legacy Alibaba `g.search[1-3].alicdn.com` names are mapped to their TLS-valid `g-search1-3.alicdn.com` aliases without disabling certificate validation. |

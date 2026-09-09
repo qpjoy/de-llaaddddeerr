@@ -105,6 +105,14 @@ test('enforced tenant wallet holds, captures, releases, and preserves idempotenc
   billing = await service.getTenantBilling(tenant.id)
   assert.equal(billing.account.availableMinor, 70)
   assert.equal(billing.account.heldMinor, 30)
+  const duringHold = await store.usage({ tenantId: tenant.id })
+  assert.equal(duringHold.customerBilling.requests, 1)
+  assert.equal(duringHold.customerBilling.capturedRequests, 0)
+  assert.equal(duringHold.customerBilling.heldRequests, 1)
+  assert.equal(duringHold.customerBilling.releasedRequests, 0)
+  assert.equal(duringHold.customerBilling.shadowRequests, 0)
+  assert.equal(duringHold.customerBilling.byCurrency.CNY.requests, 1)
+  assert.equal(duringHold.customerBilling.byMeter['social.posts.search'].requests, 1)
 
   await store.commitRequest(first.requestId, {
     responseStatus: 200,
@@ -126,11 +134,31 @@ test('enforced tenant wallet holds, captures, releases, and preserves idempotenc
   assert.equal(billing.ledger.filter((entry) => entry.kind === 'release').length, 1)
 
   const usage = await store.usage({ tenantId: tenant.id })
+  assert.equal(usage.customerBilling.requests, 2)
   assert.equal(usage.customerBilling.quotedMinor, 60)
   assert.equal(usage.customerBilling.chargedMinor, 30)
   assert.equal(usage.customerBilling.heldMinor, 0)
+  assert.equal(usage.customerBilling.capturedRequests, 1)
+  assert.equal(usage.customerBilling.heldRequests, 0)
+  assert.equal(usage.customerBilling.releasedRequests, 1)
+  assert.equal(usage.customerBilling.shadowRequests, 0)
+  assert.deepEqual(usage.customerBilling.byCurrency.CNY, {
+    requests: 2,
+    capturedRequests: 1,
+    heldRequests: 0,
+    releasedRequests: 1,
+    shadowRequests: 0,
+    quotedMinor: 60,
+    chargedMinor: 30,
+    heldMinor: 0,
+    shadowQuotedMinor: 0,
+  })
   assert.deepEqual(usage.customerBilling.byMeter['social.posts.search'], {
     requests: 2,
+    capturedRequests: 1,
+    heldRequests: 0,
+    releasedRequests: 1,
+    shadowRequests: 0,
     quotedMinor: 60,
     chargedMinor: 30,
     heldMinor: 0,
@@ -153,6 +181,10 @@ test('unknown customer charge reconciliation is audited, idempotent, and leaves 
   await store.reserve(releaseRequest)
   await store.markRequestUnknown(captureRequest.requestId, 'delivery_outcome_unknown')
   await store.markRequestUnknown(releaseRequest.requestId, 'delivery_outcome_unknown')
+  const pendingUsage = await store.usage({ tenantId: tenant.id })
+  assert.equal(pendingUsage.customerBilling.capturedRequests, 0)
+  assert.equal(pendingUsage.customerBilling.heldRequests, 2)
+  assert.equal(pendingUsage.customerBilling.releasedRequests, 0)
 
   const captureKey = `reconcile:${randomUUID()}`
   const captured = await service.reconcileUnknownCustomerCharge(captureRequest.requestId, {
@@ -194,6 +226,10 @@ test('unknown customer charge reconciliation is audited, idempotent, and leaves 
   assert.equal(captureEntry.idempotencyKey, captureKey)
   assert.equal(captureEntry.actor, 'billing-operator')
   assert.equal(captureEntry.reason, 'Operator confirmed customer delivery')
+  const settledUsage = await store.usage({ tenantId: tenant.id })
+  assert.equal(settledUsage.customerBilling.capturedRequests, 1)
+  assert.equal(settledUsage.customerBilling.heldRequests, 0)
+  assert.equal(settledUsage.customerBilling.releasedRequests, 1)
 })
 
 test('unknown customer charge reconciliation HTTP route is platform-admin only', async (t) => {
@@ -283,6 +319,11 @@ test('shadow pricing records a quote without touching tenant credit', async () =
   assert.equal(usage.customerBilling.quotedMinor, 30)
   assert.equal(usage.customerBilling.shadowQuotedMinor, 30)
   assert.equal(usage.customerBilling.chargedMinor, 0)
+  assert.equal(usage.customerBilling.capturedRequests, 0)
+  assert.equal(usage.customerBilling.heldRequests, 0)
+  assert.equal(usage.customerBilling.releasedRequests, 0)
+  assert.equal(usage.customerBilling.shadowRequests, 1)
+  assert.equal(usage.customerBilling.byMeter['social.posts.search'].shadowRequests, 1)
 })
 
 test('legacy plans remain non-monetary without a billing profile or price book', async () => {

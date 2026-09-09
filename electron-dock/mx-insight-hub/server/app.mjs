@@ -139,9 +139,26 @@ function adminCredential(request) {
   return (typeof value === 'string' && value) || bearerToken(request)
 }
 
+function usageSummaryInteger(value, field) {
+  const normalized = value == null || value === '' ? 0 : Number(value)
+  if (Number.isSafeInteger(normalized)) return normalized
+  throw new AppError(
+    500,
+    'usage_aggregate_out_of_range',
+    `Usage aggregate ${field} exceeds the JavaScript safe integer range`,
+  )
+}
+
+function addUsageSummaryInteger(left, right, field) {
+  return usageSummaryInteger(
+    usageSummaryInteger(left, field) + usageSummaryInteger(right, field),
+    field,
+  )
+}
+
 // Combine all tenant summaries in one pass. Store averages are weighted by
 // committed requests, so released/unknown traffic must not dilute latency here.
-function mergeUsageSummaries(summaries) {
+export function mergeUsageSummaries(summaries) {
   const merged = {
     requests: 0,
     committed: 0,
@@ -151,85 +168,231 @@ function mergeUsageSummaries(summaries) {
     averageUpstreamLatencyMs: null,
     byPlatform: {},
     byCapability: {},
+    requestMetering: { byMeter: {} },
     recentRequests: [],
     customerBilling: {
       currency: null,
       mixedCurrencies: false,
+      requests: 0,
       quotedMinor: 0,
       chargedMinor: 0,
       heldMinor: 0,
       shadowQuotedMinor: 0,
+      capturedRequests: 0,
+      heldRequests: 0,
+      releasedRequests: 0,
+      shadowRequests: 0,
+      byCurrency: {},
       byMeter: {},
     },
   }
-  let weightedLatency = 0
-  let latencyCommitted = 0
-  const billingCurrencies = new Set()
+  let weightedLatency = 0n
+  let latencyCommitted = 0n
+  let sawMixedBilling = false
 
   for (const summary of summaries) {
-    merged.requests += summary.requests || 0
-    merged.committed += summary.committed || 0
-    merged.released += summary.released || 0
-    merged.unknown += summary.unknown || 0
-    merged.units += summary.units || 0
+    for (const field of ['requests', 'committed', 'released', 'unknown', 'units']) {
+      merged[field] = addUsageSummaryInteger(merged[field], summary[field], field)
+    }
 
-    if (summary.averageUpstreamLatencyMs != null && summary.committed > 0) {
-      weightedLatency += summary.averageUpstreamLatencyMs * summary.committed
-      latencyCommitted += summary.committed
+    const summaryCommitted = usageSummaryInteger(summary.committed, 'committed')
+    if (summary.averageUpstreamLatencyMs != null && summaryCommitted > 0) {
+      const averageLatency = usageSummaryInteger(
+        summary.averageUpstreamLatencyMs,
+        'averageUpstreamLatencyMs',
+      )
+      weightedLatency += BigInt(averageLatency) * BigInt(summaryCommitted)
+      latencyCommitted += BigInt(summaryCommitted)
     }
 
     for (const dimension of ['byPlatform', 'byCapability']) {
       for (const [scope, entry] of Object.entries(summary[dimension] || {})) {
-        const existing = merged[dimension][scope]
-        merged[dimension][scope] = existing
-          ? {
-              requests: existing.requests + entry.requests,
-              committed: existing.committed + entry.committed,
-              released: existing.released + entry.released,
-              unknown: existing.unknown + entry.unknown,
-              units: existing.units + entry.units,
-            }
-          : { ...entry }
+        const current = merged[dimension][scope] ||= {
+          requests: 0,
+          committed: 0,
+          released: 0,
+          unknown: 0,
+          units: 0,
+        }
+        for (const field of ['requests', 'committed', 'released', 'unknown', 'units']) {
+          current[field] = addUsageSummaryInteger(
+            current[field],
+            entry[field],
+            `${dimension}.${scope}.${field}`,
+          )
+        }
+      }
+    }
+
+    for (const [meterKey, entry] of Object.entries(summary.requestMetering?.byMeter || {})) {
+      const current = merged.requestMetering.byMeter[meterKey] ||= {
+        requests: 0,
+        committed: 0,
+        released: 0,
+        unknown: 0,
+        reserved: 0,
+        units: 0,
+      }
+      for (const field of ['requests', 'committed', 'released', 'unknown', 'reserved', 'units']) {
+        current[field] = addUsageSummaryInteger(
+          current[field],
+          entry[field],
+          `requestMetering.${meterKey}.${field}`,
+        )
       }
     }
 
     const billing = summary.customerBilling || {}
-    if (billing.currency) billingCurrencies.add(billing.currency)
-    if (billing.mixedCurrencies) billingCurrencies.add('__mixed__')
-    for (const field of ['quotedMinor', 'chargedMinor', 'heldMinor', 'shadowQuotedMinor']) {
-      merged.customerBilling[field] += Number(billing[field] || 0)
+    let billingRequests = billing.requests
+    if (billingRequests == null) {
+      billingRequests = 0
+      for (const [meterKey, entry] of Object.entries(billing.byMeter || {})) {
+        billingRequests = addUsageSummaryInteger(
+          billingRequests,
+          entry.requests,
+          `customerBilling.${meterKey}.requests`,
+        )
+      }
+    }
+    for (const field of [
+      'requests',
+      'capturedRequests',
+      'heldRequests',
+      'releasedRequests',
+      'shadowRequests',
+    ]) {
+      const value = field === 'requests' ? billingRequests : billing[field]
+      merged.customerBilling[field] = addUsageSummaryInteger(
+        merged.customerBilling[field],
+        value,
+        `customerBilling.${field}`,
+      )
+    }
+    sawMixedBilling ||= Boolean(billing.mixedCurrencies)
+    let currencyEntries = Object.entries(billing.byCurrency || {})
+    if (currencyEntries.length === 0 && billing.currency && !billing.mixedCurrencies) {
+      currencyEntries = [[billing.currency, {
+        requests: billingRequests,
+        capturedRequests: billing.capturedRequests,
+        heldRequests: billing.heldRequests,
+        releasedRequests: billing.releasedRequests,
+        shadowRequests: billing.shadowRequests,
+        quotedMinor: billing.quotedMinor,
+        chargedMinor: billing.chargedMinor,
+        heldMinor: billing.heldMinor,
+        shadowQuotedMinor: billing.shadowQuotedMinor,
+      }]]
+    }
+    for (const [currency, entry] of currencyEntries) {
+      const current = merged.customerBilling.byCurrency[currency] ||= {
+        requests: 0,
+        capturedRequests: 0,
+        heldRequests: 0,
+        releasedRequests: 0,
+        shadowRequests: 0,
+        quotedMinor: 0,
+        chargedMinor: 0,
+        heldMinor: 0,
+        shadowQuotedMinor: 0,
+      }
+      for (const field of [
+        'requests',
+        'capturedRequests',
+        'heldRequests',
+        'releasedRequests',
+        'shadowRequests',
+        'quotedMinor',
+        'chargedMinor',
+        'heldMinor',
+        'shadowQuotedMinor',
+      ]) {
+        current[field] = addUsageSummaryInteger(
+          current[field],
+          entry[field],
+          `customerBilling.byCurrency.${currency}.${field}`,
+        )
+      }
     }
     for (const [meterKey, entry] of Object.entries(billing.byMeter || {})) {
       const current = merged.customerBilling.byMeter[meterKey] ||= {
         requests: 0,
+        capturedRequests: 0,
+        heldRequests: 0,
+        releasedRequests: 0,
+        shadowRequests: 0,
         quotedMinor: 0,
         chargedMinor: 0,
         heldMinor: 0,
-        currency: entry.currency || billing.currency || null,
+        currency: null,
         mixedCurrencies: false,
       }
-      current.requests += Number(entry.requests || 0)
-      current.quotedMinor += Number(entry.quotedMinor || 0)
-      current.chargedMinor += Number(entry.chargedMinor || 0)
-      current.heldMinor += Number(entry.heldMinor || 0)
+      for (const field of [
+        'requests',
+        'capturedRequests',
+        'heldRequests',
+        'releasedRequests',
+        'shadowRequests',
+      ]) {
+        current[field] = addUsageSummaryInteger(
+          current[field],
+          entry[field],
+          `customerBilling.${meterKey}.${field}`,
+        )
+      }
       const entryCurrency = entry.currency || billing.currency || null
-      if ((current.currency && entryCurrency && current.currency !== entryCurrency) || entry.mixedCurrencies) {
+      const entryHasUnattributedMoney = !entryCurrency && ['quotedMinor', 'chargedMinor', 'heldMinor']
+        .some((field) => entry[field] != null && usageSummaryInteger(
+          entry[field],
+          `customerBilling.${meterKey}.${field}`,
+        ) !== 0)
+      if (
+        current.mixedCurrencies
+        || entry.mixedCurrencies
+        || (current.currency && entryCurrency && current.currency !== entryCurrency)
+        || entryHasUnattributedMoney
+      ) {
         current.currency = null
         current.mixedCurrencies = true
+        current.quotedMinor = null
+        current.chargedMinor = null
+        current.heldMinor = null
       } else if (!current.currency) {
         current.currency = entryCurrency
+      }
+      if (!current.mixedCurrencies) {
+        for (const field of ['quotedMinor', 'chargedMinor', 'heldMinor']) {
+          current[field] = addUsageSummaryInteger(
+            current[field],
+            entry[field],
+            `customerBilling.${meterKey}.${field}`,
+          )
+        }
       }
     }
     merged.recentRequests.push(...(summary.recentRequests || []))
   }
 
-  merged.averageUpstreamLatencyMs = latencyCommitted > 0
-    ? Math.round(weightedLatency / latencyCommitted)
+  merged.averageUpstreamLatencyMs = latencyCommitted > 0n
+    ? usageSummaryInteger(
+        (weightedLatency + latencyCommitted / 2n) / latencyCommitted,
+        'averageUpstreamLatencyMs',
+      )
     : null
-  merged.customerBilling.currency = billingCurrencies.size === 1 && !billingCurrencies.has('__mixed__')
-    ? [...billingCurrencies][0]
-    : null
-  merged.customerBilling.mixedCurrencies = billingCurrencies.size > 1 || billingCurrencies.has('__mixed__')
+  const billingCurrencies = Object.keys(merged.customerBilling.byCurrency)
+  merged.customerBilling.mixedCurrencies = sawMixedBilling || billingCurrencies.length > 1
+  if (billingCurrencies.length === 1 && !merged.customerBilling.mixedCurrencies) {
+    const currency = billingCurrencies[0]
+    const amounts = merged.customerBilling.byCurrency[currency]
+    merged.customerBilling.currency = currency
+    for (const field of ['quotedMinor', 'chargedMinor', 'heldMinor', 'shadowQuotedMinor']) {
+      merged.customerBilling[field] = amounts[field]
+    }
+  } else if (merged.customerBilling.mixedCurrencies) {
+    merged.customerBilling.quotedMinor = null
+    merged.customerBilling.chargedMinor = null
+    merged.customerBilling.heldMinor = null
+    merged.customerBilling.shadowQuotedMinor = null
+  }
   merged.recentRequests.sort((left, right) => (
     String(right.createdAt || '').localeCompare(String(left.createdAt || ''))
       || String(right.id || '').localeCompare(String(left.id || ''))

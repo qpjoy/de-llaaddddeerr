@@ -1029,6 +1029,33 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       'The three explicitly named Night-All compatibility routes retain the legacy envelope. Eligible Xiaohongshu raw calls may use a Hub-native projection with the same raw_info/raw_data field types; Night-All-owned bodies remain unchanged. Other public routes do not expose raw source rows or management coordinates.',
     ].join('\n\n'),
   },
+  'x-mx-external-platform-admission': {
+    paidReady: {
+      definition: 'The current usage request has a positive enforced per-request customer charge and its wallet hold was successfully reserved.',
+      rejectedByHubMonthlyProcurementOrSubsidyCaps: false,
+    },
+    subsidizedTraffic: {
+      definition: 'Traffic without that positive enforced per-request wallet hold, including unpriced, shadow-priced and zero-price requests.',
+      possibleFinancialCapErrors: [
+        'external_platform_cost_budget_exhausted',
+        'external_platform_subsidy_budget_exhausted',
+      ],
+    },
+    procurementEvidence: {
+      currentEndpointAndRequestRequiredForPaidReady: true,
+      unrelatedHistoricalAnomaliesRejectPaidReady: false,
+    },
+    technicalProtections: {
+      applyToPaidReady: true,
+      controls: [
+        'api_key_and_plan_quota',
+        'shared_provider_rate_limit',
+        'global_and_consumer_concurrency',
+        'circuit_breaker',
+        'contract_credential_idempotency_and_dispatch_safety',
+      ],
+    },
+  },
   servers: [{ url: '/api/v1', description: 'Same-origin public API' }],
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
@@ -5028,9 +5055,10 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
       <tr><td><code>403 platform_not_granted / capability_not_granted</code></td><td>为 consumer 授权后签发同时包含两项 scope 的新 Key。</td></tr>
       <tr><td><code>404 post_not_found / stored_snapshot_not_found</code></td><td>前者是已严格识别的笔记不可用；后者只是 cache_only 未命中。</td></tr>
       <tr><td><code>429 quota_exceeded</code></td><td>Hub 套餐/Key/consumer 限额；等待窗口或由管理员调整。</td></tr>
-      <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded / external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>Hub 并发、外部容量、供应商预算或未覆盖成本补贴预算不足；按响应退避，不能换 Key 绕过。</td></tr>
+      <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded</code></td><td>Hub 或供应方的限流与并发保护；paid-ready 请求也仍受这些技术保护，按响应退避，不能换 Key 绕过。</td></tr>
+      <tr><td><code>429 external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>仅可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量；已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。</td></tr>
       <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>
-      <tr><td><code>503 not_configured / contract_unverified / circuit_open / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>稍后用相同意图重试，或由 operator 检查发布门禁、内部平台状态和计费证据。</td></tr>
+      <tr><td><code>503 not_configured / contract_unverified / circuit_open / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>由 operator 检查发布门禁和当前 endpoint/当前请求的成本证据；paid-ready 只绕过月度财务线，不绕过这些完整性检查。无关历史成本异常不会阻断该请求。</td></tr>
     </tbody></table>
     </section>
 
@@ -5346,13 +5374,14 @@ curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timelin
 
     <section class="doc-page" data-doc-page="errors">
     <h2 id="errors">错误与重试</h2>
+    <div class="notice"><strong>外采财务准入：</strong><code>external_platform_cost_budget_exhausted</code> 与 <code>external_platform_subsidy_budget_exhausted</code> 保留在兼容错误合同中，但只可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量。已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。API Key/套餐配额、共享供应方限流、全局与单 consumer 并发、熔断、合同、凭据、幂等和派发安全保护仍然适用。</div>
     <table><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
       <tr><td>400</td><td>字段、游标、页大小或幂等 Key 不合法</td><td>修正请求，不原样盲重试</td></tr>
       <tr><td>401 / 403</td><td>Key 无效，或平台未授权</td><td>检查 Key 与 capabilities</td></tr>
       <tr><td>409</td><td>幂等冲突/处理中/结果未知，或该 dataset 不支持上下文/时间线</td><td>搜索请求保持原 body 与原幂等 Key；上下文/时间线请求先检查 capabilities</td></tr>
       <tr><td>410</td><td>搜索游标过期</td><td>从无 cursor 的第一页重新开始，并使用新幂等 Key</td></tr>
       <tr><td>429</td><td>请求或并发配额耗尽</td><td>等待策略窗口恢复</td></tr>
-      <tr><td>503</td><td>当前数据或搜索运行时不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key</td></tr>
+      <tr><td>503</td><td>当前数据/搜索运行时，或本次外采成本证据不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key，并由 operator 检查当前 endpoint/请求证据</td></tr>
     </tbody></table>
     <p>所有错误都返回稳定的 <code>error.code</code> 和用于排查的 <code>requestId</code>。</p>
     </section>

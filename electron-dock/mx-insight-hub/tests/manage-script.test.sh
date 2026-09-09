@@ -11,7 +11,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VALID_JUSTONE_BILLING_JSON='{"source":"manual","currency":"CNY","pricingAsOf":"2026-09-08T00:00:00Z","monthlyBudgetMinor":100000,"monthlySubsidyBudgetMinor":100000,"unitCostMinorByEndpoint":{"jd.product-search.v1":5}}'
+VALID_JUSTONE_BILLING_JSON='{"source":"manual","currency":"CNY","pricingAsOf":"2026-09-08T00:00:00Z","monthlyBudgetMinor":0,"monthlySubsidyBudgetMinor":0,"unitCostMinorByEndpoint":{"jd.product-search.v1":5}}'
+VALID_TIKHUB_BILLING_JSON='{"source":"manual","currency":"USD","pricingAsOf":"2026-09-08T00:00:00Z","monthlyBudgetMinor":0,"monthlySubsidyBudgetMinor":0,"unitCostMinor":1}'
 # shellcheck source=../scripts/manage.sh
 source "${ROOT_DIR}/scripts/manage.sh"
 
@@ -194,25 +195,58 @@ JUSTONE_BLANK_MARKER="$justone_blank_marker" bash -c '
   source "$1/scripts/manage.sh"
   export MX_INSIGHT_JUSTONE_TOKEN=""
   export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
+  export MX_INSIGHT_JUSTONE_BILLING_JSON=""
   retained_encoded="$(encoded_secret_value "retained-token-from-older-template")"
   kubectl() {
     case " $* " in
       *" get secret mx-insight-hub-secrets "*"MX_INSIGHT_JUSTONE_TOKEN"*)
         printf "%s" "$retained_encoded"
         ;;
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_JUSTONE_BILLING_JSON"*)
+        printf "%s" "{\"source\":\"manual\",\"monthlySubsidyBudgetMinor\":0}"
+        ;;
       *) return 1 ;;
     esac
   }
   preserve_existing_justone_runtime_config
-  printf "token=%s\ncontract=%s\n" \
+  printf "token=%s\ncontract=%s\nbilling=%s\n" \
     "$MX_INSIGHT_JUSTONE_TOKEN" \
-    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" >"$JUSTONE_BLANK_MARKER"
+    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" \
+    "$MX_INSIGHT_JUSTONE_BILLING_JSON" >"$JUSTONE_BLANK_MARKER"
 ' _ "$ROOT_DIR"
 assert_eq \
-  $'token=retained-token-from-older-template\ncontract=0' \
+  $'token=retained-token-from-older-template\ncontract=0\nbilling={"source":"manual","monthlySubsidyBudgetMinor":0}' \
   "$(cat "$justone_blank_marker")" \
-  'legacy blank token preserves fallback while explicit gate zero disables dispatch'
+  'blank paid-provider values preserve evidence while explicit gate zero disables dispatch'
 rm -f -- "$justone_blank_marker"
+
+tikhub_blank_billing_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tikhub-blank-billing.XXXXXX")"
+rm -f -- "$tikhub_blank_billing_marker"
+TIKHUB_BLANK_BILLING_MARKER="$tikhub_blank_billing_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_TIKHUB_API_KEY="retained-test-key"
+  export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0
+  export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=0
+  export MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=0
+  export MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=""
+  export MX_INSIGHT_TIKHUB_BILLING_JSON=""
+  kubectl() {
+    case " $* " in
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_TIKHUB_BILLING_JSON"*)
+        printf "%s" "{\"source\":\"manual\",\"monthlySubsidyBudgetMinor\":0}"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  preserve_existing_tikhub_runtime_config
+  printf "%s" "$MX_INSIGHT_TIKHUB_BILLING_JSON" >"$TIKHUB_BLANK_BILLING_MARKER"
+' _ "$ROOT_DIR"
+assert_eq \
+  '{"source":"manual","monthlySubsidyBudgetMinor":0}' \
+  "$(cat "$tikhub_blank_billing_marker")" \
+  'blank TikHub billing preserves reviewed evidence while its parent gate is zero'
+rm -f -- "$tikhub_blank_billing_marker"
 
 justone_clear_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-clear.XXXXXX")"
 rm -f -- "$justone_clear_marker"
@@ -221,6 +255,7 @@ JUSTONE_CLEAR_MARKER="$justone_clear_marker" bash -c '
   source "$1/scripts/manage.sh"
   export MX_INSIGHT_JUSTONE_TOKEN="file-or-shell-token"
   export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
+  export MX_INSIGHT_JUSTONE_BILLING_JSON="{}"
   export MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1
   kubectl() { printf "unexpected-get\n" >>"$JUSTONE_CLEAR_MARKER"; return 1; }
   preserve_existing_justone_runtime_config
@@ -255,6 +290,9 @@ justone_override_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-overri
 rm -f -- "$justone_override_marker"
 MX_INSIGHT_JUSTONE_TOKEN="" \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
+MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_TIKHUB_BILLING_JSON="$VALID_TIKHUB_BILLING_JSON" \
 MX_INSIGHT_SYNC_LAUNCHER=0 \
 JUSTONE_OVERRIDE_MARKER="$justone_override_marker" bash -c '
   set -euo pipefail
@@ -262,23 +300,36 @@ JUSTONE_OVERRIDE_MARKER="$justone_override_marker" bash -c '
   load_env_file() {
     export MX_INSIGHT_JUSTONE_TOKEN="persisted-token"
     export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1
+    export MX_INSIGHT_JUSTONE_BILLING_JSON="persisted-justone-billing"
+    export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1
+    export MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=1
+    export MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=1
+    export MX_INSIGHT_TIKHUB_BILLING_JSON="persisted-tikhub-billing"
     export MX_INSIGHT_SYNC_LAUNCHER=1
   }
   need() { :; }
   render_file() {
     if [ ! -s "$JUSTONE_OVERRIDE_MARKER" ]; then
-      printf "token=%s\ncontract=%s\nsync=%s\n" \
+      printf "token=%s\ncontract=%s\njustoneBilling=%s\ntikhubContract=%s\ntikhubSearch=%s\ntikhubUsers=%s\ntikhubBilling=%s\nsync=%s\n" \
         "$MX_INSIGHT_JUSTONE_TOKEN" \
         "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" \
+        "$MX_INSIGHT_JUSTONE_BILLING_JSON" \
+        "$MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED" \
+        "$MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED" \
+        "$MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED" \
+        "$MX_INSIGHT_TIKHUB_BILLING_JSON" \
         "$MX_INSIGHT_SYNC_LAUNCHER" >"$JUSTONE_OVERRIDE_MARKER"
     fi
   }
   ops_action internal-production plan
 ' _ "$ROOT_DIR"
+expected_provider_overrides="$(printf \
+  'token=\ncontract=0\njustoneBilling=%s\ntikhubContract=0\ntikhubSearch=0\ntikhubUsers=0\ntikhubBilling=%s\nsync=0' \
+  "$VALID_JUSTONE_BILLING_JSON" "$VALID_TIKHUB_BILLING_JSON")"
 assert_eq \
-  $'token=\ncontract=0\nsync=0' \
+  "$expected_provider_overrides" \
   "$(cat "$justone_override_marker")" \
-  'one-shot command environment overrides persisted JustOne and Launcher values'
+  'one-shot command environment overrides persisted provider billing and Launcher values'
 rm -f -- "$justone_override_marker"
 
 # API keys enter a fixed 30-day overlap window. The deploy must inspect the
@@ -1701,9 +1752,7 @@ if [ -e "$clean_preflight_root/node_modules" ] || [ -e "$clean_preflight_root/pa
   rm -rf -- "$clean_preflight_root"
   exit 1
 fi
-if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" \
-  MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
-  bash -c '
+if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" bash -c '
   set -euo pipefail
   cd "$1"
   source "$1/scripts/manage.sh"
@@ -1712,6 +1761,11 @@ if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" \
   export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
   export MX_INSIGHT_JUSTONE_TOKEN="provider-token"
   export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1
+  MX_INSIGHT_JUSTONE_BILLING_JSON="$2"
+  export -n MX_INSIGHT_JUSTONE_BILLING_JSON
+  export MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=1
+  MX_INSIGHT_TIKHUB_BILLING_JSON="$3"
+  export -n MX_INSIGHT_TIKHUB_BILLING_JSON
   export NIGHT_ALL_BASE_URL="http://night-all.internal"
   export MX_INSIGHT_SEARCH_READY=1
   docker_daemon_proxy_snapshot() {
@@ -1732,14 +1786,14 @@ if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" \
     esac
   }
   create_runtime_config
-' _ "$clean_preflight_root"; then
-  printf 'not ok - JustOne deploy preflight required packages absent from a clean host checkout\n' >&2
+' _ "$clean_preflight_root" "$VALID_JUSTONE_BILLING_JSON" "$VALID_TIKHUB_BILLING_JSON"; then
+  printf 'not ok - provider deploy preflight lost billing values or required packages absent from a clean host checkout\n' >&2
   rm -rf -- "$clean_preflight_root"
   rm -f -- "$clean_preflight_marker"
   exit 1
 fi
 assert_eq $'secret\nconfigmap' "$(cat "$clean_preflight_marker")" \
-  'JustOne deploy preflight works without host node_modules'
+  'provider deploy preflight receives exact non-exported billing values without host node_modules'
 rm -rf -- "$clean_preflight_root"
 rm -f -- "$clean_preflight_marker"
 
@@ -1947,6 +2001,31 @@ do
   rm -f -- "$invalid_justone_error"
 done
 printf 'ok - invalid JustOne settings fail strict preflight before cluster mutation\n'
+
+# The common migration-first recovery must be actionable without weakening the
+# paid-provider gate or confusing the downstream request price book with
+# upstream procurement evidence.
+missing_justone_billing_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-missing-justone-billing.XXXXXX")"
+if MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+  MX_INSIGHT_JUSTONE_BILLING_JSON= \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+    export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+    export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+    export NIGHT_ALL_BASE_URL="http://night-all.internal"
+    kubectl() { return 79; }
+    create_runtime_config
+  ' _ "$ROOT_DIR" >/dev/null 2>"$missing_justone_billing_error"; then
+  printf 'not ok - enabled JustOne without reviewed cost evidence was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0' "$missing_justone_billing_error"
+grep -Fq 'MX_INSIGHT_SYNC_LAUNCHER=0' "$missing_justone_billing_error"
+grep -Fq 'migration 056 request metering remains enabled' "$missing_justone_billing_error"
+rm -f -- "$missing_justone_billing_error"
+printf 'ok - missing JustOne cost evidence gives a safe migration-first recovery\n'
 
 invalid_justone_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-lease.XXXXXX")"
 invalid_justone_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-lease-error.XXXXXX")"

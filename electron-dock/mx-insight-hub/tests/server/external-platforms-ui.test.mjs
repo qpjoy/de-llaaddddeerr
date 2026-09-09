@@ -105,7 +105,7 @@ test('JustOne detail exposes usage, cost, processing, capability, tenant, and gu
     '实际上游调用',
     'Hub 成功率',
     '避免调用',
-    '成本与免费额度',
+    '上游成本与免费额度',
     '调用趋势',
     'Hub 四阶段处理链路',
     '稳定 API 合同',
@@ -136,7 +136,8 @@ test('JustOne detail exposes usage, cost, processing, capability, tenant, and gu
     'costPlan',
   ]) assert.match(pageSource, new RegExp(`\\b${field}\\b`, 'u'))
 
-  assert.match(pageSource, /已计费 \/ 计费待定/u)
+  assert.match(pageSource, /上游已计费 \/ 状态待定/u)
+  assert.match(pageSource, /已明确按次计费的 Key 继续调用/u)
   assert.match(pageSource, /计费状态未确定的调用/u)
   assert.match(pageSource, /实际净支出/u)
   assert.match(pageSource, /免费额度 \/ 折扣前标价估算/u)

@@ -396,17 +396,18 @@ Hub usage, provider procurement cost and customer pricing are three independent 
 
 | sourceMode | New Hub usage row | New provider dispatch | Cost interpretation |
 | --- | --- | --- | --- |
-| `live` | yes | yes | A business-success response is recorded as provider-billed under the reviewed provider rule; that is internal procurement evidence, not a Hub customer charge. Monetary amount remains unknown unless a reviewed provider price book is configured. |
+| `live` | yes | yes | A business-success response records internal provider procurement evidence. A separately configured Hub customer price book may also create one customer charge for the logical request; the two amounts are independent. |
 | `fresh_cache` | yes | no | A new customer request consumed Hub service while reusing a fresh exact snapshot. |
 | `stored_fallback` | yes | maybe | Fallback can happen before dispatch, or after a failed/ambiguous dispatch; it cannot be labelled universally free. |
 | `idempotent_replay` | no | no | The exact committed request is replayed with the original request ID. |
 
-Future Hub pricing must price the service independently from provider cost. A customer charge may include
+Hub customer pricing must price the service independently from provider cost. A customer charge may include
 normalization, durable archive, search projection, freshness SLA and reliability even when the current request
 uses cache. Provider price/free quota/balance remain null unless obtained from a verified API or a dated manual
 price book; unknown is never zero. Provider rates, balances, free quota and procurement evidence stay Internal.
-The Public capability, search and media responses never expose them. A separately versioned Hub price book will
-apply customer rates through the same consumer identity, without issuing a second Hub API key or changing this API contract.
+The Public capability, search and media responses never expose them. Migration 056's separately versioned Hub
+price book applies customer rates through the same consumer identity, without issuing a second Hub API key or
+changing this API contract. Until a rate is approved, usage remains countable without publishing a zero price.
 
 ## 8. Idempotency and pagination
 

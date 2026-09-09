@@ -227,11 +227,11 @@ function costProjection(analytics, config, range, providerName = '外部平台')
   } else if (projectedMonthlyCostMinor == null) {
     recommendation = '各接口单价不同，需按 endpoint 调用结构预测；当前只展示已知成本，不给出伪精确充值额。'
   } else if (configuredBudget == null) {
-    recommendation = `按当前调用速度预计月末产生约 ${projectedMonthlyCostMinor} 个最小货币单位；配置月预算后才能给出超支判断。`
+    recommendation = `按当前调用速度预计月末产生约 ${projectedMonthlyCostMinor} 个最小货币单位；配置成本线后才能给出超支判断。`
   } else if (projectedMonthlyCostMinor <= configuredBudget) {
-    recommendation = '当前预测在已配置月预算内；仍应优先使用可验证的免费额度，并保留异常调用熔断。'
+    recommendation = '当前预测在已配置上游成本线内；仍应优先使用可验证的免费额度，并保留异常调用熔断。'
   } else {
-    recommendation = '当前预测将超过月预算；应先收紧异常调用和刷新策略，再评估充值，而不是用充值掩盖重复请求。'
+    recommendation = '当前预测将超过上游成本线；已明确按次计费的请求继续服务并逐次记账，补贴流量保持预算保护，同时排查重复请求。'
   }
   return {
     pricingSource: billing.source,
