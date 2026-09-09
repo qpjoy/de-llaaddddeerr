@@ -1552,15 +1552,24 @@ build_and_import_image() {
   )"
   if [ -n "${MX_INSIGHT_BUILD_PROXY:-}" ]; then
     # Special case: force THIS build through the given proxy (e.g. Mihomo 7788),
-    # leaving the server's global Docker proxy untouched.
+    # leaving the server's global Docker proxy untouched. BuildKit normally
+    # asks the buildx client to fetch short-lived registry tokens, so the proxy
+    # must cover the client process as well as buildkitd and Dockerfile RUNs.
+    local build_no_proxy="${MX_INSIGHT_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"
     ensure_build_proxy_builder "$MX_INSIGHT_BUILD_PROXY"
+    HTTP_PROXY="$MX_INSIGHT_BUILD_PROXY" \
+    HTTPS_PROXY="$MX_INSIGHT_BUILD_PROXY" \
+    NO_PROXY="$build_no_proxy" \
+    http_proxy="$MX_INSIGHT_BUILD_PROXY" \
+    https_proxy="$MX_INSIGHT_BUILD_PROXY" \
+    no_proxy="$build_no_proxy" \
     docker buildx build \
       --builder "${MX_INSIGHT_BUILDX_BUILDER:-mx-insight-buildproxy}" \
       --network host \
       --allow network.host \
       --build-arg "HTTP_PROXY=$MX_INSIGHT_BUILD_PROXY" \
       --build-arg "HTTPS_PROXY=$MX_INSIGHT_BUILD_PROXY" \
-      --build-arg "NO_PROXY=${MX_INSIGHT_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}" \
+      --build-arg "NO_PROXY=$build_no_proxy" \
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \

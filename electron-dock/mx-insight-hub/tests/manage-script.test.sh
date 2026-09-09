@@ -42,6 +42,39 @@ assert_eq \
   "$(canonical_image_ref registry.example/mx-insight-hub:release)" \
   "qualified registry image"
 
+# Registry token requests can be delegated back to the buildx client. The
+# one-shot build proxy must therefore cover that process, not only buildkitd
+# and Dockerfile RUN instructions.
+build_proxy_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-build-proxy.XXXXXX")"
+(
+  export MX_INSIGHT_BUILD_PROXY="http://127.0.0.1:7788"
+  export MX_INSIGHT_BUILD_NO_PROXY="localhost,127.0.0.1,.svc"
+  unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+  need() { :; }
+  ensure_build_proxy_builder() { :; }
+  containerd_import_docker_image() { :; }
+  docker() {
+    if [ "${1:-} ${2:-}" = "buildx build" ]; then
+      printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=%s\nhttp_proxy=%s\nhttps_proxy=%s\nno_proxy=%s\n' \
+        "${HTTP_PROXY:-}" "${HTTPS_PROXY:-}" "${NO_PROXY:-}" \
+        "${http_proxy:-}" "${https_proxy:-}" "${no_proxy:-}" \
+        >"$build_proxy_marker"
+      return 0
+    fi
+    if [ "${1:-} ${2:-}" = "image inspect" ]; then
+      printf 'sha256:test-image\n'
+      return 0
+    fi
+    return 0
+  }
+  build_and_import_image
+)
+assert_eq \
+  $'HTTP_PROXY=http://127.0.0.1:7788\nHTTPS_PROXY=http://127.0.0.1:7788\nNO_PROXY=localhost,127.0.0.1,.svc\nhttp_proxy=http://127.0.0.1:7788\nhttps_proxy=http://127.0.0.1:7788\nno_proxy=localhost,127.0.0.1,.svc' \
+  "$(cat "$build_proxy_marker")" \
+  "scoped build proxy covers buildx client token requests"
+rm -f -- "$build_proxy_marker"
+
 # ---------------------------------------------------------------------------
 # Credential drift
 # ---------------------------------------------------------------------------

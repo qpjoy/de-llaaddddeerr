@@ -21,8 +21,11 @@ cd ../mx-common
 bash scripts/manage.sh deploy hanlp
 cd ../mx-insight-hub
 
-# 一键部署：自动 build → migrate → 起 Admin/Public → 幂等建并打印 bootstrap API key
+# 一键部署：自动 build → migrate → 起 Admin/Public → 幂等建并打印 bootstrap API key。
+# 服务器有 127.0.0.1:7788 出口代理时使用代理模式；它同时覆盖 Docker Hub
+# token/frontend、基础镜像和 Dockerfile RUN。不要再叠加 BUILD_NETWORK。
 MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/manage.sh ops internal-production deploy
+# 仅在 Docker Hub 可以直接访问、只需让 RUN 使用宿主网络时，才改用下面这一条：
 MX_INSIGHT_BUILD_NETWORK=host \
 bash scripts/manage.sh ops internal-production deploy
 
