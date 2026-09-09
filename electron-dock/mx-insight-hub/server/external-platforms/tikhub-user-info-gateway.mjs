@@ -137,6 +137,8 @@ export class TikHubUserInfoGateway {
     config,
     apiKeyPepper,
     reservationLeaseMs,
+    operationControlStore = null,
+    credentialStore = null,
     defaultPolicy = DEFAULT_POLICY,
     logger = console,
   }) {
@@ -146,6 +148,8 @@ export class TikHubUserInfoGateway {
     this.config = config
     this.apiKeyPepper = apiKeyPepper
     this.reservationLeaseMs = reservationLeaseMs
+    this.operationControlStore = operationControlStore
+    this.credentialStore = credentialStore
     this.defaultPolicy = defaultPolicy
     this.logger = logger
     this.active = 0
@@ -170,13 +174,49 @@ export class TikHubUserInfoGateway {
   }
 
   async #credential() {
-    if (!this.adapter) return null
+    if (!this.adapter) return { ready: false, value: null, revision: null }
+    let credentialSnapshot = null
+    if (typeof this.credentialStore?.readCredentialSnapshot === 'function') {
+      try {
+        credentialSnapshot = await this.credentialStore.readCredentialSnapshot(TIKHUB_PROVIDER_KEY)
+        if (credentialSnapshot.source === 'database') {
+          return {
+            ready: Boolean(credentialSnapshot.apiKey),
+            value: credentialSnapshot.apiKey,
+            revision: credentialSnapshot.revision,
+          }
+        }
+      } catch {
+        this.logger?.warn?.('[external-platform] TikHub credential snapshot is unavailable')
+        return { ready: false, value: null, revision: null }
+      }
+    }
     try {
-      return await this.adapter.resolveCredential()
+      const value = await this.adapter.resolveCredential()
+      return { ready: Boolean(value), value, revision: credentialSnapshot?.revision ?? null }
     } catch {
       this.logger?.warn?.('[external-platform] TikHub credential is unavailable')
-      return null
+      return { ready: false, value: null, revision: credentialSnapshot?.revision ?? null }
     }
+  }
+
+  async #authorizeOperation(context, operationKey, credential) {
+    if (this.operationControlStore) {
+      return this.operationControlStore.authorizeDispatch('tikhub', operationKey, {
+        consumerId: context.consumer.id,
+        config: this.config,
+        credentialConfigured: Boolean(credential?.ready),
+        credentialRevision: credential?.revision ?? null,
+      })
+    }
+    if (!this.config?.userActivityContractVerified) {
+      throw new AppError(
+        503,
+        'external_platform_contract_unverified',
+        'Hub-native Xiaohongshu user activity live dispatch is disabled',
+      )
+    }
+    return null
   }
 
   async legacyUserInfo(context, input) {
@@ -201,11 +241,23 @@ export class TikHubUserInfoGateway {
       if (typeof idempotencyKey !== 'string' || !IDEMPOTENCY_PATTERN.test(idempotencyKey)) {
         throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8-128 safe characters')
       }
-      const grants = typeof this.usageStore.listEffectiveGrants === 'function'
-        ? await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
-        : await this.usageStore.listGrants(context.consumer.id)
+      const isCrawl = operation === 'crawl'
+      const gatewayOperation = isCrawl
+        ? XIAOHONGSHU_CRAWL_OPERATION
+        : XIAOHONGSHU_USER_INFO_OPERATION
+      const [grants, capabilityGrants] = await Promise.all([
+        typeof this.usageStore.listEffectiveGrants === 'function'
+          ? this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
+          : this.usageStore.listGrants(context.consumer.id),
+        typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
+          ? this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
+          : this.usageStore.listCapabilityGrants(context.consumer.id),
+      ])
       if (!grants.includes(XIAOHONGSHU_PLATFORM)) {
         throw new AppError(403, 'platform_not_granted', 'Xiaohongshu data is not granted')
+      }
+      if (!capabilityGrants.includes(gatewayOperation)) {
+        throw new AppError(403, 'capability_not_granted', `${gatewayOperation} is not granted`)
       }
       const consumerPolicy = {
         ...this.defaultPolicy,
@@ -220,17 +272,9 @@ export class TikHubUserInfoGateway {
           ? Math.min(consumerPolicy.maxPageSize, entitlement.maxPageSize)
           : consumerPolicy.maxPageSize,
       }
-      const apiKeyQuota = entitlement ? {
-        maxRequests: entitlement.maxRequests,
-        windowSeconds: entitlement.windowSeconds,
-      } : null
-      const isCrawl = operation === 'crawl'
       const contractVersion = isCrawl
         ? XIAOHONGSHU_CRAWL_CONTRACT_VERSION
         : XIAOHONGSHU_USER_INFO_CONTRACT_VERSION
-      const gatewayOperation = isCrawl
-        ? XIAOHONGSHU_CRAWL_OPERATION
-        : XIAOHONGSHU_USER_INFO_OPERATION
       let cursorCodec = null
       if (isCrawl) {
         if (typeof this.apiKeyPepper !== 'string' || !this.apiKeyPepper) {
@@ -297,11 +341,14 @@ export class TikHubUserInfoGateway {
         apiKeyId: context.apiKey.id,
         platform: XIAOHONGSHU_PLATFORM,
         meterKey: gatewayOperation,
+        requiredAuthorizationScopes: [
+          { type: 'platform', key: XIAOHONGSHU_PLATFORM },
+          { type: 'capability', key: gatewayOperation },
+        ],
         unitsReserved: 1,
         leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
         windowStart: new Date(Date.now() - policy.windowSeconds * 1_000),
         maxRequests: policy.maxRequests,
-        ...(apiKeyQuota ? { apiKeyQuota } : {}),
         replayWindowMs: null,
       })
       durableRequestId = reservation.request?.id || requestId
@@ -365,11 +412,26 @@ export class TikHubUserInfoGateway {
         return response(responseBody, activeRequestId, false, 'fresh_cache', snapshot.capturedAt)
       }
 
-      // A previously issued opaque cursor remains routed to this gateway so it
-      // can consume an existing snapshot safely. The rollout gate is still a
-      // live-dispatch kill switch: when disabled, stale storage is the only
-      // permitted fallback and no provider lease/cost/capacity is acquired.
-      if (!this.config.userActivityContractVerified) {
+      const state = await this.platformStore.providerState(TIKHUB_PROVIDER_KEY)
+      const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
+      const resolvedCredential = circuitOpen
+        ? { ready: false, value: null, revision: null }
+        : await this.#credential()
+      let operationControl = null
+      let operationControlError = null
+      if (!circuitOpen) {
+        try {
+          operationControl = await this.#authorizeOperation(
+            context,
+            gatewayOperation,
+            resolvedCredential,
+          )
+        } catch (error) {
+          operationControlError = error
+        }
+      }
+
+      if (!resolvedCredential.ready || circuitOpen || operationControlError) {
         if (snapshot) {
           const fallback = fallbackResponse(snapshot, activeRequestId)
           await this.platformStore.commitSnapshotDelivery({
@@ -382,38 +444,22 @@ export class TikHubUserInfoGateway {
           ownsReservation = false
           return fallback.result
         }
+        const code = operationControlError instanceof AppError
+          ? operationControlError.code
+          : operationControlError
+            ? 'external_platform_control_store_unavailable'
+            : circuitOpen
+              ? 'external_platform_circuit_open'
+              : 'external_platform_not_configured'
+        const status = operationControlError instanceof AppError ? operationControlError.status : 503
         await this.platformStore.rejectWithoutDispatch({
           delivery,
-          sourceMode: 'unavailable',
-          status: 503,
-          errorCode: 'external_platform_contract_unverified',
+          sourceMode: circuitOpen ? 'circuit_rejected' : 'unavailable',
+          status,
+          errorCode: code,
         })
         ownsReservation = false
-        throw new AppError(
-          503,
-          'external_platform_contract_unverified',
-          'Hub-native Xiaohongshu user activity live dispatch is disabled',
-        )
-      }
-
-      const state = await this.platformStore.providerState(TIKHUB_PROVIDER_KEY)
-      const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
-      const resolvedCredential = circuitOpen ? null : await this.#credential()
-      if (!resolvedCredential || circuitOpen) {
-        if (snapshot) {
-          const fallback = fallbackResponse(snapshot, activeRequestId)
-          await this.platformStore.commitSnapshotDelivery({
-            delivery, snapshot, sourceMode: 'stored_fallback', responseBody: fallback.body,
-            usageUnitsActual: 1,
-          })
-          ownsReservation = false
-          return fallback.result
-        }
-        const code = circuitOpen ? 'external_platform_circuit_open' : 'external_platform_not_configured'
-        await this.platformStore.rejectWithoutDispatch({
-          delivery, sourceMode: circuitOpen ? 'circuit_rejected' : 'unavailable', status: 503, errorCode: code,
-        })
-        ownsReservation = false
+        if (operationControlError) throw operationControlError
         throw new AppError(503, code, 'External Xiaohongshu user data is unavailable')
       }
 
@@ -482,7 +528,10 @@ export class TikHubUserInfoGateway {
             'Atomic external provider cost admission is unavailable',
           )
         }
-        const costControls = endpointKeys.map((endpointKey) => providerCostControl(this.config, endpointKey))
+        const costConfig = operationControl?.billing
+          ? { billing: operationControl.billing }
+          : this.config
+        const costControls = endpointKeys.map((endpointKey) => providerCostControl(costConfig, endpointKey))
         try {
           costReservation = await this.platformStore.reserveProviderCostWorkflow({
             tenantId: context.tenant.id,
@@ -563,6 +612,7 @@ export class TikHubUserInfoGateway {
               callRole: ordinal === 0 ? 'primary' : 'enrichment',
               costControl,
               costReservationId: costReservation.id,
+              operationControl,
             })
           } catch (error) {
             if (paidDispatchOccurred) {
@@ -726,7 +776,7 @@ export class TikHubUserInfoGateway {
             terminal: false,
             itemCount: () => 1,
             invoke: () => this.adapter.searchXiaohongshuUsers(selectedIdentity.value, {
-              credential: resolvedCredential,
+              credential: resolvedCredential.value,
             }),
             ingestJob: (upstream, callId) => profileIngestJob({
               user_id: upstream.user.userId,
@@ -748,7 +798,7 @@ export class TikHubUserInfoGateway {
           terminal: !isCrawl,
           itemCount: () => 1,
           invoke: () => this.adapter.getXiaohongshuUserInfo(profileCall.query, {
-            credential: resolvedCredential,
+            credential: resolvedCredential.value,
           }),
           ingestJob: isCrawl
             ? (upstream, callId) => profileIngestJob(
@@ -770,7 +820,7 @@ export class TikHubUserInfoGateway {
               user_id: profile.profile.user_id,
               ...(plan.providerCursor ? { cursor: plan.providerCursor } : {}),
             }, plan, {
-              credential: resolvedCredential,
+              credential: resolvedCredential.value,
               encodeCursor: cursorCodec.encode,
             }),
           })

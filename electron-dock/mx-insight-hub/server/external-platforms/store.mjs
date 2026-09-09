@@ -140,6 +140,40 @@ function normalizedCostControl(value) {
   return { ...value, currency }
 }
 
+function normalizedOperationControl(value, { providerKey, operation }) {
+  if (value == null) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('operationControl must be an object')
+  }
+  const supported = new Set([
+    'providerKey', 'operationKey', 'policyRevision', 'releaseRevision',
+    'priceBookVersion', 'credentialRevision', 'desiredState', 'billing',
+  ])
+  if (Object.keys(value).some((field) => !supported.has(field))) {
+    throw new TypeError('operationControl contains unsupported fields')
+  }
+  if (value.providerKey !== providerKey || value.operationKey !== operation) {
+    throw new TypeError('operationControl does not match the provider call')
+  }
+  for (const field of ['policyRevision', 'priceBookVersion']) {
+    if (!Number.isSafeInteger(value[field]) || value[field] < 0) {
+      throw new TypeError(`operationControl.${field} must be a non-negative safe integer`)
+    }
+  }
+  if (!Number.isSafeInteger(value.releaseRevision) || value.releaseRevision <= 0) {
+    throw new TypeError('operationControl.releaseRevision must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(value.credentialRevision) || value.credentialRevision < 0) {
+    throw new TypeError('operationControl.credentialRevision must be a non-negative safe integer')
+  }
+  return {
+    policyRevision: value.policyRevision,
+    releaseRevision: value.releaseRevision,
+    priceBookVersion: value.priceBookVersion,
+    credentialRevision: value.credentialRevision,
+  }
+}
+
 function hasMatchingCustomerHold(usageStore, usage, charge) {
   return Array.isArray(usageStore?.creditLedgerEntries)
     && usageStore.creditLedgerEntries.some((entry) => (
@@ -906,6 +940,10 @@ export class MemoryExternalPlatformStore {
       }
     }
     const costControl = normalizedCostControl(input.costControl)
+    const operationControl = normalizedOperationControl(input.operationControl, {
+      providerKey: this.providerKey,
+      operation: input.operation,
+    })
     if (costControl) {
       const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
       const state = this.#costState(costControl, {
@@ -1000,6 +1038,7 @@ export class MemoryExternalPlatformStore {
     const {
       costControl: _costControl,
       costReservationId: _costReservationId,
+      operationControl: _operationControl,
       ...callInput
     } = input
     const call = {
@@ -1009,6 +1048,12 @@ export class MemoryExternalPlatformStore {
       callRole,
       dispatchFingerprint,
       providerKey: this.providerKey,
+      ...(operationControl ? {
+        operationPolicyRevision: operationControl.policyRevision,
+        operationReleaseRevision: operationControl.releaseRevision,
+        providerPriceBookVersion: operationControl.priceBookVersion,
+        providerCredentialRevision: operationControl.credentialRevision,
+      } : {}),
       outcome: 'pending',
       ...(costControl ? {
         costMinor: costControl.costMinor,
@@ -2356,12 +2401,27 @@ export class PostgresExternalPlatformStore {
       throw new TypeError('callRole must be primary or enrichment')
     }
     const costControl = normalizedCostControl(input.costControl)
+    const operationControl = normalizedOperationControl(input.operationControl, {
+      providerKey: this.providerKey,
+      operation: input.operation,
+    })
+    const operationControlValues = operationControl
+      ? [
+          operationControl.policyRevision,
+          operationControl.releaseRevision,
+          operationControl.priceBookVersion,
+          operationControl.credentialRevision,
+        ]
+      : []
+    const operationControlOffset = 18
+    const costControlOffset = operationControlOffset + operationControlValues.length
     const values = [
       id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
       input.operation, input.contractVersion, input.endpointKey,
       input.endpointVersion, input.marketplace, input.fingerprint,
       input.retryOfRequestId ?? null, this.providerKey, this.authorizationPlatform,
       callOrdinal, callRole, input.dispatchFingerprint ?? input.fingerprint,
+      ...operationControlValues,
       ...(costControl ? [costControl.costMinor, costControl.costKind, costControl.currency] : []),
     ]
     try {
@@ -2463,9 +2523,17 @@ export class PostgresExternalPlatformStore {
              (id, provider_key, tenant_id, consumer_id, api_key_id, usage_request_id,
               operation, contract_version, endpoint_key, endpoint_version, marketplace,
               request_fingerprint, retry_of_usage_request_id, call_ordinal, call_role,
-              dispatch_fingerprint${costControl ? ', cost_minor, cost_kind, currency' : ''})
+              dispatch_fingerprint${operationControl
+                ? `, operation_policy_revision, operation_release_revision,
+                   provider_price_book_version, provider_credential_revision`
+                : ''}${costControl ? ', cost_minor, cost_kind, currency' : ''})
            SELECT $1, $13, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                  $15, $16, $17${costControl ? ', $18, $19, $20' : ''}
+                  $15, $16, $17${operationControl
+                    ? `, $${operationControlOffset}, $${operationControlOffset + 1},
+                       $${operationControlOffset + 2}, $${operationControlOffset + 3}`
+                    : ''}${costControl
+                      ? `, $${costControlOffset}, $${costControlOffset + 1}, $${costControlOffset + 2}`
+                      : ''}
              FROM owned_request
             WHERE $12::uuid IS NULL OR EXISTS (SELECT 1 FROM retry_target)
            RETURNING id, started_at`,
@@ -2524,9 +2592,15 @@ export class PostgresExternalPlatformStore {
             AND call.call_ordinal = $15
             AND call.call_role = $16
             AND call.dispatch_fingerprint = $17
-            ${costControl ? `AND call.cost_minor = $18
-            AND call.cost_kind = $19
-            AND call.currency = $20` : ''}
+            ${operationControl
+              ? `AND call.operation_policy_revision = $${operationControlOffset}
+            AND call.operation_release_revision = $${operationControlOffset + 1}
+            AND call.provider_price_book_version = $${operationControlOffset + 2}
+            AND call.provider_credential_revision IS NOT DISTINCT FROM $${operationControlOffset + 3}::bigint`
+              : ''}
+            ${costControl ? `AND call.cost_minor = $${costControlOffset}
+            AND call.cost_kind = $${costControlOffset + 1}
+            AND call.currency = $${costControlOffset + 2}` : ''}
             AND call.outcome = 'pending'
             AND request.status = 'reserved'
             AND request.platform = $14

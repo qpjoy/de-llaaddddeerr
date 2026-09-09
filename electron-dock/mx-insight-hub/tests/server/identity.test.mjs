@@ -426,16 +426,16 @@ test('scoped dashboard counts only mixed-role tenants and weights latency by com
     await store.setPlatformGrant(consumer.id, 'xiaohongshu', true)
   }
   const ownerKey = await create('/internal/v1/admin/api-keys', {
-    consumerId: ownerConsumer.id, name: 'Dashboard Owner Key',
+    consumerId: ownerConsumer.id, name: 'Dashboard Owner Key', platforms: ['xiaohongshu'],
   })
   const viewerKey = await create('/internal/v1/admin/api-keys', {
-    consumerId: viewerConsumer.id, name: 'Dashboard Viewer Key',
+    consumerId: viewerConsumer.id, name: 'Dashboard Viewer Key', platforms: ['xiaohongshu'],
   })
   const hiddenKey = await create('/internal/v1/admin/api-keys', {
-    consumerId: hiddenConsumer.id, name: 'Dashboard Hidden Key',
+    consumerId: hiddenConsumer.id, name: 'Dashboard Hidden Key', platforms: ['xiaohongshu'],
   })
   const revokedKey = await create('/internal/v1/admin/api-keys', {
-    consumerId: ownerConsumer.id, name: 'Dashboard Revoked Key',
+    consumerId: ownerConsumer.id, name: 'Dashboard Revoked Key', platforms: ['xiaohongshu'],
   })
   assert.equal((await callAdmin(`/internal/v1/admin/api-keys/${revokedKey.id}/revoke`, {
     method: 'POST',

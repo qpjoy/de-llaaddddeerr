@@ -16,13 +16,14 @@ The console intentionally keeps Sub2API-like operational clarity while using the
 | --- | --- | --- |
 | Business governance | Dashboard | Observe callers, active keys, request outcomes, units and upstream latency. |
 | Business governance | Consumers | Manage tenant-scoped business/application identities. |
-| Business governance | API Keys | Issue one-time secrets with a 180-day default (configurable 1–730 days), distinguish effective expiry from revocation, filter keys and perform explicit revocation. |
+| Business governance | API Keys | Issue one-time secrets with a 180-day default (configurable 1–730 days), default new snapshots to zero access, explicitly group data-domain/platform, business-operation and compatible-interface-contract scopes, distinguish effective expiry from revocation, filter keys and perform explicit revocation. |
 | Policy control | Plans and quotas | Explain and edit product-limit semantics. |
-| Policy control | Platforms | Grant concrete platforms and configure consumer-specific windows/page size. |
+| Policy control | Open capabilities | Grant data domains/platforms, business operations and compatible interface contracts separately, then configure consumer-specific windows/page size. Data products are reviewed permission/workflow combinations, not providers. |
+| Policy control | External data platforms | Admin-only provider connector, credential, contract, price/cost, health and activation management. |
 | Data plane | Data Center | Browse PostgreSQL canonical truth, search the rebuildable ES projection, inspect full Admin records, and navigate exact numbered pages. |
 | Data plane | External sources | Register/test PostgreSQL connections; operate the fixed TG two-table pipeline; explicitly prepare its source-side cursor contract; inspect schema/value shapes, checkpoints, progress and import-run counts. Direct file upload remains supported. |
 | Observability | Usage | Inspect request evidence without exposing provider details. |
-| Observability | Runtime | Separate liveness, store readiness and Night-All readiness. |
+| Observability | Runtime | Separate liveness, store readiness and per-provider/per-operation readiness; Night-All readiness affects only remaining compatibility paths. |
 
 Admin authentication is a session-only bootstrap surface. The token is kept in browser session storage, never written to the URL, and automatically cleared on authorization failure or explicit logout.
 

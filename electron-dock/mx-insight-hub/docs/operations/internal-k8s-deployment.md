@@ -38,9 +38,10 @@ fixed public port prevents a second Public Pod on the same node, and every
 public request still performs authenticated PostgreSQL accounting. Keep
 Launcher and MX-H2I untouched; qualify aggregate retained/cache throughput in
 an isolated environment before changing this deployment to ordinary Pod
-networking, RollingUpdate and multiple replicas. Night-All must first have an
-authenticated, cluster-routable endpoint (or route-local readiness), because
-the current Public readiness contract still includes that dependency.
+networking, RollingUpdate and multiple replicas. Public readiness depends only
+on Hub's authoritative store. Night-All and direct external providers are
+optional capability-scoped dependencies whose health is reported separately;
+their failure must not remove login or Hub-native traffic from service.
 
 ## Secret preparation
 
@@ -105,6 +106,15 @@ changing the gate requires the normal Public workload rollout performed by the
 deploy command. Explicit command-environment values take precedence over
 `.env.internal`, including emergency gate `0`.
 
+The provider gates are deployment ceilings, not routine rollout buttons. Migration
+`060_external_platform_operation_control.sql` adds the database-authoritative per-operation state and reviewed
+upstream price-book versions shown under **数据清洗中心 → 外部数据平台**. An existing enabled environment starts
+in revision-zero compatibility mode; the first Admin operation write takes authority without restarting Pods.
+Missing reviewed JustOne/TikHub cost evidence prints a deploy warning and blocks only the affected provider
+operation, so the Admin plane remains available to publish the price book and recover. Malformed technical
+configuration and failure to apply a Secret/ConfigMap remain fatal. Provider operation state is not part of
+readiness and cannot affect Launcher or MX-H2I login.
+
 The explicit Telegram **prepare source** action is the only external-DDL
 exception. It runs in the Admin workload (which has the Internal host-network
 path needed by a saved `127.0.0.1` source), only while the fixed pipeline is
@@ -128,8 +138,11 @@ Order:
 3. discover the optional Launcher introspection endpoint;
 4. build/import the Hub image;
 5. apply namespace, ServiceAccount, ConfigMap and Secrets;
-6. run the migration Job against shared PostgreSQL;
-7. roll out public, Admin, projector and ingest workloads, apply NetworkPolicy,
+6. atomically install migration 061's evidence writers and prepare the bounded
+   061/064 online history indexes against any populated ledgers; only then freeze Hub Admin and
+   run the migration Job against shared PostgreSQL;
+7. reconcile the remaining online serving/quota indexes, then roll out public,
+   Admin, projector and ingest workloads, apply NetworkPolicy,
    and run smoke checks;
 8. remove scoped temporary build/import artifacts.
 
@@ -172,7 +185,10 @@ manifest to another node. Public, projector and ingest workloads receive
 neither the mount nor the supplemental group.
 
 The command is idempotent after an interrupted deployment. A migration Job is
-recreated; data and database-managed credentials remain in `mx-common`. The Hub
+single-attempt with a 240-second active deadline. On timeout or interruption,
+the deploy deletes the Job and confirms its Pods are gone before restoring the
+frozen Admin replica; if termination cannot be confirmed, Admin remains frozen.
+Data and database-managed credentials remain in `mx-common`. The Hub
 deploy neither recreates nor deletes shared PVCs. Runtime ConfigMap/Secret
 objects are reconciled, while omitted optional JustOne values inherit their
 existing Kubernetes values as described above. Tagged containerd runtime/release
@@ -181,6 +197,39 @@ If shared search was unhealthy during deployment, the projector is deliberately
 scaled to zero even though API/Admin Pods can later discover the recovered
 Service. After a successful Admin reindex, verify or restore the projector
 replica so subsequent outbox events continue to project.
+
+### Acquisition-history migration indexes
+
+Routine deploy streams `scripts/acquisition-history-indexes.sql` into the shared
+Hub database before temporarily freezing Hub Admin writes and before it creates
+the transactional migration Job. Per ledger, the script installs migration
+061's additive evidence column, constraint, function and trigger in one short
+transaction, then builds the gateway-request, observation and direct-request
+ingest-run history indexes with `CREATE INDEX CONCURRENTLY`. It skips tables
+that do not exist on a new database; migrations 061/064 then create those empty
+or small-table indexes directly. The new nullable gateway reference is added `NOT
+VALID`, which still enforces every new non-null value but avoids scanning the
+necessarily-null historical column while holding a DDL lock.
+The DDL runs as the ledger-table owner even when `manage.sh` streams it through
+the shared PostgreSQL administrator, so migration 061 can safely replace the
+same functions. Each concurrent build has a 15-minute statement timeout; an
+interrupted or timed-out invalid index is recognized and repaired on retry.
+
+For an independently managed deployment, run the script as a top-level psql
+operation before `npm run migrate`:
+
+```bash
+cd electron-dock/mx-insight-hub
+psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f scripts/acquisition-history-indexes.sql
+npm run migrate
+```
+
+Do not wrap the index script in a transaction. Migration 061 or 064 refuses a missing,
+invalid or drifted index on a relevant ledger larger than 128 MiB, so a manual migration
+fails clearly instead of holding a long write-blocking index build. Re-running
+the script is safe and repairs invalid concurrent-build remnants by validating
+the complete catalog definition rather than the index name alone.
 
 ### Province-opinion serving indexes
 

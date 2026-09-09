@@ -78,7 +78,11 @@ async function createConsumerFixture(service, tenant, name, platforms = []) {
       maxPageSize: 50,
     })
   }
-  const key = await service.createApiKey({ consumerId: consumer.id, name: `${name} key` })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: `${name} key`,
+    platforms,
+  })
   return { consumer, key }
 }
 

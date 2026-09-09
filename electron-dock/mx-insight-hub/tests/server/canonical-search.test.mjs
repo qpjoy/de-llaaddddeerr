@@ -233,7 +233,11 @@ test('canonical endpoint searches one authorized global projection with filters,
     windowSeconds: 120,
     maxPageSize: 2,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Canonical search key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Canonical search key',
+    platforms: ['xiaohongshu', 'telegram'],
+  })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant consumer' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN, logger: { error() {} } })
@@ -330,6 +334,7 @@ test('canonical endpoint searches one authorized global projection with filters,
       degraded: false,
     })
     assert.equal(JSON.stringify(first.payload).includes('must-not-leak'), false)
+    assert.deepEqual(store.requests.get(first.payload.requestId).responseBody, first.payload)
     assert.deepEqual(contentCalls[0], {
       query: 'agent update',
       options: {

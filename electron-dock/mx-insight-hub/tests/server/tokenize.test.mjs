@@ -22,7 +22,11 @@ async function withFixture(segmenter, run) {
   })
   const tenant = await service.createTenant({ name: 'Tokenizer tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Tokenizer consumer' })
-  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Tokenizer key' })
+  const issued = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Tokenizer key',
+    capabilities: ['nlp.tokenize'],
+  })
   const server = createServer(createApp({
     service,
     store,
@@ -109,6 +113,11 @@ test('generic capability grants stay separate from platform grants and policies'
       { capability: 'public_opinion.all_ingested.read', ready: false },
       { capability: 'public_opinion.diagnostics.read', ready: false },
       { capability: 'social.posts.resolve', ready: false },
+      { capability: 'social.posts.search', ready: false },
+      { capability: 'social.users.resolve', ready: false },
+      { capability: 'social.users.posts', ready: false },
+      { capability: 'compat.xiaohongshu.app_v2', ready: false },
+      { capability: 'ecommerce.products.search', ready: false },
     ])
 
     const unsupported = await call('/internal/v1/admin/capabilities/all', {
@@ -287,6 +296,10 @@ test('Postgres capability configuration rolls back its grant when policy persist
         stagedAuthorized = authorized
         return { rows: [] }
       }
+      if (normalized.startsWith('SELECT pg_advisory_xact_lock')) {
+        statements.push('LOCK')
+        return { rows: [] }
+      }
       if (normalized.startsWith('INSERT INTO capability_grants')) {
         statements.push('GRANT')
         stagedAuthorized = true
@@ -320,7 +333,7 @@ test('Postgres capability configuration rolls back its grant when policy persist
     }),
     /simulated policy transaction failure/,
   )
-  assert.deepEqual(statements, ['BEGIN', 'GRANT', 'POLICY', 'ROLLBACK'])
+  assert.deepEqual(statements, ['BEGIN', 'LOCK', 'GRANT', 'POLICY', 'ROLLBACK'])
   assert.equal(stagedAuthorized, false)
   assert.equal(authorized, false)
   assert.equal(released, true)
@@ -490,6 +503,7 @@ test('public tokenize enforces auth, grant, strict input, quota, and bounded rep
       assert.equal(evidence.platform, null)
       assert.equal(evidence.capability, 'nlp.tokenize')
       assert.deepEqual(evidence.responseBody.data.tokens, ['吴恩达', '人工智能'])
+      assert.equal(evidence.responseBody.requestId, evidence.id)
       assert.equal(JSON.stringify(evidence).includes('吴恩达与人工智能'), false)
     }
   })

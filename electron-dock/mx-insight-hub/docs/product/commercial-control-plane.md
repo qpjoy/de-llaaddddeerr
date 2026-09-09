@@ -36,6 +36,14 @@
 供应商，只要保持同一公开合同与 meter，客户套餐、API Key 和账单语义都无需变化。
 上游平台不是客户分组；需要区别客户价格时，使用套餐价目表和租户倍率。
 
+Grant / entitlement 自身再拆成三个相交维度：数据域/来源范围（如
+`xiaohongshu`、`ecommerce`）、业务操作（如 `social.posts.resolve`、
+`ecommerce.products.search`）和兼容接口合同（如
+`compat.xiaohongshu.app_v2`）。兼容合同不混入普通业务操作列表；只有调用
+provider-shaped surface 时才额外要求。数据产品是这些权限与 Hub workflow 的已审组合，
+不是 provider、第四类 grant 或另一把凭据。provider 连接器、credential、采购策略和启停
+只由 Admin 管理。
+
 ## 2. 当前对象与权威边界
 
 | 对象 | 含义 | 权威系统 |
@@ -99,6 +107,11 @@ Key，不需要持有 Night-All、TikHub 或 JustOne 的凭据。
 客户价与供应商成本必须分别记录原币种，不能用猜测汇率相减或把不同币种的最小单位相加。
 真实供应商 rate/quota、并发、熔断、合同和凭据保护仍然有效；未核验的内部容量假设不能被
 写成下游已付款请求的额外财务限流。
+
+具体而言，已经通过客户价格/钱包门禁并被标记为 customer-funded/billed 的请求，不因
+Hub 的 provider 月度采购总额或补贴阈值被拒绝；这些阈值只生成运营告警和成本证据。
+未定价/补贴流量仍可受已审核的采购预算门禁。两者都不能绕过 provider rate limit、并发、
+circuit breaker、合同/readiness、15 页边界或幂等/unknown-outcome 保护。
 
 ## 4. 三种计费模式
 
@@ -238,7 +251,7 @@ authenticate API key
 
 - 余额不足或 `enforced` 缺价在上游之前 fail closed，避免 Hub 为无余额请求垫付采购费；
 - `shadow` 缺价不阻塞流量，用于上线前找出 meter 覆盖缺口；
-- 月度额度、窗口限额、burst RPS、分页上限、API Key ceiling 和 consumer policy 继续取最严值；
+- 客户套餐月请求额度、窗口限额、burst RPS、分页上限、API Key ceiling 和 consumer policy 继续取最严值；已 funded/billed 请求的 provider 月采购/补贴阈值仅告警，不混作客户可用性门禁；
 - TikHub / JustOne 的 provider rate limit、并发门禁、circuit breaker、分布式 dispatch lease、
   fresh/stale cache 与 unknown 防重放继续独立工作；
 - 客户 wallet 锁和 provider QPS 是不同资源，不能用充值绕过速率限制；
@@ -330,6 +343,6 @@ provider credential 能力。在线支付落地前不得把人工 `topup` 接口
 - XHS search 的一个客户 charge 可关联 1+N provider calls，detail endpoint 成本没有漏算；
 - fresh cache、stored fallback、idempotent replay、failed、partial 和 unknown 均有合同测试；
 - 租户看不到 provider、采购成本、内部倍率、credential、入账 actor 或外部参考号；
-- 旧 plan、旧 API Key 和原接口 response contract 在未显式迁移时保持原行为；
+- 旧 plan 和原接口 response contract 保持兼容；既有可访问 Key 通过明确 migration/grandfather 保留既有授权，新签发 snapshot Key 默认零权限，只有显式 `legacy_all` 才全量继承；
 - Launcher membership 撤销能收窄 Hub 页面和 API，Hub 故障不影响 MX-H2I 登录或联网；
 - 客户 charge、钱包流水、usage 和 provider evidence 能从不可变记录独立复算。

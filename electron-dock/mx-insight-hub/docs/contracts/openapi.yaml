@@ -73,6 +73,9 @@ paths:
       description: >-
         Requires apikey.write in the consumer's owning tenant, or the
         break-glass Admin Token. The complete secret is returned exactly once.
+        New keys default to an empty immutable scope. Select platforms and
+        capabilities explicitly, or request the legacy_all issuance preset
+        only when preserving the former snapshot-all selection behavior.
         Omitted expiresInDays defaults to 180; callers may select 1 through 730
         days. Lifetime is immutable: rotate by issuing a replacement and then
         revoking the old key.
@@ -1791,7 +1794,7 @@ paths:
                           additionalProperties: false
                           required: [capability, ready]
                           properties:
-                            capability: { type: string, enum: [nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve] }
+                            capability: { type: string, enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts] }
                             ready: { type: boolean }
                   requestId: { type: string }
               example:
@@ -1954,12 +1957,15 @@ paths:
     post:
       operationId: searchExternalCommerceProducts
       summary: Search marketplace products through the governed external data gateway.
+      x-mx-required-platform: ecommerce
+      x-mx-required-capabilities: [ecommerce.products.search]
       description: >-
         Uses the ordinary Hub Public API key issued through API Keys. The key's
-        immutable entitlement snapshot must include ecommerce, and its owning
-        consumer must still retain that grant; a later consumer grant never
-        widens an existing snapshot key. No ecommerce-specific or provider key
-        is accepted. External ecommerce acquisition accepts only a live Hub key. A
+        immutable entitlement snapshot must include both the ecommerce data
+        domain and ecommerce.products.search business operation, and its owning
+        consumer must still retain both grants; a later consumer grant never
+        widens an existing snapshot key. No ecommerce-specific or provider key is
+        accepted. External ecommerce acquisition accepts only a live Hub key. A
         valid legacy test key receives 403 test_key_not_supported before grant
         lookup, usage reservation, cache lookup or provider dispatch; the
         rejection creates no usage reservation and invokes no provider. The strict
@@ -1990,13 +1996,13 @@ paths:
       x-mx-error-codes:
         "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]
         "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted, test_key_not_supported]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
         "404": [stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2005,9 +2011,10 @@ paths:
             Optional for cache_only and cache_first, but required for refresh.
             Reuse it only
             for a transport retry of the exact same page request. Every next-page
-            request changes the body and must use a new Idempotency-Key. When omitted, Hub
-            derives a short-lived key from the active API-key identity, freshness bucket,
-            and normalized request; exact snapshots remain consumer-scoped.
+            request changes the body and must use a new Idempotency-Key. When omitted,
+            every HTTP call receives a unique internal key and is a distinct
+            metered Hub request, even when served from cache. Exact snapshots
+            and provider-dispatch suppression remain consumer-scoped.
           schema:
             type: string
             minLength: 8
@@ -2171,11 +2178,13 @@ paths:
         grants remain active. cache_only never dispatches external acquisition;
         cache_first is the default; refresh requires Idempotency-Key. This path
         and the platform-shaped GET/POST forms share one canonical fingerprint
-        and idempotency namespace. Public responses omit external platform identity,
-        credentials, endpoint coordinates, upstream media/avatar URLs, raw
-        envelopes, diagnostic cache URLs, procurement price and customer
-        invoice. Each media url is an authenticated same-origin Hub relay
-        locator bound to the response requestId and media index.
+        and idempotency namespace. Public responses omit provider credentials,
+        endpoint coordinates, raw envelopes, diagnostic cache URLs, procurement
+        price and customer invoice. Business content is not desensitized or
+        filtered: media and avatar URLs preserve accepted source values. Media
+        indexes 0..19 also include an additive authenticated same-origin Hub
+        relay locator bound to the response requestId and media index; later
+        source media remain intact without a relay locator.
       x-mx-canonical-operation: /data/post
       x-mx-error-codes:
         "400": [invalid_request, invalid_json, invalid_platform, invalid_post_url, unsupported_fields, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]
@@ -2184,9 +2193,9 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2197,9 +2206,8 @@ paths:
             note URL. All supported route and method forms share one
             idempotency namespace. A
             supplied key is consumer-scoped and bound to its first API key.
-            When omitted, Hub derives an API-key-scoped freshness-bucket key;
-            separate API keys keep separate usage while sharing consumer
-            snapshots and dispatch suppression.
+            When omitted, every HTTP call receives a unique internal key and separate
+            usage/charge while consumer snapshots and dispatch suppression remain shared.
           schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
         - name: X-MX-Insight-Retry-Of
           in: header
@@ -2222,9 +2230,10 @@ paths:
       responses:
         "200":
           description: >-
-            A normalized social post plus Hub freshness evidence. Media URLs
-            are same-origin authenticated Hub relay locators; upstream media
-            and avatar URLs are not exposed.
+            A normalized social post plus Hub freshness evidence. Business media
+            and avatar URLs preserve their accepted source values. Media indexes
+            0..19 also have an authenticated same-origin Hub relay locator; later
+            media remain intact without one.
           headers:
             x-mx-insight-request-id: { schema: { type: string, format: uuid } }
             idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
@@ -2271,9 +2280,9 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
         - name: note_id
           in: query
@@ -2297,6 +2306,9 @@ paths:
             Optional for cache_only and cache_first, but required for refresh.
             Reuse only for a transport retry of the exact normalized note. A
             supplied key is consumer-scoped and bound to its first API key.
+            When omitted, every HTTP call receives a unique internal key and
+            separate usage/charge while consumer snapshots and dispatch
+            suppression remain shared.
           schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
         - name: X-MX-Insight-Retry-Of
           in: header
@@ -2308,9 +2320,10 @@ paths:
       responses:
         "200":
           description: >-
-            A normalized social post plus Hub freshness evidence. Media URLs
-            are same-origin authenticated Hub relay locators; upstream media
-            and avatar URLs are not exposed.
+            A normalized social post plus Hub freshness evidence. Business media
+            and avatar URLs preserve their accepted source values. Media indexes
+            0..19 also have an authenticated same-origin Hub relay locator; later
+            media remain intact without one.
           headers:
             x-mx-insight-request-id: { schema: { type: string, format: uuid } }
             idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
@@ -2347,9 +2360,9 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2358,9 +2371,8 @@ paths:
             Optional for cache_only and cache_first, but required for refresh.
             Reuse only for a transport retry of the exact normalized note URL.
             A supplied key is consumer-scoped and bound to its first API key.
-            When omitted, Hub derives an API-key-scoped freshness-bucket key;
-            separate API keys keep separate usage while sharing consumer
-            snapshots and dispatch suppression.
+            When omitted, every HTTP call receives a unique internal key and separate
+            usage/charge while consumer snapshots and dispatch suppression remain shared.
           schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
         - name: X-MX-Insight-Retry-Of
           in: header
@@ -2380,9 +2392,10 @@ paths:
       responses:
         "200":
           description: >-
-            A normalized social post plus Hub freshness evidence. Media URLs
-            are same-origin authenticated Hub relay locators; upstream media
-            and avatar URLs are not exposed.
+            A normalized social post plus Hub freshness evidence. Business media
+            and avatar URLs preserve their accepted source values. Media indexes
+            0..19 also have an authenticated same-origin Hub relay locator; later
+            media remain intact without one.
           headers:
             x-mx-insight-request-id: { schema: { type: string, format: uuid } }
             idempotent-replay: { schema: { type: string, enum: ["true", "false"] } }
@@ -2409,31 +2422,36 @@ paths:
       x-mx-strict-query: true
       description: &xiaohongshuOfficialDescription >-
         A Hub-governed App V2-compatible GET, not an unmetered proxy. It uses a
-        Live Hub Public API key, one-unit customer metering, provider cost
-        admission, idempotency, exact restricted raw archive and canonical
-        ingest/outbox. Business fields, text, tags, pagination identifiers and
-        signed media URLs remain intact. Only an exact active Hub-to-upstream
-        credential is removed if the upstream echoes it. Explicit pages and
-        the opaque user-post cursor are capped at 15; this governance limit
-        does not truncate content. Idempotency-Key is optional because Hub can
-        derive an API-key-scoped freshness-bucket key.
+        Live Hub Public API key with the xiaohongshu data-domain entitlement,
+        the compat.xiaohongshu.app_v2 contract entitlement and this endpoint's
+        business-operation entitlement. It uses one-unit customer metering,
+        provider cost admission, idempotency, exact restricted raw archive and
+        canonical ingest/outbox. Business fields, text, tags and signed media
+        URLs remain intact. For user-post traversal only, provider pagination
+        controls are replaced with the governed opaque Hub cursor/has-more state
+        and terminate at page 15. Only an exact active Hub-to-upstream credential
+        is removed if the upstream echoes it. This governance limit does not
+        truncate content. Idempotency-Key is optional;
+        when omitted, each HTTP call receives a unique internal key and is metered separately.
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities: [compat.xiaohongshu.app_v2, social.posts.resolve]
       x-mx-error-codes: &xiaohongshuOfficialErrors
-        "400": [invalid_request, unsupported_fields, invalid_page, invalid_ai_mode, invalid_cursor, invalid_upstream_pagination, invalid_idempotency_key]
+        "400": [invalid_request, unsupported_fields, invalid_page, invalid_sort_type, invalid_note_type, invalid_time_filter, invalid_ai_mode, invalid_cursor, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
         "404": [not_found, post_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
-        - { name: note_id, in: query, required: false, schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
+        - { name: note_id, in: query, required: false, description: "A 24-character Xiaohongshu note ID. Either note_id or share_text is required; note_id takes precedence when both are present.", schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
         - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
         - &xiaohongshuOfficialIdempotency
           name: Idempotency-Key
           in: header
           required: false
-          description: Optional; when omitted Hub derives a replay-safe API-key-scoped freshness-bucket key.
+          description: Optional for App V2-compatible GETs. When supplied it is bound to this exact endpoint and normalized query and only exact explicit reuse is replayed. When omitted, every HTTP call receives a unique internal key and is metered separately; cache and provider-dispatch suppression remain independent.
           schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
       responses: &xiaohongshuOfficialResponses
         "200":
@@ -2462,9 +2480,11 @@ paths:
       summary: Search notes with the App V2-compatible contract.
       x-mx-strict-query: true
       description: *xiaohongshuOfficialDescription
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities: [compat.xiaohongshu.app_v2, social.posts.search]
       x-mx-error-codes:
         <<: *xiaohongshuOfficialErrors
-        "403": [platform_not_granted, test_key_not_supported]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
       parameters:
         - { name: keyword, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 500 } }
         - { name: page, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 15, default: 1 } }
@@ -2473,7 +2493,7 @@ paths:
         - { name: time_filter, in: query, required: false, schema: { type: string, enum: [不限, 一天内, 一周内, 半年内], default: 不限 } }
         - { name: search_id, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
         - { name: search_session_id, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
-        - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192, default: explore_feed } }
         - { name: ai_mode, in: query, required: false, schema: { type: string, enum: ["0", "1"], default: "0" } }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
@@ -2483,14 +2503,16 @@ paths:
       summary: Search users with the App V2-compatible contract.
       x-mx-strict-query: true
       description: *xiaohongshuOfficialDescription
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities: [compat.xiaohongshu.app_v2, social.users.resolve]
       x-mx-error-codes:
         <<: *xiaohongshuOfficialErrors
-        "403": [platform_not_granted, test_key_not_supported]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
       parameters:
         - { name: keyword, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 500 } }
         - { name: page, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 15, default: 1 } }
         - { name: search_id, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
-        - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192, default: explore_feed } }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
   /xiaohongshu/app_v2/get_user_info:
@@ -2499,11 +2521,13 @@ paths:
       summary: Get one user profile with the App V2-compatible contract.
       x-mx-strict-query: true
       description: *xiaohongshuOfficialDescription
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities: [compat.xiaohongshu.app_v2, social.users.resolve]
       x-mx-error-codes:
         <<: *xiaohongshuOfficialErrors
-        "403": [platform_not_granted, test_key_not_supported]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
       parameters:
-        - { name: user_id, in: query, required: false, schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
+        - { name: user_id, in: query, required: false, description: "A 24-character Xiaohongshu user ID. Either user_id or share_text is required; user_id takes precedence when both are present.", schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
         - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
@@ -2513,11 +2537,13 @@ paths:
       summary: Get one user's posted notes with the App V2-compatible contract.
       x-mx-strict-query: true
       description: *xiaohongshuOfficialDescription
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities: [compat.xiaohongshu.app_v2, social.users.posts]
       x-mx-error-codes:
         <<: *xiaohongshuOfficialErrors
-        "403": [platform_not_granted, test_key_not_supported]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
       parameters:
-        - { name: user_id, in: query, required: false, schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
+        - { name: user_id, in: query, required: false, description: "A 24-character Xiaohongshu user ID. Either user_id or share_text is required; user_id takes precedence when both are present.", schema: { type: string, pattern: "^[0-9a-fA-F]{24}$" } }
         - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
         - name: cursor
           in: query
@@ -2588,12 +2614,16 @@ paths:
   /data/search:
     post:
       operationId: searchData
+      x-mx-required-capabilities-by-platform:
+        xiaohongshu: social.posts.search
       description: >-
         Stable provider-neutral Night-All-v1 search facade. For platform telegram, Hub serves
         canonical local data with the same fixed item source and response meta
         labels documented by /data/telegram/search; PostgreSQL degradation is
-        represented only by warnings. For platform xiaohongshu, the default and
-        only Hub-native page size is exactly 20. Compatible first-page requests
+        represented only by warnings. For platform xiaohongshu, the immutable
+        API-key scope must additionally contain social.posts.search before any
+        direct or historical dispatch; the default and only Hub-native page size
+        is exactly 20. Compatible first-page requests
         use a governed direct external-data connector only after an independent
         rollout gate; previously issued opaque mxec2 direct cursors remain on that
         connector. The response retains the same envelope; a non-20 pageSize remains on the
@@ -2614,12 +2644,12 @@ paths:
       x-mx-error-codes:
         "400": [invalid_request, invalid_platform, invalid_query, invalid_cursor, invalid_page_size, cursor_scope_mismatch, page_size_exceeded, unsupported_fields, unsupported_match_mode, invalid_result_type, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported]
         "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted, test_key_not_supported]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "410": [search_cursor_expired]
         "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -2673,10 +2703,19 @@ paths:
     post: &nightAllCompatibilityPost
       operationId: searchNightAllCompatibility
       summary: Call one of the three Night-All legacy search operations.
+      x-mx-required-capabilities-by-platform-operation:
+        xiaohongshu:
+          raw: social.posts.search
+          crawl: social.users.posts
+          user-info: social.users.resolve
       description: >-
         The Hub authenticates the consumer, enforces the platform grant and
         policy, then selects the implementation without exposing provider
-        details. After an independent rollout gate, a compatible Xiaohongshu raw
+        details. For Xiaohongshu, the immutable API-key scope must also include
+        the matching operation: raw requires social.posts.search, crawl requires
+        social.users.posts and user-info requires social.users.resolve. This is
+        checked before either direct or historical dispatch. After an independent
+        rollout gate, a compatible Xiaohongshu raw
         first-page request uses the Hub-native direct connector only for exactly
         one scalar keyword or query, effective page size 20, and no
         batch/comment/request-specific-concurrency controls; previously issued opaque direct
@@ -2729,15 +2768,15 @@ paths:
         and equivalent cost-amplification controls are also rejected; they require
         a separately granted capability and server policy.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_query, invalid_cursor, invalid_page_size, cursor_scope_mismatch, invalid_platform, page_size_exceeded, work_budget_exceeded, unsupported_fields, business_id_mismatch, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported, night_all_rejected]
+        "400": [invalid_request, invalid_query, invalid_cursor, invalid_page_size, cursor_scope_mismatch, invalid_platform, page_size_exceeded, work_budget_exceeded, unsupported_fields, business_id_mismatch, idempotency_key_required, invalid_idempotency_key, invalid_user_profile_url, cursor_page_mismatch, platform_operation_unsupported, night_all_rejected]
         "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted, test_key_not_supported]
-        "404": [not_found, night_all_rejected]
+        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
+        "404": [not_found, user_not_found, night_all_rejected]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, night_all_rejected]
         "422": [night_all_rejected]
         "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted, night_all_rejected]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete]
+        "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
         - name: operation
           in: path
@@ -4202,6 +4241,33 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/RequestStatus"
+  /acquisitions/{requestId}:
+    get:
+      operationId: getPublicAcquisitionHistory
+      summary: Replay the exact committed delivery created by this API key
+      description: >-
+        Read-only evidence lookup. Returns the response body previously delivered
+        by the Hub, its stable semantic hash, downstream charge, and ordered
+        canonical references. It never dispatches or re-runs an upstream request.
+        Only the same API key that created the request may read the full delivery;
+        a rotated, zero-scope, or foreign key receives
+        acquisition_query_run_not_found. The Admin Token is the recovery path.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Caller-owned exact delivery and safe lineage evidence.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcquisitionHistoryEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /usage:
     get:
       operationId: getUsage
@@ -5586,14 +5652,24 @@ components:
           maximum: 730
           default: 180
           description: Whole-day lifetime measured from server-side issuance time.
+        scopePreset:
+          type: string
+          enum: [none, legacy_all]
+          default: none
+          description: >-
+            Controls only omitted scope arrays. none is fail-closed and leaves
+            omitted platforms and capabilities empty. legacy_all snapshots all
+            current consumer grants using the former issuance behavior; it
+            cannot be combined with either explicit scope array and does not
+            create a legacy_dynamic key.
         platforms:
           type: array
           maxItems: 128
           uniqueItems: true
           description: >-
             Optional explicit subset of the consumer's current platform grants.
-            Omission snapshots all current platform grants. Later grants do not
-            expand the key; revoke still narrows it immediately.
+            Omission is empty unless scopePreset=legacy_all. Later grants do
+            not expand the key; revoke still narrows it immediately.
           items:
             type: string
             pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$"
@@ -5603,10 +5679,10 @@ components:
           uniqueItems: true
           description: >-
             Optional explicit subset of the consumer's current capability
-            grants. Omission snapshots all current capabilities.
+            grants. Omission is empty unless scopePreset=legacy_all.
           items:
             type: string
-            enum: [nlp.tokenize, social.posts.resolve, public_opinion.all_ingested.read, public_opinion.diagnostics.read]
+            enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts]
     ApiKeyMetadata:
       type: object
       required:
@@ -6781,12 +6857,20 @@ components:
         type: { type: string, const: image }
         url:
           type: string
+          format: uri
+          description: >-
+            Accepted source business-media URL preserved without Hub filtering
+            or replacement.
+        hubRelayUrl:
+          type: string
           format: uri-reference
           maxLength: 2048
           pattern: "^/api/v1/data/posts/media\\?requestId=[0-9a-f-]+&mediaIndex=(?:[0-9]|1[0-9])$"
           description: >-
-            Same-origin authenticated Hub media relay locator bound to this
-            response requestId and media index. It is never an upstream URL.
+            Optional additive same-origin authenticated Hub media relay locator,
+            present for media indexes 0..19 and bound to this response requestId
+            and media index. Later source media remain intact without an unusable
+            locator.
     ExternalSocialPost:
       type: object
       additionalProperties: false
@@ -6796,28 +6880,26 @@ components:
         externalId: { type: string, pattern: "^[0-9a-f]{24}$" }
         platform: { type: string, const: xiaohongshu }
         contentType: { type: string, const: post }
-        url: { type: string, format: uri, maxLength: 2048 }
-        title: { type: [string, "null"], maxLength: 500 }
+        url: { type: string, format: uri }
+        title: { type: [string, "null"] }
         text: { type: [string, "null"] }
         tags:
           type: array
-          maxItems: 100
           uniqueItems: true
-          items: { type: string, minLength: 1, maxLength: 160 }
+          items: { type: string, minLength: 1 }
         author:
           type: object
           additionalProperties: false
           required: [id, name, avatarUrl]
           properties:
-            id: { type: [string, "null"], maxLength: 128 }
-            name: { type: [string, "null"], maxLength: 256 }
+            id: { type: [string, "null"] }
+            name: { type: [string, "null"] }
             avatarUrl:
               type: [string, "null"]
-              format: uri-reference
-              maxLength: 2048
+              format: uri
               description: >-
-                Reserved for a future Hub-owned avatar locator. Currently null;
-                upstream avatar URLs are never exposed.
+                Accepted source avatar URL preserved as business data; null only
+                when the source did not provide one.
         metrics:
           type: object
           additionalProperties: false
@@ -6829,7 +6911,6 @@ components:
             shared: { type: [integer, "null"], minimum: 0 }
         media:
           type: array
-          maxItems: 20
           items: { $ref: "#/components/schemas/ExternalSocialPostMedia" }
         publishedAt: { type: [string, "null"], format: date-time }
         collectedAt: { type: string, format: date-time }
@@ -7695,6 +7776,37 @@ components:
         capturedAt: { type: string, format: date-time }
         reservedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
+    AcquisitionHistoryEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, requestId, status, scope, units, delivered, customerCharge, items]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.acquisition-query-run.v1 }
+            requestId: { type: string, format: uuid }
+            status: { type: string, const: committed }
+            scope: { type: object, additionalProperties: true }
+            units: { type: object, additionalProperties: true }
+            delivered:
+              type: object
+              additionalProperties: false
+              required: [responseStatus, sourceMode, capturedAt, completedAt, responseHash, responseHashContract, responseBody, gatewayEvents]
+              properties:
+                responseStatus: { type: integer, minimum: 100, maximum: 599 }
+                sourceMode: { type: [string, "null"] }
+                capturedAt: { type: [string, "null"], format: date-time }
+                completedAt: { type: [string, "null"], format: date-time }
+                responseHash: { type: string, pattern: "^[0-9a-f]{64}$" }
+                responseHashContract: { type: string, const: sha256-canonical-json-v1 }
+                responseBody: {}
+                gatewayEvents: { type: array, items: { type: object, additionalProperties: true } }
+            customerCharge: { type: [object, "null"], additionalProperties: true }
+            items: { type: array, items: { type: object, additionalProperties: true } }
+        requestId: { type: string }
     MobileCommerceMarketplace: {"type":"object","additionalProperties":false,"required":["sourceValue","mappingStatus","catalogEntryId","catalogSourceKey","catalogRevision","canonicalName","majorCategory","scenarios","regions"],"properties":{"sourceValue":{"type":["string","null"]},"mappingStatus":{"type":"string","enum":["mapped","unmapped"]},"catalogEntryId":{"type":["string","null"],"format":"uuid"},"catalogSourceKey":{"type":["string","null"]},"catalogRevision":{"type":["integer","null"],"minimum":1},"canonicalName":{"type":["string","null"]},"majorCategory":{"type":["string","null"]},"scenarios":{"type":"array","items":{"type":"string"}},"regions":{"type":"array","items":{"type":"string"}}}}
     MobileCommerceItem: {"type":"object","additionalProperties":false,"required":["id","captureId","dataVersion","marketplace","task","product","shop","signals","collectedAt"],"properties":{"id":{"type":"string","format":"uuid"},"captureId":{"type":["string","null"]},"dataVersion":{"type":"string"},"marketplace":{"$ref":"#/components/schemas/MobileCommerceMarketplace"},"task":{"type":"object","additionalProperties":false,"required":["id","keyword","sourceBrandLabel"],"properties":{"id":{"type":["string","null"]},"keyword":{"type":["string","null"]},"sourceBrandLabel":{"type":["string","null"]}}},"product":{"type":"object","additionalProperties":false,"required":["goodsId","title","price","resolution"],"properties":{"goodsId":{"type":["string","null"]},"title":{"type":["string","null"]},"price":{"type":["string","null"]},"resolution":{"type":"string","enum":["source-goods-id","capture-only"]}}},"shop":{"type":"object","additionalProperties":false,"required":["id","name","level","fans","reputation"],"properties":{"id":{"type":["string","null"]},"name":{"type":["string","null"]},"level":{"type":["string","null"]},"fans":{"type":["string","null"]},"reputation":{"type":["string","null"]}}},"signals":{"type":"object","additionalProperties":false,"required":["sales","shipFrom","commentCount","goodRate","tagsText"],"properties":{"sales":{"type":["string","null"]},"shipFrom":{"type":["string","null"]},"commentCount":{"type":["string","null"]},"goodRate":{"type":["string","null"]},"tagsText":{"type":["string","null"]}}},"collectedAt":{"type":["string","null"],"format":"date-time"}}}
     MobileCommercePage: {"type":"object","additionalProperties":false,"required":["contractVersion","sourceMode","acquisition","scope","filters","items","pageInfo"],"properties":{"contractVersion":{"type":"string","const":"mx-insight-hub.data-products.mobile-commerce-items.v1"},"sourceMode":{"type":"string","const":"stored"},"acquisition":{"type":"object","additionalProperties":false,"required":["remoteFetchAvailable","remoteFetchStatus","executionPlane","hubRole","plannedMode"],"properties":{"remoteFetchAvailable":{"type":"boolean","const":false},"remoteFetchStatus":{"type":"string","const":"reserved"},"executionPlane":{"type":"string","const":"external-mobile-collector"},"hubRole":{"type":"string","const":"asynchronous-trigger-and-data-api"},"plannedMode":{"type":"string","const":"asynchronous-command"}}},"scope":{"type":"object","additionalProperties":false,"required":["authorizationPlatform","datasetId","objectType"],"properties":{"authorizationPlatform":{"type":"string","const":"mobile_commerce"},"datasetId":{"type":"string","const":"mobile-commerce.collected-items.v1"},"objectType":{"type":"string","const":"commerce_capture"}}},"filters":{"type":"object","additionalProperties":false,"required":["sourcePlatform","catalogEntryId","keyword","brand","taskId","from","to"],"properties":{"sourcePlatform":{"type":["string","null"]},"catalogEntryId":{"type":["string","null"],"format":"uuid"},"keyword":{"type":["string","null"]},"brand":{"type":["string","null"]},"taskId":{"type":["string","null"]},"from":{"type":["string","null"],"format":"date-time"},"to":{"type":["string","null"],"format":"date-time"}}},"items":{"type":"array","maxItems":100,"items":{"$ref":"#/components/schemas/MobileCommerceItem"}},"pageInfo":{"type":"object","additionalProperties":false,"required":["returnedCount","hasMore","nextCursor"],"properties":{"returnedCount":{"type":"integer","minimum":0,"maximum":100},"hasMore":{"type":"boolean"},"nextCursor":{"type":["string","null"],"maxLength":2048}}}}}

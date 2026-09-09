@@ -14,6 +14,14 @@ const DEFAULT_POLICY = Object.freeze({ maxRequests: 1_000, windowSeconds: 3_600,
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
+function operationReadyForConsumer(operation, consumerId) {
+  if (operation?.effectiveState === 'active') return true
+  if (operation?.effectiveState !== 'canary' || !consumerId) return false
+  return operation.canaryConsumerIds?.some((candidate) => (
+    String(candidate).toLowerCase() === String(consumerId).toLowerCase()
+  )) === true
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value && typeof value === 'object') {
@@ -220,6 +228,8 @@ export class ExternalPlatformGateway {
     config,
     apiKeyPepper,
     reservationLeaseMs,
+    operationControlStore = null,
+    credentialStore = null,
     defaultPolicy = DEFAULT_POLICY,
     logger = console,
   }) {
@@ -229,6 +239,8 @@ export class ExternalPlatformGateway {
     this.config = config
     this.apiKeyPepper = apiKeyPepper
     this.reservationLeaseMs = reservationLeaseMs
+    this.operationControlStore = operationControlStore
+    this.credentialStore = credentialStore
     this.defaultPolicy = defaultPolicy
     this.logger = logger
     this.active = 0
@@ -255,20 +267,58 @@ export class ExternalPlatformGateway {
 
   async #resolvedCredential() {
     if (!this.adapter) return { ready: false, credential: null }
+    let credentialSnapshot = null
+    if (typeof this.credentialStore?.readCredentialSnapshot === 'function') {
+      try {
+        credentialSnapshot = await this.credentialStore.readCredentialSnapshot('justone')
+        if (credentialSnapshot.source === 'database') {
+          return {
+            ready: Boolean(credentialSnapshot.apiKey),
+            credential: credentialSnapshot.apiKey,
+            revision: credentialSnapshot.revision,
+          }
+        }
+      } catch {
+        this.logger?.warn?.('[external-platform] JustOne credential snapshot is unavailable')
+        return { ready: false, credential: null, revision: null }
+      }
+    }
     if (typeof this.adapter.resolveCredential !== 'function') {
-      return { ready: true, credential: undefined }
+      return { ready: true, credential: undefined, revision: credentialSnapshot?.revision ?? null }
     }
     try {
       const credential = await this.adapter.resolveCredential()
-      return { ready: Boolean(credential), credential }
+      return {
+        ready: Boolean(credential),
+        credential,
+        revision: credentialSnapshot?.revision ?? null,
+      }
     } catch {
       this.logger?.warn?.('[external-platform] JustOne credential is unavailable')
-      return { ready: false, credential: null }
+      return { ready: false, credential: null, revision: credentialSnapshot?.revision ?? null }
     }
   }
 
-  async capabilities() {
-    const { ready } = await this.#resolvedCredential()
+  async capabilities({ consumerId = null, credentialConfigured = null } = {}) {
+    const credentialReady = typeof credentialConfigured === 'boolean'
+      ? credentialConfigured
+      : (await this.#resolvedCredential()).ready
+    let ready = credentialReady
+    if (this.operationControlStore) {
+      try {
+        const operations = await this.operationControlStore.describeProvider('justone', {
+          config: this.config,
+          credentialConfigured: credentialReady,
+        })
+        ready = operationReadyForConsumer(
+          operations.find((operation) => operation.operationKey === JUSTONE_OPERATION),
+          consumerId,
+        )
+      } catch {
+        this.logger?.warn?.('[external-platform] JustOne operation readiness is unavailable')
+        ready = false
+      }
+    }
     return {
       platform: AUTHORIZATION_PLATFORM,
       ready,
@@ -309,6 +359,16 @@ export class ExternalPlatformGateway {
     if (!grants.includes(AUTHORIZATION_PLATFORM)) {
       throw new AppError(403, 'platform_not_granted', 'E-commerce data is not granted')
     }
+    const capabilityGrants = typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
+      ? await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
+      : await this.usageStore.listCapabilityGrants(context.consumer.id)
+    if (!capabilityGrants.includes(JUSTONE_OPERATION)) {
+      throw new AppError(
+        403,
+        'capability_not_granted',
+        'E-commerce product search is not granted for this API key',
+      )
+    }
     const consumerPolicy = {
       ...this.defaultPolicy,
       ...((await this.usageStore.getPolicy(context.consumer.id, AUTHORIZATION_PLATFORM)) || {}),
@@ -322,10 +382,6 @@ export class ExternalPlatformGateway {
         ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
         : consumerPolicy.maxPageSize,
     }
-    const apiKeyQuota = keyEntitlement ? {
-      maxRequests: keyEntitlement.maxRequests,
-      windowSeconds: keyEntitlement.windowSeconds,
-    } : null
     const codec = createExternalPlatformCursorCodec(this.apiKeyPepper, context.consumer.id)
     let normalized
     try {
@@ -390,11 +446,10 @@ export class ExternalPlatformGateway {
       }
       validatedRetryOfRequestId = candidateId
     }
-    const cacheBucket = Math.floor(Date.now() / this.config.freshTtlMs)
+    const requestId = randomUUID()
     const effectiveKey = suppliedKey
       ? idempotencyKey
-      : `auto:${context.apiKey.id}:${cacheBucket}:${requestFingerprint.slice(0, 48)}`
-    const requestId = randomUUID()
+      : `auto:${context.apiKey.id}:${requestId}`
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     const reservation = await this.usageStore.reserve({
       requestId,
@@ -405,13 +460,17 @@ export class ExternalPlatformGateway {
       apiKeyId: context.apiKey.id,
       platform: AUTHORIZATION_PLATFORM,
       meterKey: JUSTONE_OPERATION,
+      requiredAuthorizationScopes: [
+        { type: 'platform', key: AUTHORIZATION_PLATFORM },
+        { type: 'capability', key: JUSTONE_OPERATION },
+      ],
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
-      ...(apiKeyQuota ? { apiKeyQuota } : {}),
-      // A caller-supplied key names one immutable delivery attempt. Generated
-      // keys rotate with the freshness bucket, so neither form needs row reuse.
+      // A caller-supplied key names one immutable delivery attempt. An omitted
+      // key means this HTTP call is a new billable intent; only explicit key
+      // reuse is idempotent.
       replayWindowMs: null,
     })
     durableRequestId = reservation.request?.id || requestId
@@ -463,11 +522,10 @@ export class ExternalPlatformGateway {
       const capturedAt = reservation.request.capturedAt
         || base?.meta?.capturedAt
         || reservation.request.completedAt
-      const responseBody = deliveryBody(base, {
-        requestId: reservation.request.id,
-        sourceMode: 'idempotent_replay',
-        capturedAt,
-      })
+      // The Idempotency-Key identifies the already delivered HTTP body. Replay
+      // metadata belongs in the transport/result fields below; rewriting body
+      // timestamps or sourceMode would make the durable response non-exact.
+      const responseBody = structuredClone(base)
       await this.platformStore.recordReplay({ delivery, sourceMode: 'idempotent_replay' }).catch((error) => {
         this.logger?.warn?.(`[external-platform] replay evidence unavailable: ${error.message}`)
       })
@@ -528,11 +586,33 @@ export class ExternalPlatformGateway {
     const state = await this.platformStore.providerState('justone')
     const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
     const resolvedCredential = circuitOpen
-      ? { ready: Boolean(this.adapter), credential: null }
+      ? { ready: Boolean(this.adapter), credential: null, revision: null }
       : await this.#resolvedCredential()
-    if (!resolvedCredential.ready || circuitOpen) {
+    let operationControl = null
+    let operationControlError = null
+    if (!circuitOpen && this.operationControlStore) {
+      try {
+        // This authoritative read is intentionally at the live-dispatch
+        // boundary: cache delivery remains available while a provider is
+        // paused, and an admitted in-flight call keeps this immutable revision.
+        operationControl = await this.operationControlStore.authorizeDispatch(
+          'justone',
+          JUSTONE_OPERATION,
+          {
+            consumerId: context.consumer.id,
+            config: this.config,
+            credentialConfigured: resolvedCredential.ready,
+            credentialRevision: resolvedCredential.revision,
+          },
+        )
+      } catch (error) {
+        operationControlError = error
+      }
+    }
+    if (!resolvedCredential.ready || circuitOpen || operationControlError) {
       if (snapshot) {
-        const reason = !resolvedCredential.ready ? 'provider_not_configured' : 'provider_circuit_open'
+        const reason = operationControlError?.code
+          || (!resolvedCredential.ready ? 'provider_not_configured' : 'provider_circuit_open')
         const responseBody = deliveryBody(snapshot.responseBody, {
           requestId: activeRequestId,
           sourceMode: 'stored_fallback',
@@ -553,13 +633,15 @@ export class ExternalPlatformGateway {
         })
       }
       const sourceMode = circuitOpen ? 'circuit_rejected' : 'unavailable'
-      const errorCode = circuitOpen ? 'external_platform_circuit_open' : 'external_platform_not_configured'
+      const errorCode = operationControlError?.code
+        || (circuitOpen ? 'external_platform_circuit_open' : 'external_platform_not_configured')
       await this.platformStore.rejectWithoutDispatch({
         delivery,
         sourceMode,
         status: 503,
         errorCode,
       })
+      if (operationControlError) throw operationControlError
       throw new AppError(503, errorCode, 'External product search is unavailable')
     }
 
@@ -694,7 +776,10 @@ export class ExternalPlatformGateway {
       }
       entered = true
 
-      const costControl = providerCostControl(this.config, normalized.endpointKey)
+      const costControl = providerCostControl(
+        operationControl?.billing ? { billing: operationControl.billing } : this.config,
+        normalized.endpointKey,
+      )
       if (typeof this.platformStore.reserveProviderCostWorkflow !== 'function') {
         throw new AppError(
           503,
@@ -761,6 +846,7 @@ export class ExternalPlatformGateway {
         retryOfRequestId: validatedRetryOfRequestId,
         costControl,
         costReservationId: costReservation.id,
+        ...(operationControl ? { operationControl } : {}),
       })
       lastDispatchEvidence = {
         billed: null,
@@ -785,7 +871,7 @@ export class ExternalPlatformGateway {
           billed: true,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
-          currency: unitCost == null ? null : this.config.billing.currency,
+          currency: unitCost == null ? null : costControl.currency,
           latencyMs,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
@@ -814,7 +900,7 @@ export class ExternalPlatformGateway {
           billed: true,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
-          currency: unitCost == null ? null : this.config.billing.currency,
+          currency: unitCost == null ? null : costControl.currency,
           archiveObjects: result.archiveObjects,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
@@ -853,7 +939,7 @@ export class ExternalPlatformGateway {
           billed,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
-          currency: unitCost == null ? null : this.config.billing.currency,
+          currency: unitCost == null ? null : costControl.currency,
           latencyMs,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
@@ -879,7 +965,7 @@ export class ExternalPlatformGateway {
           billed,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
-          currency: unitCost == null ? null : this.config.billing.currency,
+          currency: unitCost == null ? null : costControl.currency,
           latencyMs,
           errorCode: evidence.errorCode,
           failureResponseStatus: mappedError.status,

@@ -9,6 +9,7 @@ import {
   WarningCircle,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { AcquisitionHistoryPanel } from './acquisition-history.jsx'
 import { canConfirmSearchReindex } from './search-reindex-confirmation.js'
 import {
   EmptyState,
@@ -826,6 +827,8 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
         <MetricCard icon={ClockCounterClockwise} label="历史修订" value={formatNumber(stats.revisionCount ?? 0)} hint="可追溯版本" />
         <MetricCard icon={Archive} label="已删除记录" value={formatNumber(stats.deletedRecordCount ?? 0)} hint="源端 tombstone；Hub 保留证据而非物理删除" tone={stats.deletedRecordCount ? 'warning' : 'primary'} />
       </div>
+
+      <AcquisitionHistoryPanel token={token} onUnauthorized={onUnauthorized} />
 
       <SearchReindexControl token={token} onUnauthorized={onUnauthorized} onReindexed={refreshAfterReindex} />
 

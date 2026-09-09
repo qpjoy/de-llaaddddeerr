@@ -123,7 +123,11 @@ async function withServer(callback) {
     windowSeconds: 3600,
     maxPageSize: 25,
   })
-  const publicKey = await service.createApiKey({ consumerId: consumer.id, name: 'Public key' })
+  const publicKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Public key',
+    platforms: ['virtual_supermarket', 'mobile_commerce'],
+  })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   const identity = {

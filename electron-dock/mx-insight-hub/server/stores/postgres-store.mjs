@@ -4,6 +4,11 @@ import { usageMeterKey } from '../billing/contracts.mjs'
 import { CANONICAL_CONTEXT_DATASETS } from '../data/canonical-context.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 import {
+  authorizationScopeKey,
+  authorizationScopeLockKey,
+  requiredAuthorizationScopes,
+} from './usage-authorization.mjs'
+import {
   CONNECTOR_ID,
   DATASET_ID,
   PARSER_VERSION,
@@ -1960,8 +1965,22 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      const existing = await client.query(
+        'SELECT platform FROM platform_grants WHERE consumer_id = $1',
+        [consumerId],
+      )
+      const requested = [...new Set(platforms)].sort()
+      const locked = [...new Set([
+        ...existing.rows.map((row) => row.platform),
+        ...requested,
+      ])].sort()
+      for (const platformName of locked) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          authorizationScopeLockKey(consumerId, { type: 'platform', key: platformName }),
+        ])
+      }
       await client.query('DELETE FROM platform_grants WHERE consumer_id = $1', [consumerId])
-      for (const platformName of [...new Set(platforms)]) {
+      for (const platformName of requested) {
         await client.query(
           'INSERT INTO platform_grants (consumer_id, platform) VALUES ($1, $2)',
           [consumerId, platformName],
@@ -1978,18 +1997,31 @@ export class PostgresStore {
   }
 
   async setPlatformGrant(consumerId, platformName, enabled) {
-    if (enabled) {
-      await this.pool.query(
-        `INSERT INTO platform_grants (consumer_id, platform) VALUES ($1, $2)
-         ON CONFLICT (consumer_id, platform) DO NOTHING`,
-        [consumerId, platformName],
-      )
-      return
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        authorizationScopeLockKey(consumerId, { type: 'platform', key: platformName }),
+      ])
+      if (enabled) {
+        await client.query(
+          `INSERT INTO platform_grants (consumer_id, platform) VALUES ($1, $2)
+           ON CONFLICT (consumer_id, platform) DO NOTHING`,
+          [consumerId, platformName],
+        )
+      } else {
+        await client.query(
+          'DELETE FROM platform_grants WHERE consumer_id = $1 AND platform = $2',
+          [consumerId, platformName],
+        )
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
     }
-    await this.pool.query(
-      'DELETE FROM platform_grants WHERE consumer_id = $1 AND platform = $2',
-      [consumerId, platformName],
-    )
   }
 
   async listGrants(consumerId) {
@@ -2019,6 +2051,9 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        authorizationScopeLockKey(consumerId, { type: 'capability', key: capability }),
+      ])
       if (enabled) {
         await client.query(
           `INSERT INTO capability_grants (consumer_id, capability) VALUES ($1, $2)
@@ -2054,20 +2089,33 @@ export class PostgresStore {
   }
 
   async putPolicy({ tenantId, consumerId, platform: platformName, maxRequests, windowSeconds, maxPageSize }) {
-    const { rows } = await this.pool.query(
-      `INSERT INTO consumer_platform_policies
-         (tenant_id, consumer_id, platform, max_requests, window_seconds, max_page_size)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (consumer_id, platform) DO UPDATE SET
-         tenant_id = EXCLUDED.tenant_id,
-         max_requests = EXCLUDED.max_requests,
-         window_seconds = EXCLUDED.window_seconds,
-         max_page_size = EXCLUDED.max_page_size,
-         updated_at = now()
-       RETURNING *`,
-      [tenantId, consumerId, platformName, maxRequests, windowSeconds, maxPageSize],
-    )
-    return policy(rows[0])
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        authorizationScopeLockKey(consumerId, { type: 'platform', key: platformName }),
+      ])
+      const { rows } = await client.query(
+        `INSERT INTO consumer_platform_policies
+           (tenant_id, consumer_id, platform, max_requests, window_seconds, max_page_size)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (consumer_id, platform) DO UPDATE SET
+           tenant_id = EXCLUDED.tenant_id,
+           max_requests = EXCLUDED.max_requests,
+           window_seconds = EXCLUDED.window_seconds,
+           max_page_size = EXCLUDED.max_page_size,
+           updated_at = now()
+         RETURNING *`,
+        [tenantId, consumerId, platformName, maxRequests, windowSeconds, maxPageSize],
+      )
+      await client.query('COMMIT')
+      return policy(rows[0])
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async getPolicy(consumerId, platformName) {
@@ -2128,20 +2176,40 @@ export class PostgresStore {
     if (Boolean(input.platform) === Boolean(input.capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
     }
+    const authorizationScopes = requiredAuthorizationScopes(input)
+    const legacySingleScope = input.requiredAuthorizationScopes == null
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${input.tenantId}:${input.consumerId}:plan-month`,
       ])
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `${input.tenantId}:${input.consumerId}:${input.capability ? `capability:${input.capability}` : `platform:${input.platform}`}`,
-      ])
+      for (const scope of authorizationScopes) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          authorizationScopeLockKey(input.consumerId, scope),
+        ])
+      }
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${input.consumerId}:idempotency:${input.idempotencyKey}`,
       ])
-      const keyEntitlement = await this.#apiKeyEntitlement(client, input)
-      const quotaInput = { ...input, keyEntitlement }
+      await this.#assertApiKeyOwner(client, input)
+      const scopeEntitlements = new Map()
+      for (const scope of authorizationScopes) {
+        const entitlement = await this.#apiKeyEntitlement(client, {
+          ...input,
+          platform: scope.type === 'platform' ? scope.key : null,
+          capability: scope.type === 'capability' ? scope.key : null,
+          apiKeyQuota: legacySingleScope ? input.apiKeyQuota : null,
+          authorizationPlatforms: legacySingleScope ? input.authorizationPlatforms : null,
+        })
+        scopeEntitlements.set(authorizationScopeKey(scope), entitlement)
+      }
+      const quotaInput = {
+        ...input,
+        authorizationScopes,
+        scopeEntitlements,
+        legacySingleScope,
+      }
       const { rows } = await client.query(
         `SELECT request.*
            FROM usage_idempotency_bindings binding
@@ -2166,8 +2234,9 @@ export class PostgresStore {
           const inserted = await client.query(
             `INSERT INTO usage_requests
                (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
-                platform, capability, billing_meter_key, status, units_reserved, lease_expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $11)
+                platform, capability, billing_meter_key, authorization_scopes,
+                status, units_reserved, lease_expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12)
              RETURNING *`,
             [
               input.requestId,
@@ -2179,6 +2248,7 @@ export class PostgresStore {
               input.platform ?? null,
               input.capability ?? null,
               usageMeterKey(input),
+              JSON.stringify(authorizationScopes),
               input.unitsReserved,
               input.leaseExpiresAt,
             ],
@@ -2200,8 +2270,9 @@ export class PostgresStore {
       const inserted = await client.query(
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
-            platform, capability, billing_meter_key, status, units_reserved, lease_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $11)
+            platform, capability, billing_meter_key, authorization_scopes,
+            status, units_reserved, lease_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12)
          RETURNING *`,
         [
           input.requestId,
@@ -2213,6 +2284,7 @@ export class PostgresStore {
           input.platform ?? null,
           input.capability ?? null,
           usageMeterKey(input),
+          JSON.stringify(authorizationScopes),
           input.unitsReserved,
           input.leaseExpiresAt,
         ],
@@ -2247,45 +2319,105 @@ export class PostgresStore {
   }
 
   async #assertQuota(client, input) {
-    const keyEntitlement = input.keyEntitlement
+    for (const scope of input.authorizationScopes) {
+      const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
+      const consumerMaxRequests = input.legacySingleScope
+        ? input.maxRequests
+        : Number(keyEntitlement.consumer_max_requests)
+      const consumerWindowSeconds = input.legacySingleScope
+        ? Number(input.windowSeconds ?? (
+            input.windowStart == null
+              ? keyEntitlement.consumer_window_seconds
+              : Math.max(1, Math.ceil((Date.now() - new Date(input.windowStart).getTime()) / 1_000))
+          ))
+        : Number(keyEntitlement.consumer_window_seconds)
+      const consumerWindowStart = input.legacySingleScope ? input.windowStart : null
+      const details = scope.type === 'platform'
+        ? { platform: scope.key }
+        : { capability: scope.key }
+      const { rows } = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM usage_requests request
+          WHERE request.tenant_id = $1 AND request.consumer_id = $2
+            AND request.status IN ('reserved', 'committed', 'unknown')
+            AND (
+              EXISTS (
+                SELECT 1
+                  FROM usage_request_authorization_scopes authorization_scope
+                 WHERE authorization_scope.usage_request_id = request.id
+                   AND authorization_scope.scope_type = $3
+                   AND authorization_scope.scope_key = $4
+              )
+              OR (
+                NOT EXISTS (
+                  SELECT 1 FROM usage_request_authorization_scopes admitted_scope
+                   WHERE admitted_scope.usage_request_id = request.id
+                )
+                AND CASE $3
+                      WHEN 'platform' THEN request.platform = $4
+                      ELSE request.capability = $4
+                    END
+              )
+            )
+            AND request.reserved_at >= CASE
+                  WHEN $5::timestamptz IS NULL
+                    THEN now() - ($6::integer * interval '1 second')
+                  ELSE $5::timestamptz
+                END`,
+        [
+          input.tenantId,
+          input.consumerId,
+          scope.type,
+          scope.key,
+          consumerWindowStart,
+          consumerWindowSeconds,
+        ],
+      )
+      if (Number(rows[0].count) >= consumerMaxRequests) {
+        throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
+          ...details,
+          maxRequests: consumerMaxRequests,
+          limitScope: 'consumer',
+        })
+      }
 
-    const { rows } = await client.query(
-      `SELECT count(*)::integer AS count
-       FROM usage_requests
-       WHERE tenant_id = $1 AND consumer_id = $2
-         AND platform IS NOT DISTINCT FROM $3
-         AND capability IS NOT DISTINCT FROM $4
-         AND status IN ('reserved', 'committed', 'unknown')
-         AND reserved_at >= $5`,
-      [input.tenantId, input.consumerId, input.platform ?? null, input.capability ?? null, input.windowStart],
-    )
-    if (Number(rows[0].count) >= input.maxRequests) {
-      throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
-        ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
-        maxRequests: input.maxRequests,
-        limitScope: 'consumer',
-      })
-    }
-
-    const keyMaxRequests = Number(keyEntitlement.maxRequests ?? keyEntitlement.max_requests)
-    const keyWindowSeconds = Number(keyEntitlement.windowSeconds ?? keyEntitlement.window_seconds)
-    const keyUsage = await client.query(
-      `SELECT count(*)::integer AS count
-         FROM usage_requests
-        WHERE api_key_id = $1
-          AND platform IS NOT DISTINCT FROM $2
-          AND capability IS NOT DISTINCT FROM $3
-          AND status IN ('reserved', 'committed', 'unknown')
-          AND reserved_at >= now() - ($4::integer * interval '1 second')`,
-      [input.apiKeyId, input.platform ?? null, input.capability ?? null, keyWindowSeconds],
-    )
-    if (Number(keyUsage.rows[0].count) >= keyMaxRequests) {
-      throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
-        ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
-        maxRequests: keyMaxRequests,
-        windowSeconds: keyWindowSeconds,
-        limitScope: 'api_key',
-      })
+      const keyMaxRequests = Number(keyEntitlement.maxRequests ?? keyEntitlement.max_requests)
+      const keyWindowSeconds = Number(keyEntitlement.windowSeconds ?? keyEntitlement.window_seconds)
+      const keyUsage = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM usage_requests request
+          WHERE request.api_key_id = $1
+            AND request.status IN ('reserved', 'committed', 'unknown')
+            AND (
+              EXISTS (
+                SELECT 1
+                  FROM usage_request_authorization_scopes authorization_scope
+                 WHERE authorization_scope.usage_request_id = request.id
+                   AND authorization_scope.scope_type = $2
+                   AND authorization_scope.scope_key = $3
+              )
+              OR (
+                NOT EXISTS (
+                  SELECT 1 FROM usage_request_authorization_scopes admitted_scope
+                   WHERE admitted_scope.usage_request_id = request.id
+                )
+                AND CASE $2
+                      WHEN 'platform' THEN request.platform = $3
+                      ELSE request.capability = $3
+                    END
+              )
+            )
+            AND request.reserved_at >= now() - ($4::integer * interval '1 second')`,
+        [input.apiKeyId, scope.type, scope.key, keyWindowSeconds],
+      )
+      if (Number(keyUsage.rows[0].count) >= keyMaxRequests) {
+        throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
+          ...details,
+          maxRequests: keyMaxRequests,
+          windowSeconds: keyWindowSeconds,
+          limitScope: 'api_key',
+        })
+      }
     }
 
     const planResult = await client.query(
@@ -2375,6 +2507,23 @@ export class PostgresStore {
     }
   }
 
+  async #assertApiKeyOwner(client, input) {
+    const result = await client.query(
+      `SELECT id
+         FROM api_keys
+        WHERE id = $1
+          AND consumer_id = $2
+          AND tenant_id = $3
+          AND status = 'active'
+          AND expires_at > now()
+        FOR SHARE`,
+      [input.apiKeyId, input.consumerId, input.tenantId],
+    )
+    if (result.rowCount !== 1) {
+      throw new AppError(403, 'api_key_scope_not_granted', 'API key does not belong to the requested usage scope')
+    }
+  }
+
   async #apiKeyEntitlement(client, input) {
     if (input.capability === DERIVED_PLATFORM_USAGE_CAPABILITY
       && Array.isArray(input.authorizationPlatforms)) {
@@ -2418,7 +2567,9 @@ export class PostgresStore {
     const column = input.platform ? 'platform' : 'capability'
     const { rows } = await client.query(
       `SELECT coalesce(entitlement.max_requests, policy.max_requests, 1000) AS max_requests,
-              coalesce(entitlement.window_seconds, policy.window_seconds, 3600) AS window_seconds
+              coalesce(entitlement.window_seconds, policy.window_seconds, 3600) AS window_seconds,
+              coalesce(policy.max_requests, 1000) AS consumer_max_requests,
+              coalesce(policy.window_seconds, 3600) AS consumer_window_seconds
          FROM api_keys api_key_record
          JOIN ${grantTable} scope_grant
            ON scope_grant.consumer_id = api_key_record.consumer_id AND scope_grant.${column} = $2
@@ -2429,7 +2580,10 @@ export class PostgresStore {
         WHERE api_key_record.id = $1
           AND api_key_record.consumer_id = $3
           AND api_key_record.tenant_id = $4
-          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)`,
+          AND api_key_record.status = 'active'
+          AND api_key_record.expires_at > now()
+          AND (api_key_record.scope_mode = 'legacy_dynamic' OR entitlement.api_key_id IS NOT NULL)
+        FOR KEY SHARE OF scope_grant`,
       [input.apiKeyId, input.platform || input.capability, input.consumerId, input.tenantId],
     )
     if (!rows[0]) {
@@ -2437,7 +2591,13 @@ export class PostgresStore {
         ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
       })
     }
-    return input.apiKeyQuota || rows[0]
+    return input.apiKeyQuota
+      ? {
+          ...rows[0],
+          max_requests: input.apiKeyQuota.maxRequests,
+          window_seconds: input.apiKeyQuota.windowSeconds,
+        }
+      : rows[0]
   }
 
   async commitRequest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }) {

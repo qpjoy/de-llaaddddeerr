@@ -490,7 +490,11 @@ test('public province routes enforce grants, paginate safely and keep public_opi
     windowSeconds: 60,
     maxPageSize: 1,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Province key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Province key',
+    platforms: ['public_opinion'],
+  })
   const noGrantConsumer = await service.createConsumer({ tenantId: tenant.id, name: 'No grant consumer' })
   const noGrantKey = await service.createApiKey({ consumerId: noGrantConsumer.id, name: 'No grant key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN, logger: { error() {} } })

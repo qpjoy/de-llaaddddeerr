@@ -709,8 +709,16 @@ test('product image source is available only from the same consumer committed ec
       return { body: Buffer.from('safe-image'), contentType: 'image/png' }
     },
   })
-  const ownerApiKey = await service.createApiKey({ consumerId: owner.id, name: 'Owner media key' })
-  const strangerApiKey = await service.createApiKey({ consumerId: stranger.id, name: 'Stranger media key' })
+  const ownerApiKey = await service.createApiKey({
+    consumerId: owner.id,
+    name: 'Owner media key',
+    platforms: ['ecommerce', 'telegram'],
+  })
+  const strangerApiKey = await service.createApiKey({
+    consumerId: stranger.id,
+    name: 'Stranger media key',
+    platforms: ['ecommerce'],
+  })
   const ownerContext = { consumer: { id: owner.id }, apiKey: ownerApiKey }
   const strangerContext = { consumer: { id: stranger.id }, apiKey: strangerApiKey }
   const committed = await createUsageRequest(store, owner, ownerApiKey)
@@ -764,7 +772,11 @@ test('product image reads enforce a separate per-consumer request window', async
     externalMediaPolicy: { maxRequests: 1, windowMs: 60_000, maxConcurrency: 1 },
     externalImageLoader: async () => ({ body: pngImage(), contentType: 'image/png' }),
   })
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rate media key' })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Rate media key',
+    platforms: ['ecommerce'],
+  })
   const context = { consumer: { id: consumer.id }, apiKey }
   const requestId = await createUsageRequest(store, consumer, apiKey)
 
@@ -801,7 +813,11 @@ test('product image reads enforce per-consumer concurrency before another relay 
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Concurrency media key' })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Concurrency media key',
+    platforms: ['ecommerce'],
+  })
   const context = { consumer: { id: consumer.id }, apiKey }
   const requestId = await createUsageRequest(store, consumer, apiKey)
 
@@ -839,7 +855,11 @@ test('product image concurrency remains held until downstream delivery completes
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Delivery media key' })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Delivery media key',
+    platforms: ['ecommerce'],
+  })
   const context = { consumer: { id: consumer.id }, apiKey }
   const requestId = await createUsageRequest(store, consumer, apiKey)
 
@@ -886,7 +906,11 @@ test('busy media attempts also consume the per-consumer request window', async (
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Busy media key' })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Busy media key',
+    platforms: ['ecommerce'],
+  })
   const context = { consumer: { id: consumer.id }, apiKey }
   const requestId = await createUsageRequest(store, consumer, apiKey)
 
@@ -935,7 +959,11 @@ test('rate-window rollover preserves active per-consumer media concurrency', asy
       return { body: pngImage(), contentType: 'image/png' }
     },
   })
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rollover media key' })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Rollover media key',
+    platforms: ['ecommerce'],
+  })
   const context = { consumer: { id: consumer.id }, apiKey }
   const requestId = await createUsageRequest(store, consumer, apiKey)
 

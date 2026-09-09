@@ -317,6 +317,7 @@ test('Telegram search replays pre-sourceScope idempotency fingerprints on dedica
   const apiKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Fingerprint compatibility key',
+    platforms: ['telegram'],
   })
   const context = { tenant, consumer, apiKey }
   const legacyCursorBinding = createHash('sha256').update(JSON.stringify({
@@ -2198,7 +2199,11 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     assert.equal(existingKeyStillForbidden.response.status, 403)
     assert.equal(existingKeyStillForbidden.payload.error.code, 'platform_not_granted')
 
-    const keyA = await service.createApiKey({ consumerId: consumerA.id, name: 'A after grant' })
+    const keyA = await service.createApiKey({
+      consumerId: consumerA.id,
+      name: 'A after grant',
+      platforms: ['telegram'],
+    })
     allowed = { authorization: `Bearer ${keyA.secret}` }
     const newlyIssuedAllowed = await call(
       baseUrl,
@@ -2341,7 +2346,11 @@ test('public Telegram conversation facade exposes explicit mixed-source discover
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 10, windowSeconds: 3600, maxPageSize: 20,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Conversation key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Conversation key',
+    platforms: ['telegram'],
+  })
   const app = createApp({ service, store, adapter: {}, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
@@ -2545,7 +2554,11 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 20, windowSeconds: 3600, maxPageSize: 20,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Telegram key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Telegram key',
+    platforms: ['telegram'],
+  })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
@@ -2699,7 +2712,11 @@ test('POST Telegram search keeps an ambiguous commit unknown and never releases 
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 10, windowSeconds: 3600, maxPageSize: 20,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous POST key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Ambiguous POST key',
+    platforms: ['telegram'],
+  })
 
   const commit = store.commitRequest.bind(store)
   store.commitRequest = async (...args) => {
@@ -2757,7 +2774,11 @@ test('usage request terminal states cannot transition back to committed or relea
     windowSeconds: 3_600,
     maxPageSize: 10,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Terminal-state key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Terminal-state key',
+    platforms: ['telegram'],
+  })
   const input = {
     requestId: 'terminal-request',
     idempotencyKey: 'terminal-request',
@@ -2801,7 +2822,11 @@ test('Telegram history enforces maxRequests and commits count-only usage evidenc
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 1, windowSeconds: 3600, maxPageSize: 10,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Metered key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Metered key',
+    platforms: ['telegram'],
+  })
   const context = await service.authenticate(key.secret)
 
   const first = await service.telegramMonitor(context, 'messages', { pageSize: '2' })
@@ -2831,7 +2856,11 @@ test('a failed Telegram history read releases its reservation so it does not con
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 1, windowSeconds: 3600, maxPageSize: 10,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Retry key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Retry key',
+    platforms: ['telegram'],
+  })
   const context = await service.authenticate(key.secret)
 
   await assert.rejects(() => service.telegramMonitor(context, 'messages', {}), /temporary local read failure/)
@@ -2858,7 +2887,11 @@ test('an ambiguous Telegram usage commit is retained as unknown, never released'
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 2, windowSeconds: 3600, maxPageSize: 10,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Ambiguous key',
+    platforms: ['telegram'],
+  })
   const context = await service.authenticate(key.secret)
 
   await assert.rejects(() => service.telegramMonitor(context, 'messages', {}), /dropped after commit/)

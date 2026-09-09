@@ -29,6 +29,7 @@ import {
 
 export const TIKHUB_XIAOHONGSHU_OFFICIAL_CONTRACT_VERSION = 'tikhub.app-v2.compat.v1'
 export const TIKHUB_XIAOHONGSHU_OFFICIAL_MAX_PAGES = 15
+export const XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY = 'compat.xiaohongshu.app_v2'
 
 const MAX_TEXT = 8_192
 const MAX_KEYWORD = 500

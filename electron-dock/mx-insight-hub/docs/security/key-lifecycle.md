@@ -9,20 +9,42 @@ The pepper is a K8s Secret, not a database field. A database dump alone must not
 ## Lifecycle
 
 1. Issue under one consumer. The current Admin UI signs `live` keys only.
-2. Select a subset of the consumer's current platform/capability grants. The server freezes those entitlements and their request/page ceilings into an immutable key snapshot; omission selects all grants that exist at issuance time.
+2. Select the intended subset of the consumer's current platform/capability grants. The server freezes those entitlements and their request/page ceilings into an immutable key snapshot. Omission selects **nothing**, so issuing an explicit zero-permission key is valid. `scopePreset=legacy_all` is the only opt-in that snapshots all current grants.
 3. Record last-used/request evidence without storing the plaintext.
 4. Rotate by issuing a second key, verifying traffic, then revoking the old key.
 5. Revocation is immediate for database-backed auth; caches must have bounded TTL and explicit invalidation later.
 
 The client normally receives one ordinary Hub Public API key; there is no
-provider-specific key format. A request is allowed only by the intersection of
-the key snapshot and the consumer's current grants. Consumer revocation therefore
-takes effect immediately, while a later grant or higher ceiling does not silently
-expand an existing key: issue a replacement and explicitly select the new scope.
-Keys created before the entitlement migration are marked `legacy_dynamic` and
-should be rotated. A consumer may now issue sibling keys for different platforms
-or workloads while keeping usage attribution per key; a separate consumer remains
-the stronger boundary for independent business identity or shared-budget isolation.
+provider-secret key format. Authorization is deliberately split into three
+dimensions:
+
+- **data domain/source scope**, such as `xiaohongshu` or `ecommerce`;
+- **business operation**, such as `social.posts.resolve`,
+  `social.posts.search` or `ecommerce.products.search`; and
+- **compatible interface contract**, such as
+  `compat.xiaohongshu.app_v2`, only when the caller needs that provider-shaped
+  surface.
+
+Gateway checks are only an early rejection path. The usage reservation is the
+authoritative admission boundary: it locks and revalidates every required axis
+in deterministic order before any customer hold or paid provider dispatch. Each
+axis keeps its own consumer and key quota window; the request still has one
+operation meter for per-call billing, and its admitted axes are stored as
+immutable evidence. Idempotent replay neither creates another edge set nor
+consumes quota again. A later revoke blocks new reservations but does not
+retroactively invalidate a request already admitted for dispatch.
+
+A data product is a reviewed combination of these grants; it does not expose or
+grant a physical provider connector. A request is allowed only by the intersection
+of the immutable key snapshot and the consumer's current grants. Consumer
+revocation therefore takes effect immediately, while a later grant or higher
+ceiling does not silently expand an existing key: issue a replacement and
+explicitly select the new scope. Keys created before the entitlement migration are
+marked `legacy_dynamic` and should be rotated. `scopePreset=legacy_all` is an
+explicit controlled-migration choice and cannot be combined with explicit scope
+lists. A consumer may issue sibling keys for different products or workloads while
+keeping usage attribution per key; a separate consumer remains the stronger
+boundary for independent business identity or shared-budget isolation.
 
 The backend continues to recognize `environment=test` as compatibility metadata,
 but it does **not** provide an isolated sandbox. The Admin UI therefore issues only
@@ -52,8 +74,10 @@ lookups remain blocked.
 
 - Caller key: identifies a customer consumer and carries no provider secret.
 - Admin token: permits internal operator API access; never accepted by public routes.
-- Night-All service token: workload identity on the private Hub-to-Night-All hop.
-- Night-All upstream/provider credentials: remain in Night-All Credential Center.
+- Night-All service token: workload identity only on the private transitional
+  Hub-to-Night-All compatibility hop.
+- Night-All upstream/provider credentials: remain in Night-All Credential Center
+  only for explicitly unmigrated operations and retire with those operations.
 - Hub external-platform credentials: JustOne and TikHub environment fallbacks are
   injected only into the Public/combined runtime. Prefer the Admin-token UI, which stores
   the value in isolated `control.external_platform_provider_credentials`; safe
@@ -86,8 +110,9 @@ the application does not currently provide column-level credential encryption.
 
 Development defaults in Compose are intentionally local-only. Internal
 production requires an explicit Admin token and API-key pepper in
-`.env.internal` or the environment. Night-All may use either an explicit
-reviewed URL or the documented host-local default. The shared `mx-common` plane
+`.env.internal` or the environment. A remaining Night-All compatibility route may
+use either an explicit reviewed URL or the documented host-local default; direct
+TikHub/JustOne operations do not depend on that URL. The shared `mx-common` plane
 may generate and retain the Hub database password; pinning it is optional.
 
 Source passwords are changed directly with

@@ -11,7 +11,14 @@ import {
   normalizeCreditAdjustment,
   normalizePublishedPlan,
 } from './billing/contracts.mjs'
-import { XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH } from './contracts/tikhub-xiaohongshu-search.mjs'
+import {
+  XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH,
+  XIAOHONGSHU_SEARCH_OPERATION,
+} from './contracts/tikhub-xiaohongshu-search.mjs'
+import { XIAOHONGSHU_USER_INFO_OPERATION } from './contracts/tikhub-xiaohongshu-user-info.mjs'
+import { XIAOHONGSHU_CRAWL_OPERATION } from './contracts/tikhub-xiaohongshu-user-posts.mjs'
+import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY } from './contracts/tikhub-xiaohongshu-official.mjs'
+import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -217,15 +224,39 @@ const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
   TOKENIZE_CAPABILITY,
+  XIAOHONGSHU_SEARCH_OPERATION,
   XIAOHONGSHU_POST_OPERATION,
+  XIAOHONGSHU_USER_INFO_OPERATION,
+  XIAOHONGSHU_CRAWL_OPERATION,
+  XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
+  JUSTONE_OPERATION,
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+])
+const NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES = Object.freeze({
+  raw: XIAOHONGSHU_SEARCH_OPERATION,
+  crawl: XIAOHONGSHU_CRAWL_OPERATION,
+  'user-info': XIAOHONGSHU_USER_INFO_OPERATION,
+})
+const XIAOHONGSHU_ACQUISITION_CAPABILITIES = new Set([
+  XIAOHONGSHU_SEARCH_OPERATION,
+  XIAOHONGSHU_POST_OPERATION,
+  XIAOHONGSHU_USER_INFO_OPERATION,
+  XIAOHONGSHU_CRAWL_OPERATION,
+  XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
 ])
 const CANONICAL_SEARCH_USAGE_SCOPE = 'data.canonical-search'
 const TOKENIZE_MAX_TEXT_LENGTH = 4_096
 const TOKENIZE_MAX_TOKENS = 8_192
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/
+
+function providerOperationReady(providerCapability, operationKey) {
+  const operationReady = providerCapability?.operations?.[operationKey]?.ready
+  return typeof operationReady === 'boolean'
+    ? operationReady
+    : Boolean(providerCapability?.ready)
+}
 
 function canonicalPlatform(value) {
   const platform = requiredString(value, 'platform').toLowerCase()
@@ -328,6 +359,17 @@ function requestedScopes(value, field, canonicalize) {
   assert(Array.isArray(value), 400, 'invalid_request', `${field} must be an array`)
   assert(value.length <= 128, 400, 'invalid_request', `${field} must contain at most 128 entries`)
   return [...new Set(value.map((entry) => canonicalize(entry)))].sort()
+}
+
+function apiKeyScopePreset(value) {
+  const preset = value == null ? 'none' : value
+  assert(
+    typeof preset === 'string' && ['none', 'legacy_all'].includes(preset),
+    400,
+    'invalid_request',
+    'scopePreset must be none or legacy_all',
+  )
+  return preset
 }
 
 function optionalNightAllBusinessId(value) {
@@ -547,7 +589,7 @@ export class HubService {
   async createApiKey(body) {
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const unsupported = Object.keys(body).filter(
-      (field) => !['consumerId', 'name', 'environment', 'expiresInDays', 'platforms', 'capabilities'].includes(field),
+      (field) => !['consumerId', 'name', 'environment', 'expiresInDays', 'scopePreset', 'platforms', 'capabilities'].includes(field),
     )
     assert(unsupported.length === 0, 400, 'unsupported_fields', `Unsupported API key fields: ${unsupported.join(', ')}`)
     const consumerId = requiredUuid(body.consumerId, 'consumerId')
@@ -561,10 +603,17 @@ export class HubService {
     const consumerCapabilities = typeof this.store.listCapabilityGrants === 'function'
       ? await this.store.listCapabilityGrants(consumerId)
       : []
+    const scopePreset = apiKeyScopePreset(body.scopePreset)
     const requestedPlatforms = requestedScopes(body.platforms, 'platforms', canonicalPlatform)
     const requestedCapabilities = requestedScopes(body.capabilities, 'capabilities', canonicalCapability)
-    const platforms = requestedPlatforms ?? [...consumerPlatforms]
-    const capabilities = requestedCapabilities ?? [...consumerCapabilities]
+    assert(
+      scopePreset !== 'legacy_all' || (requestedPlatforms == null && requestedCapabilities == null),
+      400,
+      'invalid_request',
+      'legacy_all cannot be combined with explicit platforms or capabilities',
+    )
+    const platforms = requestedPlatforms ?? (scopePreset === 'legacy_all' ? [...consumerPlatforms] : [])
+    const capabilities = requestedCapabilities ?? (scopePreset === 'legacy_all' ? [...consumerCapabilities] : [])
     const consumerPlatformSet = new Set(consumerPlatforms)
     const consumerCapabilitySet = new Set(consumerCapabilities)
     const plan = typeof this.store.getConsumerPlan === 'function'
@@ -902,6 +951,12 @@ export class HubService {
     const normalizedTenantId = optionalUuid(tenantId, 'tenantId')
     const normalizedConsumerId = optionalUuid(consumerId, 'consumerId')
     const allIngestedReady = await this.#publicOpinionRegionServingReady()
+    const xiaohongshuAcquisition = this.externalPostCapabilities
+      ? await this.externalPostCapabilities({ consumerId: normalizedConsumerId })
+      : null
+    const ecommerceSearch = this.externalPlatformCapabilities
+      ? await this.externalPlatformCapabilities({ consumerId: normalizedConsumerId })
+      : null
     return {
       grants: normalizedConsumerId ? await this.store.listGrants(normalizedConsumerId) : [],
       policies: normalizedConsumerId ? await this.store.listPolicies(normalizedConsumerId) : [],
@@ -928,9 +983,29 @@ export class HubService {
         },
         {
           capability: XIAOHONGSHU_POST_OPERATION,
-          ready: this.externalPostCapabilities
-            ? Boolean((await this.externalPostCapabilities()).ready)
-            : false,
+          ready: providerOperationReady(xiaohongshuAcquisition, XIAOHONGSHU_POST_OPERATION),
+        },
+        {
+          capability: XIAOHONGSHU_SEARCH_OPERATION,
+          ready: providerOperationReady(xiaohongshuAcquisition, XIAOHONGSHU_SEARCH_OPERATION),
+        },
+        {
+          capability: XIAOHONGSHU_USER_INFO_OPERATION,
+          ready: providerOperationReady(xiaohongshuAcquisition, XIAOHONGSHU_USER_INFO_OPERATION),
+        },
+        {
+          capability: XIAOHONGSHU_CRAWL_OPERATION,
+          ready: providerOperationReady(xiaohongshuAcquisition, XIAOHONGSHU_CRAWL_OPERATION),
+        },
+        {
+          capability: XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
+          // The compatibility grant covers several App V2 endpoints, so its
+          // generic readiness stays conservative unless every operation is ready.
+          ready: Boolean(xiaohongshuAcquisition?.ready),
+        },
+        {
+          capability: JUSTONE_OPERATION,
+          ready: providerOperationReady(ecommerceSearch, JUSTONE_OPERATION),
         },
       ],
     }
@@ -1188,17 +1263,20 @@ export class HubService {
         })
       }
     }
+    let externalEcommerceCapability = null
     if (canonicalGrants.includes(ECOMMERCE_PLATFORM) && this.externalPlatformCapabilities) {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms)) {
+        externalEcommerceCapability = await this.externalPlatformCapabilities({
+          consumerId: context.consumer.id,
+        })
         const ecommerceIndex = platforms.findIndex((entry) => (
           (entry?.platform || entry) === ECOMMERCE_PLATFORM
         ))
         if (ecommerceIndex < 0) {
-          const ecommerce = await this.externalPlatformCapabilities()
           platforms.push(isTestApiKey(context.apiKey)
-            ? { ...ecommerce, ready: false }
-            : ecommerce)
+            ? { ...externalEcommerceCapability, ready: false }
+            : externalEcommerceCapability)
         } else if (isTestApiKey(context.apiKey)) {
           const ecommerce = platforms[ecommerceIndex]
           platforms[ecommerceIndex] = typeof ecommerce === 'object'
@@ -1210,29 +1288,35 @@ export class HubService {
     const capabilityGrants = await this.#effectiveCapabilityGrants(context)
     let externalPostCapability = null
     const hasPostDetailGrant = capabilityGrants.includes(XIAOHONGSHU_POST_OPERATION)
+    const hasXiaohongshuAcquisitionGrant = capabilityGrants.some((capability) => (
+      XIAOHONGSHU_ACQUISITION_CAPABILITIES.has(capability)
+    ))
     const externalSocialSearchEnabled = this.#externalSocialSearchEnabledFor(context)
     if (
       canonicalGrants.includes('xiaohongshu')
       && this.externalPostCapabilities
-      && (externalSocialSearchEnabled || hasPostDetailGrant)
+      && (externalSocialSearchEnabled || hasXiaohongshuAcquisitionGrant)
     ) {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms)) {
         let capability = null
         try {
-          capability = await this.externalPostCapabilities()
+          capability = await this.externalPostCapabilities({ consumerId: context.consumer.id })
         } catch {
           this.logger?.warn?.('[external-platform] TikHub capability discovery is unavailable')
         }
         externalPostCapability = capability
         const index = platforms.findIndex((entry) => (entry?.platform || entry) === 'xiaohongshu')
-        const ready = !isTestApiKey(context.apiKey) && Boolean(capability?.ready)
+        const postDetailReady = !isTestApiKey(context.apiKey)
+          && providerOperationReady(capability, XIAOHONGSHU_POST_OPERATION)
+        const searchReady = !isTestApiKey(context.apiKey)
+          && providerOperationReady(capability, XIAOHONGSHU_SEARCH_OPERATION)
         const directCapabilities = [
           ...(externalSocialSearchEnabled ? [XIAOHONGSHU_SEARCH_CAPABILITY] : []),
           ...(hasPostDetailGrant ? ['post_detail'] : []),
         ]
         const postDetail = hasPostDetailGrant ? {
-          ready,
+          ready: postDetailReady,
           source: 'hub',
           servingMode: capability?.servingMode || 'live_with_stored_fallback',
           contractVersion: capability?.contractVersion,
@@ -1240,7 +1324,7 @@ export class HubService {
           deliveryModes: capability?.deliveryModes,
         } : null
         const search = externalSocialSearchEnabled ? {
-          ready,
+          ready: searchReady,
           source: 'hub',
           servingMode: capability?.servingMode || 'live_with_stored_fallback',
           contractVersion: 'night-all.data-search.v1',
@@ -1248,7 +1332,7 @@ export class HubService {
         if (index < 0) {
           platforms.push({
             platform: 'xiaohongshu',
-            ready,
+            ready: Boolean(capability?.ready) && !isTestApiKey(context.apiKey),
             source: 'hub',
             servingMode: capability?.servingMode || 'live_with_stored_fallback',
             capabilities: directCapabilities,
@@ -1262,7 +1346,11 @@ export class HubService {
             // This top-level row may still describe Night-All-only legacy
             // operations. Preserve its provider/readiness identity and publish
             // direct readiness only on the nested search/postDetail fields.
-            capabilities: [...new Set([...(current.capabilities || []), ...directCapabilities])],
+            ...(
+              Array.isArray(current.capabilities) || directCapabilities.length > 0
+                ? { capabilities: [...new Set([...(current.capabilities || []), ...directCapabilities])] }
+                : {}
+            ),
             ...(search ? { search } : {}),
             ...(postDetail ? { postDetail } : {}),
           }
@@ -1289,8 +1377,15 @@ export class HubService {
                 ? allIngestedReady
                 : capability === PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY
                   ? diagnosticsReady
-                  : capability === XIAOHONGSHU_POST_OPERATION
-                    ? !isTestApiKey(context.apiKey) && Boolean(externalPostCapability?.ready)
+                  : XIAOHONGSHU_ACQUISITION_CAPABILITIES.has(capability)
+                    ? !isTestApiKey(context.apiKey) && (
+                        capability === XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY
+                          ? Boolean(externalPostCapability?.ready)
+                          : providerOperationReady(externalPostCapability, capability)
+                      )
+                    : capability === JUSTONE_OPERATION
+                      ? !isTestApiKey(context.apiKey)
+                        && providerOperationReady(externalEcommerceCapability, JUSTONE_OPERATION)
                     : false,
           })),
       },
@@ -1407,6 +1502,7 @@ export class HubService {
         degraded: metadata.degraded,
         errorCode: safeErrorCode,
       },
+      requestId: activeRequestId,
     }
     try {
       await this.store.commitRequest(activeRequestId, {
@@ -2638,12 +2734,15 @@ export class HubService {
           ? { publicOpinionVisibility: query.publicOpinionVisibility }
           : {}),
       })
-      const responseBody = storedSearchResponse({
-        query,
-        result,
-        durationMs: Math.round(performance.now() - startedAt),
-        cursorSecret: this.apiKeyPepper,
-      })
+      const responseBody = {
+        ...storedSearchResponse({
+          query,
+          result,
+          durationMs: Math.round(performance.now() - startedAt),
+          cursorSecret: this.apiKeyPepper,
+        }),
+        requestId: activeRequestId,
+      }
       commitAttempted = true
       await this.store.commitRequest(activeRequestId, {
         responseStatus: 200,
@@ -2800,12 +2899,15 @@ export class HubService {
           ? { publicOpinionVisibility: query.publicOpinionVisibility }
           : {}),
       })
-      const responseBody = canonicalSearchResponse({
-        query,
-        result,
-        durationMs: Math.round(performance.now() - startedAt),
-        cursorSecret: this.apiKeyPepper,
-      })
+      const responseBody = {
+        ...canonicalSearchResponse({
+          query,
+          result,
+          durationMs: Math.round(performance.now() - startedAt),
+          cursorSecret: this.apiKeyPepper,
+        }),
+        requestId: activeRequestId,
+      }
       commitAttempted = true
       await this.store.commitRequest(activeRequestId, {
         responseStatus: 200,
@@ -3162,6 +3264,16 @@ export class HubService {
     const grants = await this.#effectivePlatformGrants(context)
     const matchingGrant = grants.find((grant) => canonicalPlatform(grant) === requestedPlatform)
     assert(matchingGrant, 403, 'platform_not_granted', 'Platform is not granted')
+    if (requestedPlatform === 'xiaohongshu') {
+      const requiredCapability = NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
+      const capabilityGrants = await this.#effectiveCapabilityGrants(context)
+      assert(
+        capabilityGrants.includes(requiredCapability),
+        403,
+        'capability_not_granted',
+        `${requiredCapability} is not granted`,
+      )
+    }
     const storedPolicy = (await this.store.getPolicy(context.consumer.id, requestedPlatform))
       || (matchingGrant !== requestedPlatform
         ? await this.store.getPolicy(context.consumer.id, matchingGrant)
@@ -3247,7 +3359,18 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: normalized.platform,
-      meterKey: operation,
+      meterKey: normalized.platform === 'xiaohongshu'
+        ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
+        : operation,
+      ...(normalized.platform === 'xiaohongshu' ? {
+        requiredAuthorizationScopes: [
+          { type: 'platform', key: normalized.platform },
+          {
+            type: 'capability',
+            key: NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation],
+          },
+        ],
+      } : {}),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3547,6 +3670,15 @@ export class HubService {
     assert(query.length <= 500, 400, 'invalid_request', 'query must not exceed 500 characters')
     const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
+    if (platform === 'xiaohongshu') {
+      const capabilityGrants = await this.#effectiveCapabilityGrants(context)
+      assert(
+        capabilityGrants.includes(XIAOHONGSHU_SEARCH_OPERATION),
+        403,
+        'capability_not_granted',
+        `${XIAOHONGSHU_SEARCH_OPERATION} is not granted`,
+      )
+    }
     assert(
       platform !== PUBLIC_OPINION_PLATFORM,
       400,
@@ -3645,6 +3777,13 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform,
+      ...(platform === 'xiaohongshu' ? {
+        meterKey: XIAOHONGSHU_SEARCH_OPERATION,
+        requiredAuthorizationScopes: [
+          { type: 'platform', key: platform },
+          { type: 'capability', key: XIAOHONGSHU_SEARCH_OPERATION },
+        ],
+      } : {}),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3685,7 +3824,7 @@ export class HubService {
             body: historicalUpstreamBody,
             businessId: context.consumer.businessId,
           })
-      const responseBody = localTelegram
+      const responsePayload = localTelegram
         ? await this.#searchStoredTelegram(telegramQuery, startedAt)
         : historicalCompatibilityTraversal
           ? capNightAllDataSearchTraversal(upstream.payload, {
@@ -3695,6 +3834,10 @@ export class HubService {
               codec: historicalCompatibilityCursorCodec,
             })
           : upstream.payload
+      // The HTTP layer has always exposed the durable Hub request ID. Persist
+      // that exact delivered JSON as the replay/history body too, instead of
+      // appending requestId only after the usage commit.
+      const responseBody = { ...responsePayload, requestId: activeRequestId }
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
       const commit = {
         responseStatus: 200,

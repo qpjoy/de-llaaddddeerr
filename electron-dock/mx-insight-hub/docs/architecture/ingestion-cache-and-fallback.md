@@ -1,10 +1,10 @@
 # 数据接入、增量游标、缓存与稳定性
 
-状态：整体仍是目标设计。当前 `/api/v1/data/search` 没有通用持久查询缓存或相同请求合并；已实现的窄例外是三个 `/api/v1/night-all/search/*` 兼容路由的调用证据和 complete-only exact last-good 快照。本文件会分别标注“已实现兼容层”和“后续通用缓存”，不能把后者当成当前运行语义。
+状态：整体仍是目标设计。当前 `/api/v1/data/search` 没有通用持久查询缓存或相同请求合并；已实现的特定路径包括 Hub-native TikHub/JustOne operation 的受控交付，以及三个 `/api/v1/night-all/search/*` 兼容路由的调用证据和 complete-only exact last-good 快照。本文件会分别标注“已实现路径”和“后续通用缓存”，不能把后者当成当前运行语义。
 
 ## 1. Connector contract
 
-Night-All、未来 Night-All 2.0、文件导入和其他平台都实现同一版本化 connector，不把来源特例散落到公共 API。
+Hub-native TikHub/JustOne、过渡 Night-All、文件导入和其他来源都实现同一版本化 connector，不把来源特例散落到公共 API。
 
 ```text
 ConnectorDescriptor
@@ -35,11 +35,11 @@ ConnectorDescriptor
 
 `payload` 可以在小消息中内联；大 payload 只传 URI/hash。每个 connector 必须声明删除/tombstone、时间语义、分页和重放规则。
 
-## 2. Night-All 接入方式
+## 2. 过渡 Night-All 接入方式
 
 ### 2.1 生产读取
 
-Internal 上继续让原作者维护的宿主 Night-All 作为唯一生产 writer。Hub K8s 通过受控 host facade/private Service 调用，不需要为“读取更方便”再启动第二套完整 Night-All。
+Internal 上继续让原作者维护的宿主 Night-All 作为其剩余 legacy 数据和 operation 的唯一生产 writer。Hub K8s 仅对这些兼容路径通过受控 host facade/private Service 调用，不需要为“读取更方便”再启动第二套完整 Night-All；Hub-native TikHub/JustOne 不经过此 hop。
 
 ```mermaid
 flowchart LR
@@ -217,7 +217,7 @@ flowchart TD
 - `platform=all` 或多平台 fan-out 默认创建 job，设置总 deadline、每租户并发、取消、checkpoint 和 partial result。
 - 公共客户不能选择 provider、availability mode、raw、businessId 或任意 timeout；兼容 body 如为迁移而带 `businessId`，只能等于已认证 consumer 的服务端归属，不能覆盖它。
 
-## 6. Night-All 故障隔离
+## 6. Connector 故障隔离
 
 每个 `platform + capability + endpoint contract version` 独立维护：
 
@@ -240,11 +240,11 @@ ready -> degraded -> open -> half-open -> ready
 
 必须拆分三类证据：
 
-1. `provider_cost_event`：Night-All 实际 dispatch/费用，未来由 Night-All 幂等输出；
+1. `provider_cost_event`：Hub-native 或过渡 Night-All connector 的每次实际 dispatch/费用证据；
 2. `refresh_usage`：Hub 发起的一次来源刷新；
 3. `delivery_usage`：客户读取缓存/历史/live 的产品用量。
 
-相同 refresh 被多个客户请求合并时，上游成本只发生一次，但客户交付是否计费由 plan/price-book 决定。不能按 Night-All 当前 `providerCalls` 或结果条数直接推断财务费用。每条账本记录捕获 price-book、cache source、dataset version 和 request/job ID。
+相同 refresh 被多个客户请求合并时，上游成本只发生一次，但客户交付是否计费由 plan/price-book 决定。不能按任一 provider 的 call 数或结果条数直接推断下游费用。每条账本记录捕获 price-book、cache source、dataset version 和 request/job ID。
 
 ## 8. 无数据源与新来源
 
@@ -256,7 +256,7 @@ Hub 的 read path 只依赖已发布 dataset，不依赖 connector 实时在线�
 - 切换只更新 dataset source policy，不改变公共 API、客户 key 或 Launcher 登录；
 - 新来源不能直接写 ES，必须走 raw -> PG canonical -> outbox -> projection。
 
-TikHub、JustOne 也可按 `platform + operation` 逐步成为 Hub direct connector，但不是把 provider 参数开放给客户。迁移时保持三个兼容路由和 legacy envelope 不变：先实现统一 connector/evidence contract，以批准的 bounded fixture/call 对比原始兼容响应与 canonical 记录，再由服务端 routing policy 灰度切换并保留 rollback。平台层、供应方 credential/计费策略仍依赖 Night-All 的范围继续走 Night-All；direct connector 同样必须生成 call evidence，并经过 raw -> PG canonical -> outbox -> projection。
+TikHub、JustOne 已按 `platform + operation` 成为 Hub direct connector，但这不把 provider 参数开放给客户。后续迁移仍保持三个兼容路由和 legacy envelope 不变：先实现统一 connector/evidence contract，以批准的 bounded fixture/call 对比原始兼容响应与 canonical 记录，再由服务端 routing policy 灰度切换并保留 rollback。只有尚未迁移、credential/计费策略仍由 Night-All 持有的 operation 继续走 Night-All；direct connector 同样必须生成 call evidence，并经过 raw -> PG canonical -> outbox -> projection。
 
 兼容 snapshot 与 canonical dataset 是两种产品语义。前者只回放 exact legacy response；后者通过 `/api/v1/data/canonical/search` 对 Hub 已存规范化数据做全局授权检索。canonical search 不能用来填充 legacy stale，legacy snapshot 也不能进入 canonical 排序冒充当前全局索引。
 

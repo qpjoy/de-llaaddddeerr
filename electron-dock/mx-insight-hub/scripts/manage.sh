@@ -26,10 +26,36 @@ DEPLOY_PULLED_RUNTIME_IMAGE=""
 DEPLOY_LOCK_DIR=""
 DEPLOY_K8S_NODE_NAME=""
 DEPLOY_FROZEN_ADMIN=0
+DEPLOY_MIGRATION_JOB_ACTIVE=0
 
 say() { printf '[mx-insight-hub] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+
+# A timed-out or interrupted migration must stop before the frozen Admin writer
+# is restored. Otherwise the Job can keep holding schema locks while the old
+# Admin starts accepting writes again.
+terminate_active_migration_job() {
+  [ "$DEPLOY_MIGRATION_JOB_ACTIVE" = 1 ] || return 0
+  say "terminating the active Hub migration Job before restoring Admin" >&2
+  if ! kubectl -n mx-insight-hub delete job mx-insight-hub-migrate \
+    --ignore-not-found --cascade=foreground --wait=true --timeout=90s; then
+    return 1
+  fi
+
+  local remaining_pods=""
+  if ! remaining_pods="$(
+    kubectl -n mx-insight-hub get pods \
+      -l job-name=mx-insight-hub-migrate -o name 2>/dev/null
+  )"; then
+    return 1
+  fi
+  if [ -n "$remaining_pods" ] && ! kubectl -n mx-insight-hub wait --for=delete pod \
+    -l job-name=mx-insight-hub-migrate --timeout=90s; then
+    return 1
+  fi
+  DEPLOY_MIGRATION_JOB_ACTIVE=0
+}
 
 # Execute curl with one sensitive header without placing its value in process
 # argv. The subshell owns a mode-0600 header file and always removes it when the
@@ -139,6 +165,13 @@ cleanup_deploy_runtime() {
   local status=$?
   local lock_owner=""
   trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$DEPLOY_MIGRATION_JOB_ACTIVE" = 1 ] \
+    && command -v kubectl >/dev/null 2>&1; then
+    if ! terminate_active_migration_job; then
+      say "ERROR: migration Job termination could not be confirmed; Hub Admin remains frozen." >&2
+      DEPLOY_FROZEN_ADMIN=0
+    fi
+  fi
   if [ "$status" -ne 0 ] && [ "$DEPLOY_FROZEN_ADMIN" = 1 ] \
     && command -v kubectl >/dev/null 2>&1; then
     say "restoring the Hub Admin replica after an interrupted staged rollout" >&2
@@ -1123,9 +1156,10 @@ create_runtime_config() {
     ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
   )"; then
     if [[ "$justone_preflight_error" == *"contract activation requires"* ]]; then
-      die "JustOne preflight failed: ${justone_preflight_error}. For an independent migration-first deploy with unreviewed upstream pricing, explicitly set MX_INSIGHT_SYNC_LAUNCHER=0 and MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0; migration 056 request metering remains enabled."
+      say "WARNING: JustOne cost-control preflight is incomplete: ${justone_preflight_error}. Hub deployment continues; JustOne operations remain blocked until a reviewed database price book is published from Admin." >&2
+    else
+      die "JustOne preflight failed: ${justone_preflight_error}"
     fi
-    die "JustOne preflight failed: ${justone_preflight_error}"
   fi
   if [ "$justone_contract_verified" != "1" ]; then
     say "JustOne upstream dispatch is disabled by the contract gate; stored Hub data remains available."
@@ -1155,9 +1189,10 @@ create_runtime_config() {
     ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
   )"; then
     if [[ "$tikhub_preflight_error" == *"contract activation requires"* ]]; then
-      die "TikHub preflight failed: ${tikhub_preflight_error}. For an independent migration-first deploy with unreviewed upstream pricing, explicitly set MX_INSIGHT_SYNC_LAUNCHER=0 and the TikHub parent, search and user-activity contract gates to 0; migration 056 request metering remains enabled."
+      say "WARNING: TikHub cost-control preflight is incomplete: ${tikhub_preflight_error}. Hub deployment continues; affected TikHub operations remain blocked until a reviewed database price book is published from Admin." >&2
+    else
+      die "TikHub preflight failed: ${tikhub_preflight_error}"
     fi
-    die "TikHub preflight failed: ${tikhub_preflight_error}"
   fi
   if [ "$tikhub_contract_verified" != "1" ]; then
     say "TikHub upstream dispatch is disabled by the contract gate; stored Hub data remains available."
@@ -1661,6 +1696,21 @@ ensure_api_key_quota_indexes() {
   fi
 }
 
+# Prepare migration 061 without blocking writes on populated evidence ledgers.
+# The SQL installs only its short additive columns/triggers when 061 is still
+# pending, then builds or repairs both large-table indexes CONCURRENTLY. It is
+# safe on a brand-new database: tables not created by earlier migrations yet
+# are skipped and migration 061 creates their empty/small indexes itself.
+ensure_acquisition_history_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/acquisition-history-indexes.sql"
+  [ -r "$sql_file" ] || die "acquisition-history index SQL is missing: ${sql_file}"
+  say "preparing acquisition-history indexes"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "acquisition-history indexes could not be prepared"
+  fi
+}
+
 # Explicit, irreversible removal of the retired local PostgreSQL.
 #
 # Separate command, never part of deploy, and it names what it will destroy
@@ -1705,7 +1755,12 @@ apply_k8s() {
   # only by the explicit `decommission-local-postgres` action.
   warn_local_postgres_present
 
-  # Freeze only the Hub Admin writer while the additive schema and Public API
+  # Install migration 061's writer triggers atomically, then build its large
+  # indexes online while Admin is still available. Concurrent index creation
+  # is bounded and retry-safe and must not lengthen the Admin write freeze.
+  ensure_acquisition_history_indexes
+
+  # Freeze only the Hub Admin writer while the capability schema and Public API
   # are upgraded. This closes the mixed-version window in which an old Admin
   # could issue a legacy-dynamic key, or a new snapshot key could hit an old
   # Public pod. Launcher and MX-H2I are separate workloads and stay online.
@@ -1719,13 +1774,19 @@ apply_k8s() {
     fi
   fi
 
-  kubectl -n "$namespace" delete job mx-insight-hub-migrate --ignore-not-found
+  DEPLOY_MIGRATION_JOB_ACTIVE=1
+  terminate_active_migration_job \
+    || die "previous Hub migration Job could not be terminated"
+  DEPLOY_MIGRATION_JOB_ACTIVE=1
   render_file "${K8S_DIR}/20-migration-job.yaml" | kubectl apply -f -
   if ! kubectl -n "$namespace" wait \
     --for=condition=complete job/mx-insight-hub-migrate --timeout=300s; then
     k8s_migration_diagnostics
+    terminate_active_migration_job \
+      || die "migration timed out and Job termination could not be confirmed; Hub Admin remains frozen"
     die "migration did not complete"
   fi
+  DEPLOY_MIGRATION_JOB_ACTIVE=0
 
   ensure_province_opinion_serving_indexes
   ensure_canonical_context_serving_indexes
@@ -2109,14 +2170,15 @@ print_deploy_summary() {
   if [ -n "${BOOTSTRAP_API_KEY:-}" ]; then
     say "Bootstrap API key : stored in Secret mx-insight-hub-bootstrap (plaintext withheld)"
     say "Quick check       : bash scripts/manage.sh verify-data-path"
-    # capabilities calls Night-All and validates the key; a 200 proves the whole
-    # public → Hub → Night-All path works (independent of per-platform grants).
+    # Capability discovery validates the bootstrap key and Public Hub listener.
+    # It is a local catalog read and intentionally does not probe Night-All or a
+    # paid provider; provider paths are verified explicitly by verify-data-path.
     if curl_with_protected_header \
          'authorization' "Bearer ${BOOTSTRAP_API_KEY}" -fsS \
          "http://127.0.0.1:18150/api/v1/data/capabilities" >/dev/null 2>&1; then
-      say "Night-All data path: OK (capabilities returned through the Hub)."
+      say "Public Hub auth/catalog: OK (capabilities returned)."
     else
-      say "Night-All data path: NOT verified (Hub is up; Night-All at ${NIGHT_ALL_BASE_URL} may be down)."
+      say "Public Hub auth/catalog: NOT verified (check listener and bootstrap key)."
     fi
   fi
   say "SECURITY: hostNetwork binds :18150/:18151 on all host interfaces. Firewall them to the internal net until the public Nginx front is in place."

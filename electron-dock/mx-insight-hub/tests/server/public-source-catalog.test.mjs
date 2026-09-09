@@ -78,7 +78,11 @@ async function withFixture(run, { maxRequests = 100, maxPageSize = 2 } = {}) {
     windowSeconds: 3_600,
     maxPageSize,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Source catalog key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Source catalog key',
+    platforms: ['source_catalog'],
+  })
 
   const owner = await store.createSourceCatalogOwner(normalizeSourceCatalogOwnerCreate({
     ownerKey: 'public-owner',

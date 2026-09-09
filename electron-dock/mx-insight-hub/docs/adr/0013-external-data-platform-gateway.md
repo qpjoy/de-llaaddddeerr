@@ -114,8 +114,9 @@ the key for transport retries of that exact page. Reusing it with a changed requ
 the same query snapshot, not which data was requested. Consequently, reusing a committed Idempotency-Key with a
 different delivery preference replays the original result instead of converting it into a new dispatch.
 
-When a caller omits the key, Hub derives a short-lived freshness-bucket key. This is a convenience and
-duplicate guard, not a durable client replay contract. The gateway additionally holds an exact
+When a caller omits the key, Hub assigns that HTTP call a unique internal key, so it remains a distinct
+metered usage/charge even when an exact cache serves it. Only explicit caller key reuse is a replay. The
+gateway additionally holds an exact
 consumer/operation/fingerprint dispatch lease so two concurrent requests with different `Idempotency-Key` values cannot both
 launch the same provider call and multiply procurement cost. Quota, global concurrency, per-consumer concurrency and the provider circuit
 bound faulty-client amplification.

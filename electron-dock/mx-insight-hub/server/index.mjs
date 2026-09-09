@@ -19,6 +19,7 @@ import { TikHubGateway } from './external-platforms/tikhub-gateway.mjs'
 import { TikHubUserInfoGateway } from './external-platforms/tikhub-user-info-gateway.mjs'
 import { createExternalImageLoader } from './external-platforms/media.mjs'
 import { createExternalPlatformCredentialStore } from './external-platforms/credentials-store.mjs'
+import { createExternalPlatformControlStore } from './external-platforms/control-store.mjs'
 import { createExternalPlatformStore } from './external-platforms/store.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
 import { AgentSettingsStore } from './agent/settings-store.mjs'
@@ -37,6 +38,7 @@ import { TelegramMonitorSourcePreparer } from './ingest/telegram/source-preparer
 import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
+import { PostgresAcquisitionHistoryStore } from './acquisitions/history-store.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -64,6 +66,7 @@ export async function createRuntime(config = loadConfig()) {
   const pool = config.storeDriver === 'postgres'
     ? createPool(config.common.postgres, { applicationName: 'mx-insight-hub-api' })
     : null
+  const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool) : null
   const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
   // Constructed unconditionally; it reports `enabled: false` when no Launcher
   // URL is configured, so the admin-token path is unaffected either way.
@@ -142,6 +145,10 @@ export async function createRuntime(config = loadConfig()) {
     providerKey: 'tikhub',
     environmentConfigured: Boolean(config.tikHub.configured),
   })
+  // Operation rollout is read on every admission/admin request. Environment
+  // flags remain the outer adapter/emergency ceiling; migration-060 rows start
+  // in legacy mode so an existing env=1 deployment does not switch off.
+  const externalPlatformControlStore = createExternalPlatformControlStore({ pool })
   // JustOne is optional and is never a Hub readiness dependency. The admin
   // listener still receives truthful configuration/analytics, while only a
   // listener that serves public APIs constructs the credentialed adapter.
@@ -168,12 +175,14 @@ export async function createRuntime(config = loadConfig()) {
     store: externalPlatformStore,
     config: config.justOne,
     credentialStore: externalPlatformCredentialStore,
+    operationControlStore: externalPlatformControlStore,
     durable: Boolean(pool),
   })
   const tikHubPlatformAdmin = new ExternalPlatformAdminService({
     store: tikHubPlatformStore,
     config: config.tikHub,
     credentialStore: tikHubCredentialStore,
+    operationControlStore: externalPlatformControlStore,
     durable: Boolean(pool),
     providerKey: 'tikhub',
   })
@@ -188,6 +197,8 @@ export async function createRuntime(config = loadConfig()) {
     config: config.justOne,
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore,
+    credentialStore: externalPlatformCredentialStore,
   })
   const tikHubGateway = new TikHubGateway({
     usageStore: store,
@@ -196,6 +207,8 @@ export async function createRuntime(config = loadConfig()) {
     config: config.tikHub,
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore,
+    credentialStore: tikHubCredentialStore,
   })
   const tikHubUserInfoGateway = new TikHubUserInfoGateway({
     usageStore: store,
@@ -204,26 +217,46 @@ export async function createRuntime(config = loadConfig()) {
     config: config.tikHub,
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore,
+    credentialStore: tikHubCredentialStore,
   })
   // The split Admin listener deliberately has no provider adapter or secret.
   // Its readiness indicator therefore uses only safe, shared credential
   // metadata; Public/combined listeners continue to verify the live resolver.
   const externalPostCapabilities = config.listenerMode === 'admin'
-    ? async () => {
+    ? async (options = {}) => {
         try {
           const credential = await tikHubCredentialStore.describeCredential('tikhub')
-          return {
-            ready: Boolean(
+          return tikHubGateway.capabilities({
+            ...options,
+            credentialConfigured: Boolean(
               config.tikHub.contractVerified
               && !config.tikHub.configurationError
               && credential.credentialConfigured
             ),
-          }
+          })
         } catch {
           return { ready: false }
         }
       }
-    : () => tikHubGateway.capabilities()
+    : (options) => tikHubGateway.capabilities(options)
+  const externalEcommerceCapabilities = config.listenerMode === 'admin'
+    ? async (options = {}) => {
+        try {
+          const credential = await externalPlatformCredentialStore.describeCredential('justone')
+          return externalPlatformGateway.capabilities({
+            ...options,
+            credentialConfigured: Boolean(
+              config.justOne.contractVerified
+              && !config.justOne.configurationError
+              && credential.credentialConfigured
+            ),
+          })
+        } catch {
+          return { ready: false }
+        }
+      }
+    : (options) => externalPlatformGateway.capabilities(options)
   const service = new HubService({
     store,
     adapter,
@@ -231,7 +264,7 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,
     segmenter,
-    externalPlatformCapabilities: () => externalPlatformGateway.capabilities(),
+    externalPlatformCapabilities: externalEcommerceCapabilities,
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     // New first pages cut over only after the verified TikHub adapter is
@@ -286,6 +319,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformAdmin,
     externalPlatformGateway,
     tikHubGateway,
+    acquisitionHistory,
     segmenterConfig: config.common.segmenter,
     launcherAudience: config.launcher.audience,
     backfillPlatforms: config.backfill.platforms,
@@ -299,7 +333,9 @@ export async function createRuntime(config = loadConfig()) {
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore,
+    acquisitionHistory,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
+    externalPlatformControlStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
   }
 }

@@ -409,10 +409,10 @@ Use the same `Idempotency-Key` only when retrying the exact same
 path and page body. The key permanently binds that request; reusing it with a
 different body returns `409 idempotency_conflict`. Every continuation has a
 different body and **must use a new Idempotency-Key**. When the header is
-omitted, Hub derives a short-lived key from the active API-key identity,
-freshness bucket and normalized request. This keeps rotated keys independently
-accountable while their consumer can still share an exact snapshot; clients
-must not rely on the generated key for durable replay.
+omitted, Hub assigns a unique internal key to that HTTP call. It is therefore a
+distinct metered usage/charge even if an exact consumer snapshot serves it;
+snapshot and provider-dispatch suppression remain independent. Durable replay
+requires the caller to supply and explicitly reuse a key.
 
 The response is provider-neutral:
 
@@ -459,6 +459,18 @@ The response is provider-neutral:
   `fallbackReason`, and HTTP `Warning: 110 - "Response is stale"`;
 - `idempotent_replay`: the committed result for the same caller `Idempotency-Key`, path, and
   body was replayed without another external call.
+
+If a live acquisition reaches database operation control and no exact fallback
+can be delivered, its policy state is exposed without umbrella remapping:
+
+- `503 external_platform_operation_disabled`: the operation is explicitly disabled;
+- `503 external_platform_operation_shadow`: it is validation-only and cannot create a customer dispatch;
+- `503 external_platform_operation_paused`: new provider calls are incident-paused;
+- `503 external_platform_operation_canary`: the consumer is outside the exact canary allowlist;
+- `503 external_platform_operation_blocked`: release, contract, credential or reviewed-cost prerequisites block dispatch.
+
+The provider call-rate admission code is `429 external_platform_rate_limited`;
+it is distinct from consumer quota, Hub concurrency and provider capacity.
 
 ### Ecommerce product media relay
 
@@ -725,9 +737,9 @@ Successful responses preserve the stable Night-All data-search envelope and add:
 Direct Xiaohongshu errors add `403 test_key_not_supported`,
 `400 invalid_page_size|cursor_scope_mismatch`,
 `409 external_platform_response_unusable`,
-`429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded`,
+`429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted`,
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected`,
-and `503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable`.
+and `503 external_platform_unavailable|external_platform_not_configured|external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete|external_platform_operation_disabled|external_platform_operation_shadow|external_platform_operation_paused|external_platform_operation_canary|external_platform_operation_blocked`.
 
 When this route uses the historical path, `mxnc1` is authenticated-encrypted and
 bound to the consumer, operation (`data-search`), platform, stable query scope
@@ -745,11 +757,11 @@ These transitional routes preserve the three existing request aliases and
 standard raw response envelope behind the Hub trust boundary. Hub selects the
 implementation; the caller never selects a provider:
 
-| Hub route | Historical operation | Required selector | Historical complete snapshot window |
-| --- | --- | --- | ---: |
-| `POST /api/v1/night-all/search/raw` | `/api/v1/search/raw` | `keyword`, `query`, `keywords` or `queries` | 15 minutes |
-| `POST /api/v1/night-all/search/crawl` | `/api/v1/search/crawl` | a user/channel identifier | 1 hour |
-| `POST /api/v1/night-all/search/user-info` | `/api/v1/search/user-info` | a user identifier | 1 hour |
+| Hub route | Historical operation | Required selector | Xiaohongshu operation grant | Historical complete snapshot window |
+| --- | --- | --- | --- | ---: |
+| `POST /api/v1/night-all/search/raw` | `/api/v1/search/raw` | `keyword`, `query`, `keywords` or `queries` | `social.posts.search` | 15 minutes |
+| `POST /api/v1/night-all/search/crawl` | `/api/v1/search/crawl` | a user/channel identifier | `social.users.posts` | 1 hour |
+| `POST /api/v1/night-all/search/user-info` | `/api/v1/search/user-info` | a user identifier | `social.users.resolve` | 1 hour |
 
 The three historical operation spellings in the second column are also active
 Hub route aliases. Each alias and its `/night-all/search/*` spelling enter the
@@ -758,7 +770,11 @@ authorize or purchase a second upstream dispatch.
 
 All three require `Authorization: Bearer <mx key>` (or `x-api-key`), an
 `Idempotency-Key` of 8–128 safe characters, one explicit platform, and that
-platform's consumer grant. `all` and `*` are invalid. For example:
+platform's consumer grant. When the platform is `xiaohongshu`, the key's
+immutable scope and the consumer must also include the operation grant in the
+table. The same mapping applies before either Hub-native direct execution or
+historical compatibility dispatch and to both route spellings. `all` and `*`
+are invalid. For example:
 
 ```http
 POST /api/v1/night-all/search/raw
@@ -858,6 +874,11 @@ non-20 crawl pages, custom cache/params controls and every unsupported shape
 remain on Night-All. An existing direct crawl cursor remains pinned to the
 Hub-native connector when the first-page gate is later closed.
 
+On this Hub-native slice, a non-official Xiaohongshu profile URL returns `400
+invalid_user_profile_url`, a page conflicting with its direct crawl cursor
+returns `400 cursor_page_mismatch`, and a user that cannot be resolved returns
+`404 user_not_found`.
+
 Direct routing does not remove Xiaohongshu from `data.legacySearch`. For a key
 granted both Xiaohongshu and Twitter, every `raw`, `crawl`, and `user-info`
 matrix entry still includes both platforms in `supportedPlatforms` and
@@ -956,6 +977,14 @@ For an eligible Hub-native Xiaohongshu raw request, the corresponding safe
 errors use the `external_platform_*` codes documented for `/data/search`,
 including `external_platform_rate_limited`; they are not relabeled as
 `night_all_rejected`.
+
+The five database operation-control rejections retain their exact 503 codes on
+Hub-native raw, crawl and user-info paths: `external_platform_operation_disabled`
+means explicitly disabled, `external_platform_operation_shadow` means
+validation-only, `external_platform_operation_paused` means incident-paused,
+`external_platform_operation_canary` means the consumer is outside the recorded
+canary allowlist, and `external_platform_operation_blocked` means a release,
+contract, credential or reviewed-cost prerequisite is not ready.
 
 An ambiguous request must not be automatically retried with a new `Idempotency-Key`. A
 dispatched compatibility error includes the durable Hub ID as
@@ -2023,15 +2052,29 @@ second dispatch for an otherwise identical request. This compatibility name is
 owned by Hub; the public result remains the stable Hub schema.
 
 Five separate App V2-compatible GET surfaces preserve the acquired business
-envelope instead of returning that Hub projection:
+envelope instead of returning that Hub projection. Every row requires the
+`xiaohongshu` platform grant, `compat.xiaohongshu.app_v2` compatibility grant,
+and the listed operation grant in both the key snapshot and current consumer
+authorization:
 
-- `/api/v1/xiaohongshu/app_v2/get_image_note_detail` — `note_id|share_text`;
-- `/api/v1/xiaohongshu/app_v2/search_notes` — `keyword`, `page`, `sort_type`,
-  `note_type`, `time_filter`, `search_id`, `search_session_id`, `source`, `ai_mode`;
-- `/api/v1/xiaohongshu/app_v2/search_users` — `keyword`, `page`, `search_id`, `source`;
-- `/api/v1/xiaohongshu/app_v2/get_user_info` — `user_id|share_text`;
-- `/api/v1/xiaohongshu/app_v2/get_user_posted_notes` —
-  `user_id|share_text`, plus the preceding Hub-issued opaque `cursor`.
+| GET path | Input | Operation grant |
+| --- | --- | --- |
+| `/api/v1/xiaohongshu/app_v2/get_image_note_detail` | `note_id|share_text` | `social.posts.resolve` |
+| `/api/v1/xiaohongshu/app_v2/search_notes` | `keyword`, `page`, `sort_type`, `note_type`, `time_filter`, `search_id`, `search_session_id`, `source`, `ai_mode` | `social.posts.search` |
+| `/api/v1/xiaohongshu/app_v2/search_users` | `keyword`, `page`, `search_id`, `source` | `social.users.resolve` |
+| `/api/v1/xiaohongshu/app_v2/get_user_info` | `user_id|share_text` | `social.users.resolve` |
+| `/api/v1/xiaohongshu/app_v2/get_user_posted_notes` | `user_id|share_text`, plus the preceding Hub-issued opaque `cursor` | `social.users.posts` |
+
+Each identity-shaped route requires at least one selector from its documented
+`ID|share_text` pair. When both are present, `note_id` or `user_id` takes
+precedence respectively; that same normalized selector binds idempotency and
+snapshot identity.
+
+Each App V2 endpoint is its own compatibility contract and uses an exact
+endpoint-plus-normalized-query idempotency namespace. These GETs are not a
+fourth alias of canonical `/api/v1/data/post`; an `Idempotency-Key` must not be
+carried across App V2 endpoints or between an App V2 GET and the three Hub
+projection entries.
 
 `search_notes` accepts only the documented App V2 filters: `sort_type` is one of
 `general|time_descending|popularity_descending|comment_descending|collect_descending|english_preferred`;
@@ -2043,12 +2086,15 @@ These routes still enforce Hub Live-Key authorization, immutable grants, quota,
 provider cost admission, idempotency, exact restricted archive and canonical
 ingest/outbox. `page` is limited to `1..15`; user-post traversal terminates at
 page 15. The response preserves text, tags, interactions, signed media URLs,
-`params`, `search_id` and `search_session_id`; Hub applies no field-level text
+`params`, `search_id` and `search_session_id`; only the user-post provider
+pagination controls are replaced by the governed opaque Hub cursor/has-more
+state. Hub applies no field-level text
 ceiling. Search may contain an official preview, so callers use the detail route
 for complete note text. Only an exact active Hub-to-upstream credential is
 removed if echoed; request Authorization, Cookie and API-key headers are never
-copied into the response. `Idempotency-Key` is optional on these GETs because
-Hub can derive an API-key-scoped freshness-bucket key.
+copied into the response. `Idempotency-Key` is optional on these GETs; when it
+is absent, every HTTP call receives a unique internal key and is metered
+separately. Only exact caller-supplied key reuse is an idempotent replay.
 
 The POST body accepts only `platform`, `url`, and `deliveryMode`. `platform` must be
 `xiaohongshu` on the canonical path. `url` must be an official
@@ -2061,9 +2107,10 @@ same delivery semantics as ecommerce. `refresh` requires a caller-supplied
 automatically converted into a second external call. A supplied key is scoped
 to the consumer and remains bound to the API key that first used it, so another
 API key gets `409 idempotency_conflict`. If `cache_only` or `cache_first` omits
-the header, Hub derives an API-key-scoped freshness-bucket key: separate API
-keys keep separate usage attribution, while consumer-scoped snapshots and the
-dispatch lease still suppress duplicate external acquisition.
+the header, Hub assigns a unique internal key to every HTTP call, including
+successes served from cache. Each call has separate usage/charge attribution,
+while consumer-scoped snapshots and the dispatch lease still suppress duplicate
+external acquisition.
 
 Authorization requires all of the following:
 
@@ -2098,9 +2145,13 @@ The success contract is `mx-insight-hub.social-post.v1`:
     "title": "示例标题",
     "text": "示例正文",
     "tags": ["旅行", "杭州"],
-    "author": { "id": "author-id", "name": "作者", "avatarUrl": null },
+    "author": { "id": "author-id", "name": "作者", "avatarUrl": "https://sns-avatar.example/avatar.webp" },
     "metrics": { "liked": 12, "collected": 3, "comments": 4, "shared": 1 },
-    "media": [{ "type": "image", "url": "/api/v1/data/posts/media?requestId=00000000-0000-4000-8000-000000000001&mediaIndex=0" }],
+    "media": [{
+      "type": "image",
+      "url": "https://sns-img.example/note.webp?signature=source-value",
+      "hubRelayUrl": "/api/v1/data/posts/media?requestId=00000000-0000-4000-8000-000000000001&mediaIndex=0"
+    }],
     "publishedAt": "2026-09-07T00:00:00.000Z",
     "collectedAt": "2026-09-07T00:00:01.000Z"
   } },
@@ -2114,12 +2165,14 @@ The success contract is `mx-insight-hub.social-post.v1`:
 }
 ```
 
-Provider identity, credential, endpoint, raw envelope, upstream media/avatar
-URLs, diagnostic cache URL, procurement price and customer invoice are
-intentionally absent. `author.avatarUrl` is currently `null`; every
-`media[].url` is already a same-origin Hub relay locator bound to the owning
-consumer, committed response and media index. Fetch that locator with the same
-consumer's Live Key (then render the returned bytes as a Blob):
+Provider credential, endpoint, raw envelope, diagnostic cache URL, procurement
+price and customer invoice are intentionally absent. Business payload is not
+desensitized or filtered: `author.avatarUrl` and each `media[].url` preserve the
+accepted source value. Media indexes `0..19` also have an additive
+`media[].hubRelayUrl` bound to the owning consumer, committed response and media
+index; later source media remain intact without a relay locator. Fetch an
+available locator with the same consumer's Live Key (then render the returned
+bytes as a Blob):
 
 ```http
 GET /api/v1/data/posts/media?requestId=<response requestId>&mediaIndex=0
@@ -2139,10 +2192,13 @@ Stable errors include `400 invalid_post_url|invalid_platform|unsupported_fields`
 `403 platform_not_granted|capability_not_granted|test_key_not_supported`,
 `404 post_not_found|stored_snapshot_not_found`, `409 request_in_progress|`
 `idempotency_conflict|request_outcome_unknown|uncertain_retry_not_allowed`,
-`429 quota_exceeded|external_platform_busy|external_platform_capacity_exceeded`,
+`429 quota_exceeded|external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted`,
 `502 external_platform_response_unusable|external_platform_outcome_unknown|`
-`external_platform_rejected`, and `503 external_platform_not_configured|`
-`external_platform_circuit_open|external_platform_capacity_unavailable`.
+`external_platform_rejected`, and `503 external_platform_unavailable|external_platform_not_configured|`
+`external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|`
+`external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete|`
+`external_platform_operation_disabled|external_platform_operation_shadow|external_platform_operation_paused|`
+`external_platform_operation_canary|external_platform_operation_blocked`.
 An accepted but missing/invalid note can still consume external capacity, so
 the Hub negative-caches only the narrowly verified request-local miss and does
 not automatically retry it.
@@ -2195,6 +2251,31 @@ replacement key. A key owned by another consumer receives `404
 request_not_found`, so callers cannot probe another consumer's ledger. Clients
 must not place the idempotency key in a URL query or path.
 
+## Acquisition exact-delivery evidence
+
+```http
+GET /api/v1/acquisitions/{requestId}
+Authorization: Bearer <the same active Hub Public API key that created the request>
+```
+
+This read-only route reproduces the exact committed JSON body previously
+delivered for the durable request UUID. A successful result uses
+`mx-insight-hub.acquisition-query-run.v1`; `data.delivered.responseBody` is the
+delivered body, and `responseHash` with
+`responseHashContract=sha256-canonical-json-v1` provides stable semantic
+verification. The same object records the response status, source mode,
+capture/completion times and bounded gateway events. `customerCharge` is the
+downstream charge evidence, while `items[]` preserves the safe canonical
+lineage in delivery order.
+
+The query creates no usage, provider call or upstream dispatch and never
+re-runs the original request. Unlike the consumer-scoped status lookup, full
+delivery evidence is key-bound: a rotated key for the same consumer, a
+zero-scope key, a foreign key or an unknown UUID receives `404
+acquisition_query_run_not_found`. The management recovery path remains
+available after key rotation. A request without a provably committed response
+body returns `409`; clients must not treat this evidence lookup as a retry.
+
 ## Usage
 
 ```http
@@ -2243,7 +2324,10 @@ content-type/JSON/envelope maps to `502 upstream_outcome_unknown`, not `504`; th
 request becomes `unknown`. When an unexpired exact complete snapshot exists, those
 ambiguous outcomes or a real non-2xx `502/503/504` instead return a successful
 stale response with the source/age headers documented above. Partial HTTP 200 is
-returned live and never replaced by stale.
+returned live and never replaced by stale. These compatibility routes do not
+return `410 search_cursor_expired`; that error remains on PIT-backed Hub search
+operations such as `/data/search`, `/data/stored/search`, and
+`/data/canonical/search`.
 
 Tokenizer errors add `capability_not_granted`, `tokenizer_unavailable` and
 `tokenizer_invalid_response`. Any segmenter exception is mapped to a fixed safe

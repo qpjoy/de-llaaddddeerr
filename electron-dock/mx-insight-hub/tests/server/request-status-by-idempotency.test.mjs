@@ -36,8 +36,16 @@ async function withFixture(run) {
       maxPageSize: 100,
     })
   }
-  const ownerKey = await service.createApiKey({ consumerId: owner.id, name: 'Owner key' })
-  const otherKey = await service.createApiKey({ consumerId: other.id, name: 'Other key' })
+  const ownerKey = await service.createApiKey({
+    consumerId: owner.id,
+    name: 'Owner key',
+    platforms: ['ecommerce'],
+  })
+  const otherKey = await service.createApiKey({
+    consumerId: other.id,
+    name: 'Other key',
+    platforms: ['ecommerce'],
+  })
   const server = createServer(createApp({
     service,
     store,

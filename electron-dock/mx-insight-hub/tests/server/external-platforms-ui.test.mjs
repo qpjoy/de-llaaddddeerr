@@ -21,6 +21,8 @@ async function sources() {
 // detail = { contractVersion, range, generatedAt, provider,
 //   pipeline: [{ key, label, description, status }],
 //   credential: { source, revision, credentialConfigured, revealable, updatedAt },
+//   operations: [{ operationKey, desiredState, effectiveState, revision,
+//     blockers, release, priceBook }],
 //   timeSeries: [{ bucket, hubRequests, successfulHubRequests, hubSuccessRate,
 //     upstreamCalls, freshCache, storedFallback, idempotentReplay, knownCostMinor }],
 //   capabilities: [{ capability, label, hubContractVersion, providerMapping,
@@ -35,7 +37,45 @@ test('external-platform admin facade uses bounded range queries and encoded prov
   assert.match(apiSource, /externalPlatforms: \(token, query = \{\}\) => request\([\s\S]*?`\$\{ADMIN_ROOT\}\/external-platforms`, \{ query \}/u)
   assert.match(apiSource, /externalPlatform: \(token, key, query = \{\}\) => request\([\s\S]*?`\$\{ADMIN_ROOT\}\/external-platforms\/\$\{encodeURIComponent\(key\)\}`, \{ query \}/u)
   assert.match(apiSource, /updateExternalPlatformCredential:[\s\S]*?encodeURIComponent\(key\)[\s\S]*?\/credential`[\s\S]*?method: 'PUT'/u)
+  assert.match(apiSource, /updateExternalPlatformOperationPolicy:[\s\S]*?encodeURIComponent\(key\)[\s\S]*?\/operations\/\$\{encodeURIComponent\(operation\)\}\/policy`[\s\S]*?method: 'PUT'[\s\S]*?body/u)
   assert.match(apiSource, /revealExternalPlatformCredential:[\s\S]*?encodeURIComponent\(key\)[\s\S]*?\/credential\/reveal`[\s\S]*?method: 'POST'[\s\S]*?body: \{ adminToken \}/u)
+})
+
+test('external-platform detail provides DB-backed upstream operation controls and price recovery', async () => {
+  const [appSource, apiSource, pageSource] = await sources()
+  const route = appSource.match(/\{ path: '\/external-platforms',[^\n]+\}/u)?.[0] || ''
+
+  assert.match(route, /adminTokenOnly: true/u)
+  assert.match(pageSource, /operations: normalizeOperations\(envelope, root\)/u)
+  assert.match(pageSource, /updateExternalPlatformOperationPolicy\([\s\S]*?token,[\s\S]*?provider,[\s\S]*?operation\.operationKey,[\s\S]*?body/u)
+  assert.match(apiSource, /x-mx-insight-admin-token': token/u)
+
+  for (const action of [
+    "{ value: 'shadow', label: '校验' }",
+    "{ value: 'canary', label: '灰度' }",
+    "{ value: 'active', label: '启用', primary: true }",
+    "{ value: 'paused', label: '暂停' }",
+    "{ value: 'disabled', label: '停用' }",
+  ]) assert.match(pageSource, new RegExp(action.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
+
+  for (const field of [
+    'expectedRevision',
+    'desiredState',
+    'reason: submittedReason',
+    'canaryConsumerIds',
+    'priceBook',
+    'currency',
+    'pricingAsOf',
+    'monthlyBudgetMinor',
+    'monthlySubsidyBudgetMinor',
+    'unitCostMinorByEndpoint',
+  ]) assert.match(pageSource, new RegExp(`\\b${field}\\b`, 'u'))
+
+  assert.match(pageSource, /当前阻断项/u)
+  assert.match(pageSource, /变更原因[\s\S]*?必填/u)
+  assert.match(pageSource, /当环境变量中没有价格时[\s\S]*?无需手工 SQL/u)
+  assert.match(pageSource, /下游 API Key [\s\S]*?“开放能力”中独立管理/u)
+  assert.match(pageSource, /仅 Admin Token 可写/u)
 })
 
 test('JustOne credential UI keeps normal DTOs secret-free and requires step-up reveal', async () => {

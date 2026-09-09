@@ -80,11 +80,24 @@ const PLATFORM_CATALOG = [
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }
 const CAPABILITY_CATALOG = {
+  'compat.xiaohongshu.app_v2': {
+    group: 'compatibility',
+    label: '小红书 App V2 兼容接口',
+    description: '允许调用 Hub 管理的 App V2 provider-compatible 路径；不会暴露或绑定物理供应商凭证',
+    endpoint: 'GET /api/v1/xiaohongshu/app_v2/*',
+    usageHint: '还需同时授予 xiaohongshu 数据域及每个 endpoint 对应的业务能力',
+  },
   'nlp.tokenize': {
     label: '中文分词',
     description: 'HanLP → Jieba → CJK bigram，响应明确本次实际后端与降级状态',
     endpoint: 'POST /api/v1/tools/tokenize',
     usageHint: 'curl 粘贴即运行并静默读取 Key；旧 API Key 不会被读取或回显',
+  },
+  'ecommerce.products.search': {
+    label: '电商商品搜索',
+    description: '通过 Hub 统一商品合同读取缓存或调用已开通的外部数据平台；可能产生外部数据成本',
+    endpoint: 'POST /api/v1/data/ecommerce/products/search',
+    usageHint: '还需同时授予 ecommerce 数据域；每把 Key 都要显式包含此业务操作',
   },
   'public_opinion.all_ingested.read': {
     label: '全量安全舆情读取',
@@ -97,6 +110,24 @@ const CAPABILITY_CATALOG = {
     description: '按官方笔记链接获取正文、作者、标签、互动量与媒体清单；可能产生外部数据成本',
     endpoint: 'POST /api/v1/data/post',
     usageHint: '当前需同时授予 xiaohongshu 平台；历史 Key 不会自动获得此能力',
+  },
+  'social.posts.search': {
+    label: '社交笔记搜索',
+    description: '按关键词调用已开通的小红书笔记搜索接口；可能产生外部数据成本',
+    endpoint: 'GET /api/v1/xiaohongshu/app_v2/search_notes',
+    usageHint: '需同时授予 xiaohongshu 平台；每把 Key 都要显式包含此能力',
+  },
+  'social.users.resolve': {
+    label: '社交用户资料',
+    description: '搜索用户或按用户 ID 获取资料；可能产生外部数据成本',
+    endpoint: 'GET /api/v1/xiaohongshu/app_v2/get_user_info',
+    usageHint: '需同时授予 xiaohongshu 平台；同一能力覆盖 search_users 与 get_user_info',
+  },
+  'social.users.posts': {
+    label: '社交用户笔记',
+    description: '按用户获取已发布笔记并使用 Hub 不透明游标翻页；可能产生外部数据成本',
+    endpoint: 'GET /api/v1/xiaohongshu/app_v2/get_user_posted_notes',
+    usageHint: '需同时授予 xiaohongshu 平台；每把 Key 都要显式包含此能力',
   },
 }
 
@@ -915,6 +946,12 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const writableConsumers = consumers.filter((consumer) => tenantAllows(session, consumer.tenantId, 'apikey.write'))
   const canIssueKey = writableConsumers.length > 0
   const consumerNames = new Map(consumers.map((consumer) => [consumer.id, consumer.name]))
+  const compatibilityScopeOptions = scopeOptions.capabilities.filter((capability) => (
+    CAPABILITY_CATALOG[capability]?.group === 'compatibility'
+  ))
+  const operationScopeOptions = scopeOptions.capabilities.filter((capability) => (
+    CAPABILITY_CATALOG[capability]?.group !== 'compatibility'
+  ))
 
   const applyScopes = async (targetConsumerId, requestedScopes = null) => {
     const generation = ++scopeRequestRef.current
@@ -933,10 +970,10 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         capabilities: [...(configuration?.capabilityGrants || [])].sort(),
       }
       setScopeOptions(scopes)
-      const selectedScopes = requestedScopes ? {
+      const selectedScopes = requestedScopes === 'legacy_all' ? scopes : requestedScopes ? {
         platforms: scopes.platforms.filter((value) => requestedScopes.platforms?.includes(value)),
         capabilities: scopes.capabilities.filter((value) => requestedScopes.capabilities?.includes(value)),
-      } : scopes
+      } : { platforms: [], capabilities: [] }
       setForm((current) => current.consumerId === targetConsumerId
         ? { ...current, platforms: selectedScopes.platforms, capabilities: selectedScopes.capabilities }
         : current)
@@ -975,7 +1012,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     setRotationSource(key)
     setFormError(null)
     setOpen(true)
-    await applyScopes(key.consumerId, key.scopeMode === 'legacy_dynamic' ? null : {
+    await applyScopes(key.consumerId, key.scopeMode === 'legacy_dynamic' ? 'legacy_all' : {
       platforms: key.platforms || [],
       capabilities: key.capabilities || [],
     })
@@ -1131,7 +1168,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           title={rotationSource ? '签发替代 API Key' : '签发 API Key'}
           description={rotationSource
             ? '先签发不超过旧 Key 有效范围的替代 Key；安全保存并完成客户端切换后，再显式撤销旧 Key。'
-            : '先选择调用者，再从其当前授权中勾选这把 Key 的不可变范围；完整 secret 只显示一次。'}
+            : '新 Key 默认不包含任何平台或能力，也可保持零权限；需要调用时再显式勾选不可变范围。完整 secret 只显示一次。'}
           onClose={() => {
             if (!saving) {
               scopeRequestRef.current += 1
@@ -1142,7 +1179,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           footer={(
             <>
               <button className="qp-button qp-button--ghost" type="button" onClick={() => setOpen(false)} disabled={saving}>取消</button>
-              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading || (form.platforms.length === 0 && form.capabilities.length === 0)}>{saving ? '正在签发' : rotationSource ? '签发替代 Key' : '签发密钥'}</button>
+              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading}>{saving ? '正在签发' : rotationSource ? '签发替代 Key' : '签发密钥'}</button>
             </>
           )}
         >
@@ -1155,7 +1192,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <Field label="密钥名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
             </Field>
-            <Field label="平台范围" hint="只展示调用者当前已授权的平台；扩大范围需要签发新 Key。">
+            <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，扩大范围需要签发新 Key。">
               <div className="mih-key-scopes">
                 {scopeOptions.platforms.map((platform) => (
                   <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.platforms?.includes(platform))} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
@@ -1163,12 +1200,20 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权，请先到“开放能力”配置。</small> : null}
               </div>
             </Field>
-            <Field label="能力范围" hint="产生外部费用的操作采用独立能力授权，不随平台授权自动开启。">
+            <Field label="业务操作" hint="决定 Key 可以执行什么；产生外部费用的操作不随数据域授权自动开启。">
               <div className="mih-key-scopes">
-                {scopeOptions.capabilities.map((capability) => (
+                {operationScopeOptions.map((capability) => (
                   <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
                 ))}
-                {!scopeLoading && scopeOptions.capabilities.length === 0 ? <small>暂无通用能力授权。</small> : null}
+                {!scopeLoading && operationScopeOptions.length === 0 ? <small>暂无业务操作授权。</small> : null}
+              </div>
+            </Field>
+            <Field label="兼容接口合同" hint="仅授权 provider-compatible 接口形状；仍需同时勾选对应数据域和业务操作。">
+              <div className="mih-key-scopes">
+                {compatibilityScopeOptions.map((capability) => (
+                  <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
+                ))}
+                {!scopeLoading && compatibilityScopeOptions.length === 0 ? <small>暂无兼容接口合同授权。</small> : null}
               </div>
             </Field>
             <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
@@ -1937,6 +1982,8 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       endpoint: '—',
     },
   }))
+  const businessOperationRows = capabilityRows.filter((row) => row.metadata.group !== 'compatibility')
+  const compatibilityCapabilityRows = capabilityRows.filter((row) => row.metadata.group === 'compatibility')
   const selectedTenant = data.tenants.find((tenant) => tenant.id === data.tenantId)
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
   const contextMatchesRequest = (
@@ -2096,7 +2143,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           <span><Cloud size={19} weight="duotone" aria-hidden="true" /></span>
           <div>
             <strong>对外授权 Hub 数据域，对内选择上游适配器</strong>
-            <p>可归一化的商品检索统一授权 <code>ecommerce</code>；列表里的具体平台仅保留给“平台身份本身就是接口语义”的兼容能力。调用方只持有同一把 Hub API Key，不会看到或指定供应方。</p>
+            <p>数据产品只是“数据域 + 业务操作”的权限组合；provider-compatible 接口再叠加兼容合同授权。调用方只持有同一把 Hub API Key，不会看到或指定供应方。</p>
           </div>
         </div>
         <div className="mih-provider-routing-boundary__flow" aria-label="电商请求分流">
@@ -2107,7 +2154,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           <span><small>ROUTING BOUNDARY</small><strong>Hub 内部路由</strong></span>
         </div>
         <footer>
-          <span>供应商选择、健康、采购成本与游标绑定均由 Hub 内部治理；租户只看开放能力、合同费率与交付结果。客户始终使用同一把 Hub API Key。</span>
+          <span>上游连接器、供应商选择、健康、采购成本与游标绑定均由 Admin 内部治理；租户只看数据域、业务操作、兼容合同、费率与交付结果。</span>
           {session?.platformAdmin && session?.kind === 'admin-token' ? <a className="qp-button qp-button--ghost qp-button--sm" href="#/external-platforms?range=24h">管理内部上游<ArrowRight size={15} aria-hidden="true" /></a> : null}
         </footer>
       </section>
@@ -2165,13 +2212,29 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         )}
       </Panel>
 
-      <Panel title="通用开放 API" subtitle={`${capabilityGrants.size} / ${capabilityRows.length} 已启用；调用者总配额与 Key 独立额度同时生效，不授予数据集读取权限`}>
-        {data.consumerId ? (
-          capabilityRows.length ? (
-            <Table label="通用 API 授权与策略">
+      {[
+        {
+          key: 'operations',
+          title: '业务操作',
+          subtitle: '决定调用者可以执行什么；与数据域共同生效，数据产品只组合底层权限',
+          rows: businessOperationRows,
+          tableLabel: '业务操作授权与策略',
+        },
+        {
+          key: 'compatibility',
+          title: '兼容接口合同',
+          subtitle: '只开放兼容接口形状，不代表可指定或查看物理上游连接器',
+          rows: compatibilityCapabilityRows,
+          tableLabel: '兼容接口合同授权与策略',
+        },
+      ].map((section) => (
+        <Panel key={section.key} title={section.title} subtitle={`${section.rows.filter((row) => row.enabled).length} / ${section.rows.length} 已启用；${section.subtitle}`}>
+          {data.consumerId ? (
+            section.rows.length ? (
+              <Table label={section.tableLabel}>
               <thead><tr><th>能力</th><th>授权</th><th>运行状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>操作</th></tr></thead>
               <tbody>
-                {capabilityRows.map((row) => (
+                {section.rows.map((row) => (
                   <tr key={row.capability}>
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
@@ -2206,14 +2269,15 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                   </tr>
                 ))}
               </tbody>
-            </Table>
+              </Table>
+            ) : (
+              <EmptyState icon={Globe} title={`当前版本没有可配置的${section.title}`} description="升级 Hub 后刷新能力目录。" />
+            )
           ) : (
-            <EmptyState icon={Globe} title="当前版本没有可配置的通用能力" description="升级 Hub 后刷新能力目录。" />
-          )
-        ) : (
-          <EmptyState icon={Globe} title="请选择调用者" description="通用 API 授权与配额同样绑定到具体调用者。" />
-        )}
-      </Panel>
+            <EmptyState icon={Globe} title="请选择调用者" description={`${section.title}授权与配额同样绑定到具体调用者。`} />
+          )}
+        </Panel>
+      ))}
 
       {configureTarget && canUpdatePlatform ? (
         <Modal

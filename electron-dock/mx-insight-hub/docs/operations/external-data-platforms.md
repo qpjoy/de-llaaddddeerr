@@ -18,18 +18,24 @@ procurement cost, separately from scheduled cleaning jobs. Public callers use on
 
 - `POST /api/v1/data/ecommerce/products/search` with the `ecommerce` platform entitlement;
 - `POST /api/v1/xiaohongshu/app/get_note_info` with a JSON note link, plus both the `xiaohongshu` platform
-  entitlement and `social.posts.resolve` capability entitlement. Hub also retains GET `share_text`/`note_id`
-  at both `/api/v1/xiaohongshu/app/get_note_info` and the official-shaped
-  `/api/v1/xiaohongshu/app_v2/get_image_note_detail`, plus the provider-neutral `POST /api/v1/data/post`;
-  all four share one canonical operation, note identity,
-  snapshots and external-dispatch suppression rather than being purchased or metered independently. Exact
-  idempotency additionally binds the delivery mode;
+  entitlement and `social.posts.resolve` capability entitlement. Hub also retains legacy GET
+  `share_text`/`note_id` at `/api/v1/xiaohongshu/app/get_note_info` plus the provider-neutral
+  `POST /api/v1/data/post`; these three Hub projection entries share one canonical operation, note identity,
+  snapshot, external-dispatch suppression and delivery-mode-bound idempotency namespace;
+- five official-shaped `/api/v1/xiaohongshu/app_v2/*` GETs as separate compatibility contracts and separate
+  endpoint-plus-normalized-query idempotency namespaces. Every endpoint requires the `xiaohongshu` platform
+  and `compat.xiaohongshu.app_v2` grants, plus `social.posts.resolve` for `get_image_note_detail`,
+  `social.posts.search` for `search_notes`, `social.users.resolve` for `search_users` and `get_user_info`, or
+  `social.users.posts` for `get_user_posted_notes`;
 - `POST /api/v1/data/search` for an eligible Xiaohongshu page, with the `xiaohongshu` platform entitlement;
 - the eligible Xiaohongshu subset of `POST /api/v1/night-all/search/raw`, projected back into the existing
-  compatibility envelope so callers do not select or learn a physical provider;
+  compatibility envelope so callers do not select or learn a physical provider; Xiaohongshu requires the
+  `social.posts.search` operation grant before either direct or historical dispatch;
 - the separately gated eligible Xiaohongshu subsets of `POST /api/v1/night-all/search/crawl` and
   `/api/v1/night-all/search/user-info`: crawl is one user, posts-only, page size 20 and concurrency 1;
-  user-info is one supported user identifier on page 1 with no continuation/custom params/concurrency. The
+  user-info is one supported user identifier on page 1 with no continuation/custom params/concurrency.
+  Xiaohongshu requires `social.users.posts` for crawl and `social.users.resolve` for user-info before either
+  direct or historical dispatch. The
   `/api/v1/search/raw|crawl|user-info` spellings remain exact aliases of their `/night-all/search/*`
   counterparts and use the same paid-operation fingerprint.
 
@@ -67,9 +73,15 @@ cost requires an explicit operator decision.
 ## 2. Activation checklist
 
 1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql` through
-   `059_external_platform_credential_privileges.sql` are applied. Install
+   `065_lock_usage_authorization_scope_set.sql` are applied. Migration 060 adds the versioned provider
+   operation policy, release, upstream price book and policy-event ledger; do not create those rows by hand. Install
    `scripts/api-key-quota-indexes.sql` through the documented concurrent-index phase after migration 054.
-   Do not create or patch the `external_platform` tables by hand.
+   Migration 061 adds immutable delivered-source and canonical-revision evidence; migration 064 indexes
+   pre-connector generic-search ingest runs by their durable request owner. Migration 065 atomically stores
+   the complete multi-axis authorization snapshot on `usage_requests`; its child scope table is a
+   non-expandable index projection, not a second mutable source of authorization. The standard Kubernetes
+   deploy runs `scripts/acquisition-history-indexes.sql` before the transactional migration Job so populated
+   ledgers receive all three history indexes online. Do not create or patch the evidence tables by hand.
    Before enabling direct Xiaohongshu search or bounded detail enrichment, also verify
    `055_external_platform_multi_call_rate_limit.sql` in the same database used by every Public replica. If
    `external_platform.provider_calls` is larger than 128 MiB or the installation has latency-sensitive writers,
@@ -124,11 +136,12 @@ cost requires an explicit operator decision.
    its entitlement snapshot is immutable and a later consumer grant does not widen it. Consumer revocation or
    plan reduction still narrows effective access immediately. Keys migrated as `legacy_dynamic` retain only
    bounded compatibility behavior and should be replaced deliberately, not treated as the model for new keys.
-8. Keep the contract gate at `0` until `MX_INSIGHT_JUSTONE_BILLING_JSON` is reviewed. Activation accepts only
-   `source=manual` and requires a three-letter currency, `pricingAsOf`, a positive endpoint gross cost,
-   `monthlyBudgetMinor`, and `monthlySubsidyBudgetMinor`. A missing price, balance or free quota remains
-   null/unknown, never zero. `monthlySubsidyBudgetMinor=0` is a safe closed default while downstream pricing
-   is unset; it does not claim that acquisition is free.
+8. Keep the deployment contract gate at `0` until the adapter host and response contract are reviewed. Upstream
+   prices may then come from the retained environment price JSON or, preferably, a reviewed version published in
+   **外部数据平台 → 平台详情 → 上游操作控制**. A database-controlled `active` or `canary` operation requires a
+   three-letter currency, `pricingAsOf`, a positive cost for every endpoint in that release,
+   `monthlyBudgetMinor`, and `monthlySubsidyBudgetMinor`. A missing price remains null/unknown, never zero.
+   `monthlySubsidyBudgetMinor=0` is a valid closed subsidy threshold; it does not claim acquisition is free.
 9. Start with one approved marketplace/query and one page. Verify public delivery, provider-call evidence,
    archive objects and the linked canonical ingest before widening grants or concurrency.
 
@@ -145,13 +158,79 @@ preferred credential source. Command-environment values take precedence over
 `.env.internal` for an intentional activation or emergency stop.
 
 Use this rollout order for either paid provider: deploy migrations and code with its contract gate `0`; verify
-the endpoint, credential, response and idempotency contract; record reviewed procurement prices for every
-enabled paid endpoint; then change the gate to `1` in a recorded canary release. An enabled gate still requires
-valid billing evidence including both non-negative monthly threshold fields; set both thresholds to `0` when
-only positive enforced downstream requests should dispatch. Those fields are warning-only for a request with
-its own positive wallet hold, but keep unpriced/subsidized traffic closed. Runtime parsing remains
-fail-soft for optional providers: an out-of-band bad provider value disables only that provider's dispatch and
-does not stop Hub Admin, login, stored reads, or workers.
+the endpoint, credential, response and idempotency contract; open the deployment gate as the outer ceiling; then
+publish a reviewed price book and use `shadow`, `canary`, and `active` in the Admin operation control. Set both
+monthly thresholds to `0` when only positive enforced downstream requests should dispatch. Those fields are
+warning-only for a request with its own positive wallet hold, but unpriced/subsidized traffic stays closed.
+Missing reviewed price evidence is an operation blocker, not a Hub deployment blocker: `manage.sh` reports a
+warning and still applies the runtime Secret/ConfigMap so Admin can repair the operation. Malformed host, timeout,
+gate/ceiling syntax, Secret apply failure, and other infrastructure errors still fail the deployment closed.
+
+### Runtime operation control and price recovery
+
+Migration 060 starts every existing operation at revision `0` with
+`controlSource=legacy_environment`. This is the sole transition exception: an already-enabled deployment keeps
+its previous environment gate/canary/price behavior after migration. The first successful Admin write changes
+that operation to `controlSource=database`; later dispatches read the current database revision at the live-call
+boundary. No restart is required.
+
+The operation states are deliberately separate from downstream API Key authorization:
+
+- `disabled`: operation intentionally unavailable;
+- `shadow` (the **校验** action): validate configuration and evidence without customer provider dispatch;
+- `canary`: only the exact recorded Consumer UUID allowlist may start new provider calls;
+- `active`: authorized callers may start new provider calls;
+- `paused`: incident stop for new provider calls while retained exact snapshots remain readable.
+
+When no exact fallback satisfies the requested delivery policy, Public API
+responses preserve the operation-control decision one-to-one: `disabled` is
+`503 external_platform_operation_disabled`, `shadow` is
+`503 external_platform_operation_shadow`, `paused` is
+`503 external_platform_operation_paused`, a non-allowlisted `canary` request is
+`503 external_platform_operation_canary`, and an operation whose release,
+contract, credential or reviewed-cost prerequisite is incomplete is
+`503 external_platform_operation_blocked`. These codes must not be collapsed
+into a generic unavailable response; they are the stable boundary between the
+Admin state machine and downstream incident handling.
+
+Public `GET /api/v1/data/capabilities` evaluates this same authoritative view with the authenticated Consumer ID.
+Its business-operation rows (and Xiaohongshu `search` / `postDetail` entries) report `ready=false` for
+`disabled`, `shadow`, `paused`, or blocked operations; `canary` is ready only for a Consumer UUID in that
+operation's allowlist. TikHub's provider-wide readiness is deliberately conservative when its operations differ;
+callers must use the matching operation row rather than treating one credential as proof that every operation is
+dispatchable.
+
+Every change requires the current `expectedRevision` and a non-empty reason. A stale browser receives a revision
+conflict and must reload; it cannot overwrite a newer operator decision. A call admitted before a later pause
+keeps its immutable policy revision, release revision, upstream price-book version, and credential revision in
+`external_platform.provider_calls`. New admissions see the later revision. The append-only policy event records
+who changed the state, the before/after revision and the reason.
+
+If a deploy reports `cost-control preflight is incomplete`, open the affected operation in the Admin detail page,
+enter currency, effective timestamp, both monthly thresholds, and a positive unit cost for every listed endpoint,
+then choose **校验**, **灰度**, or **启用** with a reason. The write transaction publishes an immutable reviewed
+price book, a new operation release and the CAS-fenced policy together. This is the supported recovery path; it
+does not require manual SQL or adding a price JSON to the deployment environment.
+
+Database state can only narrow deployment authority. The fixed provider origin/endpoint allowlist, parent and
+operation contract gates, timeouts, RPM/concurrency ceilings, response bounds and emergency stop stay in deploy
+configuration. A database `active` state cannot cross a closed parent/operation gate. Likewise, the upstream
+credential may be rotated through the Admin credential store, but the environment value remains a rollback
+fallback until deliberately cleared. `MX_INSIGHT_*_CONFIGURED` is derived metadata, not an enable button.
+
+The downstream authorization remains an independent intersection of the consumer grant and the immutable Key
+snapshot. A JustOne request needs both the `ecommerce` platform entitlement and
+`ecommerce.products.search`; a new Key has neither unless they are explicitly selected at issuance. Provider
+activation never broadens a Key. TikHub App V2 requests require `xiaohongshu`, the
+`compat.xiaohongshu.app_v2` contract and their per-endpoint social operation; migrated or historical
+Xiaohongshu raw/crawl/user-info require the same platform plus their exact operation mapping documented above.
+Provider price books describe Hub procurement, while the customer price book,
+wallet hold and one logical Hub request determine the downstream charge. Do not derive one price from the other.
+
+This control plane does not desensitize, truncate, or filter business content. It controls only provider dispatch,
+release evidence and procurement accounting; canonical raw/PG/ES ingestion retains its existing data contract.
+Optional-provider blockers never participate in Hub readiness, Launcher/MX-H2I login, DNS, WireGuard, or stored
+data availability.
 
 ### Direct TikHub / Xiaohongshu activation
 
@@ -171,11 +250,11 @@ passed target-environment fixtures. This gate also requires the parent TikHub ga
 first pages; an existing direct `mxec2` crawl cursor remains pinned to the Hub-native connector and is never
 reinterpreted as a historical `mxnc1` traversal.
 
-Before any TikHub paid-operation gate is opened, verify the enabled endpoints against the target account and
-record reviewed `MX_INSIGHT_TIKHUB_BILLING_JSON` evidence (`source=manual`, currency, `pricingAsOf`, positive
-costs for every enabled endpoint, and both non-negative monthly threshold fields). A missing or unknown
-procurement price remains explicitly unknown; it is never entered as zero and the corresponding gate remains
-closed. `monthlyBudgetMinor` and `monthlySubsidyBudgetMinor` are operator cost-warning thresholds, not
+Before a TikHub paid operation becomes `active` or `canary`, verify the enabled endpoints against the target
+account and publish reviewed price evidence in its Admin operation control (or retain the revision-zero
+environment `MX_INSIGHT_TIKHUB_BILLING_JSON` compatibility evidence). A missing or unknown procurement price
+remains explicitly unknown; it is never entered as zero and only the affected operation is blocked.
+`monthlyBudgetMinor` and `monthlySubsidyBudgetMinor` are operator cost-warning thresholds, not
 technical-contract evidence and not admission limits for a downstream request that already has a positive
 enforced wallet hold. The repository example records one-US-cent-per-call evidence as an example only; operators
 must verify the target account and effective date. Do not infer a downstream selling price or an exchange rate
@@ -224,6 +303,50 @@ after every Public replica is compatible should a recorded canary set both the r
 search gate to `1`. A Live key needs an immutable `xiaohongshu` platform entitlement for direct search; the
 separate explicit note-detail API additionally requires `social.posts.resolve`. Never delete the Night-All
 credential until the Hub rollback window has closed.
+
+#### Online preparation for migrations 061 and 064
+
+Migration 061 links each new gateway delivery to the provider call that supplied
+its data and captures the canonical revision seen by each new observation.
+Migration 064 keeps older generic-search ingestion queryable by the request that
+created it. History reads require these three exact partial indexes:
+
+- `external_platform.external_platform_gateway_requests_usage_source_idx` on
+  `(usage_request_id, source_provider_call_id, created_at)`;
+- `core.observations_ingest_order_idx` on
+  `(ingest_run_id, rank, observed_at, id)`;
+- `ingest.ingest_runs_request_history_idx` on
+  `(request_id, started_at, id)` only where both call-ledger FKs are null.
+
+`bash scripts/manage.sh deploy` prepares them automatically **before the Admin
+write freeze and before** the transactional migration Job. For each ledger, the
+preparation adds migration 061's nullable column, constraint, function and
+writer trigger in one short transaction, under the actual table-owner role,
+then builds or repairs the indexes with bounded `CREATE INDEX CONCURRENTLY`.
+On a brand-new
+database, absent tables are skipped and the normal migration creates the empty or
+small-table indexes itself. The new gateway reference is installed `NOT VALID`:
+it is enforced for every new non-null value, while the necessarily-null legacy
+column does not require a full historical table scan under a DDL lock.
+
+For a separately managed or manual PostgreSQL rollout, run the same reviewed
+script first. Do not wrap it in a transaction:
+
+```bash
+cd electron-dock/mx-insight-hub
+psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f scripts/acquisition-history-indexes.sql
+npm run migrate
+```
+
+The script validates keys, order, sort options, predicate and ready/valid/live
+catalog state; an invalid or drifted same-name index is dropped and rebuilt
+concurrently. It is safe to rerun after migrations 061/064, when it validates/repairs
+indexes without reinstalling the triggers. A build is limited to 15 minutes;
+an invalid artifact left by cancellation is repaired on the next run. If any ledger exceeds 128 MiB and
+the exact index was not prepared, migration 061 or 064 fails with this script path
+instead of starting a write-blocking transactional index build. Do not work
+around that gate by renaming an unrelated index or changing the size threshold.
 
 #### Online preparation for migration 055
 
@@ -790,10 +913,12 @@ response-shape problem, not for crossing a cost-warning threshold.
 
 ## 9. Safe disable and rollback
 
-To stop one consumer immediately, remove its `ecommerce` grant or set a restrictive policy through the
-existing authorization workflow. To stop all new JustOne dispatches, set
-`MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0` and roll only the Hub public process; this disables dispatch even when
-a database-managed key exists. If the deployment still uses the environment fallback, remove it at the
+To stop one consumer immediately, remove its platform/capability grant through the existing authorization
+workflow. To stop one provider operation without a rollout, use **暂停** with the current revision and an incident
+reason; this affects only new provider calls and leaves exact retained snapshots readable. To stop every JustOne
+operation at the outer emergency boundary, set `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0` and roll only the Hub
+public process; this overrides a database `active` state and a database-managed key. If the deployment still uses
+the environment fallback, remove it at the
 same time by prefixing that deploy with
 `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`. Exact stored fallback may continue until `staleUntil`; afterward
 Public API returns unavailable.

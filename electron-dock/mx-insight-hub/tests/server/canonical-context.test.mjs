@@ -304,7 +304,11 @@ test('canonical context endpoint is API-key/grant metered and never calls Launch
     windowSeconds: 60,
     maxPageSize: 2,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Context key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Context key',
+    platforms: ['telegram'],
+  })
   const app = createApp({ service, store, adapter, identity, adminToken: ADMIN_TOKEN, logger: { error() {} } })
 
   await withServer(app, async (baseUrl) => {
@@ -371,7 +375,11 @@ test('canonical context endpoint fails closed for missing grants, unsupported re
     windowSeconds: 60,
     maxPageSize: 100,
   })
-  const grantedKey = await service.createApiKey({ consumerId: granted.id, name: 'Granted context key' })
+  const grantedKey = await service.createApiKey({
+    consumerId: granted.id,
+    name: 'Granted context key',
+    platforms: ['telegram'],
+  })
   const denied = await service.createConsumer({ tenantId: tenant.id, name: 'Denied context consumer' })
   const deniedKey = await service.createApiKey({ consumerId: denied.id, name: 'Denied context key' })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN, logger: { error() {} } })

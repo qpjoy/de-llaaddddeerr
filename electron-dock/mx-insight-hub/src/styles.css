@@ -9811,6 +9811,7 @@ button.mih-catalog-status {
 
 .mih-external-provider-panel,
 .mih-external-credential-panel,
+.mih-external-operation-panel,
 .mih-external-chain-panel,
 .mih-external-capability-panel,
 .mih-external-difference-panel,
@@ -10026,6 +10027,186 @@ button.mih-catalog-status {
 .mih-external-credential-panel > .mih-external-unknown,
 .mih-external-credential-panel > .mih-external-context-note {
   margin-top: 12px;
+}
+
+.mih-external-operation-list {
+  display: grid;
+  gap: 12px;
+}
+
+.mih-external-operation-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--qp-info) 24%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--qp-info) 5%, transparent), transparent 58%),
+    var(--qp-bg-4);
+}
+
+.mih-external-operation-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mih-external-operation-card > header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mih-external-operation-card > header strong {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-1);
+}
+
+.mih-external-operation-card > header small {
+  overflow-wrap: anywhere;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-external-operation-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  background: var(--qp-line);
+}
+
+.mih-external-operation-facts > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--qp-bg-3);
+}
+
+.mih-external-operation-facts dt {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-external-operation-facts dd {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.mih-external-operation-blockers,
+.mih-external-operation-ready {
+  border-radius: var(--qp-radius-sm);
+  padding: 10px 12px;
+}
+
+.mih-external-operation-blockers {
+  border: 1px solid color-mix(in srgb, var(--qp-warning) 32%, transparent);
+  background: color-mix(in srgb, var(--qp-warning) 7%, transparent);
+}
+
+.mih-external-operation-blockers > strong,
+.mih-external-operation-ready {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-external-operation-blockers > strong {
+  color: var(--qp-warning);
+}
+
+.mih-external-operation-blockers ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mih-external-operation-blockers li {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(0, 1fr);
+  gap: 9px;
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-external-operation-blockers li > .mih-mono {
+  overflow-wrap: anywhere;
+  color: var(--qp-warning);
+}
+
+.mih-external-operation-ready {
+  border: 1px solid color-mix(in srgb, var(--qp-success) 28%, transparent);
+  background: color-mix(in srgb, var(--qp-success) 7%, transparent);
+  color: var(--qp-success);
+}
+
+.mih-external-operation-inputs,
+.mih-external-operation-price-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mih-external-operation-canary {
+  min-height: 66px;
+  resize: vertical;
+}
+
+.mih-external-operation-price-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 9px;
+  width: fit-content;
+  color: var(--qp-text-1);
+  cursor: pointer;
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-external-operation-price-toggle input {
+  grid-row: 1 / 3;
+  accent-color: var(--qp-primary);
+}
+
+.mih-external-operation-price-toggle small {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-external-operation-price-grid {
+  padding: 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  background: color-mix(in srgb, var(--qp-bg-2) 60%, transparent);
+}
+
+.mih-external-operation-endpoint-price {
+  grid-column: span 2;
+}
+
+.mih-external-operation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mih-external-operation-actions .qp-button[aria-pressed="true"] {
+  border-color: var(--qp-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--qp-primary) 35%, transparent) inset;
 }
 
 .mih-external-two-column {
@@ -10307,6 +10488,7 @@ button.mih-catalog-status {
 
   .mih-external-provider-grid,
   .mih-external-credential-layout,
+  .mih-external-operation-facts,
   .mih-external-two-column,
   .mih-external-two-column--balanced {
     grid-template-columns: 1fr;
@@ -10334,6 +10516,15 @@ button.mih-catalog-status {
 
   .mih-external-detail-status > small:last-child {
     grid-column: 2 / -1;
+  }
+
+  .mih-external-operation-inputs,
+  .mih-external-operation-price-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-external-operation-endpoint-price {
+    grid-column: auto;
   }
 }
 
@@ -10366,6 +10557,21 @@ button.mih-catalog-status {
   .mih-external-credential-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .mih-external-operation-card > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .mih-external-operation-blockers li {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .mih-external-operation-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

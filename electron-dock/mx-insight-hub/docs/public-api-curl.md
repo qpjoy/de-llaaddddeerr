@@ -35,10 +35,13 @@ new_idempotency_key() {
 下文每个 POST 都会生成格式合法且新的 `Idempotency-Key`。默认情况下，如果只是重试
 **相同路径和完全相同的规范化 body**，应复用已有的 `IDEMPOTENCY_KEY`，不要再次
 执行 `new_idempotency_key`；更换 body、路径或 cursor 页面必须使用新的 `Idempotency-Key`。
-第 3.4 节的小红书正文解析是明确例外：两个 GET 平台路径、POST 平台路径和
-`POST /api/v1/data/post` 四个入口共享一个 canonical 幂等 namespace。同一次逻辑请求的重试
-不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`，且应保持规范化笔记标识和
-`deliveryMode` 不变；复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`。
+第 3.4 节的小红书正文解析是明确例外：legacy
+`GET /api/v1/xiaohongshu/app/get_note_info`、同路径 POST 和
+`POST /api/v1/data/post` 共三个 Hub 投影入口共享一个 canonical 幂等 namespace。同一次逻辑请求的
+重试不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`，且应保持规范化笔记标识和
+`deliveryMode` 不变；复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`。五个
+App V2-compatible GET 各自使用“endpoint + 规范化 query”的独立兼容合同与幂等域，不属于这三个
+入口，也不能跨 endpoint 复用 key。
 同一个 key 对应其他不同请求也会返回 `409 idempotency_conflict`。POST 重试还必须继续使用创建该
 usage 记录的同一把 Hub API Key；同一 consumer 的另一把 Key 只能执行只读状态查询，不能接管旧记录，
 需要发起新业务请求时应使用新的 `Idempotency-Key`。
@@ -646,8 +649,8 @@ consumer、该请求是已提交且 HTTP 200 的 ecommerce 请求，并且 item/
 | `idempotent_replay` | 同 `Idempotency-Key`、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
 
 `Idempotency-Key` 对 `cache_only` 和 `cache_first` 可省略，但 `refresh` 必须提供；建议所有模式
-都显式提供。省略时 Hub 只根据规范化请求生成
-短期 freshness-bucket key，客户端不能用它实现持久重放。缓存与 fallback 都严格绑定当前
+都显式提供。省略时 Hub 为每次 HTTP 调用生成唯一内部 key：每次都是独立
+usage/计费，即使命中缓存也不合并。只有调用方显式复用相同 key 才是可重放的传输重试。缓存与 fallback 都严格绑定当前
 consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 canonical search
 结果拼装。
 
@@ -665,11 +668,17 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
 | 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |
 | 429 | `external_platform_busy`, `external_platform_capacity_exceeded` | Hub 并发保护或外部容量不足；按响应退避，不要并发放大。 |
+| 429 | `external_platform_rate_limited` | Hub 的外部调用速率门禁拒绝了本次 live dispatch；按服务端节奏退避，不要换 Key 放大请求。 |
 | 429 | `external_platform_cost_budget_exhausted`, `external_platform_subsidy_budget_exhausted` | 仅表示本次请求没有形成正价 `enforced` 按次钱包 hold，且未计价/补贴工作流越过了 Hub 月度财务线；不要换 Key 重试。已有严格匹配且已冻结下游资金的请求不会因这两条财务线被拒；运营方仍须分别审核上下游原币种账本。 |
 | 502 | `external_platform_response_unusable` | 上游成功 envelope 无法映射。该稳定错误会随同一 `Idempotency-Key` 重放且不再次派发；保存 requestId 作为证据，不得使用 uncertain-repeat 通道。 |
 | 502 | `external_platform_outcome_unknown` | 结果可能已经产生外部调用；保存 requestId 和原幂等键，禁止自动换键重试。只有只读状态 GET 明确返回 `unknown`，才可用一次新的 `refresh`、新 Key 和 `X-MX-Insight-Retry-Of`；这可能形成第二笔供应方成本。 |
 | 502 | `external_platform_rejected` | 上游已确定拒绝；检查请求条件，避免连续自动重试。 |
 | 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable`, `external_platform_cost_control_unavailable`, `external_platform_cost_evidence_incomplete` | 若没有 exact fallback，按运维窗口退避。后两个错误表示当前 endpoint 的正数已审核成本配置或本次请求自身的成本证据不完整；即使下游已冻结资金也不能跳过，未知成本不能填 `0`。无关历史异常不会阻断 paid-ready 请求。 |
+| 503 | `external_platform_operation_disabled` | 管理端明确禁用了该上游 operation；只恢复已审核的同一 operation，不要让客户端换 Key 探测。 |
+| 503 | `external_platform_operation_shadow` | 该 operation 仅处于配置/证据校验态，不允许客户请求创建上游调用。 |
+| 503 | `external_platform_operation_paused` | 该 operation 因事件处置暂停新上游调用；精确存量仍可按交付策略读取。 |
+| 503 | `external_platform_operation_canary` | 该 operation 仅允许其记录的 Consumer UUID 灰度名单；当前 consumer 不在名单中。 |
+| 503 | `external_platform_operation_blocked` | 当前 release、contract、credential 或已审核成本前置条件使该 operation 阻断；按返回的管理端 blockers 修复，不要绕过。 |
 | 200 | `data.items=[]` | 正常空结果，不是接口故障；可调整关键词或平台。空结果不能证明上游成本为零。 |
 
 `external_platform_not_configured` intentionally does not expose whether a
@@ -735,6 +744,21 @@ Hub 自定义数据产品入口 `POST /api/v1/data/post` 继续接受
 - `/api/v1/xiaohongshu/app_v2/get_user_info?user_id=...`；
 - `/api/v1/xiaohongshu/app_v2/get_user_posted_notes?user_id=...&cursor=...`。
 
+所有五个入口都要求平台 grant `xiaohongshu`、兼容合同 grant
+`compat.xiaohongshu.app_v2`，并按 endpoint 叠加下列 operation grant：
+
+| App V2 endpoint | operation grant |
+| --- | --- |
+| `get_image_note_detail` | `social.posts.resolve` |
+| `search_notes` | `social.posts.search` |
+| `search_users` | `social.users.resolve` |
+| `get_user_info` | `social.users.resolve` |
+| `get_user_posted_notes` | `social.users.posts` |
+
+三个 identity 入口都要求对应的 `note_id|share_text` 或
+`user_id|share_text` 至少提供一个；同时提供时分别以 `note_id` 或
+`user_id` 为准，并用该规范化 selector 绑定幂等与快照 identity。
+
 `search_notes` 还接受 `sort_type,note_type,time_filter,search_id,search_session_id,source,ai_mode`。
 其中 `sort_type` 仅支持
 `general|time_descending|popularity_descending|comment_descending|collect_descending|english_preferred`，
@@ -744,27 +768,29 @@ Hub 自定义数据产品入口 `POST /api/v1/data/post` 继续接受
 Hub 对 provider cursor 与用户 scope 的不透明封装，第 15 页终止。响应正文、标签、互动、签名媒体
 URL、`params/search_id/search_session_id` 等业务字段保持原样且没有字段级长度截断。搜索结果本身
 可能是官方预览，需要完整正文时调用详情。请求的 Authorization/Cookie/API key 不会进入响应；
-只有上游意外回显的当前 Hub→上游 credential 会按精确值移除。`Idempotency-Key` 可选，省略时
-Hub 会按 API key、endpoint、query 和短时 freshness bucket 生成安全的 effective key。
+只有上游意外回显的当前 Hub→上游 credential 会按精确值移除。`Idempotency-Key` 可选；省略时
+每次 HTTP 调用都使用唯一内部 key，独立记录 usage/计费，而缓存和上游 dispatch lease 继续独立去重。
 
-租户端完整开通路径是：平台方建立 tenant、consumer、`xiaohongshu` 和
+上述 Hub 投影 POST 的租户端完整开通路径是：平台方建立 tenant、consumer、`xiaohongshu` 和
 `social.posts.resolve` grants 与 membership；租户成员通过 Launcher 会话登录 Internal Hub，
 在“API Keys”签发只显示一次完整 secret 的 Live Key；客户后端用该 Key 调用上面的 POST；
 租户再从套餐、余额和用量视图检查调用与扣费。Public 文档和响应始终不显示外部平台凭据、
-采购成本或内部归档位置。
+采购成本或内部归档位置。若调用 App V2-compatible GET，则签发 Key 时还必须选择上表中的兼容
+合同与对应 operation grant。
 
 `cache_only|cache_first|refresh` 的交付证据与 3.3 节一致。`refresh` 必须有调用方生成的
 `Idempotency-Key`。完全相同的传输重试复用原 body/key；`409 reserved/unknown` 或
 `502 outcome_unknown` 不能自动换 key 重试。某些无效/失效笔记可能已被外部平台接受并消耗
 容量，因此 Hub 只对已严格识别的单笔不存在结果做短时 negative cache。调用方显式提供的
 key 仍按 consumer 唯一并绑定首次使用它的 API Key，跨 Key 重用返回
-`409 idempotency_conflict`；省略 header 时 Hub 生成包含 API Key 身份的短时 key，因此同一
-consumer 的不同 Key 会各自记一笔 usage，但继续共享 consumer 级快照和外采 dispatch lease。
+`409 idempotency_conflict`；省略 header 时，无论是同一还是不同 API Key，每次调用都各自记一笔
+usage/计费，但继续共享 consumer 级快照和外采 dispatch lease。
 
 ### `GET /api/v1/data/posts/media`
 
-响应里的每个 `media[].url` 已是同源 Hub 中继 locator，不包含上游地址；
-`author.avatarUrl` 当前固定为 `null`。用同一 consumer 的 Live Key 获取 locator（浏览器端先
+Hub 不过滤或替换业务数据：每个 `media[].url` 和 `author.avatarUrl` 保留已接受的源值；
+前 20 个媒体项（index `0..19`）额外提供同源 `media[].hubRelayUrl`，后续媒体仍保留源 URL 但不生成
+不可用的中继 locator。用同一 consumer 的 Live Key 获取 locator（浏览器端先
 fetch 为 Blob，不能用不带 Authorization 的裸 `<img>` 请求）。也可以用已提交结果的
 `requestId` 和 `0..19` 的 `mediaIndex` 直接构造同一中继路径；客户端可以在服务端并发护栏内
 并发加载一页多图：
@@ -795,9 +821,9 @@ fi
 常见错误：`400 invalid_post_url|invalid_platform|unsupported_fields`、
 `403 platform_not_granted|capability_not_granted|test_key_not_supported`、
 `404 post_not_found|stored_snapshot_not_found|external_media_not_found`、
-`429 quota_exceeded|external_platform_busy|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted|external_media_busy`、
+`429 quota_exceeded|external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted|external_media_busy`、
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
-`503 external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete`。
+`503 external_platform_unavailable|external_platform_not_configured|external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete|external_platform_operation_disabled|external_platform_operation_shadow|external_platform_operation_paused|external_platform_operation_canary|external_platform_operation_blocked`。
 429 是 Hub 额度/并发或外部平台容量类别，不是域名封禁的证据；保留 requestId 后按错误码处理。
 
 ## 4. 搜索 API
@@ -847,7 +873,7 @@ code point 或 grapheme 长度恰好为 60 的正文边界，执行有界的内�
 `409 external_platform_response_unusable`、
 `429 external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted`、
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
-`503 external_platform_unavailable|external_platform_not_configured|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete`。
+`503 external_platform_unavailable|external_platform_not_configured|external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete|external_platform_operation_disabled|external_platform_operation_shadow|external_platform_operation_paused|external_platform_operation_canary|external_platform_operation_blocked`。
 历史路径上的 Night-All 明确拒绝会映射为安全的
 `502 night_all_rejected`；无法证明 dispatch 结果时返回
 `502 upstream_outcome_unknown`，此时应使用原 request ID/`Idempotency-Key` 查询，不能换新的 `Idempotency-Key`
@@ -1093,6 +1119,11 @@ POST /api/v1/night-all/search/user-info
 legacy 客户端可发送 `includeRaw:false`，Hub 会在 dispatch 前移除；
 `includeRaw:true` 会被拒绝。
 
+当 `platform=xiaohongshu` 时，Key 与 consumer 还必须同时拥有对应 operation grant：
+`raw → social.posts.search`、`crawl → social.users.posts`、
+`user-info → social.users.resolve`。这一映射对 Hub-native direct 子集、历史兼容分支以及
+`/api/v1/search/*` 别名都相同；切换路径或内部执行方式不会改变授权范围。
+
 对于小红书 `raw`，独立 rollout gate 开启后，Hub 才会让满足下列条件的首屏请求无感使用
 direct external-data connector：只提供一个 scalar `keyword` 或 `query`；有效
 `count|pageSize|limit` 恰好为 20；请求为 page 1 或携带同一 direct traversal 的
@@ -1115,6 +1146,10 @@ external-platform contract gate 和独立 user-activity rollout gate 同时开�
 capability 条目存在都不能证明目标环境已就绪。历史 `mxnc1`、批量/多标识、channel、非 posts、非 20 的
 crawl 页、自定义 cache/params 及其他不支持形状继续走 Night-All。已有 direct crawl cursor 在关闸后
 仍固定由 Hub-native connector 处理，不会改道 Night-All。
+
+Hub-native 子集会稳定返回 `400 invalid_user_profile_url`（非官方小红书 profile URL）、
+`400 cursor_page_mismatch`（显式 page 与 direct crawl cursor 冲突）或
+`404 user_not_found`（无法解析目标用户）。
 
 三条历史执行路径的 cursor/composite/page/offset continuation 统一由 Hub 加密包装为 `mxnc1`，并绑定
 consumer、operation、platform、稳定 query/account scope 和下一页。cursor/page 响应把密文放在
@@ -1199,6 +1234,10 @@ dispatch。
 
 错误语义如下；除明确标注的 fallback 外，不要自动换新 `Idempotency-Key` 重试：
 
+这两组 legacy compatibility 路径不返回 `410 search_cursor_expired`；该错误保留在使用
+Elasticsearch PIT 的 Hub search 操作，例如 `/data/search`、`/data/stored/search` 和
+`/data/canonical/search`。
+
 | HTTP / `error.code` | 语义 |
 |---|---|
 | `400 platform_operation_unsupported` | 平台不在该 operation 的 `supportedPlatforms`；Telegram 会走此分支，尚未 dispatch |
@@ -1207,12 +1246,20 @@ dispatch。
 | `503 compatibility_capabilities_unavailable` | Hub-pinned `legacySearch` dispatch 矩阵缺失或无效，Hub fail closed，尚未 dispatch |
 | `503 compatibility_store_unavailable` | fallback 所需的 Hub compatibility store 暂不可用 |
 | `400 invalid_cursor` | 裸 provider cursor/continuation params、被篡改或跨 consumer/operation/platform/query scope 的 `mxnc1`；删除 continuation，换新 Key，从 page 1 重启 |
+| `400 invalid_user_profile_url` | Hub-native 小红书 crawl/user-info 收到非官方 profile URL；修正 URL，不要原样重试 |
+| `400 cursor_page_mismatch` | 显式 page 与 Hub-native 小红书 crawl cursor 内绑定的页码冲突 |
+| `404 user_not_found` | Hub-native 小红书 crawl/user-info 无法解析目标用户 |
 | `400/404/409/422/429 night_all_rejected` | Night-All 明确拒绝；Hub 保留这些可安全转发的上游 HTTP 状态 |
 | `502 night_all_rejected` | Night-All 的其他明确拒绝，且没有可用 exact snapshot |
 | `502 upstream_outcome_unknown` | dispatch 结果存在歧义且没有可用 exact snapshot；同一 key 不会重新 dispatch |
 | `429 external_platform_rate_limited` | Hub-native 小红书请求达到服务端外部调用速率门禁；没有可用 stored fallback |
 | `429 external_platform_cost_budget_exhausted` / `external_platform_subsidy_budget_exhausted` | 只适用于没有正价 `enforced` 钱包 hold 的未计价/补贴请求；严格匹配且资金已冻结的按次计费请求不因 Hub 月度财务线停止，客户端仍不得换 Key 重试 |
 | `503 external_platform_cost_control_unavailable` / `external_platform_cost_evidence_incomplete` | 当前 endpoint 的已审核正数成本配置或本次请求自身的受控账本证据不完整；即使 paid-ready 也 fail closed，未知成本不能用 `0` 代替 |
+| `503 external_platform_operation_disabled` | 当前 Hub 操作策略明确禁用该上游 operation；没有可用 exact fallback |
+| `503 external_platform_operation_shadow` | operation 仅处于配置/证据校验态，不允许客户 live dispatch；没有可用 exact fallback |
+| `503 external_platform_operation_paused` | operation 已暂停新上游调用；没有可用 exact fallback |
+| `503 external_platform_operation_canary` | 当前 consumer 不在该 operation 的精确灰度名单；没有可用 exact fallback |
+| `503 external_platform_operation_blocked` | release、contract、credential 或已审核成本前置条件阻断该 operation；没有可用 exact fallback |
 | `409/429/502/503 external_platform_*` | Hub-native 小红书的去重、容量、响应合同、结果歧义、配置或 circuit 类别；保留 durable request ID 并按具体 code 处理 |
 
 ### `POST /api/v1/night-all/search/raw`
@@ -1538,6 +1585,31 @@ GET 返回的旧请求 ID 放入 `X-MX-Insight-Retry-Of`；发送该组合即接
 `reserved`、查询失败、跨 consumer、指纹不匹配或已消费的 retry-of 均不能走此通道。管理台
 百宝箱会在选择 `refresh` 并点击主按钮后自动完成 GET 和请求头组装，页面不要求填写 UUID、
 单独确认或人工核查 consumer 归属。
+
+### `GET /api/v1/acquisitions/{requestId}`
+
+该接口用于复现一次已经 `committed` 的精确交付。`HUB_REQUEST_ID` 必须是原数据请求的 durable
+UUID，并且读取时必须使用创建该请求的**同一把**仍有效 Live Hub API Key；同一 consumer 的
+轮换 Key、零 scope Key、其他 consumer 的 Key 和未知 ID 都返回
+`404 acquisition_query_run_not_found`，避免成为账本探测接口。管理恢复通道可用于 Key 轮换后的审计。
+
+```bash
+export HUB_REQUEST_ID="${HUB_REQUEST_ID:?set the committed acquisition request UUID}"
+curl -sS \
+  -H "Authorization: Bearer $HUB_KEY" \
+  "$HUB_URL/api/v1/acquisitions/$HUB_REQUEST_ID" \
+  | tee /tmp/mxih-acquisition.json
+
+jq '{contractVersion:.data.contractVersion,requestId:.data.requestId,delivered:.data.delivered,customerCharge:.data.customerCharge,items:.data.items}' \
+  /tmp/mxih-acquisition.json
+```
+
+`data.contractVersion` 固定为 `mx-insight-hub.acquisition-query-run.v1`。
+`data.delivered.responseBody` 是当时实际交付的完整 JSON body；`responseHash` 配合
+`responseHashContract=sha256-canonical-json-v1` 提供稳定语义校验，旁边还有响应状态、source mode、
+采集/完成时间与 gateway events。`customerCharge` 是该次下游计费证据，`items[]` 按交付顺序给出
+安全 canonical lineage。此 GET 是纯只读证据查询，不创建 usage、provider call 或任何上游 dispatch；
+不会重跑原请求。尚未形成可证明提交正文的记录返回 `409`，调用方不能把该查询当作业务重试。
 
 ### `GET /api/v1/usage`
 

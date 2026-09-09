@@ -8,6 +8,10 @@ import {
 import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
 import { sourceCatalogTermNormalizedName } from '../data/source-catalog.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
+import {
+  authorizationScopeKey,
+  requiredAuthorizationScopes,
+} from './usage-authorization.mjs'
 
 const DERIVED_PLATFORM_USAGE_CAPABILITY = 'data.canonical-search'
 
@@ -386,6 +390,7 @@ export class MemoryStore {
     this.creditAdjustmentKeys = new Map()
     this.requests = new Map()
     this.requestsByScope = new Map()
+    this.usageAuthorizationScopes = new Map()
     this.connectorCalls = new Map()
     this.compatibilitySnapshots = new Map()
     this.compatibilitySnapshotsByKey = new Map()
@@ -1289,13 +1294,28 @@ export class MemoryStore {
     authorizationPlatforms = null,
     replayWindowMs = null,
     meterKey = null,
+    requiredAuthorizationScopes: suppliedAuthorizationScopes = null,
   }) {
     if (Boolean(platform) === Boolean(capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
     }
-    this.#apiKeyEntitlement({
-      tenantId, consumerId, apiKeyId, platform, capability, apiKeyQuota, authorizationPlatforms,
+    const authorizationScopes = requiredAuthorizationScopes({
+      platform,
+      capability,
+      requiredAuthorizationScopes: suppliedAuthorizationScopes,
     })
+    const scopeEntitlements = new Map(authorizationScopes.map((scope) => [
+      authorizationScopeKey(scope),
+      this.#apiKeyEntitlement({
+        tenantId,
+        consumerId,
+        apiKeyId,
+        platform: scope.type === 'platform' ? scope.key : null,
+        capability: scope.type === 'capability' ? scope.key : null,
+        apiKeyQuota: suppliedAuthorizationScopes == null ? apiKeyQuota : null,
+        authorizationPlatforms: suppliedAuthorizationScopes == null ? authorizationPlatforms : null,
+      }),
+    ]))
     const scopeKey = `${consumerId}:${idempotencyKey}`
     const existingId = this.requestsByScope.get(scopeKey)
     if (existingId) {
@@ -1313,7 +1333,8 @@ export class MemoryStore {
       if (existing.status === 'released' || existing.status === 'committed') {
         this.#assertQuota({
           tenantId, consumerId, apiKeyId, platform, capability,
-          windowStart, maxRequests, apiKeyQuota, authorizationPlatforms,
+          windowStart, maxRequests, authorizationScopes, scopeEntitlements,
+          legacySingleScope: suppliedAuthorizationScopes == null,
         })
         const reservedAt = nowIso()
         const record = {
@@ -1343,6 +1364,7 @@ export class MemoryStore {
         }
         this.#reserveCustomerCharge(record)
         this.requests.set(record.id, record)
+        this.usageAuthorizationScopes.set(record.id, clone(authorizationScopes))
         this.requestsByScope.set(scopeKey, record.id)
         return { kind: 'reserved', request: clone(record) }
       }
@@ -1350,7 +1372,8 @@ export class MemoryStore {
 
     this.#assertQuota({
       tenantId, consumerId, apiKeyId, platform, capability,
-      windowStart, maxRequests, apiKeyQuota, authorizationPlatforms,
+      windowStart, maxRequests, authorizationScopes, scopeEntitlements,
+      legacySingleScope: suppliedAuthorizationScopes == null,
     })
     const record = {
       id: requestId,
@@ -1379,53 +1402,69 @@ export class MemoryStore {
     }
     this.#reserveCustomerCharge(record)
     this.requests.set(record.id, record)
+    this.usageAuthorizationScopes.set(record.id, clone(authorizationScopes))
     this.requestsByScope.set(scopeKey, record.id)
     return { kind: 'reserved', request: clone(record) }
   }
 
   #assertQuota({
     tenantId, consumerId, apiKeyId, platform, capability,
-    windowStart, maxRequests, apiKeyQuota, authorizationPlatforms,
+    windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
   }) {
-    const keyEntitlement = this.#apiKeyEntitlement({
-      tenantId, consumerId, apiKeyId, platform, capability, apiKeyQuota, authorizationPlatforms,
-    })
     const records = [...this.requests.values()]
-    const count = records.filter(
-      (record) =>
-        record.tenantId === tenantId &&
-        record.consumerId === consumerId &&
-        record.platform === (platform ?? null) &&
-        record.capability === (capability ?? null) &&
-        ['reserved', 'committed', 'unknown'].includes(record.status) &&
-        new Date(record.reservedAt) >= windowStart,
-    ).length
-    if (Number.isFinite(maxRequests) && count >= maxRequests) {
-      throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
-        ...(platform ? { platform } : { capability }),
-        maxRequests,
-        limitScope: 'consumer',
-      })
+    const recordHasScope = (record, expected) => {
+      const admitted = this.usageAuthorizationScopes.get(record.id)
+        || [{
+          type: record.platform ? 'platform' : 'capability',
+          key: record.platform ?? record.capability,
+        }]
+      return admitted.some((scope) => (
+        scope.type === expected.type && scope.key === expected.key
+      ))
     }
+    for (const scope of authorizationScopes) {
+      const entitlement = scopeEntitlements.get(authorizationScopeKey(scope))
+      const consumerMaxRequests = legacySingleScope
+        ? maxRequests
+        : Number(entitlement.consumerMaxRequests)
+      const consumerWindowStart = legacySingleScope
+        ? windowStart
+        : new Date(Date.now() - Number(entitlement.consumerWindowSeconds) * 1_000)
+      const details = scope.type === 'platform'
+        ? { platform: scope.key }
+        : { capability: scope.key }
+      const count = records.filter((record) => (
+        record.tenantId === tenantId
+        && record.consumerId === consumerId
+        && recordHasScope(record, scope)
+        && ['reserved', 'committed', 'unknown'].includes(record.status)
+        && new Date(record.reservedAt) >= consumerWindowStart
+      )).length
+      if (Number.isFinite(consumerMaxRequests) && count >= consumerMaxRequests) {
+        throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
+          ...details,
+          maxRequests: consumerMaxRequests,
+          limitScope: 'consumer',
+        })
+      }
 
-    const keyWindowSeconds = Number(keyEntitlement.windowSeconds)
-    const keyMaxRequests = Number(keyEntitlement.maxRequests)
-    const keyWindowStart = new Date(Date.now() - keyWindowSeconds * 1_000)
-    const keyCount = records.filter(
-      (record) =>
-        record.apiKeyId === apiKeyId &&
-        record.platform === (platform ?? null) &&
-        record.capability === (capability ?? null) &&
-        ['reserved', 'committed', 'unknown'].includes(record.status) &&
-        new Date(record.reservedAt) >= keyWindowStart,
-    ).length
-    if (Number.isFinite(keyMaxRequests) && keyCount >= keyMaxRequests) {
-      throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
-        ...(platform ? { platform } : { capability }),
-        maxRequests: keyMaxRequests,
-        windowSeconds: keyWindowSeconds,
-        limitScope: 'api_key',
-      })
+      const keyWindowSeconds = Number(entitlement.windowSeconds)
+      const keyMaxRequests = Number(entitlement.maxRequests)
+      const keyWindowStart = new Date(Date.now() - keyWindowSeconds * 1_000)
+      const keyCount = records.filter((record) => (
+        record.apiKeyId === apiKeyId
+        && recordHasScope(record, scope)
+        && ['reserved', 'committed', 'unknown'].includes(record.status)
+        && new Date(record.reservedAt) >= keyWindowStart
+      )).length
+      if (Number.isFinite(keyMaxRequests) && keyCount >= keyMaxRequests) {
+        throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
+          ...details,
+          maxRequests: keyMaxRequests,
+          windowSeconds: keyWindowSeconds,
+          limitScope: 'api_key',
+        })
+      }
     }
 
     const assignment = this.consumerPlans.get(consumerId)
@@ -1502,7 +1541,10 @@ export class MemoryStore {
     tenantId, consumerId, apiKeyId, platform, capability, apiKeyQuota, authorizationPlatforms,
   }) {
     const apiKeyRecord = this.apiKeys.get(apiKeyId)
-    if (!apiKeyRecord || apiKeyRecord.tenantId !== tenantId || apiKeyRecord.consumerId !== consumerId) {
+    if (!active(apiKeyRecord)
+      || (apiKeyRecord.expiresAt != null && new Date(apiKeyRecord.expiresAt).getTime() <= Date.now())
+      || apiKeyRecord.tenantId !== tenantId
+      || apiKeyRecord.consumerId !== consumerId) {
       throw new AppError(403, 'api_key_scope_not_granted', 'API key does not belong to the requested usage scope')
     }
     const platformEntitlements = apiKeyRecord.scopeMode === 'legacy_dynamic'
@@ -1543,11 +1585,19 @@ export class MemoryStore {
         ...(platform ? { platform } : { capability }),
       })
     }
+    const consumerPolicy = platform
+      ? this.policies.get(`${consumerId}:${platform}`) || {}
+      : this.capabilityPolicies.get(`${consumerId}:${capability}`) || {}
     // A gateway may combine two independently verified ceilings (for example
     // platform + capability).  That combined ceiling may only narrow an
     // entitlement that still exists; it must never act as an authorization
     // bypass if a grant is revoked between the pre-check and reservation.
-    return apiKeyQuota || grantedEntitlement
+    return {
+      ...grantedEntitlement,
+      ...(apiKeyQuota || {}),
+      consumerMaxRequests: consumerPolicy.maxRequests || 1_000,
+      consumerWindowSeconds: consumerPolicy.windowSeconds || 3_600,
+    }
   }
 
   async commitRequest(id, {

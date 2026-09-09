@@ -6,6 +6,9 @@
 -- do not wrap it in BEGIN/COMMIT.  CREATE/DROP INDEX CONCURRENTLY cannot run in
 -- a transaction block.  The source stays paused and no upstream data is read.
 
+SET lock_timeout = '2s';
+SET statement_timeout = '15min';
+
 -- pg_get_indexdef(index_oid, column_no, pretty) returns only the key expression,
 -- not its DESC/NULLS attributes. Keep expressions and pg_index.indoption bits
 -- separate, and reuse this dynamic view for both preflight and the final

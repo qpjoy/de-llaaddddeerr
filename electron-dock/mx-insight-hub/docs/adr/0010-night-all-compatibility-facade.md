@@ -3,6 +3,12 @@
 - Status: Accepted
 - Date: 2026-08-20
 
+Current architecture note (2026-09-10): this ADR preserves the compatibility
+contract, not Night-All as the target provider layer. Migrated TikHub and JustOne
+operations dispatch directly from Hub. Night-All remains only for explicitly
+unmigrated shapes and retires one operation at a time without changing the public
+paths or business payload.
+
 ## Context
 
 Existing products call three Night-All social endpoints and depend on their
@@ -12,10 +18,12 @@ request aliases and standard raw response envelope:
 - `POST /api/v1/search/crawl`;
 - `POST /api/v1/search/user-info`.
 
-Night-All still owns platform routing, paid-token policy and upstream integrations
-such as TikHub, JustOne and RapidAPI. Its `businessId` is an audit/ownership label,
-not a substitute for Hub authentication. Night-All may also use its own provider
-cache, but those internal cache semantics are not a Hub serving contract.
+When this ADR was accepted, Night-All owned platform routing, paid-token policy and
+upstream integrations such as TikHub, JustOne and RapidAPI. That is historical
+context for the facade, not the current target architecture. Its `businessId` is
+an audit/ownership label, not a substitute for Hub authentication. Night-All may
+also use its own provider cache, but those internal cache semantics are not a Hub
+serving contract.
 
 MX Insight Hub needs to accept the existing request/response shape while it builds
 its own canonical data store and search plane. A generic reverse proxy would let a
@@ -231,8 +239,10 @@ create canonical edges.
 
 ### 6. Migrate providers behind the Hub boundary
 
-TikHub, JustOne or another upstream can later become a direct Hub connector without
-changing the three public route paths. Migration is per platform + operation:
+TikHub, JustOne or another upstream becomes a direct Hub connector without changing
+the public route paths. This is already the active model for migrated TikHub
+Xiaohongshu and JustOne ecommerce operations. Migration remains per platform +
+operation:
 
 1. implement the same internal connector result and evidence contract;
 2. shadow with authorized, bounded fixtures or calls and compare original legacy
@@ -252,8 +262,9 @@ networking, users or DNS.
 
 - Existing clients can migrate by changing only the base path while retaining the
   legacy body aliases and response envelope.
-- Hub authentication, grants, quota, idempotency and evidence apply
-  even though Night-All continues to own upstream provider policy.
+- Hub authentication, grants, quota, idempotency and evidence apply regardless of
+  whether a migrated Hub-native connector or a remaining Night-All compatibility
+  connector performs the bounded operation.
 - Exact complete snapshots improve availability without presenting partial,
   different-query or canonical data as a live legacy result.
 - The compatibility facade is deliberately narrower than Night-All and is not a

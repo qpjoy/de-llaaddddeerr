@@ -21,6 +21,20 @@ function credentialStoreUnavailable() {
   )
 }
 
+function credentialRevision(value) {
+  let parsed = null
+  if (typeof value === 'number') {
+    parsed = value
+  } else if (typeof value === 'bigint') {
+    if (value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= 0n) parsed = Number(value)
+  } else if (typeof value === 'string' && /^\d+$/u.test(value)) {
+    const exact = BigInt(value)
+    if (exact <= BigInt(Number.MAX_SAFE_INTEGER)) parsed = Number(exact)
+  }
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw credentialStoreUnavailable()
+  return parsed
+}
+
 function normalizeUpdate(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     invalid('request body must be an object')
@@ -52,7 +66,7 @@ function safeCredential(setting, { environmentConfigured, databaseConfigured = f
     : Boolean(environmentConfigured)
   return {
     source,
-    revision: Number(setting?.revision ?? 0),
+    revision: credentialRevision(setting?.revision ?? 0),
     credentialConfigured,
     revealable: source === 'database' && credentialConfigured,
     updatedAt: setting?.updatedAt ?? null,
@@ -63,7 +77,7 @@ function settingFromRow(row) {
   if (!row) return null
   return {
     source: row.source,
-    revision: Number(row.revision),
+    revision: credentialRevision(row.revision),
     updatedAt: row.updated_at == null ? null : new Date(row.updated_at).toISOString(),
   }
 }
@@ -120,6 +134,16 @@ export class MemoryExternalPlatformCredentialStore {
     if (this.setting.source !== 'database') return null
     if (!this.apiKey) throw credentialStoreUnavailable()
     return this.apiKey
+  }
+
+  /** Atomic secret + revision snapshot for provider-call admission evidence. */
+  async readCredentialSnapshot(providerKey) {
+    assertProvider(providerKey, this.providerKey)
+    if (this.setting.source !== 'database') {
+      return { source: 'environment', revision: this.setting.revision, apiKey: null }
+    }
+    if (!this.apiKey) throw credentialStoreUnavailable()
+    return { source: 'database', revision: this.setting.revision, apiKey: this.apiKey }
   }
 }
 
@@ -244,6 +268,34 @@ export class PostgresExternalPlatformCredentialStore {
       if (!row || row.source !== 'database') return null
       if (!row.api_key) throw credentialStoreUnavailable()
       return row.api_key
+    } catch (error) {
+      if (error instanceof AppError) throw error
+      throw credentialStoreUnavailable()
+    }
+  }
+
+  /** Atomic secret + revision snapshot for provider-call admission evidence. */
+  async readCredentialSnapshot(providerKey) {
+    assertProvider(providerKey, this.providerKey)
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT settings.source, settings.revision, credential.api_key
+           FROM control.external_platform_provider_settings settings
+           LEFT JOIN control.external_platform_provider_credentials credential
+             ON credential.provider_key = settings.provider_key
+          WHERE settings.provider_key = $1`,
+        [providerKey],
+      )
+      const row = rows[0]
+      if (!row || row.source !== 'database') {
+        return {
+          source: 'environment',
+          revision: credentialRevision(row?.revision ?? 0),
+          apiKey: null,
+        }
+      }
+      if (!row.api_key) throw credentialStoreUnavailable()
+      return { source: 'database', revision: credentialRevision(row.revision), apiKey: row.api_key }
     } catch (error) {
       if (error instanceof AppError) throw error
       throw credentialStoreUnavailable()

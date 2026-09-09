@@ -1,17 +1,25 @@
 # MX Insight Hub
 
-MX Insight Hub is the governed data-access layer between callers and private data systems such as Night-All. It turns internal platform capabilities into stable, key-scoped APIs with tenant-scoped identities, consumers, grants, quotas and usage evidence, plus idempotency and an operator console.
+MX Insight Hub is an independently deployed data control plane and data center.
+It turns Hub-managed provider connectors and stored datasets into stable,
+key-scoped APIs with tenant-scoped identities, consumers, grants, quotas,
+request/usage evidence, idempotency, raw/canonical storage and an operator
+console. Night-All is a transitional compatibility dependency for explicitly
+unmigrated request shapes, not the Hub's long-term control plane or primary
+provider layer.
 
 The runtime now includes Admin-managed PostgreSQL and file sources, versioned
 source objects/mappings, canonical records/revisions/tombstones, transactional
 projection outbox, direct file import, durable pull workers and customer-safe
-Telegram history/full-text/entity APIs. Eligible Xiaohongshu search/detail and
-narrow single-user crawl/user-info shapes can be served through separately gated
-Hub-owned TikHub workflows, ecommerce product search through the provider-neutral
-JustOne gateway, and unmigrated live platforms/shapes continue through the Night-All
-compatibility path. Historical `mxnc1`, batch/channel/non-post and other unsupported
-Xiaohongshu shapes remain Night-All-owned; repository code alone does not prove a
-direct rollout gate is active. Telegram stored search is locally
+Telegram history/full-text/entity APIs. Migrated Xiaohongshu search/detail and
+narrow single-user crawl/user-info shapes are served by Hub-owned TikHub workflows,
+and ecommerce product search is served by the Hub-owned provider-neutral JustOne
+gateway. Explicitly unmigrated platforms and request shapes may still traverse the
+Night-All compatibility path while each operation is retired from that path after
+contract-parity and rollback gates pass. Requests carrying historical `mxnc1`
+continuations, batch/channel/non-post and other unsupported Xiaohongshu shapes
+remain compatibility-only; repository code alone does not prove a particular
+rollout gate is active. Telegram stored search is locally
 served in the same `night-all.data-search.v1` envelope. `/shared_dir` watching, immutable
 object/cloud adapters, a generic CDC connector, freshness-aware live fallback,
 BI datasets and governed Text2SQL/Data Agent tools remain later delivery gates
@@ -27,8 +35,12 @@ production analysis pipeline.
 
 It is an independently deployed product module and a sibling of `mx-launcher`, not a Night-All fork and not an embedded Launcher database/service:
 
-- **Night-All** owns its legacy/unmigrated collection, normalization, source evidence and credentials.
-- **MX Insight Hub** owns tenants, consumers, API keys, grants, limits, request state, customer usage/billing, and its direct TikHub/JustOne provider gateways.
+- **Night-All** temporarily owns only its explicitly legacy/unmigrated connector
+  behavior, source evidence and credentials until each operation is cut over.
+- **MX Insight Hub** owns the product control plane and data center: tenants,
+  consumers, API keys, grants, limits, request state, customer usage/billing,
+  direct TikHub/JustOne provider gateways, raw observations and canonical/search
+  projections.
 - **MX Launcher / MX-H2I** owns deployment orchestration, private/public connectivity, DNS, TLS edge, and the operator entrypoint.
 
 Compatibility acquisition preserves upstream business content, tags, engagement,
@@ -38,6 +50,46 @@ Night-All lineage retains complete parsed JSON and legacy raw strings; Hub-nativ
 provider calls additionally archive exact bounded response bytes in restricted
 storage. API keys, Authorization/Cookie material and other request secrets are
 kept out of business responses, ordinary UI and logs.
+
+## Current authorization and delivery model
+
+The provider layer and the data-product layer are deliberately separate. A
+provider connector such as TikHub or JustOne owns upstream request/response
+adaptation, credentials, health, procurement evidence and technical protection.
+A data product such as the Xiaohongshu note scroll composes stable Hub operations
+over those connectors and/or stored Hub data. Granting a product does not expose
+provider credentials or make its provider selectable by the caller; changing a
+provider does not change the product's public meter or response contract.
+
+A newly issued snapshot API key starts with **no access**. An operator grants a
+deliberate intersection of three dimensions:
+
+1. **data domain/source scope**, for example `xiaohongshu` or `ecommerce`;
+2. **business operation**, for example `social.posts.resolve` or
+   `ecommerce.products.search`; and
+3. **compatible interface contract**, when a provider-shaped surface is required,
+   for example `compat.xiaohongshu.app_v2`.
+
+The explicit `legacy_all` issuance preset exists only for controlled migration,
+and pre-migration `legacy_dynamic` keys remain a rotation target. A data product is
+a reviewed combination of these permissions and workflows, not a fourth upstream
+platform grant. Provider credentials and connector activation remain Admin-managed.
+
+Compatibility delivery preserves upstream business fields and values as received:
+Hub does not desensitize, filter or truncate the content. The 15-page acquisition
+boundary and opaque continuation are technical controls, not content filtering.
+Credentials, tokens, cookies and other secrets remain isolated from public
+responses, ordinary UI, logs and search projections. Derived data products may
+publish a separately versioned projection, but must not silently rewrite a
+compatibility response.
+
+Downstream billing counts successful logical Hub service deliveries, not the
+number of internal provider calls. A committed delivery captures at most one
+customer charge; an idempotent replay does not create another. Once a request is
+explicitly customer-funded/billed, Hub monthly procurement or subsidy thresholds
+are observability warnings rather than an availability gate. Provider rate limits,
+concurrency, circuit breakers, contract/readiness checks, pagination limits and
+unknown-outcome/idempotency protections still apply.
 
 Launcher is the authority for human login and organization identity; Hub keeps
 its own tenant membership, consumer applications, API keys, product grants,
@@ -84,7 +136,11 @@ cd /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock/mx-insight-hub
 bash scripts/manage.sh up
 ```
 
-The Admin UI and combined local API listen on `http://127.0.0.1:18180`. The first run creates a local tenant, consumer, `xiaohongshu`/`weibo` grants, and a one-time development API key at `.runtime/local-api-key` with mode `0600`.
+The Admin UI and combined local API listen on `http://127.0.0.1:18180`. The first
+run creates a local tenant, consumer and a one-time bootstrap API key at
+`.runtime/local-api-key` with mode `0600`. This development bootstrap is an
+explicitly provisioned exception; ordinary Admin UI/API key issuance defaults to
+an empty platform/capability snapshot.
 
 Run the non-billable control-plane smoke:
 
@@ -92,7 +148,8 @@ Run the non-billable control-plane smoke:
 bash scripts/manage.sh smoke
 ```
 
-Run one real Night-All-backed request only when local Night-All is available on `18141` and real upstream usage is acceptable:
+Run one real legacy-compatibility request only when local Night-All is available
+on `18141` and real upstream usage is acceptable:
 
 ```bash
 bash scripts/manage.sh data-smoke
@@ -153,7 +210,11 @@ GET  /api/v1/requests/:requestId
 GET  /api/v1/usage
 ```
 
-Every costly `POST` requires `Idempotency-Key`. Public callers can choose only documented platform and query fields. Night-All `businessId`, provider, endpoint, credentials, raw response switches, and availability policy are server-owned and never accepted as public parameters.
+Every costly `POST` requires `Idempotency-Key`. Public callers can choose only
+documented platform and query fields. Provider identity, endpoint, credentials,
+raw-response switches and availability policy are server-owned on both direct and
+legacy compatibility connectors. A compatibility `businessId`, when accepted, is
+derived from and must match the authenticated consumer.
 
 The Telegram endpoints require the consumer's explicit `telegram` grant and
 serve fixed, currently shared Hub datasets with opaque keyset cursors. They do

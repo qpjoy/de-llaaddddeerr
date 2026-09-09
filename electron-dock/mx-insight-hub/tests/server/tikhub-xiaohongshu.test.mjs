@@ -138,8 +138,13 @@ async function gatewayFixture({ fetchImpl, config = gatewayConfig(), externalIma
     maxRequests: 1_000,
     windowSeconds: 3_600,
   })
-  // Snapshot-mode keys inherit only grants that exist when the key is issued.
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'TikHub Key' })
+  // Snapshot-mode keys explicitly bind both authorization axes at issuance.
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'TikHub Key',
+    platforms: ['xiaohongshu'],
+    capabilities: [XIAOHONGSHU_POST_OPERATION],
+  })
   const context = await service.authenticate(apiKey.secret)
   const adapter = new TikHubAdapter({ apiKey: PROVIDER_KEY, fetchImpl })
   const platformStore = new MemoryExternalPlatformStore({
@@ -162,7 +167,12 @@ async function gatewayFixture({ fetchImpl, config = gatewayConfig(), externalIma
 }
 
 async function issueApiKey(state, name) {
-  const apiKey = await state.service.createApiKey({ consumerId: state.context.consumer.id, name })
+  const apiKey = await state.service.createApiKey({
+    consumerId: state.context.consumer.id,
+    name,
+    platforms: ['xiaohongshu'],
+    capabilities: [XIAOHONGSHU_POST_OPERATION],
+  })
   return { apiKey, context: await state.service.authenticate(apiKey.secret) }
 }
 
@@ -412,8 +422,8 @@ test('standalone detail budget rejection occurs before consuming provider RPM or
   assert.equal(state.platformStore.calls.size, 0)
 })
 
-test('customer delivery exposes only Hub media locators while the authorized relay retains the source URL', async () => {
-  const marker = 'signed-source-marker-that-must-not-leak'
+test('customer delivery preserves business media fields and adds an authorized Hub relay locator', async () => {
+  const marker = 'signed-source-business-marker'
   const mediaUrl = `https://media.example.test/note.webp?xsec_token=${marker}&width=1080`
   const avatarUrl = `https://media.example.test/avatar.webp?signature=${marker}`
   const loadedSources = []
@@ -432,9 +442,11 @@ test('customer delivery exposes only Hub media locators while the authorized rel
     path: POST_PATH,
   })
   const locator = `/api/v1/data/posts/media?requestId=${live.requestId}&mediaIndex=0`
-  assert.equal(live.body.data.item.media[0].url, locator)
-  assert.equal(live.body.data.item.author.avatarUrl, null)
-  assert.doesNotMatch(JSON.stringify(live.body), new RegExp(`${marker}|media\\.example\\.test`, 'u'))
+  assert.equal(live.body.data.item.media[0].url, mediaUrl)
+  assert.equal(live.body.data.item.media[0].hubRelayUrl, locator)
+  assert.equal(live.body.data.item.author.avatarUrl, avatarUrl)
+  assert.match(JSON.stringify(live.body), new RegExp(marker, 'u'))
+  assert.deepEqual(state.usageStore.requests.get(live.requestId)?.responseBody, live.body)
 
   const retained = await state.usageStore.getCommittedSocialPostMediaSource({
     requestId: live.requestId,
@@ -455,8 +467,10 @@ test('customer delivery exposes only Hub media locators while the authorized rel
     path: POST_PATH,
   })
   assert.equal(replay.sourceMode, 'idempotent_replay')
-  assert.equal(replay.body.data.item.media[0].url, locator)
-  assert.doesNotMatch(JSON.stringify(replay.body), new RegExp(`${marker}|media\\.example\\.test`, 'u'))
+  assert.deepEqual(replay.body, live.body)
+  assert.equal(replay.body.data.item.media[0].url, mediaUrl)
+  assert.equal(replay.body.data.item.media[0].hubRelayUrl, locator)
+  assert.equal(replay.body.data.item.author.avatarUrl, avatarUrl)
 
   await new Promise((resolve) => setTimeout(resolve, 5))
   const fallback = await state.gateway.getPost(state.context, {
@@ -465,11 +479,13 @@ test('customer delivery exposes only Hub media locators while the authorized rel
     path: POST_PATH,
   })
   assert.equal(fallback.sourceMode, 'stored_fallback')
+  assert.equal(fallback.body.data.item.media[0].url, mediaUrl)
   assert.equal(
-    fallback.body.data.item.media[0].url,
+    fallback.body.data.item.media[0].hubRelayUrl,
     `/api/v1/data/posts/media?requestId=${fallback.requestId}&mediaIndex=0`,
   )
-  assert.doesNotMatch(JSON.stringify(fallback.body), new RegExp(`${marker}|media\\.example\\.test`, 'u'))
+  assert.equal(fallback.body.data.item.author.avatarUrl, avatarUrl)
+  assert.deepEqual(state.usageStore.requests.get(fallback.requestId)?.responseBody, fallback.body)
 
   const fallbackReplay = await state.gateway.getPost(state.context, {
     body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'cache_only' },
@@ -478,7 +494,29 @@ test('customer delivery exposes only Hub media locators while the authorized rel
   })
   assert.equal(fallbackReplay.sourceMode, 'idempotent_replay')
   assert.equal(fallbackReplay.originSourceMode, 'stale')
-  assert.equal(fallbackReplay.body.data.item.media[0].url, fallback.body.data.item.media[0].url)
+  assert.deepEqual(fallbackReplay.body, fallback.body)
+})
+
+test('business media beyond the bounded relay window remains intact without a dead locator', async () => {
+  const upstream = successEnvelope()
+  upstream.data.data[0].note_list[0].image_list = Array.from({ length: 21 }, (_, index) => ({
+    url_default: `https://media.example.test/note-${index}.webp?signature=business-${index}`,
+  }))
+  const state = await gatewayFixture({
+    fetchImpl: async () => jsonResponse(upstream),
+  })
+
+  const live = await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl() },
+    idempotencyKey: 'public-projection-many-media-01',
+    path: POST_PATH,
+  })
+
+  assert.equal(live.body.data.item.media.length, 21)
+  assert.match(live.body.data.item.media[0].hubRelayUrl, /mediaIndex=0$/u)
+  assert.match(live.body.data.item.media[19].hubRelayUrl, /mediaIndex=19$/u)
+  assert.equal(live.body.data.item.media[20].url, upstream.data.data[0].note_list[0].image_list[20].url_default)
+  assert.equal(live.body.data.item.media[20].hubRelayUrl, undefined)
 })
 
 test('canonical ingest preserves business URL queries and maps tags and bookmarks to stable fields', async () => {
@@ -514,7 +552,7 @@ test('canonical ingest preserves business URL queries and maps tags and bookmark
   )
 })
 
-test('automatic idempotency is API-key scoped while snapshots remain shared by the consumer', async () => {
+test('headerless note calls are separately metered while snapshots remain shared by the consumer', async () => {
   let upstreamCalls = 0
   const state = await gatewayFixture({
     fetchImpl: async () => {
@@ -529,19 +567,30 @@ test('automatic idempotency is API-key scoped while snapshots remain shared by t
   }
 
   const live = await state.gateway.getPost(state.context, request)
-  const cached = await state.gateway.getPost(second.context, request)
+  const cachedSameKey = await state.gateway.getPost(state.context, request)
+  const cachedSecondKey = await state.gateway.getPost(second.context, request)
 
   assert.equal(live.sourceMode, 'live')
-  assert.equal(cached.sourceMode, 'fresh_cache')
+  assert.equal(cachedSameKey.sourceMode, 'fresh_cache')
+  assert.equal(cachedSecondKey.sourceMode, 'fresh_cache')
   assert.equal(upstreamCalls, 1)
-  assert.equal(state.usageStore.requests.size, 2)
+  assert.equal(state.usageStore.requests.size, 3)
   assert.deepEqual(
     [...state.usageStore.requests.values()].map((entry) => entry.apiKeyId).sort(),
-    [state.apiKey.id, second.apiKey.id].sort(),
+    [state.apiKey.id, state.apiKey.id, second.apiKey.id].sort(),
   )
   assert.equal(
-    cached.body.data.item.media[0].url,
-    `/api/v1/data/posts/media?requestId=${cached.requestId}&mediaIndex=0`,
+    cachedSameKey.body.data.item.media[0].hubRelayUrl,
+    `/api/v1/data/posts/media?requestId=${cachedSameKey.requestId}&mediaIndex=0`,
+  )
+  assert.equal(cachedSameKey.body.data.item.media[0].url, 'https://media.example.test/note.webp')
+  assert.deepEqual(
+    state.usageStore.requests.get(cachedSameKey.requestId)?.responseBody,
+    cachedSameKey.body,
+  )
+  assert.deepEqual(
+    state.usageStore.requests.get(cachedSecondKey.requestId)?.responseBody,
+    cachedSecondKey.body,
   )
 })
 
@@ -1015,12 +1064,13 @@ test('Hub-projected platform GET, JSON POST, and canonical routes share one idem
     assert.equal(canonical.payload.requestId, platformGet.payload.requestId)
     assert.equal(platformGet.payload.data.item.text, '一篇完整的小红书图文笔记')
     assert.deepEqual(platformGet.payload.data.item.tags, ['摄影', '便携相机'])
+    assert.equal(platformGet.payload.data.item.media[0].url, `https://media.example.test/note.webp?xsec_token=${marker}`)
     assert.equal(
-      platformGet.payload.data.item.media[0].url,
+      platformGet.payload.data.item.media[0].hubRelayUrl,
       `/api/v1/data/posts/media?requestId=${platformGet.payload.requestId}&mediaIndex=0`,
     )
-    assert.equal(platformGet.payload.data.item.author.avatarUrl, null)
-    assert.doesNotMatch(
+    assert.equal(platformGet.payload.data.item.author.avatarUrl, `https://media.example.test/avatar.webp?signature=${marker}`)
+    assert.match(
       JSON.stringify([
         platformGet.payload,
         noteIdPrecedence.payload,
@@ -1063,6 +1113,8 @@ test('platform-shaped GET rejects missing auth, Test keys, missing grants, and i
     consumerId: state.context.consumer.id,
     name: 'TikHub Test Key',
     environment: 'test',
+    platforms: ['xiaohongshu'],
+    capabilities: [XIAOHONGSHU_POST_OPERATION],
   })
   const ungrantedConsumer = await state.service.createConsumer({
     tenantId: state.context.tenant.id,
@@ -1087,6 +1139,8 @@ test('platform-shaped GET rejects missing auth, Test keys, missing grants, and i
   const platformOnlyApiKey = await state.service.createApiKey({
     consumerId: platformOnlyConsumer.id,
     name: 'TikHub Platform-only Key',
+    platforms: ['xiaohongshu'],
+    capabilities: [],
   })
   const server = createServer(createApp({
     service: state.service,

@@ -707,6 +707,7 @@ export function createApp({
   externalPlatformAdmin = null,
   externalPlatformGateway = null,
   tikHubGateway = null,
+  acquisitionHistory = null,
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -1518,6 +1519,23 @@ export function createApp({
         })
         return
       }
+      let params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'acquisition history lookup')
+        if (!acquisitionHistory) {
+          throw new AppError(
+            503,
+            'acquisition_history_unavailable',
+            'Acquisition history requires the PostgreSQL store',
+          )
+        }
+        sendJson(response, 200, {
+          data: await acquisitionHistory.getAdminDeliveredRun(params.requestId),
+          requestId,
+        })
+        return
+      }
       if (
         request.method === 'GET'
         && pathname === '/internal/v1/admin/data-products/virtual-supermarket/metadata'
@@ -1662,7 +1680,7 @@ export function createApp({
         })
         return
       }
-      let params = routeMatch(
+      params = routeMatch(
         pathname,
         '/internal/v1/admin/data-products/telegram/chats/:chatId/messages',
       )
@@ -2400,6 +2418,30 @@ export function createApp({
           data: await externalPlatformAdmin.updateCredential(
             params.provider,
             await readJson(request, 16 * 1024),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/external-platforms/:provider/operations/:operation/policy',
+      )
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform operation policy update')
+        if (typeof externalPlatformAdmin?.updateOperationPolicy !== 'function') {
+          throw new AppError(
+            503,
+            'external_platform_control_store_unavailable',
+            'External platform operation control is unavailable',
+          )
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.updateOperationPolicy(
+            params.provider,
+            params.operation,
+            await readJson(request, 64 * 1024),
           ),
           requestId,
         })
@@ -5158,6 +5200,27 @@ export function createApp({
       if (request.method === 'GET' && params) {
         const context = await requirePublic(request)
         sendJson(response, 200, { data: await service.requestStatus(context, params.id), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/acquisitions/:requestId')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'acquisition history lookup')
+        if (!acquisitionHistory) {
+          throw new AppError(
+            503,
+            'acquisition_history_unavailable',
+            'Acquisition history requires the PostgreSQL store',
+          )
+        }
+        sendJson(response, 200, {
+          data: await acquisitionHistory.getPublicDeliveredRun({
+            requestId: params.requestId,
+            consumerId: context.consumer.id,
+            apiKeyId: context.apiKey.id,
+          }),
+          requestId,
+        })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/usage') {

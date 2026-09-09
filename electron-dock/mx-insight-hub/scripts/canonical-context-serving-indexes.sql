@@ -5,7 +5,7 @@
 -- CONCURRENTLY cannot run in a transaction block. The source stays paused and
 -- no upstream data is read.
 SET lock_timeout = '2s';
-SET statement_timeout = '0';
+SET statement_timeout = '15min';
 
 -- A concurrent build can leave an invalid same-name index behind. Likewise, a
 -- manually replaced index can have the right name but the wrong contract. Test

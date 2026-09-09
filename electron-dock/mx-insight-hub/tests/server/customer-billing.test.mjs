@@ -336,7 +336,17 @@ test('legacy plans remain non-monetary without a billing profile or price book',
     consumerId: consumer.id,
     enabled: true,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Legacy key' })
+  await service.putCapabilityConfiguration('social.posts.search', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+  })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Legacy key',
+    platforms: ['xiaohongshu'],
+    capabilities: ['social.posts.search'],
+  })
   const context = await service.authenticate(key.secret)
   const request = reserveInput(context)
   const reservation = await store.reserve(request)

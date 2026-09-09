@@ -1018,6 +1018,7 @@ justone_preserve_line="$(grep -n 'preserve_existing_justone_runtime_config' <<<"
 discovery_line="$(grep -n 'discover_hanlp_url' <<<"$apply_k8s_body" | cut -d: -f1)"
 config_line="$(grep -n 'create_runtime_config' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_workload_change_line="$(grep -nE 'rollout restart|scale deployment' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
+admin_freeze_line="$(grep -n 'scale deployment/mx-insight-hub-admin --replicas=0' <<<"$apply_k8s_body" | cut -d: -f1)"
 if ! [ "$namespace_line" -lt "$justone_preserve_line" ] \
   || ! [ "$justone_preserve_line" -lt "$discovery_line" ] \
   || ! [ "$discovery_line" -lt "$config_line" ] \
@@ -1028,19 +1029,141 @@ fi
 grep -q -- '--from-literal=MX_COMMON_HANLP_URL=' <<<"$runtime_config_body"
 printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
 
-# Fixed-source serving indexes are an idempotent deploy prerequisite, not a
-# separate operator memory step. They must run only after schema migrations and
-# before any API workload is applied/restarted.
+# Acquisition-history indexes must be prepared online before migration 061;
+# the other serving indexes remain post-migration prerequisites before rollout.
+migration_job_apply_line="$(grep -n '20-migration-job.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
+acquisition_indexes_line="$(grep -n '^  ensure_acquisition_history_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 migration_complete_line="$(grep -n -- '--for=condition=complete job/mx-insight-hub-migrate' <<<"$apply_k8s_body" | cut -d: -f1)"
 province_indexes_line="$(grep -n '^  ensure_province_opinion_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 context_indexes_line="$(grep -n '^  ensure_canonical_context_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_api_apply_line="$(grep -n '30-public-api.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
-if ! [ "$migration_complete_line" -lt "$province_indexes_line" ] \
+if ! [ "$acquisition_indexes_line" -lt "$migration_job_apply_line" ] \
+  || ! [ "$acquisition_indexes_line" -lt "$admin_freeze_line" ] \
+  || ! [ "$migration_complete_line" -lt "$province_indexes_line" ] \
   || ! [ "$province_indexes_line" -lt "$context_indexes_line" ] \
   || ! [ "$context_indexes_line" -lt "$first_api_apply_line" ]; then
-  printf 'not ok - serving indexes are not reconciled after migrations and before API rollout\n' >&2
+  printf 'not ok - online index preparation is not ordered around migration and API rollout\n' >&2
   exit 1
 fi
+
+grep -q '^  backoffLimit: 0$' "$ROOT_DIR/deploy/k8s/internal/20-migration-job.yaml"
+grep -q '^  activeDeadlineSeconds: 240$' "$ROOT_DIR/deploy/k8s/internal/20-migration-job.yaml"
+if grep -q '^  backoffLimit: [1-9]' "$ROOT_DIR/deploy/k8s/internal/20-migration-job.yaml"; then
+  printf 'not ok - migration Job can retry a failed schema writer automatically\n' >&2
+  exit 1
+fi
+
+migration_cleanup_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-migration-cleanup.XXXXXX")"
+MIGRATION_CLEANUP_EVENTS="$migration_cleanup_events" bash -c '
+  source "$1/scripts/manage.sh"
+  DEPLOY_MIGRATION_JOB_ACTIVE=1
+  DEPLOY_FROZEN_ADMIN=1
+  kubectl() {
+    printf "%s\n" "$*" >>"$MIGRATION_CLEANUP_EVENTS"
+    case "$*" in
+      *"get pods"*) printf "pod/mx-insight-hub-migrate-test\n" ;;
+    esac
+  }
+  docker() { :; }
+  set +e
+  false
+  cleanup_deploy_runtime
+' _ "$ROOT_DIR" >/dev/null 2>&1 || true
+migration_delete_line="$(grep -n 'delete job mx-insight-hub-migrate' "$migration_cleanup_events" | cut -d: -f1)"
+migration_pod_wait_line="$(grep -n -- '--for=delete pod -l job-name=mx-insight-hub-migrate' "$migration_cleanup_events" | cut -d: -f1)"
+admin_restore_line="$(grep -n 'scale deployment/mx-insight-hub-admin --replicas=1' "$migration_cleanup_events" | cut -d: -f1)"
+if [ -z "$migration_delete_line" ] || [ -z "$migration_pod_wait_line" ] \
+  || [ -z "$admin_restore_line" ] \
+  || ! [ "$migration_delete_line" -lt "$migration_pod_wait_line" ] \
+  || ! [ "$migration_pod_wait_line" -lt "$admin_restore_line" ]; then
+  printf 'not ok - failed deploy restored Admin before migration Job termination was confirmed\n' >&2
+  exit 1
+fi
+
+migration_cleanup_failure_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-migration-cleanup-failure.XXXXXX")"
+migration_cleanup_failure_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-migration-cleanup-failure-error.XXXXXX")"
+MIGRATION_CLEANUP_EVENTS="$migration_cleanup_failure_events" bash -c '
+  source "$1/scripts/manage.sh"
+  DEPLOY_MIGRATION_JOB_ACTIVE=1
+  DEPLOY_FROZEN_ADMIN=1
+  kubectl() {
+    printf "%s\n" "$*" >>"$MIGRATION_CLEANUP_EVENTS"
+    case "$*" in
+      *"delete job mx-insight-hub-migrate"*) return 1 ;;
+    esac
+  }
+  docker() { :; }
+  set +e
+  false
+  cleanup_deploy_runtime
+' _ "$ROOT_DIR" >"$migration_cleanup_failure_error" 2>&1 || true
+if grep -q 'scale deployment/mx-insight-hub-admin --replicas=1' "$migration_cleanup_failure_events"; then
+  printf 'not ok - unconfirmed migration termination restored Admin\n' >&2
+  exit 1
+fi
+grep -q 'migration Job termination could not be confirmed; Hub Admin remains frozen' \
+  "$migration_cleanup_failure_error"
+rm -f -- "$migration_cleanup_events" "$migration_cleanup_failure_events" \
+  "$migration_cleanup_failure_error"
+printf 'ok - migration deadline is single-attempt and cleanup stops the Job before Admin restore\n'
+
+acquisition_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-acquisition-index-stdin.XXXXXX")"
+acquisition_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-acquisition-index-argv.XXXXXX")"
+ACQUISITION_INDEX_STDIN="$acquisition_index_stdin" \
+ACQUISITION_INDEX_ARGV="$acquisition_index_argv" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >"$ACQUISITION_INDEX_ARGV"
+    cat >"$ACQUISITION_INDEX_STDIN"
+  }
+  ensure_acquisition_history_indexes
+' _ "$ROOT_DIR"
+assert_eq \
+  '-n mx-common exec -i statefulset/mx-common-postgres -- psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1' \
+  "$(cat "$acquisition_index_argv")" \
+  'deploy streams acquisition-history indexes to the shared Hub database'
+cmp -s "$ROOT_DIR/scripts/acquisition-history-indexes.sql" "$acquisition_index_stdin" \
+  || { printf 'not ok - deploy did not stream the exact acquisition-history index SQL\n' >&2; exit 1; }
+
+acquisition_index_sql="$(cat "$ROOT_DIR/scripts/acquisition-history-indexes.sql")"
+grep -Fq 'ADD COLUMN IF NOT EXISTS source_provider_call_id uuid' <<<"$acquisition_index_sql"
+grep -Fq 'ADD COLUMN IF NOT EXISTS canonical_revision integer' <<<"$acquisition_index_sql"
+grep -Fq 'SET ROLE :"acquisition_history_product_owner"' <<<"$acquisition_index_sql"
+grep -Fq "SET statement_timeout = '15min'" <<<"$acquisition_index_sql"
+grep -Fq 'CREATE OR REPLACE TRIGGER gateway_requests_capture_source_provider_call' \
+  <<<"$acquisition_index_sql"
+grep -Fq 'CREATE OR REPLACE TRIGGER observations_capture_canonical_revision' \
+  <<<"$acquisition_index_sql"
+if grep -Eq 'DROP TRIGGER.*(gateway_requests|observations)' <<<"$acquisition_index_sql"; then
+  printf 'not ok - acquisition-history preparation exposes a trigger replacement gap\n' >&2
+  exit 1
+fi
+grep -Fq 'CREATE INDEX CONCURRENTLY external_platform_gateway_requests_usage_source_idx' \
+  <<<"$acquisition_index_sql"
+grep -Fq 'CREATE INDEX CONCURRENTLY observations_ingest_order_idx' \
+  <<<"$acquisition_index_sql"
+grep -Fq 'DROP INDEX CONCURRENTLY IF EXISTS' <<<"$acquisition_index_sql"
+grep -Fq 'SELECT bool_and(NOT table_exists OR contract_ready)' <<<"$acquisition_index_sql"
+if grep -Eq 'CREATE INDEX CONCURRENTLY IF NOT EXISTS' <<<"$acquisition_index_sql"; then
+  printf 'not ok - acquisition-history reconciliation can skip an invalid same-name index\n' >&2
+  exit 1
+fi
+
+acquisition_index_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-acquisition-index-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { cat >/dev/null; return 1; }
+  ensure_acquisition_history_indexes
+' _ "$ROOT_DIR" >"$acquisition_index_error" 2>&1; then
+  printf 'not ok - deploy continued after acquisition-history index preparation failed\n' >&2
+  exit 1
+fi
+grep -q 'acquisition-history indexes could not be prepared' "$acquisition_index_error"
+rm -f -- "$acquisition_index_stdin" "$acquisition_index_argv" "$acquisition_index_error"
+printf 'ok - acquisition-history index preparation is exact, online, and fail-closed\n'
 
 province_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-stdin.XXXXXX")"
 province_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-argv.XXXXXX")"
@@ -2002,11 +2125,14 @@ do
 done
 printf 'ok - invalid JustOne settings fail strict preflight before cluster mutation\n'
 
-# The common migration-first recovery must be actionable without weakening the
-# paid-provider gate or confusing the downstream request price book with
-# upstream procurement evidence.
+# Missing reviewed procurement evidence blocks only the provider operation. It
+# must not abort a Hub deploy or prevent Admin from publishing the price book
+# that clears the blocker.
 missing_justone_billing_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-missing-justone-billing.XXXXXX")"
-if MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+missing_justone_billing_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-missing-justone-marker.XXXXXX")"
+: >"$missing_justone_billing_marker"
+if ! MISSING_JUSTONE_BILLING_MARKER="$missing_justone_billing_marker" \
+  MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
   MX_INSIGHT_JUSTONE_BILLING_JSON= \
   bash -c '
     set -euo pipefail
@@ -2015,17 +2141,33 @@ if MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
     export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
     export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
     export NIGHT_ALL_BASE_URL="http://night-all.internal"
-    kubectl() { return 79; }
+    export MX_INSIGHT_SEARCH_READY=1
+    docker_daemon_proxy_snapshot() { printf "%s" "{}"; }
+    kubectl() {
+      case " $* " in
+        *" create secret generic mx-insight-hub-secrets "*)
+          printf "secret\n" >>"$MISSING_JUSTONE_BILLING_MARKER"
+          printf "apiVersion: v1\nkind: Secret\n"
+          ;;
+        *" create configmap mx-insight-hub-config "*)
+          printf "configmap\n" >>"$MISSING_JUSTONE_BILLING_MARKER"
+          printf "apiVersion: v1\nkind: ConfigMap\n"
+          ;;
+        *" apply -f - "*) while IFS= read -r _line; do :; done ;;
+        *) return 1 ;;
+      esac
+    }
     create_runtime_config
   ' _ "$ROOT_DIR" >/dev/null 2>"$missing_justone_billing_error"; then
-  printf 'not ok - enabled JustOne without reviewed cost evidence was accepted\n' >&2
+  printf 'not ok - missing JustOne cost evidence aborted the whole Hub deploy\n' >&2
   exit 1
 fi
-grep -Fq 'MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0' "$missing_justone_billing_error"
-grep -Fq 'MX_INSIGHT_SYNC_LAUNCHER=0' "$missing_justone_billing_error"
-grep -Fq 'migration 056 request metering remains enabled' "$missing_justone_billing_error"
-rm -f -- "$missing_justone_billing_error"
-printf 'ok - missing JustOne cost evidence gives a safe migration-first recovery\n'
+grep -Fq 'Hub deployment continues' "$missing_justone_billing_error"
+grep -Fq 'operations remain blocked' "$missing_justone_billing_error"
+assert_eq $'secret\nconfigmap' "$(cat "$missing_justone_billing_marker")" \
+  'missing JustOne price evidence still publishes runtime Secret and ConfigMap'
+rm -f -- "$missing_justone_billing_error" "$missing_justone_billing_marker"
+printf 'ok - missing JustOne cost evidence blocks only the provider operation\n'
 
 invalid_justone_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-lease.XXXXXX")"
 invalid_justone_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-lease-error.XXXXXX")"

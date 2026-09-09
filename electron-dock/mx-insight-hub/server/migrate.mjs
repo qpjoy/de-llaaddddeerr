@@ -5,12 +5,29 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import pg from 'pg'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+// Distinct from mx-common's lock. Two Hub migration Jobs may overlap across
+// operator hosts; a session lock serializes schema_migrations inspection and
+// all product DDL, and is released automatically if Kubernetes kills the Pod.
+const MIGRATION_LOCK_KEY = 0x4d58_0002
+
+export async function acquireMigrationLock(client) {
+  const { rows } = await client.query(
+    'SELECT pg_try_advisory_lock($1) AS acquired',
+    [MIGRATION_LOCK_KEY],
+  )
+  if (rows[0]?.acquired !== true) {
+    throw new Error('Another MX Insight Hub migration is already running')
+  }
+}
 
 export async function runMigrations({ connectionString, migrationsDir = resolve(projectRoot, 'migrations') }) {
   if (!connectionString) throw new Error('DATABASE_URL is required')
   const pool = new pg.Pool({ connectionString })
   const client = await pool.connect()
+  let migrationLockAcquired = false
   try {
+    await acquireMigrationLock(client)
+    migrationLockAcquired = true
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         filename text PRIMARY KEY,
@@ -49,6 +66,9 @@ export async function runMigrations({ connectionString, migrationsDir = resolve(
       console.log(`applied ${filename}`)
     }
   } finally {
+    if (migrationLockAcquired) {
+      await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]).catch(() => {})
+    }
     client.release()
     await pool.end()
   }

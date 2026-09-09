@@ -1,23 +1,29 @@
 # Night-All integration
 
-## Source role
+## Transitional source role
 
-Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub,
-legacy JustOne routes, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence;
-and owns the credentials and quotas for those routes. Versioned JustOne ecommerce product search and TikHub
-Xiaohongshu note detail are separate, release-gated Hub-native connectors governed by
-[ADR-0013](../adr/0013-external-data-platform-gateway.md). The additional direct Xiaohongshu search/raw slice
-is a staged migration with narrower eligibility and retained Night-All ownership, documented in the
+MX Insight Hub is the independent control plane and data center. It owns public
+authorization and metering, provider routing, direct-provider credentials and
+evidence, raw observations, canonical storage and search projections. Migrated
+JustOne ecommerce operations and TikHub Xiaohongshu search/detail plus eligible
+single-user crawl/user-info operations are Hub-native connectors governed by
+[ADR-0013](../adr/0013-external-data-platform-gateway.md) and the
 [direct TikHub migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md).
 
-MX Insight Hub does not duplicate Night-All's remaining provider orchestration. Its Night-All adapter calls a
-versioned private capability contract; Hub-native adapters own only explicitly pinned operation slices behind
-the same provider-neutral Hub boundary. A direct route name or compatibility projection never permits
-relabelling historical Night-All evidence.
+Night-All remains only as a transitional compatibility connector for explicitly
+unmigrated platform/operation shapes. For those calls it may still own provider
+orchestration, credentials, collection and source evidence, but that ownership
+retires per operation after parity, accounting and rollback gates pass. A direct
+route name or compatibility projection never permits relabelling historical
+Night-All evidence.
 
-For Internal production, keep the host Night-All as the only writer and call it through a workload-authenticated host facade/private Service. A second full Docker Night-All is for isolated local snapshot testing, not a production read shortcut and never shares production PG/Redis or scheduler ownership.
+For Internal production, keep the host Night-All as the only writer for its
+remaining legacy datasets and call it through a workload-authenticated host
+facade/private Service. A second full Docker Night-All is for isolated local
+snapshot testing, not a production read shortcut and never shares production
+PG/Redis or scheduler ownership.
 
-## Versioned data-search adapter
+## Legacy versioned data-search adapter
 
 The Hub calls:
 
@@ -128,11 +134,13 @@ to reappear during an outage. Only a structurally valid `complete` response is
 snapshot material, and the snapshot keeps the same upstream fields for exact
 replay except for the intentional `mxnc1` pagination-control projection above.
 
-The facade always attempts live Night-All first for a new `Idempotency-Key`.
-Once a live or stale delivery commits, that `Idempotency-Key` permanently replays
-the committed delivery. Its live attempt may have consumed provider quota or
-incurred Hub procurement cost; it does not prove a Hub customer charge. Requesting
-current data requires a new `Idempotency-Key`. On an ambiguous
+When routing selects the remaining Night-All compatibility connector, the facade
+attempts it live first for a new `Idempotency-Key`. Eligible migrated shapes use
+the Hub-native connector instead. Once a live or stale delivery commits, that
+`Idempotency-Key` permanently replays the committed delivery. Its live attempt may
+have consumed provider quota or incurred Hub procurement cost; it does not prove a
+Hub customer charge. Requesting current data requires a new `Idempotency-Key`. On
+an ambiguous
 network/timeout outcome, an unusable HTTP 2xx content-type/JSON/envelope, or a
 definite upstream `502`/`503`/`504`, Hub may return the prior complete response
 for the exact authenticated consumer, operation and normalized request
@@ -246,13 +254,26 @@ historical query must never be returned as if it were live.
 
 ## Platform readiness
 
-Night-All exposes a broad 15-platform catalog, but catalog presence is not proof of a live production contract. Grant only platforms that have passed a real credential/endpoint/pagination verification. Automated deploy smoke must not call provider-backed live acquisition endpoints.
+Readiness is evaluated for the connector and operation Hub will actually dispatch.
+The legacy Night-All catalog exposes a broad 15-platform set, but catalog presence
+is not proof of a live production contract. Likewise, a configured direct Hub
+provider is not ready until its credential, contract, pagination and cost evidence
+have passed the operation gate. Grant only verified operations. Automated deploy
+smoke must not call provider-backed live acquisition endpoints.
 
 Before deployment, probe the actual Internal revision and route. The local Night-All checkout contains the new `/api/v1/data/search` and durable-cursor work, but repository presence is not proof that the host has that commit/migration. The adapter must also validate the response business status because Night-All can report a failed/partial platform result inside an HTTP 200 envelope, and readiness must inspect dependency sub-status rather than a top-level `ok` alone.
 
 The Hub stores explicit grants such as `xhs` and `weibo`. A future “all platforms” action creates a versioned snapshot of currently approved platforms; it is not a wildcard.
 
-Observed on Internal (2026-08-06): every platform in `/api/v1/data/capabilities` reports `degraded` with reason `endpoint_degraded`, so `ready_only` search fails closed with `503 DATA_PLATFORM_NOT_READY`. Per the upstream spec a platform is promoted to `ready` only when a successful live call is recorded no earlier than the contract version it belongs to (`last_success_at >= contract_updated_at`); re-verification is required whenever the endpoint path/params/schema change. Hub-side grants and the Admin "platform enabled" view are authorization state and say nothing about upstream readiness, so the Admin console must surface the upstream capability status separately instead of implying a granted platform can serve data.
+Historical observation on Internal (2026-08-06): every legacy Night-All platform
+in `/api/v1/data/capabilities` reported `degraded` with reason
+`endpoint_degraded`, so its `ready_only` search failed closed with
+`503 DATA_PLATFORM_NOT_READY`. Per that legacy contract a platform is promoted to
+`ready` only when a successful live call is recorded no earlier than its contract
+version (`last_success_at >= contract_updated_at`). Hub grants and the Admin
+"platform enabled" view are authorization state, not proof of either Night-All or
+direct-provider readiness; the console surfaces connector/operation readiness
+separately.
 
 ## Upstream capability coverage
 
@@ -263,15 +284,16 @@ and Hub safeguards but remain outside Night-All's `ready_only` capability-freshn
 governance. A compatibility success is not evidence that the platform has passed
 the versioned data-contract readiness gate.
 
-Item detail and comments still exist only on the older
-`/api/v1/search/post-detail` and `/api/v1/search/post-comments` routes and are not
-proxied by Hub. The target is to extend the upstream data contract with
-`post_detail`, `post_comments` and `profile` capabilities so they inherit catalog
-readiness, opaque cursors and stable fields.
+Approved App V2-compatible Xiaohongshu note detail, note search, user search,
+user-profile and user-post operations now have Hub-native TikHub contracts.
+Comments, arbitrary batch/custom forms and any operation not represented by an
+approved Hub contract remain unavailable or on an explicitly bounded legacy path;
+they are not unlocked by a broad platform grant.
 
-Night-All remains the connector wherever it owns upstream routing and provider-credential/billing
-business policy. JustOne ecommerce product search and TikHub Xiaohongshu note detail are implemented
-operation-scoped Hub-native connectors. Direct Xiaohongshu search/raw remains governed by its staged
+Night-All remains the transitional connector only where upstream routing and
+provider-credential/billing policy have not moved. JustOne ecommerce product
+search and TikHub Xiaohongshu note detail are operation-scoped Hub-native
+connectors. Direct Xiaohongshu search/raw remains governed by its staged
 [migration boundary](../integrations/xiaohongshu-direct-tikhub-migration.md). Eligible single-identifier
 Xiaohongshu crawl/user-info is also Hub-native; historical `mxnc1` traversals, batch/multi-identifier queries, channel forms,
 comments, non-post activity, non-20 pages and custom params remain on Night-All. Other provider routes remain unchanged until each is
@@ -284,7 +306,7 @@ do not change.
 - internal service authentication middleware;
 - provider credential encryption, rotation and redaction;
 - the `CH` (Switzerland) versus `CN` (China) classification fix and historical reclassification;
-- TikHub endpoint/capability contract fixtures and per-platform live verification;
+- provider fixtures and live verification only for the operations still executed by Night-All;
 - Night-All PostgreSQL PITR, artifact snapshot and restore drills;
 - collection scheduler/worker ownership and single-writer cutover.
 

@@ -345,6 +345,7 @@ export class ExternalPlatformAdminService {
     store,
     config,
     credentialStore = null,
+    operationControlStore = null,
     durable = false,
     providerKey = 'justone',
     metadata = null,
@@ -352,6 +353,7 @@ export class ExternalPlatformAdminService {
     this.store = store
     this.config = config
     this.credentialStore = credentialStore
+    this.operationControlStore = operationControlStore
     this.durable = durable
     this.providerKey = providerKey
     this.metadata = metadata || (providerKey === 'tikhub' ? TIKHUB_METADATA : JUSTONE_METADATA)
@@ -374,6 +376,17 @@ export class ExternalPlatformAdminService {
     return this.credentialStore
   }
 
+  #requireOperationControlStore() {
+    if (!this.operationControlStore) {
+      throw new AppError(
+        503,
+        'external_platform_control_store_unavailable',
+        'External platform operation control is unavailable',
+      )
+    }
+    return this.operationControlStore
+  }
+
   async #credential(providerKey = this.providerKey) {
     this.#assertProvider(providerKey)
     if (!this.credentialStore) return fallbackCredential(this.config)
@@ -388,11 +401,24 @@ export class ExternalPlatformAdminService {
       this.store.analytics({ from: shanghaiDayStart(now), bucket: 'hour' }),
       this.#credential(),
     ])
+    const operations = this.operationControlStore
+      ? await this.operationControlStore.describeProvider(this.providerKey, {
+          config: this.config,
+          credentialConfigured: credential.credentialConfigured,
+        })
+      : []
     const provider = providerProjection(analytics, todayAnalytics, {
       ...this.config,
       configured: credential.credentialConfigured,
     }, range, now, this.metadata)
-    return { now, range, analytics, provider, credential }
+    provider.operationControl = {
+      operationCount: operations.length,
+      effectiveStates: Object.fromEntries(operations.map((operation) => [
+        operation.operationKey,
+        operation.effectiveState,
+      ])),
+    }
+    return { now, range, analytics, provider, credential, operations }
   }
 
   async overview(rangeValue) {
@@ -428,13 +454,14 @@ export class ExternalPlatformAdminService {
 
   async detail(providerKey, rangeValue) {
     this.#assertProvider(providerKey)
-    const { now, range, analytics, provider, credential } = await this.#data(rangeValue)
+    const { now, range, analytics, provider, credential, operations } = await this.#data(rangeValue)
     return {
       contractVersion: 'mx-insight-hub.external-platform-admin.v1',
       range: range.range,
       generatedAt: now.toISOString(),
       provider,
       credential,
+      operations,
       pipeline: [
         {
           key: 'stable_contract',
@@ -512,6 +539,18 @@ export class ExternalPlatformAdminService {
     this.#assertProvider(providerKey)
     return this.#requireCredentialStore().updateCredential(providerKey, input, {
       updatedBy: 'admin-token',
+    })
+  }
+
+  async updateOperationPolicy(providerKey, operationKey, input) {
+    this.#assertProvider(providerKey)
+    const credential = await this.#credential(providerKey)
+    return this.#requireOperationControlStore().updatePolicy(providerKey, operationKey, input, {
+      actor: 'admin-token',
+      runtime: {
+        config: this.config,
+        credentialConfigured: credential.credentialConfigured,
+      },
     })
   }
 
@@ -615,6 +654,10 @@ export class MultiExternalPlatformAdminService {
 
   updateCredential(providerKey, input) {
     return this.#service(providerKey).updateCredential(providerKey, input)
+  }
+
+  updateOperationPolicy(providerKey, operationKey, input) {
+    return this.#service(providerKey).updateOperationPolicy(providerKey, operationKey, input)
   }
 
   revealCredential(providerKey) {

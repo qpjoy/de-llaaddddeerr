@@ -130,6 +130,29 @@ test('memory credential store reports only safe state and fences rotations by re
   )
 })
 
+test('Postgres credential reads fail closed for a revision outside JavaScript safe integers', async () => {
+  const store = new PostgresExternalPlatformCredentialStore({
+    providerKey: 'justone',
+    pool: {
+      async query() {
+        return {
+          rows: [{
+            source: 'database',
+            revision: '9007199254740992',
+            updated_at: null,
+            credential_configured: true,
+          }],
+        }
+      },
+    },
+  })
+
+  await assert.rejects(
+    store.describeCredential('justone'),
+    (error) => error?.code === 'external_platform_credential_store_unavailable',
+  )
+})
+
 test('Postgres credential store keeps secret reads separate from safe projections', async () => {
   const secret = 'justone-postgres-secret'
   const timestamp = '2026-09-05T00:00:00.000Z'

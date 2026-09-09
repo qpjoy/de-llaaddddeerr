@@ -73,12 +73,31 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     windowSeconds: 3_600,
     maxPageSize: 20,
   })
-  const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'HTTP Key' })
-  const rotatedApiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rotated HTTP Key' })
+  await service.putCapabilityConfiguration('ecommerce.products.search', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+  })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'HTTP Key',
+    platforms: ['ecommerce'],
+    capabilities: ['ecommerce.products.search'],
+  })
+  const rotatedApiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Rotated HTTP Key',
+    platforms: ['ecommerce'],
+    capabilities: ['ecommerce.products.search'],
+  })
   const testApiKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Legacy Test HTTP Key',
     environment: 'test',
+    platforms: ['ecommerce'],
+    capabilities: ['ecommerce.products.search'],
   })
   // Simulate a row created before environment metadata was backfilled. The
   // immutable prefix remains authoritative enough to fail closed.
@@ -277,13 +296,14 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
 
     const replay = await request('http-live-key-0001', apiKey.secret, refreshBody)
     assert.equal(replay.response.status, 200)
-    assert.equal(replay.payload.meta.sourceMode, 'idempotent_replay')
+    assert.deepEqual(
+      replay.payload,
+      live.payload,
+      'explicit idempotency replay must return the exact response body committed for the original charge',
+    )
     assert.equal(replay.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
     assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
     assert.equal(replay.response.headers.get('x-mx-insight-request-id'), live.payload.requestId)
-    assert.equal(replay.payload.requestId, live.payload.requestId)
-    assert.equal(replay.payload.meta.capturedAt, capturedAt)
-    assert.deepEqual(replay.payload.data.items, live.payload.data.items)
 
     const mediaUrl = new URL('/api/v1/data/ecommerce/products/media', baseUrl)
     mediaUrl.searchParams.set('requestId', live.payload.requestId)

@@ -29,6 +29,9 @@ function storeWithCommittedRequest({ completedAt }) {
   const client = {
     async query(sql, values) {
       statements.push(sql.trim())
+      if (sql.includes('FROM api_keys') && sql.includes('FOR SHARE')) {
+        return { rows: [{ id: values[0] }], rowCount: 1 }
+      }
       if (sql.includes('FROM api_keys api_key_record')) {
         return { rows: [{ max_requests: 1_000, window_seconds: 3_600 }] }
       }

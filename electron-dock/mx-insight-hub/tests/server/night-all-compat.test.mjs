@@ -5,6 +5,9 @@ import {
   buildNightAllLegacySearchCapabilities,
   NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS,
 } from '../../server/contracts/night-all-legacy.mjs'
+import { XIAOHONGSHU_SEARCH_OPERATION } from '../../server/contracts/tikhub-xiaohongshu-search.mjs'
+import { XIAOHONGSHU_USER_INFO_OPERATION } from '../../server/contracts/tikhub-xiaohongshu-user-info.mjs'
+import { XIAOHONGSHU_CRAWL_OPERATION } from '../../server/contracts/tikhub-xiaohongshu-user-posts.mjs'
 import {
   canUseNightAllCompatibilityFallback,
   nightAllCompatibilityBusinessOutcome,
@@ -446,7 +449,16 @@ test('legacy raw/profile records enter one canonical compatibility dataset', () 
   assert.equal(fullTextPost.body, 'complete message body')
 })
 
-async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
+const XIAOHONGSHU_COMPATIBILITY_CAPABILITIES = [
+  XIAOHONGSHU_SEARCH_OPERATION,
+  XIAOHONGSHU_USER_INFO_OPERATION,
+  XIAOHONGSHU_CRAWL_OPERATION,
+]
+
+async function compatibilityFixture({
+  grants = ['xiaohongshu'],
+  capabilityGrants = grants.includes('xiaohongshu') ? XIAOHONGSHU_COMPATIBILITY_CAPABILITIES : [],
+} = {}) {
   const store = new MemoryStore()
   const jobs = []
   const commitLive = store.commitCompatibilityLiveDelivery.bind(store)
@@ -469,6 +481,16 @@ async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
       maxRequests: 100,
       windowSeconds: 3_600,
       maxPageSize: 100,
+    })
+  }
+  for (const capability of capabilityGrants) {
+    await store.putCapabilityConfiguration({
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      capability,
+      enabled: true,
+      maxRequests: 100,
+      windowSeconds: 3_600,
     })
   }
 
@@ -510,6 +532,7 @@ async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
     consumerId: consumer.id,
     name: 'Compatibility key',
     platforms: grants,
+    capabilities: capabilityGrants,
   })
   const context = await service.authenticate(issued.secret)
   return {
@@ -522,6 +545,47 @@ async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
     jobs,
   }
 }
+
+test('Xiaohongshu compatibility operations require their own grant before reservation or dispatch', async () => {
+  const cases = [
+    {
+      operation: 'raw',
+      capability: XIAOHONGSHU_SEARCH_OPERATION,
+      body: { platform: 'xiaohongshu', query: 'AI', count: 20 },
+    },
+    {
+      operation: 'crawl',
+      capability: XIAOHONGSHU_CRAWL_OPERATION,
+      body: { platform: 'xiaohongshu', username: 'alice', count: 20 },
+    },
+    {
+      operation: 'user-info',
+      capability: XIAOHONGSHU_USER_INFO_OPERATION,
+      body: { platform: 'xiaohongshu', username: 'alice' },
+    },
+  ]
+
+  for (const item of cases) {
+    const fixture = await compatibilityFixture({
+      capabilityGrants: XIAOHONGSHU_COMPATIBILITY_CAPABILITIES
+        .filter((capability) => capability !== item.capability),
+    })
+    await assert.rejects(
+      () => fixture.service.nightAllCompatibilitySearch(fixture.context, {
+        operation: item.operation,
+        path: `/api/v1/night-all/search/${item.operation}`,
+        idempotencyKey: `compat-no-scope-${item.operation}`,
+        body: item.body,
+      }),
+      (error) => error?.status === 403
+        && error?.code === 'capability_not_granted'
+        && error?.message.includes(item.capability),
+    )
+    assert.equal(fixture.calls(), 0)
+    assert.equal(fixture.store.requests.size, 0)
+    assert.equal(fixture.store.connectorCalls.size, 0)
+  }
+})
 
 test('compatibility uses the local pinned matrix and rejects unsupported operations before reservation or dispatch', async () => {
   const fixture = await compatibilityFixture({ grants: ['bilibili'] })
@@ -617,6 +681,11 @@ test('compatibility service records complete live data and returns exact stale f
   const live = await compatibilityCall(fixture, 'compat-live-001')
   assert.equal(live.sourceMode, 'live')
   assert.equal(JSON.parse(live.body.data.raw_data)[0].text, 'AI')
+  assert.equal(
+    fixture.store.requests.get(live.requestId)?.billingMeterKey,
+    XIAOHONGSHU_SEARCH_OPERATION,
+    'hidden Night-All routing must keep the same provider-neutral customer meter',
+  )
   assert.equal(fixture.store.compatibilitySnapshots.size, 1)
   assert.match(fixture.jobs[0].dedupeKey, /^night-all-compat-result:[0-9a-f-]{36}$/)
   assert.equal(fixture.jobs[0].payload.connectorCallId, fixture.jobs[0].dedupeKey.split(':')[1])

@@ -19,6 +19,8 @@ import {
   TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_PATH,
 } from '../../server/contracts/tikhub-xiaohongshu-user-posts.mjs'
 import {
+  TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS,
+  XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
   normalizeTikHubXiaohongshuOfficialRequest,
 } from '../../server/contracts/tikhub-xiaohongshu-official.mjs'
 import { ExternalPlatformAdminService } from '../../server/external-platforms/admin.mjs'
@@ -31,6 +33,9 @@ const USER_ID = '61b46d790000000010008153'
 const NOTE_ID = '675d277d000000000600e655'
 const PROVIDER_CREDENTIAL = 'provider-key-must-not-enter-public-output'
 const PEPPER = 'official-shaped-xiaohongshu-test-pepper-with-entropy'
+const OFFICIAL_OPERATIONS = [...new Set(
+  Object.values(TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS).map((endpoint) => endpoint.operation),
+)]
 
 function jsonResponse(payload) {
   return new Response(JSON.stringify(payload), {
@@ -87,7 +92,12 @@ function config() {
   }
 }
 
-async function fixture(fetchImpl, { detailGrant = true, searchCanary = 'global' } = {}) {
+async function fixture(fetchImpl, {
+  detailGrant = true,
+  keyCapabilities = null,
+  keyPlatforms = ['xiaohongshu'],
+  searchCanary = 'global',
+} = {}) {
   const usageStore = new MemoryStore()
   const service = new HubService({ store: usageStore, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Official Tenant' })
@@ -100,8 +110,12 @@ async function fixture(fetchImpl, { detailGrant = true, searchCanary = 'global' 
     windowSeconds: 3_600,
     maxPageSize: 100,
   })
-  if (detailGrant) {
-    await service.putCapabilityConfiguration('social.posts.resolve', {
+  const consumerCapabilities = [
+    XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
+    ...OFFICIAL_OPERATIONS.filter((capability) => detailGrant || capability !== 'social.posts.resolve'),
+  ]
+  for (const capability of consumerCapabilities) {
+    await service.putCapabilityConfiguration(capability, {
       tenantId: tenant.id,
       consumerId: consumer.id,
       enabled: true,
@@ -109,7 +123,12 @@ async function fixture(fetchImpl, { detailGrant = true, searchCanary = 'global' 
       windowSeconds: 3_600,
     })
   }
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Official Key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Official Key',
+    platforms: keyPlatforms,
+    capabilities: keyCapabilities ?? consumerCapabilities,
+  })
   const context = await service.authenticate(key.secret)
   const adapter = new TikHubAdapter({ apiKey: PROVIDER_CREDENTIAL, fetchImpl })
   const platformStore = new MemoryExternalPlatformStore({
@@ -262,6 +281,99 @@ test('official detail requires the immutable Live Key capability before dispatch
   )
   assert.equal(providerCalls, 0)
   assert.equal(state.platformStore.calls.size, 0)
+})
+
+test('headerless official calls create distinct downstream usage while sharing a fresh snapshot', async () => {
+  let providerCalls = 0
+  const state = await fixture(async () => {
+    providerCalls += 1
+    return jsonResponse({ code: 200, data: note() })
+  })
+  const input = {
+    endpointName: 'detail',
+    path: TIKHUB_XIAOHONGSHU_ENDPOINT_PATH,
+    query: { note_id: NOTE_ID },
+  }
+
+  const live = await state.gateway.officialXiaohongshu(state.context, input)
+  const cached = await state.gateway.officialXiaohongshu(state.context, input)
+
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(cached.sourceMode, 'fresh_cache')
+  assert.notEqual(live.requestId, cached.requestId)
+  assert.equal(providerCalls, 1)
+  assert.equal(state.usageStore.requests.size, 2)
+  assert.equal(state.platformStore.calls.size, 1)
+  assert.equal(state.platformStore.costReservations.size, 1)
+})
+
+test('every official-shaped endpoint requires its data domain, compatibility surface, and operation', async () => {
+  const endpointCases = [
+    ['search_notes', TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH, { keyword: '电子签名避坑' }],
+    ['search_users', TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_PATH, { keyword: 'Alice' }],
+    ['get_user_info', TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_PATH, { user_id: USER_ID }],
+    ['get_user_posted_notes', TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_PATH, { user_id: USER_ID }],
+  ]
+
+  for (const [endpointName, path, query] of endpointCases) {
+    const requiredOperation = TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS[endpointName].operation
+    let providerCalls = 0
+    const missingOperation = await fixture(async () => {
+      providerCalls += 1
+      return jsonResponse({ code: 200, data: {} })
+    }, {
+      keyCapabilities: [
+        XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
+        ...OFFICIAL_OPERATIONS.filter((capability) => capability !== requiredOperation),
+      ],
+    })
+    await assert.rejects(
+      missingOperation.gateway.officialXiaohongshu(missingOperation.context, {
+        endpointName,
+        path,
+        query,
+        idempotencyKey: `missing-operation-${endpointName}`,
+      }),
+      (error) => error?.status === 403
+        && error?.code === 'capability_not_granted'
+        && error?.message.includes(requiredOperation),
+    )
+    assert.equal(providerCalls, 0)
+    assert.equal(missingOperation.usageStore.requests.size, 0)
+    assert.equal(missingOperation.platformStore.costReservations.size, 0)
+
+    const missingCompat = await fixture(async () => {
+      providerCalls += 1
+      return jsonResponse({ code: 200, data: {} })
+    }, { keyCapabilities: OFFICIAL_OPERATIONS })
+    await assert.rejects(
+      missingCompat.gateway.officialXiaohongshu(missingCompat.context, {
+        endpointName,
+        path,
+        query,
+        idempotencyKey: `missing-compat-${endpointName}`,
+      }),
+      (error) => error?.status === 403
+        && error?.code === 'capability_not_granted'
+        && error?.message.includes(XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY),
+    )
+    assert.equal(providerCalls, 0)
+  }
+
+  const missingPlatform = await fixture(async () => {
+    assert.fail('provider must not be called without the data-domain entitlement')
+  }, { keyPlatforms: [] })
+  await assert.rejects(
+    missingPlatform.gateway.officialXiaohongshu(missingPlatform.context, {
+      endpointName: 'search_notes',
+      path: TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH,
+      query: { keyword: '无数据域' },
+      idempotencyKey: 'missing-platform-search-notes',
+    }),
+    (error) => error?.status === 403 && error?.code === 'platform_not_granted',
+  )
+  assert.equal(missingPlatform.usageStore.requests.size, 0)
+  assert.equal(missingPlatform.platformStore.costReservations.size, 0)
 })
 
 test('official search_notes enforces the consumer canary before reservations while other endpoints remain open', async () => {
@@ -653,7 +765,11 @@ test('HTTP App V2 detail route returns the provider business envelope under Hub 
       { headers: { authorization: `Bearer ${state.key.secret}` } },
     )
     assert.equal(replayResponse.status, 200)
-    assert.equal(replayResponse.headers.get('idempotent-replay'), 'true')
+    assert.equal(
+      replayResponse.headers.get('idempotent-replay'),
+      'false',
+      'a headerless HTTP call is a new downstream charge even when it reuses the governed snapshot',
+    )
 
     const invalidPage = await fetch(
       `${baseUrl}${TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH}?keyword=test&page=16`,

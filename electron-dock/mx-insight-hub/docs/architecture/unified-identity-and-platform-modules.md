@@ -16,13 +16,15 @@ The current implementation has two independent Launcher integrations:
   and explicit tenant memberships. Hub does not validate JWT/JWKS because the
   current `mx-v1-...` token is opaque and revocation lives in Launcher.
 
-Hub owns multiple tenants, consumers, API keys, explicit platform grants,
-limits, memberships, per-tenant roles, idempotency, and request/usage evidence.
+Hub owns multiple tenants, consumers, API keys, explicit platform/capability
+grants, limits, memberships, per-tenant roles, idempotency, request/usage
+evidence, direct provider connectors, and the raw-to-canonical data center.
 JIT identity provisioning creates only a member/binding; it never creates a
 tenant or membership. A configured Launcher scope allowlist may grant the
 separate platform-admin role. The Admin Token remains an unscoped, global
-break-glass path. Append-only billing/credit ledgers and invoice processing
-remain roadmap work.
+break-glass path. Append-only customer billing/credit ledgers are implemented;
+online payment, subscription lifecycle and invoice processing remain roadmap
+work.
 
 Multi-tenancy in the current release scopes control-plane ownership,
 authorization and accounting. It is not a blanket claim that every canonical
@@ -37,10 +39,10 @@ path as OIDC/JWKS, or either path as shared user management.
 ## Decision summary
 
 1. **Launcher authenticates people and organizations.** It owns password/enterprise identity login, organization selection, session issuance, and the private/public edge gateway.
-2. **Hub authorizes use of the data product.** It owns tenant membership, consumer applications, API keys, platform grants, quotas, usage evidence, credit ledgers, and billing semantics. A platform grant does not itself create a tenant-specific row subset.
+2. **Hub authorizes use of the data product.** It owns tenant membership, consumer applications, API keys, data-domain/platform grants, business-operation grants, provider-compatible contract grants, quotas, usage evidence, credit ledgers, and billing semantics. A platform grant does not itself create a tenant-specific row subset.
 3. **Identity is federated, not copied.** Hub maps a verified Launcher principal using `iss + sub + aud`; Launcher organization is observed metadata, not part of the implemented binding key or an automatic Hub tenant grant.
 4. **Gateway admission is not product authorization.** Every public or internal data-plane request is authorized again by Hub against the target consumer, platform, capability, quota, and balance.
-5. **Platforms implement one module contract.** A new platform adds a versioned capability module and Night-All adapter mapping; it does not create a separate customer auth or billing path.
+5. **Providers implement one Hub connector contract.** A new provider adds a versioned Hub-managed adapter and operation policy. It does not create a separate customer auth or billing path, and it is not itself a data product. Night-All is used only by explicitly unmigrated compatibility operations.
 6. **Hub is an optional, isolated module.** Hub failure, upgrade, or removal must not enter the MX-H2I connection path or block Launcher’s existing network services.
 
 ## Ownership boundary
@@ -52,9 +54,10 @@ path as OIDC/JWKS, or either path as shared user management.
 | Hub tenant membership and product role | Does not own | Authoritative | None |
 | Consumer/service application | Does not own | Authoritative | None |
 | Public API key | Does not issue or validate | Issues, hashes, rotates and validates | Never receives it |
-| Platform/dataset authorization | Coarse route admission only | Authoritative grant decision | Executes only the bounded internal request |
-| Quota, reservation, usage, credit and billing | Does not own | Authoritative | Reports upstream outcome/evidence |
-| Night-All upstream provider credentials, collection and fallback | None | Never stores them | Authoritative |
+| Platform/dataset/operation authorization | Coarse route admission only | Authoritative grant decision | Executes only a bounded legacy request when selected |
+| Quota, reservation, usage, credit and billing | Does not own | Authoritative customer and provider evidence | Reports outcome evidence only for legacy calls |
+| Provider credentials, collection and fallback | None | Authoritative for migrated TikHub/JustOne operations; credentials isolated in the provider control plane | Transitional authority only for explicitly unmigrated operations |
+| Raw observations, canonical records and search projections | Does not own | Authoritative Hub data center | May remain a legacy evidence source during migration |
 | Edge DNS/TLS, host and method routing | Authoritative | Declares required routes | Private origin only |
 
 Launcher may retain organization display metadata needed for login and navigation. Hub may retain a denormalized organization label for operator usability. Neither copy is a substitute for the explicit identity binding and Hub-local tenant membership.
@@ -137,17 +140,25 @@ The data-plane remains Hub-owned even after unified human login exists:
 flowchart LR
   C["Caller / consumer"] --> E["Launcher edge\nTLS + host/method route"]
   E --> H["Hub public listener\nAPI key authentication"]
-  H --> M["Hub product authorization\ntenant + consumer + platform + capability"]
+  H --> M["Hub product authorization\ntenant + consumer + data domain + operation + contract"]
   M --> Q["Quota / reservation / credit policy"]
-  Q --> N["Versioned Night-All adapter"]
-  N --> NA["Night-All source capability"]
+  Q --> R["Hub provider router"]
+  R --> P["Hub-managed TikHub / JustOne adapters"]
+  R -. explicitly unmigrated shape .-> N["Night-All compatibility adapter"]
+  P --> D["raw observation -> canonical data center"]
+  N --> D
 ```
 
 Rules:
 
 - A gateway route proves only that the request reached the correct service.
 - A Launcher human session does not imply a Hub consumer grant.
-- An API key resolves to one Hub tenant and consumer, then Hub evaluates explicit platform/capability grants and current limits.
+- An API key resolves to one Hub tenant and consumer, then Hub evaluates the
+  intersection of its immutable snapshot and the consumer's current grants and
+  limits. A newly issued snapshot key defaults to zero permissions; access is
+  explicitly selected across data domain/platform, business operation and, for
+  provider-shaped routes, compatible interface contract. `legacy_all` is an
+  explicit migration preset, not the default.
 - For the current fixed Telegram datasets, that authorization is grant-level:
   all consumers granted `telegram` query the same canonical rows because those
   records have no tenant key. Add a dataset/row-scope model before promising
@@ -162,7 +173,14 @@ This second authorization prevents a gateway, organization login, or broad inter
 
 ### Purpose
 
-Hub exposes stable data-product semantics while Night-All owns changing provider mechanics. Every new platform therefore implements the same Hub module contract and plugs into the common authentication, authorization, quota, idempotency and usage pipeline.
+Hub exposes stable data-product semantics while Hub-managed provider adapters own
+changing upstream mechanics. TikHub and JustOne are direct connectors for the
+operations already migrated; Night-All is a transitional compatibility connector
+for the shapes not yet migrated. Every provider adapter plugs into the common
+authentication, authorization, quota, idempotency, billing and evidence pipeline.
+A data product composes one or more authorized operations over live connectors
+and/or stored Hub data; it neither owns provider credentials nor creates an
+independent authorization namespace.
 
 The target module descriptor contains at least:
 
@@ -178,18 +196,23 @@ The target module descriptor contains at least:
 | `dispatchSemantics` | Whether dispatch is read-only, paid, idempotent, retry-safe or ambiguous on timeout. |
 | `readinessContract` | Credential/capability evidence required before the module can be granted. |
 | `dataClassification` | Sensitivity, retention, export and field-policy metadata. |
-| `nightAllMapping` | Fixed private Night-All capability/version; never a caller-selected provider URL. |
+| `providerBinding` | Admin-managed provider/endpoint family and contract revision; never caller-selected. |
+| `compatibilityFallback` | Optional bounded Night-All operation for an explicitly unmigrated request shape, with an exit/rollback policy. |
 
-The module descriptor is policy/configuration. Provider tokens, cookies, proxy credentials and paid endpoint IDs stay in Night-All.
+The module descriptor is policy/configuration. Provider tokens, cookies, proxy
+credentials and paid endpoint IDs stay in Hub's isolated Admin-only provider
+control plane for direct connectors. Night-All retains only the credentials for
+the legacy operations it still executes. Neither set is returned to public
+callers, ordinary tenant UI, logs or search projections.
 
 ### Onboarding a platform
 
-1. Night-All verifies the real provider credential, endpoint contract, pagination and normalized evidence for the platform.
-2. Hub adds a versioned module descriptor and adapter fixture for the approved Night-All capability.
-3. Contract tests cover request validation, normalized output, cursor behavior, dispatch classification and redaction.
+1. Hub Admin registers and verifies the real provider credential, endpoint contract, pagination and cost evidence for the required operation.
+2. Hub adds a versioned provider adapter/module descriptor and bounded fixtures. A legacy Night-All mapping is optional and temporary, not the default implementation.
+3. Contract tests cover request validation, response compatibility, normalized output, cursor behavior, dispatch classification and secret isolation. Compatibility responses preserve business fields without desensitization, filtering or truncation.
 4. Operations verify a bounded live smoke without fan-out across paid platforms.
 5. The module is enabled behind a platform-specific feature policy.
-6. Tenants/consumers receive explicit grants and limits; existing consumers are not auto-enrolled.
+6. Tenants/consumers receive explicit data-domain, operation and compatibility-contract grants and limits; new API keys start empty and existing consumers are not auto-enrolled.
 7. Usage and cost reconciliation are observed before broader rollout.
 
 Disabling one module must not disable authentication, other platforms, Hub Admin, or Launcher networking. A module readiness failure produces a platform-scoped unavailable decision and evidence.
@@ -220,7 +243,7 @@ Disabling one module must not disable authentication, other platforms, Hub Admin
 | Hub namespace absent | Launcher deploy and MX-H2I connectivity succeed; Hub card says offline. |
 | Hub Admin unavailable | Launcher overview returns quickly with offline status; other Admin panels work. |
 | Hub public listener unavailable | Only the Hub data route fails; existing gateway routes continue. |
-| Night-All unavailable | Hub is not ready for data dispatch; Launcher networking remains ready. |
+| Night-All unavailable | Only explicitly Night-All-backed compatibility operations are unavailable; Hub-direct providers, stored data, Admin and Launcher networking remain independent. |
 | One platform unavailable | That module is unavailable; other granted platforms remain callable. |
 | Hub upgrade/rollback | No Launcher database migration and no restart unless managed sync was explicitly requested. |
 

@@ -9,6 +9,7 @@ import {
   normalizeTikHubXiaohongshuSearchResponse,
   normalizeXiaohongshuSearchRequest,
   TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY,
+  XIAOHONGSHU_SEARCH_OPERATION,
 } from '../../server/contracts/tikhub-xiaohongshu-search.mjs'
 import { TIKHUB_XIAOHONGSHU_ENDPOINT_KEY } from '../../server/contracts/tikhub-xiaohongshu.mjs'
 import { TikHubGateway } from '../../server/external-platforms/tikhub-gateway.mjs'
@@ -190,9 +191,12 @@ class UsageStoreMock {
     this.reservations = []
     this.released = []
     this.unknown = []
+    this.capabilityGrants = [XIAOHONGSHU_SEARCH_OPERATION]
   }
 
   async listEffectiveGrants() { return ['xiaohongshu'] }
+
+  async listEffectiveCapabilityGrants() { return [...this.capabilityGrants] }
 
   async getPolicy() {
     return { maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 20 }
@@ -366,6 +370,25 @@ function request(overrides = {}) {
     ...overrides,
   }
 }
+
+test('direct XHS search requires its operation grant before any paid work', async () => {
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '不会派发')] })
+  const state = fixture(adapter)
+  state.usageStore.capabilityGrants = []
+
+  await assert.rejects(
+    () => state.gateway.searchNotes(state.context, request()),
+    (error) => error?.status === 403
+      && error?.code === 'capability_not_granted'
+      && error?.message.includes(XIAOHONGSHU_SEARCH_OPERATION),
+  )
+
+  assert.equal(state.usageStore.reservations.length, 0)
+  assert.equal(state.platformStore.providerRateAdmissions, 0)
+  assert.equal(state.platformStore.costReservations.length, 0)
+  assert.equal(state.platformStore.providerCalls.length, 0)
+  assert.equal(adapter.calls.search.length, 0)
+})
 
 test('direct XHS search returns the strict modern envelope and records a primary provider call', async () => {
   const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '完整正文，不在预览边界')] })

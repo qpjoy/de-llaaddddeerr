@@ -66,37 +66,35 @@ function unknownJustOneBilling() {
   }
 }
 
+function costControlConfigurationError(message) {
+  return new AppError(500, 'invalid_configuration', message, {
+    externalProviderBlocker: 'cost_control',
+  })
+}
+
 function requirePaidProviderCostControl(billing, providerName, {
   endpointKeys = [],
   requireAnyEndpoint = false,
   requireExplicitEndpoints = false,
 } = {}) {
   if (billing.source !== 'manual' || !billing.currency || !billing.pricingAsOf) {
-    throw new AppError(
-      500,
-      'invalid_configuration',
+    throw costControlConfigurationError(
       `${providerName} contract activation requires reviewed cost control evidence`,
     )
   }
   if (billing.monthlyBudgetMinor == null) {
-    throw new AppError(
-      500,
-      'invalid_configuration',
+    throw costControlConfigurationError(
       `${providerName} contract activation requires an explicit monthly budget`,
     )
   }
   if (billing.monthlySubsidyBudgetMinor == null) {
-    throw new AppError(
-      500,
-      'invalid_configuration',
+    throw costControlConfigurationError(
       `${providerName} contract activation requires an explicit monthly subsidy budget`,
     )
   }
   const costs = billing.unitCostMinorByEndpoint || {}
   if (requireAnyEndpoint && Object.keys(costs).length === 0) {
-    throw new AppError(
-      500,
-      'invalid_configuration',
+    throw costControlConfigurationError(
       `${providerName} contract activation requires reviewed endpoint cost control`,
     )
   }
@@ -105,9 +103,7 @@ function requirePaidProviderCostControl(billing, providerName, {
     : endpointKeys
   for (const endpointKey of reviewedEndpointKeys) {
     if (requireExplicitEndpoints && !Object.hasOwn(costs, endpointKey)) {
-      throw new AppError(
-        500,
-        'invalid_configuration',
+      throw costControlConfigurationError(
         `${providerName} contract activation requires explicit cost control for ${endpointKey}`,
       )
     }
@@ -115,9 +111,7 @@ function requirePaidProviderCostControl(billing, providerName, {
       ? costs[endpointKey]
       : billing.unitCostMinor
     if (!Number.isSafeInteger(unitCostMinor) || unitCostMinor <= 0) {
-      throw new AppError(
-        500,
-        'invalid_configuration',
+      throw costControlConfigurationError(
         `${providerName} contract activation requires positive reviewed cost control for ${endpointKey}`,
       )
     }
@@ -257,8 +251,14 @@ export function parseJustOneConfig(environment = process.env, {
   }
   const configured = Boolean(token) || configuredSignal
   const billing = parseJustOneBilling(environment.MX_INSIGHT_JUSTONE_BILLING_JSON)
+  let costControlError = null
   if (contractVerified) {
-    requirePaidProviderCostControl(billing, 'JustOne', { requireAnyEndpoint: true })
+    try {
+      requirePaidProviderCostControl(billing, 'JustOne', { requireAnyEndpoint: true })
+    } catch (error) {
+      if (error?.details?.externalProviderBlocker !== 'cost_control') throw error
+      costControlError = { code: 'cost_control_incomplete', message: error.message }
+    }
   }
   const maxConcurrency = positiveInteger(
     environment.MX_INSIGHT_JUSTONE_MAX_CONCURRENCY,
@@ -288,6 +288,7 @@ export function parseJustOneConfig(environment = process.env, {
     contractVerified,
     dispatchEnabled: Boolean(token && contractVerified),
     configurationError: null,
+    costControlError,
     timeoutMs,
     freshTtlMs,
     staleTtlMs,
@@ -334,6 +335,7 @@ export function disabledJustOneConfig(environment, error) {
     contractVerified: environment.MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED === '1',
     dispatchEnabled: false,
     configurationError: safeJustOneConfigurationError(error),
+    costControlError: null,
     timeoutMs: 120_000,
     freshTtlMs: 60_000,
     staleTtlMs: 7 * 86_400_000,
@@ -351,6 +353,9 @@ export function disabledJustOneConfig(environment, error) {
 // Unlike loadConfig(), it deliberately rejects a bad optional-provider config.
 export function preflightJustOneConfig(environment = process.env) {
   const config = parseJustOneConfig(environment)
+  if (config.costControlError) {
+    throw costControlConfigurationError(config.costControlError.message)
+  }
   return {
     configured: config.configured,
     contractVerified: config.contractVerified,
@@ -566,22 +571,28 @@ export function parseTikHubConfig(environment = process.env, {
   }
   const configured = Boolean(apiKey) || configuredSignal
   const billing = parseTikHubBilling(environment.MX_INSIGHT_TIKHUB_BILLING_JSON)
+  let costControlError = null
   if (contractVerified) {
-    requirePaidProviderCostControl(billing, 'TikHub', {
-      endpointKeys: [
-        'xiaohongshu.image-note-detail.v2',
-        ...(searchContractVerified ? ['xiaohongshu.app-v2.search-notes.v1'] : []),
-      ],
-    })
-    if (userActivityContractVerified) {
-      requirePaidProviderCostControl(billing, 'TikHub user activity', {
+    try {
+      requirePaidProviderCostControl(billing, 'TikHub', {
         endpointKeys: [
-          'xiaohongshu.app-v2.search-users.v1',
-          'xiaohongshu.app-v2.get-user-info.v1',
-          'xiaohongshu.app-v2.get-user-posted-notes.v1',
+          'xiaohongshu.image-note-detail.v2',
+          ...(searchContractVerified ? ['xiaohongshu.app-v2.search-notes.v1'] : []),
         ],
-        requireExplicitEndpoints: true,
       })
+      if (userActivityContractVerified) {
+        requirePaidProviderCostControl(billing, 'TikHub user activity', {
+          endpointKeys: [
+            'xiaohongshu.app-v2.search-users.v1',
+            'xiaohongshu.app-v2.get-user-info.v1',
+            'xiaohongshu.app-v2.get-user-posted-notes.v1',
+          ],
+          requireExplicitEndpoints: true,
+        })
+      }
+    } catch (error) {
+      if (error?.details?.externalProviderBlocker !== 'cost_control') throw error
+      costControlError = { code: 'cost_control_incomplete', message: error.message }
     }
   }
   return {
@@ -594,6 +605,7 @@ export function parseTikHubConfig(environment = process.env, {
     searchCanaryConsumerIds,
     dispatchEnabled: Boolean(apiKey && contractVerified),
     configurationError: null,
+    costControlError,
     timeoutMs,
     freshTtlMs,
     staleTtlMs,
@@ -651,6 +663,7 @@ export function disabledTikHubConfig(environment, error) {
       message: error instanceof AppError && error.code === 'invalid_configuration'
         ? error.message : 'TikHub configuration is invalid',
     },
+    costControlError: null,
     timeoutMs: 30_000,
     freshTtlMs: 24 * 60 * 60_000,
     staleTtlMs: 30 * 24 * 60 * 60_000,
@@ -670,6 +683,9 @@ export function disabledTikHubConfig(environment, error) {
 
 export function preflightTikHubConfig(environment = process.env) {
   const config = parseTikHubConfig(environment)
+  if (config.costControlError) {
+    throw costControlConfigurationError(config.costControlError.message)
+  }
   return {
     configured: config.configured,
     contractVerified: config.contractVerified,

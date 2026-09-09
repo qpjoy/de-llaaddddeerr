@@ -5,7 +5,7 @@
 -- A same-name invalid or manually drifted index is repaired, then the complete
 -- key/order/predicate contract is verified before rollout may continue.
 SET lock_timeout = '2s';
-SET statement_timeout = '0';
+SET statement_timeout = '15min';
 
 CREATE TEMP TABLE api_key_quota_index_template
   (LIKE usage_requests INCLUDING DEFAULTS);

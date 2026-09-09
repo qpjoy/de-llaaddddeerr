@@ -152,6 +152,14 @@ const DOCUMENTED_DIFFERENCES = [
   },
 ]
 
+const OPERATION_STATE_ACTIONS = [
+  { value: 'shadow', label: '校验' },
+  { value: 'canary', label: '灰度' },
+  { value: 'active', label: '启用', primary: true },
+  { value: 'paused', label: '暂停' },
+  { value: 'disabled', label: '停用' },
+]
+
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -443,6 +451,66 @@ function normalizeTenants(root, fallback = {}) {
   }))
 }
 
+function normalizeEndpointPrices(priceBook = {}) {
+  const raw = firstRecord(priceBook.endpointPrices, priceBook.unitCostMinorByEndpoint)
+  return Object.fromEntries(Object.entries(raw).map(([endpointKey, value]) => [
+    endpointKey,
+    optionalNumber(isRecord(value) ? firstDefined(value.unitCostMinor, value.priceMinor) : value),
+  ]))
+}
+
+function normalizeOperations(root, fallback = {}) {
+  return firstArray(root.operations, fallback.operations).map((row, index) => {
+    const release = firstRecord(row.release)
+    const priceBook = firstRecord(row.priceBook, row.pricing)
+    const labels = firstRecord(row.labels)
+    const operationKey = optionalText(row.operationKey, row.operation, row.key) || `operation-${index + 1}`
+    return {
+      operationKey,
+      label: optionalText(
+        row.label,
+        labels['zh-CN'],
+        labels.zh,
+        labels.displayName,
+        row.displayName,
+      ) || operationKey,
+      controlSource: optionalText(row.controlSource, row.source),
+      desiredState: optionalText(row.desiredState, row.desired, row.state) || 'disabled',
+      effectiveState: optionalText(row.effectiveState, row.effective, row.status) || 'unknown',
+      revision: optionalNumber(row.revision) ?? 0,
+      canaryConsumerIds: firstArray(row.canaryConsumerIds, row.canaryConsumers).map(String),
+      release: {
+        revision: optionalNumber(release.revision, row.releaseRevision),
+        status: optionalText(release.status, row.releaseStatus),
+        contractVersion: optionalText(release.contractVersion, row.contractVersion),
+        endpointKeys: firstArray(release.endpointKeys, row.endpointKeys).map(String),
+      },
+      priceBook: {
+        version: optionalNumber(priceBook.version),
+        source: optionalText(priceBook.source),
+        status: optionalText(priceBook.status),
+        ready: optionalBoolean(priceBook.ready),
+        currency: optionalText(priceBook.currency)?.toUpperCase() || null,
+        pricingAsOf: optionalText(priceBook.pricingAsOf),
+        monthlyBudgetMinor: optionalNumber(priceBook.monthlyBudgetMinor),
+        monthlySubsidyBudgetMinor: optionalNumber(priceBook.monthlySubsidyBudgetMinor),
+        endpointPrices: normalizeEndpointPrices(priceBook),
+      },
+      blockers: firstArray(row.blockers).map((entry, blockerIndex) => (
+        isRecord(entry)
+          ? {
+              key: `${optionalText(entry.code, entry.key) || 'blocker'}:${blockerIndex}`,
+              code: optionalText(entry.code, entry.key),
+              message: optionalText(entry.message, entry.description) || UNKNOWN,
+            }
+          : { key: String(blockerIndex), code: null, message: String(entry) }
+      )),
+      updatedAt: optionalText(row.updatedAt),
+      updatedBy: optionalText(row.updatedBy),
+    }
+  })
+}
+
 function keyedEvidence(value) {
   if (Array.isArray(value)) {
     return new Map(value.map((item) => [optionalText(item.key, item.name, item.type), item]))
@@ -548,6 +616,7 @@ function normalizeDetail(payload, requestedKey) {
     timeline: normalizeTimeline(envelope, root),
     capabilities: normalizeCapabilities(envelope, root),
     tenants: normalizeTenants(envelope, root),
+    operations: normalizeOperations(envelope, root),
     stages: PROCESSING_STAGES.map((definition) => ({
       ...definition,
       evidence: findEvidence(stageEvidence, definition.aliases),
@@ -600,6 +669,13 @@ function statusLabel(status) {
     misconfigured: '配置错误',
     awaiting_verification: '待契约验证',
     circuit_open: '熔断中',
+    shadow: '校验中',
+    canary: '灰度中',
+    paused: '已暂停',
+    blocked: '已阻断',
+    reviewed: '已复核',
+    inherited: '继承环境配置',
+    incomplete: '证据不完整',
     memory_only: '仅内存',
     implemented: '已实现',
     planned: '规划中',
@@ -1081,6 +1157,332 @@ function ExternalPlatformCredentialPanel({
   )
 }
 
+function operationControlSourceLabel(source) {
+  const labels = {
+    database: '数据库热更新',
+    legacy_environment: '环境变量兼容',
+  }
+  return labels[source] || source || UNKNOWN
+}
+
+function initialOperationPriceDraft(operation) {
+  return {
+    currency: operation.priceBook.currency || 'CNY',
+    pricingAsOf: operation.priceBook.pricingAsOf || '',
+    monthlyBudgetMinor: operation.priceBook.monthlyBudgetMinor ?? '',
+    monthlySubsidyBudgetMinor: operation.priceBook.monthlySubsidyBudgetMinor ?? '',
+    endpointPrices: Object.fromEntries(operation.release.endpointKeys.map((endpointKey) => [
+      endpointKey,
+      operation.priceBook.endpointPrices[endpointKey] ?? '',
+    ])),
+  }
+}
+
+function parseMinorUnit(value, label, { positive = false } = {}) {
+  const normalized = String(value).trim()
+  if (!/^\d+$/u.test(normalized)) {
+    throw new Error(`${label}必须是不含小数的最小货币单位整数`)
+  }
+  const parsed = Number(normalized)
+  if (!Number.isSafeInteger(parsed) || (positive ? parsed <= 0 : parsed < 0)) {
+    throw new Error(`${label}必须是${positive ? '大于 0 的' : '非负'}安全整数`)
+  }
+  return parsed
+}
+
+function operationPriceBookPayload(draft, endpointKeys) {
+  const currency = draft.currency.trim().toUpperCase()
+  const pricingAsOf = draft.pricingAsOf.trim()
+  if (!/^[A-Z]{3}$/u.test(currency)) throw new Error('币种必须是 3 位 ISO 代码，例如 CNY')
+  if (!pricingAsOf || Number.isNaN(Date.parse(pricingAsOf))) {
+    throw new Error('请填写有效的定价证据日期')
+  }
+  return {
+    currency,
+    pricingAsOf,
+    monthlyBudgetMinor: parseMinorUnit(draft.monthlyBudgetMinor, '月度上游预算'),
+    monthlySubsidyBudgetMinor: parseMinorUnit(draft.monthlySubsidyBudgetMinor, '月度补贴预算'),
+    unitCostMinorByEndpoint: Object.fromEntries(endpointKeys.map((endpointKey) => [
+      endpointKey,
+      parseMinorUnit(draft.endpointPrices[endpointKey], `${endpointKey} 单次价格`, { positive: true }),
+    ])),
+  }
+}
+
+function ExternalPlatformOperationCard({
+  token,
+  provider,
+  operation,
+  onSaved,
+  onUnauthorized,
+  notify,
+}) {
+  const [reason, setReason] = useState('')
+  const [canaryConsumerIds, setCanaryConsumerIds] = useState(operation.canaryConsumerIds.join('\n'))
+  const [publishPriceBook, setPublishPriceBook] = useState(false)
+  const [priceDraft, setPriceDraft] = useState(() => initialOperationPriceDraft(operation))
+  const [busyState, setBusyState] = useState(null)
+  const [error, setError] = useState(null)
+  const busy = busyState !== null
+  const activationNeedsPriceBook = operation.priceBook.ready === false
+
+  const updatePriceDraft = (field, value) => {
+    setPriceDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  const updateEndpointPrice = (endpointKey, value) => {
+    setPriceDraft((current) => ({
+      ...current,
+      endpointPrices: { ...current.endpointPrices, [endpointKey]: value },
+    }))
+  }
+
+  const submit = async (event) => {
+    event.preventDefault()
+    const desiredState = event.nativeEvent.submitter?.dataset?.state
+    if (!OPERATION_STATE_ACTIONS.some((action) => action.value === desiredState)) return
+    const submittedReason = reason.trim()
+    if (!submittedReason) {
+      setError(new Error('请先填写本次状态变更原因'))
+      return
+    }
+    const submittedCanaryIds = canaryConsumerIds
+      .split(/[\s,;]+/u)
+      .map((value) => value.trim())
+      .filter(Boolean)
+    if (desiredState === 'canary' && submittedCanaryIds.length === 0) {
+      setError(new Error('灰度状态至少需要一个下游 Consumer UUID'))
+      return
+    }
+
+    setBusyState(desiredState)
+    setError(null)
+    try {
+      const body = {
+        expectedRevision: operation.revision,
+        desiredState,
+        reason: submittedReason,
+        canaryConsumerIds: desiredState === 'canary' ? submittedCanaryIds : null,
+        ...(publishPriceBook ? {
+          priceBook: operationPriceBookPayload(priceDraft, operation.release.endpointKeys),
+        } : {}),
+      }
+      await adminApi.updateExternalPlatformOperationPolicy(
+        token,
+        provider,
+        operation.operationKey,
+        body,
+      )
+      setReason('')
+      notify?.(`${operation.label}已切换为${statusLabel(desiredState)}`, 'success')
+      onSaved?.()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+      notify?.(requestError?.message || `${operation.label}状态更新失败`, 'danger')
+    } finally {
+      setBusyState(null)
+    }
+  }
+
+  return (
+    <form className="mih-external-operation-card" onSubmit={submit}>
+      <header>
+        <div>
+          <strong>{operation.label}</strong>
+          <small className="mih-mono">{operation.operationKey}</small>
+        </div>
+        <StatusBadge status={operation.effectiveState} label={`生效：${statusLabel(operation.effectiveState)}`} />
+      </header>
+
+      <dl className="mih-external-operation-facts">
+        <div><dt>期望状态</dt><dd>{statusLabel(operation.desiredState)}</dd></div>
+        <div><dt>策略修订</dt><dd>#{formatOptionalNumber(operation.revision)}</dd></div>
+        <div><dt>控制来源</dt><dd>{operationControlSourceLabel(operation.controlSource)}</dd></div>
+        <div><dt>发布 / 价格版本</dt><dd>#{formatOptionalNumber(operation.release.revision)} / #{formatOptionalNumber(operation.priceBook.version)}</dd></div>
+        <div><dt>价格表来源 / 状态</dt><dd>{operationControlSourceLabel(operation.priceBook.source)} / {statusLabel(operation.priceBook.status)}</dd></div>
+        <div><dt>上游合同版本</dt><dd>{operation.release.contractVersion || UNKNOWN}</dd></div>
+      </dl>
+
+      {operation.blockers.length ? (
+        <div className="mih-external-operation-blockers" role="status">
+          <strong><WarningCircle size={16} aria-hidden="true" />当前阻断项</strong>
+          <ul>
+            {operation.blockers.map((blocker) => (
+              <li key={blocker.key}>
+                {blocker.code ? <span className="mih-mono">{blocker.code}</span> : null}
+                <span>{blocker.message}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="mih-external-operation-ready"><CheckCircle size={16} aria-hidden="true" />当前没有上游运行阻断项</p>
+      )}
+
+      <div className="mih-external-operation-inputs">
+        <Field label="变更原因" hint="必填；与修订号一起写入审计事件。">
+          <input
+            className="qp-input"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            maxLength="1000"
+            placeholder="例如：已复核 2026-09 价格，开启线上调用"
+            disabled={busy}
+            required
+          />
+        </Field>
+        <Field label="灰度 Consumer UUID" hint="多个 UUID 用换行、空格或逗号分隔；仅“灰度”操作提交。">
+          <textarea
+            className="qp-input mih-external-operation-canary"
+            value={canaryConsumerIds}
+            onChange={(event) => setCanaryConsumerIds(event.target.value)}
+            placeholder="00000000-0000-4000-8000-000000000000"
+            disabled={busy}
+            rows="2"
+          />
+        </Field>
+      </div>
+
+      <label className="mih-external-operation-price-toggle">
+        <input
+          type="checkbox"
+          checked={publishPriceBook}
+          onChange={(event) => setPublishPriceBook(event.target.checked)}
+          disabled={busy}
+        />
+        <span>随本次变更发布经复核的上游价格表</span>
+        <small>{activationNeedsPriceBook ? '当前价格证据不完整；启用或灰度前请勾选并录入。' : '如需更新价格证据，勾选后与策略一次发布。'}当环境变量中没有价格时，在此录入后可直接启用，无需手工 SQL。</small>
+      </label>
+
+      <div className="mih-external-operation-price-grid" aria-label={`${operation.label}上游价格表`}>
+        <Field label="币种">
+          <input
+            className="qp-input mih-mono"
+            value={priceDraft.currency}
+            onChange={(event) => updatePriceDraft('currency', event.target.value.toUpperCase())}
+            maxLength="3"
+            pattern="[A-Za-z]{3}"
+            disabled={busy || !publishPriceBook}
+            required={publishPriceBook}
+          />
+        </Field>
+        <Field label="定价证据日期">
+          <input
+            className="qp-input mih-mono"
+            type="date"
+            value={priceDraft.pricingAsOf.slice(0, 10)}
+            onChange={(event) => updatePriceDraft('pricingAsOf', event.target.value)}
+            disabled={busy || !publishPriceBook}
+            required={publishPriceBook}
+          />
+        </Field>
+        <Field label="月度上游预算（最小货币单位）">
+          <input
+            className="qp-input mih-mono"
+            type="number"
+            min="0"
+            step="1"
+            value={priceDraft.monthlyBudgetMinor}
+            onChange={(event) => updatePriceDraft('monthlyBudgetMinor', event.target.value)}
+            disabled={busy || !publishPriceBook}
+            required={publishPriceBook}
+          />
+        </Field>
+        <Field label="月度补贴预算（最小货币单位）">
+          <input
+            className="qp-input mih-mono"
+            type="number"
+            min="0"
+            step="1"
+            value={priceDraft.monthlySubsidyBudgetMinor}
+            onChange={(event) => updatePriceDraft('monthlySubsidyBudgetMinor', event.target.value)}
+            disabled={busy || !publishPriceBook}
+            required={publishPriceBook}
+          />
+        </Field>
+        {operation.release.endpointKeys.map((endpointKey) => (
+          <Field
+            key={endpointKey}
+            className="mih-external-operation-endpoint-price"
+            label={`${endpointKey} 单次价格`}
+            hint="必须大于 0；与这个上游 endpoint 精确绑定。"
+          >
+            <input
+              className="qp-input mih-mono"
+              type="number"
+              min="1"
+              step="1"
+              value={priceDraft.endpointPrices[endpointKey] ?? ''}
+              onChange={(event) => updateEndpointPrice(endpointKey, event.target.value)}
+              disabled={busy || !publishPriceBook}
+              required={publishPriceBook}
+            />
+          </Field>
+        ))}
+      </div>
+
+      {error ? <ErrorState error={error} /> : null}
+      <footer className="mih-external-operation-actions">
+        {OPERATION_STATE_ACTIONS.map((action) => (
+          <button
+            key={action.value}
+            className={`qp-button ${action.primary ? 'qp-button--primary' : 'qp-button--outline'}`}
+            type="submit"
+            data-state={action.value}
+            aria-pressed={operation.desiredState === action.value}
+            disabled={busy
+              || !reason.trim()
+              || (['active', 'canary'].includes(action.value) && activationNeedsPriceBook && !publishPriceBook)}
+          >
+            {busyState === action.value ? '正在更新' : action.label}
+          </button>
+        ))}
+      </footer>
+    </form>
+  )
+}
+
+function ExternalPlatformOperationControlPanel({
+  token,
+  provider,
+  operations,
+  onSaved,
+  onUnauthorized,
+  notify,
+}) {
+  return (
+    <Panel
+      title="上游平台操作控制"
+      subtitle="这里控制 Hub 是否可以调用某个上游操作；下游 API Key 的平台与产品授权仍在“开放能力”中独立管理。"
+      className="mih-external-operation-panel"
+      action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
+    >
+      {operations.length ? (
+        <div className="mih-external-operation-list">
+          {operations.map((operation) => (
+            <ExternalPlatformOperationCard
+              key={`${operation.operationKey}:${operation.revision}:${operation.priceBook.version}`}
+              token={token}
+              provider={provider}
+              operation={operation}
+              onSaved={onSaved}
+              onUnauthorized={onUnauthorized}
+              notify={notify}
+            />
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={FlowArrow}
+          title="暂无可管理的上游操作"
+          description="管理后端尚未返回 operation policy 证据；页面不会用默认开启状态代替。"
+        />
+      )}
+    </Panel>
+  )
+}
+
 function DetailMetricRail({ detail }) {
   const quotaDisplay = detail.quota.remaining !== null && detail.quota.freeLimit !== null
     ? `${formatNumber(detail.quota.remaining)} / ${formatNumber(detail.quota.freeLimit)}`
@@ -1323,6 +1725,14 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             token={token}
             provider={provider}
             credential={detail.credential}
+            onSaved={remote.refresh}
+            onUnauthorized={onUnauthorized}
+            notify={notify}
+          />
+          <ExternalPlatformOperationControlPanel
+            token={token}
+            provider={provider}
+            operations={detail.operations}
             onSaved={remote.refresh}
             onUnauthorized={onUnauthorized}
             notify={notify}

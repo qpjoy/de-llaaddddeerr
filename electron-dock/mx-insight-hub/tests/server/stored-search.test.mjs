@@ -195,7 +195,19 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
     windowSeconds: 3_600,
     maxPageSize: 2,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Stored search key' })
+  await service.putCapabilityConfiguration('social.posts.search', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+  })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Stored search key',
+    platforms: ['xiaohongshu', 'public_opinion'],
+    capabilities: ['social.posts.search'],
+  })
   const app = createApp({
     service,
     store,
@@ -278,6 +290,7 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
     assert.ok(first.payload.data.pageInfo.nextCursor)
     assert.equal(first.payload.data.pageInfo.cursorType, 'opaque')
     assert.equal(JSON.stringify(first.payload).includes('must-not-leak'), false)
+    assert.deepEqual(store.requests.get(first.payload.requestId).responseBody, first.payload)
     assert.deepEqual(contentCalls[0], {
       query: 'agent',
       options: {

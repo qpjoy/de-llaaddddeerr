@@ -533,7 +533,11 @@ test('expired reservations become unknown instead of permanent in-progress reque
     windowSeconds: 3_600,
     maxPageSize: 100,
   })
-  const key = await leaseService.createApiKey({ consumerId: consumer.id, name: 'Lease key' })
+  const key = await leaseService.createApiKey({
+    consumerId: consumer.id,
+    name: 'Lease key',
+    platforms: ['xiaohongshu'],
+  })
   const context = await leaseService.authenticate(key.secret)
   const reservation = await leaseStore.reserve({
     requestId: 'request-lease-test',
@@ -839,10 +843,27 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
     },
   })
 
+  await call('/internal/v1/admin/capabilities/social.posts.search', {
+    method: 'PUT',
+    headers: adminHeaders,
+    body: {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+      maxRequests: 10,
+      windowSeconds: 3600,
+    },
+  })
+
   const keyResult = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Terminal key' },
+    body: {
+      consumerId: consumer.id,
+      name: 'Terminal key',
+      platforms: ['xiaohongshu'],
+      capabilities: ['social.posts.search'],
+    },
   })
   assert.equal(keyResult.response.status, 201)
   const secret = keyResult.payload.data.secret
@@ -887,6 +908,35 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   assert.equal(missingIdempotency.response.status, 400)
   assert.equal(missingIdempotency.payload.error.code, 'idempotency_key_required')
 
+  const platformOnlyKey = await call('/internal/v1/admin/api-keys', {
+    method: 'POST',
+    headers: adminHeaders,
+    body: {
+      consumerId: consumer.id,
+      name: 'Platform-only search key',
+      platforms: ['xiaohongshu'],
+      capabilities: [],
+    },
+  })
+  const beforeUnauthorizedSearch = upstreamCalls.get('xiaohongshu') || 0
+  const missingSearchOperation = await call('/api/v1/data/search', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${platformOnlyKey.payload.data.secret}`,
+      'idempotency-key': 'search-operation-required',
+    },
+    // A non-direct page size proves the historical fallback cannot bypass the
+    // business-operation grant either.
+    body: { platform: 'xiaohongshu', query: 'AI', pageSize: 2 },
+  })
+  assert.equal(missingSearchOperation.response.status, 403)
+  assert.equal(missingSearchOperation.payload.error.code, 'capability_not_granted')
+  assert.equal(upstreamCalls.get('xiaohongshu') || 0, beforeUnauthorizedSearch)
+  await call(`/internal/v1/admin/api-keys/${platformOnlyKey.payload.data.id}/revoke`, {
+    method: 'POST',
+    headers: adminHeaders,
+  })
+
   const searchHeaders = { ...publicHeaders, 'idempotency-key': 'search-one' }
   const attemptedFanout = await call('/api/v1/data/search', {
     method: 'POST',
@@ -913,6 +963,7 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   assert.equal(first.payload.data.meta.sourceProvider, undefined)
   assert.equal(first.payload.data.meta.endpointId, undefined)
   assert.equal(JSON.stringify(first.payload).includes('private-upstream-endpoint'), false)
+  assert.deepEqual(store.requests.get(first.payload.requestId).responseBody, first.payload)
   assert.equal(upstreamBodies.at(-1).businessId, consumer.businessId)
   assert.equal(upstreamBodies.at(-1).availabilityMode, 'ready_only')
 
@@ -966,7 +1017,12 @@ test('Night-All compatibility route preserves the envelope and serves only an ex
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Compatibility test key' },
+    body: {
+      consumerId: consumer.id,
+      name: 'Compatibility test key',
+      platforms: ['xiaohongshu'],
+      capabilities: ['social.posts.search'],
+    },
   })
   const authorization = `Bearer ${issued.payload.data.secret}`
   const body = { platform: 'xhs', keyword: 'compat-cache', count: 1 }
@@ -1044,7 +1100,7 @@ test('ambiguous POST is called once and held in unknown state', async () => {
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Unknown test key' },
+    body: { consumerId: consumer.id, name: 'Unknown test key', platforms: ['twitter'] },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}` }
   const first = await call('/api/v1/data/search', {
@@ -1077,7 +1133,7 @@ test('known upstream rejection releases reservation so explicit retry is possibl
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Release test key' },
+    body: { consumerId: consumer.id, name: 'Release test key', platforms: ['facebook'] },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}`, 'idempotency-key': 'released-one' }
   const body = { platform: 'facebook', query: 'AI' }

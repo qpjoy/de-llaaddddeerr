@@ -208,6 +208,11 @@ export const publicDataApi = {
     `/api/v1/requests/${encodeURIComponent(requestId)}`,
     { signal },
   ),
+  acquisitionHistory: (apiKey, requestId, { signal } = {}) => publicDataRequest(
+    apiKey,
+    `/api/v1/acquisitions/${encodeURIComponent(requestId)}`,
+    { signal },
+  ),
   requestByIdempotencyKey: (apiKey, idempotencyKey, { signal } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/requests/by-idempotency-key',
@@ -342,6 +347,11 @@ export const adminApi = {
     `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/credential`,
     { method: 'PUT', body },
   ),
+  updateExternalPlatformOperationPolicy: (token, key, operation, body) => request(
+    token,
+    `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/operations/${encodeURIComponent(operation)}/policy`,
+    { method: 'PUT', body },
+  ),
   revealExternalPlatformCredential: (token, key, adminToken) => request(
     token,
     `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/credential/reveal`,
@@ -371,6 +381,10 @@ export const adminApi = {
     `${ADMIN_ROOT}/data-center/records`,
     { query: { ...query, presentation: 'safe' } },
   )),
+  acquisitionHistory: (token, requestId) => request(
+    token,
+    `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}`,
+  ),
   searchReindex: (token) => request(token, `${ADMIN_ROOT}/search/reindex`),
   cancelSearchReindex: (token) => request(
     token, `${ADMIN_ROOT}/search/reindex/cancel`, { method: 'POST' },

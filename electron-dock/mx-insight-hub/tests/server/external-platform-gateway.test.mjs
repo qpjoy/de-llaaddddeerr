@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { JustOneAdapter, JustOneRejectedError } from '../../server/adapters/justone.mjs'
-import { normalizeJustOneProductSearchRequest } from '../../server/contracts/justone.mjs'
+import {
+  JUSTONE_OPERATION,
+  normalizeJustOneProductSearchRequest,
+} from '../../server/contracts/justone.mjs'
 import { ExternalPlatformAdminService } from '../../server/external-platforms/admin.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
@@ -56,7 +59,17 @@ async function fixture({ adapter, gatewayConfig = config() } = {}) {
   const tenant = await hub.createTenant({ name: 'Tenant A' })
   const consumer = await hub.createConsumer({ tenantId: tenant.id, name: 'Consumer A' })
   await usageStore.setPlatformGrant(consumer.id, 'ecommerce', true)
-  const key = await hub.createApiKey({ consumerId: consumer.id, name: 'Key A' })
+  await hub.putCapabilityConfiguration(JUSTONE_OPERATION, {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+  })
+  const key = await hub.createApiKey({
+    consumerId: consumer.id,
+    name: 'Key A',
+    platforms: ['ecommerce'],
+    capabilities: [JUSTONE_OPERATION],
+  })
   await usageStore.putPolicy({
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -114,7 +127,63 @@ function successfulResult(body, options) {
   }
 }
 
-test('gateway binds the immutable API-key quota to the JustOne usage reservation', async () => {
+test('JustOne requires the operation grant in addition to the ecommerce platform grant', async () => {
+  let providerDispatches = 0
+  const state = await fixture({
+    adapter: {
+      async searchProducts(body, options) {
+        providerDispatches += 1
+        return successfulResult(body, options)
+      },
+    },
+  })
+  assert.deepEqual(
+    await state.usageStore.listEffectiveGrants(state.context.consumer.id, state.context.apiKey.id),
+    ['ecommerce'],
+  )
+  await state.hub.putCapabilityConfiguration(JUSTONE_OPERATION, {
+    tenantId: state.context.tenant.id,
+    consumerId: state.context.consumer.id,
+    enabled: false,
+  })
+  assert.deepEqual(
+    await state.usageStore.listEffectiveCapabilityGrants(
+      state.context.consumer.id,
+      state.context.apiKey.id,
+    ),
+    [],
+  )
+  let cacheLookups = 0
+  let providerAdmissions = 0
+  const snapshotFor = state.platformStore.snapshotFor.bind(state.platformStore)
+  state.platformStore.snapshotFor = async (...args) => {
+    cacheLookups += 1
+    return snapshotFor(...args)
+  }
+  const acquireProviderRateLimit = state.platformStore.acquireProviderRateLimit.bind(state.platformStore)
+  state.platformStore.acquireProviderRateLimit = async (...args) => {
+    providerAdmissions += 1
+    return acquireProviderRateLimit(...args)
+  }
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'operation not granted' },
+      idempotencyKey: 'operation-not-granted-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 403 && error?.code === 'capability_not_granted',
+  )
+
+  assert.equal(state.usageStore.requests.size, 0)
+  assert.equal(cacheLookups, 0)
+  assert.equal(providerAdmissions, 0)
+  assert.equal(state.platformStore.costReservations.size, 0)
+  assert.equal(state.platformStore.calls.size, 0)
+  assert.equal(providerDispatches, 0)
+})
+
+test('gateway binds the JustOne data domain and operation to one usage reservation', async () => {
   const state = await fixture({
     adapter: {
       async searchProducts(body, options) {
@@ -135,10 +204,11 @@ test('gateway binds the immutable API-key quota to the JustOne usage reservation
     path: '/api/v1/data/ecommerce/products/search',
   })
 
-  assert.deepEqual(reservationInput?.apiKeyQuota, {
-    maxRequests: 1_000,
-    windowSeconds: 3_600,
-  })
+  assert.deepEqual(reservationInput?.requiredAuthorizationScopes, [
+    { type: 'platform', key: 'ecommerce' },
+    { type: 'capability', key: 'ecommerce.products.search' },
+  ])
+  assert.equal(reservationInput?.apiKeyQuota, undefined)
 })
 
 test('cost rejection happens before provider RPM admission and creates no provider call', async () => {
@@ -364,7 +434,7 @@ test('live, fresh-cache and idempotent replay are separate delivery modes and on
   assert.equal(replay.replay, true)
   assert.equal(live.body.meta.sourceMode, 'live')
   assert.equal(cached.body.meta.sourceMode, 'fresh_cache')
-  assert.equal(replay.body.meta.sourceMode, 'idempotent_replay')
+  assert.deepEqual(replay.body, live.body)
   assert.equal(calls, 1, 'cache delivery and replay never dispatch upstream')
 
   const analytics = await stable.platformStore.analytics({ from: new Date(Date.now() - 60_000) })
@@ -374,7 +444,7 @@ test('live, fresh-cache and idempotent replay are separate delivery modes and on
   assert.equal(analytics.totals.knownCostMinor, 5)
 })
 
-test('generated idempotency is API-key scoped while the consumer snapshot remains shared', async () => {
+test('headerless calls are separately metered while consumer snapshots remain shared', async () => {
   let calls = 0
   const state = await fixture({
     adapter: {
@@ -387,6 +457,8 @@ test('generated idempotency is API-key scoped while the consumer snapshot remain
   const secondKey = await state.hub.createApiKey({
     consumerId: state.consumer.id,
     name: 'Rotated Key',
+    platforms: ['ecommerce'],
+    capabilities: [JUSTONE_OPERATION],
   })
   const secondContext = await state.hub.authenticate(secondKey.secret)
   const input = {
@@ -395,13 +467,16 @@ test('generated idempotency is API-key scoped while the consumer snapshot remain
   }
 
   const live = await state.gateway.search(state.context, input)
-  const cached = await state.gateway.search(secondContext, input)
+  const cachedSameKey = await state.gateway.search(state.context, input)
+  const cachedSecondKey = await state.gateway.search(secondContext, input)
 
   assert.equal(live.sourceMode, 'live')
-  assert.equal(cached.sourceMode, 'fresh_cache')
-  assert.notEqual(live.requestId, cached.requestId)
+  assert.equal(cachedSameKey.sourceMode, 'fresh_cache')
+  assert.equal(cachedSecondKey.sourceMode, 'fresh_cache')
+  assert.notEqual(live.requestId, cachedSameKey.requestId)
+  assert.notEqual(cachedSameKey.requestId, cachedSecondKey.requestId)
   assert.equal(calls, 1)
-  assert.equal(state.usageStore.requests.size, 2)
+  assert.equal(state.usageStore.requests.size, 3)
 })
 
 test('cache-only never dispatches and reports an exact miss without consuming usage', async () => {

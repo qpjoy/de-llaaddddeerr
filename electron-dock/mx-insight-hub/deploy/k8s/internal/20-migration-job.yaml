@@ -7,7 +7,10 @@ metadata:
     app.kubernetes.io/name: mx-insight-hub-migrate
     app.kubernetes.io/part-of: mx-insight-hub
 spec:
-  backoffLimit: 3
+  # Migrations are transactional and operator-retried after diagnosis. Do not
+  # start another writer automatically after a lock timeout or schema failure.
+  backoffLimit: 0
+  activeDeadlineSeconds: 240
   ttlSecondsAfterFinished: 86400
   template:
     metadata:

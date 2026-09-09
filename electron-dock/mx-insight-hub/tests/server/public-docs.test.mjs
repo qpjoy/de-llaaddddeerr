@@ -38,6 +38,13 @@ const NIGHT_ALL_REJECTED_PARAMS = [
   'maxEnrichItems', 'enrichConcurrency', 'cacheMaxAgeHours',
 ]
 const NIGHT_ALL_LEGACY_SEARCH_CONTRACT_VERSION = 'night-all.legacy-search-capabilities.v1'
+const EXTERNAL_OPERATION_CONTROL_ERROR_CODES = [
+  'external_platform_operation_disabled',
+  'external_platform_operation_shadow',
+  'external_platform_operation_paused',
+  'external_platform_operation_canary',
+  'external_platform_operation_blocked',
+]
 const NIGHT_ALL_COMPATIBILITY_EXAMPLES = {
   raw: { value: { platform: 'xiaohongshu', keyword: 'AI Agent', count: 20 } },
   crawl: { value: { platform: 'twitter', username: 'openai', count: 20 } },
@@ -49,11 +56,12 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
     'cursor_scope_mismatch', 'invalid_platform', 'page_size_exceeded',
     'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch',
     'idempotency_key_required', 'invalid_idempotency_key',
+    'invalid_user_profile_url', 'cursor_page_mismatch',
     'platform_operation_unsupported', 'night_all_rejected',
   ],
   401: ['api_key_required', 'invalid_api_key'],
-  403: ['platform_not_granted', 'test_key_not_supported'],
-  404: ['not_found', 'night_all_rejected'],
+  403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
+  404: ['not_found', 'user_not_found', 'night_all_rejected'],
   409: [
     'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
     'external_platform_response_unusable', 'night_all_rejected',
@@ -80,6 +88,7 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
     'external_platform_capacity_unavailable',
     'external_platform_cost_control_unavailable',
     'external_platform_cost_evidence_incomplete',
+    ...EXTERNAL_OPERATION_CONTROL_ERROR_CODES,
   ],
 }
 
@@ -91,7 +100,7 @@ const XIAOHONGSHU_SEARCH_ERROR_CODES = {
     'invalid_idempotency_key', 'platform_operation_unsupported',
   ],
   401: ['api_key_required', 'invalid_api_key'],
-  403: ['platform_not_granted', 'test_key_not_supported'],
+  403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
   409: [
     'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
     'external_platform_response_unusable',
@@ -113,6 +122,7 @@ const XIAOHONGSHU_SEARCH_ERROR_CODES = {
     'external_platform_contract_unverified', 'external_platform_circuit_open',
     'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable',
     'external_platform_cost_evidence_incomplete',
+    ...EXTERNAL_OPERATION_CONTROL_ERROR_CODES,
   ],
 }
 
@@ -181,6 +191,8 @@ function assertExternalCommerceContract(document) {
   const operation = document.paths['/data/ecommerce/products/search']?.post
   assert.ok(operation)
   assert.equal(operation.operationId, 'searchExternalCommerceProducts')
+  assert.equal(operation['x-mx-required-platform'], 'ecommerce')
+  assert.deepEqual(operation['x-mx-required-capabilities'], ['ecommerce.products.search'])
   assert.doesNotMatch(JSON.stringify(operation), /tikhub|rapidapi|justone/i)
   assert.deepEqual(operation['x-mx-error-codes'], {
     400: [
@@ -192,7 +204,7 @@ function assertExternalCommerceContract(document) {
       'invalid_uncertain_retry',
     ],
     401: ['api_key_required', 'invalid_api_key'],
-    403: ['platform_not_granted', 'test_key_not_supported'],
+    403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
     404: ['stored_snapshot_not_found'],
     409: [
       'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
@@ -200,7 +212,8 @@ function assertExternalCommerceContract(document) {
     ],
     413: ['payload_too_large'],
     429: [
-      'quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded',
+      'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+      'external_platform_capacity_exceeded',
       'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted',
     ],
     502: [
@@ -211,6 +224,7 @@ function assertExternalCommerceContract(document) {
       'external_platform_unavailable', 'external_platform_not_configured',
       'external_platform_circuit_open', 'external_platform_capacity_unavailable',
       'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete',
+      ...EXTERNAL_OPERATION_CONTROL_ERROR_CODES,
     ],
   })
   assert.deepEqual(
@@ -224,6 +238,8 @@ function assertExternalCommerceContract(document) {
   assert.equal(idempotency.in, 'header')
   assert.equal(idempotency.required, false)
   assert.match(idempotency.description, /next-page request changes the body and must use a new Idempotency-Key/i)
+  assert.match(idempotency.description, /every HTTP call receives a unique internal key/i)
+  assert.match(idempotency.description, /distinct metered Hub request/i)
   assert.equal(idempotency.schema.minLength, 8)
   assert.equal(idempotency.schema.maxLength, 128)
   const uncertainRepeat = operation.parameters[1]
@@ -408,9 +424,14 @@ function assertExternalSocialPostContract(document) {
     'platform_not_granted', 'capability_not_granted', 'test_key_not_supported',
   ])
   assert.deepEqual(canonical['x-mx-error-codes'][429], [
-    'quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded',
+    'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+    'external_platform_capacity_exceeded',
     'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted',
   ])
+  assert.ok(canonical['x-mx-error-codes'][503].includes('external_platform_contract_unverified'))
+  for (const code of EXTERNAL_OPERATION_CONTROL_ERROR_CODES) {
+    assert.ok(canonical['x-mx-error-codes'][503].includes(code), code)
+  }
   assert.deepEqual(compatibilityGet['x-mx-error-codes'], canonical['x-mx-error-codes'])
   assert.deepEqual(platformPost['x-mx-error-codes'], canonical['x-mx-error-codes'])
   assert.equal(
@@ -442,22 +463,72 @@ function assertExternalSocialPostContract(document) {
   assert.deepEqual(appV2.get_user_posted_notes.parameters.map(({ name }) => name), [
     'user_id', 'share_text', 'cursor', 'Idempotency-Key',
   ])
+  assert.match(
+    appV2Get.parameters[0].description,
+    /Either note_id or share_text is required; note_id takes precedence when both are present/i,
+  )
+  for (const operation of [appV2.get_user_info, appV2.get_user_posted_notes]) {
+    assert.match(
+      operation.parameters[0].description,
+      /Either user_id or share_text is required; user_id takes precedence when both are present/i,
+    )
+  }
   assert.equal(appV2.search_notes.parameters[1].schema.maximum, 15)
   assert.equal(appV2.search_users.parameters[1].schema.maximum, 15)
+  const parameterSchema = (operation, name) => (
+    operation.parameters.find((parameter) => parameter.name === name).schema
+  )
+  assert.deepEqual(parameterSchema(appV2.search_notes, 'sort_type'), {
+    type: 'string',
+    enum: ['general', 'time_descending', 'popularity_descending', 'comment_descending', 'collect_descending', 'english_preferred'],
+    default: 'general',
+  })
+  assert.deepEqual(parameterSchema(appV2.search_notes, 'note_type'), {
+    type: 'string', enum: ['不限', '视频笔记', '普通笔记', '直播笔记'], default: '不限',
+  })
+  assert.deepEqual(parameterSchema(appV2.search_notes, 'time_filter'), {
+    type: 'string', enum: ['不限', '一天内', '一周内', '半年内'], default: '不限',
+  })
+  assert.equal(parameterSchema(appV2.search_notes, 'search_id').maxLength, 2048)
+  assert.equal(parameterSchema(appV2.search_notes, 'search_session_id').maxLength, 2048)
+  assert.equal(parameterSchema(appV2.search_notes, 'source').maxLength, 8192)
+  assert.equal(parameterSchema(appV2.search_notes, 'source').default, 'explore_feed')
+  assert.equal(parameterSchema(appV2.search_users, 'search_id').maxLength, 2048)
+  assert.equal(parameterSchema(appV2.search_users, 'source').maxLength, 8192)
+  assert.equal(parameterSchema(appV2.search_users, 'source').default, 'explore_feed')
   assert.match(appV2.get_user_posted_notes.parameters[2].description, /opaque Hub cursor|不透明 Hub cursor/i)
+  const appV2RequiredCapabilities = {
+    get_image_note_detail: ['compat.xiaohongshu.app_v2', 'social.posts.resolve'],
+    search_notes: ['compat.xiaohongshu.app_v2', 'social.posts.search'],
+    search_users: ['compat.xiaohongshu.app_v2', 'social.users.resolve'],
+    get_user_info: ['compat.xiaohongshu.app_v2', 'social.users.resolve'],
+    get_user_posted_notes: ['compat.xiaohongshu.app_v2', 'social.users.posts'],
+  }
+  for (const [name, operation] of Object.entries(appV2)) {
+    assert.equal(operation['x-mx-required-platform'], 'xiaohongshu')
+    assert.deepEqual(operation['x-mx-required-capabilities'], appV2RequiredCapabilities[name])
+  }
   for (const operation of Object.values(appV2)) {
     assert.ok(operation)
     assert.equal(operation.parameters.at(-1).name, 'Idempotency-Key')
     assert.equal(operation.parameters.at(-1).required, false)
+    assert.match(operation.parameters.at(-1).description, /every HTTP call receives a unique internal key/i)
+    assert.match(operation.parameters.at(-1).description, /metered separately/i)
     assert.equal(operation.responses[200].content['application/json'].schema.type, 'object')
     assert.equal(operation.responses[200].content['application/json'].schema.additionalProperties, true)
     assert.match(operation.description, /15/)
     assert.match(operation.description, /business fields remain intact|Business fields.*intact/i)
+    for (const code of ['invalid_sort_type', 'invalid_note_type', 'invalid_time_filter']) {
+      assert.ok(operation['x-mx-error-codes'][400].includes(code))
+    }
+    assert.ok(!operation['x-mx-error-codes'][400].includes('invalid_upstream_pagination'))
+    assert.ok(operation['x-mx-error-codes'][403].includes('capability_not_granted'))
     assert.ok(operation['x-mx-error-codes'][429].includes('external_platform_cost_budget_exhausted'))
     assert.ok(operation['x-mx-error-codes'][503].includes('external_platform_cost_control_unavailable'))
+    for (const code of EXTERNAL_OPERATION_CONTROL_ERROR_CODES) {
+      assert.ok(operation['x-mx-error-codes'][503].includes(code), code)
+    }
   }
-  assert.ok(appV2Get['x-mx-error-codes'][403].includes('capability_not_granted'))
-  assert.equal(appV2.search_users['x-mx-error-codes'][403].includes('capability_not_granted'), false)
   assert.match(compatibilityGet.parameters[0].schema.pattern, /\{24\}/u)
   assert.deepEqual(compatibilityGet.parameters[2].schema.enum, ['cache_only', 'cache_first', 'refresh'])
   for (const operation of [canonical, platformPost]) {
@@ -473,6 +544,10 @@ function assertExternalSocialPostContract(document) {
     assert.deepEqual(
       operation.responses[200].headers['x-mx-insight-source-mode'].schema.enum,
       ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+    )
+    assert.match(
+      operation.parameters.find(({ name }) => name === 'Idempotency-Key').description,
+      /every HTTP call receives a unique internal key/i,
     )
   }
 
@@ -492,17 +567,28 @@ function assertExternalSocialPostContract(document) {
     'id', 'externalId', 'platform', 'contentType', 'url', 'title', 'text', 'tags',
     'author', 'metrics', 'media', 'publishedAt', 'collectedAt',
   ])
-  assert.equal(post.properties.media.maxItems, 20)
+  assert.equal(post.properties.url.maxLength, undefined)
+  assert.equal(post.properties.title.maxLength, undefined)
+  assert.equal(post.properties.tags.maxItems, undefined)
+  assert.equal(post.properties.tags.items.maxLength, undefined)
+  assert.equal(post.properties.author.properties.id.maxLength, undefined)
+  assert.equal(post.properties.author.properties.name.maxLength, undefined)
+  assert.equal(post.properties.author.properties.avatarUrl.maxLength, undefined)
+  assert.equal(post.properties.media.maxItems, undefined)
   assert.equal(
     post.properties.media.items.$ref,
     '#/components/schemas/ExternalSocialPostMedia',
   )
   const socialMedia = document.components.schemas.ExternalSocialPostMedia
-  assert.equal(socialMedia.properties.url.format, 'uri-reference')
-  assert.match(socialMedia.properties.url.pattern, /\/api\/v1\/data\/posts\/media/)
-  assert.match(socialMedia.properties.url.description, /never an upstream URL/i)
-  assert.match(post.properties.author.properties.avatarUrl.description, /upstream avatar URLs are never exposed/i)
-  assert.match(canonical.description, /upstream media(?: or |\/)avatar URLs/i)
+  assert.deepEqual(socialMedia.required, ['type', 'url'])
+  assert.equal(socialMedia.properties.url.format, 'uri')
+  assert.equal(socialMedia.properties.url.maxLength, undefined)
+  assert.match(socialMedia.properties.url.description, /preserved without Hub filtering/i)
+  assert.equal(socialMedia.properties.hubRelayUrl.format, 'uri-reference')
+  assert.match(socialMedia.properties.hubRelayUrl.pattern, /\/api\/v1\/data\/posts\/media/)
+  assert.match(socialMedia.properties.hubRelayUrl.description, /indexes 0\.\.19/i)
+  assert.match(post.properties.author.properties.avatarUrl.description, /preserved as business data/i)
+  assert.match(canonical.description, /Business content is not desensitized or filtered/i)
   assert.equal(envelope.properties.contractVersion.const, 'mx-insight-hub.social-post.v1')
   assert.deepEqual(envelope.properties.data.required, ['item'])
   assert.equal(
@@ -557,6 +643,9 @@ function assertXiaohongshuSearchContract(document) {
   const operation = document.paths['/data/search']?.post
   assert.ok(operation)
   assert.deepEqual(operation['x-mx-error-codes'], XIAOHONGSHU_SEARCH_ERROR_CODES)
+  assert.deepEqual(operation['x-mx-required-capabilities-by-platform'], {
+    xiaohongshu: 'social.posts.search',
+  })
   assert.match(operation.description, /xiaohongshu/i)
   assert.match(operation.description, /exactly 20|page size is exactly 20/i)
   assert.match(operation.description, /historical cursor/i)
@@ -839,8 +928,10 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
     capabilitiesEnvelope.properties.data.properties.capabilities
       .items.properties.capability.enum,
     [
-      'nlp.tokenize', 'public_opinion.all_ingested.read',
-      'public_opinion.diagnostics.read', 'social.posts.resolve',
+      'compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize',
+      'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read',
+      'social.posts.resolve', 'social.posts.search', 'social.users.resolve',
+      'social.users.posts',
     ],
   )
 
@@ -878,11 +969,23 @@ function assertNightAllPublicContract(document) {
   assert.equal(compatibilityContent.schema.$ref, '#/components/schemas/NightAllLegacyRequest')
   assert.deepEqual(compatibilityContent.examples, NIGHT_ALL_COMPATIBILITY_EXAMPLES)
   assert.deepEqual(compatibility['x-mx-error-codes'], NIGHT_ALL_COMPATIBILITY_ERROR_CODES)
+  assert.deepEqual(compatibility['x-mx-required-capabilities-by-platform-operation'], {
+    xiaohongshu: {
+      raw: 'social.posts.search',
+      crawl: 'social.users.posts',
+      'user-info': 'social.users.resolve',
+    },
+  })
   assert.equal(historicalAlias['x-mx-canonical-operation'], '/night-all/search/{operation}')
   assert.deepEqual(historicalAlias['x-mx-error-codes'], compatibility['x-mx-error-codes'])
   assert.deepEqual(historicalAlias.parameters, compatibility.parameters)
   assert.deepEqual(historicalAlias.requestBody, compatibility.requestBody)
   assert.deepEqual(historicalAlias.responses, compatibility.responses)
+  assert.deepEqual(
+    Object.keys(compatibility.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 409, 422, 429, 502, 503],
+  )
+  assert.equal(compatibility.responses[410], undefined)
   assert.match(historicalAlias.description, /same Hub service and paid-operation fingerprint/i)
   assert.ok(compatibility.responses[422])
   assert.ok(compatibility.responses[503])
@@ -1076,8 +1179,10 @@ function assertPublicOpinionContract(document) {
       .content['application/json'].schema,
   ).properties.data.properties.capabilities.items.properties.capability
   assert.deepEqual(capabilities.enum, [
-    'nlp.tokenize', 'public_opinion.all_ingested.read',
-    'public_opinion.diagnostics.read', 'social.posts.resolve',
+    'compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize',
+    'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read',
+    'social.posts.resolve', 'social.posts.search', 'social.users.resolve',
+    'social.users.posts',
   ])
   assert.deepEqual(
     capabilitiesExample.data.capabilities.find(
@@ -1323,6 +1428,8 @@ function publicOperationMirrorShape(operation) {
     operationId: operation.operationId,
     allowedQueryFields: operation['x-mx-allowed-query-fields'] ?? null,
     errorCodes: operation['x-mx-error-codes'] ?? null,
+    requiredPlatform: operation['x-mx-required-platform'] ?? null,
+    requiredCapabilities: operation['x-mx-required-capabilities'] ?? null,
     parameters: (operation.parameters || []).map(({ name, in: location, required, schema }) => ({
       name, in: location, required, schema,
     })),
@@ -1378,6 +1485,7 @@ test('public listener serves self-contained public API documentation', async () 
     const html = pages.map((page) => page.html).join('\n')
     const ecommerceHtml = pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html
     const xiaohongshuHtml = pages.find((page) => page.path === '/docs/xiaohongshu-note').html
+    const nightAllHtml = pages.find((page) => page.path === '/docs/night-all').html
     const errorsHtml = pages.find((page) => page.path === '/docs/errors').html
 
     assert.ok(pages.every((page) => page.response.status === 200))
@@ -1391,12 +1499,22 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(xiaohongshuHtml, /\/api\/v1\/xiaohongshu\/app\/get_note_info/)
     assert.match(xiaohongshuHtml, /GET[\s\S]*?share_text/u)
     assert.match(xiaohongshuHtml, /note_id[\s\S]*?优先/u)
+    assert.match(xiaohongshuHtml, /user_id[\s\S]*?优先/u)
     assert.match(xiaohongshuHtml, /\/api\/v1\/data\/posts\/media/)
     assert.match(xiaohongshuHtml, /mx-insight-hub\.social-post\.v1/)
     assert.match(xiaohongshuHtml, /data\.item/)
     assert.match(xiaohongshuHtml, /immutable snapshot/)
     assert.match(xiaohongshuHtml, /tenant[\s\S]*?consumer[\s\S]*?membership/u)
     assert.match(xiaohongshuHtml, /Launcher 会话[\s\S]*?API Keys[\s\S]*?Live Key/u)
+    assert.match(xiaohongshuHtml, /compat\.xiaohongshu\.app_v2/u)
+    assert.match(xiaohongshuHtml, /social\.posts\.search/u)
+    assert.match(xiaohongshuHtml, /social\.users\.resolve/u)
+    assert.match(xiaohongshuHtml, /social\.users\.posts/u)
+    for (const code of ['invalid_user_profile_url', 'cursor_page_mismatch', 'user_not_found']) {
+      assert.match(nightAllHtml, new RegExp(code), code)
+    }
+    assert.match(nightAllHtml, /不返回[\s\S]*410 search_cursor_expired/u)
+    assert.match(html, /新 Key 默认是零权限 snapshot/u)
     assert.match(xiaohongshuHtml, /套餐与配额[\s\S]*?余额[\s\S]*?扣费/u)
     assert.match(errorsHtml, /正价 enforced 按次计费 wallet hold/u)
     assert.match(errorsHtml, /paid-ready 请求不会因 Hub 月度采购或补贴上限被拒/u)
@@ -1562,6 +1680,17 @@ test('public documentation navigation uses stable page routes and keeps legacy a
       assert.doesNotMatch(html, /href="#[^"]+"/, path)
     }
 
+    const evidenceResponse = await fetch(`${baseUrl}/docs/evidence`)
+    const evidenceHtml = await evidenceResponse.text()
+    assert.equal(evidenceResponse.status, 200)
+    assert.match(evidenceHtml, /\/api\/v1\/acquisitions\/\{requestId\}/)
+    assert.match(evidenceHtml, /delivered\.responseBody/)
+    assert.match(evidenceHtml, /sha256-canonical-json-v1/)
+    assert.match(evidenceHtml, /customerCharge/)
+    assert.match(evidenceHtml, /canonical lineage/)
+    assert.match(evidenceHtml, /不创建 usage，也绝不重新派发或运行上游请求/)
+    assert.match(evidenceHtml, /curl -sS.*\/api\/v1\/acquisitions\/\$ACQUISITION_REQUEST_ID/s)
+
     const trailingSlash = await fetch(`${baseUrl}/docs/telegram/`)
     assert.equal(trailingSlash.status, 200)
     assert.match(await trailingSlash.text(), /data-doc-page="telegram"/)
@@ -1601,6 +1730,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(response.status, 200)
     assert.equal(document.openapi, '3.1.0')
     assert.deepEqual(paths.sort(), [
+      '/acquisitions/{requestId}',
       '/data/canonical/items/{id}/context',
       '/data/canonical/items/{id}/timeline',
       '/data/canonical/search',
@@ -1846,9 +1976,11 @@ test('public curl guide hides deployment topology and documents the Xiaohongshu 
     guide,
     /Domestic Nginx|WireGuard|Internal Nginx|10\.88\.88\.88|127\.0\.0\.1:(?:18150|18151|13141)|public listener `18150`|admin listener/,
   )
-  assert.match(guide, /四个入口共享一个 canonical 幂等 namespace/)
+  assert.match(guide, /共三个 Hub 投影入口共享一个 canonical 幂等 namespace/)
   assert.match(guide, /不能仅因 method 或入口路径写法变化而生成新的 `Idempotency-Key`/)
   assert.match(guide, /复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`/)
+  assert.match(guide, /App V2-compatible GET[^。]*独立兼容合同与幂等域/)
+  assert.match(guide, /不能跨 endpoint 复用 key/)
 })
 
 test('external data platform public contract and internal operations guidance stay aligned', async () => {
@@ -1862,6 +1994,12 @@ test('external data platform public contract and internal operations guidance st
 
   for (const source of [contract, curlGuide, staticOpenApi]) {
     assert.doesNotMatch(source, /tikhub|rapidapi|justone/i)
+    for (const code of EXTERNAL_OPERATION_CONTROL_ERROR_CODES) {
+      assert.match(source, new RegExp(code), code)
+    }
+  }
+  for (const code of EXTERNAL_OPERATION_CONTROL_ERROR_CODES) {
+    assert.match(operations, new RegExp(code), code)
   }
   for (const source of [contract, curlGuide]) {
     assert.match(source, /\/api\/v1\/data\/ecommerce\/products\/search/)
@@ -1890,6 +2028,27 @@ test('external data platform public contract and internal operations guidance st
     assert.match(source, /pageSize.*exactly 20|pageSize.*恰好.*20/is)
     assert.match(source, /60-character provider\s+preview boundary|长度恰好为 60/is)
     assert.match(source, /external_platform_rate_limited/)
+    assert.match(source, /note_id[\s\S]{0,300}(?:takes\s+precedence|优先)/i)
+    assert.match(source, /user_id[\s\S]{0,300}(?:takes\s+precedence|为准|优先)/i)
+    for (const code of ['invalid_user_profile_url', 'cursor_page_mismatch', 'user_not_found']) {
+      assert.match(source, new RegExp(code), code)
+    }
+    for (const [endpoint, capability] of [
+      ['get_image_note_detail', 'social.posts.resolve'],
+      ['search_notes', 'social.posts.search'],
+      ['search_users', 'social.users.resolve'],
+      ['get_user_info', 'social.users.resolve'],
+      ['get_user_posted_notes', 'social.users.posts'],
+    ]) {
+      assert.match(source, new RegExp(`${endpoint}[\\s\\S]{0,500}${capability.replaceAll('.', '\\.')}|${capability.replaceAll('.', '\\.')}[\\s\\S]{0,500}${endpoint}`))
+    }
+    for (const [operation, capability] of [
+      ['raw', 'social.posts.search'],
+      ['crawl', 'social.users.posts'],
+      ['user-info', 'social.users.resolve'],
+    ]) {
+      assert.match(source, new RegExp(`${operation}[\\s\\S]{0,500}${capability.replaceAll('.', '\\.')}`))
+    }
   }
 
   assert.match(adr, /JustOne/)
@@ -1904,6 +2063,9 @@ test('external data platform public contract and internal operations guidance st
   assert.match(operations, /provider_calls.*actual JustOne dispatches/is)
   assert.match(operations, /next-page request.*new.*Idempotency-Key|下一页.*新的.*Idempotency-Key/is)
   assert.match(operations, /Launcher.*MX-H2I/is)
+  assert.match(operations, /065_lock_usage_authorization_scope_set\.sql/)
+  assert.match(operations, /complete multi-axis authorization snapshot/)
+  assert.match(operations, /non-expandable index projection/)
 })
 
 test('admin-only listener does not expose public documentation', async () => {

@@ -3,6 +3,9 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
+import { XIAOHONGSHU_SEARCH_OPERATION } from '../../server/contracts/tikhub-xiaohongshu-search.mjs'
+import { XIAOHONGSHU_USER_INFO_OPERATION } from '../../server/contracts/tikhub-xiaohongshu-user-info.mjs'
+import { XIAOHONGSHU_CRAWL_OPERATION } from '../../server/contracts/tikhub-xiaohongshu-user-posts.mjs'
 import { createExternalPlatformCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -163,8 +166,8 @@ async function routingFixture({
       sourceMode: 'live',
     }
   }
-  const externalPostCapabilities = async () => {
-    postCapabilityCalls.push(true)
+  const externalPostCapabilities = async (options = {}) => {
+    postCapabilityCalls.push(structuredClone(options))
     return {
       platform: 'xiaohongshu',
       ready: true,
@@ -194,6 +197,11 @@ async function routingFixture({
     logger: { warn() {} },
   })
   const grantedPlatforms = [...new Set(['xiaohongshu', ...additionalPlatforms])]
+  const grantedCapabilities = [
+    XIAOHONGSHU_SEARCH_OPERATION,
+    XIAOHONGSHU_USER_INFO_OPERATION,
+    XIAOHONGSHU_CRAWL_OPERATION,
+  ]
   for (const platform of grantedPlatforms) {
     await store.setPlatformGrant(consumer.id, platform, true)
     await store.putPolicy({
@@ -205,17 +213,29 @@ async function routingFixture({
       maxPageSize: 100,
     })
   }
+  for (const capability of grantedCapabilities) {
+    await store.putCapabilityConfiguration({
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      capability,
+      enabled: true,
+      maxRequests: 1_000,
+      windowSeconds: 3_600,
+    })
+  }
   const liveKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Routing live key',
     environment: 'live',
     platforms: grantedPlatforms,
+    capabilities: grantedCapabilities,
   })
   const testKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Routing test key',
     environment: 'test',
     platforms: grantedPlatforms,
+    capabilities: grantedCapabilities,
   })
   const liveContext = await service.authenticate(liveKey.secret)
   const testContext = await service.authenticate(testKey.secret)
@@ -350,7 +370,7 @@ test('consumer canary advertises and opens modern/legacy direct search only for 
   assert.deepEqual(allowedCapabilities.data.platforms[0].capabilities, ['search_posts'])
   assert.equal(Object.hasOwn(deniedCapabilities.data.platforms[0], 'search'), false)
   assert.equal(Object.hasOwn(deniedCapabilities.data.platforms[0], 'capabilities'), false)
-  assert.equal(denied.postCapabilityCalls.length, 0)
+  assert.deepEqual(denied.postCapabilityCalls, [{ consumerId: denied.consumer.id }])
 
   await modernSearch(denied, 'canary-issued-cursor', {
     platform: 'xiaohongshu', query: 'existing continuation', cursor: denied.cursor,

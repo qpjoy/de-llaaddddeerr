@@ -10,6 +10,7 @@ import {
   normalizeTikHubXiaohongshuUserInfoResponse,
   toNightAllXiaohongshuUserInfoEnvelope,
   TIKHUB_XIAOHONGSHU_SEARCH_USERS_ENDPOINT_PATH,
+  TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_KEY,
   TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_PATH,
   XIAOHONGSHU_USER_INFO_OPERATION,
 } from '../../server/contracts/tikhub-xiaohongshu-user-info.mjs'
@@ -487,6 +488,8 @@ test('restricted TikHub evidence retains bounded invalid UTF-8 bytes without inv
 async function gatewayFixture(fetchImpl, {
   monthlyBudgetMinor = 1_000,
   monthlySubsidyBudgetMinor = 1_000,
+  operationControlStore = null,
+  credentialStore = null,
 } = {}) {
   const usageStore = new MemoryStore()
   const service = new HubService({
@@ -504,7 +507,19 @@ async function gatewayFixture(fetchImpl, {
     windowSeconds: 3_600,
     maxPageSize: 20,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Profile Key' })
+  for (const capability of [XIAOHONGSHU_USER_INFO_OPERATION, XIAOHONGSHU_CRAWL_OPERATION]) {
+    await service.putCapabilityConfiguration(capability, {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+    })
+  }
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Profile Key',
+    platforms: ['xiaohongshu'],
+    capabilities: [XIAOHONGSHU_USER_INFO_OPERATION, XIAOHONGSHU_CRAWL_OPERATION],
+  })
   const context = await service.authenticate(key.secret)
   const adapter = new TikHubAdapter({ apiKey: 'fake-provider-key', fetchImpl })
   const platformStore = new MemoryExternalPlatformStore({
@@ -518,6 +533,8 @@ async function gatewayFixture(fetchImpl, {
     adapter,
     apiKeyPepper: 'user-info-gateway-test-pepper-with-entropy',
     reservationLeaseMs: 150_000,
+    operationControlStore,
+    credentialStore,
     logger: { warn() {}, error() {} },
     config: {
       userActivityContractVerified: true,
@@ -541,6 +558,103 @@ async function gatewayFixture(fetchImpl, {
   })
   return { context, usageStore, platformStore, gateway }
 }
+
+test('user-info binds database policy, price-book and credential revisions to its paid call', async () => {
+  let authorization = null
+  let admissionRuntime = null
+  const operationControlStore = {
+    async authorizeDispatch(providerKey, operationKey, runtime) {
+      admissionRuntime = structuredClone(runtime)
+      return Object.freeze({
+        providerKey,
+        operationKey,
+        policyRevision: 4,
+        releaseRevision: 3,
+        priceBookVersion: 8,
+        credentialRevision: runtime.credentialRevision,
+        desiredState: 'active',
+        billing: Object.freeze({
+          source: 'database',
+          currency: 'CNY',
+          pricingAsOf: '2026-09-01T00:00:00.000Z',
+          monthlyBudgetMinor: 2_000,
+          monthlySubsidyBudgetMinor: 1_000,
+          unitCostMinorByEndpoint: Object.freeze({
+            [TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_KEY]: 17,
+          }),
+        }),
+      })
+    },
+  }
+  const credentialStore = {
+    async readCredentialSnapshot() {
+      return { source: 'database', revision: 6, apiKey: 'database-provider-key' }
+    },
+  }
+  const state = await gatewayFixture(async (_url, init) => {
+    authorization = init.headers.authorization
+    return jsonResponse({
+      code: 200,
+      request_id: 'profile-db-control-call',
+      data: { data: { user_id: USER_ID, nickname: 'Database Policy' } },
+    })
+  }, { operationControlStore, credentialStore })
+
+  const result = await state.gateway.legacyUserInfo(state.context, {
+    body: { platform: 'xiaohongshu', userId: USER_ID },
+    idempotencyKey: 'xhs-database-operation-control-01',
+    path: '/api/v1/search/user-info',
+  })
+  const [call] = state.platformStore.calls.values()
+
+  assert.equal(result.status, 200)
+  assert.equal(authorization, 'Bearer database-provider-key')
+  assert.equal(admissionRuntime.credentialConfigured, true)
+  assert.equal(admissionRuntime.credentialRevision, 6)
+  assert.equal(call.costMinor, 17)
+  assert.equal(call.operationPolicyRevision, 4)
+  assert.equal(call.operationReleaseRevision, 3)
+  assert.equal(call.providerPriceBookVersion, 8)
+  assert.equal(call.providerCredentialRevision, 6)
+})
+
+test('an open TikHub circuit is rejected before credential and operation-control admission', async () => {
+  let providerCalls = 0
+  let credentialReads = 0
+  let operationAdmissions = 0
+  const state = await gatewayFixture(async () => {
+    providerCalls += 1
+    return jsonResponse({ code: 200, data: { data: { user_id: USER_ID } } })
+  }, {
+    credentialStore: {
+      async readCredentialSnapshot() {
+        credentialReads += 1
+        return { source: 'database', revision: 2, apiKey: 'database-provider-key' }
+      },
+    },
+    operationControlStore: {
+      async authorizeDispatch() {
+        operationAdmissions += 1
+        throw new AppError(503, 'operation_blocked', 'Credential is missing')
+      },
+    },
+  })
+  state.platformStore.state.circuitOpenUntil = new Date(Date.now() + 60_000).toISOString()
+
+  await assert.rejects(
+    state.gateway.legacyUserInfo(state.context, {
+      body: { platform: 'xiaohongshu', userId: USER_ID },
+      idempotencyKey: 'xhs-open-circuit-precedence',
+      path: '/api/v1/search/user-info',
+    }),
+    (error) => error?.code === 'external_platform_circuit_open',
+  )
+
+  assert.equal(credentialReads, 0)
+  assert.equal(operationAdmissions, 0)
+  assert.equal(providerCalls, 0)
+  assert.equal(state.platformStore.calls.size, 0)
+})
 
 test('Hub-native user-info persists invalid UTF-8 as restricted failure evidence', async () => {
   const bytes = Buffer.from([0x7B, 0x22, 0x78, 0x22, 0x3A, 0x22, 0xC3, 0x28, 0x22, 0x7D])
@@ -858,12 +972,27 @@ test('Hub routes all gated Xiaohongshu crawl and user-info shapes before Night-A
     windowSeconds: 3_600,
     maxPageSize: 20,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Routing Key' })
+  const routingCapabilities = [XIAOHONGSHU_USER_INFO_OPERATION, XIAOHONGSHU_CRAWL_OPERATION]
+  for (const capability of routingCapabilities) {
+    await service.putCapabilityConfiguration(capability, {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+    })
+  }
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Routing Key',
+    platforms: ['xiaohongshu'],
+    capabilities: routingCapabilities,
+  })
   const context = await service.authenticate(key.secret)
   const testKey = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Routing Test Key',
     environment: 'test',
+    platforms: ['xiaohongshu'],
+    capabilities: routingCapabilities,
   })
   const testContext = await service.authenticate(testKey.secret)
 

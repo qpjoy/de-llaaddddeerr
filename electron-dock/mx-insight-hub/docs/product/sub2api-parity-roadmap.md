@@ -13,14 +13,15 @@ The supplied Sub2API dashboard is used as an information-architecture reference,
 | Token usage | Request, record, byte, agent-token and credit usage dimensions |
 | Account balance | Customer credit account; separate from provider quota |
 | Usage record | Idempotent mutable request/usage evidence now; immutable credit ledger later |
-| Channel status | Night-All capability readiness and circuit state |
+| Channel status | Hub provider-connector + operation readiness and circuit state; Night-All only for remaining compatibility operations |
 
 ## MVP admin capabilities
 
 - dashboard totals, request state, usage, latency and platform distribution;
 - consumer creation and status;
-- API-key issue/revoke with plaintext shown once;
-- explicit platform enable/disable and per-platform request/page limits;
+- API-key issue/revoke with plaintext shown once and a zero-permission default;
+- explicit data-domain/platform, business-operation and compatible-contract grants
+  with per-scope request/page limits;
 - usage filtering and runtime dependency health.
 
 ## Production backlog

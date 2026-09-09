@@ -153,7 +153,11 @@ async function withFixture(run) {
     windowSeconds: 3_600,
     maxPageSize: 100,
   })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Regions key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Regions key',
+    platforms: ['public_opinion'],
+  })
   const noGrantConsumer = await service.createConsumer({
     tenantId: tenant.id,
     name: 'Regions consumer without platform grant',

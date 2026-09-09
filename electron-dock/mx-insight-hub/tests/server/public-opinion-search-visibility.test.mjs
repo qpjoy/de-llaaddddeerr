@@ -415,7 +415,11 @@ test('Hub public-opinion fingerprints bind the publication contract while cursor
       maxPageSize: 20,
     })
   }
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Visibility fingerprint key' })
+  const key = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Visibility fingerprint key',
+    platforms: ['public_opinion', 'telegram'],
+  })
   const context = await service.authenticate(key.secret)
 
   await service.storedSearch(context, {
