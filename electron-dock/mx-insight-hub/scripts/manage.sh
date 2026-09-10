@@ -1660,40 +1660,48 @@ warn_local_postgres_present() {
   say "        bash scripts/manage.sh ops internal-production decommission-local-postgres" >&2
 }
 
-# A deploy always rolls the projector so it can run the new image. If the
-# persistent startup-rebuild switch is enabled, that rollout would turn an
-# otherwise routine deploy into a full PostgreSQL -> Elasticsearch replay.
-# Refuse instead of silently changing an operator-owned setting. The switch can
-# be disabled in Data Center; a deliberate rebuild remains available there or
-# through the separate reindex-search command.
-require_deploy_projector_schema_only() {
-  local startup_rebuild
-  startup_rebuild="$(
+# A deploy always rolls the projector so it can run the new image. Force that
+# rollout into schema-only/incremental mode before any deploy work and check it
+# again immediately before the projector changes. This only disables the
+# persistent restart side effect; it never starts or cancels a deliberate
+# strict rebuild, which remains a separate operator action.
+disable_projector_startup_rebuild_for_deploy() {
+  local deploy_startup_mode
+  deploy_startup_mode="$(
     kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
       psql -X -qAt -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <<'SQL'
 SELECT to_regclass('control.search_settings') IS NOT NULL
   AS search_settings_exists
 \gset
 \if :search_settings_exists
-  SELECT coalesce(
-           (SELECT startup_rebuild
-              FROM control.search_settings
-             WHERE id),
-           false
-         ) AS startup_rebuild
+  WITH changed AS (
+    INSERT INTO control.search_settings AS settings
+      (id, startup_rebuild, updated_by, updated_at)
+    VALUES (true, false, 'deploy', now())
+    ON CONFLICT (id) DO UPDATE
+      SET startup_rebuild = false,
+          updated_by = 'deploy',
+          updated_at = now()
+      WHERE settings.startup_rebuild
+    RETURNING 1
+  )
+  SELECT CASE WHEN EXISTS (SELECT 1 FROM changed)
+              THEN 'disabled'
+              ELSE 'already-disabled'
+         END AS deploy_startup_mode
   \gset
 \else
-  \set startup_rebuild false
+  \set deploy_startup_mode not-installed
 \endif
-\echo :startup_rebuild
+\echo :deploy_startup_mode
 SQL
-  )" || die "could not verify the projector startup-rebuild setting"
-  case "$startup_rebuild" in
-    f|false|off|0) return 0 ;;
-    t|true|on|1)
-      die "projector startup full rebuild is enabled; turn off 'projector 重启时自动全量重建' in Data Center before deploy, then start any required strict rebuild manually"
+  )" || die "could not disable the projector startup full rebuild for deploy"
+  case "$deploy_startup_mode" in
+    disabled)
+      say "disabled projector restart full rebuild for deploy; strict rebuild remains manual"
       ;;
-    *) die "unexpected projector startup-rebuild setting: ${startup_rebuild:-empty}" ;;
+    already-disabled|not-installed) return 0 ;;
+    *) die "unexpected projector startup-rebuild update result: ${deploy_startup_mode:-empty}" ;;
   esac
 }
 
@@ -2008,9 +2016,9 @@ decommission_local_postgres() {
 
 apply_k8s() {
   local namespace="mx-insight-hub"
-  # Check before changing any Hub resource. Check again immediately before the
+  # Disable before changing any Hub resource. Repeat immediately before the
   # projector rollout in case an operator toggled the setting mid-deploy.
-  require_deploy_projector_schema_only
+  disable_projector_startup_rebuild_for_deploy
   kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
@@ -2088,7 +2096,7 @@ apply_k8s() {
   # new ingest worker can schedule a source pull.
   ensure_night_all_saved_records_source_indexes
 
-  require_deploy_projector_schema_only
+  disable_projector_startup_rebuild_for_deploy
   render_file "${K8S_DIR}/32-projector.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
@@ -2824,10 +2832,9 @@ ops_action() {
       init_deploy_runtime
       acquire_deploy_lock
       ensure_shared_data_plane
-      # Avoid spending time building/importing an image when the later
-      # projector rollout is intentionally blocked by an operator-owned full
-      # startup rebuild setting.
-      require_deploy_projector_schema_only
+      # Make the deploy schema-only/incremental before spending time building
+      # and importing the image. Strict rebuild remains an explicit UI/CLI job.
+      disable_projector_startup_rebuild_for_deploy
       build_and_import_image
       apply_k8s
       k8s_smoke

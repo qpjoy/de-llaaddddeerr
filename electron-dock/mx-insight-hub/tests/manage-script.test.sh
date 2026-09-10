@@ -1025,7 +1025,7 @@ if HANLP_FAIL_CLOSED_EVENTS="$hanlp_fail_closed_events" bash -c '
   sync_launcher_secret() { printf "launcher-sync\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
   refresh_launcher_workload() { printf "launcher-rollout\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
   warn_local_postgres_present() { :; }
-  require_deploy_projector_schema_only() { :; }
+  disable_projector_startup_rebuild_for_deploy() { :; }
   apply_k8s
 ' _ "$ROOT_DIR" >"$hanlp_fail_closed_error" 2>&1; then
   printf 'not ok - transient HanLP Endpoint loss downgraded the deployed Hub\n' >&2
@@ -1040,31 +1040,23 @@ rm -f -- "$hanlp_fail_closed_events" "$hanlp_fail_closed_error"
 printf 'ok - transient HanLP Endpoint loss preserves the deployed config before any rollout or Launcher sync\n'
 
 startup_rebuild_query="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-startup-rebuild-query.XXXXXX")"
+startup_rebuild_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-startup-rebuild-output.XXXXXX")"
 STARTUP_REBUILD_QUERY="$startup_rebuild_query" bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
   kubectl() {
     cat >"$STARTUP_REBUILD_QUERY"
-    printf "false\n"
+    printf "disabled\n"
   }
-  require_deploy_projector_schema_only
-' _ "$ROOT_DIR"
+  disable_projector_startup_rebuild_for_deploy
+' _ "$ROOT_DIR" >"$startup_rebuild_output"
 grep -q "to_regclass('control.search_settings')" "$startup_rebuild_query"
-grep -q 'SELECT startup_rebuild' "$startup_rebuild_query"
-
-startup_rebuild_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-startup-rebuild-error.XXXXXX")"
-if bash -c '
-  set -euo pipefail
-  source "$1/scripts/manage.sh"
-  kubectl() { cat >/dev/null; printf "true\n"; }
-  require_deploy_projector_schema_only
-' _ "$ROOT_DIR" >"$startup_rebuild_error" 2>&1; then
-  printf 'not ok - deploy accepted a projector startup full rebuild\n' >&2
-  exit 1
-fi
-grep -q "turn off 'projector 重启时自动全量重建'" "$startup_rebuild_error"
-rm -f -- "$startup_rebuild_query" "$startup_rebuild_error"
-printf 'ok - deploy fails closed while projector startup full rebuild is enabled\n'
+grep -q 'INSERT INTO control.search_settings AS settings' "$startup_rebuild_query"
+grep -q 'SET startup_rebuild = false' "$startup_rebuild_query"
+grep -q "updated_by = 'deploy'" "$startup_rebuild_query"
+grep -q 'strict rebuild remains manual' "$startup_rebuild_output"
+rm -f -- "$startup_rebuild_query" "$startup_rebuild_output"
+printf 'ok - deploy disables projector restart full rebuild without starting one\n'
 
 grep -q '^    mx-common\.io/client: allowed$' \
   "$ROOT_DIR/deploy/k8s/internal/00-namespace.yaml"
@@ -1080,9 +1072,9 @@ discovery_line="$(grep -n 'discover_hanlp_url' <<<"$apply_k8s_body" | cut -d: -f
 config_line="$(grep -n 'create_runtime_config' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_workload_change_line="$(grep -nE 'rollout restart|scale deployment' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
 admin_freeze_line="$(grep -n 'scale deployment/mx-insight-hub-admin --replicas=0' <<<"$apply_k8s_body" | cut -d: -f1)"
-first_schema_only_guard_line="$(grep -n '^  require_deploy_projector_schema_only$' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
-last_schema_only_guard_line="$(grep -n '^  require_deploy_projector_schema_only$' <<<"$apply_k8s_body" | tail -1 | cut -d: -f1)"
-schema_only_guard_count="$(grep -c '^  require_deploy_projector_schema_only$' <<<"$apply_k8s_body")"
+first_schema_only_guard_line="$(grep -n '^  disable_projector_startup_rebuild_for_deploy$' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
+last_schema_only_guard_line="$(grep -n '^  disable_projector_startup_rebuild_for_deploy$' <<<"$apply_k8s_body" | tail -1 | cut -d: -f1)"
+schema_only_guard_count="$(grep -c '^  disable_projector_startup_rebuild_for_deploy$' <<<"$apply_k8s_body")"
 projector_manifest_line="$(grep -n '32-projector.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
 if ! [ "$schema_only_guard_count" -eq 2 ] \
   || ! [ "$namespace_line" -lt "$justone_preserve_line" ] \
@@ -1100,14 +1092,14 @@ printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
 ops_action_body="$(sed -n '/^ops_action() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
 deploy_case_body="$(sed -n '/^    deploy)$/,/^      ;;$/p' <<<"$ops_action_body")"
 shared_plane_line="$(grep -n '^      ensure_shared_data_plane$' <<<"$deploy_case_body" | cut -d: -f1)"
-early_schema_only_guard_line="$(grep -n '^      require_deploy_projector_schema_only$' <<<"$deploy_case_body" | cut -d: -f1)"
+early_schema_only_guard_line="$(grep -n '^      disable_projector_startup_rebuild_for_deploy$' <<<"$deploy_case_body" | cut -d: -f1)"
 build_import_line="$(grep -n '^      build_and_import_image$' <<<"$deploy_case_body" | cut -d: -f1)"
 if ! [ "$shared_plane_line" -lt "$early_schema_only_guard_line" ] \
   || ! [ "$early_schema_only_guard_line" -lt "$build_import_line" ]; then
-  printf 'not ok - deploy does not reject startup rebuild before image build/import\n' >&2
+  printf 'not ok - deploy does not disable startup rebuild before image build/import\n' >&2
   exit 1
 fi
-printf 'ok - deploy rejects startup full rebuild before image build/import\n'
+printf 'ok - deploy disables startup full rebuild before image build/import\n'
 
 # Acquisition-history indexes must be prepared online before migration 061;
 # the other serving indexes remain post-migration prerequisites before rollout.

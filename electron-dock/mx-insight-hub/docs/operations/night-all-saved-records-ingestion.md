@@ -452,10 +452,11 @@ Keep every task paused until this sequence is complete:
 Deploy never accepts the writer/delete/commit-order attestation, activates a
 task, schedules a pull, grants a Public capability, or starts an Elasticsearch
 full rebuild. Those remain explicit Admin UI decisions. If the persistent
-**projector 重启时自动全量重建** setting is still enabled, deploy refuses before
-building/importing the image or applying Hub Kubernetes resources and asks the
-operator to disable it; it does not clear
-the setting silently and it does not restart the projector into a full replay.
+**projector 重启时自动全量重建** setting is still enabled, deploy idempotently
+turns it off before building/importing the image and verifies it again before
+the projector rollout. The change is logged; deploy does not start, cancel or
+wait for a full replay. A strict rebuild must still be started separately by an
+operator in Data Center.
 
 Immediately after migration 066, this read-only acceptance query must return
 `13, 13, 13, 13, 13` in column order:

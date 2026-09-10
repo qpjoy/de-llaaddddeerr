@@ -34,9 +34,9 @@ MX_INSIGHT_BUILD_NETWORK=host \
 bash scripts/manage.sh ops internal-production deploy
 
 # deploy 不会触发 Elasticsearch 全量重建。若数据中心仍开启“projector 重启时
-# 自动全量重建”，deploy 会在应用 Hub Kubernetes 资源前拒绝执行，请先关闭它。content schema
-# 变化时，在数据中心核对磁盘/HanLP 负载后手动点一次“开始严格重建”；日常新数据
-# 继续走增量 outbox。
+# 自动全量重建”，deploy 会幂等关闭这个重启副作用、打印提示并继续；不会启动或
+# 等待全量回放。content schema 变化时，在数据中心核对磁盘/HanLP 负载后手动点一次
+# “开始严格重建”；日常新数据继续走增量 outbox。
 
 # 部署完即可用，无需 port-forward / 手动连 admin：
 #   Admin : http://10.88.88.88:18151/            （SPA + /internal/v1/admin/*，头 x-mx-insight-admin-token）

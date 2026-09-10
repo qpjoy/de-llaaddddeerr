@@ -156,12 +156,11 @@ Search projection rebuilds are intentionally absent from this order. A content
 schema change is rebuilt once through the Data Center strict-rebuild control
 after its disk and HanLP preflight; ordinary deploys and newly ingested sources
 continue with incremental projection work. Because the projector rollout would
-honor a persisted `startupRebuild=true`, deploy checks that operator setting
-before building/importing the Hub image, before applying Hub Kubernetes
-resources, and again immediately before the projector rollout. When it is
-enabled, deploy fails closed and asks the operator to turn
-off **projector 重启时自动全量重建** in Data Center; it never silently changes
-the setting or converts the rollout into a full replay.
+honor a persisted `startupRebuild=true`, deploy idempotently disables that
+restart side effect before building/importing the Hub image, before applying Hub
+Kubernetes resources, and again immediately before the projector rollout. It
+logs when the setting changed, but it never starts, cancels or waits for a full
+replay. Strict rebuild remains a separate operator decision in Data Center.
 
 ### Browser Public-origin smoke and 404 triage
 
