@@ -7,6 +7,10 @@ import {
   JUSTONE_OPERATION,
 } from '../contracts/justone.mjs'
 import {
+  JUSTONE_RESOURCE_CONTRACT_VERSION,
+  justoneResourceOperations,
+} from '../contracts/justone-resources.mjs'
+import {
   TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
   XIAOHONGSHU_POST_CONTRACT_VERSION,
   XIAOHONGSHU_POST_OPERATION,
@@ -50,6 +54,21 @@ function uniqueEndpointKeys() {
   return [...new Set(Object.values(JUSTONE_ENDPOINTS).map(({ endpointKey }) => endpointKey))]
 }
 
+// The resource operations share the provider's single contract gate rather
+// than adding a gate each. Their release control is the per-endpoint price:
+// an operation whose endpoint key has no reviewed price is `blocked`, so
+// turning one on is one line in the pricebook and nothing else. A second gate
+// would only add a second thing to forget.
+function justoneResourceOperationEntries() {
+  return [...justoneResourceOperations()].map(([operationKey, resources]) => Object.freeze({
+    operationKey,
+    label: resources.map((entry) => entry.label).join(' / '),
+    legacyGate: 'contractVerified',
+    contractVersion: JUSTONE_RESOURCE_CONTRACT_VERSION,
+    endpointKeys: Object.freeze([...new Set(resources.map((entry) => entry.endpointKey))]),
+  }))
+}
+
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
   justone: Object.freeze([
     Object.freeze({
@@ -59,6 +78,7 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
       contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
       endpointKeys: Object.freeze(uniqueEndpointKeys()),
     }),
+    ...justoneResourceOperationEntries(),
   ]),
   tikhub: Object.freeze([
     Object.freeze({

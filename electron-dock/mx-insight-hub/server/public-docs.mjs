@@ -3,6 +3,7 @@ import {
   POSTGRES_SEARCH_PROFILE,
   searchCapabilities,
 } from './search/profiles.mjs'
+import { JUSTONE_RELEASED_RESOURCES } from './contracts/justone-resources.mjs'
 
 export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','xiaohongshu-note':'/docs/xiaohongshu-note','virtual-supermarket':'/docs/virtual-supermarket','topic-reports':'/docs/topic-reports',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
@@ -1036,6 +1037,90 @@ const virtualSupermarketPageResponse = {
   },
 }
 
+
+// OpenAPI entries for the platform-shaped resources are generated from the same
+// registry the dispatcher uses, so a released resource cannot ship undocumented
+// and a documented one cannot drift from its real parameters.
+function justoneResourcePaths() {
+  const entries = {}
+  for (const resource of JUSTONE_RELEASED_RESOURCES) {
+    const versions = resource.versions
+    const properties = {
+      version: {
+        type: 'string',
+        enum: [...versions],
+        default: resource.defaultVersion,
+        description: 'Upstream endpoint version. Each version is a distinct logical request and is fingerprinted separately.',
+      },
+      deliveryMode: {
+        type: 'string',
+        enum: ['cache_only', 'cache_first', 'refresh'],
+        default: 'cache_first',
+      },
+    }
+    const required = []
+    const seen = new Set()
+    for (const version of versions) {
+      for (const declared of resource.variantFor(version).params) {
+        if (seen.has(declared.name)) continue
+        seen.add(declared.name)
+        properties[declared.name] = declared.kind === 'page'
+          ? { type: 'integer', minimum: 1, maximum: 1000, default: declared.defaultValue ?? 1 }
+          : declared.values
+            ? { type: 'string', enum: [...declared.values] }
+            : { type: 'string', maxLength: 64 }
+      }
+      if (version === resource.defaultVersion) {
+        for (const declared of resource.variantFor(version).params) {
+          if (declared.required) required.push(declared.name)
+        }
+      }
+    }
+    entries[resource.hubPath.replace('/api/v1', '')] = {
+      post: {
+        tags: ['External Data'],
+        operationId: `fetch${resource.resourceKey.replace(/[.-]([a-z])/gu, (_, c) => c.toUpperCase()).replace(/^[a-z]/u, (c) => c.toUpperCase())}`,
+        summary: `${resource.label}（平台原生字段）`,
+        'x-mx-required-platform': 'ecommerce',
+        'x-mx-required-capabilities': [resource.operationKey],
+        'x-mx-upstream-versions': [...versions],
+        description: `平台原生合同：请求路径与参数名与上游文档一致，响应 data 保留上游字段名，不做 Hub 重命名或裁剪，外层保留 Hub 的 contractVersion/meta/requestId。上游未对 data 发布类型，因此字段随上游变化；需要稳定结构时改用 /data/ecommerce/products/search。要求 ecommerce 数据域授权与 ${resource.operationKey} 业务操作授权，两者独立于商品搜索。deliveryMode 默认 cache_first：cache_only 不发起上游调用，refresh 绕过新鲜缓存并需要调用方提供 Idempotency-Key。每次真实上游调用计一次上游成本；命中缓存不计上游成本。`,
+        'x-mx-error-codes': {
+          400: [
+            'invalid_request', 'unsupported_request_field', 'unsupported_version',
+            'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
+          ],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
+          404: ['stored_snapshot_not_found', 'unsupported_resource'],
+          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
+          413: ['payload_too_large'],
+          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited'],
+          502: ['external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
+          503: [
+            'external_platform_unavailable', 'external_platform_not_configured',
+            'external_platform_circuit_open', 'external_platform_operation_disabled',
+            'external_platform_operation_shadow', 'external_platform_operation_paused',
+            'external_platform_operation_canary', 'external_platform_operation_blocked',
+          ],
+        },
+        parameters: [externalCommerceIdempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { type: 'object', additionalProperties: false, required, properties },
+            },
+          },
+        },
+        responses: { 200: { description: `${resource.label}（上游字段名）` } },
+      },
+    }
+  }
+  return entries
+}
+
+
 const virtualSupermarketDetailResponse = {
   description: 'One on-shelf customer-safe virtual-supermarket product.',
   content: {
@@ -1104,6 +1189,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   ],
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
+    ...justoneResourcePaths(),
     '/data/capabilities': {
       get: {
         tags: ['Discovery'],
@@ -2563,7 +2649,31 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               ageSeconds: { type: 'integer', minimum: 0 },
               fallbackReason: {
                 type: 'string',
-                description: 'Bounded reason category present only for stored_fallback.',
+                description: 'Bounded reason category present only for stored_fallback. Retained for compatibility; prefer `reason`.',
+              },
+              reason: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['code', 'scope', 'summary', 'degraded', 'liveAttempted'],
+                description:
+                  'Why this delivery looks the way it does. Present on every delivery, including healthy ones, so the absence of a field never has to be interpreted. `scope` names the subsystem that made the decision, `degraded` says whether the caller received less than a live upstream read, and `liveAttempted` says whether an upstream call was actually started (and therefore possibly billed).',
+                properties: {
+                  code: { type: 'string', maxLength: 160 },
+                  scope: {
+                    type: 'string',
+                    enum: [
+                      'upstream', 'delivery_policy', 'operation_control', 'provider_credential',
+                      'circuit_breaker', 'dispatch_dedup', 'concurrency', 'rate_limit', 'idempotency',
+                    ],
+                  },
+                  summary: { type: 'string', maxLength: 400 },
+                  degraded: { type: 'boolean' },
+                  liveAttempted: { type: 'boolean' },
+                  detail: {
+                    type: 'object',
+                    description: 'Optional machine-readable evidence, such as the operation-control blockers that refused dispatch.',
+                  },
+                },
               },
             },
           },
@@ -2681,6 +2791,30 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               },
               ageSeconds: { type: 'integer', minimum: 0 },
               fallbackReason: { type: 'string', maxLength: 160 },
+              reason: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['code', 'scope', 'summary', 'degraded', 'liveAttempted'],
+                description:
+                  'Why this delivery looks the way it does. Present on every delivery, including healthy ones, so the absence of a field never has to be interpreted. `scope` names the subsystem that made the decision, `degraded` says whether the caller received less than a live upstream read, and `liveAttempted` says whether an upstream call was actually started (and therefore possibly billed).',
+                properties: {
+                  code: { type: 'string', maxLength: 160 },
+                  scope: {
+                    type: 'string',
+                    enum: [
+                      'upstream', 'delivery_policy', 'operation_control', 'provider_credential',
+                      'circuit_breaker', 'dispatch_dedup', 'concurrency', 'rate_limit', 'idempotency',
+                    ],
+                  },
+                  summary: { type: 'string', maxLength: 400 },
+                  degraded: { type: 'boolean' },
+                  liveAttempted: { type: 'boolean' },
+                  detail: {
+                    type: 'object',
+                    description: 'Optional machine-readable evidence, such as the operation-control blockers that refused dispatch.',
+                  },
+                },
+              },
             },
           },
           requestId: { type: 'string', format: 'uuid' },
@@ -4877,6 +5011,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
   { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录', section: '数据目录' },
   { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
+  { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫原生接口', section: '平台原生接口' },
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
@@ -5229,6 +5364,63 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     </tbody></table>
     <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件。主搜索按钮是唯一入口：页面自动调用状态 GET，没有额外核对按钮、费用复选框，也不要求用户查找或粘贴 UUID、人工核查 consumer 归属。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>。v1 或 v2 本地账本只有在同一 consumer 的查询明确返回 <code>request_not_found</code> 时才清除孤儿记录；路由级 <code>not_found</code> 和其他查询失败继续保留审计。<code>committed</code> 自动精确重放，<code>released</code> 关闭旧记录；只有明确 <code>unknown</code> 可在用户已选择 <code>refresh</code> 并点击重采按钮后，用新幂等键和页面自动填入的 <code>X-MX-Insight-Retry-Of</code> 旧请求 ID 发起一次新采集。<code>reserved</code>、网络失败、路由/版本不匹配和 succeeded-unusable 隔离继续阻止外部调用。切换演示不会删除实时请求账本。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
+    </section>
+
+    <section class="doc-page" data-doc-page="taobao-tmall">
+    <h2 id="taobao-tmall">淘宝天猫原生接口</h2>
+    <p class="lead">Hub 对外提供两层电商接口。这一层是<strong>平台原生合同</strong>：请求路径与参数名和上游文档一致，响应 <code>data</code> 保留上游字段名，调用方按上游文档理解载荷、按 Hub 合同理解交付。另一层是<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>，返回 Hub 归一化的稳定商品结构。</p>
+
+    <div class="notice">两层用同一把 Hub Public API Key、同一套幂等与交付语义，也共用同一份上游调用证据与归档。区别只有一个：原生层不重命名、不裁剪上游字段，稳定性交给上游；数据产品层由 Hub 钉住结构，上游改字段不会打到你身上。</div>
+
+    <h3>1. 何时用哪一层</h3>
+    <table><thead><tr><th></th><th>平台原生接口（本页）</th><th>电商数据百宝箱</th></tr></thead><tbody>
+      <tr><td>响应字段</td><td>上游原字段名，随上游变化</td><td>Hub 归一化结构，版本化稳定</td></tr>
+      <tr><td>适合</td><td>自己组合产品、需要上游全部字段</td><td>直接消费，不想处理上游差异</td></tr>
+      <tr><td>上游 <code>data</code> 类型</td><td>上游 OpenAPI 未发布类型，Hub 不猜也不裁剪</td><td>由 Hub 钉住并逐字段审核</td></tr>
+      <tr><td>翻页</td><td>上游自己的分页字段</td><td>Hub 不透明游标</td></tr>
+      <tr><td>计费</td><td colspan="2">相同：一次真实上游调用计一次上游成本；命中缓存不产生上游成本</td></tr>
+    </tbody></table>
+
+    <h3>2. 授权</h3>
+    <p>每个资源族是<strong>独立的业务操作授权</strong>，不随商品搜索一起开通。Key 需要同时具备 <code>ecommerce</code> 数据域和对应操作：<code>ecommerce.products.detail</code>、<code>ecommerce.products.reviews</code>、<code>ecommerce.products.questions</code>、<code>ecommerce.shops.products</code>。缺少时返回 <code>403 capability_not_granted</code>。</p>
+
+    <h3>3. 接口</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/taobao/product-detail</code></div><p>商品详情。<code>itemId</code> 必填；<code>version</code> 可选 <code>v1|v3|v4|v5|v7|v9</code>，默认 <code>v7</code>。V2 是上游异步工作流，不在本合同内。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/taobao/product-reviews</code></div><p>商品评价。<code>itemId</code> 必填；<code>orderType</code> 可选 <code>general|feedbackdate</code>；<code>page</code> 默认 1。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/taobao/product-questions</code></div><p>商品问答。<code>itemId</code> 必填；<code>page</code> 默认 1。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/taobao/shop-products</code></div><p>店铺商品列表。三个上游版本用不同字段标识店铺，因此参数按版本区分：<code>v4</code>（默认）用 <code>sellerId</code>；<code>v1</code> 用 <code>userId</code>；<code>v2</code> 用 <code>userId</code> + <code>shopId</code>。传了不属于该版本的字段会返回 <code>400 unsupported_request_field</code>。</p></div>
+
+    <h3>4. 调用</h3>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/ecommerce/taobao/product-detail" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: detail-$(uuidgen)" \
+  -d '{"itemId":"778899","version":"v7","deliveryMode":"cache_first"}'</code></pre>
+
+    <p>响应结构：</p>
+    <pre><code>{
+  "contractVersion": "mx-insight-hub.ecommerce-resource.v1",
+  "resource": { "key": "taobao-tmall.product-detail", "version": "v7" },
+  "data": { /* 上游原样字段，Hub 不重命名、不裁剪 */ },
+  "meta": {
+    "capturedAt": "...", "servedAt": "...", "sourceMode": "live", "ageSeconds": 0,
+    "reason": { "code": "live", "scope": "upstream", "degraded": false, "liveAttempted": true }
+  },
+  "requestId": "..."
+}</code></pre>
+
+    <h3>5. 交付策略</h3>
+    <p><code>deliveryMode</code> 与百宝箱完全一致，默认 <code>cache_first</code>：</p>
+    <table><thead><tr><th>模式</th><th>行为</th><th>上游成本</th></tr></thead><tbody>
+      <tr><td><code>cache_only</code></td><td>只读精确存量；没有存量时 <code>404 stored_snapshot_not_found</code>。</td><td>0</td></tr>
+      <tr><td><code>cache_first</code></td><td><strong>只有快照仍在新鲜窗口内才复用</strong>；超出窗口会去请求上游，上游不可用时才回落到存量。它不是“永远读缓存”。</td><td>缓存命中 0；穿透后 1</td></tr>
+      <tr><td><code>refresh</code></td><td>绕过新鲜缓存，明确尝试上游；上游失败且存在精确存量时仍会回落。必须提供 <code>Idempotency-Key</code>。</td><td>1（除非未派发即被拒绝）</td></tr>
+    </tbody></table>
+    <p>拿到的是不是实时数据，看 <code>meta.reason</code>，不要靠 <code>sourceMode</code> 猜：<code>reason.degraded=false</code> 才是完整交付；<code>reason.liveAttempted</code> 区分“没有发生上游调用”和“上游调用已发生、可能已计费”。详见<a href="/docs/errors">错误与重试</a>。</p>
+
+    <h3>6. 上游字段的稳定性</h3>
+    <p>上游对 <code>data</code> 没有发布类型定义，因此本层<strong>不承诺字段稳定</strong>：Hub 只做结构边界检查与凭据脱敏，不重命名、不补默认值、不删除未知字段。请按缺字段返回 <code>null</code> 的方式消费，不要假设某个字段一定存在。需要稳定结构时用<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>。</p>
+    <p>不同 <code>version</code> 是不同的逻辑请求，各自独立缓存与计费；切换版本不会复用另一个版本的快照。</p>
     </section>
 
     <section class="doc-page" data-doc-page="xiaohongshu-note">

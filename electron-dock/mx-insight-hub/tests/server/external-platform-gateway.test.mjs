@@ -43,13 +43,17 @@ function config(overrides = {}) {
         'jd.product-search.v1': 5,
         'xiaohongshu-ec.product-search.v1': 5,
         'xianyu.product-search.v1': 5,
+        'taobao-tmall.product-detail.v1': 5,
+        'taobao-tmall.product-reviews.v1': 5,
+        'taobao-tmall.product-questions.v1': 5,
+        'taobao-tmall.shop-products.v1': 5,
       },
     },
     ...overrides,
   }
 }
 
-async function fixture({ adapter, gatewayConfig = config() } = {}) {
+async function fixture({ adapter, gatewayConfig = config(), capabilities = [] } = {}) {
   const usageStore = new MemoryStore()
   const hub = new HubService({
     store: usageStore,
@@ -59,16 +63,18 @@ async function fixture({ adapter, gatewayConfig = config() } = {}) {
   const tenant = await hub.createTenant({ name: 'Tenant A' })
   const consumer = await hub.createConsumer({ tenantId: tenant.id, name: 'Consumer A' })
   await usageStore.setPlatformGrant(consumer.id, 'ecommerce', true)
-  await hub.putCapabilityConfiguration(JUSTONE_OPERATION, {
-    tenantId: tenant.id,
-    consumerId: consumer.id,
-    enabled: true,
-  })
+  for (const capability of [JUSTONE_OPERATION, ...capabilities]) {
+    await hub.putCapabilityConfiguration(capability, {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+    })
+  }
   const key = await hub.createApiKey({
     consumerId: consumer.id,
     name: 'Key A',
     platforms: ['ecommerce'],
-    capabilities: [JUSTONE_OPERATION],
+    capabilities: [JUSTONE_OPERATION, ...capabilities],
   })
   await usageStore.putPolicy({
     tenantId: tenant.id,
@@ -683,8 +689,39 @@ test('a definite provider capacity error returns an exact stored fallback withou
   })
   assert.equal(fallback.sourceMode, 'stored_fallback')
   assert.equal(fallback.body.meta.fallbackReason, 'upstream_balance_exhausted')
+  // The degraded delivery explains itself: an upstream call really was made,
+  // so triage starts at the provider rather than at Hub's own control plane.
+  assert.equal(fallback.body.meta.reason.code, 'upstream_balance_exhausted')
+  assert.equal(fallback.body.meta.reason.scope, 'upstream')
+  assert.equal(fallback.body.meta.reason.degraded, true)
+  assert.equal(fallback.body.meta.reason.liveAttempted, true)
   assert.equal(fallback.body.data.items[0].id, 'sku-1')
   assert.equal(calls, 2, 'the failed upstream request is not retried')
+})
+
+test('every delivery explains itself, including the ones that went to the upstream', async () => {
+  const adapter = { async searchProducts(body, options) { return successfulResult(body, options) } }
+  const state = await fixture({ adapter })
+  const body = { marketplace: 'jd', query: 'camera' }
+
+  const live = await state.gateway.search(state.context, {
+    body, idempotencyKey: 'reason-live-01', path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(live.body.meta.reason.code, 'live')
+  assert.equal(live.body.meta.reason.degraded, false)
+  assert.equal(live.body.meta.reason.liveAttempted, true)
+
+  // A cache hit is a decision, not an absence of one, so it is named as well.
+  const cached = await state.gateway.search(state.context, {
+    body: { ...body, deliveryMode: 'cache_first' },
+    idempotencyKey: 'reason-cache-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.equal(cached.sourceMode, 'fresh_cache')
+  assert.equal(cached.body.meta.reason.code, 'fresh_cache_hit')
+  assert.equal(cached.body.meta.reason.degraded, false)
+  assert.equal(cached.body.meta.reason.liveAttempted, false)
 })
 
 test('a definite request rejection is durably replayed and never advances the provider circuit', async () => {
@@ -1693,4 +1730,59 @@ test('admin projection distinguishes contract verification from safe misconfigur
     message: 'MX_INSIGHT_JUSTONE_STALE_TTL_MS must be greater than or equal to MX_INSIGHT_JUSTONE_FRESH_TTL_MS',
   })
   assert.doesNotMatch(JSON.stringify(misconfigured.provider), /token/u)
+})
+
+test('a resource operation is authorized and metered on its own capability, not on search', async () => {
+  let dispatched = null
+  const adapter = {
+    async searchProducts() { assert.fail('a resource request must not dispatch product search') },
+    async fetchResource(resourceKey, body) {
+      dispatched = { resourceKey, body }
+      return {
+        publicBody: {
+          contractVersion: 'mx-insight-hub.ecommerce-resource.v1',
+          resource: { key: resourceKey, version: 'v7' },
+          data: { item: { itemId: body.itemId, title: 'Product' } },
+          meta: { capturedAt: new Date().toISOString() },
+        },
+        archiveObjects: [],
+        items: [],
+      }
+    },
+  }
+  const body = { itemId: '778899' }
+  const invoke = (state) => state.gateway.fetchResource(state.context, {
+    resourceKey: 'taobao-tmall.product-detail',
+    body,
+    idempotencyKey: 'resource-detail-01',
+    path: '/api/v1/data/ecommerce/taobao/product-detail',
+  })
+
+  // A key scoped to product search shares the ecommerce platform grant with
+  // this resource. That must not carry a paid detail call with it.
+  const searchOnly = await fixture({ adapter })
+  await assert.rejects(
+    () => invoke(searchOnly),
+    (error) => error.code === 'capability_not_granted',
+  )
+  assert.equal(dispatched, null)
+
+  const granted = await fixture({ adapter, capabilities: ['ecommerce.products.detail'] })
+  const result = await invoke(granted)
+  assert.equal(result.sourceMode, 'live')
+  assert.equal(result.body.data.item.itemId, '778899')
+  assert.equal(result.body.meta.reason.code, 'live')
+  assert.deepEqual(dispatched, { resourceKey: 'taobao-tmall.product-detail', body })
+})
+
+test('an unreleased resource is not reachable through the gateway', async () => {
+  const state = await fixture({ adapter: { async searchProducts() { assert.fail('unreachable') } } })
+  await assert.rejects(
+    () => state.gateway.fetchResource(state.context, {
+      resourceKey: 'jd.product-detail',
+      body: { itemId: '1' },
+      path: '/api/v1/data/ecommerce/jd/product-detail',
+    }),
+    (error) => error.code === 'unsupported_resource',
+  )
 })

@@ -474,6 +474,58 @@ The response is provider-neutral:
 - `idempotent_replay`: the committed result for the same caller `Idempotency-Key`, path, and
   body was replayed without another external call.
 
+### `meta.reason`
+
+`sourceMode` says what was served; `meta.reason` says why, and it is present on
+every delivery rather than only on the degraded ones. A caller therefore never
+has to read "no fallbackReason" as "nothing happened":
+
+| field | meaning |
+| --- | --- |
+| `code` | stable reason identifier; equal to `fallbackReason` when that field is present, and one of `live`, `fresh_cache_hit`, `idempotent_replay` otherwise |
+| `scope` | which subsystem made the decision: `upstream`, `delivery_policy`, `operation_control`, `provider_credential`, `circuit_breaker`, `dispatch_dedup`, `concurrency`, `rate_limit`, `idempotency` |
+| `summary` | one-sentence human-readable explanation |
+| `degraded` | `true` when the caller received less than a live upstream read |
+| `liveAttempted` | `true` when an upstream call was actually started, and therefore possibly billed |
+| `detail` | optional structured evidence; for `operation_control` it carries the same `blockers` array the matching `503` publishes |
+
+The reason `code` is also returned in the `x-mx-insight-reason` response header,
+and rejections carry the same object at `error.details.reason`, so a degraded
+delivery and a hard rejection describe one decision in one vocabulary.
+
+`scope` is the field to route on. `operation_control`, `provider_credential` and
+`circuit_breaker` are Hub-side deployment state that an operator fixes;
+`upstream` is the provider; `delivery_policy` is the caller's own `deliveryMode`;
+`dispatch_dedup`, `concurrency` and `rate_limit` are transient and safe to retry
+later. `liveAttempted` separates "no upstream call happened" from "an upstream
+call happened and may already be billed" -- the two need different follow-up.
+
+```json
+{
+  "meta": {
+    "sourceMode": "stored_fallback",
+    "ageSeconds": 81360,
+    "fallbackReason": "external_platform_operation_blocked",
+    "reason": {
+      "code": "external_platform_operation_blocked",
+      "scope": "operation_control",
+      "summary": "A deployment prerequisite (release, contract gate, credential or reviewed cost evidence) blocks dispatch. See detail.blockers.",
+      "degraded": true,
+      "liveAttempted": false,
+      "detail": {
+        "blockers": [
+          {
+            "code": "price_control_incomplete",
+            "message": "Reviewed upstream price and budget evidence is incomplete",
+            "endpointKeys": ["jd.product-search.v1"]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
 If a live acquisition reaches database operation control and no exact fallback
 can be delivered, its policy state is exposed without umbrella remapping:
 

@@ -41,6 +41,7 @@ import {
   projectTikHubXiaohongshuOfficialPostedNotes,
 } from '../contracts/tikhub-xiaohongshu-official.mjs'
 import { createExternalPlatformCursorCodec } from './cursor.mjs'
+import { describeDeliveryReason } from './delivery-reason.mjs'
 import {
   TIKHUB_XIAOHONGSHU_CONNECTOR_ID,
   TIKHUB_XIAOHONGSHU_DATASET_ID,
@@ -160,9 +161,13 @@ function freshDetailItem(snapshot, now = new Date()) {
   return snapshot?.responseBody?.data?.item ?? null
 }
 
-function deliveryBody(base, { requestId, sourceMode, capturedAt, fallbackReason = null }) {
+function deliveryBody(base, {
+  requestId, sourceMode, capturedAt, fallbackReason = null, reasonDetail = null,
+}) {
   const servedAt = new Date()
   const captured = date(capturedAt) || servedAt
+  // Shared with the JustOne gateway so one vocabulary explains every provider.
+  const reason = describeDeliveryReason({ sourceMode, fallbackReason, detail: reasonDetail })
   return publicDeliveryBody({
     ...structuredClone(base),
     requestId,
@@ -173,6 +178,7 @@ function deliveryBody(base, { requestId, sourceMode, capturedAt, fallbackReason 
       sourceMode,
       ageSeconds: Math.max(0, Math.floor((servedAt - captured) / 1_000)),
       ...(fallbackReason ? { fallbackReason } : {}),
+      ...(reason ? { reason } : {}),
     },
   }, requestId)
 }
@@ -2452,6 +2458,7 @@ export class TikHubGateway {
             capturedAt: snapshot.capturedAt,
             fallbackReason: operationControlError?.code
               || (circuitOpen ? 'provider_circuit_open' : 'provider_not_configured'),
+            reasonDetail: { blockers: operationControlError?.details?.blockers || null },
           })
           await this.platformStore.commitSnapshotDelivery({ delivery, snapshot, sourceMode: 'stored_fallback', responseBody })
           return result(responseBody, activeRequestId, false, 'stored_fallback', snapshot.capturedAt)

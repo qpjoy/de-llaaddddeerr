@@ -1,13 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  ECOMMERCE_DELIVERY_MODES,
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
   JUSTONE_OPERATION,
   JustOneContractError,
   normalizeJustOneProductSearchRequest,
 } from '../contracts/justone.mjs'
+import {
+  JUSTONE_RESOURCE_CATALOG,
+  normalizeJustOneResourceRequest,
+} from '../contracts/justone-resources.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createExternalPlatformCursorCodec } from './cursor.mjs'
+import { describeDeliveryReason } from './delivery-reason.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100 })
@@ -107,9 +113,14 @@ function deliveryBody(base, {
   capturedAt,
   servedAt = new Date(),
   fallbackReason = null,
+  reasonDetail = null,
 }) {
   const captured = asDate(capturedAt) || servedAt
   const ageSeconds = Math.max(0, Math.floor((servedAt.getTime() - captured.getTime()) / 1_000))
+  // `reason` is derived from the same sourceMode/fallbackReason pair that is
+  // written to durable delivery evidence, so the public explanation and the
+  // audit row cannot drift apart. `fallbackReason` stays for compatibility.
+  const reason = describeDeliveryReason({ sourceMode, fallbackReason, detail: reasonDetail })
   return {
     ...structuredClone(base),
     requestId,
@@ -120,6 +131,7 @@ function deliveryBody(base, {
       sourceMode,
       ageSeconds,
       ...(fallbackReason ? { fallbackReason } : {}),
+      ...(reason ? { reason } : {}),
     },
   }
 }
@@ -335,6 +347,47 @@ export class ExternalPlatformGateway {
   }
 
   async search(context, { body, idempotencyKey, retryOfRequestId, path }) {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
+      operation: JUSTONE_OPERATION,
+      capabilityMessage: 'E-commerce product search is not granted for this API key',
+      normalize: ({ policy, codec }) => normalizeJustOneProductSearchRequest(body, {
+        decodeCursor: codec.decode,
+        encodeCursor: codec.encode,
+        maxPageSize: policy.maxPageSize,
+      }),
+      dispatch: ({ policy, codec, credential }) => this.adapter.searchProducts(body, {
+        decodeCursor: codec.decode,
+        encodeCursor: codec.encode,
+        maxPageSize: policy.maxPageSize,
+        ...credential,
+      }),
+    })
+  }
+
+  // Registry-declared resources (detail, reviews, questions, shop products)
+  // reuse the whole delivery path: the same grants, quota reservation,
+  // idempotency, snapshot policy, dispatch lease, cost reservation, circuit and
+  // operation control. Only request validation and the adapter call differ,
+  // which is what these two hooks carry.
+  async fetchResource(context, { resourceKey, body, idempotencyKey, retryOfRequestId, path }) {
+    const resource = JUSTONE_RESOURCE_CATALOG[resourceKey]
+    if (!resource?.released) {
+      throw new AppError(404, 'unsupported_resource', 'This external resource is not available')
+    }
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
+      operation: resource.operationKey,
+      capabilityMessage: `${resource.label} is not granted for this API key`,
+      normalize: () => normalizeJustOneResourceRequest(resourceKey, body, {
+        deliveryModes: ECOMMERCE_DELIVERY_MODES,
+      }),
+      dispatch: ({ credential }) => this.adapter.fetchResource(resourceKey, body, {
+        deliveryModes: ECOMMERCE_DELIVERY_MODES,
+        ...credential,
+      }),
+    })
+  }
+
+  async #deliver(context, { body, idempotencyKey, retryOfRequestId, path }, plan) {
     let durableRequestId = null
     let ownsReservation = false
     try {
@@ -362,12 +415,8 @@ export class ExternalPlatformGateway {
     const capabilityGrants = typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
       ? await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
       : await this.usageStore.listCapabilityGrants(context.consumer.id)
-    if (!capabilityGrants.includes(JUSTONE_OPERATION)) {
-      throw new AppError(
-        403,
-        'capability_not_granted',
-        'E-commerce product search is not granted for this API key',
-      )
+    if (!capabilityGrants.includes(plan.operation)) {
+      throw new AppError(403, 'capability_not_granted', plan.capabilityMessage)
     }
     const consumerPolicy = {
       ...this.defaultPolicy,
@@ -385,11 +434,7 @@ export class ExternalPlatformGateway {
     const codec = createExternalPlatformCursorCodec(this.apiKeyPepper, context.consumer.id)
     let normalized
     try {
-      normalized = normalizeJustOneProductSearchRequest(body, {
-        decodeCursor: codec.decode,
-        encodeCursor: codec.encode,
-        maxPageSize: policy.maxPageSize,
-      })
+      normalized = plan.normalize({ body, policy, codec })
     } catch (error) {
       if (error instanceof JustOneContractError) {
         throw new AppError(400, error.code, error.message)
@@ -459,10 +504,10 @@ export class ExternalPlatformGateway {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: AUTHORIZATION_PLATFORM,
-      meterKey: JUSTONE_OPERATION,
+      meterKey: plan.operation,
       requiredAuthorizationScopes: [
         { type: 'platform', key: AUTHORIZATION_PLATFORM },
-        { type: 'capability', key: JUSTONE_OPERATION },
+        { type: 'capability', key: plan.operation },
       ],
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
@@ -484,7 +529,7 @@ export class ExternalPlatformGateway {
       tenantName: context.tenant.name,
       consumerId: context.consumer.id,
       usageRequestId: reservation.request.id,
-      operation: JUSTONE_OPERATION,
+      operation: plan.operation,
       fingerprint: requestFingerprint,
     }
     if (reservation.kind === 'in_progress') {
@@ -542,7 +587,7 @@ export class ExternalPlatformGateway {
     const now = new Date()
     let snapshot = await this.platformStore.snapshotFor({
       consumerId: context.consumer.id,
-      operation: JUSTONE_OPERATION,
+      operation: plan.operation,
       fingerprint: requestFingerprint,
     }, now)
     const snapshotIsFresh = snapshot && new Date(snapshot.freshUntil) >= now
@@ -597,7 +642,7 @@ export class ExternalPlatformGateway {
         // paused, and an admitted in-flight call keeps this immutable revision.
         operationControl = await this.operationControlStore.authorizeDispatch(
           'justone',
-          JUSTONE_OPERATION,
+          plan.operation,
           {
             consumerId: context.consumer.id,
             config: this.config,
@@ -613,11 +658,17 @@ export class ExternalPlatformGateway {
       if (snapshot) {
         const reason = operationControlError?.code
           || (!resolvedCredential.ready ? 'provider_not_configured' : 'provider_circuit_open')
+        // A silently degraded delivery is the hardest state to triage, so the
+        // blockers that refused dispatch travel with the fallback body itself
+        // instead of only with the 503 that a caller with a snapshot never sees.
+        // These are the same non-secret prerequisites the 503 path already
+        // publishes; they name deployment state, never credentials or URLs.
         const responseBody = deliveryBody(snapshot.responseBody, {
           requestId: activeRequestId,
           sourceMode: 'stored_fallback',
           capturedAt: snapshot.capturedAt,
           fallbackReason: reason,
+          reasonDetail: { blockers: operationControlError?.details?.blockers || null },
         })
         await this.platformStore.commitSnapshotDelivery({
           delivery,
@@ -654,7 +705,7 @@ export class ExternalPlatformGateway {
     try {
       const lease = await this.platformStore.acquireDispatchLease({
         consumerId: context.consumer.id,
-        operation: JUSTONE_OPERATION,
+        operation: plan.operation,
         fingerprint: requestFingerprint,
         endpointKey: normalized.endpointKey,
         contractVersion: normalized.endpointContractVersion,
@@ -668,7 +719,7 @@ export class ExternalPlatformGateway {
         // lease attempt. Recheck once; never poll or create an upstream retry.
         snapshot = await this.platformStore.snapshotFor({
           consumerId: context.consumer.id,
-          operation: JUSTONE_OPERATION,
+          operation: plan.operation,
           fingerprint: requestFingerprint,
         }, new Date())
         if (snapshot && new Date(snapshot.freshUntil) >= new Date()) {
@@ -837,7 +888,7 @@ export class ExternalPlatformGateway {
         consumerId: context.consumer.id,
         apiKeyId: context.apiKey.id,
         usageRequestId: activeRequestId,
-        operation: JUSTONE_OPERATION,
+        operation: plan.operation,
         contractVersion: normalized.endpointContractVersion,
         endpointKey: normalized.endpointKey,
         endpointVersion: normalized.endpointVersion,
@@ -856,13 +907,13 @@ export class ExternalPlatformGateway {
       }
       const startedAt = performance.now()
       try {
-        const result = await this.adapter.searchProducts(body, {
-          decodeCursor: codec.decode,
-          encodeCursor: codec.encode,
-          maxPageSize: policy.maxPageSize,
-          ...(resolvedCredential.credential === undefined
+        const result = await plan.dispatch({
+          body,
+          policy,
+          codec,
+          credential: resolvedCredential.credential === undefined
             ? {}
-            : { credential: resolvedCredential.credential }),
+            : { credential: resolvedCredential.credential },
         })
         const persistedEvidence = persistedCallEvidence(result)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
@@ -892,7 +943,9 @@ export class ExternalPlatformGateway {
           capturedAt,
           freshUntil: new Date(capturedAt.getTime() + this.config.freshTtlMs),
           staleUntil: new Date(capturedAt.getTime() + this.config.staleTtlMs),
-          itemCount: result.items.length,
+          // A contract with no reviewed per-item identity extracts no items and
+          // reports zero, rather than crashing the delivery on a missing field.
+          itemCount: result.items?.length ?? 0,
           latencyMs,
           // Official usage semantics count only code=0 as a successful billed
           // request. Monetary cost remains unknown unless a reviewed price book
@@ -1030,7 +1083,7 @@ export class ExternalPlatformGateway {
       if (ownsLease) {
         await this.platformStore.releaseDispatchLease({
           consumerId: context.consumer.id,
-          operation: JUSTONE_OPERATION,
+          operation: plan.operation,
           fingerprint: requestFingerprint,
           ownerRequestId: activeRequestId,
         }).catch((error) => {

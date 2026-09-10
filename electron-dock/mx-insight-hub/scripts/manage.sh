@@ -1156,7 +1156,7 @@ create_runtime_config() {
     ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
   )"; then
     if [[ "$justone_preflight_error" == *"contract activation requires"* ]]; then
-      say "WARNING: JustOne cost-control preflight is incomplete: ${justone_preflight_error}. Hub deployment continues; JustOne operations remain blocked until a reviewed database price book is published from Admin." >&2
+      say "WARNING: JustOne cost-control preflight is incomplete: ${justone_preflight_error}. Hub deployment continues; JustOne operations stay blocked and keep serving stored snapshots. Fix it either by setting MX_INSIGHT_JUSTONE_BILLING_JSON in .env.internal with a positive price for every endpoint key, or by publishing a reviewed database price book from Admin. Note this check only requires one priced endpoint; the per-endpoint report below is the one that matches runtime." >&2
     else
       die "JustOne preflight failed: ${justone_preflight_error}"
     fi
@@ -1286,6 +1286,19 @@ create_runtime_config() {
     say "shared search is not ready; deploying with MX_COMMON_ELASTICSEARCH_URL unset (search degraded)"
     elasticsearch_url=""
   fi
+
+  # An unpriced endpoint does not fail a deploy or an upstream call: it makes the
+  # operation `blocked`, and Hub then keeps serving stored snapshots. The tenant
+  # sees stale data rather than an error, which is why this is reported here at
+  # the last point where the operator is still watching. It never gates a deploy.
+  MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_verified" \
+  MX_INSIGHT_JUSTONE_BILLING_JSON="$justone_billing_json" \
+  MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
+  MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \
+  MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED="$tikhub_user_activity_contract_verified" \
+  MX_INSIGHT_TIKHUB_BILLING_JSON="$tikhub_billing_json" \
+    node "${ROOT_DIR}/scripts/check-external-platform-pricing.mjs" >&2 \
+    || say "WARNING: could not run the paid-operation pricing preflight; continuing" >&2
 
   # Accept the matching Secret generation before publishing a newly enabled
   # paid-provider gate. If Secret creation fails, the existing ConfigMap stays
@@ -2356,6 +2369,25 @@ reconcile_reused_bootstrap_configuration() {
   return "$failed"
 }
 
+# Seed each paid provider operation's reviewed default price book on first
+# deploy, so a fresh cluster is not silently blocked on missing cost evidence.
+# The seed is one-directional: an operation whose price book already comes from
+# the database (seeded earlier, or published from Admin) is left untouched, so a
+# redeploy can never walk back a price somebody set in the UI. Best-effort by
+# design; a pricing gap must not fail an otherwise good deploy.
+seed_default_price_books() {
+  local admin_base="http://127.0.0.1:18151"
+  need node
+  if [ -z "${MX_INSIGHT_ADMIN_TOKEN:-}" ]; then
+    say "WARNING: MX_INSIGHT_ADMIN_TOKEN is unset; skipping price-book seeding" >&2
+    return 0
+  fi
+  MX_INSIGHT_ADMIN_BASE_URL="$admin_base" \
+  MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
+    node "${ROOT_DIR}/scripts/provision-price-books.mjs" \
+    || say "WARNING: price-book seeding did not complete; operations may stay blocked" >&2
+}
+
 # Idempotently guarantee a usable public API key after deploy. The plaintext key
 # is stored in the mx-insight-hub-bootstrap Secret and reused on later deploys, so
 # no manual admin call is needed to start pulling platform data. Provisioning is
@@ -2839,6 +2871,7 @@ ops_action() {
       apply_k8s
       k8s_smoke
       ensure_default_api_key
+      seed_default_price_books
       print_deploy_summary
       say "Internal production deploy OK."
       ;;
@@ -2853,6 +2886,7 @@ ops_action() {
       apply_k8s
       k8s_smoke
       ensure_default_api_key
+      seed_default_price_books
       print_deploy_summary
       ;;
     decommission-local-postgres)

@@ -652,8 +652,50 @@ consumer、该请求是已提交且 HTTP 200 的 ecommerce 请求，并且 item/
 | --- | --- | --- |
 | `live` | 本次完成新的外部数据调用。 | 仍使用 `capturedAt/ageSeconds` 判断时效。 |
 | `fresh_cache` | 同 consumer、同规范化请求的有效快照；没有再次外部调用。 | 当作该 capturedAt 的快照。 |
-| `stored_fallback` | 实时路径不可用，返回同请求的 last-good 快照。 | 检查 `fallbackReason`、`Age`、`Warning: 110`，不得标成实时。 |
+| `stored_fallback` | 实时路径不可用，返回同请求的 last-good 快照。 | 检查 `meta.reason`、`Age`、`Warning: 110`，不得标成实时。 |
 | `idempotent_replay` | 同 `Idempotency-Key`、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
+
+### `meta.reason`：每一次投递都说明自己
+
+`sourceMode` 说的是「返回了什么」，`meta.reason` 说的是「为什么」。它在**所有**投递上都存在，
+包括正常的 `live` 与 `fresh_cache`，所以调用方不需要把「没有 `fallbackReason`」解读成「一切正常」。
+同一个 `code` 也会出现在响应头 `x-mx-insight-reason`，被拒绝时则出现在 `error.details.reason`。
+
+| 字段 | 含义 |
+| --- | --- |
+| `code` | 稳定标识；有 `fallbackReason` 时与之相同，否则是 `live` / `fresh_cache_hit` / `idempotent_replay` |
+| `scope` | 做出该决定的子系统：`upstream`、`delivery_policy`、`operation_control`、`provider_credential`、`circuit_breaker`、`dispatch_dedup`、`concurrency`、`rate_limit`、`idempotency` |
+| `summary` | 一句话说明 |
+| `degraded` | 调用方拿到的是否少于一次实时上游读取 |
+| `liveAttempted` | 是否真的发起了上游调用（因而可能已经计费） |
+| `detail` | 可选证据；`operation_control` 下携带与对应 `503` 相同的 `blockers` |
+
+排查时先看 `scope`：`operation_control` / `provider_credential` / `circuit_breaker` 是 Hub 侧
+部署状态，需要运维处理；`upstream` 是上游供应方；`delivery_policy` 是调用方自己传的 `deliveryMode`；
+`dispatch_dedup` / `concurrency` / `rate_limit` 是瞬时状态，稍后重试即可。
+`liveAttempted` 用来区分「没有发生上游调用」和「上游调用已发生且可能已计费」——两者的后续处理不同。
+
+```bash
+curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $HUB_KEY" -H 'Content-Type: application/json' \
+  -d '{"marketplace":"jd","query":"耳机"}' \
+  | jq '.meta.reason'
+```
+
+```json
+{
+  "code": "external_platform_operation_blocked",
+  "scope": "operation_control",
+  "summary": "A deployment prerequisite (release, contract gate, credential or reviewed cost evidence) blocks dispatch. See detail.blockers.",
+  "degraded": true,
+  "liveAttempted": false,
+  "detail": {
+    "blockers": [
+      { "code": "price_control_incomplete", "endpointKeys": ["jd.product-search.v1"] }
+    ]
+  }
+}
+```
 
 `Idempotency-Key` 对 `cache_only` 和 `cache_first` 可省略，但 `refresh` 必须提供；建议所有模式
 都显式提供。省略时 Hub 为每次 HTTP 调用生成唯一内部 key：每次都是独立

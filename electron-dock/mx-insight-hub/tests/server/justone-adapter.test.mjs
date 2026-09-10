@@ -420,7 +420,8 @@ test('adapter accepts the reviewed JD V1 data.products response shape', async ()
 
   assert.equal(result.payload.data.items.length, 1)
   assert.equal(result.payload.data.items[0].id, 'jd-product-1')
-  assert.equal(result.payload.data.page.hasMore, null)
+  // The fixture is page 1 of 1, so JD's own counters state "no more pages".
+  assert.equal(result.payload.data.page.hasMore, false)
   assert.equal(result.payload.data.page.nextCursor, null)
   assert.equal(result.archiveObjects[0].contractState, 'accepted')
   assert.equal(result.archiveObjects[1].envelopePointer, '$.data.products[0]')

@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import {
+  assertBoundedJson,
   classifyJustOneBusinessCode,
   createJustOneCallArchiveObject,
   inspectJustOneEnvelope,
   normalizeJustOneProductSearchRequest,
   redactJustOnePrivateFields,
 } from '../contracts/justone.mjs'
+import {
+  normalizeJustOneResourceRequest,
+  normalizeJustOneResourceResponse,
+} from '../contracts/justone-resources.mjs'
 import {
   normalizeJustOneProductSearchPayload,
   prepareJustOneArchiveObjects,
@@ -356,11 +361,80 @@ export class JustOneAdapter {
     capturedAt = null,
     credential: suppliedCredential,
   } = {}) {
+    const credential = await this.#credentialFor(suppliedCredential)
+    const request = normalizeJustOneProductSearchRequest(body, { decodeCursor, maxPageSize })
+    return this.#dispatch({
+      request,
+      credential,
+      capturedAt,
+      normalize: (raw, context) => normalizeJustOneProductSearchPayload(raw, request, {
+        encodeCursor,
+        capturedAt: context.capturedAt,
+        httpStatus: context.httpStatus,
+        bodySha256: context.bodySha256,
+        bodySize: context.bodySize,
+        contentType: context.contentType,
+        contractState: 'accepted',
+        secret: credential,
+      }),
+    })
+  }
+
+  // Fetch one registry-declared resource. The payload keeps the provider's own
+  // field names, so this path adds no marketplace-specific extraction; it is
+  // the same transport, envelope and evidence handling as product search.
+  async fetchResource(resourceKey, body, {
+    capturedAt = null,
+    deliveryModes,
+    credential: suppliedCredential,
+  } = {}) {
+    const credential = await this.#credentialFor(suppliedCredential)
+    const request = normalizeJustOneResourceRequest(resourceKey, body, { deliveryModes })
+    return this.#dispatch({
+      request,
+      credential,
+      capturedAt,
+      normalize: (raw, context) => {
+        const normalized = normalizeJustOneResourceResponse(raw, request, {
+          capturedAt: context.capturedAt,
+          assertBounded: assertBoundedJson,
+        })
+        return {
+          publicBody: normalized.publicBody,
+          // One provider-call evidence object per dispatch, identical in shape
+          // to the one product search records, so a paid resource call is as
+          // auditable as a paid search call.
+          archiveObjects: Object.freeze([createJustOneCallArchiveObject(raw, request, {
+            capturedAt: context.capturedAt,
+            httpStatus: context.httpStatus,
+            outcome: 'success',
+            businessCode: Number.isInteger(raw?.code) ? raw.code : null,
+            billed: true,
+            bodySha256: context.bodySha256,
+            bodySize: context.bodySize,
+            contentType: context.contentType,
+            contractState: 'accepted',
+            secret: credential,
+          })]),
+          // This contract extracts no per-item projection, because an untyped
+          // payload gives no reviewed item identity to extract. Zero is the
+          // honest count; the payload itself is retained in the call evidence
+          // and in restricted storage.
+          items: Object.freeze([]),
+        }
+      },
+    })
+  }
+
+  async #credentialFor(suppliedCredential) {
     const credential = suppliedCredential === undefined
       ? await this.resolveCredential()
       : normalizedCredential(suppliedCredential)
     if (!credential) throw new TypeError('JustOne credential is unavailable')
-    const request = normalizeJustOneProductSearchRequest(body, { decodeCursor, maxPageSize })
+    return credential
+  }
+
+  async #dispatch({ request, credential, capturedAt, normalize }) {
     const url = new URL(request.endpointPath, JUSTONE_BASE_URL)
     url.searchParams.set('token', credential)
     for (const [key, value] of Object.entries(request.upstreamQuery)) {
@@ -522,15 +596,12 @@ export class JustOneAdapter {
       const acceptedCapturedAt = capturedAt ?? new Date()
       let normalized
       try {
-        normalized = normalizeJustOneProductSearchPayload(raw, request, {
-          encodeCursor,
+        normalized = normalize(raw, {
           capturedAt: acceptedCapturedAt,
           httpStatus,
           bodySha256,
           bodySize,
           contentType,
-          contractState: 'accepted',
-          secret: credential,
         })
       } catch (error) {
         if (error instanceof JustOneUpstreamError) throw error

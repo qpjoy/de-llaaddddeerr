@@ -19,6 +19,7 @@ import { XIAOHONGSHU_USER_INFO_OPERATION } from './contracts/tikhub-xiaohongshu-
 import { XIAOHONGSHU_CRAWL_OPERATION } from './contracts/tikhub-xiaohongshu-user-posts.mjs'
 import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY } from './contracts/tikhub-xiaohongshu-official.mjs'
 import { JUSTONE_OPERATION } from './contracts/justone.mjs'
+import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -237,6 +238,10 @@ const PUBLIC_CAPABILITIES = new Set([
   XIAOHONGSHU_CRAWL_OPERATION,
   XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
   JUSTONE_OPERATION,
+  // Each released platform-shaped resource family is its own capability, so a
+  // key granted product search never gains a paid detail or reviews call with
+  // it. The list is derived from the registry rather than restated here.
+  ...JUSTONE_RESOURCE_OPERATION_KEYS,
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])

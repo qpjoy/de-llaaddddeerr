@@ -7017,7 +7017,29 @@ components:
             ageSeconds: { type: integer, minimum: 0 }
             fallbackReason:
               type: string
-              description: Bounded reason category present only for stored_fallback.
+              description: Bounded reason category present only for stored_fallback. Retained for compatibility; prefer `reason`.
+            reason:
+              type: object
+              additionalProperties: false
+              required: [code, scope, summary, degraded, liveAttempted]
+              description: >-
+                Why this delivery looks the way it does. Present on every delivery,
+                including healthy ones, so the absence of a field never has to be
+                interpreted. `scope` names the subsystem that made the decision,
+                `degraded` says whether the caller received less than a live upstream
+                read, and `liveAttempted` says whether an upstream call was actually
+                started (and therefore possibly billed).
+              properties:
+                code: { type: string, maxLength: 160 }
+                scope:
+                  type: string
+                  enum: [upstream, delivery_policy, operation_control, provider_credential, circuit_breaker, dispatch_dedup, concurrency, rate_limit, idempotency]
+                summary: { type: string, maxLength: 400 }
+                degraded: { type: boolean }
+                liveAttempted: { type: boolean }
+                detail:
+                  type: object
+                  description: Optional machine-readable evidence, such as the operation-control blockers that refused dispatch.
         requestId: { type: string, format: uuid }
     XiaohongshuPostRequest:
       type: object
@@ -7133,6 +7155,28 @@ components:
             sourceMode: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
             ageSeconds: { type: integer, minimum: 0 }
             fallbackReason: { type: string, maxLength: 160 }
+            reason:
+              type: object
+              additionalProperties: false
+              required: [code, scope, summary, degraded, liveAttempted]
+              description: >-
+                Why this delivery looks the way it does. Present on every delivery,
+                including healthy ones, so the absence of a field never has to be
+                interpreted. `scope` names the subsystem that made the decision,
+                `degraded` says whether the caller received less than a live upstream
+                read, and `liveAttempted` says whether an upstream call was actually
+                started (and therefore possibly billed).
+              properties:
+                code: { type: string, maxLength: 160 }
+                scope:
+                  type: string
+                  enum: [upstream, delivery_policy, operation_control, provider_credential, circuit_breaker, dispatch_dedup, concurrency, rate_limit, idempotency]
+                summary: { type: string, maxLength: 400 }
+                degraded: { type: boolean }
+                liveAttempted: { type: boolean }
+                detail:
+                  type: object
+                  description: Optional machine-readable evidence, such as the operation-control blockers that refused dispatch.
         requestId: { type: string, format: uuid }
     SearchRequest:
       type: object

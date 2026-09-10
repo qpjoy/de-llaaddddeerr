@@ -1,0 +1,32 @@
+{
+  "provider": "justone",
+  "$comment": [
+    "Reviewed default price book for the JustOne provider, seeded into the",
+    "control plane on first deploy and never overwritten afterwards.",
+    "",
+    "REVIEW NOTE: these unit costs are carried over from the previous",
+    "MX_INSIGHT_JUSTONE_BILLING_JSON example and are NOT confirmed against a",
+    "JustOne procurement contract. They flow into the cost ledger, so replace",
+    "them with the real per-endpoint prices before production dispatch, and",
+    "move pricingAsOf to the date that review happened.",
+    "",
+    "unitCostMinor is in minor units of `currency` (CNY: 1 = 0.01 yuan).",
+    "Every released endpoint key needs a positive price; a missing key leaves",
+    "its whole operation blocked. `bash scripts/manage.sh ops",
+    "internal-production deploy` reports any key this file does not cover."
+  ],
+  "currency": "CNY",
+  "pricingAsOf": "2026-09-11T00:00:00Z",
+  "monthlyBudgetMinor": 0,
+  "monthlySubsidyBudgetMinor": 0,
+  "unitCostMinorByEndpoint": {
+    "taobao-tmall.product-search.v1": 5,
+    "jd.product-search.v1": 5,
+    "xiaohongshu-ec.product-search.v1": 5,
+    "xianyu.product-search.v1": 5,
+    "taobao-tmall.product-detail.v1": 5,
+    "taobao-tmall.product-reviews.v1": 5,
+    "taobao-tmall.product-questions.v1": 5,
+    "taobao-tmall.shop-products.v1": 5
+  }
+}

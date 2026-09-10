@@ -14,6 +14,12 @@ export const ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION = 'mx-insight-hub.ecommer
 export const ECOMMERCE_DELIVERY_MODES = Object.freeze(['cache_only', 'cache_first', 'refresh'])
 
 export const JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION = 'justone.product-search.v2'
+// Hub request contracts whose dispatches produce provider-call evidence. Kept
+// here rather than imported to avoid a cycle with the resource registry.
+const JUSTONE_EVIDENCE_CONTRACT_VERSIONS = new Set([
+  ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
+  'mx-insight-hub.ecommerce-resource.v1',
+])
 
 const MAX_QUERY_LENGTH = 200
 const MAX_CURSOR_LENGTH = 4_096
@@ -41,6 +47,18 @@ const XIANYU_SORTS = Object.freeze({
   newest: 'newest',
 })
 
+// Pagination evidence is endpoint-scoped on purpose: one marketplace's counter
+// shape must never be read out of another marketplace's response. Each entry
+// names the exact reviewed location of the upstream page counters, so adding a
+// marketplace is a fixture plus one descriptor, not a change to the extractor.
+function pageCounters({ path, currentKey, totalPagesKey }) {
+  return Object.freeze({
+    path: Object.freeze([...path]),
+    currentKey,
+    totalPagesKey,
+  })
+}
+
 function endpoint({
   endpointKey,
   path,
@@ -48,6 +66,7 @@ function endpoint({
   contractVersion = JUSTONE_CONTRACT_VERSION,
   sortMap = null,
   tmall = false,
+  pagination = null,
 }) {
   return Object.freeze({
     endpointKey,
@@ -58,6 +77,7 @@ function endpoint({
     itemPaths: Object.freeze(itemPaths.map((segments) => Object.freeze([...segments]))),
     sortMap,
     tmall,
+    pagination,
   })
 }
 
@@ -71,6 +91,7 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
     itemPaths: [['data', 'model', 'itemList'], ['data', 'items'], ['data', 'itemList']],
     contractVersion: JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION,
     sortMap: TAOBAO_SORTS,
+    pagination: pageCounters({ path: ['data', 'model', 'page'], currentKey: 'pageNo', totalPagesKey: 'totalPages' }),
   }),
   tmall: endpoint({
     endpointKey: 'taobao-tmall.product-search.v1',
@@ -79,11 +100,15 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
     contractVersion: JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION,
     sortMap: TAOBAO_SORTS,
     tmall: true,
+    pagination: pageCounters({ path: ['data', 'model', 'page'], currentKey: 'pageNo', totalPagesKey: 'totalPages' }),
   }),
   jd: endpoint({
     endpointKey: 'jd.product-search.v1',
     path: '/api/jd/search-item-list/v1',
     itemPaths: [['data', 'items'], ['data', 'list'], ['data', 'products']],
+    // Reviewed against tests/fixtures/justone/jd-product-search-v1.success.json,
+    // whose envelope carries data.currentPage/data.totalPages alongside the items.
+    pagination: pageCounters({ path: ['data'], currentKey: 'currentPage', totalPagesKey: 'totalPages' }),
   }),
   xiaohongshu_ec: endpoint({
     endpointKey: 'xiaohongshu-ec.product-search.v1',
@@ -102,6 +127,13 @@ export const JUSTONE_SUPPORTED_MARKETPLACES = Object.freeze(Object.keys(JUSTONE_
 
 export const JUSTONE_BUSINESS_CODES = Object.freeze({
   100: Object.freeze({ category: 'authentication', errorCode: 'upstream_auth_invalid' }),
+  // Undocumented in the provider's public guide but observed in production by
+  // the reference collector: the item exists yet this endpoint version cannot
+  // serve it. It is a permanent per-item condition, not a transient failure, so
+  // naming it keeps callers from reading it as "retry later". The provider's
+  // OpenAPI enum also lists 101, 300, 404 and 503; those have no attested
+  // meaning, so they stay `unknown` rather than being guessed at.
+  202: Object.freeze({ category: 'unsupported_item', errorCode: 'upstream_item_unsupported' }),
   301: Object.freeze({ category: 'collection', errorCode: 'upstream_collection_failed' }),
   302: Object.freeze({ category: 'rate_limit', errorCode: 'upstream_rate_limited' }),
   303: Object.freeze({ category: 'quota', errorCode: 'upstream_daily_quota_exceeded' }),
@@ -150,7 +182,7 @@ function canonicalJson(value) {
   return JSON.stringify(value === undefined ? null : value)
 }
 
-function assertBoundedJson(value, depth = 0, state = { nodes: 0 }) {
+export function assertBoundedJson(value, depth = 0, state = { nodes: 0 }) {
   state.nodes += 1
   if (depth > MAX_JSON_DEPTH || state.nodes > MAX_JSON_NODES) {
     throw new JustOneResponseContractError(
@@ -586,21 +618,26 @@ function explicitBoolean(raw, paths) {
   return null
 }
 
+// Only the descriptor pinned to this exact marketplace may supply counters, so
+// a shape borrowed from another marketplace's envelope can never issue a cursor.
+// A missing or self-inconsistent counter block stays null ("upstream did not
+// say"), which is deliberately different from false ("upstream said no more").
 function explicitPageHasMore(raw, request) {
-  if (!['taobao', 'tmall'].includes(request.marketplace)) return null
-  const page = valueAt(raw, ['data', 'model', 'page'])
-  if (!plainObject(page)) return null
-  const pageNo = page.pageNo
-  const totalPages = page.totalPages
+  const descriptor = JUSTONE_ENDPOINTS[request.marketplace]?.pagination
+  if (!descriptor) return null
+  const counters = valueAt(raw, descriptor.path)
+  if (!plainObject(counters)) return null
+  const current = counters[descriptor.currentKey]
+  const totalPages = counters[descriptor.totalPagesKey]
   if (
-    !Number.isInteger(pageNo)
+    !Number.isInteger(current)
     || !Number.isInteger(totalPages)
-    || pageNo < 1
+    || current < 1
     || totalPages < 1
-    || pageNo > totalPages
-    || pageNo !== request.page
+    || current > totalPages
+    || current !== request.page
   ) return null
-  return pageNo < totalPages
+  return current < totalPages
 }
 
 function explicitContinuation(raw) {
@@ -722,8 +759,11 @@ export function createJustOneCallArchiveObject(raw, request, {
   contractState = null,
   secret = null,
 } = {}) {
-  if (!request || request.contractVersion !== ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION) {
-    throw new JustOneResponseContractError('invalid_normalized_request', 'a normalized search request is required')
+  // Provider-call evidence is contract-agnostic: search and the platform-shaped
+  // resources both produce one call record per dispatch, and losing that record
+  // for resources would leave paid calls without an audit trail.
+  if (!request || !JUSTONE_EVIDENCE_CONTRACT_VERSIONS.has(request.contractVersion)) {
+    throw new JustOneResponseContractError('invalid_normalized_request', 'a normalized Hub request is required')
   }
   const envelope = raw === undefined || raw === null
     ? null

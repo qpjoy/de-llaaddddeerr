@@ -242,7 +242,7 @@ test('response extraction is shallow, explicit and rejects unreviewed envelope d
   )
 })
 
-test('JD V1 accepts the reviewed data.products response shape without changing pagination semantics', () => {
+test('JD V1 accepts the reviewed data.products response shape and its data-level page counters', () => {
   const extracted = extractJustOneProductSearchItems(jdProductSearchV1Fixture, 'jd')
   assert.deepEqual(extracted.path, ['data', 'products'])
   assert.equal(extracted.items.length, 1)
@@ -263,14 +263,52 @@ test('JD V1 accepts the reviewed data.products response shape without changing p
     signals: { sales: null, reviewCount: null, location: null },
     attributes: { brand: null, category: null },
   })
+  // The reviewed fixture is a single-page result (currentPage 1 of totalPages 1).
+  // An explicit false is the upstream saying "no more"; null stays reserved for
+  // "upstream did not say" so callers can tell the two apart.
   assert.deepEqual(response.page, {
     page: 1,
     returnedCount: 1,
     discardedCount: 0,
-    hasMore: null,
+    hasMore: false,
     nextCursor: null,
   })
   assert.equal(response.archiveObjects[1].envelopePointer, '$.data.products[0]')
+})
+
+test('JD issues a continuation when its own page counters prove another page exists', () => {
+  const encodedStates = []
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '耳机' })
+  const response = normalizeJustOneProductSearchResponse({
+    ...jdProductSearchV1Fixture,
+    data: { ...jdProductSearchV1Fixture.data, totalCount: 96, currentPage: 1, totalPages: 2 },
+  }, request, {
+    capturedAt: '2026-09-06T05:00:17Z',
+    encodeCursor: (state) => {
+      encodedStates.push(state)
+      return 'opaque-jd-page-2'
+    },
+  })
+
+  assert.equal(response.page.hasMore, true)
+  assert.equal(response.page.nextCursor, 'opaque-jd-page-2')
+  assert.deepEqual(encodedStates, [{
+    version: 1, marketplace: 'jd', page: 2, scope: request.cursorScope, continuation: null,
+  }])
+})
+
+test('JD page counters are ignored when they disagree with the requested page', () => {
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '耳机', page: 3 })
+  const response = normalizeJustOneProductSearchResponse({
+    ...jdProductSearchV1Fixture,
+    data: { ...jdProductSearchV1Fixture.data, currentPage: 1, totalPages: 9 },
+  }, request, {
+    capturedAt: '2026-09-06T05:00:17Z',
+    encodeCursor: () => assert.fail('a mismatched counter block must not issue a cursor'),
+  })
+
+  assert.equal(response.page.hasMore, null)
+  assert.equal(response.page.nextCursor, null)
 })
 
 test('Taobao model.page pagination evidence cannot issue a cursor for another marketplace', () => {
@@ -519,12 +557,21 @@ test('upstream request identifiers are read only from the scrubbed bounded envel
 })
 
 test('all required non-zero business codes have stable, never-auto-retry classifications', () => {
-  assert.deepEqual(Object.keys(JUSTONE_BUSINESS_CODES).map(Number), [100, 301, 302, 303, 400, 500, 600, 601, 602])
-  for (const code of [100, 301, 302, 303, 400, 500, 600, 601, 602]) {
+  assert.deepEqual(Object.keys(JUSTONE_BUSINESS_CODES).map(Number), [100, 202, 301, 302, 303, 400, 500, 600, 601, 602])
+  for (const code of [100, 202, 301, 302, 303, 400, 500, 600, 601, 602]) {
     const classification = classifyJustOneBusinessCode(code)
     assert.equal(classification.businessCode, code)
     assert.equal(classification.retryable, false)
     assert.ok(classification.errorCode)
+  }
+  // The provider's OpenAPI enum is wider than its documented table. An
+  // undocumented code must stay unknown-but-safe rather than borrow a
+  // neighbouring code's retry semantics.
+  for (const code of [101, 300, 404, 503]) {
+    const classification = classifyJustOneBusinessCode(code)
+    assert.equal(classification.category, 'unknown')
+    assert.equal(classification.errorCode, 'upstream_business_error')
+    assert.equal(classification.retryable, false)
   }
   assert.deepEqual(inspectJustOneEnvelope({ ...envelope(null), code: 601 }), {
     outcome: 'rejected',

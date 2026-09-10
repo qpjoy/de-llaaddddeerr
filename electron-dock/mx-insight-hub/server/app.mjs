@@ -51,6 +51,11 @@ import {
 
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
+  KNOWN_DELIVERY_REASON_CODES,
+  describeDeliveryReason,
+} from './external-platforms/delivery-reason.mjs'
+import { justoneResourceByHubPath } from './contracts/justone-resources.mjs'
+import {
   BUILTIN_FILE_FORMAT_RULES,
   builtinFileFormatRule,
 } from './ingest/external/builtin-format-rules.mjs'
@@ -1327,7 +1332,7 @@ export function createApp({
         response.setHeader('access-control-allow-origin', '*')
         response.setHeader(
           'access-control-expose-headers',
-          'idempotent-replay, x-mx-insight-request-id, x-mx-insight-source-mode, x-mx-insight-captured-at, age, warning',
+          'idempotent-replay, x-mx-insight-request-id, x-mx-insight-source-mode, x-mx-insight-reason, x-mx-insight-captured-at, age, warning',
         )
       }
 
@@ -4902,6 +4907,9 @@ export function createApp({
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.body?.meta?.reason?.code
+            ? { 'x-mx-insight-reason': result.body.meta.reason.code }
+            : {}),
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
           ...(result.sourceMode === 'stored_fallback'
@@ -4972,6 +4980,9 @@ export function createApp({
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.body?.meta?.reason?.code
+            ? { 'x-mx-insight-reason': result.body.meta.reason.code }
+            : {}),
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
           ...(result.sourceMode === 'stored_fallback'
@@ -5008,6 +5019,43 @@ export function createApp({
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.body?.meta?.reason?.code
+            ? { 'x-mx-insight-reason': result.body.meta.reason.code }
+            : {}),
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            || (result.sourceMode === 'idempotent_replay'
+              && ['stale', 'stored_fallback'].includes(result.originSourceMode))
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
+        })
+        return
+      }
+      // Platform-shaped resource routes. The path set comes from the registry,
+      // so releasing a resource adds a route without editing this dispatcher.
+      const justoneResource = request.method === 'POST'
+        ? justoneResourceByHubPath(pathname)
+        : null
+      if (justoneResource) {
+        const context = await requirePublic(request)
+        if (!externalPlatformGateway) {
+          throw new AppError(503, 'external_platform_unavailable', 'External acquisition is unavailable')
+        }
+        const result = await externalPlatformGateway.fetchResource(context, {
+          resourceKey: justoneResource.resourceKey,
+          body: await readJson(request, 64 * 1024),
+          idempotencyKey: request.headers['idempotency-key'],
+          retryOfRequestId: request.headers['x-mx-insight-retry-of'],
+          path: pathname,
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.body?.meta?.reason?.code
+            ? { 'x-mx-insight-reason': result.body.meta.reason.code }
+            : {}),
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
           ...(result.sourceMode === 'stored_fallback'
@@ -5376,6 +5424,9 @@ export function createApp({
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
           ...(result.sourceMode ? { 'x-mx-insight-source-mode': result.sourceMode } : {}),
+          ...(result.body?.meta?.reason?.code
+            ? { 'x-mx-insight-reason': result.body.meta.reason.code }
+            : {}),
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
           ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
           ...(result.sourceMode === 'stored_fallback'
@@ -5458,11 +5509,23 @@ export function createApp({
       if (durableRequestId) {
         response.setHeader('x-mx-insight-request-id', durableRequestId)
       }
+      // A rejection and a degraded delivery are the same decision seen from two
+      // sides, so both carry the same reason vocabulary. Only codes the catalog
+      // actually knows are annotated; an unrecognised code stays untouched
+      // rather than being mislabelled as an upstream failure.
+      const failureReason = KNOWN_DELIVERY_REASON_CODES.has(appError.code)
+        ? describeDeliveryReason({ sourceMode: 'unavailable', fallbackReason: appError.code })
+        : null
+      if (failureReason) {
+        response.setHeader('x-mx-insight-reason', failureReason.code)
+      }
       sendJson(response, appError.status, {
         error: {
           code: appError.code,
           message: appError.message,
-          ...(appError.details ? { details: appError.details } : {}),
+          ...(appError.details || failureReason
+            ? { details: { ...(appError.details || {}), ...(failureReason ? { reason: failureReason } : {}) } }
+            : {}),
         },
         requestId: durableRequestId || requestId,
       })
