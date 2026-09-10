@@ -53,10 +53,19 @@ Every leaf needs one valid, ready, non-partial unique B-tree whose exact keys
 are `(last_seen_at, id)`. The parent primary key `(source_type, id)` does not
 prove the generic keyset puller's total-order contract.
 
-Run the versioned script against the source database as a standalone `psql`
-operation, outside any surrounding transaction. Prefer a local PostgreSQL
-service definition or another credential mechanism that does not place a
-password in the repository or shell history:
+The Internal deploy reads only the 13 effective transport shapes from the Hub
+catalog. Once all 13 are configured consistently for
+`127.0.0.1:5432/agent_data_crawler_platform`, it runs the versioned script as a
+standalone `psql` operation through the host `postgres` peer identity, but only
+after matching the Unix-socket postmaster PID to the real IPv4 5432 listener.
+No source password is exported from the Hub catalog. A non-local or legacy
+`dsnEnv` source uses the root-managed libpq service named by
+`MX_INSIGHT_NIGHT_ALL_DDL_SERVICE`. Both paths disable password prompting and
+bound connection setup to 10 seconds; partial 13-task transport configuration
+is drift and stops deployment rather than being treated as unconfigured.
+
+An independently managed deployment can run the same operation directly,
+outside any surrounding transaction:
 
 ```sh
 cd electron-dock/mx-insight-hub
@@ -94,8 +103,10 @@ The fixed cleaner also keeps collector and publisher separate. It classifies
 both only against one active PostgreSQL source-catalog snapshot, records the
 catalog entry ID/revision in `stable_fields.sourceCatalog`, and leaves unknown
 or ambiguous values unresolved. It never infers a provider from a title.
-After migration 066, run the Hub-side online index script separately against
-the Hub database (not the source database and not inside a transaction):
+After migration 066, the Internal deploy automatically streams the Hub-side
+online index script into the shared Hub database before Public rollout. An
+independently managed deployment can run the same operation directly (not
+against the source database and not inside a transaction):
 
 ```sh
 cd electron-dock/mx-insight-hub
@@ -417,27 +428,34 @@ before granting the new data product.
 
 Keep every task paused until this sequence is complete:
 
-1. apply Hub migration 066 and verify exactly 13 sources are `paused`, exactly
+1. run the Internal deploy, which applies Hub migration 066 and the four Hub
+   indexes, and verify exactly 13 sources are `paused`, exactly
    13 version-1 mappings have no `approved_at`, every source has no connection
    profile yet, and both authorization preflight counts remain zero;
-2. run `scripts/night-all-saved-records-hub-indexes.sql` against the Hub
-   database and retain its four-row ready result;
-3. configure the shared read-only PostgreSQL connection without changing the
+2. configure the shared read-only PostgreSQL connection without changing the
    fixed locators;
-4. run the source index script and preserve its 13-row ready result as rollout
-   evidence;
-5. probe all leaves and review exact columns, nullability, types, constraints,
+3. rerun deploy so it reconciles the 13 source indexes, then use **重新核对** to
+   preserve the ready result as rollout evidence;
+4. probe all leaves and review exact columns, nullability, types, constraints,
    source-type membership, `record_type` distributions and representative JSON
    shapes;
-6. review the fixed published-time and source-catalog classifications;
-7. accept the writer/delete/commit-order attestation, then approve only the
+5. review the fixed published-time and source-catalog classifications;
+6. accept the writer/delete/commit-order attestation, then approve only the
    fixed version-1 mappings and activate the selected tasks;
-8. run a bounded first import, compare source/canonical counts and rejection
+7. run a bounded first import, compare source/canonical counts and rejection
    evidence, then allow scheduled increments;
-9. before any Public API grant, rerun the authorization counts and the
+8. before any Public API grant, rerun the authorization counts and the
    target-consumer key report above, run a strict full `content-v6` rebuild from
    PostgreSQL current truth, switch the content aliases only after that build
    succeeds, and compare the PostgreSQL and Elasticsearch publication gates.
+
+Deploy never accepts the writer/delete/commit-order attestation, activates a
+task, schedules a pull, grants a Public capability, or starts an Elasticsearch
+full rebuild. Those remain explicit Admin UI decisions. If the persistent
+**projector 重启时自动全量重建** setting is still enabled, deploy refuses before
+building/importing the image or applying Hub Kubernetes resources and asks the
+operator to disable it; it does not clear
+the setting silently and it does not restart the projector into a full replay.
 
 Immediately after migration 066, this read-only acceptance query must return
 `13, 13, 13, 13, 13` in column order:

@@ -115,13 +115,18 @@ operation, so the Admin plane remains available to publish the price book and re
 configuration and failure to apply a Secret/ConfigMap remain fatal. Provider operation state is not part of
 readiness and cannot affect Launcher or MX-H2I login.
 
-The explicit Telegram **prepare source** action is the only external-DDL
-exception. It runs in the Admin workload (which has the Internal host-network
-path needed by a saved `127.0.0.1` source), only while the fixed pipeline is
-paused/drained, and may receive a one-request source-owner credential that is
-not stored in a ConfigMap, Secret or catalog row. The ordinary migration Job
-has only the Hub `DATABASE_URL`; it never connects to or migrates `night_all`.
-Thus an unavailable external source cannot make a routine Hub deploy fail.
+External DDL has two narrow paths. Telegram keeps its explicit **prepare
+source** Admin action and one-request source-owner credential. The fixed
+saved-records pipeline is deploy-reconciled only after all 13 fixed tasks
+share one configured transport: a host-local `127.0.0.1:5432` database uses the
+OS `postgres` peer identity only after its socket postmaster PID is found on the
+actual IPv4 listener; a non-local or legacy `dsnEnv` transport requires the
+explicitly named root-managed `MX_INSIGHT_NIGHT_ALL_DDL_SERVICE`. Neither path
+gives the Hub runtime DDL rights or copies a DDL password into Kubernetes. Both
+use non-interactive authentication and a bounded connection timeout. An
+unconfigured source is skipped; partial transport drift is rejected, and a
+configured migration that starts and fails stops the deploy before the new
+ingest worker rolls out.
 
 ## Independent deploy
 
@@ -141,10 +146,22 @@ Order:
 6. atomically install migration 061's evidence writers and prepare the bounded
    061/064 online history indexes against any populated ledgers; only then freeze Hub Admin and
    run the migration Job against shared PostgreSQL;
-7. reconcile the remaining online serving/quota indexes, then roll out public,
-   Admin, projector and ingest workloads, apply NetworkPolicy,
+7. reconcile the remaining Hub online serving/quota indexes, roll out Public
+   and Admin, reconcile the configured saved-records source indexes while Admin
+   stays online, then roll out projector and ingest workloads, apply NetworkPolicy,
    and run smoke checks;
 8. remove scoped temporary build/import artifacts.
+
+Search projection rebuilds are intentionally absent from this order. A content
+schema change is rebuilt once through the Data Center strict-rebuild control
+after its disk and HanLP preflight; ordinary deploys and newly ingested sources
+continue with incremental projection work. Because the projector rollout would
+honor a persisted `startupRebuild=true`, deploy checks that operator setting
+before building/importing the Hub image, before applying Hub Kubernetes
+resources, and again immediately before the projector rollout. When it is
+enabled, deploy fails closed and asks the operator to turn
+off **projector 重启时自动全量重建** in Data Center; it never silently changes
+the setting or converts the rollout into a full replay.
 
 ### Browser Public-origin smoke and 404 triage
 

@@ -338,6 +338,10 @@ test('source index operation builds and verifies thirteen exact concurrent index
   assert.equal((sql.match(/^\s*CREATE UNIQUE INDEX CONCURRENTLY /gmu) || []).length, 13)
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|START TRANSACTION|COMMIT)\b/gimu)
   assert.doesNotMatch(sql, /CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS/u)
+  assert.match(sql, /current_database\(\) = 'agent_data_crawler_platform'/u)
+  assert.match(sql, /SHOW transaction_read_only/u)
+  assert.match(sql, /pg_try_advisory_lock/u)
+  assert.match(sql, /another Night-All saved_records source-index migration is running/u)
   for (const spec of CRAWLER_SOURCES) {
     const indexName = `${spec.locator.table}_last_seen_at_id_uidx`
     assert.match(sql, new RegExp(

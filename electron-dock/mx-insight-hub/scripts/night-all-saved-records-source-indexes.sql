@@ -8,6 +8,37 @@
 SET lock_timeout = '2s';
 SET statement_timeout = '30min';
 
+SELECT current_database() = 'agent_data_crawler_platform'
+         AS crawler_source_database_matches
+\gset
+\if :crawler_source_database_matches
+  \echo 'Night-All saved_records source database verified'
+\else
+  \warn 'refusing to migrate a database other than agent_data_crawler_platform'
+  \quit 1
+\endif
+
+SHOW transaction_read_only
+\gset
+\if :transaction_read_only
+  \warn 'Night-All saved_records source-index migration requires a writable session'
+  \quit 1
+\endif
+
+-- The repository deploy lock covers one checkout only. This session lock
+-- prevents two operators from racing the same concurrent repair from separate
+-- checkouts or hosts and is released automatically when psql exits.
+SELECT pg_try_advisory_lock(
+         hashtextextended('mx-insight-hub:night-all-saved-records-source-indexes:v1', 0)
+       ) AS crawler_source_index_lock_acquired
+\gset
+\if :crawler_source_index_lock_acquired
+  \echo 'Night-All saved_records source-index migration lock acquired'
+\else
+  \warn 'another Night-All saved_records source-index migration is running'
+  \quit 1
+\endif
+
 CREATE TEMP TABLE crawler_source_index_expected (
   table_name text PRIMARY KEY,
   index_name text NOT NULL UNIQUE

@@ -12,6 +12,9 @@ MX_INSIGHT_POSTGRES_PASSWORD=<另一个URL安全随机值，至少24字符>
 NIGHT_ALL_SERVICE_TOKEN=
 # NIGHT_ALL_BASE_URL 可省略：hostNetwork overlay 下默认 http://127.0.0.1:13141（宿主机 Night-All）
 # NIGHT_ALL_BASE_URL=http://127.0.0.1:13141
+# 本机 127.0.0.1:5432 的 saved-records 源库由 root deploy 通过 postgres peer
+# 自动建/核对 13 个游标索引。仅远端源库需要配置 root 管理的 libpq service：
+# MX_INSIGHT_NIGHT_ALL_DDL_SERVICE=night_all_ddl
 # 可选：限定 bootstrap key 授权的平台（逗号分隔）；不填则自动发现 Night-All 支持的全部平台
 # MX_INSIGHT_BOOTSTRAP_PLATFORMS=xiaohongshu,douyin
 
@@ -21,13 +24,19 @@ cd ../mx-common
 bash scripts/manage.sh deploy hanlp
 cd ../mx-insight-hub
 
-# 一键部署：自动 build → migrate → 起 Admin/Public → 幂等建并打印 bootstrap API key。
+# 一键部署：自动 build → Hub migrate → Hub 在线索引 → 已配置 saved-records
+# 源库的 13 个在线索引 → rollout Admin/Public/worker → smoke → 幂等 bootstrap key。
 # 服务器有 127.0.0.1:7788 出口代理时使用代理模式；它同时覆盖 Docker Hub
 # token/frontend、基础镜像和 Dockerfile RUN。不要再叠加 BUILD_NETWORK。
 MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/manage.sh ops internal-production deploy
 # 仅在 Docker Hub 可以直接访问、只需让 RUN 使用宿主网络时，才改用下面这一条：
 MX_INSIGHT_BUILD_NETWORK=host \
 bash scripts/manage.sh ops internal-production deploy
+
+# deploy 不会触发 Elasticsearch 全量重建。若数据中心仍开启“projector 重启时
+# 自动全量重建”，deploy 会在应用 Hub Kubernetes 资源前拒绝执行，请先关闭它。content schema
+# 变化时，在数据中心核对磁盘/HanLP 负载后手动点一次“开始严格重建”；日常新数据
+# 继续走增量 outbox。
 
 # 部署完即可用，无需 port-forward / 手动连 admin：
 #   Admin : http://10.88.88.88:18151/            （SPA + /internal/v1/admin/*，头 x-mx-insight-admin-token）

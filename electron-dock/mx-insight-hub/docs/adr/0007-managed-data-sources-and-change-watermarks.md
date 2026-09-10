@@ -132,9 +132,16 @@ routing behavior.
 ### Explicit source-contract preparation
 
 Ordinary ingest, inspection and progress connections remain read-only by
-construction. External DDL is not coupled to the Hub migration Job or routine
-deploy: an unavailable/locked source must not block the Hub, and the normal
-runtime credential should stay a least-privilege reader.
+construction. External DDL is never part of the transactional Hub migration
+Job and the normal runtime credential stays a least-privilege reader. The fixed
+saved-records pipeline has one deploy-time exception: once all 13 fixed tasks
+declare one transport, deploy may reconcile only their versioned cursor-index
+contract through verified host-local PostgreSQL peer auth or an explicitly
+named, root-managed libpq service. Local peer use additionally proves that the
+socket postmaster owns the configured IPv4 listener; it cannot infer identity
+from a database name alone. Deploy never exports the saved runtime password. An
+unconfigured source is skipped; partial transport drift is rejected, and a
+started reconciliation fails closed before the new ingest worker rolls out.
 
 The fixed Telegram business pipeline has one explicit Admin-token preparation
 action. It requires both children paused and drained, a destructive

@@ -1025,6 +1025,7 @@ if HANLP_FAIL_CLOSED_EVENTS="$hanlp_fail_closed_events" bash -c '
   sync_launcher_secret() { printf "launcher-sync\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
   refresh_launcher_workload() { printf "launcher-rollout\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
   warn_local_postgres_present() { :; }
+  require_deploy_projector_schema_only() { :; }
   apply_k8s
 ' _ "$ROOT_DIR" >"$hanlp_fail_closed_error" 2>&1; then
   printf 'not ok - transient HanLP Endpoint loss downgraded the deployed Hub\n' >&2
@@ -1037,6 +1038,33 @@ if grep -Eq 'runtime-config|rollout restart|launcher|mx-launcher' "$hanlp_fail_c
 fi
 rm -f -- "$hanlp_fail_closed_events" "$hanlp_fail_closed_error"
 printf 'ok - transient HanLP Endpoint loss preserves the deployed config before any rollout or Launcher sync\n'
+
+startup_rebuild_query="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-startup-rebuild-query.XXXXXX")"
+STARTUP_REBUILD_QUERY="$startup_rebuild_query" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    cat >"$STARTUP_REBUILD_QUERY"
+    printf "false\n"
+  }
+  require_deploy_projector_schema_only
+' _ "$ROOT_DIR"
+grep -q "to_regclass('control.search_settings')" "$startup_rebuild_query"
+grep -q 'SELECT startup_rebuild' "$startup_rebuild_query"
+
+startup_rebuild_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-startup-rebuild-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { cat >/dev/null; printf "true\n"; }
+  require_deploy_projector_schema_only
+' _ "$ROOT_DIR" >"$startup_rebuild_error" 2>&1; then
+  printf 'not ok - deploy accepted a projector startup full rebuild\n' >&2
+  exit 1
+fi
+grep -q "turn off 'projector 重启时自动全量重建'" "$startup_rebuild_error"
+rm -f -- "$startup_rebuild_query" "$startup_rebuild_error"
+printf 'ok - deploy fails closed while projector startup full rebuild is enabled\n'
 
 grep -q '^    mx-common\.io/client: allowed$' \
   "$ROOT_DIR/deploy/k8s/internal/00-namespace.yaml"
@@ -1052,32 +1080,64 @@ discovery_line="$(grep -n 'discover_hanlp_url' <<<"$apply_k8s_body" | cut -d: -f
 config_line="$(grep -n 'create_runtime_config' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_workload_change_line="$(grep -nE 'rollout restart|scale deployment' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
 admin_freeze_line="$(grep -n 'scale deployment/mx-insight-hub-admin --replicas=0' <<<"$apply_k8s_body" | cut -d: -f1)"
-if ! [ "$namespace_line" -lt "$justone_preserve_line" ] \
+first_schema_only_guard_line="$(grep -n '^  require_deploy_projector_schema_only$' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
+last_schema_only_guard_line="$(grep -n '^  require_deploy_projector_schema_only$' <<<"$apply_k8s_body" | tail -1 | cut -d: -f1)"
+schema_only_guard_count="$(grep -c '^  require_deploy_projector_schema_only$' <<<"$apply_k8s_body")"
+projector_manifest_line="$(grep -n '32-projector.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
+if ! [ "$schema_only_guard_count" -eq 2 ] \
+  || ! [ "$namespace_line" -lt "$justone_preserve_line" ] \
+  || ! [ "$first_schema_only_guard_line" -lt "$namespace_line" ] \
   || ! [ "$justone_preserve_line" -lt "$discovery_line" ] \
   || ! [ "$discovery_line" -lt "$config_line" ] \
-  || ! [ "$config_line" -lt "$first_workload_change_line" ]; then
+  || ! [ "$config_line" -lt "$first_workload_change_line" ] \
+  || ! [ "$last_schema_only_guard_line" -lt "$projector_manifest_line" ]; then
   printf 'not ok - retained optional state and HanLP discovery are not ordered before runtime ConfigMap creation\n' >&2
   exit 1
 fi
 grep -q -- '--from-literal=MX_COMMON_HANLP_URL=' <<<"$runtime_config_body"
 printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
 
+ops_action_body="$(sed -n '/^ops_action() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+deploy_case_body="$(sed -n '/^    deploy)$/,/^      ;;$/p' <<<"$ops_action_body")"
+shared_plane_line="$(grep -n '^      ensure_shared_data_plane$' <<<"$deploy_case_body" | cut -d: -f1)"
+early_schema_only_guard_line="$(grep -n '^      require_deploy_projector_schema_only$' <<<"$deploy_case_body" | cut -d: -f1)"
+build_import_line="$(grep -n '^      build_and_import_image$' <<<"$deploy_case_body" | cut -d: -f1)"
+if ! [ "$shared_plane_line" -lt "$early_schema_only_guard_line" ] \
+  || ! [ "$early_schema_only_guard_line" -lt "$build_import_line" ]; then
+  printf 'not ok - deploy does not reject startup rebuild before image build/import\n' >&2
+  exit 1
+fi
+printf 'ok - deploy rejects startup full rebuild before image build/import\n'
+
 # Acquisition-history indexes must be prepared online before migration 061;
 # the other serving indexes remain post-migration prerequisites before rollout.
 migration_job_apply_line="$(grep -n '20-migration-job.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
 acquisition_indexes_line="$(grep -n '^  ensure_acquisition_history_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 migration_complete_line="$(grep -n -- '--for=condition=complete job/mx-insight-hub-migrate' <<<"$apply_k8s_body" | cut -d: -f1)"
+night_all_hub_indexes_line="$(grep -n '^  ensure_night_all_saved_records_hub_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 province_indexes_line="$(grep -n '^  ensure_province_opinion_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 context_indexes_line="$(grep -n '^  ensure_canonical_context_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_api_apply_line="$(grep -n '30-public-api.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
+night_all_source_indexes_line="$(grep -n '^  ensure_night_all_saved_records_source_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
+admin_ready_line="$(grep -n 'deployment/mx-insight-hub-admin --timeout=300s' <<<"$apply_k8s_body" | cut -d: -f1)"
+ingest_manifest_line="$(grep -n '33-ingest.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
 if ! [ "$acquisition_indexes_line" -lt "$migration_job_apply_line" ] \
   || ! [ "$acquisition_indexes_line" -lt "$admin_freeze_line" ] \
+  || ! [ "$migration_complete_line" -lt "$night_all_hub_indexes_line" ] \
+  || ! [ "$night_all_hub_indexes_line" -lt "$province_indexes_line" ] \
   || ! [ "$migration_complete_line" -lt "$province_indexes_line" ] \
   || ! [ "$province_indexes_line" -lt "$context_indexes_line" ] \
-  || ! [ "$context_indexes_line" -lt "$first_api_apply_line" ]; then
+  || ! [ "$context_indexes_line" -lt "$first_api_apply_line" ] \
+  || ! [ "$admin_ready_line" -lt "$night_all_source_indexes_line" ] \
+  || ! [ "$night_all_source_indexes_line" -lt "$ingest_manifest_line" ]; then
   printf 'not ok - online index preparation is not ordered around migration and API rollout\n' >&2
   exit 1
 fi
+if grep -q 'reindex_search' <<<"$apply_k8s_body"; then
+  printf 'not ok - routine deploy can trigger a full Elasticsearch rebuild\n' >&2
+  exit 1
+fi
+printf 'ok - deploy reconciles PostgreSQL indexes without triggering an Elasticsearch rebuild\n'
 
 grep -q '^  backoffLimit: 0$' "$ROOT_DIR/deploy/k8s/internal/20-migration-job.yaml"
 grep -q '^  activeDeadlineSeconds: 240$' "$ROOT_DIR/deploy/k8s/internal/20-migration-job.yaml"
@@ -1197,6 +1257,126 @@ fi
 grep -q 'acquisition-history indexes could not be prepared' "$acquisition_index_error"
 rm -f -- "$acquisition_index_stdin" "$acquisition_index_argv" "$acquisition_index_error"
 printf 'ok - acquisition-history index preparation is exact, online, and fail-closed\n'
+
+night_all_hub_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-hub-index-stdin.XXXXXX")"
+night_all_hub_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-hub-index-argv.XXXXXX")"
+NIGHT_ALL_HUB_INDEX_STDIN="$night_all_hub_index_stdin" \
+NIGHT_ALL_HUB_INDEX_ARGV="$night_all_hub_index_argv" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >"$NIGHT_ALL_HUB_INDEX_ARGV"
+    cat >"$NIGHT_ALL_HUB_INDEX_STDIN"
+  }
+  ensure_night_all_saved_records_hub_indexes
+' _ "$ROOT_DIR"
+assert_eq \
+  '-n mx-common exec -i statefulset/mx-common-postgres -- psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1' \
+  "$(cat "$night_all_hub_index_argv")" \
+  'deploy streams saved-records Hub indexes to the shared Hub database'
+cmp -s "$ROOT_DIR/scripts/night-all-saved-records-hub-indexes.sql" "$night_all_hub_index_stdin" \
+  || { printf 'not ok - deploy did not stream the exact saved-records Hub-index SQL\n' >&2; exit 1; }
+
+night_all_hub_index_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-hub-index-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { cat >/dev/null; return 1; }
+  ensure_night_all_saved_records_hub_indexes
+' _ "$ROOT_DIR" >"$night_all_hub_index_error" 2>&1; then
+  printf 'not ok - deploy continued after saved-records Hub-index reconciliation failed\n' >&2
+  exit 1
+fi
+grep -q 'Night-All saved-records Hub indexes could not be reconciled' "$night_all_hub_index_error"
+rm -f -- "$night_all_hub_index_stdin" "$night_all_hub_index_argv" "$night_all_hub_index_error"
+printf 'ok - saved-records Hub-index reconciliation is exact and fail-closed\n'
+
+night_all_source_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-source-index-stdin.XXXXXX")"
+night_all_source_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-source-index-argv.XXXXXX")"
+NIGHT_ALL_SOURCE_INDEX_STDIN="$night_all_source_index_stdin" \
+NIGHT_ALL_SOURCE_INDEX_ARGV="$night_all_source_index_argv" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  night_all_saved_records_source_mode() { printf "local\n"; }
+  night_all_saved_records_local_identity() { printf "match\n"; }
+  night_all_saved_records_local_psql() {
+    printf "%s\n" "$*" >"$NIGHT_ALL_SOURCE_INDEX_ARGV"
+    cat >"$NIGHT_ALL_SOURCE_INDEX_STDIN"
+  }
+  ensure_night_all_saved_records_source_indexes
+' _ "$ROOT_DIR"
+assert_eq \
+  '-v ON_ERROR_STOP=1' \
+  "$(cat "$night_all_source_index_argv")" \
+  'configured local saved-records source uses the standalone DDL session'
+cmp -s "$ROOT_DIR/scripts/night-all-saved-records-source-indexes.sql" "$night_all_source_index_stdin" \
+  || { printf 'not ok - deploy did not stream the exact saved-records source-index SQL\n' >&2; exit 1; }
+
+night_all_source_index_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-source-index-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  night_all_saved_records_source_mode() { printf "local\n"; }
+  night_all_saved_records_local_identity() { printf "match\n"; }
+  night_all_saved_records_local_psql() { cat >/dev/null; return 1; }
+  ensure_night_all_saved_records_source_indexes
+' _ "$ROOT_DIR" >"$night_all_source_index_error" 2>&1; then
+  printf 'not ok - deploy continued after configured source-index reconciliation failed\n' >&2
+  exit 1
+fi
+grep -q 'source indexes failed through verified local peer auth' "$night_all_source_index_error"
+
+night_all_source_fallback_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-source-fallback-events.XXXXXX")"
+if NIGHT_ALL_SOURCE_FALLBACK_EVENTS="$night_all_source_fallback_events" \
+  MX_INSIGHT_NIGHT_ALL_DDL_SERVICE=night_all_ddl bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    night_all_saved_records_source_mode() { printf "local\n"; }
+    night_all_saved_records_local_identity() { printf "match\n"; }
+    night_all_saved_records_local_psql() { cat >/dev/null; return 1; }
+    env() { printf "service-fallback\n" >>"$NIGHT_ALL_SOURCE_FALLBACK_EVENTS"; cat >/dev/null; }
+    ensure_night_all_saved_records_source_indexes
+  ' _ "$ROOT_DIR" >/dev/null 2>&1; then
+  printf 'not ok - failed verified local DDL was hidden by a service fallback\n' >&2
+  exit 1
+fi
+if [ -s "$night_all_source_fallback_events" ]; then
+  printf 'not ok - service fallback ran after verified local DDL had started\n' >&2
+  exit 1
+fi
+
+night_all_source_skip_output="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  night_all_saved_records_source_mode() { printf "unconfigured\n"; }
+  night_all_saved_records_local_psql() { return 91; }
+  ensure_night_all_saved_records_source_indexes
+' _ "$ROOT_DIR")"
+grep -q 'source is not configured; source-index reconciliation remains paused' \
+  <<<"$night_all_source_skip_output"
+rm -f -- "$night_all_source_index_stdin" "$night_all_source_index_argv" \
+  "$night_all_source_index_error" "$night_all_source_fallback_events"
+printf 'ok - saved-records source indexes auto-reconcile only for a configured source\n'
+
+local_psql_body="$(sed -n '/^night_all_saved_records_local_psql() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+source_mode_body="$(sed -n '/^night_all_saved_records_source_mode() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+local_identity_body="$(sed -n '/^night_all_saved_records_local_identity() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+source_index_helper_body="$(sed -n '/^ensure_night_all_saved_records_source_indexes() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+grep -q "connection ->> 'dsnEnv'" <<<"$source_mode_body"
+grep -q "'require'" <<<"$source_mode_body"
+grep -q 'WHEN direct_count = 0 AND dsn_count = 0 THEN' <<<"$source_mode_body"
+grep -q 'WHEN direct_count <> 13 OR direct_transport_count <> 1 THEN' <<<"$source_mode_body"
+grep -q 'postmaster.pid' <<<"$local_identity_body"
+grep -q 'ss -H -4 -ltnp' <<<"$local_identity_body"
+grep -q 'pid=${postmaster_pid}' <<<"$local_identity_body"
+grep -q 'PGCONNECT_TIMEOUT=10' <<<"$local_psql_body"
+grep -q 'psql -X -w -p 5432' <<<"$local_psql_body"
+grep -q 'connect_timeout=10' <<<"$source_index_helper_body"
+grep -q 'psql -X -w' <<<"$source_index_helper_body"
+grep -q 'service=.*dbname=agent_data_crawler_platform' <<<"$source_index_helper_body"
+printf 'ok - saved-records DDL connections never prompt and have a bounded connect timeout\n'
 
 province_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-stdin.XXXXXX")"
 province_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-argv.XXXXXX")"

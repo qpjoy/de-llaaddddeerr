@@ -1660,6 +1660,252 @@ warn_local_postgres_present() {
   say "        bash scripts/manage.sh ops internal-production decommission-local-postgres" >&2
 }
 
+# A deploy always rolls the projector so it can run the new image. If the
+# persistent startup-rebuild switch is enabled, that rollout would turn an
+# otherwise routine deploy into a full PostgreSQL -> Elasticsearch replay.
+# Refuse instead of silently changing an operator-owned setting. The switch can
+# be disabled in Data Center; a deliberate rebuild remains available there or
+# through the separate reindex-search command.
+require_deploy_projector_schema_only() {
+  local startup_rebuild
+  startup_rebuild="$(
+    kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+      psql -X -qAt -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <<'SQL'
+SELECT to_regclass('control.search_settings') IS NOT NULL
+  AS search_settings_exists
+\gset
+\if :search_settings_exists
+  SELECT coalesce(
+           (SELECT startup_rebuild
+              FROM control.search_settings
+             WHERE id),
+           false
+         ) AS startup_rebuild
+  \gset
+\else
+  \set startup_rebuild false
+\endif
+\echo :startup_rebuild
+SQL
+  )" || die "could not verify the projector startup-rebuild setting"
+  case "$startup_rebuild" in
+    f|false|off|0) return 0 ;;
+    t|true|on|1)
+      die "projector startup full rebuild is enabled; turn off 'projector 重启时自动全量重建' in Data Center before deploy, then start any required strict rebuild manually"
+      ;;
+    *) die "unexpected projector startup-rebuild setting: ${startup_rebuild:-empty}" ;;
+  esac
+}
+
+# Report whether the fixed saved-records pipeline is unconfigured, points at
+# this host's PostgreSQL, or needs an explicitly named deploy-time libpq
+# service. The query compares all 13 effective transports without returning a
+# password or any other connection value to the shell.
+night_all_saved_records_source_mode() {
+  kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 -tA <<'SQL'
+WITH expected(source_key) AS (
+  SELECT 'night-all-saved-records-' || replace(source_type, '_', '-')
+    FROM unnest(ARRAY[
+      'automotive', 'finance', 'forum', 'hotspot', 'local_news', 'media',
+      'news', 'other', 'recruitment', 'research', 'social', 'technology', 'web'
+    ]::text[]) AS source_type
+), effective AS (
+  SELECT source.source_key,
+         coalesce(profile.connection, source.connection) AS connection
+    FROM expected
+    LEFT JOIN catalog.external_sources AS source
+      ON source.source_key = expected.source_key
+    LEFT JOIN catalog.database_connections AS profile
+      ON profile.id = source.database_connection_id
+), inspected AS (
+  SELECT count(source_key) AS source_count,
+         count(*) FILTER (
+           WHERE nullif(connection ->> 'host', '') IS NOT NULL
+             AND nullif(connection ->> 'database', '') IS NOT NULL
+             AND nullif(connection ->> 'username', '') IS NOT NULL
+             AND nullif(connection ->> 'password', '') IS NOT NULL
+             AND nullif(connection ->> 'dsnEnv', '') IS NULL
+         ) AS direct_count,
+         count(*) FILTER (
+           WHERE nullif(connection ->> 'dsnEnv', '') IS NOT NULL
+             AND nullif(connection ->> 'host', '') IS NULL
+             AND nullif(connection ->> 'database', '') IS NULL
+             AND nullif(connection ->> 'username', '') IS NULL
+             AND nullif(connection ->> 'password', '') IS NULL
+             AND nullif(connection ->> 'port', '') IS NULL
+             AND nullif(connection ->> 'sslMode', '') IS NULL
+         ) AS dsn_count,
+         count(DISTINCT ROW(
+           connection ->> 'host',
+           coalesce(nullif(connection ->> 'port', ''), '5432'),
+           connection ->> 'database',
+           connection ->> 'username',
+           connection ->> 'password',
+           coalesce(nullif(connection ->> 'sslMode', ''), 'require')
+         )) FILTER (
+           WHERE nullif(connection ->> 'host', '') IS NOT NULL
+         ) AS direct_transport_count,
+         count(DISTINCT connection ->> 'dsnEnv') FILTER (
+           WHERE nullif(connection ->> 'dsnEnv', '') IS NOT NULL
+         ) AS dsn_transport_count,
+         min(lower(connection ->> 'host')) AS host,
+         min(coalesce(nullif(connection ->> 'port', ''), '5432')) AS port,
+         min(connection ->> 'database') AS database
+    FROM effective
+)
+SELECT CASE
+         WHEN source_count <> 13 THEN 'drift'
+         WHEN direct_count = 0 AND dsn_count = 0 THEN 'unconfigured'
+         WHEN dsn_count = 13 AND dsn_transport_count = 1 THEN 'external'
+         WHEN direct_count <> 13 OR direct_transport_count <> 1 THEN 'drift'
+         WHEN host = '127.0.0.1'
+          AND port = '5432'
+          AND database = 'agent_data_crawler_platform' THEN 'local'
+         ELSE 'external'
+       END
+  FROM inspected;
+SQL
+}
+
+# Run one psql command as the host-local PostgreSQL operator without inheriting
+# a diagnostic PGOPTIONS=default_transaction_read_only setting. The deploy
+# process never receives or persists a source-database password on this path.
+night_all_saved_records_local_psql() {
+  local database="agent_data_crawler_platform"
+  local -a clean_pg_env=(
+    env -u PGOPTIONS -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER
+        -u PGSERVICE -u PGSERVICEFILE -u PGPASSWORD -u PGPASSFILE
+        -u PGCONNECT_TIMEOUT PGCONNECT_TIMEOUT=10
+  )
+  if [ "$(id -u)" -eq 0 ] && command -v runuser >/dev/null 2>&1 \
+    && id -u postgres >/dev/null 2>&1; then
+    runuser -u postgres -- "${clean_pg_env[@]}" \
+      psql -X -w -p 5432 -U postgres -d "$database" "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1 \
+    && sudo -n -u postgres true >/dev/null 2>&1; then
+    sudo -n -u postgres "${clean_pg_env[@]}" \
+      psql -X -w -p 5432 -U postgres -d "$database" "$@"
+    return
+  fi
+  return 127
+}
+
+# A catalog host of 127.0.0.1 reaches the host network from the Internal
+# workload, but peer auth uses the host Unix socket. Prove that socket's
+# postmaster PID owns the actual IPv4 TCP listener on port 5432 before giving it
+# DDL. Checking only listen_addresses is insufficient: PostgreSQL can start
+# after binding IPv6 while a Docker publish owns IPv4 127.0.0.1:5432.
+night_all_saved_records_local_identity() {
+  local data_directory postmaster_pid listener state receive_queue send_queue
+  local local_endpoint remainder
+  local -a listener_command
+  data_directory="$(
+    night_all_saved_records_local_psql -tA -v ON_ERROR_STOP=1 <<'SQL'
+SELECT current_setting('data_directory')
+ WHERE current_database() = 'agent_data_crawler_platform'
+   AND current_setting('port') = '5432';
+SQL
+  )" || return 1
+  case "$data_directory" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$data_directory" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+
+  if [ "$(id -u)" -eq 0 ]; then
+    postmaster_pid="$(head -n 1 -- "${data_directory}/postmaster.pid" 2>/dev/null)" \
+      || return 1
+    listener_command=(ss -H -4 -ltnp 'sport = :5432')
+  elif command -v sudo >/dev/null 2>&1 \
+    && sudo -n -u postgres true >/dev/null 2>&1; then
+    postmaster_pid="$(sudo -n -u postgres head -n 1 -- "${data_directory}/postmaster.pid" 2>/dev/null)" \
+      || return 1
+    listener_command=(sudo -n ss -H -4 -ltnp 'sport = :5432')
+  else
+    return 1
+  fi
+  case "$postmaster_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  command -v ss >/dev/null 2>&1 || return 1
+  while IFS= read -r listener; do
+    read -r state receive_queue send_queue local_endpoint remainder <<<"$listener"
+    case "$local_endpoint" in
+      '127.0.0.1:5432'|'0.0.0.0:5432'|'*:5432') ;;
+      *) continue ;;
+    esac
+    case "$listener" in
+      *"pid=${postmaster_pid},"*|*"pid=${postmaster_pid})"*)
+        printf 'match\n'
+        return 0
+        ;;
+    esac
+  done < <("${listener_command[@]}" 2>/dev/null)
+  printf 'mismatch\n'
+}
+
+# Reconcile the 13 source cursor indexes after the new Admin is Ready but
+# before the ingest worker is rolled out. A local 127.0.0.1 source uses the
+# host PostgreSQL operator through peer auth. A remote source must name a root-
+# managed libpq service; its password stays in that service's passfile rather
+# than Hub state, argv, Kubernetes Secrets, or deploy output.
+ensure_night_all_saved_records_source_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/night-all-saved-records-source-indexes.sql"
+  local mode service
+  [ -r "$sql_file" ] || die "Night-All saved-records source-index SQL is missing: ${sql_file}"
+  mode="$(night_all_saved_records_source_mode)" \
+    || die "could not inspect the Night-All saved-records source configuration"
+  case "$mode" in
+    unconfigured)
+      say "Night-All saved-records source is not configured; source-index reconciliation remains paused."
+      return 0
+      ;;
+    drift)
+      die "Night-All saved-records tasks do not share one source transport"
+      ;;
+    local)
+      local local_identity="unavailable"
+      local_identity="$(night_all_saved_records_local_identity)" || local_identity="unavailable"
+      if [ "$local_identity" = match ]; then
+        say "reconciling 13 Night-All saved-records source indexes through verified local PostgreSQL peer auth"
+        if ! night_all_saved_records_local_psql -v ON_ERROR_STOP=1 <"$sql_file"; then
+          die "Night-All saved-records source indexes failed through verified local peer auth"
+        fi
+        return 0
+      fi
+      if [ -z "${MX_INSIGHT_NIGHT_ALL_DDL_SERVICE:-}" ]; then
+        die "Night-All saved-records source identity could not be verified through local peer auth; configure MX_INSIGHT_NIGHT_ALL_DDL_SERVICE for an explicit fallback"
+      fi
+      say "WARNING: verified local PostgreSQL peer auth is unavailable; trying the configured deploy-time libpq service." >&2
+      ;;
+    external) ;;
+    *) die "unexpected Night-All saved-records source mode: ${mode:-empty}" ;;
+  esac
+
+  service="${MX_INSIGHT_NIGHT_ALL_DDL_SERVICE:-}"
+  if [ -z "$service" ]; then
+    say "WARNING: Night-All saved-records uses a non-local source; configure MX_INSIGHT_NIGHT_ALL_DDL_SERVICE to let deploy reconcile its indexes." >&2
+    return 0
+  fi
+  case "$service" in
+    *[!A-Za-z0-9_.-]*) die "MX_INSIGHT_NIGHT_ALL_DDL_SERVICE contains unsupported characters" ;;
+  esac
+  need psql
+  say "reconciling 13 Night-All saved-records source indexes through libpq service ${service}"
+  if ! env -u PGOPTIONS -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER \
+    -u PGPASSWORD -u PGSERVICE -u PGCONNECT_TIMEOUT \
+    psql -X -w \
+    -d "service=${service} dbname=agent_data_crawler_platform connect_timeout=10" \
+    -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "Night-All saved-records source indexes could not be reconciled through libpq service ${service}"
+  fi
+}
+
 # Reconcile the Hub-local PostgreSQL indexes for the curated province feed and
 # the all-ingested region feed. The legacy pair gates source activation; the
 # region pair independently gates the broader public endpoint. The SQL is deliberately streamed from the
@@ -1674,6 +1920,19 @@ ensure_province_opinion_serving_indexes() {
   if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
     psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
     die "province-opinion serving indexes could not be reconciled"
+  fi
+}
+
+# Reconcile the Hub-local source-catalog lookup indexes introduced with the
+# fixed 13-leaf Night-All cleaner. They are online, idempotent DDL and remain
+# outside the transactional migration Job.
+ensure_night_all_saved_records_hub_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/night-all-saved-records-hub-indexes.sql"
+  [ -r "$sql_file" ] || die "Night-All saved-records Hub-index SQL is missing: ${sql_file}"
+  say "reconciling Night-All saved-records Hub indexes"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "Night-All saved-records Hub indexes could not be reconciled"
   fi
 }
 
@@ -1749,6 +2008,9 @@ decommission_local_postgres() {
 
 apply_k8s() {
   local namespace="mx-insight-hub"
+  # Check before changing any Hub resource. Check again immediately before the
+  # projector rollout in case an operator toggled the setting mid-deploy.
+  require_deploy_projector_schema_only
   kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
@@ -1797,6 +2059,7 @@ apply_k8s() {
   fi
   DEPLOY_MIGRATION_JOB_ACTIVE=0
 
+  ensure_night_all_saved_records_hub_indexes
   ensure_province_opinion_serving_indexes
   ensure_canonical_context_serving_indexes
   ensure_api_key_quota_indexes
@@ -1820,6 +2083,12 @@ apply_k8s() {
   fi
   DEPLOY_FROZEN_ADMIN=0
 
+  # A large concurrent source-index build must never lengthen the Hub writer
+  # freeze or interrupt Launcher/MX-H2I login. It still completes before the
+  # new ingest worker can schedule a source pull.
+  ensure_night_all_saved_records_source_indexes
+
+  require_deploy_projector_schema_only
   render_file "${K8S_DIR}/32-projector.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
@@ -2555,6 +2824,10 @@ ops_action() {
       init_deploy_runtime
       acquire_deploy_lock
       ensure_shared_data_plane
+      # Avoid spending time building/importing an image when the later
+      # projector rollout is intentionally blocked by an operator-owned full
+      # startup rebuild setting.
+      require_deploy_projector_schema_only
       build_and_import_image
       apply_k8s
       k8s_smoke
