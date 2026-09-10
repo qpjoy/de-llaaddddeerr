@@ -65,6 +65,9 @@ const LazyEcommerceTreasureBoxPage = lazy(() => import('./pages-ecommerce-treasu
 const LazyXiaohongshuNotePage = lazy(() => import('./pages-xiaohongshu-note.jsx').then((module) => ({
   default: module.XiaohongshuNotePage,
 })))
+const LazyTopicInsightsPage = lazy(() => import('./pages-topic-insights.jsx').then((module) => ({
+  default: module.TopicInsightsPage,
+})))
 
 function EcommerceTreasureBoxPage(props) {
   return (
@@ -78,6 +81,14 @@ function XiaohongshuNotePage(props) {
   return (
     <Suspense fallback={<LoadingState label="正在加载小红书笔记画卷" />}>
       <LazyXiaohongshuNotePage {...props} />
+    </Suspense>
+  )
+}
+
+function TopicInsightsPage(props) {
+  return (
+    <Suspense fallback={<LoadingState label="正在加载专题洞察" />}>
+      <LazyTopicInsightsPage {...props} />
     </Suspense>
   )
 }
@@ -321,6 +332,7 @@ const ROUTES = [
   { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/topic-insights', label: '专题洞察', description: '主题趋势、关联与证据报告', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TopicInsightsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/external-platforms', label: '外部数据平台', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -835,7 +847,7 @@ export function App() {
             </button>
           </div>
         </header>
-        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
+        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
           <Page {...pageProps} />
         </main>
       </div>

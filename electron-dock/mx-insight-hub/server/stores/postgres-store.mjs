@@ -63,7 +63,10 @@ const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown
 const connectorSourceModes = new Set(['live', 'stale'])
 const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
 const transientHttpStatuses = new Set([502, 503, 504])
-const DERIVED_PLATFORM_USAGE_CAPABILITY = 'data.canonical-search'
+const DERIVED_PLATFORM_USAGE_CAPABILITIES = new Set([
+  'data.canonical-search',
+  'data.topic-reports',
+])
 const publicOpinionDatasets = new Set([
   'public-opinion.province.v1',
 ])
@@ -2528,11 +2531,11 @@ export class PostgresStore {
   }
 
   async #apiKeyEntitlement(client, input) {
-    if (input.capability === DERIVED_PLATFORM_USAGE_CAPABILITY
+    if (DERIVED_PLATFORM_USAGE_CAPABILITIES.has(input.capability)
       && Array.isArray(input.authorizationPlatforms)) {
       const platforms = [...new Set(input.authorizationPlatforms)]
       if (platforms.length === 0) {
-        throw new AppError(403, 'api_key_scope_not_granted', 'Canonical search requires at least one platform entitlement', {
+        throw new AppError(403, 'api_key_scope_not_granted', 'This data product requires at least one platform entitlement', {
           capability: input.capability,
         })
       }
@@ -2556,7 +2559,7 @@ export class PostgresStore {
         [input.apiKeyId, input.consumerId, input.tenantId, platforms],
       )
       if (Number(derived.rows[0]?.granted_count) !== platforms.length) {
-        throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to canonical search platforms', {
+        throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to every requested data platform', {
           capability: input.capability,
         })
       }

@@ -4397,6 +4397,62 @@ paths:
                                 quotedMinor: { type: [integer, "null"] }
                                 chargedMinor: { type: [integer, "null"] }
                                 heldMinor: { type: [integer, "null"] }
+  /data/topic-reports:
+    post:
+      operationId: createTopicReport
+      summary: Create an asynchronous topic insight report.
+      description: >-
+        Creates one durable report from the caller's current granted
+        data_center_saved_records_* platforms. The authorization set is frozen
+        with the task. Generation reads PostgreSQL canonical truth, never calls
+        an upstream source, and neither requires nor triggers Elasticsearch or
+        HanLP. Idempotency-Key is required; an accepted task consumes one unit.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTopicReportRequest" }
+      responses:
+        "202":
+          description: Durable task accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopicReportEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/topic-reports/{id}:
+    get:
+      operationId: getTopicReport
+      summary: Read topic-report progress or the completed result.
+      description: >-
+        Returns only a report owned by the authenticated consumer. Polling does
+        not dispatch collection, call a model, rebuild an index, or add usage.
+        Associations are bounded evidence co-occurrences, not causal claims.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Current task state and completed result when available.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopicReportEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     adminToken:
@@ -4551,6 +4607,117 @@ components:
         characters; extended source/filter cursors are at most 2048.
       schema: { type: string, minLength: 1, maxLength: 2048 }
   schemas:
+    CreateTopicReportRequest:
+      type: object
+      additionalProperties: false
+      required: [topic]
+      properties:
+        topic: { type: string, minLength: 2, maxLength: 300 }
+        language: { type: string, enum: [zh-CN, en], default: zh-CN }
+        range: { type: string, enum: [24h, 7d, 30d, 90d, custom], default: 7d }
+        from: { type: string, format: date-time, description: Required when range is custom. }
+        to: { type: string, format: date-time, description: Required when range is custom. }
+        sourceScope: { type: string, enum: [all_granted, selected], default: all_granted }
+        platforms:
+          type: array
+          minItems: 1
+          maxItems: 13
+          uniqueItems: true
+          items: { type: string, pattern: "^data_center_saved_records_[a-z_]+$" }
+        sampleLimit: { type: integer, minimum: 20, maximum: 500, default: 240 }
+    TopicReportTask:
+      type: object
+      additionalProperties: false
+      required: [id, contractVersion, topic, language, range, sourceScope, sampleLimit, status, phase, progress, result, error, createdAt, startedAt, completedAt]
+      properties:
+        id: { type: string, format: uuid }
+        contractVersion: { type: string, const: mx-insight-hub.data-products.topic-report.v1 }
+        topic: { type: string }
+        language: { type: string, enum: [zh-CN, en] }
+        range:
+          type: object
+          additionalProperties: false
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        sourceScope:
+          type: object
+          additionalProperties: false
+          required: [mode, platforms, categories]
+          properties:
+            mode: { type: string, enum: [all_granted, selected] }
+            platforms: { type: array, items: { type: string } }
+            categories:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [id, label]
+                properties:
+                  id: { type: string }
+                  label: { type: string }
+        sampleLimit: { type: integer, minimum: 20, maximum: 500 }
+        status: { type: string, enum: [queued, running, succeeded, failed] }
+        phase: { type: string, enum: [queued, selecting_evidence, building_associations, complete, failed] }
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        result:
+          oneOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/TopicReportResult" }
+        error:
+          oneOf:
+            - { type: "null" }
+            - type: object
+              additionalProperties: false
+              required: [code, message]
+              properties:
+                code: { type: string }
+                message: { type: string }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"], format: date-time }
+        completedAt: { type: [string, "null"], format: date-time }
+    TopicReportResult:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, generatedAt, topic, language, window, coverage, executiveSummary, timeline, dimensions, associations, evidence, methodology]
+      properties:
+        contractVersion: { type: string, const: mx-insight-hub.data-products.topic-report.v1 }
+        generatedAt: { type: string, format: date-time }
+        topic: { type: string }
+        language: { type: string }
+        window: { type: object, additionalProperties: true }
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [matchedRecords, analyzedRecords, evidenceRecords, categoryCount, truncated]
+          properties:
+            matchedRecords: { type: integer, minimum: 0 }
+            analyzedRecords: { type: integer, minimum: 0, maximum: 500 }
+            evidenceRecords: { type: integer, minimum: 0, maximum: 80 }
+            categoryCount: { type: integer, minimum: 0, maximum: 13 }
+            truncated: { type: boolean }
+        executiveSummary: { type: object, additionalProperties: true }
+        timeline:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [date, count]
+            properties:
+              date: { type: string, format: date }
+              count: { type: integer, minimum: 1 }
+        dimensions: { type: object, additionalProperties: true }
+        associations: { type: object, additionalProperties: true }
+        evidence: { type: array, maxItems: 80, items: { type: object, additionalProperties: true } }
+        methodology: { type: object, additionalProperties: true }
+    TopicReportEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/TopicReportTask" }
+        requestId: { type: string, format: uuid }
     AgentProviderSafe:
       type: object
       additionalProperties: false

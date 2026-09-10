@@ -105,6 +105,7 @@ curl -sS -i "$HUB_URL/health/dependencies"
 | 认证与调用规则 | `/docs/auth` |
 | 数据源目录 | `/docs/source-catalog` |
 | 虚拟超市 | `/docs/virtual-supermarket` |
+| 专题洞察 | `/docs/topic-reports` |
 | Telegram 会话 | `/docs/telegram` |
 | 全国舆情 | `/docs/public-opinion` |
 | 通用搜索 | `/docs/search` |
@@ -831,6 +832,56 @@ fi
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
 `503 external_platform_unavailable|external_platform_not_configured|external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete|external_platform_operation_disabled|external_platform_operation_shadow|external_platform_operation_paused|external_platform_operation_canary|external_platform_operation_blocked`。
 429 是 Hub 额度/并发或外部平台容量类别，不是域名封禁的证据；保留 requestId 后按错误码处理。
+
+## 3.5 专题洞察报告
+
+专题报告只读取已经同步到 Hub 的 PostgreSQL canonical truth，不调用外部采集源、不调用 HanLP，
+也不要求或触发 Elasticsearch 重建。先创建异步任务，再用返回的 report id 查询进度。
+
+```bash
+TOPIC_REPORT_KEY="$(new_idempotency_key)"
+TOPIC_REPORT=$(curl -sS -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $TOPIC_REPORT_KEY" \
+  "$HUB_URL/api/v1/data/topic-reports" \
+  -d '{
+    "topic": "东南亚近期选举与外交政策变化",
+    "range": "7d",
+    "sourceScope": "all_granted",
+    "language": "zh-CN",
+    "sampleLimit": 240
+  }')
+
+TOPIC_REPORT_ID=$(printf '%s\n' "$TOPIC_REPORT" | jq -r '.data.id')
+printf '%s\n' "$TOPIC_REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.progress,requestId}'
+```
+
+`sourceScope=selected` 时增加 `platforms` 数组，平台名必须来自当前 consumer 已授权的
+`data_center_saved_records_*` 能力。任务接受成功返回 `202` 并消耗一个
+`data.topic-reports` usage unit；相同请求的传输重试复用同一个 key。
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $HUB_KEY" \
+  "$HUB_URL/api/v1/data/topic-reports/$TOPIC_REPORT_ID" \
+  | jq '{
+      status:.data.status,
+      phase:.data.phase,
+      progress:.data.progress,
+      summary:.data.result.executiveSummary,
+      coverage:.data.result.coverage,
+      timeline:.data.result.timeline,
+      dimensions:.data.result.dimensions,
+      associations:.data.result.associations,
+      evidence:.data.result.evidence,
+      methodology:.data.result.methodology
+    }'
+```
+
+建议每 2–5 秒轮询，直到 `succeeded` 或 `failed`。GET 不再次计费。外部产品应同时展示
+`methodology.limitations` 和 evidence 原文链接；`associations` 表示证据共现，不能改写为因果关系。
+完整字段、状态机与错误响应见 `/docs/topic-reports` 和 `/docs/openapi.json`。
 
 ## 4. 搜索 API
 

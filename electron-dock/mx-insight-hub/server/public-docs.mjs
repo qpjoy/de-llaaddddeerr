@@ -4,7 +4,7 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
-export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','xiaohongshu-note':'/docs/xiaohongshu-note','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','xiaohongshu-note':'/docs/xiaohongshu-note','virtual-supermarket':'/docs/virtual-supermarket','topic-reports':'/docs/topic-reports',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
@@ -4749,6 +4749,129 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   },
 }
 
+PUBLIC_OPENAPI_DOCUMENT.paths['/data/topic-reports'] = {
+  post: {
+    operationId: 'createTopicReport',
+    summary: 'Create an asynchronous topic insight report',
+    description: 'Creates a durable report from the caller\'s currently granted saved-record platforms. The immutable authorization snapshot is stored with the task. Generation reads PostgreSQL canonical truth, exposes only publication-eligible records, never invokes an upstream source, and does not require or trigger an Elasticsearch rebuild or HanLP run. Idempotency-Key is required and one accepted task consumes one usage unit.',
+    parameters: [{
+      name: 'Idempotency-Key', in: 'header', required: true,
+      schema: { type: 'string', minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$' },
+    }],
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateTopicReportRequest' } } },
+    },
+    responses: {
+      202: {
+        description: 'The durable task was accepted. Poll the returned id with GET /data/topic-reports/{id}.',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/TopicReportEnvelope' } } },
+      },
+      ...publicErrors,
+    },
+  },
+}
+
+PUBLIC_OPENAPI_DOCUMENT.paths['/data/topic-reports/{id}'] = {
+  get: {
+    operationId: 'getTopicReport',
+    summary: 'Read topic report progress or result',
+    description: 'Returns only a task owned by the authenticated consumer. Status polling does not dispatch upstream collection, invoke a model, or create another usage charge. A succeeded result contains bounded public-safe evidence and deterministic co-occurrence associations; associations are not causal claims.',
+    parameters: [{
+      name: 'id', in: 'path', required: true,
+      schema: { type: 'string', format: 'uuid' },
+    }],
+    responses: {
+      200: {
+        description: 'Current durable task state and, once succeeded, its report.',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/TopicReportEnvelope' } } },
+      },
+      ...publicErrors,
+    },
+  },
+}
+
+Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
+  CreateTopicReportRequest: {
+    type: 'object', additionalProperties: false, required: ['topic'],
+    properties: {
+      topic: { type: 'string', minLength: 2, maxLength: 300 },
+      language: { type: 'string', enum: ['zh-CN', 'en'], default: 'zh-CN' },
+      range: { type: 'string', enum: ['24h', '7d', '30d', '90d', 'custom'], default: '7d' },
+      from: { type: 'string', format: 'date-time', description: 'Required only when range=custom.' },
+      to: { type: 'string', format: 'date-time', description: 'Required only when range=custom.' },
+      sourceScope: { type: 'string', enum: ['all_granted', 'selected'], default: 'all_granted' },
+      platforms: {
+        type: 'array', minItems: 1, maxItems: 13, uniqueItems: true,
+        description: 'Required when sourceScope=selected. Every value must be a granted data_center_saved_records_* platform.',
+        items: { type: 'string', pattern: '^data_center_saved_records_[a-z_]+$' },
+      },
+      sampleLimit: { type: 'integer', minimum: 20, maximum: 500, default: 240 },
+    },
+  },
+  TopicReportTask: {
+    type: 'object', additionalProperties: false,
+    required: ['id', 'contractVersion', 'topic', 'language', 'range', 'sourceScope', 'sampleLimit', 'status', 'phase', 'progress', 'result', 'error', 'createdAt', 'startedAt', 'completedAt'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.topic-report.v1' },
+      topic: { type: 'string' },
+      language: { type: 'string', enum: ['zh-CN', 'en'] },
+      range: {
+        type: 'object', additionalProperties: false, required: ['from', 'to'],
+        properties: { from: { type: 'string', format: 'date-time' }, to: { type: 'string', format: 'date-time' } },
+      },
+      sourceScope: {
+        type: 'object', additionalProperties: false, required: ['mode', 'platforms', 'categories'],
+        properties: {
+          mode: { type: 'string', enum: ['all_granted', 'selected'] },
+          platforms: { type: 'array', items: { type: 'string' } },
+          categories: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'label'], properties: { id: { type: 'string' }, label: { type: 'string' } } } },
+        },
+      },
+      sampleLimit: { type: 'integer', minimum: 20, maximum: 500 },
+      status: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed'] },
+      phase: { type: 'string', enum: ['queued', 'selecting_evidence', 'building_associations', 'complete', 'failed'] },
+      progress: { type: 'integer', minimum: 0, maximum: 100 },
+      result: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/TopicReportResult' }] },
+      error: {
+        oneOf: [
+          { type: 'null' },
+          { type: 'object', additionalProperties: false, required: ['code', 'message'], properties: { code: { type: 'string' }, message: { type: 'string' } } },
+        ],
+      },
+      createdAt: { type: 'string', format: 'date-time' },
+      startedAt: { type: ['string', 'null'], format: 'date-time' },
+      completedAt: { type: ['string', 'null'], format: 'date-time' },
+    },
+  },
+  TopicReportResult: {
+    type: 'object', additionalProperties: false,
+    required: ['contractVersion', 'generatedAt', 'topic', 'language', 'window', 'coverage', 'executiveSummary', 'timeline', 'dimensions', 'associations', 'evidence', 'methodology'],
+    properties: {
+      contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.topic-report.v1' },
+      generatedAt: { type: 'string', format: 'date-time' },
+      topic: { type: 'string' },
+      language: { type: 'string' },
+      window: { type: 'object', additionalProperties: true },
+      coverage: { type: 'object', additionalProperties: false, required: ['matchedRecords', 'analyzedRecords', 'evidenceRecords', 'categoryCount', 'truncated'], properties: { matchedRecords: { type: 'integer', minimum: 0 }, analyzedRecords: { type: 'integer', minimum: 0, maximum: 500 }, evidenceRecords: { type: 'integer', minimum: 0, maximum: 80 }, categoryCount: { type: 'integer', minimum: 0, maximum: 13 }, truncated: { type: 'boolean' } } },
+      executiveSummary: { type: 'object', additionalProperties: true },
+      timeline: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['date', 'count'], properties: { date: { type: 'string', format: 'date' }, count: { type: 'integer', minimum: 1 } } } },
+      dimensions: { type: 'object', additionalProperties: true },
+      associations: { type: 'object', additionalProperties: true },
+      evidence: { type: 'array', maxItems: 80, items: { type: 'object', additionalProperties: true } },
+      methodology: { type: 'object', additionalProperties: true },
+    },
+  },
+  TopicReportEnvelope: {
+    type: 'object', additionalProperties: false, required: ['data', 'requestId'],
+    properties: {
+      data: { $ref: '#/components/schemas/TopicReportTask' },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+})
+
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
@@ -4758,6 +4881,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
+  { key: 'topic-reports', path: '/docs/topic-reports', label: '专题洞察', section: '数据产品' },
   { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
   { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
   { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
@@ -5213,6 +5337,37 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
     <h3>5. 外部复刻流程</h3>
     <p>先读取 metadata 并记录 <code>storefrontRevision</code>；再按默认 <code>sort=newest</code> 从无 cursor 的 products 首页逐页读取到 <code>nextCursor=null</code>。所有页面必须与 metadata 保持同一 revision；不一致或遇到 409 时丢弃未完成本地快照，重新读取 metadata 和首页。完整取回后，按 metadata 的 department/aisle/shelf/category <code>sortOrder</code> 与 item <code>placement.position</code> 在客户端陈列，position 相同或为空时用 publication UUID 稳定打破平局。调用方可选择 2D、3D 或可访问目录 renderer，但不能从 API 的 newest 分页顺序或 WebGL 坐标反推业务货架顺序。</p>
     <p>响应不包含 capture/source-row ID、marketplace product/shop source ID、marketplace raw label/映射状态/内部 source key、task/run/campaign、raw tags/share payload、metadata/device/<code>is_reported</code>、source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只有经审核的 <code>{id,name}</code>；未有 approved mapping 时二者均为 null。价格 amount 使用 decimal string，并返回 display/provenance；当前固定源没有 currency 字段，所以 source price 的 <code>currency=null</code>，不能猜成 CNY，只有人工 curated override 才携带已审核的三位 ISO currency。外层 <code>collectedAt</code> 是观测时间，不是实时交易报价；v1 不发布 brand 或 media 字段，未审核规格保持 null，当前源无图片时不伪造商品图。下架仅改变 storefront overlay，不删除 canonical capture。</p>
+    </section>
+
+    <section class="doc-page" data-doc-page="topic-reports">
+    <h2 id="topic-reports">专题洞察</h2>
+    <div class="notice">专题报告是异步数据产品，公开合同为 <code>mx-insight-hub.data-products.topic-report.v1</code>。它只读取调用者已经获准的 <code>data_center_saved_records_*</code> canonical 数据，不调用采集源、不暴露内部连接或供应方身份，不触发 Elasticsearch 索引重建，也不调用 HanLP 分词。</div>
+    <p>一个报告会返回时间趋势、类别/标签/地域/作者分布、可视化关系节点与边，以及最多 80 条可回到原文核对的公开安全证据。关系表示同一批证据中的共现强度，不是因果推断或事实认定。</p>
+    <h3>1. 创建持久化任务</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/topic-reports</code></div><p>要求至少一个已授权的 saved-record 平台以及唯一 <code>Idempotency-Key</code>。任务创建时固化完整授权平台集合，成功接受返回 HTTP 202，并消耗 1 个 usage unit。</p></div>
+    <pre><code>REPORT=$(curl -sS -X POST "$HUB_URL/api/v1/data/topic-reports" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: topic-report-$(uuidgen)" \
+  -d '{"topic":"东南亚近期选举与外交政策变化","range":"7d","sourceScope":"all_granted","language":"zh-CN"}')
+REPORT_ID=$(printf '%s' "$REPORT" | jq -r '.data.id')
+printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.progress,requestId}'</code></pre>
+    <p><code>range</code> 支持 <code>24h|7d|30d|90d|custom</code>；custom 必须同时提供带时区的 <code>from/to</code>，最长 366 天。<code>sourceScope=selected</code> 时必须提供 1–13 个 <code>platforms</code>，且每项都必须已经在当前 API Key 的有效授权快照中。</p>
+    <h3>2. 查询进度与结果</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/topic-reports/{id}</code></div><p>只允许创建任务的 consumer 读取；同一 consumer 轮换 Key 后仍可读取。轮询不会再次计费，也不会触发采集、模型调用或索引操作。</p></div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/topic-reports/$REPORT_ID" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '{status:.data.status,phase:.data.phase,progress:.data.progress,summary:.data.result.executiveSummary,coverage:.data.result.coverage}'</code></pre>
+    <table><thead><tr><th>status / phase</th><th>调用方行为</th></tr></thead><tbody>
+      <tr><td><code>queued</code></td><td>任务已经持久化，稍后以原 report id 重试 GET。</td></tr>
+      <tr><td><code>running / selecting_evidence</code></td><td>正在 PostgreSQL canonical truth 中筛选公开可发布证据。</td></tr>
+      <tr><td><code>running / building_associations</code></td><td>正在构建趋势、维度排行与共现关系。</td></tr>
+      <tr><td><code>succeeded / complete</code></td><td>消费 <code>result</code>；同一结果可用于网页、报告卡片或关系图 renderer。</td></tr>
+      <tr><td><code>failed</code></td><td>保留 error code；使用新的 Idempotency-Key 创建新任务。</td></tr>
+    </tbody></table>
+    <h3>3. 外部数据产品实现</h3>
+    <p>表单提交后保存 report id，每 2–5 秒读取任务状态；完成后用 <code>executiveSummary</code> 做摘要、<code>timeline</code> 做趋势图、<code>dimensions</code> 做排行、<code>associations.nodes/edges</code> 做关系视图、<code>evidence</code> 做证据列表。必须同时展示 <code>methodology.limitations</code>，并允许用户回到 evidence URL 核验。不要把共现边改写成因果或人物关系。</p>
+    <div class="notice">报告以任务运行时可见的 canonical 数据为准。后续新增同步记录不会改写旧结果；要获得新快照，请用新的 Idempotency-Key 创建新任务。</div>
     </section>
 
     <section class="doc-page" data-doc-page="search">

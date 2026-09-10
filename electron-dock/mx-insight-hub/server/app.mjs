@@ -1716,6 +1716,36 @@ export function createApp({
         })
         return
       }
+      if (pathname === '/internal/v1/admin/data-products/topic-reports') {
+        requireSourceAdmin(principal)
+        if (request.method === 'GET') {
+          sendJson(response, 200, {
+            data: await service.adminTopicReports(Object.fromEntries(searchParams.entries())),
+            requestId,
+          })
+          return
+        }
+        if (request.method === 'POST') {
+          requireNoQuery(searchParams, 'topic report creation')
+          sendJson(response, 202, {
+            data: await service.adminCreateTopicReport(await readJson(request), {
+              actor: principal.memberId || principal.kind || 'admin-token',
+            }),
+            requestId,
+          })
+          return
+        }
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/data-products/topic-reports/:id')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'topic report detail')
+        sendJson(response, 200, {
+          data: await service.adminTopicReport(params.id),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(
         pathname,
         '/internal/v1/admin/data-products/telegram/chats/:chatId/messages',
@@ -5296,6 +5326,29 @@ export function createApp({
         sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/topic-reports') {
+        const context = await requirePublic(request)
+        const result = await service.createTopicReport(context, {
+          body: await readJson(request),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/topic-reports/:id')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'topic report detail')
+        sendJson(response, 200, {
+          data: await service.topicReport(context, params.id),
+          requestId,
         })
         return
       }

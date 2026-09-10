@@ -240,6 +240,16 @@ export const publicDataApi = {
     { requestId, mediaIndex },
     { signal },
   ),
+  createTopicReport: (apiKey, body, { idempotencyKey, signal } = {}) => publicDataRequest(
+    apiKey,
+    '/api/v1/data/topic-reports',
+    { method: 'POST', body, idempotencyKey, signal },
+  ),
+  topicReport: (apiKey, reportId, { signal } = {}) => publicDataRequest(
+    apiKey,
+    `/api/v1/data/topic-reports/${encodeURIComponent(reportId)}`,
+    { signal },
+  ),
 }
 
 /**
@@ -509,6 +519,20 @@ export const adminApi = {
     token,
     `${ADMIN_ROOT}/data-products/telegram/items/${encodeURIComponent(id)}/context`,
     { query },
+  ),
+  topicReports: (token, { limit = 30 } = {}) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/topic-reports`,
+    { query: { limit } },
+  ),
+  createTopicReport: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/topic-reports`,
+    { method: 'POST', body },
+  ),
+  topicReport: (token, id) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/topic-reports/${encodeURIComponent(id)}`,
   ),
   dataProductPublicOpinionRegions: (token) => request(
     token, `${ADMIN_ROOT}/data-products/public-opinion/regions`,

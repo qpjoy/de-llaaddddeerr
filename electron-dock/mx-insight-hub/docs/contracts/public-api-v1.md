@@ -636,6 +636,57 @@ This is the only response allowed to contain `{apiKey}`. It carries
 `Cache-Control: no-store`; clients must keep the plaintext only in the local
 reveal interaction and clear it when that interaction closes.
 
+## Topic insight reports
+
+`POST /api/v1/data/topic-reports` creates a durable asynchronous report over
+the caller's already-synchronized saved-record corpus. The task reads
+PostgreSQL canonical truth directly. It never dispatches a source acquisition,
+calls HanLP, or starts/requires an Elasticsearch rebuild. The public contract
+version is `mx-insight-hub.data-products.topic-report.v1`.
+
+The request requires an 8–128 character `Idempotency-Key` and accepts only:
+
+- `topic`: normalized text, 2–300 characters;
+- `language`: `zh-CN` (default) or `en`;
+- `range`: `24h|7d|30d|90d|custom`, default `7d`; custom requires RFC3339
+  `from` and `to` and cannot exceed 366 days;
+- `sourceScope`: `all_granted` (default) or `selected`; selected requires
+  `platforms`, and every platform must be in the authenticated caller's current
+  `data_center_saved_records_*` grants;
+- `sampleLimit`: 20–500, default 240.
+
+The Hub freezes the exact authorized platform set into the task. An accepted
+request returns HTTP `202`, consumes one `data.topic-reports` usage unit, and
+can be replayed with the same API Key, path, normalized body and idempotency key.
+Changing that tuple returns `409 idempotency_conflict`.
+
+```http
+POST /api/v1/data/topic-reports
+Authorization: Bearer <mx key>
+Idempotency-Key: topic-report-0001
+Content-Type: application/json
+
+{
+  "topic": "东南亚近期选举与外交政策变化",
+  "range": "7d",
+  "sourceScope": "all_granted",
+  "language": "zh-CN"
+}
+```
+
+`GET /api/v1/data/topic-reports/{id}` returns `queued`, `running`, `succeeded`
+or `failed`, plus `phase` and integer `progress`. Only the owning consumer may
+read a public task; another Key for the same consumer may continue polling.
+Polling does not consume another unit or start any computation. A successful
+result contains an executive summary, time series, category/tag/location/author
+dimensions, bounded association nodes/edges and at most 80 public-safe evidence
+records. Association edges are co-occurrence evidence, not causal claims.
+
+Report results never include raw source payloads, connector credentials or
+internal source identities. They reflect the canonical corpus at execution
+time and remain immutable; clients create a new task with a new idempotency key
+to analyze later synchronized data.
+
 ## Tokenize text
 
 ```http

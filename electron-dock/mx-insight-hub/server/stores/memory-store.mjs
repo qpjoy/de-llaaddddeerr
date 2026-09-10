@@ -13,7 +13,10 @@ import {
   requiredAuthorizationScopes,
 } from './usage-authorization.mjs'
 
-const DERIVED_PLATFORM_USAGE_CAPABILITY = 'data.canonical-search'
+const DERIVED_PLATFORM_USAGE_CAPABILITIES = new Set([
+  'data.canonical-search',
+  'data.topic-reports',
+])
 
 function nowIso() {
   return new Date().toISOString()
@@ -1555,16 +1558,16 @@ export class MemoryStore {
       : this.apiKeyCapabilityEntitlements.get(apiKeyId) || []
     const currentPlatformGrants = new Set(this.grants.get(consumerId) || [])
     const currentCapabilityGrants = new Set(this.capabilityGrants.get(consumerId) || [])
-    // Canonical search is an internal usage bucket over the platforms this key
-    // already owns; it is not a customer-facing capability. Revalidate every
-    // contributing platform at reservation time so this derived bucket cannot
-    // become an authorization bypass after a grant is revoked.
-    if (capability === DERIVED_PLATFORM_USAGE_CAPABILITY && Array.isArray(authorizationPlatforms)) {
+    // Multi-platform data products use internal accounting buckets over the
+    // platforms this key already owns; they are not extra customer grants.
+    // Revalidate every contributing platform at reservation time so a derived
+    // bucket cannot become an authorization bypass after a grant is revoked.
+    if (DERIVED_PLATFORM_USAGE_CAPABILITIES.has(capability) && Array.isArray(authorizationPlatforms)) {
       const expected = [...new Set(authorizationPlatforms)]
       const entitled = new Map(platformEntitlements.map((entry) => [entry.platform, entry]))
       if (expected.length === 0
         || expected.some((name) => !currentPlatformGrants.has(name) || !entitled.has(name))) {
-        throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to canonical search platforms', {
+        throw new AppError(403, 'api_key_scope_not_granted', 'This API key is not entitled to every requested data platform', {
           capability,
         })
       }

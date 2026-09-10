@@ -1523,7 +1523,7 @@ async function withServer(listenerMode, run) {
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
     const pagePaths = [
-      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/ecommerce-treasure-box', '/docs/xiaohongshu-note', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/ecommerce-treasure-box', '/docs/xiaohongshu-note', '/docs/virtual-supermarket', '/docs/topic-reports', '/docs/search', '/docs/telegram',
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
@@ -1535,6 +1535,7 @@ test('public listener serves self-contained public API documentation', async () 
     const ecommerceHtml = pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html
     const xiaohongshuHtml = pages.find((page) => page.path === '/docs/xiaohongshu-note').html
     const nightAllHtml = pages.find((page) => page.path === '/docs/night-all').html
+    const topicReportsHtml = pages.find((page) => page.path === '/docs/topic-reports').html
     const errorsHtml = pages.find((page) => page.path === '/docs/errors').html
 
     assert.ok(pages.every((page) => page.response.status === 200))
@@ -1680,6 +1681,11 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/usage/)
     assert.match(html, /Idempotency-Key/)
     assert.match(html, /nextCursor/)
+    assert.match(topicReportsHtml, /\/api\/v1\/data\/topic-reports/)
+    assert.match(topicReportsHtml, /mx-insight-hub\.data-products\.topic-report\.v1/)
+    assert.match(topicReportsHtml, /PostgreSQL canonical truth/)
+    assert.match(topicReportsHtml, /不触发 Elasticsearch 索引重建/)
+    assert.match(topicReportsHtml, /不调用 HanLP/)
     const sourceCatalogHtml = pages.find((page) => page.path === '/docs/source-catalog').html
     assert.match(sourceCatalogHtml, /export HUB_URL=/)
     assert.match(sourceCatalogHtml, /MX_INSIGHT_API_KEY/)
@@ -1709,6 +1715,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
       ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据百宝箱'],
       ['/docs/xiaohongshu-note', 'xiaohongshu-note', '小红书笔记'],
       ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
+      ['/docs/topic-reports', 'topic-reports', '专题洞察'],
       ['/docs/search', 'search', '通用搜索'],
       ['/docs/telegram', 'telegram', 'Telegram 会话'],
       ['/docs/public-opinion', 'public-opinion', '全国省级舆情'],
@@ -1751,6 +1758,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.match(legacyHtml, /location\.hash\.slice\(1\)/)
     assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
     assert.match(legacyHtml, /'virtual-supermarket':'\/docs\/virtual-supermarket'/)
+    assert.match(legacyHtml, /'topic-reports':'\/docs\/topic-reports'/)
     assert.match(legacyHtml, /'ecommerce-treasure-box':'\/docs\/ecommerce-treasure-box'/)
     assert.match(legacyHtml, /'xiaohongshu-note':'\/docs\/xiaohongshu-note'/)
     assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
@@ -1807,6 +1815,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/telegram/entities/search',
       '/data/telegram/messages',
       '/data/telegram/search',
+      '/data/topic-reports',
+      '/data/topic-reports/{id}',
       '/data/virtual-supermarket/metadata',
       '/data/virtual-supermarket/products',
       '/data/virtual-supermarket/products/{id}',
@@ -2133,7 +2143,7 @@ test('external data platform public contract and internal operations guidance st
 
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
-    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
+    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/topic-reports', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
       const response = await fetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)

@@ -13,6 +13,7 @@ import {
 } from '../agent/pipeline-store.mjs'
 import { runProvinceAnalysisGraph } from '../agent/province-analysis-graph.mjs'
 import { loadConfig } from '../config.mjs'
+import { generateTopicReport, TopicReportStore } from '../insights/topic-reports.mjs'
 
 const WORKER_ID = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`
 const LEASE_SECONDS = 300
@@ -157,6 +158,76 @@ export async function runAgentClassifierLoop({
   }
 }
 
+export async function runTopicReportLoop({
+  reportStore,
+  signal,
+  logger = console,
+  workerId = `${WORKER_ID}:topic-reports`,
+  leaseSeconds = LEASE_SECONDS,
+  heartbeatMs = HEARTBEAT_MS,
+  reclaimMs = RECLAIM_MS,
+  idleMs = IDLE_MS,
+} = {}) {
+  let lastReclaimAt = 0
+  while (!signal?.aborted) {
+    if (Date.now() - lastReclaimAt >= reclaimMs) {
+      const reclaimed = await reportStore.reclaimExpired().catch((error) => {
+        logger.warn?.(`[topic-reports] reclaim failed code=${safeErrorCode(error)}`)
+        return 0
+      })
+      if (reclaimed > 0) logger.warn?.(`[topic-reports] reclaimed=${reclaimed}`)
+      lastReclaimAt = Date.now()
+    }
+    let claim
+    try {
+      claim = await reportStore.claimNext({ workerId, leaseSeconds })
+    } catch (error) {
+      logger.warn?.(`[topic-reports] claim failed code=${safeErrorCode(error)}`)
+      await wait(idleMs, signal)
+      continue
+    }
+    if (!claim) {
+      await wait(idleMs, signal)
+      continue
+    }
+    let leaseOwned = true
+    let heartbeatPromise = null
+    const renewLease = async () => {
+      if (heartbeatPromise || !leaseOwned) return
+      heartbeatPromise = reportStore.heartbeat(claim, leaseSeconds)
+        .then((owned) => { leaseOwned = owned })
+        .catch((error) => {
+          leaseOwned = false
+          logger.warn?.(`[topic-reports] heartbeat failed task=${claim.id} code=${safeErrorCode(error)}`)
+        })
+        .finally(() => { heartbeatPromise = null })
+      await heartbeatPromise
+    }
+    const heartbeat = setInterval(renewLease, heartbeatMs)
+    try {
+      const result = await generateTopicReport({ store: reportStore, claim })
+      clearInterval(heartbeat)
+      await heartbeatPromise
+      if (!leaseOwned) {
+        logger.warn?.(`[topic-reports] lease lost task=${claim.id}; abandoning result`)
+        continue
+      }
+      const completed = await reportStore.complete(claim, result)
+      logger.log?.(`[topic-reports] task=${claim.id} completed=${completed} evidence=${result.coverage.evidenceRecords}`)
+    } catch (error) {
+      if (signal?.aborted) {
+        const released = await reportStore.release(claim).catch(() => false)
+        logger.log?.(`[topic-reports] task=${claim.id} shutdown_requeue=${released}`)
+      } else if (leaseOwned) {
+        const failure = await reportStore.fail(claim, error).catch(() => null)
+        logger.warn?.(`[topic-reports] task=${claim.id} failed code=${safeErrorCode(error)} retry=${failure?.retry === true}`)
+      }
+    } finally {
+      clearInterval(heartbeat)
+    }
+  }
+}
+
 async function main() {
   const config = loadConfig()
   if (config.storeDriver !== 'postgres') {
@@ -174,6 +245,7 @@ async function main() {
     logger: console,
   })
   const pipelineStore = new AgentPipelineStore(pool)
+  const reportStore = new TopicReportStore(pool)
   const controller = new AbortController()
   const shutdown = (name) => {
     console.log(`[agent-pipeline] ${name} received; safely requeueing current record`)
@@ -182,9 +254,12 @@ async function main() {
   process.once('SIGTERM', () => shutdown('SIGTERM'))
   process.once('SIGINT', () => shutdown('SIGINT'))
 
-  console.log('[agent-pipeline] classifier ready; global concurrency=1')
+  console.log('[agent-pipeline] classifier ready; agent concurrency=1; topic reports use PostgreSQL rules')
   try {
-    await runAgentClassifierLoop({ pipelineStore, agent, signal: controller.signal })
+    await Promise.all([
+      runAgentClassifierLoop({ pipelineStore, agent, signal: controller.signal }),
+      runTopicReportLoop({ reportStore, signal: controller.signal }),
+    ])
   } finally {
     agent.close()
     await pool.end()

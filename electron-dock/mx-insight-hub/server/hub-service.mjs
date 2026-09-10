@@ -147,6 +147,11 @@ import {
   prepareNightAllCompatibilityTraversal,
 } from './data/night-all-pagination.mjs'
 import { createNightAllCompatibilityCursorCodec } from './external-platforms/cursor.mjs'
+import {
+  normalizeTopicReportRequest,
+  TOPIC_REPORT_PLATFORMS,
+  TOPIC_REPORT_USAGE_SCOPE,
+} from './insights/topic-reports.mjs'
 
 const DEFAULT_POLICY = Object.freeze({
   maxRequests: 1_000,
@@ -517,6 +522,7 @@ export class HubService {
     externalSocialUserActivityEnabled = false,
     externalImageLoader = null,
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
+    topicReports = null,
     logger = console,
   }) {
     const mediaPolicy = externalMediaPolicy || DEFAULT_EXTERNAL_MEDIA_POLICY
@@ -541,6 +547,7 @@ export class HubService {
     this.externalSocialUserActivity = externalSocialUserActivity
     this.externalSocialUserActivityEnabled = externalSocialUserActivityEnabled === true
     this.externalImageLoader = externalImageLoader
+    this.topicReports = topicReports
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
       windowMs: Math.max(1_000, Math.floor(Number(mediaPolicy.windowMs) || DEFAULT_EXTERNAL_MEDIA_POLICY.windowMs)),
@@ -1198,7 +1205,11 @@ export class HubService {
             ready: sources[index]?.status === 'active' && Boolean(this.searchQueries?.searchContent),
             source: 'hub',
             servingMode: 'stored',
-            capabilities: ['stored_search', 'canonical_search'],
+            capabilities: [
+              'stored_search',
+              'canonical_search',
+              ...(this.topicReports ? ['topic_report'] : []),
+            ],
           })
         }
       }
@@ -1723,6 +1734,41 @@ export class HubService {
     const row = await this.store.getAdminPublicOpinionRecord(id)
     if (!row) throw new AppError(404, 'item_not_found', 'Public-opinion item not found')
     return adminPublicOpinionItemResponse(row)
+  }
+
+  async adminCreateTopicReport(body, { actor = 'admin-token' } = {}) {
+    if (!this.topicReports) {
+      throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require PostgreSQL migration 067')
+    }
+    const input = normalizeTopicReportRequest(body, { allowedPlatforms: TOPIC_REPORT_PLATFORMS })
+    return this.topicReports.create(input, { createdBy: actor })
+  }
+
+  async adminTopicReports(queryInput = {}) {
+    if (!this.topicReports) {
+      throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require PostgreSQL migration 067')
+    }
+    const unsupported = Object.keys(queryInput || {}).filter((field) => field !== 'limit')
+    if (unsupported.length > 0) {
+      throw new AppError(400, 'unsupported_fields', `Unsupported topic report query fields: ${unsupported.join(', ')}`)
+    }
+    const limit = queryInput?.limit == null ? 30 : Number(queryInput.limit)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new AppError(400, 'invalid_request', 'limit must be an integer from 1 to 100')
+    }
+    return {
+      contractVersion: 'mx-insight-hub.data-products.topic-report.v1',
+      items: await this.topicReports.list({ limit }),
+    }
+  }
+
+  async adminTopicReport(id) {
+    if (!this.topicReports) {
+      throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require PostgreSQL migration 067')
+    }
+    const report = await this.topicReports.get(id, { includeOwner: true })
+    assert(report, 404, 'topic_report_not_found', 'Topic report not found')
+    return report
   }
 
   async telegramMonitor(context, resourceName, queryInput) {
@@ -2959,6 +3005,125 @@ export class HubService {
       await this.store.releaseRequest(activeRequestId, 'canonical_search_failed').catch(() => {})
       throw error
     }
+  }
+
+  async createTopicReport(context, { body, idempotencyKey, path }) {
+    if (!this.topicReports) {
+      throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require the PostgreSQL report store')
+    }
+    const key = requiredIdempotencyKey(idempotencyKey)
+    const grants = [...new Set(await this.#effectivePlatformGrants(context))]
+    const allowedPlatforms = grants.filter((platform) => TOPIC_REPORT_PLATFORMS.includes(platform))
+    const input = normalizeTopicReportRequest(body, { allowedPlatforms })
+    const policies = await Promise.all(input.platforms.map((platform) => (
+      this.#effectivePlatformPolicy(context, platform)
+    )))
+    const keyEntitlements = typeof this.store.getApiKeyPlatformEntitlement === 'function'
+      ? await Promise.all(input.platforms.map((platform) => (
+          this.store.getApiKeyPlatformEntitlement(context.apiKey.id, platform)
+        )))
+      : policies
+    const policy = {
+      maxRequests: Math.min(...policies.map((entry) => entry.maxRequests)),
+      windowSeconds: Math.max(...policies.map((entry) => entry.windowSeconds)),
+    }
+    const apiKeyQuota = {
+      maxRequests: Math.min(...keyEntitlements.map((entry) => entry?.maxRequests ?? this.defaultPolicy.maxRequests)),
+      windowSeconds: Math.max(...keyEntitlements.map((entry) => entry?.windowSeconds ?? this.defaultPolicy.windowSeconds)),
+    }
+    const requestId = randomUUID()
+    const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    await this.store.reapStaleReservations()
+    const reservation = await this.store.reserve({
+      requestId,
+      idempotencyKey: key,
+      fingerprint: requestFingerprint({
+        method: 'POST',
+        path,
+        body: {
+          topic: input.topic,
+          language: input.language,
+          range: input.range,
+          ...(input.range === 'custom' ? {
+            rangeStart: input.rangeStart,
+            rangeEnd: input.rangeEnd,
+          } : {}),
+          sourceScope: input.sourceScope,
+          platforms: input.platforms,
+          sampleLimit: input.sampleLimit,
+        },
+      }),
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+      apiKeyId: context.apiKey.id,
+      capability: TOPIC_REPORT_USAGE_SCOPE,
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart,
+      maxRequests: policy.maxRequests,
+      apiKeyQuota,
+      authorizationPlatforms: input.platforms,
+      replayWindowMs: null,
+    })
+    if (reservation.kind === 'conflict') {
+      throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+    }
+    if (reservation.kind === 'in_progress') {
+      throw new AppError(409, 'request_in_progress', 'Request with this Idempotency-Key is in progress', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'unknown') {
+      throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'replay') {
+      return {
+        status: reservation.request.responseStatus,
+        body: reservation.request.responseBody,
+        requestId: reservation.request.id,
+        replay: true,
+      }
+    }
+    const activeRequestId = reservation.request.id
+    let report
+    try {
+      report = await this.topicReports.create(input, {
+        id: activeRequestId,
+        owner: {
+          tenantId: context.tenant.id,
+          consumerId: context.consumer.id,
+          apiKeyId: context.apiKey.id,
+        },
+        createdBy: `consumer:${context.consumer.id}`,
+      })
+    } catch (error) {
+      await this.store.releaseRequest(activeRequestId, 'topic_report_create_failed').catch(() => {})
+      throw error
+    }
+    const responseBody = { data: report }
+    try {
+      await this.store.commitRequest(activeRequestId, {
+        responseStatus: 202,
+        responseBody,
+        unitsActual: 1,
+        upstreamLatencyMs: 0,
+      })
+    } catch (error) {
+      await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
+      throw error
+    }
+    return { status: 202, body: responseBody, requestId: activeRequestId, replay: false }
+  }
+
+  async topicReport(context, id) {
+    if (!this.topicReports) {
+      throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require the PostgreSQL report store')
+    }
+    const report = await this.topicReports.get(id, { consumerId: context.consumer.id })
+    assert(report, 404, 'topic_report_not_found', 'Topic report not found')
+    return report
   }
 
   async #storedPlatformPolicy(context, platform, label) {

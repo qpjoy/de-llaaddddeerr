@@ -419,3 +419,59 @@ No actionable P0, P1 or P2 findings remain.
 - P3: a wider-browser capture can be added to the visual regression set to exercise the three-column Inspector layout directly.
 
 final result: passed
+
+---
+
+# 专题洞察设计 QA
+
+## Visual truth
+
+- Source visual truth: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-05cad5c0-96d1-4c5e-ae97-4a2cadede414.jpg`
+- Browser-rendered implementation: `/private/tmp/mx-topic-insights-desktop-final.png`
+- Mobile form evidence: `/private/tmp/mx-topic-insights-mobile-form.png`
+- Focused comparison: `/private/tmp/mx-topic-comparison.png`
+
+## Viewport and normalization
+
+- Desktop CSS viewport: `1440 x 1000`, device scale factor `1`.
+- Desktop in-app browser capture: `1440 x 791` pixels (visible browser client area).
+- Mobile CSS viewport: `390 x 844`, device scale factor `1`; capture: `390 x 780` pixels.
+- Source pixels: `582 x 746`.
+- Focused implementation form crop: `416 x 585` pixels.
+- Density normalization: the source was proportionally resized to `456 x 585`; the implementation form remained `416 x 585`. Both were compared at the same one-pixel-per-CSS-pixel density and equal height in one `872 x 585` side-by-side image.
+
+## State
+
+- Desktop comparison state: authenticated admin session, light theme, “创建专题报告” selected, empty topic field, default 7-day range, all 13 synchronized sources, Simplified Chinese.
+- Mobile validation covered both “创建专题报告” and “任务进度”, including a queued task and a completed report.
+
+## Comparison evidence
+
+- Full view: the complete desktop page preserves the existing MX Insight Hub shell while placing the reference form hierarchy on the left and report output on the right.
+- Focused region: `/private/tmp/mx-topic-comparison.png` contains the reference and implementation form together. Tab order, topic textarea, character counter, three selectors, primary action, spacing rhythm, and rounded bordered container align structurally.
+- Intentional adaptation: the reference's isolated light form was translated into the existing Hub design tokens, icon set, typography, and responsive shell rather than introducing a second product theme.
+
+## Findings
+
+- P0: none.
+- P1: none.
+- P2: none.
+- P3: the Hub selectors include leading semantic icons and paired labels, so they are denser than the reference. This is consistent with existing Hub controls and improves scanability.
+- No clipping, horizontal overflow, broken navigation, inaccessible primary flow, or console errors were found.
+
+## Primary interactions tested
+
+- Entered a topic and submitted it.
+- Verified automatic switch to “任务进度” and a queued durable task.
+- Opened a completed task and verified executive summary, timeline, associations, dimensions, and evidence.
+- Switched between report creation and progress tabs at desktop and mobile widths.
+- Confirmed the browser console contained zero error-level entries.
+
+## Comparison history
+
+1. Initial full-page capture exposed an in-app browser full-page/sticky-layout capture artifact with duplicated whitespace; this was not present in the visible viewport.
+2. Re-captured the actual visible desktop viewport and cropped the form at 1x density.
+3. Normalized the source and implementation to equal height and compared them in one image. No actionable P0/P1/P2 difference remained, so no post-comparison visual code change was required.
+4. Repeated the core flow at `390 x 844`; responsive navigation, tabs, form, task cards, and report content remained usable.
+
+final result: passed

@@ -39,6 +39,7 @@ import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
 import { PostgresAcquisitionHistoryStore } from './acquisitions/history-store.mjs'
+import { TopicReportStore } from './insights/topic-reports.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -67,6 +68,7 @@ export async function createRuntime(config = loadConfig()) {
     ? createPool(config.common.postgres, { applicationName: 'mx-insight-hub-api' })
     : null
   const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool) : null
+  const topicReports = pool ? new TopicReportStore(pool) : null
   const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
   // Constructed unconditionally; it reports `enabled: false` when no Launcher
   // URL is configured, so the admin-token path is unaffected either way.
@@ -288,6 +290,7 @@ export async function createRuntime(config = loadConfig()) {
       windowMs: config.externalMedia.windowMs,
       maxConcurrency: config.externalMedia.maxConsumerConcurrency,
     },
+    topicReports,
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({
@@ -333,7 +336,7 @@ export async function createRuntime(config = loadConfig()) {
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore,
-    acquisitionHistory,
+    acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
     externalPlatformControlStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
