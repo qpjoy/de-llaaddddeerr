@@ -9,6 +9,7 @@ import {
 import { ExternalPlatformAdminService } from '../../server/external-platforms/admin.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
+import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { AppError } from '../../server/core/errors.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -1784,5 +1785,201 @@ test('an unreleased resource is not reachable through the gateway', async () => 
       path: '/api/v1/data/ecommerce/jd/product-detail',
     }),
     (error) => error.code === 'unsupported_resource',
+  )
+})
+
+test('capabilities report readiness per operation, not one flag for the whole platform', async () => {
+  const state = await fixture({ adapter: { async searchProducts() { assert.fail('unreachable') } } })
+  const store = new MemoryExternalPlatformControlStore()
+  const gateway = new ExternalPlatformGateway({
+    usageStore: state.usageStore,
+    platformStore: state.platformStore,
+    adapter: { async resolveCredential() { return 'configured' } },
+    config: state.gatewayConfig,
+    apiKeyPepper: PEPPER,
+    reservationLeaseMs: 150_000,
+    operationControlStore: store,
+    logger: { warn() {} },
+  })
+
+  const before = await gateway.capabilities({ consumerId: state.consumer.id })
+  assert.equal(before.operations[JUSTONE_OPERATION].ready, true)
+  assert.equal(before.operations['ecommerce.products.detail'].ready, true)
+  assert.ok(before.resources.some((entry) => entry.resourceKey === 'taobao-tmall.product-detail'))
+
+  // Pausing one operation must not report the others as unavailable.
+  const [reviews] = (await store.describeProvider('justone', {
+    config: state.gatewayConfig,
+    credentialConfigured: true,
+  })).filter((operation) => operation.operationKey === 'ecommerce.products.reviews')
+  await store.updatePolicy('justone', 'ecommerce.products.reviews', {
+    desiredState: 'paused',
+    expectedRevision: reviews.revision,
+    reason: 'incident stop for reviews only',
+  }, { actor: 'admin-token', runtime: { config: state.gatewayConfig, credentialConfigured: true } })
+
+  const after = await gateway.capabilities({ consumerId: state.consumer.id })
+  assert.equal(after.operations['ecommerce.products.reviews'].ready, false)
+  assert.equal(after.operations['ecommerce.products.reviews'].effectiveState, 'paused')
+  assert.equal(after.operations['ecommerce.products.detail'].ready, true)
+  assert.equal(after.operations[JUSTONE_OPERATION].ready, true)
+  assert.equal(after.ready, true, 'the platform flag still tracks product search')
+
+  const reviewsResource = after.resources.find((entry) => entry.operation === 'ecommerce.products.reviews')
+  assert.equal(reviewsResource.ready, false)
+})
+
+test('live_only returns the acquisition error instead of an exact stored fallback', async () => {
+  let fail = false
+  let calls = 0
+  const adapter = {
+    async searchProducts(body, options) {
+      calls += 1
+      if (fail) {
+        throw new JustOneRejectedError({
+          outcome: 'rejected', httpStatus: 200, businessCode: 601,
+          billed: false, errorCode: 'upstream_balance_exhausted', retryable: false,
+        })
+      }
+      return successfulResult(body, options)
+    },
+  }
+  const state = await fixture({ adapter, gatewayConfig: config({ freshTtlMs: 1 }) })
+  const body = { marketplace: 'jd', query: 'camera' }
+
+  await state.gateway.search(state.context, {
+    body, idempotencyKey: 'live-only-seed-01', path: '/api/v1/data/ecommerce/products/search',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 3))
+  fail = true
+
+  // refresh keeps the existing behaviour: a stored snapshot rescues the caller.
+  const fellBack = await state.gateway.search(state.context, {
+    body: { ...body, deliveryMode: 'refresh' },
+    idempotencyKey: 'live-only-refresh-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.equal(fellBack.sourceMode, 'stored_fallback')
+
+  // live_only refuses that rescue and surfaces the acquisition failure.
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { ...body, deliveryMode: 'live_only' },
+      idempotencyKey: 'live-only-strict-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error.code === 'external_platform_capacity_unavailable',
+  )
+  assert.equal(calls, 3, 'live_only still attempts exactly one upstream call')
+})
+
+test('a live_only failure is replayed as the same failure, never as the snapshot', async () => {
+  let fail = false
+  const adapter = {
+    async searchProducts(body, options) {
+      if (fail) {
+        throw new JustOneRejectedError({
+          outcome: 'rejected', httpStatus: 200, businessCode: 601,
+          billed: false, errorCode: 'upstream_balance_exhausted', retryable: false,
+        })
+      }
+      return successfulResult(body, options)
+    },
+  }
+  const state = await fixture({ adapter, gatewayConfig: config({ freshTtlMs: 1 }) })
+  const body = { marketplace: 'jd', query: 'camera' }
+
+  await state.gateway.search(state.context, {
+    body, idempotencyKey: 'replay-seed-01', path: '/api/v1/data/ecommerce/products/search',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 3))
+  fail = true
+
+  const request = {
+    body: { ...body, deliveryMode: 'live_only' },
+    idempotencyKey: 'replay-strict-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  }
+  await assert.rejects(() => state.gateway.search(state.context, request), (error) => (
+    error.code === 'external_platform_capacity_unavailable'
+  ))
+  // Replaying the committed delivery must reproduce what the caller actually
+  // received. A stored fallback recorded here would contradict the original.
+  await assert.rejects(() => state.gateway.search(state.context, request), (error) => (
+    error.code === 'external_platform_capacity_unavailable'
+  ))
+})
+
+test('live_only never serves a fresh snapshot and requires an idempotency key', async () => {
+  let calls = 0
+  const adapter = {
+    async searchProducts(body, options) {
+      calls += 1
+      return successfulResult(body, options)
+    },
+  }
+  const state = await fixture({ adapter })
+  const body = { marketplace: 'jd', query: 'camera' }
+
+  await state.gateway.search(state.context, {
+    body, idempotencyKey: 'fresh-seed-01', path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.equal(calls, 1)
+
+  // cache_first would reuse the still-fresh snapshot here; live_only does not.
+  const live = await state.gateway.search(state.context, {
+    body: { ...body, deliveryMode: 'live_only' },
+    idempotencyKey: 'fresh-strict-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(live.body.meta.reason.code, 'live')
+  assert.equal(calls, 2, 'live_only bypassed the fresh snapshot')
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { ...body, deliveryMode: 'live_only' },
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error.code === 'idempotency_key_required',
+  )
+})
+
+test('live_only surfaces a control-plane block instead of quietly serving stored data', async () => {
+  const adapter = {
+    async searchProducts(body, options) { return successfulResult(body, options) },
+  }
+  const state = await fixture({ adapter })
+  const body = { marketplace: 'jd', query: 'camera' }
+  await state.gateway.search(state.context, {
+    body, idempotencyKey: 'blocked-seed-01', path: '/api/v1/data/ecommerce/products/search',
+  })
+
+  // A gateway whose provider credential is unusable would normally fall back.
+  const blocked = new ExternalPlatformGateway({
+    usageStore: state.usageStore,
+    platformStore: state.platformStore,
+    adapter: null,
+    config: state.gatewayConfig,
+    apiKeyPepper: PEPPER,
+    reservationLeaseMs: 150_000,
+    logger: { warn() {} },
+  })
+
+  const fallback = await blocked.search(state.context, {
+    body: { ...body, deliveryMode: 'refresh' },
+    idempotencyKey: 'blocked-refresh-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.equal(fallback.sourceMode, 'stored_fallback')
+  assert.equal(fallback.body.meta.reason.code, 'provider_not_configured')
+
+  await assert.rejects(
+    () => blocked.search(state.context, {
+      body: { ...body, deliveryMode: 'live_only' },
+      idempotencyKey: 'blocked-strict-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error.code === 'external_platform_not_configured',
   )
 })

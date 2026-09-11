@@ -1206,3 +1206,78 @@ test('platform-shaped GET rejects missing auth, Test keys, missing grants, and i
     await close(server)
   }
 })
+
+test('live_only refuses a stored fallback on the Xiaohongshu note contract', async () => {
+  let upstreamCalls = 0
+  const state = await gatewayFixture({
+    config: gatewayConfig({ maxRequestsPerMinute: 1 }),
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return jsonResponse(successEnvelope())
+    },
+  })
+  await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl() },
+    idempotencyKey: 'tikhub-live-warm-01',
+    path: POST_PATH,
+  })
+  assert.equal(upstreamCalls, 1)
+
+  // The provider rate limit is now exhausted. refresh rescues the caller from
+  // the stored snapshot; live_only reports that it could not read upstream.
+  const fallback = await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'refresh' },
+    idempotencyKey: 'tikhub-live-refresh-01',
+    path: POST_PATH,
+  })
+  assert.equal(fallback.sourceMode, 'stored_fallback')
+  assert.equal(fallback.body.meta.reason.code, 'provider_rate_limit')
+  assert.equal(fallback.body.meta.reason.degraded, true)
+
+  const strict = await captureError(() => state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'live_only' },
+    idempotencyKey: 'tikhub-live-strict-01',
+    path: POST_PATH,
+  }))
+  assert.equal(strict.code, 'external_platform_rate_limited')
+  assert.equal(upstreamCalls, 1, 'no extra upstream call was made')
+})
+
+test('live_only bypasses a fresh Xiaohongshu snapshot and requires an idempotency key', async () => {
+  let upstreamCalls = 0
+  const state = await gatewayFixture({
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return jsonResponse(successEnvelope())
+    },
+  })
+  await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl() },
+    idempotencyKey: 'tikhub-fresh-warm-01',
+    path: POST_PATH,
+  })
+  assert.equal(upstreamCalls, 1)
+
+  // cache_first would reuse the still-fresh snapshot here; live_only does not.
+  const live = await state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'live_only' },
+    idempotencyKey: 'tikhub-fresh-strict-01',
+    path: POST_PATH,
+  })
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(live.body.meta.reason.code, 'live')
+  assert.equal(upstreamCalls, 2)
+
+  const missingKey = await captureError(() => state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'live_only' },
+    path: POST_PATH,
+  }))
+  assert.equal(missingKey.code, 'idempotency_key_required')
+
+  const badMode = await captureError(() => state.gateway.getPost(state.context, {
+    body: { platform: 'xiaohongshu', url: noteUrl(), deliveryMode: 'live' },
+    idempotencyKey: 'tikhub-fresh-bad-01',
+    path: POST_PATH,
+  }))
+  assert.equal(badMode.code, 'invalid_delivery_mode')
+})

@@ -90,7 +90,7 @@ test('provider-neutral request maps only reviewed marketplace parameters', () =>
   assert.equal(taobao.endpointContractVersion, 'justone.product-search.v2')
   assert.equal(taobao.fingerprintBody.page, 2)
   assert.equal(taobao.deliveryMode, 'cache_first')
-  assert.deepEqual(ECOMMERCE_DELIVERY_MODES, ['cache_only', 'cache_first', 'refresh'])
+  assert.deepEqual(ECOMMERCE_DELIVERY_MODES, ['cache_only', 'cache_first', 'refresh', 'live_only'])
 
   const cacheOnly = normalizeJustOneProductSearchRequest({
     marketplace: 'taobao', query: '焕颜有方', deliveryMode: 'cache_only',
@@ -557,8 +557,8 @@ test('upstream request identifiers are read only from the scrubbed bounded envel
 })
 
 test('all required non-zero business codes have stable, never-auto-retry classifications', () => {
-  assert.deepEqual(Object.keys(JUSTONE_BUSINESS_CODES).map(Number), [100, 202, 301, 302, 303, 400, 500, 600, 601, 602])
-  for (const code of [100, 202, 301, 302, 303, 400, 500, 600, 601, 602]) {
+  assert.deepEqual(Object.keys(JUSTONE_BUSINESS_CODES).map(Number), [100, 301, 302, 303, 400, 500, 600, 601, 602])
+  for (const code of [100, 301, 302, 303, 400, 500, 600, 601, 602]) {
     const classification = classifyJustOneBusinessCode(code)
     assert.equal(classification.businessCode, code)
     assert.equal(classification.retryable, false)
@@ -566,8 +566,10 @@ test('all required non-zero business codes have stable, never-auto-retry classif
   }
   // The provider's OpenAPI enum is wider than its documented table. An
   // undocumented code must stay unknown-but-safe rather than borrow a
-  // neighbouring code's retry semantics.
-  for (const code of [101, 300, 404, 503]) {
+  // neighbouring code's retry semantics. 202 is deliberately in this list:
+  // two in-house sources give it contradictory meanings and the provider
+  // documents neither.
+  for (const code of [101, 202, 300, 404, 503]) {
     const classification = classifyJustOneBusinessCode(code)
     assert.equal(classification.category, 'unknown')
     assert.equal(classification.errorCode, 'upstream_business_error')

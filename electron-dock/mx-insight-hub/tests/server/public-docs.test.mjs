@@ -265,7 +265,7 @@ function assertExternalCommerceContract(document) {
     'taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu',
   ])
   assert.equal(request.properties.query.maxLength, 200)
-  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh'])
+  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh', 'live_only'])
   assert.equal(request.properties.deliveryMode.default, 'cache_first')
   assert.equal(request.properties.page.default, 1)
   assert.equal(request.properties.page.maximum, 1000)
@@ -368,7 +368,7 @@ function assertExternalCommerceContract(document) {
     'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay',
   ])
   assert.deepEqual(platformProperties.deliveryModes.items.enum, [
-    'cache_only', 'cache_first', 'refresh',
+    'cache_only', 'cache_first', 'refresh', 'live_only',
   ])
   const ecommerce = capabilitiesContent.example.data.platforms
     .find(({ platform }) => platform === 'ecommerce')
@@ -382,7 +382,7 @@ function assertExternalCommerceContract(document) {
     marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
     pagination: 'opaque_cursor',
     idempotencyKey: 'optional',
-    deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+    deliveryModes: ['cache_only', 'cache_first', 'refresh', 'live_only'],
     freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
   })
 }
@@ -530,7 +530,7 @@ function assertExternalSocialPostContract(document) {
     }
   }
   assert.match(compatibilityGet.parameters[0].schema.pattern, /\{24\}/u)
-  assert.deepEqual(compatibilityGet.parameters[2].schema.enum, ['cache_only', 'cache_first', 'refresh'])
+  assert.deepEqual(compatibilityGet.parameters[2].schema.enum, ['cache_only', 'cache_first', 'refresh', 'live_only'])
   for (const operation of [canonical, platformPost]) {
     assert.deepEqual(operation.parameters.map(({ name }) => name), [
       'Idempotency-Key', 'X-MX-Insight-Retry-Of',
@@ -559,7 +559,7 @@ function assertExternalSocialPostContract(document) {
   assert.deepEqual(request.required, ['platform', 'url'])
   assert.deepEqual(Object.keys(request.properties), ['platform', 'url', 'deliveryMode'])
   assert.equal(request.properties.platform.const, 'xiaohongshu')
-  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh'])
+  assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh', 'live_only'])
   assert.equal(compatibilityRequest.additionalProperties, false)
   assert.deepEqual(compatibilityRequest.required, ['url'])
   assert.equal(post.additionalProperties, false)
@@ -629,7 +629,7 @@ function assertExternalSocialPostContract(document) {
   assert.equal(xiaohongshu.postDetail.contractVersion, 'mx-insight-hub.social-post.v1')
   assert.equal(xiaohongshu.postDetail.servingMode, 'live_with_stored_fallback')
   assert.deepEqual(xiaohongshu.postDetail.deliveryModes, [
-    'cache_only', 'cache_first', 'refresh',
+    'cache_only', 'cache_first', 'refresh', 'live_only',
   ])
   assert.deepEqual(
     capabilitiesContent.example.data.capabilities.find(
@@ -1810,6 +1810,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/public-opinion/regions',
       '/data/public-opinion/regions/{regionCode}/items',
       '/data/search',
+      '/data/social/accounts/search',
       '/data/source-catalog',
       '/data/source-catalog/metadata',
       '/data/source-catalog/{id}',

@@ -7,9 +7,16 @@ import {
   normalizeJustOneProductSearchRequest,
 } from '../contracts/justone.mjs'
 import {
+  JUSTONE_RELEASED_RESOURCES,
   JUSTONE_RESOURCE_CATALOG,
   normalizeJustOneResourceRequest,
 } from '../contracts/justone-resources.mjs'
+import {
+  SOCIAL_ACCOUNT_AUTHORIZATION_PLATFORM,
+  SOCIAL_ACCOUNT_SEARCH_OPERATION,
+  SocialAccountContractError,
+  normalizeSocialAccountSearchRequest,
+} from '../contracts/social-accounts.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createExternalPlatformCursorCodec } from './cursor.mjs'
@@ -242,9 +249,15 @@ export class ExternalPlatformGateway {
     reservationLeaseMs,
     operationControlStore = null,
     credentialStore = null,
+    // Everything in this class is provider-shaped rather than provider-specific:
+    // the adapter, config, stores and credential all arrive by injection. The
+    // provider key is the last constant, so naming it here lets a second vendor
+    // reuse this orchestration instead of growing a parallel copy of it.
+    providerKey = 'justone',
     defaultPolicy = DEFAULT_POLICY,
     logger = console,
   }) {
+    this.providerKey = providerKey
     this.usageStore = usageStore
     this.platformStore = platformStore
     this.adapter = adapter
@@ -282,7 +295,7 @@ export class ExternalPlatformGateway {
     let credentialSnapshot = null
     if (typeof this.credentialStore?.readCredentialSnapshot === 'function') {
       try {
-        credentialSnapshot = await this.credentialStore.readCredentialSnapshot('justone')
+        credentialSnapshot = await this.credentialStore.readCredentialSnapshot(this.providerKey)
         if (credentialSnapshot.source === 'database') {
           return {
             ready: Boolean(credentialSnapshot.apiKey),
@@ -316,19 +329,30 @@ export class ExternalPlatformGateway {
       ? credentialConfigured
       : (await this.#resolvedCredential()).ready
     let ready = credentialReady
+    // Operations under this platform are gated and priced independently, so one
+    // platform-level flag cannot answer "may I call this". Each operation gets
+    // its own row; the platform flag stays product search's readiness for
+    // backward compatibility, and callers check the row that matches the call
+    // they are about to make.
+    let operationReadiness = {}
     if (this.operationControlStore) {
       try {
-        const operations = await this.operationControlStore.describeProvider('justone', {
+        const operations = await this.operationControlStore.describeProvider(this.providerKey, {
           config: this.config,
           credentialConfigured: credentialReady,
         })
-        ready = operationReadyForConsumer(
-          operations.find((operation) => operation.operationKey === JUSTONE_OPERATION),
-          consumerId,
-        )
+        operationReadiness = Object.fromEntries(operations.map((operation) => [
+          operation.operationKey,
+          {
+            ready: credentialReady && operationReadyForConsumer(operation, consumerId),
+            effectiveState: operation.effectiveState,
+          },
+        ]))
+        ready = operationReadiness[JUSTONE_OPERATION]?.ready ?? false
       } catch {
         this.logger?.warn?.('[external-platform] JustOne operation readiness is unavailable')
         ready = false
+        operationReadiness = {}
       }
     }
     return {
@@ -338,6 +362,18 @@ export class ExternalPlatformGateway {
       servingMode: 'live_with_stored_fallback',
       contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
       capabilities: ['product_search'],
+      operations: operationReadiness,
+      // Platform-shaped resources are advertised separately from the
+      // normalized product-search contract so a caller can tell which of the
+      // two layers it is looking at.
+      resources: JUSTONE_RELEASED_RESOURCES.map((resource) => ({
+        resourceKey: resource.resourceKey,
+        operation: resource.operationKey,
+        path: resource.hubPath,
+        versions: [...resource.versions],
+        defaultVersion: resource.defaultVersion,
+        ready: operationReadiness[resource.operationKey]?.ready ?? false,
+      })),
       marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
       pagination: 'opaque_cursor',
       idempotencyKey: 'optional',
@@ -387,7 +423,30 @@ export class ExternalPlatformGateway {
     })
   }
 
+  // Keyword account search for the platforms this provider serves. The other
+  // two platforms in this contract are served by TikHub and dispatch through
+  // that gateway; the contract, canonical records and dataset are shared.
+  async searchAccounts(context, { body, idempotencyKey, retryOfRequestId, path }) {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
+      operation: SOCIAL_ACCOUNT_SEARCH_OPERATION,
+      authorizationPlatform: SOCIAL_ACCOUNT_AUTHORIZATION_PLATFORM,
+      capabilityMessage: 'Social account search is not granted for this API key',
+      normalize: () => normalizeSocialAccountSearchRequest(body, {
+        deliveryModes: ECOMMERCE_DELIVERY_MODES,
+      }),
+      dispatch: ({ credential }) => this.adapter.searchAccounts(body, {
+        deliveryModes: ECOMMERCE_DELIVERY_MODES,
+        ...credential,
+      }),
+    })
+  }
+
   async #deliver(context, { body, idempotencyKey, retryOfRequestId, path }, plan) {
+    // Operations under this provider do not all sit in the same data domain:
+    // product search is `ecommerce`, account search is `social`. Grants, quota
+    // policy, key entitlement and usage scope all follow the operation's own
+    // domain rather than one provider-wide constant.
+    const authorizationPlatform = plan.authorizationPlatform || AUTHORIZATION_PLATFORM
     let durableRequestId = null
     let ownsReservation = false
     try {
@@ -409,7 +468,7 @@ export class ExternalPlatformGateway {
     const grants = typeof this.usageStore.listEffectiveGrants === 'function'
       ? await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
       : await this.usageStore.listGrants(context.consumer.id)
-    if (!grants.includes(AUTHORIZATION_PLATFORM)) {
+    if (!grants.includes(authorizationPlatform)) {
       throw new AppError(403, 'platform_not_granted', 'E-commerce data is not granted')
     }
     const capabilityGrants = typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
@@ -420,10 +479,10 @@ export class ExternalPlatformGateway {
     }
     const consumerPolicy = {
       ...this.defaultPolicy,
-      ...((await this.usageStore.getPolicy(context.consumer.id, AUTHORIZATION_PLATFORM)) || {}),
+      ...((await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform)) || {}),
     }
     const keyEntitlement = typeof this.usageStore.getApiKeyPlatformEntitlement === 'function'
-      ? await this.usageStore.getApiKeyPlatformEntitlement(context.apiKey.id, AUTHORIZATION_PLATFORM)
+      ? await this.usageStore.getApiKeyPlatformEntitlement(context.apiKey.id, authorizationPlatform)
       : null
     const policy = {
       ...consumerPolicy,
@@ -436,7 +495,10 @@ export class ExternalPlatformGateway {
     try {
       normalized = plan.normalize({ body, policy, codec })
     } catch (error) {
-      if (error instanceof JustOneContractError) {
+      // Every request contract dispatched through this path reports a caller
+      // mistake as a 400. A contract added later that is not listed here would
+      // surface as a 500, so the check names the family rather than one class.
+      if (error instanceof JustOneContractError || error instanceof SocialAccountContractError) {
         throw new AppError(400, error.code, error.message)
       }
       throw error
@@ -451,11 +513,11 @@ export class ExternalPlatformGateway {
     if (suppliedKey && (typeof idempotencyKey !== 'string' || !IDEMPOTENCY_PATTERN.test(idempotencyKey))) {
       throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8-128 safe characters')
     }
-    if (normalized.deliveryMode === 'refresh' && !suppliedKey) {
+    if (['refresh', 'live_only'].includes(normalized.deliveryMode) && !suppliedKey) {
       throw new AppError(
         400,
         'idempotency_key_required',
-        'Idempotency-Key is required when deliveryMode is refresh',
+        `Idempotency-Key is required when deliveryMode is ${normalized.deliveryMode}`,
       )
     }
     await this.usageStore.reapStaleReservations()
@@ -479,7 +541,7 @@ export class ExternalPlatformGateway {
       if (
         !previous
         || previous.status !== 'unknown'
-        || previous.platform !== AUTHORIZATION_PLATFORM
+        || previous.platform !== authorizationPlatform
         || previous.fingerprint !== requestFingerprint
         || previous.idempotencyKey === idempotencyKey
       ) {
@@ -503,10 +565,10 @@ export class ExternalPlatformGateway {
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
-      platform: AUTHORIZATION_PLATFORM,
+      platform: authorizationPlatform,
       meterKey: plan.operation,
       requiredAuthorizationScopes: [
-        { type: 'platform', key: AUTHORIZATION_PLATFORM },
+        { type: 'platform', key: authorizationPlatform },
         { type: 'capability', key: plan.operation },
       ],
       unitsReserved: 1,
@@ -590,6 +652,10 @@ export class ExternalPlatformGateway {
       operation: plan.operation,
       fingerprint: requestFingerprint,
     }, now)
+    // `live_only` asks for a fresh upstream read or an explanation, never stored
+    // data. Each fallback below therefore asks whether serving stored data is
+    // permitted, not merely whether a snapshot happens to exist.
+    const allowStoredFallback = normalized.deliveryMode !== 'live_only'
     const snapshotIsFresh = snapshot && new Date(snapshot.freshUntil) >= now
     if (
       snapshot
@@ -628,7 +694,7 @@ export class ExternalPlatformGateway {
       throw new AppError(404, 'stored_snapshot_not_found', 'No stored result matches this request')
     }
 
-    const state = await this.platformStore.providerState('justone')
+    const state = await this.platformStore.providerState(this.providerKey)
     const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
     const resolvedCredential = circuitOpen
       ? { ready: Boolean(this.adapter), credential: null, revision: null }
@@ -641,7 +707,7 @@ export class ExternalPlatformGateway {
         // boundary: cache delivery remains available while a provider is
         // paused, and an admitted in-flight call keeps this immutable revision.
         operationControl = await this.operationControlStore.authorizeDispatch(
-          'justone',
+          this.providerKey,
           plan.operation,
           {
             consumerId: context.consumer.id,
@@ -655,7 +721,7 @@ export class ExternalPlatformGateway {
       }
     }
     if (!resolvedCredential.ready || circuitOpen || operationControlError) {
-      if (snapshot) {
+      if (allowStoredFallback && snapshot) {
         const reason = operationControlError?.code
           || (!resolvedCredential.ready ? 'provider_not_configured' : 'provider_circuit_open')
         // A silently degraded delivery is the hardest state to triage, so the
@@ -722,7 +788,7 @@ export class ExternalPlatformGateway {
           operation: plan.operation,
           fingerprint: requestFingerprint,
         }, new Date())
-        if (snapshot && new Date(snapshot.freshUntil) >= new Date()) {
+        if (allowStoredFallback && snapshot && new Date(snapshot.freshUntil) >= new Date()) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
             sourceMode: 'fresh_cache',
@@ -745,7 +811,7 @@ export class ExternalPlatformGateway {
           && ['unknown', 'succeeded_unusable'].includes(lease.reason)
           ? lease.reason
           : null
-        if (blockedOutcome && snapshot) {
+        if (allowStoredFallback && blockedOutcome && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
             sourceMode: 'stored_fallback',
@@ -796,7 +862,7 @@ export class ExternalPlatformGateway {
       // Equal requests suppressed by the shared lease must not crowd out a
       // different customer query before they return their 409/cache result.
       if (!this.#enter(context.consumer.id)) {
-        if (snapshot) {
+        if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
             sourceMode: 'stored_fallback',
@@ -854,7 +920,7 @@ export class ExternalPlatformGateway {
           })
         : { allowed: true, retryAfterMs: 0 }
       if (!rateLimit.allowed) {
-        if (snapshot) {
+        if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
             sourceMode: 'stored_fallback',
@@ -961,7 +1027,7 @@ export class ExternalPlatformGateway {
           ingestJob: {
             payload: {
               kind: 'external-platform-result',
-              providerKey: 'justone',
+              providerKey: this.providerKey,
               datasetId: 'ecommerce.products.v1',
               platform: 'ecommerce',
               requestId: activeRequestId,
@@ -999,11 +1065,16 @@ export class ExternalPlatformGateway {
           restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           archiveObjects: error.archiveObjects,
         }
-        const fallbackBody = snapshot
-          ? deliveryBody(snapshot.responseBody, {
+        // Under live_only the caller receives the error, so the durable delivery
+        // evidence must record the error too. Recording a fallback the caller
+        // never saw would make a later idempotent replay contradict the
+        // original response.
+        const deliverableSnapshot = allowStoredFallback ? snapshot : null
+        const fallbackBody = deliverableSnapshot
+          ? deliveryBody(deliverableSnapshot.responseBody, {
               requestId: activeRequestId,
               sourceMode: 'stored_fallback',
-              capturedAt: snapshot.capturedAt,
+              capturedAt: deliverableSnapshot.capturedAt,
               fallbackReason: evidence.errorCode,
             })
           : null
@@ -1028,16 +1099,16 @@ export class ExternalPlatformGateway {
           upstreamEvidence: persistedEvidence.upstreamEvidence,
           restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           archiveObjects: error.archiveObjects,
-          snapshot,
+          snapshot: deliverableSnapshot,
           fallbackResponseBody: fallbackBody,
         })
         callSettled = true
-        if (snapshot) {
+        if (deliverableSnapshot) {
           return resultFromBody(fallbackBody, {
             requestId: activeRequestId,
             replay: false,
             sourceMode: 'stored_fallback',
-            capturedAt: snapshot.capturedAt,
+            capturedAt: deliverableSnapshot.capturedAt,
           })
         }
         throw mappedError

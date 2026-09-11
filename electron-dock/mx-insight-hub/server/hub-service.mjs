@@ -20,6 +20,7 @@ import { XIAOHONGSHU_CRAWL_OPERATION } from './contracts/tikhub-xiaohongshu-user
 import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY } from './contracts/tikhub-xiaohongshu-official.mjs'
 import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
+import { SOCIAL_ACCOUNT_SEARCH_OPERATION } from './contracts/social-accounts.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -242,6 +243,7 @@ const PUBLIC_CAPABILITIES = new Set([
   // key granted product search never gains a paid detail or reviews call with
   // it. The list is derived from the registry rather than restated here.
   ...JUSTONE_RESOURCE_OPERATION_KEYS,
+  SOCIAL_ACCOUNT_SEARCH_OPERATION,
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
@@ -1021,6 +1023,12 @@ export class HubService {
           capability: JUSTONE_OPERATION,
           ready: providerOperationReady(ecommerceSearch, JUSTONE_OPERATION),
         },
+        // Each platform-shaped resource family is separately gated and priced,
+        // so it reports its own readiness instead of inheriting the search row.
+        ...JUSTONE_RESOURCE_OPERATION_KEYS.map((operationKey) => ({
+          capability: operationKey,
+          ready: providerOperationReady(ecommerceSearch, operationKey),
+        })),
       ],
     }
   }

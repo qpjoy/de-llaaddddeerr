@@ -133,11 +133,35 @@ export async function createRuntime(config = loadConfig()) {
     pool,
     environmentConfigured: Boolean(config.justOne.configured),
   })
+  // Account search is served by the same provider but sits in its own data
+  // domain, and a platform store is scoped to one authorization domain by
+  // construction. It therefore gets its own store and gateway, exactly as the
+  // TikHub domain does, rather than borrowing the ecommerce scope.
+  const socialAccountPlatformStore = createExternalPlatformStore({
+    pool,
+    usageStore: store,
+    authorizationPlatform: 'social',
+    circuitFailureThreshold: config.justOne.circuitFailureThreshold,
+    circuitOpenMs: config.justOne.circuitOpenMs,
+    uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
+  })
   const tikHubPlatformStore = createExternalPlatformStore({
     pool,
     usageStore: store,
     providerKey: 'tikhub',
     authorizationPlatform: 'xiaohongshu',
+    circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
+    circuitOpenMs: config.tikHub.circuitOpenMs,
+    uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
+  })
+  // The other half of the account-search platforms is served by this vendor.
+  // Same authorization domain, same contract and dataset; a separate store only
+  // because a platform store is scoped to one provider and one domain.
+  const socialAccountTikHubStore = createExternalPlatformStore({
+    pool,
+    usageStore: store,
+    providerKey: 'tikhub',
+    authorizationPlatform: 'social',
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
     uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
@@ -201,6 +225,27 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: config.reservationLeaseMs,
     operationControlStore: externalPlatformControlStore,
     credentialStore: externalPlatformCredentialStore,
+  })
+  const socialAccountGateway = new ExternalPlatformGateway({
+    usageStore: store,
+    platformStore: socialAccountPlatformStore,
+    adapter: justOneAdapter,
+    config: config.justOne,
+    apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore,
+    credentialStore: externalPlatformCredentialStore,
+  })
+  const socialAccountTikHubGateway = new ExternalPlatformGateway({
+    usageStore: store,
+    platformStore: socialAccountTikHubStore,
+    adapter: tikHubAdapter,
+    config: config.tikHub,
+    providerKey: 'tikhub',
+    apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore,
+    credentialStore: tikHubCredentialStore,
   })
   const tikHubGateway = new TikHubGateway({
     usageStore: store,
@@ -321,6 +366,8 @@ export async function createRuntime(config = loadConfig()) {
     embedding,
     externalPlatformAdmin,
     externalPlatformGateway,
+    socialAccountGateway,
+    socialAccountTikHubGateway,
     tikHubGateway,
     acquisitionHistory,
     segmenterConfig: config.common.segmenter,

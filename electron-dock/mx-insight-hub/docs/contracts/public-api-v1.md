@@ -474,6 +474,24 @@ The response is provider-neutral:
 - `idempotent_replay`: the committed result for the same caller `Idempotency-Key`, path, and
   body was replayed without another external call.
 
+### `live_only`
+
+`deliveryMode: live_only` is the counterpart of `cache_only`: it never serves
+stored data. It bypasses a fresh snapshot, attempts acquisition, and returns the
+matching error when acquisition cannot complete — including upstream failure,
+concurrency protection, provider rate limiting, an open circuit and a blocked
+operation. Like `refresh` it requires a caller-supplied `Idempotency-Key`.
+
+`refresh` and `live_only` differ in exactly one respect: when a live read is not
+possible, `refresh` delivers an exact stored snapshot labelled `stored_fallback`
+while `live_only` raises the error. Use `live_only` when a caller composing its
+own product must know that it did not get fresh data; use `refresh` when having
+some data matters more.
+
+A committed `live_only` failure is durable: replaying the same
+`Idempotency-Key` reproduces that error rather than the snapshot, because the
+delivery evidence records what the caller actually received.
+
 ### `meta.reason`
 
 `sourceMode` says what was served; `meta.reason` says why, and it is present on

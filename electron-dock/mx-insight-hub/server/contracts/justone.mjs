@@ -11,7 +11,13 @@ export const JUSTONE_OPERATION = 'ecommerce.products.search'
 // are endpoint-scoped so fixing one marketplace cannot unlock another.
 export const JUSTONE_CONTRACT_VERSION = 'justone.product-search.v1'
 export const ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION = 'mx-insight-hub.ecommerce-products.v1'
-export const ECOMMERCE_DELIVERY_MODES = Object.freeze(['cache_only', 'cache_first', 'refresh'])
+// `live_only` is the counterpart of `cache_only`: it never serves stored data.
+// `refresh` still falls back to an exact snapshot when acquisition fails, which
+// is the right default for a data product but wrong for a caller composing its
+// own product, who needs to know that it did not get a fresh read.
+export const ECOMMERCE_DELIVERY_MODES = Object.freeze([
+  'cache_only', 'cache_first', 'refresh', 'live_only',
+])
 
 export const JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION = 'justone.product-search.v2'
 // Hub request contracts whose dispatches produce provider-call evidence. Kept
@@ -19,6 +25,7 @@ export const JUSTONE_TAOBAO_TMALL_CONTRACT_VERSION = 'justone.product-search.v2'
 const JUSTONE_EVIDENCE_CONTRACT_VERSIONS = new Set([
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
   'mx-insight-hub.ecommerce-resource.v1',
+  'mx-insight-hub.social-accounts.v1',
 ])
 
 const MAX_QUERY_LENGTH = 200
@@ -127,13 +134,6 @@ export const JUSTONE_SUPPORTED_MARKETPLACES = Object.freeze(Object.keys(JUSTONE_
 
 export const JUSTONE_BUSINESS_CODES = Object.freeze({
   100: Object.freeze({ category: 'authentication', errorCode: 'upstream_auth_invalid' }),
-  // Undocumented in the provider's public guide but observed in production by
-  // the reference collector: the item exists yet this endpoint version cannot
-  // serve it. It is a permanent per-item condition, not a transient failure, so
-  // naming it keeps callers from reading it as "retry later". The provider's
-  // OpenAPI enum also lists 101, 300, 404 and 503; those have no attested
-  // meaning, so they stay `unknown` rather than being guessed at.
-  202: Object.freeze({ category: 'unsupported_item', errorCode: 'upstream_item_unsupported' }),
   301: Object.freeze({ category: 'collection', errorCode: 'upstream_collection_failed' }),
   302: Object.freeze({ category: 'rate_limit', errorCode: 'upstream_rate_limited' }),
   303: Object.freeze({ category: 'quota', errorCode: 'upstream_daily_quota_exceeded' }),
@@ -143,6 +143,17 @@ export const JUSTONE_BUSINESS_CODES = Object.freeze({
   601: Object.freeze({ category: 'balance', errorCode: 'upstream_balance_exhausted' }),
   602: Object.freeze({ category: 'quota', errorCode: 'upstream_token_limit_exceeded' }),
 })
+
+// The provider's OpenAPI enum is wider than its documented table: it also lists
+// 101, 202, 300, 404 and 503. None of those is classified here.
+//
+// 202 in particular has two conflicting in-house readings -- one internal
+// collector treats it as "this item does not support this endpoint", another
+// integration document as "token invalid" -- and the provider's own usage guide
+// documents neither, while attributing "token invalid" to 100. Guessing between
+// those would send triage in opposite directions, so an unattested code stays
+// `unknown`, which is already never auto-retried. Classify one only when the
+// provider states its meaning.
 
 export class JustOneContractError extends Error {
   constructor(code, message) {
@@ -273,7 +284,7 @@ function normalizedDeliveryMode(value) {
   if (typeof value !== 'string' || !ECOMMERCE_DELIVERY_MODES.includes(value)) {
     throw new JustOneContractError(
       'invalid_delivery_mode',
-      'deliveryMode must be cache_only, cache_first or refresh',
+      `deliveryMode must be one of ${ECOMMERCE_DELIVERY_MODES.join(', ')}`,
     )
   }
   return value

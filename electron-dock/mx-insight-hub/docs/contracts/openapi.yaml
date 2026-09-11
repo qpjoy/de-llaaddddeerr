@@ -1748,7 +1748,7 @@ paths:
                             idempotencyKey: { type: string, enum: [optional] }
                             deliveryModes:
                               type: array
-                              items: { type: string, enum: [cache_only, cache_first, refresh] }
+                              items: { type: string, enum: [cache_only, cache_first, refresh, live_only] }
                             freshnessModes:
                               type: array
                               items: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
@@ -1765,7 +1765,7 @@ paths:
                                 input: { type: string, const: official_note_url }
                                 deliveryModes:
                                   type: array
-                                  items: { type: string, enum: [cache_only, cache_first, refresh] }
+                                  items: { type: string, enum: [cache_only, cache_first, refresh, live_only] }
                             search:
                               type: object
                               additionalProperties: false
@@ -1879,7 +1879,7 @@ paths:
                       marketplaces: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
                       pagination: opaque_cursor
                       idempotencyKey: optional
-                      deliveryModes: [cache_only, cache_first, refresh]
+                      deliveryModes: [cache_only, cache_first, refresh, live_only]
                       freshnessModes: [live, fresh_cache, stored_fallback, idempotent_replay]
                     - platform: xiaohongshu
                       ready: true
@@ -1895,7 +1895,7 @@ paths:
                         servingMode: live_with_stored_fallback
                         contractVersion: mx-insight-hub.social-post.v1
                         input: official_note_url
-                        deliveryModes: [cache_only, cache_first, refresh]
+                        deliveryModes: [cache_only, cache_first, refresh, live_only]
                     - platform: twitter
                       ready: true
                   legacySearch:
@@ -2310,7 +2310,7 @@ paths:
           in: query
           required: false
           description: Hub delivery policy. refresh permits one new acquisition and requires Idempotency-Key.
-          schema: { type: string, enum: [cache_only, cache_first, refresh], default: cache_first }
+          schema: { type: string, enum: [cache_only, cache_first, refresh, live_only], default: cache_first }
         - name: Idempotency-Key
           in: header
           required: false
@@ -6894,7 +6894,7 @@ components:
         query: { type: string, minLength: 1, maxLength: 200 }
         deliveryMode:
           type: string
-          enum: [cache_only, cache_first, refresh]
+          enum: [cache_only, cache_first, refresh, live_only]
           default: cache_first
           description: >-
             cache_only reads only an exact Hub snapshot and never dispatches
@@ -7058,7 +7058,7 @@ components:
             Credentials, ports and fragments are rejected.
         deliveryMode:
           type: string
-          enum: [cache_only, cache_first, refresh]
+          enum: [cache_only, cache_first, refresh, live_only]
           default: cache_first
     XiaohongshuPostCompatibilityRequest:
       type: object

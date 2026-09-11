@@ -305,8 +305,10 @@ test('JustOne defaults admit current consumer bursts while preserving a bounded 
   const config = loadConfig(BASE)
   assert.equal(config.justOne.maxConcurrency, 32)
   assert.equal(config.justOne.maxConsumerConcurrency, 8)
-  assert.equal(config.justOne.maxRequestsPerMinute, 90)
-  assert.equal(config.tikHub.maxRequestsPerMinute, 120)
+  // One shared token bucket across every Hub pod, defaulted to the observed-safe
+  // >=1.2s spacing rather than to the providers' raw capacity.
+  assert.equal(config.justOne.maxRequestsPerMinute, 50)
+  assert.equal(config.tikHub.maxRequestsPerMinute, 50)
   assert.equal(config.tikHub.searchFreshTtlMs, 300_000)
   assert.equal(config.tikHub.searchStaleTtlMs, 86_400_000)
   assert.equal(config.tikHub.searchMaxEnrichItems, 20)

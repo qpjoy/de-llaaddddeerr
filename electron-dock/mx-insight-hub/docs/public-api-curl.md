@@ -655,6 +655,26 @@ consumer、该请求是已提交且 HTTP 200 的 ecommerce 请求，并且 item/
 | `stored_fallback` | 实时路径不可用，返回同请求的 last-good 快照。 | 检查 `meta.reason`、`Age`、`Warning: 110`，不得标成实时。 |
 | `idempotent_replay` | 同 `Idempotency-Key`、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
 
+### `live_only`：只要实时，拿不到就报错
+
+`deliveryMode: live_only` 是 `cache_only` 的对立面：**绝不返回存量数据**。它绕过新鲜缓存尝试上游，
+拿不到就返回对应错误，不做任何回落——上游失败、并发保护、限流、熔断、operation 被阻断都一样。
+和 `refresh` 一样必须提供 `Idempotency-Key`。
+
+它和 `refresh` 只差一条：拿不到实时数据时，`refresh` 在有精确存量时回落并标记 `stored_fallback`，
+`live_only` 直接报错。自己组合产品、需要明确知道"这次没拿到新数据"时用 `live_only`；
+要尽量有数据可用时用 `refresh`。
+
+`live_only` 的失败是持久的：用同一个 `Idempotency-Key` 重放，返回的仍是那个错误而不是快照——
+因为投递证据记录的是调用方实际收到的东西。
+
+```bash
+curl -sS -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $HUB_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: live-$(uuidgen)" \
+  -d '{"marketplace":"jd","query":"耳机","deliveryMode":"live_only"}'
+```
+
 ### `meta.reason`：每一次投递都说明自己
 
 `sourceMode` 说的是「返回了什么」，`meta.reason` 说的是「为什么」。它在**所有**投递上都存在，

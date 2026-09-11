@@ -11,6 +11,7 @@ import {
   TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION,
   XIAOHONGSHU_PLATFORM,
   XIAOHONGSHU_POST_CONTRACT_VERSION,
+  XIAOHONGSHU_POST_DELIVERY_MODES,
   XIAOHONGSHU_POST_OPERATION,
 } from '../contracts/tikhub-xiaohongshu.mjs'
 import {
@@ -664,7 +665,7 @@ export class TikHubGateway {
       capabilities: ['search_posts', 'post_detail'],
       input: 'official_note_url',
       idempotencyKey: 'optional',
-      deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+      deliveryModes: [...XIAOHONGSHU_POST_DELIVERY_MODES],
       freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
     }
   }
@@ -874,7 +875,7 @@ export class TikHubGateway {
         }
       }
       if (!resolved.ready || circuitOpen || operationControlError) {
-        if (snapshot) {
+        if (allowStoredFallback && snapshot) {
           await this.platformStore.commitSnapshotDelivery({
             delivery,
             snapshot,
@@ -2289,8 +2290,8 @@ export class TikHubGateway {
       if (suppliedKey && (typeof idempotencyKey !== 'string' || !IDEMPOTENCY_PATTERN.test(idempotencyKey))) {
         throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8-128 safe characters')
       }
-      if (normalized.deliveryMode === 'refresh' && !suppliedKey) {
-        throw new AppError(400, 'idempotency_key_required', 'Idempotency-Key is required when deliveryMode is refresh')
+      if (['refresh', 'live_only'].includes(normalized.deliveryMode) && !suppliedKey) {
+        throw new AppError(400, 'idempotency_key_required', `Idempotency-Key is required when deliveryMode is ${normalized.deliveryMode}`)
       }
       await this.usageStore.reapStaleReservations()
       await this.platformStore.reapStaleCalls?.()
@@ -2413,6 +2414,10 @@ export class TikHubGateway {
         fingerprint: noteFingerprint,
       }, now)
       const fresh = snapshot && new Date(snapshot.freshUntil) >= now
+      // `live_only` asks for a fresh upstream read or an explanation. Every
+      // fallback below asks whether serving stored data is permitted, not
+      // merely whether a snapshot happens to exist.
+      const allowStoredFallback = normalized.deliveryMode !== 'live_only'
       if (snapshot && (normalized.deliveryMode === 'cache_only'
         || (normalized.deliveryMode === 'cache_first' && fresh))) {
         const sourceMode = fresh ? 'fresh_cache' : 'stored_fallback'
@@ -2497,7 +2502,7 @@ export class TikHubGateway {
             operation: XIAOHONGSHU_POST_OPERATION,
             fingerprint: noteFingerprint,
           }, new Date())
-          if (snapshot) {
+          if (allowStoredFallback && snapshot) {
             const stillFresh = new Date(snapshot.freshUntil) >= new Date()
             const sourceMode = stillFresh ? 'fresh_cache' : 'stored_fallback'
             const responseBody = deliveryBody(snapshot.responseBody, {
@@ -2552,7 +2557,7 @@ export class TikHubGateway {
         // local provider slot. This keeps duplicate note lookups from starving
         // unrelated customer acquisitions.
         if (!this.#enter(context.consumer.id)) {
-          if (snapshot) {
+          if (allowStoredFallback && snapshot) {
             const responseBody = deliveryBody(snapshot.responseBody, {
               requestId: activeRequestId, sourceMode: 'stored_fallback',
               capturedAt: snapshot.capturedAt, fallbackReason: 'concurrency_guard',
@@ -2594,7 +2599,7 @@ export class TikHubGateway {
             })
           : { allowed: true, retryAfterMs: 0 }
         if (!rateLimit.allowed) {
-          if (snapshot) {
+          if (allowStoredFallback && snapshot) {
             const responseBody = deliveryBody(snapshot.responseBody, {
               requestId: activeRequestId,
               sourceMode: 'stored_fallback',
@@ -2707,9 +2712,14 @@ export class TikHubGateway {
             archiveObjects: error.archiveObjects,
             restrictedResponseArchive: error.restrictedResponseArchive,
           }
-          const fallbackBody = snapshot ? deliveryBody(snapshot.responseBody, {
+          // Under live_only the caller receives the error, so the durable
+          // delivery evidence records the error too. Recording a fallback the
+          // caller never saw would make a later idempotent replay contradict
+          // the original response.
+          const deliverableSnapshot = allowStoredFallback ? snapshot : null
+          const fallbackBody = deliverableSnapshot ? deliveryBody(deliverableSnapshot.responseBody, {
             requestId: activeRequestId, sourceMode: 'stored_fallback',
-            capturedAt: snapshot.capturedAt, fallbackReason: error.evidence.errorCode,
+            capturedAt: deliverableSnapshot.capturedAt, fallbackReason: error.evidence.errorCode,
           }) : null
           await this.platformStore.finishFailure({
             callId: call.id,
@@ -2722,12 +2732,14 @@ export class TikHubGateway {
             failureResponseStatus: mapped.status,
             failureResponseBody: failureBody(mapped, activeRequestId),
             affectsCircuit: error.evidence.affectsCircuit !== false,
-            snapshot,
+            snapshot: deliverableSnapshot,
             fallbackResponseBody: fallbackBody,
           })
           callSettled = true
           ownsReservation = false
-          if (snapshot) return result(fallbackBody, activeRequestId, false, 'stored_fallback', snapshot.capturedAt)
+          if (deliverableSnapshot) {
+            return result(fallbackBody, activeRequestId, false, 'stored_fallback', deliverableSnapshot.capturedAt)
+          }
           throw mapped
         }
       } catch (error) {

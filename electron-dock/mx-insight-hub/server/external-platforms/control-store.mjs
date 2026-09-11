@@ -11,6 +11,11 @@ import {
   justoneResourceOperations,
 } from '../contracts/justone-resources.mjs'
 import {
+  SOCIAL_ACCOUNT_SEARCH_CONTRACT_VERSION,
+  SOCIAL_ACCOUNT_SEARCH_OPERATION,
+  socialAccountEndpointKeys,
+} from '../contracts/social-accounts.mjs'
+import {
   TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
   XIAOHONGSHU_POST_CONTRACT_VERSION,
   XIAOHONGSHU_POST_OPERATION,
@@ -79,8 +84,28 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
       endpointKeys: Object.freeze(uniqueEndpointKeys()),
     }),
     ...justoneResourceOperationEntries(),
+    Object.freeze({
+      operationKey: SOCIAL_ACCOUNT_SEARCH_OPERATION,
+      label: '社交账号搜索',
+      legacyGate: 'contractVerified',
+      contractVersion: SOCIAL_ACCOUNT_SEARCH_CONTRACT_VERSION,
+      // Only this provider's platforms. The same operation also exists under
+      // TikHub with its own two platforms, priced independently, because each
+      // provider bills its own endpoints.
+      endpointKeys: socialAccountEndpointKeys('justone'),
+    }),
   ]),
   tikhub: Object.freeze([
+    Object.freeze({
+      operationKey: SOCIAL_ACCOUNT_SEARCH_OPERATION,
+      label: '社交账号搜索',
+      legacyGate: 'contractVerified',
+      contractVersion: SOCIAL_ACCOUNT_SEARCH_CONTRACT_VERSION,
+      // The same operation key exists under the other provider with its own two
+      // platforms. Each vendor prices and gates the endpoints it actually
+      // serves, so one vendor being blocked never silences the other's.
+      endpointKeys: socialAccountEndpointKeys('tikhub'),
+    }),
     Object.freeze({
       operationKey: XIAOHONGSHU_POST_OPERATION,
       label: '小红书笔记详情',

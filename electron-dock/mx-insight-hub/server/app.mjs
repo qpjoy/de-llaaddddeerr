@@ -55,6 +55,7 @@ import {
   describeDeliveryReason,
 } from './external-platforms/delivery-reason.mjs'
 import { justoneResourceByHubPath } from './contracts/justone-resources.mjs'
+import { socialAccountPlatform } from './contracts/social-accounts.mjs'
 import {
   BUILTIN_FILE_FORMAT_RULES,
   builtinFileFormatRule,
@@ -742,6 +743,8 @@ export function createApp({
   embedding = null,
   externalPlatformAdmin = null,
   externalPlatformGateway = null,
+  socialAccountGateway = null,
+  socialAccountTikHubGateway = null,
   tikHubGateway = null,
   acquisitionHistory = null,
   segmenterConfig = null,
@@ -5011,6 +5014,51 @@ export function createApp({
         }
         const result = await externalPlatformGateway.search(context, {
           body: await readJson(request, 64 * 1024),
+          idempotencyKey: request.headers['idempotency-key'],
+          retryOfRequestId: request.headers['x-mx-insight-retry-of'],
+          path: pathname,
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.body?.meta?.reason?.code
+            ? { 'x-mx-insight-reason': result.body.meta.reason.code }
+            : {}),
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            || (result.sourceMode === 'idempotent_replay'
+              && ['stale', 'stored_fallback'].includes(result.originSourceMode))
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/social/accounts/search') {
+        const context = await requirePublic(request)
+        const accountBody = await readJson(request, 64 * 1024)
+        // Which vendor serves a platform is declared once, in the contract.
+        // Reading it here rather than restating the mapping keeps a new
+        // platform from silently dispatching to the wrong provider's gateway,
+        // credential and cost ledger.
+        const accountDescriptor = typeof accountBody?.platform === 'string'
+          ? socialAccountPlatform(accountBody.platform.trim())
+          : null
+        // Reject an unsupported platform here rather than letting it fall
+        // through to whichever gateway happens to be the default: a validation
+        // error should not be attributed to a vendor that was never involved.
+        if (!accountDescriptor) {
+          throw new AppError(400, 'unsupported_platform', 'platform is not supported')
+        }
+        const accountGateway = accountDescriptor.providerKey === 'tikhub'
+          ? socialAccountTikHubGateway
+          : socialAccountGateway
+        if (!accountGateway) {
+          throw new AppError(503, 'external_platform_unavailable', 'Social account search is unavailable')
+        }
+        const result = await accountGateway.searchAccounts(context, {
+          body: accountBody,
           idempotencyKey: request.headers['idempotency-key'],
           retryOfRequestId: request.headers['x-mx-insight-retry-of'],
           path: pathname,

@@ -3,6 +3,9 @@ import {
   POSTGRES_SEARCH_PROFILE,
   searchCapabilities,
 } from './search/profiles.mjs'
+import { ECOMMERCE_DELIVERY_MODES } from './contracts/justone.mjs'
+import { XIAOHONGSHU_POST_DELIVERY_MODES } from './contracts/tikhub-xiaohongshu.mjs'
+import { SOCIAL_ACCOUNT_PLATFORMS } from './contracts/social-accounts.mjs'
 import { JUSTONE_RELEASED_RESOURCES } from './contracts/justone-resources.mjs'
 
 export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','xiaohongshu-note':'/docs/xiaohongshu-note','virtual-supermarket':'/docs/virtual-supermarket','topic-reports':'/docs/topic-reports',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
@@ -696,7 +699,7 @@ function platformShapedExternalSocialPostGetOperation() {
       {
         name: 'delivery_mode', in: 'query', required: false,
         description: 'Hub delivery policy. refresh permits one new acquisition and requires Idempotency-Key.',
-        schema: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'], default: 'cache_first' },
+        schema: { type: 'string', enum: [...XIAOHONGSHU_POST_DELIVERY_MODES], default: 'cache_first' },
       },
       ...operation.parameters,
     ],
@@ -1054,7 +1057,7 @@ function justoneResourcePaths() {
       },
       deliveryMode: {
         type: 'string',
-        enum: ['cache_only', 'cache_first', 'refresh'],
+        enum: [...ECOMMERCE_DELIVERY_MODES],
         default: 'cache_first',
       },
     }
@@ -1190,6 +1193,61 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
     ...justoneResourcePaths(),
+    '/data/social/accounts/search': {
+      post: {
+        tags: ['External Data'],
+        operationId: 'searchSocialAccounts',
+        summary: '按关键词搜索社交平台账号',
+        'x-mx-required-platform': 'social',
+        'x-mx-required-capabilities': ['social.accounts.search'],
+        description: '跨四个平台的关键词搜账号，返回 Hub 归一化的稳定账号结构（与平台原生层不同，这一层做归一化）。需要 social 数据域与 social.accounts.search 业务操作双授权，两者独立于 ecommerce。上游对这四个接口都不返回总数或 hasMore：空页是翻到底的唯一凭据，非空页不足以证明还有下一页，因此 hasMore 为 null 表示「上游未声明」。快手返回的是内容混合流，同一账号会跨条目重复，Hub 已按 (platform, userId) 去重并在 page.duplicateCount 中报出；抖音个别条目无法解析时计入 page.discardedCount 而不使整页失败。粉丝数只有在上游给出精确整数时才有值，形如「1.2万」的展示串一律为 null，不做换算。',
+        'x-mx-error-codes': {
+          400: [
+            'invalid_request', 'unsupported_request_field', 'unsupported_platform',
+            'invalid_keyword', 'invalid_page', 'invalid_delivery_mode',
+            'idempotency_key_required', 'invalid_idempotency_key',
+          ],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
+          404: ['stored_snapshot_not_found'],
+          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
+          413: ['payload_too_large'],
+          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited'],
+          502: ['external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
+          503: [
+            'external_platform_unavailable', 'external_platform_not_configured',
+            'external_platform_circuit_open', 'external_platform_operation_disabled',
+            'external_platform_operation_shadow', 'external_platform_operation_paused',
+            'external_platform_operation_canary', 'external_platform_operation_blocked',
+          ],
+        },
+        parameters: [externalCommerceIdempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['platform', 'keyword'],
+                properties: {
+                  platform: { type: 'string', enum: [...SOCIAL_ACCOUNT_PLATFORMS] },
+                  keyword: { type: 'string', minLength: 1, maxLength: 200 },
+                  page: { type: 'integer', minimum: 1, maximum: 1000, default: 1 },
+                  deliveryMode: {
+                    type: 'string',
+                    enum: [...ECOMMERCE_DELIVERY_MODES],
+                    default: 'cache_first',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: { 200: { description: '归一化账号列表' } },
+      },
+    },
+
     '/data/capabilities': {
       get: {
         tags: ['Discovery'],
@@ -1312,7 +1370,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
                         pagination: 'opaque_cursor',
                         idempotencyKey: 'optional',
-                        deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+                        deliveryModes: [...ECOMMERCE_DELIVERY_MODES],
                         freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
                       },
                       {
@@ -1331,7 +1389,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                           servingMode: 'live_with_stored_fallback',
                           contractVersion: 'mx-insight-hub.social-post.v1',
                           input: 'official_note_url',
-                          deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+                          deliveryModes: [...XIAOHONGSHU_POST_DELIVERY_MODES],
                         },
                       },
                       { platform: 'twitter', ready: true },
@@ -2509,9 +2567,9 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           query: { type: 'string', minLength: 1, maxLength: 200 },
           deliveryMode: {
             type: 'string',
-            enum: ['cache_only', 'cache_first', 'refresh'],
+            enum: [...ECOMMERCE_DELIVERY_MODES],
             default: 'cache_first',
-            description: 'cache_only reads only an exact Hub snapshot and never dispatches externally; cache_first reuses a fresh snapshot before acquisition; refresh bypasses a fresh snapshot, requires Idempotency-Key and may fall back to an exact stored snapshot after an acquisition failure.',
+            description: 'cache_only reads only an exact Hub snapshot and never dispatches externally; cache_first reuses a fresh snapshot before acquisition; refresh bypasses a fresh snapshot, requires Idempotency-Key and may fall back to an exact stored snapshot after an acquisition failure; live_only also bypasses a fresh snapshot and requires Idempotency-Key, but never serves stored data -- an acquisition that cannot complete returns its error instead of a fallback.',
           },
           page: {
             type: 'integer', minimum: 1, maximum: 1000, default: 1,
@@ -2691,7 +2749,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             description: 'Official xiaohongshu.com explore/discovery note URL with a 24-character note ID, or an xhslink.com/xhslink.cn share URL. Credentials, ports and fragments are rejected.',
           },
           deliveryMode: {
-            type: 'string', enum: ['cache_only', 'cache_first', 'refresh'], default: 'cache_first',
+            type: 'string', enum: [...XIAOHONGSHU_POST_DELIVERY_MODES], default: 'cache_first',
           },
         },
       },
@@ -4679,7 +4737,9 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     idempotencyKey: { type: 'string', enum: ['optional'] },
                     deliveryModes: {
                       type: 'array',
-                      items: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'] },
+                      // The union of values any platform may advertise. A given
+                      // platform lists only the subset its contract implements.
+                      items: { type: 'string', enum: [...ECOMMERCE_DELIVERY_MODES] },
                     },
                     freshnessModes: {
                       type: 'array',
@@ -4701,7 +4761,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         input: { type: 'string', const: 'official_note_url' },
                         deliveryModes: {
                           type: 'array',
-                          items: { type: 'string', enum: ['cache_only', 'cache_first', 'refresh'] },
+                          items: { type: 'string', enum: [...XIAOHONGSHU_POST_DELIVERY_MODES] },
                         },
                       },
                     },
@@ -5012,6 +5072,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录', section: '数据目录' },
   { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
   { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫原生接口', section: '平台原生接口' },
+  { key: 'social-accounts', path: '/docs/social-accounts', label: '社交账号搜索', section: '数据产品' },
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
@@ -5384,6 +5445,12 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     <h3>2. 授权</h3>
     <p>每个资源族是<strong>独立的业务操作授权</strong>，不随商品搜索一起开通。Key 需要同时具备 <code>ecommerce</code> 数据域和对应操作：<code>ecommerce.products.detail</code>、<code>ecommerce.products.reviews</code>、<code>ecommerce.products.questions</code>、<code>ecommerce.shops.products</code>。缺少时返回 <code>403 capability_not_granted</code>。</p>
 
+    <p>调用前可以逐 operation 预检，不必先花一次调用去试：</p>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/capabilities" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '.data.platforms[] | select(.platform == "ecommerce") | .operations'</code></pre>
+    <p>平台层的 <code>ready</code> 只跟随商品搜索，<strong>不能</strong>当作"这个平台下所有接口都可用"。要判断某个接口能不能调，看 <code>operations</code> 里对应那一行的 <code>ready</code> 与 <code>effectiveState</code>；<code>resources</code> 数组还会列出每个资源的路径与可用版本。四类资源各自独立开关，暂停其中一个不影响其余。</p>
+
     <h3>3. 接口</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/taobao/product-detail</code></div><p>商品详情。<code>itemId</code> 必填；<code>version</code> 可选 <code>v1|v3|v4|v5|v7|v9</code>，默认 <code>v7</code>。V2 是上游异步工作流，不在本合同内。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/taobao/product-reviews</code></div><p>商品评价。<code>itemId</code> 必填；<code>orderType</code> 可选 <code>general|feedbackdate</code>；<code>page</code> 默认 1。</p></div>
@@ -5415,12 +5482,73 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
       <tr><td><code>cache_only</code></td><td>只读精确存量；没有存量时 <code>404 stored_snapshot_not_found</code>。</td><td>0</td></tr>
       <tr><td><code>cache_first</code></td><td><strong>只有快照仍在新鲜窗口内才复用</strong>；超出窗口会去请求上游，上游不可用时才回落到存量。它不是“永远读缓存”。</td><td>缓存命中 0；穿透后 1</td></tr>
       <tr><td><code>refresh</code></td><td>绕过新鲜缓存，明确尝试上游；上游失败且存在精确存量时仍会回落。必须提供 <code>Idempotency-Key</code>。</td><td>1（除非未派发即被拒绝）</td></tr>
+      <tr><td><code>live_only</code></td><td><strong>绝不返回存量数据。</strong>绕过新鲜缓存尝试上游，拿不到就返回对应错误，不做任何回落——包括上游失败、并发保护、限流、熔断和 operation 被阻断。必须提供 <code>Idempotency-Key</code>。</td><td>1（除非未派发即被拒绝）</td></tr>
     </tbody></table>
+    <p><code>refresh</code> 与 <code>live_only</code> 的区别只有一条：拿不到实时数据时，前者在有精确存量时回落并标记 <code>stored_fallback</code>，后者直接报错。自己组合产品、需要明确知道"这次没拿到新数据"时用 <code>live_only</code>；要尽量有数据可用时用 <code>refresh</code>。<code>live_only</code> 失败后用同一个 <code>Idempotency-Key</code> 重放，返回的仍是那个错误，不会变成快照。</p>
     <p>拿到的是不是实时数据，看 <code>meta.reason</code>，不要靠 <code>sourceMode</code> 猜：<code>reason.degraded=false</code> 才是完整交付；<code>reason.liveAttempted</code> 区分“没有发生上游调用”和“上游调用已发生、可能已计费”。详见<a href="/docs/errors">错误与重试</a>。</p>
 
     <h3>6. 上游字段的稳定性</h3>
     <p>上游对 <code>data</code> 没有发布类型定义，因此本层<strong>不承诺字段稳定</strong>：Hub 只做结构边界检查与凭据脱敏，不重命名、不补默认值、不删除未知字段。请按缺字段返回 <code>null</code> 的方式消费，不要假设某个字段一定存在。需要稳定结构时用<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>。</p>
     <p>不同 <code>version</code> 是不同的逻辑请求，各自独立缓存与计费；切换版本不会复用另一个版本的快照。</p>
+    </section>
+
+    <section class="doc-page" data-doc-page="social-accounts">
+    <h2 id="social-accounts">社交账号搜索</h2>
+    <p class="lead">按关键词在小红书、抖音、微博、快手四个平台检索账号，返回 Hub 归一化的稳定账号结构。同一个接口覆盖四个平台，调用方不感知背后的供应方。</p>
+
+    <div class="notice">这是<strong>数据产品层</strong>：Hub 钉住账号结构，上游改字段不会打到你身上。与之相对的<a href="/docs/taobao-tmall">平台原生接口</a>不重命名不裁剪，把上游字段原样交给调用方。</div>
+
+    <h3>1. 授权</h3>
+    <p>需要 <code>social</code> 数据域与 <code>social.accounts.search</code> 业务操作双授权，两者都<strong>独立于 <code>ecommerce</code></strong>：账号搜索既不占用也不受限于电商配额。缺少时返回 <code>403 platform_not_granted</code> 或 <code>403 capability_not_granted</code>。</p>
+
+    <h3>2. 调用</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/social/accounts/search</code></div><p><code>platform</code> 取 <code>xiaohongshu</code>｜<code>douyin</code>｜<code>weibo</code>｜<code>kuaishou</code>；<code>keyword</code> 必填（≤200 字符）；<code>page</code> 从 1 递增；<code>deliveryMode</code> 与其它采集接口一致。</p></div>
+
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/social/accounts/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: accounts-$(uuidgen)" \
+  -d '{"platform":"xiaohongshu","keyword":"品牌词","page":1}'</code></pre>
+
+    <p>响应结构：</p>
+    <pre><code>{
+  "contractVersion": "mx-insight-hub.social-accounts.v1",
+  "data": {
+    "accounts": [
+      {
+        "id": "...", "platform": "xiaohongshu", "userId": "...",
+        "secUid": null,            // 抖音/快手才有；主页链接与详情接口依赖它
+        "name": "昵称", "handle": "小红书号",
+        "fans": 1164,              // 上游未给出精确整数时为 null
+        "bio": "简介", "official": true,
+        "avatar": "https://...", "profileUrl": null
+      }
+    ],
+    "page": {
+      "page": 1, "returnedCount": 20,
+      "discardedCount": 0,         // 上游条目无法解析而丢弃的数量
+      "duplicateCount": 0,         // 同一页内重复账号（快手混合流常见）
+      "hasMore": null, "nextPage": 2
+    }
+  },
+  "meta": { "capturedAt": "...", "sourceMode": "live", "reason": { ... } },
+  "requestId": "..."
+}</code></pre>
+
+    <h3>3. 翻页：靠空页判定，不靠 hasMore</h3>
+    <p>这四个上游接口<strong>都不返回总数或 hasMore</strong>。因此 <code>hasMore</code> 恒为 <code>null</code>，含义是「上游没有声明」，<em>不是</em>「没有更多了」；Hub 不会凭非空页推断下一页。<strong>唯一可靠的终止条件是 <code>returnedCount</code> 为 0</strong>：<code>page</code> 递增直到空页为止。</p>
+
+    <h3>4. 字段的确定性</h3>
+    <table><thead><tr><th>字段</th><th>说明</th></tr></thead><tbody>
+      <tr><td><code>fans</code></td><td>只有上游给出<strong>精确整数</strong>时才有值。形如「1.2万」的展示串一律为 <code>null</code>，Hub 不做换算——宁可报「未知」也不编造精度。小红书会在 <code>fans</code> 缺失时读取「粉丝 1164」这类精确文案。</td></tr>
+      <tr><td><code>secUid</code></td><td>抖音与快手有，小红书与微博为 <code>null</code>。抖音主页链接依赖它，缺失时 <code>profileUrl</code> 为 <code>null</code> 而不是给一个会 404 的链接。</td></tr>
+      <tr><td><code>duplicateCount</code></td><td>快手返回的是内容混合流，同一账号会跨条目重复出现。Hub 已按 <code>(platform, userId)</code> 去重并在此报出去重条数。</td></tr>
+      <tr><td><code>discardedCount</code></td><td>抖音个别条目内层数据无法解析或缺少 uid，Hub 丢弃该条而不让整页失败。</td></tr>
+      <tr><td><code>avatar</code></td><td>微博头像 URL 带签名会过期，需要长期展示请自行转存。</td></tr>
+    </tbody></table>
+
+    <h3>5. 数据沉淀</h3>
+    <p>每次成功采集都会写入 canonical 数据集 <code>social.accounts.v1</code>，身份是 <code>(platform, userId)</code>。<strong>关键词与页码不参与身份</strong>：同一账号通过不同关键词找到是同一行，重跑关键词也不会产生重复。账号资料真的变了才会记为内容变更。</p>
     </section>
 
     <section class="doc-page" data-doc-page="xiaohongshu-note">

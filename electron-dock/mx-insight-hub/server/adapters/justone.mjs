@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
+import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import {
   assertBoundedJson,
   classifyJustOneBusinessCode,
@@ -12,6 +13,11 @@ import {
   normalizeJustOneResourceRequest,
   normalizeJustOneResourceResponse,
 } from '../contracts/justone-resources.mjs'
+import {
+  normalizeSocialAccountSearchRequest,
+  normalizeSocialAccountSearchResponse,
+} from '../contracts/social-accounts.mjs'
+import { normalizeSocialAccountArchiveObjects } from '../ingest/social-accounts.mjs'
 import {
   normalizeJustOneProductSearchPayload,
   prepareJustOneArchiveObjects,
@@ -426,6 +432,51 @@ export class JustOneAdapter {
     })
   }
 
+  // Keyword account search. The response is normalized (not passed through)
+  // because its four upstream shapes differ wildly and the target is a
+  // canonical dataset, which needs one record shape.
+  async searchAccounts(body, { capturedAt = null, deliveryModes, credential: suppliedCredential } = {}) {
+    const credential = await this.#credentialFor(suppliedCredential)
+    const request = normalizeSocialAccountSearchRequest(body, { deliveryModes })
+    return this.#dispatch({
+      request,
+      credential,
+      capturedAt,
+      normalize: (raw, context) => {
+        const normalized = normalizeSocialAccountSearchResponse(raw, request, {
+          capturedAt: context.capturedAt,
+        })
+        const ingest = normalizeSocialAccountArchiveObjects(normalized.archiveObjects, request, {
+          capturedAt: context.capturedAt,
+        })
+        return {
+          publicBody: normalized.publicBody,
+          items: normalized.accounts,
+          records: ingest.records,
+          archiveObjects: Object.freeze([
+            createJustOneCallArchiveObject(raw, request, {
+              capturedAt: context.capturedAt,
+              httpStatus: context.httpStatus,
+              outcome: 'success',
+              businessCode: Number.isInteger(raw?.code) ? raw.code : null,
+              billed: true,
+              bodySha256: context.bodySha256,
+              bodySize: context.bodySize,
+              contentType: context.contentType,
+              contractState: 'accepted',
+              secret: credential,
+            }),
+            ...normalized.archiveObjects.map((object) => Object.freeze({
+              ...object,
+              rawItem: redactJustOnePrivateFields(object.rawItem, { secret: credential }),
+              rawPayload: redactJustOnePrivateFields(object.rawPayload, { secret: credential }),
+            })),
+          ]),
+        }
+      },
+    })
+  }
+
   async #credentialFor(suppliedCredential) {
     const credential = suppliedCredential === undefined
       ? await this.resolveCredential()
@@ -453,7 +504,7 @@ export class JustOneAdapter {
       try {
         response = await this.fetchImpl(url.toString(), {
           method: 'GET',
-          headers: { accept: 'application/json' },
+          headers: { accept: 'application/json', 'user-agent': HUB_USER_AGENT },
           redirect: 'error',
           cache: 'no-store',
           signal: controller.signal,

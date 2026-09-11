@@ -10,7 +10,14 @@ export const TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION = 'app_v2'
 export const TIKHUB_XIAOHONGSHU_ENDPOINT_PATH = '/api/v1/xiaohongshu/app_v2/get_image_note_detail'
 
 const REQUEST_FIELDS = new Set(['platform', 'url', 'deliveryMode'])
-const DELIVERY_MODES = new Set(['cache_only', 'cache_first', 'refresh'])
+// `live_only` mirrors the ecommerce contract: it never serves stored data, so a
+// caller composing its own product learns that it did not get a fresh read
+// instead of silently receiving a snapshot.
+const DELIVERY_MODES = new Set(['cache_only', 'cache_first', 'refresh', 'live_only'])
+
+// Exported so the capability advertisement and the published contract cannot
+// drift from what the validator actually accepts.
+export const XIAOHONGSHU_POST_DELIVERY_MODES = Object.freeze([...DELIVERY_MODES])
 const NOTE_ID_PATTERN = /^[0-9a-f]{24}$/iu
 const LONG_HOSTS = new Set(['xiaohongshu.com', 'www.xiaohongshu.com'])
 const SHORT_HOSTS = new Set(['xhslink.com', 'www.xhslink.com', 'xhslink.cn', 'www.xhslink.cn'])
@@ -131,7 +138,7 @@ export function normalizeXiaohongshuPostRequest(input) {
   const url = normalizedUrl(input.url.trim())
   const deliveryMode = input.deliveryMode == null ? 'cache_first' : input.deliveryMode
   if (!DELIVERY_MODES.has(deliveryMode)) {
-    invalid('invalid_delivery_mode', 'deliveryMode must be cache_only, cache_first, or refresh')
+    invalid('invalid_delivery_mode', `deliveryMode must be one of ${[...DELIVERY_MODES].join(', ')}`)
   }
 
   let identity

@@ -118,6 +118,12 @@ test('generic capability grants stay separate from platform grants and policies'
       { capability: 'social.users.posts', ready: false },
       { capability: 'compat.xiaohongshu.app_v2', ready: false },
       { capability: 'ecommerce.products.search', ready: false },
+      // Each platform-shaped resource family reports its own readiness rather
+      // than inheriting the product-search row.
+      { capability: 'ecommerce.products.detail', ready: false },
+      { capability: 'ecommerce.products.reviews', ready: false },
+      { capability: 'ecommerce.products.questions', ready: false },
+      { capability: 'ecommerce.shops.products', ready: false },
     ])
 
     const unsupported = await call('/internal/v1/admin/capabilities/all', {

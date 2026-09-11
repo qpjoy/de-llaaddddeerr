@@ -299,9 +299,12 @@ export function parseJustOneConfig(environment = process.env, {
     ),
     maxConcurrency,
     maxConsumerConcurrency,
+    // Observed-safe spacing for these providers is >=1.2s between calls
+    // (~50/min). This is one shared bucket across every Hub pod, so the default
+    // tracks that spacing rather than the providers' raw capacity.
     maxRequestsPerMinute: positiveInt32(
       environment.MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE,
-      90,
+      50,
       'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE',
     ),
     circuitFailureThreshold: positiveInteger(
@@ -342,7 +345,7 @@ export function disabledJustOneConfig(environment, error) {
     unknownFingerprintCooldownMs: 15 * 60_000,
     maxConcurrency: 32,
     maxConsumerConcurrency: 8,
-    maxRequestsPerMinute: 90,
+    maxRequestsPerMinute: 50,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: unknownJustOneBilling(),
@@ -559,7 +562,7 @@ export function parseTikHubConfig(environment = process.env, {
   }
   const maxRequestsPerMinute = positiveInt32(
     environment.MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE,
-    120,
+    50,
     'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE',
   )
   if (userActivityContractVerified && maxRequestsPerMinute < 3) {
@@ -674,7 +677,7 @@ export function disabledTikHubConfig(environment, error) {
     unknownFingerprintCooldownMs: 15 * 60_000,
     maxConcurrency: 8,
     maxConsumerConcurrency: 8,
-    maxRequestsPerMinute: 120,
+    maxRequestsPerMinute: 50,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: unknownTikHubBilling(),

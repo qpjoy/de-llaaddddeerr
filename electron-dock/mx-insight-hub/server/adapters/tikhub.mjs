@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
+import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
+import {
+  normalizeSocialAccountSearchRequest,
+  normalizeSocialAccountSearchResponse,
+} from '../contracts/social-accounts.mjs'
+import { normalizeSocialAccountArchiveObjects } from '../ingest/social-accounts.mjs'
 
 import {
   isTikHubXiaohongshuUnavailable,
@@ -397,7 +403,11 @@ async function requestTikHubJson(
     try {
       response = await adapter.fetchImpl(url.toString(), {
         method: 'GET',
-        headers: { accept: 'application/json', authorization: `Bearer ${resolvedCredential}` },
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${resolvedCredential}`,
+          'user-agent': HUB_USER_AGENT,
+        },
         redirect: 'error',
         cache: 'no-store',
         signal: controller.signal,
@@ -787,6 +797,56 @@ export class TikHubAdapter {
     }
   }
 
+  // Keyword account search for the platforms this vendor serves (Weibo,
+  // Kuaishou). The contract, canonical records and dataset are shared with the
+  // platforms the other vendor serves: which vendor answered is call evidence,
+  // not a property of the account.
+  async searchAccounts(body, { capturedAt = null, deliveryModes, credential: suppliedCredential } = {}) {
+    const resolvedCredential = suppliedCredential === undefined
+      ? await this.resolveCredential()
+      : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const request = normalizeSocialAccountSearchRequest(body, { deliveryModes })
+    const exchange = await requestTikHubJson(
+      this,
+      request.endpointPath,
+      request.upstreamQuery,
+      resolvedCredential,
+      capturedAt,
+      request.endpointVersion,
+    )
+    try {
+      const normalized = normalizeSocialAccountSearchResponse(exchange.raw, request, {
+        capturedAt: exchange.acceptedAt,
+      })
+      const ingest = normalizeSocialAccountArchiveObjects(normalized.archiveObjects, request, {
+        capturedAt: exchange.acceptedAt,
+      })
+      const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+      return securedProviderResult({
+        publicBody: normalized.publicBody,
+        items: normalized.accounts,
+        records: ingest.records,
+        archiveObjects: [...persistence.archiveObjects, ...normalized.archiveObjects],
+        responseArchive: persistence.responseArchive,
+        upstreamEvidence: persistence.upstreamEvidence,
+        endpointKey: request.endpointKey,
+        capturedAt: exchange.acceptedAt,
+      }, persistence)
+    } catch (error) {
+      if (error instanceof TikHubUpstreamError) throw error
+      // The call was accepted and is therefore already billable. A shape Hub
+      // cannot read is reported as succeeded-but-unusable rather than retried.
+      throw upstreamError('TikHub response did not match the verified account-search contract', {
+        outcome: 'succeeded_unusable',
+        httpStatus: exchange.httpStatus,
+        businessCode: 200,
+        billed: true,
+        errorCode: error?.code || 'invalid_upstream_contract',
+      }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
+    }
+  }
+
   async getXiaohongshuUserInfo(input, {
     capturedAt = null,
     credential: suppliedCredential,
@@ -947,7 +1007,11 @@ export class TikHubAdapter {
       try {
         response = await this.fetchImpl(url.toString(), {
           method: 'GET',
-          headers: { accept: 'application/json', authorization: `Bearer ${resolvedCredential}` },
+          headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${resolvedCredential}`,
+          'user-agent': HUB_USER_AGENT,
+        },
           redirect: 'error',
           cache: 'no-store',
           signal: controller.signal,
