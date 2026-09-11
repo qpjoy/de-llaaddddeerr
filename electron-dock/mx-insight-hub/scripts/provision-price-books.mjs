@@ -27,10 +27,34 @@ const priceBookDir = join(projectRoot, 'seeds', 'pricebooks')
 const base = (process.env.MX_INSIGHT_ADMIN_BASE_URL || 'http://127.0.0.1:18151').replace(/\/$/, '')
 const adminToken = process.env.MX_INSIGHT_ADMIN_TOKEN
 
-const PRICE_BOOK_FIELDS = ['currency', 'pricingAsOf', 'monthlyBudgetMinor', 'monthlySubsidyBudgetMinor']
+const PRICE_BOOK_FIELDS = ['currency', 'pricingAsOf']
+
+// The control plane stores budgets in minor currency units, but an operator
+// reasons in calls and the provider bills in calls. A file may therefore state
+// either: `monthlyBudgetCalls` is multiplied by the operation's highest unit
+// price, while `monthlyBudgetMinor` is passed through unchanged. Deriving from
+// calls means a later price change moves the money ceiling rather than silently
+// shrinking how many calls the budget buys.
+const BUDGET_FIELDS = Object.freeze([
+  ['monthlyBudgetMinor', 'monthlyBudgetCalls'],
+  ['monthlySubsidyBudgetMinor', 'monthlySubsidyBudgetCalls'],
+])
+
+function budgetMinor(file, minorField, callsField, unitCostMinor) {
+  const calls = file[callsField]
+  if (Number.isSafeInteger(calls) && calls >= 0) return calls * unitCostMinor
+  return file[minorField]
+}
 
 function say(message) {
-  process.stdout.write(`[price-book-seed] ${message}\n`)
+  // Seeding must not die because whoever is reading stopped reading. The deploy
+  // pipes this into its own log, and a closed pipe there would abort the run
+  // partway through with some operations seeded and others not.
+  try {
+    process.stdout.write(`[price-book-seed] ${message}\n`)
+  } catch {
+    // Losing a progress line is never worth failing a deploy over.
+  }
 }
 
 async function admin(path, { method = 'GET', body } = {}) {
@@ -59,12 +83,19 @@ export function priceBookForOperation(file, endpointKeys) {
   if (missing.length > 0) {
     return { ok: false, missing }
   }
+  // A call budget buys the same number of calls whichever endpoint is hit, so
+  // it is priced at this operation's most expensive one.
+  const unitCostMinor = Math.max(...endpointKeys.map((endpointKey) => unitCosts[endpointKey]))
   return {
     ok: true,
     // The control plane accepts exactly this operation's endpoint keys, so the
     // flat repository file is narrowed per operation rather than sent whole.
     priceBook: {
       ...Object.fromEntries(PRICE_BOOK_FIELDS.map((field) => [field, file[field]])),
+      ...Object.fromEntries(BUDGET_FIELDS.map(([minorField, callsField]) => [
+        minorField,
+        budgetMinor(file, minorField, callsField, unitCostMinor),
+      ])),
       unitCostMinorByEndpoint: Object.fromEntries(
         endpointKeys.map((endpointKey) => [endpointKey, unitCosts[endpointKey]]),
       ),
@@ -156,6 +187,10 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // Node raises EPIPE as an unhandled stream error rather than a throw, so the
+  // try/catch in say() alone is not enough.
+  process.stdout.on('error', () => {})
+  process.stderr.on('error', () => {})
   main().then((code) => process.exit(code)).catch((error) => {
     say(`WARNING price-book seeding failed: ${error.message}`)
     process.exit(0)

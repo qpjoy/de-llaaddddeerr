@@ -1165,10 +1165,19 @@ function operationControlSourceLabel(source) {
   return labels[source] || source || UNKNOWN
 }
 
+const BUDGET_MODES = [
+  { value: 'minor', label: '按金额 · 最小货币单位' },
+  { value: 'calls', label: '按调用次数' },
+]
+
 function initialOperationPriceDraft(operation) {
   return {
     currency: operation.priceBook.currency || 'CNY',
     pricingAsOf: operation.priceBook.pricingAsOf || '',
+    // The control plane stores a money ceiling, so a reopened form shows what
+    // is stored and round-trips it exactly. Switching to calls is a deliberate
+    // act by whoever is editing.
+    budgetMode: 'minor',
     monthlyBudgetMinor: operation.priceBook.monthlyBudgetMinor ?? '',
     monthlySubsidyBudgetMinor: operation.priceBook.monthlySubsidyBudgetMinor ?? '',
     endpointPrices: Object.fromEntries(operation.release.endpointKeys.map((endpointKey) => [
@@ -1190,6 +1199,30 @@ function parseMinorUnit(value, label, { positive = false } = {}) {
   return parsed
 }
 
+function parseCallCount(value, label) {
+  const normalized = String(value).trim()
+  if (!/^\d+$/u.test(normalized)) throw new Error(`${label}必须是不含小数的调用次数`)
+  const parsed = Number(normalized)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${label}必须是非负安全整数`)
+  }
+  return parsed
+}
+
+// A call budget has to hold whichever endpoint the call lands on, so it is
+// priced at the most expensive one. The prices used are the ones in this form,
+// not the stored ones: editing a price and a budget together must convert with
+// the price actually being submitted.
+function budgetMinorFromDraft(draft, label, unitCostMinorByEndpoint) {
+  const stated = draft.budgetMode === 'calls'
+    ? draft[`${label.field}Calls`] ?? draft[label.field]
+    : draft[label.field]
+  if (draft.budgetMode !== 'calls') return parseMinorUnit(stated, label.text)
+  const prices = Object.values(unitCostMinorByEndpoint)
+  if (prices.length === 0) throw new Error('按次数换算前必须先填写每个 endpoint 的单次价格')
+  return parseCallCount(stated, label.text) * Math.max(...prices)
+}
+
 function operationPriceBookPayload(draft, endpointKeys) {
   const currency = draft.currency.trim().toUpperCase()
   const pricingAsOf = draft.pricingAsOf.trim()
@@ -1197,15 +1230,22 @@ function operationPriceBookPayload(draft, endpointKeys) {
   if (!pricingAsOf || Number.isNaN(Date.parse(pricingAsOf))) {
     throw new Error('请填写有效的定价证据日期')
   }
+  const unitCostMinorByEndpoint = Object.fromEntries(endpointKeys.map((endpointKey) => [
+    endpointKey,
+    parseMinorUnit(draft.endpointPrices[endpointKey], `${endpointKey} 单次价格`, { positive: true }),
+  ]))
   return {
     currency,
     pricingAsOf,
-    monthlyBudgetMinor: parseMinorUnit(draft.monthlyBudgetMinor, '月度上游预算'),
-    monthlySubsidyBudgetMinor: parseMinorUnit(draft.monthlySubsidyBudgetMinor, '月度补贴预算'),
-    unitCostMinorByEndpoint: Object.fromEntries(endpointKeys.map((endpointKey) => [
-      endpointKey,
-      parseMinorUnit(draft.endpointPrices[endpointKey], `${endpointKey} 单次价格`, { positive: true }),
-    ])),
+    // The wire contract is always minor units; the call notation is an input
+    // convenience that never reaches the control plane.
+    monthlyBudgetMinor: budgetMinorFromDraft(
+      draft, { field: 'monthlyBudgetMinor', text: '月度上游预算' }, unitCostMinorByEndpoint,
+    ),
+    monthlySubsidyBudgetMinor: budgetMinorFromDraft(
+      draft, { field: 'monthlySubsidyBudgetMinor', text: '月度补贴预算' }, unitCostMinorByEndpoint,
+    ),
+    unitCostMinorByEndpoint,
   }
 }
 
@@ -1221,6 +1261,27 @@ function ExternalPlatformOperationCard({
   const [canaryConsumerIds, setCanaryConsumerIds] = useState(operation.canaryConsumerIds.join('\n'))
   const [publishPriceBook, setPublishPriceBook] = useState(false)
   const [priceDraft, setPriceDraft] = useState(() => initialOperationPriceDraft(operation))
+  // Operators reason in calls and the provider bills in calls, but the control
+  // plane stores a money ceiling. Show both so a budget can be set without
+  // doing the arithmetic by hand, and priced at the most expensive endpoint
+  // because a call budget must hold whichever one is hit.
+  // Whichever unit is being typed, show the other one. The conversion uses the
+  // prices in this form so editing a price and a budget together stays honest.
+  const budgetHint = (value) => {
+    const prices = operation.release.endpointKeys
+      .map((endpointKey) => Number(priceDraft.endpointPrices[endpointKey]))
+      .filter((price) => Number.isFinite(price) && price > 0)
+    const entered = Number(value)
+    if (prices.length === 0) return '填写每个 endpoint 的单次价格后显示换算'
+    if (!Number.isFinite(entered) || entered <= 0) {
+      return priceDraft.budgetMode === 'calls' ? '填写调用次数' : '填写金额'
+    }
+    const highest = Math.max(...prices)
+    return priceDraft.budgetMode === 'calls'
+      ? `= ${(entered * highest).toLocaleString('zh-CN')} 最小货币单位（按最高单价 ${highest} 计）`
+      : `≈ ${Math.floor(entered / highest).toLocaleString('zh-CN')} 次调用（按最高单价 ${highest} 计）`
+  }
+  const budgetUnitLabel = priceDraft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'
   const [busyState, setBusyState] = useState(null)
   const [error, setError] = useState(null)
   const busy = busyState !== null
@@ -1377,7 +1438,15 @@ function ExternalPlatformOperationCard({
             required={publishPriceBook}
           />
         </Field>
-        <Field label="月度上游预算（最小货币单位）">
+        <DropdownField
+          label="预算填写单位"
+          hint="按次数填写时提交前会用本表单的最高单价换算成金额；控制平面始终存储金额。"
+          value={priceDraft.budgetMode}
+          options={BUDGET_MODES}
+          onChange={(value) => updatePriceDraft('budgetMode', value)}
+          disabled={busy || !publishPriceBook}
+        />
+        <Field label={`月度上游预算（${budgetUnitLabel}）`} hint={budgetHint(priceDraft.monthlyBudgetMinor)}>
           <input
             className="qp-input mih-mono"
             type="number"
@@ -1389,7 +1458,7 @@ function ExternalPlatformOperationCard({
             required={publishPriceBook}
           />
         </Field>
-        <Field label="月度补贴预算（最小货币单位）">
+        <Field label={`月度补贴预算（${budgetUnitLabel}）`} hint={budgetHint(priceDraft.monthlySubsidyBudgetMinor)}>
           <input
             className="qp-input mih-mono"
             type="number"

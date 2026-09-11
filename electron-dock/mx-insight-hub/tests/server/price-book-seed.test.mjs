@@ -128,3 +128,70 @@ test('seeding never resumes a paused operation', async () => {
   assert.equal(seeded.effectiveState, 'paused')
   assert.equal(seeded.priceBook.source, 'database')
 })
+
+test('the seeded budgets are positive, because zero blocks every subsidized call', async () => {
+  const file = await priceBookFile()
+  const unitCosts = Object.values(file.unitCostMinorByEndpoint)
+  const highestUnitCost = Math.max(...unitCosts)
+
+  // Both ceilings apply only to traffic Hub absorbs itself (a consumer with no
+  // wallet-backed charge). Zero means "absorb nothing", which rejects every
+  // such call with external_platform_cost_budget_exhausted -- the
+  // blocked-on-day-one state this seed exists to prevent.
+  for (const [minorField, callsField] of [
+    ['monthlyBudgetMinor', 'monthlyBudgetCalls'],
+    ['monthlySubsidyBudgetMinor', 'monthlySubsidyBudgetCalls'],
+  ]) {
+    const calls = file[callsField]
+    const minor = file[minorField]
+    const stated = Number.isSafeInteger(calls) ? calls * highestUnitCost : minor
+    assert.ok(
+      Number.isSafeInteger(stated) && stated > 0,
+      `${callsField}/${minorField} must give a positive ceiling, not ${stated}`,
+    )
+    // The ceiling has to cover more than a single call, or the first request of
+    // the month exhausts it.
+    assert.ok(
+      stated >= highestUnitCost,
+      `${callsField}/${minorField} must cover at least one call at the highest unit price`,
+    )
+  }
+})
+
+test('a call budget is converted at the operation\'s highest unit price', async () => {
+  const file = await priceBookFile()
+  assert.ok(
+    Number.isSafeInteger(file.monthlyBudgetCalls),
+    'the seed states its budget in calls, which is what the provider bills',
+  )
+
+  const endpointKeys = ['taobao-tmall.product-search.v1', 'jd.product-search.v1']
+  const highest = Math.max(...endpointKeys.map((key) => file.unitCostMinorByEndpoint[key]))
+  const { priceBook } = priceBookForOperation(file, endpointKeys)
+
+  assert.equal(priceBook.monthlyBudgetMinor, file.monthlyBudgetCalls * highest)
+  assert.equal(priceBook.monthlyBudgetMinor / highest, file.monthlyBudgetCalls)
+})
+
+test('an explicit minor-unit budget is still honoured, and calls win per field', () => {
+  const base = {
+    currency: 'CNY',
+    pricingAsOf: '2026-09-11T00:00:00Z',
+    unitCostMinorByEndpoint: { 'a.v1': 107 },
+  }
+  const keys = ['a.v1']
+
+  // A file that predates the call notation keeps working unchanged.
+  const minorOnly = priceBookForOperation(
+    { ...base, monthlyBudgetMinor: 123_456, monthlySubsidyBudgetMinor: 999 }, keys,
+  ).priceBook
+  assert.equal(minorOnly.monthlyBudgetMinor, 123_456)
+  assert.equal(minorOnly.monthlySubsidyBudgetMinor, 999)
+
+  // The two fields are independent: one may be stated in calls, the other not.
+  const mixed = priceBookForOperation(
+    { ...base, monthlyBudgetCalls: 10, monthlyBudgetMinor: 1, monthlySubsidyBudgetMinor: 7 }, keys,
+  ).priceBook
+  assert.equal(mixed.monthlyBudgetMinor, 1_070, 'calls win over minor for the same field')
+  assert.equal(mixed.monthlySubsidyBudgetMinor, 7)
+})

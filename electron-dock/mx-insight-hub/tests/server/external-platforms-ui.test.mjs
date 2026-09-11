@@ -200,3 +200,37 @@ test('figure-four explanation scopes only channel comments to YouTube', async ()
   assert.match(pageSource, /youtube_channel_comments[\s\S]*?YouTube 专属/u)
   assert.match(pageSource, /“无等价接口”只能说明不能直接一对一映射/u)
 })
+
+test('a budget may be entered in calls, and the wire contract stays in minor units', async () => {
+  const [, , page] = await sources()
+
+  // Both units are offered, and the stored unit is the default so a reopened
+  // form round-trips exactly what the control plane holds.
+  assert.match(page, /const BUDGET_MODES = \[/u)
+  assert.match(page, /value: 'minor'/u)
+  assert.match(page, /value: 'calls'/u)
+  assert.match(page, /budgetMode: 'minor',/u)
+
+  // A call budget must hold whichever endpoint the call lands on, so it is
+  // priced at the most expensive one.
+  assert.match(page, /parseCallCount\(stated, label\.text\) \* Math\.max\(\.\.\.prices\)/u)
+
+  // The conversion uses the prices in this form, not the stored ones: editing a
+  // price and a budget together must convert with the price being submitted.
+  assert.match(
+    page,
+    /const unitCostMinorByEndpoint = Object\.fromEntries\(endpointKeys\.map[\s\S]*?budgetMinorFromDraft\(/u,
+  )
+
+  // Whatever unit was typed, the payload sent is always minor units.
+  assert.match(page, /monthlyBudgetMinor: budgetMinorFromDraft\(/u)
+  assert.match(page, /monthlySubsidyBudgetMinor: budgetMinorFromDraft\(/u)
+  assert.doesNotMatch(page, /monthlyBudgetCalls:/u, 'the call notation never reaches the wire')
+
+  // Converting without a price would silently produce a zero ceiling, which
+  // rejects every subsidized call, so it is refused instead.
+  assert.match(page, /按次数换算前必须先填写每个 endpoint 的单次价格/u)
+
+  // A fractional call count is not a call count.
+  assert.match(page, /必须是不含小数的调用次数/u)
+})
