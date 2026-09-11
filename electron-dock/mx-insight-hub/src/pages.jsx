@@ -202,6 +202,10 @@ const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = {
   },
 }
 
+function selectionContext(tenantId, consumerId) {
+  return `${tenantId || ''}\u0000${consumerId || ''}`
+}
+
 function tenantAllows(session, tenantId, capability) {
   if (!tenantId) return false
   return Boolean(
@@ -1384,7 +1388,17 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
   const configuration = tenantId && consumerId
     ? await adminApi.platforms(token, { tenantId, consumerId })
     : { grants: [], policies: [] }
-  return { tenants: safeTenants, consumers, tenantId, consumerId, configuration }
+  return {
+    tenants: safeTenants,
+    consumers,
+    tenantId,
+    consumerId,
+    configuration,
+    // Which selection this result answers. Without it a caller cannot tell a
+    // deliberate server-side redirect (the requested tenant is not visible)
+    // from data that simply predates the selection being made.
+    requestedContext: selectionContext(requestedTenantId, requestedConsumerId),
+  }
 }
 
 export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized, notify }) {
@@ -1442,7 +1456,14 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   }, [requestedConsumerId, requestedTenantId, session, token])
   const state = useRemoteData(load, onUnauthorized)
   useEffect(() => {
+    // Only act on a result that answers the selection currently in the URL.
+    // `state.loading` is not enough on its own: the refetch triggered by a new
+    // selection is still queued on the render where this first runs, so the
+    // previous tenant's data is briefly paired with the new request and would
+    // be read as a rejected selection -- snapping the picker back and making
+    // it look as though tenants cannot be switched.
     if (state.loading || !state.data) return
+    if (state.data.requestedContext !== selectionContext(requestedTenantId, requestedConsumerId)) return
     const tenantMismatch = requestedTenantId && requestedTenantId !== state.data.tenantId
     const consumerMismatch = requestedConsumerId && requestedConsumerId !== state.data.consumerId
     if (tenantMismatch || consumerMismatch) {
@@ -1999,7 +2020,14 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   )
   const state = useRemoteData(load, onUnauthorized)
   useEffect(() => {
+    // Only act on a result that answers the selection currently in the URL.
+    // `state.loading` is not enough on its own: the refetch triggered by a new
+    // selection is still queued on the render where this first runs, so the
+    // previous tenant's data is briefly paired with the new request and would
+    // be read as a rejected selection -- snapping the picker back and making
+    // it look as though tenants cannot be switched.
     if (state.loading || !state.data) return
+    if (state.data.requestedContext !== selectionContext(requestedTenantId, requestedConsumerId)) return
     const tenantMismatch = requestedTenantId && requestedTenantId !== state.data.tenantId
     const consumerMismatch = requestedConsumerId && requestedConsumerId !== state.data.consumerId
     if (tenantMismatch || consumerMismatch) {
