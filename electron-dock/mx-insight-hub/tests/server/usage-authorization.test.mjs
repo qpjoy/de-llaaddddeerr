@@ -162,7 +162,7 @@ test('MemoryStore accounts each authorization axis in its own quota window', asy
 
   await assert.rejects(owner.store.reserve(reservationInput(owner)), (error) => {
     assert.equal(error.status, 429)
-    assert.equal(error.code, 'quota_exceeded')
+    assert.equal(error.code, 'consumer_quota_exceeded')
     assert.deepEqual(error.details, {
       capability: OPERATION,
       maxRequests: 1,

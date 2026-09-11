@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { quotaExceededCode } from '../core/quota-codes.mjs'
 import { quotedMinor, usageMeterKey } from '../billing/contracts.mjs'
 import {
   CANONICAL_CONTEXT_DATASETS,
@@ -645,7 +646,7 @@ export class MemoryStore {
       const policy = this.policies.get(`${record.consumerId}:${platform}`) || {}
       return {
         platform,
-        maxRequests: policy.maxRequests || 1_000,
+        maxRequests: policy.maxRequests || 100_000,
         windowSeconds: policy.windowSeconds || 3_600,
         maxPageSize: policy.maxPageSize || 100,
       }
@@ -657,7 +658,7 @@ export class MemoryStore {
       const policy = this.capabilityPolicies.get(`${record.consumerId}:${capability}`) || {}
       return {
         capability,
-        maxRequests: policy.maxRequests || 1_000,
+        maxRequests: policy.maxRequests || 100_000,
         windowSeconds: policy.windowSeconds || 3_600,
       }
     })
@@ -1444,7 +1445,7 @@ export class MemoryStore {
         && new Date(record.reservedAt) >= consumerWindowStart
       )).length
       if (Number.isFinite(consumerMaxRequests) && count >= consumerMaxRequests) {
-        throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
+        throw new AppError(429, quotaExceededCode('consumer'), 'Request quota exceeded', {
           ...details,
           maxRequests: consumerMaxRequests,
           limitScope: 'consumer',
@@ -1461,7 +1462,7 @@ export class MemoryStore {
         && new Date(record.reservedAt) >= keyWindowStart
       )).length
       if (Number.isFinite(keyMaxRequests) && keyCount >= keyMaxRequests) {
-        throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
+        throw new AppError(429, quotaExceededCode('api_key'), 'API key quota exceeded', {
           ...details,
           maxRequests: keyMaxRequests,
           windowSeconds: keyWindowSeconds,
@@ -1493,7 +1494,7 @@ export class MemoryStore {
           && new Date(record.reservedAt) >= slidingStart,
       ).length
       if (planWindowCount >= planMaxRequests) {
-        throw new AppError(429, 'quota_exceeded', 'Plan sliding-window quota exceeded', {
+        throw new AppError(429, quotaExceededCode('plan_window'), 'Plan sliding-window quota exceeded', {
           maxRequests: planMaxRequests,
           windowSeconds: planWindowSeconds,
           limitScope: 'plan_window',
@@ -1513,7 +1514,7 @@ export class MemoryStore {
           && new Date(record.reservedAt) >= monthStart,
       ).length
       if (monthlyCount >= monthlyRequests) {
-        throw new AppError(429, 'quota_exceeded', 'Monthly plan quota exceeded', {
+        throw new AppError(429, quotaExceededCode('plan_month'), 'Monthly plan quota exceeded', {
           maxRequests: monthlyRequests,
           limitScope: 'plan_month',
           plan: plan.key,
@@ -1530,7 +1531,7 @@ export class MemoryStore {
           && new Date(record.reservedAt) >= burstStart,
       ).length
       if (burstCount >= burstRps) {
-        throw new AppError(429, 'quota_exceeded', 'Plan burst quota exceeded', {
+        throw new AppError(429, quotaExceededCode('plan_burst'), 'Plan burst quota exceeded', {
           maxRequests: burstRps,
           windowSeconds: 1,
           limitScope: 'plan_burst',
@@ -1598,7 +1599,7 @@ export class MemoryStore {
     return {
       ...grantedEntitlement,
       ...(apiKeyQuota || {}),
-      consumerMaxRequests: consumerPolicy.maxRequests || 1_000,
+      consumerMaxRequests: consumerPolicy.maxRequests || 100_000,
       consumerWindowSeconds: consumerPolicy.windowSeconds || 3_600,
     }
   }

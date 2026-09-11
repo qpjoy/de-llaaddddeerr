@@ -516,6 +516,6 @@ test('public source catalog GETs share the consumer platform quota', async () =>
     assert.equal(metadata.response.status, 200)
     const limited = await call(baseUrl, `/api/v1/data/source-catalog/${firstEntry.id}`, { headers })
     assert.equal(limited.response.status, 429)
-    assert.equal(limited.payload.error.code, 'quota_exceeded')
+    assert.equal(limited.payload.error.code, 'consumer_quota_exceeded')
   }, { maxRequests: 2, maxPageSize: 2 })
 })

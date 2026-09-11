@@ -176,7 +176,10 @@ test('new consumers receive tokenize defaults but still need an issued API key',
     tenantId: tenant.id,
     consumerId: consumer.id,
     capability: 'nlp.tokenize',
-    maxRequests: 1_000,
+    // Hub's own service quota, raised so a whole team browsing a data
+    // product does not exhaust one hour's window. Upstream cost control is
+    // a separate ceiling and is unaffected.
+    maxRequests: 100_000,
     windowSeconds: 3_600,
     updatedAt: (await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize')).updatedAt,
   })
@@ -458,7 +461,7 @@ test('public tokenize enforces auth, grant, strict input, quota, and bounded rep
       method: 'POST', headers: { ...headers, 'idempotency-key': 'tokenize-three' }, body: { text: '第三次调用' },
     })
     assert.equal(limited.response.status, 429)
-    assert.equal(limited.payload.error.code, 'quota_exceeded')
+    assert.equal(limited.payload.error.code, 'consumer_quota_exceeded')
     assert.equal(limited.payload.error.details.capability, 'nlp.tokenize')
 
     const usage = await call('/api/v1/usage', { headers })

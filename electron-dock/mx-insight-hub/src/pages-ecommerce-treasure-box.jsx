@@ -262,10 +262,41 @@ function ecommerceErrorPresentation(error) {
       operatorAction: true,
     }
   }
-  if (code === 'quota_exceeded') {
+  // Each quota layer needs a different response, so each gets its own message:
+  // a window recovers on its own, a monthly ceiling does not, and a burst limit
+  // means slow down rather than wait.
+  if (code === 'consumer_quota_exceeded') {
     return {
       title: '当前调用身份的 Hub 请求额度已用完',
-      description: '等待计量窗口恢复；若需提高这把 Key 在签发时冻结的上限，请管理员审核后签发替代 Key。',
+      description: '等待计量窗口恢复，或由管理员在「套餐与配额」调整该调用身份在此数据域的额度。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'api_key_quota_exceeded') {
+    return {
+      title: '这把 API Key 自己的额度已用完',
+      description: 'Key 的上限比调用身份更严，且在签发时冻结。改用同一调用身份下额度更宽的 Key，或请管理员审核后签发替代 Key。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'plan_window_quota_exceeded') {
+    return {
+      title: '套餐的滑动窗口额度已用完',
+      description: '等待窗口恢复即可；这是套餐层的限额，不是这把 Key 的问题。',
+      operatorAction: false,
+    }
+  }
+  if (code === 'plan_month_quota_exceeded') {
+    return {
+      title: '套餐的月度额度已用完',
+      description: '等待窗口没有用——要到下一个计费周期才会重置，或请管理员升级套餐。',
+      operatorAction: true,
+    }
+  }
+  if (code === 'plan_burst_exceeded') {
+    return {
+      title: '瞬时请求速率过高',
+      description: '额度本身没有用完，降低发起速率后立即可以继续。',
       operatorAction: false,
     }
   }

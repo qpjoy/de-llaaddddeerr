@@ -155,8 +155,12 @@ import {
   TOPIC_REPORT_USAGE_SCOPE,
 } from './insights/topic-reports.mjs'
 
+// A data product is opened by many people at once inside a customer company,
+// and a cache hit consumes this quota just as a live acquisition does, so the
+// window has to hold a whole team's browsing rather than one person's session.
+// This is Hub's own service quota; it does not loosen any upstream cost control.
 const DEFAULT_POLICY = Object.freeze({
-  maxRequests: 1_000,
+  maxRequests: 100_000,
   windowSeconds: 3_600,
   maxPageSize: 100,
 })

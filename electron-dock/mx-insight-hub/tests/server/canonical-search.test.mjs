@@ -422,7 +422,7 @@ test('canonical endpoint searches one authorized global projection with filters,
       body: { ...body, platform: 'xiaohongshu', query: 'quota boundary' },
     })
     assert.equal(strictestQuota.response.status, 429)
-    assert.equal(strictestQuota.payload.error.code, 'quota_exceeded')
+    assert.equal(strictestQuota.payload.error.code, 'consumer_quota_exceeded')
     assert.equal(strictestQuota.payload.error.details.capability, 'data.canonical-search')
     assert.equal(strictestQuota.payload.error.details.maxRequests, 3)
     assert.equal(contentCalls.length, 3)

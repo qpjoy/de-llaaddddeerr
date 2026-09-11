@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { quotaExceededCode } from '../core/quota-codes.mjs'
 import { usageMeterKey } from '../billing/contracts.mjs'
 import { CANONICAL_CONTEXT_DATASETS } from '../data/canonical-context.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
@@ -2380,7 +2381,7 @@ export class PostgresStore {
         ],
       )
       if (Number(rows[0].count) >= consumerMaxRequests) {
-        throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
+        throw new AppError(429, quotaExceededCode('consumer'), 'Request quota exceeded', {
           ...details,
           maxRequests: consumerMaxRequests,
           limitScope: 'consumer',
@@ -2417,7 +2418,7 @@ export class PostgresStore {
         [input.apiKeyId, scope.type, scope.key, keyWindowSeconds],
       )
       if (Number(keyUsage.rows[0].count) >= keyMaxRequests) {
-        throw new AppError(429, 'quota_exceeded', 'API key quota exceeded', {
+        throw new AppError(429, quotaExceededCode('api_key'), 'API key quota exceeded', {
           ...details,
           maxRequests: keyMaxRequests,
           windowSeconds: keyWindowSeconds,
@@ -2465,7 +2466,7 @@ export class PostgresStore {
         [input.consumerId, planResult.rows[0].assigned_at, planWindowSeconds],
       )
       if (Number(planWindowUsage.rows[0].count) >= planMaxRequests) {
-        throw new AppError(429, 'quota_exceeded', 'Plan sliding-window quota exceeded', {
+        throw new AppError(429, quotaExceededCode('plan_window'), 'Plan sliding-window quota exceeded', {
           maxRequests: planMaxRequests,
           windowSeconds: planWindowSeconds,
           limitScope: 'plan_window',
@@ -2484,7 +2485,7 @@ export class PostgresStore {
         [input.consumerId, planResult.rows[0].period_start],
       )
       if (Number(monthlyUsage.rows[0].count) >= monthlyRequests) {
-        throw new AppError(429, 'quota_exceeded', 'Monthly plan quota exceeded', {
+        throw new AppError(429, quotaExceededCode('plan_month'), 'Monthly plan quota exceeded', {
           maxRequests: monthlyRequests,
           limitScope: 'plan_month',
           plan: planResult.rows[0].plan_key,
@@ -2503,7 +2504,7 @@ export class PostgresStore {
         [input.consumerId],
       )
       if (Number(burstUsage.rows[0].count) >= burstRps) {
-        throw new AppError(429, 'quota_exceeded', 'Plan burst quota exceeded', {
+        throw new AppError(429, quotaExceededCode('plan_burst'), 'Plan burst quota exceeded', {
           maxRequests: burstRps,
           windowSeconds: 1,
           limitScope: 'plan_burst',

@@ -1935,7 +1935,7 @@ paths:
         "403": [capability_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
         "413": [payload_too_large]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [tokenizer_unavailable, tokenizer_invalid_response]
       parameters:
         - name: Idempotency-Key
@@ -2012,7 +2012,7 @@ paths:
         "404": [stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2205,7 +2205,7 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2292,7 +2292,7 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2372,7 +2372,7 @@ paths:
         "404": [post_not_found, stored_snapshot_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2453,7 +2453,7 @@ paths:
         "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
         "404": [not_found, post_not_found]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2659,7 +2659,7 @@ paths:
         "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "410": [search_cursor_expired]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2786,7 +2786,7 @@ paths:
         "404": [not_found, user_not_found, night_all_rejected]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, night_all_rejected]
         "422": [night_all_rejected]
-        "429": [quota_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted, night_all_rejected]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted, night_all_rejected]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
         "503": [platform_operation_unavailable, compatibility_capabilities_unavailable, compatibility_store_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
       parameters:
@@ -2904,7 +2904,7 @@ paths:
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
         "410": [search_cursor_expired]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_search_unavailable, search_cursor_unavailable]
       parameters:
         - name: Idempotency-Key
@@ -2982,7 +2982,7 @@ paths:
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
         "410": [search_cursor_expired]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [canonical_search_unavailable, search_cursor_unavailable, search_profile_unavailable]
       parameters:
         - name: Idempotency-Key
@@ -3045,7 +3045,7 @@ paths:
         "403": [platform_not_granted]
         "404": [item_not_found]
         "409": [context_not_supported]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable, serving_indexes_unavailable]
       parameters:
         - name: id
@@ -3113,7 +3113,7 @@ paths:
         "403": [platform_not_granted]
         "404": [item_not_found]
         "409": [context_not_supported]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable, serving_indexes_unavailable]
       parameters:
         - name: id
@@ -3167,7 +3167,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [remote_fetch_unavailable]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: sourcePlatform, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 120 } }
@@ -3215,7 +3215,7 @@ paths:
         "400": [unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       responses:
         "200":
@@ -3246,7 +3246,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [storefront_revision_changed]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: categoryId, in: query, required: false, schema: { type: string, format: uuid } }
@@ -3294,7 +3294,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "404": [virtual_supermarket_product_not_found]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -3323,7 +3323,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [storefront_revision_changed]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: categoryId, in: query, required: false, schema: { type: string, format: uuid } }
@@ -3380,7 +3380,7 @@ paths:
         "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: query, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
@@ -3450,7 +3450,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "404": [source_catalog_entry_not_found]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - name: id
@@ -3519,7 +3519,7 @@ paths:
         "400": [unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       responses:
         "200":
@@ -3548,7 +3548,7 @@ paths:
         "400": [invalid_request, invalid_parent_region, unsupported_region_level, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - name: parentCode
@@ -3598,7 +3598,7 @@ paths:
         "400": [invalid_region, invalid_visibility, invalid_sort, invalid_request, page_size_exceeded, invalid_cursor, unsupported_fields, all_ingested_scope_required]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, capability_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable, serving_indexes_unavailable]
       parameters:
         - name: regionCode
@@ -3679,7 +3679,7 @@ paths:
         "400": [invalid_province, invalid_request, invalid_sort, page_size_exceeded, invalid_cursor, unsupported_fields, candidate_scope_required]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable, serving_indexes_unavailable]
       parameters:
         - name: province
@@ -3784,7 +3784,7 @@ paths:
         "400": [invalid_request, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable, serving_indexes_unavailable]
       parameters:
         - name: from
@@ -3839,7 +3839,7 @@ paths:
         "400": [invalid_request, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, capability_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - name: from
@@ -3878,7 +3878,7 @@ paths:
         "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, capability_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
@@ -3949,7 +3949,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, capability_not_granted]
         "404": [item_not_found]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -3990,7 +3990,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "404": [item_not_found]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - name: id
@@ -4040,7 +4040,7 @@ paths:
         "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - $ref: "#/components/parameters/TelegramSourceScope"
@@ -4086,7 +4086,7 @@ paths:
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "404": [chat_not_found]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_data_unavailable]
       parameters:
         - $ref: "#/components/parameters/TelegramSourceScope"
@@ -4143,7 +4143,7 @@ paths:
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
         "410": [search_cursor_expired]
-        "429": [quota_exceeded]
+        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded]
         "503": [stored_search_unavailable, search_cursor_unavailable]
       parameters:
         - name: Idempotency-Key

@@ -477,7 +477,7 @@ Troubleshoot credentials from the outside inward; do not replace one key because
 | Public ecommerce with a Live key | Ordinary `mih_live_` Hub Public API Key in bearer or `x-api-key` form | Missing is `401 api_key_required`; invalid, expired or revoked is `401 invalid_api_key`; valid but without `ecommerce` on its owning consumer is `403 platform_not_granted`. No ecommerce-specific key exists. |
 | Public Xiaohongshu note with a Live key | Ordinary `mih_live_` Hub Public API Key in bearer or `x-api-key` form | The immutable key snapshot and current consumer authorization must both include `xiaohongshu` and `social.posts.resolve`. Missing platform is `403 platform_not_granted`; missing capability is `403 capability_not_granted`. |
 | Public ecommerce with a legacy Test key | Ordinary Hub Public API Key carrying compatibility `environment=test` metadata | With an ecommerce grant, capabilities keeps the entry but reports `ready=false`; search and media return `403 test_key_not_supported` before usage reservation, stored-result/media lookup or provider dispatch. It is not a sandbox. |
-| Hub request policy | Authenticated and granted consumer | `429 quota_exceeded` is consumer quota; `429 external_platform_busy` is Hub concurrency protection. Neither is a provider-key prompt. |
+| Hub request policy | Authenticated and granted consumer | `429 consumer_quota_exceeded` is consumer quota; `429 external_platform_busy` is Hub concurrency protection. Neither is a provider-key prompt. |
 | Internal provider dispatch | Server-held JustOne API Key | The caller never supplies it. Missing configuration, upstream credential rejection, balance or provider capacity is sanitized as an external-platform availability/capacity error. It must not become Public `invalid_api_key`. |
 
 `502 external_platform_outcome_unknown` and `502 external_platform_response_unusable` are post-dispatch
@@ -893,7 +893,7 @@ response-shape problem, not for crossing a cost-warning threshold.
 | `test_key_not_supported` | A valid legacy Test key reached an external ecommerce search or media route. | Use a Live key only for a deliberately new request. A historical ambiguous Test record is retained for audit and checked automatically; it does not require the old secret, UUID or manual consumer review. No usage reservation or provider/media call occurred for this rejection. |
 | `platform_not_granted` | The Hub key is valid, but its consumer lacks the `ecommerce` grant. | Grant the product through the governed Hub authorization workflow; a source-catalog/provider credential does not grant it. |
 | `stored_snapshot_not_found` | A `cache_only` request found no exact retained snapshot. No provider call was made. | Change the business filters, use the clearly marked local safe demo, or explicitly authorize one `refresh` request with a new Idempotency-Key. |
-| `quota_exceeded` | The authenticated consumer exhausted its Hub ecommerce policy window. | Inspect the consumer policy and demand. Do not treat it as JustOne balance or free-quota evidence. |
+| `consumer_quota_exceeded` | The authenticated consumer exhausted its Hub ecommerce policy window. | Inspect the consumer policy and demand. Do not treat it as JustOne balance or free-quota evidence. |
 | `external_platform_not_configured` | The provider-neutral Public path cannot dispatch: the contract gate may be closed, no DB/environment credential may be usable, or the credential store may be unavailable. | Check the JustOne page's safe `provider.configuration` and `credential` fields, then the Public Pod's non-secret gate state. Do not reveal/decode the key or restart/reconfigure Launcher/MX-H2I. |
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
@@ -927,7 +927,7 @@ TikHub is independently disabled with `MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED=0`; r
 fallback only with the one-shot `MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY=1` deploy flag. This does not disable JustOne,
 cached/stored Hub data, Launcher or MX-H2I. A 429 from `external_platform_capacity_exceeded` means the upstream
 response was classified as rate/quota capacity exhaustion; it is not evidence by itself of an IP or domain
-block. `quota_exceeded`, `external_platform_busy` and `external_media_rate_limited` are separate Hub-owned 429
+block. The `*_quota_exceeded` family, `external_platform_busy` and `external_media_rate_limited` are separate Hub-owned 429
 classes. Preserve request ID and sanitized provider evidence before changing concurrency or credentials.
 
 Keep the prior release's environment secret available for the whole rollback window before migrating source

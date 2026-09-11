@@ -213,7 +213,7 @@ invalid UUID returns `400 invalid_source_catalog_id`; any query key returns
 `400 unsupported_fields`; an unknown or archived UUID returns
 `404 source_catalog_entry_not_found`. Authentication, grant, quota, and storage
 failures use `api_key_required` / `invalid_api_key`, `platform_not_granted`,
-`quota_exceeded`, and `stored_data_unavailable`, respectively.
+`consumer_quota_exceeded`, and `stored_data_unavailable`, respectively.
 
 ## Mobile-commerce captures and virtual supermarket
 
@@ -2350,7 +2350,7 @@ Stable errors include `400 invalid_post_url|invalid_platform|unsupported_fields`
 `403 platform_not_granted|capability_not_granted|test_key_not_supported`,
 `404 post_not_found|stored_snapshot_not_found`, `409 request_in_progress|`
 `idempotency_conflict|request_outcome_unknown|uncertain_retry_not_allowed`,
-`429 quota_exceeded|external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted`,
+`429 consumer_quota_exceeded|api_key_quota_exceeded|plan_window_quota_exceeded|plan_month_quota_exceeded|plan_burst_exceeded|external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted`,
 `502 external_platform_response_unusable|external_platform_outcome_unknown|`
 `external_platform_rejected`, and `503 external_platform_unavailable|external_platform_not_configured|`
 `external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|`
@@ -2495,7 +2495,7 @@ client error.
 For Telegram history, `400` includes `invalid_request`, `invalid_cursor`,
 `page_size_exceeded` and `unsupported_fields`; `401` is `api_key_required` or
 `invalid_api_key`; `403` is `platform_not_granted`; `429` is
-`quota_exceeded`; and `503` is `stored_data_unavailable`. A retry must reuse the
+`consumer_quota_exceeded`; and `503` is `stored_data_unavailable`. A retry must reuse the
 same cursor but is separately metered. A page is a view of the current
 canonical dataset, not a frozen snapshot across a long multi-page traversal.
 

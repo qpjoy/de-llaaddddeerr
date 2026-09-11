@@ -31,7 +31,7 @@ import { TIKHUB_XIAOHONGSHU_CONNECTOR_ID } from '../ingest/tikhub-xiaohongshu.mj
 import { createExternalPlatformCursorCodec } from './cursor.mjs'
 import { providerCostControl } from './tikhub-gateway.mjs'
 
-const DEFAULT_POLICY = Object.freeze({ maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100 })
+const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
 const USER_INFO_PARSER_VERSION = 'mxih-tikhub-xiaohongshu-user-info.v1'
 const USER_POSTS_PARSER_VERSION = 'mxih-tikhub-xiaohongshu-user-posts.v1'

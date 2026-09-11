@@ -239,6 +239,6 @@ test('public-opinion diagnostics require API Key, platform and step-up grants, t
       headers: apiHeaders,
     })
     assert.equal(limited.response.status, 429)
-    assert.equal(limited.payload.error.code, 'quota_exceeded')
+    assert.equal(limited.payload.error.code, 'consumer_quota_exceeded')
   })
 })

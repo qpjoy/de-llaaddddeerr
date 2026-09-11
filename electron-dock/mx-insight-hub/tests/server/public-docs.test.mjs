@@ -68,7 +68,8 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
   ],
   422: ['night_all_rejected'],
   429: [
-    'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+    'consumer_quota_exceeded', 'api_key_quota_exceeded', 'plan_window_quota_exceeded',
+    'plan_month_quota_exceeded', 'plan_burst_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
     'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted',
     'external_platform_subsidy_budget_exhausted', 'night_all_rejected',
   ],
@@ -107,7 +108,8 @@ const XIAOHONGSHU_SEARCH_ERROR_CODES = {
   ],
   410: ['search_cursor_expired'],
   429: [
-    'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+    'consumer_quota_exceeded', 'api_key_quota_exceeded', 'plan_window_quota_exceeded',
+    'plan_month_quota_exceeded', 'plan_burst_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
     'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted',
     'external_platform_subsidy_budget_exhausted',
   ],
@@ -212,7 +214,8 @@ function assertExternalCommerceContract(document) {
     ],
     413: ['payload_too_large'],
     429: [
-      'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+      'consumer_quota_exceeded', 'api_key_quota_exceeded', 'plan_window_quota_exceeded',
+    'plan_month_quota_exceeded', 'plan_burst_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
       'external_platform_capacity_exceeded',
       'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted',
     ],
@@ -424,7 +427,8 @@ function assertExternalSocialPostContract(document) {
     'platform_not_granted', 'capability_not_granted', 'test_key_not_supported',
   ])
   assert.deepEqual(canonical['x-mx-error-codes'][429], [
-    'quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
+    'consumer_quota_exceeded', 'api_key_quota_exceeded', 'plan_window_quota_exceeded',
+    'plan_month_quota_exceeded', 'plan_burst_exceeded', 'external_platform_busy', 'external_platform_rate_limited',
     'external_platform_capacity_exceeded',
     'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted',
   ])
@@ -1697,7 +1701,9 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(sourceCatalogHtml, /nextCursor/)
     for (const code of [
       'invalid_source_catalog_id', 'source_catalog_entry_not_found',
-      'platform_not_granted', 'quota_exceeded', 'stored_data_unavailable',
+      // Each product page names the layer a caller hits first and links to the
+      // errors page, which carries the full five-layer table.
+      'platform_not_granted', 'consumer_quota_exceeded', 'stored_data_unavailable',
     ]) assert.match(sourceCatalogHtml, new RegExp(code))
     assert.equal((html.match(/<script>/g) || []).length, 1)
     assert.match(response.headers.get('content-security-policy'), /script-src 'sha256-/)

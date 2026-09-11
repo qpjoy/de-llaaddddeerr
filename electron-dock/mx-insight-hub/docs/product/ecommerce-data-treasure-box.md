@@ -278,7 +278,7 @@ Three credentials have different authorities and are never interchangeable:
 | Legacy `mih_test_` Hub Public API Key | Other Public routes only as their contracts permit | Ecommerce capabilities reports `ready=false`; search and media return `403 test_key_not_supported` before usage reservation, stored-result/media lookup or provider dispatch. The workbench sends no request with it. |
 | JustOne API Key | Server-side JustOne adapter only | Never accepted from the browser or Public caller. Missing provider configuration or provider authentication/capacity problems are returned as provider-neutral external-platform availability errors, not as `invalid_api_key`. |
 
-After authentication, `429 quota_exceeded` is Hub consumer policy; `429 external_platform_busy` is Hub
+After authentication, `429 consumer_quota_exceeded` is Hub consumer policy; `429 external_platform_busy` is Hub
 dispatch protection; `429 external_platform_capacity_exceeded` is sanitized upstream capacity. A
 `502 external_platform_outcome_unknown` or `502 external_platform_response_unusable` may already have consumed
 provider quota or incurred Hub procurement cost and
@@ -300,7 +300,11 @@ price ledger.
 | HTTP 409 `request_in_progress` | An equal request is still being handled; this browser attempt did not add a provider dispatch. | The main action checks status automatically. `reserved` remains blocked; do not send the retry-of header. |
 | HTTP 404 `stored_snapshot_not_found` | `cache_only` found no exact retained snapshot. | No provider call occurred. Change filters, use safe demo, or select `refresh` and press the main search button to authorize one acquisition. |
 | provider configuration, availability or capacity | The current exact request has neither a deliverable live result nor an eligible snapshot. | Check **External data platforms**, provider availability and quota. Do not rotate the customer Hub key. |
-| `quota_exceeded` | The Hub consumer policy rejected the request. | Wait for the Hub window or change the consumer's ecommerce policy. |
+| `consumer_quota_exceeded` | The Hub consumer policy rejected the request. | Wait for the Hub window or change the consumer's ecommerce policy. |
+| `api_key_quota_exceeded` | This key's own ceiling, frozen at issuance, rejected it. | Use a wider key under the same consumer, or issue a replacement. |
+| `plan_window_quota_exceeded` | The plan's sliding window is full. | Wait for the window. |
+| `plan_month_quota_exceeded` | The plan's monthly ceiling is reached. | Waiting does not help; upgrade the plan or wait for the next billing period. |
+| `plan_burst_exceeded` | Requests arrived too fast. | Slow down; no quota was consumed. |
 | HTTP 200 with `items=[]` | A valid delivery found no matching items; this is not an interface failure. | Adjust the query or marketplace. Keep the returned source mode and request evidence; an empty result does not prove zero provider cost. |
 
 An unresolved provider request never disables **Safe demo**, `cache_only`, or the marketplace/sort/page-size/query

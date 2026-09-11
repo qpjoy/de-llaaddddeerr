@@ -345,7 +345,7 @@ curl -sS \
 | 401 | `api_key_required`, `invalid_api_key` | 提供或轮换当前 consumer 的 API Key。 |
 | 403 | `platform_not_granted` | 让 operator 为该 consumer 授予 `source_catalog`。 |
 | 404 | `source_catalog_entry_not_found` | 重新从列表获取 active UUID。 |
-| 429 | `quota_exceeded` | 等待 platform policy 的计量窗口恢复。 |
+| 429 | `consumer_quota_exceeded` | 调用身份在该数据域的窗口额度用完；等待恢复或调整 platform policy。另有 `api_key_quota_exceeded`、`plan_window_quota_exceeded`、`plan_month_quota_exceeded`、`plan_burst_exceeded` 分别对应 Key、套餐窗口、套餐月度与突发速率。 |
 | 503 | `stored_data_unavailable` | 安全 GET 可稍后重试；保留 `requestId` 供排查。 |
 
 ## 3.2 虚拟超市 API
@@ -735,7 +735,7 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 404 | `stored_snapshot_not_found` | `cache_only` 未命中精确存量；本次没有调用外部平台。可换条件，或选择 `refresh` 并点击主按钮授权一次采集。 |
 | 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `uncertain_retry_not_allowed` | 保留原 `Idempotency-Key`/requestId，不要自动换 Key。管理台由同一主按钮先执行状态 GET；只有明确为 `unknown` 且当前选择 `refresh` 时，才自动使用新 Key 和 retry-of 头发起一次独立采集。 |
 | 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
-| 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |
+| 429 | `consumer_quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。Key/套餐层各有独立错误码。 |
 | 429 | `external_platform_busy`, `external_platform_capacity_exceeded` | Hub 并发保护或外部容量不足；按响应退避，不要并发放大。 |
 | 429 | `external_platform_rate_limited` | Hub 的外部调用速率门禁拒绝了本次 live dispatch；按服务端节奏退避，不要换 Key 放大请求。 |
 | 429 | `external_platform_cost_budget_exhausted`, `external_platform_subsidy_budget_exhausted` | 仅表示本次请求没有形成正价 `enforced` 按次钱包 hold，且未计价/补贴工作流越过了 Hub 月度财务线；不要换 Key 重试。已有严格匹配且已冻结下游资金的请求不会因这两条财务线被拒；运营方仍须分别审核上下游原币种账本。 |
@@ -890,7 +890,7 @@ fi
 常见错误：`400 invalid_post_url|invalid_platform|unsupported_fields`、
 `403 platform_not_granted|capability_not_granted|test_key_not_supported`、
 `404 post_not_found|stored_snapshot_not_found|external_media_not_found`、
-`429 quota_exceeded|external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted|external_media_busy`、
+`429 consumer_quota_exceeded|api_key_quota_exceeded|plan_window_quota_exceeded|plan_month_quota_exceeded|plan_burst_exceeded|external_platform_busy|external_platform_rate_limited|external_platform_capacity_exceeded|external_platform_cost_budget_exhausted|external_platform_subsidy_budget_exhausted|external_media_busy`、
 `502 external_platform_response_unusable|external_platform_outcome_unknown|external_platform_rejected` 和
 `503 external_platform_unavailable|external_platform_not_configured|external_platform_contract_unverified|external_platform_circuit_open|external_platform_capacity_unavailable|external_platform_cost_control_unavailable|external_platform_cost_evidence_incomplete|external_platform_operation_disabled|external_platform_operation_shadow|external_platform_operation_paused|external_platform_operation_canary|external_platform_operation_blocked`。
 429 是 Hub 额度/并发或外部平台容量类别，不是域名封禁的证据；保留 requestId 后按错误码处理。

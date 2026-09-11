@@ -3,6 +3,7 @@ import {
   POSTGRES_SEARCH_PROFILE,
   searchCapabilities,
 } from './search/profiles.mjs'
+import { QUOTA_429_CODES } from './core/quota-codes.mjs'
 import { ECOMMERCE_DELIVERY_MODES } from './contracts/justone.mjs'
 import { XIAOHONGSHU_POST_DELIVERY_MODES } from './contracts/tikhub-xiaohongshu.mjs'
 import { SOCIAL_ACCOUNT_PLATFORMS } from './contracts/social-accounts.mjs'
@@ -630,7 +631,7 @@ function externalSocialPostOperation({ platformShaped = false } = {}) {
         'external_platform_response_unusable', 'uncertain_retry_not_allowed',
       ],
       413: ['payload_too_large'],
-      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
+      429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
       502: [
         'external_platform_response_unusable', 'external_platform_outcome_unknown',
         'external_platform_rejected',
@@ -819,7 +820,7 @@ function officialXiaohongshuOperation(endpointName) {
       403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
       404: ['not_found', 'post_not_found'],
       409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable'],
-      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
+      429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
       502: ['external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
       503: ['external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete', 'external_platform_operation_disabled', 'external_platform_operation_shadow', 'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_operation_blocked'],
     },
@@ -868,7 +869,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
       404: ['not_found', 'user_not_found', 'night_all_rejected'],
       409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable', 'night_all_rejected'],
       422: ['night_all_rejected'],
-      429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted', 'night_all_rejected'],
+      429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted', 'night_all_rejected'],
       502: ['night_all_rejected', 'upstream_outcome_unknown', 'external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
       503: ['platform_operation_unavailable', 'compatibility_capabilities_unavailable', 'compatibility_store_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete', 'external_platform_operation_disabled', 'external_platform_operation_shadow', 'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_operation_blocked'],
     },
@@ -1098,7 +1099,7 @@ function justoneResourcePaths() {
           404: ['stored_snapshot_not_found', 'unsupported_resource'],
           409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
           413: ['payload_too_large'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited'],
+          429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited'],
           502: ['external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
           503: [
             'external_platform_unavailable', 'external_platform_not_configured',
@@ -1212,7 +1213,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           404: ['stored_snapshot_not_found'],
           409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
           413: ['payload_too_large'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited'],
+          429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited'],
           502: ['external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
           503: [
             'external_platform_unavailable', 'external_platform_not_configured',
@@ -1457,7 +1458,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             'external_platform_response_unusable', 'uncertain_retry_not_allowed',
           ],
           413: ['payload_too_large'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
+          429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
           502: [
             'external_platform_response_unusable', 'external_platform_outcome_unknown',
             'external_platform_rejected',
@@ -1648,7 +1649,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
           409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable'],
           410: ['search_cursor_expired'],
-          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
+          429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted'],
           502: ['night_all_rejected', 'upstream_outcome_unknown', 'external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
           503: ['stored_search_unavailable', 'search_cursor_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete', 'external_platform_operation_disabled', 'external_platform_operation_shadow', 'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_operation_blocked'],
         },
@@ -1745,7 +1746,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           403: ['platform_not_granted'],
           404: ['item_not_found'],
           409: ['context_not_supported'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
         },
         parameters: [
@@ -1781,7 +1782,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           403: ['platform_not_granted'],
           404: ['item_not_found'],
           409: ['context_not_supported'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
         },
         parameters: [
@@ -1821,7 +1822,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           409: ['remote_fetch_unavailable'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: mobileCommerceQueryParameters,
@@ -1839,7 +1840,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: [],
@@ -1858,7 +1859,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           409: ['storefront_revision_changed'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: virtualSupermarketQueryParameters,
@@ -1877,7 +1878,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           404: ['virtual_supermarket_product_not_found'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: [{
@@ -1900,7 +1901,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           409: ['storefront_revision_changed'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: virtualSupermarketQueryParameters.map((parameter) => (
@@ -1919,7 +1920,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         'x-mx-allowed-query-fields': [
@@ -1953,7 +1954,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           404: ['source_catalog_entry_not_found'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: [
@@ -2014,7 +2015,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         responses: {
@@ -2040,7 +2041,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_request', 'invalid_parent_region', 'unsupported_region_level', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: publicOpinionRegionCatalogParameters,
@@ -2064,7 +2065,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_region', 'invalid_visibility', 'invalid_sort', 'invalid_request', 'page_size_exceeded', 'invalid_cursor', 'unsupported_fields', 'all_ingested_scope_required'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'capability_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
         },
         parameters: publicOpinionRegionFeedParameters,
@@ -2088,7 +2089,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_province', 'invalid_request', 'invalid_sort', 'page_size_exceeded', 'invalid_cursor', 'unsupported_fields', 'candidate_scope_required'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
         },
         parameters: publicOpinionProvinceParameters,
@@ -2139,7 +2140,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_request', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
         },
         parameters: publicOpinionCoverageParameters,
@@ -2163,7 +2164,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_request', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'capability_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: publicOpinionDiagnosticsWindowParameters,
@@ -2190,7 +2191,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'capability_not_granted'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: publicOpinionDiagnosticsRecordParameters,
@@ -2218,7 +2219,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'capability_not_granted'],
           404: ['item_not_found'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: [
@@ -2253,7 +2254,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           404: ['item_not_found'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: [
@@ -2341,7 +2342,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           404: ['chat_not_found'],
-          429: ['quota_exceeded'],
+          429: [...QUOTA_429_CODES],
           503: ['stored_data_unavailable'],
         },
         parameters: telegramMessageParameters,
@@ -5270,7 +5271,7 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
       <tr><td>401</td><td><code>api_key_required</code>、<code>invalid_api_key</code></td><td>提供或轮换当前 consumer 的 API Key。</td></tr>
       <tr><td>403</td><td><code>platform_not_granted</code></td><td>让 operator 为该 consumer 授予 <code>source_catalog</code>。</td></tr>
       <tr><td>404</td><td><code>source_catalog_entry_not_found</code></td><td>重新从列表获取 active UUID。</td></tr>
-      <tr><td>429</td><td><code>quota_exceeded</code></td><td>等待 platform policy 的计量窗口恢复。</td></tr>
+      <tr><td>429</td><td><code>consumer_quota_exceeded</code></td><td>该调用身份在这个数据域的滑动窗口额度用完；等窗口恢复或让管理员调整 platform policy。Key、套餐窗口、套餐月度与突发速率各有独立错误码，完整对照见<a href="/docs/errors">错误与重试</a>。</td></tr>
       <tr><td>503</td><td><code>stored_data_unavailable</code></td><td>安全 GET 可稍后重试；保留错误响应的 <code>requestId</code> 供排查。</td></tr>
     </tbody></table>
     </section>
@@ -5424,7 +5425,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
       <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable / uncertain_retry_not_allowed</code></td><td>默认防重复策略挡住了本次尝试。停止自动重试；主按钮会自动查询旧状态。仅在服务器明确返回 <code>unknown</code> 且操作者确认新 <code>refresh</code> 的潜在重复成本时，才发送 <code>X-MX-Insight-Retry-Of</code>。不存在、跨 consumer、非 unknown、operation/fingerprint 不匹配均不会泄露为可覆盖状态。</td></tr>
       <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和可用的 requestId，页面自动调用状态 GET。无需查找 UUID、费用复选框或人工核查 consumer。<code>committed</code> 精确重放；<code>reserved</code> 继续阻止采集；只有明确 <code>unknown</code> 可在用户再次选择 <code>refresh</code> 并点击重采后发起带专用请求头的新采集。</td></tr>
       <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId，并分别检查普通 credential-safe 证据与受限原始响应归档。</td></tr>
-      <tr><td>429 <code>quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
+      <tr><td>429 <code>consumer_quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
       <tr><td>429 external platform busy / capacity</td><td>Hub 并发保护和外部容量是不同原因；按响应退避，不要自动生成另一把幂等键。</td></tr>
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
       <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
@@ -5643,7 +5644,11 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
       <tr><td><code>400 invalid_post_url / unsupported_fields</code></td><td>只提交官方链接与三个允许字段。</td></tr>
       <tr><td><code>403 platform_not_granted / capability_not_granted</code></td><td>为 consumer 授权后签发同时包含两项 scope 的新 Key。</td></tr>
       <tr><td><code>404 post_not_found / stored_snapshot_not_found</code></td><td>前者是已严格识别的笔记不可用；后者只是 cache_only 未命中。</td></tr>
-      <tr><td><code>429 quota_exceeded</code></td><td>Hub 套餐/Key/consumer 限额；等待窗口或由管理员调整。</td></tr>
+      <tr><td><code>429 consumer_quota_exceeded</code></td><td>调用身份在该数据域的滑动窗口额度用完。等窗口恢复，或由管理员调整该 consumer 的 policy。</td></tr>
+      <tr><td><code>429 api_key_quota_exceeded</code></td><td>这一把 Key 自己的额度用完（比 consumer 更严）。换用同一 consumer 下额度更宽的 Key，或调整这把 Key 的 entitlement。</td></tr>
+      <tr><td><code>429 plan_window_quota_exceeded</code></td><td>套餐的滑动窗口额度用完；等窗口恢复。</td></tr>
+      <tr><td><code>429 plan_month_quota_exceeded</code></td><td>套餐的<strong>月度</strong>额度用完。<strong>等窗口没有用</strong>——要到下个计费周期，或升级套餐。</td></tr>
+      <tr><td><code>429 plan_burst_exceeded</code></td><td>瞬时并发/突发速率超限。降低发起速率即可，额度本身没有用完。</td></tr>
       <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded</code></td><td>Hub 或供应方的限流与并发保护；paid-ready 请求也仍受这些技术保护，按响应退避，不能换 Key 绕过。</td></tr>
       <tr><td><code>429 external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>仅可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量；已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。</td></tr>
       <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>

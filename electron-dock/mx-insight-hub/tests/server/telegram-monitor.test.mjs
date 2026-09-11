@@ -2856,7 +2856,7 @@ test('Telegram history enforces maxRequests and commits count-only usage evidenc
   assert.equal(first.items.length, 2)
   await assert.rejects(
     () => service.telegramMonitor(context, 'messages', { pageSize: '2' }),
-    (error) => error?.status === 429 && error?.code === 'quota_exceeded',
+    (error) => error?.status === 429 && error?.code === 'consumer_quota_exceeded',
   )
   const usage = await service.publicUsage(context, {})
   assert.equal(usage.committed, 1)

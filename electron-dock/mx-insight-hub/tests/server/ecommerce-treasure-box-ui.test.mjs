@@ -393,7 +393,10 @@ test('data-product errors are localized by ownership and always retain operator 
     ['external_platform_not_configured', '实时数据源尚未配置完成'],
     ['external_platform_capacity_exceeded', '外部数据容量暂不可用'],
     ['external_platform_busy', '实时请求较多，请稍后再试'],
-    ['quota_exceeded', '当前调用身份的 Hub 请求额度已用完'],
+    ['consumer_quota_exceeded', '当前调用身份的 Hub 请求额度已用完'],
+    ['api_key_quota_exceeded', '这把 API Key 自己的额度已用完'],
+    ['plan_month_quota_exceeded', '套餐的月度额度已用完'],
+    ['plan_burst_exceeded', '瞬时请求速率过高'],
     ['external_platform_rejected', '外部数据服务拒绝了本次查询'],
     ['resolved_replay_not_verified', '当前 API Key 无法核验原请求归属'],
   ]) {
