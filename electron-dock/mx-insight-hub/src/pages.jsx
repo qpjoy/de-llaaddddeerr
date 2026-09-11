@@ -54,6 +54,49 @@ import {
   useRemoteData,
 } from './components.jsx'
 
+// Grouping for the open-capability tables. 34 platforms in one flat list means
+// scrolling from top to bottom to find anything, and the list only grows. The
+// order here is the order they render in, and membership is by explicit id or
+// prefix so a new platform lands somewhere deliberate rather than at the end.
+const PLATFORM_GROUPS = [
+  {
+    key: 'social',
+    label: '社交与内容平台',
+    hint: '按来源平台授权；内部可聚合多个供应方',
+    members: [
+      'xiaohongshu', 'weibo', 'douyin', 'kuaishou', 'bilibili', 'zhihu',
+      'wechat_mp', 'wechat_search', 'telegram',
+      'tiktok', 'instagram', 'youtube', 'twitter', 'facebook', 'linkedin', 'reddit',
+    ],
+  },
+  {
+    key: 'commerce',
+    label: '电商与商品',
+    hint: '商品、店铺与货架数据域',
+    members: ['ecommerce', 'mobile_commerce', 'virtual_supermarket'],
+  },
+  {
+    key: 'hub',
+    label: 'Hub 自有数据域',
+    hint: '由 Hub 规范化数据层提供，不直连外部供应方',
+    members: ['public_opinion', 'source_catalog'],
+  },
+  {
+    key: 'saved_records',
+    label: '存量记录 · 按栏目',
+    hint: 'Night-All 存量记录，按栏目分别授权',
+    prefix: 'data_center_saved_records_',
+  },
+]
+
+function platformGroupOf(platform) {
+  for (const group of PLATFORM_GROUPS) {
+    if (group.members?.includes(platform)) return group.key
+    if (group.prefix && platform.startsWith(group.prefix)) return group.key
+  }
+  return 'other'
+}
+
 const PLATFORM_CATALOG = [
   'xiaohongshu',
   'weibo',
@@ -1942,6 +1985,9 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   contextRef.current = requestedContext
   const [busyPlatform, setBusyPlatform] = useState('')
   const [busyCapability, setBusyCapability] = useState('')
+  // Client-side because the whole catalog is already loaded: filtering here is
+  // instant and cannot fall out of step with what the tables render.
+  const [capabilityFilter, setCapabilityFilter] = useState('')
   const [configureTarget, setConfigureTarget] = useState(null)
   const [configureCapabilityTarget, setConfigureCapabilityTarget] = useState(null)
   const [policyForm, setPolicyForm] = useState(DEFAULT_POLICY)
@@ -1973,12 +2019,23 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   const data = state.data || { tenants: [], consumers: [], configuration: { grants: [], policies: [] } }
   const grants = new Set(data.configuration?.grants || [])
   const policyByPlatform = new Map((data.configuration?.policies || []).map((policy) => [policy.platform, policy]))
+  const filterTerm = capabilityFilter.trim().toLowerCase()
+  // Match the id and the human label, so either "xhs 小红书" spelling finds it.
+  const matchesFilter = (...fields) => filterTerm === '' || fields.some(
+    (field) => String(field || '').toLowerCase().includes(filterTerm),
+  )
   const rows = PLATFORM_CATALOG.map((platform) => ({
     platform,
     enabled: grants.has(platform),
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
     explicit: policyByPlatform.has(platform),
-  }))
+  })).filter((row) => matchesFilter(row.platform, platformLabel(row.platform)))
+  const groupedPlatformRows = [...PLATFORM_GROUPS, { key: 'other', label: '其他', hint: '' }]
+    .map((group) => ({
+      ...group,
+      rows: rows.filter((row) => platformGroupOf(row.platform) === group.key),
+    }))
+    .filter((group) => group.rows.length > 0)
   const capabilityGrants = new Set(data.configuration?.capabilityGrants || [])
   const capabilityPolicyByName = new Map(
     (data.configuration?.capabilityPolicies || []).map((policy) => [policy.capability, policy]),
@@ -1995,8 +2052,11 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       endpoint: '—',
     },
   }))
-  const businessOperationRows = capabilityRows.filter((row) => row.metadata.group !== 'compatibility')
-  const compatibilityCapabilityRows = capabilityRows.filter((row) => row.metadata.group === 'compatibility')
+  const visibleCapabilityRows = capabilityRows.filter((row) => matchesFilter(
+    row.capability, row.metadata.label, row.metadata.endpoint,
+  ))
+  const businessOperationRows = visibleCapabilityRows.filter((row) => row.metadata.group !== 'compatibility')
+  const compatibilityCapabilityRows = visibleCapabilityRows.filter((row) => row.metadata.group === 'compatibility')
   const selectedTenant = data.tenants.find((tenant) => tenant.id === data.tenantId)
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
   const contextMatchesRequest = (
@@ -2172,12 +2232,42 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         </footer>
       </section>
 
-      <Panel title="API Key 可访问的数据平台 / 数据域" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；调用者授权是上限，新 Key 签发时再选择 immutable snapshot`}>
+      <Panel
+        title="API Key 可访问的数据平台 / 数据域"
+        subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；调用者授权是上限，新 Key 签发时再选择 immutable snapshot`}
+      >
         {data.consumerId ? (
-          <Table label="平台授权与策略">
+          <div className="mih-capability-filter">
+            <MagnifyingGlass size={16} aria-hidden="true" />
+            <input
+              className="qp-input"
+              type="search"
+              value={capabilityFilter}
+              onChange={(event) => setCapabilityFilter(event.target.value)}
+              placeholder="筛选开放项：名称或标识，如 小红书 / xiaohongshu / saved_records"
+              aria-label="筛选开放能力"
+            />
+            {filterTerm ? (
+              <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => setCapabilityFilter('')}>
+                清除
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {data.consumerId && groupedPlatformRows.length === 0 ? (
+          <p className="mih-capability-empty">没有匹配「{capabilityFilter}」的开放项。</p>
+        ) : null}
+        {data.consumerId ? groupedPlatformRows.map((group) => (
+          <section className="mih-capability-group" key={group.key}>
+            <header>
+              <strong>{group.label}</strong>
+              <span>{group.rows.filter((row) => row.enabled).length} / {group.rows.length} 已启用</span>
+              {group.hint ? <small>{group.hint}</small> : null}
+            </header>
+          <Table label={`${group.label}授权与策略`}>
             <thead><tr><th>开放项</th><th>能力类型</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>操作</th></tr></thead>
             <tbody>
-              {rows.map((row) => (
+              {group.rows.map((row) => (
                 <tr key={row.platform}>
                   <td>
                     <strong>{platformLabel(row.platform)}</strong>
@@ -2220,7 +2310,8 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
               ))}
             </tbody>
           </Table>
-        ) : (
+          </section>
+        )) : (
           <EmptyState icon={Globe} title={data.tenants.length ? '请选择调用者' : '请先创建调用者'} description="平台授权与配额策略必须绑定到具体调用者。" action={!data.tenants.length ? <a className="qp-button qp-button--outline" href="#/consumers"><Users size={16} aria-hidden="true" />前往调用者</a> : null} />
         )}
       </Panel>
@@ -2231,6 +2322,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           title: '业务操作',
           subtitle: '决定调用者可以执行什么；与数据域共同生效，数据产品只组合底层权限',
           rows: businessOperationRows,
+          total: capabilityRows.filter((row) => row.metadata.group !== 'compatibility'),
           tableLabel: '业务操作授权与策略',
         },
         {
@@ -2238,10 +2330,15 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           title: '兼容接口合同',
           subtitle: '只开放兼容接口形状，不代表可指定或查看物理上游连接器',
           rows: compatibilityCapabilityRows,
+          total: capabilityRows.filter((row) => row.metadata.group === 'compatibility'),
           tableLabel: '兼容接口合同授权与策略',
         },
       ].map((section) => (
-        <Panel key={section.key} title={section.title} subtitle={`${section.rows.filter((row) => row.enabled).length} / ${section.rows.length} 已启用；${section.subtitle}`}>
+        <Panel
+          key={section.key}
+          title={section.title}
+          subtitle={`${section.total.filter((row) => row.enabled).length} / ${section.total.length} 已启用${filterTerm ? `（筛选后显示 ${section.rows.length} 项）` : ''}；${section.subtitle}`}
+        >
           {data.consumerId ? (
             section.rows.length ? (
               <Table label={section.tableLabel}>

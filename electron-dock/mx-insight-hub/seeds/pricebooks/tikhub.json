@@ -1,0 +1,35 @@
+{
+  "provider": "tikhub",
+  "$comment": [
+    "Reviewed default price book for the TikHub provider, seeded into the",
+    "control plane on first deploy and never overwritten afterwards.",
+    "",
+    "The unit cost is a deliberate provisional baseline. TikHub bills against a",
+    "prepaid balance rather than publishing a per-call price, so no contract",
+    "figure is known; 1 minor unit (USD 0.01) is carried over from the previous",
+    "MX_INSIGHT_TIKHUB_BILLING_JSON example. It exists so a fresh cluster comes",
+    "up serving instead of blocked on missing cost evidence.",
+    "",
+    "Once the real per-call cost is known, change it in Admin (Data Cleaning",
+    "Center -> External Data Platforms) rather than here -- a running cluster",
+    "reads its price from the database, and editing this file has no effect on",
+    "it. Until then TikHub procurement totals are provisional.",
+    "",
+    "Budgets are written as CALL COUNTS; the seeder multiplies them by the",
+    "operation's highest unit price. They must not be 0: zero rejects every",
+    "call Hub absorbs itself with external_platform_cost_budget_exhausted."
+  ],
+  "currency": "USD",
+  "pricingAsOf": "2026-09-12T00:00:00Z",
+  "monthlyBudgetCalls": 70000,
+  "monthlySubsidyBudgetCalls": 70000,
+  "unitCostMinorByEndpoint": {
+    "weibo.account-search.v1": 1,
+    "kuaishou.account-search.v1": 1,
+    "xiaohongshu.image-note-detail.v2": 1,
+    "xiaohongshu.app-v2.search-notes.v1": 1,
+    "xiaohongshu.app-v2.search-users.v1": 1,
+    "xiaohongshu.app-v2.get-user-info.v1": 1,
+    "xiaohongshu.app-v2.get-user-posted-notes.v1": 1
+  }
+}

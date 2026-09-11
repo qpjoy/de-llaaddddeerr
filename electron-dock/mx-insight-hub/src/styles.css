@@ -12515,3 +12515,50 @@ button.mih-catalog-status {
     transform: translate(var(--orb-render-x), var(--orb-render-y));
   }
 }
+
+/* ---------- open-capability grouping ---------- */
+/* 34 platforms in one flat table meant scrolling to find anything. Groups give
+   the eye a stopping point, and the filter narrows across every section at once
+   so a search never hides half the answer. */
+.mih-capability-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 4px 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: 10px;
+  background: var(--qp-surface-sunken, var(--qp-surface));
+}
+.mih-capability-filter > svg { flex: none; color: var(--qp-text-muted); }
+.mih-capability-filter .qp-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding-left: 0;
+}
+.mih-capability-filter .qp-input:focus { outline: none; box-shadow: none; }
+
+.mih-capability-group + .mih-capability-group { margin-top: 26px; }
+.mih-capability-group > header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 9px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--qp-line);
+}
+.mih-capability-group > header strong { font-size: 13.5px; color: var(--qp-text); }
+.mih-capability-group > header span {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--qp-accent);
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--qp-accent) 30%, transparent);
+}
+.mih-capability-group > header small { flex: 1 1 220px; font-size: 11.5px; color: var(--qp-text-muted); }
+
+.mih-capability-empty { margin: 0; padding: 18px 0; color: var(--qp-text-muted); font-size: 13px; }

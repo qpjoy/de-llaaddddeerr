@@ -103,7 +103,7 @@ export function priceBookForOperation(file, endpointKeys) {
   }
 }
 
-async function seedProvider(providerKey, file) {
+async function seedProvider(providerKey, file, blocked) {
   const detail = await admin(`/internal/v1/admin/external-platforms/${providerKey}`)
   const operations = detail?.operations || []
   if (operations.length === 0) {
@@ -117,6 +117,11 @@ async function seedProvider(providerKey, file) {
 
     if (operation.priceBook?.source === 'database') {
       say(`${label}: already has a database price book (v${operation.priceBook.version}); leaving it untouched`)
+      // Untouched is not the same as healthy: a hand-edited price book can
+      // still leave an operation blocked, and that must not go unreported.
+      if (operation.effectiveState === 'blocked') {
+        blocked.push({ label, effectiveState: operation.effectiveState, blockers: operation.blockers || [] })
+      }
       continue
     }
     if (endpointKeys.length === 0) {
@@ -149,6 +154,9 @@ async function seedProvider(providerKey, file) {
         },
       )
       say(`${label}: seeded price book v${updated?.priceBook?.version ?? '?'} (${updated?.effectiveState ?? 'unknown'})`)
+      if (updated?.effectiveState === 'blocked') {
+        blocked.push({ label, effectiveState: updated.effectiveState, blockers: updated.blockers || [] })
+      }
     } catch (error) {
       // One operation failing must not stop the others or fail the deploy.
       say(`${label}: WARNING could not seed price book: ${error.message}`)
@@ -168,6 +176,7 @@ export async function main() {
     say('no seeds/pricebooks directory; nothing to seed')
     return 0
   }
+  const blocked = []
   for (const name of files.sort()) {
     const providerKey = name.replace(/\.json$/u, '')
     let file
@@ -178,9 +187,23 @@ export async function main() {
       continue
     }
     try {
-      await seedProvider(providerKey, file)
+      await seedProvider(providerKey, file, blocked)
     } catch (error) {
       say(`WARNING ${providerKey}: ${error.message}`)
+    }
+  }
+  // The pre-deploy pricing check can only predict, because it runs before the
+  // app exists. This reads what the control plane actually ended up with, which
+  // is the only statement worth acting on.
+  if (blocked.length === 0) {
+    say('every paid operation reports a usable state; nothing is blocked on cost evidence')
+  } else {
+    say(`WARNING ${blocked.length} operation(s) remain blocked after seeding:`)
+    for (const entry of blocked) {
+      say(`  ${entry.label} -> ${entry.effectiveState}`)
+      for (const blocker of entry.blockers) {
+        say(`    ${blocker.code}${blocker.message ? `: ${blocker.message}` : ''}`)
+      }
     }
   }
   return 0
