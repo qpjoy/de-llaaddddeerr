@@ -5070,14 +5070,20 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
   { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录', section: '数据目录' },
+  // Data products first, then the platform-shaped passthroughs. Sections are
+  // rendered in declaration order, so a native entry in the middle of this list
+  // would split the product group into two headings with the same name.
+  //
+  // No vendor names here: these docs are the tenant-facing contract. The admin
+  // console is where a provider is named, on the page whose subject it is.
   { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
-  { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫原生接口', section: '平台原生接口' },
   { key: 'social-accounts', path: '/docs/social-accounts', label: '社交账号搜索', section: '数据产品' },
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
   { key: 'topic-reports', path: '/docs/topic-reports', label: '专题洞察', section: '数据产品' },
+  { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫', section: '平台原生接口' },
   { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
   { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
   { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
@@ -5553,9 +5559,10 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
 
     <section class="doc-page" data-doc-page="xiaohongshu-note">
     <h2 id="xiaohongshu-note">小红书笔记</h2>
+    <div class="notice">这条数据产品由 Hub 对接的外部供应方采集，但<strong>公开合同不暴露供应方身份</strong>：请求里没有供应方选择字段，Hub 更换供应方不需要你改集成。要判断一次交付是上游的问题还是 Hub 侧的问题，看 <code>meta.reason.scope</code>（见下文「每次调用消耗什么」），不需要知道是哪一家。</div>
     <div class="notice">Hub 提供两类明确分离的合同：legacy <code>GET /api/v1/xiaohongshu/app/get_note_info</code>、同路径 POST 与 <code>POST /api/v1/data/post</code> 返回稳定的 Hub 数据产品投影；五个 <code>GET /api/v1/xiaohongshu/app_v2/*</code> 入口接受官方字段并返回已采集的 App V2 兼容业务 envelope。两类入口都使用 Live Hub Public API Key、用量/成本准入、幂等、归档和 canonical 入库，不是无治理的裸代理。</div>
     <h3>1. 输入链接，获取正文与标签</h3>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/xiaohongshu/app/get_note_info</code></div><p>推荐把官方笔记链接放入 JSON body，可选 <code>deliveryMode=cache_only|cache_first|refresh</code>。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/xiaohongshu/app/get_note_info</code></div><p>推荐把官方笔记链接放入 JSON body，可选 <code>deliveryMode=cache_only|cache_first|refresh|live_only</code>。</p></div>
     <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
 NOTE_URL='https://www.xiaohongshu.com/explore/0123456789abcdef01234567'
 XHS_BODY=$(jq -cn --arg url "$NOTE_URL" '{url:$url,deliveryMode:"cache_first"}')
@@ -5578,7 +5585,29 @@ curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
     </tbody></table>
     <p>完整路径均位于 <code>/api/v1/xiaohongshu/app_v2/</code>。三个 identity 入口都要求对应的 <code>note_id|share_text</code> 或 <code>user_id|share_text</code> 至少提供一个；同时给出时分别以 <code>note_id</code> 或 <code>user_id</code> 优先，并用该规范化 selector 绑定幂等与快照 identity。<code>page</code> 只允许 1..15；用户笔记翻页必须原样返回 Hub 签发的不透明 <code>cursor</code>，第 15 页强制终止。每个 App V2 endpoint 都有独立的兼容合同和“endpoint + 规范化 query”幂等域，不是下方 canonical 三入口的第四种别名；不要跨 endpoint 复用 <code>Idempotency-Key</code>。</p>
     <p>响应保留正文、标题、作者、标签、互动、媒体签名 URL、<code>params</code>、<code>search_id</code> 和 <code>search_session_id</code> 等上游业务字段。Hub 不做字段级长度截断；搜索接口自身可能返回官方预览，调用详情接口获取完整正文。只有上游意外回显的当前 Hub→上游 credential 会按精确值移除；请求的 Authorization、Cookie 或 API key 不会复制到响应。受限 raw archive 保存原始响应字节。<code>Idempotency-Key</code> 可选；省略时每次 HTTP 调用都生成唯一内部 key，独立记录 usage/计费，即使命中缓存也不合并。只有调用方显式复用相同幂等 key 才视为传输重试。</p>
-    <h3>3. 从租户开通到首次调用</h3>
+    <h3>3. 每次调用消耗什么</h3>
+    <p>一次请求最多产生两笔计量：<strong>Hub 请求</strong>（这条数据产品的服务用量）和<strong>上游调用</strong>（向外部供应方的实际付费采集）。两者不是一回事——命中缓存仍是一笔 Hub 请求，但不产生上游消耗。</p>
+    <table><thead><tr><th>deliveryMode</th><th>行为</th><th>Hub 请求</th><th>上游调用</th></tr></thead><tbody>
+      <tr><td><code>cache_only</code></td><td>只读精确存量；没有存量时 <code>404 stored_snapshot_not_found</code>。</td><td>1</td><td>0</td></tr>
+      <tr><td><code>cache_first</code>（默认）</td><td>快照仍在新鲜窗口内直接复用；过期则尝试上游，上游不可用时回落存量。</td><td>1</td><td>命中缓存 0；穿透后 1</td></tr>
+      <tr><td><code>refresh</code></td><td>绕过新鲜缓存尝试上游；失败且有精确存量时仍会回落。需要 <code>Idempotency-Key</code>。</td><td>1</td><td>1（未派发即被拒则 0）</td></tr>
+      <tr><td><code>live_only</code></td><td>同样绕过缓存，但<strong>绝不回落</strong>：拿不到实时数据就返回错误原因。需要 <code>Idempotency-Key</code>。</td><td>1</td><td>1（未派发即被拒则 0）</td></tr>
+      <tr><td colspan="2">幂等重放（同 Key 同 body）</td><td>0</td><td>0</td></tr>
+    </tbody></table>
+
+    <p><strong>不要用 <code>sourceMode</code> 推断是否花了钱。</strong><code>stored_fallback</code> 有两种成因：一种是派发前就被拒（没花钱），另一种是上游调用失败后兜底（可能已计费）。能区分这两者的是 <code>meta.reason</code>：</p>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/...","deliveryMode":"cache_first"}' \
+  | jq '.meta.reason'</code></pre>
+    <table><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+      <tr><td><code>liveAttempted</code></td><td><strong>本次是否真的发起了上游调用</strong>，因而是否可能已计费。这是判断消耗的唯一可靠依据。</td></tr>
+      <tr><td><code>degraded</code></td><td>本次交付是否低于一次完整的实时读取。<code>live</code> 与 <code>fresh_cache</code> 为 false。</td></tr>
+      <tr><td><code>scope</code></td><td>是谁做的决定：<code>upstream</code> 是外部供应方；<code>operation_control</code>／<code>provider_credential</code>／<code>circuit_breaker</code> 是 Hub 侧部署状态，需要运维处理；<code>delivery_policy</code> 是你自己传的 <code>deliveryMode</code>；<code>rate_limit</code>／<code>concurrency</code>／<code>dispatch_dedup</code> 是瞬时状态，稍后重试即可。</td></tr>
+    </tbody></table>
+    <p>同一个对象也出现在响应头 <code>x-mx-insight-reason</code>（只有 code）和被拒绝时的 <code>error.details.reason</code>，详见<a href="/docs/errors">错误与重试</a>。管理端「小红书笔记画卷」把这些字段直接渲染成本次交付证据。</p>
+
+    <h3>4. 从租户开通到首次调用</h3>
     <ol>
       <li>平台运营方准备 tenant、consumer、<code>xiaohongshu</code> 与 <code>social.posts.resolve</code> grants，并给租户成员建立 membership。</li>
       <li>租户成员使用 Launcher 会话登录 Internal Hub，只看到已授权模块。</li>
@@ -5586,7 +5615,7 @@ curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
       <li>客户后端用该 Key 调用上面的 POST，把自己的笔记链接放入 JSON <code>url</code>，再用稳定的 <code>text</code>/<code>tags</code> 构建自己的产品展示。</li>
       <li>租户从“套餐与配额”和自己的用量视图查看余额、调用与扣费；外部采购凭据和成本证据始终只属于管理域。</li>
     </ol>
-    <h3>4. Hub JSON 入口</h3>
+    <h3>5. Hub JSON 入口</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/post</code></div><p>body 只接受 <code>platform</code>、<code>url</code>、<code>deliveryMode</code>；只允许官方小红书笔记或分享链接。</p></div>
     <pre><code>XHS_KEY="xhs-note-$(uuidgen)"
 XHS_BODY='{"platform":"xiaohongshu","url":"https://www.xiaohongshu.com/explore/0123456789abcdef01234567","deliveryMode":"cache_first"}'
@@ -5599,7 +5628,7 @@ curl -sS -D /tmp/mxih-xhs.headers -X POST "$HUB_URL/api/v1/data/post" \
   | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
     <p>返回合同固定为 <code>mx-insight-hub.social-post.v1</code>。正文、标题、标签、作者、互动量、图片引用、发布时间与采集时间都在 <code>data.item</code>；<code>meta.sourceMode</code> 是 <code>live|fresh_cache|stored_fallback|idempotent_replay</code>。Hub 不对业务数据做脱敏或过滤：<code>media[].url</code> 和 <code>author.avatarUrl</code> 保留已接受的源值；前 20 个媒体项（index <code>0..19</code>）额外获得绑定本次 requestId/index 的同源 <code>media[].hubRelayUrl</code>，后续媒体仍保留源 URL 但不生成不可用 locator。上游密钥、endpoint、raw envelope、诊断缓存 URL、采购价格和客户账单仍严格隔离。</p>
     <p>平台命名的 POST 在未传 platform 时默认 <code>xiaohongshu</code>。legacy GET 与两个 Hub POST 共三个入口共享笔记身份、immutable snapshot（不可变快照）与外采去重；幂等绑定还包含交付策略，因此同一 <code>Idempotency-Key</code> 改变 delivery mode 会返回冲突。切换 URL、method 或参数写法不是第二次付费调用的授权；App V2-compatible GET 不属于这个 canonical 幂等域。</p>
-    <h3>5. 并发读取图片</h3>
+    <h3>6. 并发读取图片</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/posts/media?requestId=...&amp;mediaIndex=0</code></div><p>只读取当前 consumer 已提交响应中的一张图片；不接受任意源 URL、不创建 note usage、不再次派发笔记请求。</p></div>
     <pre><code>REQUEST_ID=$(jq -r '.requestId' /tmp/mxih-xhs.json)
 curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
@@ -5608,7 +5637,7 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
   --data-urlencode 'mediaIndex=0' \
   -o /tmp/mxih-xhs-0.img</code></pre>
     <p><code>requestId</code> 与 <code>mediaIndex</code> 必须各出现一次，index 为 <code>0..19</code>。响应中的 <code>media[].hubRelayUrl</code> 是该路径的同源 locator；客户端可带同一 consumer 的 Live Key 拉取为 Blob，也可根据业务需要使用原样保留的 <code>media[].url</code>。Admin 画卷固定使用 Hub 中继，并在 consumer/global 并发护栏内并发加载多图；单图失败显示本地占位符。中继返回只允许 JPEG、PNG、WebP，且带 <code>Cache-Control: private, no-store</code>。</p>
-    <h3>6. 缓存、429 与重试</h3>
+    <h3>7. 缓存、429 与重试</h3>
     <p><code>cache_only</code> 绝不外采；<code>cache_first</code> 默认先读同 consumer 的精确新鲜快照；<code>refresh</code> 绕过新鲜快照并强制调用方提供 Idempotency-Key。无效或失效笔记也可能被外部平台接受并消耗容量，所以 request-local miss 会短时 negative-cache，客户端不得自动换 key 重试。</p>
     <table><thead><tr><th>错误</th><th>处理</th></tr></thead><tbody>
       <tr><td><code>400 invalid_post_url / unsupported_fields</code></td><td>只提交官方链接与三个允许字段。</td></tr>
@@ -6006,6 +6035,10 @@ function docsNavigation(activeKey) {
       ? `<span class="nav-section">${route.section}</span>`
       : ''
     section = route.section
+    // Deliberately no vendor name here. These docs are the tenant-facing
+    // contract, which stays provider-neutral so Hub can change vendors without
+    // breaking an integration. The admin console names vendors instead, on the
+    // External Data Platforms page where that is the actual subject.
     return `${heading}<a href="${route.path}"${active ? ' class="active" aria-current="page"' : ''}>${route.label}</a>`
   }).join('')
 }

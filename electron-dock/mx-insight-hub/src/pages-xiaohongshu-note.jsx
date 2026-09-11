@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowSquareOut,
   ClockCounterClockwise,
+  Fingerprint,
   Hash,
   ImageSquare,
   LinkSimple,
@@ -15,10 +16,38 @@ import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 
 const DELIVERY_OPTIONS = [
-  { value: 'cache_first', label: '智能交付 · 缓存优先' },
-  { value: 'cache_only', label: '只读 Hub 存量' },
-  { value: 'refresh', label: '重新采集 · 实时交付' },
+  { value: 'cache_first', label: '智能交付 · 缓存优先', hint: '快照仍新鲜时直接复用；过期则尝试上游，上游不可用才回落存量。' },
+  { value: 'cache_only', label: '只读 Hub 存量 · 0 次上游', hint: '只读精确存量；没有存量时明确 404，绝不调用上游。' },
+  { value: 'refresh', label: '重新采集 · 可能产生上游消耗', hint: '绕过新鲜缓存尝试上游；上游失败时仍会回落到精确存量。' },
+  { value: 'live_only', label: '只要实时 · 拿不到就报错', hint: '同样绕过缓存，但绝不回落：拿不到实时数据就返回错误原因。' },
 ]
+
+// Which subsystem decided this delivery, in the operator's words. The codes
+// come from Hub's shared reason vocabulary, so the same labels describe a
+// degraded delivery and a rejection.
+const REASON_SCOPES = {
+  upstream: '上游供应方',
+  delivery_policy: '交付策略',
+  operation_control: 'Hub 运行控制',
+  provider_credential: '供应方凭据',
+  circuit_breaker: '熔断保护',
+  dispatch_dedup: '重复派发抑制',
+  concurrency: '并发保护',
+  rate_limit: '速率限制',
+  idempotency: '幂等重放',
+}
+
+const SOURCE_MODE_LABELS = {
+  live: { label: '实时上游', tone: 'live' },
+  fresh_cache: { label: '新鲜缓存', tone: 'cache' },
+  stored_fallback: { label: '存储兜底', tone: 'fallback' },
+  idempotent_replay: { label: '幂等重放', tone: 'replay' },
+}
+
+// The upstream provider behind this data product. Naming it here keeps the
+// page honest about where a paid call actually goes, and about which vendor an
+// operator has to look at when this product degrades.
+const UPSTREAM_PROVIDER = { key: 'tikhub', label: 'TikHub', operation: 'social.posts.resolve' }
 const PENDING_REQUEST_KEY = 'mx-insight-hub.xiaohongshu-note.pending.v1'
 const AMBIGUOUS_CODES = new Set([
   'external_platform_outcome_unknown',
@@ -172,6 +201,69 @@ function NoteScroll({ result, apiKey }) {
   )
 }
 
+// Per-call delivery evidence. Upstream consumption is read from
+// `reason.liveAttempted` rather than inferred from sourceMode: a stored
+// fallback can occur either before dispatch (nothing spent) or after an
+// upstream failure (already spent), and only the reason distinguishes them.
+function DeliveryEvidence({ evidence, error }) {
+  const reason = evidence?.reason || error?.reason || null
+  const sourceMode = evidence?.sourceMode || null
+  const mode = SOURCE_MODE_LABELS[sourceMode] || null
+  const settled = Boolean(reason || sourceMode || error)
+
+  const upstreamCall = !settled ? null : reason?.liveAttempted === true
+    ? '是 · 已发起，可能已计费'
+    : reason?.liveAttempted === false ? '否 · 未发起' : '未知'
+  // A replay returns the committed result of an earlier request, so it is the
+  // one delivery that creates no new Hub usage.
+  const hubUsage = !settled ? null
+    : sourceMode === 'idempotent_replay' ? '否 · 重放已提交结果' : '是 · 计一次 Hub 请求'
+
+  return (
+    <section className="qp-panel mih-xhs-evidence" aria-live="polite">
+      <div className="mih-xhs-panel-title">
+        <Fingerprint size={19} />
+        <div>
+          <strong>本次交付证据</strong>
+          <small>上游供应方 {UPSTREAM_PROVIDER.label} · 业务操作 <code>{UPSTREAM_PROVIDER.operation}</code></small>
+        </div>
+      </div>
+      <dl className="mih-xhs-evidence-grid">
+        <div>
+          <dt>交付模式</dt>
+          <dd>{mode
+            ? <span className={`mih-xhs-mode mih-xhs-mode--${mode.tone}`}>{mode.label}</span>
+            : settled ? '未交付' : '尚未调用'}</dd>
+        </div>
+        <div><dt>上游调用</dt><dd>{upstreamCall || '—'}</dd></div>
+        <div><dt>Hub 用量</dt><dd>{hubUsage || '—'}</dd></div>
+        <div>
+          <dt>数据年龄</dt>
+          <dd>{Number.isFinite(Number(evidence?.ageSeconds))
+            ? `${Number(evidence.ageSeconds).toLocaleString('zh-CN')} 秒`
+            : '—'}</dd>
+        </div>
+        <div><dt>采集时间</dt><dd>{evidence?.capturedAt ? formatDate(evidence.capturedAt) : '—'}</dd></div>
+        <div><dt>Request ID</dt><dd className="mih-xhs-evidence-id">{evidence?.requestId || (settled ? '—' : '等待请求')}</dd></div>
+      </dl>
+      {reason ? (
+        <p className={`mih-xhs-reason${reason.degraded ? ' mih-xhs-reason--degraded' : ''}`}>
+          <strong>{REASON_SCOPES[reason.scope] || reason.scope || '原因'}</strong>
+          <code>{reason.code}</code>
+          <span>{reason.summary || (reason.degraded ? '本次交付低于一次完整的实时读取。' : '本次交付完整。')}</span>
+        </p>
+      ) : null}
+      {reason?.detail?.blockers?.length ? (
+        <ul className="mih-xhs-blockers">
+          {reason.detail.blockers.map((blocker) => (
+            <li key={blocker.code}><code>{blocker.code}</code>{blocker.message ? <span>{blocker.message}</span> : null}</li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  )
+}
+
 export function XiaohongshuNotePage({ notify }) {
   const [apiKey, setApiKey] = useState('')
   const [url, setUrl] = useState('')
@@ -181,6 +273,12 @@ export function XiaohongshuNotePage({ notify }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const requestLabel = useMemo(() => DELIVERY_OPTIONS.find((entry) => entry.value === deliveryMode)?.label, [deliveryMode])
+  // Say what this specific mode costs, rather than one sentence that has to
+  // cover all four. Every delivery is one Hub request; only some reach upstream.
+  const deliveryHint = useMemo(() => {
+    const option = DELIVERY_OPTIONS.find((entry) => entry.value === deliveryMode)
+    return `${option?.hint || ''} 每次交付都计一笔 Hub 请求；只有真正调用 ${UPSTREAM_PROVIDER.label} 时才产生上游消耗，幂等重放两者都不产生。`
+  }, [deliveryMode])
 
   const submit = async (event) => {
     event.preventDefault()
@@ -259,7 +357,7 @@ export function XiaohongshuNotePage({ notify }) {
       <PageHeading
         eyebrow="DATA PRODUCT / XIAOHONGSHU NOTE"
         title="小红书笔记画卷"
-        description="输入官方笔记链接，通过 Hub 稳定 JSON POST 合同查看完整正文、作者、互动量与标签；API Key 仅保存在当前页面内存。"
+        description="输入官方笔记链接，通过 Hub 稳定 JSON POST 合同查看完整正文、作者、互动量与标签。上游供应方是 TikHub，但调用方只面对 Hub 合同；API Key 仅保存在当前页面内存。"
       >
         <a className="qp-button qp-button--outline" href="#/api-keys">签发 / 轮换 API Key</a>
         <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a>
@@ -277,7 +375,7 @@ export function XiaohongshuNotePage({ notify }) {
           </Field>
           <DropdownField
             label="交付策略"
-            hint="成功展开按 1 次 social.posts.resolve 计量；缓存交付仍是一笔 Hub 服务，幂等恢复不会重复计费。"
+            hint={deliveryHint}
             value={deliveryMode}
             options={DELIVERY_OPTIONS}
             onChange={setDeliveryMode}
@@ -289,7 +387,10 @@ export function XiaohongshuNotePage({ notify }) {
           {error ? <ErrorState error={error} /> : null}
         </form>
 
-        <section className="mih-xhs-canvas" aria-live="polite"><NoteScroll result={result} apiKey={apiKey.trim()} /></section>
+        <div className="mih-xhs-stage">
+          <DeliveryEvidence evidence={result?.evidence} error={error} />
+          <section className="mih-xhs-canvas" aria-live="polite"><NoteScroll result={result} apiKey={apiKey.trim()} /></section>
+        </div>
 
         <aside className="qp-panel mih-xhs-history">
           <div className="mih-xhs-panel-title"><ClockCounterClockwise size={19} /><div><strong>本次会话历史</strong><small>{history.length} 篇 · 不落浏览器存储</small></div></div>

@@ -79,13 +79,16 @@ export function publicDocsHref(path = '/docs') {
 }
 
 export class ApiError extends Error {
-  constructor({ status = 0, code = 'request_failed', message = 'Request failed', requestId, details } = {}) {
+  constructor({ status = 0, code = 'request_failed', message = 'Request failed', requestId, details, reason } = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.requestId = requestId
     this.details = details
+    // A rejection explains itself in the same vocabulary a degraded delivery
+    // uses, so failure and fallback can be triaged the same way.
+    this.reason = reason || details?.reason || null
   }
 }
 
@@ -160,6 +163,15 @@ async function publicDataRequest(apiKey, path, {
     idempotentReplay: response.headers.get('idempotent-replay') === 'true',
     capturedAt: response.headers.get('x-mx-insight-captured-at') || payload?.meta?.capturedAt || null,
     ageSeconds: payload?.meta?.ageSeconds ?? null,
+    // Hub states why a delivery looks the way it does instead of leaving the
+    // caller to infer it from sourceMode. `liveAttempted` in particular is the
+    // only definitive answer to "did this request spend an upstream call",
+    // which sourceMode alone cannot give for a stored fallback.
+    reason: payload?.meta?.reason
+      || payload?.error?.details?.reason
+      || (response.headers.get('x-mx-insight-reason')
+        ? { code: response.headers.get('x-mx-insight-reason') }
+        : null),
   }
   if (!response.ok) {
     throw new ApiError({
@@ -168,6 +180,7 @@ async function publicDataRequest(apiKey, path, {
       message: payload?.error?.message || `Request failed with HTTP ${response.status}`,
       requestId: evidence.requestId,
       details: payload?.error?.details,
+      reason: evidence.reason,
     })
   }
   return { payload, evidence }
