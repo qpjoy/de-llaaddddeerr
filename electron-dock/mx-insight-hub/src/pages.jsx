@@ -2833,8 +2833,8 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                             className={`qp-button qp-button--sm ${row.enabled ? 'qp-button--transparent' : 'qp-button--outline'}`}
                             type="button"
                             aria-pressed={row.enabled}
-                            disabled={mutationDisabled || (!row.ready && !row.enabled)}
-                            title={!row.ready && !row.enabled ? '运行时未就绪，暂不能启用' : ''}
+                            disabled={mutationDisabled}
+                            title={!row.ready ? '可更改调用者授权；运行时未就绪时仍不能调用上游' : ''}
                             onClick={() => updateCapability(row, !row.enabled)}
                           >
                             <Power size={15} weight={row.enabled ? 'fill' : 'regular'} aria-hidden="true" />

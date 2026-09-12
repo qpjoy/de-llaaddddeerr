@@ -107,6 +107,8 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(platformsPage, /上游连接器[\s\S]*?Admin 内部治理/u)
   assert.match(platformsPage, /metadata\.group !== 'compatibility'/u)
   assert.match(platformsPage, /metadata\.group === 'compatibility'/u)
+  assert.doesNotMatch(platformsPage, /disabled=\{mutationDisabled \|\| \(!row\.ready/u)
+  assert.match(platformsPage, /可更改调用者授权；运行时未就绪时仍不能调用上游/u)
   assert.doesNotMatch(platformsPage, /provider=justone/u)
   assert.match(pages, /'source_catalog'/)
   assert.match(pages, /'mobile_commerce'/)

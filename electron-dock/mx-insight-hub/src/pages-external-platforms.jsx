@@ -1294,6 +1294,7 @@ function ExternalPlatformOperationCard({
   token,
   provider,
   operation,
+  savedReceipt,
   onSaved,
   onUnauthorized,
   notify,
@@ -1343,7 +1344,7 @@ function ExternalPlatformOperationCard({
   // operator would fix them.
   const preconditionId = `operation-precondition-${operation.operationKey}`
   const actionBlockers = []
-  if (!reason.trim()) actionBlockers.push('请先填写「变更原因」，所有状态按钮才可用（它会写入审计事件）')
+  if (!reason.trim() && !savedReceipt) actionBlockers.push('请先填写「变更原因」，所有状态按钮才可用（它会写入审计事件）')
   if (activationNeedsPriceBook && !publishPriceBook) {
     actionBlockers.push('「启用」「灰度」还需勾选“随本次变更发布经复核的上游价格表”并录入价目')
   }
@@ -1386,7 +1387,7 @@ function ExternalPlatformOperationCard({
       )
       setReason('')
       notify?.(`${operation.label}已切换为${statusLabel(desiredState)}`, 'success')
-      onSaved?.()
+      onSaved?.({ state: desiredState, reason: submittedReason })
     } catch (requestError) {
       if (requestError?.status === 401) onUnauthorized?.(requestError)
       setError(requestError)
@@ -1574,6 +1575,14 @@ function ExternalPlatformOperationCard({
         ))}
       </div>
 
+      {savedReceipt ? (
+        <p className="mih-external-context-note" id={!reason.trim() && !actionBlockers.length ? preconditionId : undefined} role="status">
+          <CheckCircle size={16} aria-hidden="true" />
+          已保存：{statusLabel(savedReceipt.state)}；变更原因：{savedReceipt.reason}。
+          表单已重置，如需再次变更，请填写新的原因。
+          {savedReceipt.state === 'canary' ? '灰度仅允许指定的调用者，全面开放需另行启用。' : ''}
+        </p>
+      ) : null}
       {error ? <ErrorState error={error} /> : null}
       {/* A disabled button that does not say why is indistinguishable from a
           broken one. These preconditions are real -- the reason is written into
@@ -1787,7 +1796,7 @@ function remainingCallsLabel(operation) {
 }
 
 function ExternalPlatformOperationRow({
-  token, provider, operation, open, onToggle, onSaved, onUnauthorized, notify,
+  token, provider, operation, open, onToggle, savedReceipt, onSaved, onUnauthorized, notify,
 }) {
   const budget = operation.budget
   const remaining = remainingCallsLabel(operation)
@@ -1824,6 +1833,7 @@ function ExternalPlatformOperationRow({
           token={token}
           provider={provider}
           operation={operation}
+          savedReceipt={savedReceipt}
           onSaved={onSaved}
           onUnauthorized={onUnauthorized}
           notify={notify}
@@ -1844,6 +1854,8 @@ function ExternalPlatformOperationControlPanel({
   // Opening one at a time keeps the list scannable and makes it obvious which
   // operation an edit belongs to.
   const [openKey, setOpenKey] = useState(null)
+  // Keep receipts outside the revision-keyed forms that reset after a save.
+  const [savedReceipts, setSavedReceipts] = useState({})
   return (
     <Panel
       id="external-operations"
@@ -1864,7 +1876,11 @@ function ExternalPlatformOperationControlPanel({
               onToggle={() => setOpenKey(
                 openKey === operation.operationKey ? null : operation.operationKey,
               )}
-              onSaved={onSaved}
+              savedReceipt={savedReceipts[operation.operationKey]}
+              onSaved={(receipt) => {
+                setSavedReceipts((current) => ({ ...current, [operation.operationKey]: receipt }))
+                onSaved?.()
+              }}
               onUnauthorized={onUnauthorized}
               notify={notify}
             />

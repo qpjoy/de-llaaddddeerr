@@ -559,6 +559,17 @@ test('public capability discovery maps TikHub readiness by operation instead of 
   assert.equal(platform.postDetail.ready, true)
   assert.equal(byCapability.get(XIAOHONGSHU_SEARCH_OPERATION), false)
   assert.equal(byCapability.get(XIAOHONGSHU_POST_OPERATION), true)
+  // A paused upstream must not trap an operator after revoking a grant.
+  for (const enabled of [false, true]) {
+    const result = await service.putCapabilityConfiguration(XIAOHONGSHU_SEARCH_OPERATION, {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled,
+    })
+    assert.equal(result.enabled, enabled)
+  }
+  const restored = await service.capabilities(context)
+  assert.equal(restored.data.capabilities.find((entry) => entry.capability === XIAOHONGSHU_SEARCH_OPERATION).ready, false)
 })
 
 test('shadow never dispatches and canary requires an exact consumer allowlist', async () => {

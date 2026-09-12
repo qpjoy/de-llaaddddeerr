@@ -76,6 +76,8 @@ test('external-platform detail provides DB-backed upstream operation controls an
   assert.match(pageSource, /当环境变量中没有价格时[\s\S]*?无需手工 SQL/u)
   assert.match(pageSource, /下游 API Key [\s\S]*?“开放能力”中独立管理/u)
   assert.match(pageSource, /仅 Admin Token 可写/u)
+  assert.match(pageSource, /savedReceipt=\{savedReceipts\[operation\.operationKey\]\}/u)
+  assert.match(pageSource, /表单已重置，如需再次变更，请填写新的原因/u)
 })
 
 test('JustOne credential UI keeps normal DTOs secret-free and requires step-up reveal', async () => {
