@@ -1,3 +1,4 @@
+import { requestUuid } from './request-id.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ImageSquare } from '@phosphor-icons/react'
 import { adminApi, publicDataApi } from './api.js'
@@ -24,8 +25,8 @@ function NoteDetail({ item, apiKey, images, NoteScroll, onSelectLink, onClose })
   const resolve = async () => {
     if (lock.current || !apiKey.trim()) return
     lock.current = true; setBusy(true); setError(null)
-    identity.current ||= `xhs-detail-${crypto.randomUUID()}`
     try {
+      identity.current ||= `xhs-detail-${requestUuid()}`
       const response = await publicDataApi.xiaohongshuNote(apiKey.trim(), { platform: 'xiaohongshu', url, deliveryMode: 'cache_first' }, { idempotencyKey: identity.current })
       if (alive.current) setResult(response)
     } catch (failure) { if (alive.current) setError(failure) }
@@ -112,9 +113,10 @@ export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScro
       : /^[0-9a-f]{24}$/i.test(selector.trim()) ? { user_id: selector.trim() } : { share_text: selector.trim() })
     // Failed or ambiguous delivery retains exactly the same identity. There is
     // no timer retry and a gesture never retries a failed paid operation.
-    const identity = pending.current || { body, key: `xhs-feed-${crypto.randomUUID()}` }
-    pending.current = identity; liveBusy.current = true; setAcquiring(true); setAcquireError(null)
+    liveBusy.current = true; setAcquiring(true); setAcquireError(null)
     try {
+      const identity = pending.current || { body, key: `xhs-feed-${requestUuid()}` }
+      pending.current = identity
       const response = await publicDataApi.xiaohongshuNative(apiKey.trim(), kind, identity.body, { idempotencyKey: identity.key })
       if (ownScope !== currentScope.current) return
       const page = nativeNotePage(response.payload, kind, identity.body)

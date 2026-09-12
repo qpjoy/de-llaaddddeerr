@@ -149,16 +149,16 @@ On routine Internal deploys, an omitted/blank `MX_INSIGHT_JUSTONE_TOKEN` and an
 omitted `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` preserve their current Kubernetes values. An omitted or blank
 billing JSON preserves its current Kubernetes value even while the gate is `0`, so a migration-first deploy
 does not erase reviewed evidence; a lookup failure stops before ConfigMap mutation. An explicit gate value of
-`0` disables dispatch. Clearing the retained
+`0` disables only untouched legacy-environment operations. Database-managed operations are paused or disabled in the console. Clearing the retained
 environment fallback requires the one-shot command prefix
 `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`; never persist that flag in an env file.
 A first deployment still defaults to no environment key and a closed gate. The
 UI-managed database key is retained independently in PostgreSQL and remains the
 preferred credential source. Command-environment values take precedence over
-`.env.internal` for an intentional activation or emergency stop.
+`.env.internal` for bootstrap defaults.
 
 Use this rollout order for either paid provider: deploy migrations and code with its contract gate `0`; verify
-the endpoint, credential, response and idempotency contract; open the deployment gate as the outer ceiling; then
+the endpoint, credential, response and idempotency contract; then
 publish a reviewed price book and use `shadow`, `canary`, and `active` in the Admin operation control. Set both
 monthly thresholds to `0` when only positive enforced downstream requests should dispatch. Those fields are
 warning-only for a request with its own positive wallet hold, but unpriced/subsidized traffic stays closed.
@@ -212,9 +212,9 @@ then choose **校验**, **灰度**, or **启用** with a reason. The write trans
 price book, a new operation release and the CAS-fenced policy together. This is the supported recovery path; it
 does not require manual SQL or adding a price JSON to the deployment environment.
 
-Database state can only narrow deployment authority. The fixed provider origin/endpoint allowlist, parent and
-operation contract gates, timeouts, RPM/concurrency ceilings, response bounds and emergency stop stay in deploy
-configuration. A database `active` state cannot cross a closed parent/operation gate. Likewise, the upstream
+Database operation state replaces parent and operation contract environment gates after the first audited save.
+The fixed provider origin/endpoint allowlist, timeouts, RPM/concurrency ceilings and response bounds stay in deploy
+configuration. Use the console to pause or disable new dispatches without restarting. Likewise, the upstream
 credential may be rotated through the Admin credential store, but the environment value remains a rollback
 fallback until deliberately cleared. `MX_INSIGHT_*_CONFIGURED` is derived metadata, not an enable button.
 
@@ -916,8 +916,7 @@ response-shape problem, not for crossing a cost-warning threshold.
 To stop one consumer immediately, remove its platform/capability grant through the existing authorization
 workflow. To stop one provider operation without a rollout, use **暂停** with the current revision and an incident
 reason; this affects only new provider calls and leaves exact retained snapshots readable. To stop every JustOne
-operation at the outer emergency boundary, set `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0` and roll only the Hub
-public process; this overrides a database `active` state and a database-managed key. If the deployment still uses
+operation, pause or disable each operation in the console. Environment flags no longer override a database policy. If the deployment still uses
 the environment fallback, remove it at the
 same time by prefixing that deploy with
 `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`. Exact stored fallback may continue until `staleUntil`; afterward
@@ -939,3 +938,7 @@ Do not drop `external_platform` tables, delete archives, clear usage rows or res
 rollback. They are audit and cost evidence. Removing the connector must not roll back migrations or any
 Launcher/MX-H2I component. Re-enable only after one reviewed adapter fixture, one bounded live smoke and
 call/archive/ingest reconciliation succeed.
+
+## 2026-09-13：界面管理运行门禁
+
+部署本次代码后，在「外部数据平台 → TikHub / JustOne → 上游平台操作控制」填写原因并保存状态即可即时生效。未配置的操作仍沿用环境初始值；首次保存后以 PostgreSQL 中的版本化状态为准。启用/灰度要求已复核的数据库价目表、凭据和有效发布版本；灰度仅允许指定 Consumer。校验不派发请求，暂停/停用阻止新派发，已存数据仍可读取。操作保存不自动采集，也不扩大下游 Key 权限。Admin/Public 分离部署读取同一数据库，不需要逐个重启。首次安装此代码仍需正常部署。

@@ -358,7 +358,7 @@ test('pause is CAS-fenced, affects only new admissions and keeps the admitted re
   assert.equal(store.events[0].reason, 'Pause new upstream dispatch during incident review')
 })
 
-test('database activation cannot bypass the deployment emergency gate', async () => {
+test('database activation replaces environment bootstrap gates without restart', async () => {
   const store = new MemoryExternalPlatformControlStore()
   const controlRuntime = runtime()
   await store.updatePolicy('justone', JUSTONE_OPERATION, {
@@ -370,19 +370,22 @@ test('database activation cannot bypass the deployment emergency gate', async ()
   const closedRuntime = runtime({ contractVerified: false, priced: false })
   const [view] = await store.describeProvider('justone', closedRuntime)
   assert.equal(view.desiredState, 'active')
-  assert.equal(view.effectiveState, 'blocked')
-  assert.ok(view.blockers.some((entry) => entry.code === 'deployment_gate_closed'))
-  await assert.rejects(
-    () => store.authorizeDispatch('justone', JUSTONE_OPERATION, {
-      ...closedRuntime,
-      consumerId: randomUUID(),
-      credentialRevision: 1,
-    }),
-    (error) => error?.code === 'external_platform_operation_blocked',
-  )
+  assert.equal(view.effectiveState, 'active')
+  assert.ok(!view.blockers.some((entry) => entry.code === 'deployment_gate_closed'))
+  await store.authorizeDispatch('justone', JUSTONE_OPERATION, {
+    ...closedRuntime,
+    consumerId: randomUUID(),
+    credentialRevision: 1,
+  })
+  await store.updatePolicy('justone', JUSTONE_OPERATION, {
+    expectedRevision: 1, desiredState: 'disabled', reason: 'Stop through the console',
+  }, { runtime: closedRuntime })
+  await assert.rejects(() => store.authorizeDispatch('justone', JUSTONE_OPERATION, {
+    ...closedRuntime, consumerId: randomUUID(),
+  }))
 })
 
-test('database activation cannot bypass an operation-specific deployment gate', async () => {
+test('database activation replaces operation-specific environment defaults', async () => {
   const store = new MemoryExternalPlatformControlStore()
   const openRuntime = {
     credentialConfigured: true,
@@ -419,8 +422,8 @@ test('database activation cannot bypass an operation-specific deployment gate', 
   })
   const search = operations.find((operation) => operation.operationKey === XIAOHONGSHU_SEARCH_OPERATION)
   assert.equal(search.desiredState, 'active')
-  assert.equal(search.effectiveState, 'blocked')
-  assert.ok(search.blockers.some((entry) => entry.code === 'deployment_gate_closed'))
+  assert.equal(search.effectiveState, 'active')
+  assert.ok(!search.blockers.some((entry) => entry.code === 'deployment_gate_closed'))
 })
 
 test('gateway capability readiness follows database pause and per-consumer canary state', async () => {

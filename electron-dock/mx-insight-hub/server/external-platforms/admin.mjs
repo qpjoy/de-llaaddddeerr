@@ -429,6 +429,9 @@ export class ExternalPlatformAdminService {
     const provider = providerProjection(analytics, todayAnalytics, {
       ...this.config,
       configured: credential.credentialConfigured,
+      ...(operations.length ? {
+        contractVerified: operations.some((operation) => ['active', 'canary'].includes(operation.effectiveState)),
+      } : {}),
     }, range, now, this.metadata)
     provider.operationControl = {
       operationCount: operations.length,

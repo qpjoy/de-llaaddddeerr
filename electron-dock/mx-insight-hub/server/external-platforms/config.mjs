@@ -290,6 +290,7 @@ export function parseJustOneConfig(environment = process.env, {
     configurationError: null,
     costControlError,
     timeoutMs,
+    reservationLeaseMs,
     freshTtlMs,
     staleTtlMs,
     unknownFingerprintCooldownMs: positiveInteger(
@@ -610,6 +611,7 @@ export function parseTikHubConfig(environment = process.env, {
     configurationError: null,
     costControlError,
     timeoutMs,
+    reservationLeaseMs,
     freshTtlMs,
     staleTtlMs,
     searchFreshTtlMs,

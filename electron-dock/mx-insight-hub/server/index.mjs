@@ -173,13 +173,13 @@ export async function createRuntime(config = loadConfig()) {
     environmentConfigured: Boolean(config.tikHub.configured),
   })
   // Operation rollout is read on every admission/admin request. Environment
-  // flags remain the outer adapter/emergency ceiling; migration-060 rows start
+  // flags are bootstrap defaults only; migration-060 rows start
   // in legacy mode so an existing env=1 deployment does not switch off.
   const externalPlatformControlStore = createExternalPlatformControlStore({ pool })
   // JustOne is optional and is never a Hub readiness dependency. The admin
   // listener still receives truthful configuration/analytics, while only a
   // listener that serves public APIs constructs the credentialed adapter.
-  const justOneAdapter = config.justOne.contractVerified
+  const justOneAdapter = config.storeDriver === 'postgres'
     && !config.justOne.configurationError
     && config.listenerMode !== 'admin'
     ? new JustOneAdapter({
@@ -191,7 +191,7 @@ export async function createRuntime(config = loadConfig()) {
         logger: console,
       })
     : null
-  const tikHubAdapter = config.tikHub.contractVerified
+  const tikHubAdapter = config.storeDriver === 'postgres'
     && !config.tikHub.configurationError
     && config.listenerMode !== 'admin'
     ? new TikHubAdapter({
@@ -282,8 +282,7 @@ export async function createRuntime(config = loadConfig()) {
           return tikHubGateway.capabilities({
             ...options,
             credentialConfigured: Boolean(
-              config.tikHub.contractVerified
-              && !config.tikHub.configurationError
+              !config.tikHub.configurationError
               && credential.credentialConfigured
             ),
           })
@@ -299,8 +298,7 @@ export async function createRuntime(config = loadConfig()) {
           return externalPlatformGateway.capabilities({
             ...options,
             credentialConfigured: Boolean(
-              config.justOne.contractVerified
-              && !config.justOne.configurationError
+              !config.justOne.configurationError
               && credential.credentialConfigured
             ),
           })
@@ -309,6 +307,20 @@ export async function createRuntime(config = loadConfig()) {
         }
       }
     : (options) => externalPlatformGateway.capabilities(options)
+  // Once migrated, keep compatibility requests on TikHub even while paused:
+  // the gateway must return its stored fallback or rejection, not silently
+  // route a new paid request to the historical provider.
+  const useTikHubOperation = async (context, operationKey) => {
+    if (!tikHubAdapter) return false
+    const operations = await externalPlatformControlStore.describeProvider('tikhub', {
+      config: config.tikHub,
+    })
+    const operation = operations.find((entry) => entry.operationKey === operationKey)
+    if (operation?.controlSource === 'database') return true
+    if (operation?.desiredState === 'active') return config.tikHub.contractVerified
+    return config.tikHub.contractVerified && operation?.desiredState === 'canary'
+      && operation.canaryConsumerIds.includes(String(context.consumer.id).toLowerCase())
+  }
   const service = new HubService({
     store,
     adapter,
@@ -319,16 +331,16 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformCapabilities: externalEcommerceCapabilities,
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
-    // New first pages cut over only after the verified TikHub adapter is
-    // active. Previously issued direct cursors still return through the
-    // gateway (cache/stored fallback or an explicit unavailable result).
-    externalSocialSearchEnabled: Boolean(tikHubAdapter) && config.tikHub.searchContractVerified,
-    externalSocialSearchCanaryConsumerIds: config.tikHub.searchCanaryConsumerIds,
+    // The gateway reads the audited operation policy on every dispatch; static
+    // env flags must not prevent routing to a database-enabled operation.
+    externalSocialSearchEnabled: (context) => useTikHubOperation(context, 'social.posts.search'),
+    externalSocialSearchCanaryConsumerIds: [],
     externalSocialUserActivity: (context, input) => input.operation === 'crawl'
       ? tikHubUserInfoGateway.legacyCrawl(context, input)
       : tikHubUserInfoGateway.legacyUserInfo(context, input),
-    externalSocialUserActivityEnabled:
-      Boolean(tikHubAdapter) && config.tikHub.userActivityContractVerified,
+    externalSocialUserActivityEnabled: (context, operation) => useTikHubOperation(
+      context, operation === 'crawl' ? 'social.users.posts' : 'social.users.resolve',
+    ),
     externalImageLoader: createExternalImageLoader({
       maxConcurrency: config.externalMedia.maxConcurrency,
       maxCacheBytes: config.externalMedia.cacheBytes,

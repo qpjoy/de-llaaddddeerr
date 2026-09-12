@@ -1,3 +1,4 @@
+import { requestUuid } from './request-id.js'
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowSquareOut,
@@ -327,7 +328,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
           }
         }
       }
-      const idempotencyKey = ['refresh', 'live_only'].includes(deliveryMode) ? `xhs-${crypto.randomUUID()}` : null
+      const idempotencyKey = ['refresh', 'live_only'].includes(deliveryMode) ? `xhs-${requestUuid()}` : null
       liveIdentity = idempotencyKey ? { idempotencyKey, body: requestedBody } : null
       if (liveIdentity) rememberPendingRequest(liveIdentity)
       const response = await publicDataApi.xiaohongshuNote(

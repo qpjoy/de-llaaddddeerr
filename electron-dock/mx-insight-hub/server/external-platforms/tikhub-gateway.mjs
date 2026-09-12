@@ -1466,7 +1466,7 @@ export class TikHubGateway {
       // can consume a matching stored snapshot. The rollout flag is still a
       // live-dispatch kill switch: when disabled, do not inspect provider state,
       // resolve credentials, reserve cost/RPM, or create a provider-call row.
-      if (!this.config.searchContractVerified) {
+      if (!this.operationControlStore && !this.config.searchContractVerified) {
         const fallbackBody = snapshot ? selectSnapshot(snapshot) : null
         if (fallbackBody) {
           await this.platformStore.commitSnapshotDelivery({

@@ -1860,7 +1860,7 @@ function ExternalPlatformOperationControlPanel({
     <Panel
       id="external-operations"
       title="上游平台操作控制"
-      subtitle="这里控制 Hub 是否可以调用某个上游操作，包括每个操作被实际执行的月度上游预算；下游 API Key 的平台与产品授权仍在“开放能力”中独立管理。"
+      subtitle="这里保存的操作状态即时生效，无需修改 .env 或重启；环境变量仅作为首次配置的默认值。包括每个操作被实际执行的月度上游预算；下游 API Key 的平台与产品授权仍在“开放能力”中独立管理。"
       className="mih-external-operation-panel"
       action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
     >

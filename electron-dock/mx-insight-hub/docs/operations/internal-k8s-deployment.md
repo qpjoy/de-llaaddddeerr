@@ -97,16 +97,14 @@ The UI-managed JustOne key lives in the shared Hub database and survives an
 ordinary deployment. The runtime Secret and ConfigMap are reconciled each time:
 when `MX_INSIGHT_JUSTONE_TOKEN` is omitted or blank, or when
 `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` is omitted, the deploy preserves its
-existing Kubernetes value. An explicit gate value of `0` disables new upstream
-dispatches. Clearing an environment fallback is destructive and requires the
+existing Kubernetes value. An explicit gate value of `0` disables untouched legacy operations only. Clearing an environment fallback is destructive and requires the
 one-shot command prefix `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`; never persist
 that flag in `.env.internal`. A first deployment with neither value remains
 disabled. Updating a database-managed key takes effect on the next dispatch;
-changing the gate requires the normal Public workload rollout performed by the
-deploy command. Explicit command-environment values take precedence over
-`.env.internal`, including emergency gate `0`.
+database operation-state changes also take effect without a Public workload restart. Explicit command-environment values take precedence over
+`.env.internal`, for bootstrap defaults.
 
-The provider gates are deployment ceilings, not routine rollout buttons. Migration
+Provider contract gates are bootstrap defaults. Database-managed operations use console pause/disable for immediate stops. Migration
 `060_external_platform_operation_control.sql` adds the database-authoritative per-operation state and reviewed
 upstream price-book versions shown under **数据清洗中心 → 外部数据平台**. An existing enabled environment starts
 in revision-zero compatibility mode; the first Admin operation write takes authority without restarting Pods.

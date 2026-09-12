@@ -381,14 +381,21 @@ function operationView(row, definition, { config = {}, credentialConfigured = fa
       config.configurationError.message || 'Provider deployment configuration is invalid',
     ))
   }
-  // This parent gate remains an emergency/deployment ceiling even after the
-  // operation policy switches from legacy env mode to database mode.
-  if (!config?.contractVerified || !config?.[definition.legacyGate]) {
+  // Environment gates bootstrap untouched operations. Audited database policies
+  // are authoritative once an operator saves the operation in the console.
+  if (row.controlSource === 'legacy_environment'
+    && (!config?.contractVerified || !config?.[definition.legacyGate])) {
     blockers.push(blocker(
       'deployment_gate_closed',
       'The deployment-level provider or operation gate is closed',
       { gate: definition.legacyGate },
     ))
+  }
+  const requiredLeaseMs = (definition.legacyGate === 'userActivityContractVerified' ? 3 : 1)
+    * (config.timeoutMs || 30_000) + 30_000
+  if (Number.isFinite(config.reservationLeaseMs) && config.reservationLeaseMs < requiredLeaseMs) {
+    blockers.push(blocker('reservation_lease_too_short',
+      'The reservation lease must cover this operation timeout window', { requiredLeaseMs }))
   }
   if (!credentialConfigured) {
     blockers.push(blocker('credential_missing', 'No usable provider credential is configured'))

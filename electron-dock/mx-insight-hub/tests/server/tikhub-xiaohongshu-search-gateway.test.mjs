@@ -12,6 +12,7 @@ import {
   XIAOHONGSHU_SEARCH_OPERATION,
 } from '../../server/contracts/tikhub-xiaohongshu-search.mjs'
 import { TIKHUB_XIAOHONGSHU_ENDPOINT_KEY } from '../../server/contracts/tikhub-xiaohongshu.mjs'
+import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { TikHubGateway } from '../../server/external-platforms/tikhub-gateway.mjs'
 
 const FIRST_NOTE_ID = '675d277d000000000600e655'
@@ -1044,5 +1045,35 @@ test('modern and legacy cursors are route-bound even when both projections share
     })),
     (error) => error?.status === 400 && error?.code === 'invalid_cursor',
   )
+  assert.equal(adapter.calls.search.length, 1)
+})
+
+
+test('console activation dispatches with env gates closed and pause stops the same gateway', async () => {
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '完整正文')] })
+  const state = fixture(adapter, { contractVerified: false, searchContractVerified: false })
+  const control = new MemoryExternalPlatformControlStore()
+  state.gateway.operationControlStore = control
+  const runtime = { config: state.gateway.config, credentialConfigured: true }
+  await assert.rejects(() => state.gateway.searchNotes(state.context, request()))
+  assert.equal(adapter.calls.search.length, 0)
+  await control.updatePolicy('tikhub', XIAOHONGSHU_SEARCH_OPERATION, {
+    expectedRevision: 0, desiredState: 'active', reason: 'Verified via console',
+    priceBook: {
+      currency: 'CNY', pricingAsOf: '2026-09-13',
+      monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
+      unitCostMinorByEndpoint: { [TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY]: 5 },
+    },
+  }, { runtime })
+  const result = await state.gateway.searchNotes(state.context, request({ idempotencyKey: 'after-enable' }))
+  assert.equal(result.status, 200)
+  assert.equal(result.sourceMode, 'live')
+  assert.equal(adapter.calls.search.length, 1)
+  await control.updatePolicy('tikhub', XIAOHONGSHU_SEARCH_OPERATION, {
+    expectedRevision: 1, desiredState: 'paused', reason: 'Pause via console',
+  }, { runtime })
+  await assert.rejects(() => state.gateway.searchNotes(state.context, request({
+    idempotencyKey: 'after-pause', body: { platform: 'xiaohongshu', query: '不同关键词', pageSize: 1 },
+  })))
   assert.equal(adapter.calls.search.length, 1)
 })
