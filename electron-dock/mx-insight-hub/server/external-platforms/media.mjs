@@ -80,7 +80,7 @@ export function externalImageAddressAllowed(address, family = isIP(address)) {
 function imageUrl(value, base = null) {
   let parsed
   try {
-    parsed = base ? new URL(value, base) : new URL(value)
+    parsed = base ? new URL(value, base) : new URL(String(value).startsWith('//') ? `https:${value}` : value)
   } catch {
     throw imageError(422, 'external_media_url_invalid', 'Product image URL is invalid')
   }
@@ -88,6 +88,12 @@ function imageUrl(value, base = null) {
   // aliases, which are not covered by the CDN's wildcard TLS certificate.
   // Use only the exact corresponding HTTPS aliases; never relax TLS checks.
   const sourceHostname = parsed.hostname.toLowerCase()
+  // Legacy marketplace captures use HTTP Alibaba CDN URLs. Upgrade only this
+  // known TLS-capable family; retain raw archive URLs and all SSRF checks.
+  if (parsed.protocol === 'http:' && !parsed.port
+    && (sourceHostname === 'alicdn.com' || sourceHostname.endsWith('.alicdn.com'))) {
+    parsed.protocol = 'https:'
+  }
   parsed.hostname = LEGACY_ALICDN_SEARCH_IMAGE_HOSTS.get(sourceHostname) || parsed.hostname
   const hostname = parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase()
   if (
@@ -307,6 +313,14 @@ async function boundedBody(body, maximum) {
   return size === output.length ? output : Buffer.from(output.subarray(0, size))
 }
 
+export function validateExternalImage(body, declaredType) {
+  const detectedType = detectedImageType(body)
+  if (!detectedType || detectedType !== declaredType) {
+    throw imageError(415, 'external_media_content_invalid', 'Product image content does not match its declared type')
+  }
+  safeImageDimensions(body, detectedType)
+}
+
 /**
  * Fetches only a URL already retained in a committed, consumer-scoped Hub
  * response. DNS is resolved once, every address is checked, and Undici is
@@ -315,6 +329,8 @@ async function boundedBody(body, maximum) {
  */
 export function createExternalImageLoader({
   lookup = dnsLookup,
+  contentTypes = IMAGE_CONTENT_TYPES,
+  validateContent = validateExternalImage,
   request = undiciRequest,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxBytes = MAX_IMAGE_BYTES,
@@ -379,7 +395,7 @@ export function createExternalImageLoader({
           upstream = await request(current, {
             method: 'GET',
             headers: {
-              accept: 'image/webp,image/png,image/jpeg',
+              accept: [...contentTypes].join(','),
               'user-agent': 'MX-Insight-Hub-Media-Relay/1.0',
             },
             maxRedirections: 0,
@@ -412,17 +428,13 @@ export function createExternalImageLoader({
             throw imageError(413, 'external_media_too_large', 'Product image exceeds the preview size limit')
           }
           const declaredType = normalizedContentType(upstream.headers?.['content-type'])
-          if (!IMAGE_CONTENT_TYPES.has(declaredType)) {
+          if (!contentTypes.has(declaredType)) {
             upstream.body.destroy?.()
             throw imageError(415, 'external_media_type_rejected', 'Product image type is not allowed')
           }
           const body = await boundedBody(upstream.body, byteLimit)
-          const detectedType = detectedImageType(body)
-          if (!detectedType || detectedType !== declaredType) {
-            throw imageError(415, 'external_media_content_invalid', 'Product image content does not match its declared type')
-          }
-          safeImageDimensions(body, detectedType)
-          return { body, contentType: detectedType }
+          validateContent(body, declaredType)
+          return { body, contentType: declaredType }
         } catch (error) {
           if (error instanceof AppError) throw error
           if (operationSignal.aborted) throw abortError()

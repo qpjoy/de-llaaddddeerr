@@ -985,3 +985,20 @@ test('rate-window rollover preserves active per-consumer media concurrency', asy
   await first
   await store.close()
 })
+
+test('legacy Alibaba HTTP and protocol-relative image URLs upgrade to HTTPS without weakening origin checks', async () => {
+  const seen = []
+  const load = createExternalImageLoader({
+    lookup: async () => [{ address: PUBLIC_IPV4, family: 4 }],
+    agentFactory: () => null,
+    request: async url => {
+      seen.push(url.href)
+      return { statusCode: 200, headers: { 'content-type': 'image/png' }, body: (async function* () { yield pngImage() })() }
+    },
+  })
+  await load('http://img.alicdn.com/imgextra/test.png?signature=keep')
+  await load('//img.alicdn.com/imgextra/other.png')
+  assert.deepEqual(seen, ['https://img.alicdn.com/imgextra/test.png?signature=keep', 'https://img.alicdn.com/imgextra/other.png'])
+  await assert.rejects(load('http://alicdn.com.attacker.example/image.png'), { code: 'external_media_url_blocked' })
+  await assert.rejects(load('http://img.alicdn.com:8080/image.png'), { code: 'external_media_url_blocked' })
+})

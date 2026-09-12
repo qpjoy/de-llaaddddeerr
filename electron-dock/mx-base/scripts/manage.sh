@@ -1,166 +1,167 @@
 #!/usr/bin/env bash
-# mx-base lifecycle: shared platform services.
-#
-# Today that is Jenkins. The hard constraint (docs/adr/0001) is that nothing
-# here may become a runtime dependency of mx-test-framework: `down` on this
-# project must not stop a single test from running.
+# Explicit application dispatch. Never implicitly deploy/stop every base app.
 set -Eeuo pipefail
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-K8S_DIR="${ROOT_DIR}/deploy/k8s/internal"
-NAMESPACE="mx-base"
-IMAGE="${MX_BASE_JENKINS_IMAGE:-mx-base-jenkins:latest}"
-
+STATIC_DIR="$ROOT_DIR/mx-static"
 say() { printf '[mx-base] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
-kube() { kubectl -n "$NAMESPACE" "$@"; }
-
-usage() {
-  cat <<'EOF'
-mx-base —— 共享平台设施（目前是 Jenkins）
-
-  bash scripts/manage.sh deploy     # 镜像 -> 配置 -> Jenkins -> 等就绪
-  bash scripts/manage.sh status
-  bash scripts/manage.sh logs
-  bash scripts/manage.sh password   # 打印 admin 密码
-  bash scripts/manage.sh agent-cmd  # 打印把一台机器接成静态 agent 的命令
-  bash scripts/manage.sh down       # 停服务，保留 PVC 与 Secret
-
-配置读 .env.internal（保持 0600 权限）。必填：无。
-可选：
-  JENKINS_ADMIN_PASSWORD  不设则首次部署自动生成，之后从 Secret 读回
-  JENKINS_URL             不设则用 http://<节点 IP>:30880
-
-Jenkins 只做「构建产物」和「外部触发」。测试的调度、报告与历史在
-mx-test-framework —— 日常工作在那边，这里只在排查构建问题时打开。
-EOF
-}
-
 load_env() {
-  local file="${ROOT_DIR}/.env.internal"
-  if [ -f "$file" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$file"
-    set +a
+  local file
+  for file in "$ROOT_DIR/.env.internal" "$STATIC_DIR/.env"; do
+    if [ -f "$file" ]; then set -a; source "$file"; set +a; fi
+  done
+}
+compose() { docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" "$@"; }
+usage() {
+  cat <<'HELP'
+mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
+  bash scripts/manage.sh                  # 交互式应用/操作选择（非终端显示帮助）
+  bash scripts/manage.sh status           # 所有应用的实际状态和当前上下文
+  bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
+  bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
+  bash scripts/manage.sh deploy jenkins   # 显式启用可选构建基础设施
+  bash scripts/manage.sh <操作> <应用>
+
+应用：mx-static (Docker Compose)、jenkins (Kubernetes mx-base namespace)
+通用操作：status / deploy / start / stop / restart / logs / doctor
+mx-static：init / jobs / storage / attach / detach（项目任务计数；失败任务通过 API 查询/重试）
+jenkins：password / agent-cmd
+stop/down 保留数据、队列、凭据；没有一键删除数据或全停命令。
+
+配置：mx-base/.env.internal；mx-static 的存储/Compose 配置可放 mx-static/.env。
+检查输出中的 Docker/Kubernetes context。本机状态不等于生产状态；不可访问显示 UNKNOWN。
+HELP
+}
+choose_app() {
+  [ -t 0 ] || die '非交互调用必须指定应用：deploy mx-static 或 deploy jenkins'
+  printf '\n1) mx-static — 多媒体存储/缓存\n2) jenkins — 可选构建服务\n0) 取消\n' >&2
+  local answer
+  read -r -p '选择应用: ' answer
+  case "$answer" in 1) APP=mx-static;; 2) APP=jenkins;; 0|'') exit 0;; *) die '无效选择';; esac
+}
+contexts() {
+  say "执行主机：$(hostname)"
+  if command -v docker >/dev/null; then say "Docker context: $(docker context show 2>/dev/null || printf UNKNOWN)"; fi
+  if command -v kubectl >/dev/null; then say "Kubernetes context: $(kubectl config current-context 2>/dev/null || printf UNKNOWN)"; fi
+}
+status_app() {
+  local app="$1" output
+  case "$app" in
+    mx-static)
+      say 'mx-static [Compose]'
+      if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then say 'UNKNOWN：Docker 不可访问'; return; fi
+      if ! output="$(compose ps --all 2>&1)"; then say "UNKNOWN：$output"; return; fi
+      printf '%s\n' "$output"
+      if [ -z "$(compose ps --all --quiet)" ]; then say 'NOT DEPLOYED：此 Docker context 无 mx-static 容器'; fi
+      ;;
+    jenkins)
+      say 'jenkins [Kubernetes / mx-base]'
+      if ! command -v kubectl >/dev/null; then say 'UNKNOWN：缺少 kubectl'; return; fi
+      if ! output="$(kubectl --request-timeout=5s -n mx-base get deployment mx-base-jenkins --ignore-not-found -o wide 2>&1)"; then say "UNKNOWN：$output"; return; fi
+      if [ -z "$output" ]; then say 'NOT DEPLOYED：当前集群无 Jenkins deployment'; else printf '%s\n' "$output"; fi
+      ;;
+  esac
+}
+nas_compose() { docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas "$@"; }
+storage_control() { compose exec -T writer node mx-base/mx-static/src/archive-control.mjs "$@"; }
+attach_nas() {
+  need timeout; need findmnt
+  [ -n "${MX_STATIC_NAS_PATH:-}" ] && [ -n "${MX_STATIC_NAS_VOLUME_ID:-}" ] || die '请配置 NAS_PATH 与 NAS_VOLUME_ID，并在 NAS 创建同值 .mx-static-volume-id'
+  local filesystem
+  filesystem="$(timeout -k 1 5 findmnt -n -o FSTYPE -T "$MX_STATIC_NAS_PATH")" || die 'NAS 挂载查询失败/超时；主服务未操作'
+  case "$filesystem" in nfs|nfs4) ;; *) die 'NAS_PATH 不是已挂载 NFS；拒绝写入空挂载目录';; esac
+  storage_control attach "$MX_STATIC_NAS_VOLUME_ID"
+  if ! timeout -k 1 30 docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas up -d --no-deps --force-recreate archive; then
+    storage_control detach
+    die '归档容器接入失败/超时，已逻辑脱离；writer/reader 未重启'
+  fi
+  say 'NAS 组件已启动，storage 查看身份验证/补传状态；writer/reader 未重启'
+}
+detach_nas() {
+  storage_control detach
+  if [ -n "${MX_STATIC_NAS_PATH:-}" ] && [ -n "${MX_STATIC_NAS_VOLUME_ID:-}" ]; then
+    need timeout
+    if ! timeout -k 1 10 docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas stop --timeout 2 archive; then
+      say 'NAS 已逻辑脱离；归档容器停止超时，可能有内核 NFS 等待。不要反复创建替代进程；检查 NFS 恢复情况。'
+    fi
   fi
 }
-
-node_ip() {
-  kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true
-}
-
-# Read the existing password back rather than rotating it on every deploy: a new
-# password on each redeploy would lock out anyone who wrote the old one down.
-resolve_secrets() {
-  JENKINS_ADMIN_PASSWORD="${JENKINS_ADMIN_PASSWORD:-$(kube get secret mx-base-secrets \
-    -o 'jsonpath={.data.JENKINS_ADMIN_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)}"
-  if [ -z "${JENKINS_ADMIN_PASSWORD:-}" ]; then
-    need openssl
-    JENKINS_ADMIN_PASSWORD="$(openssl rand -hex 20)"
-    say "generated an admin password (read it back with: manage.sh password)"
+init_static() {
+  need openssl
+  local data="${MX_STATIC_DATA_PATH:-/srv/mx-static/data}" state="${MX_STATIC_STATE_PATH:-/srv/mx-static/state}"
+  local secret_dir="${MX_STATIC_SECRETS_PATH:-$STATIC_DIR/secrets}"
+  [[ "$secret_dir" = /* ]] || secret_dir="$STATIC_DIR/$secret_dir"
+  local uid="${MX_STATIC_UID:-1000}" gid="${MX_STATIC_GID:-1000}"
+  [[ "$data" = /* && "$state" = /* && "$data" != / && "$state" != / && "$data" != "$state" ]] || die 'DATA_PATH / STATE_PATH 必须是两个不同的绝对专用目录'
+  install -d -m 0750 "$data" "$state"
+  install -d -m 0700 "$secret_dir"
+  # Noclobber prevents accidental replacement/rotation on repeated deployment.
+  if [ ! -f "$secret_dir/projects.json" ]; then
+    (umask 077; set -o noclobber; printf '{"mx-insight-hub":{"read":"%s","write":"%s"}}\n' "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > "$secret_dir/projects.json")
   fi
-  export JENKINS_ADMIN_PASSWORD
-
-  if [ -z "${JENKINS_URL:-}" ]; then
-    local ip
-    ip="$(node_ip)"
-    [ -n "$ip" ] || die "cannot determine a node IP; set JENKINS_URL in .env.internal"
-    JENKINS_URL="http://${ip}:30880/"
+  if [ ! -f "$secret_dir/signing-key" ]; then
+    (umask 077; set -o noclobber; openssl rand -hex 32 > "$secret_dir/signing-key")
   fi
-  export JENKINS_URL
+  if [ "$(id -u)" = 0 ]; then chown "$uid:$gid" "$data" "$state" "$secret_dir/projects.json" "$secret_dir/signing-key"; fi
+  chmod 0440 "$secret_dir/projects.json" "$secret_dir/signing-key"
+  say "已准备 data=$data state=$state；保留现有凭据。容器 UID/GID=$uid:$gid"
 }
-
-cmd_deploy() {
-  need kubectl
+static_jobs() {
   need docker
-  load_env
-  kubectl apply -f "${K8S_DIR}/00-namespace.yaml" >/dev/null
-  resolve_secrets
-
-  say "building ${IMAGE}"
-  docker build -t "$IMAGE" "${ROOT_DIR}/jenkins"
-
-  # Passed on stdin, never as arguments: kubectl's argv is visible to every
-  # other process on the host.
-  kubectl create secret generic mx-base-secrets --namespace "$NAMESPACE" \
-    --from-env-file=/dev/stdin --dry-run=client -o yaml <<EOF | kubectl apply -f - >/dev/null
-JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD}
-EOF
-  kubectl create configmap mx-base-jenkins-config --namespace "$NAMESPACE" \
-    --from-literal=JENKINS_URL="${JENKINS_URL}" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl create configmap mx-base-jenkins-casc --namespace "$NAMESPACE" \
-    --from-file=casc.yaml="${ROOT_DIR}/jenkins/casc.yaml" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  say "configuration reconciled"
-
-  kubectl apply -f "${K8S_DIR}/05-rbac.yaml" >/dev/null
-  kubectl apply -f "${K8S_DIR}/10-home-pvc.yaml" >/dev/null
-
-  # JCasC is mounted from a ConfigMap, and changing a ConfigMap does not restart
-  # anything. Stamping its checksum onto the pod template is what makes an
-  # edited casc.yaml actually take effect on the next deploy.
-  local checksum
-  checksum="$(cksum "${ROOT_DIR}/jenkins/casc.yaml" | awk '{print $1}')"
-  sed "s/REPLACED_BY_MANAGE_SH/${checksum}/" "${K8S_DIR}/30-jenkins.yaml" \
-    | kubectl apply -f - >/dev/null
-
-  say "waiting for Jenkins (first boot installs nothing but is still slow)"
-  kube rollout status deployment/mx-base-jenkins --timeout=600s
-  say "Jenkins： ${JENKINS_URL}   admin / $(cmd_password)"
-  say "日常测试工作不在这里 —— 请开 mx-test-framework 后台。"
+  compose exec -T writer node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const projects = JSON.parse(readFileSync(process.env.MX_STATIC_PROJECTS_FILE, "utf8"));
+    for (const [project, keys] of Object.entries(projects)) {
+      const r = await fetch(`http://127.0.0.1:18200/static/v1/projects/${project}/jobs`, {headers:{authorization:`Bearer ${keys.read}`}});
+      if (!r.ok) throw new Error(`Queue status HTTP ${r.status}`);
+      const data = await r.json(); console.log(JSON.stringify({project, counts:data.counts, cache:data.cache}));
+    }
+  '
 }
-
-cmd_password() {
-  load_env
-  kube get secret mx-base-secrets -o 'jsonpath={.data.JENKINS_ADMIN_PASSWORD}' 2>/dev/null \
-    | base64 -d 2>/dev/null || die "no secret yet; run deploy first"
+run_app() {
+  local action="$1" app="$2"
+  case "$app" in mx-static|jenkins) ;; *) die "未知应用：$app";; esac
+  case "$action" in status) status_app "$app"; return;; doctor) contexts; status_app "$app"; if [ "$app" = mx-static ]; then compose config --quiet; fi; return;; esac
+  if [ "$app" = jenkins ]; then
+    case "$action" in
+      start) kubectl --request-timeout=10s -n mx-base scale deployment/mx-base-jenkins --replicas=1;;
+      restart) kubectl --request-timeout=10s -n mx-base rollout restart deployment/mx-base-jenkins;;
+      stop|down) bash "$ROOT_DIR/scripts/apps/jenkins.sh" down;;
+      deploy|logs|password|agent-cmd) bash "$ROOT_DIR/scripts/apps/jenkins.sh" "$action";;
+      *) die "jenkins 不支持 $action";;
+    esac
+    return
+  fi
+  need docker
+  case "$action" in
+    init) init_static;;
+    deploy) init_static; compose config --quiet; compose up -d --build --wait --wait-timeout 120 writer reader; status_app mx-static;;
+    start) compose start writer reader;;
+    stop|down) detach_nas || true; compose stop --timeout 40 writer reader; say '已停止 mx-static，所有容器、数据与队列保留';;
+    restart) compose restart --timeout 40 writer reader;;
+    logs) compose logs --tail 200 --follow;;
+    jobs) static_jobs;;
+    storage) storage_control status;;
+    attach) attach_nas;;
+    detach) detach_nas;;
+    *) die "mx-static 不支持 $action";;
+  esac
 }
-
-# Windows and macOS builds cannot run in a Linux container, so they need a
-# static agent. This is the only long-lived agent and the only part of mx-base
-# that someone has to maintain by hand.
-cmd_agent_cmd() {
-  load_env
-  local ip
-  ip="$(node_ip)"
-  cat <<EOF
-
-把一台 Windows / macOS 机器接成构建 agent：
-
-  1. Jenkins 里新建节点：${JENKINS_URL:-http://${ip}:30880/}computer/new
-     名字例如 win-build，Launch method 选 "Launch agent by connecting it to the controller"
-  2. 在那台机器上装 JDK 21，然后运行页面上给出的命令，形如：
-
-     java -jar agent.jar -url http://${ip}:30880/ -secret <SECRET> -name win-build -workDir C:\\jenkins
-
-  3. 给节点打标签 windows，Jenkinsfile 里用 agent { label 'windows' }
-
-注意：**构建 agent 不是测试执行机**。跑 Electron 测试的机器接的是 MXT：
-  npx mxt-runner enroll --server http://<MXT 地址>:30879 --code <后台生成的接入码>
-两者可以是同一台物理机，但是两个不同的进程、两套不同的凭据。
-
-EOF
-}
-
-cmd_status() { load_env; kube get pods,svc,pvc -o wide; }
-cmd_logs()   { load_env; kube logs deployment/mx-base-jenkins --tail="${2:-200}" -f; }
-cmd_down() {
-  load_env
-  say "scaling to zero (PVC, Secret and build history are kept)"
-  kube scale deployment/mx-base-jenkins --replicas=0 >/dev/null
-  say "down. mx-test-framework is unaffected — it does not depend on this."
-}
-
-case "${1:-}" in
-  deploy)     cmd_deploy ;;
-  password)   cmd_password ;;
-  agent-cmd)  cmd_agent_cmd ;;
-  status)     cmd_status ;;
-  logs)       cmd_logs "$@" ;;
-  down)       cmd_down ;;
-  ""|-h|--help|help) usage ;;
-  *) die "unknown command: $1" ;;
+load_env
+ACTION="${1:-}"; APP="${2:-}"
+case "$ACTION" in -h|--help|help) usage; exit 0;; esac
+if [ -z "$ACTION" ]; then
+  if [ ! -t 0 ]; then usage; exit 0; fi
+  contexts; status_app mx-static; status_app jenkins; choose_app
+  printf '\n1) status  2) deploy  3) start  4) stop  5) restart  6) logs  7) doctor  8) jobs  9) storage  10) attach NAS  11) detach NAS (mx-static)\n'
+  read -r -p '选择操作（回车取消）: ' answer
+  case "$answer" in 1) ACTION=status;; 2) ACTION=deploy;; 3) ACTION=start;; 4) ACTION=stop;; 5) ACTION=restart;; 6) ACTION=logs;; 7) ACTION=doctor;; 8) ACTION=jobs;; 9) ACTION=storage;; 10) ACTION=attach;; 11) ACTION=detach;; '') exit 0;; *) die '无效操作';; esac
+fi
+case "$ACTION" in status|list|apps)
+  contexts
+  if [ -n "$APP" ]; then run_app status "$APP"; else status_app mx-static; status_app jenkins; fi
+  exit 0;;
 esac
+[ -n "$APP" ] || choose_app
+run_app "$ACTION" "$APP"

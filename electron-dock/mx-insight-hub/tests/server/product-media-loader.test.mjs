@@ -80,3 +80,14 @@ test('aborting a queued media request removes it without blocking later work', a
   assert.equal(await last, 'last')
   assert.deepEqual(loader.stats(), { active: 0, queued: 0, maxConcurrency: 1 })
 })
+
+test('pending durable media waits and retries without treating it as missing', async () => {
+  const loader = createProductMediaLoader({ pendingBackoffMs: [1, 1] })
+  let attempts = 0
+  const result = await loader.load(async () => {
+    if (++attempts < 3) throw Object.assign(new Error('queued'), { status: 503, code: 'external_media_pending' })
+    return 'stored-image'
+  })
+  assert.equal(result, 'stored-image')
+  assert.equal(attempts, 3)
+})

@@ -1,110 +1,51 @@
-# mx-base
+# mx-base：独立基础设施
 
-共享平台设施的货架：将来的镜像仓库、对象存储、GitOps 控制器都归这里。
-目前架上放着一套**随时可启用但尚未启用**的 Jenkins。
+2026-09-12：用户确认尚未线上部署。此前仅预留 Jenkins 构建基础设施；现在按应用分别部署和管理。仓库内容不是线上状态证明，后续用 `status` 查看目标主机的实际状态。
 
-## 一句话：现在不要部署它
-
-[MXT ADR-0006](../mx-test-framework/docs/adr/0006-mxt-absorbs-builds-jenkins-deferred.md)
-的结论是 **Jenkins 对当前范围没有不可取代之处**——唯一真正难复制的是多阶段流水线
-DSL，而当前的流水线只有三步（构建 → 发布给 Release Center → 通知）。
-「构建」这个动作由 MXT 的 `kind: build` 作业吸收，跑在它本来就需要的那台
-Windows 执行机上。
-
-镜像、JCasC、清单都已就绪，所以这是一个**成本为零的期权**，不是待办事项。
-
-### 什么时候启用
-
-满足任意一条就 `manage.sh deploy`：
-
-1. 需要**多阶段 + 扇出扇入**的流水线（跨阶段，不是 `--shard` 那种单次执行内的并行）
-2. 需要**人工审批门**
-3. **超过 3 个人**各自配置构建，需要独立的权限与审计面
-4. 需要**多平台并行出包**并汇总
-
-在那之前，日常工作全部在 MXT 后台完成。
-
-## 部署（满足上述条件后）
-
-```bash
-bash scripts/manage.sh deploy
-```
-
-镜像 → 配置 → Jenkins → 等就绪。`.env.internal` **没有必填项**：
-admin 密码首次自动生成，之后从 Secret 读回（重复 deploy 不会把密码转掉）。
-
-```bash
-bash scripts/manage.sh password    # 打印 admin 密码
-bash scripts/manage.sh agent-cmd   # 打印接入构建 agent 的命令
-bash scripts/manage.sh status
-bash scripts/manage.sh down        # 停服务；MXT 完全不受影响
-```
-
-界面在 `http://<服务器内网 IP>:30880`。
-
-## 为什么它不吃硬盘
-
-| 做法 | 效果 |
-| --- | --- |
-| kubernetes-plugin，每次构建起临时 agent pod | **workspace 随 pod 消失**，`JENKINS_HOME` 不随构建次数膨胀 |
-| 插件在镜像里预装（`jenkins/plugins.txt` 钉死版本） | 启动不联网拉插件，重启后行为一致 |
-| 配置写成 `jenkins/casc.yaml` | controller 是**可重建的无状态组件**，不需要备份；重装约 20 分钟 |
-| `logRotator` 限制构建历史 | 唯一会增长的东西被封顶 |
-
-稳态约 20GB。对比 GitLab CE（完整 forge，100–200GB 起）不在一个量级。
-
-## 两种 agent，别搞混
-
-这是最容易混淆的一点：
-
-```
-构建 agent  ──→  Jenkins        跑 quasar build，出 .exe / .dmg
-测试执行机  ──→  mx-test-framework   跑 e2e 用例，出报告
-```
-
-**同一台物理机可以两个都是，但那是两个进程、两套凭据、两个队列。**
-
-| | 构建 agent | 测试执行机 |
+| 应用 | 职责 | 部署与状态 |
 | --- | --- | --- |
-| 连谁 | Jenkins（`java -jar agent.jar`） | MXT（`mxt-runner watch`） |
-| 谁派活 | Jenkins 队列 | MXT 调度器 |
-| 在哪配任务 | Jenkins（运维） | **MXT 后台（所有人）** |
-| 什么时候需要 | 出 Windows/macOS 安装包 | 跑 Electron 测试 |
+| mx-static | 多媒体持久采集、缓存、文件读取与签名预览 | 独立 Docker Compose，writer + reader，默认 18200 / 18201 |
+| jenkins | 可选的制品构建 | 原 Kubernetes `mx-base` namespace，默认 NodePort 30880，未自动启用 |
 
-Linux 构建不需要静态 agent —— k8s 里起临时 pod 就够了。
-**只有 Windows / macOS 构建需要常驻 agent**，因为 k8s 起不了 Windows 容器。
-那是 mx-base 里唯一需要人维护的部分。
+mx-common 复用代码；mx-test-framework 调度测试和构建作业；mx-insight-hub 管数据产品、原始响应、租户授权和计费；mx-base 承载可独立运行的基础服务。MX-H2I 登录、网络、DNS 不依赖 mx-static。
 
-## 构建完之后怎么交给 MXT
+## 统一入口
 
-Jenkins **不触发测试**。它构建、上传制品、然后告诉 MXT「有新包了」：
+在目标 Internal 主机、`electron-dock/mx-base` 目录执行：
 
-```bash
-curl -X POST "$MXT_URL/api/v1/apps/luopan/packages" \
-  -H "authorization: Bearer $MXT_TOKEN" -H "content-type: application/json" \
-  -d "{\"url\":\"$ARTIFACT_URL\",\"sha256\":\"$SHA\",\"filename\":\"$NAME\",\"version\":\"$VER\",\"gitSha\":\"$GIT_SHA\"}"
+```sh
+bash scripts/manage.sh                  # 展示状态 → 选择应用 → 选择操作
+bash scripts/manage.sh status           # 当前主机 / Docker / Kubernetes 上下文及所有登记应用
+bash scripts/manage.sh deploy           # 交互选择，非交互必须指定应用
+bash scripts/manage.sh deploy mx-static # 生成首次凭据、准备目录、构建、等待健康
+bash scripts/manage.sh jobs mx-static   # 项目任务状态计数、writer 内存缓存指标
+bash scripts/manage.sh logs mx-static
+bash scripts/manage.sh restart mx-static
+bash scripts/manage.sh stop mx-static   # 保留文件、队列、凭据
+bash scripts/manage.sh start mx-static
+bash scripts/manage.sh doctor mx-static
 ```
 
-MXT 按自己的排期决定什么时候用它跑测试。这个方向不能反过来——
-Jenkins 一旦触发测试，mx-base 就进了 MXT 的关键路径，
-[ADR-0001](docs/adr/0001-shared-platform-services.md) 的硬约束立刻失效。
+Jenkins 使用相同的 `操作 jenkins`；额外支持 `password jenkins`、`agent-cmd jenkins`。不提供全量部署、全停或删除数据命令。Docker 不可用、集群访问失败显示 UNKNOWN；只有查询成功且没有对应资源才显示 NOT DEPLOYED。`status` 只读，不会启用任何应用。Jenkins 停止仅缩容为零。
 
-`sha256` 是必填且强校验的：执行机会把这个文件下载到别人自己的电脑上并运行它。
+## 首次部署 mx-static
 
-## 目录
+```sh
+cp mx-static/.env.example mx-static/.env
+# 按主机规划编辑数据目录、本机队列目录、UID/GID、绑定地址。
+bash scripts/manage.sh deploy mx-static
+bash scripts/manage.sh status
+```
 
-| 路径 | 内容 |
-| --- | --- |
-| `jenkins/` | Dockerfile、钉死版本的 `plugins.txt`、`casc.yaml`（controller 的全部配置） |
-| `deploy/k8s/internal/` | namespace、RBAC、PVC、Deployment、Service（含 NodePort 30880） |
-| `scripts/manage.sh` | 生命周期 |
-| `docs/adr/` | 架构决策 |
+默认 `/srv/mx-static/data` 放文件，`/srv/mx-static/state` 放 SQLite 队列。使用 root 执行管理命令时只负责创建目录并交给配置 UID/GID，容器仍以 1000:1000 运行。非 root 部署须预先准备可写目录，UID/GID 与服务进程一致。重复部署不会轮换凭据。
 
-## 尚未上机验证
+当前暂停 Hub 接入，先验收独立静态服务。可选 NAS 使用 `attach mx-static` / `detach mx-static` / `storage mx-static`，不会替换主服务数据卷。详细步骤、接口、故障恢复和 NAS 管理见 [mx-static 运维文档](mx-static/docs/README.md)。首次部署需保证主机有 Docker Compose v2、镜像仓库网络和足够磁盘空间。
 
-Jenkins 的镜像构建、JCasC 加载、kubernetes-plugin 起 agent pod
-这三条都**没有在真实集群上跑过**。首次 `deploy` 要重点看：
+## 目录边界
 
-1. `jenkins-plugin-cli` 能否拉到插件（内网需要配代理或镜像源）
-2. JCasC 是否被接受（`manage.sh logs` 里会打印解析错误）
-3. 起一个 `agent { label 'node' }` 的流水线，确认 agent pod 能创建并连回来
+- `scripts/manage.sh`：应用选择和通用入口；`scripts/apps/jenkins.sh` 保留 Jenkins 原有生命周期实现。
+- `mx-static/`：该应用自己的源码、Compose、环境配置、文档和测试；独立凭据及两套数据挂载。
+- `jenkins/`、`deploy/k8s/internal/`：现有 Jenkins 结构与资源名称保留，避免不必要迁移。
+- `docs/adr/`：跨应用边界和架构决策；新增基础设施应拥有独立部署、数据、凭据和状态操作。
+
+相关文档：[分层决策](docs/adr/0002-independent-apps-and-media-storage.md)、[Jenkins 说明](docs/jenkins.md)。

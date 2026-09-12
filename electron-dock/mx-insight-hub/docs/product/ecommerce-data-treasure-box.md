@@ -1,3 +1,5 @@
+> 2026-09-12 更新：页面默认 Hub 开放 API + refresh（重新采集），只有用户点击搜索并验证 Key 后才发请求；演示是可选模式。媒体接入可选 mx-static，参见 ../../../mx-base/mx-static/docs/README.md。下文历史默认演示说明以本次更新为准。
+
 # 电商数据百宝箱：产品、交互与外部调用设计
 
 Status: implemented Admin demo and public documentation; live acquisition remains governed by the existing ecommerce contract.

@@ -1,0 +1,73 @@
+name: mx-static
+x-common: &common
+  image: mx-static:0.3.0
+  build:
+    context: ../..
+    dockerfile: mx-base/mx-static/Dockerfile
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 40s
+  read_only: true
+  user: "${MX_STATIC_UID:-1000}:${MX_STATIC_GID:-1000}"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  mem_limit: 2g
+  cpus: 2
+  pids_limit: 128
+  environment: &environment
+    MX_STATIC_STATE_DIR: /state
+    MX_STATIC_WORKERS: ${MX_STATIC_WORKERS:-4}
+    MX_STATIC_MAX_QUEUED: ${MX_STATIC_MAX_QUEUED:-10000}
+    MX_STATIC_CACHE_BYTES: ${MX_STATIC_CACHE_BYTES:-67108864}
+    MX_STATIC_CACHE_TTL_MS: ${MX_STATIC_CACHE_TTL_MS:-60000}
+    MX_STATIC_PROJECTS_FILE: /run/secrets/projects
+    MX_STATIC_SIGNING_KEY_FILE: /run/secrets/signing_key
+    MX_STATIC_PUBLIC_URL: ${MX_STATIC_PUBLIC_URL:-https://hub.minsight-ai.com}
+    MX_STATIC_CORS_ORIGINS: ${MX_STATIC_CORS_ORIGINS:-}
+  secrets: [projects, signing_key]
+  healthcheck:
+    test: [CMD, node, -e, "fetch('http://127.0.0.1:18200/static/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+  logging:
+    driver: json-file
+    options: { max-size: 10m, max-file: '3' }
+services:
+  writer:
+    <<: *common
+    ports: ["${MX_STATIC_BIND_IP:-127.0.0.1}:${MX_STATIC_WRITER_PORT:-18200}:18200"]
+    volumes:
+      - type: bind
+        source: ${MX_STATIC_DATA_PATH:-/srv/mx-static/data}
+        target: /data
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${MX_STATIC_STATE_PATH:-/srv/mx-static/state}
+        target: /state
+        bind: { create_host_path: false }
+  reader:
+    <<: *common
+    depends_on:
+      writer: { condition: service_healthy }
+    environment:
+      <<: *environment
+      MX_STATIC_READ_ONLY: 'true'
+      MX_STATIC_WRITER_URL: http://writer:18200
+    ports: ["${MX_STATIC_BIND_IP:-127.0.0.1}:${MX_STATIC_READER_PORT:-18201}:18200"]
+    volumes:
+      - type: bind
+        source: ${MX_STATIC_DATA_PATH:-/srv/mx-static/data}
+        target: /data
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${MX_STATIC_STATE_PATH:-/srv/mx-static/state}
+        target: /state
+        read_only: true
+        bind: { create_host_path: false }
+secrets:
+  projects:
+    file: ${MX_STATIC_SECRETS_PATH:-./secrets}/projects.json
+  signing_key:
+    file: ${MX_STATIC_SECRETS_PATH:-./secrets}/signing-key

@@ -1,0 +1,8 @@
+{
+  "name": "@mx/mx-static",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "engines": { "node": ">=24.21" },
+  "scripts": { "start": "node src/index.mjs", "test": "node --test tests/*.test.mjs", "test:compose": "node scripts/smoke-compose.mjs", "test:nas": "node scripts/smoke-nas-compose.mjs" }
+}

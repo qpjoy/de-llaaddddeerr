@@ -7,7 +7,7 @@ import { QUOTA_429_CODES } from './core/quota-codes.mjs'
 import { ECOMMERCE_DELIVERY_MODES } from './contracts/justone.mjs'
 import { XIAOHONGSHU_POST_DELIVERY_MODES } from './contracts/tikhub-xiaohongshu.mjs'
 import { SOCIAL_ACCOUNT_PLATFORMS } from './contracts/social-accounts.mjs'
-import { JUSTONE_RELEASED_RESOURCES } from './contracts/justone-resources.mjs'
+import { JUSTONE_RELEASED_RESOURCES, JUSTONE_RESOURCE_CATALOG } from './contracts/justone-resources.mjs'
 
 export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','xiaohongshu-note':'/docs/xiaohongshu-note','virtual-supermarket':'/docs/virtual-supermarket','topic-reports':'/docs/topic-reports',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
@@ -1066,7 +1066,10 @@ function justoneResourcePaths() {
     const seen = new Set()
     for (const version of versions) {
       for (const declared of resource.variantFor(version).params) {
-        if (seen.has(declared.name)) continue
+        if (seen.has(declared.name)) {
+          if (declared.values) properties[declared.name].enum = [...new Set([...(properties[declared.name].enum || []), ...declared.values])]
+          continue
+        }
         seen.add(declared.name)
         properties[declared.name] = declared.kind === 'page'
           ? { type: 'integer', minimum: 1, maximum: 1000, default: declared.defaultValue ?? 1 }
@@ -1088,7 +1091,8 @@ function justoneResourcePaths() {
         'x-mx-required-platform': 'ecommerce',
         'x-mx-required-capabilities': [resource.operationKey],
         'x-mx-upstream-versions': [...versions],
-        description: `平台原生合同：请求路径与参数名与上游文档一致，响应 data 保留上游字段名，不做 Hub 重命名或裁剪，外层保留 Hub 的 contractVersion/meta/requestId。上游未对 data 发布类型，因此字段随上游变化；需要稳定结构时改用 /data/ecommerce/products/search。要求 ecommerce 数据域授权与 ${resource.operationKey} 业务操作授权，两者独立于商品搜索。deliveryMode 默认 cache_first：cache_only 不发起上游调用，refresh 绕过新鲜缓存并需要调用方提供 Idempotency-Key。每次真实上游调用计一次上游成本；命中缓存不计上游成本。`,
+        'x-mx-version-parameters': Object.fromEntries(versions.map(v => [v, resource.variantFor(v).params])),
+        description: `平台原生合同：业务参数名按上游版本映射，Hub 使用独立 POST 路径，响应 data 保留上游字段名，不做 Hub 重命名或裁剪，外层保留 Hub 的 contractVersion/meta/requestId。上游未对 data 发布类型，因此字段随上游变化；需要稳定结构时改用 /data/ecommerce/products/search。要求 ecommerce 数据域授权与 ${resource.operationKey} 业务操作授权，两者独立于商品搜索。deliveryMode 默认 cache_first：cache_only 不发起上游调用，refresh 绕过新鲜缓存并需要调用方提供 Idempotency-Key。每次真实上游调用计一次上游成本；命中缓存不计上游成本。`,
         'x-mx-error-codes': {
           400: [
             'invalid_request', 'unsupported_request_field', 'unsupported_version',
@@ -1113,7 +1117,23 @@ function justoneResourcePaths() {
           required: true,
           content: {
             'application/json': {
-              schema: { type: 'object', additionalProperties: false, required, properties },
+              schema: {
+                type: 'object', additionalProperties: false, properties,
+                oneOf: versions.map(version => {
+                  const variant = resource.variantFor(version)
+                  const names = new Set(variant.params.map(p => p.name))
+                  return {
+                    required: [...(version === resource.defaultVersion ? [] : ['version']), ...variant.params.filter(p => p.required).map(p => p.name)],
+                    properties: {
+                      version: { const: version },
+                      ...Object.fromEntries([...seen].map(name => {
+                        const param = variant.params.find(p => p.name === name)
+                        return [name, !names.has(name) ? false : param.values ? { enum: [...param.values] } : {}]
+                      })),
+                    },
+                  }
+                }),
+              },
             },
           },
         },
@@ -5085,6 +5105,9 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
   { key: 'topic-reports', path: '/docs/topic-reports', label: '专题洞察', section: '数据产品' },
   { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫', section: '平台原生接口' },
+  { key: 'jd-native', path: '/docs/jd-native', label: '京东', section: '平台原生接口' },
+  { key: 'xianyu-native', path: '/docs/xianyu-native', label: '闲鱼', section: '平台原生接口' },
+  { key: 'xiaohongshu-ec-native', path: '/docs/xiaohongshu-ec-native', label: '小红书电商', section: '平台原生接口' },
   { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
   { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
   { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
@@ -5096,6 +5119,25 @@ const PUBLIC_DOCS_ROUTE_ALIASES = Object.freeze({
   '/docs/authentication': '/docs/auth',
   '/docs/operations': '/docs/evidence',
 })
+
+// Render the same per-version registry the request validator dispatches.
+function nativeParameterTables(marketplace) {
+  return Object.values(JUSTONE_RESOURCE_CATALOG).filter(r => r.marketplace === marketplace && r.released).map(r => `
+    <h4>${r.label}</h4><p><code>POST ${r.hubPath}</code> · 默认版本 <code>${r.defaultVersion}</code></p>
+    ${r.versions.map(v => `<h5>version=${v}</h5><table><thead><tr><th>JSON 参数</th><th>类型</th><th>必填</th><th>默认值 / 约束</th></tr></thead><tbody>${r.variantFor(v).params.map(p => `<tr><td><code>${p.name}</code></td><td>${p.kind === 'page' ? 'integer' : 'string'}</td><td>${p.required ? '是' : '否'}</td><td>${p.required ? '无默认值' : p.defaultValue ?? '省略时使用平台默认'}${p.values ? '；' + p.values.join(' | ') : p.kind === 'page' ? '；1–1000' : '；最长 64 字符'}</td></tr>`).join('')}</tbody></table>`).join('')}`).join('')
+}
+function marketplaceNativePage(key, label, marketplace, searchDescription) {
+  const planned = Object.values(JUSTONE_RESOURCE_CATALOG).filter(r => r.marketplace === marketplace && !r.released)
+  return `<section class="doc-page" data-doc-page="${key}">
+    <h2>${label}平台接口</h2><p>${searchDescription}</p>
+    <p>已开放商品搜索：<code>POST /api/v1/data/ecommerce/products/search</code>，请求 <code>marketplace=${marketplace}</code>。第一页不传 cursor；下一页原样提交响应中的 cursor，每页使用新的 Idempotency-Key。搜索是 Hub 数据产品接口，不等同于原生接口的 page 参数。</p>
+    <p><code>deliveryMode</code>：cache_only 只读精确存档，cache_first 优先缓存，refresh 重新采集。原始业务字段保留在受控归档，数据产品返回稳定投影。</p>
+    ${nativeParameterTables(marketplace)}
+    <h3>原生接口接入状态</h3><p>以下资源尚未发布，不能调用；不会因文档分类而自动开放权限或计费接口。</p>
+    <ul>${planned.length ? planned.map(r => `<li>${r.label}：待发布</li>`).join('') : '<li>暂无已发布的独立原生接口。</li>'}</ul>
+    <p><a href="/docs/ecommerce-treasure-box">完整商品搜索参数与调用示例</a></p>
+  </section>`
+}
 
 const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
 <html lang="zh-CN">
@@ -5434,9 +5476,15 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 
+    ${marketplaceNativePage('jd-native', '京东', 'jd', '商品搜索支持 query 和 cursor，不接受 sort。')}
+    ${marketplaceNativePage('xianyu-native', '闲鱼', 'xianyu', '商品搜索支持 query、cursor 和 sort：relevance / recent / seller_credit / price_asc / price_desc / price_drop / newest。')}
+    ${marketplaceNativePage('xiaohongshu-ec-native', '小红书电商', 'xiaohongshu_ec', '商品搜索支持 query 和 cursor，不接受 sort。')}
     <section class="doc-page" data-doc-page="taobao-tmall">
     <h2 id="taobao-tmall">淘宝天猫原生接口</h2>
-    <p class="lead">Hub 对外提供两层电商接口。这一层是<strong>平台原生合同</strong>：请求路径与参数名和上游文档一致，响应 <code>data</code> 保留上游字段名，调用方按上游文档理解载荷、按 Hub 合同理解交付。另一层是<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>，返回 Hub 归一化的稳定商品结构。</p>
+    <p>参数按 2026-09-12 平台文档核对。Hub 接收 POST JSON，原生业务参数按版本映射；Hub URL 与上游 URL 不相同。</p>
+    ${nativeParameterTables('taobao')}
+    <p>店铺 V1 的 sort 为 _sale / _default；V2 为 sales-des / new-des / credit-des / price-asc / price-des；V4 不接受 sort。各版本 page 默认 1。换页必须更换 Idempotency-Key；相同 Key 与不同 page 返回冲突。</p>
+    <p class="lead">Hub 对外提供两层电商接口。这一层是<strong>平台原生合同</strong>：业务参数名按上游版本映射，Hub 使用独立 POST 路径，响应 <code>data</code> 保留上游字段名，调用方按上游文档理解载荷、按 Hub 合同理解交付。另一层是<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>，返回 Hub 归一化的稳定商品结构。</p>
 
     <div class="notice">两层用同一把 Hub Public API Key、同一套幂等与交付语义，也共用同一份上游调用证据与归档。区别只有一个：原生层不重命名、不裁剪上游字段，稳定性交给上游；数据产品层由 Hub 钉住结构，上游改字段不会打到你身上。</div>
 

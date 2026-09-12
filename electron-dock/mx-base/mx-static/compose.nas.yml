@@ -1,0 +1,38 @@
+# Optional attachment only. The HTTP writer/reader NEVER mount /nas.
+services:
+  archive:
+    image: mx-static:0.3.0
+    profiles: [nas]
+    init: true
+    restart: "no" # Attach only after NFS is ready; never couple host boot to NAS.
+    read_only: true
+    user: "${MX_STATIC_UID:-1000}:${MX_STATIC_GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    stop_grace_period: 5s
+    command: [node, mx-base/mx-static/src/archive-worker.mjs]
+    environment:
+      MX_STATIC_STATE_DIR: /state
+      MX_STATIC_NAS_VOLUME_ID: ${MX_STATIC_NAS_VOLUME_ID:?Set the persistent NAS volume identity}
+      MX_STATIC_NAS_IDLE_TIMEOUT_MS: ${MX_STATIC_NAS_IDLE_TIMEOUT_MS:-15000}
+      MX_STATIC_NAS_MAX_JOB_MS: ${MX_STATIC_NAS_MAX_JOB_MS:-900000}
+      MX_STATIC_NAS_REQUIRE_NFS: ${MX_STATIC_NAS_REQUIRE_NFS:-true}
+    volumes:
+      - type: bind
+        source: ${MX_STATIC_DATA_PATH:-/srv/mx-static/data}
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MX_STATIC_STATE_PATH:-/srv/mx-static/state}
+        target: /state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MX_STATIC_NAS_PATH:?Set an existing mounted NFS directory}
+        target: /nas
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

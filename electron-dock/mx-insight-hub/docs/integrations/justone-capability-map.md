@@ -298,3 +298,15 @@ At every provider catalog review:
 5. add a new Hub contract version only when the normalized public schema or semantics must change;
 6. leave the old version callable for its published support window;
 7. update the Admin atlas and source-catalog marker only after runtime tests pass.
+
+## 2026-09-12 原生参数复核
+
+核对官方 V1/V2/V4 店铺文档，V1 sort 为 `_sale/_default`，V2 为 `sales-des/new-des/credit-des/price-asc/price-des`，V4 不接受 sort；各版本 page 默认 1。Hub 注册表、网页逐版本参数表与 OpenAPI 条件 schema 同步。
+
+来源：
+- https://docs.justoneapi.com/zh/api/taobao-and-tmall/shop-product-list-v1
+- https://docs.justoneapi.com/zh/api/taobao-and-tmall/shop-product-list-v2
+- https://docs.justoneapi.com/zh/api/taobao-and-tmall/shop-product-list-v4
+- https://docs.justoneapi.com/zh/api/xianyu-goofish/product-search-v1
+
+Public 文档按淘宝天猫、京东、闲鱼、小红书电商分组，明确区分已开放数据产品搜索与尚未发布的原生详情接口，不自动放开新上游业务。

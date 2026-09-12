@@ -854,10 +854,10 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const [lastLiveRequest, setLastLiveRequest] = useState(loadLiveRequest)
   const lastLiveRequestRef = useRef(lastLiveRequest)
   const [recoveryStatus, setRecoveryStatus] = useState(null)
-  const [mode, setMode] = useState('safe_demo')
+  const [mode, setMode] = useState('hub_live')
   const [demoDeliveryMode, setDemoDeliveryMode] = useState('cache_first')
   const [demoCacheOnlyScene, setDemoCacheOnlyScene] = useState('no_inventory')
-  const [deliveryMode, setDeliveryMode] = useState('cache_only')
+  const [deliveryMode, setDeliveryMode] = useState('refresh')
   const [marketplace, setMarketplace] = useState('taobao')
   const [sort, setSort] = useState('sales_desc')
   const [query, setQuery] = useState('便携相机')
@@ -949,7 +949,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const changeMode = (value) => {
     if (phase === 'searching') return
     setMode(value)
-    if (value === 'hub_live') setDeliveryMode('cache_only')
+    if (value === 'hub_live') setDeliveryMode('refresh')
     const nextSorts = availableSorts(value, marketplace)
     if (!nextSorts.some(({ value: option }) => option === sort)) setSort(nextSorts[0]?.value || '')
     setError(null)
@@ -1513,7 +1513,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
       <section className="qp-panel mih-treasure-lab">
         {error ? <TreasureProductError error={error} mode={mode} onUseSafeDemo={() => changeMode('safe_demo')} /> : null}
         <form className="mih-treasure-controls" onSubmit={submit}>
-          <header><MagicWand size={20} weight="duotone" aria-hidden="true" /><div><strong>告诉小聚你要什么</strong><small>先选安全演示，确认交互后再发实时请求。</small></div></header>
+          <header><MagicWand size={20} weight="duotone" aria-hidden="true" /><div><strong>告诉小聚你要什么</strong><small>选择交付策略，验证 API Key 后开始采集。</small></div></header>
           <DropdownField label="获取方式" value={mode} options={MODE_OPTIONS} disabled={phase === 'searching'} onChange={changeMode} />
           {mode === 'safe_demo' ? (
             <>

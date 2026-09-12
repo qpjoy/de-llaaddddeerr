@@ -2,6 +2,7 @@
 // leave headroom for a selected item/history preview without an avoidable 429.
 const DEFAULT_CONCURRENCY = 12
 const BUSY_BACKOFF_MS = Object.freeze([250, 1_000])
+const PENDING_BACKOFF_MS = Object.freeze([500, 1000, 2000, 4000, 8000, 8000, 8000, 8000])
 
 function abortError() {
   if (typeof DOMException === 'function') return new DOMException('The operation was aborted', 'AbortError')
@@ -34,6 +35,7 @@ function retryableBusy(error) {
 export function createProductMediaLoader({
   maxConcurrency = DEFAULT_CONCURRENCY,
   backoffMs = BUSY_BACKOFF_MS,
+  pendingBackoffMs = PENDING_BACKOFF_MS,
 } = {}) {
   if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 32) {
     throw new TypeError('maxConcurrency must be an integer between 1 and 32')
@@ -56,8 +58,10 @@ export function createProductMediaLoader({
           try {
             return await entry.operation(entry.signal)
           } catch (error) {
-            if (!retryableBusy(error) || attempt >= backoffMs.length) throw error
-            await wait(backoffMs[attempt], entry.signal)
+            const pending = error?.status === 503 && error?.code === 'external_media_pending'
+            const delays = pending ? pendingBackoffMs : backoffMs
+            if ((!pending && !retryableBusy(error)) || attempt >= delays.length) throw error
+            await wait(delays[attempt], entry.signal)
           }
         }
       })().then(

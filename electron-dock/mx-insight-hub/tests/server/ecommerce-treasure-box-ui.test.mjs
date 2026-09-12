@@ -132,7 +132,7 @@ test('treasure box exposes safe stored, cache-first and explicit refresh deliver
   for (const mode of ['cache_only', 'cache_first', 'refresh']) {
     assert.match(pageSource, new RegExp(`value: '${mode}'`, 'u'))
   }
-  assert.match(pageSource, /const \[deliveryMode, setDeliveryMode\] = useState\('cache_only'\)/u)
+  assert.match(pageSource, /const \[deliveryMode, setDeliveryMode\] = useState\('refresh'\)/u)
   assert.match(pageSource, /label="交付策略"[\s\S]*?options=\{DELIVERY_MODE_OPTIONS\}/u)
   assert.match(pageSource, /只读保障：本次不会调用外部平台/u)
   assert.match(pageSource, /读取 Hub 存量/u)
@@ -181,7 +181,7 @@ test('safe demo independently simulates all delivery strategies with zero Hub an
   assert.match(runSafeDemo, /safeDemoScenario\(\{ demoDeliveryMode, demoCacheOnlyScene, candidates \}\)/u)
   assert.match(runSafeDemo, /demoRunId: `demo-\$\{crypto\.randomUUID\(\)\}`/u)
   assert.doesNotMatch(runSafeDemo, /publicDataApi|fetch\(|requestId:|rememberLiveRequest|persistLiveRequest|sessionStorage/u)
-  assert.match(changeMode, /if \(value === 'hub_live'\) setDeliveryMode\('cache_only'\)/u)
+  assert.match(changeMode, /if \(value === 'hub_live'\) setDeliveryMode\('refresh'\)/u)
   assert.doesNotMatch(changeDemoDeliveryMode, /setDeliveryMode\(/u)
   assert.match(styleSource, /\.mih-treasure-demo-boundary/u)
   assert.match(styleSource, /\.mih-treasure-demo-trace/u)
@@ -351,7 +351,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /requestEpochRef\.current/u)
   assert.match(pageSource, /useEffect\(\(\) => \{[\s\S]*?mountedRef\.current = true[\s\S]*?return \(\) => \{/u)
   assert.match(pageSource, /if \(!finishRequest\(epoch\)\) return/u)
-  assert.match(pageSource, /const \[mode, setMode\] = useState\('safe_demo'\)/u)
+  assert.match(pageSource, /const \[mode, setMode\] = useState\('hub_live'\)/u)
   assert.match(pageSource, /const hasAmbiguousLiveRequest = lastLiveRequest\?\.outcome === 'ambiguous'/u)
   assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching'\}/u)
   assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)

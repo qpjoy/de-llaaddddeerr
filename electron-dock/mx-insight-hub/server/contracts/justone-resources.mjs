@@ -117,7 +117,7 @@ function resource({
 }
 
 const TAOBAO_MARKETPLACES = ['taobao', 'tmall']
-const TAOBAO_SHOP_SORTS = ['default', 'sale', 'price_asc', 'price_desc', 'newest']
+const TAOBAO_SHOP_SORTS = ['sales-des', 'new-des', 'credit-des', 'price-asc', 'price-des']
 
 export const JUSTONE_RESOURCE_CATALOG = Object.freeze({
   'taobao-tmall.product-detail': resource({
@@ -200,7 +200,7 @@ export const JUSTONE_RESOURCE_CATALOG = Object.freeze({
         upstreamPath: '/api/taobao/get-shop-item-list/v1',
         params: [
           param('userId', 'id', { required: true }),
-          param('sort', 'enum', { values: TAOBAO_SHOP_SORTS }),
+          param('sort', 'enum', { values: ['_sale', '_default'] }),
           param('page', 'page', { defaultValue: 1 }),
         ],
       }),

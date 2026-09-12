@@ -1069,6 +1069,7 @@ export class ExternalPlatformGateway {
           ingestJob: {
             payload: {
               kind: 'external-platform-result',
+              consumerId: context.consumer.id,
               providerKey: this.providerKey,
               datasetId: 'ecommerce.products.v1',
               platform: 'ecommerce',
