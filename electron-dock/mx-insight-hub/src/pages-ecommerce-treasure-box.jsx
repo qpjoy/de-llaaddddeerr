@@ -851,7 +851,7 @@ function TreasureProductError({ error, mode, onUseSafeDemo }) {
   )
 }
 
-function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onDelivered, forcedMarketplace }) {
+function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onDelivered, forcedMarketplace, forcedFilters, onFilterChange }) {
   const keyInputRef = useRef(null)
   const requestEpochRef = useRef(0)
   const requestInFlightRef = useRef(false)
@@ -1216,11 +1216,13 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
   const changeSort = (value) => {
     if (semanticsLocked) return
     setSort(value)
+    if (compact) onFilterChange?.('sort', value)
   }
 
   const changeQuery = (value) => {
     if (semanticsLocked) return
     setQuery(value)
+    if (compact) onFilterChange?.('query', value)
   }
 
   const revealResults = (items, nextEvidence, nextPage = null, append = false) => {
@@ -1232,7 +1234,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
     setResultPage(nextPage)
     setDisplayPage(0)
     setPhase('presenting')
-    if (nextEvidence?.sourceMode !== 'safe_demo') onDelivered?.()
+    if (nextEvidence?.sourceMode !== 'safe_demo') onDelivered?.({ items, evidence: nextEvidence, page: nextPage })
   }
 
   const showDisplayPage = (nextPage) => {
@@ -1335,6 +1337,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
         sourceMode: result.payload?.meta?.sourceMode || result.evidence.sourceMode,
         requestId: result.payload?.requestId || result.evidence.requestId,
         ageSeconds: result.payload?.meta?.ageSeconds ?? result.evidence.ageSeconds,
+        capturedAt: result.payload?.meta?.capturedAt || new Date().toISOString(),
       }
       revealResults(result.payload?.data?.items || [], nextEvidence, result.payload?.data?.page || null, append)
       if (tracksProviderRisk) rememberLiveRequest({
@@ -1548,6 +1551,12 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
   }
 
   useEffect(() => {
+    if (!compact || !forcedFilters || semanticsLocked) return
+    setQuery(forcedFilters.query)
+    setMinPrice(forcedFilters.minPrice)
+    setMaxPrice(forcedFilters.maxPrice)
+  }, [compact, forcedFilters?.query, forcedFilters?.minPrice, forcedFilters?.maxPrice, semanticsLocked])
+  useEffect(() => {
     if (compact && forcedMarketplace && forcedMarketplace !== 'all' && forcedMarketplace !== marketplace && !semanticsLocked) changeMarketplace(forcedMarketplace)
   }, [compact, forcedMarketplace, marketplace, semanticsLocked])
   useEffect(() => {
@@ -1580,14 +1589,14 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
           ) : <DropdownField label="交付策略" value={deliveryMode} options={DELIVERY_MODE_OPTIONS} disabled={phase === 'searching' || storedOnly} onChange={changeDeliveryMode} />}
           {!compact ? <DropdownField label="数据范围" value={storedOnly ? 'stored' : 'acquire'} options={[{ value: 'acquire', label: '按平台采集' }, { value: 'stored', label: '浏览已存数据' }]} disabled={semanticsLocked || marketplace === 'all'} onChange={value => { setBrowse(value); if (value === 'stored') setMode('hub_live') }} /> : null}
           <DropdownField label="平台" value={marketplace} options={compact ? MARKETPLACES : [...MARKETPLACES, { value: 'all', label: '全部平台 · 仅已存数据' }]} disabled={semanticsLocked || compact} onChange={changeMarketplace} />
-          <DropdownField label="排序" value={sort} options={sortOptions} disabled={semanticsLocked || storedOnly || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={changeSort} />
+          <DropdownField label="上游排序（仅采集）" value={sort} options={sortOptions} disabled={semanticsLocked || storedOnly || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={changeSort} />
           {!compact ? <DropdownField label="百宝箱陈列数量" value={displayPageSize} options={DISPLAY_PAGE_SIZE_OPTIONS} disabled={semanticsLocked} onChange={(value) => { setDisplayPageSize(value); setDisplayPage(0); setSelected(products[0] || null) }} /> : null}
           <Field label="搜索词" hint={storedOnly ? "按商品标题筛选本调用身份的已存记录；留空显示全部。" : "上游搜索词；刷新从指定页开始，下滑加载后续数据页。"}>
             <span className="mih-treasure-query"><MagnifyingGlass size={17} aria-hidden="true" /><input className="qp-input" value={query} maxLength="200" disabled={semanticsLocked} onChange={(event) => changeQuery(event.target.value)} placeholder="例如：便携相机" /></span>
           </Field>
           {!storedOnly && mode === 'hub_live' ? <>
-            <Field label="起始数据页" hint={marketplace === 'xiaohongshu_ec' ? '小红书从第 1 页开始，再使用上游 continuation。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={marketplace === 'xiaohongshu_ec' ? '1' : upstreamPage} disabled={semanticsLocked || marketplace === 'xiaohongshu_ec'} onChange={event => setUpstreamPage(event.target.value)} /></Field>
-            {['taobao', 'tmall'].includes(marketplace) ? <div className="mih-commerce-price"><Field label="最低价"><input className="qp-input" type="number" min="0" value={minPrice} disabled={semanticsLocked} onChange={event => setMinPrice(event.target.value)} /></Field><Field label="最高价"><input className="qp-input" type="number" min="0" value={maxPrice} disabled={semanticsLocked} onChange={event => setMaxPrice(event.target.value)} /></Field></div> : null}
+            <Field label="起始数据页" hint={marketplace === 'xiaohongshu_ec' ? '小红书从第 1 页开始，再使用上游 continuation。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={marketplace === 'xiaohongshu_ec' ? '1' : upstreamPage} disabled={semanticsLocked || marketplace === 'xiaohongshu_ec'} onChange={event => { setUpstreamPage(event.target.value); if (compact) onFilterChange?.('page', event.target.value) }} /></Field>
+            {['taobao', 'tmall'].includes(marketplace) ? <div className="mih-commerce-price"><Field label="最低价"><input className="qp-input" type="number" min="0" value={minPrice} disabled={semanticsLocked} onChange={event => { setMinPrice(event.target.value); if (compact) onFilterChange?.('minPrice', event.target.value) }} /></Field><Field label="最高价"><input className="qp-input" type="number" min="0" value={maxPrice} disabled={semanticsLocked} onChange={event => { setMaxPrice(event.target.value); if (compact) onFilterChange?.('maxPrice', event.target.value) }} /></Field></div> : null}
           </> : null}
           {storedOnly ? <p>仅查询当前调用身份已提交的商品记录，按入库请求时间倒序、同批按上游顺序展示。不会调用上游。</p> : null}
           {mode === 'hub_live' ? (

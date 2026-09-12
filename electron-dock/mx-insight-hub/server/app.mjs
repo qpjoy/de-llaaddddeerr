@@ -4863,18 +4863,19 @@ export function createApp({
           cancelDownstream()
           return
         }
-        const allowedQueryFields = new Set(['requestId', 'itemId', 'imageIndex'])
+        const allowedQueryFields = new Set(['requestId', 'itemId', 'imageIndex', 'deliveryMode'])
         for (const field of searchParams.keys()) {
           if (!allowedQueryFields.has(field)) {
             throw new AppError(400, 'unsupported_fields', `${field} query parameter is not allowed`)
           }
         }
         for (const field of allowedQueryFields) {
-          if (searchParams.getAll(field).length !== 1) {
+          if (field === 'deliveryMode' ? searchParams.getAll(field).length > 1 : searchParams.getAll(field).length !== 1) {
             throw new AppError(400, 'invalid_request', `${field} query parameter must appear exactly once`)
           }
         }
         const media = await service.ecommerceProductImage(context, {
+          deliveryMode: searchParams.get('deliveryMode'),
           requestId: requiredQuery(searchParams, 'requestId'),
           itemId: requiredQuery(searchParams, 'itemId'),
           imageIndex: requiredQuery(searchParams, 'imageIndex'),

@@ -28,8 +28,9 @@ test('Admin automatic inventory uses admin authentication; public key remains sc
  try {
   assert.equal((await send('GET',null,'')).status,401)
   assert.equal((await send('GET',null,key.secret)).status,403)
-  const first=await send();assert.equal(first.status,200);assert.equal(first.payload.data.items.length,100)
-  const second=await send('GET',null,root,'?cursor='+encodeURIComponent(first.payload.data.pageInfo.nextCursor));assert.equal(second.payload.data.items.length,5)
+  assert.equal((await send()).payload.data.items.length,10)
+  const first=await send('GET',null,root,'?pageSize=100');assert.equal(first.status,200);assert.equal(first.payload.data.items.length,100)
+  const second=await send('GET',null,root,'?pageSize=100&cursor='+encodeURIComponent(first.payload.data.pageInfo.nextCursor));assert.equal(second.payload.data.items.length,5)
   const edit={requestId:originalId,ordinal:1,revision:0,title:'修改标题',price:'25.50'}
   assert.equal((await send('PUT',edit)).status,200)
   assert.equal((await send('PUT',edit)).status,409)
@@ -56,6 +57,9 @@ test('PostgreSQL admin edits, manual rows, optimistic conflicts and hidden rows'
   assert.equal((await service.adminEcommerceItems({})).items.length,1)
   await service.adminSaveEcommerceItem({requestId:originalId,ordinal:1,revision:0,title:'修改标题',price:'20'})
   assert.equal((await service.adminEcommerceItems({})).items[0].product.title,'修改标题')
+  assert.equal((await service.adminEcommerceItems({minPrice:'15',maxPrice:'25',from:'2026-01-01T00:00:00Z',to:'2026-01-02T00:00:00Z'})).items.length,1)
+  assert.equal((await service.adminEcommerceItems({maxPrice:'15'})).items.length,0)
+  assert.equal((await service.adminEcommerceItems({from:'2026-02-01T00:00:00Z'})).items.length,0)
   await assert.rejects(service.adminSaveEcommerceItem({requestId:originalId,ordinal:1,revision:0,title:'覆盖',price:'30'}),e=>e.code==='product_revision_conflict')
   await service.adminSaveEcommerceItem({requestId:originalId,ordinal:1,revision:1},true)
   assert.equal((await service.adminEcommerceItems({})).items.length,0)

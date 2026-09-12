@@ -335,13 +335,13 @@ function assertExternalCommerceContract(document) {
   assert.equal(media.operationId, 'getExternalCommerceProductMedia')
   assert.doesNotMatch(JSON.stringify(media), /provider|tikhub|rapidapi|justone/i)
   assert.deepEqual(media.parameters.map(({ name }) => name), [
-    'requestId', 'itemId', 'imageIndex',
+    'deliveryMode', 'requestId', 'itemId', 'imageIndex',
   ])
-  assert.equal(media.parameters.every(({ required }) => required), true)
-  assert.equal(media.parameters[0].schema.format, 'uuid')
-  assert.equal(media.parameters[1].schema.maxLength, 512)
-  assert.equal(media.parameters[2].schema.minimum, 0)
-  assert.equal(media.parameters[2].schema.maximum, 19)
+  assert.equal(media.parameters.slice(1).every(({ required }) => required), true)
+  assert.equal(media.parameters[1].schema.format, 'uuid')
+  assert.equal(media.parameters[2].schema.maxLength, 512)
+  assert.equal(media.parameters[3].schema.minimum, 0)
+  assert.equal(media.parameters[3].schema.maximum, 19)
   assert.deepEqual(
     Object.keys(media.responses).map(Number).sort((left, right) => left - right),
     [200, 400, 401, 403, 404, 413, 415, 422, 429, 502, 503, 504],
@@ -1798,6 +1798,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/canonical/items/{id}/timeline',
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/ecommerce/products/items',
       '/data/ecommerce/products/media',
       '/data/ecommerce/products/search',
       '/data/ecommerce/taobao/product-detail',

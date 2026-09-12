@@ -780,10 +780,10 @@ export function App() {
     signOut('管理会话已失效，请重新验证。')
   }, [signOut])
 
-  const notify = useCallback((message, tone = 'success') => {
+  const notify = useCallback((message, tone = 'success', { durationMs = 4200 } = {}) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
     setToasts((current) => [...current, { id, message, tone }].slice(-4))
-    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200)
+    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), durationMs)
   }, [])
 
   const dismissToast = useCallback((id) => {

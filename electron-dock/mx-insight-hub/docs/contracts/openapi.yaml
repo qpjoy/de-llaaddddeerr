@@ -38,6 +38,89 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/ecommerce/products/items:
+    get:
+      tags:
+      - External Data
+      operationId: listStoredEcommerceItems
+      summary: Browse the authenticated consumer’s committed ecommerce history
+      description: Live ecommerce-granted API key required. No upstream dispatch. Sorted by recorded time descending,
+        request ID descending, ordinal ascending. Cursor binds all filters and page size. Admin edits/global inventory
+        are not exposed by this API.
+      parameters:
+      - name: marketplace
+        in: query
+        schema:
+          type: string
+          enum:
+          - all
+          - taobao
+          - tmall
+          - jd
+          - xianyu
+          - xiaohongshu_ec
+          default: all
+      - name: query
+        in: query
+        schema:
+          type: string
+          maxLength: 200
+      - name: pageSize
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+      - name: minPrice
+        in: query
+        schema:
+          type: string
+        description: Inclusive nonnegative decimal price, up to two fractional digits.
+      - name: maxPrice
+        in: query
+        schema:
+          type: string
+        description: Inclusive nonnegative decimal price, up to two fractional digits.
+      - name: from
+        in: query
+        schema:
+          type: string
+          format: date-time
+        description: Inclusive Hub recorded-time boundary.
+      - name: to
+        in: query
+        schema:
+          type: string
+          format: date-time
+        description: Inclusive Hub recorded-time boundary.
+      - name: cursor
+        in: query
+        schema:
+          type: string
+        description: Opaque nextCursor; retain identical filters.
+      responses:
+        '200':
+          description: data.items contains requestId, ordinal, recordedAt, product and media provenance; data.pageInfo
+            contains nextCursor, hasMore, returnedCount, asOf.
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api-keys:
     servers:
       - url: /internal/v1/admin
@@ -2103,81 +2186,187 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
   /data/ecommerce/products/media:
     get:
+      tags:
+      - External Data
       operationId: getExternalCommerceProductMedia
-      summary: Read one retained product image through the governed Hub media relay.
+      summary: Read one retained product image through the governed Hub media relay
       x-mx-strict-query: true
-      description: >-
-        Authenticates an ordinary live Hub Public API key and requires the same
-        consumer identity that received a committed ecommerce search result.
-        requestId identifies that response, itemId identifies one
-        returned item and imageIndex selects one of its retained images. Hub
-        never accepts an arbitrary URL on this endpoint. The relay permits
-        bounded public HTTPS raster images only, validates DNS and every
-        redirect, and rejects private-network destinations, oversized bodies
-        and mismatched content. Only JPEG, PNG and WebP are accepted. The three
-        documented parameters are the complete query allowlist. This read
-        creates no Hub usage record and dispatches no product-search request. A
-        valid legacy test key receives 403 test_key_not_supported before any
-        committed-result lookup or media-loader call.
+      description: Authenticates an ordinary Live Hub Public API key and requires the same consumer identity that
+        received a committed ecommerce search result. Test keys are rejected before any store or image-loader work.
+        requestId identifies that response, itemId identifies one returned item and imageIndex selects one of its
+        retained images; each must appear exactly once. Optional deliveryMode is cache_first (default) or cache_only;
+        cache_only misses return 404 external_media_cache_miss without external access. Hub never accepts an arbitrary
+        URL on this endpoint. The relay permits bounded public HTTPS JPEG, PNG and WebP images only, validates DNS
+        and every redirect, limits dimensions, duration, rate and concurrency, and rejects private-network destinations,
+        oversized bodies and mismatched content. This read creates no Hub usage record and dispatches no product-search
+        request.
       x-mx-error-codes:
-        "400": [invalid_request, unsupported_fields]
-        "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted, test_key_not_supported]
-        "404": [external_media_not_found]
-        "413": [external_media_too_large]
-        "415": [external_media_type_rejected, external_media_content_invalid, external_media_dimensions_rejected]
-        "422": [external_media_url_invalid, external_media_url_blocked, external_media_host_blocked]
-        "429": [external_media_rate_limited, external_media_busy]
-        "502": [external_media_unavailable, external_media_redirect_rejected, external_media_source_throttled]
-        "503": [external_media_unavailable]
-        "504": [external_media_timeout]
+        '400':
+        - invalid_request
+        - unsupported_fields
+        - invalid_media_delivery
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - test_key_not_supported
+        '404':
+        - external_media_not_found
+        - external_media_cache_miss
+        '413':
+        - external_media_too_large
+        '415':
+        - external_media_type_rejected
+        - external_media_content_invalid
+        - external_media_dimensions_rejected
+        '422':
+        - external_media_url_invalid
+        - external_media_url_blocked
+        - external_media_host_blocked
+        '429':
+        - external_media_rate_limited
+        - external_media_busy
+        '502':
+        - external_media_unavailable
+        - external_media_redirect_rejected
+        - external_media_source_throttled
+        '503':
+        - external_media_unavailable
+        '504':
+        - external_media_timeout
       parameters:
-        - name: requestId
-          in: query
-          required: true
-          description: requestId from the committed ecommerce search response that contained the image reference.
-          schema: { type: string, format: uuid }
-        - name: itemId
-          in: query
-          required: true
-          description: Exact item id from that response.
-          schema: { type: string, minLength: 1, maxLength: 512 }
-        - name: imageIndex
-          in: query
-          required: true
-          description: Zero-based index into that item's images array.
-          schema: { type: integer, minimum: 0, maximum: 19 }
+      - name: deliveryMode
+        in: query
+        schema:
+          type: string
+          enum:
+          - cache_first
+          - cache_only
+          default: cache_first
+      - name: requestId
+        in: query
+        required: true
+        description: requestId from the committed ecommerce search response that contained the image reference.
+        schema:
+          type: string
+          format: uuid
+      - name: itemId
+        in: query
+        required: true
+        description: Exact item id from that response.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 512
+      - name: imageIndex
+        in: query
+        required: true
+        description: Zero-based index into that item's images array.
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 19
       responses:
-        "200":
-          description: >-
-            A bounded image retained by the same consumer search response and
-            fetched through the Hub media relay. This read does not create Hub
-            usage or dispatch a product-search request.
+        '200':
+          description: A bounded image retained by the same consumer search response and fetched through the Hub media
+            relay. This read does not create Hub usage or dispatch a product-search request.
           headers:
             x-mx-insight-request-id:
               description: Request identifier for this media read, distinct from the search requestId query parameter.
-              schema: { type: string, format: uuid }
+              schema:
+                type: string
+                format: uuid
             cache-control:
-              description: Consumer-private browser caching policy; shared caches must not reuse it across authorization contexts.
-              schema: { type: string, example: "private, no-store" }
+              description: Prevents a consumer-authorized image response from being retained by shared or browser
+                caches.
+              schema:
+                type: string
+                example: private, no-store
             vary:
-              description: Keeps authenticated media cache entries distinct by consumer credential.
-              schema: { type: string, example: "Authorization" }
+              description: Declares that authorization is part of the response selection boundary.
+              schema:
+                type: string
+                example: Authorization
           content:
-            image/jpeg: { schema: { type: string, format: binary } }
-            image/png: { schema: { type: string, format: binary } }
-            image/webp: { schema: { type: string, format: binary } }
-        "400": { $ref: "#/components/responses/Error" }
-        "401": { $ref: "#/components/responses/Error" }
-        "403": { $ref: "#/components/responses/Error" }
-        "404": { $ref: "#/components/responses/Error" }
-        "413": { $ref: "#/components/responses/Error" }
-        "415": { $ref: "#/components/responses/Error" }
-        "422": { $ref: "#/components/responses/Error" }
-        "429": { $ref: "#/components/responses/Error" }
-        "502": { $ref: "#/components/responses/Error" }
-        "503": { $ref: "#/components/responses/Error" }
-        "504": { $ref: "#/components/responses/Error" }
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '415':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '504':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /data/post:
     post:
       operationId: resolveExternalSocialPost

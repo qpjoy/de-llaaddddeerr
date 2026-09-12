@@ -1002,3 +1002,17 @@ test('legacy Alibaba HTTP and protocol-relative image URLs upgrade to HTTPS with
   await assert.rejects(load('http://alicdn.com.attacker.example/image.png'), { code: 'external_media_url_blocked' })
   await assert.rejects(load('http://img.alicdn.com:8080/image.png'), { code: 'external_media_url_blocked' })
 })
+
+test('cache-only media misses never resolve DNS or dispatch; cached bytes remain accessible', async () => {
+  const lookups = [], requests = []
+  const loader = createExternalImageLoader({ lookup: publicLookup(lookups), agentFactory: noAgent,
+    request: async url => { requests.push(url); return response({ body: bodyOf(pngImage()) }) } })
+  const url = 'https://images.example.test/cache-only.png'
+  await rejectsMedia(() => loader(url, { cacheOnly: true, cacheScope: 'owner' }), { status: 404, code: 'external_media_cache_miss' })
+  assert.equal(lookups.length, 0); assert.equal(requests.length, 0)
+  await loader(url, { cacheScope: 'owner' })
+  const count = lookups.length
+  await loader(url, { cacheOnly: true, cacheScope: 'owner' })
+  assert.equal(requests.length, 1); assert.equal(lookups.length, count)
+  await rejectsMedia(() => loader(url, { cacheOnly: true, cacheScope: 'other' }), { status: 404, code: 'external_media_cache_miss' })
+})

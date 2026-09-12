@@ -478,7 +478,7 @@ export function createExternalImageLoader({
     })
   }
 
-  return async function loadExternalImage(sourceUrl, { signal, cacheScope = '' } = {}) {
+  return async function loadExternalImage(sourceUrl, { signal, cacheScope = '', cacheOnly = false } = {}) {
     if (signal?.aborted) {
       throw imageError(499, 'external_media_cancelled', 'Product image request was cancelled')
     }
@@ -495,6 +495,7 @@ export function createExternalImageLoader({
       cache.set(key, cached)
       return { body: cached.body, contentType: cached.contentType }
     }
+    if (cacheOnly) throw imageError(404, 'external_media_cache_miss', 'Image is not in the Hub memory cache; no external request was made')
     let entry = inFlight.get(key)
     if (!entry) {
       const controller = new AbortController()

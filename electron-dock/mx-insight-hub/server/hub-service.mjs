@@ -2347,7 +2347,7 @@ export class HubService {
   }
 
   async adminEcommerceItems(input) {
-    const query = storedEcommerceQuery({ pageSize: '100', ...input }, 'admin-ecommerce', this.apiKeyPepper)
+    const query = storedEcommerceQuery({ pageSize: '10', ...input }, 'admin-ecommerce', this.apiKeyPepper)
     return query.page(await this.store.listAdminEcommerceItems(query))
   }
 
@@ -2376,14 +2376,17 @@ export class HubService {
   }
 
   async adminEcommerceImage(input, signal) {
+    assert(!input.deliveryMode || ['cache_first', 'cache_only'].includes(input.deliveryMode), 400, 'invalid_media_delivery', 'Invalid media delivery mode')
     const requestId = requiredUuid(input.requestId, 'requestId')
     const ordinal = Number(input.ordinal)
     assert(Number.isInteger(ordinal) && ordinal > 0, 400, 'invalid_product', 'Invalid ordinal')
     const item = await this.store.getAdminEcommerceItem(requestId, ordinal)
-    assert(item && !item.deleted && item.product.images?.[0], 404, 'external_media_not_found', 'Product image is unavailable')
+    const imageIndex = Number(input.imageIndex || 0)
+    assert(Number.isInteger(imageIndex) && imageIndex >= 0 && imageIndex < 20, 400, 'invalid_product', 'Invalid image index')
+    assert(item && !item.deleted && item.product.images?.[imageIndex], 404, 'external_media_not_found', 'Product image is unavailable')
     assert(this.externalImageLoader, 503, 'external_media_unavailable', 'Image relay is unavailable')
     const release = this.#enterExternalMedia('admin-ecommerce')
-    try { return await this.externalImageLoader(item.product.images[0], { signal, cacheScope: 'admin-ecommerce' }) }
+    try { return await this.externalImageLoader(item.product.images[imageIndex], { signal, cacheScope: 'admin-ecommerce', cacheOnly: input.deliveryMode === 'cache_only' }) }
     finally { release() }
   }
 
@@ -3628,6 +3631,7 @@ export class HubService {
   }
 
   async ecommerceProductImage(context, {
+    deliveryMode,
     requestId,
     itemId,
     imageIndex,
@@ -3646,6 +3650,7 @@ export class HubService {
       'external_media_unavailable',
       'Product image relay is unavailable',
     )
+    assert(!deliveryMode || ['cache_first', 'cache_only'].includes(deliveryMode), 400, 'invalid_media_delivery', 'Invalid media delivery mode')
     const grants = await this.#effectivePlatformGrants(context)
     assert(grants.includes('ecommerce'), 403, 'platform_not_granted', 'Platform is not granted')
     const release = this.#enterExternalMedia(context.consumer.id)
@@ -3676,6 +3681,7 @@ export class HubService {
       const media = await this.externalImageLoader(sourceUrl, {
         signal,
         cacheScope: context.consumer.id,
+        cacheOnly: deliveryMode === 'cache_only',
       })
       if (deliveryComplete && typeof deliveryComplete.then === 'function') {
         releaseDeferred = true

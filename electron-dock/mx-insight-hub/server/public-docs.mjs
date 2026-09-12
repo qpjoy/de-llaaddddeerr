@@ -1,3 +1,4 @@
+import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
 import {
   DEFAULT_SEARCH_PROFILE,
   POSTGRES_SEARCH_PROFILE,
@@ -1533,18 +1534,34 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         },
       },
     },
+    '/data/ecommerce/products/items': {
+      get: {
+        tags: ['External Data'], operationId: 'listStoredEcommerceItems',
+        summary: 'Browse the authenticated consumer’s committed ecommerce history',
+        description: 'Live ecommerce-granted API key required. No upstream dispatch. Sorted by recorded time descending, request ID descending, ordinal ascending. Cursor binds all filters and page size. Admin edits/global inventory are not exposed by this API.',
+        parameters: [
+          { name: 'marketplace', in: 'query', schema: { type: 'string', enum: ['all','taobao','tmall','jd','xianyu','xiaohongshu_ec'], default: 'all' } },
+          { name: 'query', in: 'query', schema: { type: 'string', maxLength: 200 } },
+          { name: 'pageSize', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 10 } },
+          ...['minPrice','maxPrice'].map(name => ({ name, in: 'query', schema: { type: 'string' }, description: 'Inclusive nonnegative decimal price, up to two fractional digits.' })),
+          ...['from','to'].map(name => ({ name, in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'Inclusive Hub recorded-time boundary.' })),
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque nextCursor; retain identical filters.' },
+        ],
+        responses: { 200: { description: 'data.items contains requestId, ordinal, recordedAt, product and media provenance; data.pageInfo contains nextCursor, hasMore, returnedCount, asOf.' }, 400: errorResponse, 401: errorResponse, 403: errorResponse },
+      },
+    },
     '/data/ecommerce/products/media': {
       get: {
         tags: ['External Data'],
         operationId: 'getExternalCommerceProductMedia',
         summary: 'Read one retained product image through the governed Hub media relay',
         'x-mx-strict-query': true,
-        description: 'Authenticates an ordinary Live Hub Public API key and requires the same consumer identity that received a committed ecommerce search result. Test keys are rejected before any store or image-loader work. requestId identifies that response, itemId identifies one returned item and imageIndex selects one of its retained images; these are the only accepted query parameters and each must appear exactly once. Hub never accepts an arbitrary URL on this endpoint. The relay permits bounded public HTTPS JPEG, PNG and WebP images only, validates DNS and every redirect, limits dimensions, duration, rate and concurrency, and rejects private-network destinations, oversized bodies and mismatched content. This read creates no Hub usage record and dispatches no product-search request.',
+        description: 'Authenticates an ordinary Live Hub Public API key and requires the same consumer identity that received a committed ecommerce search result. Test keys are rejected before any store or image-loader work. requestId identifies that response, itemId identifies one returned item and imageIndex selects one of its retained images; each must appear exactly once. Optional deliveryMode is cache_first (default) or cache_only; cache_only misses return 404 external_media_cache_miss without external access. Hub never accepts an arbitrary URL on this endpoint. The relay permits bounded public HTTPS JPEG, PNG and WebP images only, validates DNS and every redirect, limits dimensions, duration, rate and concurrency, and rejects private-network destinations, oversized bodies and mismatched content. This read creates no Hub usage record and dispatches no product-search request.',
         'x-mx-error-codes': {
-          400: ['invalid_request', 'unsupported_fields'],
+          400: ['invalid_request', 'unsupported_fields', 'invalid_media_delivery'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'test_key_not_supported'],
-          404: ['external_media_not_found'],
+          404: ['external_media_not_found', 'external_media_cache_miss'],
           413: ['external_media_too_large'],
           415: ['external_media_type_rejected', 'external_media_content_invalid', 'external_media_dimensions_rejected'],
           422: ['external_media_url_invalid', 'external_media_url_blocked', 'external_media_host_blocked'],
@@ -1554,6 +1571,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           504: ['external_media_timeout'],
         },
         parameters: [
+          { name: 'deliveryMode', in: 'query', schema: { type: 'string', enum: ['cache_first', 'cache_only'], default: 'cache_first' } },
           {
             name: 'requestId', in: 'query', required: true,
             description: 'requestId from the committed ecommerce search response that contained the image reference.',
@@ -5153,11 +5171,12 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
     a { color:var(--cyan); text-decoration:none; }
     a:hover { text-decoration:underline; }
     .layout { display:grid; grid-template-columns:250px minmax(0,1fr); min-height:100vh; }
-    aside { position:sticky; top:0; height:100vh; padding:28px 22px; border-right:1px solid var(--line); background:rgba(7,11,18,.9); }
+    aside { display:flex; flex-direction:column; position:sticky; top:0; height:100dvh; min-height:0; overflow:hidden; padding:28px 22px; border-right:1px solid var(--line); background:rgba(7,11,18,.9); }
     .brand { display:flex; gap:12px; align-items:center; margin-bottom:32px; }
     .mark { width:38px; height:38px; display:grid; place-items:center; border:1px solid var(--cyan); border-radius:10px; color:var(--cyan); font-weight:800; box-shadow:0 0 24px #2de4d033; }
     .brand strong { display:block; font-size:16px; }
     .brand span,.eyebrow,.muted { color:var(--muted); }
+    nav { min-height:0; overflow-y:auto; flex:1; overscroll-behavior:contain; scrollbar-gutter:stable; scrollbar-width:thin; touch-action:pan-y; }
     nav a { display:block; padding:7px 10px; border-left:2px solid transparent; color:var(--muted); }
     .nav-section { display:block; margin:17px 10px 4px; color:#5f758b; font-size:10px; font-weight:800; letter-spacing:.13em; text-transform:uppercase; }
     nav .nav-section:first-child { margin-top:0; }
@@ -5188,7 +5207,7 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
     th,td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
     th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
     footer { margin-top:70px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); }
-    @media(max-width:820px){ .layout{display:block} aside{position:relative;height:auto;border-right:0;border-bottom:1px solid var(--line)} nav{display:flex;flex-wrap:wrap}.cards{grid-template-columns:1fr} main{padding-top:36px} }
+    @media(max-width:820px){ .layout{display:block} aside{position:relative;height:auto;border-right:0;border-bottom:1px solid var(--line)} nav{display:flex;flex-wrap:wrap;max-height:45vh;overflow-y:auto;flex:auto}.cards{grid-template-columns:1fr} main{padding-top:36px} }
   </style>
 </head>
 <body>
@@ -5359,11 +5378,40 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
       <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
       <tr><td><code>cursor</code></td><td>只使用上页返回的不透明签名值</td><td>绑定 marketplace/query/sort/price；不要解析或拼接</td></tr>
     </tbody></table>
-    <p>管理台外层分为数据列表与百宝箱。数据列表使用当前管理会话自动加载，默认每页 100 条；手机面板上划读取历史，下拉只采集所选单个平台。公开存量接口仍按客户 API Key 的 consumer 隔离。采集下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
-    <h3>浏览已存电商数据</h3>
-    <div class="endpoint"><span class="method">GET</span><code>/api/v1/data/ecommerce/products/items</code><p>需要 live Key 和 ecommerce 授权。只查本调用身份成功提交的商品搜索记录；不会调用上游，与 cache_only 精确请求查询不同。每次 GET 记录只读 usage。</p></div>
-    <p>参数 marketplace 可为 all（默认）或五个平台之一；query 是可选标题子串；pageSize 默认 20、上限 100，受调用身份策略进一步约束；cursor 使用本接口上页返回的 nextCursor。按请求入库时间倒序，同一批次保留上游顺序。游标绑定调用身份、筛选条件和页大小，固定请求时间上界；它不是跨请求的数据库事务快照。不同采集请求中的相同商品保留为历史观察，不做跨批去重。</p>
-    <p>返回 data.items 中每项含 product、requestId、capturedAt、recordedAt、ordinal；使用该项 requestId 和 product.id 读取受保护媒体。data.pageInfo 提供 hasMore/nextCursor/asOf。全部平台仅适用于这个存量接口，POST 搜索不接受 all。</p>
+    <p>管理台外层分为数据列表与百宝箱。数据列表使用当前管理会话自动加载，默认每页 10 条；手机面板上划读取历史，下拉只采集所选单个平台。公开存量接口仍按客户 API Key 的 consumer 隔离。采集下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
+    <h3>浏览已存电商数据与双向手机列表</h3>
+    <p>文档左侧按 Hub 数据产品与业务站点分类。淘宝、京东、闲鱼是 marketplace；它们不是上游供应商。Hub 抽象能力使用稳定商品结构；平台原生合同保留站点版本字段；供应商兼容合同仅保持已发布的特定协议形状。供应商选择、凭据和路由由 Hub 管理，调用方无需传供应商名称，也不能假定不同版本参数通用。</p>
+    <div class="endpoint"><span class="method">GET</span><code>/api/v1/data/ecommerce/products/items</code><p>需要 live Key 和 ecommerce 授权。只查本调用身份的原始成功观察；不调用上游，每次 GET 记录只读 usage。</p></div>
+    <table><thead><tr><th>历史查询参数</th><th>约束</th></tr></thead><tbody>
+    <tr><td>marketplace</td><td>all（默认）或 taobao / tmall / jd / xianyu / xiaohongshu_ec</td></tr>
+    <tr><td>query</td><td>可选标题子串，最多 200 字符；空值不筛选</td></tr>
+    <tr><td>pageSize</td><td>默认 10，1–100；受调用身份 policy 限制</td></tr>
+    <tr><td>minPrice / maxPrice</td><td>可选非负十进制字符串；按保存价格过滤，未知价格不匹配价格区间</td></tr>
+    <tr><td>from / to</td><td>可选 ISO 8601 时间，按请求入库时间（含边界）筛选；建议显式传 Z 或时区偏移</td></tr>
+    <tr><td>cursor</td><td>只接受本接口 data.pageInfo.nextCursor；不能使用采集 cursor。筛选和页大小改变后重新从首批读取</td></tr>
+    </tbody></table>
+    <p>历史固定按请求入库时间倒序、requestId 倒序、批内 ordinal 升序。sort 属于上游采集排序，不是历史时间排序；历史 GET 不接受 sort，不会按一次采集的“销量优先”重排全部历史。平台、标题、价格与时间过滤在数据库分页之前执行。不同采集请求中的相同商品是不同观察，保留原顺序与请求证据。</p>
+    <p>返回 data.items 每项含 product、requestId、capturedAt、recordedAt、ordinal、media；data.pageInfo 含 hasMore / nextCursor / asOf。asOf 固定请求创建时间上界，但不等于跨请求事务快照；晚完成请求和历史清理仍可能影响可见记录。</p>
+    <h4>手势与分页语义</h4>
+    <ol><li>进入页面：使用空关键词或选定筛选，GET 历史首批 10 条，无需重新采集。</li>
+    <li>手指向上划，滚到列表底部：携带同样筛选和历史 nextCursor 做 GET，把记录追加到底部。</li>
+    <li>在顶部向下拉：单平台 POST 搜索，第一次用 page=1 或设置的起始页，之后优先使用采集 nextCursor。每个数据页使用新的 Idempotency-Key，query/sort/price 必须一致；平台或筛选改变重置采集游标。</li>
+    <li>新采集结果先放完整前端队列，每次最多取展示数量（默认 10）从顶部加入，保留上游批内顺序；剩余结果下次下拉先取队列，不重复采集，也不丢弃。所有上游原始业务数据仍由 Hub 保存。</li>
+    <li>all 不允许 POST 采集；同一提示只显示一次约 10 秒。空结果与 401/403/429/5xx 分开处理；网络超时或未知结果不得自动重发付费请求。</li></ol>
+    <div class="notice">page=2 是上游搜索结果的第二页，不保证时间上比 page=1 更新。每批 10 条是展示/历史读取数量，不是未公开的上游 pageSize；当前搜索接口不接受 pageSize，不能伪造“上游每次一定给 10 条”。</div>
+    <h4>按平台动态展示采集参数</h4>
+    <table><thead><tr><th>marketplace</th><th>采集排序</th><th>价格范围 / 翻页</th></tr></thead><tbody>
+    <tr><td>taobao / tmall</td><td>sales_desc、relevance、price_asc、price_desc</td><td>price.min / max；page 或 cursor</td></tr>
+    <tr><td>xianyu</td><td>relevance、recent、seller_credit、price_asc、price_desc、price_drop、newest</td><td>不支持采集 price；page 或 cursor</td></tr>
+    <tr><td>jd</td><td>不传 sort</td><td>不支持采集 price；page 或 cursor</td></tr>
+    <tr><td>xiaohongshu_ec</td><td>不传 sort</td><td>不支持采集 price；第 2 页起必须携带 Hub cursor 中封装的 continuation</td></tr>
+    </tbody></table>
+    <h4>图片来源、费用与缓存</h4>
+    <p>product.images 保留外部原始链接。历史项 media 包含 originalUrl、hubUrl、externalFeeStatus（当前 unknown）、storage=memory_relay、retrievalPolicy=cache_first、staticUrl=null。外部费用不能根据链接判断；图片 GET 不发起商品搜索 API，但外部服务/流量费仍可能存在。unknown 不代表免费，未来接入持久存储时仍保留原链接。</p>
+    <p>GET media.hubUrl 携带同一 API Key，默认优先 Hub 内存缓存，未命中才访问图片源。加 deliveryMode=cache_only 严格禁止外部取图；未命中返回 404 external_media_cache_miss。若已知图片源收费且不允许付费取图，使用 cache_only 并显示占位图。缓存有容量和 TTL，重启会清空；尚未接入持久化静态存储，不能承诺磁盘命中。创建 blob URL 展示后应在卸载时 revokeObjectURL，并限制图片并发。</p>
+    <h4>用 Public API Key 复现界面</h4>
+    <p>只需上面的历史 GET、采集 POST 和图片 GET，即可复现当前调用身份范围内的瀑布流与双向加载。管理台的跨调用身份列表和管理增删改需要独立管理权限，普通 API Key 不会因此获得这些权限。下面是不依赖管理会话的完整数据控制器示例（renderer 负责顶部插入、底部追加、触摸阈值、单次提示和图片展示）。</p>
+    <pre><code>${ecommerceFeedExample.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</code></pre>
 
     <h3>3. 消费统一响应</h3>
     <pre><code>{

@@ -5,7 +5,7 @@ import { HubService } from '../../server/hub-service.mjs'
 import { storedEcommerceQuery } from '../../server/contracts/ecommerce-stored.mjs'
 const secret = 'stored-ecommerce-test-pepper-at-least-32'
 function seed(store, consumerId, id, marketplace, count = 12) {
-  store.requests.set(id, { id, consumerId, platform: 'ecommerce', status: 'committed', responseStatus: 200, createdAt: '2026-01-01T00:00:00.000Z', responseBody: { contractVersion: 'mx-insight-hub.ecommerce-products.v1', data: { items: Array.from({ length: count }, (_, index) => ({ id: `${index}`, marketplace, title: `相机 ${index}`, images: ['https://example.com/a.jpg'] })) } } })
+  store.requests.set(id, { id, consumerId, platform: 'ecommerce', status: 'committed', responseStatus: 200, createdAt: '2026-01-01T00:00:00.000Z', responseBody: { contractVersion: 'mx-insight-hub.ecommerce-products.v1', data: { items: Array.from({ length: count }, (_, index) => ({ id: `${index}`, marketplace, title: `相机 ${index}`, pricing: { current: String(index) }, images: ['https://example.com/a.jpg'] })) } } })
 }
 test('stored pagination exceeds ten items, preserves batch order and consumer isolation', async () => {
   const store = new MemoryStore()
@@ -36,7 +36,7 @@ test('stored service enforces grants, meters reads and never calls an upstream a
   const context = await service.authenticate(key.secret)
   seed(store, consumer.id, '00000000-0000-4000-8000-000000000003', 'xianyu')
   const result = await service.ecommerceStoredItems(context, { marketplace: 'all' })
-  assert.equal(result.items.length, 12)
+  assert.equal(result.items.length, 10)
   assert.equal(result.sourceMode, 'stored_inventory')
   assert.equal([...store.requests.values()].filter(row => row.status === 'committed').length, 2)
   const denied = await service.createApiKey({ consumerId: consumer.id, name: 'No scope', platforms: [] })
@@ -50,7 +50,7 @@ test('PostgreSQL stored pagination preserves timestamp precision and ordinal bou
   try {
     await pool.query('CREATE TEMP TABLE usage_requests (id uuid, consumer_id uuid, platform text, status text, response_status int, response_body jsonb, created_at timestamptz)')
     const owner = '00000000-0000-4000-8000-000000000099'
-    const body = { contractVersion: 'mx-insight-hub.ecommerce-products.v1', data: { items: Array.from({ length: 12 }, (_, i) => ({ id: `${i}`, marketplace: 'taobao', title: `相机 ${i}` })) } }
+    const body = { contractVersion: 'mx-insight-hub.ecommerce-products.v1', data: { items: Array.from({ length: 12 }, (_, i) => ({ id: `${i}`, marketplace: 'taobao', pricing: {current:String(i)}, title: `相机 ${i}` })) } }
     await pool.query('INSERT INTO usage_requests VALUES ($1,$2,\'ecommerce\',\'committed\',200,$3,$4)', ['00000000-0000-4000-8000-000000000001', owner, body, '2026-01-01T00:00:00.123456Z'])
     const store = new PostgresStore(pool)
     let query = storedEcommerceQuery({ pageSize: '5' }, owner, secret)
@@ -64,5 +64,22 @@ test('PostgreSQL stored pagination preserves timestamp precision and ordinal bou
     result = query.page(await store.listStoredEcommerceItems(query))
     assert.deepEqual(result.items.map(row => row.ordinal), [11,12])
     assert.equal(result.pageInfo.nextCursor, null)
+    query = storedEcommerceQuery({ minPrice:'3',maxPrice:'5',from:'2026-01-01T00:00:00Z',to:'2026-01-02T00:00:00Z' }, owner, secret)
+    assert.deepEqual(query.page(await store.listStoredEcommerceItems(query)).items.map(row=>row.product.id), ['3','4','5'])
   } finally { await pool.end() }
+})
+
+test('history filters bind cursor and preserve media provenance', async () => {
+  const store = new MemoryStore()
+  seed(store, 'owner', '00000000-0000-4000-8000-000000000001', 'taobao')
+  const input = { marketplace: 'taobao', minPrice: '3', maxPrice: '8', from: '2025-12-31T00:00:00Z', to: '2026-01-02T00:00:00Z', pageSize: '2' }
+  const query = storedEcommerceQuery(input, 'owner', secret)
+  const page = query.page(await store.listStoredEcommerceItems(query))
+  assert.deepEqual(page.items.map(row => row.product.id), ['3','4'])
+  assert.equal(page.items[0].media[0].externalFeeStatus, 'unknown')
+  assert.equal(page.items[0].media[0].originalUrl, 'https://example.com/a.jpg')
+  for (const changed of [{ minPrice: '4' }, { to: '2026-01-03T00:00:00Z' }])
+    assert.throws(() => storedEcommerceQuery({ ...input, ...changed, cursor: page.pageInfo.nextCursor }, 'owner', secret))
+  const outside = storedEcommerceQuery({ from: '2026-02-01T00:00:00Z' }, 'owner', secret)
+  assert.equal((await store.listStoredEcommerceItems(outside)).length, 0)
 })

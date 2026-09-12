@@ -1,3 +1,4 @@
+import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
@@ -2056,7 +2057,7 @@ export class MemoryStore {
     }
     for (const edit of this.adminEcommerceEdits.values()) if (edit.manual) rows.push(edit)
     return rows.map(row => ({ ...row, ...this.adminEcommerceEdits.get(`${row.requestId}:${row.ordinal}`) }))
-      .filter(row => !row.deleted && row.recordedAt <= query.asOf && (query.marketplace === 'all' || row.product.marketplace === query.marketplace) && (!query.query || row.product.title.toLowerCase().includes(query.query.toLowerCase())))
+      .filter(row => matchesStoredEcommerceFilters(row, query) && !row.deleted && row.recordedAt <= query.asOf && (query.marketplace === 'all' || row.product.marketplace === query.marketplace) && (!query.query || row.product.title.toLowerCase().includes(query.query.toLowerCase())))
       .sort((a,b) => b.recordedAt.localeCompare(a.recordedAt) || b.requestId.localeCompare(a.requestId) || a.ordinal - b.ordinal)
       .filter(row => !query.cursor || row.recordedAt < query.cursor.time || (row.recordedAt === query.cursor.time && (row.requestId < query.cursor.id || (row.requestId === query.cursor.id && row.ordinal > query.cursor.ordinal))))
       .slice(0, query.pageSize + 1)
@@ -2080,7 +2081,7 @@ export class MemoryStore {
     return { revision: record.revision }
   }
 
-  async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf }) {
+  async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf, ...filters }) {
     const rows = []
     for (const record of this.requests.values()) {
       if (record.consumerId !== consumerId || record.platform !== 'ecommerce' || record.status !== 'committed' || record.responseStatus !== 200 || record.responseBody?.contractVersion !== 'mx-insight-hub.ecommerce-products.v1' || record.createdAt > asOf) continue
@@ -2091,7 +2092,7 @@ export class MemoryStore {
       }
     }
     rows.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || b.requestId.localeCompare(a.requestId) || a.ordinal - b.ordinal)
-    return rows.filter(row => !cursor || row.recordedAt < cursor.time || (row.recordedAt === cursor.time && (row.requestId < cursor.id || (row.requestId === cursor.id && row.ordinal > cursor.ordinal)))).slice(0, pageSize + 1)
+    return rows.filter(row => matchesStoredEcommerceFilters(row, filters)).filter(row => !cursor || row.recordedAt < cursor.time || (row.recordedAt === cursor.time && (row.requestId < cursor.id || (row.requestId === cursor.id && row.ordinal > cursor.ordinal)))).slice(0, pageSize + 1)
   }
 
   async getCommittedEcommerceImageSource({ requestId, consumerId, itemId, imageIndex }) {

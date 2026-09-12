@@ -5919,7 +5919,7 @@ export class PostgresStore {
     return safe
   }
 
-  async listAdminEcommerceItems({ marketplace, query, pageSize, cursor, asOf }) {
+  async listAdminEcommerceItems({ marketplace, query, pageSize, cursor, asOf, minPrice, maxPrice, from, to }) {
     const { rows } = await this.pool.query(`
       WITH observations AS (
         SELECT u.id AS request_id, u.created_at, u.consumer_id,
@@ -5944,8 +5944,12 @@ export class PostgresStore {
         AND ($4::timestamptz IS NULL OR o.created_at < $4::timestamptz
           OR (o.created_at = $4::timestamptz AND o.request_id < $5::uuid)
           OR (o.created_at = $4::timestamptz AND o.request_id = $5::uuid AND o.ordinal > $6))
+        AND ($8::numeric IS NULL OR (CASE WHEN (COALESCE(e.product, o.original_product)->'pricing'->>'current') ~ '^[0-9]{1,12}([.][0-9]{1,2})?$' THEN (COALESCE(e.product, o.original_product)->'pricing'->>'current')::numeric ELSE NULL END) >= $8::numeric)
+        AND ($9::numeric IS NULL OR (CASE WHEN (COALESCE(e.product, o.original_product)->'pricing'->>'current') ~ '^[0-9]{1,12}([.][0-9]{1,2})?$' THEN (COALESCE(e.product, o.original_product)->'pricing'->>'current')::numeric ELSE NULL END) <= $9::numeric)
+        AND ($10::timestamptz IS NULL OR o.created_at >= $10::timestamptz)
+        AND ($11::timestamptz IS NULL OR o.created_at <= $11::timestamptz)
       ORDER BY o.created_at DESC, o.request_id DESC, o.ordinal LIMIT $7`,
-      [asOf, marketplace, query, cursor?.time || null, cursor?.id || null, cursor?.ordinal || 0, pageSize + 1])
+      [asOf, marketplace, query, cursor?.time || null, cursor?.id || null, cursor?.ordinal || 0, pageSize + 1, minPrice, maxPrice, from, to])
     return rows
   }
 
@@ -5980,7 +5984,7 @@ export class PostgresStore {
     return rows[0] || null
   }
 
-  async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf }) {
+  async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf, minPrice, maxPrice, from, to }) {
     const { rows } = await this.pool.query(`
       SELECT u.id AS "requestId", u.created_at::text AS "recordedAt",
              item.ordinality::int AS ordinal, item.value AS product,
@@ -5999,8 +6003,12 @@ export class PostgresStore {
         AND ($5::timestamptz IS NULL OR u.created_at < $5::timestamptz
           OR (u.created_at = $5::timestamptz AND u.id < $6::uuid)
           OR (u.created_at = $5::timestamptz AND u.id = $6::uuid AND item.ordinality > $7))
+        AND ($9::numeric IS NULL OR (CASE WHEN (item.value->'pricing'->>'current') ~ '^[0-9]{1,12}([.][0-9]{1,2})?$' THEN (item.value->'pricing'->>'current')::numeric ELSE NULL END) >= $9::numeric)
+        AND ($10::numeric IS NULL OR (CASE WHEN (item.value->'pricing'->>'current') ~ '^[0-9]{1,12}([.][0-9]{1,2})?$' THEN (item.value->'pricing'->>'current')::numeric ELSE NULL END) <= $10::numeric)
+        AND ($11::timestamptz IS NULL OR u.created_at >= $11::timestamptz)
+        AND ($12::timestamptz IS NULL OR u.created_at <= $12::timestamptz)
       ORDER BY u.created_at DESC, u.id DESC, item.ordinality ASC LIMIT $8`,
-      [consumerId, asOf, marketplace, query, cursor?.time || null, cursor?.id || null, cursor?.ordinal || 0, pageSize + 1])
+      [consumerId, asOf, marketplace, query, cursor?.time || null, cursor?.id || null, cursor?.ordinal || 0, pageSize + 1, minPrice, maxPrice, from, to])
     return rows
   }
 

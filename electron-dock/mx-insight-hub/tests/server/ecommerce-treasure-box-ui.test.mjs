@@ -356,7 +356,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching' \|\| storedOnly \|\| compact\}/u)
   assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
-  assert.match(pageSource, /label="排序"[\s\S]*?disabled=\{semanticsLocked/u)
+  assert.match(pageSource, /label="上游排序（仅采集）"[\s\S]*?disabled=\{semanticsLocked/u)
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
   assert.match(keyField, /type="password"[\s\S]*?disabled=\{phase === 'searching' \|\| checkingKey\}/u)
   assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
