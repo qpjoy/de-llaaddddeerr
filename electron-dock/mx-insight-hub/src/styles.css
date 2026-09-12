@@ -12867,3 +12867,11 @@ button.mih-catalog-status {
 .mih-commerce-modal > form { display:grid; gap:16px; width:min(100%,520px); max-height:90vh; overflow:auto; padding:24px; }
 .mih-commerce-modal small { overflow-wrap:anywhere; color:var(--qp-text-3); }
 @media (max-width:900px) { .mih-commerce-manager { grid-template-columns:minmax(0,1fr); } .mih-commerce-phone-feed { height:65vh; min-height:360px; } }
+
+/* Note browsing shares the commerce phone, retaining the scroll detail renderer. */
+.mih-xhs-key { padding: 20px; margin-bottom: 20px; }
+.mih-xhs-key .qp-input { max-width: 600px; }
+.mih-xhs-browser { margin-bottom: 32px; }
+.mih-xhs-browser .mih-commerce-card-open > span { color: var(--qp-color-text-muted); font-size: 13px; overflow-wrap: anywhere; }
+.mih-xhs-browser .mih-commerce-card-image img { object-fit: cover; }
+.mih-xhs-browser label { line-height: 1.7; }

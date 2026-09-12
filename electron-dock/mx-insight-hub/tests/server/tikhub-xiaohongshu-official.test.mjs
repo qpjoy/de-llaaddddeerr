@@ -760,6 +760,22 @@ test('HTTP App V2 detail route returns the provider business envelope under Hub 
     assert.equal(payload.credential_echo, '[REDACTED]')
     assert.equal(payload.data.image_list[0].url.includes('signature=business-signed-url'), true)
 
+    const jsonHeaders = { authorization: `Bearer ${state.key.secret}`, 'content-type': 'application/json', 'idempotency-key': 'xhs-json-replay-test' }
+    const post = await fetch(`${baseUrl}${TIKHUB_XIAOHONGSHU_ENDPOINT_PATH}`, {
+      method: 'POST', headers: jsonHeaders, body: JSON.stringify({ note_id: NOTE_ID }),
+    })
+    assert.equal(post.status, 200)
+    assert.equal((await post.json()).data.desc, upstream.data.desc)
+    const transportReplay = await fetch(`${baseUrl}${TIKHUB_XIAOHONGSHU_ENDPOINT_PATH}?note_id=${NOTE_ID}`, { headers: jsonHeaders })
+    assert.equal(transportReplay.status, 200)
+    assert.equal(transportReplay.headers.get('idempotent-replay'), 'true')
+    for (const body of [[], { note_id: {} }, { note_id: NOTE_ID, endpoint: 'arbitrary' }]) {
+      const rejected = await fetch(`${baseUrl}${TIKHUB_XIAOHONGSHU_ENDPOINT_PATH}`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) })
+      assert.equal(rejected.status, 400)
+    }
+    const mixed = await fetch(`${baseUrl}${TIKHUB_XIAOHONGSHU_ENDPOINT_PATH}?note_id=${NOTE_ID}`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ note_id: NOTE_ID }) })
+    assert.equal(mixed.status, 400)
+
     const replayResponse = await fetch(
       `${baseUrl}${TIKHUB_XIAOHONGSHU_ENDPOINT_PATH}?note_id=${NOTE_ID}`,
       { headers: { authorization: `Bearer ${state.key.secret}` } },

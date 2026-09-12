@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react'
 import { publicDataApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
+import { XiaohongshuFeed } from './pages-xiaohongshu-feed.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 
 const DELIVERY_OPTIONS = [
@@ -62,7 +63,7 @@ function readPendingRequest() {
     const value = JSON.parse(window.sessionStorage.getItem(PENDING_REQUEST_KEY) || 'null')
     if (!value || typeof value !== 'object'
       || !/^xhs-[0-9a-f-]{36}$/u.test(value.idempotencyKey || '')
-      || !value.body || value.body.deliveryMode !== 'refresh') return null
+      || !value.body || !['refresh', 'live_only'].includes(value.body.deliveryMode)) return null
     return value
   } catch {
     return null
@@ -140,7 +141,7 @@ function RelayImage({ apiKey, requestId, mediaIndex = 0, className = '', alt = '
   ) : null
 }
 
-function NoteScroll({ result, apiKey }) {
+function NoteScroll({ result, apiKey, mediaEnabled = true }) {
   const item = result?.payload?.data?.item
   const requestId = result?.evidence?.requestId || result?.payload?.requestId
   if (!item) {
@@ -152,7 +153,7 @@ function NoteScroll({ result, apiKey }) {
       </div>
     )
   }
-  const media = (Array.isArray(item.media) ? item.media : [])
+  const media = (mediaEnabled && Array.isArray(item.media) ? item.media : [])
     .filter((entry) => entry?.type === 'image' && entry.url)
     .slice(0, 20)
   return (
@@ -264,7 +265,7 @@ function DeliveryEvidence({ evidence, error }) {
   )
 }
 
-export function XiaohongshuNotePage({ notify }) {
+export function XiaohongshuNotePage({ notify, token, session }) {
   const [apiKey, setApiKey] = useState('')
   const [url, setUrl] = useState('')
   const [deliveryMode, setDeliveryMode] = useState('cache_first')
@@ -326,7 +327,7 @@ export function XiaohongshuNotePage({ notify }) {
           }
         }
       }
-      const idempotencyKey = deliveryMode === 'refresh' ? `xhs-${crypto.randomUUID()}` : null
+      const idempotencyKey = ['refresh', 'live_only'].includes(deliveryMode) ? `xhs-${crypto.randomUUID()}` : null
       liveIdentity = idempotencyKey ? { idempotencyKey, body: requestedBody } : null
       if (liveIdentity) rememberPendingRequest(liveIdentity)
       const response = await publicDataApi.xiaohongshuNote(
@@ -364,12 +365,17 @@ export function XiaohongshuNotePage({ notify }) {
         <a className="qp-button qp-button--outline" href="#/plans">查看合同费率</a>
         <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')} target="_blank" rel="noreferrer">查看开放 API / 文档</a>
       </PageHeading>
-      <div className="mih-xhs-workbench">
+      <section className="qp-panel mih-xhs-key">          <Field label="开放能力 API Key" hint="需要 xiaohongshu 与 social.posts.resolve；不会写入浏览器存储。">
+            <input className="qp-input" type="password" autoComplete="off" value={apiKey} disabled={busy} onChange={(event) => { setApiKey(event.target.value); setResult(null); setHistory([]); setError(null) }} placeholder="mih_live_…" required />
+          </Field>
+</section>
+      <XiaohongshuFeed token={token} session={session} apiKey={apiKey} NoteScroll={NoteScroll} onSelectLink={value => {
+        setUrl(value)
+        document.getElementById('xhs-note-resolve')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }} />
+      <div className="mih-xhs-workbench" id="xhs-note-resolve">
         <form className="qp-panel mih-xhs-controls" onSubmit={submit}>
           <div className="mih-xhs-panel-title"><Sparkle size={19} /><div><strong>展开一篇笔记</strong><small><code>POST /api/v1/xiaohongshu/app/get_note_info</code> · JSON body · 平台与能力必须同时授权</small></div></div>
-          <Field label="开放能力 API Key" hint="需要 xiaohongshu 与 social.posts.resolve；不会写入浏览器存储。">
-            <input className="qp-input" type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="mih_live_…" required />
-          </Field>
           <Field label="笔记链接">
             <div className="mih-xhs-input"><LinkSimple size={18} /><input className="qp-input" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.xiaohongshu.com/explore/…" maxLength={2048} required /></div>
           </Field>

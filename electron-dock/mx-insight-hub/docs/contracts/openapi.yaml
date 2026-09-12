@@ -2675,6 +2675,205 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+    post:
+      tags:
+      - External Data
+      operationId: getXiaohongshuImageNoteDetailOfficialJson
+      summary: Get one image-note detail with the App V2-compatible contract (JSON POST)
+      x-mx-strict-query: true
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - compat.xiaohongshu.app_v2
+      - social.posts.resolve
+      description: A Hub-governed App V2-compatible GET, not an unmetered proxy. It requires
+        a Live Hub Public API key whose immutable scope includes the xiaohongshu data
+        domain, compat.xiaohongshu.app_v2 contract and social.posts.resolve operation.
+        It uses one-unit customer metering, provider cost admission, idempotency, response
+        archive and canonical ingest/outbox. Provider business fields remain intact. Explicit
+        page traversal and the opaque user-post cursor are capped at 15 pages; this governance
+        limit does not truncate content. Search responses may contain provider previews;
+        use the detail endpoint for the complete note while every preview is still stored
+        with provider_preview completeness. JSON POST accepts the same fields in the body,
+        with no query parameters. GET and POST share the exact endpoint/query idempotency
+        identity.
+      x-mx-error-codes:
+        '400':
+        - invalid_request
+        - unsupported_fields
+        - invalid_page
+        - invalid_sort_type
+        - invalid_note_type
+        - invalid_time_filter
+        - invalid_ai_mode
+        - invalid_cursor
+        - invalid_idempotency_key
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - capability_not_granted
+        - test_key_not_supported
+        '404':
+        - not_found
+        - post_not_found
+        '409':
+        - request_in_progress
+        - idempotency_conflict
+        - request_outcome_unknown
+        - external_platform_response_unusable
+        '429':
+        - consumer_quota_exceeded
+        - api_key_quota_exceeded
+        - plan_window_quota_exceeded
+        - plan_month_quota_exceeded
+        - plan_burst_exceeded
+        - external_platform_busy
+        - external_platform_rate_limited
+        - external_platform_capacity_exceeded
+        - external_platform_cost_budget_exhausted
+        - external_platform_subsidy_budget_exhausted
+        '502':
+        - external_platform_response_unusable
+        - external_platform_outcome_unknown
+        - external_platform_rejected
+        '503':
+        - external_platform_unavailable
+        - external_platform_not_configured
+        - external_platform_contract_unverified
+        - external_platform_circuit_open
+        - external_platform_capacity_unavailable
+        - external_platform_cost_control_unavailable
+        - external_platform_cost_evidence_incomplete
+        - external_platform_operation_disabled
+        - external_platform_operation_shadow
+        - external_platform_operation_paused
+        - external_platform_operation_canary
+        - external_platform_operation_blocked
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: Optional for App V2-compatible GETs. When supplied it is bound to
+          this exact endpoint and normalized query and only exact explicit reuse is replayed.
+          When omitted, every HTTP call receives a unique internal key and is metered
+          separately; cache and provider-dispatch suppression remain independent.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      responses:
+        '200':
+          description: The acquired App V2 business envelope. Hub preserves business fields,
+            text, tags and signed media URLs. For user-post traversal only, provider pagination
+            controls are replaced with the governed opaque Hub cursor/has-more state and
+            terminate at page 15. Only an exact active Hub-to-upstream credential is removed
+            if the upstream echoes it; request Authorization, Cookie and API-key headers
+            are never copied into the response.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier.
+              schema:
+                type: string
+                format: uuid
+            idempotent-replay:
+              schema:
+                type: string
+                enum:
+                - 'true'
+                - 'false'
+            x-mx-insight-source-mode:
+              schema:
+                type: string
+                enum:
+                - live
+                - fresh_cache
+                - stored_fallback
+                - idempotent_replay
+            x-mx-insight-captured-at:
+              schema:
+                type: string
+                format: date-time
+            Age:
+              schema:
+                type: integer
+                minimum: 0
+            Warning:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Upstream-compatible business envelope governed and archived
+                  by Hub.
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                note_id:
+                  type: string
+                  pattern: ^[0-9a-fA-F]{24}$
+                share_text:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+              required: []
+
   /xiaohongshu/app_v2/search_notes:
     get:
       operationId: searchXiaohongshuNotesOfficial
@@ -2698,6 +2897,253 @@ paths:
         - { name: ai_mode, in: query, required: false, schema: { type: string, enum: ["0", "1"], default: "0" } }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
+    post:
+      tags:
+      - External Data
+      operationId: searchXiaohongshuNotesOfficialJson
+      summary: Search notes with the App V2-compatible contract (JSON POST)
+      x-mx-strict-query: true
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - compat.xiaohongshu.app_v2
+      - social.posts.search
+      description: A Hub-governed App V2-compatible GET, not an unmetered proxy. It requires
+        a Live Hub Public API key whose immutable scope includes the xiaohongshu data
+        domain, compat.xiaohongshu.app_v2 contract and social.posts.search operation.
+        It uses one-unit customer metering, provider cost admission, idempotency, response
+        archive and canonical ingest/outbox. Provider business fields remain intact. Explicit
+        page traversal and the opaque user-post cursor are capped at 15 pages; this governance
+        limit does not truncate content. Search responses may contain provider previews;
+        use the detail endpoint for the complete note while every preview is still stored
+        with provider_preview completeness. JSON POST accepts the same fields in the body,
+        with no query parameters. GET and POST share the exact endpoint/query idempotency
+        identity.
+      x-mx-error-codes:
+        '400':
+        - invalid_request
+        - unsupported_fields
+        - invalid_page
+        - invalid_sort_type
+        - invalid_note_type
+        - invalid_time_filter
+        - invalid_ai_mode
+        - invalid_cursor
+        - invalid_idempotency_key
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - capability_not_granted
+        - test_key_not_supported
+        '404':
+        - not_found
+        - post_not_found
+        '409':
+        - request_in_progress
+        - idempotency_conflict
+        - request_outcome_unknown
+        - external_platform_response_unusable
+        '429':
+        - consumer_quota_exceeded
+        - api_key_quota_exceeded
+        - plan_window_quota_exceeded
+        - plan_month_quota_exceeded
+        - plan_burst_exceeded
+        - external_platform_busy
+        - external_platform_rate_limited
+        - external_platform_capacity_exceeded
+        - external_platform_cost_budget_exhausted
+        - external_platform_subsidy_budget_exhausted
+        '502':
+        - external_platform_response_unusable
+        - external_platform_outcome_unknown
+        - external_platform_rejected
+        '503':
+        - external_platform_unavailable
+        - external_platform_not_configured
+        - external_platform_contract_unverified
+        - external_platform_circuit_open
+        - external_platform_capacity_unavailable
+        - external_platform_cost_control_unavailable
+        - external_platform_cost_evidence_incomplete
+        - external_platform_operation_disabled
+        - external_platform_operation_shadow
+        - external_platform_operation_paused
+        - external_platform_operation_canary
+        - external_platform_operation_blocked
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: Optional for App V2-compatible GETs. When supplied it is bound to
+          this exact endpoint and normalized query and only exact explicit reuse is replayed.
+          When omitted, every HTTP call receives a unique internal key and is metered
+          separately; cache and provider-dispatch suppression remain independent.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      responses:
+        '200':
+          description: The acquired App V2 business envelope. Hub preserves business fields,
+            text, tags and signed media URLs. For user-post traversal only, provider pagination
+            controls are replaced with the governed opaque Hub cursor/has-more state and
+            terminate at page 15. Only an exact active Hub-to-upstream credential is removed
+            if the upstream echoes it; request Authorization, Cookie and API-key headers
+            are never copied into the response.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier.
+              schema:
+                type: string
+                format: uuid
+            idempotent-replay:
+              schema:
+                type: string
+                enum:
+                - 'true'
+                - 'false'
+            x-mx-insight-source-mode:
+              schema:
+                type: string
+                enum:
+                - live
+                - fresh_cache
+                - stored_fallback
+                - idempotent_replay
+            x-mx-insight-captured-at:
+              schema:
+                type: string
+                format: date-time
+            Age:
+              schema:
+                type: integer
+                minimum: 0
+            Warning:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Upstream-compatible business envelope governed and archived
+                  by Hub.
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                keyword:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+                page:
+                  type: integer
+                  minimum: 1
+                  maximum: 15
+                  default: 1
+                sort_type:
+                  type: string
+                  enum:
+                  - general
+                  - time_descending
+                  - popularity_descending
+                  - comment_descending
+                  - collect_descending
+                  - english_preferred
+                  default: general
+                note_type:
+                  type: string
+                  enum:
+                  - 不限
+                  - 视频笔记
+                  - 普通笔记
+                  - 直播笔记
+                  default: 不限
+                time_filter:
+                  type: string
+                  enum:
+                  - 不限
+                  - 一天内
+                  - 一周内
+                  - 半年内
+                  default: 不限
+                search_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 2048
+                search_session_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 2048
+                source:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                  default: explore_feed
+                ai_mode:
+                  type: string
+                  enum:
+                  - '0'
+                  - '1'
+                  default: '0'
+              required:
+              - keyword
+
   /xiaohongshu/app_v2/search_users:
     get:
       operationId: searchXiaohongshuUsersOfficial
@@ -2716,6 +3162,217 @@ paths:
         - { name: source, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192, default: explore_feed } }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
+    post:
+      tags:
+      - External Data
+      operationId: searchXiaohongshuUsersOfficialJson
+      summary: Search users with the App V2-compatible contract (JSON POST)
+      x-mx-strict-query: true
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - compat.xiaohongshu.app_v2
+      - social.users.resolve
+      description: A Hub-governed App V2-compatible GET, not an unmetered proxy. It requires
+        a Live Hub Public API key whose immutable scope includes the xiaohongshu data
+        domain, compat.xiaohongshu.app_v2 contract and social.users.resolve operation.
+        It uses one-unit customer metering, provider cost admission, idempotency, response
+        archive and canonical ingest/outbox. Provider business fields remain intact. Explicit
+        page traversal and the opaque user-post cursor are capped at 15 pages; this governance
+        limit does not truncate content. Search responses may contain provider previews;
+        use the detail endpoint for the complete note while every preview is still stored
+        with provider_preview completeness. JSON POST accepts the same fields in the body,
+        with no query parameters. GET and POST share the exact endpoint/query idempotency
+        identity.
+      x-mx-error-codes:
+        '400':
+        - invalid_request
+        - unsupported_fields
+        - invalid_page
+        - invalid_sort_type
+        - invalid_note_type
+        - invalid_time_filter
+        - invalid_ai_mode
+        - invalid_cursor
+        - invalid_idempotency_key
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - capability_not_granted
+        - test_key_not_supported
+        '404':
+        - not_found
+        - post_not_found
+        '409':
+        - request_in_progress
+        - idempotency_conflict
+        - request_outcome_unknown
+        - external_platform_response_unusable
+        '429':
+        - consumer_quota_exceeded
+        - api_key_quota_exceeded
+        - plan_window_quota_exceeded
+        - plan_month_quota_exceeded
+        - plan_burst_exceeded
+        - external_platform_busy
+        - external_platform_rate_limited
+        - external_platform_capacity_exceeded
+        - external_platform_cost_budget_exhausted
+        - external_platform_subsidy_budget_exhausted
+        '502':
+        - external_platform_response_unusable
+        - external_platform_outcome_unknown
+        - external_platform_rejected
+        '503':
+        - external_platform_unavailable
+        - external_platform_not_configured
+        - external_platform_contract_unverified
+        - external_platform_circuit_open
+        - external_platform_capacity_unavailable
+        - external_platform_cost_control_unavailable
+        - external_platform_cost_evidence_incomplete
+        - external_platform_operation_disabled
+        - external_platform_operation_shadow
+        - external_platform_operation_paused
+        - external_platform_operation_canary
+        - external_platform_operation_blocked
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: Optional for App V2-compatible GETs. When supplied it is bound to
+          this exact endpoint and normalized query and only exact explicit reuse is replayed.
+          When omitted, every HTTP call receives a unique internal key and is metered
+          separately; cache and provider-dispatch suppression remain independent.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      responses:
+        '200':
+          description: The acquired App V2 business envelope. Hub preserves business fields,
+            text, tags and signed media URLs. For user-post traversal only, provider pagination
+            controls are replaced with the governed opaque Hub cursor/has-more state and
+            terminate at page 15. Only an exact active Hub-to-upstream credential is removed
+            if the upstream echoes it; request Authorization, Cookie and API-key headers
+            are never copied into the response.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier.
+              schema:
+                type: string
+                format: uuid
+            idempotent-replay:
+              schema:
+                type: string
+                enum:
+                - 'true'
+                - 'false'
+            x-mx-insight-source-mode:
+              schema:
+                type: string
+                enum:
+                - live
+                - fresh_cache
+                - stored_fallback
+                - idempotent_replay
+            x-mx-insight-captured-at:
+              schema:
+                type: string
+                format: date-time
+            Age:
+              schema:
+                type: integer
+                minimum: 0
+            Warning:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Upstream-compatible business envelope governed and archived
+                  by Hub.
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                keyword:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+                page:
+                  type: integer
+                  minimum: 1
+                  maximum: 15
+                  default: 1
+                search_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 2048
+                source:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                  default: explore_feed
+              required:
+              - keyword
+
   /xiaohongshu/app_v2/get_user_info:
     get:
       operationId: getXiaohongshuUserInfoOfficial
@@ -2732,6 +3389,205 @@ paths:
         - { name: share_text, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
+    post:
+      tags:
+      - External Data
+      operationId: getXiaohongshuUserInfoOfficialJson
+      summary: Get one user profile with the App V2-compatible contract (JSON POST)
+      x-mx-strict-query: true
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - compat.xiaohongshu.app_v2
+      - social.users.resolve
+      description: A Hub-governed App V2-compatible GET, not an unmetered proxy. It requires
+        a Live Hub Public API key whose immutable scope includes the xiaohongshu data
+        domain, compat.xiaohongshu.app_v2 contract and social.users.resolve operation.
+        It uses one-unit customer metering, provider cost admission, idempotency, response
+        archive and canonical ingest/outbox. Provider business fields remain intact. Explicit
+        page traversal and the opaque user-post cursor are capped at 15 pages; this governance
+        limit does not truncate content. Search responses may contain provider previews;
+        use the detail endpoint for the complete note while every preview is still stored
+        with provider_preview completeness. JSON POST accepts the same fields in the body,
+        with no query parameters. GET and POST share the exact endpoint/query idempotency
+        identity.
+      x-mx-error-codes:
+        '400':
+        - invalid_request
+        - unsupported_fields
+        - invalid_page
+        - invalid_sort_type
+        - invalid_note_type
+        - invalid_time_filter
+        - invalid_ai_mode
+        - invalid_cursor
+        - invalid_idempotency_key
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - capability_not_granted
+        - test_key_not_supported
+        '404':
+        - not_found
+        - post_not_found
+        '409':
+        - request_in_progress
+        - idempotency_conflict
+        - request_outcome_unknown
+        - external_platform_response_unusable
+        '429':
+        - consumer_quota_exceeded
+        - api_key_quota_exceeded
+        - plan_window_quota_exceeded
+        - plan_month_quota_exceeded
+        - plan_burst_exceeded
+        - external_platform_busy
+        - external_platform_rate_limited
+        - external_platform_capacity_exceeded
+        - external_platform_cost_budget_exhausted
+        - external_platform_subsidy_budget_exhausted
+        '502':
+        - external_platform_response_unusable
+        - external_platform_outcome_unknown
+        - external_platform_rejected
+        '503':
+        - external_platform_unavailable
+        - external_platform_not_configured
+        - external_platform_contract_unverified
+        - external_platform_circuit_open
+        - external_platform_capacity_unavailable
+        - external_platform_cost_control_unavailable
+        - external_platform_cost_evidence_incomplete
+        - external_platform_operation_disabled
+        - external_platform_operation_shadow
+        - external_platform_operation_paused
+        - external_platform_operation_canary
+        - external_platform_operation_blocked
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: Optional for App V2-compatible GETs. When supplied it is bound to
+          this exact endpoint and normalized query and only exact explicit reuse is replayed.
+          When omitted, every HTTP call receives a unique internal key and is metered
+          separately; cache and provider-dispatch suppression remain independent.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      responses:
+        '200':
+          description: The acquired App V2 business envelope. Hub preserves business fields,
+            text, tags and signed media URLs. For user-post traversal only, provider pagination
+            controls are replaced with the governed opaque Hub cursor/has-more state and
+            terminate at page 15. Only an exact active Hub-to-upstream credential is removed
+            if the upstream echoes it; request Authorization, Cookie and API-key headers
+            are never copied into the response.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier.
+              schema:
+                type: string
+                format: uuid
+            idempotent-replay:
+              schema:
+                type: string
+                enum:
+                - 'true'
+                - 'false'
+            x-mx-insight-source-mode:
+              schema:
+                type: string
+                enum:
+                - live
+                - fresh_cache
+                - stored_fallback
+                - idempotent_replay
+            x-mx-insight-captured-at:
+              schema:
+                type: string
+                format: date-time
+            Age:
+              schema:
+                type: integer
+                minimum: 0
+            Warning:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Upstream-compatible business envelope governed and archived
+                  by Hub.
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                user_id:
+                  type: string
+                  pattern: ^[0-9a-fA-F]{24}$
+                share_text:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+              required: []
+
   /xiaohongshu/app_v2/get_user_posted_notes:
     get:
       operationId: getXiaohongshuUserPostedNotesOfficial
@@ -2753,6 +3609,209 @@ paths:
           schema: { type: string, minLength: 1, maxLength: 8192 }
         - *xiaohongshuOfficialIdempotency
       responses: *xiaohongshuOfficialResponses
+    post:
+      tags:
+      - External Data
+      operationId: getXiaohongshuUserPostedNotesOfficialJson
+      summary: Get one user's posted notes with the App V2-compatible contract (JSON POST)
+      x-mx-strict-query: true
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - compat.xiaohongshu.app_v2
+      - social.users.posts
+      description: A Hub-governed App V2-compatible GET, not an unmetered proxy. It requires
+        a Live Hub Public API key whose immutable scope includes the xiaohongshu data
+        domain, compat.xiaohongshu.app_v2 contract and social.users.posts operation. It
+        uses one-unit customer metering, provider cost admission, idempotency, response
+        archive and canonical ingest/outbox. Provider business fields remain intact. Explicit
+        page traversal and the opaque user-post cursor are capped at 15 pages; this governance
+        limit does not truncate content. Search responses may contain provider previews;
+        use the detail endpoint for the complete note while every preview is still stored
+        with provider_preview completeness. JSON POST accepts the same fields in the body,
+        with no query parameters. GET and POST share the exact endpoint/query idempotency
+        identity.
+      x-mx-error-codes:
+        '400':
+        - invalid_request
+        - unsupported_fields
+        - invalid_page
+        - invalid_sort_type
+        - invalid_note_type
+        - invalid_time_filter
+        - invalid_ai_mode
+        - invalid_cursor
+        - invalid_idempotency_key
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - capability_not_granted
+        - test_key_not_supported
+        '404':
+        - not_found
+        - post_not_found
+        '409':
+        - request_in_progress
+        - idempotency_conflict
+        - request_outcome_unknown
+        - external_platform_response_unusable
+        '429':
+        - consumer_quota_exceeded
+        - api_key_quota_exceeded
+        - plan_window_quota_exceeded
+        - plan_month_quota_exceeded
+        - plan_burst_exceeded
+        - external_platform_busy
+        - external_platform_rate_limited
+        - external_platform_capacity_exceeded
+        - external_platform_cost_budget_exhausted
+        - external_platform_subsidy_budget_exhausted
+        '502':
+        - external_platform_response_unusable
+        - external_platform_outcome_unknown
+        - external_platform_rejected
+        '503':
+        - external_platform_unavailable
+        - external_platform_not_configured
+        - external_platform_contract_unverified
+        - external_platform_circuit_open
+        - external_platform_capacity_unavailable
+        - external_platform_cost_control_unavailable
+        - external_platform_cost_evidence_incomplete
+        - external_platform_operation_disabled
+        - external_platform_operation_shadow
+        - external_platform_operation_paused
+        - external_platform_operation_canary
+        - external_platform_operation_blocked
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: Optional for App V2-compatible GETs. When supplied it is bound to
+          this exact endpoint and normalized query and only exact explicit reuse is replayed.
+          When omitted, every HTTP call receives a unique internal key and is metered
+          separately; cache and provider-dispatch suppression remain independent.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      responses:
+        '200':
+          description: The acquired App V2 business envelope. Hub preserves business fields,
+            text, tags and signed media URLs. For user-post traversal only, provider pagination
+            controls are replaced with the governed opaque Hub cursor/has-more state and
+            terminate at page 15. Only an exact active Hub-to-upstream credential is removed
+            if the upstream echoes it; request Authorization, Cookie and API-key headers
+            are never copied into the response.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier.
+              schema:
+                type: string
+                format: uuid
+            idempotent-replay:
+              schema:
+                type: string
+                enum:
+                - 'true'
+                - 'false'
+            x-mx-insight-source-mode:
+              schema:
+                type: string
+                enum:
+                - live
+                - fresh_cache
+                - stored_fallback
+                - idempotent_replay
+            x-mx-insight-captured-at:
+              schema:
+                type: string
+                format: date-time
+            Age:
+              schema:
+                type: integer
+                minimum: 0
+            Warning:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Upstream-compatible business envelope governed and archived
+                  by Hub.
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                user_id:
+                  type: string
+                  pattern: ^[0-9a-fA-F]{24}$
+                share_text:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                cursor:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+              required: []
+
   /data/posts/media:
     get:
       operationId: getExternalSocialPostMedia

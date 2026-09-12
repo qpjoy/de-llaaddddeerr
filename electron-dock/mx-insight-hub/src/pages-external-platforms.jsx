@@ -21,7 +21,7 @@ import {
   Users,
   WarningCircle,
 } from '@phosphor-icons/react'
-import { adminApi } from './api.js'
+import { adminApi, publicDocsHref } from './api.js'
 import { copyText } from './open-capabilities.js'
 import {
   DropdownField,
@@ -2164,6 +2164,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
         onRefresh={remote.refresh}
       >
         <a className="qp-button qp-button--ghost" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />平台总览</a>
+        {provider === 'tikhub' ? <><a className="qp-button qp-button--outline" href={publicDocsHref('/docs/tikhub/get_image_note_detail')} target="_blank" rel="noreferrer">小红书接口文档</a><a className="qp-button qp-button--outline" href="#/data-products/xiaohongshu-note">小红书笔记画卷</a></> : null}
         <RangeControl range={range} setQuery={setQuery} />
       </PageHeading>
 

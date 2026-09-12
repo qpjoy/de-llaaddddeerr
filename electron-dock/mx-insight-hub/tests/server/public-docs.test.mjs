@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
 import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
-const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
+const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|rapidapi/i
 const FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS = /tikhub|rapidapi|justone/i
 const NIGHT_ALL_COMMON_FIELDS = [
   'businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page',
@@ -1577,7 +1577,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(errorsHtml, /external_platform_subsidy_budget_exhausted/u)
     assert.doesNotMatch(xiaohongshuHtml, /deprecated alias/iu)
     assert.match(html, /电商数据/)
-    assert.doesNotMatch(ecommerceHtml, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
+    assert.doesNotMatch(ecommerceHtml.match(/<section class="doc-page"[\s\S]*?<\/section>/u)?.[0] || '', FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.match(html, /同一把 Hub Public API Key/u)
     assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
     assert.match(html, /第二个候选通过合同验证后/u)
@@ -1716,6 +1716,7 @@ test('public listener serves self-contained public API documentation', async () 
 test('public documentation navigation uses stable page routes and keeps legacy anchors predictable', async () => {
   await withServer('public', async (baseUrl) => {
     const pages = [
+      ...['get_image_note_detail', 'search_notes', 'search_users', 'get_user_info', 'get_user_posted_notes'].map(endpoint => [`/docs/tikhub/${endpoint}`, `tikhub-${endpoint}`, 'Hub 兼容合同']),
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
       ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据'],

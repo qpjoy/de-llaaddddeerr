@@ -139,3 +139,5 @@ those paths retire one operation at a time and are not the target architecture.
 - [ADR-0012: Hub-native Agent Studio owns authoring, runtime evidence, evaluation and release](adr/0012-hub-native-agent-studio.md)
 - [ADR-0013: provider-neutral external data platform gateway](adr/0013-external-data-platform-gateway.md)
 - [ADR-0014: Hub-owned static media data plane on shared object-storage infrastructure](adr/0014-hub-owned-static-media-data-plane.md)
+
+- [小红书笔记画卷：列表、详情、TikHub 兼容接口与分页](product/xiaohongshu-note-browsing.md)

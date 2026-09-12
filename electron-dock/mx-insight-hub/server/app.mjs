@@ -4973,7 +4973,7 @@ export function createApp({
         response.end(media.body)
         return
       }
-      const officialXiaohongshuEndpoint = request.method === 'GET'
+      const officialXiaohongshuEndpoint = ['GET', 'POST'].includes(request.method)
         ? TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINT_BY_PATH[pathname]
         : null
       if (officialXiaohongshuEndpoint) {
@@ -4990,9 +4990,21 @@ export function createApp({
             throw new AppError(400, 'invalid_request', `${field} query parameter may appear at most once`)
           }
         }
-        const query = Object.fromEntries([...allowedQueryFields]
+        let query = Object.fromEntries([...allowedQueryFields]
           .filter((field) => searchParams.has(field))
           .map((field) => [field, searchParams.get(field)]))
+        if (request.method === 'POST') {
+          requireNoQuery(searchParams, 'App V2 JSON request')
+          const body = await readJson(request)
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            throw new AppError(400, 'invalid_request', 'body must be a JSON object')
+          }
+          // Use exactly the GET contract and fingerprint; a transport change
+          // must not create another acquisition or accept nested query values.
+          query = Object.fromEntries(Object.entries(body).map(([field, value]) => [
+            field, ['page', 'ai_mode'].includes(field) && Number.isInteger(value) ? String(value) : value,
+          ]))
+        }
         const result = await tikHubGateway.officialXiaohongshu(context, {
           endpointName: officialXiaohongshuEndpoint.name,
           query,

@@ -740,6 +740,23 @@ const officialXiaohongshuResponse = {
   },
 }
 
+function officialXiaohongshuPostOperation(endpointName) {
+  const get = officialXiaohongshuOperation(endpointName)
+  const fields = get.parameters.filter(parameter => parameter.in === 'query')
+  return {
+    ...get,
+    operationId: `${get.operationId}Json`,
+    summary: `${get.summary} (JSON POST)`,
+    description: `${get.description} JSON POST accepts the same fields in the body, with no query parameters. GET and POST share the exact endpoint/query idempotency identity.`,
+    parameters: get.parameters.filter(parameter => parameter.in === 'header'),
+    requestBody: { required: true, content: { 'application/json': { schema: {
+      type: 'object', additionalProperties: false,
+      properties: Object.fromEntries(fields.map(field => [field.name, field.schema])),
+      required: fields.filter(field => field.required).map(field => field.name),
+    } } } },
+  }
+}
+
 function officialXiaohongshuOperation(endpointName) {
   const definitions = {
     get_image_note_detail: {
@@ -1613,18 +1630,23 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     },
     '/xiaohongshu/app_v2/get_image_note_detail': {
       get: officialXiaohongshuOperation('get_image_note_detail'),
+      post: officialXiaohongshuPostOperation('get_image_note_detail'),
     },
     '/xiaohongshu/app_v2/search_notes': {
       get: officialXiaohongshuOperation('search_notes'),
+      post: officialXiaohongshuPostOperation('search_notes'),
     },
     '/xiaohongshu/app_v2/search_users': {
       get: officialXiaohongshuOperation('search_users'),
+      post: officialXiaohongshuPostOperation('search_users'),
     },
     '/xiaohongshu/app_v2/get_user_info': {
       get: officialXiaohongshuOperation('get_user_info'),
+      post: officialXiaohongshuPostOperation('get_user_info'),
     },
     '/xiaohongshu/app_v2/get_user_posted_notes': {
       get: officialXiaohongshuOperation('get_user_posted_notes'),
+      post: officialXiaohongshuPostOperation('get_user_posted_notes'),
     },
     '/data/posts/media': {
       get: {
@@ -5113,8 +5135,8 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   // rendered in declaration order, so a native entry in the middle of this list
   // would split the product group into two headings with the same name.
   //
-  // No vendor names here: these docs are the tenant-facing contract. The admin
-  // console is where a provider is named, on the page whose subject it is.
+  // Provider labels classify compatible contracts per the 2026-09-13 product decision.
+  // They do not grant caller-controlled routing or expose credentials.
   { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据', section: '数据产品' },
   { key: 'social-accounts', path: '/docs/social-accounts', label: '社交账号搜索', section: '数据产品' },
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
@@ -5122,10 +5144,15 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
   { key: 'topic-reports', path: '/docs/topic-reports', label: '专题洞察', section: '数据产品' },
-  { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫', section: '平台原生接口' },
-  { key: 'jd-native', path: '/docs/jd-native', label: '京东', section: '平台原生接口' },
-  { key: 'xianyu-native', path: '/docs/xianyu-native', label: '闲鱼', section: '平台原生接口' },
-  { key: 'xiaohongshu-ec-native', path: '/docs/xiaohongshu-ec-native', label: '小红书电商', section: '平台原生接口' },
+  { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫', section: '平台原生接口 · JustOne' },
+  { key: 'jd-native', path: '/docs/jd-native', label: '京东', section: '平台原生接口 · JustOne' },
+  { key: 'xianyu-native', path: '/docs/xianyu-native', label: '闲鱼', section: '平台原生接口 · JustOne' },
+  { key: 'xiaohongshu-ec-native', path: '/docs/xiaohongshu-ec-native', label: '小红书电商', section: '平台原生接口 · JustOne' },
+  { key: 'tikhub-get_image_note_detail', path: '/docs/tikhub/get_image_note_detail', label: '获取图文笔记详情', section: '平台原生接口 · TikHub / 小红书' },
+  { key: 'tikhub-search_notes', path: '/docs/tikhub/search_notes', label: '搜索笔记', section: '平台原生接口 · TikHub / 小红书' },
+  { key: 'tikhub-search_users', path: '/docs/tikhub/search_users', label: '搜索用户', section: '平台原生接口 · TikHub / 小红书' },
+  { key: 'tikhub-get_user_info', path: '/docs/tikhub/get_user_info', label: '获取用户信息', section: '平台原生接口 · TikHub / 小红书' },
+  { key: 'tikhub-get_user_posted_notes', path: '/docs/tikhub/get_user_posted_notes', label: '获取用户笔记列表', section: '平台原生接口 · TikHub / 小红书' },
   { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
   { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
   { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
@@ -5137,6 +5164,36 @@ const PUBLIC_DOCS_ROUTE_ALIASES = Object.freeze({
   '/docs/authentication': '/docs/auth',
   '/docs/operations': '/docs/evidence',
 })
+
+const XHS_NATIVE_DOCS = [['get_image_note_detail', '获取图文笔记详情', '420136391e0'], ['search_notes', '搜索笔记', '420136398e0'], ['search_users', '搜索用户', '420136399e0'], ['get_user_info', '获取用户信息', '420136395e0'], ['get_user_posted_notes', '获取用户笔记列表', '420136396e0']]
+function xhsNativePages() {
+  const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
+  return XHS_NATIVE_DOCS.map(([endpoint, label, reference]) => {
+    const operation = officialXiaohongshuOperation(endpoint)
+    const fields = operation.parameters.filter(field => field.in === 'query')
+    const example = endpoint.startsWith('search_') ? { keyword: '摄影', page: 1 }
+      : endpoint === 'get_image_note_detail' ? { note_id: '675d277d000000000600e655' }
+      : { user_id: '61b46d790000000010008153' }
+    return `<section class="doc-page" data-doc-page="tikhub-${endpoint}">
+      <h2>${label}</h2><p>TikHub · Xiaohongshu-App-V2-API · Hub 兼容合同</p>
+      <p><a href="https://docs.tikhub.io/${reference}" target="_blank" rel="noreferrer">官方接口参考</a> · 本次核对：2026-09-13</p>
+      <div class="endpoint"><span class="method">GET</span> / <span class="method post">POST</span> <code>/api/v1/xiaohongshu/app_v2/${endpoint}</code></div>
+      <h3>用途与范围</h3><p>${escape(operation.summary)}。本期发布五个列表与详情相关接口；未列出的评论、收藏、话题、视频专用接口尚未开放，不接受任意路径转发。</p>
+      <h3>认证与计量</h3><p>使用 Hub Live API Key，须同时授权 <code>xiaohongshu</code>、<code>compat.xiaohongshu.app_v2</code> 和 <code>${operation['x-mx-required-capabilities'][1]}</code>。同一请求重试复用 Idempotency-Key；新页必须换 Key。GET 与 POST 共用规范化请求身份。上游业务失败仍可能计费；不能仅看 HTTP 200 判断结果有效。</p>
+      <h3>请求参数</h3><p>GET 使用 query；推荐 POST JSON，分享参数不会进入请求 URL。POST 不接受 query 混用。ID 与分享链接二选一，同时提供优先 ID。</p>
+      <table><thead><tr><th>字段</th><th>类型</th><th>必填</th><th>默认值 / 约束</th></tr></thead><tbody>${fields.map(field => `<tr><td><code>${field.name}</code></td><td>${field.schema.type}</td><td>${field.required ? '是' : '否'}</td><td>${escape(field.description || '')} ${escape([field.schema.default != null ? `默认：${field.schema.default}` : '', field.schema.enum ? `可选：${field.schema.enum.join(' / ')}` : '', field.schema.maxLength ? `最长 ${field.schema.maxLength} 字符` : '', field.schema.minimum != null ? `范围 ${field.schema.minimum}–${field.schema.maximum}` : '', field.schema.pattern ? `格式：${field.schema.pattern}` : ''].filter(Boolean).join('；'))}</td></tr>`).join('')}</tbody></table>
+      <h3>调用示例</h3><pre><code>curl -X POST "$HUB_URL/api/v1/xiaohongshu/app_v2/${endpoint}" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H 'Content-Type: application/json' \\
+  -H 'Idempotency-Key: note-page-0001' \\
+  -d '${escape(JSON.stringify(example))}'</code></pre>
+      <h3>返回与分页</h3><p>响应保留上游业务 envelope，完整正文、标签和签名媒体 URL 不做长度截断。图文详情保留详情结构；列表预览不保证正文与标签完整，应再次请求同笔记详情。稳定产品字段见 <a href="/docs/xiaohongshu-note">小红书笔记：data.item.text / tags</a>。</p>
+      <p>搜索 page 为 1–15，续页携带返回的 search_id / search_session_id；用户列表只回传 Hub 返回的 opaque cursor，不自行构造或解码。上游分页与 Hub 历史分页互不通用。缺少有效续页信息时停止，第 15 页终止。上游原始分页保存在受限归档中。</p>
+      <h3>交付与历史</h3><p>响应头 x-mx-insight-request-id 标识交付，x-mx-insight-source-mode 区分 live、fresh_cache、stored_fallback、idempotent_replay。成功采集异步入库；租户可使用 <code>GET /api/v1/acquisitions/{requestId}</code> 查询自己这次交付及入库证据。当前 canonical 搜索不是历史响应重放。</p>
+      <h3>错误与重试</h3><p>400 参数或游标错误；403 缺少授权；409 幂等冲突、处理中或结果未知；429 配额/速率限制；502 上游错误；503 接口未配置或未放行。结果未知时查询请求状态，不自动重新创建付费请求。完整错误码见 <a href="/docs/errors">错误与重试</a>。</p>
+    </section>`
+  }).join('\n')
+}
 
 // Render the same per-version registry the request validator dispatches.
 function nativeParameterTables(marketplace) {
@@ -5658,6 +5715,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     <p>每次成功采集都会写入 canonical 数据集 <code>social.accounts.v1</code>，身份是 <code>(platform, userId)</code>。<strong>关键词与页码不参与身份</strong>：同一账号通过不同关键词找到是同一行，重跑关键词也不会产生重复。账号资料真的变了才会记为内容变更。</p>
     </section>
 
+    ${xhsNativePages()}
     <section class="doc-page" data-doc-page="xiaohongshu-note">
     <h2 id="xiaohongshu-note">小红书笔记</h2>
     <div class="notice">这条数据产品由 Hub 对接的外部供应方采集，但<strong>公开合同不暴露供应方身份</strong>：请求里没有供应方选择字段，Hub 更换供应方不需要你改集成。要判断一次交付是上游的问题还是 Hub 侧的问题，看 <code>meta.reason.scope</code>（见下文「每次调用消耗什么」），不需要知道是哪一家。</div>
@@ -5675,7 +5733,7 @@ curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
   | tee /tmp/mxih-xhs.json \
   | jq '{contractVersion,item:.data.item,meta,requestId}'</code></pre>
     <p>这是 Hub 自己维护的兼容路径，不是对任何外部平台响应的透明转发。返回固定为 <code>mx-insight-hub.social-post.v1</code>；正文与标签分别位于 <code>data.item.text</code> 和 <code>data.item.tags</code>。</p>
-    <h3>2. App V2 兼容 GET</h3>
+    <h3>2. App V2 兼容 GET / JSON POST</h3><p>平台原生接口已按 JustOne、TikHub 分类；五个 App V2 路径也支持同字段 JSON POST，响应与 GET 一致。各接口的参数、分页和示例见 TikHub 目录。</p>
     <p>五个入口都要求 <code>xiaohongshu</code> 数据域与 <code>compat.xiaohongshu.app_v2</code> 兼容合同，并按下表叠加业务操作授权：</p>
     <table><thead><tr><th>App V2 endpoint</th><th>输入</th><th>附加业务操作</th></tr></thead><tbody>
       <tr><td><code>get_image_note_detail</code></td><td><code>note_id|share_text</code></td><td><code>social.posts.resolve</code></td></tr>

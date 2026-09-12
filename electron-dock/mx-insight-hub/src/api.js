@@ -237,6 +237,11 @@ export const publicDataApi = {
     '/api/v1/data/ecommerce/products/search',
     { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
+  xiaohongshuNative: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => publicDataRequest(
+    apiKey,
+    `/api/v1/xiaohongshu/app_v2/${encodeURIComponent(endpoint)}`,
+    { method: 'POST', body, idempotencyKey, signal },
+  ),
   xiaohongshuNote: (apiKey, body, { idempotencyKey, retryOfRequestId, signal } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/xiaohongshu/app/get_note_info',
