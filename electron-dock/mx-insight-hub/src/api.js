@@ -231,6 +231,7 @@ export const publicDataApi = {
     '/api/v1/requests/by-idempotency-key',
     { idempotencyKey, signal },
   ),
+  ecommerceStoredItems: (apiKey, query) => publicDataRequest(apiKey, `/api/v1/data/ecommerce/products/items?${new URLSearchParams(query)}`),
   ecommerceProductsSearch: (apiKey, body, { idempotencyKey, retryOfRequestId } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/data/ecommerce/products/search',

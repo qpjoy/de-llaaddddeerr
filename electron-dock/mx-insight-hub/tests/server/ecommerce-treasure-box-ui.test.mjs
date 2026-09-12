@@ -39,7 +39,7 @@ test('ecommerce treasure box is an Admin-token-only data product', async () => {
   const route = appSource.match(/\{ path: '\/data-products\/ecommerce-treasure-box',[^\n]+\}/u)?.[0] || ''
 
   assert.match(appSource, /lazy\(\(\) => import\('\.\/pages-ecommerce-treasure-box\.jsx'\)/u)
-  assert.match(route, /label: '电商数据百宝箱'/u)
+  assert.match(route, /label: '电商数据'/u)
   assert.match(route, /navParent: DATA_PRODUCTS_NAV_KEY/u)
   assert.match(route, /component: EcommerceTreasureBoxPage/u)
   assert.match(route, /platformAdmin: true/u)
@@ -308,11 +308,11 @@ test('one click reconciles an ambiguous refresh before one explicitly related re
   assert.match(statusCheck, /recoveryDecision === 'clear_orphan'[\s\S]*?forgetLiveRequest\(\)[\s\S]*?action: refreshRequested \? 'continue' : 'stop'/u)
   assert.match(statusCheck, /recoveryDecision === 'deployment_mismatch'[\s\S]*?同版本的部署/u)
   assert.match(statusCheck, /const sameRequest = sameLogicalRequestBody\(requestedBody, pending\.body\)/u)
-  assert.match(sameLogicalRequest, /\['marketplace', 'query', 'cursor', 'sort'\]/u)
+  assert.match(sameLogicalRequest, /\['marketplace', 'query', 'cursor', 'sort', 'page'\]/u)
   assert.doesNotMatch(sameLogicalRequest, /deliveryMode/u)
   assert.match(runLive, /const refreshRequested = !replay && deliveryMode === 'refresh'/u)
   assert.doesNotMatch(runLive, /chargeConfirmed|setChargeConfirmed|allowNewRefresh/u)
-  assert.match(runLive, /checkAmbiguousRequestStatus\(\{[\s\S]*?requestedBody: currentLiveBody/u)
+  assert.match(runLive, /checkAmbiguousRequestStatus\(\{[\s\S]*?requestedBody/u)
   assert.match(runLive, /if \(recovery\?\.action !== 'continue'\) return/u)
   assert.match(runLive, /retryOfRequestId = recovery\.retryOfRequestId \|\| null/u)
   assert.match(runLive, /`treasure-\$\{crypto\.randomUUID\(\)\}`/u)
@@ -353,7 +353,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /if \(!finishRequest\(epoch\)\) return/u)
   assert.match(pageSource, /const \[mode, setMode\] = useState\('hub_live'\)/u)
   assert.match(pageSource, /const hasAmbiguousLiveRequest = lastLiveRequest\?\.outcome === 'ambiguous'/u)
-  assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching'\}/u)
+  assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching' \|\| storedOnly\}/u)
   assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="排序"[\s\S]*?disabled=\{semanticsLocked/u)
@@ -373,7 +373,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /deliveryMode === 'refresh'[\s\S]*?点击主按钮即可[\s\S]*?reserved 或核对失败仍会安全停止/u)
   assert.match(pageSource, /const providerRequestBlockedByAmbiguity = mode === 'hub_live'[\s\S]*?deliveryMode === 'cache_first'/u)
   assert.doesNotMatch(pageSource, /chargeConfirmed|setChargeConfirmed|mih-treasure-charge-confirm|成本确认/u)
-  assert.match(pageSource, /type="submit" disabled=\{phase === 'searching' \|\| checkingKey \|\| providerRequestBlockedByAmbiguity\}/u)
+  assert.match(pageSource, /type="submit" disabled=\{phase === 'searching' \|\| checkingKey \|\| \(!storedOnly && providerRequestBlockedByAmbiguity\)\}/u)
   assert.match(pageSource, /hasAmbiguousLiveRequest \? '自动核对后重新采集'/u)
   assert.doesNotMatch(pageSource, /type="submit" disabled=\{[^}]*!keyUsable/u)
   assert.match(pageSource, /mode === 'safe_demo' \? safeDemoIdleMessage\(demoDeliveryMode, demoCacheOnlyScene\)/u)
@@ -459,7 +459,7 @@ test('product spheres support local 3, 6 or 9 item display pages without another
   const [, , pageSource] = await sources()
   const pageSizeOptions = pageSource.match(/const DISPLAY_PAGE_SIZE_OPTIONS = \[[\s\S]*?\n\]/u)?.[0] || ''
   const showDisplayPage = pageSource.match(/const showDisplayPage = \(nextPage\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
-  const pageSizeControl = pageSource.match(/<DropdownField label="每页陈列"[^\n]+/u)?.[0] || ''
+  const pageSizeControl = pageSource.match(/<DropdownField label="百宝箱陈列数量"[^\n]+/u)?.[0] || ''
 
   for (const [value, label] of [['3', '3 件 / 页'], ['6', '6 件 / 页'], ['9', '9 件 / 页']]) {
     assert.match(pageSizeOptions, new RegExp(`value: '${value}', label: '${label}'`, 'u'))

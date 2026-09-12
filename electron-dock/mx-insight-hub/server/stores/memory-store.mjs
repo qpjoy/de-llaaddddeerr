@@ -2046,6 +2046,20 @@ export class MemoryStore {
     return clone(safe)
   }
 
+  async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf }) {
+    const rows = []
+    for (const record of this.requests.values()) {
+      if (record.consumerId !== consumerId || record.platform !== 'ecommerce' || record.status !== 'committed' || record.responseStatus !== 200 || record.responseBody?.contractVersion !== 'mx-insight-hub.ecommerce-products.v1' || record.createdAt > asOf) continue
+      for (const [index, product] of (record.responseBody.data?.items || []).entries()) {
+        if (marketplace !== 'all' && product.marketplace !== marketplace) continue
+        if (query && !String(product.title || '').toLowerCase().includes(query.toLowerCase())) continue
+        rows.push({ requestId: record.id, recordedAt: record.createdAt, capturedAt: record.responseBody.meta?.capturedAt, ordinal: index + 1, product })
+      }
+    }
+    rows.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || b.requestId.localeCompare(a.requestId) || a.ordinal - b.ordinal)
+    return rows.filter(row => !cursor || row.recordedAt < cursor.time || (row.recordedAt === cursor.time && (row.requestId < cursor.id || (row.requestId === cursor.id && row.ordinal > cursor.ordinal)))).slice(0, pageSize + 1)
+  }
+
   async getCommittedEcommerceImageSource({ requestId, consumerId, itemId, imageIndex }) {
     const record = this.requests.get(requestId)
     if (

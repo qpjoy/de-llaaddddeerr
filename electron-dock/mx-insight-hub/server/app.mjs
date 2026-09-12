@@ -5073,6 +5073,11 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/ecommerce/products/items') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, { data: await service.ecommerceStoredItems(context, Object.fromEntries(searchParams.entries())), requestId })
+        return
+      }
       if (request.method === 'POST' && pathname === '/api/v1/data/ecommerce/products/search') {
         const context = await requirePublic(request)
         if (!externalPlatformGateway) {

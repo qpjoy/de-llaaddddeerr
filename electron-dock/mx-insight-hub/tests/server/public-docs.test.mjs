@@ -1576,7 +1576,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(errorsHtml, /external_platform_cost_budget_exhausted/u)
     assert.match(errorsHtml, /external_platform_subsidy_budget_exhausted/u)
     assert.doesNotMatch(xiaohongshuHtml, /deprecated alias/iu)
-    assert.match(html, /电商数据百宝箱/)
+    assert.match(html, /电商数据/)
     assert.doesNotMatch(ecommerceHtml, FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.match(html, /同一把 Hub Public API Key/u)
     assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
@@ -1718,7 +1718,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     const pages = [
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
-      ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据百宝箱'],
+      ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据'],
       ['/docs/xiaohongshu-note', 'xiaohongshu-note', '小红书笔记'],
       ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
       ['/docs/topic-reports', 'topic-reports', '专题洞察'],

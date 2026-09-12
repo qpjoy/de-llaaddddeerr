@@ -5097,7 +5097,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   //
   // No vendor names here: these docs are the tenant-facing contract. The admin
   // console is where a provider is named, on the page whose subject it is.
-  { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
+  { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据', section: '数据产品' },
   { key: 'social-accounts', path: '/docs/social-accounts', label: '社交账号搜索', section: '数据产品' },
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
@@ -5319,7 +5319,7 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     </section>
 
     <section class="doc-page" data-doc-page="ecommerce-treasure-box">
-    <h2 id="ecommerce-treasure-box">电商数据百宝箱</h2>
+    <h2 id="ecommerce-treasure-box">电商数据</h2>
     <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
     <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；路径和授权规则不变，新增的可选 <code>deliveryMode</code> 只表达 Hub 是否可以访问外部平台，不是供应方选择器。</div>
     <p><code>ecommerce</code> 是稳定的数据域，不是某一家供应方的名字；<code>marketplace</code> 是本次要检索的业务站点，也不是供应方选择器。当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移。第二个候选通过合同验证后，Hub 才会在私有路由层按操作、marketplace、已验证合同版本、凭据健康、熔断/配额、成本和租户策略确定性选择。调用方不能通过请求字段指定供应方，也不需要在新增供应方后修改集成。</p>
@@ -5359,7 +5359,11 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
       <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
       <tr><td><code>cursor</code></td><td>只使用上页返回的不透明签名值</td><td>绑定 marketplace/query/sort/price；不要解析或拼接</td></tr>
     </tbody></table>
-    <p>管理端的“每页陈列 3/6/9 件”只对当前已返回批次做本地展示分页，切换时不会调用 Hub、不会新增 usage、也不会触发上游。公开 v1 请求体仍不接受 <code>pageSize</code>；真正读取下一批数据必须使用响应的 <code>nextCursor</code> 并创建新的 Idempotency-Key。</p>
+    <p>管理台默认列表视图，另保留百宝箱视图。采集只针对一个平台，下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
+    <h3>浏览已存电商数据</h3>
+    <div class="endpoint"><span class="method">GET</span><code>/api/v1/data/ecommerce/products/items</code><p>需要 live Key 和 ecommerce 授权。只查本调用身份成功提交的商品搜索记录；不会调用上游，与 cache_only 精确请求查询不同。每次 GET 记录只读 usage。</p></div>
+    <p>参数 marketplace 可为 all（默认）或五个平台之一；query 是可选标题子串；pageSize 默认 20、上限 100，受调用身份策略进一步约束；cursor 使用本接口上页返回的 nextCursor。按请求入库时间倒序，同一批次保留上游顺序。游标绑定调用身份、筛选条件和页大小，固定请求时间上界；它不是跨请求的数据库事务快照。不同采集请求中的相同商品保留为历史观察，不做跨批去重。</p>
+    <p>返回 data.items 中每项含 product、requestId、capturedAt、recordedAt、ordinal；使用该项 requestId 和 product.id 读取受保护媒体。data.pageInfo 提供 hasMore/nextCursor/asOf。全部平台仅适用于这个存量接口，POST 搜索不接受 all。</p>
 
     <h3>3. 消费统一响应</h3>
     <pre><code>{
@@ -5472,7 +5476,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
       <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
     </tbody></table>
-    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件。主搜索按钮是唯一入口：页面自动调用状态 GET，没有额外核对按钮、费用复选框，也不要求用户查找或粘贴 UUID、人工核查 consumer 归属。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>。v1 或 v2 本地账本只有在同一 consumer 的查询明确返回 <code>request_not_found</code> 时才清除孤儿记录；路由级 <code>not_found</code> 和其他查询失败继续保留审计。<code>committed</code> 自动精确重放，<code>released</code> 关闭旧记录；只有明确 <code>unknown</code> 可在用户已选择 <code>refresh</code> 并点击重采按钮后，用新幂等键和页面自动填入的 <code>X-MX-Insight-Retry-Of</code> 旧请求 ID 发起一次新采集。<code>reserved</code>、网络失败、路由/版本不匹配和 succeeded-unusable 隔离继续阻止外部调用。切换演示不会删除实时请求账本。</p>
+    <p>管理台“电商数据”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件。主搜索按钮是唯一入口：页面自动调用状态 GET，没有额外核对按钮、费用复选框，也不要求用户查找或粘贴 UUID、人工核查 consumer 归属。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>。v1 或 v2 本地账本只有在同一 consumer 的查询明确返回 <code>request_not_found</code> 时才清除孤儿记录；路由级 <code>not_found</code> 和其他查询失败继续保留审计。<code>committed</code> 自动精确重放，<code>released</code> 关闭旧记录；只有明确 <code>unknown</code> 可在用户已选择 <code>refresh</code> 并点击重采按钮后，用新幂等键和页面自动填入的 <code>X-MX-Insight-Retry-Of</code> 旧请求 ID 发起一次新采集。<code>reserved</code>、网络失败、路由/版本不匹配和 succeeded-unusable 隔离继续阻止外部调用。切换演示不会删除实时请求账本。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 
@@ -5484,12 +5488,12 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     <p>参数按 2026-09-12 平台文档核对。Hub 接收 POST JSON，原生业务参数按版本映射；Hub URL 与上游 URL 不相同。</p>
     ${nativeParameterTables('taobao')}
     <p>店铺 V1 的 sort 为 _sale / _default；V2 为 sales-des / new-des / credit-des / price-asc / price-des；V4 不接受 sort。各版本 page 默认 1。换页必须更换 Idempotency-Key；相同 Key 与不同 page 返回冲突。</p>
-    <p class="lead">Hub 对外提供两层电商接口。这一层是<strong>平台原生合同</strong>：业务参数名按上游版本映射，Hub 使用独立 POST 路径，响应 <code>data</code> 保留上游字段名，调用方按上游文档理解载荷、按 Hub 合同理解交付。另一层是<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>，返回 Hub 归一化的稳定商品结构。</p>
+    <p class="lead">Hub 对外提供两层电商接口。这一层是<strong>平台原生合同</strong>：业务参数名按上游版本映射，Hub 使用独立 POST 路径，响应 <code>data</code> 保留上游字段名，调用方按上游文档理解载荷、按 Hub 合同理解交付。另一层是<a href="/docs/ecommerce-treasure-box">电商数据</a>，返回 Hub 归一化的稳定商品结构。</p>
 
     <div class="notice">两层用同一把 Hub Public API Key、同一套幂等与交付语义，也共用同一份上游调用证据与归档。区别只有一个：原生层不重命名、不裁剪上游字段，稳定性交给上游；数据产品层由 Hub 钉住结构，上游改字段不会打到你身上。</div>
 
     <h3>1. 何时用哪一层</h3>
-    <table><thead><tr><th></th><th>平台原生接口（本页）</th><th>电商数据百宝箱</th></tr></thead><tbody>
+    <table><thead><tr><th></th><th>平台原生接口（本页）</th><th>电商数据</th></tr></thead><tbody>
       <tr><td>响应字段</td><td>上游原字段名，随上游变化</td><td>Hub 归一化结构，版本化稳定</td></tr>
       <tr><td>适合</td><td>自己组合产品、需要上游全部字段</td><td>直接消费，不想处理上游差异</td></tr>
       <tr><td>上游 <code>data</code> 类型</td><td>上游 OpenAPI 未发布类型，Hub 不猜也不裁剪</td><td>由 Hub 钉住并逐字段审核</td></tr>
@@ -5543,7 +5547,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     <p>拿到的是不是实时数据，看 <code>meta.reason</code>，不要靠 <code>sourceMode</code> 猜：<code>reason.degraded=false</code> 才是完整交付；<code>reason.liveAttempted</code> 区分“没有发生上游调用”和“上游调用已发生、可能已计费”。详见<a href="/docs/errors">错误与重试</a>。</p>
 
     <h3>6. 上游字段的稳定性</h3>
-    <p>上游对 <code>data</code> 没有发布类型定义，因此本层<strong>不承诺字段稳定</strong>：Hub 只做结构边界检查与凭据脱敏，不重命名、不补默认值、不删除未知字段。请按缺字段返回 <code>null</code> 的方式消费，不要假设某个字段一定存在。需要稳定结构时用<a href="/docs/ecommerce-treasure-box">电商数据百宝箱</a>。</p>
+    <p>上游对 <code>data</code> 没有发布类型定义，因此本层<strong>不承诺字段稳定</strong>：Hub 只做结构边界检查与凭据脱敏，不重命名、不补默认值、不删除未知字段。请按缺字段返回 <code>null</code> 的方式消费，不要假设某个字段一定存在。需要稳定结构时用<a href="/docs/ecommerce-treasure-box">电商数据</a>。</p>
     <p>不同 <code>version</code> 是不同的逻辑请求，各自独立缓存与计费；切换版本不会复用另一个版本的快照。</p>
     </section>
 

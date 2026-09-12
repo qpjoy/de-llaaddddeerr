@@ -5919,6 +5919,30 @@ export class PostgresStore {
     return safe
   }
 
+  async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf }) {
+    const { rows } = await this.pool.query(`
+      SELECT u.id AS "requestId", u.created_at::text AS "recordedAt",
+             item.ordinality::int AS ordinal, item.value AS product,
+             u.response_body->'meta'->>'capturedAt' AS "capturedAt"
+      FROM usage_requests u
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(u.response_body->'data'->'items') = 'array'
+          THEN u.response_body->'data'->'items' ELSE '[]'::jsonb END
+      ) WITH ORDINALITY AS item(value, ordinality)
+      WHERE u.consumer_id = $1 AND u.platform = 'ecommerce'
+        AND u.status = 'committed' AND u.response_status = 200
+        AND u.response_body->>'contractVersion' = 'mx-insight-hub.ecommerce-products.v1'
+        AND u.created_at <= $2::timestamptz
+        AND ($3 = 'all' OR item.value->>'marketplace' = $3)
+        AND ($4 = '' OR strpos(lower(item.value->>'title'), lower($4)) > 0)
+        AND ($5::timestamptz IS NULL OR u.created_at < $5::timestamptz
+          OR (u.created_at = $5::timestamptz AND u.id < $6::uuid)
+          OR (u.created_at = $5::timestamptz AND u.id = $6::uuid AND item.ordinality > $7))
+      ORDER BY u.created_at DESC, u.id DESC, item.ordinality ASC LIMIT $8`,
+      [consumerId, asOf, marketplace, query, cursor?.time || null, cursor?.id || null, cursor?.ordinal || 0, pageSize + 1])
+    return rows
+  }
+
   async getCommittedEcommerceImageSource({ requestId, consumerId, itemId, imageIndex }) {
     const { rows } = await this.pool.query(
       `SELECT response_body

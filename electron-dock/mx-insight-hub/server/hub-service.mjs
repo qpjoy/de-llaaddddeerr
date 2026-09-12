@@ -1,3 +1,4 @@
+import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
@@ -2342,6 +2343,17 @@ export class HubService {
       path: '/api/v1/data/public-opinion/regions',
       fingerprintBody: query,
       operation: async () => publicOpinionRegions(query),
+    })
+  }
+
+  async ecommerceStoredItems(context, input) {
+    assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'Stored ecommerce requires a live key')
+    const policy = await this.#storedPlatformPolicy(context, 'ecommerce', 'Ecommerce')
+    const query = storedEcommerceQuery(input, context.consumer.id, this.apiKeyPepper, policy.maxPageSize)
+    return this.#meterStoredRead(context, 'ecommerce', policy, {
+      path: '/api/v1/data/ecommerce/products/items',
+      fingerprintBody: input,
+      operation: async () => query.page(await this.store.listStoredEcommerceItems(query)),
     })
   }
 

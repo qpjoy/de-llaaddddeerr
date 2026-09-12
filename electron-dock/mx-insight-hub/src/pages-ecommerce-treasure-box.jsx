@@ -115,6 +115,7 @@ const SAFE_DEMO_SORTS = {
 }
 
 const SOURCE_MODE_LABELS = {
+  stored_inventory: { label: '已存历史记录', tone: 'teal', hubUsage: '只读 usage', providerCall: '0', note: '本调用身份的已提交商品记录' },
   live: { label: '实时上游', tone: 'live', providerCall: '是', hubUsage: '是', note: '当前记录 Hub usage 与内部采购成本证据；客户计价待 Hub price book' },
   fresh_cache: { label: '新鲜缓存', tone: 'cache', providerCall: '否', hubUsage: '是', note: '同一规范请求复用新鲜快照' },
   stored_fallback: { label: '存储兜底', tone: 'fallback', providerCall: '可能', hubUsage: '是', note: '可能在派发前兜底，也可能在上游失败后兜底' },
@@ -335,21 +336,22 @@ function ecommerceErrorPresentation(error) {
   }
 }
 
-function requestBody({ marketplace, query, sort, deliveryMode = 'cache_first', cursor = null }) {
+function requestBody({ marketplace, query, sort, deliveryMode = 'cache_first', cursor = null, page, price }) {
   return {
     marketplace,
     query: query.normalize('NFKC').trim(),
     deliveryMode,
-    ...(cursor ? { cursor } : {}),
-    ...(!cursor && sort ? { sort } : {}),
+    ...(cursor ? { cursor } : page != null ? { page: Number(page) } : {}),
+    ...(sort ? { sort } : {}),
+    ...(price ? { price } : {}),
   }
 }
 
 function sameLogicalRequestBody(left, right) {
   if (!left || !right) return false
-  return ['marketplace', 'query', 'cursor', 'sort'].every((field) => (
+  return ['marketplace', 'query', 'cursor', 'sort', 'page'].every((field) => (
     (left[field] || null) === (right[field] || null)
-  ))
+  )) && JSON.stringify(left.price || null) === JSON.stringify(right.price || null)
 }
 
 function orbPosition(index, total) {
@@ -517,7 +519,9 @@ async function apiKeyFingerprint(apiKey) {
 
 function storedRequestBody(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const allowed = new Set(['marketplace', 'query', 'deliveryMode', 'cursor', 'sort'])
+  if (value.page != null && (!Number.isInteger(value.page) || value.page < 1 || value.page > 1000 || value.cursor)) return null
+  if (value.price != null && (typeof value.price !== 'object' || Array.isArray(value.price) || Object.keys(value.price).some(key => !['min', 'max'].includes(key) || typeof value.price[key] !== 'string' || !/^\d+(?:\.\d{1,2})?$/.test(value.price[key])))) return null
+  const allowed = new Set(['marketplace', 'query', 'deliveryMode', 'cursor', 'sort', 'page', 'price'])
   if (Object.keys(value).some((key) => !allowed.has(key))) return null
   if (!MARKETPLACES.some(({ value: marketplace }) => marketplace === value.marketplace)) return null
   if (typeof value.query !== 'string' || !value.query.trim() || value.query.length > 200) return null
@@ -532,6 +536,8 @@ function storedRequestBody(value) {
     // cache-first behavior. This is an in-place, non-destructive migration.
     deliveryMode: value.deliveryMode || 'cache_first',
     cursor: value.cursor || null,
+    page: value.page,
+    price: value.price,
   })
 }
 
@@ -762,7 +768,7 @@ function ResultEvidence({ product, evidence }) {
     return (
       <div className="mih-treasure-empty-evidence">
         <Cube size={30} weight="duotone" aria-hidden="true" />
-        <strong>{simulatedMiss ? '沙盘无存量，没有商品返回' : '点一个商品球查看证据'}</strong>
+        <strong>{simulatedMiss ? '沙盘无存量，没有商品返回' : '选择商品查看证据'}</strong>
         <p>{simulatedMiss ? '这是浏览器本地的 cache_only 404 演练，不代表刚刚查询过当前 Hub。' : '这里展示 Hub 归一化属性，不暴露上游凭据或原始私有字段。'}</p>
       </div>
     )
@@ -867,6 +873,13 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const [phase, setPhase] = useState('idle')
   const [products, setProducts] = useState([])
   const [resultPage, setResultPage] = useState(null)
+  const [view, setView] = useState('list')
+  const [browse, setBrowse] = useState('acquire')
+  const [upstreamPage, setUpstreamPage] = useState('1')
+  const [minPrice, setMinPrice] = useState('')
+  const [maxPrice, setMaxPrice] = useState('')
+  const resultScopeRef = useRef(null)
+  const storedOnly = browse === 'stored' || marketplace === 'all'
   const [displayPageSize, setDisplayPageSize] = useState('6')
   const [displayPage, setDisplayPage] = useState(0)
   const [selected, setSelected] = useState(null)
@@ -881,9 +894,10 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const visibleProducts = products.slice(displayPage * pageSize, (displayPage + 1) * pageSize)
   const hasAmbiguousLiveRequest = lastLiveRequest?.outcome === 'ambiguous'
   const currentLiveBody = useMemo(
-    () => requestBody({ marketplace, query, sort, deliveryMode }),
-    [deliveryMode, marketplace, query, sort],
+    () => requestBody({ marketplace, query, sort, deliveryMode, page: upstreamPage, price: ['taobao', 'tmall'].includes(marketplace) && (minPrice !== '' || maxPrice !== '') ? { ...(minPrice !== '' ? { min: minPrice } : {}), ...(maxPrice !== '' ? { max: maxPrice } : {}) } : undefined }),
+    [deliveryMode, marketplace, query, sort, upstreamPage, minPrice, maxPrice],
   )
+  const resultScope = JSON.stringify([mode, storedOnly, marketplace, query, sort, minPrice, maxPrice, hubApiKey, deliveryMode])
   const resolvedReplayAvailable = mode === 'hub_live' && lastLiveRequest?.outcome === 'resolved'
   const semanticsLocked = phase === 'searching'
   const providerRequestBlockedByAmbiguity = mode === 'hub_live'
@@ -1188,6 +1202,8 @@ export function EcommerceTreasureBoxPage({ notify }) {
   const changeMarketplace = (value) => {
     if (semanticsLocked) return
     setMarketplace(value)
+    setUpstreamPage('1')
+    if (value === 'all') { setBrowse('stored'); setMode('hub_live') }
     setSort(availableSorts(mode, value)[0]?.value || '')
     setProducts([])
     setSelected(null)
@@ -1207,8 +1223,10 @@ export function EcommerceTreasureBoxPage({ notify }) {
     setQuery(value)
   }
 
-  const revealResults = (items, nextEvidence, nextPage = null) => {
-    setProducts(items)
+  const revealResults = (items, nextEvidence, nextPage = null, append = false) => {
+    items = items.map(item => ({ ...item, _evidence: item._evidence || nextEvidence }))
+    setProducts(previous => append ? [...previous, ...items] : items)
+    resultScopeRef.current = resultScope
     setSelected(items[0] || null)
     setEvidence(nextEvidence)
     setResultPage(nextPage)
@@ -1236,7 +1254,9 @@ export function EcommerceTreasureBoxPage({ notify }) {
     notify?.(`安全策略沙盘完成：${scenario.evidence.demoTitle}；实际没有访问 Hub Data API，也没有创建 Hub usage 或外部采集。`, 'success')
   }
 
-  const runLive = async ({ replay = false, apiKeyOverride, fingerprintOverride } = {}) => {
+  const runLive = async ({ replay = false, apiKeyOverride, fingerprintOverride, bodyOverride, append = false } = {}) => {
+    if (storedOnly || marketplace === 'all') return
+    const requestedBody = bodyOverride || currentLiveBody
     const apiKey = String(apiKeyOverride || hubApiKey).trim()
     if (!apiKey) {
       keyInputRef.current?.focus()
@@ -1273,13 +1293,13 @@ export function EcommerceTreasureBoxPage({ notify }) {
       const recovery = await checkAmbiguousRequestStatus({
         apiKeyOverride: apiKey,
         fingerprintOverride: fingerprint,
-        requestedBody: currentLiveBody,
+        requestedBody,
       })
       if (recovery?.action !== 'continue') return
       previous = lastLiveRequestRef.current
       retryOfRequestId = recovery.retryOfRequestId || null
     }
-    const body = replay ? previous?.body : currentLiveBody
+    const body = replay ? previous?.body : requestedBody
     const idempotencyKey = replay ? previous?.idempotencyKey : `treasure-${crypto.randomUUID()}`
     if (!body || !idempotencyKey) return
     const tracksProviderRisk = replay || body.deliveryMode !== 'cache_only'
@@ -1315,7 +1335,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
         requestId: result.payload?.requestId || result.evidence.requestId,
         ageSeconds: result.payload?.meta?.ageSeconds ?? result.evidence.ageSeconds,
       }
-      revealResults(result.payload?.data?.items || [], nextEvidence, result.payload?.data?.page || null)
+      revealResults(result.payload?.data?.items || [], nextEvidence, result.payload?.data?.page || null, append)
       if (tracksProviderRisk) rememberLiveRequest({
         ...requestRecord,
         requestId: nextEvidence.requestId || requestRecord.requestId,
@@ -1396,9 +1416,38 @@ export function EcommerceTreasureBoxPage({ notify }) {
     }
   }
 
+  const loadStored = async (append = false) => {
+    const epoch = beginRequest()
+    if (epoch == null) return
+    setError(null)
+    try {
+      const result = await publicDataApi.ecommerceStoredItems(hubApiKey.trim(), {
+        marketplace, query: query.trim(), pageSize: '20',
+        ...(append && resultPage?.nextCursor ? { cursor: resultPage.nextCursor } : {}),
+      })
+      if (!finishRequest(epoch)) return
+      const data = result.payload.data
+      revealResults(data.items.map(row => ({ ...row.product, _evidence: { sourceMode: 'stored_inventory', requestId: row.requestId, capturedAt: row.capturedAt || row.recordedAt } })), { sourceMode: 'stored_inventory' }, data.pageInfo, append)
+    } catch (failure) {
+      if (!finishRequest(epoch)) return
+      setError(failure)
+      setPhase('presenting')
+    }
+  }
+  const canContinue = phase !== 'searching' && products.length > 0 && resultScopeRef.current === resultScope && (storedOnly || !hasAmbiguousLiveRequest)
+    && mode === 'hub_live' && resultPage?.hasMore !== false
+    && (storedOnly ? Boolean(resultPage?.nextCursor) : (Boolean(resultPage?.nextCursor) || (marketplace !== 'xiaohongshu_ec' && Number(resultPage?.page || 1) < 1000)))
+  const loadNext = () => {
+    if (!canContinue) return
+    if (storedOnly) { void loadStored(true); return }
+    const { page, cursor, ...filters } = currentLiveBody
+    void runLive({ append: true, bodyOverride: { ...filters, ...(resultPage?.nextCursor ? { cursor: resultPage.nextCursor } : { page: Number(resultPage?.page || 1) + 1 }) } })
+  }
+
   const submit = async (event) => {
     event.preventDefault()
     setError(null)
+    if (storedOnly) { await loadStored(); return }
     if (!query.trim()) {
       setError({ message: '请输入要找的商品。' })
       return
@@ -1416,6 +1465,10 @@ export function EcommerceTreasureBoxPage({ notify }) {
       if (lastLiveRequestRef.current?.outcome !== 'ambiguous') forgetLiveRequest()
     }
     verifiedKeyFingerprintRef.current = null
+    setProducts([])
+    setSelected(null)
+    setResultPage(null)
+    setEvidence(null)
     setHubApiKey(value)
     setKeyCheck({ status: 'idle', fingerprint: null, message: 'Key 已改变，请重新做零费用验证' })
     setError(null)
@@ -1497,7 +1550,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
     <section className="mih-treasure-page">
       <PageHeading
         eyebrow="DATA PRODUCT / JUSTONE CONNECTOR / GOVERNED DELIVERY"
-        title="电商数据百宝箱"
+        title="电商数据"
         description="小聚替你从统一 Hub 合同中找商品；来源未来可替换或扩展，调用、数据、计量与证据仍保持一致。"
       >
         <a className="qp-button qp-button--outline qp-button--sm" href={publicDocsHref('/docs/ecommerce-treasure-box')} target="_blank" rel="noreferrer">接入文档<ArrowSquareOut size={15} aria-hidden="true" /></a>
@@ -1514,7 +1567,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
         {error ? <TreasureProductError error={error} mode={mode} onUseSafeDemo={() => changeMode('safe_demo')} /> : null}
         <form className="mih-treasure-controls" onSubmit={submit}>
           <header><MagicWand size={20} weight="duotone" aria-hidden="true" /><div><strong>告诉小聚你要什么</strong><small>选择交付策略，验证 API Key 后开始采集。</small></div></header>
-          <DropdownField label="获取方式" value={mode} options={MODE_OPTIONS} disabled={phase === 'searching'} onChange={changeMode} />
+          <DropdownField label="获取方式" value={mode} options={MODE_OPTIONS} disabled={phase === 'searching' || storedOnly} onChange={changeMode} />
           {mode === 'safe_demo' ? (
             <>
               <DropdownField label="模拟交付策略" value={demoDeliveryMode} options={DEMO_DELIVERY_MODE_OPTIONS} disabled={phase === 'searching'} onChange={changeDemoDeliveryMode} />
@@ -1524,13 +1577,19 @@ export function EcommerceTreasureBoxPage({ notify }) {
                 <span><strong>浏览器本地策略沙盘 · 实际 0 Hub / 0 上游</strong><small>不读取当前 Hub 存量，不发 JustOne 请求，不创建 Hub usage。证据始终记录真实 <code>sourceMode=safe_demo</code>；缓存或实时结果只会标作“模拟”。</small></span>
               </div>
             </>
-          ) : <DropdownField label="交付策略" value={deliveryMode} options={DELIVERY_MODE_OPTIONS} disabled={phase === 'searching'} onChange={changeDeliveryMode} />}
-          <DropdownField label="平台" value={marketplace} options={MARKETPLACES} disabled={semanticsLocked} onChange={changeMarketplace} />
-          <DropdownField label="排序" value={sort} options={sortOptions} disabled={semanticsLocked || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={changeSort} />
-          <DropdownField label="每页陈列" value={displayPageSize} options={DISPLAY_PAGE_SIZE_OPTIONS} disabled={semanticsLocked} onChange={(value) => { setDisplayPageSize(value); setDisplayPage(0); setSelected(products[0] || null) }} />
-          <Field label="搜索词" hint="最多 200 个字符；本批商品的陈列翻页不发请求，上游 cursor 才是新数据请求。">
+          ) : <DropdownField label="交付策略" value={deliveryMode} options={DELIVERY_MODE_OPTIONS} disabled={phase === 'searching' || storedOnly} onChange={changeDeliveryMode} />}
+          <DropdownField label="数据范围" value={storedOnly ? 'stored' : 'acquire'} options={[{ value: 'acquire', label: '按平台采集' }, { value: 'stored', label: '浏览已存数据' }]} disabled={semanticsLocked || marketplace === 'all'} onChange={value => { setBrowse(value); if (value === 'stored') setMode('hub_live') }} />
+          <DropdownField label="平台" value={marketplace} options={[...MARKETPLACES, { value: 'all', label: '全部平台 · 仅已存数据' }]} disabled={semanticsLocked} onChange={changeMarketplace} />
+          <DropdownField label="排序" value={sort} options={sortOptions} disabled={semanticsLocked || storedOnly || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={changeSort} />
+          {view === 'treasure' ? <DropdownField label="百宝箱陈列数量" value={displayPageSize} options={DISPLAY_PAGE_SIZE_OPTIONS} disabled={semanticsLocked} onChange={(value) => { setDisplayPageSize(value); setDisplayPage(0); setSelected(products[0] || null) }} /> : null}
+          <Field label="搜索词" hint={storedOnly ? "按商品标题筛选本调用身份的已存记录；留空显示全部。" : "上游搜索词；刷新从指定页开始，下滑加载后续数据页。"}>
             <span className="mih-treasure-query"><MagnifyingGlass size={17} aria-hidden="true" /><input className="qp-input" value={query} maxLength="200" disabled={semanticsLocked} onChange={(event) => changeQuery(event.target.value)} placeholder="例如：便携相机" /></span>
           </Field>
+          {!storedOnly && mode === 'hub_live' ? <>
+            <Field label="起始数据页" hint={marketplace === 'xiaohongshu_ec' ? '小红书从第 1 页开始，再使用上游 continuation。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={marketplace === 'xiaohongshu_ec' ? '1' : upstreamPage} disabled={semanticsLocked || marketplace === 'xiaohongshu_ec'} onChange={event => setUpstreamPage(event.target.value)} /></Field>
+            {['taobao', 'tmall'].includes(marketplace) ? <div className="mih-commerce-price"><Field label="最低价"><input className="qp-input" type="number" min="0" value={minPrice} disabled={semanticsLocked} onChange={event => setMinPrice(event.target.value)} /></Field><Field label="最高价"><input className="qp-input" type="number" min="0" value={maxPrice} disabled={semanticsLocked} onChange={event => setMaxPrice(event.target.value)} /></Field></div> : null}
+          </> : null}
+          {storedOnly ? <p>仅查询当前调用身份已提交的商品记录，按入库请求时间倒序、同批按上游顺序展示。不会调用上游。</p> : null}
           {mode === 'hub_live' ? (
             <div className="mih-treasure-live-auth">
               <Field label="开放能力 API Key" hint="就是客户端从“API Keys”获得的同一把 Hub Public API secret；签发时必须显式包含 ecommerce，新增授权不会扩大旧 snapshot Key。">
@@ -1576,13 +1635,32 @@ export function EcommerceTreasureBoxPage({ notify }) {
           {recoveryStatus === 'released' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原预留已确认 released</strong><small>本地未决锁已解除；本次重新采集会使用新的 Idempotency-Key。</small></span></div> : null}
           {recoveryStatus === 'orphan_cleared' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>孤儿未决账本已安全清理</strong><small>Hub 明确返回 request_not_found；这不是通用路由 404，本次重新采集可以继续。</small></span></div> : null}
           {lastLiveRequest?.outcome === 'resolved' && lastLiveRequest.committedErrorCode === 'external_platform_response_unusable' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><Fingerprint size={17} weight="duotone" aria-hidden="true" /><span><strong>首次 committed-unusable 账本已保留</strong><small>该调用的响应无法归一化，可能已有上游采购成本；精确重放只读取已提交错误，不会再次访问 JustOne。{lastLiveRequest.requestId ? <> Request ID <code>{lastLiveRequest.requestId}</code></> : null}</small></span></div> : null}
-          <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || checkingKey || providerRequestBlockedByAmbiguity}>
-            {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : providerRequestBlockedByAmbiguity ? '改为重新采集或只读存量' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? (hasAmbiguousLiveRequest ? '自动核对后重新采集' : '重新采集最新数据') : '调用开放 API'}</>}
+          <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || checkingKey || (!storedOnly && providerRequestBlockedByAmbiguity)}>
+            {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{storedOnly ? '查询已存电商数据' : mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : providerRequestBlockedByAmbiguity ? '改为重新采集或只读存量' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? (hasAmbiguousLiveRequest ? '自动核对后重新采集' : '重新采集最新数据') : '调用开放 API'}</>}
           </button>
           {resolvedReplayAvailable ? <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={phase === 'searching'} onClick={() => runLive({ replay: true })}><ArrowClockwise size={15} aria-hidden="true" />读取已提交的原结果 · 幂等 POST / 0 新增 usage / 外部采集</button> : null}
           <p className="mih-treasure-auth-note"><LockKey size={15} aria-hidden="true" />这里使用普通 Hub Public API secret，不是供应方 Key；它必须在签发时包含 ecommerce entitlement。列表掩码不能调用，供应方密钥只在“外部数据平台”管理。</p>
         </form>
 
+        <section className="mih-commerce-results">
+          <div className="mih-commerce-toolbar" role="group" aria-label="电商数据视图">
+            <button type="button" className="qp-button qp-button--outline" aria-pressed={view === 'list'} onClick={() => setView('list')}>列表视图</button>
+            <button type="button" className="qp-button qp-button--outline" aria-pressed={view === 'treasure'} onClick={() => setView('treasure')}>百宝箱视图</button>
+            <span>{products.length} 条已载入</span>
+            <button type="button" className="qp-button qp-button--ghost" disabled={phase === 'searching' || checkingKey} onClick={() => { if (storedOnly) void loadStored(); else if (mode === 'safe_demo') void runSafeDemo(); else void runLive() }}>{storedOnly ? '刷新已存列表' : '刷新当前查询'}</button>
+          </div>
+          {view === 'list' ? <div className="mih-commerce-feed" tabIndex="0" aria-label="商品列表" onScroll={event => {
+            const element = event.currentTarget
+            if (element.scrollTop > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 100 && resultPage?.nextCursor && !error) loadNext()
+          }}>
+            <div className="mih-commerce-grid">{products.map((item, index) => <button type="button" className="mih-commerce-card" key={`${item._evidence?.requestId}-${item.id}-${index}`} onClick={() => setSelected(item)}>
+              <div className="mih-commerce-card-image"><HubProductImage item={item} apiKey={mode === 'hub_live' ? hubApiKey.trim() : ''} requestId={item._evidence?.requestId} /></div>
+              <small>{MARKETPLACES.find(platform => platform.value === item.marketplace)?.label || item.marketplace}</small>
+              <strong>{item.title}</strong><b>{priceLabel(item.pricing)}</b>
+              {item._evidence?.capturedAt ? <time>{new Date(item._evidence.capturedAt).toLocaleString()}</time> : null}
+            </button>)}</div>
+            {!products.length ? <p className="mih-commerce-empty">{phase === 'searching' ? '正在读取数据…' : '选择平台和条件后开始。全部平台只浏览已存数据。'}</p> : null}
+          </div> : (
         <div className={`mih-treasure-stage mih-treasure-stage--${phase}`} aria-live="polite">
           <div className="mih-treasure-stage__halo" aria-hidden="true" />
           <span className="mih-treasure-stage__provider">{mode === 'safe_demo' ? <>本地策略沙盘 <strong>不连接 Hub / JustOne</strong></> : <>当前唯一上游候选 <strong>JustOne</strong></>}</span>
@@ -1598,7 +1676,7 @@ export function EcommerceTreasureBoxPage({ notify }) {
             alt={phase === 'searching' ? '原创数据百宝猫小聚正在从数据袋中搜索' : '原创数据百宝猫小聚张开双手展示商品'}
           />
           {phase === 'searching' ? <span className="mih-treasure-searching-copy"><i /><i /><i />{mode === 'safe_demo' ? '正在本地演练交付策略 · 不访问 Hub 或上游' : '正在检查授权、Hub 存量与交付策略'}</span> : null}
-          {phase === 'presenting' ? visibleProducts.map((item, index) => <ProductOrb key={`${item.marketplace}-${item.id}-${displayPage}-${index}`} item={item} index={index} total={visibleProducts.length} selected={selected?.id === item.id} onSelect={setSelected} apiKey={mode === 'hub_live' ? hubApiKey.trim() : ''} requestId={evidence?.requestId} />) : null}
+          {phase === 'presenting' ? visibleProducts.map((item, index) => <ProductOrb key={`${item.marketplace}-${item.id}-${displayPage}-${index}`} item={item} index={index} total={visibleProducts.length} selected={selected?.id === item.id} onSelect={setSelected} apiKey={mode === 'hub_live' ? hubApiKey.trim() : ''} requestId={item._evidence?.requestId || evidence?.requestId} />) : null}
           {phase === 'presenting' && products.length ? (
             <nav className="mih-treasure-pagination" aria-label="商品陈列分页">
               <button type="button" aria-label="上一陈列页" disabled={displayPage === 0} onClick={() => showDisplayPage(displayPage - 1)}><CaretLeft size={15} aria-hidden="true" /></button>
@@ -1613,10 +1691,16 @@ export function EcommerceTreasureBoxPage({ notify }) {
             </p>
           ) : null}
         </div>
+)}
+          <div className="mih-commerce-footer">
+            <button type="button" className="qp-button qp-button--outline" disabled={!canContinue} onClick={loadNext}>{phase === 'searching' ? '正在加载…' : storedOnly ? '加载更多已存数据' : resultPage?.nextCursor ? '加载下一数据页' : '尝试下一数据页'}</button>
+            <small>{resultScopeRef.current !== resultScope && products.length ? '条件已变化，请重新查询。' : resultPage?.hasMore === false ? '本次分页已结束。' : storedOnly ? '按时间浏览已存记录，不触发采集。' : '下滑加载已确认的下一页；上游未给出分页标记时，可手动尝试下一页。刷新请点击左侧采集按钮。'}</small>
+          </div>
+        </section>
 
         <aside className="mih-treasure-inspector">
-          <ResultEvidence product={selected} evidence={evidence} />
-          <CallEvidence evidence={evidence} />
+          <ResultEvidence product={selected} evidence={selected?._evidence || evidence} />
+          <CallEvidence evidence={selected?._evidence || evidence} />
         </aside>
       </section>
 
