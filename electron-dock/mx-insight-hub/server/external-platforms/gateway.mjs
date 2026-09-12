@@ -324,6 +324,29 @@ export class ExternalPlatformGateway {
     }
   }
 
+  // The monthly procurement cap for one operation, as the gateway would apply
+  // it. The price book bound to the operation wins over the deployment-level
+  // billing config, exactly as it does when a call is dispatched -- otherwise
+  // the console would report a cap that is not the one being enforced.
+  async #operationBudget(operation) {
+    if (typeof this.platformStore?.describeCostBudget !== 'function') return null
+    // describeProvider reports the effective price book, having already chosen
+    // between a database price book and the deployment billing the same way
+    // dispatch does. Reading operation.billing here would silently fall back to
+    // the deployment config and report a cap that is not the enforced one.
+    const priceBook = operation?.priceBook
+    if (!priceBook) return null
+    try {
+      return await this.platformStore.describeCostBudget({
+        currency: priceBook.currency,
+        monthlyBudgetMinor: priceBook.monthlyBudgetMinor,
+      })
+    } catch {
+      // Diagnostics must never take the capabilities response down with them.
+      return null
+    }
+  }
+
   async capabilities({ consumerId = null, credentialConfigured = null } = {}) {
     const credentialReady = typeof credentialConfigured === 'boolean'
       ? credentialConfigured
@@ -341,11 +364,21 @@ export class ExternalPlatformGateway {
           config: this.config,
           credentialConfigured: credentialReady,
         })
-        operationReadiness = Object.fromEntries(operations.map((operation) => [
+        // The monthly procurement cap is only evaluated while dispatching, so
+        // an operation can be perfectly ready and still refuse every call for
+        // having spent its budget. Reported alongside readiness rather than
+        // folded into it: a request that carries an enforced per-request charge
+        // is exempt from the aggregate cap, so this blocks unbilled traffic
+        // rather than the operation as such.
+        const budgets = await Promise.all(operations.map((operation) => (
+          this.#operationBudget(operation)
+        )))
+        operationReadiness = Object.fromEntries(operations.map((operation, index) => [
           operation.operationKey,
           {
             ready: credentialReady && operationReadyForConsumer(operation, consumerId),
             effectiveState: operation.effectiveState,
+            budget: budgets[index],
           },
         ]))
         ready = operationReadiness[JUSTONE_OPERATION]?.ready ?? false

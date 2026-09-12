@@ -784,6 +784,45 @@ export class MemoryExternalPlatformStore {
     }
   }
 
+  // What the monthly procurement cap looks like right now, read-only.
+  //
+  // The cap is only ever evaluated while dispatching, so until now the console
+  // could show an operation as "可调用" -- correctly, because configuration,
+  // credential, release and price evidence were all fine -- while every call
+  // was refused for having spent the month's budget. Reporting a readiness the
+  // gateway does not honour is the failure this whole view exists to prevent.
+  //
+  // Deliberately non-throwing: #costState fails closed on incomplete evidence
+  // because it guards real money, but a diagnostic that throws would blank the
+  // very page an operator opened to find out what is wrong. Evidence problems
+  // are reported as an unknown spend instead.
+  describeCostBudget(costControl) {
+    const budgetMinor = costControl?.monthlyBudgetMinor
+    if (!Number.isSafeInteger(budgetMinor) || budgetMinor < 0) return null
+    let knownCostMinor = null
+    let reservedCostMinor = null
+    try {
+      const state = this.#costState(costControl, { customerBilled: false })
+      knownCostMinor = state.knownCostMinor
+      reservedCostMinor = state.reservedCostMinor
+    } catch {
+      // Cost evidence is incomplete. The budget is still worth reporting; what
+      // cannot be stated is how much of it is already committed.
+      return { budgetMinor, currency: costControl.currency ?? null, spentMinor: null, remainingMinor: null, exhausted: null }
+    }
+    const spentMinor = knownCostMinor + reservedCostMinor
+    return {
+      budgetMinor,
+      currency: costControl.currency ?? null,
+      spentMinor,
+      // Mirrors the admission comparison in reserveProviderCostWorkflow: a
+      // request is refused when spend plus its own cost would exceed the cap,
+      // so a budget with nothing left over admits nothing.
+      remainingMinor: Math.max(0, budgetMinor - spentMinor),
+      exhausted: spentMinor >= budgetMinor,
+    }
+  }
+
   #isCustomerBilledRequest(usageRequestId) {
     const usage = this.usageStore?.requests?.get?.(usageRequestId)
     const charge = this.usageStore?.customerCharges?.get?.(usageRequestId)
@@ -2153,6 +2192,57 @@ export class PostgresExternalPlatformStore {
       allowed: rows[0].allowed === true,
       remaining: Math.max(0, Number(rows[0].remaining)),
       retryAfterMs: Math.max(0, Number(rows[0].retry_after_ms)),
+    }
+  }
+
+  // The monthly procurement cap, read-only. See the memory store for why this
+  // exists; the difference here is that it must not take the advisory lock the
+  // transactional path uses -- a diagnostic has no business serialising against
+  // live dispatch, and outside a transaction that lock would be released
+  // immediately anyway.
+  //
+  // The two sums mirror the admission query's own predicates: provider, current
+  // UTC month, costs in the policy currency, and reservations still held by a
+  // live lease. A test drives real reservations until admission refuses and
+  // asserts this reports exhausted at exactly that point, so the duplication
+  // cannot drift silently.
+  async describeCostBudget(costControl) {
+    const budgetMinor = costControl?.monthlyBudgetMinor
+    if (!Number.isSafeInteger(budgetMinor) || budgetMinor < 0) return null
+    const currency = costControl.currency ?? null
+    const { rows } = await this.pool.query(
+      `WITH monthly_calls AS (
+         SELECT cost_minor, currency
+           FROM external_platform.provider_calls
+          WHERE provider_key = $1
+            AND started_at >= (date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+            AND started_at < ((date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC')
+       )
+       SELECT (
+                SELECT coalesce(sum(cost_minor), 0)::bigint
+                  FROM monthly_calls
+                 WHERE cost_minor IS NOT NULL AND currency = $2
+              ) AS known_cost_minor,
+              (
+                SELECT coalesce(sum(reservation.reserved_cost_minor), 0)::bigint
+                  FROM external_platform.provider_cost_reservations reservation
+                  JOIN usage_requests request ON request.id = reservation.usage_request_id
+                 WHERE reservation.provider_key = $1
+                   AND reservation.status = 'active'
+                   AND request.status = 'reserved'
+                   AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())
+                   AND reservation.created_at >= (date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+                   AND reservation.created_at < ((date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC')
+              ) AS reserved_cost_minor`,
+      [this.providerKey, currency],
+    )
+    const spentMinor = Number(rows[0].known_cost_minor) + Number(rows[0].reserved_cost_minor)
+    return {
+      budgetMinor,
+      currency,
+      spentMinor,
+      remainingMinor: Math.max(0, budgetMinor - spentMinor),
+      exhausted: spentMinor >= budgetMinor,
     }
   }
 

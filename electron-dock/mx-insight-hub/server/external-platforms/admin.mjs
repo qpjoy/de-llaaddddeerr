@@ -401,12 +401,31 @@ export class ExternalPlatformAdminService {
       this.store.analytics({ from: shanghaiDayStart(now), bucket: 'hour' }),
       this.#credential(),
     ])
-    const operations = this.operationControlStore
+    const describedOperations = this.operationControlStore
       ? await this.operationControlStore.describeProvider(this.providerKey, {
           config: this.config,
           credentialConfigured: credential.credentialConfigured,
         })
       : []
+    // How much of each operation's monthly procurement budget is already
+    // committed. This is the cap the gateway actually enforces -- the price
+    // book bound to the operation, falling back to deployment billing exactly
+    // as dispatch does -- which is not the same thing as the provider-level
+    // billing shown in the cost panel. Reporting only the latter is how an
+    // operator ends up staring at "未知" while calls fail on a real budget.
+    const operations = await Promise.all(describedOperations.map(async (operation) => {
+      // priceBook here is already the effective pricing: describeProvider
+      // resolves a database price book against the deployment billing exactly
+      // as dispatch does, so reading it avoids re-deciding which source wins.
+      const priceBook = operation.priceBook
+      const budget = typeof this.store.describeCostBudget === 'function' && priceBook
+        ? await this.store.describeCostBudget({
+            currency: priceBook.currency,
+            monthlyBudgetMinor: priceBook.monthlyBudgetMinor,
+          })
+        : null
+      return { ...operation, budget }
+    }))
     const provider = providerProjection(analytics, todayAnalytics, {
       ...this.config,
       configured: credential.credentialConfigured,

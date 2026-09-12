@@ -12714,3 +12714,54 @@ button.mih-catalog-status {
 }
 .mih-quota-meters__track > span[data-spent="true"] { background: var(--qp-danger, #9c3a34); }
 .mih-quota-meters li small { display: block; margin-top: 4px; font-size: 11px; color: var(--qp-text-muted); }
+
+/* ---------- Jump-to-fix ---------- */
+/* Every reported problem should be one click from the control that fixes it.
+   These are buttons rather than anchors because the console routes on the URL
+   fragment, so an in-page href would navigate away instead of scrolling. */
+.mih-fix-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--qp-accent, #1c7365);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.mih-fix-link:hover { text-decoration-thickness: 2px; }
+.mih-fix-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 3px; }
+
+.mih-external-cost-note__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0 2px;
+}
+.mih-external-cost-note__actions .mih-fix-link { margin-left: 0; }
+
+/* The jumped-to panel flashes so it is obvious where you landed. */
+.is-jump-target {
+  animation: mih-jump-flash 1.6s ease-out;
+  outline: none;
+}
+@keyframes mih-jump-flash {
+  0%, 40% { box-shadow: 0 0 0 2px var(--qp-accent, #1c7365); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .is-jump-target { animation: none; box-shadow: 0 0 0 2px var(--qp-accent, #1c7365); }
+}
+
+.mih-external-budget--spent { color: var(--qp-danger, #9c3a34); font-variant-numeric: tabular-nums; }
+
+/* Jump targets clear the sticky top bar rather than hiding their own heading. */
+#external-cost,
+#external-operations,
+#external-credential,
+.mih-external-operation-card { scroll-margin-top: 84px; }

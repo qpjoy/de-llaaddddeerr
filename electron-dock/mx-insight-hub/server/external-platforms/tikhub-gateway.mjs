@@ -628,11 +628,38 @@ export class TikHubGateway {
     return null
   }
 
+  // The monthly procurement cap for one operation, as the gateway would apply
+  // it. The price book bound to the operation wins over the deployment-level
+  // billing config, exactly as it does when a call is dispatched -- otherwise
+  // the console would report a cap that is not the one being enforced.
+  async #operationBudget(operation) {
+    if (typeof this.platformStore?.describeCostBudget !== 'function') return null
+    // describeProvider reports the effective price book, having already chosen
+    // between a database price book and the deployment billing the same way
+    // dispatch does. Reading operation.billing here would silently fall back to
+    // the deployment config and report a cap that is not the enforced one.
+    const priceBook = operation?.priceBook
+    if (!priceBook) return null
+    try {
+      return await this.platformStore.describeCostBudget({
+        currency: priceBook.currency,
+        monthlyBudgetMinor: priceBook.monthlyBudgetMinor,
+      })
+    } catch {
+      // Diagnostics must never take the capabilities response down with them.
+      return null
+    }
+  }
+
   async capabilities({ consumerId = null, credentialConfigured = null } = {}) {
     const credentialReady = typeof credentialConfigured === 'boolean'
       ? credentialConfigured
       : (await this.#credential()).ready
     let readiness = legacyOperationReadiness(this.config, credentialReady, consumerId)
+    // Why an operation is not ready, and whether its monthly budget still has
+    // room. Without these the console can only say "unknown", which tells an
+    // operator nothing about what to go and fix.
+    let operationDetail = {}
     if (this.operationControlStore) {
       try {
         const operationViews = await this.operationControlStore.describeProvider(TIKHUB_PROVIDER_KEY, {
@@ -646,9 +673,22 @@ export class TikHubGateway {
             consumerId,
           ),
         ]))
+        const budgets = await Promise.all(TIKHUB_OPERATION_KEYS.map((operationKey) => (
+          this.#operationBudget(operationViews.find((operation) => operation.operationKey === operationKey))
+        )))
+        operationDetail = Object.fromEntries(TIKHUB_OPERATION_KEYS.map((operationKey, index) => [
+          operationKey,
+          {
+            effectiveState: operationViews.find(
+              (operation) => operation.operationKey === operationKey,
+            )?.effectiveState ?? null,
+            budget: budgets[index],
+          },
+        ]))
       } catch {
         this.logger?.warn?.('[external-platform] TikHub operation readiness is unavailable')
         readiness = Object.fromEntries(TIKHUB_OPERATION_KEYS.map((operationKey) => [operationKey, false]))
+        operationDetail = {}
       }
     }
     const ready = TIKHUB_OPERATION_KEYS.every((operationKey) => readiness[operationKey] === true)
@@ -657,7 +697,10 @@ export class TikHubGateway {
       ready,
       operations: Object.fromEntries(TIKHUB_OPERATION_KEYS.map((operationKey) => [
         operationKey,
-        { ready: readiness[operationKey] === true },
+        {
+          ready: readiness[operationKey] === true,
+          ...(operationDetail[operationKey] || {}),
+        },
       ])),
       source: 'hub',
       servingMode: 'live_with_stored_fallback',

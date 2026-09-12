@@ -218,3 +218,42 @@ test('an active tenant adds no issue of its own', () => {
   })
   assert.equal(health.level, 'healthy')
 })
+
+// A spent procurement budget is the one blocker that readiness cannot see: the
+// operation stays configured, priced, released and "可调用" while every unbilled
+// call is refused. It therefore needs its own sentence and its own fix.
+test('an exhausted budget is reported as a budget problem, not a readiness one', () => {
+  const health = consumerHealth({
+    blockedOperations: [{
+      operation: 'ecommerce.products.search',
+      effectiveState: 'active',
+      reason: 'budget_exhausted',
+      budget: { budgetMinor: 1000, spentMinor: 1000, remainingMinor: 0, exhausted: true },
+    }],
+  })
+  assert.equal(health.level, 'blocked')
+  assert.match(health.issues[0].text, /月度上游预算已用完/u)
+  assert.match(health.issues[0].action, /外部数据平台/u)
+  // The distinction matters: sending someone to check upstream prerequisites
+  // when the prerequisites are all fine wastes the exact time this view saves.
+  assert.doesNotMatch(health.issues[0].action, /前置条件/u)
+})
+
+test('a not-ready operation keeps its own wording', () => {
+  const health = consumerHealth({
+    blockedOperations: [{ operation: 'ecommerce.products.search', effectiveState: 'blocked', reason: 'not_ready' }],
+  })
+  assert.match(health.issues[0].text, /当前不可调用/u)
+  assert.match(health.issues[0].action, /前置条件/u)
+})
+
+test('a nearly spent budget warns before the first rejection', () => {
+  const health = consumerHealth({
+    budgetWarnings: [{
+      operation: 'ecommerce.products.search',
+      budget: { budgetMinor: 1000, spentMinor: 950, remainingMinor: 50, exhausted: false },
+    }],
+  })
+  assert.equal(health.level, 'warn')
+  assert.match(health.issues[0].text, /即将用完/u)
+})

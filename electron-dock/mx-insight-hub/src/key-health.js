@@ -104,6 +104,18 @@ export function consumerHealth(health, {
   }
 
   for (const entry of health?.blockedOperations || []) {
+    // A spent procurement budget is not a readiness problem: the operation is
+    // configured, priced and released, and the console called it 可调用 right up
+    // to the 429. It needs a different sentence and a different fix.
+    if (entry.reason === 'budget_exhausted') {
+      issues.push({
+        level: 'blocked',
+        text: `${operationLabel(entry.operation)} 月度上游预算已用完`,
+        detail: '未计费流量会被拒绝（external_platform_cost_budget_exhausted）；已按次计费的请求不受此上限限制。',
+        action: '在“外部数据平台”提高该业务操作的月度上游预算',
+      })
+      continue
+    }
     issues.push({
       level: 'blocked',
       text: `${operationLabel(entry.operation)} 当前不可调用`,
@@ -111,6 +123,15 @@ export function consumerHealth(health, {
       action: entry.effectiveState === 'blocked'
         ? '由管理员在“开放能力”检查上游前置条件'
         : `运行状态：${entry.effectiveState}`,
+    })
+  }
+
+  for (const entry of health?.budgetWarnings || []) {
+    issues.push({
+      level: 'warn',
+      text: `${operationLabel(entry.operation)} 月度上游预算即将用完`,
+      detail: '预算耗尽后未计费流量会被拒绝。',
+      action: '在“外部数据平台”提前提高月度上游预算',
     })
   }
 

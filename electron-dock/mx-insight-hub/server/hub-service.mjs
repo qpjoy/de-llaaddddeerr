@@ -980,12 +980,31 @@ export class HubService {
     const granted = new Set(capabilityGrants.map((entry) => (
       typeof entry === 'string' ? entry : entry.capability
     )))
+    // Two different ways an operation refuses work, kept apart because they
+    // have different owners and different fixes. An operation can be perfectly
+    // ready and still reject every unbilled call for having spent its monthly
+    // procurement budget -- which is invisible from readiness alone, and was
+    // previously only discoverable by making a call and reading the 429.
     const blockedOperations = Object.entries(operations)
-      .filter(([operationKey, state]) => granted.has(operationKey) && state?.ready === false)
+      .filter(([operationKey, state]) => granted.has(operationKey) && (
+        state?.ready === false || state?.budget?.exhausted === true
+      ))
       .map(([operationKey, state]) => ({
         operation: operationKey,
         effectiveState: state.effectiveState || 'unknown',
+        reason: state?.ready === false ? 'not_ready' : 'budget_exhausted',
+        budget: state?.budget ?? null,
       }))
+    // Not yet refusing, but close enough that it will during the next burst.
+    const budgetWarnings = Object.entries(operations)
+      .filter(([operationKey, state]) => granted.has(operationKey)
+        && state?.ready !== false
+        && state?.budget
+        && state.budget.exhausted === false
+        && Number.isFinite(state.budget.budgetMinor)
+        && state.budget.budgetMinor > 0
+        && state.budget.remainingMinor / state.budget.budgetMinor <= 0.1)
+      .map(([operationKey, state]) => ({ operation: operationKey, budget: state.budget }))
 
     const now = Date.now()
     const keys = allKeys.map((key) => ({
@@ -1001,6 +1020,7 @@ export class HubService {
       quota,
       operations,
       blockedOperations,
+      budgetWarnings,
       keys: {
         total: keys.length,
         active: keys.filter((key) => key.status === 'active').length,

@@ -63,6 +63,35 @@ const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
 const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub'])
 const UNKNOWN = '未知'
 
+// Jump to the control that fixes what you just read.
+//
+// The console routes on the URL fragment, so an in-page anchor href would
+// navigate away instead of scrolling. This moves the viewport and the focus
+// ring itself, and flashes the target so it is obvious what was jumped to.
+function jumpToControl(elementId) {
+  const target = typeof document === 'undefined' ? null : document.getElementById(elementId)
+  if (!target) return
+  // 'start', not 'center': these targets are tall panels, and centering one
+  // puts its heading above the viewport so the operator lands in the middle of
+  // a form with no idea what they are looking at. scroll-margin-top keeps the
+  // heading clear of the sticky top bar.
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  // Focus lands on the panel rather than a field: the operator still has to
+  // choose what to change, and stealing the caret into an input would let a
+  // stray keystroke edit a price.
+  target.focus?.({ preventScroll: true })
+  target.classList.add('is-jump-target')
+  window.setTimeout(() => target.classList.remove('is-jump-target'), 1600)
+}
+
+function FixLink({ target, children }) {
+  return (
+    <button className="mih-fix-link" type="button" onClick={() => jumpToControl(target)}>
+      {children}<ArrowRight size={13} aria-hidden="true" />
+    </button>
+  )
+}
+
 function providerDisplayName(provider) {
   return ({ justone: 'JustOne', tikhub: 'TikHub' })[provider] || provider || '外部平台'
 }
@@ -496,6 +525,16 @@ function normalizeOperations(root, fallback = {}) {
         monthlySubsidyBudgetMinor: optionalNumber(priceBook.monthlySubsidyBudgetMinor),
         endpointPrices: normalizeEndpointPrices(priceBook),
       },
+      // The cap the gateway actually enforces for this operation, and how much
+      // of it is already committed. Distinct from the provider-level cost panel,
+      // which reads deployment billing and can read "未知" while this is real.
+      budget: isRecord(row.budget) ? {
+        budgetMinor: optionalNumber(row.budget.budgetMinor),
+        spentMinor: optionalNumber(row.budget.spentMinor),
+        remainingMinor: optionalNumber(row.budget.remainingMinor),
+        currency: optionalText(row.budget.currency)?.toUpperCase() || null,
+        exhausted: optionalBoolean(row.budget.exhausted),
+      } : null,
       blockers: firstArray(row.blockers).map((entry, blockerIndex) => (
         isRecord(entry)
           ? {
@@ -686,9 +725,9 @@ function statusLabel(status) {
   return labels[String(status || 'unknown').toLowerCase()] || String(status)
 }
 
-function Panel({ title, subtitle, action, className = '', children }) {
+function Panel({ title, subtitle, action, className = '', id = null, children }) {
   return (
-    <section className={`qp-panel mih-panel ${className}`.trim()}>
+    <section className={`qp-panel mih-panel ${className}`.trim()} id={id || undefined} tabIndex={id ? -1 : undefined}>
       <header className="mih-panel__header">
         <div>
           <h2>{title}</h2>
@@ -1087,6 +1126,7 @@ function ExternalPlatformCredentialPanel({
 
   return (
     <Panel
+      id="external-credential"
       title="API Key 管理"
       subtitle="密钥写入数据库来源；普通详情响应只返回配置状态，不返回明文。"
       className="mih-external-credential-panel"
@@ -1347,7 +1387,12 @@ function ExternalPlatformOperationCard({
   }
 
   return (
-    <form className="mih-external-operation-card" onSubmit={submit}>
+    <form
+      className="mih-external-operation-card"
+      id={`operation-${operation.operationKey}`}
+      tabIndex={-1}
+      onSubmit={submit}
+    >
       <header>
         <div>
           <strong>{operation.label}</strong>
@@ -1363,7 +1408,35 @@ function ExternalPlatformOperationCard({
         <div><dt>发布 / 价格版本</dt><dd>#{formatOptionalNumber(operation.release.revision)} / #{formatOptionalNumber(operation.priceBook.version)}</dd></div>
         <div><dt>价格表来源 / 状态</dt><dd>{operationControlSourceLabel(operation.priceBook.source)} / {statusLabel(operation.priceBook.status)}</dd></div>
         <div><dt>上游合同版本</dt><dd>{operation.release.contractVersion || UNKNOWN}</dd></div>
+        {/* The number that actually refuses calls. Readiness above can say
+            "可调用" while this is spent, which is precisely the gap that made
+            external_platform_cost_budget_exhausted look inexplicable. */}
+        <div>
+          <dt>月度上游预算 已用 / 上限</dt>
+          <dd className={operation.budget?.exhausted ? 'mih-external-budget--spent' : undefined}>
+            {operation.budget && operation.budget.budgetMinor !== null
+              ? `${formatMoneyMinor(operation.budget.spentMinor, operation.budget.currency)} / ${formatMoneyMinor(operation.budget.budgetMinor, operation.budget.currency)}`
+              : UNKNOWN}
+          </dd>
+        </div>
       </dl>
+
+      {operation.budget?.exhausted ? (
+        <div className="mih-external-operation-blockers" role="status">
+          <strong><WarningCircle size={16} aria-hidden="true" />月度上游预算已用完</strong>
+          <ul>
+            <li>
+              <code className="mih-mono">external_platform_cost_budget_exhausted</code>
+              <span>
+                未计费流量会被拒绝；已按次计费的请求不受此上限限制。
+                本月已用 {formatMoneyMinor(operation.budget.spentMinor, operation.budget.currency)}，
+                上限 {formatMoneyMinor(operation.budget.budgetMinor, operation.budget.currency)}。
+                在下方勾选“发布新价目表”后提高月度上游预算即可恢复。
+              </span>
+            </li>
+          </ul>
+        </div>
+      ) : null}
 
       {operation.blockers.length ? (
         <div className="mih-external-operation-blockers" role="status">
@@ -1522,8 +1595,9 @@ function ExternalPlatformOperationControlPanel({
 }) {
   return (
     <Panel
+      id="external-operations"
       title="上游平台操作控制"
-      subtitle="这里控制 Hub 是否可以调用某个上游操作；下游 API Key 的平台与产品授权仍在“开放能力”中独立管理。"
+      subtitle="这里控制 Hub 是否可以调用某个上游操作，包括每个操作被实际执行的月度上游预算；下游 API Key 的平台与产品授权仍在“开放能力”中独立管理。"
       className="mih-external-operation-panel"
       action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
     >
@@ -1576,12 +1650,28 @@ function CostQuotaPanel({ detail }) {
   const hasProgress = quota.used !== null && quota.freeLimit !== null && quota.freeLimit > 0
   const quotaPercent = hasProgress ? Math.max(0, Math.min(100, (quota.used / quota.freeLimit) * 100)) : null
   return (
-    <Panel title="上游成本与免费额度" subtitle="这里只展示供应商采购证据；下游按次价格与扣费在套餐、调用方和用量账本中单独核对。" className="mih-external-cost-panel">
+    <Panel
+      id="external-cost"
+      title="上游成本与免费额度"
+      subtitle="这里只展示部署级（环境变量）采购证据；真正拦住调用的月度预算按业务操作单独配置，在下方“上游平台操作控制”里。"
+      className="mih-external-cost-panel"
+    >
       <dl className="mih-external-facts">
         <div><dt>窗口实际净支出</dt><dd>{formatMoneyMinor(cost.actualMinor, cost.currency)}</dd></div>
         <div><dt>免费额度 / 折扣前标价估算</dt><dd>{formatMoneyMinor(cost.grossEstimatedMinor, cost.currency)}</dd></div>
         <div><dt>预计月度成本</dt><dd>{formatMoneyMinor(cost.projectedMonthMinor, cost.currency)}</dd></div>
-        <div><dt>上游月度成本线</dt><dd>{formatMoneyMinor(cost.monthlyBudgetMinor, cost.currency)}</dd></div>
+        <div>
+          <dt>上游月度成本线（部署级）</dt>
+          <dd>
+            {formatMoneyMinor(cost.monthlyBudgetMinor, cost.currency)}
+            {/* Unknown here does not mean unpriced: an operation with its own
+                database price book is enforced against that instead, and this
+                deployment-level value is never consulted for it. */}
+            {cost.monthlyBudgetMinor === null
+              ? <FixLink target="external-operations">改为按业务操作配置</FixLink>
+              : null}
+          </dd>
+        </div>
         <div><dt>单价未知的已计费调用</dt><dd>{formatOptionalNumber(cost.unknownCostCalls)}</dd></div>
         <div><dt>计费状态未确定的调用</dt><dd>{formatOptionalNumber(cost.indeterminateBillingCalls)}</dd></div>
         <div><dt>预计月调用 / 付费调用</dt><dd>{formatOptionalNumber(cost.projectedMonthlyCalls)} / {formatOptionalNumber(cost.projectedPaidCalls)}</dd></div>
@@ -1599,7 +1689,13 @@ function CostQuotaPanel({ detail }) {
             </tr>
           ))}</tbody>
         </Table>
-      ) : <p className="mih-external-unknown"><WarningCircle size={16} aria-hidden="true" />尚未配置可验证的逐接口采购价目。</p>}
+      ) : (
+        <p className="mih-external-unknown">
+          <WarningCircle size={16} aria-hidden="true" />
+          部署级环境变量未配置逐接口采购价目。若该操作已绑定数据库价目表，则以那份为准。
+          <FixLink target="external-operations">查看各操作的价目与预算</FixLink>
+        </p>
+      )}
       {hasProgress ? (
         <div className="mih-external-quota">
           <span><strong>免费额度使用进度</strong><small>{quotaPercent.toFixed(1)}%</small></span>
@@ -1611,6 +1707,12 @@ function CostQuotaPanel({ detail }) {
       <div className="mih-external-cost-note">
         <strong>成本规划建议</strong>
         <p>{cost.recommendation || '管理接口尚未提供定价建议；页面不会自行假设免费额度、阶梯价或充值折扣。'}</p>
+        {/* The advice above is about deployment-level billing, so it is paired
+            with the control that acts on it rather than left as prose. */}
+        <div className="mih-external-cost-note__actions">
+          <FixLink target="external-operations">去配置业务操作的价目与月度预算</FixLink>
+          <FixLink target="external-credential">检查上游凭据</FixLink>
+        </div>
         <small>
           定价证据：{displayDate(cost.pricingAsOf)} · 定价来源：{cost.pricingSource || UNKNOWN} · 预测置信度：{cost.confidence || UNKNOWN}
         </small>
@@ -1790,14 +1892,15 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             <StatusBadge status={detail.status} label={statusLabel(detail.status)} />
             <small>最近观测：{displayDate(detail.lastObservedAt)}</small>
           </section>
-          <ExternalPlatformCredentialPanel
-            token={token}
-            provider={provider}
-            credential={detail.credential}
-            onSaved={remote.refresh}
-            onUnauthorized={onUnauthorized}
-            notify={notify}
-          />
+          {/* What is happening comes before what to change: an operator opens
+              this page to read the situation, and only then edits a credential
+              or a price book. The controls keep stable ids so every metric and
+              blocker above can jump straight to the one that fixes it. */}
+          <DetailMetricRail detail={detail} />
+          <section className="mih-external-two-column">
+            <TrendPanel detail={detail} />
+            <CostQuotaPanel detail={detail} />
+          </section>
           <ExternalPlatformOperationControlPanel
             token={token}
             provider={provider}
@@ -1806,11 +1909,14 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             onUnauthorized={onUnauthorized}
             notify={notify}
           />
-          <DetailMetricRail detail={detail} />
-          <section className="mih-external-two-column">
-            <TrendPanel detail={detail} />
-            <CostQuotaPanel detail={detail} />
-          </section>
+          <ExternalPlatformCredentialPanel
+            token={token}
+            provider={provider}
+            credential={detail.credential}
+            onSaved={remote.refresh}
+            onUnauthorized={onUnauthorized}
+            notify={notify}
+          />
           <ProcessingChain stages={detail.stages} />
           <CapabilityMatrix capabilities={detail.capabilities} providerName={providerName} />
           <section className="mih-external-two-column mih-external-two-column--balanced">
