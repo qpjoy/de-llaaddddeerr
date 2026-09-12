@@ -136,7 +136,7 @@ const PLATFORM_CATALOG = [
   'data_center_saved_records_web',
 ]
 
-const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }
+const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
   'compat.xiaohongshu.app_v2': {
     group: 'compatibility',
@@ -2550,6 +2550,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         maxRequests: Number(overrides.maxRequests),
         windowSeconds: Number(overrides.windowSeconds),
         maxPageSize: Number(overrides.maxPageSize),
+        maxCrawlWork: Number(overrides.maxCrawlWork ?? Math.min(overrides.maxPageSize, 100)),
       })
       if (contextRef.current === targetContext) {
         const refreshed = await load()
@@ -2573,6 +2574,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       maxRequests: row.policy.maxRequests,
       windowSeconds: row.policy.windowSeconds,
       maxPageSize: row.policy.maxPageSize,
+      maxCrawlWork: row.policy.maxCrawlWork ?? Math.min(row.policy.maxPageSize, 100),
     })
     setFormError(null)
   }
@@ -2729,7 +2731,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
               {group.hint ? <small>{group.hint}</small> : null}
             </header>
           <Table label={`${group.label}授权与策略`}>
-            <thead><tr><th>开放项</th><th>能力类型</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>操作</th></tr></thead>
+            <thead><tr><th>开放项</th><th>能力类型</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>crawl 总预算</th><th>操作</th></tr></thead>
             <tbody>
               {group.rows.map((row) => (
                 <tr key={row.platform}>
@@ -2751,6 +2753,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                   <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                   <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
                   <td>{formatNumber(row.policy.maxPageSize)}</td>
+                  <td>{formatNumber(row.policy.maxCrawlWork ?? Math.min(row.policy.maxPageSize, 100))}</td>
                   <td className="mih-table__actions mih-table__actions--wide">
                     {hasPlatformWrite ? (
                       <>
@@ -2882,6 +2885,10 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
             <Field label="最大 pageSize">
               <input className="qp-input" type="number" min="1" value={policyForm.maxPageSize} onChange={(event) => setPolicyForm({ ...policyForm, maxPageSize: event.target.value })} required />
             </Field>
+            <Field label="采集总工作预算（crawl）">
+              <input className="qp-input" type="number" min="1" max="5000" value={policyForm.maxCrawlWork} onChange={(event) => setPolicyForm({ ...policyForm, maxCrawlWork: event.target.value })} required />
+            </Field>
+            <p className="mih-form__wide">采集总预算 = 身份数 × 每身份条数 × 活动类型数，范围 1–5000。仅作用于当前调用者与平台的 crawl；独立于价格和单页上限。</p>
             {formError ? <div className="mih-form__wide"><ErrorState error={formError} /></div> : null}
           </form>
         </Modal>

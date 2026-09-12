@@ -998,6 +998,7 @@ function policy(row) {
     maxRequests: row.max_requests,
     windowSeconds: row.window_seconds,
     maxPageSize: row.max_page_size,
+    maxCrawlWork: row.max_crawl_work ?? Math.min(row.max_page_size, 100),
     updatedAt: iso(row.updated_at),
   }
 }
@@ -2152,7 +2153,7 @@ export class PostgresStore {
     }
   }
 
-  async putPolicy({ tenantId, consumerId, platform: platformName, maxRequests, windowSeconds, maxPageSize }) {
+  async putPolicy({ tenantId, consumerId, platform: platformName, maxRequests, windowSeconds, maxPageSize, maxCrawlWork }) {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
@@ -2161,16 +2162,17 @@ export class PostgresStore {
       ])
       const { rows } = await client.query(
         `INSERT INTO consumer_platform_policies
-           (tenant_id, consumer_id, platform, max_requests, window_seconds, max_page_size)
-         VALUES ($1, $2, $3, $4, $5, $6)
+           (tenant_id, consumer_id, platform, max_requests, window_seconds, max_page_size, max_crawl_work)
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, LEAST($6, 100)))
          ON CONFLICT (consumer_id, platform) DO UPDATE SET
            tenant_id = EXCLUDED.tenant_id,
            max_requests = EXCLUDED.max_requests,
            window_seconds = EXCLUDED.window_seconds,
            max_page_size = EXCLUDED.max_page_size,
+           max_crawl_work = COALESCE($7, consumer_platform_policies.max_crawl_work),
            updated_at = now()
          RETURNING *`,
-        [tenantId, consumerId, platformName, maxRequests, windowSeconds, maxPageSize],
+        [tenantId, consumerId, platformName, maxRequests, windowSeconds, maxPageSize, maxCrawlWork ?? null],
       )
       await client.query('COMMIT')
       return policy(rows[0])

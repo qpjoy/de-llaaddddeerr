@@ -1143,7 +1143,7 @@ export class MemoryStore {
     return clone(policyRecord)
   }
 
-  async putPolicy({ tenantId, consumerId, platform, maxRequests, windowSeconds, maxPageSize }) {
+  async putPolicy({ tenantId, consumerId, platform, maxRequests, windowSeconds, maxPageSize, maxCrawlWork }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     if (this.consumers.get(consumerId)?.tenantId !== tenantId) throw new AppError(404, 'consumer_not_found', 'Consumer not found')
     const key = `${consumerId}:${platform}`
@@ -1154,6 +1154,7 @@ export class MemoryStore {
       maxRequests,
       windowSeconds,
       maxPageSize,
+      maxCrawlWork: maxCrawlWork ?? this.policies.get(key)?.maxCrawlWork ?? Math.min(maxPageSize, 100),
       updatedAt: nowIso(),
     }
     this.policies.set(key, record)

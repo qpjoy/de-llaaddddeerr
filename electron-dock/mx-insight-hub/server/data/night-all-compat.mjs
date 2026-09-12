@@ -24,10 +24,11 @@ const OPERATION_FIELDS = {
 }
 
 const PRIVATE_PARAMETER = /(provider|credential|endpoint|capability|module.?code|business.?id|availability|billing|token|secret|password|authori[sz]ation|api.?key|access.?key|private.?key|proxy|headers?|cookies?|session(?:id|key|cookie)?|bearer|base.?url|webhook|callback.?url|timeout|include.?raw|debug)/iu
-const HIGH_COST_PARAMETER = /^(archive|full.?archive|all.?tweets|archive.?limit|total.?count|max.*pages?|page.?count|chunk.?size|budget|crawl.?depth)$/iu
+const HIGH_COST_PARAMETER = /^(archive|full.?archive|all.?tweets|archive.?limit|total.?count|max.*pages?|page.?count|chunk.?size|budget|max.?crawl.?work|crawl.?depth)$/iu
 const WORKLOAD_PARAMETER = /^(count|limit|page.?size|page|page.?number|page.?no|concurrency|include.?details|include.?comments|disable.?auto.?details|comment.?limit|max.?enrich.?items|enrich.?concurrency|cache.?max.?age.?hours)$/iu
 const MAX_MULTI_VALUE_COUNT = 100
 const MAX_UPSTREAM_JOBS_PER_REQUEST = 50
+export const MAX_CRAWL_WORK = 5_000
 export const NIGHT_ALL_COMPATIBILITY_MAX_PAGE = 15
 const MAX_IDENTIFIER_LENGTH = 2_048
 const FALLBACK_WINDOWS_MS = {
@@ -153,6 +154,7 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
   businessId,
   canonicalizePlatform,
   maxPageSize,
+  maxCrawlWork = Math.min(maxPageSize, 100),
 }) {
   assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
   assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
@@ -291,7 +293,7 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
         ? normalizeIdentifierArray(upstreamBody[field], field)
         : normalizeIdentifier(upstreamBody[field], field, { allowNumber: numericAliases.has(field) })
     }
-    const identifierCount = supplied.reduce(
+    let identifierCount = supplied.reduce(
       (sum, field) => sum + (arrays.has(field) ? upstreamBody[field].length : 1),
       0,
     )
@@ -313,8 +315,21 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
       if (identifiers.length === 1) upstreamBody.username = identifiers[0]
       else upstreamBody.usernames = identifiers
     }
-    assert(identifierCount <= MAX_MULTI_VALUE_COUNT, 400, 'work_budget_exceeded', `Identifier count must not exceed ${MAX_MULTI_VALUE_COUNT}`)
+    if (operation === 'user-info') {
+      assert(identifierCount <= MAX_MULTI_VALUE_COUNT, 400, 'work_budget_exceeded', `Identifier count must not exceed ${MAX_MULTI_VALUE_COUNT}`)
+    }
     if (operation === 'crawl') {
+      // Only collapse aliases that Night-All explicitly deduplicates. A username
+      // and a user ID can identify different people; never infer equivalence.
+      const groups = [
+        ['username', 'usernames'], ['userId', 'userIds', 'user_id', 'uid'],
+        ['channelId', 'channel_id'], ['channelUrl', 'channel_url', 'url', 'urls'],
+      ]
+      identifierCount = groups.reduce((total, group) => total + new Set(
+        group.flatMap((field) => upstreamBody[field] == null ? [] : [upstreamBody[field]].flat()),
+      ).size, 0)
+      assert(Number.isSafeInteger(maxCrawlWork) && maxCrawlWork > 0 && maxCrawlWork <= MAX_CRAWL_WORK,
+        500, 'invalid_crawl_work_policy', 'Invalid server crawl work policy')
       const activityTypeCount = upstreamBody.activityTypes?.length || 1
       assert(
         identifierCount <= MAX_UPSTREAM_JOBS_PER_REQUEST,
@@ -323,10 +338,13 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
         `Identifier count must not exceed ${MAX_UPSTREAM_JOBS_PER_REQUEST}`,
       )
       assert(
-        identifierCount * pageSize * activityTypeCount <= effectivePageSizeLimit,
+        identifierCount * pageSize * activityTypeCount <= maxCrawlWork,
         400,
         'work_budget_exceeded',
-        `Crawl work must not exceed ${effectivePageSizeLimit}`,
+        `Crawl work must not exceed ${maxCrawlWork}`,
+        { stage: 'admission', upstreamDispatched: false, retryable: false,
+          identityCount: identifierCount, pageSize, activityTypeCount,
+          requestedWork: identifierCount * pageSize * activityTypeCount, allowedWork: maxCrawlWork },
       )
     }
   }

@@ -142,6 +142,7 @@ import {
   nightAllCompatibilityFallbackWindowMs,
   nightAllCompatibilityItemCount,
   normalizeNightAllCompatibilityRequest,
+  MAX_CRAWL_WORK,
   staleSnapshotAgeSeconds,
 } from './data/night-all-compat.mjs'
 import {
@@ -1271,17 +1272,18 @@ export class HubService {
     assert(consumer?.tenantId === tenantId, 404, 'consumer_not_found', 'Consumer not found in tenant')
 
     const enabled = body.enabled !== false
-    await this.store.setPlatformGrant(consumerId, platform, enabled)
-
     const current = (await this.store.getPolicy(consumerId, platform)) || this.defaultPolicy
-    const policy = await this.store.putPolicy({
-      tenantId,
-      consumerId,
-      platform,
+    const maxCrawlWork = positiveInteger(body.maxCrawlWork, 'maxCrawlWork', current.maxCrawlWork ?? Math.min(current.maxPageSize, 100))
+    assert(maxCrawlWork <= MAX_CRAWL_WORK, 400, 'invalid_request', `maxCrawlWork must not exceed ${MAX_CRAWL_WORK}`)
+    const policyInput = {
+      tenantId, consumerId, platform,
       maxRequests: positiveInteger(body.maxRequests, 'maxRequests', current.maxRequests),
       windowSeconds: positiveInteger(body.windowSeconds, 'windowSeconds', current.windowSeconds),
       maxPageSize: positiveInteger(body.maxPageSize, 'maxPageSize', current.maxPageSize),
-    })
+      maxCrawlWork,
+    }
+    await this.store.setPlatformGrant(consumerId, platform, enabled)
+    const policy = await this.store.putPolicy(policyInput)
     return { platform, enabled, policy }
   }
 
@@ -3793,6 +3795,7 @@ export class HubService {
       businessId: context.consumer.businessId,
       canonicalizePlatform: canonicalPlatform,
       maxPageSize: policy.maxPageSize,
+      maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
     })
     const directUserActivity = directXiaohongshuLegacyUserActivityRequest(operation, normalized)
     if (

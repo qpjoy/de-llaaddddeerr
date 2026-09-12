@@ -2142,7 +2142,7 @@ function NightAllPlatformDetail({ token, range, setQuery, onUnauthorized }) {
           <tbody>{data.endpointStatistics.map(row => <tr key={`${row.operation}:${row.platform}`}><td>{row.operation}</td><td>{row.platform}</td><td>{row.hubRequests}</td><td>{row.upstreamCalls}</td><td>{row.successfulHubRequests}</td><td>{row.unknownOutcomes}</td></tr>)}</tbody></Table>
         {!data.endpointStatistics.length ? <p>当前窗口暂无调用证据；这不表示接口已通过健康检查。</p> : null}
       </section>
-      <section className="qp-panel"><h2>交付与运行边界</h2><p>{data.notes.budget}</p><p>{data.notes.fallback}</p><p>{data.notes.connection}</p><p>上游调用成功后，原始结果与入库任务一起提交，再由后台完成归一化和检索投影。</p></section>
+      <section className="qp-panel"><h2>交付与运行边界</h2><p>{data.notes.budget}</p><a className="qp-button qp-button--outline" href="#/platforms">配置调用身份采集预算</a><p>{data.notes.fallback}</p><p>{data.notes.connection}</p><p>上游调用成功后，原始结果与入库任务一起提交，再由后台完成归一化和检索投影。</p></section>
     </> : null}
   </>
 }

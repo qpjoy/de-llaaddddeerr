@@ -45,7 +45,7 @@ export class NightAllPlatformAdminService {
       customerBilling: { planPath: '#/plans', unit: 'request', modes: ['disabled', 'shadow', 'enforced'],
         note: '套餐分别设置 raw / crawl / user-info 单价（可为 0），分配给调用身份；租户计费模式决定是否实际扣款。相同幂等请求重放不重复收费。小红书直连分支使用 social.* 计费键。' },
       notes: { scope: '统计已留存的逻辑请求和调用证据，不包含预检拒绝、重放 HTTP 次数、data/search、回填或小红书直连。状态未知不代表故障，也不代表实时健康。',
-        budget: '工作预算与费率独立。免费不会跳过权限、页大小、工作量限制或未知结果恢复。',
+        budget: '工作预算与费率独立。免费不会跳过权限、页大小、工作量限制或未知结果恢复。采集总预算 maxCrawlWork 可在开放能力中按调用身份与平台配置（1–5000，默认 100），单页最多 100 的限制仍生效。',
         fallback: 'Night-All 不确定结果或 502/503/504 可读取 Hub 精确快照；快照成功交付沿用既有客户请求计费语义。',
         connection: '连接与服务凭据仍由部署配置管理，不在此显示或迁移密钥。' },
     }

@@ -955,3 +955,70 @@ test('Night-All commercial calls reject insufficient balance before connector di
   for (const operation of ['raw','crawl','user-info']) await assert.rejects(service.nightAllCompatibilitySearch(context,{operation,path:`/api/v1/night-all/search/${operation}`,idempotencyKey:`no-credit-${operation}`,body:{platform:'twitter',count:20,...(operation==='raw'?{query:'AI'}:{username:'alice'})}}),e=>e.code==='insufficient_credit')
   assert.equal(calls(),0);assert.equal(store.connectorCalls.size,0);assert.equal(store.requests.size,0)
 })
+
+test('crawl work is separately configurable and duplicate identity aliases do not inflate work', () => {
+  const options = { businessId: 'test', canonicalizePlatform: (value) => value, maxPageSize: 100, maxCrawlWork: 200 }
+  const request = { platform: 'twitter', usernames: ['alice', 'bob'], count: 100 }
+  assert.equal(normalizeNightAllCompatibilityRequest('crawl', request, options).pageSize, 100)
+  assert.throws(() => normalizeNightAllCompatibilityRequest('crawl', { ...request, count: 101 }, options), { code: 'page_size_exceeded' })
+  assert.throws(() => normalizeNightAllCompatibilityRequest('crawl', { ...request, activityTypes: ['posts', 'replies'] }, options), (error) => {
+    assert.equal(error.code, 'work_budget_exceeded')
+    assert.deepEqual(error.details, { stage: 'admission', upstreamDispatched: false, retryable: false,
+      identityCount: 2, pageSize: 100, activityTypeCount: 2, requestedWork: 400, allowedWork: 200 })
+    return true
+  })
+  const aliases = { platform: 'twitter', username: 'alice', usernames: Array(100).fill('alice'), count: 100 }
+  assert.equal(normalizeNightAllCompatibilityRequest('crawl', aliases, { ...options, maxCrawlWork: 100 }).pageSize, 100)
+  assert.equal(normalizeNightAllCompatibilityRequest('crawl', { platform: 'twitter', uid: '123', userId: '123', userIds: ['123'], count: 100 }, { ...options, maxCrawlWork: 100 }).pageSize, 100)
+  assert.throws(() => normalizeNightAllCompatibilityRequest('crawl', { ...aliases, userId: 'alice' }, { ...options, maxCrawlWork: 100 }), { code: 'work_budget_exceeded' })
+  for (const extra of [{ maxCrawlWork: 500 }, { params: { maxCrawlWork: 500 } }]) {
+    assert.throws(() => normalizeNightAllCompatibilityRequest('crawl', { ...request, ...extra }, options))
+  }
+})
+
+test('consumer platform budget rejects before dispatch, can be raised by management, and preserves other platforms', async () => {
+  const fixture = await compatibilityFixture({ grants: ['twitter', 'youtube'] })
+  const { consumer } = fixture.context
+  const input = { operation: 'crawl', path: '/api/v1/night-all/search/crawl', idempotencyKey: 'crawl-budget-config',
+    body: { platform: 'twitter', usernames: ['alice', 'bob'], count: 100 } }
+  await assert.rejects(() => fixture.service.nightAllCompatibilitySearch(fixture.context, input), (error) => error.code === 'work_budget_exceeded' && error.details.allowedWork === 100)
+  assert.equal(fixture.calls(), 0)
+  assert.equal(fixture.store.requests.size, 0)
+  const config = { tenantId: consumer.tenantId, consumerId: consumer.id, maxCrawlWork: 200 }
+  const updated = await fixture.service.putPlatformConfiguration('twitter', config)
+  assert.equal(updated.policy.maxCrawlWork, 200)
+  assert.equal((await fixture.store.getPolicy(consumer.id, 'youtube')).maxCrawlWork, 100)
+  assert.equal((await fixture.service.putPlatformConfiguration('twitter', { tenantId: consumer.tenantId, consumerId: consumer.id })).policy.maxCrawlWork, 200)
+  await fixture.service.nightAllCompatibilitySearch(fixture.context, input)
+  assert.equal(fixture.calls(), 1)
+  for (const value of [0, -1, 1.5, 5001, '500']) {
+    await assert.rejects(() => fixture.service.putPlatformConfiguration('twitter', { ...config, enabled: false, maxCrawlWork: value }), { code: 'invalid_request' })
+    assert.equal((await fixture.store.getPolicy(consumer.id, 'twitter')).maxCrawlWork, 200)
+  }
+  // Invalid configuration must not silently revoke the grant.
+  assert.ok((await fixture.store.listGrants(consumer.id)).includes('twitter'))
+})
+
+test('PostgreSQL crawl budget migration preserves lower limits and policy edits persist independently', { skip: !process.env.MX_ECOMMERCE_TEST_DATABASE_URL }, async () => {
+  const { default: pg } = await import('pg')
+  const { readFile } = await import('node:fs/promises')
+  const { PostgresStore } = await import('../../server/stores/postgres-store.mjs')
+  const pool = new pg.Pool({ connectionString: process.env.MX_ECOMMERCE_TEST_DATABASE_URL, max: 1 })
+  const tenantId = '00000000-0000-4000-8000-000000000001'
+  const consumerId = '00000000-0000-4000-8000-000000000002'
+  try {
+    await pool.query('CREATE TEMP TABLE consumer_platform_policies (tenant_id uuid, consumer_id uuid, platform text, max_requests int, window_seconds int, max_page_size int, updated_at timestamptz DEFAULT now(), PRIMARY KEY(consumer_id,platform))')
+    await pool.query('INSERT INTO consumer_platform_policies VALUES ($1,$2,\'twitter\',100,3600,20),($1,$2,\'youtube\',100,3600,1000)', [tenantId, consumerId])
+    await pool.query(await readFile(new URL('../../migrations/075_crawl_work_policy.sql', import.meta.url), 'utf8'))
+    const store = new PostgresStore(pool)
+    assert.equal((await store.getPolicy(consumerId, 'twitter')).maxCrawlWork, 20)
+    assert.equal((await store.getPolicy(consumerId, 'youtube')).maxCrawlWork, 100)
+    const input = { tenantId, consumerId, platform: 'twitter', maxRequests: 100, windowSeconds: 3600, maxPageSize: 20 }
+    assert.equal((await store.putPolicy({ ...input, maxCrawlWork: 500 })).maxCrawlWork, 500)
+    assert.equal((await store.putPolicy({ ...input, maxPageSize: 10 })).maxCrawlWork, 500)
+    assert.equal((await store.getPolicy(consumerId, 'twitter')).maxPageSize, 10)
+    assert.equal((await store.listPolicies(consumerId)).find((entry) => entry.platform === 'twitter').maxCrawlWork, 500)
+    await assert.rejects(() => store.putPolicy({ ...input, maxCrawlWork: 5001 }), (error) => error.code === '23514')
+    assert.equal((await store.getPolicy(consumerId, 'twitter')).maxCrawlWork, 500)
+  } finally { await pool.end() }
+})
