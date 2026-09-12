@@ -1,3 +1,4 @@
+import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Brain,
@@ -828,7 +829,7 @@ export function App() {
   }
 
   return (
-    <div className={`qp-app ${themeClassName(theme)} qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
+    <DemoCredentialProvider key={token} token={token}><div className={`qp-app ${themeClassName(theme)} qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
       <a className="mih-skip-link" href="#mih-main-content">跳到主要内容</a>
       <button className="mih-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMenuOpen(false)} />
       <aside className="qp-sidebar qp-scrollbar mih-sidebar" aria-label="MX Insight Hub">
@@ -873,7 +874,7 @@ export function App() {
           </div>
         </header>
         <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
-          <Page {...pageProps} />
+          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} />
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
@@ -882,6 +883,6 @@ export function App() {
           <X size={19} aria-hidden="true" />
         </button>
       ) : null}
-    </div>
+    </div></DemoCredentialProvider>
   )
 }

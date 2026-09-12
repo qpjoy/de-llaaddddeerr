@@ -1,3 +1,4 @@
+import { issueDemoCredential, readDemoCredential } from './core/demo-credential.mjs'
 import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
@@ -732,8 +733,28 @@ export class HubService {
     return this.store.revokeApiKey(requiredUuid(id, 'id'))
   }
 
+  async createDemoCredential(body = {}) {
+    const keys = (await this.listApiKeys()).filter(key => key.status === 'active' && key.environment === 'live'
+      && (!key.expiresAt || new Date(key.expiresAt).getTime() > Date.now()))
+    const defaults = keys.filter(key => key.name === 'LCY-delta' && key.environment === 'live')
+    const selected = body.keyId ? keys.find(key => key.id === requiredUuid(body.keyId, 'keyId'))
+      : defaults.length === 1 ? defaults[0] : null
+    const choices = keys.map(({ id, name, consumerId, environment }) => ({ id, name, consumerId, environment }))
+    if (!selected && !body.keyId) return { choices, keyId: null, secret: null, reason: '请选择演示 Key（未找到唯一的 LCY-delta Live Key）' }
+    assert(selected, 400, 'demo_key_unavailable', 'Select an active API key')
+    assert(await this.store.findApiKeyById(selected.id), 403, 'demo_identity_unavailable', 'Selected key or tenant is unavailable')
+    return { choices, keyId: selected.id, name: selected.name,
+      ...issueDemoCredential(selected.id, this.apiKeyPepper) }
+  }
+
   async authenticate(secret) {
     assert(secret, 401, 'api_key_required', 'API key is required')
+    const demoKeyId = readDemoCredential(secret, this.apiKeyPepper)
+    if (demoKeyId) {
+      const context = await this.store.findApiKeyById(demoKeyId)
+      assert(context, 401, 'invalid_api_key', 'Selected API key is invalid, expired, or revoked')
+      return context
+    }
     const digest = hmacSecret(secret, this.apiKeyPepper)
     const context = await this.store.findApiKeyByDigest(digest)
     if (context) return context

@@ -704,6 +704,11 @@ export class MemoryStore {
       .map((record) => this.#publicApiKey(record))
   }
 
+  async findApiKeyById(id) {
+    const key = this.apiKeys.get(id)
+    return key ? this.findApiKeyByDigest(key.digest) : null
+  }
+
   async findApiKeyByDigest(digest) {
     const key = this.apiKeys.get(this.apiKeysByDigest.get(digest))
     if (!active(key) || (key.expiresAt != null && new Date(key.expiresAt).getTime() <= Date.now())) return null

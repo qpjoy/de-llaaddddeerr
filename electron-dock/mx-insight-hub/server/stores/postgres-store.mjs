@@ -1335,6 +1335,11 @@ export class PostgresStore {
     return rows.map(apiKey)
   }
 
+  async findApiKeyById(id) {
+    const { rows } = await this.pool.query('SELECT key_digest FROM api_keys WHERE id = $1', [id])
+    return rows[0] ? this.findApiKeyByDigest(rows[0].key_digest) : null
+  }
+
   async findApiKeyByDigest(digest) {
     const { rows } = await this.pool.query(
       `SELECT

@@ -299,6 +299,7 @@ export async function signInWithLauncher({ username, password }) {
 }
 
 export const adminApi = {
+  demoCredential: (token, keyId) => request(token, `${ADMIN_ROOT}/demo-credentials`, { method: 'POST', body: keyId ? { keyId } : {} }),
   ecommerceItems: (token, query) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { query }),
   saveEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: body.requestId ? 'PUT' : 'POST', body }),
   deleteEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: 'DELETE', body }),

@@ -24,7 +24,7 @@ test('Xiaohongshu note gallery uses the governed concurrent relay and stable fai
   assert.match(page, /publicDocsHref\('\/docs\/xiaohongshu-note#xiaohongshu-note'\)/u)
   assert.match(page, /签发 \/ 轮换 API Key/u)
   assert.match(page, /查看开放能力/u)
-  assert.match(page, /const \[apiKey, setApiKey\] = useState\(''\)/u)
+  assert.match(page, /const \[apiKey\] = useDemoApiKey\(\)/u)
   assert.doesNotMatch(page, /(?:localStorage|sessionStorage)\.setItem\([^\n]*apiKey/iu)
   // This page lives in the admin console (route capability `apikey.read`; the
   // public listener serves no SPA), so it may name the vendor the way the

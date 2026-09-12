@@ -52,8 +52,9 @@ test('treasure box reuses the ordinary Open Capabilities API key and never persi
   assert.match(apiSource, /export const publicDataApi/u)
   assert.match(apiSource, /\/api\/v1\/data\/ecommerce\/products\/search/u)
   assert.match(pageSource, /publicDataApi\.ecommerceProductsSearch/u)
-  assert.match(pageSource, /type="password"/u)
-  assert.match(pageSource, /autocomplete="off"/iu)
+  const demoSource = await readFile(new URL('../../src/demo-credentials.jsx', import.meta.url), 'utf8')
+  assert.match(demoSource, /type="password"/u)
+  assert.match(demoSource, /autocomplete="off"/iu)
   assert.match(pageSource, /开放能力 API Key/u)
   assert.match(pageSource, /无需另签产品 Key/u)
   assert.doesNotMatch(pageSource, /chargeConfirmed|mih-treasure-charge-confirm|允许一次新的外部采集/u)
@@ -192,7 +193,7 @@ test('live key preflight is zero-cost, rejects every Test key and leaves one-cli
   const capabilitiesApi = apiSource.match(/capabilities: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
   const requestLookupApi = apiSource.match(/requestByIdempotencyKey: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
   const verifyKey = pageSource.match(/const verifyHubApiKey = async \(\) => \{[\s\S]*?\n  \}\n\n  useEffect\(/u)?.[0] || ''
-  const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
+  const demoSource = await readFile(new URL('../../src/demo-credentials.jsx', import.meta.url), 'utf8')
 
   assert.match(capabilitiesApi, /'\/api\/v1\/data\/capabilities'/u)
   assert.doesNotMatch(capabilitiesApi, /method: 'POST'|ecommerce\/products\/search/u)
@@ -219,7 +220,8 @@ test('live key preflight is zero-cost, rejects every Test key and leaves one-cli
   assert.match(verifyKey, /status: 'missing_grant'/u)
   assert.match(verifyKey, /status: 'degraded'/u)
   assert.match(verifyKey, /status: 'ready'/u)
-  assert.match(pageSource, /placeholder="mih_live_…"/u)
+  assert.match(pageSource, /useDemoApiKey/u)
+  assert.match(verifyKey, /apiKey\.startsWith\('mih_demo_'\)/u)
   assert.doesNotMatch(pageSource, /placeholder="[^"]*mih_test_/u)
   assert.doesNotMatch(pageSource, /placeholder="mxk_/u)
   assert.match(pageSource, /type="button"[^>]+onClick=\{verifyHubApiKey\}[\s\S]*?零费用验证 Key/u)
@@ -228,8 +230,8 @@ test('live key preflight is zero-cost, rejects every Test key and leaves one-cli
   assert.match(pageSource, /本页调用 Public API：[\s\S]*?publicApiOrigin\(\)[\s\S]*?MX_INSIGHT_PUBLIC_URL/u)
   assert.match(pageSource, /上一次外部采集请求仍待核查[\s\S]*?点击主按钮即可[\s\S]*?先自动只读核对/u)
   assert.doesNotMatch(pageSource, /ambiguousLookupReady|再次核对状态|需要人工核查 consumer 归属/u)
-  assert.match(changeKey, /setKeyCheck\(\{ status: 'idle', fingerprint: null/u)
-  assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'\) forgetLiveRequest\(\)/u)
+  assert.match(demoSource, /<Page key=\{state.identity\}/u)
+  assert.match(pageSource, /useState\(loadLiveRequest\)/u)
   assert.doesNotMatch(pageSource, /const keyUsable|ambiguousLookupReady/u)
   assert.doesNotMatch(pageSource, /type="submit"[^>]+!keyUsable/u)
 })
@@ -266,7 +268,7 @@ test('one click reconciles an ambiguous refresh before one explicitly related re
   const sameLogicalRequest = pageSource.match(/function sameLogicalRequestBody\(left, right\) \{[\s\S]*?\n\}/u)?.[0] || ''
   const ambiguityClassifier = pageSource.match(/function ambiguousLiveFailure\(error\) \{[\s\S]*?\n\}/u)?.[0] || ''
   const ambiguousCodes = pageSource.match(/const AMBIGUOUS_LIVE_ERROR_CODES = new Set\(\[[\s\S]*?\]\)/u)?.[0] || ''
-  const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
+  const demoSource = await readFile(new URL('../../src/demo-credentials.jsx', import.meta.url), 'utf8')
   const searchApi = apiSource.match(/ecommerceProductsSearch: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
 
   assert.match(pageSource, /crypto\.subtle\.digest\('SHA-256'/u)
@@ -332,7 +334,7 @@ test('one click reconciles an ambiguous refresh before one explicitly related re
   assert.doesNotMatch(runLive, /previous\?\.keyFingerprint !== fingerprint/u)
   assert.match(statusCheck, /verifiedKeyFingerprintRef\.current !== fingerprint/u)
   assert.doesNotMatch(statusCheck, /fingerprint !== pending\.keyFingerprint|fingerprint === pending\.keyFingerprint/u)
-  assert.match(changeKey, /lastLiveRequestRef\.current\?\.outcome !== 'ambiguous'/u)
+  assert.doesNotMatch(demoSource, /forgetLiveRequest|sessionStorage/u)
   assert.match(runLive, /stableCommittedFailure[\s\S]*?outcome: 'resolved'/u)
   assert.match(runLive, /stableCommittedFailure[\s\S]*?requestError\?\.details\?\.requestId[\s\S]*?committedErrorCode: requestError\.code/u)
   assert.match(runLive, /const priorCommittedUnusable = requestError\?\.status === 409[\s\S]*?previous\?\.committedErrorCode === 'external_platform_response_unusable'/u)
@@ -342,7 +344,7 @@ test('one click reconciles an ambiguous refresh before one explicitly related re
 
 test('ambiguous refresh is one click without fee checkbox, UUID or manual reconciliation controls', async () => {
   const [, , pageSource] = await sources()
-  const keyField = pageSource.match(/<Field label="开放能力 API Key"[\s\S]*?<\/Field>/u)?.[0] || ''
+  const demoSource = await readFile(new URL('../../src/demo-credentials.jsx', import.meta.url), 'utf8')
   const changeMode = pageSource.match(/const changeMode = \(value\) => \{[\s\S]*?\n  \}\n\n  const changeDeliveryMode/u)?.[0] || ''
   const statusCheck = pageSource.match(/const checkAmbiguousRequestStatus = async \(\{[\s\S]*?\n  \}\n\n  const verifyResolvedReplayOwnership/u)?.[0] || ''
   const runSafeDemo = pageSource.match(/const runSafeDemo = async \(\) => \{[\s\S]*?\n  \}/u)?.[0] || ''
@@ -358,7 +360,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="上游排序（仅采集）"[\s\S]*?disabled=\{semanticsLocked/u)
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
-  assert.match(keyField, /type="password"[\s\S]*?disabled=\{phase === 'searching' \|\| checkingKey\}/u)
+  assert.match(demoSource, /<Page key=\{state.identity\}/u)
   assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
   assert.doesNotMatch(pageSource, /const semanticsLocked = [^\n]*ambiguousOriginalSelected/u)
   assert.match(changeMode, /if \(phase === 'searching'\) return/u)

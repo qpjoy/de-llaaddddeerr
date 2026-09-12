@@ -241,3 +241,7 @@ curl -fsS \
   "$HUB_PUBLIC_URL/api/v1/data/capabilities" \
   | jq '.data.platforms[] | select(.platform == "ecommerce")'
 ```
+
+```bash
+
+```

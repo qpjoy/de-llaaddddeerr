@@ -141,7 +141,7 @@ export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScro
       <hr /><h3>采集笔记</h3>
       <DropdownField label="采集来源" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
       <Field label={kind === 'search_notes' ? '采集关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
-      <p>使用上方开放能力 API Key。需要小红书、App V2 兼容合同及相应搜索／用户笔记授权；每页独立计量，最多 15 页。</p>
+      <p>使用上方统一选择的演示身份。需要小红书、App V2 兼容合同及相应搜索／用户笔记授权；每页独立计量，最多 15 页。</p>
       <label><input type="checkbox" checked={armed} disabled={acquiring || !apiKey.trim() || !selector.trim()} onChange={event => setArmed(event.target.checked)} /> 允许下拉采集下一页（可能计费）</label>
       <button className="qp-button qp-button--primary" disabled={acquiring || loading || !apiKey.trim() || !selector.trim() || (next === null && !overflow.current.length)} onClick={() => void acquire()}>{acquiring ? '正在获取…' : acquireError ? '重试同一请求' : next === undefined ? '采集第一页' : '获取下一批笔记'}</button>
       {next === null ? <p>本次上游列表已结束，或已达 15 页上限。</p> : null}

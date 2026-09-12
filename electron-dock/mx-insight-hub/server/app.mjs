@@ -2614,6 +2614,14 @@ export function createApp({
         })
         return
       }
+      if (pathname === '/internal/v1/admin/demo-credentials' && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'demo credentials')
+        const body = await readJson(request, 2048)
+        if (Object.keys(body).some(key => key !== 'keyId')) throw new AppError(400, 'unsupported_fields', 'Only keyId is accepted')
+        sendJson(response, 200, { data: await service.createDemoCredential(body), requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/proxy')
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)

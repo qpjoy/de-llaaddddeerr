@@ -1,3 +1,4 @@
+import { useDemoApiKey } from './demo-credentials.jsx'
 import { requestUuid } from './request-id.js'
 import { useEffect, useMemo, useState } from 'react'
 import {
@@ -267,7 +268,7 @@ function DeliveryEvidence({ evidence, error }) {
 }
 
 export function XiaohongshuNotePage({ notify, token, session }) {
-  const [apiKey, setApiKey] = useState('')
+  const [apiKey] = useDemoApiKey()
   const [url, setUrl] = useState('')
   const [deliveryMode, setDeliveryMode] = useState('cache_first')
   const [result, setResult] = useState(null)
@@ -359,17 +360,14 @@ export function XiaohongshuNotePage({ notify, token, session }) {
       <PageHeading
         eyebrow="DATA PRODUCT / XIAOHONGSHU NOTE"
         title="小红书笔记画卷"
-        description="输入官方笔记链接，通过 Hub 稳定 JSON POST 合同查看完整正文、作者、互动量与标签。上游供应方是 TikHub，但调用方只面对 Hub 合同；API Key 仅保存在当前页面内存。"
+        description="输入官方笔记链接，通过 Hub 稳定 JSON POST 合同查看完整正文、作者、互动量与标签。上游供应方是 TikHub，但调用方只面对 Hub 合同；演示身份由数据产品统一选择。"
       >
         <a className="qp-button qp-button--outline" href="#/api-keys">签发 / 轮换 API Key</a>
         <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a>
         <a className="qp-button qp-button--outline" href="#/plans">查看合同费率</a>
         <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')} target="_blank" rel="noreferrer">查看开放 API / 文档</a>
       </PageHeading>
-      <section className="qp-panel mih-xhs-key">          <Field label="开放能力 API Key" hint="需要 xiaohongshu 与 social.posts.resolve；不会写入浏览器存储。">
-            <input className="qp-input" type="password" autoComplete="off" value={apiKey} disabled={busy} onChange={(event) => { setApiKey(event.target.value); setResult(null); setHistory([]); setError(null) }} placeholder="mih_live_…" required />
-          </Field>
-</section>
+
       <XiaohongshuFeed token={token} session={session} apiKey={apiKey} NoteScroll={NoteScroll} onSelectLink={value => {
         setUrl(value)
         document.getElementById('xhs-note-resolve')?.scrollIntoView({ behavior: 'smooth', block: 'start' })

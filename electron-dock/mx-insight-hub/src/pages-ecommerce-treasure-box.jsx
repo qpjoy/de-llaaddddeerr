@@ -1,3 +1,4 @@
+import { useDemoApiKey } from './demo-credentials.jsx'
 import { EcommerceDataList } from './pages-ecommerce-data-list.jsx'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -868,7 +869,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
   const [marketplace, setMarketplace] = useState('taobao')
   const [sort, setSort] = useState('sales_desc')
   const [query, setQuery] = useState('便携相机')
-  const [hubApiKey, setHubApiKey] = useState('')
+  const [hubApiKey] = useDemoApiKey()
   const [keyCheck, setKeyCheck] = useState({ status: 'idle', fingerprint: null, message: '尚未验证' })
   const [checkingKey, setCheckingKey] = useState(false)
   const [phase, setPhase] = useState('idle')
@@ -1460,24 +1461,6 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
     else await runLive()
   }
 
-  const changeHubApiKey = (value) => {
-    // A resolved replay can be discarded when the credential changes. An
-    // ambiguous request remains locked when only the credential changes. A
-    // controlled repeat is available only after an explicit refresh action
-    // and an automatic GET that verifies the old unknown ID.
-    if (verifiedKeyFingerprintRef.current && value !== hubApiKey) {
-      if (lastLiveRequestRef.current?.outcome !== 'ambiguous') forgetLiveRequest()
-    }
-    verifiedKeyFingerprintRef.current = null
-    setProducts([])
-    setSelected(null)
-    setResultPage(null)
-    setEvidence(null)
-    setHubApiKey(value)
-    setKeyCheck({ status: 'idle', fingerprint: null, message: 'Key 已改变，请重新做零费用验证' })
-    setError(null)
-  }
-
   const verifyHubApiKey = async () => {
     const apiKey = hubApiKey.trim()
     if (!apiKey) {
@@ -1499,7 +1482,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
       })
       return null
     }
-    if (!/^mih_live_/u.test(apiKey)) {
+    if (!/^mih_live_/u.test(apiKey) && !apiKey.startsWith('mih_demo_')) {
       setKeyCheck({ status: 'invalid', fingerprint: null, message: 'Hub Public API secret 应以 mih_live_ 开头；不要填写列表掩码、Admin token 或 JustOne key' })
       return null
     }
@@ -1601,9 +1584,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
           {storedOnly ? <p>仅查询当前调用身份已提交的商品记录，按入库请求时间倒序、同批按上游顺序展示。不会调用上游。</p> : null}
           {mode === 'hub_live' ? (
             <div className="mih-treasure-live-auth">
-              <Field label="开放能力 API Key" hint="就是客户端从“API Keys”获得的同一把 Hub Public API secret；签发时必须显式包含 ecommerce，新增授权不会扩大旧 snapshot Key。">
-                <span className="mih-treasure-key"><Key size={17} aria-hidden="true" /><input ref={keyInputRef} className="qp-input" type="password" autoComplete="off" value={hubApiKey} disabled={phase === 'searching' || checkingKey} onChange={(event) => changeHubApiKey(event.target.value)} placeholder="mih_live_…" /></span>
-              </Field>
+              <p>使用上方统一选择的演示 Key。</p>
               <div className={`mih-treasure-key-check mih-treasure-key-check--${keyCheck.status}`} role="status" aria-live="polite">
                 <span><ShieldCheck size={16} weight="duotone" aria-hidden="true" />{keyCheck.message}</span>
                 <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!hubApiKey.trim() || checkingKey || phase === 'searching'} onClick={verifyHubApiKey}>{checkingKey ? '验证中' : '零费用验证 Key'}</button>
