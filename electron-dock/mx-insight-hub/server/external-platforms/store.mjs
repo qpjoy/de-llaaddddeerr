@@ -2128,7 +2128,14 @@ export class PostgresExternalPlatformStore {
        )
        INSERT INTO external_platform.provider_rate_buckets AS bucket
          (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at, updated_at)
-       SELECT $1, $2, $3, ($2 - $4)::double precision, true,
+       -- Both operands are cast, and each parameter is cast to exactly one
+       -- type everywhere it appears. In an INSERT ... SELECT the parameters
+       -- carry no column context, so a bare "$2 - $4" leaves PostgreSQL with
+       -- unknown on both sides and it refuses the expression (42725); casting
+       -- $2 to double precision instead collides with the integer capacity
+       -- column it also feeds (42P08). So capacity stays integer and only the
+       -- subtraction's result becomes double precision.
+       SELECT $1, $2, $3, ($2::integer - $4::double precision), true,
               db_clock.observed_at, db_clock.observed_at
          FROM db_clock
        ON CONFLICT (provider_key) DO UPDATE SET
