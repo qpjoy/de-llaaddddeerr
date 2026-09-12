@@ -499,6 +499,8 @@ export class MemoryExternalPlatformStore {
       lastFailureAt: null,
       lastErrorCode: null,
     }
+    // Keyed by marketplace; only contract failures land here.
+    this.contractCircuits = new Map()
   }
 
   async snapshotFor(input, at = new Date()) {
@@ -597,6 +599,19 @@ export class MemoryExternalPlatformStore {
   async providerState(providerKey = this.providerKey) {
     if (providerKey !== this.providerKey) return null
     return clone(this.state)
+  }
+
+  // The breaker for one marketplace's contract failures.
+  //
+  // A response the Hub cannot normalize is a gap in our own contract rather
+  // than an upstream outage: the vendor answered, and answered for exactly one
+  // marketplace. Counting those provider-wide suspended live dispatch for every
+  // other marketplace too, which then degraded healthy traffic to stale
+  // snapshots. Upstream faults still use the provider-wide breaker.
+  async contractCircuitState(providerKey = this.providerKey, scope = null) {
+    if (providerKey !== this.providerKey || !scope) return null
+    const bucket = this.contractCircuits.get(scope)
+    return bucket ? clone(bucket) : null
   }
 
   async acquireProviderRateLimit({ limit, tokens = 1, windowMs = 60_000, at = new Date() }) {
@@ -1262,6 +1277,9 @@ export class MemoryExternalPlatformStore {
     itemCount = null,
     errorCode = null,
     affectsCircuit = true,
+    // Which breaker a failure belongs to: 'contract' faults are scoped to the
+    // marketplace, everything else is provider-wide.
+    circuitCategory = null,
     responseArchive = null,
     restrictedResponseArchive = null,
     upstreamEvidence = null,
@@ -1336,8 +1354,10 @@ export class MemoryExternalPlatformStore {
         lastSuccessAt: call.completedAt,
         lastErrorCode: null,
       })
+      // A marketplace that parses again is no longer the one that was broken.
+      if (call.marketplace) this.contractCircuits.delete(call.marketplace)
     } else if (affectsCircuit) {
-      this.#recordFailure(errorCode)
+      this.#recordFailure(errorCode, { circuitCategory, scope: call.marketplace ?? null })
     }
     return { snapshot: clone(storedSnapshot) }
   }
@@ -1371,7 +1391,26 @@ export class MemoryExternalPlatformStore {
     }))
   }
 
-  #recordFailure(errorCode) {
+  #recordFailure(errorCode, { circuitCategory = null, scope = null } = {}) {
+    // A contract failure is ours, and it is specific to the marketplace whose
+    // response we could not read, so it opens only that marketplace's breaker.
+    // Everything else -- authentication, capacity, balance, transport -- really
+    // is a provider-wide condition and keeps the provider-wide breaker.
+    if (circuitCategory === 'contract' && scope) {
+      const current = this.contractCircuits.get(scope)
+      const failures = (current?.consecutiveFailures ?? 0) + 1
+      this.contractCircuits.set(scope, {
+        providerKey: this.providerKey,
+        scope,
+        consecutiveFailures: failures,
+        lastFailureAt: iso(),
+        lastErrorCode: errorCode,
+        circuitOpenUntil: failures >= this.circuitFailureThreshold
+          ? iso(Date.now() + this.circuitOpenMs)
+          : current?.circuitOpenUntil ?? null,
+      })
+      return
+    }
     const failures = this.state.consecutiveFailures + 1
     Object.assign(this.state, {
       consecutiveFailures: failures,
@@ -1398,6 +1437,9 @@ export class MemoryExternalPlatformStore {
     failureResponseStatus = 502,
     failureResponseBody = null,
     affectsCircuit = true,
+    // Which breaker a failure belongs to: 'contract' faults are scoped to the
+    // marketplace, everything else is provider-wide.
+    circuitCategory = null,
     responseArchive = null,
     restrictedResponseArchive = null,
     upstreamEvidence = null,
@@ -1455,7 +1497,9 @@ export class MemoryExternalPlatformStore {
     })
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
     if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
-    if (affectsCircuit) this.#recordFailure(errorCode)
+    if (affectsCircuit) {
+      this.#recordFailure(errorCode, { circuitCategory, scope: delivery?.marketplace ?? null })
+    }
     if (snapshot) {
       this.requests.push(requestEvent({
         ...delivery,
@@ -2091,6 +2135,58 @@ export class PostgresExternalPlatformStore {
         WHERE consumer_id = $1 AND operation = $2 AND request_fingerprint = $3
           AND owner_request_id = $4`,
       [consumerId, operation, fingerprint, ownerRequestId],
+    )
+  }
+
+  // See the memory store: contract failures are scoped to one marketplace so an
+  // unparseable response cannot suspend live dispatch for the rest of the
+  // provider. Kept in its own table so provider_state keeps meaning exactly
+  // what it meant before -- the provider-wide breaker.
+  async contractCircuitState(providerKey = this.providerKey, scope = null) {
+    if (providerKey !== this.providerKey || !scope) return null
+    const { rows } = await this.pool.query(
+      `SELECT provider_key, scope, consecutive_failures, circuit_open_until,
+              last_failure_at, last_error_code
+         FROM external_platform.provider_contract_circuits
+        WHERE provider_key = $1 AND scope = $2`,
+      [providerKey, scope],
+    )
+    const row = rows[0]
+    return row ? {
+      providerKey: row.provider_key,
+      scope: row.scope,
+      consecutiveFailures: Number(row.consecutive_failures),
+      circuitOpenUntil: row.circuit_open_until ? iso(row.circuit_open_until) : null,
+      lastFailureAt: row.last_failure_at ? iso(row.last_failure_at) : null,
+      lastErrorCode: row.last_error_code,
+    } : null
+  }
+
+  async #recordContractFailure(client, scope, errorCode) {
+    await client.query(
+      `INSERT INTO external_platform.provider_contract_circuits AS circuit
+         (provider_key, scope, consecutive_failures, last_failure_at, last_error_code, updated_at)
+       VALUES ($1, $2, 1, now(), $3, now())
+       ON CONFLICT (provider_key, scope) DO UPDATE SET
+         consecutive_failures = circuit.consecutive_failures + 1,
+         last_failure_at = now(),
+         last_error_code = EXCLUDED.last_error_code,
+         circuit_open_until = CASE
+           WHEN circuit.consecutive_failures + 1 >= $4::integer
+             THEN now() + ($5::integer * interval '1 millisecond')
+           ELSE circuit.circuit_open_until
+         END,
+         updated_at = now()`,
+      [this.providerKey, scope, errorCode, this.circuitFailureThreshold, this.circuitOpenMs],
+    )
+  }
+
+  async #clearContractCircuit(client, scope) {
+    if (!scope) return
+    await client.query(
+      `DELETE FROM external_platform.provider_contract_circuits
+        WHERE provider_key = $1 AND scope = $2`,
+      [this.providerKey, scope],
     )
   }
 
@@ -3108,6 +3204,8 @@ export class PostgresExternalPlatformStore {
     itemCount = null,
     errorCode = null,
     affectsCircuit = true,
+    // Which breaker this failure belongs to; see #advanceFailureState.
+    circuitCategory = null,
     responseArchive = null,
     restrictedResponseArchive = null,
     upstreamEvidence = null,
@@ -3220,8 +3318,13 @@ export class PostgresExternalPlatformStore {
            WHERE provider_key = $1`,
           [this.providerKey],
         )
+        // A marketplace that parses again is no longer the broken one.
+        await this.#clearContractCircuit(client, delivery?.marketplace ?? null)
       } else if (affectsCircuit) {
-        await this.#advanceFailureState(client, errorCode)
+        await this.#advanceFailureState(client, errorCode, {
+          circuitCategory,
+          scope: delivery?.marketplace ?? null,
+        })
       }
       await this.#insertIngestJob(client, ingestJob)
       const settled = await this.#readProviderEvidence(client, settlement, {
@@ -3315,7 +3418,13 @@ export class PostgresExternalPlatformStore {
     })
   }
 
-  async #advanceFailureState(client, errorCode) {
+  async #advanceFailureState(client, errorCode, { circuitCategory = null, scope = null } = {}) {
+    // Contract failures belong to one marketplace; everything else is a
+    // provider-wide condition. Same split as the memory store.
+    if (circuitCategory === 'contract' && scope) {
+      await this.#recordContractFailure(client, scope, errorCode)
+      return
+    }
     await client.query(
       `UPDATE external_platform.provider_state SET
          consecutive_failures = consecutive_failures + 1,
@@ -3345,6 +3454,8 @@ export class PostgresExternalPlatformStore {
     failureResponseStatus = 502,
     failureResponseBody = null,
     affectsCircuit = true,
+    // Which breaker this failure belongs to; see #advanceFailureState.
+    circuitCategory = null,
     responseArchive = null,
     restrictedResponseArchive = null,
     upstreamEvidence = null,
@@ -3380,7 +3491,10 @@ export class PostgresExternalPlatformStore {
         archiveObjects,
       })
       if (affectsCircuit) {
-        await this.#advanceFailureState(client, errorCode)
+        await this.#advanceFailureState(client, errorCode, {
+          circuitCategory,
+          scope: delivery?.marketplace ?? null,
+        })
       }
       if (snapshot) {
         const locked = await client.query(

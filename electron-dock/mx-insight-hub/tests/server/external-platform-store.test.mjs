@@ -1802,6 +1802,9 @@ test('Postgres reserved workflow begins real calls from held headroom without do
         return { rows: [{ id: input.id, started_at: new Date() }] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       throw new Error(`unexpected SQL: ${sql}`)
     },
     release() {},
@@ -1855,6 +1858,9 @@ test('Postgres provider-call cost admission locks and checks the UTC monthly led
         return { rows: [{ id: input.id, started_at: startedAt }] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       throw new Error(`unexpected SQL: ${sql}`)
     },
     release() {},
@@ -1920,6 +1926,9 @@ test('Postgres billed standalone call bypasses zero cost caps', async () => {
         return { rows: [{ id: input.id, started_at: startedAt }] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       throw new Error(`unexpected SQL: ${sql}`)
     },
     release() {},
@@ -2071,6 +2080,9 @@ test('Postgres provider-call insert validates and persists uncertain retry linea
         return { rows: [{ id: input.id, started_at: startedAt }] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       throw new Error(`unexpected SQL: ${sql}`)
     },
     release() {},
@@ -2112,6 +2124,9 @@ test('Postgres beginProviderCall reconciles a lost COMMIT only with the full own
         return { rows: [{ id: input.id, started_at: startedAt }] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       if (sql === 'COMMIT') throw commitError
       throw new Error(`unexpected SQL: ${sql}`)
     },
@@ -2172,6 +2187,9 @@ test('Postgres beginProviderCall fails closed when a lost COMMIT cannot be recon
         return { rows: [{ id: input.id, started_at: new Date() }] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       if (sql === 'COMMIT') throw commitError
       throw new Error(`unexpected SQL: ${sql}`)
     },
@@ -2723,6 +2741,9 @@ test('Postgres finishProviderStep persists only provider-step evidence and uses 
         return { rows: [storedSnapshot] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       if (/INSERT INTO mxq\.jobs/u.test(sql)) {
         storedIngestJob = {
           queue: 'mx-insight-hub:ingest',
@@ -2886,6 +2907,9 @@ test('Postgres finishProviderStep reconciles a committed terminal step after its
         return { rows: [] }
       }
       if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      // A success also clears this marketplace's contract breaker, so a
+      // deployed contract fix takes effect without waiting the breaker out.
+      if (/FROM external_platform\.provider_contract_circuits/u.test(sql)) return { rows: [] }
       throw new Error(`unexpected SQL: ${sql}`)
     },
     release(error) { releasedWith = error },

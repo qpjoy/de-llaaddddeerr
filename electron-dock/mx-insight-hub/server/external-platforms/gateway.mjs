@@ -728,7 +728,16 @@ export class ExternalPlatformGateway {
     }
 
     const state = await this.platformStore.providerState(this.providerKey)
-    const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
+    // Two breakers: the provider-wide one for upstream faults, and this
+    // marketplace's own for responses the Hub could not normalize. A gap in our
+    // contract for one marketplace must not suspend live dispatch for the rest.
+    const contractCircuit = typeof this.platformStore.contractCircuitState === 'function'
+      ? await this.platformStore.contractCircuitState(this.providerKey, normalized.marketplace ?? null)
+      : null
+    const circuitOpen = Boolean(
+      (state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now)
+      || (contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now),
+    )
     const resolvedCredential = circuitOpen
       ? { ready: Boolean(this.adapter), credential: null, revision: null }
       : await this.#resolvedCredential()
@@ -1128,6 +1137,7 @@ export class ExternalPlatformGateway {
           failureResponseStatus: mappedError.status,
           failureResponseBody: failureResponseBody(mappedError, activeRequestId),
           affectsCircuit: evidence.affectsCircuit !== false,
+          circuitCategory: evidence.circuitCategory ?? null,
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
           restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,

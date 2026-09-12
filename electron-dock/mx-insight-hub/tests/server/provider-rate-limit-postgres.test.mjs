@@ -48,12 +48,17 @@ test('PostgreSQL admits, exhausts and refills the shared provider bucket', {
     assert.ok(Number(row.rows[0].tokens) < 1, 'fewer than one token remains')
 
     // Raising the limit must not hand out a free burst: the bucket keeps the
-    // tokens it has and refills over time, so a spent provider stays spent
-    // until real time passes.
-    const raised = await store.acquireProviderRateLimit({ limit: 60, tokens: 1, windowMs: 1_000 })
+    // tokens it has and refills over time.
+    //
+    // Asserted over an hour-long window rather than a one-second one, so the
+    // refill earned by the milliseconds this test takes is nil. Stating it
+    // against a fast window would make the assertion a race with the clock
+    // rather than a statement about the bucket.
+    const raised = await store.acquireProviderRateLimit({ limit: 60, tokens: 1, windowMs: 3_600_000 })
     assert.equal(raised.allowed, false, 'a larger bucket does not refill instantly')
 
-    // 60 tokens per second, so a fraction of a second is plenty.
+    // And with a window short enough for refill to be the dominant effect,
+    // admission returns on its own: 60 per second over ~250ms is ~15 tokens.
     await new Promise((resolve) => setTimeout(resolve, 250))
     const refilled = await store.acquireProviderRateLimit({ limit: 60, tokens: 1, windowMs: 1_000 })
     assert.equal(refilled.allowed, true, 'the bucket refills as time passes')
