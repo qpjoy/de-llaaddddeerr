@@ -327,6 +327,9 @@ export class JustOneAdapter {
     fetchImpl = globalThis.fetch,
     timeoutMs = JUSTONE_DEFAULT_TIMEOUT_MS,
     maxResponseBytes = JUSTONE_DEFAULT_MAX_RESPONSE_BYTES,
+    // Used only to report a response shape the contract does not accept yet.
+    // Optional so every existing construction keeps working unchanged.
+    logger = null,
   } = {}) {
     const fallbackToken = normalizedCredential(token)
     if (credentialResolver != null && typeof credentialResolver !== 'function') {
@@ -338,6 +341,7 @@ export class JustOneAdapter {
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
     this.#fallbackToken = fallbackToken
     this.#credentialResolver = credentialResolver
+    this.logger = logger
     this.fetchImpl = fetchImpl
     this.timeoutMs = boundedInteger(timeoutMs, {
       name: 'timeoutMs',
@@ -656,6 +660,19 @@ export class JustOneAdapter {
         })
       } catch (error) {
         if (error instanceof JustOneUpstreamError) throw error
+        // The accepted item paths are a closed set on purpose: a new upstream
+        // shape is meant to arrive with a reviewed fixture rather than be
+        // guessed at. That is only actionable if the shape can be seen, and the
+        // response body itself is never archived for an unusable call -- so the
+        // keys-and-types outline is logged here, values excluded.
+        if (error?.observedShape) {
+          this.logger?.warn?.({
+            marketplace: request?.marketplace ?? null,
+            errorCode: error.code,
+            triedPaths: error.triedPaths,
+            observedShape: error.observedShape,
+          }, '[external-platform] upstream response shape is not in the accepted set')
+        }
         throw succeededUnusable(
           httpStatus,
           error?.code || 'invalid_upstream_contract',

@@ -476,6 +476,35 @@ function valueAt(root, path) {
   return current
 }
 
+// A keys-and-types outline of a response, for diagnosing a shape the contract
+// does not yet accept.
+//
+// Six levels because the deepest accepted shape today is data.model.itemList[],
+// and the item's own field names are the point: they are what a reviewed
+// fixture has to reproduce.
+//
+// Values are never included. The point is to learn where an item array lives
+// so a reviewed fixture and an explicit path can be added, and that question is
+// answered entirely by structure -- while the values would be product data, and
+// on some marketplaces personal data.
+export function describeResponseShape(value, { depth = 6 } = {}) {
+  if (Array.isArray(value)) {
+    return depth <= 0 ? `array[${value.length}]` : {
+      __array: value.length,
+      __item: value.length > 0 ? describeResponseShape(value[0], { depth: depth - 1 }) : null,
+    }
+  }
+  if (value === null) return 'null'
+  if (typeof value !== 'object') return typeof value
+  if (depth <= 0) return 'object'
+  const shape = {}
+  // Bounded so a wide response cannot produce an unbounded log line.
+  for (const key of Object.keys(value).slice(0, 40)) {
+    shape[key] = describeResponseShape(value[key], { depth: depth - 1 })
+  }
+  return shape
+}
+
 export function extractJustOneProductSearchItems(raw, marketplace) {
   const descriptor = JUSTONE_ENDPOINTS[marketplace]
   if (!descriptor) throw new JustOneResponseContractError('unsupported_marketplace', 'marketplace is not supported')
@@ -492,7 +521,17 @@ export function extractJustOneProductSearchItems(raw, marketplace) {
       return Object.freeze({ items, path: Object.freeze([...path]) })
     }
   }
-  throw new JustOneResponseContractError('invalid_upstream_items', 'upstream item list is missing')
+  // The declared paths are deliberately a closed set: a new upstream shape is
+  // supposed to arrive with a reviewed fixture rather than be guessed at here.
+  // That policy is only followable if the shape can be seen, so the outline
+  // travels with the error for the dispatcher to log.
+  const error = new JustOneResponseContractError(
+    'invalid_upstream_items',
+    'upstream item list is missing',
+  )
+  error.observedShape = describeResponseShape(raw)
+  error.triedPaths = descriptor.itemPaths.map((path) => path.join('.'))
+  throw error
 }
 
 function scalarText(value, maxLength = 4_096) {

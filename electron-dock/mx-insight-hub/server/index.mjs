@@ -185,6 +185,9 @@ export async function createRuntime(config = loadConfig()) {
         token: config.justOne.token,
         credentialResolver: () => externalPlatformCredentialStore.readCredential('justone'),
         timeoutMs: config.justOne.timeoutMs,
+        // Same default the HTTP app uses, so an unaccepted upstream shape is
+        // reported in the ordinary process log.
+        logger: console,
       })
     : null
   const tikHubAdapter = config.tikHub.contractVerified
