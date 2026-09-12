@@ -1,0 +1,72 @@
+{
+  "code": 0,
+  "message": null,
+  "recordTime": "2026-09-12T00:00:00Z",
+  "requestId": "xianyu-request-1",
+  "data": {
+    "resultList": [
+      {
+        "type": "item",
+        "style": {},
+        "data": {
+          "template": {},
+          "templateSingle": {},
+          "item": {
+            "main": {
+              "targetUrl": "https://www.goofish.com/item?id=880001",
+              "clickParam": { "args": {} },
+              "exContent": {
+                "itemId": "880001",
+                "title": "便携相机 九成新",
+                "richTitle": [{ "text": "便携相机 九成新", "bold": true, "type": "text" }],
+                "price": [
+                  { "text": "¥", "bold": true, "type": "text", "textSize": 12 },
+                  { "text": "1999", "bold": true, "type": "text", "textSize": 18 }
+                ],
+                "oriPrice": "¥2999",
+                "priceTag": [{ "text": "包邮", "type": "tag" }],
+                "picUrl": "https://img.example.invalid/880001.jpg",
+                "picWidth": 800,
+                "picHeight": 800,
+                "area": "浙江 杭州",
+                "userNickName": "相机小铺",
+                "userAvatarUrl": "https://img.example.invalid/avatar-1.jpg",
+                "want": "12人想要",
+                "isAuction": false,
+                "fishTags": { "r1": { "tagList": [] } }
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "item",
+        "style": {},
+        "data": {
+          "template": {},
+          "templateSingle": {},
+          "item": {
+            "main": {
+              "targetUrl": "https://www.goofish.com/item?id=880002",
+              "exContent": {
+                "itemId": "880002",
+                "title": "旅行相机 带镜头",
+                "price": [{ "text": "880", "type": "text" }],
+                "picUrl": "https://img.example.invalid/880002.jpg",
+                "area": "广东 深圳",
+                "userNickName": "二手数码"
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "banner",
+        "style": {},
+        "data": { "template": {} }
+      }
+    ],
+    "tabList": [],
+    "topList": []
+  }
+}

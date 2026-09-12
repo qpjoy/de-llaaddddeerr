@@ -389,7 +389,10 @@ test('adapter dispatch allowlist contains every marketplace and no caller-select
     token: 'test-token',
     fetchImpl: async (url) => {
       seen.push(new URL(url).pathname)
-      return response(envelope({ items: [], hasMore: false }))
+      // This test is about which path is dispatched, so the body carries an
+      // empty list under every marketplace's own item key -- Xianyu returns a
+      // render tree at resultList, the rest a flat list at items.
+      return response(envelope({ items: [], resultList: [], hasMore: false }))
     },
   })
   for (const marketplace of ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu']) {

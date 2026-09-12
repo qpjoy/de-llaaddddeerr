@@ -66,7 +66,7 @@ test('an unaccepted shape names both what was tried and what arrived', () => {
     (error) => {
       assert.equal(error.code, 'invalid_upstream_items')
       // What the contract looked for, so the gap is obvious at a glance.
-      assert.deepEqual(error.triedPaths, ['data.items', 'data.list'])
+      assert.deepEqual(error.triedPaths, ['data.resultList'])
       // And where the array actually was.
       assert.equal(error.observedShape.data.model.itemList.__array, 1)
       return true
@@ -76,7 +76,7 @@ test('an unaccepted shape names both what was tried and what arrived', () => {
 
 test('an accepted shape still extracts without any diagnostic', () => {
   const raw = { code: 0, message: null, recordTime: null, data: { items: [{ itemId: '1' }, { itemId: '2' }] } }
-  const extracted = extractJustOneProductSearchItems(raw, 'xianyu')
+  const extracted = extractJustOneProductSearchItems(raw, 'taobao')
   assert.equal(extracted.items.length, 2)
   assert.deepEqual([...extracted.path], ['data', 'items'])
 })
@@ -88,7 +88,7 @@ test('the adapter reports the shape when an upstream response cannot be normaliz
   const warnings = []
   const adapter = new JustOneAdapter({
     token: 'token-value',
-    logger: { warn: (payload, message) => warnings.push({ payload, message }) },
+    logger: { warn: (line) => warnings.push(line) },
     fetchImpl: async () => new Response(JSON.stringify({
       code: 0,
       message: null,
@@ -108,12 +108,25 @@ test('the adapter reports the shape when an upstream response cannot be normaliz
   )
 
   assert.equal(warnings.length, 1, 'exactly one diagnostic, on the failure path only')
-  assert.equal(warnings[0].payload.marketplace, 'xianyu')
-  assert.equal(warnings[0].payload.errorCode, 'invalid_upstream_items')
-  assert.deepEqual(warnings[0].payload.triedPaths, ['data.items', 'data.list'])
-  assert.equal(warnings[0].payload.observedShape.data.model.itemList.__array, 1)
-  // Item titles are values, and never belong in a log line.
-  assert.doesNotMatch(JSON.stringify(warnings[0].payload), /相机|xy-1/u)
+  const line = warnings[0]
+
+  // One line: this gets grepped out of a pod log, and a payload split across
+  // lines by a pretty-printer cannot be extracted with grep.
+  assert.equal(typeof line, 'string')
+  assert.equal(line.split('\n').length, 1, 'the diagnostic is a single line')
+  // And complete: console's inspector renders nested objects as "[Object]"
+  // beyond depth 2, which would hide exactly the nesting being reported.
+  assert.doesNotMatch(line, /\[Object\]/u)
+
+  const reported = JSON.parse(line.slice(line.indexOf('{')))
+  assert.equal(reported.marketplace, 'xianyu')
+  assert.equal(reported.errorCode, 'invalid_upstream_items')
+  assert.deepEqual(reported.triedPaths, ['data.resultList'])
+  // The whole point: the path where the array actually sits is legible.
+  assert.equal(reported.observedShape.data.model.itemList.__array, 1)
+  assert.equal(reported.observedShape.data.model.itemList.__item.itemId, 'string')
+  // Item values are product data and never belong in a log line.
+  assert.doesNotMatch(line, /相机|xy-1/u)
 })
 
 test('a normal dispatch logs nothing', async () => {
@@ -127,7 +140,11 @@ test('a normal dispatch logs nothing', async () => {
       message: null,
       recordTime: '2026-09-12T00:00:00Z',
       requestId: 'request-1',
-      data: { items: [{ itemId: 'xy-1', title: '相机' }] },
+      data: {
+        resultList: [{
+          data: { item: { main: { targetUrl: 'https://example.invalid/1', exContent: { itemId: 'xy-1', title: '相机' } } } },
+        }],
+      },
     }), { status: 200, headers: { 'content-type': 'application/json' } }),
   })
 

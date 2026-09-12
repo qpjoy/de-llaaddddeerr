@@ -74,6 +74,7 @@ function endpoint({
   sortMap = null,
   tmall = false,
   pagination = null,
+  projectItem = null,
 }) {
   return Object.freeze({
     endpointKey,
@@ -85,7 +86,55 @@ function endpoint({
     sortMap,
     tmall,
     pagination,
+    // Most marketplaces return a flat product object and need none of this.
+    // One returns a render tree, where the product's fields are several levels
+    // down and prices arrive as styled text runs, so it declares how to reach a
+    // flat item before the shared field mapping runs.
+    projectItem,
   })
+}
+
+// Xianyu answers a search with a render tree rather than a product list: the
+// element is a view node, and the product's own fields sit at
+// `data.item.main`, with most of them under `exContent` and the detail link one
+// level above it. Reviewed against a live response on 2026-09-12.
+//
+// Prices there are styled text runs -- an array of segments carrying `text`
+// alongside font and colour -- rather than numbers, because the payload
+// describes how to draw the price, not what it is. The amount is recovered by
+// joining the segments in order and taking the first numeric run, which is
+// deliberately indifferent to how the vendor splits them: "¥" + "1999",
+// "1999" + ".00" and "¥1999" + "起" all yield the same answer.
+function xianyuPriceAmount(value) {
+  if (value === null || value === undefined) return null
+  const joined = Array.isArray(value)
+    ? value
+        .map((segment) => (plainObject(segment) ? segment.text : segment))
+        .filter((text) => typeof text === 'string' || typeof text === 'number')
+        .join('')
+    : String(value)
+  const amount = /\d+(?:\.\d+)?/u.exec(joined)
+  return amount ? amount[0] : null
+}
+
+function projectXianyuItem(element) {
+  const main = valueAt(element, ['data', 'item', 'main'])
+  if (!plainObject(main)) return null
+  const exContent = plainObject(main.exContent) ? main.exContent : {}
+  return {
+    // Everything the shared mapping already understands by name -- itemId,
+    // title, picUrl -- passes straight through.
+    ...exContent,
+    // And the rest is renamed to the vocabulary that mapping expects, rather
+    // than widening every marketplace's field list with Xianyu's spellings.
+    price: xianyuPriceAmount(exContent.price),
+    originPrice: xianyuPriceAmount(exContent.oriPrice),
+    itemUrl: main.targetUrl,
+    itemLoc: exContent.area,
+    sellerName: exContent.userNickName,
+    // `want` is a wishlist count, not a sales count, so it is deliberately not
+    // mapped onto `sales`: a number under the wrong name is worse than none.
+  }
 }
 
 // `data` is intentionally untyped in the upstream OpenAPI documents. These
@@ -125,7 +174,10 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
   xianyu: endpoint({
     endpointKey: 'xianyu.product-search.v1',
     path: '/api/xianyu/search-item-list/v1',
-    itemPaths: [['data', 'items'], ['data', 'list']],
+    // Reviewed against tests/fixtures/justone/xianyu-product-search-v1.success.json,
+    // captured from a live response on 2026-09-12.
+    itemPaths: [['data', 'resultList']],
+    projectItem: projectXianyuItem,
     sortMap: XIANYU_SORTS,
   }),
 })
@@ -616,46 +668,52 @@ const PRODUCT_ID_FIELDS = Object.freeze({
 })
 
 export function normalizeJustOneProductItem(rawItem, marketplace, { secret = null } = {}) {
-  if (!plainObject(rawItem) || !JUSTONE_ENDPOINTS[marketplace]) return null
-  const id = firstScalar(rawItem, PRODUCT_ID_FIELDS[marketplace], 256)
+  const descriptor = JUSTONE_ENDPOINTS[marketplace]
+  if (!plainObject(rawItem) || !descriptor) return null
+  // A marketplace that returns a render tree flattens it here first. The
+  // original element is what gets archived as evidence; only the normalized
+  // product is projected.
+  const item = descriptor.projectItem ? descriptor.projectItem(rawItem) : rawItem
+  if (!plainObject(item)) return null
+  const id = firstScalar(item, PRODUCT_ID_FIELDS[marketplace], 256)
   if (!id) return null
-  const shopObject = firstObject(rawItem, ['shop', 'seller', 'merchant'])
-  const priceObject = firstObject(rawItem, ['priceInfo', 'price_info', 'pricing'])
-  const shopId = firstScalar(rawItem, ['shopId', 'shop_id', 'sellerId', 'seller_id', 'userId', 'user_id'], 256)
+  const shopObject = firstObject(item, ['shop', 'seller', 'merchant'])
+  const priceObject = firstObject(item, ['priceInfo', 'price_info', 'pricing'])
+  const shopId = firstScalar(item, ['shopId', 'shop_id', 'sellerId', 'seller_id', 'userId', 'user_id'], 256)
     || firstScalar(shopObject, ['id', 'shopId', 'sellerId', 'userId'], 256)
-  const shopName = firstScalar(rawItem, ['shopName', 'shop_name', 'sellerName', 'seller_name'], 512)
+  const shopName = firstScalar(item, ['shopName', 'shop_name', 'sellerName', 'seller_name'], 512)
     || firstScalar(shopObject, ['name', 'shopName', 'sellerName'], 512)
-  const currentPrice = firstScalar(rawItem, [
+  const currentPrice = firstScalar(item, [
     'discntPriceYuan', 'discountPrice', 'currentPrice', 'salePrice', 'priceZKYuanDouble', 'price',
   ], 128) || firstScalar(priceObject, ['current', 'sale', 'amount', 'price'], 128)
-  const originalPrice = firstScalar(rawItem, [
+  const originalPrice = firstScalar(item, [
     'priceYuan', 'price_yuan', 'priceYuanDouble', 'originPrice', 'originalPrice', 'listPrice',
   ], 128) || firstScalar(priceObject, ['original', 'list', 'originalPrice'], 128)
 
   return Object.freeze({
     id,
     marketplace,
-    title: firstScalar(rawItem, ['itemName', 'item_name', 'title', 'name', 'productName'], 4_096),
+    title: firstScalar(item, ['itemName', 'item_name', 'title', 'name', 'productName'], 4_096),
     url: firstUrl(
-      rawItem,
+      item,
       ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl'],
       secret,
     ),
     pricing: Object.freeze({
       current: currentPrice,
       original: originalPrice,
-      currency: firstScalar(rawItem, ['currency', 'currencyCode'], 16) || 'CNY',
+      currency: firstScalar(item, ['currency', 'currencyCode'], 16) || 'CNY',
     }),
     shop: Object.freeze({ id: shopId, name: shopName }),
-    images: Object.freeze(imageUrls(rawItem, secret)),
+    images: Object.freeze(imageUrls(item, secret)),
     signals: Object.freeze({
-      sales: firstScalar(rawItem, ['orderPayUV', 'sales', 'saleCount', 'soldCount', 'volume'], 128),
-      reviewCount: firstScalar(rawItem, ['commentCount', 'comment_count', 'reviewCount'], 128),
-      location: firstScalar(rawItem, ['itemLoc', 'item_loc', 'sellerLoc', 'seller_loc', 'location'], 512),
+      sales: firstScalar(item, ['orderPayUV', 'sales', 'saleCount', 'soldCount', 'volume'], 128),
+      reviewCount: firstScalar(item, ['commentCount', 'comment_count', 'reviewCount'], 128),
+      location: firstScalar(item, ['itemLoc', 'item_loc', 'sellerLoc', 'seller_loc', 'location'], 512),
     }),
     attributes: Object.freeze({
-      brand: firstScalar(rawItem, ['brand', 'brandName', 'brand_name'], 512),
-      category: firstScalar(rawItem, ['category', 'categoryName', 'category_name'], 512),
+      brand: firstScalar(item, ['brand', 'brandName', 'brand_name'], 512),
+      category: firstScalar(item, ['category', 'categoryName', 'category_name'], 512),
     }),
   })
 }

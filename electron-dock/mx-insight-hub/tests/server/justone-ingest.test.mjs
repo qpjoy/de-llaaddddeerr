@@ -83,9 +83,16 @@ test('records use the ecommerce canonical shape with catalog mapping and lineage
     const idField = marketplace === 'jd' ? 'skuId'
       : marketplace === 'xiaohongshu_ec' ? 'goodsId'
         : 'itemId'
-    const normalized = normalizeJustOneProductSearchPayload(envelope([{
-      [idField]: `${marketplace}-1`, title: `${marketplace} 商品`,
-    }]), request, { capturedAt: '2026-09-03T00:00:00Z' })
+    const flatItem = { [idField]: `${marketplace}-1`, title: `${marketplace} 商品` }
+    // Xianyu answers with a render tree instead of a flat product list, so the
+    // canonical mapping has to be exercised through that shape for it to mean
+    // anything here.
+    const raw = marketplace === 'xianyu'
+      ? envelope([], { resultList: [{ data: { item: { main: { exContent: flatItem } } } }] })
+      : envelope([flatItem])
+    const normalized = normalizeJustOneProductSearchPayload(raw, request, {
+      capturedAt: '2026-09-03T00:00:00Z',
+    })
     const record = normalized.records[0]
     const catalog = JUSTONE_MARKETPLACE_CATALOG[marketplace]
     assert.equal(record.platform, 'ecommerce')
@@ -127,7 +134,12 @@ test('records use the ecommerce canonical shape with catalog mapping and lineage
     assert.equal(itemArchive.payloadSha256, record.rawPayloadSha256)
     assert.deepEqual(itemArchive.rawPayload, itemArchive.rawItem)
     assert.equal(itemArchive.rawPointer, '$')
-    assert.equal(itemArchive.envelopePointer, '$.data.items[0]')
+    // The pointer records where the item actually was, so it follows each
+    // marketplace's own shape rather than one assumed path.
+    assert.equal(
+      itemArchive.envelopePointer,
+      marketplace === 'xianyu' ? '$.data.resultList[0]' : '$.data.items[0]',
+    )
     assert.equal(record.sourcePointer, '$')
     assert.match(
       itemArchive.archivePath,
@@ -171,7 +183,10 @@ test('archive capturedDate and directory date are derived in UTC', () => {
 
 test('canonical, PG-bound and ES projections retain JustOne business fields but not the request credential', async () => {
   const secret = 'top-secret-token'
-  const request = normalizeJustOneProductSearchRequest({ marketplace: 'xianyu', query: '相机' })
+  // taobao rather than xianyu: this asserts credential redaction on a flat
+  // item, and xianyu's response is a render tree whose projection would rename
+  // the very fields under test.
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'taobao', query: '相机' })
   const raw = envelope([{
     ...product('xy-1'),
     itemUrl: 'https://example.invalid/items/xy-1?signature=business-signature&search_id=business-search#session_id=business-session',

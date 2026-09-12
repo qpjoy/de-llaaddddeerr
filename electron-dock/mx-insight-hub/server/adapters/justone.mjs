@@ -666,12 +666,19 @@ export class JustOneAdapter {
         // response body itself is never archived for an unusable call -- so the
         // keys-and-types outline is logged here, values excluded.
         if (error?.observedShape) {
-          this.logger?.warn?.({
-            marketplace: request?.marketplace ?? null,
-            errorCode: error.code,
-            triedPaths: error.triedPaths,
-            observedShape: error.observedShape,
-          }, '[external-platform] upstream response shape is not in the accepted set')
+          // Serialized here rather than handed to the logger as an object.
+          // This line exists to be grepped out of a pod log, and console's
+          // inspector truncates nested objects to "[Object]" at depth 2 --
+          // which would hide the one thing being reported. One line, complete.
+          this.logger?.warn?.(
+            '[external-platform] upstream response shape is not in the accepted set '
+            + JSON.stringify({
+              marketplace: request?.marketplace ?? null,
+              errorCode: error.code,
+              triedPaths: error.triedPaths,
+              observedShape: error.observedShape,
+            }),
+          )
         }
         throw succeededUnusable(
           httpStatus,
