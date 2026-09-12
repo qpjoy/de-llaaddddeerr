@@ -379,6 +379,7 @@ export const adminApi = {
   externalPlatforms: (token, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms`, { query },
   ),
+  updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
   externalPlatform: (token, key, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}`, { query },
   ),

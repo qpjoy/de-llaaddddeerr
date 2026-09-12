@@ -1,3 +1,4 @@
+import { ExternalProxyPanel } from './external-proxy-panel.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
@@ -621,6 +622,7 @@ function normalizeDetail(payload, requestedKey) {
   const rawCredential = firstRecord(envelope.credential, root.credential)
   return {
     ...platform,
+    proxy: envelope.proxy || root.proxy || null,
     credential: {
       source: optionalText(
         rawCredential.source,
@@ -2211,6 +2213,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             onUnauthorized={onUnauthorized}
             notify={notify}
           />
+          {provider === 'tikhub' && detail.proxy ? <ExternalProxyPanel notify={notify} Panel={Panel} key={detail.proxy.revision} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           <ExternalPlatformOperationControlPanel
             token={token}
             provider={provider}

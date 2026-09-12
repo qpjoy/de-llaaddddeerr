@@ -346,10 +346,12 @@ export class ExternalPlatformAdminService {
     config,
     credentialStore = null,
     operationControlStore = null,
+    proxyStore = null,
     durable = false,
     providerKey = 'justone',
     metadata = null,
   }) {
+    this.proxyStore = proxyStore
     this.store = store
     this.config = config
     this.credentialStore = credentialStore
@@ -474,6 +476,12 @@ export class ExternalPlatformAdminService {
     }
   }
 
+  async updateProxy(providerKey, input) {
+    this.#assertProvider(providerKey)
+    if (!this.proxyStore) throw new AppError(503, 'proxy_store_unavailable', 'System Proxy binding unavailable')
+    return this.proxyStore.update(input)
+  }
+
   async detail(providerKey, rangeValue) {
     this.#assertProvider(providerKey)
     const { now, range, analytics, provider, credential, operations } = await this.#data(rangeValue)
@@ -483,6 +491,7 @@ export class ExternalPlatformAdminService {
       generatedAt: now.toISOString(),
       provider,
       credential,
+      proxy: this.proxyStore ? await this.proxyStore.describe() : null,
       operations,
       pipeline: [
         {
@@ -758,6 +767,10 @@ export class MultiExternalPlatformAdminService {
       },
       providers,
     }
+  }
+
+  updateProxy(providerKey, input) {
+    return this.#service(providerKey).updateProxy(providerKey, input)
   }
 
   detail(providerKey, rangeValue) {

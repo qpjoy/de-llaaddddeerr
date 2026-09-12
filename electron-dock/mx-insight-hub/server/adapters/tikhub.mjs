@@ -1,3 +1,4 @@
+import { AppError } from '../core/errors.mjs'
 import { createHash } from 'node:crypto'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
@@ -412,7 +413,12 @@ async function requestTikHubJson(
         cache: 'no-store',
         signal: controller.signal,
       })
-    } catch {
+    } catch (error) {
+      if (error instanceof AppError && ['proxy_route_unavailable', 'proxy_routes_unreachable'].includes(error.code)) {
+        throw upstreamError('TikHub proxy connectivity failed before paid dispatch', {
+          outcome: 'rejected', httpStatus: null, billed: false, errorCode: error.code,
+        })
+      }
       throw upstreamError('TikHub request outcome is unknown', {
         outcome: 'unknown',
         httpStatus: null,
@@ -1016,7 +1022,12 @@ export class TikHubAdapter {
           cache: 'no-store',
           signal: controller.signal,
         })
-      } catch {
+      } catch (error) {
+        if (error instanceof AppError && ['proxy_route_unavailable', 'proxy_routes_unreachable'].includes(error.code)) {
+          throw upstreamError('TikHub proxy connectivity failed before paid dispatch', {
+            outcome: 'rejected', httpStatus: null, billed: false, errorCode: error.code,
+          })
+        }
         throw upstreamError('TikHub request outcome is unknown', {
           outcome: 'unknown',
           httpStatus: null,

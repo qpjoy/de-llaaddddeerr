@@ -1,3 +1,4 @@
+import { ExternalPlatformProxyStore, createTikHubProxyFetch } from './external-platforms/proxy.mjs'
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { createServer } from 'node:http'
 import { createPool, createQueue } from '@qpjoy/mx-common'
@@ -191,10 +192,12 @@ export async function createRuntime(config = loadConfig()) {
         logger: console,
       })
     : null
+  const tikHubProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress) : null
   const tikHubAdapter = config.storeDriver === 'postgres'
     && !config.tikHub.configurationError
     && config.listenerMode !== 'admin'
     ? new TikHubAdapter({
+        fetchImpl: createTikHubProxyFetch(tikHubProxyStore),
         baseUrl: config.tikHub.baseUrl,
         apiKey: config.tikHub.apiKey,
         credentialResolver: () => tikHubCredentialStore.readCredential('tikhub'),
@@ -210,6 +213,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   const tikHubPlatformAdmin = new ExternalPlatformAdminService({
     store: tikHubPlatformStore,
+    proxyStore: tikHubProxyStore,
     config: config.tikHub,
     credentialStore: tikHubCredentialStore,
     operationControlStore: externalPlatformControlStore,

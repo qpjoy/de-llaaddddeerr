@@ -1099,13 +1099,13 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
     return '服务端未报告该层详情'
   }
 
-  if (state.loading && !state.data) return <LoadingState label="正在读取 LLM Proxy" />
+  if (state.loading && !state.data) return <LoadingState label="正在读取 System Proxy" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   return (
     <>
-      <PageHeading eyebrow="AGENT CENTER / PROXY SEQUENCES" title="LLM Proxy"
-        description="Proxy 是显式出网覆盖：未绑定 Proxy Sequence 时默认继承部署侧 Docker daemon proxy，也可明确选择 Pod / Node 系统出网。"
+      <PageHeading eyebrow="AGENT CENTER / PROXY SEQUENCES" title="System Proxy"
+        description="共享代理与代理序列供 Agent 和 TikHub 使用。TikHub 可在外部数据平台中选择继承全局设置、指定序列或直接出网；服务绑定优先于全局设置。"
         loading={state.loading} onRefresh={state.refresh}><></></PageHeading>
       <div className="mih-inline-warning"><Warning size={17} />K8s 内的 127.0.0.1 指当前 Pod 网络命名空间。生产已让使用 Agent 的 worker 与 Admin 统一 hostNetwork；Compose 请使用 host.docker.internal。</div>
       {persistedPolicyMode === 'proxy-sequence' && persistedPolicySequenceKey && (!currentGlobalSequence || currentGlobalSequence.enabled === false) ? (

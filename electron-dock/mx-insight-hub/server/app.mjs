@@ -2614,6 +2614,16 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/proxy')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform proxy update')
+        if (!externalPlatformAdmin?.updateProxy) throw new AppError(503, 'proxy_store_unavailable', 'System Proxy unavailable')
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.updateProxy(params.provider, await readJson(request, 8192)), requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider')
       if (request.method === 'GET' && params) {
         requireSourceAdmin(principal)
