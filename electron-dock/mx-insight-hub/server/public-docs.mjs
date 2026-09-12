@@ -5969,6 +5969,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     </section>
 
     <section class="doc-page" data-doc-page="night-all">
+    <div class="notice">客户计费：历史 raw、crawl、user-info 分别使用同名计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
     <h2 id="night-all">Night-All 兼容层</h2>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
     <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。小红书平台项包含 <code>search_posts</code> 且 <code>search.ready=true</code> 表示独立的首屏 rollout gate 已开启；此时单 scalar query、有效页大小 20 的 page 1 raw 请求由 Hub-native connector 处理，已签发的 <code>mxec2</code> direct traversal cursor 继续走同一路径。独立 user-activity gate 开启后，单个 <code>username|userId|uid|profileUrl</code> 的 user-info，以及 posts-only、页大小 20、concurrency 1 的 crawl 也由 Hub-native connector 处理；crawl 只接受并返回 Hub 不透明 cursor，最多 15 页。<code>data.legacySearch</code> 仍保留小红书，因为 multi-identifier、channel、非 posts、非 20 页和自定义 params 等尚未迁移形态继续走历史路径。矩阵不会在请求时从 Night-All 的 capability 接口实时发现。</p>

@@ -61,7 +61,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub'])
+const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub', 'night-all'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -94,7 +94,7 @@ function FixLink({ target, children }) {
 }
 
 function providerDisplayName(provider) {
-  return ({ justone: 'JustOne', tikhub: 'TikHub' })[provider] || provider || '外部平台'
+  return ({ justone: 'JustOne', tikhub: 'TikHub', 'night-all': 'Night-All' })[provider] || provider || '外部平台'
 }
 
 const PROCESSING_STAGES = [
@@ -2117,6 +2117,36 @@ function DifferencePanel() {
   )
 }
 
+function NightAllPlatformDetail({ token, range, setQuery, onUnauthorized }) {
+  const load = useCallback(() => adminApi.externalPlatform(token, 'night-all', { range }), [token, range])
+  const remote = useRemoteData(load, onUnauthorized)
+  const data = remote.data
+  return <>
+    <PageHeading title="Night-All · 数据接口与客户计费" description="内部数据服务也纳入平台治理；服务转移价、客户售价与采集工作预算分别管理。" loading={remote.loading} onRefresh={remote.refresh}>
+      <a className="qp-button qp-button--ghost" href="#/external-platforms">返回平台总览</a><RangeControl range={range} setQuery={setQuery} />
+    </PageHeading>
+    {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
+    {!data && remote.loading ? <LoadingState label="读取 Night-All 调用证据" /> : null}
+    {data ? <>
+      <section className="qp-panel"><h2>收费或免费，由 Hub 套餐决定</h2>
+        <p>{data.provider.billing.recommendation}</p><p>{data.customerBilling.note}</p>
+        <a className="qp-button qp-button--primary" href="#/plans">配置租户套餐与接口费率</a>
+        <p>发布套餐时可添加这三个计费键，单价填 0 即免费；发布后分配给调用身份。disabled 不扣款，shadow 仅模拟，enforced 按余额结算。修改不会自动影响旧套餐版本。</p>
+      </section>
+      <section className="qp-panel"><h2>已接入接口</h2>{data.commercialOperations.map(operation => <article key={operation.operationKey}>
+        <h3>{operation.label}</h3><p><code>POST {operation.publicPath}</code></p><p>兼容路径：<code>{operation.aliasPath}</code> · 客户计费键：<code>{operation.meterKey}</code> · 按请求计费</p>
+        <p>Night-All 服务单价：0 · 业务平台：{operation.platforms.join('、')}</p>
+      </article>)}</section>
+      <section className="qp-panel"><h2>调用证据</h2><p>{data.notes.scope}</p>
+        <Table label="Night-All 调用证据"><thead><tr><th>接口</th><th>业务平台</th><th>已记录请求</th><th>调用记录</th><th>成功交付</th><th>未知结果</th></tr></thead>
+          <tbody>{data.endpointStatistics.map(row => <tr key={`${row.operation}:${row.platform}`}><td>{row.operation}</td><td>{row.platform}</td><td>{row.hubRequests}</td><td>{row.upstreamCalls}</td><td>{row.successfulHubRequests}</td><td>{row.unknownOutcomes}</td></tr>)}</tbody></Table>
+        {!data.endpointStatistics.length ? <p>当前窗口暂无调用证据；这不表示接口已通过健康检查。</p> : null}
+      </section>
+      <section className="qp-panel"><h2>交付与运行边界</h2><p>{data.notes.budget}</p><p>{data.notes.fallback}</p><p>{data.notes.connection}</p><p>上游调用成功后，原始结果与入库任务一起提交，再由后台完成归一化和检索投影。</p></section>
+    </> : null}
+  </>
+}
+
 function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.externalPlatform(token, provider, { range }), [provider, range, token])
   const remote = useRemoteData(load, onUnauthorized)
@@ -2229,6 +2259,7 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   }, [range, setQuery, unsupportedProvider])
 
   if (unsupportedProvider) return <UnsupportedProvider range={range} />
+  if (provider === 'night-all') return <NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
   if (provider) {
     return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   }

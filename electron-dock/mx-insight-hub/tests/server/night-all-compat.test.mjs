@@ -908,3 +908,50 @@ test('a persistence failure closes connector evidence and holds usage as unknown
   assert.equal(call.errorCode, 'compatibility_persistence_failed')
   assert.ok(call.completedAt)
 })
+
+for (const unitPriceMinor of [0, 7]) test(`Night-All three commercial meters preserve request billing and replay at price ${unitPriceMinor}`, async () => {
+  const fixture = await compatibilityFixture({ grants: ['twitter'] })
+  const {service, context, store} = fixture
+  const plan = await service.publishPlanVersion({ key: `night-all-${unitPriceMinor}`, name: 'Night-All contract', limits: {},
+    priceBook: { key: `night-all-${unitPriceMinor}`, currency: 'CNY', entries: ['raw','crawl','user-info'].map(meterKey=>({meterKey,unitPriceMinor})) } }, 'test')
+  const current = await service.getConsumerPlan(context.consumer.id)
+  await service.assignConsumerPlan(context.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'test')
+  await service.setTenantBillingProfile(context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'test')
+  await service.addTenantCredit(context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'test' }, { idempotencyKey: 'night-all-test-credit', actor: 'test' })
+  for (const operation of ['raw','crawl','user-info']) {
+    const input = { operation, path: `/api/v1/night-all/search/${operation}`, idempotencyKey: `night-all-${operation}-${unitPriceMinor}`, body: { platform: 'twitter', ...(operation === 'raw' ? {query:'AI'} : {username:'alice'}), count:20 } }
+    await service.nightAllCompatibilitySearch(context,input)
+    const replay = await service.nightAllCompatibilitySearch(context,input)
+    assert.equal(replay.replay, true)
+  }
+  assert.equal(fixture.calls(),3)
+  const billing = await service.getTenantBilling(context.tenant.id)
+  assert.equal(billing.account.availableMinor,100-3*unitPriceMinor)
+  assert.equal(billing.account.heldMinor,0)
+  const { NightAllPlatformAdminService } = await import('../../server/external-platforms/night-all-admin.mjs')
+  const admin = new NightAllPlatformAdminService({store,config:{baseUrl:'http://internal'}})
+  const detail = await admin.detail('night-all','24h')
+  assert.equal(detail.provider.metrics.upstreamCalls,3)
+  assert.equal(detail.provider.metrics.successfulHubRequests,3)
+  assert.equal(detail.provider.billing.actualCostMinor,0)
+  assert.equal(detail.commercialOperations.length,3)
+  assert.doesNotMatch(JSON.stringify(detail), /http:\/\/internal/)
+  await assert.rejects(admin.detail('night-all','invalid'),e=>e.status===400)
+  assert.throws(()=>admin.updateProviderPriceBook(),e=>e.code==='customer_plan_required')
+})
+
+test('Night-All free pricing cannot bypass crawl work admission', async () => {
+  const { service,context,calls,store } = await compatibilityFixture({ grants:['twitter'] })
+  await assert.rejects(service.nightAllCompatibilitySearch(context, { operation:'crawl', path:'/api/v1/night-all/search/crawl', idempotencyKey:'over-budget-free', body:{platform:'twitter',usernames:['one','two'],count:100} }),e=>e.code==='work_budget_exceeded')
+  assert.equal(calls(),0); assert.equal(store.connectorCalls.size,0); assert.equal(store.requests.size,0)
+})
+
+test('Night-All commercial calls reject insufficient balance before connector dispatch', async () => {
+  const {service,context,calls,store} = await compatibilityFixture({ grants:['twitter'] })
+  const plan = await service.publishPlanVersion({key:'paid-legacy',name:'Paid legacy',limits:{},priceBook:{key:'paid-legacy',currency:'CNY',entries:['raw','crawl','user-info'].map(meterKey=>({meterKey,unitPriceMinor:10}))}},'test')
+  const current = await service.getConsumerPlan(context.consumer.id)
+  await service.assignConsumerPlan(context.consumer.id,{planVersionId:plan.versionId,expectedRevision:current.revision},'test')
+  await service.setTenantBillingProfile(context.tenant.id,{mode:'enforced',multiplierPpm:1000000},'test')
+  for (const operation of ['raw','crawl','user-info']) await assert.rejects(service.nightAllCompatibilitySearch(context,{operation,path:`/api/v1/night-all/search/${operation}`,idempotencyKey:`no-credit-${operation}`,body:{platform:'twitter',count:20,...(operation==='raw'?{query:'AI'}:{username:'alice'})}}),e=>e.code==='insufficient_credit')
+  assert.equal(calls(),0);assert.equal(store.connectorCalls.size,0);assert.equal(store.requests.size,0)
+})

@@ -2785,6 +2785,21 @@ export class PostgresStore {
     )
   }
 
+  async nightAllAnalytics({ since, until }) {
+    const { rows } = await this.pool.query(`
+      SELECT c.operation, c.platform, count(*)::int AS "upstreamCalls",
+        count(DISTINCT c.usage_request_id)::int AS "hubRequests",
+        count(DISTINCT c.usage_request_id) FILTER (WHERE u.status = 'committed' AND u.response_status = 200)::int AS "successfulHubRequests",
+        count(*) FILTER (WHERE c.http_status = 200)::int AS "successfulUpstreamCalls",
+        count(*) FILTER (WHERE c.outcome IN ('complete','partial'))::int AS "usableUpstreamCalls",
+        count(*) FILTER (WHERE c.outcome = 'unknown')::int AS "unknownOutcomes",
+        max(c.started_at) AS "lastObservedAt"
+      FROM serving.connector_calls c LEFT JOIN usage_requests u ON u.id = c.usage_request_id
+      WHERE c.started_at >= $1 AND c.started_at <= $2 AND c.operation IN ('raw','crawl','user-info')
+      GROUP BY c.operation, c.platform ORDER BY c.operation, c.platform`, [since, until])
+    return rows.map(row => ({ ...row, lastObservedAt: iso(row.lastObservedAt) }))
+  }
+
   async beginConnectorCall({
     id = randomUUID(),
     consumerId,

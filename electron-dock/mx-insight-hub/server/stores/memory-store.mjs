@@ -1761,6 +1761,24 @@ export class MemoryStore {
     return clone(record)
   }
 
+  async nightAllAnalytics({ since, until }) {
+    const groups = new Map()
+    for (const call of this.connectorCalls.values()) {
+      if (call.startedAt < since || call.startedAt > until || !['raw','crawl','user-info'].includes(call.operation)) continue
+      const key = `${call.operation}:${call.platform}`
+      if (!groups.has(key)) groups.set(key, { operation: call.operation, platform: call.platform, upstreamCalls: 0, requestIds: new Set(), successes: new Set(), successfulUpstreamCalls: 0, usableUpstreamCalls: 0, unknownOutcomes: 0, lastObservedAt: null })
+      const row = groups.get(key), request = this.requests.get(call.requestId)
+      row.upstreamCalls++
+      if (call.requestId) row.requestIds.add(call.requestId)
+      if (request?.status === 'committed' && request.responseStatus === 200) row.successes.add(call.requestId)
+      if (call.httpStatus === 200) row.successfulUpstreamCalls++
+      if (['complete','partial'].includes(call.outcome)) row.usableUpstreamCalls++
+      if (call.outcome === 'unknown') row.unknownOutcomes++
+      if (!row.lastObservedAt || call.startedAt > row.lastObservedAt) row.lastObservedAt = call.startedAt
+    }
+    return [...groups.values()].map(({requestIds, successes, ...row}) => ({ ...row, hubRequests: requestIds.size, successfulHubRequests: successes.size }))
+  }
+
   async beginConnectorCall({
     id = randomUUID(),
     consumerId,

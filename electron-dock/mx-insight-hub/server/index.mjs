@@ -1,3 +1,4 @@
+import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { createServer } from 'node:http'
 import { createPool, createQueue } from '@qpjoy/mx-common'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
@@ -218,6 +219,7 @@ export async function createRuntime(config = loadConfig()) {
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
     justOnePlatformAdmin,
     tikHubPlatformAdmin,
+    new NightAllPlatformAdminService({ store, config: config.nightAll }),
   ])
   const externalPlatformGateway = new ExternalPlatformGateway({
     usageStore: store,

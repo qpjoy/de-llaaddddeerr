@@ -210,7 +210,7 @@ test('admin runtime keeps provider adapters secretless and reports TikHub readin
     assert.equal((await runtime.tikHubGateway.capabilities()).ready, false)
     assert.deepEqual(
       (await runtime.externalPlatformAdmin.overview('24h')).providers.map(({ key }) => key),
-      ['justone', 'tikhub'],
+      ['justone', 'tikhub', 'night-all'],
     )
 
     let secretRead = false

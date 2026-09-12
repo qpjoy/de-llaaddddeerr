@@ -330,6 +330,9 @@ function billingMeterLabel(meterKey) {
     'social.users.posts': '小红书用户笔记',
     'ecommerce.products.search': '电商商品搜索',
     'nlp.tokenize': '中文分词',
+    raw: '内容关键词搜索（兼容）',
+    crawl: '账号内容采集（兼容）',
+    'user-info': '账号资料（兼容）',
   })[meterKey] || meterKey
 }
 
@@ -2409,6 +2412,8 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
             <Field label="突发 QPS"><input className="qp-input" type="number" min="1" value={planForm.burstRps} onChange={(event) => setPlanForm({ ...planForm, burstRps: event.target.value })} required /></Field>
             <Field label="最大分页"><input className="qp-input" type="number" min="1" max="1000" value={planForm.maxPageSize} onChange={(event) => setPlanForm({ ...planForm, maxPageSize: event.target.value })} required /></Field>
             <div className="mih-form__wide">
+              <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current, entries: [...current.entries.filter(entry => entry.meterKey || entry.price), ...['raw', 'crawl', 'user-info'].filter(key => !current.entries.some(entry => entry.meterKey === key)).map(meterKey => ({ meterKey, price: '' }))] }))}>添加 Night-All 三类接口费率</button>
+              <p>raw、crawl、user-info 按请求计费；价格填 0 表示免费。小红书直连使用自己的 social.* 计费键；费用配置不放宽采集工作预算。</p>
               <Table label="逐接口价格">
                 <thead><tr><th>开放能力计量键</th><th>每次基础价格</th><th>操作</th></tr></thead>
                 <tbody>{planForm.entries.map((entry, index) => (
