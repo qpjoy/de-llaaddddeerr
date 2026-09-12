@@ -1621,11 +1621,19 @@ function ExternalPlatformOperationCard({
 // reason.
 function ExternalPlatformProviderPriceBook({ token, provider, operations, onSaved, onUnauthorized, notify }) {
   const priced = operations.find((operation) => operation.priceBook.monthlyBudgetMinor !== null)
+  // Prefilled from what is already configured, so the common case is reviewing
+  // a number rather than hunting for it. Only an unambiguous price is offered:
+  // if endpoints are priced differently there is no single value to suggest,
+  // and guessing one would quietly reprice the others on submit.
+  const configuredPrices = [...new Set(
+    operations.flatMap((operation) => Object.values(operation.priceBook.endpointPrices || {}))
+      .filter((value) => Number.isFinite(value) && value > 0),
+  )]
   const [draft, setDraft] = useState(() => ({
     currency: priced?.priceBook.currency || 'CNY',
     pricingAsOf: (priced?.priceBook.pricingAsOf || new Date().toISOString()).slice(0, 10),
     budgetMode: 'calls',
-    unitCostMinor: '',
+    unitCostMinor: configuredPrices.length === 1 ? String(configuredPrices[0]) : '',
     monthlyBudgetStated: '',
     monthlySubsidyBudgetStated: '',
     reason: '',
@@ -1676,7 +1684,14 @@ function ExternalPlatformProviderPriceBook({ token, provider, operations, onSave
     }
   }
 
-  const incomplete = !draft.reason.trim() || !(Number(draft.unitCostMinor) > 0)
+  // Named individually: telling someone to fill a field they already filled is
+  // how a form trains people to stop reading its warnings.
+  const missing = []
+  if (!(Number(draft.unitCostMinor) > 0)) missing.push('每次调用单价')
+  if (!(Number(draft.monthlyBudgetStated) >= 0) || draft.monthlyBudgetStated === '') missing.push('月度上游预算')
+  if (!(Number(draft.monthlySubsidyBudgetStated) >= 0) || draft.monthlySubsidyBudgetStated === '') missing.push('月度补贴预算')
+  if (!draft.reason.trim()) missing.push('变更原因')
+  const incomplete = missing.length > 0
 
   return (
     <Panel
@@ -1706,7 +1721,10 @@ function ExternalPlatformProviderPriceBook({ token, provider, operations, onSave
             <input className="qp-input mih-mono" type="number" min="0" step="1" value={draft.monthlyBudgetStated}
               onChange={(event) => update('monthlyBudgetStated', event.target.value)} disabled={busy} required />
           </Field>
-          <Field label={`月度补贴预算（${draft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'}）`}>
+          <Field
+            label={`月度补贴预算（${draft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'}）`}
+            hint="限制上游成本中没有被下游正价扣费覆盖的部分。若下游还没有按次计费的付费客户，每次调用都算全额补贴，这里填得比上游预算小会先撞补贴上限——通常与上游预算填相同数值。"
+          >
             <input className="qp-input mih-mono" type="number" min="0" step="1" value={draft.monthlySubsidyBudgetStated}
               onChange={(event) => update('monthlySubsidyBudgetStated', event.target.value)} disabled={busy} required />
           </Field>
@@ -1721,7 +1739,7 @@ function ExternalPlatformProviderPriceBook({ token, provider, operations, onSave
         <p className="mih-external-operation-precondition" role="status">
           <WarningCircle size={15} aria-hidden="true" />
           这会覆盖全部业务操作当前的价目表与预算；之后可在下面对个别操作单独调整。
-          {incomplete ? ' 还需填写单价与变更原因。' : null}
+          {incomplete ? ` 还需填写：${missing.join('、')}。` : null}
         </p>
 
         {error ? <ErrorState error={error} /> : null}
