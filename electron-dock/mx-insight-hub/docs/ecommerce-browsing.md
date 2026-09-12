@@ -1,14 +1,23 @@
-# 电商数据：采集与已存浏览
+# 电商数据：管理列表与平台采集
 
-2026-09-12。页面路由保留 `/data-products/ecommerce-treasure-box`，名称改为电商数据；列表默认，百宝箱为可选陈列视图。
+## 当前交互（2026-09-12 修订）
 
-## 两种分页
+外层“数据列表 / 百宝箱”标签默认进入数据列表。列表使用当前 Admin Token 会话，自动读取全部平台的 Hub 已存商品，不要求客户 Public API Key。标题筛选默认空，每页默认 100，可设 1–100；筛选变化重新读取，游标不会跨条件复用。读取失败显示 HTTP 错误和重试入口，与空数据明确区分。
 
-- **按平台采集**：默认淘宝、开放 API、refresh。首次点击从起始 page 查询，后续追加结果并保留批次内上游顺序。有 nextCursor 时用户下滑或点击下一页；没有分页证据时只允许手动尝试下一页，小红书必须使用 continuation。每次数据页是独立请求和幂等键，未决付费请求沿用原恢复机制，不自动重试。
-- **浏览已存数据**：`GET /api/v1/data/ecommerce/products/items`；单平台或 all，仅本 consumer 成功提交的商品搜索响应。按请求创建时间倒序、请求 ID 倒序、商品序号升序。过滤 query 是标题子串，不是重新向上游搜索。每次 GET 计只读 usage，无供应商派发。
-- 存量 pageSize 默认 20、最大 100，受 policy 进一步限制。HMAC 游标绑定 consumer、筛选、页大小、请求时间上界和精确行边界。时间上界阻止新建请求插入已翻页范围，但不宣称跨请求数据库快照；晚完成请求和保留期清理仍会改变可见历史。
-- 同商品多次采集保留多次观察；当前功能不是去重后的商品主档，也不混合多个平台的实时采集。每条历史观察携带原 requestId，媒体继续走已有鉴权接口。
-- 刷新当前查询重新读取指定起始页；切换条件后旧结果不能继续翻页，需重新查询。切换 API Key 清空当前结果。每页 3/6/9 只保留在百宝箱视图，和上游数据页无关。
+手机面板下拉（触摸、顶部向上滚轮或按钮）是显式获取选定单平台的下一上游页，仍使用采集设置中的 Public API Key 和原有幂等账本。首次从设置的起始页开始；已结束或未知请求保持原恢复限制。上划到底只获取 Hub 历史下一页。全部平台禁用采集，包括隐藏采集设置中的提交按钮。浏览历史不会验证或使用 Public Key。
+
+管理端接口：
+- `GET /internal/v1/admin/data-products/ecommerce/items`：marketplace、query、pageSize、cursor。仅 Admin Token，全调用身份视野，不创建客户 usage。
+- 同路径 POST 新增、PUT 修改、DELETE 软删除。修改/删除须带 requestId、ordinal、revision；过期 revision 返回 409。新增必须选择单平台，允许修改标题和价格。手动记录明确标记。
+- `GET /internal/v1/admin/data-products/ecommerce/media`：requestId、ordinal；读取保存的图片引用，继承现有图片校验、并发、缓存限制。仅管理端凭证，不传任意 URL。
+
+部署须包含增量迁移 `073_ecommerce_product_edits.sql`。新增管理投影独立于 usage_requests 中的原始响应：修改或删除不改变客户原响应、幂等重放及其原始媒体，软删除只隐藏管理列表。Public 已存接口仍按 consumer 隔离。迁移缺失会显示读取错误，不默认为空。
+
+## 原始采集与 Public 存量合同
+
+`POST /api/v1/data/ecommerce/products/search` 保留原有单平台查询、page/cursor、price、sort 和幂等语义。百宝箱作为可选演示保留这些能力。`GET /api/v1/data/ecommerce/products/items` 是另一条客户 Public API：仍需要 live Key 和 ecommerce 授权，按 consumer 隔离，默认 20、上限 100，每次 GET 计只读 usage，返回原始成功观察，不应用管理编辑。
+
+历史按请求创建时间倒序、请求 ID 倒序、商品序号升序。HMAC 游标绑定调用身份或管理域、筛选、页大小和时间上界。上界不是跨请求事务快照，晚完成请求和保留期清理仍影响可见历史。相同商品多次采集是多次观察，不做跨批去重。目前历史源仍是保留的成功 usage 响应，不宣称覆盖已清理记录或其他尚未归一化的数据集。
 
 ## 参数覆盖与边界
 
@@ -25,4 +34,4 @@
 
 验证包含内存库 consumer 隔离、签名/筛选绑定、跨 10 条翻页、只读 usage 和无上游调用；独立 PostgreSQL 临时表验证微秒时间及 ordinal 翻页；浏览器模拟两批 24 条、新幂等键、cursor/sort 保持、全部平台只读与手机视口。
 
-未连接 mx-static；未修改 Launcher、MX-H2I 登录或网络路径；未部署线上，也未发真实付费采集。
+本次未连接 mx-static；未修改 Launcher、MX-H2I 登录或网络路径；未部署线上，也未发真实付费采集。

@@ -12838,3 +12838,32 @@ button.mih-catalog-status {
 .mih-commerce-price { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .mih-commerce-empty { padding: 48px 16px; text-align: center; }
 @media (max-width: 600px) { .mih-commerce-grid { gap: 8px; } .mih-commerce-feed { padding: 8px; max-height: 70vh; } }
+
+.mih-commerce-outer-tabs { display:flex; gap:8px; margin: 20px 0; border-bottom:1px solid var(--qp-line); }
+.mih-commerce-outer-tabs button { padding:12px 24px; color:var(--qp-text-2); background:transparent; border:0; border-bottom:3px solid transparent; cursor:pointer; }
+.mih-commerce-outer-tabs button[aria-selected="true"] { color:var(--qp-primary); border-bottom-color:var(--qp-primary); }
+.mih-commerce-manager { display:grid; grid-template-columns:minmax(260px,340px) minmax(0,1fr); gap:28px; align-items:start; }
+.mih-commerce-filters { display:grid; gap:16px; padding:20px; }
+.mih-commerce-filters h2 { margin:0; }
+.mih-commerce-filters p { font-size:12px; line-height:1.7; color:var(--qp-text-3); margin:0; }
+.mih-commerce-settings summary { cursor:pointer; padding:12px 0; color:var(--qp-primary); }
+.mih-commerce-acquisition .mih-treasure-controls { padding:12px 0; border:0; background:transparent; grid-template-columns:minmax(0,1fr); }
+.mih-commerce-phone-wrap { display:grid; justify-items:center; gap:16px; }
+.mih-commerce-phone-wrap > p { max-width:500px; font-size:12px; color:var(--qp-text-3); }
+.mih-commerce-phone { width:min(100%,480px); border:8px solid var(--qp-line); border-radius:36px; background:var(--qp-bg-2); overflow:hidden; box-shadow:0 16px 50px #00000012; }
+.mih-commerce-phone > header { display:flex; align-items:center; gap:10px; justify-content:space-between; padding:24px 16px 12px; font-size:12px; }
+.mih-commerce-phone > header strong { color:var(--qp-primary); }
+.mih-commerce-phone-actions { display:flex; align-items:center; justify-content:space-between; padding:4px 12px 12px; font-size:11px; border-bottom:1px solid var(--qp-line); }
+.mih-commerce-phone-feed { height:680px; overflow-y:auto; overscroll-behavior-y:contain; padding:12px; scroll-padding-top:12px; }
+.mih-commerce-phone-feed > p { text-align:center; font-size:12px; color:var(--qp-text-3); padding:16px 0; }
+.mih-commerce-phone-feed .mih-commerce-grid { gap:10px; align-items:start; }
+.mih-commerce-phone-feed .mih-commerce-card { padding:8px; cursor:default; }
+.mih-commerce-card-open { display:grid; text-align:left; gap:8px; border:0; padding:0; color:inherit; background:transparent; cursor:pointer; width:100%; }
+.mih-commerce-card-open small { color:var(--qp-text-3); }
+.mih-commerce-card-open strong { font-size:13px; line-height:1.6; }
+.mih-commerce-card-open time { font-size:10px; }
+.mih-commerce-message { padding:20px 8px; font-size:13px; }
+.mih-commerce-modal { position:fixed; inset:0; z-index:200; background:#0008; display:grid; place-items:center; padding:20px; }
+.mih-commerce-modal > form { display:grid; gap:16px; width:min(100%,520px); max-height:90vh; overflow:auto; padding:24px; }
+.mih-commerce-modal small { overflow-wrap:anywhere; color:var(--qp-text-3); }
+@media (max-width:900px) { .mih-commerce-manager { grid-template-columns:minmax(0,1fr); } .mih-commerce-phone-feed { height:65vh; min-height:360px; } }

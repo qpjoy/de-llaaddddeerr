@@ -327,7 +327,7 @@ export async function createRuntime(config = loadConfig()) {
       : tikHubUserInfoGateway.legacyUserInfo(context, input),
     externalSocialUserActivityEnabled:
       Boolean(tikHubAdapter) && config.tikHub.userActivityContractVerified,
-    externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader({
+    externalImageLoader: createExternalImageLoader({
       maxConcurrency: config.externalMedia.maxConcurrency,
       maxCacheBytes: config.externalMedia.cacheBytes,
       maxCacheEntries: config.externalMedia.cacheEntries,

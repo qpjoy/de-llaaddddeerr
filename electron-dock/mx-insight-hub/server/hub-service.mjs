@@ -2346,6 +2346,47 @@ export class HubService {
     })
   }
 
+  async adminEcommerceItems(input) {
+    const query = storedEcommerceQuery({ pageSize: '100', ...input }, 'admin-ecommerce', this.apiKeyPepper)
+    return query.page(await this.store.listAdminEcommerceItems(query))
+  }
+
+  async adminSaveEcommerceItem(body, deleting = false) {
+    const allowed = new Set(['requestId', 'ordinal', 'revision', 'title', 'price', 'marketplace'])
+    assert(body && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).every(key => allowed.has(key)), 400, 'invalid_product', 'Invalid product fields')
+    const manual = !body.requestId
+    assert(!deleting || !manual, 400, 'invalid_product', 'Select a saved product to delete')
+    const requestId = manual ? randomUUID() : requiredUuid(body.requestId, 'requestId')
+    const ordinal = manual ? 1 : Number(body.ordinal)
+    const revision = manual ? 0 : Number(body.revision)
+    assert(Number.isInteger(ordinal) && ordinal > 0 && Number.isInteger(revision) && revision >= 0, 400, 'invalid_product', 'Invalid product revision')
+    const existing = manual ? null : await this.store.getAdminEcommerceItem(requestId, ordinal)
+    assert(manual || (existing && !existing.deleted), 404, 'product_not_found', 'Product is not available')
+    assert(manual || existing.revision === revision, 409, 'product_revision_conflict', 'Product changed; reload before editing')
+    let product = existing?.product
+    if (!deleting) {
+      assert(typeof body.title === 'string' && body.title.trim().length > 0 && body.title.length <= 1000, 400, 'invalid_product', 'Title must be 1–1000 characters')
+      assert(typeof body.price === 'string' && /^\d{1,12}(?:\.\d{1,2})?$/.test(body.price), 400, 'invalid_product', 'Price must be a decimal amount')
+      assert(!manual || ['taobao','tmall','jd','xianyu','xiaohongshu_ec'].includes(body.marketplace), 400, 'invalid_product', 'Choose one marketplace')
+      product = { ...(product || { id: requestId, marketplace: body.marketplace, images: [] }), title: body.title.trim(), pricing: { ...product?.pricing, current: body.price, currency: 'CNY' } }
+    }
+    const saved = await this.store.saveAdminEcommerceItem({ requestId, ordinal, product, manual, deleted: deleting, revision })
+    assert(saved, 409, 'product_revision_conflict', 'Product changed; reload before editing')
+    return { requestId, ordinal, ...saved }
+  }
+
+  async adminEcommerceImage(input, signal) {
+    const requestId = requiredUuid(input.requestId, 'requestId')
+    const ordinal = Number(input.ordinal)
+    assert(Number.isInteger(ordinal) && ordinal > 0, 400, 'invalid_product', 'Invalid ordinal')
+    const item = await this.store.getAdminEcommerceItem(requestId, ordinal)
+    assert(item && !item.deleted && item.product.images?.[0], 404, 'external_media_not_found', 'Product image is unavailable')
+    assert(this.externalImageLoader, 503, 'external_media_unavailable', 'Image relay is unavailable')
+    const release = this.#enterExternalMedia('admin-ecommerce')
+    try { return await this.externalImageLoader(item.product.images[0], { signal, cacheScope: 'admin-ecommerce' }) }
+    finally { release() }
+  }
+
   async ecommerceStoredItems(context, input) {
     assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'Stored ecommerce requires a live key')
     const policy = await this.#storedPlatformPolicy(context, 'ecommerce', 'Ecommerce')

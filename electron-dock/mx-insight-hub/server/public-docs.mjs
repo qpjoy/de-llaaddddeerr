@@ -5359,7 +5359,7 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
       <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
       <tr><td><code>cursor</code></td><td>只使用上页返回的不透明签名值</td><td>绑定 marketplace/query/sort/price；不要解析或拼接</td></tr>
     </tbody></table>
-    <p>管理台默认列表视图，另保留百宝箱视图。采集只针对一个平台，下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
+    <p>管理台外层分为数据列表与百宝箱。数据列表使用当前管理会话自动加载，默认每页 100 条；手机面板上划读取历史，下拉只采集所选单个平台。公开存量接口仍按客户 API Key 的 consumer 隔离。采集下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
     <h3>浏览已存电商数据</h3>
     <div class="endpoint"><span class="method">GET</span><code>/api/v1/data/ecommerce/products/items</code><p>需要 live Key 和 ecommerce 授权。只查本调用身份成功提交的商品搜索记录；不会调用上游，与 cache_only 精确请求查询不同。每次 GET 记录只读 usage。</p></div>
     <p>参数 marketplace 可为 all（默认）或五个平台之一；query 是可选标题子串；pageSize 默认 20、上限 100，受调用身份策略进一步约束；cursor 使用本接口上页返回的 nextCursor。按请求入库时间倒序，同一批次保留上游顺序。游标绑定调用身份、筛选条件和页大小，固定请求时间上界；它不是跨请求的数据库事务快照。不同采集请求中的相同商品保留为历史观察，不做跨批去重。</p>

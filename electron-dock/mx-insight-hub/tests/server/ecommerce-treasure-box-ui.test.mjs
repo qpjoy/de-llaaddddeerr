@@ -191,7 +191,7 @@ test('live key preflight is zero-cost, rejects every Test key and leaves one-cli
   const [, apiSource, pageSource] = await sources()
   const capabilitiesApi = apiSource.match(/capabilities: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
   const requestLookupApi = apiSource.match(/requestByIdempotencyKey: \(apiKey,[\s\S]*?\n  \),/u)?.[0] || ''
-  const verifyKey = pageSource.match(/const verifyHubApiKey = async \(\) => \{[\s\S]*?\n  \}\n\n  return \(/u)?.[0] || ''
+  const verifyKey = pageSource.match(/const verifyHubApiKey = async \(\) => \{[\s\S]*?\n  \}\n\n  useEffect\(/u)?.[0] || ''
   const changeKey = pageSource.match(/const changeHubApiKey = \(value\) => \{[\s\S]*?\n  \}\n\n  const verifyHubApiKey/u)?.[0] || ''
 
   assert.match(capabilitiesApi, /'\/api\/v1\/data\/capabilities'/u)
@@ -353,7 +353,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /if \(!finishRequest\(epoch\)\) return/u)
   assert.match(pageSource, /const \[mode, setMode\] = useState\('hub_live'\)/u)
   assert.match(pageSource, /const hasAmbiguousLiveRequest = lastLiveRequest\?\.outcome === 'ambiguous'/u)
-  assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching' \|\| storedOnly\}/u)
+  assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching' \|\| storedOnly \|\| compact\}/u)
   assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="排序"[\s\S]*?disabled=\{semanticsLocked/u)
@@ -373,12 +373,12 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /deliveryMode === 'refresh'[\s\S]*?点击主按钮即可[\s\S]*?reserved 或核对失败仍会安全停止/u)
   assert.match(pageSource, /const providerRequestBlockedByAmbiguity = mode === 'hub_live'[\s\S]*?deliveryMode === 'cache_first'/u)
   assert.doesNotMatch(pageSource, /chargeConfirmed|setChargeConfirmed|mih-treasure-charge-confirm|成本确认/u)
-  assert.match(pageSource, /type="submit" disabled=\{phase === 'searching' \|\| checkingKey \|\| \(!storedOnly && providerRequestBlockedByAmbiguity\)\}/u)
+  assert.match(pageSource, /type="submit" disabled=\{phase === 'searching' \|\| checkingKey \|\| \(compact && forcedMarketplace === 'all'\) \|\| \(!storedOnly && providerRequestBlockedByAmbiguity\)\}/u)
   assert.match(pageSource, /hasAmbiguousLiveRequest \? '自动核对后重新采集'/u)
   assert.doesNotMatch(pageSource, /type="submit" disabled=\{[^}]*!keyUsable/u)
   assert.match(pageSource, /mode === 'safe_demo' \? safeDemoIdleMessage\(demoDeliveryMode, demoCacheOnlyScene\)/u)
   assert.match(pageSource, /aria-pressed=\{capabilityGroup === group\.id\}/u)
-  assert.doesNotMatch(pageSource, /role="tab(?:list)?"|aria-selected=/u)
+  assert.match(pageSource, /role="tablist" aria-label="电商数据工作区"/u)
 })
 
 test('data-product errors are localized by ownership and always retain operator evidence', async () => {

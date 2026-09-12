@@ -5919,6 +5919,67 @@ export class PostgresStore {
     return safe
   }
 
+  async listAdminEcommerceItems({ marketplace, query, pageSize, cursor, asOf }) {
+    const { rows } = await this.pool.query(`
+      WITH observations AS (
+        SELECT u.id AS request_id, u.created_at, u.consumer_id,
+          item.ordinality::int AS ordinal, item.value AS original_product,
+          u.response_body->'meta'->>'capturedAt' AS captured_at
+        FROM usage_requests u
+        CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(u.response_body->'data'->'items') = 'array' THEN u.response_body->'data'->'items' ELSE '[]'::jsonb END) WITH ORDINALITY item(value, ordinality)
+        WHERE u.platform = 'ecommerce' AND u.status = 'committed' AND u.response_status = 200
+          AND u.response_body->>'contractVersion' = 'mx-insight-hub.ecommerce-products.v1'
+        UNION ALL
+        SELECT request_id, created_at, NULL::uuid, ordinal, product, NULL::text
+        FROM ecommerce_product_edits WHERE manual
+      )
+      SELECT o.request_id AS "requestId", o.ordinal, o.created_at::text AS "recordedAt",
+        o.consumer_id AS "consumerId", o.captured_at AS "capturedAt",
+        COALESCE(e.product, o.original_product) AS product, COALESCE(e.revision, 0) AS revision,
+        COALESCE(e.manual, false) AS manual
+      FROM observations o LEFT JOIN ecommerce_product_edits e USING (request_id, ordinal)
+      WHERE NOT COALESCE(e.deleted, false) AND o.created_at <= $1::timestamptz
+        AND ($2 = 'all' OR COALESCE(e.product, o.original_product)->>'marketplace' = $2)
+        AND ($3 = '' OR strpos(lower(COALESCE(e.product, o.original_product)->>'title'), lower($3)) > 0)
+        AND ($4::timestamptz IS NULL OR o.created_at < $4::timestamptz
+          OR (o.created_at = $4::timestamptz AND o.request_id < $5::uuid)
+          OR (o.created_at = $4::timestamptz AND o.request_id = $5::uuid AND o.ordinal > $6))
+      ORDER BY o.created_at DESC, o.request_id DESC, o.ordinal LIMIT $7`,
+      [asOf, marketplace, query, cursor?.time || null, cursor?.id || null, cursor?.ordinal || 0, pageSize + 1])
+    return rows
+  }
+
+  async getAdminEcommerceItem(requestId, ordinal) {
+    const { rows } = await this.pool.query(`SELECT u.consumer_id AS "consumerId",
+      COALESCE(e.product, u.response_body->'data'->'items'->($2::int - 1)) AS product,
+      COALESCE(e.revision, 0) AS revision, COALESCE(e.deleted, false) AS deleted
+      FROM (SELECT $1::uuid AS request_id, $2::int AS ordinal) key
+      LEFT JOIN ecommerce_product_edits e USING (request_id, ordinal)
+      LEFT JOIN usage_requests u ON u.id = key.request_id AND u.platform = 'ecommerce'
+        AND u.status = 'committed' AND u.response_status = 200
+        AND u.response_body->>'contractVersion' = 'mx-insight-hub.ecommerce-products.v1'`, [requestId, ordinal])
+    return rows[0]?.product ? rows[0] : null
+  }
+
+  async saveAdminEcommerceItem({ requestId, ordinal, product, revision, manual = false, deleted = false }) {
+    const audit = JSON.stringify([{ at: new Date().toISOString(), actor: 'admin-token', action: deleted ? 'delete' : manual ? 'create' : 'edit' }])
+    const { rows } = await this.pool.query(`INSERT INTO ecommerce_product_edits (request_id, ordinal, product, manual, deleted, audit)
+      SELECT $1, $2, $3, $4, $5, $7 WHERE $6 = 0
+      ON CONFLICT (request_id, ordinal) DO UPDATE SET product = EXCLUDED.product,
+        deleted = EXCLUDED.deleted, revision = ecommerce_product_edits.revision + 1,
+        updated_at = now(), audit = ecommerce_product_edits.audit || EXCLUDED.audit
+      WHERE ecommerce_product_edits.revision = $6
+      RETURNING revision`, [requestId, ordinal, product, manual, deleted, revision, audit])
+    // An existing row uses UPDATE directly: INSERT SELECT with expectedRevision>0 has no input rows.
+    if (!rows.length && revision > 0) {
+      const updated = await this.pool.query(`UPDATE ecommerce_product_edits SET product=$3, deleted=$4,
+        revision=revision+1, updated_at=now(), audit=audit || $6::jsonb
+        WHERE request_id=$1 AND ordinal=$2 AND revision=$5 RETURNING revision`, [requestId, ordinal, product, deleted, revision, audit])
+      return updated.rows[0] || null
+    }
+    return rows[0] || null
+  }
+
   async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf }) {
     const { rows } = await this.pool.query(`
       SELECT u.id AS "requestId", u.created_at::text AS "recordedAt",

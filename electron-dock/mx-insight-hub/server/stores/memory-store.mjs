@@ -2046,6 +2046,40 @@ export class MemoryStore {
     return clone(safe)
   }
 
+  adminEcommerceEdits = new Map()
+
+  async listAdminEcommerceItems(query) {
+    const rows = []
+    for (const record of this.requests.values()) {
+      if (record.platform !== 'ecommerce' || record.status !== 'committed' || record.responseStatus !== 200 || record.responseBody?.contractVersion !== 'mx-insight-hub.ecommerce-products.v1') continue
+      for (const [index, product] of record.responseBody.data.items.entries()) rows.push({ requestId: record.id, ordinal: index + 1, recordedAt: record.createdAt, consumerId: record.consumerId, product, revision: 0 })
+    }
+    for (const edit of this.adminEcommerceEdits.values()) if (edit.manual) rows.push(edit)
+    return rows.map(row => ({ ...row, ...this.adminEcommerceEdits.get(`${row.requestId}:${row.ordinal}`) }))
+      .filter(row => !row.deleted && row.recordedAt <= query.asOf && (query.marketplace === 'all' || row.product.marketplace === query.marketplace) && (!query.query || row.product.title.toLowerCase().includes(query.query.toLowerCase())))
+      .sort((a,b) => b.recordedAt.localeCompare(a.recordedAt) || b.requestId.localeCompare(a.requestId) || a.ordinal - b.ordinal)
+      .filter(row => !query.cursor || row.recordedAt < query.cursor.time || (row.recordedAt === query.cursor.time && (row.requestId < query.cursor.id || (row.requestId === query.cursor.id && row.ordinal > query.cursor.ordinal))))
+      .slice(0, query.pageSize + 1)
+  }
+
+  async getAdminEcommerceItem(requestId, ordinal) {
+    const record = this.requests.get(requestId)
+    const product = record?.platform === 'ecommerce' && record.status === 'committed' && record.responseStatus === 200 && record.responseBody?.contractVersion === 'mx-insight-hub.ecommerce-products.v1' ? record.responseBody?.data?.items?.[ordinal - 1] : null
+    const edit = this.adminEcommerceEdits.get(`${requestId}:${ordinal}`)
+    return edit || (product ? { product, consumerId: record.consumerId, revision: 0 } : null)
+  }
+
+  async saveAdminEcommerceItem(input) {
+    const key = `${input.requestId}:${input.ordinal}`
+    const current = this.adminEcommerceEdits.get(key)
+    if ((current?.revision || 0) !== input.revision) return null
+    const record = { ...current, ...input, manual: current?.manual || input.manual, revision: input.revision + 1,
+      ...(input.manual && !current ? { recordedAt: new Date().toISOString() } : {}),
+      audit: [...(current?.audit || []), { at: new Date().toISOString(), actor: 'admin-token', action: input.deleted ? 'delete' : 'save' }] }
+    this.adminEcommerceEdits.set(key, record)
+    return { revision: record.revision }
+  }
+
   async listStoredEcommerceItems({ consumerId, marketplace, query, pageSize, cursor, asOf }) {
     const rows = []
     for (const record of this.requests.values()) {

@@ -1505,6 +1505,33 @@ export function createApp({
         return
       }
 
+      if (pathname === '/internal/v1/admin/data-products/ecommerce/items') {
+        requireSourceAdmin(principal)
+        if (request.method === 'GET') {
+          sendJson(response, 200, { data: await service.adminEcommerceItems(Object.fromEntries(searchParams)), requestId })
+          return
+        }
+        if (['POST', 'PUT', 'DELETE'].includes(request.method)) {
+          const body = await readJson(request, 16 * 1024)
+          if (request.method === 'POST' ? Boolean(body?.requestId) : !body?.requestId) throw new AppError(400, 'invalid_product', 'Method does not match create/update identity')
+          sendJson(response, request.method === 'POST' ? 201 : 200, { data: await service.adminSaveEcommerceItem(body, request.method === 'DELETE'), requestId })
+          return
+        }
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-products/ecommerce/media') {
+        requireSourceAdmin(principal)
+        const controller = new AbortController()
+        const cancel = () => controller.abort()
+        response.once('close', cancel)
+        try {
+          const media = await service.adminEcommerceImage(Object.fromEntries(searchParams), controller.signal)
+          response.writeHead(200, { 'content-type': media.contentType, 'content-length': media.body.length,
+            'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" })
+          response.end(media.body)
+        } finally { response.removeListener('close', cancel) }
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/dashboard') {
         sendJson(response, 200, { data: await scopedDashboardFor(principal), requestId })
         return

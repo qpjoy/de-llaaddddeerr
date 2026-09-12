@@ -294,6 +294,14 @@ export async function signInWithLauncher({ username, password }) {
 }
 
 export const adminApi = {
+  ecommerceItems: (token, query) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { query }),
+  saveEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: body.requestId ? 'PUT' : 'POST', body }),
+  deleteEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: 'DELETE', body }),
+  ecommerceImage: async (token, query, signal) => {
+    const response = await fetch(`${API_BASE}${ADMIN_ROOT}/data-products/ecommerce/media${queryString(query)}`, { headers: { 'x-mx-insight-admin-token': token }, signal })
+    if (!response.ok) throw new ApiError({ status: response.status, message: '图片暂不可用' })
+    return response.blob()
+  },
   // Unauthenticated: the console needs to know how to sign in before it can.
   signInOptions: () => fetch(`${API_BASE}${ADMIN_ROOT}/sign-in-options`)
     .then(parsePayload)
