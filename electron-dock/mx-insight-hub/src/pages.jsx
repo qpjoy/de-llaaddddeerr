@@ -25,10 +25,12 @@ import {
   UserPlus,
   Users,
   WarningCircle,
+  CheckCircle,
 } from '@phosphor-icons/react'
 import { adminApi, publicDocsHref } from './api.js'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from './open-capabilities.js'
 import { selectVisibleTenantId } from './tenant-scope.js'
+import { apiKeyHealth, consumerHealth } from './key-health.js'
 import {
   DropdownField,
   EmptyState,
@@ -711,6 +713,214 @@ export function DashboardPage({ token, query, setQuery, onUnauthorized }) {
   )
 }
 
+// One naming of an authorization scope for the whole console, so a scope never
+// appears under two different names in the same card.
+function scopeLabelOf(entry) {
+  return entry.scopeType === 'platform'
+    ? platformLabel(entry.scope)
+    : CAPABILITY_CATALOG[entry.scope]?.label || entry.scope
+}
+
+// What a tenant lands on after signing in.
+//
+// Every other page in this console is built for an operator deciding something
+// about someone else's tenant. A tenant signing in is asking two questions
+// about their own: can my integration call right now, and what is about to stop
+// working. So this page leads with the verdict and the action, and treats the
+// numbers as supporting evidence rather than the point.
+//
+// It deliberately reuses the same health rule the operator pages use. A tenant
+// being told "everything is fine" while an operator sees the same account
+// blocked would be worse than having no page at all.
+function planCeiling(plan) {
+  const monthly = plan?.limits?.monthlyRequests
+  return Number.isFinite(monthly) ? monthly : null
+}
+
+function TenantConsumerCard({ entry, operationLabel, canManageKeys }) {
+  const health = consumerHealth(entry, { operationLabel, scopeLabel: scopeLabelOf })
+  const monthly = planCeiling(entry.plan)
+  return (
+    <article className={`qp-panel mih-access-card mih-access-card--${health.level}`}>
+      <header>
+        {health.level === 'healthy'
+          ? <CheckCircle size={19} weight="fill" aria-hidden="true" />
+          : <WarningCircle size={19} weight="fill" aria-hidden="true" />}
+        <div>
+          <h3>{entry.consumer.name}</h3>
+          <p>
+            {health.level === 'healthy'
+              ? '当前可以正常调用。'
+              : health.level === 'blocked' ? '当前有调用会被拒绝。' : '当前可以调用，但有即将到期或接近上限的项。'}
+          </p>
+        </div>
+        {canManageKeys ? (
+          <a
+            className="qp-button qp-button--ghost qp-button--sm"
+            href={`#/api-keys?${new URLSearchParams({ consumerId: entry.consumer.id })}`}
+          >
+            <Key size={15} aria-hidden="true" />管理 Key
+          </a>
+        ) : null}
+      </header>
+
+      <dl className="mih-access-card__facts">
+        <div>
+          <dt>API Key</dt>
+          <dd>{formatNumber(entry.keys.active)} 可用 / 共 {formatNumber(entry.keys.total)}</dd>
+        </div>
+        <div>
+          <dt>套餐</dt>
+          <dd>{entry.plan?.name || '未分配'}</dd>
+        </div>
+        <div>
+          <dt>月度调用上限</dt>
+          {/* An absent ceiling is stated as unknown rather than as unlimited:
+              the two lead to opposite decisions about whether to scale up. */}
+          <dd>{monthly === null ? '—' : `${formatNumber(monthly)} 次`}</dd>
+        </div>
+      </dl>
+
+      {health.issues.length ? (
+        <ul className="mih-access-card__issues">
+          {health.issues.map((issue) => (
+            <li key={issue.text} className={`mih-shared-health__issue--${issue.level}`}>
+              <span>{issue.text}</span>
+              {issue.detail ? <small>{issue.detail}</small> : null}
+              <small>{issue.action}</small>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {entry.quota.length ? (
+        /* A meter rather than a table: at card width a five-column table would
+           scroll sideways, and the tenant's question here is "how much is
+           left", which a proportion answers better than five numbers. */
+        <ul className="mih-quota-meters">
+          {entry.quota.map((scope) => {
+            const used = scope.limit > 0 ? Math.min(1, scope.used / scope.limit) : 0
+            const spent = scope.remaining === 0
+            return (
+              <li key={`${scope.scopeType}:${scope.scope}`}>
+                <div className="mih-quota-meters__head">
+                  <strong>{scopeLabelOf(scope)}</strong>
+                  <span className={spent ? 'mih-key-health__spent' : ''}>
+                    剩余 {formatNumber(scope.remaining)} / {formatNumber(scope.limit)}
+                  </span>
+                </div>
+                <div
+                  className="mih-quota-meters__track"
+                  role="meter"
+                  aria-valuenow={scope.used}
+                  aria-valuemin={0}
+                  aria-valuemax={scope.limit}
+                  aria-label={`${scope.scope} 已用 ${scope.used}，上限 ${scope.limit}`}
+                >
+                  <span style={{ inlineSize: `${(used * 100).toFixed(1)}%` }} data-spent={spent ? 'true' : 'false'} />
+                </div>
+                <small>每 {scope.windowSeconds} 秒的窗口，由该调用者下所有 Key 共用</small>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <p className="mih-access-card__empty">这个调用者还没有被授予任何数据域或业务操作。</p>
+      )}
+    </article>
+  )
+}
+
+export function MyAccessPage({ token, session, onUnauthorized }) {
+  const load = useCallback(() => adminApi.myOverview(token), [token])
+  const state = useRemoteData(load, onUnauthorized)
+  const operationLabel = useCallback(
+    (operationKey) => CAPABILITY_CATALOG[operationKey]?.label || operationKey,
+    [],
+  )
+
+  if (state.loading && !state.data) return <LoadingState label="正在汇总你的接入状态" />
+  if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
+
+  const tenants = state.data?.tenants || []
+  const roleOf = new Map((session?.memberships || []).map((membership) => [membership.tenantId, membership.role]))
+  const consumers = tenants.flatMap((tenant) => tenant.consumers)
+  // One sentence at the top, computed from the same rule each card uses.
+  const overall = consumers.reduce((worst, entry) => {
+    const level = consumerHealth(entry, { operationLabel, scopeLabel: scopeLabelOf }).level
+    if (worst === 'blocked' || level === 'blocked') return 'blocked'
+    if (worst === 'warn' || level === 'warn') return 'warn'
+    return 'healthy'
+  }, 'healthy')
+
+  return (
+    <>
+      <PageHeading
+        eyebrow="MY ACCESS / QUOTA / EXPIRY"
+        title="我的接入"
+        description="这里只显示你自己租户的调用能力、共享额度与到期情况，不包含其他租户的数据。"
+        loading={state.loading}
+        onRefresh={state.refresh}
+      />
+      {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+
+      {consumers.length ? (
+        <section className={`qp-panel mih-shared-health mih-shared-health--${overall}`}>
+          <header>
+            {overall === 'healthy'
+              ? <CheckCircle size={19} weight="fill" aria-hidden="true" />
+              : <WarningCircle size={19} weight="fill" aria-hidden="true" />}
+            <div>
+              <strong>
+                {overall === 'healthy'
+                  ? '一切正常'
+                  : overall === 'blocked' ? '有调用会被拒绝' : '有项目需要关注'}
+              </strong>
+              <p>
+                共 {formatNumber(tenants.length)} 个租户、{formatNumber(consumers.length)} 个调用者。
+                {overall === 'blocked' ? '下面标红的项会让对应调用者的所有 Key 都被拒绝。' : null}
+              </p>
+            </div>
+          </header>
+        </section>
+      ) : null}
+
+      {tenants.length === 0 ? (
+        <EmptyState
+          icon={Buildings}
+          title="还没有可访问的租户"
+          description="你的账号已经登录成功，但还没有被授予任何租户的访问权限。请联系管理员为你添加成员身份。"
+        />
+      ) : tenants.map((tenant) => (
+        <Panel
+          key={tenant.id}
+          title={tenant.name}
+          subtitle={`${roleOf.get(tenant.id) ? `我的角色：${roleOf.get(tenant.id)} · ` : ''}${tenant.consumers.length} 个调用者`}
+        >
+          {tenant.consumers.length ? (
+            <div className="mih-access-grid">
+              {tenant.consumers.map((entry) => (
+                <TenantConsumerCard
+                  key={entry.consumer.id}
+                  entry={entry}
+                  operationLabel={operationLabel}
+                  canManageKeys={tenantAllows(session, tenant.id, 'apikey.read')}
+                />
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              icon={Users}
+              title="这个租户下还没有调用者"
+              description="调用者是签发 API Key 的归属身份；请联系管理员创建。"
+            />
+          )}
+        </Panel>
+      ))}
+    </>
+  )
+}
+
 export function ConsumersPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const tenantId = query.get('tenantId') || ''
   const [search, setSearch] = useState('')
@@ -719,6 +929,11 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
   const [formError, setFormError] = useState(null)
   const [form, setForm] = useState({ tenantId: '', tenantName: '', name: '', businessId: '' })
   const [tenantDialog, setTenantDialog] = useState(null)
+  // Suspension is reversible, but it stops a customer's production traffic the
+  // moment it is confirmed, so it is never a one-click table action.
+  const [statusTarget, setStatusTarget] = useState(null)
+  const [statusSaving, setStatusSaving] = useState(false)
+  const [statusError, setStatusError] = useState(null)
   const [tenantSaving, setTenantSaving] = useState(false)
   const [tenantError, setTenantError] = useState(null)
 
@@ -761,6 +976,23 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
   const showTenantDialog = (tenant = null) => {
     setTenantError(null)
     setTenantDialog({ id: tenant?.id || null, name: tenant?.name || '' })
+  }
+
+  const applyTenantStatus = async () => {
+    const next = statusTarget.status === 'suspended' ? 'active' : 'suspended'
+    setStatusSaving(true)
+    setStatusError(null)
+    try {
+      await adminApi.setTenantStatus(token, statusTarget.id, { status: next })
+      notify(next === 'suspended' ? '租户已停用' : '租户已恢复', 'success')
+      setStatusTarget(null)
+      state.refresh()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setStatusError(error)
+    } finally {
+      setStatusSaving(false)
+    }
   }
 
   const saveTenant = async (event) => {
@@ -846,9 +1078,18 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
                   <td><code className="mih-mono">{tenant.id}</code></td>
                   <td className="mih-table__actions">
                     {tenantAllows(session, tenant.id, 'tenant.write') ? (
-                      <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showTenantDialog(tenant)}>
-                        <PencilSimple size={15} aria-hidden="true" />重命名
-                      </button>
+                      <>
+                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showTenantDialog(tenant)}>
+                          <PencilSimple size={15} aria-hidden="true" />重命名
+                        </button>
+                        <button
+                          className="qp-button qp-button--ghost qp-button--sm"
+                          type="button"
+                          onClick={() => { setStatusError(null); setStatusTarget(tenant) }}
+                        >
+                          <Power size={15} aria-hidden="true" />{tenant.status === 'suspended' ? '恢复' : '停用'}
+                        </button>
+                      </>
                     ) : null}
                   </td>
                 </tr>
@@ -941,6 +1182,43 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         </Modal>
       ) : null}
 
+      {statusTarget ? (
+        <Modal
+          title={statusTarget.status === 'suspended' ? '恢复租户' : '停用租户'}
+          description={statusTarget.status === 'suspended'
+            ? '恢复后，该租户下原有的 API Key 会立即重新可用，无需重新签发。'
+            : '停用会立即让该租户下所有 API Key 的调用被拒绝。这是可逆操作：Key、授权、额度与用量记录都保留，随时可以恢复。'}
+          onClose={() => !statusSaving && setStatusTarget(null)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setStatusTarget(null)} disabled={statusSaving}>取消</button>
+              <button
+                className={`qp-button ${statusTarget.status === 'suspended' ? 'qp-button--primary' : 'qp-button--danger'}`}
+                type="button"
+                onClick={applyTenantStatus}
+                disabled={statusSaving}
+              >
+                {statusSaving
+                  ? '正在提交'
+                  : statusTarget.status === 'suspended' ? '确认恢复' : '确认停用'}
+              </button>
+            </>
+          )}
+        >
+          <div className="mih-confirm-copy">
+            <WarningCircle size={26} weight="duotone" aria-hidden="true" />
+            <p>
+              将{statusTarget.status === 'suspended' ? '恢复' : '停用'} <strong>{statusTarget.name}</strong>。
+              {/* Said plainly, because the operator's likely next question is
+                  whether this is the destructive operation they were looking
+                  for -- it is not, and Hub has no such operation. */}
+              {statusTarget.status === 'suspended' ? null : ' 这不是删除：租户、调用者、Key 与用量证据都不会被移除。'}
+            </p>
+          </div>
+          {statusError ? <ErrorState error={statusError} /> : null}
+        </Modal>
+      ) : null}
+
       {tenantDialog ? (
         <Modal
           title={tenantDialog.id ? '重命名租户' : '新建租户'}
@@ -963,6 +1241,13 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
       ) : null}
     </>
   )
+}
+
+// The row sees the same rule as the drawer, minus the parts only the overview
+// request can answer. Passing no overview is what makes that explicit: there is
+// one health rule, evaluated against less evidence.
+function rowHealth(key) {
+  return apiKeyHealth(key, null)
 }
 
 export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, notify }) {
@@ -988,21 +1273,46 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     const selectedConsumerId = consumers.some((consumer) => consumer.id === consumerId) ? consumerId : ''
     const keys = consumers.length ? await adminApi.apiKeys(token, selectedConsumerId) : []
     const visibleConsumerIds = new Set(consumers.map((consumer) => consumer.id))
+    // The shared layer is a property of one consumer, so it is only fetched
+    // once a consumer is selected. Its failure must not blank the key list:
+    // "we could not read the shared ceiling" is far less useful than the keys.
+    const health = selectedConsumerId
+      ? await adminApi.consumerHealth(token, selectedConsumerId).catch(() => null)
+      : null
     return {
       consumers,
       keys: (keys || []).filter((key) => visibleConsumerIds.has(key.consumerId)),
       selectedConsumerId,
+      health,
+      // Which selection this result answers, so a deliberate server-side
+      // redirect can be told apart from data that simply predates the
+      // selection being made.
+      requestedContext: selectionContext(null, consumerId),
     }
   }, [consumerId, session, token])
   const state = useRemoteData(load, onUnauthorized)
   useEffect(() => {
-    if (!state.loading && state.data && consumerId && consumerId !== state.data.selectedConsumerId) {
+    // Only act on a result that answers the selection currently in the URL.
+    // `state.loading` is not enough on its own: the refetch triggered by a new
+    // selection is still queued on the render where this first runs, so the
+    // previous consumer's data is briefly paired with the new request and
+    // would be read as a rejected selection -- snapping the picker back and
+    // making it look as though consumers cannot be switched.
+    if (state.loading || !state.data) return
+    if (state.data.requestedContext !== selectionContext(null, consumerId)) return
+    if (consumerId && consumerId !== state.data.selectedConsumerId) {
       setQuery({ consumerId: state.data.selectedConsumerId || null })
     }
   }, [consumerId, setQuery, state.data, state.loading])
   const consumers = state.data?.consumers || []
   const keys = state.data?.keys || []
   const selectedConsumerId = state.data?.selectedConsumerId || ''
+  const sharedHealth = state.data?.health
+    ? consumerHealth(state.data.health, {
+        operationLabel: (operationKey) => CAPABILITY_CATALOG[operationKey]?.label || operationKey,
+        scopeLabel: scopeLabelOf,
+      })
+    : null
   const writableConsumers = consumers.filter((consumer) => tenantAllows(session, consumer.tenantId, 'apikey.write'))
   const canIssueKey = writableConsumers.length > 0
   const consumerNames = new Map(consumers.map((consumer) => [consumer.id, consumer.name]))
@@ -1167,6 +1477,66 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           options={consumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
         />
       </section>
+      {selectedConsumerId ? (
+        state.data?.health ? (
+          <section className={`qp-panel mih-shared-health mih-shared-health--${sharedHealth.level}`}>
+            <header>
+              {sharedHealth.level === 'healthy'
+                ? <CheckCircle size={19} weight="fill" aria-hidden="true" />
+                : <WarningCircle size={19} weight="fill" aria-hidden="true" />}
+              <div>
+                <strong>
+                  {sharedHealth.level === 'healthy'
+                    ? '共享层正常'
+                    : sharedHealth.level === 'blocked' ? '共享层存在阻断' : '共享层需要关注'}
+                </strong>
+                {/* Named explicitly, because the whole point of this panel is
+                    that these limits are not per key. */}
+                <p>以下限制由 <strong>{state.data.health.consumer.name}</strong> 下全部 {state.data.health.keys.total} 把 Key 共用；换一把 Key 不会绕开。</p>
+              </div>
+            </header>
+            {sharedHealth.issues.length ? (
+              <ul>
+                {sharedHealth.issues.map((issue) => (
+                  <li key={issue.text} className={`mih-shared-health__issue--${issue.level}`}>
+                    <span>{issue.text}</span>
+                    {issue.detail ? <small>{issue.detail}</small> : null}
+                    <small>{issue.action}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {state.data.health.quota.length ? (
+              <Table label="共享额度">
+                <thead><tr><th>授权范围</th><th>窗口</th><th>已用</th><th>上限</th><th>剩余</th></tr></thead>
+                <tbody>
+                  {state.data.health.quota.map((entry) => (
+                    <tr key={`${entry.scopeType}:${entry.scope}`}>
+                      <td><strong>{scopeLabelOf(entry)}</strong><small>{entry.scope}</small></td>
+                      <td>{entry.windowSeconds} 秒</td>
+                      <td>{formatNumber(entry.used)}</td>
+                      <td>{formatNumber(entry.limit)}</td>
+                      <td className={entry.remaining === 0 ? 'mih-key-health__spent' : ''}>{formatNumber(entry.remaining)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            ) : null}
+          </section>
+        ) : (
+          /* The shared ceiling is what explains most rejections, so failing to
+             read it is reported rather than rendered as "everything is fine". */
+          <section className="qp-panel mih-shared-health mih-shared-health--warn">
+            <header>
+              <WarningCircle size={19} weight="fill" aria-hidden="true" />
+              <div>
+                <strong>共享层状态暂不可读</strong>
+                <p>下方 Key 列表仍然有效，但共享额度与被阻断的业务操作这次没有取到；刷新可重试。</p>
+              </div>
+            </header>
+          </section>
+        )
+      ) : null}
       <Panel title="已签发密钥" subtitle={`${keys.length} 条记录`}>
         {keys.length ? (
           <Table label="API Key 列表">
@@ -1183,7 +1553,19 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                     <small>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? '非沙箱；外部电商接口拒绝使用' : '正式开放能力凭据'}</small>
                   </td>
                   <td><StatusBadge status={key.effectiveStatus || key.status} /></td>
-                  <td>{formatDate(key.expiresAt)}</td>
+                  <td>
+                    {formatDate(key.expiresAt)}
+                    {/* Only what the list itself knows. Quota and blocked
+                        operations are shared across the consumer, so they are
+                        reported once in the header rather than repeated on
+                        every row -- and fetching them per row would cost one
+                        provider probe per key. */}
+                    {rowHealth(key).issues.map((issue) => (
+                      <small key={issue.text} className={`mih-key-chip mih-key-chip--${issue.level}`}>
+                        <WarningCircle size={13} weight="fill" aria-hidden="true" />{issue.text} · {issue.action}
+                      </small>
+                    ))}
+                  </td>
                   <td>{formatDate(key.lastUsedAt)}</td>
                   <td className="mih-table__actions mih-table__actions--wide">
                     <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showOverview(key)}>
@@ -1350,6 +1732,55 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           {overviewError ? <ErrorState error={overviewError} onRetry={() => showOverview(overviewTarget.key)} /> : null}
           {overviewTarget.data ? (
             <div className="mih-form">
+              {(() => {
+                const health = apiKeyHealth(overviewTarget.key, overviewTarget.data, {
+                  operationLabel: (operationKey) => CAPABILITY_CATALOG[operationKey]?.label || operationKey,
+                  scopeLabel: scopeLabelOf,
+                })
+                return (
+                  <section className={`mih-key-health mih-key-health--${health.level}`}>
+                    <header>
+                      {health.level === 'healthy' ? <CheckCircle size={18} weight="fill" /> : <WarningCircle size={18} weight="fill" />}
+                      <strong>
+                        {health.level === 'healthy' ? '这把 Key 现在可以正常调用'
+                          : health.level === 'blocked' ? '这把 Key 现在会被拒绝'
+                            : '这把 Key 即将受限'}
+                      </strong>
+                    </header>
+                    {health.issues.length ? (
+                      <ul>
+                        {health.issues.map((issue) => (
+                          <li key={`${issue.level}:${issue.text}`} className={`mih-key-health__issue--${issue.level}`}>
+                            <span>{issue.text}</span>
+                            <small>{issue.action}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>额度、授权与有效期都没有问题。</p>
+                    )}
+                  </section>
+                )
+              })()}
+              {overviewTarget.data.quota?.length ? (
+                <Table label="当前窗口余量">
+                  <thead><tr><th>范围</th><th>最紧的上限</th><th>已用 / 上限</th><th>剩余</th><th>窗口</th></tr></thead>
+                  <tbody>
+                    {overviewTarget.data.quota.map((entry) => (
+                      <tr key={`${entry.scopeType}:${entry.scope}`}>
+                        <td>
+                          <strong>{entry.scopeType === 'platform' ? platformLabel(entry.scope) : (CAPABILITY_CATALOG[entry.scope]?.label || entry.scope)}</strong>
+                          <small>{entry.scope}</small>
+                        </td>
+                        <td>{entry.binding.limitScope === 'api_key' ? '这把 Key' : '调用者'}</td>
+                        <td>{formatNumber(entry.binding.used)} / {formatNumber(entry.binding.limit)}</td>
+                        <td className={entry.binding.remaining === 0 ? 'mih-key-health__spent' : ''}>{formatNumber(entry.binding.remaining)}</td>
+                        <td>{formatNumber(entry.binding.windowSeconds)} 秒</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              ) : null}
               <section className="mih-metric-grid mih-metric-grid--compact">
                 <MetricCard icon={Pulse} label="累计请求" value={formatNumber(overviewTarget.data.usage?.requests || 0)} hint={`已提交 ${formatNumber(overviewTarget.data.usage?.committed || 0)}`} />
                 <MetricCard icon={Coins} label="所属套餐" value={overviewTarget.data.plan?.name || '未分配'} hint={overviewTarget.data.plan ? `${overviewTarget.data.plan.key} · v${overviewTarget.data.plan.version}` : '无套餐总额'} />

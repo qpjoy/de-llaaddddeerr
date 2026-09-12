@@ -531,6 +531,21 @@ export class MemoryStore {
     return clone(record)
   }
 
+  // Suspending a tenant is the reversible way to stop it calling. It is not a
+  // delete: usage and billing evidence stays exactly where it is, which is also
+  // why the schema refuses to delete a tenant that has any.
+  //
+  // Nothing here needs to reach into keys or consumers. Authentication already
+  // requires an active tenant, so flipping this one field stops every key under
+  // it at once, and flipping it back restores them unchanged.
+  async setTenantStatus(id, status) {
+    const record = this.tenants.get(id)
+    if (!record) return null
+    record.status = status
+    record.updatedAt = nowIso()
+    return clone(record)
+  }
+
   async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     if (businessId && [...this.consumers.values()].some((consumer) => consumer.businessId === businessId)) {
@@ -696,6 +711,21 @@ export class MemoryStore {
     if (!active(consumer) || !active(tenant)) return null
     key.lastUsedAt = nowIso()
     return clone({ apiKey: this.#publicApiKey(key), consumer, tenant })
+  }
+
+  // Why a presented key was refused, asked only after it already was.
+  //
+  // Authentication deliberately answers null for every reason at once, so the
+  // hot path stays one lookup and a bad guess learns nothing. But a caller
+  // holding a real key for a suspended tenant would otherwise be told their key
+  // is "invalid, expired, or revoked" -- none of which is true, and all of
+  // which point at rotating a key that is fine.
+  async explainApiKeyRejection(digest) {
+    const key = this.apiKeys.get(this.apiKeysByDigest.get(digest))
+    if (!key) return null
+    const tenant = this.tenants.get(key.tenantId)
+    if (active(key) && !active(tenant)) return 'tenant_suspended'
+    return null
   }
 
   async revokeApiKey(id) {
@@ -1411,21 +1441,131 @@ export class MemoryStore {
     return { kind: 'reserved', request: clone(record) }
   }
 
-  #assertQuota({
-    tenantId, consumerId, apiKeyId, platform, capability,
-    windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
-  }) {
-    const records = [...this.requests.values()]
+  // The one definition of "how many requests count against this window".
+  // A health view that counted differently from the admission check would be
+  // worse than no view at all: it would show room where the next call is about
+  // to be rejected, or the reverse.
+  #countAgainstWindow({ records, scope, windowStart, tenantId, consumerId, apiKeyId }) {
     const recordHasScope = (record, expected) => {
       const admitted = this.usageAuthorizationScopes.get(record.id)
         || [{
           type: record.platform ? 'platform' : 'capability',
           key: record.platform ?? record.capability,
         }]
-      return admitted.some((scope) => (
-        scope.type === expected.type && scope.key === expected.key
+      return admitted.some((entry) => (
+        entry.type === expected.type && entry.key === expected.key
       ))
     }
+    return records.filter((record) => (
+      (tenantId == null || record.tenantId === tenantId)
+      && (consumerId == null || record.consumerId === consumerId)
+      && (apiKeyId == null || record.apiKeyId === apiKeyId)
+      && recordHasScope(record, scope)
+      // A reservation in flight already holds its slot, and an unknown outcome
+      // may have spent one, so both count exactly as a committed request does.
+      && ['reserved', 'committed', 'unknown'].includes(record.status)
+      && new Date(record.reservedAt) >= windowStart
+    )).length
+  }
+
+  // What a caller would hit right now, per authorization scope, using the same
+  // counter the admission check uses. This answers "can my next call get
+  // through, and if not which ceiling stops it" -- which is the question a
+  // tenant actually has when a request is rejected.
+  async quotaSnapshot({ tenantId, consumerId, apiKeyId }) {
+    const key = this.apiKeys.get(apiKeyId)
+    if (!key || key.consumerId !== consumerId) return []
+    const records = [...this.requests.values()]
+    const now = Date.now()
+
+    const platforms = (this.apiKeyPlatformEntitlements.get(apiKeyId) || [])
+      .map((entry) => ({ scope: { type: 'platform', key: entry.platform }, entitlement: entry }))
+    const capabilities = (this.apiKeyCapabilityEntitlements.get(apiKeyId) || [])
+      .map((entry) => ({ scope: { type: 'capability', key: entry.capability }, entitlement: entry }))
+
+    return [...platforms, ...capabilities].map(({ scope, entitlement }) => {
+      const consumerPolicy = scope.type === 'platform'
+        ? this.policies.get(`${consumerId}:${scope.key}`)
+        : this.capabilityPolicies.get(`${consumerId}:${scope.key}`)
+      const consumerWindowSeconds = Number(consumerPolicy?.windowSeconds) || 3_600
+      const consumerMax = Number(consumerPolicy?.maxRequests) || 100_000
+      const keyWindowSeconds = Number(entitlement.windowSeconds) || consumerWindowSeconds
+      const keyMax = Number(entitlement.maxRequests) || consumerMax
+
+      const consumerUsed = this.#countAgainstWindow({
+        records,
+        scope,
+        windowStart: new Date(now - consumerWindowSeconds * 1_000),
+        tenantId,
+        consumerId,
+      })
+      const keyUsed = this.#countAgainstWindow({
+        records,
+        scope,
+        windowStart: new Date(now - keyWindowSeconds * 1_000),
+        apiKeyId,
+      })
+
+      // Report the ceiling that binds first. A caller shown the looser of the
+      // two would be told it has room right up to the moment it is rejected.
+      const layers = [
+        { limitScope: 'consumer', limit: consumerMax, used: consumerUsed, windowSeconds: consumerWindowSeconds },
+        { limitScope: 'api_key', limit: keyMax, used: keyUsed, windowSeconds: keyWindowSeconds },
+      ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
+      const binding = layers.reduce((tightest, layer) => (
+        layer.remaining < tightest.remaining ? layer : tightest
+      ))
+
+      return {
+        scopeType: scope.type,
+        scope: scope.key,
+        layers,
+        binding,
+      }
+    })
+  }
+
+  // The ceiling every key under this consumer draws from. It is one fact, not
+  // one per key: two keys that each look idle can still be jointly out of
+  // quota, which no per-key view can show.
+  async consumerQuotaSnapshot({ tenantId, consumerId }) {
+    const records = [...this.requests.values()]
+    const now = Date.now()
+    const scopes = [
+      ...(this.grants.get(consumerId) || []).map((key) => ({ type: 'platform', key })),
+      ...(this.capabilityGrants.get(consumerId) || []).map((key) => ({ type: 'capability', key })),
+    ]
+
+    return scopes.map((scope) => {
+      const policy = scope.type === 'platform'
+        ? this.policies.get(`${consumerId}:${scope.key}`)
+        : this.capabilityPolicies.get(`${consumerId}:${scope.key}`)
+      const windowSeconds = Number(policy?.windowSeconds) || 3_600
+      const limit = Number(policy?.maxRequests) || 100_000
+      const used = this.#countAgainstWindow({
+        records,
+        scope,
+        windowStart: new Date(now - windowSeconds * 1_000),
+        tenantId,
+        consumerId,
+      })
+      return {
+        scopeType: scope.type,
+        scope: scope.key,
+        limitScope: 'consumer',
+        limit,
+        used,
+        remaining: Math.max(0, limit - used),
+        windowSeconds,
+      }
+    })
+  }
+
+  #assertQuota({
+    tenantId, consumerId, apiKeyId, platform, capability,
+    windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
+  }) {
+    const records = [...this.requests.values()]
     for (const scope of authorizationScopes) {
       const entitlement = scopeEntitlements.get(authorizationScopeKey(scope))
       const consumerMaxRequests = legacySingleScope
@@ -1437,13 +1577,9 @@ export class MemoryStore {
       const details = scope.type === 'platform'
         ? { platform: scope.key }
         : { capability: scope.key }
-      const count = records.filter((record) => (
-        record.tenantId === tenantId
-        && record.consumerId === consumerId
-        && recordHasScope(record, scope)
-        && ['reserved', 'committed', 'unknown'].includes(record.status)
-        && new Date(record.reservedAt) >= consumerWindowStart
-      )).length
+      const count = this.#countAgainstWindow({
+        records, scope, windowStart: consumerWindowStart, tenantId, consumerId,
+      })
       if (Number.isFinite(consumerMaxRequests) && count >= consumerMaxRequests) {
         throw new AppError(429, quotaExceededCode('consumer'), 'Request quota exceeded', {
           ...details,
@@ -1455,12 +1591,9 @@ export class MemoryStore {
       const keyWindowSeconds = Number(entitlement.windowSeconds)
       const keyMaxRequests = Number(entitlement.maxRequests)
       const keyWindowStart = new Date(Date.now() - keyWindowSeconds * 1_000)
-      const keyCount = records.filter((record) => (
-        record.apiKeyId === apiKeyId
-        && recordHasScope(record, scope)
-        && ['reserved', 'committed', 'unknown'].includes(record.status)
-        && new Date(record.reservedAt) >= keyWindowStart
-      )).length
+      const keyCount = this.#countAgainstWindow({
+        records, scope, windowStart: keyWindowStart, apiKeyId,
+      })
       if (Number.isFinite(keyMaxRequests) && keyCount >= keyMaxRequests) {
         throw new AppError(429, quotaExceededCode('api_key'), 'API key quota exceeded', {
           ...details,

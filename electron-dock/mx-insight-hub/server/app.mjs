@@ -2275,6 +2275,19 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/status')
+      if (request.method === 'PUT' && params) {
+        // Same capability as renaming: whoever may administer the tenant may
+        // stop it. Suspension is reversible and destroys nothing, so it does
+        // not warrant a stricter gate than the rest of tenant administration.
+        requireTenantCapability(principal, params.id, 'tenant.write')
+        requireNoQuery(searchParams, 'tenant status')
+        sendJson(response, 200, {
+          data: await service.setTenantStatus(params.id, await readJson(request)),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/tenants/:id')
       if (request.method === 'PUT' && params) {
         requireTenantCapability(principal, params.id, 'tenant.write')
@@ -2309,6 +2322,39 @@ export function createApp({
           ),
           requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/me/overview') {
+        // "My access", answered from the principal's own memberships rather
+        // than from anything the caller sends. A tenant cannot widen this by
+        // naming someone else's tenant, because no tenant is read from the
+        // request unless it is explicitly checked below.
+        const requestedTenantId = searchParams.get('tenantId')
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'tenantId')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported overview query fields: ${unsupported.join(', ')}`)
+        }
+        const tenantIds = requestedTenantId
+          ? [requireTenantCapability(principal, requestedTenantId, 'usage.read')]
+          // Derived only from memberships the caller actually holds, each
+          // carrying the capability this view needs. A member with none gets an
+          // empty answer rather than a 403: "you are signed in and hold no
+          // access yet" is a true and useful thing to be told, and it is what a
+          // newly invited user sees before an owner grants them anything.
+          : (principal.memberships || [])
+              .filter((membership) => (membership.capabilities || []).includes('usage.read'))
+              .map((membership) => membership.tenantId)
+        sendJson(response, 200, { data: await service.getTenantOverview(tenantIds), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/consumers/:id/health')
+      if (request.method === 'GET' && params) {
+        // Scoped by the consumer's own tenant, exactly like the key list it
+        // sits above: seeing the shared ceiling is the same disclosure as
+        // seeing the keys that draw from it.
+        await assertConsumerCapability(principal, params.id, 'apikey.read')
+        requireNoQuery(searchParams, 'consumer health')
+        sendJson(response, 200, { data: await service.getConsumerHealth(params.id), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/api-keys') {

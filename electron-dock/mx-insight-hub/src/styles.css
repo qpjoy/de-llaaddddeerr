@@ -12562,3 +12562,155 @@ button.mih-catalog-status {
 .mih-capability-group > header small { flex: 1 1 220px; font-size: 11.5px; color: var(--qp-text-muted); }
 
 .mih-capability-empty { margin: 0; padding: 18px 0; color: var(--qp-text-muted); font-size: 13px; }
+
+/* ---------- API key health ---------- */
+/* The first question this drawer answers is "can this key call right now", so
+   the verdict leads and the numbers follow. Severity is carried by the border
+   and the issue marker rather than by colour alone. */
+.mih-key-health {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--qp-line);
+  border-left-width: 3px;
+  background: color-mix(in srgb, var(--qp-surface) 96%, transparent);
+}
+.mih-key-health > header { display: flex; align-items: center; gap: 8px; }
+.mih-key-health > header strong { font-size: 14px; }
+.mih-key-health > p { margin: 0; font-size: 13px; color: var(--qp-text-muted); }
+.mih-key-health ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.mih-key-health li {
+  display: grid;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 2px solid var(--qp-line);
+}
+.mih-key-health li span { font-size: 13px; color: var(--qp-text); }
+.mih-key-health li small { font-size: 12px; color: var(--qp-text-muted); }
+
+.mih-key-health--healthy { border-left-color: var(--qp-success, #1c7365); }
+.mih-key-health--healthy > header { color: var(--qp-success, #1c7365); }
+.mih-key-health--warn { border-left-color: var(--qp-warning, #a8661a); }
+.mih-key-health--warn > header { color: var(--qp-warning, #a8661a); }
+.mih-key-health--blocked { border-left-color: var(--qp-danger, #9c3a34); }
+.mih-key-health--blocked > header { color: var(--qp-danger, #9c3a34); }
+
+.mih-key-health__issue--blocked { border-left-color: var(--qp-danger, #9c3a34); }
+.mih-key-health__issue--warn { border-left-color: var(--qp-warning, #a8661a); }
+.mih-key-health__spent { color: var(--qp-danger, #9c3a34); font-variant-numeric: tabular-nums; }
+
+/* Row-level health chip: a nudge in the list, never the whole verdict. */
+.mih-key-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.7;
+  border: 1px solid currentColor;
+}
+.mih-key-chip--warn { color: var(--qp-warning, #a8661a); }
+.mih-key-chip--blocked { color: var(--qp-danger, #9c3a34); }
+
+/* ---------- Shared (consumer-wide) health ---------- */
+/* Sits above the key list because it explains rejections that no per-key view
+   can: these ceilings and gates apply to every key under the consumer. */
+.mih-shared-health { display: grid; gap: 12px; }
+.mih-shared-health > header { display: flex; align-items: flex-start; gap: 10px; }
+.mih-shared-health > header strong { font-size: 14px; }
+.mih-shared-health > header p { margin: 4px 0 0; font-size: 13px; color: var(--qp-text-muted); }
+.mih-shared-health ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.mih-shared-health li {
+  display: grid;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 2px solid var(--qp-line);
+}
+.mih-shared-health li span { font-size: 13px; }
+.mih-shared-health li small { font-size: 12px; color: var(--qp-text-muted); }
+
+.mih-shared-health--healthy > header { color: var(--qp-success, #1c7365); }
+.mih-shared-health--warn > header { color: var(--qp-warning, #a8661a); }
+.mih-shared-health--blocked > header { color: var(--qp-danger, #9c3a34); }
+.mih-shared-health__issue--warn { border-left-color: var(--qp-warning, #a8661a); }
+.mih-shared-health__issue--blocked { border-left-color: var(--qp-danger, #9c3a34); }
+
+/* ---------- My access (tenant landing) ---------- */
+/* One card per consumer: a tenant with several integrations has several
+   independent ceilings, and collapsing them into one number would hide which
+   integration is the one about to stop working. */
+.mih-access-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+}
+.mih-access-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  border-left: 3px solid var(--qp-line);
+}
+.mih-access-card > header { display: flex; align-items: flex-start; gap: 10px; }
+.mih-access-card > header h3 { margin: 0; font-size: 15px; }
+.mih-access-card > header p { margin: 3px 0 0; font-size: 13px; color: var(--qp-text-muted); }
+.mih-access-card > header > a { margin-left: auto; flex: none; }
+
+.mih-access-card--healthy { border-left-color: var(--qp-success, #1c7365); }
+.mih-access-card--healthy > header { color: var(--qp-success, #1c7365); }
+.mih-access-card--warn { border-left-color: var(--qp-warning, #a8661a); }
+.mih-access-card--warn > header { color: var(--qp-warning, #a8661a); }
+.mih-access-card--blocked { border-left-color: var(--qp-danger, #9c3a34); }
+.mih-access-card--blocked > header { color: var(--qp-danger, #9c3a34); }
+
+.mih-access-card__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+.mih-access-card__facts dt { font-size: 12px; color: var(--qp-text-muted); }
+.mih-access-card__facts dd {
+  margin: 2px 0 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.mih-access-card__issues { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.mih-access-card__issues li {
+  display: grid;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 2px solid var(--qp-line);
+}
+.mih-access-card__issues li span { font-size: 13px; }
+.mih-access-card__issues li small { font-size: 12px; color: var(--qp-text-muted); }
+.mih-access-card__empty { margin: 0; font-size: 13px; color: var(--qp-text-muted); }
+
+/* Quota as a proportion: the tenant's question is "how much is left", and a
+   five-column table would scroll sideways inside a card. */
+.mih-quota-meters { margin: 0; padding: 0; list-style: none; display: grid; gap: 11px; }
+.mih-quota-meters__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.mih-quota-meters__head span { font-variant-numeric: tabular-nums; color: var(--qp-text-muted); }
+.mih-quota-meters__track {
+  margin-top: 5px;
+  block-size: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--qp-line) 70%, transparent);
+  overflow: hidden;
+}
+.mih-quota-meters__track > span {
+  display: block;
+  block-size: 100%;
+  border-radius: inherit;
+  background: var(--qp-success, #1c7365);
+}
+.mih-quota-meters__track > span[data-spent="true"] { background: var(--qp-danger, #9c3a34); }
+.mih-quota-meters li small { display: block; margin-top: 4px; font-size: 11px; color: var(--qp-text-muted); }

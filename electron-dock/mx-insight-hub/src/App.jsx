@@ -30,12 +30,14 @@ import {
   Sun,
   X,
 } from '@phosphor-icons/react'
+import { landingPathFor, showsOwnAccess } from './tenant-scope.js'
 import { adminApi, configurePublicApiBase, signInWithLauncher } from './api.js'
 import { ErrorState, Field, LoadingState, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
   ConsumersPage,
   DashboardPage,
+  MyAccessPage,
   PlansQuotasPage,
   PlatformsPage,
   RuntimePage,
@@ -320,6 +322,9 @@ const NAV_PARENTS = {
 // console renders itself from the server's answer rather than from a local role
 // guess, so a scoped user never sees a control that would 403.
 const ROUTES = [
+  // Listed first so that a tenant whose requested route is not visible to them
+  // falls back here rather than to an operator page they cannot use.
+  { path: '/my', label: '我的接入', description: '额度、到期与可用性', icon: ShieldCheck, group: '业务治理', component: MyAccessPage, ownAccess: true },
   { path: '/dashboard', label: '仪表盘', description: '网关运营总览', icon: House, group: '业务治理', component: DashboardPage, capability: 'usage.read' },
   { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
@@ -356,18 +361,23 @@ const LEGACY_ROUTE_REDIRECTS = new Map([
   ['/agent-market', { path: '/agent/market' }],
 ])
 
+
+
 function visibleRoutes(session) {
   // An older server may omit capabilities, but platform-wide pages still stay
   // hidden unless the session explicitly identifies a platform administrator.
   if (!session?.capabilities) {
     return ROUTES.filter((route) => (
-      (!route.platformAdmin || session?.platformAdmin) && (!route.adminTokenOnly || session?.kind === 'admin-token')
+      (!route.platformAdmin || session?.platformAdmin)
+        && (!route.adminTokenOnly || session?.kind === 'admin-token')
+        && (!route.ownAccess || showsOwnAccess(session))
     ))
   }
   const granted = new Set(session.capabilities)
   return ROUTES.filter((route) => (
     (!route.platformAdmin || session.platformAdmin)
       && (!route.adminTokenOnly || session.kind === 'admin-token')
+      && (!route.ownAccess || showsOwnAccess(session))
       && (!route.capability || granted.has(route.capability))
   ))
 }
@@ -402,6 +412,10 @@ function themeClassName(theme) {
 }
 
 function readLocation({ canonicalize = false } = {}) {
+  // An empty hash means the visitor asked for nothing in particular, which is
+  // not the same as asking for the dashboard: which page is the right landing
+  // depends on who signed in, and that is not known yet when this first runs.
+  const defaulted = !window.location.hash.replace(/^#/, '')
   const raw = window.location.hash.replace(/^#/, '') || '/dashboard?range=24h'
   const separator = raw.indexOf('?')
   let candidatePath = separator === -1 ? raw : raw.slice(0, separator)
@@ -421,7 +435,7 @@ function readLocation({ canonicalize = false } = {}) {
   }
   const studioDetail = candidatePath.startsWith('/agent/studio/')
   const path = ROUTE_MAP.has(candidatePath) ? candidatePath : studioDetail ? '/agent/studio' : '/dashboard'
-  return { path, detailPath: studioDetail ? candidatePath : path, query }
+  return { path, detailPath: studioDetail ? candidatePath : path, query, defaulted }
 }
 
 function ThemeToggle({ theme, onToggle, className = '' }) {
@@ -697,9 +711,7 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    if (!window.location.hash) {
-      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/dashboard?range=24h`)
-    } else {
+    if (window.location.hash) {
       setLocation(readLocation({ canonicalize: true }))
     }
     const update = () => {
@@ -709,6 +721,13 @@ export function App() {
     window.addEventListener('hashchange', update)
     return () => window.removeEventListener('hashchange', update)
   }, [])
+
+  useEffect(() => {
+    if (authState !== 'signed-in' || !location.defaulted) return
+    const landing = landingPathFor(session) === '/my' ? '/my' : '/dashboard?range=24h'
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${landing}`)
+    setLocation(readLocation({ canonicalize: true }))
+  }, [authState, location.defaulted, session])
 
   useEffect(() => {
     if (authState !== 'checking' || !token) return undefined
@@ -781,13 +800,19 @@ export function App() {
     window.location.hash = `${location.detailPath || location.path}${search ? `?${search}` : ''}`
   }, [location.detailPath, location.path, location.query])
 
+
   if (authState !== 'signed-in') {
     return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate}
       theme={theme} onToggleTheme={toggleTheme} />
   }
 
   const routes = visibleRoutes(session)
-  const requested = ROUTE_MAP.get(location.path)
+  // A tenant signing in is asking about their own access, not about gateway
+  // operations, so an unchosen landing goes to "my access" for them. Platform
+  // admins keep the operator dashboard: they are here to look at other people's
+  // tenants, and "my access" would be empty or irrelevant for them.
+  const landingPath = landingPathFor(session)
+  const requested = ROUTE_MAP.get(location.defaulted ? landingPath : location.path)
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')

@@ -1030,6 +1030,37 @@ function replayExpired(existing, replayWindowMs) {
   return Date.now() - new Date(existing.completedAt).getTime() > replayWindowMs
 }
 
+// One definition of "this usage request counts against this scope", shared by
+// the admission check and the quota snapshot the console renders. Two copies
+// would eventually disagree, and the console would then promise headroom the
+// gateway does not honour.
+//
+// A request admitted before authorization scopes were recorded has no scope
+// rows at all, so those fall back to the request's own platform/capability
+// column rather than silently counting against nothing.
+function countsAgainstScopeSql(scopeTypeParam, scopeKeyParam) {
+  return `AND request.status IN ('reserved', 'committed', 'unknown')
+            AND (
+              EXISTS (
+                SELECT 1
+                  FROM usage_request_authorization_scopes authorization_scope
+                 WHERE authorization_scope.usage_request_id = request.id
+                   AND authorization_scope.scope_type = ${scopeTypeParam}
+                   AND authorization_scope.scope_key = ${scopeKeyParam}
+              )
+              OR (
+                NOT EXISTS (
+                  SELECT 1 FROM usage_request_authorization_scopes admitted_scope
+                   WHERE admitted_scope.usage_request_id = request.id
+                )
+                AND CASE ${scopeTypeParam}
+                      WHEN 'platform' THEN request.platform = ${scopeKeyParam}
+                      ELSE request.capability = ${scopeKeyParam}
+                    END
+              )
+            )`
+}
+
 export class PostgresStore {
   constructor(pool) {
     this.pool = pool
@@ -1093,6 +1124,17 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       'UPDATE tenants SET name = $2, updated_at = now() WHERE id = $1 RETURNING *',
       [id, name],
+    )
+    return tenant(rows[0]) || null
+  }
+
+  // See the memory store for why this is one field and not a cascade: the auth
+  // query already joins on an active tenant, so this single write stops every
+  // key under the tenant and is reversible without touching them.
+  async setTenantStatus(id, status) {
+    const { rows } = await this.pool.query(
+      'UPDATE tenants SET status = $2, updated_at = now() WHERE id = $1 RETURNING *',
+      [id, status],
     )
     return tenant(rows[0]) || null
   }
@@ -1325,6 +1367,21 @@ export class PostgresStore {
       consumer: consumer(rows[0].consumer_record),
       tenant: tenant(rows[0].tenant_record),
     }
+  }
+
+  // See the memory store: asked only after authentication already refused, so
+  // that a suspended tenant is not reported as a bad key.
+  async explainApiKeyRejection(digest) {
+    const { rows } = await this.pool.query(
+      `SELECT t.status AS tenant_status
+         FROM api_keys k
+         JOIN tenants t ON t.id = k.tenant_id
+        WHERE k.key_digest = $1
+          AND k.status = 'active'
+          AND k.expires_at > now()`,
+      [digest],
+    )
+    return rows[0]?.tenant_status === 'suspended' ? 'tenant_suspended' : null
   }
 
   async revokeApiKey(id) {
@@ -2325,6 +2382,155 @@ export class PostgresStore {
     }
   }
 
+  // What this key would hit on its next call, counted exactly as #assertQuota
+  // counts it. Cumulative usage cannot answer "can I call right now", and a
+  // console that shows only cumulative usage leaves a 429 unexplained.
+  //
+  // Only the two per-scope layers are reported. Plan window, plan month and
+  // burst are consumer-wide rather than per scope, and folding them into a
+  // per-scope row would misattribute the ceiling that actually bound.
+  async quotaSnapshot({ tenantId, consumerId, apiKeyId }) {
+    // The snapshot is only meaningful for a key that belongs to the consumer
+    // whose ceiling it reports, so the pairing is verified rather than assumed.
+    const owner = await this.pool.query(
+      `SELECT 1 FROM api_keys WHERE id = $1 AND consumer_id = $2 AND tenant_id = $3`,
+      [apiKeyId, consumerId, tenantId],
+    )
+    if (owner.rowCount === 0) return []
+
+    const [platforms, capabilities] = await Promise.all([
+      this.listApiKeyPlatformEntitlements(apiKeyId),
+      this.listApiKeyCapabilityEntitlements(apiKeyId),
+    ])
+    const scopes = [
+      ...platforms.map((entry) => ({
+        scope: { type: 'platform', key: entry.platform },
+        entitlement: entry,
+        policyTable: 'consumer_platform_policies',
+        column: 'platform',
+      })),
+      ...capabilities.map((entry) => ({
+        scope: { type: 'capability', key: entry.capability },
+        entitlement: entry,
+        policyTable: 'consumer_capability_policies',
+        column: 'capability',
+      })),
+    ]
+
+    const snapshot = []
+    for (const { scope, entitlement, policyTable, column } of scopes) {
+      // The same coalesce defaults admission uses, so an unconfigured policy
+      // reports the ceiling that would actually apply rather than "unlimited".
+      const policy = await this.pool.query(
+        `SELECT coalesce(policy.max_requests, 1000) AS max_requests,
+                coalesce(policy.window_seconds, 3600) AS window_seconds
+           FROM (SELECT 1) AS present
+           LEFT JOIN ${policyTable} policy
+             ON policy.consumer_id = $1 AND policy.${column} = $2`,
+        [consumerId, scope.key],
+      )
+      const consumerMax = Number(policy.rows[0].max_requests)
+      const consumerWindowSeconds = Number(policy.rows[0].window_seconds)
+      const keyMax = Number(entitlement.maxRequests ?? entitlement.max_requests ?? consumerMax)
+      const keyWindowSeconds = Number(
+        entitlement.windowSeconds ?? entitlement.window_seconds ?? consumerWindowSeconds,
+      )
+
+      const [consumerUsed, keyUsed] = await Promise.all([
+        this.pool.query(
+          `SELECT count(*)::integer AS count
+             FROM usage_requests request
+            WHERE request.tenant_id = $1 AND request.consumer_id = $2
+              ${countsAgainstScopeSql('$3', '$4')}
+              AND request.reserved_at >= now() - ($5::integer * interval '1 second')`,
+          [tenantId, consumerId, scope.type, scope.key, consumerWindowSeconds],
+        ),
+        this.pool.query(
+          `SELECT count(*)::integer AS count
+             FROM usage_requests request
+            WHERE request.api_key_id = $1
+              ${countsAgainstScopeSql('$2', '$3')}
+              AND request.reserved_at >= now() - ($4::integer * interval '1 second')`,
+          [apiKeyId, scope.type, scope.key, keyWindowSeconds],
+        ),
+      ])
+
+      // Report the ceiling that binds first. A caller shown the looser of the
+      // two would be told it has room right up to the moment it is rejected.
+      const layers = [
+        {
+          limitScope: 'consumer',
+          limit: consumerMax,
+          used: Number(consumerUsed.rows[0].count),
+          windowSeconds: consumerWindowSeconds,
+        },
+        {
+          limitScope: 'api_key',
+          limit: keyMax,
+          used: Number(keyUsed.rows[0].count),
+          windowSeconds: keyWindowSeconds,
+        },
+      ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
+      const binding = layers.reduce((tightest, layer) => (
+        layer.remaining < tightest.remaining ? layer : tightest
+      ))
+
+      snapshot.push({ scopeType: scope.type, scope: scope.key, layers, binding })
+    }
+    return snapshot
+  }
+
+  // The ceiling every key under this consumer draws from. It is one fact, not
+  // one per key: two keys that each look idle can still be jointly out of
+  // quota, which no per-key view can show.
+  async consumerQuotaSnapshot({ tenantId, consumerId }) {
+    const [platforms, capabilities] = await Promise.all([
+      this.listGrants(consumerId),
+      typeof this.listCapabilityGrants === 'function' ? this.listCapabilityGrants(consumerId) : [],
+    ])
+    const scopes = [
+      ...platforms.map((key) => ({
+        type: 'platform', key, policyTable: 'consumer_platform_policies', column: 'platform',
+      })),
+      ...capabilities.map((key) => ({
+        type: 'capability', key, policyTable: 'consumer_capability_policies', column: 'capability',
+      })),
+    ]
+
+    const snapshot = []
+    for (const scope of scopes) {
+      const policy = await this.pool.query(
+        `SELECT coalesce(policy.max_requests, 1000) AS max_requests,
+                coalesce(policy.window_seconds, 3600) AS window_seconds
+           FROM (SELECT 1) AS present
+           LEFT JOIN ${scope.policyTable} policy
+             ON policy.consumer_id = $1 AND policy.${scope.column} = $2`,
+        [consumerId, scope.key],
+      )
+      const limit = Number(policy.rows[0].max_requests)
+      const windowSeconds = Number(policy.rows[0].window_seconds)
+      const used = await this.pool.query(
+        `SELECT count(*)::integer AS count
+           FROM usage_requests request
+          WHERE request.tenant_id = $1 AND request.consumer_id = $2
+            ${countsAgainstScopeSql('$3', '$4')}
+            AND request.reserved_at >= now() - ($5::integer * interval '1 second')`,
+        [tenantId, consumerId, scope.type, scope.key, windowSeconds],
+      )
+      const usedCount = Number(used.rows[0].count)
+      snapshot.push({
+        scopeType: scope.type,
+        scope: scope.key,
+        limitScope: 'consumer',
+        limit,
+        used: usedCount,
+        remaining: Math.max(0, limit - usedCount),
+        windowSeconds,
+      })
+    }
+    return snapshot
+  }
+
   async #assertQuota(client, input) {
     for (const scope of input.authorizationScopes) {
       const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
@@ -2346,26 +2552,7 @@ export class PostgresStore {
         `SELECT count(*)::integer AS count
            FROM usage_requests request
           WHERE request.tenant_id = $1 AND request.consumer_id = $2
-            AND request.status IN ('reserved', 'committed', 'unknown')
-            AND (
-              EXISTS (
-                SELECT 1
-                  FROM usage_request_authorization_scopes authorization_scope
-                 WHERE authorization_scope.usage_request_id = request.id
-                   AND authorization_scope.scope_type = $3
-                   AND authorization_scope.scope_key = $4
-              )
-              OR (
-                NOT EXISTS (
-                  SELECT 1 FROM usage_request_authorization_scopes admitted_scope
-                   WHERE admitted_scope.usage_request_id = request.id
-                )
-                AND CASE $3
-                      WHEN 'platform' THEN request.platform = $4
-                      ELSE request.capability = $4
-                    END
-              )
-            )
+            ${countsAgainstScopeSql('$3', '$4')}
             AND request.reserved_at >= CASE
                   WHEN $5::timestamptz IS NULL
                     THEN now() - ($6::integer * interval '1 second')
@@ -2394,26 +2581,7 @@ export class PostgresStore {
         `SELECT count(*)::integer AS count
            FROM usage_requests request
           WHERE request.api_key_id = $1
-            AND request.status IN ('reserved', 'committed', 'unknown')
-            AND (
-              EXISTS (
-                SELECT 1
-                  FROM usage_request_authorization_scopes authorization_scope
-                 WHERE authorization_scope.usage_request_id = request.id
-                   AND authorization_scope.scope_type = $2
-                   AND authorization_scope.scope_key = $3
-              )
-              OR (
-                NOT EXISTS (
-                  SELECT 1 FROM usage_request_authorization_scopes admitted_scope
-                   WHERE admitted_scope.usage_request_id = request.id
-                )
-                AND CASE $2
-                      WHEN 'platform' THEN request.platform = $3
-                      ELSE request.capability = $3
-                    END
-              )
-            )
+            ${countsAgainstScopeSql('$2', '$3')}
             AND request.reserved_at >= now() - ($4::integer * interval '1 second')`,
         [input.apiKeyId, scope.type, scope.key, keyWindowSeconds],
       )

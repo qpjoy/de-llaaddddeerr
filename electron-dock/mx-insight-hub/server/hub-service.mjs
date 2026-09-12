@@ -514,6 +514,10 @@ function directXiaohongshuLegacyUserActivityRequest(operation, normalized) {
   return { body }
 }
 
+// Mirrors the CHECK constraint on tenants.status. A value outside this set is
+// rejected here rather than surfacing as a database error.
+const TENANT_STATUSES = new Set(['active', 'suspended'])
+
 export class HubService {
   constructor({
     store,
@@ -582,6 +586,33 @@ export class HubService {
   async renameTenant(id, body) {
     const tenantId = requiredUuid(id, 'tenantId')
     const tenant = await this.store.renameTenant(tenantId, requiredString(body.name, 'name'))
+    assert(tenant, 404, 'tenant_not_found', 'Tenant not found')
+    return tenant
+  }
+
+  // Stop a tenant calling, reversibly.
+  //
+  // Deliberately not a delete. The schema refuses to delete a tenant that has
+  // usage or billing rows (those foreign keys are RESTRICT, not CASCADE), which
+  // is the right call -- metering evidence should outlive the account. So the
+  // console offers the operation that is actually safe to offer, and says so.
+  async setTenantStatus(idInput, body) {
+    const tenantId = requiredUuid(idInput, 'tenantId')
+    const status = requiredString(body?.status, 'status')
+    assert(
+      TENANT_STATUSES.has(status),
+      400,
+      'invalid_tenant_status',
+      `status must be one of ${[...TENANT_STATUSES].join(', ')}`,
+    )
+    assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
+    assert(
+      typeof this.store.setTenantStatus === 'function',
+      503,
+      'tenant_status_unavailable',
+      'Tenant suspension requires the current Hub database migration',
+    )
+    const tenant = await this.store.setTenantStatus(tenantId, status)
     assert(tenant, 404, 'tenant_not_found', 'Tenant not found')
     return tenant
   }
@@ -699,7 +730,17 @@ export class HubService {
 
   async authenticate(secret) {
     assert(secret, 401, 'api_key_required', 'API key is required')
-    const context = await this.store.findApiKeyByDigest(hmacSecret(secret, this.apiKeyPepper))
+    const digest = hmacSecret(secret, this.apiKeyPepper)
+    const context = await this.store.findApiKeyByDigest(digest)
+    if (context) return context
+    // Only now, having already refused, is it worth asking why. A suspended
+    // tenant is an operator decision rather than a credential problem, and
+    // reporting it as "invalid, expired, or revoked" sends the caller to
+    // rotate a key that is perfectly good.
+    if (typeof this.store.explainApiKeyRejection === 'function'
+      && await this.store.explainApiKeyRejection(digest) === 'tenant_suspended') {
+      throw new AppError(403, 'tenant_suspended', 'This tenant is suspended; contact the account owner to resume it')
+    }
     assert(context, 401, 'invalid_api_key', 'API key is invalid, expired, or revoked')
     return context
   }
@@ -892,6 +933,127 @@ export class HubService {
     })
   }
 
+  // The layer every key under a consumer shares.
+  //
+  // Most reasons a call is refused are not properties of the key that made it:
+  // a blocked provider operation and a spent consumer window reject every key
+  // alike. Reporting them per key would print the same fact N times and cost
+  // one provider probe per key, so they are gathered once here and the per-key
+  // view keeps only what is genuinely per key.
+  async getConsumerHealth(consumerIdInput) {
+    const consumerId = requiredUuid(consumerIdInput, 'consumerId')
+    const consumer = await this.store.getConsumer(consumerId)
+    assert(consumer, 404, 'consumer_not_found', 'Consumer not found')
+
+    const [plan, allKeys, capabilityGrants, tenant] = await Promise.all([
+      typeof this.store.getConsumerPlan === 'function'
+        ? this.store.getConsumerPlan(consumerId)
+        : null,
+      this.store.listApiKeys(consumerId),
+      typeof this.store.listCapabilityGrants === 'function'
+        ? this.store.listCapabilityGrants(consumerId)
+        : [],
+      // A suspended tenant rejects every key beneath it, and nothing else in
+      // this payload would reveal that: the keys stay active, the quota stays
+      // unspent, and the operations stay ready.
+      this.store.getTenant(consumer.tenantId),
+    ])
+    const quota = typeof this.store.consumerQuotaSnapshot === 'function'
+      ? await this.store.consumerQuotaSnapshot({ tenantId: consumer.tenantId, consumerId })
+      : []
+
+    const operations = {}
+    for (const source of [this.externalPlatformCapabilities, this.externalPostCapabilities]) {
+      if (typeof source !== 'function') continue
+      try {
+        const capability = await source({ consumerId })
+        for (const [operationKey, state] of Object.entries(capability?.operations || {})) {
+          operations[operationKey] = state
+        }
+      } catch {
+        // Provider readiness is diagnostic here. A provider that cannot answer
+        // must not stop the rest of the health view from rendering.
+      }
+    }
+    // Only operations this consumer is actually granted. A provider operation
+    // nobody here can call is an operator concern, not this consumer's.
+    const granted = new Set(capabilityGrants.map((entry) => (
+      typeof entry === 'string' ? entry : entry.capability
+    )))
+    const blockedOperations = Object.entries(operations)
+      .filter(([operationKey, state]) => granted.has(operationKey) && state?.ready === false)
+      .map(([operationKey, state]) => ({
+        operation: operationKey,
+        effectiveState: state.effectiveState || 'unknown',
+      }))
+
+    const now = Date.now()
+    const keys = allKeys.map((key) => ({
+      id: key.id,
+      name: key.name,
+      status: key.effectiveStatus || key.status,
+      expiresAt: key.expiresAt,
+    }))
+    return {
+      consumer: { id: consumer.id, name: consumer.name, tenantId: consumer.tenantId },
+      tenant: tenant ? { id: tenant.id, name: tenant.name, status: tenant.status } : null,
+      plan,
+      quota,
+      operations,
+      blockedOperations,
+      keys: {
+        total: keys.length,
+        active: keys.filter((key) => key.status === 'active').length,
+        // Rotation should start before the key stops working, so keys already
+        // inside the warning window are counted separately from healthy ones.
+        expiringSoon: keys.filter((key) => key.status === 'active'
+          && key.expiresAt
+          && new Date(key.expiresAt).getTime() - now <= 14 * 86_400_000).length,
+        unusable: keys.filter((key) => key.status === 'expired' || key.status === 'revoked').length,
+      },
+    }
+  }
+
+  // What a tenant sees after signing in: their own access, across every
+  // consumer they own, in one answer.
+  //
+  // The operator console asks "which of all tenants is in trouble". A tenant
+  // asks a different question -- "can my integration call right now, and how
+  // long until something stops working" -- and that question is not answerable
+  // from any one consumer page, because a tenant with several consumers has
+  // several independent ceilings and gates.
+  //
+  // Per-consumer health is reused verbatim rather than re-derived, so the
+  // tenant view and the operator view can never disagree about what is blocked.
+  // That does mean one provider readiness probe per consumer; consumers are
+  // fetched in parallel, and this stays proportional to a single tenant's
+  // consumer count rather than the whole platform's.
+  async getTenantOverview(tenantIdsInput) {
+    const tenantIds = (Array.isArray(tenantIdsInput) ? tenantIdsInput : [tenantIdsInput])
+      .filter(Boolean)
+      .map((tenantId) => requiredUuid(tenantId, 'tenantId'))
+    if (tenantIds.length === 0) return { tenants: [], generatedAt: new Date().toISOString() }
+
+    const wanted = new Set(tenantIds)
+    const allTenants = await this.store.listTenants()
+    const tenants = allTenants.filter((tenant) => wanted.has(tenant.id))
+
+    const resolved = await Promise.all(tenants.map(async (tenant) => {
+      const consumers = await this.store.listConsumers(tenant.id)
+      const health = await Promise.all(
+        consumers.map((consumer) => this.getConsumerHealth(consumer.id)),
+      )
+      return {
+        id: tenant.id,
+        name: tenant.name,
+        status: tenant.status,
+        consumers: health,
+      }
+    }))
+
+    return { tenants: resolved, generatedAt: new Date().toISOString() }
+  }
+
   async getApiKeyOverview(apiKeyIdInput) {
     const apiKeyId = requiredUuid(apiKeyIdInput, 'apiKeyId')
     const apiKey = (await this.store.listApiKeys()).find((candidate) => candidate.id === apiKeyId)
@@ -908,7 +1070,49 @@ export class HubService {
         : null,
       this.store.usage({ apiKeyId }),
     ])
-    return { apiKey, platformEntitlements, capabilityEntitlements, plan, usage }
+    // What this key would hit on its next call, counted exactly as admission
+    // counts it. Cumulative usage alone cannot answer "can I call right now".
+    const quota = typeof this.store.quotaSnapshot === 'function'
+      ? await this.store.quotaSnapshot({
+          tenantId: apiKey.tenantId,
+          consumerId: apiKey.consumerId,
+          apiKeyId,
+        })
+      : []
+    // Which of this key's granted operations can actually dispatch right now.
+    // A key can be perfectly scoped and still fail because the provider
+    // operation behind it is blocked, and that is invisible from the key alone.
+    const operations = {}
+    for (const source of [this.externalPlatformCapabilities, this.externalPostCapabilities]) {
+      if (typeof source !== 'function') continue
+      try {
+        const capability = await source({ consumerId: apiKey.consumerId })
+        for (const [operationKey, state] of Object.entries(capability?.operations || {})) {
+          operations[operationKey] = state
+        }
+      } catch {
+        // Provider readiness is diagnostic here. A provider that cannot answer
+        // must not stop the rest of the key overview from rendering.
+      }
+    }
+    const grantedCapabilities = new Set(capabilityEntitlements.map((entry) => entry.capability))
+    const blockedOperations = Object.entries(operations)
+      .filter(([operationKey, state]) => grantedCapabilities.has(operationKey) && state?.ready === false)
+      .map(([operationKey, state]) => ({
+        operation: operationKey,
+        effectiveState: state.effectiveState || 'unknown',
+      }))
+
+    return {
+      apiKey,
+      platformEntitlements,
+      capabilityEntitlements,
+      plan,
+      usage,
+      quota,
+      operations,
+      blockedOperations,
+    }
   }
 
   async #effectivePlatformGrants(context) {
