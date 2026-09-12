@@ -378,6 +378,11 @@ export const adminApi = {
     `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/operations/${encodeURIComponent(operation)}/policy`,
     { method: 'PUT', body },
   ),
+  updateExternalPlatformPriceBook: (token, key, body) => request(
+    token,
+    `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/price-book`,
+    { method: 'PUT', body },
+  ),
   revealExternalPlatformCredential: (token, key, adminToken) => request(
     token,
     `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/credential/reveal`,

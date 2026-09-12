@@ -16,6 +16,7 @@ import {
   Key,
   Pulse,
   ShieldCheck,
+  SlidersHorizontal,
   Stack,
   Users,
   WarningCircle,
@@ -1338,6 +1339,15 @@ function ExternalPlatformOperationCard({
     }))
   }
 
+  // Exactly what is stopping the action buttons right now, in the order an
+  // operator would fix them.
+  const preconditionId = `operation-precondition-${operation.operationKey}`
+  const actionBlockers = []
+  if (!reason.trim()) actionBlockers.push('请先填写「变更原因」，所有状态按钮才可用（它会写入审计事件）')
+  if (activationNeedsPriceBook && !publishPriceBook) {
+    actionBlockers.push('「启用」「灰度」还需勾选“随本次变更发布经复核的上游价格表”并录入价目')
+  }
+
   const submit = async (event) => {
     event.preventDefault()
     const desiredState = event.nativeEvent.submitter?.dataset?.state
@@ -1565,23 +1575,243 @@ function ExternalPlatformOperationCard({
       </div>
 
       {error ? <ErrorState error={error} /> : null}
+      {/* A disabled button that does not say why is indistinguishable from a
+          broken one. These preconditions are real -- the reason is written into
+          the audit event, and activation needs reviewed price evidence -- so
+          they are stated next to the controls they block rather than left for
+          the operator to infer from a button that simply does not respond. */}
+      {actionBlockers.length ? (
+        <p className="mih-external-operation-precondition" id={preconditionId} role="status">
+          <WarningCircle size={15} aria-hidden="true" />
+          {actionBlockers.join('；')}
+        </p>
+      ) : null}
       <footer className="mih-external-operation-actions">
-        {OPERATION_STATE_ACTIONS.map((action) => (
-          <button
-            key={action.value}
-            className={`qp-button ${action.primary ? 'qp-button--primary' : 'qp-button--outline'}`}
-            type="submit"
-            data-state={action.value}
-            aria-pressed={operation.desiredState === action.value}
-            disabled={busy
-              || !reason.trim()
-              || (['active', 'canary'].includes(action.value) && activationNeedsPriceBook && !publishPriceBook)}
-          >
-            {busyState === action.value ? '正在更新' : action.label}
-          </button>
-        ))}
+        {OPERATION_STATE_ACTIONS.map((action) => {
+          const needsPriceBook = ['active', 'canary'].includes(action.value)
+            && activationNeedsPriceBook
+            && !publishPriceBook
+          const blocked = !reason.trim() || needsPriceBook
+          return (
+            <button
+              key={action.value}
+              className={`qp-button ${action.primary ? 'qp-button--primary' : 'qp-button--outline'}`}
+              type="submit"
+              data-state={action.value}
+              aria-pressed={operation.desiredState === action.value}
+              aria-describedby={blocked ? preconditionId : undefined}
+              title={needsPriceBook && reason.trim() ? '启用或灰度前需勾选并录入经复核的价目表' : undefined}
+              disabled={busy || blocked}
+            >
+              {busyState === action.value ? '正在更新' : action.label}
+            </button>
+          )
+        })}
       </footer>
     </form>
+  )
+}
+
+// Pricing for the whole provider, in one place.
+//
+// A provider quotes one rate and one monthly commitment; per-operation pricing
+// is the exception. Putting the common case here means an operator sets it once
+// instead of retyping it into every operation -- which is how a deployment ends
+// up with one operation left on a zero budget, refusing calls for no visible
+// reason.
+function ExternalPlatformProviderPriceBook({ token, provider, operations, onSaved, onUnauthorized, notify }) {
+  const priced = operations.find((operation) => operation.priceBook.monthlyBudgetMinor !== null)
+  const [draft, setDraft] = useState(() => ({
+    currency: priced?.priceBook.currency || 'CNY',
+    pricingAsOf: (priced?.priceBook.pricingAsOf || new Date().toISOString()).slice(0, 10),
+    budgetMode: 'calls',
+    unitCostMinor: '',
+    monthlyBudgetStated: '',
+    monthlySubsidyBudgetStated: '',
+    reason: '',
+  }))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [result, setResult] = useState(null)
+
+  const update = (field, value) => setDraft((current) => ({ ...current, [field]: value }))
+  const unitCost = Number(draft.unitCostMinor)
+  const budgetPreview = draft.budgetMode === 'calls' && Number.isSafeInteger(unitCost) && unitCost > 0
+    && Number(draft.monthlyBudgetStated) > 0
+    ? `= ${formatNumber(Number(draft.monthlyBudgetStated) * unitCost)} 最小货币单位`
+    : null
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    setResult(null)
+    try {
+      // The call notation is an input convenience and never reaches the wire:
+      // the control plane stores money, and the whole admin API states budgets
+      // in minor units. Converting here uses the unit price being submitted in
+      // this same form, so the two can never disagree.
+      const unitCostMinor = Number(draft.unitCostMinor)
+      const toMinor = (stated) => (draft.budgetMode === 'calls'
+        ? Number(stated) * unitCostMinor
+        : Number(stated))
+      const data = await adminApi.updateExternalPlatformPriceBook(token, provider, {
+        currency: draft.currency.trim().toUpperCase(),
+        pricingAsOf: draft.pricingAsOf,
+        unitCostMinor,
+        monthlyBudgetMinor: toMinor(draft.monthlyBudgetStated),
+        monthlySubsidyBudgetMinor: toMinor(draft.monthlySubsidyBudgetStated),
+        reason: draft.reason.trim(),
+      })
+      setResult(data)
+      setDraft((current) => ({ ...current, reason: '' }))
+      notify?.(`已统一录入 ${data.applied.length} 个业务操作的价目表`, 'success')
+      onSaved?.()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+      notify?.(requestError?.message || '统一价目表发布失败', 'danger')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const incomplete = !draft.reason.trim() || !(Number(draft.unitCostMinor) > 0)
+
+  return (
+    <Panel
+      id="external-price-book"
+      title="统一采购价目与预算"
+      subtitle="一次录入，应用到该供应方的全部业务操作。个别操作需要单独收紧或放宽时，再到下面对应的操作里改。"
+      className="mih-external-pricebook-panel"
+      action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
+    >
+      <form className="mih-external-pricebook-form" onSubmit={submit}>
+        <div className="mih-external-operation-price-grid">
+          <Field label="币种">
+            <input className="qp-input mih-mono" value={draft.currency} maxLength="3" pattern="[A-Za-z]{3}"
+              onChange={(event) => update('currency', event.target.value.toUpperCase())} disabled={busy} required />
+          </Field>
+          <Field label="定价证据日期">
+            <input className="qp-input mih-mono" type="date" value={draft.pricingAsOf}
+              onChange={(event) => update('pricingAsOf', event.target.value)} disabled={busy} required />
+          </Field>
+          <Field label="每次调用单价（最小货币单位）" hint="应用到该供应方每一个上游 endpoint；个别 endpoint 不同价时再单独改。">
+            <input className="qp-input mih-mono" type="number" min="1" step="1" value={draft.unitCostMinor}
+              onChange={(event) => update('unitCostMinor', event.target.value)} disabled={busy} required />
+          </Field>
+          <DropdownField label="预算填写单位" value={draft.budgetMode} options={BUDGET_MODES}
+            onChange={(value) => update('budgetMode', value)} disabled={busy} />
+          <Field label={`月度上游预算（${draft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'}）`} hint={budgetPreview}>
+            <input className="qp-input mih-mono" type="number" min="0" step="1" value={draft.monthlyBudgetStated}
+              onChange={(event) => update('monthlyBudgetStated', event.target.value)} disabled={busy} required />
+          </Field>
+          <Field label={`月度补贴预算（${draft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'}）`}>
+            <input className="qp-input mih-mono" type="number" min="0" step="1" value={draft.monthlySubsidyBudgetStated}
+              onChange={(event) => update('monthlySubsidyBudgetStated', event.target.value)} disabled={busy} required />
+          </Field>
+          <Field label="变更原因" hint="必填；与修订号一起写入每个业务操作的审计事件。">
+            <input className="qp-input" value={draft.reason} placeholder="例如：按 2026-09 合同统一录入采购价目"
+              onChange={(event) => update('reason', event.target.value)} disabled={busy} required />
+          </Field>
+        </div>
+
+        {/* Overwriting is the stated model, not a surprise: set the common
+            value, then re-narrow the exceptions. */}
+        <p className="mih-external-operation-precondition" role="status">
+          <WarningCircle size={15} aria-hidden="true" />
+          这会覆盖全部业务操作当前的价目表与预算；之后可在下面对个别操作单独调整。
+          {incomplete ? ' 还需填写单价与变更原因。' : null}
+        </p>
+
+        {error ? <ErrorState error={error} /> : null}
+        {result ? (
+          <div className="mih-external-pricebook-result" role="status">
+            <strong>已应用到 {result.applied.length} 个业务操作</strong>
+            {result.skipped.length ? (
+              <ul>
+                {result.skipped.map((entry) => (
+                  <li key={entry.operationKey}>
+                    <code className="mih-mono">{entry.operationKey}</code>
+                    <span>{entry.message || entry.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : <small>没有被跳过的操作。</small>}
+          </div>
+        ) : null}
+
+        <footer className="mih-external-operation-actions">
+          <button className="qp-button qp-button--primary" type="submit" disabled={busy || incomplete}>
+            {busy ? '正在应用' : '应用到全部业务操作'}
+          </button>
+        </footer>
+      </form>
+    </Panel>
+  )
+}
+
+// A scannable list first, a form only on demand.
+//
+// Every operation rendered as a full form meant scrolling past six price books
+// to find the one that is actually stuck. The row states the two things worth
+// scanning -- can it run, and how much budget is left -- and opens into the
+// existing editor when there is something to change.
+function remainingCallsLabel(operation) {
+  const budget = operation.budget
+  if (!budget || budget.remainingMinor === null) return null
+  const prices = Object.values(operation.priceBook.endpointPrices || {})
+    .filter((value) => Number.isFinite(value) && value > 0)
+  if (prices.length === 0) return null
+  // Priced at the operation's dearest endpoint, the same basis the budget was
+  // set on, so this is a floor rather than an optimistic count.
+  return `约 ${formatNumber(Math.floor(budget.remainingMinor / Math.max(...prices)))} 次`
+}
+
+function ExternalPlatformOperationRow({
+  token, provider, operation, open, onToggle, onSaved, onUnauthorized, notify,
+}) {
+  const budget = operation.budget
+  const remaining = remainingCallsLabel(operation)
+  const spent = budget?.exhausted === true
+  return (
+    <article className={`mih-external-operation-row${open ? ' is-open' : ''}`}>
+      <header>
+        <div className="mih-external-operation-row__name">
+          <strong>{operation.label}</strong>
+          <small className="mih-mono">{operation.operationKey}</small>
+        </div>
+        <StatusBadge status={operation.effectiveState} label={`生效：${statusLabel(operation.effectiveState)}`} />
+        <div className="mih-external-operation-row__budget">
+          <span className={spent ? 'mih-external-budget--spent' : undefined}>
+            {budget && budget.budgetMinor !== null
+              ? `剩余 ${formatMoneyMinor(budget.remainingMinor, budget.currency)} / ${formatMoneyMinor(budget.budgetMinor, budget.currency)}`
+              : '预算未配置'}
+          </span>
+          {remaining ? <small>{spent ? '本月已用完' : `还可调用 ${remaining}`}</small> : null}
+        </div>
+        {operation.blockers.length || spent ? (
+          <span className="mih-external-operation-row__flag">
+            <WarningCircle size={14} aria-hidden="true" />
+            {spent ? '预算已用完' : `${operation.blockers.length} 项阻断`}
+          </span>
+        ) : null}
+        <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={onToggle}
+          aria-expanded={open} aria-controls={`operation-${operation.operationKey}`}>
+          <SlidersHorizontal size={15} aria-hidden="true" />{open ? '收起' : '设置'}
+        </button>
+      </header>
+      {open ? (
+        <ExternalPlatformOperationCard
+          token={token}
+          provider={provider}
+          operation={operation}
+          onSaved={onSaved}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+        />
+      ) : null}
+    </article>
   )
 }
 
@@ -1593,6 +1823,9 @@ function ExternalPlatformOperationControlPanel({
   onUnauthorized,
   notify,
 }) {
+  // Opening one at a time keeps the list scannable and makes it obvious which
+  // operation an edit belongs to.
+  const [openKey, setOpenKey] = useState(null)
   return (
     <Panel
       id="external-operations"
@@ -1604,11 +1837,15 @@ function ExternalPlatformOperationControlPanel({
       {operations.length ? (
         <div className="mih-external-operation-list">
           {operations.map((operation) => (
-            <ExternalPlatformOperationCard
+            <ExternalPlatformOperationRow
               key={`${operation.operationKey}:${operation.revision}:${operation.priceBook.version}`}
               token={token}
               provider={provider}
               operation={operation}
+              open={openKey === operation.operationKey}
+              onToggle={() => setOpenKey(
+                openKey === operation.operationKey ? null : operation.operationKey,
+              )}
               onSaved={onSaved}
               onUnauthorized={onUnauthorized}
               notify={notify}
@@ -1901,6 +2138,14 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             <TrendPanel detail={detail} />
             <CostQuotaPanel detail={detail} />
           </section>
+          <ExternalPlatformProviderPriceBook
+            token={token}
+            provider={provider}
+            operations={detail.operations}
+            onSaved={remote.refresh}
+            onUnauthorized={onUnauthorized}
+            notify={notify}
+          />
           <ExternalPlatformOperationControlPanel
             token={token}
             provider={provider}

@@ -2543,6 +2543,26 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/price-book')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform price book update')
+        if (typeof externalPlatformAdmin?.updateProviderPriceBook !== 'function') {
+          throw new AppError(
+            503,
+            'external_platform_control_store_unavailable',
+            'External platform operation control is unavailable',
+          )
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.updateProviderPriceBook(
+            params.provider,
+            await readJson(request, 16 * 1024),
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(
         pathname,
         '/internal/v1/admin/external-platforms/:provider/operations/:operation/policy',

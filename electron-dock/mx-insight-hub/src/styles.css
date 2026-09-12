@@ -12765,3 +12765,59 @@ button.mih-catalog-status {
 #external-operations,
 #external-credential,
 .mih-external-operation-card { scroll-margin-top: 84px; }
+
+/* Why the state buttons are refusing, said next to them. */
+.mih-external-operation-precondition {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 -4px;
+  font-size: 12px;
+  color: var(--qp-warning, #a8661a);
+}
+
+/* ---------- Operation list: scan first, configure on demand ---------- */
+.mih-external-operation-row {
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--qp-surface) 96%, transparent);
+}
+.mih-external-operation-row + .mih-external-operation-row { margin-top: 10px; }
+.mih-external-operation-row > header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+}
+.mih-external-operation-row__name { display: grid; min-inline-size: 180px; flex: 1 1 200px; }
+.mih-external-operation-row__name strong { font-size: 14px; }
+.mih-external-operation-row__name small { font-size: 11px; color: var(--qp-text-muted); }
+.mih-external-operation-row__budget { display: grid; text-align: right; min-inline-size: 160px; }
+.mih-external-operation-row__budget span { font-size: 13px; font-variant-numeric: tabular-nums; }
+.mih-external-operation-row__budget small { font-size: 11px; color: var(--qp-text-muted); }
+.mih-external-operation-row__flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  color: var(--qp-warning, #a8661a);
+}
+.mih-external-operation-row > header > button { margin-left: auto; }
+.mih-external-operation-row.is-open { border-color: color-mix(in srgb, var(--qp-accent, #1c7365) 50%, var(--qp-line)); }
+.mih-external-operation-row.is-open > header { border-block-end: 1px solid var(--qp-line); }
+
+.mih-external-pricebook-form { display: grid; gap: 14px; }
+.mih-external-pricebook-result {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--qp-line);
+  font-size: 13px;
+}
+.mih-external-pricebook-result ul { margin: 0; padding-left: 16px; display: grid; gap: 4px; }
+.mih-external-pricebook-result li { font-size: 12px; }

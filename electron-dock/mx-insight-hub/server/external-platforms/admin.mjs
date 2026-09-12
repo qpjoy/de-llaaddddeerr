@@ -573,6 +573,96 @@ export class ExternalPlatformAdminService {
     })
   }
 
+  // One price book for the whole provider.
+  //
+  // Pricing per operation is the exception, not the rule: a provider quotes one
+  // rate and one monthly commitment, and making an operator retype that into
+  // every operation is how a deployment ends up with one operation still on a
+  // zero budget, refusing calls for no visible reason. So this applies the same
+  // evidence everywhere, and per-operation editing stays available for the
+  // genuine exceptions.
+  //
+  // Each operation is still written through the ordinary policy path, so every
+  // one gets its own audit event, its own revision check and its own blockers.
+  // Nothing here bypasses the control plane; it just stops the typing.
+  async updateProviderPriceBook(providerKey, input) {
+    this.#assertProvider(providerKey)
+    const body = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (!reason) {
+      throw new AppError(400, 'invalid_request', 'reason is required')
+    }
+    const unitCostMinor = body.unitCostMinor
+    if (!Number.isSafeInteger(unitCostMinor) || unitCostMinor <= 0) {
+      throw new AppError(400, 'invalid_request', 'unitCostMinor must be a positive integer')
+    }
+    // Budgets may be stated in calls, which is how a provider quotes them and
+    // how an operator reasons about them. The control plane stores money.
+    const budgetMinor = (callsField, minorField) => {
+      const calls = body[callsField]
+      if (Number.isSafeInteger(calls) && calls >= 0) return calls * unitCostMinor
+      const minor = body[minorField]
+      if (Number.isSafeInteger(minor) && minor >= 0) return minor
+      throw new AppError(400, 'invalid_request', `${callsField} or ${minorField} is required`)
+    }
+    const monthlyBudgetMinor = budgetMinor('monthlyBudgetCalls', 'monthlyBudgetMinor')
+    const monthlySubsidyBudgetMinor = budgetMinor('monthlySubsidyBudgetCalls', 'monthlySubsidyBudgetMinor')
+
+    const credential = await this.#credential(providerKey)
+    const runtime = { config: this.config, credentialConfigured: credential.credentialConfigured }
+    const controlStore = this.#requireOperationControlStore()
+    const operations = await controlStore.describeProvider(providerKey, runtime)
+    const only = Array.isArray(body.operationKeys) && body.operationKeys.length > 0
+      ? new Set(body.operationKeys.map(String))
+      : null
+
+    const applied = []
+    const skipped = []
+    for (const operation of operations) {
+      if (only && !only.has(operation.operationKey)) continue
+      const endpointKeys = operation.release?.endpointKeys || []
+      if (endpointKeys.length === 0) {
+        skipped.push({ operationKey: operation.operationKey, reason: 'release_declares_no_endpoints' })
+        continue
+      }
+      try {
+        const updated = await controlStore.updatePolicy(providerKey, operation.operationKey, {
+          // The desired state is preserved, never raised: pricing a provider
+          // must not switch on an operation somebody deliberately paused.
+          desiredState: operation.desiredState,
+          expectedRevision: operation.revision,
+          reason,
+          ...(operation.desiredState === 'canary'
+            ? { canaryConsumerIds: operation.canaryConsumerIds || [] }
+            : {}),
+          priceBook: {
+            currency: body.currency,
+            pricingAsOf: body.pricingAsOf,
+            monthlyBudgetMinor,
+            monthlySubsidyBudgetMinor,
+            unitCostMinorByEndpoint: Object.fromEntries(
+              endpointKeys.map((endpointKey) => [endpointKey, unitCostMinor]),
+            ),
+          },
+        }, { actor: 'admin-token', runtime })
+        applied.push({
+          operationKey: operation.operationKey,
+          priceBookVersion: updated?.priceBook?.version ?? null,
+          effectiveState: updated?.effectiveState ?? null,
+        })
+      } catch (error) {
+        // One operation failing must not silently abandon the rest, and must
+        // not be reported as success.
+        skipped.push({
+          operationKey: operation.operationKey,
+          reason: error?.code || 'update_failed',
+          message: error?.message || null,
+        })
+      }
+    }
+    return { applied, skipped, monthlyBudgetMinor, monthlySubsidyBudgetMinor, unitCostMinor }
+  }
+
   async revealCredential(providerKey) {
     this.#assertProvider(providerKey)
     const store = this.#requireCredentialStore()
@@ -677,6 +767,10 @@ export class MultiExternalPlatformAdminService {
 
   updateOperationPolicy(providerKey, operationKey, input) {
     return this.#service(providerKey).updateOperationPolicy(providerKey, operationKey, input)
+  }
+
+  updateProviderPriceBook(providerKey, input) {
+    return this.#service(providerKey).updateProviderPriceBook(providerKey, input)
   }
 
   revealCredential(providerKey) {
