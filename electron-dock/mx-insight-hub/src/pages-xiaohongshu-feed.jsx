@@ -1,3 +1,4 @@
+import { XiaohongshuConsole } from './xiaohongshu-console.jsx'
 import { FeedRuler } from './feed-ruler.jsx'
 import { useDemoAccess, DemoAccessNotice } from './demo-credentials.jsx'
 import { requestUuid } from './request-id.js'
@@ -60,7 +61,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     return details.current.notes.get(id)
   }
   const isAdmin = session?.kind === 'admin-token'
-  const [view, setView] = useState('list')
+  const [view, setView] = useState('api')
   const [listPage, setListPage] = useState(1)
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('search_notes')
@@ -155,8 +156,9 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   const more = () => { if (cursor && !loading && !error) void load(cursor) }
 
   return <section className={`mih-commerce-manager mih-xhs-browser ${view === 'list' ? 'mih-xhs-list-view' : ''}`}>
-    <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'list'} onClick={() => setView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => setView('mobile')}>Mobile 视图</button></nav>
-    <aside className="qp-panel mih-commerce-filters">
+    <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'api'} onClick={() => setView('api')}>接口调试</button><button aria-pressed={view === 'list'} onClick={() => setView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => setView('mobile')}>Mobile 视图</button></nav>
+    <div className="mih-api-console-tab" hidden={view !== 'api'}><XiaohongshuConsole apiKey={apiKey} /></div>
+    <aside className="qp-panel mih-commerce-filters" style={view === 'api' ? { display: 'none' } : undefined}>
       <h2>笔记列表</h2>
       <p>{isAdmin ? '当前管理会话读取 Hub 已存笔记。上划加载历史，点击展开正文和标签。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>
       {isAdmin ? <><Field label="查找 Hub 已存笔记"><input className="qp-input" value={query} onChange={event => setQuery(event.target.value)} maxLength={500} /></Field>
@@ -174,7 +176,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       {acquireError ? <ErrorState error={acquireError} /> : null}
       {evidence ? <p>交付：{evidence.sourceMode || '未知'}<br />请求：{evidence.requestId}<br />查询结果已返回，历史记录稍后更新。</p> : null}
     </aside>
-    <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation"><div className="mih-commerce-phone">
+    <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation" style={view === 'api' ? { display: 'none' } : undefined}><div className="mih-commerce-phone">
       <header><span>MX · 小红书笔记</span><strong>笔记画卷</strong><small>{rows.length} 篇已加载</small></header>
       <div className="mih-commerce-phone-actions"><span>{armed ? '下拉采集下一页' : '下拉采集未开启'}</span><span>{isAdmin ? '上划读取 Hub 历史' : '本次查询结果'}</span></div>
       <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表" onKeyDown={() => { rulerNavigation.current = false }}

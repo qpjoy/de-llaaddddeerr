@@ -82,3 +82,8 @@ export function DemoAccessNotice({ operation, compatibility = false }) {
     <button className="qp-button qp-button--ghost qp-button--sm" disabled={state?.busy} onClick={() => state.select(state.credential?.keyId)}>重新检查</button>
   </div></div>
 }
+
+export function useDemoAccessSnapshot() {
+  const state = useContext(DemoContext)
+  return state?.custom ? null : state?.credential?.access
+}

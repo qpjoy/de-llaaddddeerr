@@ -175,7 +175,7 @@ async function publicDataRequest(apiKey, path, {
       reason: evidence.reason,
     })
   }
-  return { payload, evidence }
+  return { payload, evidence, status: response.status }
 }
 
 async function publicDataImage(apiKey, path, query, { signal } = {}) {
@@ -229,6 +229,7 @@ export const publicDataApi = {
     '/api/v1/data/ecommerce/products/search',
     { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
+  xiaohongshuPost: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(apiKey, '/api/v1/data/post', { method: 'POST', body, idempotencyKey }),
   xiaohongshuNative: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => publicDataRequest(
     apiKey,
     `/api/v1/xiaohongshu/app_v2/${encodeURIComponent(endpoint)}`,

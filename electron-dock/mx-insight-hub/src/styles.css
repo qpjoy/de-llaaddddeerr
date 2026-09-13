@@ -12968,3 +12968,24 @@ button.mih-catalog-status {
 .mih-xhs-list-title img { width: 100%; height: 100%; object-fit: cover; }
 .mih-xhs-list-title strong { max-width: 360px; white-space: normal; }
 .mih-xhs-list-pages { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 16px 0; }
+
+.mih-api-console-tab { grid-column: 1 / -1; min-width: 0; }
+.mih-api-console { display: grid; grid-template-columns: 220px minmax(0, 1fr); overflow: hidden; padding: 0; }
+.mih-api-console-nav { padding: 20px 12px; border-right: 1px solid var(--qp-line); background: var(--qp-bg-2); }
+.mih-api-console-nav h2 { font-size: 16px; margin: 0 8px 8px; }
+.mih-api-console-nav p { font-size: 12px; color: var(--qp-text-3); margin: 8px; }
+.mih-api-console-nav button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-radius: 6px; background: none; color: var(--qp-text-2); padding: 12px 8px; text-align: left; cursor: pointer; }
+.mih-api-console-nav button[aria-pressed="true"] { color: var(--qp-primary); background: color-mix(in srgb, var(--qp-primary) 12%, transparent); }
+.mih-api-console-nav small, .mih-api-method { color: var(--qp-success); font-weight: 700; }
+.mih-api-console-main { min-width: 0; padding: 22px; display: grid; gap: 16px; align-content: start; }
+.mih-api-console-main > header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--qp-line); padding-bottom: 16px; }
+.mih-api-console-main > header code { flex: 1; overflow-wrap: anywhere; }
+.mih-api-console-main h3, .mih-api-console-main p { margin: 0; }
+.mih-api-console-main p { font-size: 12px; line-height: 1.7; color: var(--qp-text-3); }
+.mih-api-console-main .mih-table { min-width: 500px; }
+.mih-api-console-main .mih-table td:last-child { width: 55%; }
+.mih-api-console-main pre { margin: 0; padding: 16px; overflow: auto; background: var(--qp-bg-1); color: var(--qp-text-1); border: 1px solid var(--qp-line); border-radius: 8px; white-space: pre; font-size: 12px; line-height: 1.6; }
+.mih-api-console-main summary { cursor: pointer; margin-bottom: 10px; }
+.mih-api-response { min-height: 200px; max-height: 600px; }
+.mih-api-response-heading { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+@media(max-width: 760px) { .mih-api-console { grid-template-columns: minmax(0,1fr); } .mih-api-console-nav { border-right: 0; border-bottom: 1px solid var(--qp-line); } .mih-api-console-main { padding: 14px; } }
