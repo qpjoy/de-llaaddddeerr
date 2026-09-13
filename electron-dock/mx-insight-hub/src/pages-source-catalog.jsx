@@ -48,6 +48,7 @@ import {
   Field,
   LoadingState,
   Modal,
+  MetricCard,
   PageHeading,
   Pagination,
   ReadinessGauge,
@@ -148,10 +149,11 @@ function connectorHint(item, value) {
 }
 
 const SECTION_OPTIONS = [
-  { id: 'overview', label: '数据源总览', icon: ChartDonut },
+  { id: 'connections', label: '数据接入看板', icon: Globe },
   { id: 'catalog', label: '多维数据表', icon: Rows },
   { id: 'taxonomy', label: '分类与字段', icon: TreeStructure },
   { id: 'plans', label: '计划与证据', icon: FlowArrow },
+  { id: 'overview', label: '覆盖与治理', icon: ChartDonut },
 ]
 
 const EMPTY_FILTERS = Object.freeze({
@@ -1828,10 +1830,66 @@ function PlansPage({ snapshot }) {
   )
 }
 
+function SourceConnectionsDashboard({ snapshot }) {
+  const [category, setCategory] = useState('')
+  const [search, setSearch] = useState('')
+  const [status, setStatus] = useState('')
+  const [page, setPage] = useState(1)
+  const [detail, setDetail] = useState(null)
+  const items = snapshot.items.filter(item => !item.archivedAt)
+  const categories = [...new Set(items.map(item => item.majorCategory).filter(Boolean))]
+  const covered = items.filter(item => item.coverageStatus === 'covered').length
+  const partial = items.filter(item => item.coverageStatus === 'partial').length
+  const filtered = items.filter(item => (!category || item.majorCategory === category)
+    && (!status || (status === 'pending' ? !['covered', 'partial'].includes(item.coverageStatus) : item.coverageStatus === status))
+    && `${item.canonicalName} ${(item.aliases || []).join(' ')} ${(item.connectorHints || []).join(' ')}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
+    .sort((a, b) => ({ covered: 0, partial: 1 }[a.coverageStatus] ?? 2) - ({ covered: 0, partial: 1 }[b.coverageStatus] ?? 2) || Number(a.legacySequence || 0) - Number(b.legacySequence || 0))
+  const totalPages = Math.max(1, Math.ceil(filtered.length / 15))
+  const currentPage = Math.min(page, totalPages)
+  const percent = count => items.length ? `${(count / items.length * 100).toFixed(1)}%` : '0%'
+  return <div className="mih-source-connections">
+    <section className="mih-metric-grid" aria-label="平台与来源覆盖概况">
+      <MetricCard icon={Database} label="平台与来源" value={formatNumber(items.length)} hint={`${categories.length} 个分类 · 不含归档`} />
+      <MetricCard icon={CheckCircle} tone="success" label="平台已覆盖" value={formatNumber(covered)} hint={`占比 ${percent(covered)}`} />
+      <MetricCard icon={CirclesThree} tone="info" label="部分能力覆盖" value={formatNumber(partial)} hint={`占比 ${percent(partial)}`} />
+      <MetricCard icon={Compass} tone="warning" label="未覆盖 / 待核验" value={formatNumber(items.length - covered - partial)} hint={`占比 ${percent(items.length - covered - partial)}`} />
+    </section>
+    <section className="qp-panel mih-source-connection-list">
+      <header className="mih-source-connection-toolbar">
+        <div><h2>平台接入目录</h2><p>覆盖状态取自目录；建议接入方式与待核验能力单独标注。</p></div>
+        <label className="mih-source-connection-search"><MagnifyingGlass size={18} /><input className="qp-input" aria-label="搜索平台或来源" placeholder="搜索平台或来源" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></label>
+      </header>
+      <div className="mih-source-connection-filters">
+        <nav aria-label="平台分类"><button className={!category ? 'is-active' : ''} onClick={() => { setCategory(''); setPage(1) }}>全部 <span>{items.length}</span></button>{categories.map(value => <button className={category === value ? 'is-active' : ''} key={value} onClick={() => { setCategory(value); setPage(1) }}>{value} <span>{items.filter(item => item.majorCategory === value).length}</span></button>)}</nav>
+        <DropdownField label="覆盖状态" value={status} onChange={value => { setStatus(value); setPage(1) }} options={[{ value: '', label: '全部状态' }, { value: 'covered', label: '已覆盖' }, { value: 'partial', label: '部分覆盖' }, { value: 'pending', label: '未覆盖 / 待核验' }]} />
+      </div>
+      <div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table"><thead><tr><th>#</th><th>平台 / 数据来源</th><th>数据状态</th><th>能力与内容</th><th>接入方式 / 线索</th><th>操作</th></tr></thead><tbody>
+        {filtered.slice((currentPage - 1) * 15, currentPage * 15).map((item, index) => <tr key={item.id}>
+          <td>{(currentPage - 1) * 15 + index + 1}</td><td><strong>{item.canonicalName}</strong><small>{item.majorCategory || '未分类'}</small></td>
+          <td><CatalogBadge dimension="coverage" value={item.coverageStatus} /><small>{optionLabel(DELIVERY_OPTIONS, item.deliveryStatus)}</small></td>
+          <td><div className="mih-source-cell-tags">{(item.monitorableContent || []).slice(0, 3).map(value => <span key={value}>{value}</span>)}</div><small>{item.reviewStatus === 'verified' ? '字段已核验' : '目录能力待核验'}{item.monitorableContent?.length > 3 ? ` · 共 ${item.monitorableContent.length} 项` : ''}</small></td>
+          <td><div className="mih-source-cell-tags">{(item.connectorHints || []).map(value => { const hint = connectorHint(item, value); return <span key={value} title={hint.title}>{hint.label}</span> })}</div><small>{item.suggestedAccess?.length ? `建议：${item.suggestedAccess.join(' / ')}` : '暂无接入方式记录'}</small></td>
+          <td><button className="qp-button qp-button--ghost qp-button--sm" onClick={() => setDetail(item)}>查看详情<ArrowRight size={14} /></button></td>
+        </tr>)}
+      </tbody></table></div>
+      {!filtered.length ? <EmptyState icon={MagnifyingGlass} title="暂无匹配的平台" description="尝试其他分类、状态或关键词。" /> : null}
+      <Pagination page={currentPage} pageSize={15} total={filtered.length} totalPages={totalPages} hasMore={currentPage < totalPages} onPageChange={setPage} label="平台接入目录分页" />
+    </section>
+    {detail ? <Modal title={detail.canonicalName} size="large" onClose={() => setDetail(null)} footer={<button className="qp-button qp-button--primary" onClick={() => setDetail(null)}>关闭</button>}>
+      <div className="mih-form"><div><CatalogBadge dimension="coverage" value={detail.coverageStatus} /> <CatalogBadge dimension="delivery" value={detail.deliveryStatus} /></div>
+        <h3>能力与内容</h3><p>{detail.monitorableContent?.join('、') || '尚未记录'}</p><p>{detail.reviewStatus === 'verified' ? '字段已核验' : '这些内容来自目录，仍需核验实际覆盖能力。'}</p>
+        <h3>接入方式</h3><p>{detail.connectorHints?.map(value => connectorHint(detail, value).label).join('、') || '暂无接入线索'}</p><p>建议方式：{detail.suggestedAccess?.join('、') || '尚未记录'}</p>
+        <h3>接入与数据证据</h3>{detail.evidenceRefs?.length ? <ul>{detail.evidenceRefs.map((ref, i) => <li key={i}>{ref.label || ref.key}</li>)}</ul> : <p>尚未绑定数据集或实施证据。</p>}
+        <p>{detail.notes}</p>
+      </div>
+    </Modal> : null}
+  </div>
+}
+
 export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.sourceCatalog(token, { includeArchived: true }), [token])
   const state = useRemoteData(load, onUnauthorized)
-  const section = query.get('section') || 'overview'
+  const section = query.get('section') || 'connections'
   const requestedView = query.get('catalogView') || ''
   const requestedTermKind = query.get('termKind') || ''
   const requestedTermValue = query.get('termValue') || ''
@@ -1843,7 +1901,9 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const snapshot = state.data || { items: [], summary: {}, facets: { majorCategories: [], scenarios: [], regions: [], owners: [], connectorHints: [], tags: [] } }
-  const heading = section === 'catalog'
+  const heading = section === 'connections'
+    ? { eyebrow: 'DATA / PLATFORMS / CONNECTIONS', title: '数据接入看板', description: '汇总平台与数据来源，查看覆盖状态、接入能力与已有数据。' }
+    : section === 'catalog'
     ? { eyebrow: 'CATALOG / MULTI-DIMENSIONAL / GOVERNANCE', title: '多维数据源目录', description: '同一底表上的保存视图、筛选、分组、批量状态、编辑、归档与导出。' }
     : section === 'taxonomy'
       ? { eyebrow: 'TAXONOMY / OWNERS / FIELDS', title: '分类与字段治理', description: '集中管理大类、场景、区域和负责人，并与平台实测证据拆开治理。' }
@@ -1867,6 +1927,7 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
       </nav>
 
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+      {section === 'connections' ? <SourceConnectionsDashboard snapshot={snapshot} /> : null}
       {section === 'overview' ? <SourceCatalogOverview snapshot={snapshot} onOpenCatalog={openCatalog} /> : null}
       {section === 'catalog' ? <SourceCatalogTable snapshot={snapshot} token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} requestedView={catalogViewRequest} onRequestedViewHandled={() => setCatalogViewRequest('')} requestedTermKind={requestedTermKind} requestedTermValue={requestedTermValue} /> : null}
       {section === 'taxonomy' ? <TaxonomyPage token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} onOpenCatalog={(termKind, termValue) => openCatalog(REFERENCE_VIEW.id, termKind, termValue)} /> : null}
