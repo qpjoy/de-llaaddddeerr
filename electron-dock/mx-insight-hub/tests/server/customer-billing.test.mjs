@@ -10,7 +10,7 @@ import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const PEPPER = 'customer-billing-test-pepper-at-least-32-bytes'
 
-async function fixture({ mode = 'enforced', multiplierPpm = 1_200_000 } = {}) {
+async function fixture({ mode = 'enforced', multiplierPpm = 1_200_000, unitPriceMinor = 25 } = {}) {
   const store = new MemoryStore()
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Wallet tenant' })
@@ -37,7 +37,7 @@ async function fixture({ mode = 'enforced', multiplierPpm = 1_200_000 } = {}) {
       key: `customer-xhs-${randomUUID()}`,
       currency: 'CNY',
       defaultMultiplierPpm: 1_000_000,
-      entries: [{ meterKey: 'social.posts.search', unitPriceMinor: 25 }],
+      entries: [{ meterKey: 'social.posts.search', unitPriceMinor }],
     },
   }, 'test-admin')
   const current = await service.getConsumerPlan(consumer.id)
@@ -614,4 +614,24 @@ test('Postgres unknown charge reconciliation calls the audited database primitiv
   assert.equal(charge.status, 'captured')
   assert.equal(charge.chargedMinor, 30)
   assert.deepEqual(charge.pricingSnapshot, { quotedMinor: 30 })
+})
+
+
+test('existing CNY 100000 credit charges 0.10 per new success after activation without retroactive debit', async () => {
+  const { service, store, tenant, context } = await fixture({ mode: 'disabled', multiplierPpm: 1_000_000, unitPriceMinor: 10 })
+  await service.addTenantCredit(tenant.id, { amountMinor: 10_000_000, currency: 'CNY', reason: 'Prepaid contract' }, { idempotencyKey: randomUUID(), actor: 'test-admin' })
+  const prior = reserveInput(context)
+  await store.reserve(prior)
+  await store.commitRequest(prior.requestId, { responseStatus: 200, responseBody: {}, unitsActual: 1 })
+  assert.equal((await service.getTenantBilling(tenant.id)).account.availableMinor, 10_000_000)
+  await service.setTenantBillingProfile(tenant.id, { mode: 'enforced', multiplierPpm: 1_000_000 }, 'test-admin')
+  const current = reserveInput(context)
+  await store.reserve(current)
+  await store.commitRequest(current.requestId, { responseStatus: 200, responseBody: {}, unitsActual: 1 })
+  await store.reserve(current) // Same request must not charge again.
+  const billing = await service.getTenantBilling(tenant.id)
+  assert.equal(billing.account.availableMinor, 9_999_990)
+  assert.equal(billing.account.heldMinor, 0)
+  assert.equal(Math.floor(billing.account.availableMinor / 10), 999_999)
+  assert.equal(billing.ledger.filter(entry => entry.kind === 'capture').length, 1)
 })

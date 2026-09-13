@@ -352,7 +352,7 @@ const ROUTES = [
   { path: '/agent/studio', label: 'Agent Studio', description: '开发、编译与管理 Agent', icon: Graph, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentStudioRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
-  { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },
+  { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read', platformAdmin: true },
   { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '接口与文档', component: DocsPage },
 ]
 
@@ -840,7 +840,7 @@ export function App() {
           <img src="assets/mx-insight-logo-mark.png" alt="" />
           <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
         </a>
-        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes} />
+        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : item)} />
         <section className="mih-sidebar-session">
           <ShieldCheck size={20} weight="duotone" aria-hidden="true" />
           <span>

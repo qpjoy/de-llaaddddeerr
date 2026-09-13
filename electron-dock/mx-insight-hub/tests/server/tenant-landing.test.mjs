@@ -58,3 +58,9 @@ test('an unknown session never lands on a tenant page', () => {
   assert.equal(landingPathFor(null), '/dashboard')
   assert.equal(showsOwnAccess(undefined), false)
 })
+
+// New tenant home applies only when the server grants usage access.
+test('a tenant with usage access lands on its personal dashboard', () => {
+  assert.equal(landingPathFor({ ...tenantUser, capabilities: ['usage.read'] }), '/dashboard')
+  assert.equal(landingPathFor({ ...tenantUser, capabilities: ['apikey.read'] }), '/my')
+})
