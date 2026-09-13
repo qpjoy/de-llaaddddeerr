@@ -3442,6 +3442,13 @@ export class MemoryStore {
     return granted
   }
 
+  async canMemberUseTenantKeys(memberId, tenantId) {
+    const member = this.#members.get(memberId)
+    const membership = this.#memberships.get(memberId)?.get(tenantId)
+    return member?.status === 'active' && membership?.status === 'active'
+      && ['owner', 'admin'].includes(membership.role)
+  }
+
   async listTenantMemberships(memberId) {
     return [...(this.#memberships.get(memberId) || new Map()).values()].map((membership) => ({
       ...membership,

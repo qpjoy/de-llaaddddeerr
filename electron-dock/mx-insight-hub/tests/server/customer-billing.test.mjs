@@ -635,3 +635,27 @@ test('existing CNY 100000 credit charges 0.10 per new success after activation w
   assert.equal(Math.floor(billing.account.availableMinor / 10), 999_999)
   assert.equal(billing.ledger.filter(entry => entry.kind === 'capture').length, 1)
 })
+
+
+test('a private 0.10 plan assignment leaves other tenant plans, wallets and admin-key identity unchanged', async () => {
+  const { service, store, tenant, consumer } = await fixture({ unitPriceMinor: 10, multiplierPpm: 1_000_000 })
+  const other = await service.createTenant({ name: 'Other tenant / admin demo' })
+  const otherConsumer = await service.createConsumer({ tenantId: other.id, name: 'Existing business' })
+  const otherKey = await service.createApiKey({ consumerId: otherConsumer.id, name: 'LCY-delta', platforms: [], capabilities: [] })
+  const originalPlan = await service.getConsumerPlan(otherConsumer.id)
+  const originalBilling = await service.getTenantBilling(other.id)
+  const originalDemo = await service.createDemoCredential()
+  await service.addTenantCredit(tenant.id, { amountMinor: 10_000_000, currency: 'CNY', reason: 'Private prepaid contract' }, { idempotencyKey: randomUUID(), actor: 'test-admin' })
+  const before = await service.getConsumerPlan(consumer.id)
+  const higherPrice = await service.publishPlanVersion({
+    key: before.key, name: before.name, limits: before.limits,
+    priceBook: { key: before.priceBook.key, currency: 'CNY', defaultMultiplierPpm: 1_000_000, entries: [{ meterKey: 'social.posts.search', unitPriceMinor: 20 }] },
+  }, 'test-admin')
+  assert.equal((await service.getConsumerPlan(consumer.id)).versionId, before.versionId, 'publishing alone does not reprice existing business')
+  await service.assignConsumerPlan(consumer.id, { planVersionId: higherPrice.versionId, expectedRevision: before.revision }, 'test-admin')
+  assert.deepEqual(await service.getConsumerPlan(otherConsumer.id), originalPlan)
+  assert.deepEqual(await service.getTenantBilling(other.id), originalBilling)
+  assert.equal((await service.authenticate(originalDemo.secret)).apiKey.id, otherKey.id)
+  assert.equal((await service.createDemoCredential()).keyId, otherKey.id)
+  assert.equal(store.apiKeys.size, 2)
+})

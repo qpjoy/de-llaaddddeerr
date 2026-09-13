@@ -52,3 +52,75 @@ test('only admin token may issue a demo credential, not a tenant key',async()=>{
   }
  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve))}
 })
+
+async function memberFor(store, tenantId, role = 'owner') {
+ const member = await store.upsertExternalIdentity({issuer:'test', subject:crypto.randomUUID(), audience:'hub', displayName:'Tenant operator'})
+ await store.grantTenantMembership({memberId:member.id,tenantId,role})
+ return member
+}
+
+test('tenant default selects only its own key and revocation invalidates an issued ticket', async () => {
+ const {service,store,tenant,key} = await fixture()
+ const otherTenant = await service.createTenant({name:'Other'})
+ const otherConsumer = await service.createConsumer({tenantId:otherTenant.id,name:'Other'})
+ const otherKey = await service.createApiKey({consumerId:otherConsumer.id,name:'Other key',platforms:[],capabilities:[]})
+ const member = await memberFor(store, tenant.id)
+ const scope = {memberId:member.id,tenantIds:[tenant.id]}
+ const demo = await service.createDemoCredential({},scope)
+ assert.equal(demo.keyId,key.id)
+ assert.ok(demo.secret.startsWith('mih_tenant_demo_'))
+ await assert.rejects(()=>service.authenticate(demo.secret.replace('mih_tenant_demo_', 'mih_demo_')),e=>e.code==='demo_credential_expired_or_invalid')
+ assert.deepEqual(demo.choices.map(item=>item.id),[key.id])
+ assert.equal((await service.authenticate(demo.secret)).apiKey.id,key.id)
+ await assert.rejects(()=>service.createDemoCredential({keyId:otherKey.id},scope), e=>e.code==='demo_key_unavailable')
+ await store.revokeTenantMembership({memberId:member.id,tenantId:tenant.id})
+ await assert.rejects(()=>service.authenticate(demo.secret), e=>e.code==='demo_membership_revoked')
+ // The original machine key and the admin demo path retain their old behavior.
+ assert.equal((await service.authenticate(key.secret)).apiKey.id,key.id)
+ assert.equal((await service.createDemoCredential()).keyId,key.id)
+})
+
+test('multiple tenant keys require selection and a role downgrade invalidates the temporary credential',async()=>{
+ const {service,store,tenant,key,consumer}=await fixture()
+ await service.createApiKey({consumerId:consumer.id,name:'Second',platforms:[],capabilities:[]})
+ const member=await memberFor(store,tenant.id)
+ const scope={memberId:member.id,tenantIds:[tenant.id]}
+ const choice=await service.createDemoCredential({},scope)
+ assert.equal(choice.secret,null)
+ assert.equal(choice.choices.length,2)
+ const selected=await service.createDemoCredential({keyId:key.id},scope)
+ await store.grantTenantMembership({memberId:member.id,tenantId:tenant.id,role:'analyst'})
+ await assert.rejects(()=>service.authenticate(selected.secret),e=>e.code==='demo_membership_revoked')
+ assert.deepEqual((await service.createDemoCredential({},scope)).choices,[])
+})
+
+test('tenant HTTP selection is scoped, ignores no caller-supplied scope, and sends no-store',async()=>{
+ const {service,store,tenant,key}=await fixture()
+ const member=await memberFor(store,tenant.id)
+ const principal={kind:'launcher-user',memberId:member.id,platformAdmin:false,tenantIds:[tenant.id],capabilities:['apikey.read','apikey.write'],memberships:[{tenantId:tenant.id,capabilities:['apikey.read','apikey.write']}]}
+ const identity={enabled:true,resolve:async()=>principal}
+ const server=createServer(createApp({store,service,identity,adminToken:'demo-admin-token',logger:{warn(){},error(){}}}))
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
+ const call=body=>fetch(`http://127.0.0.1:${server.address().port}/internal/v1/admin/demo-credentials`,{method:'POST',headers:{authorization:'Bearer tenant-console','content-type':'application/json'},body:JSON.stringify(body)})
+ try {
+  const response=await call({})
+  assert.equal(response.status,200)
+  assert.equal(response.headers.get('cache-control'),'no-store')
+  const issued = (await response.json()).data
+  assert.equal(issued.keyId,key.id)
+  const misuse = await fetch(`http://127.0.0.1:${server.address().port}/internal/v1/admin/session`,{headers:{authorization:`Bearer ${issued.secret}`}})
+  assert.equal(misuse.status,403)
+  assert.equal((await call({tenantIds:[tenant.id]})).status,400)
+  principal.memberships[0].capabilities=['apikey.read']
+  assert.equal((await call({})).status,403)
+ } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve))}
+})
+
+test('diagnostics distinguish a consumer grant from the unchanged key snapshot',async()=>{
+ const {service,tenant,consumer,key}=await fixture()
+ await service.putPlatformConfiguration('xiaohongshu',{tenantId:tenant.id,consumerId:consumer.id,enabled:true,maxRequests:1000,windowSeconds:3600,maxPageSize:100})
+ const demo=await service.createDemoCredential({keyId:key.id})
+ assert.deepEqual(demo.access.platforms,[])
+ assert.deepEqual(demo.access.consumerPlatforms,['xiaohongshu'])
+ assert.deepEqual((await service.authenticate(demo.secret)).apiKey.platforms,[])
+})

@@ -1689,6 +1689,14 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <Field label="密钥名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
             </Field>
+            {!rotationSource ? <div>
+              <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={scopeLoading || !scopeOptions.platforms.includes('xiaohongshu')} onClick={() => setForm(current => ({
+                ...current,
+                platforms: [...new Set([...current.platforms, 'xiaohongshu'])],
+                capabilities: [...new Set([...current.capabilities, ...['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts', 'compat.xiaohongshu.app_v2'].filter(scope => scopeOptions.capabilities.includes(scope))])],
+              }))}>勾选已开通的小红书画卷权限</button>
+              <small>同时选择小红书数据、已开通的笔记操作和 App V2 接口。已有 Key 的权限不变，确认签发后在画卷中选择新 Key。</small>
+            </div> : null}
             <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，扩大范围需要签发新 Key。">
               <div className="mih-key-scopes">
                 {scopeOptions.platforms.map((platform) => (
@@ -1888,6 +1896,51 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
   }
 }
 
+function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state, setQuery }) {
+  const account = billing.account
+  const currency = account?.currency || currentPlan?.customerRates?.[0]?.currency || 'CNY'
+  const billed = usage.customerBilling || {}
+  return <>
+    <PageHeading title="用量与账单" description="查看账户余额、服务价格和消费明细。" loading={state.loading} onRefresh={state.refresh} />
+    {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+    <section className="qp-panel mih-filterbar">
+      {data.tenants.length > 1 ? <FilterSelect label="账户" value={data.tenantId} onChange={tenantId => setQuery({ tenantId, consumerId: null })} options={data.tenants.map(item => ({ value: item.id, label: item.name }))} /> : null}
+      <FilterSelect label="业务" value={data.consumerId} onChange={consumerId => setQuery({ tenantId: data.tenantId, consumerId })} options={data.consumers.map(item => ({ value: item.id, label: item.name }))} emptyLabel="暂无已开通业务" />
+    </section>
+    <section className="mih-metric-grid mih-metric-grid--compact">
+      <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, currency) : '待开通'} hint="账户内各业务共用余额" />
+      <MetricCard icon={Pulse} label="本月调用" value={formatNumber(usage.requests || 0)} />
+      <MetricCard icon={ChartLine} label="本月消费" value={billed.mixedCurrencies ? '请按币种查看明细' : formatMoneyMinor(billed.chargedMinor || 0, billed.currency || currency)} hint="当前业务实际扣款" />
+      <MetricCard icon={Timer} label="待结算金额" value={account ? formatMoneyMinor(account.heldMinor, currency) : '—'} hint="结算完成后更新余额" />
+    </section>
+    <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用后按以下价格扣费。' : '自动扣费尚未开通，请联系服务方确认。'}>
+      {rates.length ? <Table label="我的服务价格">
+        <thead><tr><th>服务</th><th>单次价格</th><th>预计可用次数</th></tr></thead>
+        <tbody>{rates.map(rate => <tr key={rate.meterKey}>
+          <td>{billingMeterLabel(rate.meterKey)}</td>
+          <td>{formatMoneyMinor(rate.unitPriceMinor, rate.currency || currency)} / 次</td>
+          <td>{account && rate.unitPriceMinor > 0 && (rate.currency || currency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / rate.unitPriceMinor))} 次` : '—'}</td>
+        </tr>)}</tbody>
+      </Table> : <EmptyState icon={Coins} title="服务价格待确认" description="请联系服务方确认此业务的价格与开通时间。" />}
+      {rates.length ? <p>预计次数仅按当前余额和单项服务价格计算；其他业务消费及调用限额会影响实际可用次数。</p> : null}
+    </Panel>
+    <Panel title="账户明细" subtitle="充值、扣款与待结算记录。">
+      {billing.ledger?.length ? <Table label="账户明细">
+        <thead><tr><th>时间</th><th>类型</th><th>金额</th><th>可用余额</th><th>说明</th></tr></thead>
+        <tbody>{billing.ledger.map(entry => <tr key={entry.id}>
+          <td>{formatDate(entry.createdAt)}</td><td>{billingLedgerKindLabel(entry.kind)}</td>
+          <td>{formatMoneyMinor(entry.amountMinor, entry.currency)}</td><td>{formatMoneyMinor(entry.availableAfterMinor, entry.currency)}</td><td>{entry.reason || '调用结算'}</td>
+        </tr>)}</tbody>
+      </Table> : <EmptyState icon={Coins} title="暂无账单记录" description="充值或使用服务后，记录将显示在这里。" />}
+    </Panel>
+    <details className="qp-panel mih-panel"><summary>查看服务用量限制</summary>
+      <p>当前套餐：{currentPlan?.name || '待开通'}</p>
+      <p>本月剩余调用：{currentPlan?.limits?.monthlyRequests ? formatNumber(Math.max(0, currentPlan.limits.monthlyRequests - (usage.requests || 0))) : '未设置月上限'}</p>
+      <p>月调用额度与账户余额分别计算，实际调用还受接口速率限制。</p>
+    </details>
+  </>
+}
+
 export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
@@ -1999,6 +2052,8 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     && Number.isInteger(currentPlan?.revision)
     && currentPlan.revision > 0,
   )
+
+  if (!session?.platformAdmin) return <TenantBillingSummary data={data} billing={billing} rates={effectiveRates} currentPlan={currentPlan} usage={data.usage || {}} state={state} setQuery={setQuery} />
 
   const openPlanPublisher = (sourcePlan = currentPlan) => {
     const reusablePlan = sourcePlan?.key === 'legacy-unmetered' ? null : sourcePlan
@@ -2501,11 +2556,12 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
               <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current, entries: [...current.entries.filter(entry => entry.meterKey || entry.price), ...['raw', 'crawl', 'user-info'].filter(key => !current.entries.some(entry => entry.meterKey === key)).map(meterKey => ({ meterKey, price: '' }))] }))}>添加 Night-All 三类接口费率</button>
               <p>raw、crawl、user-info 按请求计费；价格填 0 表示免费。小红书直连使用自己的 social.* 计费键；费用配置不放宽采集工作预算。</p>
               <Table label="逐接口价格">
-                <thead><tr><th>开放能力计量键</th><th>每次基础价格</th><th>操作</th></tr></thead>
+                <thead><tr><th>开放能力计量键</th><th>每次基础价格</th><th>当前租户成交价</th><th>操作</th></tr></thead>
                 <tbody>{planForm.entries.map((entry, index) => (
                   <tr key={index}>
                     <td><input className="qp-input" value={entry.meterKey} onChange={(event) => updatePlanEntry(index, { meterKey: event.target.value.toLowerCase() })} placeholder="social.posts.resolve" required /></td>
                     <td><input className="qp-input" type="text" inputMode="decimal" value={entry.price} onChange={(event) => updatePlanEntry(index, { price: event.target.value })} placeholder="输入合同价格" required /></td>
+                    <td>{decimalToMinor(entry.price) != null && multiplierToPpm(planForm.defaultMultiplier) != null ? formatMoneyMinor(effectivePriceMinor(decimalToMinor(entry.price), billing.profile?.multiplierPpm ?? multiplierToPpm(planForm.defaultMultiplier)), planForm.currency) : '待填写'}</td>
                     <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="删除费率" disabled={planForm.entries.length <= 1} onClick={() => setPlanForm((current) => ({ ...current, entries: current.entries.filter((_, entryIndex) => entryIndex !== index) }))}><Trash size={17} aria-hidden="true" /></button></td>
                   </tr>
                 ))}</tbody>
@@ -2902,7 +2958,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
                     <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} />
-                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href="#/external-platforms">检查外部数据平台 →</a> : <small>请联系管理员检查该业务运行配置。</small>}</div> : null}
+                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href="#/external-platforms?provider=tikhub">检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
                     </td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>

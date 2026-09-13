@@ -1,3 +1,4 @@
+import { useDemoAccess, DemoAccessNotice } from './demo-credentials.jsx'
 import { requestUuid } from './request-id.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ImageSquare } from '@phosphor-icons/react'
@@ -60,6 +61,8 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   const isAdmin = session?.kind === 'admin-token'
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('search_notes')
+  const operation = kind === 'search_notes' ? 'social.posts.search' : 'social.users.posts'
+  const accessIssues = useDemoAccess(operation, true)
   const [selector, setSelector] = useState('')
   const [pageSize, setPageSize] = useState('10')
   const [images, setImages] = useState(true)
@@ -117,7 +120,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     if (viewport.current) viewport.current.scrollTop = 0
   }
   const acquire = async () => {
-    if (liveBusy.current || historyBusy.current || !apiKey.trim() || !selector.trim()) return
+    if (accessIssues.length || liveBusy.current || historyBusy.current || !apiKey.trim() || !selector.trim()) return
     if (overflow.current.length) { present(); return }
     if (next === null) return
     const ownScope = scope
@@ -146,7 +149,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   return <section className="mih-commerce-manager mih-xhs-browser">
     <aside className="qp-panel mih-commerce-filters">
       <h2>笔记列表</h2>
-      <p>{isAdmin ? '当前管理会话读取 Hub 已存笔记。上划加载历史，点击展开正文和标签。' : '使用下方 API Key 采集已授权笔记；跨租户管理历史仅管理员可读。'}</p>
+      <p>{isAdmin ? '当前管理会话读取 Hub 已存笔记。上划加载历史，点击展开正文和标签。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>
       {isAdmin ? <><Field label="查找 Hub 已存笔记"><input className="qp-input" value={query} onChange={event => setQuery(event.target.value)} maxLength={500} /></Field>
         <button className="qp-button qp-button--outline" disabled={loading || acquiring} onClick={() => void load()}>刷新 Hub 历史</button></> : null}
       <DropdownField label="每批展示数量" value={pageSize} onChange={setPageSize} options={['10', '20', '50'].map(value => ({ value, label: `${value} 篇` }))} />
@@ -154,16 +157,17 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       <hr /><h3>采集笔记</h3>
       <DropdownField label="采集来源" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
       <Field label={kind === 'search_notes' ? '采集关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
-      <p>使用上方统一选择的演示身份。需要小红书、App V2 兼容合同及相应搜索／用户笔记授权；每页独立计量，最多 15 页。</p>
-      <label><input type="checkbox" checked={armed} disabled={acquiring || !apiKey.trim() || !selector.trim()} onChange={event => setArmed(event.target.checked)} /> 允许下拉采集下一页（可能计费）</label>
-      <button className="qp-button qp-button--primary" disabled={acquiring || loading || !apiKey.trim() || !selector.trim() || (next === null && !overflow.current.length)} onClick={() => void acquire()}>{acquiring ? '正在获取…' : acquireError ? '重试同一请求' : next === undefined ? '采集第一页' : '获取下一批笔记'}</button>
+      <p>每页查询计为一次调用，最多查询 15 页。</p>
+      <DemoAccessNotice operation={operation} compatibility />
+      <label><input type="checkbox" checked={armed} disabled={accessIssues.length > 0 || acquiring || !apiKey.trim() || !selector.trim()} onChange={event => setArmed(event.target.checked)} /> 允许下拉采集下一页（可能计费）</label>
+      <button className="qp-button qp-button--primary" disabled={accessIssues.length > 0 || acquiring || loading || !apiKey.trim() || !selector.trim() || (next === null && !overflow.current.length)} onClick={() => void acquire()}>{acquiring ? '正在获取…' : acquireError ? '重试同一请求' : next === undefined ? '采集第一页' : '获取下一批笔记'}</button>
       {next === null ? <p>本次上游列表已结束，或已达 15 页上限。</p> : null}
       {acquireError ? <ErrorState error={acquireError} /> : null}
       {evidence ? <p>交付：{evidence.sourceMode || '未知'}<br />请求：{evidence.requestId}<br />采集后异步进入 Hub 历史；未入库前不代表数据丢失。</p> : null}
     </aside>
     <div className="mih-commerce-phone-wrap"><div className="mih-commerce-phone">
       <header><span>MX · 小红书笔记</span><strong>笔记画卷</strong><small>{rows.length} 篇已加载</small></header>
-      <div className="mih-commerce-phone-actions"><span>{armed ? '下拉采集下一页' : '下拉采集未开启'}</span><span>上划读取 Hub 历史</span></div>
+      <div className="mih-commerce-phone-actions"><span>{armed ? '下拉采集下一页' : '下拉采集未开启'}</span><span>{isAdmin ? '上划读取 Hub 历史' : '本次查询结果'}</span></div>
       <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表"
         onScroll={() => { const node = viewport.current; if (node.scrollTop > 0 && node.scrollHeight - node.scrollTop - node.clientHeight < 160) more() }}
         onWheel={event => { if (event.deltaY < 0 && viewport.current.scrollTop <= 0) { wheel.current -= event.deltaY; if (wheel.current >= 140) { wheel.current = 0; pull() } } else wheel.current = 0 }}

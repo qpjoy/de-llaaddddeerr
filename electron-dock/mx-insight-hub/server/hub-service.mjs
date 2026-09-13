@@ -1,5 +1,5 @@
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
-import { issueDemoCredential, readDemoCredential } from './core/demo-credential.mjs'
+import { issueDemoCredential, readDemoCredentialClaims } from './core/demo-credential.mjs'
 import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
@@ -761,26 +761,52 @@ export class HubService {
     return this.store.revokeApiKey(requiredUuid(id, 'id'))
   }
 
-  async createDemoCredential(body = {}) {
-    const keys = (await this.listApiKeys()).filter(key => key.status === 'active' && key.environment === 'live'
+  async createDemoCredential(body = {}, scope = null) {
+    // The caller supplies only keyId. Tenant scope comes from the authenticated
+    // console principal and is rechecked against current Hub membership.
+    const allowedTenants = scope ? new Set(scope.tenantIds || []) : null
+    const candidates = (await this.listApiKeys()).filter(key =>
+      (!allowedTenants || allowedTenants.has(key.tenantId))
+      && (key.effectiveStatus || key.status) === 'active' && key.environment === 'live'
       && (!key.expiresAt || new Date(key.expiresAt).getTime() > Date.now()))
-    const defaults = keys.filter(key => key.name === 'LCY-delta' && key.environment === 'live')
+    const keys = []
+    for (const key of candidates) {
+      if (scope && !await this.store.canMemberUseTenantKeys(scope.memberId, key.tenantId)) continue
+      // Suspended tenants/consumers must not appear as usable demo identities.
+      if (await this.store.findApiKeyById(key.id)) keys.push(key)
+    }
+    const defaults = scope ? keys : keys.filter(key => key.name === 'LCY-delta')
     const selected = body.keyId ? keys.find(key => key.id === requiredUuid(body.keyId, 'keyId'))
       : defaults.length === 1 ? defaults[0] : null
     const choices = keys.map(({ id, name, consumerId, environment }) => ({ id, name, consumerId, environment }))
-    if (!selected && !body.keyId) return { choices, keyId: null, secret: null, reason: '请选择演示 Key（未找到唯一的 LCY-delta Live Key）' }
-    assert(selected, 400, 'demo_key_unavailable', 'Select an active API key')
-    assert(await this.store.findApiKeyById(selected.id), 403, 'demo_identity_unavailable', 'Selected key or tenant is unavailable')
-    return { choices, keyId: selected.id, name: selected.name,
-      ...issueDemoCredential(selected.id, this.apiKeyPepper) }
+    if (!selected && !body.keyId) return { choices, keyId: null, secret: null,
+      reason: keys.length ? '请选择本次使用的 Key' : '暂无可用的 Live Key，请在 API Keys 中创建或联系管理员。' }
+    assert(selected, 400, 'demo_key_unavailable', '所选 Key 不可用，请刷新后重新选择')
+    const context = await this.store.findApiKeyById(selected.id)
+    assert(context, 403, 'demo_identity_unavailable', 'Selected key or tenant is unavailable')
+    const [platforms, capabilities, consumerPlatforms, consumerCapabilities] = await Promise.all([
+      this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context),
+      this.store.listGrants(selected.consumerId), this.store.listCapabilityGrants(selected.consumerId),
+    ])
+    const overview = await this.getApiKeyOverview(selected.id)
+    // Only product-level availability, never provider configuration/cost evidence.
+    const operations = Object.fromEntries(Object.entries(overview.operations || {}).map(([key, value]) =>
+      [key, { ready: value.ready, effectiveState: value.effectiveState }]))
+    return { choices, keyId: selected.id, consumerId: selected.consumerId, name: selected.name,
+      access: { platforms, capabilities, consumerPlatforms, consumerCapabilities, operations },
+      ...issueDemoCredential(selected.id, this.apiKeyPepper, Date.now(), scope?.memberId) }
   }
 
   async authenticate(secret) {
     assert(secret, 401, 'api_key_required', 'API key is required')
-    const demoKeyId = readDemoCredential(secret, this.apiKeyPepper)
-    if (demoKeyId) {
-      const context = await this.store.findApiKeyById(demoKeyId)
+    const demo = readDemoCredentialClaims(secret, this.apiKeyPepper)
+    if (demo) {
+      const context = await this.store.findApiKeyById(demo.keyId)
       assert(context, 401, 'invalid_api_key', 'Selected API key is invalid, expired, or revoked')
+      if (demo.memberId) {
+        assert(await this.store.canMemberUseTenantKeys(demo.memberId, context.tenant.id),
+          401, 'demo_membership_revoked', '当前账号已无权使用此 Key，请重新选择调用身份')
+      }
       return context
     }
     const digest = hmacSecret(secret, this.apiKeyPepper)

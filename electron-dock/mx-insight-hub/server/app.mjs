@@ -804,7 +804,7 @@ export function createApp({
     // arguments, so a null admin token would compare equal to the literal
     // credential "null".
     if (adminToken && secureEqual(credential, adminToken)) return adminTokenPrincipal()
-    if (credential.startsWith('mih_live_') || credential.startsWith('mih_test_')) {
+    if (['mih_live_', 'mih_test_', 'mih_demo_', 'mih_tenant_demo_'].some(prefix => credential.startsWith(prefix))) {
       throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage external data sources')
     }
 
@@ -2666,11 +2666,19 @@ export function createApp({
         return
       }
       if (pathname === '/internal/v1/admin/demo-credentials' && request.method === 'POST') {
-        requireSourceAdmin(principal)
+        const scope = principal.kind === 'admin-token' ? null : {
+          memberId: principal.memberId,
+          tenantIds: (principal.memberships || []).filter(item =>
+            item.capabilities?.includes('apikey.write')).map(item => item.tenantId),
+        }
+        if (scope && (!scope.memberId || !scope.tenantIds.length)) {
+          throw new AppError(403, 'demo_key_access_denied', '仅租户所有者或管理员可使用本租户的演示 Key')
+        }
         requireNoQuery(searchParams, 'demo credentials')
         const body = await readJson(request, 2048)
         if (Object.keys(body).some(key => key !== 'keyId')) throw new AppError(400, 'unsupported_fields', 'Only keyId is accepted')
-        sendJson(response, 200, { data: await service.createDemoCredential(body), requestId })
+        response.setHeader('Cache-Control', 'no-store')
+        sendJson(response, 200, { data: await service.createDemoCredential(body, scope), requestId })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/proxy')

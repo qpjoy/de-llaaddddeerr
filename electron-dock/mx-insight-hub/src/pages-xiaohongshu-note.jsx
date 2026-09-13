@@ -1,4 +1,4 @@
-import { useDemoApiKey } from './demo-credentials.jsx'
+import { useDemoApiKey, useDemoAccess, DemoAccessNotice } from './demo-credentials.jsx'
 import { requestUuid } from './request-id.js'
 import { useEffect, useMemo, useState } from 'react'
 import {
@@ -269,6 +269,7 @@ function DeliveryEvidence({ evidence, error }) {
 
 export function XiaohongshuNotePage({ notify, token, session }) {
   const [apiKey] = useDemoApiKey()
+  const accessIssues = useDemoAccess('social.posts.resolve')
   const [url, setUrl] = useState('')
   const [deliveryMode, setDeliveryMode] = useState('cache_first')
   const [result, setResult] = useState(null)
@@ -285,7 +286,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
 
   const submit = async (event) => {
     event.preventDefault()
-    if (!apiKey.trim() || !url.trim() || busy) return
+    if (accessIssues.length || !apiKey.trim() || !url.trim() || busy) return
     setBusy(true)
     setError(null)
     let liveIdentity = null
@@ -360,10 +361,10 @@ export function XiaohongshuNotePage({ notify, token, session }) {
       <PageHeading
         eyebrow="DATA PRODUCT / XIAOHONGSHU NOTE"
         title="小红书笔记画卷"
-        description="输入官方笔记链接，通过 Hub 稳定 JSON POST 合同查看完整正文、作者、互动量与标签。上游供应方是 TikHub，但调用方只面对 Hub 合同；演示身份由数据产品统一选择。"
+        description="搜索笔记或输入分享链接，查看正文、作者、图片和标签。"
       >
         <a className="qp-button qp-button--outline" href="#/api-keys">签发 / 轮换 API Key</a>
-        <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a>
+        {session?.platformAdmin ? <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a> : null}
         <a className="qp-button qp-button--outline" href="#/plans">查看合同费率</a>
         <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')}>查看开放 API / 文档</a>
       </PageHeading>
@@ -382,10 +383,11 @@ export function XiaohongshuNotePage({ notify, token, session }) {
             options={DELIVERY_OPTIONS}
             onChange={setDeliveryMode}
           />
-          <button className="qp-button qp-button--primary mih-xhs-submit" type="submit" disabled={busy || !apiKey.trim() || !url.trim()}>
+          <button className="qp-button qp-button--primary mih-xhs-submit" type="submit" disabled={accessIssues.length > 0 || busy || !apiKey.trim() || !url.trim()}>
             {busy ? <SpinnerGap className="mih-spin" size={18} /> : <Scroll size={18} />}
             {busy ? '正在展开画卷' : '获取笔记内容'}
           </button>
+          <DemoAccessNotice operation="social.posts.resolve" />
           {error ? <ErrorState error={error} /> : null}
         </form>
 

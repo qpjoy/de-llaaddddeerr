@@ -8259,6 +8259,17 @@ export class PostgresStore {
     return false
   }
 
+  async canMemberUseTenantKeys(memberId, tenantId) {
+    const { rows } = await this.pool.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM iam.members m JOIN iam.tenant_memberships tm ON tm.member_id = m.id
+          WHERE m.id = $1 AND tm.tenant_id = $2 AND m.status = 'active'
+            AND tm.status = 'active' AND tm.role IN ('owner', 'admin')
+       ) AS allowed`, [memberId, tenantId],
+    )
+    return rows[0]?.allowed === true
+  }
+
   async listTenantMemberships(memberId) {
     const { rows } = await this.pool.query(
       `SELECT m.id, m.tenant_id, m.role, m.status, t.name AS tenant_name

@@ -840,7 +840,7 @@ export function App() {
           <img src="assets/mx-insight-logo-mark.png" alt="" />
           <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
         </a>
-        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : item)} />
+        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : !session?.platformAdmin && item.path === '/plans' ? { ...item, label: '用量与账单', description: '余额、价格与消费' } : item)} />
         <section className="mih-sidebar-session">
           <ShieldCheck size={20} weight="duotone" aria-hidden="true" />
           <span>
