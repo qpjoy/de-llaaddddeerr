@@ -822,6 +822,7 @@ export function App() {
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
   const Page = route.component
   const pageProps = {
+    theme,
     token,
     session,
     query: location.query,

@@ -1,3 +1,4 @@
+import { FeedRuler } from './feed-ruler.jsx'
 import { useDemoAccess, DemoAccessNotice } from './demo-credentials.jsx'
 import { requestUuid } from './request-id.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -85,6 +86,8 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   const touch = useRef(null)
   const wheel = useRef(0)
   const lastPull = useRef(0)
+  const lastAcquire = useRef(0)
+  const rulerNavigation = useRef(false)
   const scope = `${apiKey}|${kind}|${selector}`
   const currentScope = useRef(scope)
   currentScope.current = scope
@@ -121,6 +124,8 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   }
   const acquire = async () => {
     if (accessIssues.length || liveBusy.current || historyBusy.current || !apiKey.trim() || !selector.trim()) return
+    if (Date.now() - lastAcquire.current < 800) return
+    lastAcquire.current = Date.now()
     if (overflow.current.length) { present(); return }
     if (next === null) return
     const ownScope = scope
@@ -165,16 +170,16 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       {acquireError ? <ErrorState error={acquireError} /> : null}
       {evidence ? <p>交付：{evidence.sourceMode || '未知'}<br />请求：{evidence.requestId}<br />采集后异步进入 Hub 历史；未入库前不代表数据丢失。</p> : null}
     </aside>
-    <div className="mih-commerce-phone-wrap"><div className="mih-commerce-phone">
+    <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation"><div className="mih-commerce-phone">
       <header><span>MX · 小红书笔记</span><strong>笔记画卷</strong><small>{rows.length} 篇已加载</small></header>
       <div className="mih-commerce-phone-actions"><span>{armed ? '下拉采集下一页' : '下拉采集未开启'}</span><span>{isAdmin ? '上划读取 Hub 历史' : '本次查询结果'}</span></div>
-      <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表"
-        onScroll={() => { const node = viewport.current; if (node.scrollTop > 0 && node.scrollHeight - node.scrollTop - node.clientHeight < 160) more() }}
-        onWheel={event => { if (event.deltaY < 0 && viewport.current.scrollTop <= 0) { wheel.current -= event.deltaY; if (wheel.current >= 140) { wheel.current = 0; pull() } } else wheel.current = 0 }}
-        onTouchStart={event => { touch.current = viewport.current.scrollTop <= 0 ? event.touches[0].clientY : null }}
+      <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表" onKeyDown={() => { rulerNavigation.current = false }}
+        onScroll={() => { const node = viewport.current; if (!rulerNavigation.current && node.scrollTop > 0 && node.scrollHeight - node.scrollTop - node.clientHeight < 160) more() }}
+        onWheel={event => { rulerNavigation.current = false; if (event.deltaY < 0 && viewport.current.scrollTop <= 0) { wheel.current -= event.deltaY; if (wheel.current >= 140) { wheel.current = 0; pull() } } else wheel.current = 0 }}
+        onTouchStart={event => { rulerNavigation.current = false; touch.current = viewport.current.scrollTop <= 0 ? event.touches[0].clientY : null }}
         onTouchEnd={event => { if (touch.current != null && event.changedTouches[0].clientY - touch.current >= 80) pull(); touch.current = null }} onTouchCancel={() => { touch.current = null }}>
         {error ? <ErrorState error={error} /> : null}
-        <div className="mih-commerce-grid">{rows.map(item => <article className="mih-commerce-card" key={item.externalId || item.id}><button className="mih-commerce-card-open" onClick={() => setSelected(item)}>
+        <div className="mih-commerce-grid">{rows.map((item, index) => <article data-feed-index={index} className="mih-commerce-card" key={item.externalId || item.id}><button className="mih-commerce-card-open" onClick={() => setSelected(item)}>
           <div className="mih-commerce-card-image"><BusinessImage url={item.media?.[0]?.url} enabled={images} alt={item.title || '笔记封面'} /></div>
           <strong>{item.title || '无标题笔记'}</strong>{item.media?.length ? <small>{item.media.length} 张图片 · 点击查看全部</small> : null}<small>{item.author?.name || '作者未知'}</small><span>{item.tags?.map(tag => `#${tag}`).join(' ') || '点击查看正文与标签'}</span>
         </button></article>)}</div>
@@ -182,7 +187,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
         {!loading && !error && !rows.length ? <p className="mih-commerce-message">暂无笔记。可采集关键词列表，或在下方输入笔记链接。</p> : null}
         {cursor ? <button className="qp-button qp-button--outline" disabled={loading} onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕；上游续页请使用采集操作。</p> : null}
       </div>
-    </div></div>
+    </div><FeedRuler viewport={viewport} count={rows.length} pageSize={Number(pageSize)} onNavigate={() => { rulerNavigation.current = true; wheel.current = 0; touch.current = null; lastPull.current = Date.now() }} /></div>
     {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} saved={detailState(selected.id)} onClose={() => setSelected(null)} /> : null}
   </section>
 }

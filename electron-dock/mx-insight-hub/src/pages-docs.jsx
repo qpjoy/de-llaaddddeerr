@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { adminApi, publicDocsHref } from './api.js'
 import { ErrorState } from './components.jsx'
 
-export function DocsPage({ token, query, onUnauthorized }) {
+export function DocsPage({ token, query, onUnauthorized, theme = 'light' }) {
   const path = query.get('path') || '/docs'
   const [content, setContent] = useState(null)
   const [error, setError] = useState(null)
@@ -30,5 +30,5 @@ export function DocsPage({ token, query, onUnauthorized }) {
   }, [token, path, onUnauthorized])
   if (error) return <ErrorState error={error} />
   if (!content) return <p role="status">正在读取文档…</p>
-  return content.schema ? <pre>{JSON.stringify(content.schema, null, 2)}</pre> : <iframe title="接口文档" srcDoc={content.html} sandbox="allow-scripts allow-popups allow-top-navigation-by-user-activation" style={{ width: '100%', height: 'calc(100vh - 120px)', border: 0 }} />
+  return content.schema ? <pre>{JSON.stringify(content.schema, null, 2)}</pre> : <iframe title="接口文档" srcDoc={content.html.replace('<html', `<html data-theme="${theme === 'dark' ? 'dark' : 'light'}"`)} sandbox="allow-scripts allow-popups allow-top-navigation-by-user-activation" style={{ width: '100%', height: 'calc(100vh - 120px)', border: 0 }} />
 }

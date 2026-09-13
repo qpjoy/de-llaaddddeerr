@@ -1196,6 +1196,34 @@ select {
   width: min(100%, 1120px);
 }
 
+/* Key usage is a dense read-only view; size its cards to the dialog, not the viewport. */
+.mih-key-overview .mih-metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+}
+
+.mih-key-overview .qp-metric__label,
+.mih-key-overview .qp-metric__value,
+.mih-key-overview .qp-metric__hint {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+
+.mih-key-overview .mih-table-wrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.mih-key-overview .mih-table {
+  min-width: 620px;
+}
+
+.mih-key-overview .mih-table td:first-child {
+  overflow-wrap: anywhere;
+}
+
 .mih-modal__header,
 .mih-modal__footer {
   display: flex;
@@ -12900,3 +12928,16 @@ button.mih-catalog-status {
 .mih-memberships__actions { flex-shrink: 0; gap: 10px; }
 @media (max-width: 1000px) { .mih-memberships__member { grid-template-columns: 1fr; gap: 16px; } .mih-memberships__member > .qp-button { justify-self: start; } }
 @media (max-width: 640px) { .mih-memberships__header, .mih-memberships__toolbar, .mih-memberships__binding { flex-direction: column; align-items: stretch; } }
+
+.mih-xhs-phone-navigation { grid-template-columns: minmax(0, 500px) 76px; justify-content: center; align-items: start; gap: 12px; }
+.mih-xhs-phone-navigation > .mih-commerce-phone { width: 100%; min-width: 0; }
+.mih-feed-ruler { width: 76px; display: grid; gap: 12px; position: sticky; top: 16px; color: var(--qp-text-2); font-size: 12px; padding-top: 12px; }
+.mih-feed-ruler-track { height: min(440px, 45vh); position: relative; display: flex; gap: 4px; }
+.mih-feed-ruler-track > input { writing-mode: vertical-lr; direction: ltr; width: 20px; height: 100%; margin: 0; accent-color: var(--qp-primary); touch-action: none; }
+.mih-feed-ruler-track > div { position: relative; flex: 1; }
+.mih-feed-ruler-track button { position: absolute; transform: translateY(-50%); border: 0; padding: 5px 0; background: transparent; color: var(--qp-text-3); cursor: pointer; white-space: nowrap; }
+.mih-feed-ruler form, .mih-feed-ruler label { display: grid; gap: 6px; }
+.mih-feed-ruler .qp-input { width: 100%; min-width: 0; padding: 6px; }
+.mih-feed-ruler .qp-button { padding: 6px; min-width: 0; }
+.mih-feed-ruler small { font-size: 10px; color: var(--qp-text-3); }
+@media(max-width: 480px) { .mih-xhs-phone-navigation { grid-template-columns: minmax(0, 1fr) 56px; gap: 6px; } .mih-feed-ruler { width: 56px; } }

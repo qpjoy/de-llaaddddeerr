@@ -1788,6 +1788,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       {overviewTarget ? (
         <Modal
           title={`${overviewTarget.key.name} · 额度与用量`}
+          size="xlarge"
           description="这里的调用量只属于这一把 Key；套餐总额仍由同一调用者下的所有 Key 共享。"
           onClose={() => !overviewLoading && setOverviewTarget(null)}
           footer={<button className="qp-button qp-button--primary" type="button" onClick={() => setOverviewTarget(null)} disabled={overviewLoading}>关闭</button>}
@@ -1795,7 +1796,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           {overviewLoading && !overviewTarget.data ? <LoadingState label="正在读取 Key 用量" /> : null}
           {overviewError ? <ErrorState error={overviewError} onRetry={() => showOverview(overviewTarget.key)} /> : null}
           {overviewTarget.data ? (
-            <div className="mih-form">
+            <div className="mih-form mih-key-overview">
               {(() => {
                 const health = apiKeyHealth(overviewTarget.key, overviewTarget.data, {
                   operationLabel: (operationKey) => CAPABILITY_CATALOG[operationKey]?.label || operationKey,

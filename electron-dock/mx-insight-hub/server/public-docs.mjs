@@ -5223,6 +5223,17 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
   <title>__PUBLIC_DOCS_TITLE__ · MX Insight Hub Open API</title>
   <style>
     :root { color-scheme: dark; --bg:#070b12; --panel:#101824; --line:#26364b; --text:#e9f2fb; --muted:#91a4b8; --cyan:#2de4d0; --blue:#5597ff; --amber:#f3c85a; }
+    :root[data-theme="light"] { color-scheme:light; --bg:#f3f7fb; --panel:#ffffff; --line:#d5dfe9; --text:#243445; --muted:#637487; --cyan:#007f78; --blue:#2767b7; --amber:#866400; }
+    [data-theme="light"] body { background:var(--bg); }
+    [data-theme="light"] aside { background:#f8fafc; }
+    [data-theme="light"] .lead, [data-theme="light"] .path { color:var(--text); }
+    [data-theme="light"] .card, [data-theme="light"] .endpoint { background:var(--panel); }
+    [data-theme="light"] nav a:hover, [data-theme="light"] nav a.active { background:#e1f2ef; }
+    [data-theme="light"] pre { background:#edf2f8; color:#234363; border-color:var(--line); }
+    [data-theme="light"] :not(pre)>code { background:#e7edf6; color:#245b98; }
+    [data-theme="light"] .notice { background:#fff8e3; color:#785b19; border-color:#e5d4a2; }
+    [data-theme="light"] .method { background:#dcf2ec; }
+    [data-theme="light"] .method.post { background:#e2ebfc; color:#245b98; }
     * { box-sizing:border-box; }
     body { margin:0; background:radial-gradient(circle at 75% 0,#102338 0,transparent 34rem),var(--bg); color:var(--text); font:15px/1.7 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     a { color:var(--cyan); text-decoration:none; }
@@ -6195,9 +6206,40 @@ function normalizedDocsPath(pathname) {
   return normalized || '/'
 }
 
-function docsNavigation(activeKey) {
+const TENANT_HIDDEN_DOCS = new Set(['source-catalog', 'search', 'night-all', 'tools', 'discovery'])
+const tenantDocsRoute = route => !TENANT_HIDDEN_DOCS.has(route.key)
+const platformDisplayName = text => text.replace(/JustOne/gi, 'J 平台').replace(/TikHub/gi, 'T 平台')
+
+export function tenantOpenApiDocument() {
+  const document = structuredClone(PUBLIC_OPENAPI_DOCUMENT)
+  const hidden = new Set(['/data/capabilities', '/data/search', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
+  document.paths = Object.fromEntries(Object.entries(document.paths).filter(([path]) =>
+    !hidden.has(path) && !path.startsWith('/data/source-catalog') && !path.startsWith('/night-all/') && !path.startsWith('/search/')))
+  const refs = new Set()
+  const visit = value => {
+    if (!value || typeof value !== 'object') return
+    for (const [key, child] of Object.entries(value)) {
+      if (key === '$ref' && typeof child === 'string' && child.startsWith('#/components/') && !refs.has(child)) {
+        refs.add(child)
+        visit(child.slice(2).split('/').reduce((node, part) => node?.[part], document))
+      } else if (['description', 'summary', 'title'].includes(key) && typeof child === 'string') value[key] = platformDisplayName(child)
+      else visit(child)
+    }
+  }
+  visit(document.paths)
+  // Keep only schemas referenced by the tenant contract plus its authentication schemes.
+  for (const [group, entries] of Object.entries(document.components || {})) {
+    if (group !== 'securitySchemes') document.components[group] = Object.fromEntries(Object.entries(entries).filter(([name]) => refs.has(`#/components/${group}/${name}`)))
+  }
+  const usedTags = new Set(Object.values(document.paths).flatMap(path => Object.values(path).flatMap(operation => operation?.tags || [])))
+  document.tags = (document.tags || []).filter(tag => usedTags.has(tag.name))
+  document.info.description = '使用 Hub API Key 调用已授权的数据产品与平台原生接口。'
+  return document
+}
+
+function docsNavigation(activeKey, tenant = false) {
   let section = null
-  return PUBLIC_DOCS_ROUTES.map((route) => {
+  return PUBLIC_DOCS_ROUTES.filter(route => !tenant || tenantDocsRoute(route)).map((route) => {
     const active = route.key === activeKey
     const heading = route.section !== section
       ? `<span class="nav-section">${route.section}</span>`
@@ -6211,17 +6253,27 @@ function docsNavigation(activeKey) {
   }).join('')
 }
 
-export function publicDocsHtmlForPath(pathname) {
+export function publicDocsHtmlForPath(pathname, { tenant = false } = {}) {
   const normalized = normalizedDocsPath(pathname)
   const route = PUBLIC_DOCS_ROUTES.find((candidate) => candidate.path === normalized)
-  if (!route) return null
+  if (!route || (tenant && !tenantDocsRoute(route))) return null
 
-  return PUBLIC_DOCS_TEMPLATE
+  let html = PUBLIC_DOCS_TEMPLATE
     .replace('__PUBLIC_DOCS_TITLE__', route.label)
-    .replace('__PUBLIC_DOCS_NAV__', docsNavigation(route.key))
+    .replace('__PUBLIC_DOCS_NAV__', docsNavigation(route.key, tenant))
     .replace(/\n\s*<section class="doc-page" data-doc-page="([^"]+)">[\s\S]*?<\/section>/g, (section, key) => (
       key === route.key ? section : ''
     ))
+  if (tenant) {
+    html = html.replace(/<a href="(\/docs[^"#]*)(?:#[^"]*)?"[^>]*>([\s\S]*?)<\/a>/g, (link, path, text) => {
+      const target = PUBLIC_DOCS_ROUTES.find(item => item.path === path)
+      return target && !tenantDocsRoute(target) ? text : link
+    })
+    html = html.replace(/<a href="https?:\/\/[^"]*(?:tikhub|justone)[^"]*"[^>]*>[\s\S]*?<\/a>/gi, '平台参考文档请联系管理员')
+    if (route.key === 'start') html = html.replace(/<p class="lead">[\s\S]*?<\/p>/, '<p class="lead">使用一把 Hub API Key 调用已授权的数据产品和平台原生接口。每把 Key 的服务范围、额度与费率以账户配置为准；无需填写外部平台凭据。</p>')
+  }
+  // Change display copy only; preserve API paths, scopes and machine identifiers.
+  return html.split(/(<[^>]+>)/g).map(part => part.startsWith('<') ? part : platformDisplayName(part)).join('')
 }
 
 export function publicDocsRedirectForPath(pathname) {

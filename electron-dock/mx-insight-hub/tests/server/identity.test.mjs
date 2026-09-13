@@ -762,3 +762,20 @@ test('a response without a usable token string is rejected, not passed through',
     /did not return a token/,
   )
 })
+
+test('tenant documentation filtering applies to embedded pages and direct schema access', async () => {
+  launcherState = { payload: launcherResponse({ subject: 'docs-tenant' }) }
+  const options = { token: 'launcher-docs-tenant' }
+  for (const path of ['/internal/v1/admin/documentation?path=/docs/tools', '/docs/tools']) {
+    assert.equal((await callAdmin(path, options)).status, 404)
+  }
+  for (const path of ['/internal/v1/admin/documentation?path=/docs/openapi.json', '/docs/openapi.json']) {
+    const response = await callAdmin(path, options)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    const schema = body.data?.schema || body
+    assert.ok(schema.paths['/data/post'])
+    assert.equal(schema.paths['/tools/tokenize'], undefined)
+  }
+  assert.equal((await callAdmin('/internal/v1/admin/documentation?path=/docs/tools')).status, 200)
+})

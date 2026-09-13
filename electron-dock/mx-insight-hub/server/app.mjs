@@ -8,6 +8,7 @@ import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson }
 import {
   PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT,
   PUBLIC_OPENAPI_DOCUMENT,
+  tenantOpenApiDocument,
   publicDocsHtmlForPath,
   publicDocsRedirectForPath,
 } from './public-docs.mjs'
@@ -1429,8 +1430,9 @@ export function createApp({
       }
 
       // Documentation is private console content, including schema and aliases.
+      let docsPrincipal = null
       if (pathname === '/docs' || pathname.startsWith('/docs/')) {
-        try { await resolvePrincipal(request) } catch (error) {
+        try { docsPrincipal = await resolvePrincipal(request) } catch (error) {
           if (error.status !== 401) throw error
           response.writeHead(302, { location: `${listenerMode === 'public' ? '/admin/' : '/'}#/docs?path=${encodeURIComponent(pathname)}`, 'cache-control': 'no-store' })
           response.end()
@@ -1452,7 +1454,7 @@ export function createApp({
         return
       }
 
-      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname) : null
+      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname, { tenant: docsPrincipal ? !docsPrincipal.platformAdmin : false }) : null
       if (publicDocsHtml !== null) {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
         response.writeHead(200, {
@@ -1468,7 +1470,7 @@ export function createApp({
       }
       if (request.method === 'GET' && pathname === '/docs/openapi.json') {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
-        sendJson(response, 200, PUBLIC_OPENAPI_DOCUMENT, {
+        sendJson(response, 200, docsPrincipal?.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument(), {
           'cache-control': 'private, no-store',
           'access-control-allow-origin': '*',
         })
@@ -1484,9 +1486,9 @@ export function createApp({
         const target = url.searchParams.get('path') || '/docs'
         const page = target.split('#')[0]
         const redirect = publicDocsRedirectForPath(page)
-        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page)
+        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page, { tenant: !principal.platformAdmin })
         if (!html && page !== '/docs/openapi.json') throw new AppError(404, 'not_found', 'Documentation not found')
-        sendJson(response, 200, { data: { html, schema: page === '/docs/openapi.json' ? PUBLIC_OPENAPI_DOCUMENT : null }, requestId }, { 'cache-control': 'private, no-store' })
+        sendJson(response, 200, { data: { html, schema: page === '/docs/openapi.json' ? (principal.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument()) : null }, requestId }, { 'cache-control': 'private, no-store' })
         return
       }
 
