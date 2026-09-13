@@ -17,14 +17,14 @@ export function storedNote(row) {
 export function nativeNote(note) {
   const externalId = note.note_id || note.id
   if (typeof externalId !== 'string' || !/^[0-9a-f]{24}$/i.test(externalId)) throw new Error('上游笔记缺少有效 ID')
-  const images = note.image_list || note.images || []
+  const images = note.image_list || note.images_list || note.imageList || note.images || []
   return {
     id: `xiaohongshu:${externalId}`, externalId, platform: 'xiaohongshu',
     title: note.display_title || note.title, text: note.desc || '',
     url: `https://www.xiaohongshu.com/explore/${externalId}`,
     author: { id: note.user?.user_id, name: note.user?.nickname },
     tags: (note.tag_list || note.tags || []).map(tag => typeof tag === 'string' ? tag : tag.name).filter(Boolean),
-    media: images.map(image => ({ type: 'image', url: typeof image === 'string' ? image : image.url_default || image.url || image.info_list?.[0]?.url })).filter(image => image.url),
+    media: images.map(image => ({ type: 'image', url: typeof image === 'string' ? image : image.url_default || image.urlDefault || image.url || image.url_size_large || image.url_size_medium || image.info_list?.[0]?.url || image.infoList?.[0]?.url })).filter(image => image.url),
     metrics: {}, bodyCompleteness: 'provider_preview',
   }
 }

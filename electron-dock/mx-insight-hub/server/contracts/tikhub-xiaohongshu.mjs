@@ -182,7 +182,7 @@ function isRecord(value) {
 function usableNote(candidate) {
   if (!isRecord(candidate)) return false
   const id = string(candidate.note_id) || string(candidate.noteId) || string(candidate.id)
-  const images = candidate.image_list || candidate.imageList || candidate.images
+  const images = candidate.image_list || candidate.images_list || candidate.imageList || candidate.images
   const hasContent = string(candidate.title) || string(candidate.desc)
     || string(candidate.description) || string(candidate.content)
     || (Array.isArray(images) && images.length > 0)
@@ -261,6 +261,7 @@ function imageUrl(image, options) {
   return safeHttpsUrl(image.url_default, options) || safeHttpsUrl(image.urlDefault, options)
     || safeHttpsUrl(image.url_pre, options) || safeHttpsUrl(image.urlPre, options)
     || safeHttpsUrl(image.url, options)
+    || safeHttpsUrl(image.url_size_large, options) || safeHttpsUrl(image.url_size_medium, options)
     || (Array.isArray(info) ? info.map((entry) => safeHttpsUrl(entry?.url, options)).find(Boolean) : null)
 }
 
@@ -275,7 +276,7 @@ function tagsOf(note) {
 }
 
 function mediaOf(note, options) {
-  const images = [note.image_list, note.imageList, note.images]
+  const images = [note.image_list, note.images_list, note.imageList, note.images]
     .find(Array.isArray) || []
   return [...new Set(images.map((image) => imageUrl(image, options)).filter(Boolean))]
     .map((url) => ({ type: 'image', url }))

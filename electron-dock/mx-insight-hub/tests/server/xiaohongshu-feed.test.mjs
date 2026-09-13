@@ -32,3 +32,20 @@ test('stored projection retains complete body/tags and merges canonical IDs with
   assert.equal(mergeNotes([live], [row]).length, 1)
   assert.equal(row.media[0].url, 'https://image.test/a')
 })
+
+test('App V2 images_list survives both live display and stored normalization', async () => {
+  const { normalizeTikHubXiaohongshuNote } = await import('../../server/contracts/tikhub-xiaohongshu.mjs')
+  const preview = 'https://sns-na-i11.xhscdn.com/example?sign=test&sc=SRH_PRV'
+  const full = 'https://sns-na-i11.xhscdn.com/second?sign=test&sc=SRH_DTL'
+  // Observed App V2 search shape: subsequent images have empty url and only a large URL.
+  const source = { ...note, images_list: [{ url: preview, url_size_large: full }, { url: '', url_size_large: full }] }
+  const payload = response({ items: [{ model_type: 'note', note: source }] })
+  const live = nativeNotePage(payload, 'search_notes', { page: 1 }).items[0]
+  const normalized = normalizeTikHubXiaohongshuNote({ data: source })
+  const expected = [{ type: 'image', url: preview }, { type: 'image', url: full }]
+  assert.deepEqual(live.media, expected)
+  assert.deepEqual(normalized.media, expected)
+  assert.deepEqual(storedNote({ stableFields: { media: { images: normalized.media.map(m => m.url) } } }).media, expected)
+  assert.equal(normalizeTikHubXiaohongshuNote({ data: { note_id: note.note_id, images_list: source.images_list } }).media.length, 2)
+  assert.deepEqual(normalizeTikHubXiaohongshuNote({ data: { ...note, images_list: [{ url_size_large: 'http://localhost/private' }] } }).media, [])
+})
