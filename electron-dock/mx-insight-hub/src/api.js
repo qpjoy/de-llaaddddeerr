@@ -67,15 +67,7 @@ export function publicApiOrigin() {
 }
 
 export function publicDocsHref(path = '/docs') {
-  const normalizedPath = path.startsWith('/docs') ? path : `/docs/${String(path).replace(/^\/+/, '')}`
-  if (runtimePublicApiBase) return `${runtimePublicApiBase}${normalizedPath}`
-  const configured = withoutTrailingSlash(import.meta.env.VITE_MX_INSIGHT_PUBLIC_DOCS_URL)
-  if (configured) {
-    return normalizedPath === '/docs'
-      ? configured
-      : `${configured}${normalizedPath.slice('/docs'.length)}`
-  }
-  return `${publicApiBase()}${normalizedPath}`
+  return `#/docs?path=${encodeURIComponent(path)}`
 }
 
 export class ApiError extends Error {
@@ -320,6 +312,7 @@ export const adminApi = {
   setTenantStatus: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${encodeURIComponent(id)}/status`, { method: 'PUT', body }),
   consumers: (token, tenantId) => request(token, `${ADMIN_ROOT}/consumers`, { query: { tenantId } }),
   createConsumer: (token, body) => request(token, `${ADMIN_ROOT}/consumers`, { method: 'POST', body }),
+  documentation: (token, path) => request(token, `${ADMIN_ROOT}/documentation`, { query: { path } }),
   apiKeys: (token, consumerId) => request(token, `${ADMIN_ROOT}/api-keys`, { query: { consumerId } }),
   createApiKey: (token, body) => request(token, `${ADMIN_ROOT}/api-keys`, { method: 'POST', body }),
   apiKeyOverview: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/overview`),

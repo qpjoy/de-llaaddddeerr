@@ -292,7 +292,7 @@ export function TopicInsightsPage({ token, onUnauthorized, notify }) {
         loading={loading}
         onRefresh={() => load()}
       >
-        <a className="qp-button qp-button--outline qp-button--sm" href={publicDocsHref('/docs/topic-reports')} target="_blank" rel="noreferrer">
+        <a className="qp-button qp-button--outline qp-button--sm" href={publicDocsHref('/docs/topic-reports')}>
           开放 API<ArrowSquareOut size={15} aria-hidden="true" />
         </a>
       </PageHeading>

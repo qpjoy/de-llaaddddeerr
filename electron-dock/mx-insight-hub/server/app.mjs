@@ -1428,12 +1428,22 @@ export function createApp({
         return
       }
 
+      // Documentation is private console content, including schema and aliases.
+      if (pathname === '/docs' || pathname.startsWith('/docs/')) {
+        try { await resolvePrincipal(request) } catch (error) {
+          if (error.status !== 401) throw error
+          response.writeHead(302, { location: `${listenerMode === 'public' ? '/admin/' : '/'}#/docs?path=${encodeURIComponent(pathname)}`, 'cache-control': 'no-store' })
+          response.end()
+          return
+        }
+      }
+
       const publicDocsRedirect = request.method === 'GET' ? publicDocsRedirectForPath(pathname) : null
       if (publicDocsRedirect !== null) {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
         response.writeHead(308, {
           location: publicDocsRedirect,
-          'cache-control': 'public, max-age=300',
+          'cache-control': 'private, no-store',
           'content-length': '0',
           'referrer-policy': 'no-referrer',
           'x-content-type-options': 'nosniff',
@@ -1448,7 +1458,7 @@ export function createApp({
         response.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'content-length': Buffer.byteLength(publicDocsHtml),
-          'cache-control': 'public, max-age=300',
+          'cache-control': 'private, no-store',
           'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${PUBLIC_DOCS_SCRIPT_HASH}'; base-uri 'none'; frame-ancestors 'none'`,
           'referrer-policy': 'no-referrer',
           'x-content-type-options': 'nosniff',
@@ -1459,7 +1469,7 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/docs/openapi.json') {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
         sendJson(response, 200, PUBLIC_OPENAPI_DOCUMENT, {
-          'cache-control': 'public, max-age=300',
+          'cache-control': 'private, no-store',
           'access-control-allow-origin': '*',
         })
         return
@@ -1468,6 +1478,16 @@ export function createApp({
       let principal = null
       if (isAdminPath) {
         principal = await resolvePrincipal(request)
+      }
+
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
+        const target = url.searchParams.get('path') || '/docs'
+        const page = target.split('#')[0]
+        const redirect = publicDocsRedirectForPath(page)
+        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page)
+        if (!html && page !== '/docs/openapi.json') throw new AppError(404, 'not_found', 'Documentation not found')
+        sendJson(response, 200, { data: { html, schema: page === '/docs/openapi.json' ? PUBLIC_OPENAPI_DOCUMENT : null }, requestId }, { 'cache-control': 'private, no-store' })
+        return
       }
 
       // Who am I, and what may I see? The console calls this first and renders

@@ -1,3 +1,4 @@
+import { DocsPage } from './pages-docs.jsx'
 import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -323,6 +324,7 @@ const NAV_PARENTS = {
 // console renders itself from the server's answer rather than from a local role
 // guess, so a scoped user never sees a control that would 403.
 const ROUTES = [
+  { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '数据平面', component: DocsPage },
   // Listed first so that a tenant whose requested route is not visible to them
   // falls back here rather than to an operator page they cannot use.
   { path: '/my', label: '我的接入', description: '额度、到期与可用性', icon: ShieldCheck, group: '业务治理', component: MyAccessPage, ownAccess: true },

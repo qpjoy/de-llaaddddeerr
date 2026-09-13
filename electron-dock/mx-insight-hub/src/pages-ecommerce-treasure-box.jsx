@@ -1641,7 +1641,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
         title="电商数据"
         description="小聚替你从统一 Hub 合同中找商品；来源未来可替换或扩展，调用、数据、计量与证据仍保持一致。"
       >
-        <a className="qp-button qp-button--outline qp-button--sm" href={publicDocsHref('/docs/ecommerce-treasure-box')} target="_blank" rel="noreferrer">接入文档<ArrowSquareOut size={15} aria-hidden="true" /></a>
+        <a className="qp-button qp-button--outline qp-button--sm" href={publicDocsHref('/docs/ecommerce-treasure-box')}>接入文档<ArrowSquareOut size={15} aria-hidden="true" /></a>
       </PageHeading>
 
       <div className="mih-treasure-trust-strip" role="list" aria-label="产品边界">
@@ -1730,7 +1730,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
         <div className="mih-treasure-next-links">
           <a href="#/external-platforms?provider=justone&range=24h"><ChartLineUp size={18} weight="duotone" aria-hidden="true" /><span><strong>看真实调用与成本</strong><small>请求量、上游派发、成功率、租户排行</small></span><ArrowRight size={16} aria-hidden="true" /></a>
           <a href="#/api-keys"><Key size={18} weight="duotone" aria-hidden="true" /><span><strong>获取开放能力 API Key</strong><small>一把 Key 的调用身份授予 ecommerce 后即可调用</small></span><ArrowRight size={16} aria-hidden="true" /></a>
-          <a href={publicDocsHref('/docs/ecommerce-treasure-box')} target="_blank" rel="noreferrer"><Coins size={18} weight="duotone" aria-hidden="true" /><span><strong>交给其他系统调用</strong><small>稳定请求、响应、分页与错误合同</small></span><ArrowRight size={16} aria-hidden="true" /></a>
+          <a href={publicDocsHref('/docs/ecommerce-treasure-box')}><Coins size={18} weight="duotone" aria-hidden="true" /><span><strong>交给其他系统调用</strong><small>稳定请求、响应、分页与错误合同</small></span><ArrowRight size={16} aria-hidden="true" /></a>
         </div>
       </section>
     </section>

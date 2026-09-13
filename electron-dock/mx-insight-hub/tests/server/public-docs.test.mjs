@@ -1507,12 +1507,17 @@ function assertPublicDataProductMirror(dynamicDocument, staticDocument) {
   }
 }
 
+function authenticatedFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: { 'x-mx-insight-admin-token': 'docs-test-admin', ...options.headers } })
+}
+
 async function withServer(listenerMode, run) {
   const app = createApp({
     service: {},
     store: {},
     adapter: {},
     listenerMode,
+    adminToken: 'docs-test-admin',
     logger: { error() {} },
   })
   const server = createServer(app)
@@ -1531,7 +1536,7 @@ test('public listener serves self-contained public API documentation', async () 
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
-      const response = await fetch(`${baseUrl}${path}`)
+      const response = await authenticatedFetch(`${baseUrl}${path}`)
       return { path, response, html: await response.text() }
     }))
     const response = pages[0].response
@@ -1733,7 +1738,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     ]
 
     for (const [path, key, heading] of pages) {
-      const response = await fetch(`${baseUrl}${path}`)
+      const response = await authenticatedFetch(`${baseUrl}${path}`)
       const html = await response.text()
       assert.equal(response.status, 200, path)
       assert.match(html, new RegExp(`href="${path}" class="active" aria-current="page"`), path)
@@ -1743,7 +1748,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
       assert.doesNotMatch(html, /href="#[^"]+"/, path)
     }
 
-    const evidenceResponse = await fetch(`${baseUrl}/docs/evidence`)
+    const evidenceResponse = await authenticatedFetch(`${baseUrl}/docs/evidence`)
     const evidenceHtml = await evidenceResponse.text()
     assert.equal(evidenceResponse.status, 200)
     assert.match(evidenceHtml, /\/api\/v1\/acquisitions\/\{requestId\}/)
@@ -1754,11 +1759,11 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.match(evidenceHtml, /不创建 usage，也绝不重新派发或运行上游请求/)
     assert.match(evidenceHtml, /curl -sS.*\/api\/v1\/acquisitions\/\$ACQUISITION_REQUEST_ID/s)
 
-    const trailingSlash = await fetch(`${baseUrl}/docs/telegram/`)
+    const trailingSlash = await authenticatedFetch(`${baseUrl}/docs/telegram/`)
     assert.equal(trailingSlash.status, 200)
     assert.match(await trailingSlash.text(), /data-doc-page="telegram"/)
 
-    const legacyEntry = await fetch(`${baseUrl}/docs`)
+    const legacyEntry = await authenticatedFetch(`${baseUrl}/docs`)
     const legacyHtml = await legacyEntry.text()
     assert.equal(legacyEntry.status, 200)
     assert.equal((legacyHtml.match(/class="doc-page"/g) || []).length, 1)
@@ -1775,19 +1780,19 @@ test('public documentation navigation uses stable page routes and keeps legacy a
       ['/docs/authentication', '/docs/auth'],
       ['/docs/operations', '/docs/evidence'],
     ]) {
-      const redirect = await fetch(`${baseUrl}${alias}`, { redirect: 'manual' })
+      const redirect = await authenticatedFetch(`${baseUrl}${alias}`, { redirect: 'manual' })
       assert.equal(redirect.status, 308)
       assert.equal(redirect.headers.get('location'), canonical)
     }
 
-    const unknown = await fetch(`${baseUrl}/docs/unknown-page`)
+    const unknown = await authenticatedFetch(`${baseUrl}/docs/unknown-page`)
     assert.equal(unknown.status, 404)
   })
 })
 
 test('public OpenAPI document contains only implemented Open API paths', async () => {
   await withServer('public', async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/docs/openapi.json`)
+    const response = await authenticatedFetch(`${baseUrl}/docs/openapi.json`)
     const document = await response.json()
     const paths = Object.keys(document.paths)
 
@@ -2157,10 +2162,28 @@ test('external data platform public contract and internal operations guidance st
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
     for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/topic-reports', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
-      const response = await fetch(`${baseUrl}${path}`)
+      const response = await authenticatedFetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)
       assert.equal(payload.error.code, 'not_found')
     }
+  })
+})
+
+
+test('documentation and schema require login, including unknown paths and aliases', async () => {
+  await withServer('combined', async base => {
+    for (const path of ['/docs', '/docs/openapi.json', '/docs/unknown-page', '/docs/xiaohongshu-note']) {
+      const response = await fetch(base + path, { redirect: 'manual' })
+      assert.equal(response.status, 302)
+      assert.match(response.headers.get('location'), /^\/#\/docs\?path=/)
+      assert.equal(response.headers.get('cache-control'), 'no-store')
+      assert.equal(await response.text(), '')
+    }
+    const denied = await fetch(base + '/internal/v1/admin/documentation?path=/docs/ecommerce')
+    assert.equal(denied.status, 401)
+    const allowed = await authenticatedFetch(base + '/internal/v1/admin/documentation?path=/docs/xiaohongshu-note')
+    assert.equal(allowed.status, 200)
+    assert.match((await allowed.json()).data.html, /小红书/)
   })
 })

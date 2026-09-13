@@ -1,3 +1,4 @@
+import { TenantMemberships } from './tenant-memberships.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowClockwise,
@@ -1060,6 +1061,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+      {session?.platformAdmin ? <TenantMemberships token={token} tenants={tenants} /> : null}
       <Panel
         title="租户"
         subtitle={`${tenants.length} 个租户`}
@@ -1254,6 +1256,7 @@ function rowHealth(key) {
 }
 
 export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+  const [showRevoked, setShowRevoked] = useState(false)
   const consumerId = query.get('consumerId') || ''
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -1308,7 +1311,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     }
   }, [consumerId, setQuery, state.data, state.loading])
   const consumers = state.data?.consumers || []
-  const keys = state.data?.keys || []
+  const keys = (state.data?.keys || []).filter(key => showRevoked || key.status !== 'revoked')
   const selectedConsumerId = state.data?.selectedConsumerId || ''
   const sharedHealth = state.data?.health
     ? consumerHealth(state.data.health, {
@@ -1541,6 +1544,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         )
       ) : null}
       <Panel title="已签发密钥" subtitle={`${keys.length} 条记录`}>
+        <label><input type="checkbox" checked={showRevoked} onChange={event => setShowRevoked(event.target.checked)} /> 显示已撤销 Key</label>
         {keys.length ? (
           <Table label="API Key 列表">
             <thead><tr><th>名称</th><th>调用者</th><th>密钥标识（不可用于调用）</th><th>授权范围</th><th>环境</th><th>状态</th><th>有效至</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
@@ -2633,7 +2637,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     <>
       <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="调用者授权是上限，API Key 在签发时选择其中的平台与能力。停用会立即收窄现有 Key；新增能力需重新签发并显式勾选。" loading={state.loading} onRefresh={state.refresh}>
         {canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
-        <a className="qp-button qp-button--outline" href={publicDocsHref()} target="_blank" rel="noreferrer">查看公共 API 文档</a>
+        <a className="qp-button qp-button--outline" href={publicDocsHref()}>查看公共 API 文档</a>
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar">

@@ -365,7 +365,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
         <a className="qp-button qp-button--outline" href="#/api-keys">签发 / 轮换 API Key</a>
         <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a>
         <a className="qp-button qp-button--outline" href="#/plans">查看合同费率</a>
-        <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')} target="_blank" rel="noreferrer">查看开放 API / 文档</a>
+        <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')}>查看开放 API / 文档</a>
       </PageHeading>
 
       <details className="qp-panel mih-xhs-link-entry" id="xhs-link-entry"><summary>按链接打开笔记 · 已有分享链接时使用</summary><p>与列表中的笔记详情使用相同读取能力；此入口支持粘贴链接、选择交付策略和查看本次会话历史。</p>
