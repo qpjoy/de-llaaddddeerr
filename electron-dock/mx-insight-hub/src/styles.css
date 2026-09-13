@@ -12879,3 +12879,6 @@ button.mih-catalog-status {
 .mih-xhs-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
 .mih-xhs-link-entry { margin-bottom: 24px; }
 .mih-xhs-link-entry > summary { cursor: pointer; font-weight: 600; padding: 12px 0; }
+.mih-tenant-access-scopes { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; margin-bottom: 20px; }
+.mih-tenant-access-scopes label { padding: 8px; overflow-wrap: anywhere; }
+.mih-tenant-access-scopes small { display: block; opacity: .7; }

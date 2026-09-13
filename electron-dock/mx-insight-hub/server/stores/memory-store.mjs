@@ -360,6 +360,8 @@ function assertTransientFallback({ failureKind, httpStatus }) {
 
 export class MemoryStore {
   constructor() {
+    this.tenantServiceAccess = new Map()
+    this.tenantServiceAccessEvents = []
     this.tenants = new Map()
     this.consumers = new Map()
     this.apiKeys = new Map()
@@ -547,6 +549,31 @@ export class MemoryStore {
     return clone(record)
   }
 
+  async getTenantServiceAccess(tenantId) {
+    return clone(this.tenantServiceAccess.get(tenantId) || {platforms: [], capabilities: [], revision: 0, maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100})
+  }
+  applyTenantServiceAccess(consumerId, before, after) {
+    const tenantId = this.consumers.get(consumerId).tenantId
+    for (const [field, grants, policies, column] of [['platforms',this.grants,this.policies,'platform'],['capabilities',this.capabilityGrants,this.capabilityPolicies,'capability']]) {
+      const current = new Set(grants.get(consumerId) || [])
+      for (const scope of before[field]) if (!after[field].includes(scope)) current.delete(scope)
+      for (const scope of after[field]) {
+        current.add(scope)
+        policies.set(`${consumerId}:${scope}`, {tenantId,consumerId,[column]:scope,maxRequests:after.maxRequests,windowSeconds:after.windowSeconds,...(field === 'platforms' ? {maxPageSize:after.maxPageSize,maxCrawlWork:after.maxCrawlWork} : {}),updatedAt:nowIso()})
+      }
+      grants.set(consumerId,[...current].sort())
+    }
+  }
+  async putTenantServiceAccess(tenantId, input, actor) {
+    const before = this.tenantServiceAccess.get(tenantId) || {platforms:[],capabilities:[],revision:0}
+    if (before.revision !== input.revision) throw new AppError(409,'revision_conflict','Tenant access changed; reload before saving')
+    const after = {...input, revision:before.revision+1}
+    for (const consumer of this.consumers.values()) if (consumer.tenantId === tenantId) this.applyTenantServiceAccess(consumer.id,before,after)
+    this.tenantServiceAccess.set(tenantId,clone(after))
+    this.tenantServiceAccessEvents.push({tenantId,actor,...clone(after)})
+    return clone(after)
+  }
+
   async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     if (businessId && [...this.consumers.values()].some((consumer) => consumer.businessId === businessId)) {
@@ -596,6 +623,8 @@ export class MemoryStore {
         updatedAt: createdAt,
       })
     }
+    const access = this.tenantServiceAccess.get(tenantId)
+    if (access) this.applyTenantServiceAccess(id,{platforms:[],capabilities:[]},access)
     return clone(record)
   }
 

@@ -1,3 +1,4 @@
+import { TenantServiceAccess } from './tenant-service-access.jsx'
 import { TenantMemberships } from './tenant-memberships.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -139,6 +140,11 @@ const PLATFORM_CATALOG = [
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
+  'public_opinion.diagnostics.read': { label: '舆情诊断读取' },
+  'ecommerce.products.detail': { label: '电商商品详情' },
+  'ecommerce.products.reviews': { label: '电商商品评价' },
+  'ecommerce.products.questions': { label: '电商商品问答' },
+  'ecommerce.shops.products': { label: '电商店铺商品' },
   'compat.xiaohongshu.app_v2': {
     group: 'compatibility',
     label: '小红书 App V2 兼容接口',
@@ -1061,7 +1067,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
-      {session?.platformAdmin ? <TenantMemberships token={token} tenants={tenants} /> : null}
+      {session?.platformAdmin ? <><TenantMemberships token={token} tenants={tenants} /><TenantServiceAccess token={token} tenants={tenants} platforms={PLATFORM_CATALOG} capabilities={CAPABILITY_CATALOG} /></> : null}
       <Panel
         title="租户"
         subtitle={`${tenants.length} 个租户`}
@@ -1578,7 +1584,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                     <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showOverview(key)}>
                       <ChartLine size={15} aria-hidden="true" />额度与用量
                     </button>
-                    {tenantAllows(session, key.tenantId, 'platform.write') ? (
+                    {session?.platformAdmin && tenantAllows(session, key.tenantId, 'platform.write') ? (
                       <a
                         className="qp-button qp-button--ghost qp-button--sm"
                         href={`#/platforms?${new URLSearchParams({ tenantId: key.tenantId, consumerId: key.consumerId })}`}
@@ -1646,7 +1652,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 {scopeOptions.platforms.map((platform) => (
                   <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.platforms?.includes(platform))} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
                 ))}
-                {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权，请先到“开放能力”配置。</small> : null}
+                {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权。请联系平台管理员在“调用者 → 租户业务开通”中开通。</small> : null}
               </div>
             </Field>
             <Field label="业务操作" hint="决定 Key 可以执行什么；产生外部费用的操作不随数据域授权自动开启。">
@@ -1694,7 +1700,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
               <button className="qp-button qp-button--ghost" type="button" onClick={() => setIssuedSecret(null)}>{issuedSecret.replaces ? '先保留旧 Key' : '我已安全保存'}</button>
               {issuedSecret.replaces ? (
                 <button className="qp-button qp-button--danger" type="button" onClick={() => { setRevokeTarget(issuedSecret.replaces); setIssuedSecret(null) }}>已切换并验证，撤销旧 Key</button>
-              ) : tenantAllows(session, issuedSecret.tenantId, 'platform.write') ? (
+              ) : session?.platformAdmin && tenantAllows(session, issuedSecret.tenantId, 'platform.write') ? (
                 <a
                   className="qp-button qp-button--primary"
                   href={`#/platforms?${new URLSearchParams({ tenantId: issuedSecret.tenantId, consumerId: issuedSecret.consumerId })}`}
@@ -1919,7 +1925,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const capabilityGrants = new Set(data.configuration?.capabilityGrants || [])
   const platformHref = `#/platforms?${new URLSearchParams({ tenantId: data.tenantId || '', consumerId: data.consumerId || '' })}`
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
-  const canManagePlatform = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
+  const canManagePlatform = Boolean(session?.platformAdmin) && tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
   const currentPlan = data.plans?.currentPlan
   const planLimits = currentPlan?.limits || {}
   const monthlyUsed = Number(data.usage?.requests || 0)
@@ -2532,7 +2538,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     && (!requestedConsumerId || requestedConsumerId === data.consumerId)
   )
   const contextUnavailable = state.loading || !contextMatchesRequest
-  const hasPlatformWrite = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
+  const hasPlatformWrite = Boolean(session?.platformAdmin) && tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
   const canReadApiKeys = tenantAllows(session, selectedConsumer?.tenantId, 'apikey.read')
   const canUpdatePlatform = hasPlatformWrite && !contextUnavailable
   const mutationPending = Boolean(busyPlatform || busyCapability)

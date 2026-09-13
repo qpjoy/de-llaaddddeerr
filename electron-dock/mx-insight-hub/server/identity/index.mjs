@@ -7,8 +7,8 @@ export { LauncherIdentityClient } from './launcher-client.mjs'
 // Hub roles, ordered from most to least privileged. Each role's capabilities are
 // a superset of the ones below it.
 const ROLE_CAPABILITIES = Object.freeze({
-  owner: ['tenant.read', 'tenant.write', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'platform.write', 'usage.read', 'membership.write'],
-  admin: ['tenant.read', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'platform.write', 'usage.read'],
+  owner: ['tenant.read', 'tenant.write', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'usage.read', 'membership.write'],
+  admin: ['tenant.read', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'usage.read'],
   analyst: ['tenant.read', 'consumer.read', 'apikey.read', 'usage.read'],
   viewer: ['tenant.read', 'consumer.read', 'usage.read'],
 })

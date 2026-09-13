@@ -1,3 +1,4 @@
+import { readTenantAccess, writeTenantAccess, applyTenantAccess } from './tenant-service-access.mjs'
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
@@ -1140,11 +1141,15 @@ export class PostgresStore {
     return tenant(rows[0]) || null
   }
 
+  async getTenantServiceAccess(tenantId) { return readTenantAccess(this.pool, tenantId) }
+  async putTenantServiceAccess(tenantId, input, actor) { return writeTenantAccess(this.pool, tenantId, input, actor) }
+
   async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     const id = randomUUID()
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${tenantId}`])
       const { rows } = await client.query(
         `INSERT INTO consumers (id, tenant_id, name, status, business_id)
          VALUES ($1, $2, $3, $4, $5) RETURNING *`,
@@ -1163,6 +1168,8 @@ export class PostgresStore {
           [tenantId, id, capability, maxRequests, windowSeconds],
         )
       }
+      const access = await readTenantAccess(client, tenantId)
+      await applyTenantAccess(client, tenantId, id, {platforms: [], capabilities: []}, access)
       const assignment = await client.query(
         `SELECT 1
            FROM consumer_plan_assignments assignment

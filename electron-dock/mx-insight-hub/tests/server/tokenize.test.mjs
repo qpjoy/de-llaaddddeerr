@@ -22,6 +22,7 @@ async function withFixture(segmenter, run) {
   })
   const tenant = await service.createTenant({ name: 'Tokenizer tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Tokenizer consumer' })
+  await service.putCapabilityConfiguration('nlp.tokenize', { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
   const issued = await service.createApiKey({
     consumerId: consumer.id,
     name: 'Tokenizer key',
@@ -165,28 +166,14 @@ test('a failed atomic capability update cannot leave a partial grant or policy',
   })
 })
 
-test('new consumers receive tokenize defaults but still need an issued API key', async () => {
+test('new consumers have no implicit free capabilities', async () => {
   const store = new MemoryStore()
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
-  const tenant = await service.createTenant({ name: 'Default capability tenant' })
-  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Default capability consumer' })
-
-  assert.deepEqual(await store.listCapabilityGrants(consumer.id), ['nlp.tokenize'])
-  assert.deepEqual(await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize'), {
-    tenantId: tenant.id,
-    consumerId: consumer.id,
-    capability: 'nlp.tokenize',
-    // Hub's own service quota, raised so a whole team browsing a data
-    // product does not exhaust one hour's window. Upstream cost control is
-    // a separate ceiling and is unaffected.
-    maxRequests: 100_000,
-    windowSeconds: 3_600,
-    updatedAt: (await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize')).updatedAt,
-  })
-  await assert.rejects(
-    service.authenticate('mih_live_not-issued'),
-    (error) => error?.status === 401 && error?.code === 'invalid_api_key',
-  )
+  const tenant = await service.createTenant({ name: 'Closed tenant' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Closed consumer' })
+  assert.deepEqual(await store.listCapabilityGrants(consumer.id), [])
+  assert.equal(await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize'), null)
+  await assert.rejects(service.createApiKey({ consumerId: consumer.id, name: 'NLP', capabilities: ['nlp.tokenize'] }))
 })
 
 test('Postgres creates a consumer and its default tokenize policy in one transaction', async () => {
@@ -196,6 +183,7 @@ test('Postgres creates a consumer and its default tokenize policy in one transac
   const client = {
     async query(sql, params = []) {
       const normalized = sql.trim().replace(/\s+/g, ' ')
+      if (normalized.startsWith('SELECT pg_advisory_xact_lock') || normalized.startsWith('SELECT configuration, revision FROM tenant_service_access')) return { rows: [] }
       parameters.push(params)
       if (normalized === 'BEGIN' || normalized === 'COMMIT') {
         statements.push(normalized)
@@ -249,6 +237,7 @@ test('Postgres consumer defaults roll back the consumer when policy creation fai
   const client = {
     async query(sql, params = []) {
       const normalized = sql.trim().replace(/\s+/g, ' ')
+      if (normalized.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
       if (normalized === 'BEGIN' || normalized === 'ROLLBACK') {
         statements.push(normalized)
         return { rows: [] }

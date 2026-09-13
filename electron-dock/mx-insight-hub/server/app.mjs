@@ -2478,6 +2478,18 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:tenantId/service-access')
+      if (params && request.method === 'GET') {
+        requireTenantCapability(principal, params.tenantId, 'tenant.read')
+        sendJson(response,200,{data:await store.getTenantServiceAccess(params.tenantId),requestId})
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requirePlatformAdmin(principal)
+        sendJson(response,200,{data:await service.putTenantServiceAccess(params.tenantId,await readJson(request),principal.memberId || 'admin-token'),requestId})
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/platforms') {
         const filters = queryFilters(searchParams)
         if (filters.consumerId) await assertConsumerCapability(principal, filters.consumerId, 'consumer.read')
@@ -2491,6 +2503,7 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/platforms/:platform')
       if (request.method === 'PUT' && params) {
         const body = await readJson(request)
+        requirePlatformAdmin(principal)
         await assertConsumerCapability(principal, body?.consumerId, 'platform.write')
         sendJson(response, 200, {
           data: await service.putPlatformConfiguration(params.platform, body),
@@ -2501,6 +2514,7 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/capabilities/:capability')
       if (request.method === 'PUT' && params) {
         const body = await readJson(request, 64 * 1024)
+        requirePlatformAdmin(principal)
         await assertConsumerCapability(principal, body?.consumerId, 'platform.write')
         sendJson(response, 200, {
           data: await service.putCapabilityConfiguration(params.capability, body),

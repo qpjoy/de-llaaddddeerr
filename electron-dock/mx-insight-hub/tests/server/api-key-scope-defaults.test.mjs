@@ -26,7 +26,7 @@ async function fixture() {
     consumerId: consumer.id,
     enabled: true,
   })
-  for (const capability of APP_V2_CAPABILITIES) {
+  for (const capability of ['nlp.tokenize', ...APP_V2_CAPABILITIES]) {
     await service.putCapabilityConfiguration(capability, {
       tenantId: tenant.id,
       consumerId: consumer.id,

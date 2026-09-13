@@ -622,6 +622,22 @@ export class HubService {
     return tenant
   }
 
+  async putTenantServiceAccess(id, body, actor) {
+    const tenantId = requiredUuid(id, 'tenantId')
+    assert(await this.store.getTenant(tenantId),404,'tenant_not_found','Tenant not found')
+    assert(Array.isArray(body?.platforms) && Array.isArray(body?.capabilities),400,'invalid_request','Explicit platforms and capabilities are required')
+    assert(body.platforms.length <= 100 && body.capabilities.length <= 100,400,'invalid_request','Too many scopes')
+    const platforms = [...new Set(body.platforms.map(canonicalPlatform))]
+    assert(platforms.every(p => !RESERVED_PLATFORM_NAMES.has(p)),400,'invalid_platform','Wildcard grants are not allowed')
+    const capabilities = [...new Set(body.capabilities.map(canonicalCapability))]
+    assert(Number.isInteger(body.revision) && body.revision >= 0,400,'invalid_request','Revision is required')
+    const input = {platforms,capabilities,revision:body.revision,reason:requiredString(body.reason,'reason'),
+      maxRequests:positiveInteger(body.maxRequests,'maxRequests',1000),windowSeconds:positiveInteger(body.windowSeconds,'windowSeconds',3600),
+      maxPageSize:positiveInteger(body.maxPageSize,'maxPageSize',100),maxCrawlWork:positiveInteger(body.maxCrawlWork,'maxCrawlWork',100)}
+    assert(input.maxCrawlWork <= MAX_CRAWL_WORK,400,'invalid_request','Crawl work exceeds limit')
+    return this.store.putTenantServiceAccess(tenantId,input,actor)
+  }
+
   async createConsumer(body) {
     const tenantId = requiredUuid(body.tenantId, 'tenantId')
     assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
@@ -630,11 +646,7 @@ export class HubService {
       name: requiredString(body.name, 'name'),
       status: validateStatus(body.status),
       businessId: optionalNightAllBusinessId(body.businessId),
-      defaultCapabilityPolicy: {
-        capability: TOKENIZE_CAPABILITY,
-        maxRequests: this.defaultPolicy.maxRequests,
-        windowSeconds: this.defaultPolicy.windowSeconds,
-      },
+
     })
   }
 

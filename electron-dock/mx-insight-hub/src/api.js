@@ -363,6 +363,8 @@ export const adminApi = {
   // from the returned capabilities so a scoped user never sees a control they
   // are not allowed to use.
   session: (token) => request(token, `${ADMIN_ROOT}/session`),
+  tenantServiceAccess: (token, id) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access`),
+  saveTenantServiceAccess: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access`, { method: 'PUT', body }),
   members: (token) => request(token, `${ADMIN_ROOT}/members`),
   grantMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships`, { method: 'POST', body }),
   revokeMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships/revoke`, { method: 'POST', body }),

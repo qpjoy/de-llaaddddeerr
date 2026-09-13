@@ -174,7 +174,7 @@ test('scoped tenant navigation exposes provider-neutral self-service and capabil
   assert.match(consumersPage, /session\?\.platformAdmin && form\.businessId\.trim\(\)/u)
 
   const platformsPage = pages.match(/export function PlatformsPage[\s\S]*?\nexport function UsagePage/u)?.[0] || ''
-  assert.match(platformsPage, /const hasPlatformWrite = tenantAllows\(session, selectedConsumer\?\.tenantId, 'platform\.write'\)/u)
+  assert.match(platformsPage, /const hasPlatformWrite = Boolean\(session\?\.platformAdmin\) && tenantAllows\(session, selectedConsumer\?\.tenantId, 'platform\.write'\)/u)
   assert.match(platformsPage, /hasPlatformWrite \? \(/u)
   assert.match(platformsPage, /调用方只持有同一把 Hub API Key，不会看到或指定供应方/u)
   assert.match(pages, /const tenantId = selectVisibleTenantId\(safeTenants, requestedTenantId\)/u)

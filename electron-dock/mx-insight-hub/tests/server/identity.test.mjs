@@ -368,6 +368,16 @@ test('tenant capabilities come from the role held in the target tenant', async (
   })
   assert.equal(ownerConsumer.status, 201)
 
+  for (const path of ['/internal/v1/admin/platforms/xiaohongshu', '/internal/v1/admin/capabilities/nlp.tokenize', `/internal/v1/admin/tenants/${tenantA.id}/service-access`]) {
+    const denied = await callAdmin(path, {token:'mx-v1-mixed-role',method:'PUT',body:{tenantId:tenantA.id,consumerId:consumerA.id,enabled:true}})
+    assert.equal(denied.status,403)
+    assert.equal((await denied.json()).error.code,'platform_admin_required')
+  }
+  const opened = await callAdmin(`/internal/v1/admin/tenants/${tenantA.id}/service-access`, {method:'PUT',body:{revision:0,platforms:[],capabilities:['nlp.tokenize'],reason:'Approved NLP'}})
+  assert.equal(opened.status,200)
+  const selfKey = await callAdmin('/internal/v1/admin/api-keys', {token:'mx-v1-mixed-role',method:'POST',body:{consumerId:consumerA.id,name:'Scoped self service',capabilities:['nlp.tokenize']}})
+  assert.equal(selfKey.status,201)
+
   const deniedRequests = [
     callAdmin(`/internal/v1/admin/tenants/${tenantB.id}`, {
       token: 'mx-v1-mixed-role', method: 'PUT', body: { name: 'Viewer Cannot Rename' },
@@ -394,7 +404,7 @@ test('tenant capabilities come from the role held in the target tenant', async (
   for (const responsePromise of deniedRequests) {
     const response = await responsePromise
     assert.equal(response.status, 403)
-    assert.equal((await response.json()).error.code, 'insufficient_capability')
+    assert.ok(['insufficient_capability', 'platform_admin_required'].includes((await response.json()).error.code))
   }
 
   const visibleKeys = (await (await callAdmin('/internal/v1/admin/api-keys', {
