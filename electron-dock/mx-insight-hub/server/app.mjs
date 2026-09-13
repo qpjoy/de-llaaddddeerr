@@ -2423,6 +2423,23 @@ export function createApp({
         sendJson(response, 201, { data: await service.createApiKey(body), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/reveal')
+      if (params && request.method === 'POST') {
+        await assertApiKeyCapability(principal,params.id,'apikey.write')
+        if (!identity?.enabled) throw new AppError(503,'launcher_not_configured','查看完整 Key 需要 Launcher 账号密码验证')
+        const clientIp = clientAddress(request)
+        assertSignInAllowed(clientIp)
+        const body = await readJson(request, 16 * 1024)
+        const issued = await identity.client.signIn({username:requiredField(body,'username'),password:requiredField(body,'password'),clientIp})
+        const verified = await identity.resolve(issued.token)
+        if (!verified?.memberId) throw new AppError(401,'invalid_session','Password verification did not return a valid member')
+        if (principal.memberId && verified.memberId !== principal.memberId) throw new AppError(403,'identity_mismatch','请使用当前登录账号验证')
+        await assertApiKeyCapability(verified,params.id,'apikey.write')
+        response.setHeader('Cache-Control','no-store')
+        sendJson(response,200,{data:await service.revealApiKey(params.id,verified.memberId),requestId})
+        return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/overview')
       if (request.method === 'GET' && params) {
         await assertApiKeyCapability(principal, params.id, 'apikey.read')

@@ -1,3 +1,4 @@
+import { KeyReveal } from './key-reveal.jsx'
 import { TenantServiceAccess } from './tenant-service-access.jsx'
 import { TenantMemberships } from './tenant-memberships.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -1272,6 +1273,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const [scopeLoading, setScopeLoading] = useState(false)
   const scopeRequestRef = useRef(0)
   const [issuedSecret, setIssuedSecret] = useState(null)
+  const [revealTarget, setRevealTarget] = useState(null)
   const [rotationSource, setRotationSource] = useState(null)
   const [revokeTarget, setRevokeTarget] = useState(null)
   const [revoking, setRevoking] = useState(false)
@@ -1559,7 +1561,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 <tr key={key.id}>
                   <td><strong>{key.name}</strong><small>{formatDate(key.createdAt)} 签发</small></td>
                   <td>{consumerNames.get(key.consumerId) || key.consumerId}</td>
-                  <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code><small>仅用于核对；完整 secret 只在签发时显示一次</small></td>
+                  <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code><small>仅用于核对；查看完整 Key 需验证账号密码</small></td>
                   <td><strong>{key.platforms?.length || 0} 平台 · {key.capabilities?.length || 0} 能力</strong><small>{[...(key.platforms || []), ...(key.capabilities || [])].join('、') || '无调用权限'}</small></td>
                   <td>
                     <strong>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? 'Test · 兼容标签' : 'Live'}</strong>
@@ -1584,6 +1586,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                     <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showOverview(key)}>
                       <ChartLine size={15} aria-hidden="true" />额度与用量
                     </button>
+                    {tenantAllows(session, key.tenantId, 'apikey.write') && key.effectiveStatus === 'active' ? <button className="qp-button qp-button--ghost qp-button--sm" onClick={() => setRevealTarget(key)}>查看完整 Key</button> : null}
                     {session?.platformAdmin && tenantAllows(session, key.tenantId, 'platform.write') ? (
                       <a
                         className="qp-button qp-button--ghost qp-button--sm"
@@ -1612,7 +1615,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           <EmptyState
             icon={Key}
             title={consumers.length ? '还没有 API Key' : '请先创建调用者'}
-            description={consumers.length ? '签发后完整 secret 只展示一次。' : 'API Key 必须归属于一个调用者。'}
+            description={consumers.length ? '签发后可查看完整 Key；再次查看需验证账号密码。' : 'API Key 必须归属于一个调用者。'}
             action={canIssueKey ? <button className="qp-button qp-button--outline" type="button" onClick={showCreate}><Plus size={16} aria-hidden="true" />签发 API Key</button> : !consumers.length ? <a className="qp-button qp-button--outline" href="#/consumers"><Users size={16} aria-hidden="true" />前往调用者</a> : null}
           />
         )}
@@ -1623,7 +1626,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           title={rotationSource ? '签发替代 API Key' : '签发 API Key'}
           description={rotationSource
             ? '先签发不超过旧 Key 有效范围的替代 Key；安全保存并完成客户端切换后，再显式撤销旧 Key。'
-            : '新 Key 默认不包含任何平台或能力，也可保持零权限；需要调用时再显式勾选不可变范围。完整 secret 只显示一次。'}
+            : '新 Key 默认不包含任何平台或能力，也可保持零权限；需要调用时再显式勾选不可变范围。完整 Key 加密保存，之后需验证账号密码查看。'}
           onClose={() => {
             if (!saving) {
               scopeRequestRef.current += 1
@@ -1692,8 +1695,8 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         <Modal
           title={issuedSecret.replaces ? '替代 API Key 已签发' : 'API Key 已签发'}
           description={issuedSecret.replaces
-            ? `这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。旧 Key 保持有效，请先安全保存、更新客户端并验证，再撤销旧 Key。`
-            : `这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用签发时勾选、且调用者当前仍允许的范围。`}
+            ? `完整密钥已加密保存，可验证账号密码后再次查看；有效至 ${formatDate(issuedSecret.expiresAt)}。旧 Key 保持有效，请先安全保存、更新客户端并验证，再撤销旧 Key。`
+            : `完整密钥已加密保存，可验证账号密码后再次查看；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用签发时勾选、且调用者当前仍允许的范围。`}
           onClose={() => setIssuedSecret(null)}
           footer={(
             <>
@@ -1714,10 +1717,11 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             </>
           )}
         >
-          <SecretPanel secret={issuedSecret.secret} onCopied={() => notify('密钥已复制', 'success')} />
+          <SecretPanel recoverable secret={issuedSecret.secret} onCopied={() => notify('密钥已复制', 'success')} />
         </Modal>
       ) : null}
 
+      {revealTarget ? <KeyReveal token={token} apiKey={revealTarget} onClose={() => setRevealTarget(null)} /> : null}
       {revokeTarget ? (
         <Modal
           title="撤销 API Key"
@@ -2825,7 +2829,9 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                   <tr key={row.capability}>
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
-                    <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} /></td>
+                    <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} />
+                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href="#/external-platforms">检查外部数据平台 →</a> : <small>请联系管理员检查该业务运行配置。</small>}</div> : null}
+                    </td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
                     <td className="mih-table__actions mih-table__actions--wide">

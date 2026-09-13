@@ -1,3 +1,4 @@
+import { sealApiKey, openApiKey } from './core/key-vault.mjs'
 import { issueDemoCredential, readDemoCredential } from './core/demo-credential.mjs'
 import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
@@ -726,6 +727,7 @@ export class HubService {
     const issued = issueApiKey(this.apiKeyPepper, environment)
     const record = await this.store.createApiKey({
       ...issued,
+      sealedSecret: sealApiKey(issued.plaintext, issued.id, this.apiKeyPepper),
       environment,
       expiresAt,
       tenantId: consumer.tenantId,
@@ -735,6 +737,20 @@ export class HubService {
       capabilityEntitlements,
     })
     return { ...record, secret: issued.plaintext }
+  }
+
+  async revealApiKey(id, memberId) {
+    const key = (await this.store.listApiKeys()).find(entry => entry.id === requiredUuid(id, 'id'))
+    assert(key,404,'api_key_not_found','API key not found')
+    assert(key.status === 'active' && (!key.expiresAt || new Date(key.expiresAt).getTime() > Date.now()),409,'api_key_unavailable','Revoked or expired keys cannot be revealed')
+    const consumer = await this.store.getConsumer(key.consumerId)
+    const tenant = await this.store.getTenant(key.tenantId)
+    assert(consumer?.status === 'active' && tenant?.status === 'active',403,'identity_inactive','Tenant or consumer is inactive')
+    const envelope = await this.store.readApiKeyVault(id)
+    assert(envelope,409,'api_key_not_recoverable','此历史 Key 仅保存哈希，无法还原。请签发替代 Key；新版签发的 Key 支持验证密码后查看。')
+    const secret = openApiKey(envelope,id,this.apiKeyPepper)
+    await this.store.recordApiKeyReveal(id,memberId)
+    return {secret}
   }
 
   listApiKeys(consumerId) {
@@ -1240,6 +1256,7 @@ export class HubService {
       ? await this.externalPlatformCapabilities({ consumerId: normalizedConsumerId })
       : null
     return {
+      operationReadiness: Object.fromEntries(Object.entries(xiaohongshuAcquisition?.operations || {}).map(([operation,state]) => [operation,{ready:state?.ready === true,effectiveState:state?.effectiveState || 'unknown'}])),
       grants: normalizedConsumerId ? await this.store.listGrants(normalizedConsumerId) : [],
       policies: normalizedConsumerId ? await this.store.listPolicies(normalizedConsumerId) : [],
       capabilityGrants: normalizedConsumerId && typeof this.store.listCapabilityGrants === 'function'

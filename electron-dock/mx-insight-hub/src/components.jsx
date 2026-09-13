@@ -678,7 +678,7 @@ export function ConfirmDialog({
   )
 }
 
-export function SecretPanel({ secret, onCopied }) {
+export function SecretPanel({ secret, onCopied, recoverable = false }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
     try {
@@ -695,7 +695,7 @@ export function SecretPanel({ secret, onCopied }) {
         <WarningCircle size={22} weight="duotone" aria-hidden="true" />
         <div>
           <strong>请立即保存此密钥</strong>
-          <p>关闭窗口后，MX Insight Hub 不会再次显示完整密钥。</p>
+          <p>{recoverable ? '关闭后可在 Key 列表验证 Launcher 账号密码，再次查看。' : '关闭窗口后，MX Insight Hub 不会再次显示完整密钥。'}</p>
         </div>
       </div>
       <div className="qp-input-group">

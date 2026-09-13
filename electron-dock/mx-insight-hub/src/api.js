@@ -314,6 +314,7 @@ export const adminApi = {
   createConsumer: (token, body) => request(token, `${ADMIN_ROOT}/consumers`, { method: 'POST', body }),
   documentation: (token, path) => request(token, `${ADMIN_ROOT}/documentation`, { query: { path } }),
   apiKeys: (token, consumerId) => request(token, `${ADMIN_ROOT}/api-keys`, { query: { consumerId } }),
+  revealApiKey: (token, id, body) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/reveal`, { method: 'POST', body }),
   createApiKey: (token, body) => request(token, `${ADMIN_ROOT}/api-keys`, { method: 'POST', body }),
   apiKeyOverview: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/overview`),
   consumerHealth: (token, id) => request(token, `${ADMIN_ROOT}/consumers/${encodeURIComponent(id)}/health`),

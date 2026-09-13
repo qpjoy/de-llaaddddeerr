@@ -1212,8 +1212,16 @@ export class PostgresStore {
     return consumer(rows[0]) || null
   }
 
+  async readApiKeyVault(id) {
+    const {rows} = await this.pool.query('SELECT envelope FROM api_key_vault WHERE api_key_id=$1',[id])
+    return rows[0]?.envelope || null
+  }
+  async recordApiKeyReveal(id,memberId) {
+    await this.pool.query('INSERT INTO api_key_reveal_events(api_key_id,member_id) VALUES($1,$2)',[id,memberId])
+  }
+
   async createApiKey({
-    id, tenantId, consumerId, name, digest, prefix, lastFour,
+    id, tenantId, consumerId, name, digest, prefix, lastFour, sealedSecret = null,
     environment = 'live', status = 'active', expiresAt,
     platformEntitlements = null, capabilityEntitlements = null,
   }) {
@@ -1290,6 +1298,7 @@ export class PostgresStore {
           [consumerId],
         ),
       ])
+      if (sealedSecret) await client.query('INSERT INTO api_key_vault(api_key_id,envelope) VALUES($1,$2)',[id,sealedSecret])
       await client.query('COMMIT')
       return {
         ...apiKey(rows[0]),

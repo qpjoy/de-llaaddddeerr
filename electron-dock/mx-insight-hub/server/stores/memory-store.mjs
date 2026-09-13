@@ -638,8 +638,14 @@ export class MemoryStore {
     return clone(this.consumers.get(id) || null)
   }
 
+  async readApiKeyVault(id) { return this.apiKeyVault?.get(id) || null }
+  async recordApiKeyReveal(id, memberId) {
+    this.apiKeyRevealEvents ||= []
+    this.apiKeyRevealEvents.push({id,memberId,createdAt:nowIso()})
+  }
+
   async createApiKey({
-    id, tenantId, consumerId, name, digest, prefix, lastFour,
+    id, tenantId, consumerId, name, digest, prefix, lastFour, sealedSecret = null,
     environment = 'live', status = 'active', expiresAt,
     platformEntitlements = null, capabilityEntitlements = null,
   }) {
@@ -676,6 +682,10 @@ export class MemoryStore {
       expiresAt,
       revokedAt: null,
       lastUsedAt: null,
+    }
+    if (sealedSecret) {
+      this.apiKeyVault ||= new Map()
+      this.apiKeyVault.set(id,sealedSecret)
     }
     this.apiKeys.set(id, record)
     this.apiKeysByDigest.set(digest, id)
