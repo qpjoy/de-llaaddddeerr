@@ -5,7 +5,7 @@ import { adminApi, publicDataApi } from './api.js'
 import { DropdownField, ErrorState, Field, Modal } from './components.jsx'
 import { mergeNotes, nativeNotePage, storedNote } from './xiaohongshu-feed.js'
 
-function BusinessImage({ url, enabled, alt, className }) {
+export function BusinessImage({ url, enabled, alt, className }) {
   const [failed, setFailed] = useState(false)
   useEffect(() => setFailed(false), [url, enabled])
   let safe = false
@@ -13,12 +13,12 @@ function BusinessImage({ url, enabled, alt, className }) {
   return enabled && safe && !failed ? <img className={className} src={url} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <span className="mih-xhs-image-placeholder"><ImageSquare size={32} aria-label="图片未加载" /><small>{!enabled ? '图片显示已关闭' : !safe ? '暂无图片地址' : '图片加载失败，可在详情中重试'}</small></span>
 }
 
-function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, onSelectLink, onClose }) {
-  const [result, setResult] = useState(null)
+function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, DeliveryEvidence, saved, onClose }) {
+  const [result, setResult] = useState(saved.result || null)
   const [imageRevision, setImageRevision] = useState(0)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
-  const identity = useRef(null)
+  const [error, setError] = useState(saved.error || null)
+  const identity = useRef(saved.identity || null)
   const lock = useRef(false)
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
@@ -28,28 +28,35 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, onSelect
     lock.current = true; setBusy(true); setError(null)
     try {
       identity.current ||= { key: `xhs-detail-${requestUuid()}`, deliveryMode }
+      saved.identity = identity.current
       const response = await publicDataApi.xiaohongshuNote(apiKey.trim(), { platform: 'xiaohongshu', url, deliveryMode: identity.current.deliveryMode }, { idempotencyKey: identity.current.key })
       if (alive.current) { setResult(response); setImageRevision(value => value + 1) }
-      identity.current = null
-    } catch (failure) { if (alive.current) setError(failure) }
+      identity.current = null; saved.identity = null; saved.result = response; saved.error = null
+    } catch (failure) { saved.error = failure; if (alive.current) setError(failure) }
     finally { lock.current = false; if (alive.current) setBusy(false) }
   }
-  return <Modal title={item.title || '笔记详情'} size="xlarge" onClose={onClose} footer={<button className="qp-button" onClick={onClose}>关闭</button>}>
+  return <Modal title={item.title || '笔记详情'} size="xlarge" closeOnBackdrop={false} closeOnEscape={false} busy={busy} onClose={onClose} footer={<button className="qp-button" disabled={busy} onClick={onClose}>关闭</button>}>
     <p>{item.bodyCompleteness === 'provider_preview' ? '列表预览可能不含完整正文和标签。' : '展示当前 Hub 已存版本，完整性以采集结果为准。'} 获取完整详情优先读缓存，必要时采集，可能计费。</p>
-    <button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim()} onClick={() => void resolve()}>{busy ? '正在读取详情…' : error ? '重试同一详情请求' : '获取完整正文与标签'}</button>
-    <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || Boolean(error)} onClick={() => void resolve('live_only')}>重新采集完整笔记（可能计费）</button>
+    <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim()} onClick={() => void resolve()}>{busy ? '正在读取详情…' : error ? '重试同一详情请求' : '获取完整正文与标签'}</button>
+    <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || Boolean(error)} onClick={() => void resolve('live_only')}>重新采集完整笔记（可能计费）</button></div>
     <p>重新采集会请求上游获取最新正文、标签和全部图片地址；图片重试只重新加载已有图片。</p>
-    <label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
-    <button className="qp-button qp-button--outline" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button>
-    <button className="qp-button qp-button--ghost" onClick={() => { onSelectLink(url); onClose() }}>带入链接解析表单</button>
+    <div className="mih-xhs-detail-actions"><label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
+    <button className="qp-button qp-button--outline" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button></div>
+    <p>关闭后再次打开会保留本页会话中的详情与请求状态；刷新页面后清空。</p>
     {error ? <ErrorState error={error} /> : null}
-    {result?.evidence ? <p>交付：{result.evidence.sourceMode} · Request ID：{result.evidence.requestId}</p> : null}
-    <NoteScroll key={imageRevision} result={result || { payload: { data: { item: { ...item, media: [] } } } }} apiKey={apiKey} mediaEnabled={images} />
+    <DeliveryEvidence evidence={result?.evidence} error={error} />
+    <NoteScroll key={imageRevision} result={result || { payload: { data: { item: { ...item, media: [] } } } }} apiKey={apiKey} mediaEnabled={images} directImages />
     {!result ? <div className="mih-xhs-gallery" aria-label={`笔记图片，共 ${item.media?.length || 0} 张`}>{item.media?.map((media, index) => <figure key={`${imageRevision}:${index}`}><BusinessImage className="mih-xhs-note-image" url={media.url} enabled={images} alt={`笔记媒体 ${index + 1}`} /><figcaption>{index + 1} / {item.media.length}</figcaption></figure>)}</div> : null}
   </Modal>
 }
 
-export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScroll }) {
+export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEvidence }) {
+  const details = useRef({ apiKey, notes: new Map() })
+  if (details.current.apiKey !== apiKey) details.current = { apiKey, notes: new Map() }
+  const detailState = id => {
+    if (!details.current.notes.has(id)) details.current.notes.set(id, {})
+    return details.current.notes.get(id)
+  }
   const isAdmin = session?.kind === 'admin-token'
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('search_notes')
@@ -172,6 +179,6 @@ export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScro
         {cursor ? <button className="qp-button qp-button--outline" disabled={loading} onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕；上游续页请使用采集操作。</p> : null}
       </div>
     </div></div>
-    {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} onSelectLink={onSelectLink} onClose={() => setSelected(null)} /> : null}
+    {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} saved={detailState(selected.id)} onClose={() => setSelected(null)} /> : null}
   </section>
 }

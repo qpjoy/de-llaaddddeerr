@@ -12875,3 +12875,7 @@ button.mih-catalog-status {
 .mih-xhs-browser .mih-commerce-card-open > span { color: var(--qp-color-text-muted); font-size: 13px; overflow-wrap: anywhere; }
 .mih-xhs-browser .mih-commerce-card-image img { object-fit: cover; }
 .mih-xhs-browser label { line-height: 1.7; }
+
+.mih-xhs-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
+.mih-xhs-link-entry { margin-bottom: 24px; }
+.mih-xhs-link-entry > summary { cursor: pointer; font-weight: 600; padding: 12px 0; }

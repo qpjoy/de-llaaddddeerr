@@ -15,7 +15,7 @@ import {
 } from '@phosphor-icons/react'
 import { publicDataApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
-import { XiaohongshuFeed } from './pages-xiaohongshu-feed.jsx'
+import { XiaohongshuFeed, BusinessImage } from './pages-xiaohongshu-feed.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 
 const DELIVERY_OPTIONS = [
@@ -143,7 +143,7 @@ function RelayImage({ apiKey, requestId, mediaIndex = 0, className = '', alt = '
   ) : null
 }
 
-function NoteScroll({ result, apiKey, mediaEnabled = true }) {
+function NoteScroll({ result, apiKey, mediaEnabled = true, directImages = false }) {
   const item = result?.payload?.data?.item
   const requestId = result?.evidence?.requestId || result?.payload?.requestId
   if (!item) {
@@ -172,14 +172,14 @@ function NoteScroll({ result, apiKey, mediaEnabled = true }) {
         <div className="mih-xhs-gallery" aria-label={`笔记图片，共 ${media.length} 张`}>
           {media.map((_, mediaIndex) => (
             <figure key={mediaIndex}>
-              <RelayImage
+              {directImages ? <BusinessImage className="mih-xhs-note-image" url={media[mediaIndex].url} enabled={mediaEnabled} alt={`笔记图片 ${mediaIndex + 1}`} /> : <RelayImage
                 className="mih-xhs-note-image"
                 apiKey={apiKey}
                 requestId={requestId}
                 mediaIndex={mediaIndex}
                 alt={`笔记图片 ${mediaIndex + 1}`}
                 showPlaceholder
-              />
+              />}
               <figcaption>{mediaIndex + 1} / {media.length}</figcaption>
             </figure>
           ))}
@@ -368,10 +368,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
         <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')} target="_blank" rel="noreferrer">查看开放 API / 文档</a>
       </PageHeading>
 
-      <XiaohongshuFeed token={token} session={session} apiKey={apiKey} NoteScroll={NoteScroll} onSelectLink={value => {
-        setUrl(value)
-        document.getElementById('xhs-note-resolve')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      }} />
+      <details className="qp-panel mih-xhs-link-entry" id="xhs-link-entry"><summary>按链接打开笔记 · 已有分享链接时使用</summary><p>与列表中的笔记详情使用相同读取能力；此入口支持粘贴链接、选择交付策略和查看本次会话历史。</p>
       <div className="mih-xhs-workbench" id="xhs-note-resolve">
         <form className="qp-panel mih-xhs-controls" onSubmit={submit}>
           <div className="mih-xhs-panel-title"><Sparkle size={19} /><div><strong>展开一篇笔记</strong><small><code>POST /api/v1/xiaohongshu/app/get_note_info</code> · JSON body · 平台与能力必须同时授权</small></div></div>
@@ -394,7 +391,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
 
         <div className="mih-xhs-stage">
           <DeliveryEvidence evidence={result?.evidence} error={error} />
-          <section className="mih-xhs-canvas" aria-live="polite"><NoteScroll result={result} apiKey={apiKey.trim()} /></section>
+          <section className="mih-xhs-canvas" aria-live="polite"><NoteScroll result={result} apiKey={apiKey.trim()} directImages /></section>
         </div>
 
         <aside className="qp-panel mih-xhs-history">
@@ -408,7 +405,8 @@ export function XiaohongshuNotePage({ notify, token, session }) {
             </button>
           )) : <p className="mih-xhs-history-empty">成功获取的笔记会出现在这里；Hub 的长期历史由异步 canonical ingest 保存。</p>}
         </aside>
-      </div>
+      </div></details>
+      <XiaohongshuFeed token={token} session={session} apiKey={apiKey} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} />
     </>
   )
 }
