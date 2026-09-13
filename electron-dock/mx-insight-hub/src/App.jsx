@@ -1,3 +1,4 @@
+import { TenantPresentation } from './components.jsx'
 import { DocsPage } from './pages-docs.jsx'
 import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -833,7 +834,7 @@ export function App() {
   }
 
   return (
-    <DemoCredentialProvider key={token} token={token}><div className={`qp-app ${themeClassName(theme)} qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
+    <TenantPresentation.Provider value={!session?.platformAdmin}><DemoCredentialProvider key={token} token={token}><div className={`qp-app ${themeClassName(theme)} qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
       <a className="mih-skip-link" href="#mih-main-content">跳到主要内容</a>
       <button className="mih-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMenuOpen(false)} />
       <aside className="qp-sidebar qp-scrollbar mih-sidebar" aria-label="MX Insight Hub">
@@ -887,6 +888,6 @@ export function App() {
           <X size={19} aria-hidden="true" />
         </button>
       ) : null}
-    </div></DemoCredentialProvider>
+    </div></DemoCredentialProvider></TenantPresentation.Provider>
   )
 }

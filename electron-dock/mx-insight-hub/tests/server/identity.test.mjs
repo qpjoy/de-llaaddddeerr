@@ -774,7 +774,7 @@ test('tenant documentation filtering applies to embedded pages and direct schema
     assert.equal(response.status, 200)
     const body = await response.json()
     const schema = body.data?.schema || body
-    assert.ok(schema.paths['/data/post'])
+    assert.equal(schema.paths['/data/post'], undefined)
     assert.equal(schema.paths['/tools/tokenize'], undefined)
   }
   assert.equal((await callAdmin('/internal/v1/admin/documentation?path=/docs/tools')).status, 200)

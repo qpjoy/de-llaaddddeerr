@@ -836,6 +836,15 @@ export function createApp({
     return mergeUsageSummaries(results)
   }
 
+  async function documentationScopes(principal) {
+    if (principal.platformAdmin) return undefined
+    const tenants = new Set(principal.tenantIds || [])
+    const consumers = (await service.listConsumers()).filter(item => tenants.has(item.tenantId) && item.status !== 'suspended')
+    return Promise.all(consumers.map(async item => ({
+      platforms: await store.listGrants(item.id), capabilities: await store.listCapabilityGrants(item.id),
+    })))
+  }
+
   async function scopedDashboardFor(principal) {
     const scope = scopeTenantCapability(principal, null, 'usage.read')
     if (!Array.isArray(scope)) return service.dashboard()
@@ -1431,6 +1440,7 @@ export function createApp({
 
       // Documentation is private console content, including schema and aliases.
       let docsPrincipal = null
+      let docsScopes
       if (pathname === '/docs' || pathname.startsWith('/docs/')) {
         try { docsPrincipal = await resolvePrincipal(request) } catch (error) {
           if (error.status !== 401) throw error
@@ -1440,6 +1450,7 @@ export function createApp({
         }
       }
 
+      if (docsPrincipal) docsScopes = await documentationScopes(docsPrincipal)
       const publicDocsRedirect = request.method === 'GET' ? publicDocsRedirectForPath(pathname) : null
       if (publicDocsRedirect !== null) {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
@@ -1454,7 +1465,7 @@ export function createApp({
         return
       }
 
-      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname, { tenant: docsPrincipal ? !docsPrincipal.platformAdmin : false }) : null
+      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname, { tenant: docsPrincipal ? !docsPrincipal.platformAdmin : false, scopes: docsScopes }) : null
       if (publicDocsHtml !== null) {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
         response.writeHead(200, {
@@ -1470,7 +1481,7 @@ export function createApp({
       }
       if (request.method === 'GET' && pathname === '/docs/openapi.json') {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
-        sendJson(response, 200, docsPrincipal?.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument(), {
+        sendJson(response, 200, docsPrincipal?.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument(docsScopes), {
           'cache-control': 'private, no-store',
           'access-control-allow-origin': '*',
         })
@@ -1483,12 +1494,13 @@ export function createApp({
       }
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
+        const scopes = await documentationScopes(principal)
         const target = url.searchParams.get('path') || '/docs'
         const page = target.split('#')[0]
         const redirect = publicDocsRedirectForPath(page)
-        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page, { tenant: !principal.platformAdmin })
+        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page, { tenant: !principal.platformAdmin, scopes })
         if (!html && page !== '/docs/openapi.json') throw new AppError(404, 'not_found', 'Documentation not found')
-        sendJson(response, 200, { data: { html, schema: page === '/docs/openapi.json' ? (principal.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument()) : null }, requestId }, { 'cache-control': 'private, no-store' })
+        sendJson(response, 200, { data: { html, schema: page === '/docs/openapi.json' ? (principal.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument(scopes)) : null }, requestId }, { 'cache-control': 'private, no-store' })
         return
       }
 

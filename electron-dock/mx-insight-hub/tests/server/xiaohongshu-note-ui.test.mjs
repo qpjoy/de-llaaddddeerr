@@ -51,7 +51,7 @@ test('Xiaohongshu note body renders text beyond 60 characters without a UI clamp
   assert.doesNotMatch(bodyRule, /line-clamp|max-height|overflow:\s*hidden|text-overflow/u)
 })
 
-test('the gallery reports per-call consumption from the reason, not from sourceMode', async () => {
+test('the gallery shows Hub usage and freshness without procurement details', async () => {
   const [page, api] = await Promise.all([
     readFile(new URL('../../src/pages-xiaohongshu-note.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../../src/api.js', import.meta.url), 'utf8'),
@@ -63,12 +63,7 @@ test('the gallery reports per-call consumption from the reason, not from sourceM
   assert.match(api, /x-mx-insight-reason/u)
   assert.match(api, /this\.reason = reason \|\| details\?\.reason \|\| null/u)
 
-  // Upstream consumption is read from liveAttempted. Inferring it from
-  // sourceMode cannot distinguish a fallback taken before dispatch (nothing
-  // spent) from one taken after an upstream failure (already spent).
-  assert.match(page, /reason\?\.liveAttempted === true/u)
-  assert.match(page, /reason\?\.liveAttempted === false/u)
-  assert.match(page, /<dt>上游调用<\/dt>/u)
+  assert.doesNotMatch(page, /<dt>上游调用<\/dt>/u)
   assert.match(page, /<dt>Hub 用量<\/dt>/u)
 
   // A replay returns an already-committed result, so it is the one delivery
@@ -78,7 +73,7 @@ test('the gallery reports per-call consumption from the reason, not from sourceM
   // The evidence panel must render for failures too, or a blocked request
   // would show no explanation at all.
   assert.match(page, /<DeliveryEvidence evidence=\{result\?\.evidence\} error=\{error\}/u)
-  assert.match(page, /reason\?\.detail\?\.blockers/u)
+  assert.doesNotMatch(page, /reason\?\.detail\?\.blockers/u)
 
   // Every delivery mode the contract accepts is offered.
   for (const mode of ['cache_only', 'cache_first', 'refresh', 'live_only']) {

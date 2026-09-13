@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useContext, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
   ArrowClockwise,
@@ -86,12 +86,18 @@ export function LoadingState({ label = '正在加载数据' }) {
   )
 }
 
+export const TenantPresentation = createContext(false)
+
 export function ErrorState({ error, onRetry }) {
+  const tenant = useContext(TenantPresentation)
+  const message = tenant && /upstream|provider|supplier|tikhub|justone|night-all|上游|供应|采购/i.test(error?.message || '')
+    ? '当前服务未能完成请求。请保留请求编号，查询请求状态或联系管理员。'
+    : error?.message || '数据请求失败'
   return (
     <section className="mih-state mih-state--error" role="alert">
       <WarningCircle size={30} weight="duotone" aria-hidden="true" />
       <div>
-        <strong>{error?.message || '数据请求失败'}</strong>
+        <strong>{message}</strong>
         <p>
           {error?.code ? `错误码：${error.code}` : '请检查服务状态后重试'}
           {error?.requestId ? ` · Request ID：${error.requestId}` : ''}

@@ -12957,3 +12957,14 @@ button.mih-catalog-status {
 .mih-source-connection-list .mih-table td:nth-child(4), .mih-source-connection-list .mih-table td:nth-child(5) { max-width: 290px; white-space: normal; overflow-wrap: anywhere; }
 .mih-source-connection-list .mih-table-wrap { overflow-x: auto; }
 @media(max-width: 700px) { .mih-source-connection-filters { grid-template-columns: minmax(0,1fr); } }
+
+.mih-xhs-view-tabs { grid-column: 1 / -1; }
+.mih-xhs-list-view .mih-xhs-phone-navigation { display: block; min-width: 0; }
+.mih-xhs-list-view .mih-commerce-phone { width: 100%; border: 1px solid var(--qp-line); border-radius: 12px; }
+.mih-xhs-list-view .mih-commerce-phone-feed { height: auto; max-height: 850px; }
+.mih-xhs-list-view .mih-commerce-phone-actions { display: none; }
+.mih-xhs-list-title { display: flex; align-items: center; gap: 12px; text-align: left; background: none; border: 0; color: var(--qp-text-1); cursor: pointer; }
+.mih-xhs-list-title > span { width: 64px; height: 72px; overflow: hidden; flex-shrink: 0; border-radius: 6px; }
+.mih-xhs-list-title img { width: 100%; height: 100%; object-fit: cover; }
+.mih-xhs-list-title strong { max-width: 360px; white-space: normal; }
+.mih-xhs-list-pages { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 16px 0; }

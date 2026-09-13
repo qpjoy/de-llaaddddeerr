@@ -41,7 +41,7 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
     <p>{item.bodyCompleteness === 'provider_preview' ? '列表预览可能不含完整正文和标签。' : '展示当前 Hub 已存版本，完整性以采集结果为准。'} 获取完整详情优先读缓存，必要时采集，可能计费。</p>
     <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim()} onClick={() => void resolve()}>{busy ? '正在读取详情…' : error ? '重试同一详情请求' : '获取完整正文与标签'}</button>
     <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || Boolean(error)} onClick={() => void resolve('live_only')}>重新采集完整笔记（可能计费）</button></div>
-    <p>重新采集会请求上游获取最新正文、标签和全部图片地址；图片重试只重新加载已有图片。</p>
+    <p>重新查询会获取最新正文、标签和全部图片地址；图片重试只重新加载已有图片。</p>
     <div className="mih-xhs-detail-actions"><label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
     <button className="qp-button qp-button--outline" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button></div>
     <p>关闭后再次打开会保留本页会话中的详情与请求状态；刷新页面后清空。</p>
@@ -60,6 +60,8 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     return details.current.notes.get(id)
   }
   const isAdmin = session?.kind === 'admin-token'
+  const [view, setView] = useState('list')
+  const [listPage, setListPage] = useState(1)
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('search_notes')
   const operation = kind === 'search_notes' ? 'social.posts.search' : 'social.users.posts'
@@ -118,6 +120,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   useEffect(() => { setRows([]); setSelected(null); void load() }, [apiKey])
 
   const present = () => {
+    setListPage(1)
     const items = overflow.current.splice(0, Number(pageSize))
     setRows(previous => mergeNotes(items, previous))
     if (viewport.current) viewport.current.scrollTop = 0
@@ -146,12 +149,13 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     finally { liveBusy.current = false; setAcquiring(false) }
   }
   const pull = () => {
-    if (!armed || acquireError || Date.now() - lastPull.current < 1500) return
+    if (view !== 'mobile' || !armed || acquireError || Date.now() - lastPull.current < 1500) return
     lastPull.current = Date.now(); void acquire()
   }
   const more = () => { if (cursor && !loading && !error) void load(cursor) }
 
-  return <section className="mih-commerce-manager mih-xhs-browser">
+  return <section className={`mih-commerce-manager mih-xhs-browser ${view === 'list' ? 'mih-xhs-list-view' : ''}`}>
+    <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'list'} onClick={() => setView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => setView('mobile')}>Mobile 视图</button></nav>
     <aside className="qp-panel mih-commerce-filters">
       <h2>笔记列表</h2>
       <p>{isAdmin ? '当前管理会话读取 Hub 已存笔记。上划加载历史，点击展开正文和标签。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>
@@ -159,16 +163,16 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
         <button className="qp-button qp-button--outline" disabled={loading || acquiring} onClick={() => void load()}>刷新 Hub 历史</button></> : null}
       <DropdownField label="每批展示数量" value={pageSize} onChange={setPageSize} options={['10', '20', '50'].map(value => ({ value, label: `${value} 篇` }))} />
       <label><input type="checkbox" checked={images} onChange={event => setImages(event.target.checked)} /> 加载原始图片</label><small>默认显示已有图片；只读取图片链接，不重新调用笔记采集接口。图片服务费用未知，可关闭显示。</small>
-      <hr /><h3>采集笔记</h3>
-      <DropdownField label="采集来源" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
-      <Field label={kind === 'search_notes' ? '采集关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
-      <p>每页查询计为一次调用，最多查询 15 页。</p>
+      <hr /><h3>查询笔记</h3>
+      <DropdownField label="查询方式" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
+      <Field label={kind === 'search_notes' ? '查询关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
+      <p>每页查询计为一次调用，费用以当前套餐为准；最多查询 15 页。</p>
       <DemoAccessNotice operation={operation} compatibility />
       <label><input type="checkbox" checked={armed} disabled={accessIssues.length > 0 || acquiring || !apiKey.trim() || !selector.trim()} onChange={event => setArmed(event.target.checked)} /> 允许下拉采集下一页（可能计费）</label>
-      <button className="qp-button qp-button--primary" disabled={accessIssues.length > 0 || acquiring || loading || !apiKey.trim() || !selector.trim() || (next === null && !overflow.current.length)} onClick={() => void acquire()}>{acquiring ? '正在获取…' : acquireError ? '重试同一请求' : next === undefined ? '采集第一页' : '获取下一批笔记'}</button>
-      {next === null ? <p>本次上游列表已结束，或已达 15 页上限。</p> : null}
+      <button className="qp-button qp-button--primary" disabled={accessIssues.length > 0 || acquiring || loading || !apiKey.trim() || !selector.trim() || (next === null && !overflow.current.length)} onClick={() => void acquire()}>{acquiring ? '正在获取…' : acquireError ? '重试同一请求' : next === undefined ? '查询第一页' : '获取下一批笔记'}</button>
+      {next === null ? <p>本次查询列表已结束，或已达 15 页上限。</p> : null}
       {acquireError ? <ErrorState error={acquireError} /> : null}
-      {evidence ? <p>交付：{evidence.sourceMode || '未知'}<br />请求：{evidence.requestId}<br />采集后异步进入 Hub 历史；未入库前不代表数据丢失。</p> : null}
+      {evidence ? <p>交付：{evidence.sourceMode || '未知'}<br />请求：{evidence.requestId}<br />查询结果已返回，历史记录稍后更新。</p> : null}
     </aside>
     <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation"><div className="mih-commerce-phone">
       <header><span>MX · 小红书笔记</span><strong>笔记画卷</strong><small>{rows.length} 篇已加载</small></header>
@@ -179,15 +183,25 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
         onTouchStart={event => { rulerNavigation.current = false; touch.current = viewport.current.scrollTop <= 0 ? event.touches[0].clientY : null }}
         onTouchEnd={event => { if (touch.current != null && event.changedTouches[0].clientY - touch.current >= 80) pull(); touch.current = null }} onTouchCancel={() => { touch.current = null }}>
         {error ? <ErrorState error={error} /> : null}
+        {view === 'list' ? <>
+          <div className="qp-table-wrap"><table className="qp-table mih-table"><thead><tr><th>笔记</th><th>作者</th><th>标签</th><th>操作</th></tr></thead><tbody>
+            {rows.slice((Math.min(listPage, Math.max(1, Math.ceil(rows.length / Number(pageSize)))) - 1) * Number(pageSize), Math.min(listPage, Math.max(1, Math.ceil(rows.length / Number(pageSize)))) * Number(pageSize)).map(item => <tr key={item.externalId || item.id}>
+              <td><button className="mih-xhs-list-title" onClick={() => setSelected(item)}><span><BusinessImage url={item.media?.[0]?.url} enabled={images} alt={item.title || '笔记封面'} /></span><strong>{item.title || '无标题笔记'}</strong></button></td>
+              <td>{item.author?.name || '作者未知'}</td><td>{item.tags?.join('、') || '—'}</td><td><button className="qp-button qp-button--outline qp-button--sm" onClick={() => setSelected(item)}>查看详情</button></td>
+            </tr>)}
+          </tbody></table></div>
+          <div className="mih-xhs-list-pages"><button className="qp-button qp-button--outline" disabled={listPage <= 1} onClick={() => setListPage(page => page - 1)}>上一页</button><span>{Math.min(listPage, Math.max(1, Math.ceil(rows.length / Number(pageSize))))} / {Math.max(1, Math.ceil(rows.length / Number(pageSize)))} · {rows.length} 篇已加载</span><button className="qp-button qp-button--outline" disabled={listPage >= Math.ceil(rows.length / Number(pageSize))} onClick={() => setListPage(page => page + 1)}>下一页</button></div>
+        </> : <>
         <div className="mih-commerce-grid">{rows.map((item, index) => <article data-feed-index={index} className="mih-commerce-card" key={item.externalId || item.id}><button className="mih-commerce-card-open" onClick={() => setSelected(item)}>
           <div className="mih-commerce-card-image"><BusinessImage url={item.media?.[0]?.url} enabled={images} alt={item.title || '笔记封面'} /></div>
           <strong>{item.title || '无标题笔记'}</strong>{item.media?.length ? <small>{item.media.length} 张图片 · 点击查看全部</small> : null}<small>{item.author?.name || '作者未知'}</small><span>{item.tags?.map(tag => `#${tag}`).join(' ') || '点击查看正文与标签'}</span>
         </button></article>)}</div>
+        </>}
         {loading ? <p role="status">正在读取 Hub 历史…</p> : null}
-        {!loading && !error && !rows.length ? <p className="mih-commerce-message">暂无笔记。可采集关键词列表，或在下方输入笔记链接。</p> : null}
-        {cursor ? <button className="qp-button qp-button--outline" disabled={loading} onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕；上游续页请使用采集操作。</p> : null}
+        {!loading && !error && !rows.length ? <p className="mih-commerce-message">暂无笔记。可查询关键词列表，或在下方输入笔记链接。</p> : null}
+        {cursor ? <button className="qp-button qp-button--outline" disabled={loading} onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕；获取新数据请使用查询操作。</p> : null}
       </div>
-    </div><FeedRuler viewport={viewport} count={rows.length} pageSize={Number(pageSize)} onNavigate={() => { rulerNavigation.current = true; wheel.current = 0; touch.current = null; lastPull.current = Date.now() }} /></div>
+    </div>{view === 'mobile' ? <FeedRuler viewport={viewport} count={rows.length} pageSize={Number(pageSize)} onNavigate={() => { rulerNavigation.current = true; wheel.current = 0; touch.current = null; lastPull.current = Date.now() }} /> : null}</div>
     {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} saved={detailState(selected.id)} onClose={() => setSelected(null)} /> : null}
   </section>
 }

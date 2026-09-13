@@ -39,25 +39,25 @@ const MARKETPLACES = [
 ]
 
 const MODE_OPTIONS = [
-  { value: 'safe_demo', label: '安全演示 · 0 Hub / 0 上游', description: '浏览器本地策略沙盘；只使用清晰标注的页面示例。' },
+  { value: 'safe_demo', label: '安全演示 · 不调用接口', description: '浏览器本地策略沙盘；只使用清晰标注的页面示例。' },
   { value: 'hub_live', label: 'Hub 开放 API · 真实调用', description: '同一把开放能力 API Key，无需另签产品 Key；由交付策略决定只读存量或允许新采集。' },
 ]
 
 const DELIVERY_MODE_OPTIONS = [
-  { value: 'cache_only', label: '只读 Hub 存量 · 0 上游调用', description: '只返回精确缓存或存档；没有存量时明确提示。' },
+  { value: 'cache_only', label: '只读 Hub 存量 · 只读查询', description: '只返回精确缓存或存档；没有存量时明确提示。' },
   { value: 'cache_first', label: '智能交付 · 缓存优先', description: '优先新鲜缓存，未命中时可能发起一次外部采集。' },
-  { value: 'refresh', label: '重新采集 · 可能产生上游成本', description: '绕过新鲜缓存，明确尝试从外部平台获取最新数据。' },
+  { value: 'refresh', label: '重新采集 · 按套餐计费', description: '绕过新鲜缓存，明确尝试从Hub 数据服务获取最新数据。' },
 ]
 const DELIVERY_MODES = new Set(DELIVERY_MODE_OPTIONS.map(({ value }) => value))
 
 const DEMO_DELIVERY_MODE_OPTIONS = [
   { value: 'cache_only', label: '模拟 cache_only · 只读存量', description: '只在浏览器沙盘中演练精确存量命中或无存量停止。' },
-  { value: 'cache_first', label: '模拟 cache_first · 缓存优先', description: '模拟无新鲜存量后使用页面 fixture 返回结果；不会访问 Hub 或上游。' },
-  { value: 'refresh', label: '模拟 refresh · 重新采集', description: '模拟绕过缓存并使用页面 fixture 返回结果；不会访问 Hub 或上游。' },
+  { value: 'cache_first', label: '模拟 cache_first · 缓存优先', description: '模拟无新鲜存量后使用页面 fixture 返回结果；不会访问 Hub 或数据服务。' },
+  { value: 'refresh', label: '模拟 refresh · 重新采集', description: '模拟绕过缓存并使用页面 fixture 返回结果；不会访问 Hub 或数据服务。' },
 ]
 
 const DEMO_CACHE_ONLY_SCENE_OPTIONS = [
-  { value: 'no_inventory', label: '无精确存量 · 演练 404', description: '模拟 stored_snapshot_not_found，并在上游调用前停止。' },
+  { value: 'no_inventory', label: '无精确存量 · 演练 404', description: '模拟 stored_snapshot_not_found，并在数据服务调用前停止。' },
   { value: 'stored_hit', label: '存在演示存档 · 演练命中', description: '使用浏览器内页面 fixture 模拟精确存档命中。' },
 ]
 const DEMO_CACHE_ONLY_SCENES = new Set(DEMO_CACHE_ONLY_SCENE_OPTIONS.map(({ value }) => value))
@@ -118,9 +118,9 @@ const SAFE_DEMO_SORTS = {
 
 const SOURCE_MODE_LABELS = {
   stored_inventory: { label: '已存历史记录', tone: 'teal', hubUsage: '只读 usage', providerCall: '0', note: '本调用身份的已提交商品记录' },
-  live: { label: '实时上游', tone: 'live', providerCall: '是', hubUsage: '是', note: '当前记录 Hub usage 与内部采购成本证据；客户计价待 Hub price book' },
+  live: { label: '实时数据服务', tone: 'live', providerCall: '是', hubUsage: '是', note: '费用以当前合同及账单为准' },
   fresh_cache: { label: '新鲜缓存', tone: 'cache', providerCall: '否', hubUsage: '是', note: '同一规范请求复用新鲜快照' },
-  stored_fallback: { label: '存储兜底', tone: 'fallback', providerCall: '可能', hubUsage: '是', note: '可能在派发前兜底，也可能在上游失败后兜底' },
+  stored_fallback: { label: '存储兜底', tone: 'fallback', providerCall: '可能', hubUsage: '是', note: '可能在派发前兜底，也可能在数据服务失败后兜底' },
   idempotent_replay: { label: '幂等重放', tone: 'replay', providerCall: '否', hubUsage: '否', note: '相同 Idempotency-Key + 相同请求返回原结果' },
   safe_demo: { label: '安全演示', tone: 'demo', providerCall: '否', hubUsage: '否', note: '浏览器内演示数据，不访问 Hub Data API' },
 }
@@ -191,35 +191,35 @@ function ecommerceErrorPresentation(error) {
   if (code === 'external_platform_response_unusable') {
     if (error?.status === 409) {
       return {
-        title: 'JustOne 响应格式隔离仍在生效',
-        description: '这次 409 在访问 JustOne 前已被 Hub 拦截，没有新增 JustOne 调用或上游采购计费；最初触发 succeeded_unusable 隔离的调用仍可能已经计费。请查看上游运行状态并处理响应归档，不要连续重试。',
+        title: 'Hub 响应格式隔离仍在生效',
+        description: '这次请求被保护策略拒绝，未发起新的数据更新；最初触发 succeeded_unusable 隔离的调用仍可能已经计费。请查看数据服务运行状态并处理响应归档，不要连续重试。',
         operatorAction: true,
       }
     }
     return {
-      title: '外部数据已返回，但暂时无法整理成 Hub 商品',
-      description: 'Hub 没有展示不符合稳定合同的数据。该调用可能已产生内部采购成本；请保留原请求标识，不要换 Idempotency-Key 或连续重试，并交由管理员核查响应归档。',
+      title: '数据已返回，但暂时无法整理成 Hub 商品',
+      description: 'Hub 没有展示不符合稳定合同的数据。本次请求结果需要核实；请保留原请求标识，不要换 Idempotency-Key 或连续重试，并交由管理员核查响应归档。',
       operatorAction: true,
     }
   }
   if (code === 'stored_snapshot_not_found') {
     return {
       title: 'Hub 里还没有这组条件的存量商品（不是路由 404）',
-      description: 'Public API 已正常处理请求；本次只读检查没有命中精确存量，也没有调用 JustOne 或产生新的上游成本。可以换条件、查看安全演示，或明确切换到“重新采集”。',
+      description: 'Public API 已正常处理请求；本次只读检查没有命中精确存量，没有发起实时数据更新，费用以账单为准。可以换条件、查看安全演示，或明确切换到“重新采集”。',
       operatorAction: false,
     }
   }
   if (code === 'request_outcome_unknown' && error?.status === 409) {
     return {
       title: '同类实时请求仍在未决隔离期',
-      description: '本次尝试在上游派发前停止，没有新增外部采集；早先的请求结果仍可能未知。页面不会循环重试；选择“重新采集”并再次点击后，会先自动只读核对，只有 Hub 明确返回 unknown 与旧 Request ID 时才申请一次受控新尝试。',
+      description: '本次尝试在数据服务派发前停止，没有新增外部采集；早先的请求结果仍可能未知。页面不会循环重试；选择“重新采集”并再次点击后，会先自动只读核对，只有 Hub 明确返回 unknown 与旧 Request ID 时才申请一次受控新尝试。',
       operatorAction: true,
     }
   }
   if (['external_platform_outcome_unknown', 'request_outcome_unknown', 'upstream_outcome_unknown'].includes(code)) {
     return {
       title: '这次实时请求的结果暂时无法确认',
-      description: '请求可能已经发往外部平台。原请求条件与 Idempotency-Key 已写入本地账本；选择“重新采集”并点击后，页面会先自动做零上游查询。reserved 或核对失败会停止；只有 Hub 明确返回 unknown 与旧 Request ID 时才申请一次受控新尝试。',
+      description: '请求可能已经发往Hub 数据服务。原请求条件与 Idempotency-Key 已写入本地账本；选择“重新采集”并点击后，页面会先自动做零数据服务查询。reserved 或核对失败会停止；只有 Hub 明确返回 unknown 与旧 Request ID 时才申请一次受控新尝试。',
       operatorAction: true,
     }
   }
@@ -233,14 +233,14 @@ function ecommerceErrorPresentation(error) {
   if (code === 'resolved_replay_not_verified') {
     return {
       title: '当前 API Key 无法核验原请求归属',
-      description: '页面只执行了只读状态查询；未能证明本地账本对应当前调用身份下已提交的 ecommerce 请求，因此没有发送重放 POST，也没有访问 JustOne。本地账本会继续保留。',
+      description: '页面只执行了只读状态查询；未能证明本地账本对应当前调用身份下已提交的 ecommerce 请求，因此没有发送重放 POST，也没有发起新的数据查询。本地账本会继续保留。',
       operatorAction: false,
     }
   }
   if (code === 'external_platform_not_configured') {
     return {
       title: '实时数据源尚未配置完成',
-      description: '当前也没有可交付的精确缓存或存档。请管理员前往“数据清洗中心 → 外部数据平台”检查凭据和发布门禁；这不是客户端 API Key 失效。',
+      description: '当前也没有可交付的精确缓存或存档。请管理员前往“数据清洗中心 → 数据平台”检查凭据和发布门禁；这不是客户端 API Key 失效。',
       operatorAction: true,
     }
   }
@@ -253,15 +253,15 @@ function ecommerceErrorPresentation(error) {
   }
   if (['external_platform_capacity_exceeded', 'external_platform_capacity_unavailable'].includes(code)) {
     return {
-      title: '外部数据容量暂不可用',
-      description: '请稍后重试，或请管理员检查外部平台额度与可用性；无需更换 Hub API Key。',
+      title: '数据容量暂不可用',
+      description: '请稍后重试，或请管理员检查Hub 数据服务额度与可用性；无需更换 Hub API Key。',
       operatorAction: true,
     }
   }
   if (code === 'external_platform_busy') {
     return {
       title: '实时请求较多，请稍后再试',
-      description: 'Hub 已在派发前保护上游，本次没有新增外部采集。请退避后按原条件重试。',
+      description: 'Hub 已在派发前保护数据服务，本次没有新增外部采集。请退避后按原条件重试。',
       operatorAction: true,
     }
   }
@@ -305,7 +305,7 @@ function ecommerceErrorPresentation(error) {
   }
   if (code === 'external_platform_rejected') {
     return {
-      title: '外部数据服务拒绝了本次查询',
+      title: '数据服务拒绝了本次查询',
       description: '请检查平台、关键词、排序和价格条件后再提交。若条件有效，请保留页面展示的错误证据并联系管理员，不要连续自动重试。',
       operatorAction: true,
     }
@@ -313,7 +313,7 @@ function ecommerceErrorPresentation(error) {
   if (code === 'invalid_api_key') {
     return {
       title: '开放能力 API Key 无效或已失效',
-      description: error?.message || '请使用当前 Hub 实例签发的完整 Live Key；不要填写列表掩码、Admin Token 或外部平台密钥。',
+      description: error?.message || '请使用当前 Hub 实例签发的完整 Live Key；不要填写列表掩码、Admin Token 或其他凭据。',
       operatorAction: false,
     }
   }
@@ -437,11 +437,11 @@ function safeDemoScenario({ demoDeliveryMode, demoCacheOnlyScene, candidates }) 
         ...commonEvidence,
         simulatedErrorCode: 'stored_snapshot_not_found',
         demoTitle: '沙盘：无精确存量，已安全停止',
-        demoDescription: '模拟 404 stored_snapshot_not_found；页面没有查询当前 Hub，也没有访问 JustOne。',
+        demoDescription: '模拟 404 stored_snapshot_not_found；页面没有查询当前 Hub，也没有访问 Hub。',
         demoTrace: [
           '模拟检查精确存量（不查询当前 Hub）',
           '模拟结果：没有匹配快照',
-          '按 cache_only 停止 · 实际 0 Hub / 0 上游',
+          '按 cache_only 停止 · 实际 不调用接口',
         ],
       },
     }
@@ -459,7 +459,7 @@ function safeDemoScenario({ demoDeliveryMode, demoCacheOnlyScene, candidates }) 
         demoTrace: [
           '载入浏览器内演示存档（不查询当前 Hub）',
           '模拟精确存档命中，按 cache_only 返回',
-          '实际 0 Hub / 0 上游',
+          '实际 不调用接口',
         ],
       },
     }
@@ -476,8 +476,8 @@ function safeDemoScenario({ demoDeliveryMode, demoCacheOnlyScene, candidates }) 
         demoDescription: `${candidates.length} 件页面示例；沙盘模拟绕过缓存，但没有发出真实请求。`,
         demoTrace: [
           '模拟 refresh 绕过新鲜缓存',
-          '使用页面 fixture 模拟一次已授权上游响应',
-          '实际 0 Hub / 0 上游',
+          '使用页面 fixture 模拟一次已授权数据服务响应',
+          '实际 不调用接口',
         ],
       },
     }
@@ -490,11 +490,11 @@ function safeDemoScenario({ demoDeliveryMode, demoCacheOnlyScene, candidates }) 
       ...commonEvidence,
       simulatedSourceMode: 'live',
       demoTitle: '沙盘：模拟缓存未命中后交付',
-      demoDescription: `${candidates.length} 件页面示例；沙盘用 fixture 代替可能的上游响应。`,
+      demoDescription: `${candidates.length} 件页面示例；沙盘用 fixture 代替可能的数据服务响应。`,
       demoTrace: [
         '模拟 cache_first 检查新鲜存量（不查询当前 Hub）',
-        '模拟结果：没有新鲜快照，可进入上游分支',
-        '使用页面 fixture 返回 · 实际 0 Hub / 0 上游',
+        '模拟结果：没有新鲜快照，可进入数据服务分支',
+        '使用页面 fixture 返回 · 实际 不调用接口',
       ],
     },
   }
@@ -502,15 +502,15 @@ function safeDemoScenario({ demoDeliveryMode, demoCacheOnlyScene, candidates }) 
 
 function safeDemoIdleMessage(demoDeliveryMode, demoCacheOnlyScene) {
   if (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory') {
-    return '将演练无精确存量时的 cache_only 404；不访问 Hub 或上游。'
+    return '将演练无精确存量时的 cache_only 404；不访问 Hub 或数据服务。'
   }
   if (demoDeliveryMode === 'cache_only') {
     return '将用浏览器演示存档模拟 cache_only 命中；不访问当前 Hub。'
   }
   if (demoDeliveryMode === 'refresh') {
-    return '将用页面 fixture 模拟 refresh；不会访问 Hub 或上游。'
+    return '将用页面 fixture 模拟 refresh；不会访问 Hub 或数据服务。'
   }
-  return '将用页面 fixture 模拟 cache_first 的缓存未命中分支；不会访问 Hub 或上游。'
+  return '将用页面 fixture 模拟 cache_first 的缓存未命中分支；不会访问 Hub 或数据服务。'
 }
 
 async function apiKeyFingerprint(apiKey) {
@@ -771,7 +771,7 @@ function ResultEvidence({ product, evidence }) {
       <div className="mih-treasure-empty-evidence">
         <Cube size={30} weight="duotone" aria-hidden="true" />
         <strong>{simulatedMiss ? '沙盘无存量，没有商品返回' : '选择商品查看证据'}</strong>
-        <p>{simulatedMiss ? '这是浏览器本地的 cache_only 404 演练，不代表刚刚查询过当前 Hub。' : '这里展示 Hub 归一化属性，不暴露上游凭据或原始私有字段。'}</p>
+        <p>{simulatedMiss ? '这是浏览器本地的 cache_only 404 演练，不代表刚刚查询过当前 Hub。' : '这里展示 Hub 归一化属性，不暴露内部配置。'}</p>
       </div>
     )
   }
@@ -813,11 +813,11 @@ function CallEvidence({ evidence }) {
         {safeDemo ? <div><dt>沙盘策略</dt><dd><code>{evidence?.demoDeliveryMode || '等待选择'}</code></dd></div> : null}
         {safeDemo ? <div><dt>模拟结果</dt><dd>{simulatedResult}</dd></div> : null}
         <div><dt>{safeDemo ? '真实 Hub usage' : 'Hub usage'}</dt><dd>{mode.hubUsage}</dd></div>
-        <div><dt>{safeDemo ? '实际上游调用' : '上游调用'}</dt><dd>{mode.providerCall}</dd></div>
+
         <div><dt>{safeDemo ? '演示运行 ID' : 'Request ID'}</dt><dd>{safeDemo ? evidence?.demoRunId || '等待演练' : evidence?.requestId || '等待请求'}</dd></div>
         <div><dt>数据年龄</dt><dd>{safeDemo ? '不适用（页面示例）' : Number.isFinite(Number(evidence?.ageSeconds)) ? `${evidence.ageSeconds} 秒` : '—'}</dd></div>
       </dl>
-      <p>{mode.note}</p>
+      <p>费用以当前套餐与账单为准；示例演示不产生接口消费。</p>
       {safeDemo && Array.isArray(evidence?.demoTrace) ? (
         <ol className="mih-treasure-demo-trace" aria-label="本地模拟步骤">
           {evidence.demoTrace.map((step) => <li key={step}>{step}</li>)}
@@ -829,9 +829,6 @@ function CallEvidence({ evidence }) {
 
 function TreasureProductError({ error, mode, onUseSafeDemo }) {
   const presentation = ecommerceErrorPresentation(error)
-  const serverDetails = error?.details == null
-    ? null
-    : typeof error.details === 'string' ? error.details : JSON.stringify(error.details)
   return (
     <section className="mih-treasure-product-error" role="alert">
       <WarningCircle size={30} weight="duotone" aria-hidden="true" />
@@ -842,11 +839,10 @@ function TreasureProductError({ error, mode, onUseSafeDemo }) {
           {error?.code ? <>错误码 <code>{error.code}</code></> : '本次操作未完成'}
           {error?.requestId ? <> · Request ID <code>{error.requestId}</code></> : null}
         </small>
-        {serverDetails ? <small>服务端 details <code>{serverDetails}</code></small> : null}
       </div>
       <div className="mih-treasure-product-error__actions">
         {mode !== 'safe_demo' ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={onUseSafeDemo}>转到零费用演示</button> : null}
-        {presentation.operatorAction ? <a className="qp-button qp-button--ghost qp-button--sm" href="#/external-platforms?provider=justone&range=24h">查看上游运行状态<ArrowRight size={14} aria-hidden="true" /></a> : null}
+
       </div>
     </section>
   )
@@ -1132,10 +1128,10 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
       setError({
         ...statusError,
         message: deploymentMismatch
-          ? '当前 Public API 尚未提供按幂等键查询路由。请先完成与页面同版本的部署；本地账本会保留，页面不会 POST 或访问 JustOne。'
+          ? '当前 Public API 尚未提供按幂等键查询路由。请先完成与页面同版本的部署；本地账本会保留，页面不会提交新的数据查询。'
           : [403, 404].includes(statusError?.status)
           ? '当前调用身份无法核对这条旧幂等记录。本地审计账本会继续保留，本次不会 POST 或创建新的外部采集。'
-          : `${statusError?.message || '原请求状态查询失败'}。本地审计账本仍保留；本次 GET 没有创建 Hub usage 或调用外部平台。`,
+          : `${statusError?.message || '原请求状态查询失败'}。本地审计账本仍保留；本次 GET 没有创建 Hub usage 或调用Hub 数据服务。`,
       })
       return { action: 'stop' }
     }
@@ -1264,7 +1260,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
     const apiKey = String(apiKeyOverride || hubApiKey).trim()
     if (!apiKey) {
       keyInputRef.current?.focus()
-      setError({ message: '实时模式使用“API Keys”已签发的开放能力 API Key；无需电商专用 Key，也不接受 JustOne 上游密钥。' })
+      setError({ message: '实时模式使用“API Keys”已签发的开放能力 API Key；无需电商专用 Key，也不接受 Hub 数据服务密钥。' })
       return
     }
     const providerMayRun = deliveryMode !== 'cache_only'
@@ -1281,7 +1277,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
     let previous = lastLiveRequestRef.current
     let retryOfRequestId = null
     if (replay && previous?.outcome !== 'resolved') {
-      setError({ message: '原请求尚未确认 committed。页面只会先做零上游状态核对；reserved 或 unknown 状态不能从浏览器 POST 重放。' })
+      setError({ message: '原请求尚未确认 committed。页面只会先做零数据服务状态核对；reserved 或 unknown 状态不能从浏览器 POST 重放。' })
       return
     }
     if (replay) {
@@ -1360,7 +1356,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
         })
         setError({
           ...requestError,
-          message: `${requestError?.message || '实时请求结果不确定'}。该调用可能已经发起外部采集并产生内部采购成本；原请求已保留，仍可另外使用“只读 Hub 存量”。`,
+          message: `${requestError?.message || '实时请求结果不确定'}。本次请求结果尚未确定；原请求已保留，仍可另外使用“只读 Hub 存量”。`,
         })
       } else {
         // Authentication or policy changes do not prove that an earlier
@@ -1402,7 +1398,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
           })
           setError({
             ...requestError,
-            message: '开放能力 API Key 认证失败。请确认页面和 Key 来自同一 Hub 实例；列表掩码、Admin token 与 JustOne key 均不可调用。',
+            message: '开放能力 API Key 认证失败。请确认页面和 Key 来自同一 Hub 实例；列表掩码、Admin token 与 Hub key 均不可调用。',
           })
         } else if (requestError?.code === 'platform_not_granted') {
           setKeyCheck({
@@ -1483,7 +1479,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
       return null
     }
     if (!/^mih_live_/u.test(apiKey) && !apiKey.startsWith('mih_demo_')) {
-      setKeyCheck({ status: 'invalid', fingerprint: null, message: 'Hub Public API secret 应以 mih_live_ 开头；不要填写列表掩码、Admin token 或 JustOne key' })
+      setKeyCheck({ status: 'invalid', fingerprint: null, message: 'Hub Public API secret 应以 mih_live_ 开头；不要填写列表掩码、Admin token 或 Hub key' })
       return null
     }
     if (keyVerificationInFlightRef.current) return null
@@ -1509,7 +1505,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
         setKeyCheck({
           status: 'degraded',
           fingerprint,
-          message: 'Key 与 ecommerce 授权有效；当前上游未就绪，仍可尝试缓存、存档或精确重放',
+          message: 'Key 与 ecommerce 授权有效；当前数据服务未就绪，仍可尝试缓存、存档或精确重放',
         })
       } else {
         setKeyCheck({
@@ -1523,7 +1519,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
     } catch (checkError) {
       verifiedKeyFingerprintRef.current = null
       const message = checkError?.code === 'invalid_api_key'
-        ? '不是当前 Public API 实例可用的完整 secret：不要粘贴列表中的掩码、Admin token 或 JustOne key；内存模式重启后需重新签发'
+        ? '不是当前 Public API 实例可用的完整 secret：不要粘贴列表中的掩码、Admin token 或 Hub key；内存模式重启后需重新签发'
         : checkError?.message || 'Key 验证失败'
       setKeyCheck({ status: 'invalid', fingerprint: null, message })
       return null
@@ -1566,22 +1562,22 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
               {demoDeliveryMode === 'cache_only' ? <DropdownField label="cache_only 演练场景" value={demoCacheOnlyScene} options={DEMO_CACHE_ONLY_SCENE_OPTIONS} disabled={phase === 'searching'} onChange={changeDemoCacheOnlyScene} /> : null}
               <div className="mih-treasure-demo-boundary" role="status">
                 <ShieldCheck size={17} weight="duotone" aria-hidden="true" />
-                <span><strong>浏览器本地策略沙盘 · 实际 0 Hub / 0 上游</strong><small>不读取当前 Hub 存量，不发 JustOne 请求，不创建 Hub usage。证据始终记录真实 <code>sourceMode=safe_demo</code>；缓存或实时结果只会标作“模拟”。</small></span>
+                <span><strong>浏览器本地策略沙盘 · 实际 不调用接口</strong><small>不读取当前 Hub 存量，不发 Hub 请求，不创建 Hub usage。证据始终记录真实 <code>sourceMode=safe_demo</code>；缓存或实时结果只会标作“模拟”。</small></span>
               </div>
             </>
           ) : <DropdownField label="交付策略" value={deliveryMode} options={DELIVERY_MODE_OPTIONS} disabled={phase === 'searching' || storedOnly} onChange={changeDeliveryMode} />}
           {!compact ? <DropdownField label="数据范围" value={storedOnly ? 'stored' : 'acquire'} options={[{ value: 'acquire', label: '按平台采集' }, { value: 'stored', label: '浏览已存数据' }]} disabled={semanticsLocked || marketplace === 'all'} onChange={value => { setBrowse(value); if (value === 'stored') setMode('hub_live') }} /> : null}
           <DropdownField label="平台" value={marketplace} options={compact ? MARKETPLACES : [...MARKETPLACES, { value: 'all', label: '全部平台 · 仅已存数据' }]} disabled={semanticsLocked || compact} onChange={changeMarketplace} />
-          <DropdownField label="上游排序（仅采集）" value={sort} options={sortOptions} disabled={semanticsLocked || storedOnly || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={changeSort} />
+          <DropdownField label="数据服务排序（仅采集）" value={sort} options={sortOptions} disabled={semanticsLocked || storedOnly || !(mode === 'safe_demo' ? SAFE_DEMO_SORTS : SORTS)[marketplace]} onChange={changeSort} />
           {!compact ? <DropdownField label="百宝箱陈列数量" value={displayPageSize} options={DISPLAY_PAGE_SIZE_OPTIONS} disabled={semanticsLocked} onChange={(value) => { setDisplayPageSize(value); setDisplayPage(0); setSelected(products[0] || null) }} /> : null}
-          <Field label="搜索词" hint={storedOnly ? "按商品标题筛选本调用身份的已存记录；留空显示全部。" : "上游搜索词；刷新从指定页开始，下滑加载后续数据页。"}>
+          <Field label="搜索词" hint={storedOnly ? "按商品标题筛选本调用身份的已存记录；留空显示全部。" : "数据服务搜索词；刷新从指定页开始，下滑加载后续数据页。"}>
             <span className="mih-treasure-query"><MagnifyingGlass size={17} aria-hidden="true" /><input className="qp-input" value={query} maxLength="200" disabled={semanticsLocked} onChange={(event) => changeQuery(event.target.value)} placeholder="例如：便携相机" /></span>
           </Field>
           {!storedOnly && mode === 'hub_live' ? <>
-            <Field label="起始数据页" hint={marketplace === 'xiaohongshu_ec' ? '小红书从第 1 页开始，再使用上游 continuation。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={marketplace === 'xiaohongshu_ec' ? '1' : upstreamPage} disabled={semanticsLocked || marketplace === 'xiaohongshu_ec'} onChange={event => { setUpstreamPage(event.target.value); if (compact) onFilterChange?.('page', event.target.value) }} /></Field>
+            <Field label="起始数据页" hint={marketplace === 'xiaohongshu_ec' ? '小红书从第 1 页开始，再使用数据服务 continuation。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={marketplace === 'xiaohongshu_ec' ? '1' : upstreamPage} disabled={semanticsLocked || marketplace === 'xiaohongshu_ec'} onChange={event => { setUpstreamPage(event.target.value); if (compact) onFilterChange?.('page', event.target.value) }} /></Field>
             {['taobao', 'tmall'].includes(marketplace) ? <div className="mih-commerce-price"><Field label="最低价"><input className="qp-input" type="number" min="0" value={minPrice} disabled={semanticsLocked} onChange={event => { setMinPrice(event.target.value); if (compact) onFilterChange?.('minPrice', event.target.value) }} /></Field><Field label="最高价"><input className="qp-input" type="number" min="0" value={maxPrice} disabled={semanticsLocked} onChange={event => { setMaxPrice(event.target.value); if (compact) onFilterChange?.('maxPrice', event.target.value) }} /></Field></div> : null}
           </> : null}
-          {storedOnly ? <p>仅查询当前调用身份已提交的商品记录，按入库请求时间倒序、同批按上游顺序展示。不会调用上游。</p> : null}
+          {storedOnly ? <p>仅查询当前调用身份已提交的商品记录，按入库请求时间倒序、同批按数据服务顺序展示。不会调用数据服务。</p> : null}
           {mode === 'hub_live' ? (
             <div className="mih-treasure-live-auth">
               <p>使用上方统一选择的演示 Key。</p>
@@ -1590,9 +1586,9 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
                 <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!hubApiKey.trim() || checkingKey || phase === 'searching'} onClick={verifyHubApiKey}>{checkingKey ? '验证中' : '零费用验证 Key'}</button>
                 <a href="#/api-keys">签发 / 轮换 API Key<ArrowRight size={13} aria-hidden="true" /></a>
               </div>
-              <p className="mih-treasure-public-origin"><Database size={15} weight="duotone" aria-hidden="true" />本页调用 Public API：<code>{publicApiOrigin()}</code><small>由部署项 <code>MX_INSIGHT_PUBLIC_URL</code> 下发；它不是 JustOne 地址。</small></p>
+              <p className="mih-treasure-public-origin"><Database size={15} weight="duotone" aria-hidden="true" />本页调用 Public API：<code>{publicApiOrigin()}</code><small>由部署项 <code>MX_INSIGHT_PUBLIC_URL</code> 下发；它不是 Hub 地址。</small></p>
               {deliveryMode === 'cache_only' ? (
-                <div className="mih-treasure-cache-guarantee"><ShieldCheck size={17} weight="duotone" aria-hidden="true" /><span><strong>只读保障：本次不会调用外部平台</strong><small>只查同一调用身份下的精确缓存或存档；命中会记录 Hub usage，未命中会明确提示，不会偷偷切到 JustOne。</small></span></div>
+                <div className="mih-treasure-cache-guarantee"><ShieldCheck size={17} weight="duotone" aria-hidden="true" /><span><strong>只读保障：本次仅查询已存数据</strong><small>只查同一调用身份下的精确缓存或存档；命中会记录 Hub usage，未命中会明确提示，不会自动更新数据。</small></span></div>
               ) : null}
             </div>
           ) : null}
@@ -1604,7 +1600,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
                 <small>{mode === 'safe_demo'
                   ? '原请求与 Idempotency-Key 会继续保留，但不影响本地安全演示。'
                   : recoveryStatus === 'checking'
-                    ? '正在自动用本地幂等账本做只读 GET 核对；无需输入 Request ID，也不会在核对阶段访问 JustOne。'
+                    ? '正在自动用本地幂等账本做只读 GET 核对；无需输入 Request ID，也不会在核对阶段发起数据更新。'
                     : recoveryStatus === 'reserved'
                       ? '服务端仍为 reserved，原请求可能正在执行；本次已停止，不会并发创建新的外部采集。稍后再次点击即可自动核对。'
                       : recoveryStatus === 'unknown'
@@ -1616,7 +1612,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
                           : deliveryMode === 'refresh'
                             ? '选择条件后点击主按钮即可：页面会先自动只读核对；明确 unknown 时保留旧审计，再由 Hub 受控开启一次新尝试。reserved 或核对失败仍会安全停止。'
                             : deliveryMode === 'cache_only'
-                              ? '可以直接读取 Hub 存量；只读请求不会覆盖这条未决审计，也不会访问 JustOne。'
+                              ? '可以直接读取 Hub 存量；只读请求不会覆盖这条未决审计，也不会发起数据更新。'
                               : 'cache_first 不会绕过未决请求；如需明确新采集，请改选“重新采集”后点击主按钮。'}</small>
               </span>
             </div>
@@ -1624,12 +1620,12 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
           {recoveryStatus === 'replaying' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原请求已确认 committed</strong><small>正在自动使用相同 body 与 Idempotency-Key 读取原结果；不会新增 Hub usage 或外部采集。</small></span></div> : null}
           {recoveryStatus === 'released' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>原预留已确认 released</strong><small>本地未决锁已解除；本次重新采集会使用新的 Idempotency-Key。</small></span></div> : null}
           {recoveryStatus === 'orphan_cleared' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><CheckCircle size={17} weight="duotone" aria-hidden="true" /><span><strong>孤儿未决账本已安全清理</strong><small>Hub 明确返回 request_not_found；这不是通用路由 404，本次重新采集可以继续。</small></span></div> : null}
-          {lastLiveRequest?.outcome === 'resolved' && lastLiveRequest.committedErrorCode === 'external_platform_response_unusable' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><Fingerprint size={17} weight="duotone" aria-hidden="true" /><span><strong>首次 committed-unusable 账本已保留</strong><small>该调用的响应无法归一化，可能已有上游采购成本；精确重放只读取已提交错误，不会再次访问 JustOne。{lastLiveRequest.requestId ? <> Request ID <code>{lastLiveRequest.requestId}</code></> : null}</small></span></div> : null}
+          {lastLiveRequest?.outcome === 'resolved' && lastLiveRequest.committedErrorCode === 'external_platform_response_unusable' ? <div className="mih-treasure-recovery-note mih-treasure-recovery-note--resolved" role="status"><Fingerprint size={17} weight="duotone" aria-hidden="true" /><span><strong>首次 committed-unusable 账本已保留</strong><small>该调用的响应无法归一化，请查询该请求的结算状态；精确重放只读取已提交错误，不会再次更新数据。{lastLiveRequest.requestId ? <> Request ID <code>{lastLiveRequest.requestId}</code></> : null}</small></span></div> : null}
           <button className="qp-button qp-button--primary mih-treasure-search" type="submit" disabled={phase === 'searching' || checkingKey || (compact && forcedMarketplace === 'all') || (!storedOnly && providerRequestBlockedByAmbiguity)}>
             {phase === 'searching' ? <><Sparkle className="mih-spin" size={17} aria-hidden="true" />正在处理</> : <><MagnifyingGlass size={17} aria-hidden="true" />{storedOnly ? '查询已存电商数据' : mode === 'safe_demo' ? (demoDeliveryMode === 'cache_only' && demoCacheOnlyScene === 'no_inventory' ? '演练无存量 cache_only' : '运行本地策略沙盘') : providerRequestBlockedByAmbiguity ? '改为重新采集或只读存量' : deliveryMode === 'cache_only' ? '读取 Hub 存量' : deliveryMode === 'refresh' ? (hasAmbiguousLiveRequest ? '自动核对后重新采集' : '重新采集最新数据') : '调用开放 API'}</>}
           </button>
           {resolvedReplayAvailable ? <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={phase === 'searching'} onClick={() => runLive({ replay: true })}><ArrowClockwise size={15} aria-hidden="true" />读取已提交的原结果 · 幂等 POST / 0 新增 usage / 外部采集</button> : null}
-          <p className="mih-treasure-auth-note"><LockKey size={15} aria-hidden="true" />这里使用普通 Hub Public API secret，不是供应方 Key；它必须在签发时包含 ecommerce entitlement。列表掩码不能调用，供应方密钥只在“外部数据平台”管理。</p>
+          <p className="mih-treasure-auth-note"><LockKey size={15} aria-hidden="true" />使用已授权的 Hub API Key 调用商品接口；列表中的掩码不能用于调用。</p>
         </form>
   )
   if (compact) return <section className="mih-commerce-acquisition">{error ? <p role="alert">{error.message}</p> : null}{controls}</section>
@@ -1662,7 +1658,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
           </div>
         <div className={`mih-treasure-stage mih-treasure-stage--${phase}`} aria-live="polite">
           <div className="mih-treasure-stage__halo" aria-hidden="true" />
-          <span className="mih-treasure-stage__provider">{mode === 'safe_demo' ? <>本地策略沙盘 <strong>不连接 Hub / JustOne</strong></> : <>当前唯一上游候选 <strong>JustOne</strong></>}</span>
+          <span className="mih-treasure-stage__provider">{mode === 'safe_demo' ? <>本地策略沙盘 <strong>不连接 Hub / Hub</strong></> : <>当前唯一数据服务候选 <strong>Hub</strong></>}</span>
           {phase === 'presenting' ? (
             <div className="mih-treasure-speech">
               <strong>{evidence?.sourceMode === 'safe_demo' ? evidence.demoTitle : products.length ? (evidence?.sourceMode === 'fresh_cache' ? '缓存里刚好有一份' : evidence?.sourceMode === 'stored_fallback' ? '先给你可靠的存档' : 'Here you are') : '这次没有找到商品'}</strong>
@@ -1674,7 +1670,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
             src={phase === 'searching' ? SEARCHING_ASSET : PRESENTING_ASSET}
             alt={phase === 'searching' ? '原创数据百宝猫小聚正在从数据袋中搜索' : '原创数据百宝猫小聚张开双手展示商品'}
           />
-          {phase === 'searching' ? <span className="mih-treasure-searching-copy"><i /><i /><i />{mode === 'safe_demo' ? '正在本地演练交付策略 · 不访问 Hub 或上游' : '正在检查授权、Hub 存量与交付策略'}</span> : null}
+          {phase === 'searching' ? <span className="mih-treasure-searching-copy"><i /><i /><i />{mode === 'safe_demo' ? '正在本地演练交付策略 · 不访问 Hub 或数据服务' : '正在检查授权、Hub 存量与交付策略'}</span> : null}
           {phase === 'presenting' ? visibleProducts.map((item, index) => <ProductOrb key={`${item.marketplace}-${item.id}-${displayPage}-${index}`} item={item} index={index} total={visibleProducts.length} selected={selected?.id === item.id} onSelect={setSelected} apiKey={mode === 'hub_live' ? hubApiKey.trim() : ''} requestId={item._evidence?.requestId || evidence?.requestId} />) : null}
           {phase === 'presenting' && products.length ? (
             <nav className="mih-treasure-pagination" aria-label="商品陈列分页">
@@ -1686,13 +1682,13 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
           {phase === 'idle' ? (
             <p className="mih-treasure-stage__welcome">
               <Sparkle size={17} weight="fill" aria-hidden="true" />
-              {mode === 'safe_demo' ? safeDemoIdleMessage(demoDeliveryMode, demoCacheOnlyScene) : deliveryMode === 'cache_only' ? '我只找 Hub 的精确存量，本次不会访问外部平台。' : deliveryMode === 'refresh' ? '已选择重新采集；点击搜索会尝试访问当前合格上游。' : '我会先找 Hub 新鲜数据，需要时才去上游。'}
+              {mode === 'safe_demo' ? safeDemoIdleMessage(demoDeliveryMode, demoCacheOnlyScene) : deliveryMode === 'cache_only' ? '我只找 Hub 的精确存量，本次不会更新数据。' : deliveryMode === 'refresh' ? '已选择重新采集；点击搜索会获取最新数据。' : '我会先找 Hub 新鲜数据，需要时更新数据。'}
             </p>
           ) : null}
         </div>
           <div className="mih-commerce-footer">
             <button type="button" className="qp-button qp-button--outline" disabled={!canContinue} onClick={loadNext}>{phase === 'searching' ? '正在加载…' : storedOnly ? '加载更多已存数据' : resultPage?.nextCursor ? '加载下一数据页' : '尝试下一数据页'}</button>
-            <small>{resultScopeRef.current !== resultScope && products.length ? '条件已变化，请重新查询。' : resultPage?.hasMore === false ? '本次分页已结束。' : storedOnly ? '按时间浏览已存记录，不触发采集。' : '点击加载下一数据页；上游未给出分页标记时，可手动尝试。刷新请点击左侧采集按钮。'}</small>
+            <small>{resultScopeRef.current !== resultScope && products.length ? '条件已变化，请重新查询。' : resultPage?.hasMore === false ? '本次分页已结束。' : storedOnly ? '按时间浏览已存记录，不触发采集。' : '点击加载下一数据页；数据服务未给出分页标记时，可手动尝试。刷新请点击左侧采集按钮。'}</small>
           </div>
         </section>
 
@@ -1704,7 +1700,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
 
       <section className="mih-treasure-section">
         <header className="mih-treasure-section__header">
-          <div><p className="qp-kicker">UPSTREAM API ATLAS</p><h2>JustOne 接口星图</h2><p>先看 Hub 做到了什么，再看官方目录还可以吸纳什么；“存在”不等于“已接”。</p></div>
+          <div><p className="qp-kicker">UPSTREAM API ATLAS</p><h2>Hub 接口星图</h2><p>先看 Hub 做到了什么，再看官方目录还可以吸纳什么；“存在”不等于“已接”。</p></div>
           <a className="qp-button qp-button--ghost qp-button--sm" href="https://docs.justoneapi.com/zh/api/" target="_blank" rel="noreferrer">官方接口目录<ArrowSquareOut size={14} aria-hidden="true" /></a>
         </header>
         <div className="mih-treasure-atlas-tabs" role="group" aria-label="接口星图分组">
@@ -1718,17 +1714,17 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
       </section>
 
       <section className="mih-treasure-section">
-        <header className="mih-treasure-section__header"><div><p className="qp-kicker">ONE ENDPOINT / DIFFERENT DELIVERY</p><h2>一次调用，四种真实交付路径</h2><p>Hub usage、供应方采购成本与客户计价是三套逻辑；客户只使用同一把 API Key。</p></div></header>
+        <header className="mih-treasure-section__header"><div><p className="qp-kicker">ONE ENDPOINT / DIFFERENT DELIVERY</p><h2>一次调用，四种真实交付路径</h2><p>使用同一把 Hub API Key 选择交付方式，费用以套餐和账单为准。</p></div></header>
         <div className="qp-data-table mih-table-wrap mih-treasure-cost-table">
           <table className="mih-table">
-            <thead><tr><th>sourceMode</th><th>用户拿到什么</th><th>新 Hub usage</th><th>新上游调用</th><th>处理原则</th></tr></thead>
+            <thead><tr><th>sourceMode</th><th>用户拿到什么</th><th>新 Hub usage</th><th>新数据服务调用</th><th>处理原则</th></tr></thead>
             <tbody>
               {Object.entries(SOURCE_MODE_LABELS).filter(([key]) => key !== 'safe_demo').map(([key, value]) => <tr key={key}><td><code>{key}</code></td><td><span className={`mih-treasure-mode mih-treasure-mode--${value.tone}`}>{value.label}</span></td><td>{value.hubUsage}</td><td>{value.providerCall}</td><td>{value.note}</td></tr>)}
             </tbody>
           </table>
         </div>
         <div className="mih-treasure-next-links">
-          <a href="#/external-platforms?provider=justone&range=24h"><ChartLineUp size={18} weight="duotone" aria-hidden="true" /><span><strong>看真实调用与成本</strong><small>请求量、上游派发、成功率、租户排行</small></span><ArrowRight size={16} aria-hidden="true" /></a>
+          <a href="#/external-platforms?provider=justone&range=24h"><ChartLineUp size={18} weight="duotone" aria-hidden="true" /><span><strong>看真实调用与成本</strong><small>请求量、数据服务派发、成功率、租户排行</small></span><ArrowRight size={16} aria-hidden="true" /></a>
           <a href="#/api-keys"><Key size={18} weight="duotone" aria-hidden="true" /><span><strong>获取开放能力 API Key</strong><small>一把 Key 的调用身份授予 ecommerce 后即可调用</small></span><ArrowRight size={16} aria-hidden="true" /></a>
           <a href={publicDocsHref('/docs/ecommerce-treasure-box')}><Coins size={18} weight="duotone" aria-hidden="true" /><span><strong>交给其他系统调用</strong><small>稳定请求、响应、分页与错误合同</small></span><ArrowRight size={16} aria-hidden="true" /></a>
         </div>

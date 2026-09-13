@@ -135,7 +135,7 @@ test('treasure box exposes safe stored, cache-first and explicit refresh deliver
   }
   assert.match(pageSource, /const \[deliveryMode, setDeliveryMode\] = useState\('refresh'\)/u)
   assert.match(pageSource, /label="交付策略"[\s\S]*?options=\{DELIVERY_MODE_OPTIONS\}/u)
-  assert.match(pageSource, /只读保障：本次不会调用外部平台/u)
+  assert.match(pageSource, /只读保障：本次仅查询已存数据/u)
   assert.match(pageSource, /读取 Hub 存量/u)
   assert.match(pageSource, /重新采集最新数据/u)
   assert.match(runLive, /const providerMayRun = deliveryMode !== 'cache_only'/u)
@@ -148,7 +148,7 @@ test('treasure box exposes safe stored, cache-first and explicit refresh deliver
   )
   assert.match(runLive, /if \(tracksProviderRisk\) \{[\s\S]*?rememberLiveRequest/u)
   assert.match(storedBody, /deliveryMode: value\.deliveryMode \|\| 'cache_first'/u)
-  assert.match(pageSource, /stored_snapshot_not_found[\s\S]*?没有调用 JustOne/u)
+  assert.match(pageSource, /stored_snapshot_not_found[\s\S]*?没有发起实时数据更新/u)
   for (const transition of [changeMode, changeDeliveryMode]) {
     assert.match(transition, /setProducts\(\[\]\)/u)
     assert.match(transition, /setSelected\(null\)/u)
@@ -171,12 +171,12 @@ test('safe demo independently simulates all delivery strategies with zero Hub an
   assert.match(pageSource, /const \[demoCacheOnlyScene, setDemoCacheOnlyScene\] = useState\('no_inventory'\)/u)
   assert.match(pageSource, /label="模拟交付策略"[^\n]+options=\{DEMO_DELIVERY_MODE_OPTIONS\}[^\n]+onChange=\{changeDemoDeliveryMode\}/u)
   assert.match(pageSource, /label="cache_only 演练场景"[^\n]+options=\{DEMO_CACHE_ONLY_SCENE_OPTIONS\}[^\n]+onChange=\{changeDemoCacheOnlyScene\}/u)
-  assert.match(pageSource, /浏览器本地策略沙盘 · 实际 0 Hub \/ 0 上游/u)
+  assert.match(pageSource, /浏览器本地策略沙盘 · 实际 不调用接口/u)
   assert.match(pageSource, /sourceMode=safe_demo/u)
   assert.match(demoScenario, /sourceMode: 'safe_demo'/u)
   assert.doesNotMatch(demoScenario, /\bsourceMode: '(?:live|fresh_cache|stored_fallback|idempotent_replay)'/u)
   assert.match(demoScenario, /simulatedErrorCode: 'stored_snapshot_not_found'/u)
-  assert.match(demoScenario, /products: \[\][\s\S]*?实际 0 Hub \/ 0 上游/u)
+  assert.match(demoScenario, /products: \[\][\s\S]*?实际 不调用接口/u)
   assert.match(demoScenario, /simulatedSourceMode: 'stored_fallback'/u)
   assert.match(demoScenario, /simulatedSourceMode: 'live'/u)
   assert.match(runSafeDemo, /safeDemoScenario\(\{ demoDeliveryMode, demoCacheOnlyScene, candidates \}\)/u)
@@ -358,7 +358,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /label="获取方式"[^\n]+disabled=\{phase === 'searching' \|\| storedOnly \|\| compact\}/u)
   assert.doesNotMatch(pageSource, /label="获取方式"[^\n]+disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
-  assert.match(pageSource, /label="上游排序（仅采集）"[\s\S]*?disabled=\{semanticsLocked/u)
+  assert.match(pageSource, /label="数据服务排序（仅采集）"[\s\S]*?disabled=\{semanticsLocked/u)
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
   assert.match(demoSource, /<Page key=\{state.identity\}/u)
   assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
@@ -389,36 +389,36 @@ test('data-product errors are localized by ownership and always retain operator 
   const errorState = pageSource.match(/function TreasureProductError[\s\S]*?\n\}/u)?.[0] || ''
 
   for (const [code, copy] of [
-    ['external_platform_response_unusable', '外部数据已返回，但暂时无法整理成 Hub 商品'],
+    ['external_platform_response_unusable', '数据已返回，但暂时无法整理成 Hub 商品'],
     ['external_platform_outcome_unknown', '这次实时请求的结果暂时无法确认'],
     ['request_in_progress', '同一实时请求仍在处理中'],
     ['external_platform_not_configured', '实时数据源尚未配置完成'],
-    ['external_platform_capacity_exceeded', '外部数据容量暂不可用'],
+    ['external_platform_capacity_exceeded', '数据容量暂不可用'],
     ['external_platform_busy', '实时请求较多，请稍后再试'],
     ['consumer_quota_exceeded', '当前调用身份的 Hub 请求额度已用完'],
     ['api_key_quota_exceeded', '这把 API Key 自己的额度已用完'],
     ['plan_month_quota_exceeded', '套餐的月度额度已用完'],
     ['plan_burst_exceeded', '瞬时请求速率过高'],
-    ['external_platform_rejected', '外部数据服务拒绝了本次查询'],
+    ['external_platform_rejected', '数据服务拒绝了本次查询'],
     ['resolved_replay_not_verified', '当前 API Key 无法核验原请求归属'],
   ]) {
     assert.match(presentation, new RegExp(code, 'u'))
     assert.match(presentation, new RegExp(copy, 'u'))
   }
-  assert.match(presentation, /error\?\.status === 409[\s\S]*?本次尝试在上游派发前停止，没有新增外部采集/u)
-  assert.match(presentation, /JustOne 响应格式隔离仍在生效[\s\S]*?没有新增 JustOne 调用或上游采购计费/u)
+  assert.match(presentation, /error\?\.status === 409[\s\S]*?本次尝试在数据服务派发前停止，没有新增外部采集/u)
+  assert.match(presentation, /Hub 响应格式隔离仍在生效[\s\S]*?未发起新的数据更新/u)
   assert.match(presentation, /succeeded_unusable/u)
   assert.match(presentation, /同类实时请求仍在未决隔离期[\s\S]*?早先的请求结果仍可能未知/u)
-  assert.match(presentation, /resolved_replay_not_verified[\s\S]*?没有发送重放 POST，也没有访问 JustOne[\s\S]*?本地账本会继续保留/u)
+  assert.match(presentation, /resolved_replay_not_verified[\s\S]*?没有发送重放 POST，也没有发起新的数据查询[\s\S]*?本地账本会继续保留/u)
   assert.match(errorState, /error\.code/u)
   assert.match(errorState, /error\.requestId/u)
-  assert.match(errorState, /JSON\.stringify\(error\.details\)/u)
-  assert.match(errorState, /服务端 details/u)
+  assert.doesNotMatch(errorState, /JSON\.stringify\(error\.details\)/u)
+  assert.doesNotMatch(errorState, /服务端 details/u)
   assert.match(errorState, /转到零费用演示/u)
-  assert.match(errorState, /查看上游运行状态/u)
+  assert.doesNotMatch(errorState, /查看数据服务运行状态/u)
   assert.doesNotMatch(errorState, /error\?\.message \|\| '数据请求失败'/u)
   assert.match(pageSource, /<section className="qp-panel mih-treasure-lab">\s*\{error \? <TreasureProductError/u)
-  assert.match(pageSource, /首次 committed-unusable 账本已保留[\s\S]*?精确重放只读取已提交错误，不会再次访问 JustOne/u)
+  assert.match(pageSource, /首次 committed-unusable 账本已保留[\s\S]*?精确重放只读取已提交错误，不会再次更新数据/u)
   assert.equal(pageSource.match(/<TreasureProductError\b/gu)?.length, 1)
   assert.match(styleSource, /\.mih-treasure-lab > \.mih-treasure-product-error \{[\s\S]*?grid-column: 1 \/ -1/u)
   assert.match(pageSource, /这次没有找到商品/u)
@@ -507,7 +507,7 @@ test('treasure box presents truthful safe, live, cache, fallback and replay stat
   for (const value of ['safe_demo', 'live', 'fresh_cache', 'stored_fallback', 'idempotent_replay']) {
     assert.match(pageSource, new RegExp(value, 'u'))
   }
-  for (const label of ['安全演示 · 0 Hub / 0 上游', 'Here you are', '缓存里刚好有一份', '先给你可靠的存档']) {
+  for (const label of ['安全演示 · 不调用接口', 'Here you are', '缓存里刚好有一份', '先给你可靠的存档']) {
     assert.match(pageSource, new RegExp(label, 'u'))
   }
   assert.match(pageSource, /phase === 'searching' \? SEARCHING_ASSET : PRESENTING_ASSET/u)

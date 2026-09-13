@@ -136,7 +136,7 @@ export function EcommerceDataList({ token, notify, AcquisitionPanel }) {
       <div className="mih-commerce-price"><Field label="最低价格"><input className="qp-input" type="number" min="0" step="0.01" value={minPrice} disabled={controller.current?.busy} onChange={event => setMinPrice(event.target.value)} /></Field><Field label="最高价格"><input className="qp-input" type="number" min="0" step="0.01" value={maxPrice} disabled={controller.current?.busy} onChange={event => setMaxPrice(event.target.value)} /></Field></div>
       <Field label="历史开始时间"><input className="qp-input" type="datetime-local" value={from} onChange={event => setFrom(event.target.value)} /></Field>
       <Field label="历史结束时间"><input className="qp-input" type="datetime-local" value={to} onChange={event => setTo(event.target.value)} /></Field>
-      <p>历史按采集请求时间倒序；价格、平台和标题筛选同时生效。上游排序只影响新采集批次内部顺序。淘宝/天猫支持采集价格区间，其他平台的价格条件仅筛选历史。</p>
+      <p>历史按采集请求时间倒序；价格、平台和标题筛选同时生效。查询排序只影响新采集批次内部顺序。淘宝/天猫支持采集价格区间，其他平台的价格条件仅筛选历史。</p>
       <DropdownField label="图片读取策略" value={mediaMode} options={[{ value: 'cache_first', label: 'Hub 缓存优先 · 未命中访问原链接' }, { value: 'cache_only', label: '仅 Hub 缓存 · 禁止外部取图' }]} onChange={setMediaMode} />
       <p>图片外部费用未知；不调用商品采集 API。当前缓存仅在内存，尚未接入 mx-static。</p>
       <button className="qp-button qp-button--primary" onClick={() => setEditor({ title: '', price: '', marketplace: marketplace === 'all' ? 'taobao' : marketplace })}>新增商品</button>

@@ -67,7 +67,7 @@ const PLATFORM_GROUPS = [
   {
     key: 'social',
     label: '社交与内容平台',
-    hint: '按来源平台授权；内部可聚合多个供应方',
+    hint: '按数据域与业务能力授权',
     members: [
       'xiaohongshu', 'weibo', 'douyin', 'kuaishou', 'bilibili', 'zhihu',
       'wechat_mp', 'wechat_search', 'telegram',
@@ -83,7 +83,7 @@ const PLATFORM_GROUPS = [
   {
     key: 'hub',
     label: 'Hub 自有数据域',
-    hint: '由 Hub 规范化数据层提供，不直连外部供应方',
+    hint: '通过 Hub API 查询已存数据',
     members: ['public_opinion', 'source_catalog'],
   },
   {
@@ -2820,7 +2820,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </section>
 
-      <section className="qp-panel mih-provider-routing-boundary" aria-label="电商能力与上游路由边界">
+      {session?.platformAdmin ? <section className="qp-panel mih-provider-routing-boundary" aria-label="电商能力与上游路由边界">
         <div className="mih-provider-routing-boundary__intro">
           <span><Cloud size={19} weight="duotone" aria-hidden="true" /></span>
           <div>
@@ -2839,7 +2839,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           <span>上游连接器、供应商选择、健康、采购成本与游标绑定均由 Admin 内部治理；租户只看数据域、业务操作、兼容合同、费率与交付结果。</span>
           {session?.platformAdmin && session?.kind === 'admin-token' ? <a className="qp-button qp-button--ghost qp-button--sm" href="#/external-platforms?range=24h">管理内部上游<ArrowRight size={15} aria-hidden="true" /></a> : null}
         </footer>
-      </section>
+      </section> : null}
 
       <Panel
         title="API Key 可访问的数据平台 / 数据域"

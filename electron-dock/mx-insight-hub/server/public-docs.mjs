@@ -6207,14 +6207,47 @@ function normalizedDocsPath(pathname) {
 }
 
 const TENANT_HIDDEN_DOCS = new Set(['source-catalog', 'search', 'night-all', 'tools', 'discovery'])
-const tenantDocsRoute = route => !TENANT_HIDDEN_DOCS.has(route.key)
-const platformDisplayName = text => text.replace(/JustOne/gi, 'J 平台').replace(/TikHub/gi, 'T 平台')
+export function tenantDocumentPathAllowed(path, scopes) {
+  if (scopes == null) return true
+  if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
+  const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
+  let platform = operation?.['x-mx-required-platform']
+  let capabilities = operation?.['x-mx-required-capabilities'] || []
+  if (!platform) {
+    if (path === '/data/post' || path === '/data/posts/media') { platform = 'xiaohongshu'; capabilities = ['social.posts.resolve'] }
+    else if (path.startsWith('/xiaohongshu/')) return false
+    else if (path.startsWith('/data/ecommerce/')) { platform = 'ecommerce'; capabilities = ['ecommerce.products.search'] }
+    else if (path.startsWith('/data/telegram/') || path.startsWith('/data/canonical/items/')) platform = 'telegram'
+    else if (path.startsWith('/data/public-opinion/')) platform = 'public_opinion'
+    else if (path.startsWith('/data/virtual-supermarket/')) platform = 'virtual_supermarket'
+    else if (path.startsWith('/data/topic-reports')) platform = 'topic_reports'
+    else return false
+  }
+  return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
+}
+const TENANT_PRODUCT_PATHS = {
+  'xiaohongshu-note': ['/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
+  'ecommerce-treasure-box': ['/data/ecommerce/products/search'],
+  'social-accounts': ['/data/social/accounts/search'],
+  'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],
+  'virtual-supermarket': ['/data/virtual-supermarket/products'], 'topic-reports': ['/data/topic-reports'],
+  'taobao-tmall': ['/data/ecommerce/taobao/product-detail', '/data/ecommerce/taobao/product-reviews', '/data/ecommerce/taobao/product-questions', '/data/ecommerce/taobao/shop-products'],
+  'jd-native': [], 'xianyu-native': [], 'xiaohongshu-ec-native': [],
+}
+const tenantDocsRoute = (route, scopes) => {
+  if (TENANT_HIDDEN_DOCS.has(route.key)) return false
+  if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
+  const paths = route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
+  return paths.some(path => tenantDocumentPathAllowed(path, scopes))
+}
 
-export function tenantOpenApiDocument() {
+const platformDisplayName = text => text.replace(/JustOne/gi, 'J Platform').replace(/TikHub/gi, 'T Platform')
+
+export function tenantOpenApiDocument(scopes) {
   const document = structuredClone(PUBLIC_OPENAPI_DOCUMENT)
   const hidden = new Set(['/data/capabilities', '/data/search', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
   document.paths = Object.fromEntries(Object.entries(document.paths).filter(([path]) =>
-    !hidden.has(path) && !path.startsWith('/data/source-catalog') && !path.startsWith('/night-all/') && !path.startsWith('/search/')))
+    !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/data/source-catalog') && !path.startsWith('/night-all/') && !path.startsWith('/search/')))
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6222,7 +6255,7 @@ export function tenantOpenApiDocument() {
       if (key === '$ref' && typeof child === 'string' && child.startsWith('#/components/') && !refs.has(child)) {
         refs.add(child)
         visit(child.slice(2).split('/').reduce((node, part) => node?.[part], document))
-      } else if (['description', 'summary', 'title'].includes(key) && typeof child === 'string') value[key] = platformDisplayName(child)
+      } else if (['description', 'summary', 'title'].includes(key) && typeof child === 'string') value[key] = platformDisplayName(child).split(/(?<=[。.!])\s*/).filter(sentence => !/upstream|provider|supplier|procurement|供应|上游|采购|Night-All/i.test(sentence)).join(' ')
       else visit(child)
     }
   }
@@ -6237,9 +6270,32 @@ export function tenantOpenApiDocument() {
   return document
 }
 
-function docsNavigation(activeKey, tenant = false) {
+function tenantDocBody(route, scopes) {
+  const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
+  const resolve = value => value?.$ref ? value.$ref.slice(2).split('/').reduce((node, key) => node?.[key], PUBLIC_OPENAPI_DOCUMENT) : value
+  const copy = value => String(value || '').split(/(?<=[。.!])\s*/).filter(sentence => !/upstream|provider|supplier|procurement|供应|上游|采购|成本|Night-All|TikHub|JustOne/i.test(sentence)).join(' ')
+  if (route.key === 'start') return '<h1>Hub 开放平台</h1><p class="lead">使用一把 Hub API Key 调用已开通的数据产品和平台接口。左侧目录展示当前账户已开放的服务；具体调用还需所选 Key 包含相应授权。</p><div class="cards"><div class="card"><strong>接口地址</strong><code>/api/v1</code></div><div class="card"><strong>认证</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>接口规范</strong><a href="/docs/openapi.json">OpenAPI JSON</a></div></div>'
+  if (route.key === 'rules') return '<h2>认证与调用规则</h2><p>在 API Keys 中签发已授权的 Live Key。请求携带 <code>Authorization: Bearer YOUR_HUB_API_KEY</code> 或 <code>x-api-key</code>，使用同一 Hub 接口地址。</p><p>账户开通权限是上限；每把 Key 使用签发时选择的权限。新增能力需要签发包含该能力的新 Key。</p><h3>计费与重试</h3><p>费用以当前合同费率和账单为准。对同一请求重试时保留 Idempotency-Key 和请求参数；更换页码、游标或查询条件须使用新标识。结果不确定时先查询请求记录，避免重复提交。</p><h3>额度</h3><p>账户余额、套餐和 Key 限额共同生效。收到 429 后等待额度窗口恢复；不要连续重试。</p>'
+  if (route.key === 'errors') return '<h2>错误与重试</h2><p>保留错误码与 requestId，便于排查。401：检查 Key；403：检查服务与 Key 授权；429：等待额度恢复。请求结果不确定时，使用原 Idempotency-Key 查询或重试同一请求，避免重复消费。</p>'
+  const paths = route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
+  let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
+  for (const path of paths.filter(path => tenantDocumentPathAllowed(path, scopes))) {
+    for (const [method, operation] of Object.entries(PUBLIC_OPENAPI_DOCUMENT.paths[path] || {})) {
+      if (!['get', 'post'].includes(method)) continue
+      html += `<h3><code>${method.toUpperCase()} /api/v1${escape(path)}</code></h3>`
+      const params = (operation.parameters || []).map(resolve).filter(Boolean).map(param => ({ name: param.name, required: param.required, schema: resolve(param.schema), description: param.description }))
+      const body = resolve(operation.requestBody?.content?.['application/json']?.schema)
+      if (body?.properties) for (const [name, schema] of Object.entries(body.properties)) params.push({ name, required: body.required?.includes(name), schema: resolve(schema), description: schema.description })
+      html += '<table><thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody>' + params.map(param => `<tr><td><code>${escape(param.name)}</code></td><td>${escape(param.schema?.type || 'object')}</td><td>${param.required ? '是' : '否'}</td><td>${escape(copy(param.description))}${param.schema?.enum ? ` 可选值：${escape(param.schema.enum.join(', '))}` : ''}${param.schema?.default != null ? ` 默认：${escape(param.schema.default)}` : ''}</td></tr>`).join('') + '</tbody></table>'
+      html += `<p>响应结构与完整字段定义见 <a href="/docs/openapi.json">当前账户 OpenAPI 规范</a>。</p>`
+    }
+  }
+  return html + '<h3>分页与交付</h3><p>仅使用接口声明的分页参数；返回游标时原样提交游标。每次新查询或续页使用新的 Idempotency-Key，同一请求重试保留原值。列表结果可能是摘要，完整正文通过已授权的详情接口获取。</p><p>支持 deliveryMode 的接口：cache_only 只读已存数据；cache_first 优先有效缓存；refresh 更新数据，失败可返回已存版本；live_only 仅返回实时结果。具体可选值以该接口参数表为准。数据时间以响应为准，计费以当前套餐和账单为准。</p>'
+}
+
+function docsNavigation(activeKey, tenant = false, scopes) {
   let section = null
-  return PUBLIC_DOCS_ROUTES.filter(route => !tenant || tenantDocsRoute(route)).map((route) => {
+  return PUBLIC_DOCS_ROUTES.filter(route => !tenant || tenantDocsRoute(route, scopes)).map((route) => {
     const active = route.key === activeKey
     const heading = route.section !== section
       ? `<span class="nav-section">${route.section}</span>`
@@ -6253,25 +6309,31 @@ function docsNavigation(activeKey, tenant = false) {
   }).join('')
 }
 
-export function publicDocsHtmlForPath(pathname, { tenant = false } = {}) {
+export function publicDocsHtmlForPath(pathname, { tenant = false, scopes } = {}) {
   const normalized = normalizedDocsPath(pathname)
   const route = PUBLIC_DOCS_ROUTES.find((candidate) => candidate.path === normalized)
-  if (!route || (tenant && !tenantDocsRoute(route))) return null
+  if (!route || (tenant && !tenantDocsRoute(route, scopes))) return null
 
   let html = PUBLIC_DOCS_TEMPLATE
     .replace('__PUBLIC_DOCS_TITLE__', route.label)
-    .replace('__PUBLIC_DOCS_NAV__', docsNavigation(route.key, tenant))
+    .replace('__PUBLIC_DOCS_NAV__', docsNavigation(route.key, tenant, scopes))
     .replace(/\n\s*<section class="doc-page" data-doc-page="([^"]+)">[\s\S]*?<\/section>/g, (section, key) => (
       key === route.key ? section : ''
     ))
   if (tenant) {
     html = html.replace(/<a href="(\/docs[^"#]*)(?:#[^"]*)?"[^>]*>([\s\S]*?)<\/a>/g, (link, path, text) => {
       const target = PUBLIC_DOCS_ROUTES.find(item => item.path === path)
-      return target && !tenantDocsRoute(target) ? text : link
+      return target && !tenantDocsRoute(target, scopes) ? text : link
     })
     html = html.replace(/<a href="https?:\/\/[^"]*(?:tikhub|justone)[^"]*"[^>]*>[\s\S]*?<\/a>/gi, '平台参考文档请联系管理员')
-    if (route.key === 'start') html = html.replace(/<p class="lead">[\s\S]*?<\/p>/, '<p class="lead">使用一把 Hub API Key 调用已授权的数据产品和平台原生接口。每把 Key 的服务范围、额度与费率以账户配置为准；无需填写外部平台凭据。</p>')
+    if (route.key === 'start') html = html.replace(/<p class="lead">[\s\S]*?<\/p>/, '<p class="lead">使用一把 Hub API Key 调用已授权的数据产品和平台原生接口。每把 Key 的服务范围、额度与费率以账户配置为准；通过统一的 Hub API 地址完成调用。</p>')
   }
+  if (tenant) {
+    html = html.replace(/<table[^>]*>[\s\S]*?<\/table>/g, table => /<th[^>]*>上游调用<\/th>/.test(table) ? '<p>每次成功交付按当前合同费率结算；相同请求的幂等重放不重复扣费。cache_only 读取已存数据；cache_first 优先读取有效缓存；refresh 更新数据并允许存量回退；live_only 仅接受实时结果。实际费用请查看用量与账单。</p>' : table)
+    html = html.replace(/<p(?: [^>]*)?>[\s\S]*?<\/p>/g, paragraph => /供应方|供应商|上游消耗|上游调用|采购|成本证据|物理数据|外部平台凭据/.test(paragraph) ? '' : paragraph)
+    html = html.split(/(<[^>]+>)/g).map(part => part.startsWith('<') ? part : part.replace(/上游/g, '数据服务').replace(/供应方/g, '服务').replace(/外部平台/g, '平台').replace(/平台原生接口 · /g, '').replace(/运维契约/g, '调用帮助')).join('')
+  }
+  if (tenant) html = html.replace(/<main>[\s\S]*?<\/main>/, `<main>${tenantDocBody(route, scopes)}<footer>MX Insight Hub · Open API</footer></main>`)
   // Change display copy only; preserve API paths, scopes and machine identifiers.
   return html.split(/(<[^>]+>)/g).map(part => part.startsWith('<') ? part : platformDisplayName(part)).join('')
 }

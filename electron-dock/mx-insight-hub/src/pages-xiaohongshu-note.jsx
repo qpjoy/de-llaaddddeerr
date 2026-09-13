@@ -19,29 +19,14 @@ import { XiaohongshuFeed, BusinessImage } from './pages-xiaohongshu-feed.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 
 const DELIVERY_OPTIONS = [
-  { value: 'cache_first', label: '智能交付 · 缓存优先', hint: '快照仍新鲜时直接复用；过期则尝试上游，上游不可用才回落存量。' },
-  { value: 'cache_only', label: '只读 Hub 存量 · 0 次上游', hint: '只读精确存量；没有存量时明确 404，绝不调用上游。' },
-  { value: 'refresh', label: '重新采集 · 可能产生上游消耗', hint: '绕过新鲜缓存尝试上游；上游失败时仍会回落到精确存量。' },
+  { value: 'cache_first', label: '智能交付 · 缓存优先', hint: '优先读取有效缓存；需要时更新数据，更新失败可返回已存版本。' },
+  { value: 'cache_only', label: '只读已存数据', hint: '只读精确存量；没有存量时返回 404。' },
+  { value: 'refresh', label: '更新数据 · 按套餐计费', hint: '更新数据；更新失败时允许返回已存版本。' },
   { value: 'live_only', label: '只要实时 · 拿不到就报错', hint: '同样绕过缓存，但绝不回落：拿不到实时数据就返回错误原因。' },
 ]
 
-// Which subsystem decided this delivery, in the operator's words. The codes
-// come from Hub's shared reason vocabulary, so the same labels describe a
-// degraded delivery and a rejection.
-const REASON_SCOPES = {
-  upstream: '上游供应方',
-  delivery_policy: '交付策略',
-  operation_control: 'Hub 运行控制',
-  provider_credential: '供应方凭据',
-  circuit_breaker: '熔断保护',
-  dispatch_dedup: '重复派发抑制',
-  concurrency: '并发保护',
-  rate_limit: '速率限制',
-  idempotency: '幂等重放',
-}
-
 const SOURCE_MODE_LABELS = {
-  live: { label: '实时上游', tone: 'live' },
+  live: { label: '实时结果', tone: 'live' },
   fresh_cache: { label: '新鲜缓存', tone: 'cache' },
   stored_fallback: { label: '存储兜底', tone: 'fallback' },
   idempotent_replay: { label: '幂等重放', tone: 'replay' },
@@ -50,7 +35,6 @@ const SOURCE_MODE_LABELS = {
 // The upstream provider behind this data product. Naming it here keeps the
 // page honest about where a paid call actually goes, and about which vendor an
 // operator has to look at when this product degrades.
-const UPSTREAM_PROVIDER = { key: 'tikhub', label: 'TikHub', operation: 'social.posts.resolve' }
 const PENDING_REQUEST_KEY = 'mx-insight-hub.xiaohongshu-note.pending.v1'
 const AMBIGUOUS_CODES = new Set([
   'external_platform_outcome_unknown',
@@ -214,9 +198,6 @@ function DeliveryEvidence({ evidence, error }) {
   const mode = SOURCE_MODE_LABELS[sourceMode] || null
   const settled = Boolean(reason || sourceMode || error)
 
-  const upstreamCall = !settled ? null : reason?.liveAttempted === true
-    ? '是 · 已发起，可能已计费'
-    : reason?.liveAttempted === false ? '否 · 未发起' : '未知'
   // A replay returns the committed result of an earlier request, so it is the
   // one delivery that creates no new Hub usage.
   const hubUsage = !settled ? null
@@ -228,7 +209,7 @@ function DeliveryEvidence({ evidence, error }) {
         <Fingerprint size={19} />
         <div>
           <strong>本次交付证据</strong>
-          <small>上游供应方 {UPSTREAM_PROVIDER.label} · 业务操作 <code>{UPSTREAM_PROVIDER.operation}</code></small>
+          <small>Hub 笔记查询 · 费用请查看用量与账单</small>
         </div>
       </div>
       <dl className="mih-xhs-evidence-grid">
@@ -238,7 +219,7 @@ function DeliveryEvidence({ evidence, error }) {
             ? <span className={`mih-xhs-mode mih-xhs-mode--${mode.tone}`}>{mode.label}</span>
             : settled ? '未交付' : '尚未调用'}</dd>
         </div>
-        <div><dt>上游调用</dt><dd>{upstreamCall || '—'}</dd></div>
+
         <div><dt>Hub 用量</dt><dd>{hubUsage || '—'}</dd></div>
         <div>
           <dt>数据年龄</dt>
@@ -249,20 +230,7 @@ function DeliveryEvidence({ evidence, error }) {
         <div><dt>采集时间</dt><dd>{evidence?.capturedAt ? formatDate(evidence.capturedAt) : '—'}</dd></div>
         <div><dt>Request ID</dt><dd className="mih-xhs-evidence-id">{evidence?.requestId || (settled ? '—' : '等待请求')}</dd></div>
       </dl>
-      {reason ? (
-        <p className={`mih-xhs-reason${reason.degraded ? ' mih-xhs-reason--degraded' : ''}`}>
-          <strong>{REASON_SCOPES[reason.scope] || reason.scope || '原因'}</strong>
-          <code>{reason.code}</code>
-          <span>{reason.summary || (reason.degraded ? '本次交付低于一次完整的实时读取。' : '本次交付完整。')}</span>
-        </p>
-      ) : null}
-      {reason?.detail?.blockers?.length ? (
-        <ul className="mih-xhs-blockers">
-          {reason.detail.blockers.map((blocker) => (
-            <li key={blocker.code}><code>{blocker.code}</code>{blocker.message ? <span>{blocker.message}</span> : null}</li>
-          ))}
-        </ul>
-      ) : null}
+      {reason?.degraded ? <p className="mih-xhs-reason">本次返回已存版本，请查看采集时间与数据时效。</p> : null}
     </section>
   )
 }
@@ -281,7 +249,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
   // cover all four. Every delivery is one Hub request; only some reach upstream.
   const deliveryHint = useMemo(() => {
     const option = DELIVERY_OPTIONS.find((entry) => entry.value === deliveryMode)
-    return `${option?.hint || ''} 每次交付都计一笔 Hub 请求；只有真正调用 ${UPSTREAM_PROVIDER.label} 时才产生上游消耗，幂等重放两者都不产生。`
+    return `${option?.hint || ''} 费用以当前套餐及账单为准；相同请求的幂等重放不重复扣费。`
   }, [deliveryMode])
 
   const submit = async (event) => {
