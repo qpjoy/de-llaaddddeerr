@@ -324,7 +324,6 @@ const NAV_PARENTS = {
 // console renders itself from the server's answer rather than from a local role
 // guess, so a scoped user never sees a control that would 403.
 const ROUTES = [
-  { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '数据平面', component: DocsPage },
   // Listed first so that a tenant whose requested route is not visible to them
   // falls back here rather than to an operator page they cannot use.
   { path: '/my', label: '我的接入', description: '额度、到期与可用性', icon: ShieldCheck, group: '业务治理', component: MyAccessPage, ownAccess: true },
@@ -354,6 +353,7 @@ const ROUTES = [
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },
+  { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '接口与文档', component: DocsPage },
 ]
 
 const ROUTE_MAP = new Map(ROUTES.map((route) => [route.path, route]))
@@ -643,6 +643,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
     <nav className="mih-nav" aria-label="管理台导航">
       {groups.map((group) => {
         const groupRoutes = routes.filter((route) => route.group === group)
+          .sort((left, right) => Number(right.path === '/dashboard') - Number(left.path === '/dashboard'))
         const renderedParents = new Set()
         return (
           <section className="mih-nav__group" key={group}>

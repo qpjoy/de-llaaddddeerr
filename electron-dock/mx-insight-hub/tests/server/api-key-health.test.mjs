@@ -257,3 +257,14 @@ test('a nearly spent budget warns before the first rejection', () => {
   assert.equal(health.level, 'warn')
   assert.match(health.issues[0].text, /即将用完/u)
 })
+
+test('no keys is an onboarding warning, separate from a disabled business', () => {
+  const empty = consumerHealth({ keys: {total:0,active:0} })
+  assert.equal(empty.level,'warn')
+  assert.match(empty.issues[0].text,/尚未签发/)
+  const disabled = consumerHealth({keys:{total:0,active:0},blockedOperations:[{operation:'social.users.posts',effectiveState:'disabled'}]})
+  assert.equal(disabled.level,'blocked')
+  assert.equal(disabled.issues.length,2)
+  assert.match(disabled.issues[0].detail,/不代表其他已开通业务不可用/)
+  assert.match(disabled.issues[0].action,/外部数据平台/)
+})

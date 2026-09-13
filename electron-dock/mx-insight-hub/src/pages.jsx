@@ -761,7 +761,7 @@ function TenantConsumerCard({ entry, operationLabel, canManageKeys }) {
           <p>
             {health.level === 'healthy'
               ? '当前可以正常调用。'
-              : health.level === 'blocked' ? '当前有调用会被拒绝。' : '当前可以调用，但有即将到期或接近上限的项。'}
+              : health.level === 'blocked' ? '当前有调用会被拒绝。' : '请检查下方的凭据、到期或额度提示。'}
           </p>
         </div>
         {canManageKeys ? (
@@ -888,7 +888,7 @@ export function MyAccessPage({ token, session, onUnauthorized }) {
               </strong>
               <p>
                 共 {formatNumber(tenants.length)} 个租户、{formatNumber(consumers.length)} 个调用者。
-                {overall === 'blocked' ? '下面标红的项会让对应调用者的所有 Key 都被拒绝。' : null}
+                {overall === 'blocked' ? '下方按业务列出阻断原因；单项业务不可用不代表所有业务不可用。' : null}
               </p>
             </div>
           </header>

@@ -119,10 +119,10 @@ export function consumerHealth(health, {
     issues.push({
       level: 'blocked',
       text: `${operationLabel(entry.operation)} 当前不可调用`,
-      detail: '该调用者的所有 Key 都会被拒绝，与 Key 本身无关。',
+      detail: '所有 Key 对这项业务的请求都会被拒绝；不代表其他已开通业务不可用。签发 Key 不会解除此运行阻断。',
       action: entry.effectiveState === 'blocked'
-        ? '由管理员在“开放能力”检查上游前置条件'
-        : `运行状态：${entry.effectiveState}`,
+        ? '由管理员在“外部数据平台”检查该业务的运行门禁与上游前置条件'
+        : entry.effectiveState === 'disabled' ? '该业务运行开关已关闭，请管理员在“外部数据平台”检查并启用。' : `运行状态：${entry.effectiveState}`,
     })
   }
 
@@ -154,6 +154,11 @@ export function consumerHealth(health, {
   }
 
   const keys = health?.keys
+  if (keys?.total === 0) {
+    issues.push({level:'warn',text:'尚未签发 API Key',detail:'业务授权已配置后，还需签发包含所需范围的 Key 才能调用。',action:'前往“API Keys”签发 Key'})
+  } else if (keys?.active === 0) {
+    issues.push({level:'warn',text:'没有可用的 API Key',detail:'已有 Key 均不可用，请检查有效期和撤销状态。',action:'前往“API Keys”管理凭据'})
+  }
   if (keys?.expiringSoon > 0) {
     issues.push({
       level: 'warn',
