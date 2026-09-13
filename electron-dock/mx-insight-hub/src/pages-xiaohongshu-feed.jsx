@@ -5,16 +5,17 @@ import { adminApi, publicDataApi } from './api.js'
 import { DropdownField, ErrorState, Field, Modal } from './components.jsx'
 import { mergeNotes, nativeNotePage, storedNote } from './xiaohongshu-feed.js'
 
-function BusinessImage({ url, enabled, alt }) {
+function BusinessImage({ url, enabled, alt, className }) {
   const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [url])
+  useEffect(() => setFailed(false), [url, enabled])
   let safe = false
   try { const parsed = new URL(url); safe = parsed.protocol === 'https:' && !parsed.username && !parsed.password } catch { /* no image */ }
-  return enabled && safe && !failed ? <img src={url} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <ImageSquare size={32} aria-label="图片未加载" />
+  return enabled && safe && !failed ? <img className={className} src={url} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <span className="mih-xhs-image-placeholder"><ImageSquare size={32} aria-label="图片未加载" /><small>{!enabled ? '图片显示已关闭' : !safe ? '暂无图片地址' : '图片加载失败，可在详情中重试'}</small></span>
 }
 
-function NoteDetail({ item, apiKey, images, NoteScroll, onSelectLink, onClose }) {
+function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, onSelectLink, onClose }) {
   const [result, setResult] = useState(null)
+  const [imageRevision, setImageRevision] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const identity = useRef(null)
@@ -22,24 +23,29 @@ function NoteDetail({ item, apiKey, images, NoteScroll, onSelectLink, onClose })
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const url = item.url || `https://www.xiaohongshu.com/explore/${item.externalId}`
-  const resolve = async () => {
+  const resolve = async (deliveryMode = 'cache_first') => {
     if (lock.current || !apiKey.trim()) return
     lock.current = true; setBusy(true); setError(null)
     try {
-      identity.current ||= `xhs-detail-${requestUuid()}`
-      const response = await publicDataApi.xiaohongshuNote(apiKey.trim(), { platform: 'xiaohongshu', url, deliveryMode: 'cache_first' }, { idempotencyKey: identity.current })
-      if (alive.current) setResult(response)
+      identity.current ||= { key: `xhs-detail-${requestUuid()}`, deliveryMode }
+      const response = await publicDataApi.xiaohongshuNote(apiKey.trim(), { platform: 'xiaohongshu', url, deliveryMode: identity.current.deliveryMode }, { idempotencyKey: identity.current.key })
+      if (alive.current) { setResult(response); setImageRevision(value => value + 1) }
+      identity.current = null
     } catch (failure) { if (alive.current) setError(failure) }
     finally { lock.current = false; if (alive.current) setBusy(false) }
   }
   return <Modal title={item.title || '笔记详情'} size="xlarge" onClose={onClose} footer={<button className="qp-button" onClick={onClose}>关闭</button>}>
     <p>{item.bodyCompleteness === 'provider_preview' ? '列表预览可能不含完整正文和标签。' : '展示当前 Hub 已存版本，完整性以采集结果为准。'} 获取完整详情优先读缓存，必要时采集，可能计费。</p>
     <button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim()} onClick={() => void resolve()}>{busy ? '正在读取详情…' : error ? '重试同一详情请求' : '获取完整正文与标签'}</button>
+    <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || Boolean(error)} onClick={() => void resolve('live_only')}>重新采集完整笔记（可能计费）</button>
+    <p>重新采集会请求上游获取最新正文、标签和全部图片地址；图片重试只重新加载已有图片。</p>
+    <label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
+    <button className="qp-button qp-button--outline" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button>
     <button className="qp-button qp-button--ghost" onClick={() => { onSelectLink(url); onClose() }}>带入链接解析表单</button>
     {error ? <ErrorState error={error} /> : null}
     {result?.evidence ? <p>交付：{result.evidence.sourceMode} · Request ID：{result.evidence.requestId}</p> : null}
-    <NoteScroll result={result || { payload: { data: { item: { ...item, media: [] } } } }} apiKey={apiKey} mediaEnabled={images} />
-    {!result ? <div className="mih-xhs-gallery">{item.media?.map((media, index) => <figure key={index}><BusinessImage url={media.url} enabled={images} alt={`笔记媒体 ${index + 1}`} /></figure>)}</div> : null}
+    <NoteScroll key={imageRevision} result={result || { payload: { data: { item: { ...item, media: [] } } } }} apiKey={apiKey} mediaEnabled={images} />
+    {!result ? <div className="mih-xhs-gallery" aria-label={`笔记图片，共 ${item.media?.length || 0} 张`}>{item.media?.map((media, index) => <figure key={`${imageRevision}:${index}`}><BusinessImage className="mih-xhs-note-image" url={media.url} enabled={images} alt={`笔记媒体 ${index + 1}`} /><figcaption>{index + 1} / {item.media.length}</figcaption></figure>)}</div> : null}
   </Modal>
 }
 
@@ -49,7 +55,7 @@ export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScro
   const [kind, setKind] = useState('search_notes')
   const [selector, setSelector] = useState('')
   const [pageSize, setPageSize] = useState('10')
-  const [images, setImages] = useState(false)
+  const [images, setImages] = useState(true)
   const [rows, setRows] = useState([])
   const [cursor, setCursor] = useState(null)
   const [next, setNext] = useState(undefined)
@@ -137,7 +143,7 @@ export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScro
       {isAdmin ? <><Field label="查找 Hub 已存笔记"><input className="qp-input" value={query} onChange={event => setQuery(event.target.value)} maxLength={500} /></Field>
         <button className="qp-button qp-button--outline" disabled={loading || acquiring} onClick={() => void load()}>刷新 Hub 历史</button></> : null}
       <DropdownField label="每批展示数量" value={pageSize} onChange={setPageSize} options={['10', '20', '50'].map(value => ({ value, label: `${value} 篇` }))} />
-      <label><input type="checkbox" checked={images} onChange={event => setImages(event.target.checked)} /> 加载原始图片</label><small>图片从原链接读取，费用未知；默认不访问外部图片。</small>
+      <label><input type="checkbox" checked={images} onChange={event => setImages(event.target.checked)} /> 加载原始图片</label><small>默认显示已有图片；只读取图片链接，不重新调用笔记采集接口。图片服务费用未知，可关闭显示。</small>
       <hr /><h3>采集笔记</h3>
       <DropdownField label="采集来源" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
       <Field label={kind === 'search_notes' ? '采集关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
@@ -159,13 +165,13 @@ export function XiaohongshuFeed({ token, session, apiKey, onSelectLink, NoteScro
         {error ? <ErrorState error={error} /> : null}
         <div className="mih-commerce-grid">{rows.map(item => <article className="mih-commerce-card" key={item.externalId || item.id}><button className="mih-commerce-card-open" onClick={() => setSelected(item)}>
           <div className="mih-commerce-card-image"><BusinessImage url={item.media?.[0]?.url} enabled={images} alt={item.title || '笔记封面'} /></div>
-          <strong>{item.title || '无标题笔记'}</strong><small>{item.author?.name || '作者未知'}</small><span>{item.tags?.map(tag => `#${tag}`).join(' ') || '点击查看正文与标签'}</span>
+          <strong>{item.title || '无标题笔记'}</strong>{item.media?.length ? <small>{item.media.length} 张图片 · 点击查看全部</small> : null}<small>{item.author?.name || '作者未知'}</small><span>{item.tags?.map(tag => `#${tag}`).join(' ') || '点击查看正文与标签'}</span>
         </button></article>)}</div>
         {loading ? <p role="status">正在读取 Hub 历史…</p> : null}
         {!loading && !error && !rows.length ? <p className="mih-commerce-message">暂无笔记。可采集关键词列表，或在下方输入笔记链接。</p> : null}
         {cursor ? <button className="qp-button qp-button--outline" disabled={loading} onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕；上游续页请使用采集操作。</p> : null}
       </div>
     </div></div>
-    {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} NoteScroll={NoteScroll} onSelectLink={onSelectLink} onClose={() => setSelected(null)} /> : null}
+    {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} onSelectLink={onSelectLink} onClose={() => setSelected(null)} /> : null}
   </section>
 }
