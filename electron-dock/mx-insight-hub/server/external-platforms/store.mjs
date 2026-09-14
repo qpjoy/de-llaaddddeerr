@@ -439,7 +439,10 @@ function postgresIngestJobMatches(row, expected, defaultQueue) {
   return row?.queue === (expected.queue || defaultQueue)
     && (row.dedupe_key ?? null) === (expected.dedupeKey ?? null)
     && nullableNumber(row.priority) === nullableNumber(expected.priority ?? 100)
-    && isDeepStrictEqual(row.payload, expected.payload)
+    // pg serializes object parameters as JSON. Canonical records contain Date
+    // values, which return from JSONB as ISO strings; compare the persisted
+    // representation rather than mistaking that conversion for corruption.
+    && isDeepStrictEqual(row.payload, JSON.parse(JSON.stringify(expected.payload)))
 }
 
 function requestEvent(input, overrides = {}) {

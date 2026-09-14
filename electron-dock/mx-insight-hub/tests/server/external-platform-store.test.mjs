@@ -2705,7 +2705,7 @@ test('Postgres finishProviderStep persists only provider-step evidence and uses 
       freshUntil: new Date(capturedAt.getTime() + 60_000),
       staleUntil: new Date(capturedAt.getTime() + 120_000),
     },
-    ingestJob: { payload: { records: [] }, dedupeKey: `step:${input.id}` },
+    ingestJob: { payload: { records: [{ collectedAt: capturedAt, eventTime: capturedAt, deletedAt: null }] }, dedupeKey: `step:${input.id}` },
   }
   const client = {
     async query(sql, values) {
@@ -2747,7 +2747,7 @@ test('Postgres finishProviderStep persists only provider-step evidence and uses 
       if (/INSERT INTO mxq\.jobs/u.test(sql)) {
         storedIngestJob = {
           queue: 'mx-insight-hub:ingest',
-          payload: settlement.ingestJob.payload,
+          payload: JSON.parse(JSON.stringify(settlement.ingestJob.payload)),
           dedupe_key: settlement.ingestJob.dedupeKey,
           priority: 100,
         }
@@ -2773,6 +2773,11 @@ test('Postgres finishProviderStep persists only provider-step evidence and uses 
   assert.equal(queries.some(({ sql }) => /gateway_requests/u.test(sql)), false)
   assert.equal(queries.some(({ sql }) => /INSERT INTO mxq\.jobs/u.test(sql)), true)
   assert.equal(queries.at(-1).sql, 'COMMIT')
+  // JSON normalization must not hide a genuinely changed persisted timestamp.
+  storedIngestJob.payload.records[0].collectedAt = '2026-09-09T03:00:00.000Z'
+  await assert.rejects(() => store.finishProviderStep(settlement),
+    error => error.code === 'external_platform_evidence_conflict')
+
 })
 
 test('Postgres finishProviderStep can terminalize staged detail evidence as unknown without changing it', async () => {
