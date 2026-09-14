@@ -737,6 +737,12 @@ export class MemoryStore {
     })
   }
 
+  async listProductScopes(tenantIds) {
+    return [...this.consumers.values()].filter(item => tenantIds.includes(item.tenantId) && item.status === 'active').map(item => ({
+      platforms: clone(this.grants.get(item.id) || []), capabilities: clone(this.capabilityGrants.get(item.id) || []),
+    }))
+  }
+
   async listApiKeys(consumerId) {
     return [...this.apiKeys.values()]
       .filter((record) => !consumerId || record.consumerId === consumerId)

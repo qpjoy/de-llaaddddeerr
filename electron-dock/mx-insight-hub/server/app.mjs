@@ -838,6 +838,7 @@ export function createApp({
 
   async function documentationScopes(principal) {
     if (principal.platformAdmin) return undefined
+    if (typeof store.listProductScopes === 'function') return store.listProductScopes(principal.tenantIds || [])
     const tenants = new Set(principal.tenantIds || [])
     const consumers = (await service.listConsumers()).filter(item => tenants.has(item.tenantId) && item.status !== 'suspended')
     return Promise.all(consumers.map(async item => ({

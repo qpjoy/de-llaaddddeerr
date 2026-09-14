@@ -1891,7 +1891,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   )
 }
 
-async function loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session) {
+async function loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session, includeConfiguration = true) {
   const [tenants, allConsumers] = await Promise.all([adminApi.tenants(token), adminApi.consumers(token)])
   const safeTenants = (tenants || []).filter((tenant) => tenantAllows(session, tenant.id, 'consumer.read'))
   const visibleTenantIds = new Set(safeTenants.map((tenant) => tenant.id))
@@ -1901,7 +1901,7 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
   const consumerId = consumers.some((consumer) => consumer.id === requestedConsumerId)
     ? requestedConsumerId
     : consumers[0]?.id || ''
-  const configuration = tenantId && consumerId
+  const configuration = includeConfiguration && tenantId && consumerId
     ? await adminApi.platforms(token, { tenantId, consumerId })
     : { grants: [], policies: [] }
   return {
@@ -1989,7 +1989,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     entries: [{ meterKey: '', price: '' }],
   })
   const load = useCallback(async () => {
-    const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session)
+    const context = await loadConfigurationContext(token, requestedTenantId, requestedConsumerId, session, Boolean(session?.platformAdmin))
     const billingPromise = context.tenantId
       ? adminApi.tenantBilling(token, context.tenantId)
       : Promise.resolve({ profile: null, account: null, ledger: [] })

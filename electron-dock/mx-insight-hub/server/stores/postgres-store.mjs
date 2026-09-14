@@ -1313,6 +1313,16 @@ export class PostgresStore {
     }
   }
 
+  async listProductScopes(tenantIds) {
+    if (!tenantIds.length) return []
+    const { rows } = await this.pool.query(`
+      SELECT
+        coalesce((SELECT jsonb_agg(g.platform ORDER BY g.platform) FROM platform_grants g WHERE g.consumer_id=c.id), '[]'::jsonb) AS platforms,
+        coalesce((SELECT jsonb_agg(g.capability ORDER BY g.capability) FROM capability_grants g WHERE g.consumer_id=c.id), '[]'::jsonb) AS capabilities
+      FROM consumers c WHERE c.tenant_id = ANY($1::uuid[]) AND c.status = 'active'`, [tenantIds])
+    return rows
+  }
+
   async listApiKeys(consumerId) {
     const { rows } = consumerId
       ? await this.pool.query(
@@ -1351,14 +1361,20 @@ export class PostgresStore {
     return rows.map(apiKey)
   }
 
-  async findApiKeyById(id) {
-    const { rows } = await this.pool.query('SELECT key_digest FROM api_keys WHERE id = $1', [id])
-    return rows[0] ? this.findApiKeyByDigest(rows[0].key_digest) : null
+  findApiKeyById(id) {
+    return this.findApiKeyContext('id', id)
   }
 
-  async findApiKeyByDigest(digest) {
+  findApiKeyByDigest(digest) {
+    return this.findApiKeyContext('key_digest', digest)
+  }
+
+  async findApiKeyContext(column, value) {
+    if (!['id', 'key_digest'].includes(column)) throw new Error('Unsupported key lookup')
+    // Authentication is fresh on every request. Only last-seen telemetry is
+    // coalesced to one write/minute, avoiding a row-lock hotspot on busy keys.
     const { rows } = await this.pool.query(
-      `SELECT
+      `WITH authenticated AS MATERIALIZED (SELECT
          k.*,
          coalesce(CASE WHEN k.scope_mode = 'legacy_dynamic'
            THEN (SELECT jsonb_agg(scope_grant.platform ORDER BY scope_grant.platform)
@@ -1377,13 +1393,17 @@ export class PostgresStore {
        FROM api_keys k
        JOIN consumers c ON c.id = k.consumer_id AND c.status = 'active'
        JOIN tenants t ON t.id = k.tenant_id AND t.status = 'active'
-       WHERE k.key_digest = $1
+       WHERE k.${column} = $1
          AND k.status = 'active'
-         AND k.expires_at > now()`,
-      [digest],
+         AND k.expires_at > now()), touched AS (
+        UPDATE api_keys target SET last_used_at = now()
+        FROM authenticated valid
+        WHERE target.id = valid.id
+          AND (target.last_used_at IS NULL OR target.last_used_at < now() - interval '1 minute')
+        RETURNING target.id
+      ) SELECT * FROM authenticated`, [value],
     )
     if (!rows[0]) return null
-    await this.pool.query('UPDATE api_keys SET last_used_at = now() WHERE id = $1', [rows[0].id])
     return {
       apiKey: apiKey(rows[0]),
       consumer: consumer(rows[0].consumer_record),
@@ -8217,6 +8237,30 @@ export class PostgresStore {
     authProvider,
     displayName,
   }) {
+    // Existing console users take one fresh read/update statement rather than
+    // opening a transaction and rewriting the binding on every asset/API load.
+    const { rows: known } = await this.pool.query(`
+      WITH existing AS MATERIALIZED (
+        SELECT b.id AS binding_id, b.member_id, m.display_name, m.status
+        FROM iam.external_identity_bindings b JOIN iam.members m ON m.id=b.member_id
+        WHERE b.issuer=$1 AND b.subject=$2 AND b.audience=$3
+      ), seen AS (
+        UPDATE iam.external_identity_bindings b
+        SET last_seen_at=now(), organization_id=coalesce($4,b.organization_id),
+            launcher_tenant_id=coalesce($5,b.launcher_tenant_id), auth_provider=coalesce($6,b.auth_provider)
+        FROM existing e WHERE b.id=e.binding_id AND (
+          b.last_seen_at IS NULL OR b.last_seen_at < now()-interval '1 minute'
+          OR ($4::text IS NOT NULL AND b.organization_id IS DISTINCT FROM $4)
+          OR ($5::text IS NOT NULL AND b.launcher_tenant_id IS DISTINCT FROM $5)
+          OR ($6::text IS NOT NULL AND b.auth_provider IS DISTINCT FROM $6))
+        RETURNING b.id
+      ), renamed AS (
+        UPDATE iam.members m SET display_name=$7, updated_at=now()
+        FROM existing e WHERE m.id=e.member_id AND nullif($7::text,'') IS NOT NULL
+          AND m.display_name IS DISTINCT FROM $7 RETURNING m.id
+      ) SELECT * FROM existing`, [issuer,subject,audience,organizationId,launcherTenantId,authProvider,displayName])
+    if (known[0]) return { id: known[0].member_id, displayName: displayName || known[0].display_name, status: known[0].status }
+
     return withPgTransaction(this.pool, async (client) => {
       const existing = await client.query(
         `SELECT b.member_id, m.display_name, m.status
@@ -8280,7 +8324,8 @@ export class PostgresStore {
       await this.pool.query(
         `INSERT INTO iam.platform_admins (member_id, granted_via)
          VALUES ($1, $2)
-         ON CONFLICT (member_id) DO UPDATE SET granted_via = EXCLUDED.granted_via, updated_at = now()`,
+         ON CONFLICT (member_id) DO UPDATE SET granted_via = EXCLUDED.granted_via, updated_at = now()
+         WHERE platform_admins.granted_via IS DISTINCT FROM EXCLUDED.granted_via`,
         [memberId, grantedVia || 'launcher-scope'],
       )
       return true

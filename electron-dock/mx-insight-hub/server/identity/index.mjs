@@ -94,14 +94,12 @@ export class IdentityService {
     }
 
     const grantsAdmin = principal.scopes.some((scope) => this.adminScopes.has(scope))
-    const platformAdmin = await this.store.syncPlatformAdmin(member.id, {
+    const [platformAdmin, memberships] = await Promise.all([this.store.syncPlatformAdmin(member.id, {
       granted: grantsAdmin,
       grantedVia: grantsAdmin
         ? `launcher-scope:${principal.scopes.find((scope) => this.adminScopes.has(scope))}`
         : null,
-    })
-
-    const memberships = await this.store.listTenantMemberships(member.id)
+    }), this.store.listTenantMemberships(member.id)])
     const active = memberships
       .filter((membership) => membership.status === 'active')
       .map((membership) => ({
