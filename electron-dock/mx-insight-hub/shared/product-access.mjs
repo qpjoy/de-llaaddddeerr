@@ -13,3 +13,11 @@ export function productAllowed(path, scopes = []) {
   const rule = PRODUCT_ACCESS[path]
   return !!rule && scopes.some(scope => scope.platforms?.includes(rule.platform) && (!rule.any || rule.any.some(value => scope.capabilities?.includes(value))))
 }
+
+// Explicit UI preset only: callers still submit through the audited grant APIs.
+export function withIpRiskProductScopes(form) {
+  return { ...form,
+    platforms: [...new Set([...form.platforms, 'ip_risk'])],
+    capabilities: [...new Set([...form.capabilities, 'ip.risk.query'])],
+  }
+}

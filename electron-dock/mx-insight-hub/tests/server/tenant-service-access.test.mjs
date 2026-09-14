@@ -49,3 +49,32 @@ test('Postgres tenant grant failure rolls back grants, configuration and audit',
   assert.equal(queries.some(q=>q.startsWith('INSERT INTO tenant_service_access')),false)
   assert.equal(released,true)
 })
+
+import { productAllowed, withIpRiskProductScopes } from '../../shared/product-access.mjs'
+import { tenantOpenApiDocument, publicDocsHtmlForPath } from '../../server/public-docs.mjs'
+test('IP-only tenant product preset exposes menu and docs, without expanding an old Key', async () => {
+ const store = new MemoryStore()
+ const service = new HubService({ store, adapter: {}, apiKeyPepper: 'ip-tenant-access-test-pepper-at-least-32-bytes' })
+ const tenant = await service.createTenant({ name: 'IP only' })
+ const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'IP consumer' })
+ await service.putPlatformConfiguration('ip_risk', { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+ const key = await service.createApiKey({ consumerId: consumer.id, name: 'Old IP key', platforms: ['ip_risk'], capabilities: [] })
+ const scopes = async () => [{ platforms: await store.listGrants(consumer.id), capabilities: await store.listCapabilityGrants(consumer.id) }]
+ assert.equal(productAllowed('/data-products/ip-risk', await scopes()), false)
+ assert.equal(tenantOpenApiDocument(await scopes()).paths['/data/ip/risk'], undefined)
+ const form = withIpRiskProductScopes({ platforms: ['ip_risk'], capabilities: [], revision: 0, reason: 'Enable IP product', maxRequests: 42, windowSeconds: 3600, maxPageSize: 20, maxCrawlWork: 50 })
+ assert.deepEqual(form.platforms, ['ip_risk'])
+ assert.deepEqual(form.capabilities, ['ip.risk.query'])
+ await service.putTenantServiceAccess(tenant.id, form, 'admin')
+ const access = await scopes()
+ assert.equal(productAllowed('/data-products/ip-risk', access), true)
+ assert.equal(productAllowed('/data-products/xiaohongshu-note', access), false)
+ const schema = tenantOpenApiDocument(access)
+ assert.ok(schema.paths['/data/ip/risk']); assert.ok(schema.paths['/data/ip/risk/batch'])
+ const html = publicDocsHtmlForPath('/docs/ip-risk', { tenant: true, scopes: access })
+ assert.match(html, /IP 风险画像/u); assert.doesNotMatch(html, /ipsearch|ipdatacloud/u)
+ assert.deepEqual(await store.listEffectiveCapabilityGrants(consumer.id, key.id), [])
+ await service.updateApiKeyScopes(key.id, { platforms: ['ip_risk'], capabilities: ['ip.risk.query'], expected: { scopeMode: key.scopeMode, platforms: key.platforms, capabilities: key.capabilities } }, 'admin')
+ assert.deepEqual(await store.listEffectiveCapabilityGrants(consumer.id, key.id), ['ip.risk.query'])
+ assert.equal((await service.authenticate(key.secret)).apiKey.id, key.id)
+})

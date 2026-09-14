@@ -1,3 +1,4 @@
+import { withIpRiskProductScopes } from '../shared/product-access.mjs'
 import { KeyReveal } from './key-reveal.jsx'
 import { TenantServiceAccess } from './tenant-service-access.jsx'
 import { TenantMemberships } from './tenant-memberships.jsx'
@@ -1718,6 +1719,12 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 capabilities: [...new Set([...current.capabilities, ...['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts', 'compat.xiaohongshu.app_v2'].filter(scope => scopeOptions.capabilities.includes(scope))])],
               }))}>勾选已开通的小红书画卷权限</button>
               <small>同时选择小红书数据、已开通的笔记操作和 App V2 接口。请确认勾选范围后保存；调整权限时原 Key 继续有效。</small>
+            </div> : null}
+            {!rotationSource && scopeOptions.platforms.includes('ip_risk') ? <div>
+              <button className="qp-button qp-button--outline qp-button--sm" type="button"
+                disabled={scopeLoading || !scopeOptions.capabilities.includes('ip.risk.query')}
+                onClick={() => setForm(withIpRiskProductScopes)}>勾选已开通的 IP 风险画像权限</button>
+              {!scopeOptions.capabilities.includes('ip.risk.query') ? <p role="status">当前调用者只有 ip_risk 数据域，尚未开通“IP 风险查询能力（ip.risk.query）”。请平台管理员在“调用者 → 租户业务开通”中补齐并保存，再重新打开此窗口。</p> : null}
             </div> : null}
             <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，可在此选择授权后应用到原 Key。">
               <div className="mih-key-scopes">
