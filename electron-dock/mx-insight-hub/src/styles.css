@@ -12989,3 +12989,10 @@ button.mih-catalog-status {
 .mih-api-response { min-height: 200px; max-height: 600px; }
 .mih-api-response-heading { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 @media(max-width: 760px) { .mih-api-console { grid-template-columns: minmax(0,1fr); } .mih-api-console-nav { border-right: 0; border-bottom: 1px solid var(--qp-line); } .mih-api-console-main { padding: 14px; } }
+.mih-catalog-public-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+.mih-catalog-public-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin-block: 20px; }
+.mih-catalog-public-filters > * { flex: 1 1 180px; }
+.mih-table[aria-label="API Key 列表"] { min-width: 1120px; }
+.mih-table[aria-label="API Key 列表"] td:nth-child(3) { min-width: 160px; }
+.mih-table[aria-label="API Key 列表"] td:nth-child(4) { min-width: 200px; max-width: 340px; }
+.mih-table[aria-label="API Key 列表"] .qp-button { white-space: nowrap; }

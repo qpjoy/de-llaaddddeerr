@@ -6206,7 +6206,7 @@ function normalizedDocsPath(pathname) {
   return normalized || '/'
 }
 
-const TENANT_HIDDEN_DOCS = new Set(['source-catalog', 'search', 'night-all', 'tools', 'discovery'])
+const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
@@ -6214,7 +6214,8 @@ export function tenantDocumentPathAllowed(path, scopes) {
   let platform = operation?.['x-mx-required-platform']
   let capabilities = operation?.['x-mx-required-capabilities'] || []
   if (!platform) {
-    if (path === '/data/post' || path === '/data/posts/media') { platform = 'xiaohongshu'; capabilities = ['social.posts.resolve'] }
+    if (path.startsWith('/data/source-catalog')) { return scopes.some(scope => scope.platforms.includes('source_catalog') && (!path.endsWith('/items') || scope.platforms.includes('mobile_commerce'))) }
+    else if (path === '/data/post' || path === '/data/posts/media') { platform = 'xiaohongshu'; capabilities = ['social.posts.resolve'] }
     else if (path.startsWith('/xiaohongshu/')) return false
     else if (path.startsWith('/data/ecommerce/')) { platform = 'ecommerce'; capabilities = ['ecommerce.products.search'] }
     else if (path.startsWith('/data/telegram/') || path.startsWith('/data/canonical/items/')) platform = 'telegram'
@@ -6226,6 +6227,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  'source-catalog': ['/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
   'ecommerce-treasure-box': ['/data/ecommerce/products/search'],
   'social-accounts': ['/data/social/accounts/search'],
@@ -6247,7 +6249,7 @@ export function tenantOpenApiDocument(scopes) {
   const document = structuredClone(PUBLIC_OPENAPI_DOCUMENT)
   const hidden = new Set(['/data/capabilities', '/data/search', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
   document.paths = Object.fromEntries(Object.entries(document.paths).filter(([path]) =>
-    !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/data/source-catalog') && !path.startsWith('/night-all/') && !path.startsWith('/search/')))
+    !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/night-all/') && !path.startsWith('/search/')))
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6275,7 +6277,7 @@ function tenantDocBody(route, scopes) {
   const resolve = value => value?.$ref ? value.$ref.slice(2).split('/').reduce((node, key) => node?.[key], PUBLIC_OPENAPI_DOCUMENT) : value
   const copy = value => String(value || '').split(/(?<=[。.!])\s*/).filter(sentence => !/upstream|provider|supplier|procurement|供应|上游|采购|成本|Night-All|TikHub|JustOne/i.test(sentence)).join(' ')
   if (route.key === 'start') return '<h1>Hub 开放平台</h1><p class="lead">使用一把 Hub API Key 调用已开通的数据产品和平台接口。左侧目录展示当前账户已开放的服务；具体调用还需所选 Key 包含相应授权。</p><div class="cards"><div class="card"><strong>接口地址</strong><code>/api/v1</code></div><div class="card"><strong>认证</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>接口规范</strong><a href="/docs/openapi.json">OpenAPI JSON</a></div></div>'
-  if (route.key === 'rules') return '<h2>认证与调用规则</h2><p>在 API Keys 中签发已授权的 Live Key。请求携带 <code>Authorization: Bearer YOUR_HUB_API_KEY</code> 或 <code>x-api-key</code>，使用同一 Hub 接口地址。</p><p>账户开通权限是上限；每把 Key 使用签发时选择的权限。新增能力需要签发包含该能力的新 Key。</p><h3>计费与重试</h3><p>费用以当前合同费率和账单为准。对同一请求重试时保留 Idempotency-Key 和请求参数；更换页码、游标或查询条件须使用新标识。结果不确定时先查询请求记录，避免重复提交。</p><h3>额度</h3><p>账户余额、套餐和 Key 限额共同生效。收到 429 后等待额度窗口恢复；不要连续重试。</p>'
+  if (route.key === 'rules') return '<h2>认证与调用规则</h2><p>在 API Keys 中签发已授权的 Live Key。请求携带 <code>Authorization: Bearer YOUR_HUB_API_KEY</code> 或 <code>x-api-key</code>，使用同一 Hub 接口地址。</p><p>账户开通权限是上限；每把 Key 使用签发时选择的权限。新增能力可在 API Keys 中调整原 Key 权限，无需更换密钥；变更后即时生效。</p><h3>计费与重试</h3><p>费用以当前合同费率和账单为准。对同一请求重试时保留 Idempotency-Key 和请求参数；更换页码、游标或查询条件须使用新标识。结果不确定时先查询请求记录，避免重复提交。</p><h3>额度</h3><p>账户余额、套餐和 Key 限额共同生效。收到 429 后等待额度窗口恢复；不要连续重试。</p>'
   if (route.key === 'errors') return '<h2>错误与重试</h2><p>保留错误码与 requestId，便于排查。401：检查 Key；403：检查服务与 Key 授权；429：等待额度恢复。请求结果不确定时，使用原 Idempotency-Key 查询或重试同一请求，避免重复消费。</p>'
   const paths = route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
@@ -6290,6 +6292,7 @@ function tenantDocBody(route, scopes) {
       html += `<p>响应结构与完整字段定义见 <a href="/docs/openapi.json">当前账户 OpenAPI 规范</a>。</p>`
     }
   }
+  if (route.key === 'source-catalog') return html + '<h3>复刻目录看板</h3><p>先调用 metadata 获取字段、枚举、分类、汇总与筛选项，再调用列表获取数据。详情使用列表返回的 UUID；items 还需要 mobile_commerce 授权。列表按 pageInfo.nextCursor 续页；筛选条件或 pageSize 改变后必须清空游标。GET 每次调用独立计量，不使用 Idempotency-Key。</p><pre>GET /api/v1/data/source-catalog?pageSize=50\nAuthorization: Bearer YOUR_HUB_API_KEY</pre>'
   return html + '<h3>分页与交付</h3><p>仅使用接口声明的分页参数；返回游标时原样提交游标。每次新查询或续页使用新的 Idempotency-Key，同一请求重试保留原值。列表结果可能是摘要，完整正文通过已授权的详情接口获取。</p><p>支持 deliveryMode 的接口：cache_only 只读已存数据；cache_first 优先有效缓存；refresh 更新数据，失败可返回已存版本；live_only 仅返回实时结果。具体可选值以该接口参数表为准。数据时间以响应为准，计费以当前套餐和账单为准。</p>'
 }
 

@@ -1,3 +1,5 @@
+import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
+import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
 import { DocsPage } from './pages-docs.jsx'
 import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
@@ -368,17 +370,18 @@ const LEGACY_ROUTE_REDIRECTS = new Map([
 
 
 function visibleRoutes(session) {
+  const productRoutes = route => !session?.platformAdmin && PRODUCT_ACCESS[route.path] ? productAllowed(route.path, session?.productScopes) && session?.capabilities?.includes('apikey.read') : null
   // An older server may omit capabilities, but platform-wide pages still stay
   // hidden unless the session explicitly identifies a platform administrator.
   if (!session?.capabilities) {
-    return ROUTES.filter((route) => (
+    return ROUTES.filter((route) => productRoutes(route) ?? (
       (!route.platformAdmin || session?.platformAdmin)
         && (!route.adminTokenOnly || session?.kind === 'admin-token')
         && (!route.ownAccess || showsOwnAccess(session))
     ))
   }
   const granted = new Set(session.capabilities)
-  return ROUTES.filter((route) => (
+  return ROUTES.filter((route) => productRoutes(route) ?? (
     (!route.platformAdmin || session.platformAdmin)
       && (!route.adminTokenOnly || session.kind === 'admin-token')
       && (!route.ownAccess || showsOwnAccess(session))
@@ -821,7 +824,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && route.path !== '/data-products/xiaohongshu-note' ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     theme,
     token,

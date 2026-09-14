@@ -4,7 +4,7 @@ import { publicDocsHtmlForPath, tenantOpenApiDocument, PUBLIC_OPENAPI_DOCUMENT }
 
 test('tenant pages omit operator navigation and reject direct hidden pages', () => {
   const html = publicDocsHtmlForPath('/docs', { tenant: true })
-  for (const path of ['/docs/tools', '/docs/evidence', '/docs/night-all', '/docs/source-catalog', '/docs/search']) {
+  for (const path of ['/docs/tools', '/docs/evidence', '/docs/night-all', '/docs/search']) {
     assert.equal(publicDocsHtmlForPath(path, { tenant: true }), null)
     assert.ok(publicDocsHtmlForPath(path))
     assert.ok(!html.includes(`href="${path}"`))
@@ -22,7 +22,7 @@ test('tenant schema preserves product contracts and all referenced schemas witho
   assert.ok(doc.paths['/xiaohongshu/app_v2/search_notes'])
   assert.ok(doc.paths['/data/post'])
   assert.ok(!doc.paths['/tools/tokenize'])
-  assert.ok(!doc.paths['/data/source-catalog'])
+  assert.ok(doc.paths['/data/source-catalog'])
   const visit = value => {
     if (!value || typeof value !== 'object') return
     for (const [key, child] of Object.entries(value)) {
@@ -56,3 +56,15 @@ test('scope combinations stay within one consumer and empty access hides product
   assert.ok(!tenantOpenApiDocument(scopes).paths['/xiaohongshu/app_v2/search_notes'])
   assert.equal(publicDocsHtmlForPath('/docs/xiaohongshu-note', { tenant: true, scopes: [] }), null)
 })
+
+ test('catalog docs and schema follow same-consumer grants, including item extra scope', () => {
+ const scopes = [{ platforms: ['source_catalog'], capabilities: [] }]
+ assert.ok(publicDocsHtmlForPath('/docs/source-catalog', { tenant: true, scopes }))
+ const doc = tenantOpenApiDocument(scopes)
+ assert.ok(doc.paths['/data/source-catalog'])
+ assert.ok(doc.paths['/data/source-catalog/metadata'])
+ assert.ok(!doc.paths['/data/source-catalog/{id}/items'])
+ assert.ok(!tenantOpenApiDocument([...scopes, { platforms: ['mobile_commerce'], capabilities: [] }]).paths['/data/source-catalog/{id}/items'])
+ assert.ok(tenantOpenApiDocument([{ platforms: ['source_catalog', 'mobile_commerce'], capabilities: [] }]).paths['/data/source-catalog/{id}/items'])
+ assert.equal(publicDocsHtmlForPath('/docs/source-catalog', { tenant: true, scopes: [] }), null)
+ })

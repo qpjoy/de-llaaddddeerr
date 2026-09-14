@@ -773,6 +773,26 @@ export class MemoryStore {
     return null
   }
 
+  async updateApiKeyScopes(id, { platformEntitlements, capabilityEntitlements, expected, actor }) {
+    const record = this.apiKeys.get(id)
+    if (!record || record.status !== 'active' || new Date(record.expiresAt) <= new Date()) throw new AppError(409, 'api_key_unavailable', 'Key is expired or revoked')
+    const current = this.#publicApiKey(record)
+    const before = { scopeMode: current.scopeMode, platforms: current.platforms, capabilities: current.capabilities }
+    if (expected.scopeMode !== before.scopeMode || ['platforms', 'capabilities'].some(field => JSON.stringify([...expected[field]].sort()) !== JSON.stringify([...before[field]].sort()))) throw new AppError(409, 'api_key_scopes_changed', 'Key permissions changed; reload before saving')
+    for (const [rows, field, grants] of [[platformEntitlements, 'platform', this.grants], [capabilityEntitlements, 'capability', this.capabilityGrants]]) {
+      if (rows.some(row => !(grants.get(record.consumerId) || []).includes(row[field]))) throw new AppError(409, 'api_key_scope_not_granted', 'Consumer grants changed')
+    }
+    for (const [rows, field, map] of [[platformEntitlements, 'platform', this.apiKeyPlatformEntitlements], [capabilityEntitlements, 'capability', this.apiKeyCapabilityEntitlements]]) {
+      const old = map.get(id) || []
+      map.set(id, clone(rows.map(row => old.find(item => item[field] === row[field]) || row)))
+    }
+    record.scopeMode = 'snapshot'
+    const updated = this.#publicApiKey(record)
+    this.apiKeyScopeEvents ||= []
+    this.apiKeyScopeEvents.push({ id, actor, before, after: { scopeMode: updated.scopeMode, platforms: updated.platforms, capabilities: updated.capabilities } })
+    return updated
+  }
+
   async revokeApiKey(id) {
     const record = this.apiKeys.get(id)
     if (!record) throw new AppError(404, 'api_key_not_found', 'API key not found')

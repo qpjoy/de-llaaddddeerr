@@ -779,3 +779,26 @@ test('tenant documentation filtering applies to embedded pages and direct schema
   }
   assert.equal((await callAdmin('/internal/v1/admin/documentation?path=/docs/tools')).status, 200)
 })
+
+test('binding an existing consumer preserves its original key and enables scoped catalog docs and scope edits', async () => {
+  const tenant = (await (await callAdmin('/internal/v1/admin/tenants', { method: 'POST', body: { name: 'Legacy catalog tenant' } })).json()).data
+  const consumer = (await (await callAdmin('/internal/v1/admin/consumers', { method: 'POST', body: { tenantId: tenant.id, name: 'Pre-binding consumer' } })).json()).data
+  await store.replaceGrants(consumer.id, ['source_catalog', 'xiaohongshu'])
+  const issued = (await (await callAdmin('/internal/v1/admin/api-keys', { method: 'POST', body: { consumerId: consumer.id, name: 'Pre-binding key', platforms: ['source_catalog'], capabilities: [] } })).json()).data
+  launcherState = { payload: launcherResponse({ subject: 'catalog-bound-user' }) }
+  const first = (await (await callAdmin('/internal/v1/admin/session', { token: 'mx-catalog-bound' })).json()).data
+  await callAdmin('/internal/v1/admin/members/memberships', { method: 'POST', body: { memberId: first.memberId, tenantId: tenant.id, role: 'owner' } })
+  const session = (await (await callAdmin('/internal/v1/admin/session', { token: 'mx-catalog-bound' })).json()).data
+  assert.ok(session.productScopes.some(scope => scope.platforms.includes('source_catalog')))
+  const doc = await callAdmin('/internal/v1/admin/documentation?path=/docs/source-catalog', { token: 'mx-catalog-bound' })
+  assert.equal(doc.status, 200)
+  assert.match((await doc.json()).data.html, /\/api\/v1\/data\/source-catalog/)
+  const body = { platforms: ['source_catalog', 'xiaohongshu'], capabilities: [], expected: { scopeMode: issued.scopeMode, platforms: issued.platforms, capabilities: issued.capabilities } }
+  const saved = await callAdmin(`/internal/v1/admin/api-keys/${issued.id}/scopes`, { token: 'mx-catalog-bound', method: 'POST', body })
+  assert.equal(saved.status, 200)
+  const keys = (await (await callAdmin('/internal/v1/admin/api-keys', { token: 'mx-catalog-bound' })).json()).data
+  assert.ok(keys.some(key => key.id === issued.id && key.platforms.includes('xiaohongshu')))
+  launcherState = { payload: launcherResponse({ subject: 'catalog-unbound-user' }) }
+  const denied = await callAdmin(`/internal/v1/admin/api-keys/${issued.id}/scopes`, { token: 'mx-catalog-unbound', method: 'POST', body })
+  assert.equal(denied.status, 403)
+})

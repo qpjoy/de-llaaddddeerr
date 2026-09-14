@@ -655,7 +655,7 @@ export class HubService {
     return this.store.listConsumers(optionalUuid(tenantId, 'tenantId'))
   }
 
-  async createApiKey(body) {
+  async createApiKey(body, scopeUpdate = null) {
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const unsupported = Object.keys(body).filter(
       (field) => !['consumerId', 'name', 'environment', 'expiresInDays', 'scopePreset', 'platforms', 'capabilities'].includes(field),
@@ -724,6 +724,9 @@ export class HubService {
         windowSeconds: policy.windowSeconds,
       }
     }))
+    if (scopeUpdate) return this.store.updateApiKeyScopes(scopeUpdate.id, {
+      platformEntitlements, capabilityEntitlements, expected: scopeUpdate.expected, actor: scopeUpdate.actor,
+    })
     const issued = issueApiKey(this.apiKeyPepper, environment)
     const record = await this.store.createApiKey({
       ...issued,
@@ -737,6 +740,15 @@ export class HubService {
       capabilityEntitlements,
     })
     return { ...record, secret: issued.plaintext }
+  }
+
+  async updateApiKeyScopes(id, body, actor) {
+    assert(body && Array.isArray(body.platforms) && Array.isArray(body.capabilities) && body.expected && Array.isArray(body.expected.platforms) && Array.isArray(body.expected.capabilities), 400, 'invalid_request', 'Explicit scopes and previous scope snapshot are required')
+    assert(Object.keys(body).every(key => ['platforms', 'capabilities', 'expected'].includes(key)), 400, 'unsupported_fields', 'Only scopes can be updated')
+    const key = (await this.store.listApiKeys()).find(item => item.id === requiredUuid(id, 'id'))
+    assert(key, 404, 'api_key_not_found', 'API key not found')
+    assert(key.status === 'active' && new Date(key.expiresAt) > new Date(), 409, 'api_key_unavailable', 'Key is expired or revoked')
+    return this.createApiKey({ consumerId: key.consumerId, name: key.name, platforms: body.platforms, capabilities: body.capabilities }, { id, expected: body.expected, actor })
   }
 
   async revealApiKey(id, memberId) {

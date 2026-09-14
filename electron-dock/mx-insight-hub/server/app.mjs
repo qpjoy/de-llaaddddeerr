@@ -1517,6 +1517,7 @@ export function createApp({
             scoped: principal.tenantIds !== null,
             tenantIds: principal.tenantIds,
             capabilities: principal.capabilities,
+            productScopes: await documentationScopes(principal),
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
             // Deployment routing metadata, not a credential. Browser clients
@@ -2437,6 +2438,14 @@ export function createApp({
         sendJson(response, 201, { data: await service.createApiKey(body), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/scopes')
+      if (request.method === 'POST' && params) {
+        await assertApiKeyCapability(principal, params.id, 'apikey.write')
+        const body = await readJson(request)
+        sendJson(response, 200, { data: await service.updateApiKeyScopes(params.id, body, principal.memberId || principal.kind), requestId })
+        return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/reveal')
       if (params && request.method === 'POST') {
         await assertApiKeyCapability(principal,params.id,'apikey.write')

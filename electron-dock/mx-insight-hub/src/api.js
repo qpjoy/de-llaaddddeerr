@@ -203,6 +203,10 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  sourceCatalog: (apiKey, query = {}) => publicDataRequest(apiKey, `/api/v1/data/source-catalog${queryString(query)}`),
+  sourceCatalogMetadata: apiKey => publicDataRequest(apiKey, '/api/v1/data/source-catalog/metadata'),
+  sourceCatalogDetail: (apiKey, id) => publicDataRequest(apiKey, `/api/v1/data/source-catalog/${encodeURIComponent(id)}`),
+
   capabilities: (apiKey, { signal } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/data/capabilities',
@@ -320,6 +324,7 @@ export const adminApi = {
   apiKeyOverview: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/overview`),
   consumerHealth: (token, id) => request(token, `${ADMIN_ROOT}/consumers/${encodeURIComponent(id)}/health`),
   myOverview: (token, tenantId) => request(token, `${ADMIN_ROOT}/me/overview${tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : ''}`),
+  updateApiKeyScopes: (token, id, body) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/scopes`, { method: 'POST', body }),
   revokeApiKey: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
   plans: (token, consumerId) => request(token, `${ADMIN_ROOT}/plans`, { query: { consumerId } }),
   publishPlan: (token, body) => request(token, `${ADMIN_ROOT}/plans`, { method: 'POST', body }),

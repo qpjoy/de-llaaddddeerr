@@ -1406,6 +1406,46 @@ export class PostgresStore {
     return rows[0]?.tenant_status === 'suspended' ? 'tenant_suspended' : null
   }
 
+  async updateApiKeyScopes(id, { platformEntitlements, capabilityEntitlements, expected, actor }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const { rows: keys } = await client.query('SELECT * FROM api_keys WHERE id=$1 FOR UPDATE', [id])
+      const key = keys[0]
+      if (!key || key.status !== 'active' || new Date(key.expires_at) <= new Date()) throw new AppError(409, 'api_key_unavailable', 'Key is expired or revoked')
+      const before = { scopeMode: key.scope_mode, platforms: [], capabilities: [] }
+      const after = { scopeMode: 'snapshot', platforms: [], capabilities: [] }
+      const groups = [
+        ['platforms', 'platform', 'api_key_platform_entitlements', 'platform_grants', platformEntitlements],
+        ['capabilities', 'capability', 'api_key_capability_entitlements', 'capability_grants', capabilityEntitlements],
+      ]
+      const snapshots = []
+      for (const [field, column, table, grants, requested] of groups) {
+        const { rows: old } = await client.query(`SELECT * FROM ${table} WHERE api_key_id=$1`, [id])
+        const { rows: allowed } = await client.query(`SELECT ${column} FROM ${grants} WHERE consumer_id=$1`, [key.consumer_id])
+        before[field] = (key.scope_mode === 'legacy_dynamic' ? allowed : old).map(row => row[column]).sort()
+        if (expected.scopeMode !== key.scope_mode || JSON.stringify([...expected[field]].sort()) !== JSON.stringify(before[field])) throw new AppError(409, 'api_key_scopes_changed', 'Key permissions changed; reload before saving')
+        if (requested.some(row => !allowed.some(grant => grant[column] === row[column]))) throw new AppError(409, 'api_key_scope_not_granted', 'Consumer grants changed; reload before saving')
+        after[field] = requested.map(row => row[column]).sort()
+        snapshots.push(old)
+      }
+      for (const [index, [, column, table, , requested]] of groups.entries()) {
+        await client.query(`DELETE FROM ${table} WHERE api_key_id=$1`, [id])
+        for (const row of requested) {
+          const old = snapshots[index].find(item => item[column] === row[column])
+          const values = [id, row[column], old?.max_requests ?? row.maxRequests, old?.window_seconds ?? row.windowSeconds]
+          if (column === 'platform') values.push(old?.max_page_size ?? row.maxPageSize)
+          await client.query(`INSERT INTO ${table} (api_key_id, ${column}, max_requests, window_seconds${column === 'platform' ? ', max_page_size' : ''}) VALUES (${values.map((_, i) => '$' + (i + 1)).join(',')})`, values)
+        }
+      }
+      await client.query("UPDATE api_keys SET scope_mode='snapshot' WHERE id=$1", [id])
+      await client.query('INSERT INTO api_key_scope_events(api_key_id,actor,previous_scopes,next_scopes) VALUES($1,$2,$3,$4)', [id, actor, JSON.stringify(before), JSON.stringify(after)])
+      await client.query('COMMIT')
+      return { id, ...after }
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
+    finally { client.release() }
+  }
+
   async revokeApiKey(id) {
     const { rows } = await this.pool.query(
       `UPDATE api_keys SET status = 'revoked', revoked_at = now()

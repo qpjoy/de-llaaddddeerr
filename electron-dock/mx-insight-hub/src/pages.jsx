@@ -1313,6 +1313,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const scopeRequestRef = useRef(0)
   const [issuedSecret, setIssuedSecret] = useState(null)
   const [revealTarget, setRevealTarget] = useState(null)
+  const [scopeTarget, setScopeTarget] = useState(null)
   const [rotationSource, setRotationSource] = useState(null)
   const [revokeTarget, setRevokeTarget] = useState(null)
   const [revoking, setRevoking] = useState(false)
@@ -1410,6 +1411,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   }
 
   const showCreate = async () => {
+    setScopeTarget(null)
     const targetConsumerId = writableConsumers.some((consumer) => consumer.id === selectedConsumerId)
       ? selectedConsumerId
       : writableConsumers[0]?.id || ''
@@ -1422,6 +1424,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   }
 
   const showRotate = async (key) => {
+    setScopeTarget(null)
     if (key.status !== 'active' || !writableConsumers.some((consumer) => consumer.id === key.consumerId)) return
     setForm({
       consumerId: key.consumerId,
@@ -1439,6 +1442,13 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       platforms: key.platforms || [],
       capabilities: key.capabilities || [],
     })
+  }
+
+  const showScopeEdit = async key => {
+    setScopeTarget(key); setRotationSource(null); setFormError(null)
+    setForm({ consumerId: key.consumerId, name: key.name, platforms: key.platforms || [], capabilities: key.capabilities || [] })
+    setOpen(true)
+    await applyScopes(key.consumerId, key)
   }
 
   const changeFormConsumer = async (targetConsumerId) => {
@@ -1459,6 +1469,15 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     setSaving(true)
     setFormError(null)
     try {
+      if (scopeTarget) {
+        await adminApi.updateApiKeyScopes(token, scopeTarget.id, {
+          platforms: form.platforms, capabilities: form.capabilities,
+          expected: { scopeMode: scopeTarget.scopeMode, platforms: scopeTarget.platforms || [], capabilities: scopeTarget.capabilities || [] },
+        })
+        setOpen(false); setScopeTarget(null); state.refresh()
+        notify('权限已更新，原 Key 继续有效；产品页刷新调用身份后可见新权限', 'success')
+        return
+      }
       const key = await adminApi.createApiKey(token, form)
       setOpen(false)
       setIssuedSecret({
@@ -1514,7 +1533,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
   return (
     <>
-      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="每把 Key 在签发时固化平台与能力范围，并独立统计用量。调用者授权减少会立即收窄现有 Key；新增授权需要重新签发。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="每把 Key 在签发时固化平台与能力范围，并独立统计用量。调用者授权减少会立即收窄现有 Key；新增授权可通过“调整 Key 权限”应用到原 Key。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
         {canIssueKey ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
             <Plus size={17} aria-hidden="true" />签发 API Key
@@ -1601,7 +1620,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                   <td><strong>{key.name}</strong><small>{formatDate(key.createdAt)} 签发</small></td>
                   <td>{consumerNames.get(key.consumerId) || key.consumerId}</td>
                   <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code><small>仅用于核对；查看完整 Key 需验证账号密码</small></td>
-                  <td><strong>{key.platforms?.length || 0} 平台 · {key.capabilities?.length || 0} 能力</strong><small>{[...(key.platforms || []), ...(key.capabilities || [])].join('、') || '无调用权限'}</small></td>
+                  <td><details><summary>{key.platforms?.length || 0} 平台 · {key.capabilities?.length || 0} 能力</summary><small>{[...(key.platforms || []), ...(key.capabilities || [])].join('、') || '无调用权限'}</small></details></td>
                   <td>
                     <strong>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? 'Test · 兼容标签' : 'Live'}</strong>
                     <small>{key.environment === 'test' || key.prefix?.startsWith('mih_test_') ? '非沙箱；外部电商接口拒绝使用' : '正式开放能力凭据'}</small>
@@ -1640,6 +1659,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                         <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={key.status !== 'active'} onClick={() => showRotate(key)}>
                           <ArrowClockwise size={15} aria-hidden="true" />签发替代 Key
                         </button>
+                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={key.effectiveStatus !== 'active'} onClick={() => showScopeEdit(key)}>调整 Key 权限</button>
                         <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`撤销 ${key.name}`} disabled={key.status !== 'active'} onClick={() => setRevokeTarget(key)}>
                           <Trash size={17} aria-hidden="true" />
                         </button>
@@ -1662,10 +1682,10 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
       {open ? (
         <Modal
-          title={rotationSource ? '签发替代 API Key' : '签发 API Key'}
-          description={rotationSource
+          title={scopeTarget ? '调整 Key 权限 · 保留原密钥' : rotationSource ? '签发替代 API Key' : '签发 API Key'}
+          description={scopeTarget ? '仅更新勾选的授权，原密钥、有效期、已有额度限制与历史用量保持不变。只能选择调用者已开放的权限；提交会立即影响使用此 Key 的客户端。' : rotationSource
             ? '先签发不超过旧 Key 有效范围的替代 Key；安全保存并完成客户端切换后，再显式撤销旧 Key。'
-            : '新 Key 默认不包含任何平台或能力，也可保持零权限；需要调用时再显式勾选不可变范围。完整 Key 加密保存，之后需验证账号密码查看。'}
+            : '新 Key 默认不包含任何平台或能力，也可保持零权限；需要调用时再显式勾选授权范围。完整 Key 加密保存，之后需验证账号密码查看。'}
           onClose={() => {
             if (!saving) {
               scopeRequestRef.current += 1
@@ -1676,7 +1696,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           footer={(
             <>
               <button className="qp-button qp-button--ghost" type="button" onClick={() => setOpen(false)} disabled={saving}>取消</button>
-              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading}>{saving ? '正在签发' : rotationSource ? '签发替代 Key' : '签发密钥'}</button>
+              <button className="qp-button qp-button--primary" type="submit" form="create-api-key" disabled={saving || scopeLoading}>{saving ? '正在保存' : scopeTarget ? '应用权限到原 Key' : rotationSource ? '签发替代 Key' : '签发密钥'}</button>
             </>
           )}
         >
@@ -1684,10 +1704,10 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             <DropdownField label="调用者" value={form.consumerId}
               onChange={changeFormConsumer}
               options={writableConsumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
-              disabled={scopeLoading || Boolean(rotationSource)}
+              disabled={scopeLoading || Boolean(rotationSource) || Boolean(scopeTarget)}
               required autoFocus />
             <Field label="密钥名称">
-              <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
+              <input className="qp-input" disabled={Boolean(scopeTarget)} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
             </Field>
             {!rotationSource ? <div>
               <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={scopeLoading || !scopeOptions.platforms.includes('xiaohongshu')} onClick={() => setForm(current => ({
@@ -1695,9 +1715,9 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 platforms: [...new Set([...current.platforms, 'xiaohongshu'])],
                 capabilities: [...new Set([...current.capabilities, ...['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts', 'compat.xiaohongshu.app_v2'].filter(scope => scopeOptions.capabilities.includes(scope))])],
               }))}>勾选已开通的小红书画卷权限</button>
-              <small>同时选择小红书数据、已开通的笔记操作和 App V2 接口。已有 Key 的权限不变，确认签发后在画卷中选择新 Key。</small>
+              <small>同时选择小红书数据、已开通的笔记操作和 App V2 接口。请确认勾选范围后保存；调整权限时原 Key 继续有效。</small>
             </div> : null}
-            <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，扩大范围需要签发新 Key。">
+            <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，可在此选择授权后应用到原 Key。">
               <div className="mih-key-scopes">
                 {scopeOptions.platforms.map((platform) => (
                   <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.platforms?.includes(platform))} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
@@ -1705,7 +1725,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权。请联系平台管理员在“调用者 → 租户业务开通”中开通。</small> : null}
               </div>
             </Field>
-            <Field label="业务操作" hint="决定 Key 可以执行什么；产生外部费用的操作不随数据域授权自动开启。">
+            <Field label="业务操作" hint="决定 Key 可以执行什么；业务操作不随数据域授权自动开启。">
               <div className="mih-key-scopes">
                 {operationScopeOptions.map((capability) => (
                   <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
@@ -1713,7 +1733,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 {!scopeLoading && operationScopeOptions.length === 0 ? <small>暂无业务操作授权。</small> : null}
               </div>
             </Field>
-            <Field label="兼容接口合同" hint="仅授权 provider-compatible 接口形状；仍需同时勾选对应数据域和业务操作。">
+            <Field label="兼容接口合同" hint="开放平台原生接口；仍需同时勾选对应数据域和业务操作。">
               <div className="mih-key-scopes">
                 {compatibilityScopeOptions.map((capability) => (
                   <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
@@ -1721,7 +1741,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 {!scopeLoading && compatibilityScopeOptions.length === 0 ? <small>暂无兼容接口合同授权。</small> : null}
               </div>
             </Field>
-            <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
+            {!scopeTarget ? <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
               <input
                 className="qp-input"
                 type="number"
@@ -1732,7 +1752,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 onChange={(event) => setForm({ ...form, expiresInDays: Number(event.target.value) })}
                 required
               />
-            </Field>
+            </Field> : null}
             {formError ? <ErrorState error={formError} /> : null}
           </form>
         </Modal>
@@ -2774,7 +2794,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
   return (
     <>
-      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="调用者授权是上限，API Key 在签发时选择其中的平台与能力。停用会立即收窄现有 Key；新增能力需重新签发并显式勾选。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="调用者授权是上限，API Key 在签发时选择其中的平台与能力。停用会立即收窄现有 Key；新增能力需在 Key 列表中显式调整权限。" loading={state.loading} onRefresh={state.refresh}>
         {canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
         <a className="qp-button qp-button--outline" href={publicDocsHref()}>查看公共 API 文档</a>
       </PageHeading>
@@ -2815,7 +2835,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
             <span>当前授权对象</span>
             <strong>{selectedTenant?.name || data.tenantId} / {selectedConsumer.name}</strong>
             <code className="mih-mono">Consumer ID: {selectedConsumer.id}</code>
-            <small>现有 Key 只会被这里的变更收窄，不会因新增授权而静默扩权；扩大范围请签发新 Key</small>
+            <small>现有 Key 只会被这里的变更收窄，不会因新增授权而静默扩权；扩大范围请在 Key 列表中调整权限</small>
           </div>
         ) : null}
       </section>
@@ -2843,7 +2863,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
       <Panel
         title="API Key 可访问的数据平台 / 数据域"
-        subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；调用者授权是上限，新 Key 签发时再选择 immutable snapshot`}
+        subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；调用者授权是上限，Key 权限需单独勾选并保存`}
       >
         {data.consumerId ? (
           <div className="mih-capability-filter">
