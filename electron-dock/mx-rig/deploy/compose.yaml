@@ -1,0 +1,50 @@
+name: mx-rig
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mx_rig
+      POSTGRES_USER: mx_rig
+      POSTGRES_PASSWORD: ${MX_RIG_DB_PASSWORD:?set an independent database password}
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mx_rig -d mx_rig"]
+      interval: 5s
+      retries: 20
+    mem_limit: 512m
+    cpus: 0.5
+  migrate:
+    image: mx-rig-server:local
+    build: { context: ../.., dockerfile: mx-rig/deploy/Dockerfile }
+    command: ["node", "apps/server/migrate.mjs"]
+    environment:
+      MX_RIG_DATABASE_URL: postgresql://mx_rig:${MX_RIG_DB_PASSWORD}@postgres:5432/mx_rig
+    depends_on: { postgres: { condition: service_healthy } }
+    mem_limit: 256m
+    cpus: 0.5
+  server:
+    image: mx-rig-server:local
+    ports: ["127.0.0.1:8791:8791"]
+    environment:
+      MX_RIG_STORE: postgres
+      MX_RIG_DATABASE_URL: postgresql://mx_rig:${MX_RIG_DB_PASSWORD}@postgres:5432/mx_rig
+      MX_RIG_ADMIN_TOKEN: ${MX_RIG_ADMIN_TOKEN:?set an independent admin token}
+      MX_RIG_SECRET_KEY: ${MX_RIG_SECRET_KEY:?set an independent encryption key}
+      MX_RIG_LAUNCHER_URL: ${MX_RIG_LAUNCHER_URL:-}
+      MX_RIG_LAUNCHER_AUDIENCE: mx-sdk
+      MX_RIG_PUBLIC_URL: ${MX_RIG_PUBLIC_URL:-http://127.0.0.1:8791}
+      MX_RIG_SELF_URL: http://server:8791
+      MX_RIG_MODEL_API_KEY: ${MX_RIG_MODEL_API_KEY:-}
+    volumes: ["control:/data/control", "artifacts:/data/artifacts"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 768m
+    cpus: 1
+    restart: unless-stopped
+volumes:
+  postgres:
+  control:
+  artifacts:

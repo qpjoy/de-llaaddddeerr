@@ -1,5 +1,7 @@
 # mx-auto-server
 
+> 历史原型（2026-09-14）：独立服务后续由 [MX Rig / apps/server](../mx-rig/README.md) 承载。本目录不再作为新产品开发入口；原代码和部署脚本保留，未修改或操作现网。
+
 `mx-auto-server` 是 MX Autotest 的独立 V0 服务。它部署在自己的 `mx-auto`
 namespace，使用自己的 PostgreSQL、Secret、ServiceAccount、PVC 和服务地址。
 它不导入、不修改也不部署 MX-H2I；唯一的产品级集成是通过 Launcher 的公开

@@ -14,6 +14,9 @@
 
 相关专题：
 
+- [30-mx-rig-product-boundary.md](./30-mx-rig-product-boundary.md)：
+  MX Rig 独立产品工作区、测试领域内核迁入与 Launcher 测试中心入口边界；取代旧 AutoTest 的产品发展方向，不改 MX-H2I 登录和联网实现。
+
 - [13-platform-ops-and-admin-design-system-roadmap.md](./13-platform-ops-and-admin-design-system-roadmap.md)：
   Admin/运维设计系统与 Three.js 工作区。
 - [20-luopan-standalone-development-guide.md](./20-luopan-standalone-development-guide.md)：
@@ -24,7 +27,7 @@
   MX Insight Hub 与 Night-All 数据产品边界。
 - [29-unified-launcher-updater-integration.md](./29-unified-launcher-updater-integration.md)：
   通用应用 updater、ProductNetwork 相对制品地址、Electron 产品接入与 Luopan 一次性 L3 切换边界。
-- [MX AutoTest 产品文档](../demos/mx-autotest/docs/README.md)：
+- [MX AutoTest 历史产品文档](../demos/mx-autotest/docs/README.md)：
   独立安装、可与 MX-H2I 共存的测试领域产品；包括 Launcher 登录隔离、JUnit/证据契约、
   Compass Web/Electron 首期验收、低流量运行和商业路线。旧 `mx-test-framework` 仅作为
   `mx-auto-server` V0 的过渡执行内核。

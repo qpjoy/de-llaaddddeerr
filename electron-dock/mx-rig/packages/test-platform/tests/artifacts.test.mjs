@@ -1,0 +1,352 @@
+import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test, { after, before } from 'node:test'
+import { ArtifactStore } from '../server/artifacts.mjs'
+
+let root
+let store
+let base
+let server
+
+const stream = (text) =>
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(text))
+      controller.close()
+    },
+  })
+
+before(async () => {
+  root = await mkdtemp(join(tmpdir(), 'mxt-art-'))
+  store = new ArtifactStore({ root })
+
+  // Range serving is exercised over a real HTTP server. A hand-rolled fake
+  // response would prove the code runs, not that a browser can seek the file —
+  // and seeking is the entire point of the step timeline.
+  server = createServer(async (request, response) => {
+    const path = decodeURIComponent(new URL(request.url, 'http://x').pathname).slice(1)
+    try {
+      await store.serve('trun_3', path, request, response)
+    } catch (error) {
+      response.writeHead(error.status ?? 500, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ code: error.code, hint: error.details?.hint }))
+    }
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  base = `http://127.0.0.1:${server.address().port}`
+
+  await store.write('trun_3', 'clip.mp4', stream('abcdefghij'))
+  await store.write('trun_3', 'report/index.html', stream('<script>steal()</script>'))
+})
+
+after(async () => {
+  await new Promise((resolve) => server.close(resolve))
+  await rm(root, { recursive: true, force: true })
+})
+
+const get = (path, range) => fetch(`${base}/${path}`, { headers: range ? { range } : {} })
+
+// -- writing -----------------------------------------------------------------
+
+test('writes a nested artifact path and lists it back', async () => {
+  const bytes = await store.write('trun_1', 'videos/smoke/auth.cy.ts.mp4', stream('fake-video'))
+  assert.equal(bytes, 10)
+  assert.deepEqual(await store.list('trun_1'), [
+    { path: 'videos/smoke/auth.cy.ts.mp4', bytes: 10, contentType: 'video/mp4' },
+  ])
+})
+
+test('refuses paths that escape the run directory', () => {
+  for (const bad of ['../escape.txt', 'a/../../escape.txt', '/etc/passwd']) {
+    assert.throws(
+      () => store.resolveWithin('trun_1', bad),
+      (error) => error.code === 'invalid_artifact_path',
+      bad,
+    )
+  }
+})
+
+test('a path that merely looks suspicious but stays inside is allowed', () => {
+  // `..` inside a filename is not traversal, and rejecting it would break real
+  // spec names.
+  assert.ok(store.resolveWithin('trun_1', 'videos/a..b/report.html'))
+  assert.ok(store.resolveWithin('trun_1', 'videos/sub/../sibling.mp4'))
+})
+
+test('an oversized upload leaves no partial file behind', async () => {
+  await assert.rejects(
+    store.write('trun_2', 'big.bin', stream('0123456789'), { limitBytes: 4 }),
+    (error) => error.code === 'artifact_too_large',
+  )
+  // A truncated file would later be served as if it were complete.
+  assert.deepEqual(await store.list('trun_2'), [])
+})
+
+test('rejected deep uploads leave no empty directory ladder or zero-byte file', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'rejected-entry-budget'),
+    maxFileBytes: 1,
+    maxRunBytes: 100,
+    maxFilesPerRun: 100,
+    maxTotalBytes: 100,
+    maxTotalEntries: 20,
+  })
+  for (let index = 0; index < 25; index += 1) {
+    await assert.rejects(
+      bounded.write(
+        'trun_rejected',
+        `attempt-${index}/nested/deep/file.bin`,
+        stream('xx'),
+      ),
+      (error) => error.code === 'artifact_too_large',
+    )
+  }
+  assert.equal(await bounded.totalEntries(), 0)
+  assert.deepEqual(await bounded.list('trun_rejected'), [])
+})
+
+test('one run has hard aggregate-byte and file-count limits', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'run-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 10,
+    maxFilesPerRun: 2,
+  })
+  await bounded.write('trun_bounded', 'a.txt', stream('123456'))
+  await assert.rejects(
+    bounded.write('trun_bounded', 'b.txt', stream('12345')),
+    (error) => error.code === 'artifact_run_too_large',
+  )
+  await bounded.write('trun_bounded', 'b.txt', stream('1234'))
+  await assert.rejects(
+    bounded.write('trun_bounded', 'c.txt', stream('x')),
+    (error) => error.code === 'artifact_file_limit',
+  )
+  assert.deepEqual(
+    (await bounded.list('trun_bounded')).map(({ path, bytes }) => ({ path, bytes })),
+    [
+      { path: 'a.txt', bytes: 6 },
+      { path: 'b.txt', bytes: 4 },
+    ],
+  )
+})
+
+test('parallel uploads cannot race past the per-run byte limit', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'parallel-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 10,
+    maxFilesPerRun: 10,
+  })
+  const results = await Promise.allSettled([
+    bounded.write('trun_parallel', 'a.txt', stream('123456')),
+    bounded.write('trun_parallel', 'b.txt', stream('123456')),
+  ])
+  assert.deepEqual(
+    results.map((result) => result.status).sort(),
+    ['fulfilled', 'rejected'],
+  )
+  assert.equal(
+    (await bounded.list('trun_parallel')).reduce((total, entry) => total + entry.bytes, 0),
+    6,
+  )
+})
+
+test('parallel uploads from different runs cannot race past the persistent-volume budget', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'global-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 10,
+  })
+  const results = await Promise.allSettled([
+    bounded.write('trun_global_a', 'a.txt', stream('123456')),
+    bounded.write('trun_global_b', 'b.txt', stream('123456')),
+  ])
+  assert.deepEqual(
+    results.map((result) => result.status).sort(),
+    ['fulfilled', 'rejected'],
+  )
+  const rejection = results.find((result) => result.status === 'rejected')
+  assert.equal(rejection.reason.code, 'artifact_storage_budget')
+  assert.equal(await bounded.totalBytes(), 6)
+})
+
+test('zero-byte files and their directories consume the global entry budget', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'global-entry-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 100,
+    maxTotalEntries: 7,
+  })
+  for (let index = 0; index < 3; index += 1) {
+    await bounded.write(`trun_empty_${index}`, 'empty.bin', stream(''))
+  }
+  await assert.rejects(
+    bounded.write('trun_empty_3', 'empty.bin', stream('')),
+    (error) => error.code === 'artifact_storage_entry_budget' && error.status === 507,
+  )
+  assert.equal(await bounded.totalBytes(), 0)
+  assert.equal(await bounded.totalEntries(), 7)
+})
+
+test('the filesystem safety reserve is enforced while streaming', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'reserve-budget'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 1_000,
+    minFreeBytes: 6,
+    statfsImpl: async () => ({ bavail: 10, bsize: 1, ffree: 100 }),
+  })
+  await assert.rejects(
+    bounded.write('trun_reserve', 'a.txt', stream('12345')),
+    (error) => error.code === 'artifact_storage_low' && error.status === 507,
+  )
+  assert.deepEqual(await bounded.list('trun_reserve'), [])
+})
+
+test('the filesystem inode reserve includes staging files and missing directories', async () => {
+  const bounded = new ArtifactStore({
+    root: join(root, 'inode-reserve'),
+    maxFileBytes: 100,
+    maxRunBytes: 100,
+    maxFilesPerRun: 10,
+    maxTotalBytes: 1_000,
+    maxTotalEntries: 1_000,
+    minFreeInodes: 10,
+    statfsImpl: async () => ({ bavail: 1_000, bsize: 1, ffree: 12 }),
+  })
+  await assert.rejects(
+    bounded.write('trun_inode', 'a.txt', stream('x')),
+    (error) => error.code === 'artifact_storage_inode_low' && error.status === 507,
+  )
+  assert.equal(await bounded.totalEntries(), 0)
+})
+
+test('infers the content types that matter for playback and reports', () => {
+  assert.equal(store.contentType('a/b.mp4'), 'video/mp4')
+  assert.equal(store.contentType('a/b.webm'), 'video/webm')
+  assert.equal(store.contentType('a/b.png'), 'image/png')
+  assert.equal(store.contentType('a/index.html'), 'text/html; charset=utf-8')
+  assert.equal(store.contentType('a/unknown.xyz'), 'application/octet-stream')
+})
+
+// -- serving -----------------------------------------------------------------
+
+test('serves a whole file and advertises range support', async () => {
+  const response = await get('clip.mp4')
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('accept-ranges'), 'bytes')
+  assert.equal(response.headers.get('content-type'), 'video/mp4')
+  assert.equal(await response.text(), 'abcdefghij')
+})
+
+test('serves a byte range so a browser can seek', async () => {
+  const response = await get('clip.mp4', 'bytes=2-5')
+  assert.equal(response.status, 206)
+  assert.equal(response.headers.get('content-range'), 'bytes 2-5/10')
+  assert.equal(response.headers.get('content-length'), '4')
+  assert.equal(await response.text(), 'cdef')
+})
+
+test('serves an open-ended range', async () => {
+  const response = await get('clip.mp4', 'bytes=7-')
+  assert.equal(response.status, 206)
+  assert.equal(response.headers.get('content-range'), 'bytes 7-9/10')
+  assert.equal(await response.text(), 'hij')
+})
+
+test('serves a suffix range', async () => {
+  const response = await get('clip.mp4', 'bytes=-3')
+  assert.equal(response.status, 206)
+  assert.equal(response.headers.get('content-range'), 'bytes 7-9/10')
+  assert.equal(await response.text(), 'hij')
+})
+
+test('clamps a range running past the end instead of erroring', async () => {
+  const response = await get('clip.mp4', 'bytes=5-999')
+  assert.equal(response.status, 206)
+  assert.equal(response.headers.get('content-range'), 'bytes 5-9/10')
+  assert.equal(await response.text(), 'fghij')
+})
+
+test('uploaded HTML cannot become stored XSS against the platform session', async () => {
+  const response = await get('report/index.html')
+  assert.match(response.headers.get('content-security-policy'), /sandbox/)
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+})
+
+test('a missing artifact explains that it may have expired', async () => {
+  const response = await get('nope.mp4')
+  assert.equal(response.status, 404)
+  const body = await response.json()
+  assert.equal(body.code, 'artifact_not_found')
+  assert.match(body.hint, /过期/)
+})
+
+// -- retention ---------------------------------------------------------------
+
+test('purge removes old run directories and leaves recent ones', async () => {
+  const stale = join(root, 'runs', 'trun_old')
+  await mkdir(stale, { recursive: true })
+  await writeFile(join(stale, 'a.txt'), 'x')
+  const old = new Date(Date.now() - 40 * 86_400_000)
+  await utimes(stale, old, old)
+
+  const purged = await store.purgeOlderThan(30)
+  assert.ok(purged.includes('trun_old'), JSON.stringify(purged))
+  assert.ok(!purged.includes('trun_3'), '近期产物不应被清理')
+})
+
+// -- retention actually runs ---------------------------------------------------
+//
+// `purgeOlderThan` was written when the artifact store was, and for months its
+// only caller was the test above it. The 30-day policy in docs/10 was a sentence
+// nothing executed. docs/26 §2.2.
+
+test('the retention sweep runs on the scheduler tick, and only occasionally', async () => {
+  const { sweepRetention } = await import('../server/index.mjs')
+  const purged = []
+  const artifacts = { purgeOlderThan: async () => purged.splice(0) }
+  const events = []
+  const store = { purgeRunEvents: async (before) => { events.push(before); return 3 } }
+  const config = { artifactRetainDays: 30 }
+  const state = {}
+  const now = Date.parse('2026-09-03T00:00:00Z')
+
+  purged.push('trun_old')
+  const first = await sweepRetention({ store, artifacts, config, state, logger: null, now })
+  assert.deepEqual(first, { runs: 1, events: 3 })
+  // The cutoff it hands the store is the same window the artifacts use.
+  assert.equal(events[0], new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
+
+  // A minute later the scheduler ticks again and this must do nothing.
+  assert.equal(await sweepRetention({ store, artifacts, config, state, logger: null, now: now + 60_000 }), null)
+  assert.equal(events.length, 1)
+
+  // Six hours on, it runs again.
+  const later = await sweepRetention({ store, artifacts, config, state, logger: null, now: now + 6 * 60 * 60 * 1000 })
+  assert.equal(later.events, 3)
+})
+
+test('one half of the sweep failing does not stop the other', async () => {
+  const { sweepRetention } = await import('../server/index.mjs')
+  const errors = []
+  const result = await sweepRetention({
+    artifacts: { purgeOlderThan: async () => { throw new Error('volume is read-only') } },
+    store: { purgeRunEvents: async () => 7 },
+    config: { artifactRetainDays: 30 },
+    state: {},
+    logger: { error: (message) => errors.push(message), log: () => {} },
+  })
+  assert.deepEqual(result, { runs: 0, events: 7 })
+  assert.match(errors[0], /read-only/u)
+})

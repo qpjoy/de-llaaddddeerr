@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 2,
+  "application": "luopan",
+  "surface": "electron",
+  "suite": "compass-electron-smoke",
+  "executionMode": "playwright-electron external QA pack",
+  "coverage": {
+    "nativeDialogs": "unsupported",
+    "systemPermissions": "manual-witness"
+  },
+  "cases": [
+    {
+      "id": "CPS-EL-BOOT-001",
+      "title": "Packaged Compass cold-starts into a real renderer",
+      "priority": "P0",
+      "tags": ["electron", "boot", "packaged", "bootstrap"],
+      "tracks": ["functional"],
+      "spec": "tests/boot.spec.ts",
+      "coverageMode": "automated-renderer",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-EL-BOOT-002",
+      "title": "Renderer has no uncaught error after readiness",
+      "priority": "P0",
+      "tags": ["electron", "renderer", "stability", "bootstrap"],
+      "tracks": ["functional"],
+      "spec": "tests/boot.spec.ts",
+      "coverageMode": "automated-renderer",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-EL-AUTH-001",
+      "title": "Dedicated test user completes the packaged login flow",
+      "priority": "P0",
+      "tags": ["electron", "auth", "acceptance", "formal-auth"],
+      "tracks": ["functional"],
+      "spec": "tests/login.spec.ts",
+      "coverageMode": "automated-renderer",
+      "automationState": "blocked-prerequisite",
+      "prerequisites": [
+        "dedicated restricted test account",
+        "reviewed non-production captcha test hook",
+        "dedicated or reviewed-isolated desktop runner"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "appId": "dev.qpjoy.mx-rig",
+  "productName": "MX Rig",
+  "npmRebuild": false,
+  "directories": { "output": "dist" },
+  "extraMetadata": { "main": "apps/desktop/main.mjs" },
+  "files": [
+    "apps/desktop/**",
+    "apps/web/**",
+    "packages/runtime/**",
+    "packages/contracts/**",
+    "package.json"
+  ],
+  "asarUnpack": ["node_modules/playwright*/**"],
+  "win": { "target": ["nsis"], "requestedExecutionLevel": "asInvoker" },
+  "mac": { "target": ["dmg"], "category": "public.app-category.developer-tools" },
+  "linux": { "target": ["AppImage"] }
+}

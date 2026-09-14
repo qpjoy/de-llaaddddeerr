@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'"
+    />
+    <title>MX Rig · Mission Control</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="login" class="login-shell">
+      <div class="login-story">
+        <span class="mark">MX / RIG</span>
+        <p class="eyebrow">YOUR WORK. UNDER CONTROL.</p>
+        <h1>让任务有目标，<br />让执行有证据。</h1>
+        <p>连接你的工具、测试与内网能力。<br />从一次对话开始，把工作沉淀成可重复的流程。</p>
+        <div class="orbit"><i></i><b>R</b></div>
+      </div>
+      <form id="login-form" class="login-card">
+        <p class="eyebrow">MISSION CONTROL</p>
+        <h2>进入工作台</h2>
+        <p class="muted">使用 Internal 账号登录 MX Rig</p>
+        <label id="server-field"
+          >Internal 服务地址<input
+            id="server"
+            type="url"
+            value="http://127.0.0.1:8791"
+            required /></label
+        ><label>账号<input id="account" autocomplete="username" required /></label
+        ><label
+          >密码<input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required /></label
+        ><button class="primary" type="submit">登录工作台 →</button>
+        <p id="login-error" class="error" role="alert"></p>
+        <p class="small muted">本地开发使用 admin 与 .runtime/dev-token 文件中的密码。</p>
+      </form>
+    </div>
+    <div id="workspace" class="shell" hidden>
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-symbol">R</span>
+          <div>MX Rig<small>MISSION CONTROL</small></div>
+        </div>
+        <button id="new-mission" class="new-button">＋ 新建任务</button>
+        <nav>
+          <button class="nav active" data-view="missions">◈ <span>任务工作台</span></button
+          ><button class="nav" data-view="tests">▤ <span>测试中心</span></button
+          ><button class="nav" data-view="tools">⌘ <span>工具与能力</span></button
+          ><button class="nav" data-view="settings">⚙ <span>Internal 配置</span></button>
+        </nav>
+        <div class="section-label">最近任务</div>
+        <div id="mission-list" class="mission-list"></div>
+        <footer>
+          <span id="member"></span><button id="logout" class="text-button">退出</button>
+        </footer>
+      </aside>
+      <main>
+        <header class="topbar">
+          <div>
+            <span class="breadcrumb">MX Rig / </span><span id="view-title">任务工作台</span>
+          </div>
+          <span id="surface" class="pill">Internal</span>
+        </header>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <section id="missions-view" class="view">
+          <div id="welcome" class="welcome">
+            <p class="eyebrow">READY FOR YOUR NEXT MISSION</p>
+            <h1>今天，一起完成什么？</h1>
+            <p>描述目标，选择工具，让每一步执行都可检查。</p>
+            <div class="suggestions">
+              <button data-prompt="查看已有测试计划，告诉我每个计划验证什么。">
+                ▤ 查看测试计划<small>从已维护的测试资产开始</small></button
+              ><button data-prompt="帮我检查最近一次测试结果，区分产品失败和环境受阻。">
+                ⌕ 分析测试结果<small>用证据解释，而非猜测</small></button
+              ><button data-prompt="打开允许的测试页面，读取页面状态并协助我检查。">
+                ◉ 检查浏览器页面<small>桌面端 · 隔离的浏览器会话</small>
+              </button>
+            </div>
+          </div>
+          <div id="mission-detail" hidden>
+            <div class="mission-heading">
+              <div>
+                <p id="mission-id" class="eyebrow"></p>
+                <h2 id="mission-goal"></h2>
+              </div>
+              <span id="mission-status" class="pill"></span>
+            </div>
+            <div id="timeline" class="timeline"></div>
+            <div id="approval" class="approval" hidden></div>
+            <button id="cancel" class="danger" hidden>停止此任务</button>
+          </div>
+          <form id="composer" class="composer">
+            <textarea
+              id="goal"
+              rows="3"
+              placeholder="描述任务目标，或选择一个测试工作流……"
+              maxlength="8000"
+              required
+            ></textarea>
+            <div class="composer-controls">
+              <select id="mode" aria-label="执行方式">
+                <option value="agent">Agent 对话</option>
+                <option value="workflow">测试工作流 · 无需模型</option></select
+              ><select id="task" aria-label="测试计划" hidden></select
+              ><button id="start" type="submit" class="primary">开始任务 ↑</button>
+            </div>
+            <p class="small muted">
+              写入和点击动作会展示具体参数，确认后才执行。完成任务不等于测试通过。
+            </p>
+          </form>
+        </section>
+        <section id="tests-view" class="view" hidden>
+          <p class="eyebrow">QUALITY EVIDENCE</p>
+          <h1>测试中心</h1>
+          <p class="muted">沿用测试目录、Runner、JUnit 与原生证据，保留独立的测试结论。</p>
+          <a id="classic" href="/test-center/" target="_blank" rel="noopener"
+            >打开完整测试管理台 ↗</a
+          >
+          <h2>已保存的测试计划</h2>
+          <div id="test-tasks" class="cards"></div>
+          <h2>最近执行</h2>
+          <div id="test-runs" class="table-wrap"></div>
+        </section>
+        <section id="tools-view" class="view" hidden>
+          <p class="eyebrow">CAPABILITIES</p>
+          <h1>工具与执行边界</h1>
+          <p class="muted">工具由 Internal 允许列表控制；执行前还会重新校验权限。</p>
+          <div id="tools" class="cards"></div>
+        </section>
+        <section id="settings-view" class="view" hidden>
+          <p class="eyebrow">INTERNAL · SOURCE OF TRUTH</p>
+          <h1>工作台配置</h1>
+          <p class="muted">配置保存在独立 MX Rig 服务中，模型凭据仅从服务端环境读取。</p>
+          <form id="settings-form" class="settings-form">
+            <label
+              >模型 API Base URL<input
+                id="model-url"
+                placeholder="https://gateway.example.com/v1" /></label
+            ><label>模型名称<input id="model-name" placeholder="网关中可用的模型 ID" /></label
+            ><label
+              >服务端凭据环境变量名<input id="model-key-env" value="MX_RIG_MODEL_API_KEY" /></label
+            ><label
+              >每项任务最多模型轮数<input
+                id="max-turns"
+                type="number"
+                min="1"
+                max="30"
+                value="12" /></label
+            ><label>允许的工具（每行一个）<textarea id="allowed-tools" rows="7"></textarea></label
+            ><label
+              >浏览器允许访问的 origin（每行一个，含页面资源域名）<textarea
+                id="browser-origins"
+                rows="4"
+                placeholder="https://test.example.com"
+              ></textarea></label
+            ><button type="submit" class="primary">保存到 Internal</button>
+            <p id="settings-note" class="muted"></p>
+          </form>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

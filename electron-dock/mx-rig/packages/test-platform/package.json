@@ -1,0 +1,12 @@
+{
+  "name": "@qpjoy/mx-rig-test-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fast-xml-parser": "5.11.1",
+    "pg": "8.22.0",
+    "@qpjoy/mx-common": "file:../../../mx-common",
+    "@qpjoy/ui-design-neon-void": "file:../../../mx-launcher/ui-design"
+  }
+}

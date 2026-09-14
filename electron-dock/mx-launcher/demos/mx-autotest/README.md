@@ -1,5 +1,7 @@
 # MX AutoTest Desktop
 
+> Historical prototype (2026-09-14). The product successor is [MX Rig](../../../mx-rig/README.md), a single sibling workspace containing its desktop, runtime and Internal service. This demo remains unchanged for comparison; do not create another `demos/mx-rig` copy.
+
 MX AutoTest is an independent Quasar/Electron product registered through MX
 Launcher in `standalone` mode. It uses Launcher for product-scoped networking
 and User Center identity, while test projects, tasks, runs and evidence live in

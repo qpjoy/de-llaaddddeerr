@@ -1,0 +1,35 @@
+{
+  "name": "@qpjoy/mx-rig",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MX Rig desktop agent workbench and independent Internal test control plane.",
+  "author": "QPJoy",
+  "type": "module",
+  "workspaces": [
+    "packages/test-platform"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "server": "node apps/server/index.mjs",
+    "desktop": "electron apps/desktop/main.mjs",
+    "test": "node scripts/test.mjs",
+    "test:kernel": "node scripts/test.mjs kernel",
+    "check": "node scripts/check.mjs",
+    "browser:install": "node scripts/browser-install.mjs",
+    "package": "node scripts/package.mjs",
+    "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "migrate": "node apps/server/migrate.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.58.2"
+  },
+  "devDependencies": {
+    "electron": "34.5.8",
+    "electron-builder": "25.1.8",
+    "prettier": "3.5.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
