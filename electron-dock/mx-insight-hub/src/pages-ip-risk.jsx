@@ -44,7 +44,7 @@ export function IpRiskPage() {
   }
   return <div className="mih-page">
     <header><h1>IP 风险画像</h1><p>查询 IPv4 的代理识别、风险评分、秒拨概率、真人概率与风险标签。</p></header>
-    <div className="qp-panel mih-panel"><strong>接口调试</strong><p>当前仅记录调用次数，暂未定价、不扣费。画像是本次查询结果，不代表绝对安全。</p></div>
+    <div className="qp-panel mih-panel"><strong>接口调试</strong><p>按当前调用者生效套餐计费，实际费用见“用量与账单”。批量按成功交付的 IP 逐项计费。画像是本次查询结果，不代表绝对安全。</p></div>
     <section className="mih-api-console qp-panel" aria-label="Hub IP 风险接口调试">
       <aside className="mih-api-console-nav"><h2>IP 风险接口</h2><p>使用当前 Hub Key</p>{[false, true].map(mode => <button key={String(mode)} aria-pressed={batch === mode} disabled={busy} type="button" onClick={() => { setBatch(mode); setResult(null); setError(null); setCopyStatus('') }}><small>POST</small>{mode ? '批量查询 IPv4 风险画像' : '查询 IPv4 风险画像'}</button>)}</aside>
       <div className="mih-api-console-main">

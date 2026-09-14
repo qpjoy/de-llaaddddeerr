@@ -3075,7 +3075,8 @@ test('known provider failures atomically commit stable error responses', async (
   })
 
   const usage = queries.find(({ sql }) => /UPDATE usage_requests/u.test(sql))
-  assert.match(usage.sql, /status = 'committed'/u)
+  assert.match(usage.sql, /status = CASE WHEN \$7::boolean THEN 'released' ELSE 'committed' END/u)
+  assert.equal(usage.values[6], false, 'legacy providers keep stable committed failures')
   assert.match(usage.sql, /error_code = \$6/u)
   assert.match(usage.sql, /RETURNING id/u)
   assert.equal(usage.values[0], input.usageRequestId)
@@ -3103,8 +3104,15 @@ test('known provider failures atomically commit stable error responses', async (
   })
 
   const unusableUsage = queries.slice(beforeUnusable).find(({ sql }) => /UPDATE usage_requests/u.test(sql))
-  assert.match(unusableUsage.sql, /status = 'committed'/u)
+  assert.equal(unusableUsage.values[6], false)
   assert.equal(unusableUsage.values[1], 502)
   assert.deepEqual(unusableUsage.values[2], unusableBody)
+  assert.equal(queries.at(-1).sql, 'COMMIT')
+  const ipStore = new PostgresExternalPlatformStore({ pool: { async connect() { return client } }, providerKey: 'ipsearch' })
+  const beforeIp = queries.length
+  await ipStore.finishFailure({ callId: randomUUID(), delivery: input, outcome: 'rejected', httpStatus: 400,
+    businessCode: 400, billed: null, errorCode: 'ip_query_rejected', affectsCircuit: false })
+  const ipUsage = queries.slice(beforeIp).find(({ sql }) => /UPDATE usage_requests/u.test(sql))
+  assert.equal(ipUsage.values[6], true, 'IP definitive failure releases usage and the transactional customer hold')
   assert.equal(queries.at(-1).sql, 'COMMIT')
 })

@@ -1,3 +1,4 @@
+import { BILLING_FEATURES, compileBillingComponents } from '../shared/billing-composition.mjs'
 import { KeyAccessLimitsPanel } from './key-access-limits.jsx'
 import { withIpRiskProductScopes } from '../shared/product-access.mjs'
 import { KeyReveal } from './key-reveal.jsx'
@@ -1991,6 +1992,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const [billingError, setBillingError] = useState(null)
   const [creditForm, setCreditForm] = useState({ amount: '', currency: 'CNY', reason: '', externalReference: '' })
   const [profileForm, setProfileForm] = useState({ mode: 'shadow', multiplier: '1.000000' })
+  const [componentChoice, setComponentChoice] = useState('feature:ip-risk')
   const [planForm, setPlanForm] = useState({
     key: '',
     name: '',
@@ -2098,15 +2100,45 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       key: planKey,
       name: reusablePlan?.name || '',
       priceBookKey: planKey ? `${planKey.slice(0, 60)}-cny` : '',
-      currency: 'CNY',
-      defaultMultiplier: '1.000000',
+      currency: reusablePlan?.priceBook?.currency || 'CNY',
+      defaultMultiplier: ((reusablePlan?.priceBook?.defaultMultiplierPpm ?? 1000000) / 1000000).toFixed(6),
+      components: reusablePlan?.priceBook ? [{ type: 'plan', versionId: reusablePlan.versionId }] : [],
+      inheritedWindow: reusablePlan?.limits?.maxRequests ? { maxRequests: reusablePlan.limits.maxRequests, windowSeconds: reusablePlan.limits.windowSeconds } : {},
       monthlyRequests: String(reusablePlan?.limits?.monthlyRequests || 1000000),
       burstRps: String(reusablePlan?.limits?.burstRps || 100),
       maxPageSize: String(reusablePlan?.limits?.maxPageSize || 100),
-      entries: [{ meterKey: '', price: '' }],
+      entries: reusablePlan?.priceBook?.entries?.length ? reusablePlan.priceBook.entries.map(entry=>({meterKey:entry.meterKey,price:(entry.unitPriceMinor/100).toFixed(2)})) : [{ meterKey: '', price: '' }],
     })
     setActivatePlan(false)
     setPlanOpen(true)
+  }
+
+  const appendComponent = () => {
+    const [type, id] = componentChoice.split(':')
+    const component = type === 'feature' ? {type,key:id,version:1} : {type:'plan',versionId:id}
+    try {
+      const compiled=compileBillingComponents([component],data.plans?.catalog||[],planForm.currency)
+      const entries=planForm.entries.filter(entry=>entry.meterKey)
+      for(const rate of compiled.entries) {
+        const existing=entries.find(entry=>entry.meterKey===rate.meterKey)
+        if(existing && decimalToMinor(existing.price)!==rate.unitPriceMinor) throw new Error(`${rate.meterKey} 存在不同费率。请先在最终价目表确认并修改价格，再添加该来源。`)
+        if(!existing) entries.push({meterKey:rate.meterKey,price:(rate.unitPriceMinor/100).toFixed(2)})
+      }
+      setPlanForm(current=>({...current,entries,components:[...(current.components||[]).filter(item=>JSON.stringify(item)!==JSON.stringify(component)),component]}))
+      setBillingError(null)
+    }catch(error){setBillingError(error)}
+  }
+  const openFeaturePlan = featureKey => {
+    const feature=BILLING_FEATURES.find(item=>item.key===featureKey)
+    openPlanPublisher()
+    setPlanForm(current=>({...current,
+      key:`customer-${data.consumerId}`,
+      name:currentPlan?.key===`customer-${data.consumerId}` ? currentPlan.name : `${selectedConsumer?.name} 专属套餐`,
+      priceBookKey:`customer-${data.consumerId}-cny`,
+      components:[...(current.components||[]),{type:'feature',key:feature.key,version:feature.version}],
+      entries:[...current.entries.filter(entry=>entry.meterKey&&!feature.entries.some(rate=>rate.meterKey===entry.meterKey)),...feature.entries.map(rate=>({meterKey:rate.meterKey,price:(rate.unitPriceMinor/100).toFixed(2)}))],
+    }))
+    setActivatePlan(true)
   }
 
   const refreshCurrentContext = async () => {
@@ -2240,7 +2272,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       const plan = await adminApi.publishPlan(token, {
         key: planForm.key,
         name: planForm.name,
+        components: planForm.components || [],
         limits: {
+          ...planForm.inheritedWindow,
           monthlyRequests: Number(planForm.monthlyRequests),
           maxPageSize: Number(planForm.maxPageSize),
           burstRps: Number(planForm.burstRps),
@@ -2337,7 +2371,11 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       {session?.platformAdmin ? <Panel title="自动按次计费" subtitle="余额、合同价格和运行授权分别生效；充值本身不会启用扣费。">
         <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定费率' : '尚未绑定费率'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
         <p>为不同客户使用独立套餐标识，同一套餐可配置多个业务的接口价格。已授权但未配置价格的接口免费，价格填 0 也表示免费；调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
-        <button className="qp-button qp-button--primary" disabled={!canAssignPlan || !account} onClick={() => { openPlanPublisher(); setPlanForm(current => ({ ...current, key: `customer-${data.consumerId}`, name: `${selectedConsumer?.name} 专属套餐`, priceBookKey: `customer-${data.consumerId}-cny`, entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts'].map(meterKey => ({ meterKey, price: '0.10' })) })); setActivatePlan(true) }}>配置小红书专属套餐 · ¥0.10/次</button>
+        <div className="mih-page-actions">
+          <button className="qp-button qp-button--primary" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={()=>openFeaturePlan('xiaohongshu')}>追加小红书费率 · ¥0.10/次</button>
+          <button className="qp-button qp-button--outline" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={()=>openFeaturePlan('ip-risk')}>追加 IP 风险画像费率 · ¥0.05/次</button>
+        </div>
+        <p>快捷配置保留其他接口价格，打开草案供确认。当前套餐绑定调用者，该调用者的 Key 共用生效费率；发布、分配后才改变未来请求价格，不追补历史费用。</p>
       </Panel> : null}
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="当前套餐与配额基线">
         <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, account.currency) : '未开户'} hint={account ? `冻结 ${formatMoneyMinor(account.heldMinor, account.currency)}` : '由平台管理员首次入账时开户'} tone="success" />
@@ -2435,10 +2473,11 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 <td>{plan.limits?.burstRps ? `${formatNumber(plan.limits.burstRps)} RPS` : '不限制'}</td>
                 <td>{plan.limits?.maxPageSize ? formatNumber(plan.limits.maxPageSize) : '按策略'}</td>
                 <td>{plan.priceBook
-                  ? <><strong>{plan.priceBook.currency} · {formatNumber(plan.priceBook.entries?.length || 0)} 项</strong><small>{plan.priceBook.key} · v{plan.priceBook.version}</small></>
+                  ? <><strong>{plan.priceBook.currency} · {formatNumber(plan.priceBook.entries?.length || 0)} 项</strong><small>{plan.priceBook.key} · v{plan.priceBook.version}</small>{plan.pricing?.components?.length ? <small>组合来源：{plan.pricing.components.map(item=>`${item.name} v${item.version}`).join(" + ")}</small> : null}</>
                   : plan.pricing?.mode === 'operator_price_book' ? <><strong>尚未配置费率</strong><small>当前不计费</small></> : plan.pricing?.mode === 'contract' ? '按租户合同价' : '历史兼容'}</td>
                 {session?.platformAdmin ? (
                   <td>
+                    {plan.priceBook ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={()=>openPlanPublisher(plan)}>基于此版本改价</button> : null}
                     {plan.key === 'legacy-unmetered' ? (
                       <small>{plan.versionId === currentPlan?.versionId ? '当前历史绑定' : '仅保留现有绑定'}</small>
                     ) : !plan.priceBook && plan.pricing?.mode === 'operator_price_book' ? (
@@ -2638,6 +2677,13 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
             <Field label="突发 QPS"><input className="qp-input" type="number" min="1" value={planForm.burstRps} onChange={(event) => setPlanForm({ ...planForm, burstRps: event.target.value })} required /></Field>
             <Field label="最大分页"><input className="qp-input" type="number" min="1" max="1000" value={planForm.maxPageSize} onChange={(event) => setPlanForm({ ...planForm, maxPageSize: event.target.value })} required /></Field>
             <div className="mih-form__wide">
+              <DropdownField label="添加产品费率或组合已发布套餐" value={componentChoice} onChange={setComponentChoice} options={[
+                ...BILLING_FEATURES.map(item=>({value:`feature:${item.key}`,label:`${item.name} · v${item.version} · ${item.key==='ip-risk'?'¥0.05':'¥0.10'}/次`})),
+                ...(data.plans?.catalog||[]).filter(plan=>plan.priceBook&&plan.versionStatus==='published').map(plan=>({value:`plan:${plan.versionId}`,label:`${plan.name} · v${plan.version}`})),
+              ]}/>
+              <button className="qp-button qp-button--outline" type="button" onClick={appendComponent}>添加到组合</button>
+              <p>组合在发布时展开为下方一份价目表；运行时不遍历套餐。额度和倍率统一使用上方设置，不累加来源套餐额度。最终只计下表所列价格，未列出的已授权接口免费；本操作不改变权限或文档开放。</p>
+              <p>来源：{(planForm.components||[]).map(item=>item.type==='feature' ? BILLING_FEATURES.find(feature=>feature.key===item.key)?.name : (data.plans?.catalog||[]).find(plan=>plan.versionId===item.versionId)?.name||item.versionId).join(' + ')||'手动费率'}</p>
               <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current, entries: [...current.entries.filter(entry => entry.meterKey || entry.price), ...['raw', 'crawl', 'user-info'].filter(key => !current.entries.some(entry => entry.meterKey === key)).map(meterKey => ({ meterKey, price: '' }))] }))}>添加 Night-All 三类接口费率</button>
               <p>raw、crawl、user-info 按请求计费；价格填 0 表示免费。小红书直连使用自己的 social.* 计费键；费用配置不放宽采集工作预算。</p>
               <Table label="逐接口价格">

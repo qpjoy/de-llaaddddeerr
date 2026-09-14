@@ -2296,7 +2296,7 @@ function IpSearchPlatformDetail({ token, range, setQuery, onUnauthorized, notify
     {data?.credential ? <ExternalPlatformCredentialPanel token={token} provider="ipsearch" credential={data.credential} onSaved={state.refresh} onUnauthorized={onUnauthorized} notify={notify} /> : null}
     {state.error ? <ErrorState error={state.error} /> : null}
     {!data ? <p>正在加载…</p> : <section className="qp-panel mih-panel"><h2>调用与持久化证据</h2>
-      <p>暂不定价、不扣费。采购费用和是否计费均保留未知值。</p>
+      <p>客户费用按当前套餐结算；采购费用和供应商是否计费均保留未知值。</p>
       <div className="qp-table-wrap"><table className="qp-table mih-table"><tbody>{[
         ['认证后 HTTP 请求', data.httpMetrics?.authenticatedHttpRequests], ['逻辑交付及回放事件', data.provider.metrics.hubRequests],
         ['实际调用', data.provider.metrics.upstreamCalls], ['可用响应', data.provider.metrics.usableUpstreamCalls],

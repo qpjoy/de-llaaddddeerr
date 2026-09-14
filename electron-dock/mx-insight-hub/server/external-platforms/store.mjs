@@ -1469,6 +1469,9 @@ export class MemoryExternalPlatformStore {
         deliverySourceMode: 'stale',
         capturedAt: currentSnapshot.capturedAt,
       })
+    } else if (this.providerKey === 'ipsearch' && (outcome === 'rejected' || outcome === 'succeeded_unusable')) {
+      // A definitive failed IP query has no customer delivery to charge.
+      await this.usageStore.releaseRequest(delivery.usageRequestId, errorCode)
     } else if (outcome === 'rejected' || outcome === 'succeeded_unusable') {
       await this.usageStore.commitRequest(delivery.usageRequestId, {
         responseStatus: failureResponseStatus,
@@ -3541,7 +3544,7 @@ export class PostgresExternalPlatformStore {
       const usage = outcome === 'rejected' || outcome === 'succeeded_unusable'
         ? await client.query(
             `UPDATE usage_requests SET
-               status = 'committed', response_status = $2, response_body = $3,
+               status = CASE WHEN $7::boolean THEN 'released' ELSE 'committed' END, response_status = $2, response_body = $3,
                units_actual = 0, upstream_latency_ms = $4,
                delivery_source_mode = 'live', response_captured_at = $5,
                error_code = $6, completed_at = now()
@@ -3556,6 +3559,7 @@ export class PostgresExternalPlatformStore {
               latencyMs,
               responseArchive?.capturedAt ?? new Date(),
               errorCode,
+              this.providerKey === 'ipsearch',
             ],
           )
         : await client.query(

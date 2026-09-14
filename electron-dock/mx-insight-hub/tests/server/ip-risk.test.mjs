@@ -25,7 +25,7 @@ async function fixture(fetchImpl, grant = true) {
   const context = await hub.authenticate(key.secret)
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'ipsearch', authorizationPlatform: 'ip_risk' })
   const adapter = new IpSearchAdapter({ apiKey: 'secret-not-public', fetchImpl })
-  return { store, platformStore, context, gateway: new IpRiskGateway({ usageStore: store, platformStore, adapter, enabled: true }) }
+  return { store, hub, tenant, consumer, platformStore, context, gateway: new IpRiskGateway({ usageStore: store, platformStore, adapter, enabled: true }) }
 }
 const request = { body: { ip: '1.1.1.1' }, idempotencyKey: 'ip-test-0001', path: '/api/v1/data/ip/risk' }
 
@@ -44,7 +44,8 @@ test('only granted keys dispatch; successful calls archive exact evidence and re
   const result = await f.gateway.query(f.context, request)
   assert.equal(result.status, 200); assert.equal(calls, 1)
   assert.equal(f.platformStore.restrictedResponseArchives.size, 1)
-  assert.equal(result.body.meta.chargeStatus, 'not_charged')
+  assert.equal(result.body.meta.pricingStatus, 'plan_based')
+  assert.equal(f.store.customerCharges.size, 0, 'unpriced legacy plans remain free')
   assert.ok(!JSON.stringify(result.body).match(/ipsearch|ipdatacloud|secret-not-public/u))
   const replay = await f.gateway.query(f.context, request)
   assert.equal(replay.replay, true); assert.equal(calls, 1)
@@ -316,4 +317,63 @@ test('only Admin Token can configure independent Key limits through HTTP', async
   assert.equal(saved.status,200);assert.equal((await saved.json()).data.totalLimit,10)
   const read=await fetch(url,{headers});assert.equal((await read.json()).data[0].rateLimit,2)
  }finally {if(server.listening)await new Promise(resolve=>server.close(resolve));runtime.agent.close();await runtime.store.close()}
+})
+
+async function enableIpBilling(f, includeIp = true) {
+  const plan = await f.hub.publishPlanVersion({
+    key: 'ip-priced', name: 'IP and social', limits: { monthlyRequests: 10000, burstRps: 100, maxPageSize: 100 },
+    components: [...(includeIp ? [{ type: 'feature', key: 'ip-risk', version: 1 }] : []), { type: 'feature', key: 'xiaohongshu', version: 1 }],
+    priceBook: { key: 'ip-priced', currency: 'CNY', defaultMultiplierPpm: 1000000 },
+  }, 'admin')
+  const current = await f.hub.getConsumerPlan(f.consumer.id)
+  await f.hub.assignConsumerPlan(f.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'admin')
+  await f.hub.setTenantBillingProfile(f.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'admin')
+  await f.hub.addTenantCredit(f.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Billing test' }, { idempotencyKey: 'test-credit', actor: 'admin' })
+}
+
+test('IP composed rate captures five cents, replay is free, batch charges each successful item', async () => {
+  let calls = 0
+  const f = await fixture(async () => { calls++; return new Response(JSON.stringify(payload)) })
+  await enableIpBilling(f)
+  const result = await f.gateway.query(f.context, request)
+  assert.equal(result.status, 200)
+  assert.equal((await f.hub.getTenantBilling(f.tenant.id)).account.availableMinor, 95)
+  await f.gateway.query(f.context, request)
+  assert.equal(calls, 1)
+  const batch = await f.gateway.batch.query(f.context, { body: { ips: ['8.8.8.8', '9.9.9.9'] }, idempotencyKey: 'priced-batch-001', path: '/api/v1/data/ip/risk/batch' })
+  assert.equal(batch.status, 200)
+  const billing = await f.hub.getTenantBilling(f.tenant.id)
+  assert.equal(billing.account.availableMinor, 85)
+  assert.equal(billing.account.heldMinor, 0)
+  assert.equal(calls, 3)
+})
+
+test('IP failure releases customer hold; uncertain transport retains it for reconciliation', async () => {
+  const rejected = await fixture(async () => new Response(JSON.stringify({ code: 400 })))
+  await enableIpBilling(rejected)
+  assert.equal((await rejected.gateway.query(rejected.context, request)).status, 502)
+  assert.equal((await rejected.hub.getTenantBilling(rejected.tenant.id)).account.availableMinor, 100)
+  assert.equal((await rejected.hub.getTenantBilling(rejected.tenant.id)).account.heldMinor, 0)
+  const unknown = await fixture(async () => { throw new Error('network error') })
+  await enableIpBilling(unknown)
+  assert.equal((await unknown.gateway.query(unknown.context, request)).status, 502)
+  const billing = await unknown.hub.getTenantBilling(unknown.tenant.id)
+  assert.equal(billing.account.availableMinor, 95)
+  assert.equal(billing.account.heldMinor, 5)
+})
+
+
+test('old Xiaohongshu-only pricing leaves IP free, while insufficient IP credit blocks before dispatch', async () => {
+  let calls = 0
+  const f = await fixture(async () => { calls++; return new Response(JSON.stringify(payload)) })
+  await enableIpBilling(f, false)
+  assert.equal((await f.gateway.query(f.context, request)).status, 200)
+  assert.equal((await f.hub.getTenantBilling(f.tenant.id)).account.availableMinor, 100)
+  assert.equal(f.store.customerCharges.size, 0)
+  const paid = await fixture(async () => { calls++; return new Response(JSON.stringify(payload)) })
+  await enableIpBilling(paid)
+  const account = (await paid.hub.getTenantBilling(paid.tenant.id)).account
+  await paid.hub.debitTenantCredit(paid.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Empty test wallet', expectedRevision: account.revision }, { idempotencyKey: 'empty-test-wallet', actor: 'admin' })
+  await assert.rejects(paid.gateway.query(paid.context, request), { code: 'insufficient_credit', status: 402 })
+  assert.equal(calls, 1)
 })

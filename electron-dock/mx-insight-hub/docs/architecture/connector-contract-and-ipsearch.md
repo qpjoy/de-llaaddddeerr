@@ -117,7 +117,7 @@ Hub 的新能力不能成为 Launcher/MX-H2I 身份、登录、联网、readines
 
 ## 7. 计量与待定价
 
-上游采购价格与客户销售价格独立。用户此次明确“暂不定价但详细计量”，所以 ipsearch 需要显式 metering-only 策略，不能填一个虚构的零价来通过现有付费 provider 门禁，也不能放宽 JustOne/TikHub 的现有门禁。
+当前客户销售定价已按后续需求升级为套餐中的 `ip.risk.query`（预设 ¥0.05/次），详见 `../operations/billing-composition.md`；采购成本仍未知。以下为首期决策记录：上游采购价格与客户销售价格独立。用户当时明确“暂不定价但详细计量”，所以 ipsearch 需要显式 metering-only 策略，不能填一个虚构的零价来通过现有付费 provider 门禁，也不能放宽 JustOne/TikHub 的现有门禁。
 
 客户账单状态为未定价/未扣费，金额 nullable；采购价格未知则保持 unknown。计量模式仍执行次数配额、QPS、并发、超时及 operation 开关。未来价格发布只影响生效后新请求，不追溯扣除历史请求。
 

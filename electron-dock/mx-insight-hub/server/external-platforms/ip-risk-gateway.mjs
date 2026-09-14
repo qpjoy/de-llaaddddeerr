@@ -53,8 +53,8 @@ export class IpRiskGateway {
     const reservation = await this.usageStore.reserve({
       requestId: randomUUID(), idempotencyKey, fingerprint, tenantId: tenant.id, consumerId: consumer.id, apiKeyId: apiKey.id,
       platform: IP_RISK_PLATFORM,
-      // Explicit metering-only v1: no customer billing meter is reserved.
-      meterKey: null,
+      // Unlisted meters remain free; assigned explicit prices use the existing wallet ledger.
+      meterKey: IP_RISK_OPERATION,
       requiredAuthorizationScopes: [{ type: 'platform', key: IP_RISK_PLATFORM }, { type: 'capability', key: IP_RISK_OPERATION }],
       unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart: new Date(Date.now() - policy.windowSeconds * 1000), maxRequests: policy.maxRequests, replayWindowMs: null,
@@ -97,7 +97,7 @@ export class IpRiskGateway {
       }
       const capturedAt = new Date()
       const responseBody = { contractVersion: IP_RISK_VERSION, data: { ip: input.ip, ...evidence.normalized },
-        meta: { capturedAt: capturedAt.toISOString(), sourceMode: 'live', pricingStatus: 'unpriced', chargeStatus: 'not_charged' }, requestId }
+        meta: { capturedAt: capturedAt.toISOString(), sourceMode: 'live', pricingStatus: 'plan_based', chargeStatus: 'see_usage' }, requestId }
       await this.platformStore.commitLiveDelivery({ ...common, responseBody, capturedAt, freshUntil: capturedAt, staleUntil: capturedAt,
         itemCount: evidence.normalized.status === 'no_data' ? 0 : 1, usageUnitsActual: 1 })
       terminal = true

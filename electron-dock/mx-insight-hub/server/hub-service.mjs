@@ -1,3 +1,4 @@
+import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
 import { issueDemoCredential, readDemoCredentialClaims } from './core/demo-credential.mjs'
 import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
@@ -843,7 +844,7 @@ export class HubService {
     return this.store.listPlans()
   }
 
-  publishPlanVersion(body, publishedByInput) {
+  async publishPlanVersion(body, publishedByInput) {
     assert(
       typeof this.store.publishPlanVersion === 'function',
       503,
@@ -857,10 +858,23 @@ export class HubService {
       'invalid_request',
       'publishedBy must be at most 256 characters and contain no control characters',
     )
-    return this.store.publishPlanVersion({
-      ...normalizePublishedPlan(body),
-      publishedBy,
-    })
+    assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object is required')
+    const { components = [], ...inputPlan } = body
+    const planBody = inputPlan.priceBook?.entries?.length ? normalizePublishedPlan(inputPlan) : inputPlan
+    assert(Array.isArray(components), 400, 'invalid_plan_composition', 'components must be an array')
+    const sourcePlans = components.some(item => item?.type === 'plan') ? await this.store.listPlans() : []
+    let compiled
+    try {
+      compiled = compileBillingComponents(
+        components, sourcePlans,
+        String(planBody.priceBook?.currency || '').trim().toUpperCase(),
+        planBody.priceBook?.entries || [],
+      )
+    } catch (error) {
+      throw new AppError(400, 'invalid_plan_composition', error.message)
+    }
+    const normalized = normalizePublishedPlan({ ...planBody, priceBook: { ...planBody.priceBook, entries: compiled.entries } })
+    return this.store.publishPlanVersion({ ...normalized, components: compiled.components, publishedBy })
   }
 
   async getTenantBilling(tenantIdInput, options = {}) {

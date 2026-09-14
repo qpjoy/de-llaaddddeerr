@@ -70,7 +70,7 @@ export class IpRiskBatch {
     }
     await Promise.all(Array.from({ length: Math.min(3, ips.length) }, worker))
     const response = { contractVersion: IP_RISK_VERSION, batchId: row.id, data: results,
-      meta: { sourceMode: 'live', pricingStatus: 'unpriced', chargeStatus: 'not_charged', requestedItems: ips.length, succeededItems: results.filter(item => item.status === 200).length } }
+      meta: { sourceMode: 'live', pricingStatus: 'plan_based', chargeStatus: 'see_usage', requestedItems: ips.length, succeededItems: results.filter(item => item.status === 200).length } }
     if (this.pool) await this.pool.query('UPDATE external_platform.ipsearch_batches SET response=$2::jsonb,completed_at=now() WHERE id=$1', [row.id, JSON.stringify(response)])
     else row.response = structuredClone(response)
     return { status: 200, body: response, batchId: row.id, replay: false }

@@ -46,7 +46,7 @@ Hub 自动为普通请求生成新的批次身份。对于显式使用幂等请�
 - 复用 `usage_requests`、provider_calls、response_archives、restricted_response_archives 和 consumer-scoped response_snapshots。成功响应和用量在 PG 同一事务提交；归档保留完整 bytes/hash，公共输出只含业务白名单。
 - 响应过大、网络中断等不能取得完整响应的情况为 unknown，不伪造完整 archive。持久化异常返回结果未知，不能自动再次消费上游；记录可能需要人工核对。
 - 首期结果已落 PostgreSQL 原始证据及响应快照，但**不自动写共享 canonical/ES**。IP 查询结果可能带租户业务意图，后续须先定义 observation 授权、保留周期及发布规则，再接 canonical worker。重新规范化应使用 archive，不重新调用上游。
-- 仅计量：不预占客户 billing meter；响应 `pricingStatus=unpriced`、`chargeStatus=not_charged`。采购金额、币种、是否计费为 null/unknown。不能把 unknown 展示为免费，也不会将后续价格追溯到本期请求。
+- 客户费用使用 `ip.risk.query` 计费键和已分配套餐；预设基础价 ¥0.05/次，实际价格还受现有租户倍率影响。未配置价格或未启用自动扣费的旧客户保持原行为。成功交付扣费（含有效 no_data），确定失败释放冻结，结果未知保留冻结待对账；批量逐项结算。确定失败项释放后，用户再次提交可以重新派发；Hub 不自动重试。响应 `pricingStatus=plan_based`、`chargeStatus=see_usage`，精确金额查看用量和账单。采购金额、币种、是否计费仍为 null/unknown，不能把未知采购成本展示为免费。新价格不会追溯历史请求。
 - “外部数据平台 → ipsearch”显示 HTTP 尝试、逻辑交付/回放、实际调用、可用响应、未知结果。租户只看到 Hub 产品、接口和自己的 usage。
 
 ## 验证边界
@@ -63,3 +63,7 @@ Hub 自动为普通请求生成新的批次身份。对于显式使用幂等请�
 累计上限按此 Key 该范围的历史逻辑请求计数（reserved/committed/unknown）；正在执行和未知结果占用额度，失败 released 不占累计额度。频率按窗口内已受理的逻辑请求计数，包括最终失败项；精确幂等回放不新增用量。批量逐 IP 检查；达到上限后未派发的项独立返回 429。修改额度不清零历史，新额度低于已用时下一项即拒绝。
 
 PostgreSQL 在现有 usage reservation 事务和调用者锁内核验上限，配置更新使用同一锁，多实例并发共享计数；不能只依赖浏览器按钮限制。没有客户端请求编号也仍然按真实 Key ID 限制频率，临时调用凭据轮换不改变 Key 身份。此处限制数据查询用量，不替代网关层对匿名请求、无效认证或 HTTP 洪泛的流量防护。
+
+## 组合费率
+
+在套餐与配额选择调用者，点击“追加 IP 风险画像费率 · ¥0.05/次”，草稿保留已有小红书等价格。核对价格、租户倍率及启用范围后发布、分配。也可以在发布窗口下拉添加预设产品或已发布套餐。详见 [组合套餐](billing-composition.md)。

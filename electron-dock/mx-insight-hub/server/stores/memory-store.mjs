@@ -877,7 +877,7 @@ export class MemoryStore {
     )))
   }
 
-  async publishPlanVersion({ key, name, limits, priceBook, publishedBy }) {
+  async publishPlanVersion({ key, name, limits, priceBook, components = [], publishedBy }) {
     const existingVersions = this.plans.filter((candidate) => candidate.key === key)
     const existingName = existingVersions[0]?.name
     if (existingName && existingName !== name) {
@@ -905,6 +905,7 @@ export class MemoryStore {
         mode: 'prepaid_wallet',
         defaultMultiplierPpm: priceBook.defaultMultiplierPpm,
         rateCount: priceBook.entries.length,
+        ...(components.length ? { components } : {}),
       },
       priceBook: {
         id: randomUUID(),

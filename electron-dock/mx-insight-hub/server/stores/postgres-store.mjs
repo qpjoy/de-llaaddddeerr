@@ -1664,7 +1664,7 @@ export class PostgresStore {
     return rows.map(planRecord)
   }
 
-  async publishPlanVersion({ key, name, limits, priceBook, publishedBy }) {
+  async publishPlanVersion({ key, name, limits, priceBook, components = [], publishedBy }) {
     return withPgTransaction(this.pool, async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing-plan:${key}`])
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing-price-book:${priceBook.key}`])
@@ -1730,6 +1730,7 @@ export class PostgresStore {
         currency: priceBook.currency,
         defaultMultiplierPpm: priceBook.defaultMultiplierPpm,
         rateCount: priceBook.entries.length,
+        ...(components.length ? { components } : {}),
       }
       await client.query(
         `INSERT INTO plan_versions
