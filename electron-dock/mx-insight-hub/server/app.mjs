@@ -2338,6 +2338,23 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing/debits')
+      if (request.method === 'POST' && params) {
+        requirePlatformAdmin(principal)
+        requireNoQuery(searchParams, 'tenant credit adjustment')
+        sendJson(response, 201, {
+          data: await service.debitTenantCredit(
+            params.id,
+            await readJson(request, 16 * 1024),
+            {
+              idempotencyKey: request.headers['idempotency-key'],
+              actor: principal.memberId || principal.kind || 'admin-token',
+            },
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/status')
       if (request.method === 'PUT' && params) {
         // Same capability as renaming: whoever may administer the tenant may

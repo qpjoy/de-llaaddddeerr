@@ -12,6 +12,7 @@ import { XIAOHONGSHU_POST_OPERATION } from './contracts/tikhub-xiaohongshu.mjs'
 import {
   normalizeBillingProfile,
   normalizeCreditAdjustment,
+  normalizeCreditDebit,
   normalizePublishedPlan,
 } from './billing/contracts.mjs'
 import {
@@ -908,6 +909,31 @@ export class HubService {
     return this.store.addTenantCredit({
       tenantId,
       ...normalizeCreditAdjustment(body),
+      idempotencyKey,
+      actor: requiredString(actor, 'actor'),
+    })
+  }
+
+  async debitTenantCredit(tenantIdInput, body, { idempotencyKey, actor } = {}) {
+    const tenantId = requiredUuid(tenantIdInput, 'tenantId')
+    assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
+    assert(
+      typeof idempotencyKey === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(idempotencyKey),
+      400,
+      'invalid_idempotency_key',
+      'Idempotency-Key must contain 8-128 safe characters',
+    )
+    assert(
+      typeof this.store.addTenantCredit === 'function',
+      503,
+      'billing_store_unavailable',
+      'Tenant credit requires the current Hub database migration',
+    )
+    return this.store.addTenantCredit({
+      tenantId,
+      ...normalizeCreditDebit(body),
+      debit: true,
       idempotencyKey,
       actor: requiredString(actor, 'actor'),
     })

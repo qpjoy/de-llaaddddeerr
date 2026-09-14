@@ -972,14 +972,16 @@ export class MemoryStore {
     return clone(next)
   }
 
-  async addTenantCredit({ tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor }) {
+  async addTenantCredit({ tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor, debit = false, expectedRevision }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     const scope = `${tenantId}:${idempotencyKey}`
     const existingId = this.creditAdjustmentKeys.get(scope)
     if (existingId) {
       const existing = this.creditLedgerEntries.find((entry) => entry.id === existingId)
       if (
-        existing.amountMinor !== amountMinor
+        existing.kind !== (debit ? 'adjustment' : 'topup')
+        || (debit && existing.accountRevision !== expectedRevision + 1)
+        || existing.amountMinor !== amountMinor
         || existing.currency !== currency
         || existing.reason !== reason
         || existing.externalReference !== externalReference
@@ -990,6 +992,12 @@ export class MemoryStore {
     if (account && account.currency !== currency) {
       throw new AppError(409, 'wallet_currency_conflict', 'Tenant wallet currency cannot be changed')
     }
+    if (debit && (!account || account.revision !== expectedRevision)) {
+      throw new AppError(409, 'wallet_revision_conflict', '余额已变化，请刷新后重新确认扣账')
+    }
+    if (debit && account.availableMinor < amountMinor) {
+      throw new AppError(409, 'insufficient_credit', '扣账金额超过可用余额')
+    }
     const createdAt = nowIso()
     if (!account) {
       account = {
@@ -998,13 +1006,13 @@ export class MemoryStore {
       }
       this.creditAccounts.set(tenantId, account)
     }
-    account.availableMinor += amountMinor
+    account.availableMinor += debit ? -amountMinor : amountMinor
     account.revision += 1
     account.updatedAt = createdAt
     const entry = {
       id: randomUUID(), accountId: account.id, tenantId, chargeId: null,
-      usageRequestId: null, kind: 'topup', amountMinor,
-      availableDeltaMinor: amountMinor, heldDeltaMinor: 0,
+      usageRequestId: null, kind: debit ? 'adjustment' : 'topup', amountMinor,
+      availableDeltaMinor: debit ? -amountMinor : amountMinor, heldDeltaMinor: 0,
       availableAfterMinor: account.availableMinor, heldAfterMinor: account.heldMinor,
       accountRevision: account.revision,
       currency, idempotencyKey, externalReference, actor, reason, createdAt,

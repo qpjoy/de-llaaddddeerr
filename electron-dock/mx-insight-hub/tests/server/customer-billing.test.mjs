@@ -697,3 +697,102 @@ test('unpriced operations stay metered and free while priced operations retain w
   assert.equal(billing.account.heldMinor, 0)
   assert.equal(store.customerCharges.size, 1)
 })
+
+test('manual debit preserves holds, rejects stale balances and replays without a second deduction', async () => {
+  const { store, service, tenant, context } = await fixture()
+  await service.addTenantCredit(tenant.id, { amountMinor: 1_000, currency: 'CNY', reason: 'Test funds' },
+    { idempotencyKey: randomUUID(), actor: 'admin' })
+  const paid = reserveInput(context)
+  await store.reserve(paid) // 30 minor units held; 970 available.
+  const account = (await service.getTenantBilling(tenant.id)).account
+  const body = { amountMinor: 670, currency: 'CNY', reason: 'Adjust available balance to 3 yuan', expectedRevision: account.revision }
+  const options = { idempotencyKey: randomUUID(), actor: 'admin' }
+  const entry = await service.debitTenantCredit(tenant.id, body, options)
+  assert.equal(entry.kind, 'adjustment')
+  assert.equal(entry.availableDeltaMinor, -670)
+  assert.equal(entry.availableAfterMinor, 300)
+  assert.equal(entry.heldAfterMinor, 30)
+  assert.equal(entry.actor, 'admin')
+  assert.equal((await service.debitTenantCredit(tenant.id, body, options)).id, entry.id)
+  await assert.rejects(() => service.debitTenantCredit(tenant.id, { ...body, amountMinor: 1 }, options), error => error.code === 'credit_idempotency_conflict')
+  await assert.rejects(() => service.debitTenantCredit(tenant.id, body, { ...options, idempotencyKey: randomUUID() }), error => error.code === 'wallet_revision_conflict')
+  const revision = (await service.getTenantBilling(tenant.id)).account.revision
+  await assert.rejects(() => service.debitTenantCredit(tenant.id, { ...body, expectedRevision: revision, amountMinor: 301 }, { ...options, idempotencyKey: randomUUID() }), error => error.code === 'insufficient_credit')
+  await assert.rejects(() => service.addTenantCredit(tenant.id, { amountMinor: -300, currency: 'CNY', reason: 'Invalid' }, options))
+  await assert.rejects(() => service.debitTenantCredit(tenant.id, { ...body, reason: '' }, options))
+  await store.commitRequest(paid.requestId, { responseStatus: 200, responseBody: { data: [] }, unitsActual: 1 })
+  assert.equal((await service.getTenantBilling(tenant.id)).account.availableMinor, 300)
+  assert.equal((await service.getTenantBilling(tenant.id)).account.heldMinor, 0)
+})
+
+test('manual debit HTTP route is platform-admin only', async (t) => {
+  const { store, service, tenant, context } = await fixture()
+  await service.addTenantCredit(tenant.id, {
+    amountMinor: 100,
+    currency: 'CNY',
+    reason: 'HTTP reconciliation credit',
+  }, { idempotencyKey: `topup:${randomUUID()}`, actor: 'test-admin' })
+  const usageRequest = reserveInput(context)
+  await store.reserve(usageRequest)
+  await store.markRequestUnknown(usageRequest.requestId, 'delivery_outcome_unknown')
+
+  const identity = {
+    enabled: true,
+    async resolve(token) {
+      if (token !== 'scoped-billing-member') return null
+      return {
+        kind: 'launcher-user',
+        memberId: 'tenant-billing-member',
+        displayName: 'Tenant billing member',
+        platformAdmin: false,
+        tenantIds: [tenant.id],
+        capabilities: [],
+        memberships: [{ tenantId: tenant.id, capabilities: ['usage.read'] }],
+      }
+    },
+  }
+  const app = createApp({
+    service,
+    store,
+    adapter: {},
+    identity,
+    adminToken: 'customer-billing-http-admin-token',
+    logger: { error() {} },
+  })
+  const server = createServer(app)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  const path = `/internal/v1/admin/tenants/${tenant.id}/billing/debits`
+  const body = {
+    amountMinor: 50, currency: 'CNY',
+    expectedRevision: (await service.getTenantBilling(tenant.id)).account.revision,
+    reason: 'Operator confirmed no customer delivery',
+  }
+  const idempotencyKey = `reconcile:${randomUUID()}`
+  const call = async (scoped) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        ...(scoped
+          ? { authorization: 'Bearer scoped-billing-member' }
+          : { 'x-mx-insight-admin-token': 'customer-billing-http-admin-token' }),
+        'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify(body),
+    })
+    return { response, payload: await response.json() }
+  }
+
+  const denied = await call(true)
+  assert.equal(denied.response.status, 403)
+  assert.equal(denied.payload.error.code, 'platform_admin_required')
+  const reconciled = await call(false)
+  assert.equal(reconciled.response.status, 201)
+  assert.equal(reconciled.payload.data.availableAfterMinor, 20)
+  assert.equal((await store.getRequest(usageRequest.requestId, context.consumer.id)).status, 'unknown')
+  const terminal = store.creditLedgerEntries.find((entry) => entry.idempotencyKey === idempotencyKey)
+  assert.equal(terminal.actor, 'admin-token')
+  assert.equal(terminal.reason, body.reason)
+})

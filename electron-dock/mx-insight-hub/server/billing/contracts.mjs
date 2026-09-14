@@ -159,6 +159,14 @@ export function normalizeCreditAdjustment(input) {
   }
 }
 
+export function normalizeCreditDebit(input) {
+  const value = plainObject(input)
+  strictFields(value, ['amountMinor', 'currency', 'reason', 'externalReference', 'expectedRevision'], 'credit debit')
+  const { expectedRevision, ...adjustment } = value
+  return { ...normalizeCreditAdjustment(adjustment),
+    expectedRevision: boundedInteger(expectedRevision, 'expectedRevision', { min: 0 }) }
+}
+
 export function usageMeterKey({ meterKey, capability, platform }) {
   const value = String(meterKey || capability || platform || '').trim().toLowerCase()
   assert(BILLING_METER_PATTERN.test(value), 500, 'invalid_usage_meter', 'Usage meter key is invalid')

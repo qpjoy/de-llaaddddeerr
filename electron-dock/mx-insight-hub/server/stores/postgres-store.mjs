@@ -1853,7 +1853,7 @@ export class PostgresStore {
   }
 
   async addTenantCredit({
-    tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor,
+    tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor, debit = false, expectedRevision,
   }) {
     return withPgTransaction(this.pool, async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing:tenant:${tenantId}`])
@@ -1865,7 +1865,8 @@ export class PostgresStore {
       if (existing.rows[0]) {
         const entry = creditLedgerRecord(existing.rows[0])
         if (
-          entry.kind !== 'topup'
+          entry.kind !== (debit ? 'adjustment' : 'topup')
+          || (debit && entry.accountRevision !== expectedRevision + 1)
           || entry.amountMinor !== amountMinor
           || entry.currency !== currency
           || entry.reason !== reason
@@ -1892,16 +1893,23 @@ export class PostgresStore {
       if (!account || account.currency !== currency) {
         throw new AppError(409, 'wallet_currency_conflict', 'Tenant wallet currency cannot be changed')
       }
+      if (debit && Number(account.revision) !== expectedRevision) {
+        throw new AppError(409, 'wallet_revision_conflict', '余额已变化，请刷新后重新确认扣账')
+      }
+      if (debit && Number(account.available_minor) < amountMinor) {
+        throw new AppError(409, 'insufficient_credit', '扣账金额超过可用余额')
+      }
       const entryResult = await client.query(
         `INSERT INTO billing.credit_ledger_entries
            (id, account_id, tenant_id, kind, amount_minor,
             available_delta_minor, held_delta_minor, currency,
             idempotency_key, external_reference, actor, reason)
-         VALUES ($1, $2, $3, 'topup', $4, $4, 0, $5, $6, $7, $8, $9)
+         VALUES ($1, $2, $3, $10, $4, $11, 0, $5, $6, $7, $8, $9)
          RETURNING *`,
         [
           randomUUID(), account.id, tenantId, amountMinor,
           currency, idempotencyKey, externalReference, actor, reason,
+          debit ? 'adjustment' : 'topup', debit ? -amountMinor : amountMinor,
         ],
       )
       return creditLedgerRecord(entryResult.rows[0])

@@ -360,6 +360,11 @@ export const adminApi = {
     `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing/credits`,
     { method: 'POST', body, headers: { 'idempotency-key': idempotencyKey } },
   ),
+  debitTenantCredit: (token, tenantId, body, idempotencyKey) => request(
+    token,
+    `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing/debits`,
+    { method: 'POST', body, headers: { 'idempotency-key': idempotencyKey } },
+  ),
   reconcileUnknownCustomerCharge: (token, usageRequestId, body, idempotencyKey) => request(
     token,
     `${ADMIN_ROOT}/usage/${encodeURIComponent(usageRequestId)}/customer-charge/reconciliation`,

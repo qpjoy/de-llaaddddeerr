@@ -1970,6 +1970,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   contextRef.current = requestedContext
   const [assigningPlanVersionId, setAssigningPlanVersionId] = useState('')
   const [creditOpen, setCreditOpen] = useState(false)
+  const [debit, setDebit] = useState(null)
+  const [debitMode, setDebitMode] = useState('target')
+  const [debitAmount, setDebitAmount] = useState('')
+  const [debitReason, setDebitReason] = useState('')
   const [profileOpen, setProfileOpen] = useState(false)
   const [planOpen, setPlanOpen] = useState(false)
   const [activatePlan, setActivatePlan] = useState(false)
@@ -2099,6 +2103,31 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     const targetContext = contextRef.current
     const refreshed = await load()
     if (contextRef.current === targetContext) state.setData(refreshed)
+  }
+
+  const debitInputMinor = decimalToMinor(debitAmount)
+  const debitMinor = debitInputMinor == null || !debit ? null
+    : debitMode === 'target' ? debit.availableMinor - debitInputMinor : debitInputMinor
+  const debitValid = debitMinor != null && debitMinor > 0 && debitMinor <= debit?.availableMinor
+  const saveDebit = async (event) => {
+    event.preventDefault()
+    if (!session?.platformAdmin || billingBusy || !debitValid || !debitReason.trim()) return
+    setBillingBusy('debit')
+    setBillingError(null)
+    try {
+      await adminApi.debitTenantCredit(token, debit.tenantId, {
+        amountMinor: debitMinor, currency: debit.currency,
+        expectedRevision: debit.revision, reason: debitReason.trim(),
+      }, debit.idempotencyKey)
+      setDebit(null)
+      await refreshCurrentContext()
+      notify?.('扣账完成，已记录人工调账流水', 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setBillingError(error)
+    } finally {
+      setBillingBusy('')
+    }
   }
 
   const saveCredit = async (event) => {
@@ -2268,6 +2297,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   return (
     <>
       <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="套餐总额、调用者策略与 API Key 签发额度同时生效；每次请求会受其中最严格的边界约束。" loading={state.loading} onRefresh={state.refresh}>
+        {session?.platformAdmin ? <button className="qp-button qp-button--secondary" type="button" disabled={!account || Boolean(billingBusy)} onClick={() => {
+          setBillingError(null); setDebitAmount(''); setDebitReason(''); setDebitMode('target')
+          setDebit({ ...account, tenantId: data.tenantId, idempotencyKey: `debit-${crypto.randomUUID()}` })
+        }}>人工扣账</button> : null}
         {session?.platformAdmin ? <button className="qp-button qp-button--primary" type="button" onClick={() => { setBillingError(null); setCreditForm((current) => ({ ...current, currency: billingCurrency })); setCreditOpen(true) }} disabled={!data.tenantId}><Plus size={17} aria-hidden="true" />人工充值</button> : null}
         {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={openProfile} disabled={!data.tenantId}><SlidersHorizontal size={17} aria-hidden="true" />计费策略</button> : null}
         {session?.platformAdmin ? <button className="qp-button qp-button--outline" type="button" onClick={() => openPlanPublisher()}><Coins size={17} aria-hidden="true" />发布套餐版本</button> : null}
@@ -2481,6 +2514,27 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           />
         )}
       </Panel>
+
+      {debit && session?.platformAdmin ? <Modal title="人工扣账"
+        description="扣减租户共享钱包的可用余额，影响该租户下所有业务和 Key；冻结金额保持不变。"
+        busy={billingBusy === 'debit'} onClose={() => !billingBusy && setDebit(null)}
+        footer={<><button className="qp-button qp-button--ghost" type="button" disabled={Boolean(billingBusy)} onClick={() => setDebit(null)}>取消</button>
+          <button className="qp-button qp-button--primary" type="submit" form="tenant-debit-form" disabled={Boolean(billingBusy) || !debitValid || !debitReason.trim()}>{billingBusy === 'debit' ? '正在扣账…' : '确认扣账'}</button></>}>
+        <form id="tenant-debit-form" className="mih-form mih-form--grid" onSubmit={saveDebit}>
+          <div className="mih-form__wide"><p>租户：{data.tenants?.find(tenant => tenant.id === debit.tenantId)?.name || debit.tenantId}</p>
+            <p>当前可用余额：{formatMoneyMinor(debit.availableMinor, debit.currency)}；冻结：{formatMoneyMinor(debit.heldMinor, debit.currency)}</p></div>
+          <Field label="扣账方式"><select className="qp-input" value={debitMode} disabled={Boolean(billingBusy)} onChange={event => { setDebitMode(event.target.value); setDebitAmount('') }}>
+            <option value="target">扣减至指定余额</option><option value="amount">按金额扣减</option>
+          </select></Field>
+          <Field label={debitMode === 'target' ? '目标可用余额' : '扣减金额'} hint="最多两位小数，不允许扣成负数。">
+            <input className="qp-input" inputMode="decimal" value={debitAmount} disabled={Boolean(billingBusy)} onChange={event => setDebitAmount(event.target.value)} placeholder={debitMode === 'target' ? '3.00' : '100.00'} required autoFocus />
+          </Field>
+          <div className="mih-form__wide"><Field label="扣账原因"><input className="qp-input" value={debitReason} disabled={Boolean(billingBusy)} onChange={event => setDebitReason(event.target.value)} required maxLength={256} /></Field></div>
+          <div className="mih-form__wide"><p>{debitValid ? `本次扣减 ${formatMoneyMinor(debitMinor, debit.currency)}，调整后可用余额 ${formatMoneyMinor(debit.availableMinor - debitMinor, debit.currency)}。` : '请输入有效金额；目标余额必须低于当前可用余额。'}</p>
+            <p>确认后新增人工调账流水。若余额已变化，请关闭弹窗、刷新余额后重新确认。</p>
+            {billingError ? <ErrorState error={billingError} /> : null}</div>
+        </form>
+      </Modal> : null}
 
       {creditOpen && session?.platformAdmin ? (
         <Modal
