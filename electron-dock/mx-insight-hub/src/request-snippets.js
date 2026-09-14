@@ -7,7 +7,7 @@ export const REQUEST_FORMATS = [
   { value: 'node', label: 'fetch · Node.js 18+' },
 ]
 export function requestSnippet({ format, url, body, credential, idempotencyKey }) {
-  const headers = { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }
+  const headers = { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) }
   const json = JSON.stringify(body)
   if (format === 'curl') return [
     `curl --request POST ${shellQuote(url)}`,

@@ -256,3 +256,64 @@ test('IP operation is configurable before grant and can be explicitly applied to
   assert.ok(refreshed.access.capabilities.includes('ip.risk.query'))
   assert.equal((await service.authenticate(key.secret)).apiKey.id, key.id)
 })
+
+test('ordinary IP requests need no idempotency header and every request gets its own identity', async () => {
+ let calls=0
+ const f=await fixture(async()=>{calls++;return new Response(JSON.stringify(payload))})
+ const input={body:{ip:'1.1.1.1'},path:request.path}
+ const first=await f.gateway.query(f.context,input),second=await f.gateway.query(f.context,input)
+ assert.equal(first.status,200);assert.equal(second.status,200)
+ assert.notEqual(first.requestId,second.requestId);assert.equal(calls,2)
+ const batchInput={body:{ips:['8.8.8.8']},path:'/api/v1/data/ip/risk/batch'}
+ const a=await f.gateway.batch.query(f.context,batchInput),b=await f.gateway.batch.query(f.context,batchInput)
+ assert.notEqual(a.batchId,b.batchId);assert.equal(calls,4)
+})
+
+test('per-Key operation total limits are opt-in, atomic and do not reset historical usage', async () => {
+ const {saveKeyAccessLimit,readKeyAccessLimits}=await import('../../server/stores/key-access-limits.mjs')
+ let calls=0
+ const f=await fixture(async()=>{calls++;return new Response(JSON.stringify(payload))})
+ assert.deepEqual(await readKeyAccessLimits(f.store,f.context.apiKey.id),[])
+ const input={body:{ip:'1.1.1.1'},path:request.path}
+ await f.gateway.query(f.context,input)
+ const policy={scopeType:'capability',scopeKey:'ip.risk.query',totalLimit:2,rateLimit:null,windowSeconds:60,revision:0}
+ await saveKeyAccessLimit(f.store,f.context.apiKey,policy,'admin-token')
+ const results=await Promise.allSettled([f.gateway.query(f.context,input),f.gateway.query(f.context,input)])
+ assert.equal(results.filter(item=>item.status==='fulfilled').length,1)
+ assert.equal(results.find(item=>item.status==='rejected').reason.code,'api_key_total_limit_exceeded')
+ assert.equal(calls,2)
+ await assert.rejects(saveKeyAccessLimit(f.store,f.context.apiKey,policy,'admin-token'),{code:'revision_conflict'})
+ await saveKeyAccessLimit(f.store,f.context.apiKey,{...policy,totalLimit:null,revision:1},'admin-token')
+ assert.equal((await f.gateway.query(f.context,input)).status,200);assert.equal(calls,3)
+})
+
+test('Key rate limits count failed admissions without client idempotency keys and block before upstream', async () => {
+ const {saveKeyAccessLimit}=await import('../../server/stores/key-access-limits.mjs')
+ let calls=0
+ const f=await fixture(async()=>{calls++;return new Response(JSON.stringify({code:400}))})
+ await saveKeyAccessLimit(f.store,f.context.apiKey,{scopeType:'capability',scopeKey:'ip.risk.query',totalLimit:null,rateLimit:1,windowSeconds:60,revision:0},'admin-token')
+ await f.gateway.query(f.context,{body:{ip:'1.1.1.1'},path:request.path})
+ await assert.rejects(f.gateway.query(f.context,{body:{ip:'8.8.8.8'},path:request.path}),{code:'api_key_rate_limit_exceeded'})
+ assert.equal(calls,1)
+})
+
+test('only Admin Token can configure independent Key limits through HTTP', async () => {
+ const adminToken='key-limits-admin-test-at-least-32-characters'
+ const runtime=await createRuntime(loadConfig({MX_INSIGHT_STORE:'memory',MX_INSIGHT_LISTENER_MODE:'combined',MX_INSIGHT_ADMIN_TOKEN:adminToken,MX_INSIGHT_API_KEY_PEPPER:'key-limits-pepper-at-least-32-characters'}))
+ const server=createServer(runtime.app)
+ try {
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
+  const tenant=await runtime.service.createTenant({name:'Limits tenant'})
+  const consumer=await runtime.service.createConsumer({tenantId:tenant.id,name:'Limits consumer'})
+  await runtime.service.putCapabilityConfiguration('ip.risk.query',{tenantId:tenant.id,consumerId:consumer.id,enabled:true})
+  const key=await runtime.service.createApiKey({consumerId:consumer.id,name:'Limited key',capabilities:['ip.risk.query']})
+  const url=`http://127.0.0.1:${server.address().port}/internal/v1/admin/api-keys/${key.id}/access-limits`
+  const body={scopeType:'capability',scopeKey:'ip.risk.query',totalLimit:10,rateLimit:2,windowSeconds:60,revision:0}
+  const rejected=await fetch(url,{method:'PUT',headers:{'x-mx-insight-admin-token':key.secret,'content-type':'application/json'},body:JSON.stringify(body)})
+  assert.ok([401,403].includes(rejected.status));await rejected.text()
+  const headers={'x-mx-insight-admin-token':adminToken,'content-type':'application/json'}
+  const saved=await fetch(url,{method:'PUT',headers,body:JSON.stringify(body)})
+  assert.equal(saved.status,200);assert.equal((await saved.json()).data.totalLimit,10)
+  const read=await fetch(url,{headers});assert.equal((await read.json()).data[0].rateLimit,2)
+ }finally {if(server.listening)await new Promise(resolve=>server.close(resolve));runtime.agent.close();await runtime.store.close()}
+})

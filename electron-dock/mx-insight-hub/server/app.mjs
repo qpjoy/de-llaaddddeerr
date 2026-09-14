@@ -1,3 +1,4 @@
+import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
@@ -2457,6 +2458,17 @@ export function createApp({
         sendJson(response, 201, { data: await service.createApiKey(body), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/access-limits')
+      if (params && ['GET','PUT'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        await assertApiKeyCapability(principal, params.id, 'apikey.write')
+        const key = (await service.listApiKeys()).find(item => item.id === params.id)
+        if (!key) throw new AppError(404, 'api_key_not_found', 'Key not found')
+        const data = request.method === 'GET' ? await readKeyAccessLimits(store, key.id)
+          : await saveKeyAccessLimit(store, key, await readJson(request,4096), principal.kind)
+        sendJson(response,200,{data,requestId}); return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/scopes')
       if (request.method === 'POST' && params) {
         await assertApiKeyCapability(principal, params.id, 'apikey.write')

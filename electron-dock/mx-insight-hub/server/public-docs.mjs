@@ -1235,9 +1235,9 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
         'x-mx-required-platform': 'ip_risk', 'x-mx-required-capabilities': ['ip.risk.query'],
-        description: '使用已授权 Live Hub Key。只支持 IPv4，单次一项；必须提供 Idempotency-Key。相同请求重放不重新查询；结果未知时不得自动新建请求。当前仅计量，未定价且不扣费。概率单位为百分数；null 表示未知，不表示零风险。',
+        description: '使用已授权 Live Hub Key。只支持 IPv4，单次一项；无需提供请求去重标识，每次普通请求都是新查询并计入次数。可选 Idempotency-Key 仅供需要精确重试的高级调用者使用；结果未知时不要自动重试。当前仅计量，未定价且不扣费。概率单位为百分数；null 表示未知，不表示零风险。',
         security: [{ bearerKey: [] }],
-        parameters: [{ in: 'header', name: 'Idempotency-Key', required: true, schema: { type: 'string', minLength: 8, maxLength: 128 } }],
+        parameters: [{ in: 'header', name: 'Idempotency-Key', required: false, schema: { type: 'string', minLength: 8, maxLength: 128 } }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['ip'], properties: { ip: { type: 'string', format: 'ipv4', description: 'IPv4 地址，例如 1.1.1.1' } } } } } },
         responses: { '200': { description: '画像、部分画像或明确无数据；包含 requestId、contractVersion、data 和 meta。data.status 为 success/partial/no_data。data.data 包含 proxy_type、risk_score、risk_level、rapid_rotation_probability_percent、human_probability_percent、risk_tags。' },
           '400': { description: '请求格式错误' }, '401': { description: '身份无效' }, '403': { description: '未开通或 Key 未授权' }, '409': { description: '幂等冲突、处理中或结果未知' }, '429': { description: '配额或速率限制' }, '502': { description: '查询失败或结果不可用' }, '503': { description: '服务未启用或持久化结果未知' } },
@@ -1247,9 +1247,9 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       post: {
         tags: ['IP 风险画像'], summary: '批量查询 IPv4 风险画像', operationId: 'queryIpRiskBatch',
         'x-mx-required-platform': 'ip_risk', 'x-mx-required-capabilities': ['ip.risk.query'],
-        description: '使用已授权 Live Hub Key。只支持 IPv4，单次 1–100 项，保留顺序与重复项，每项独立计量，最多 3 并发，60 秒批次预算，未调度项返回独立错误；必须提供 Idempotency-Key。相同请求重放不重新查询；结果未知时不得自动新建请求。当前仅计量，未定价且不扣费。概率单位为百分数；null 表示未知，不表示零风险。',
+        description: '使用已授权 Live Hub Key。只支持 IPv4，单次 1–100 项，保留顺序与重复项，每项独立计量，最多 3 并发，60 秒批次预算，未调度项返回独立错误；无需提供请求去重标识，每次普通请求都是新查询并计入次数。可选 Idempotency-Key 仅供需要精确重试的高级调用者使用；结果未知时不要自动重试。当前仅计量，未定价且不扣费。概率单位为百分数；null 表示未知，不表示零风险。',
         security: [{ bearerKey: [] }],
-        parameters: [{ in: 'header', name: 'Idempotency-Key', required: true, schema: { type: 'string', minLength: 8, maxLength: 128 } }],
+        parameters: [{ in: 'header', name: 'Idempotency-Key', required: false, schema: { type: 'string', minLength: 8, maxLength: 128 } }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['ips'], properties: { ips: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', format: 'ipv4' } } } } } } },
         responses: { '200': { description: '包含 batchId、contractVersion、data 数组与 meta；每项含 index、ip、HTTP status 及 response 或 error。200 表示批次完成，具体成功状态按项判断。重放不重新查询，未完成批次返回 409。' },
           '400': { description: '请求格式错误' }, '401': { description: '身份无效' }, '403': { description: '未开通或 Key 未授权' }, '409': { description: '幂等冲突、处理中或结果未知' }, '429': { description: '配额或速率限制' }, '502': { description: '查询失败或结果不可用' }, '503': { description: '服务未启用或持久化结果未知' } },
@@ -5430,7 +5430,7 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     </tbody></table>
     </section>
 
-    <section class="doc-page" data-doc-page="ip-risk"><h2>IP 风险画像</h2><p>POST /api/v1/data/ip/risk · Live Hub API Key</p><p>要求 ip_risk 数据域与 ip.risk.query 能力。Body 为 {"ip":"1.1.1.1"}，必须提供 Idempotency-Key。批量接口 POST /api/v1/data/ip/risk/batch 接收 {"ips":["1.1.1.1","8.8.8.8"]}，1–100 项，保留顺序与重复项，每项独立计量；结果逐项返回，不自动重试。</p><p>当前仅记录次数，未定价、不扣费。相同请求重试沿用幂等键；新查询使用新键。风险值、概率和标签可能缺失，不补成零；观测时间不等于风险事件时间。</p><p>success/partial/no_data 分别表示有效、部分有效、明确无数据。失败不自动重试；结果未知时保留请求标识用于核对。</p></section>
+    <section class="doc-page" data-doc-page="ip-risk"><h2>IP 风险画像</h2><p>POST /api/v1/data/ip/risk · Live Hub API Key</p><p>要求 ip_risk 数据域与 ip.risk.query 能力。Body 为 {"ip":"1.1.1.1"}，无需额外请求去重参数，每次请求独立计量。批量接口 POST /api/v1/data/ip/risk/batch 接收 {"ips":["1.1.1.1","8.8.8.8"]}，1–100 项，保留顺序与重复项，每项独立计量；结果逐项返回，不自动重试。</p><p>当前仅记录次数，未定价、不扣费。超过 Key 次数或频率限制时返回 429；不要自动重试结果未知的请求。风险值、概率和标签可能缺失，不补成零；观测时间不等于风险事件时间。</p><p>success/partial/no_data 分别表示有效、部分有效、明确无数据。失败不自动重试；结果未知时保留请求标识用于核对。</p></section>
     <section class="doc-page" data-doc-page="ecommerce-treasure-box">
     <h2 id="ecommerce-treasure-box">电商数据</h2>
     <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>

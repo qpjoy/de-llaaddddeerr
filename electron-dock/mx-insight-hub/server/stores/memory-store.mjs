@@ -1,3 +1,4 @@
+import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
 import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -1638,6 +1639,7 @@ export class MemoryStore {
     tenantId, consumerId, apiKeyId, platform, capability,
     windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
   }) {
+    assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes)
     const records = [...this.requests.values()]
     for (const scope of authorizationScopes) {
       const entitlement = scopeEntitlements.get(authorizationScopeKey(scope))

@@ -36,6 +36,7 @@ export class IpRiskBatch {
     if (!grants.includes('ip_risk') || !capabilities.includes('ip.risk.query')) throw new AppError(403, 'capability_not_granted', 'IP risk queries are not granted')
     if (context.apiKey.environment === 'test' || context.apiKey.prefix?.startsWith('mih_test_')) throw new AppError(403, 'test_key_not_supported', 'Use a Live Hub key')
     if (!body || Array.isArray(body) || Object.keys(body).length !== 1 || !Array.isArray(body.ips) || body.ips.length < 1 || body.ips.length > 100) throw new AppError(400, 'invalid_ip_batch', 'Provide 1–100 IPv4 addresses in ips')
+    idempotencyKey ??= `ip-batch-auto-${randomUUID()}`
     const ips = body.ips.map(ip => normalizeIpRiskRequest({ ip }).ip)
     if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(idempotencyKey)) throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key requires 8–128 safe characters')
     const fingerprint = createHash('sha256').update(JSON.stringify({ path, ips, version: IP_RISK_VERSION })).digest('hex')

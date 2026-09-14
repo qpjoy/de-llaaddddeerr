@@ -1,3 +1,4 @@
+import { KeyAccessLimitsPanel } from './key-access-limits.jsx'
 import { withIpRiskProductScopes } from '../shared/product-access.mjs'
 import { KeyReveal } from './key-reveal.jsx'
 import { TenantServiceAccess } from './tenant-service-access.jsx'
@@ -3009,6 +3010,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         )}
       </Panel>
 
+      {session?.kind === 'admin-token' && data.consumerId && !contextUnavailable ? <KeyAccessLimitsPanel key={data.consumerId} token={token} consumerId={data.consumerId} capabilities={CAPABILITY_CATALOG} /> : null}
       {[
         {
           key: 'operations',

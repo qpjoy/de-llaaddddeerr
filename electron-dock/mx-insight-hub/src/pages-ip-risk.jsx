@@ -1,11 +1,10 @@
 import { REQUEST_FORMATS, requestSnippet } from './request-snippets.js'
 import { copyText } from './open-capabilities.js'
-import { useMemo, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck, useDemoCredentialExpiry } from './demo-credentials.jsx'
 import { publicDataApi, publicApiOrigin } from './api.js'
 import { DropdownField, ErrorState } from './components.jsx'
 import { ipRiskAccessIssues } from './demo-access.js'
-import { requestUuid } from './request-id.js'
 
 export function IpRiskPage() {
   const [key] = useDemoApiKey()
@@ -21,20 +20,12 @@ export function IpRiskPage() {
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const lock = useRef(false)
-  const attempts = useRef(new Map())
-  const [revision, setRevision] = useState(0)
   const values = batch ? ip.trim().split(/[\s,，]+/u).filter(Boolean) : [ip.trim()]
   const valid = values.length > 0 && values.length <= 100 && values.every(value => /^(?:\d{1,3}\.){3}\d{1,3}$/u.test(value) && value.split('.').every(part => Number(part) <= 255 && String(Number(part)) === part))
   const body = batch ? { ips: values } : { ip: ip.trim() }
-  const signature = JSON.stringify(body)
   const path = batch ? '/api/v1/data/ip/risk/batch' : '/api/v1/data/ip/risk'
-  const identity = useMemo(() => {
-    if (!valid) return ''
-    if (!attempts.current.has(signature)) attempts.current.set(signature, `ip-risk-${requestUuid()}`)
-    return attempts.current.get(signature)
-  }, [signature, valid, revision])
   const url = `${publicApiOrigin()}${path}`
-  const snippet = credential => requestSnippet({ format, url, body, credential, idempotencyKey: identity })
+  const snippet = credential => requestSnippet({ format, url, body, credential })
   const copyRequest = async () => {
     if (!allowed || !valid || busy) return
     const copied = await copyText(snippet(key))
@@ -46,8 +37,8 @@ export function IpRiskPage() {
     lock.current = true; setBusy(true); setError(null)
     const started = performance.now()
     try {
-      const response = await (batch ? publicDataApi.ipRiskBatch : publicDataApi.ipRisk)(key, body, { idempotencyKey: identity })
-      setResult({ ...response, elapsedMs: Math.round(performance.now() - started), request: { ...body, idempotencyKey: identity } })
+      const response = await (batch ? publicDataApi.ipRiskBatch : publicDataApi.ipRisk)(key, body)
+      setResult({ ...response, elapsedMs: Math.round(performance.now() - started), request: body })
     } catch (failure) { setError(failure) }
     finally { lock.current = false; setBusy(false) }
   }
@@ -68,10 +59,9 @@ export function IpRiskPage() {
         <div className="qp-table-wrap"><table className="qp-table mih-table"><thead><tr><th>参数</th><th>说明</th><th>值</th></tr></thead><tbody><tr><td><code>{batch ? 'ips *' : 'ip *'}</code></td><td>{batch ? '1–100 个 IPv4，以逗号或空格分隔' : 'IPv4 地址'}</td><td><input className="qp-input" aria-label="IPv4 地址" placeholder="例如 1.1.1.1" value={ip} disabled={busy} onChange={event => { setIp(event.target.value); setResult(null); setError(null); setCopyStatus('') }} /></td></tr></tbody></table></div>
         <div className="mih-page-actions">
           <button className="qp-button qp-button--primary" disabled={!allowed || !valid || busy}>{busy ? '查询中…' : '发送请求'}</button>
-          <button type="button" className="qp-button qp-button--outline" disabled={busy || !attempts.current.has(signature)} onClick={() => { attempts.current.delete(signature); setRevision(revision + 1); setResult(null); setError(null); setCopyStatus('') }}>新请求 · 再次查询同一 IP</button>
         </div>
       </form>
-      <p>相同参数再次发送沿用幂等标识；“新请求”会产生新的查询。批量查询按项记录次数，最多 3 并发；60 秒预算内未执行的项目会返回错误。查询失败不会自动重试。</p>
+      <p>每次点击“发送请求”都会发起一次新查询并计入用量，重复查询同一 IP 也会计数。批量按每个 IP 计数；达到次数或频率限制时返回 429。查询失败不会自动重试。</p>
       <section className="qp-panel mih-panel" aria-label="复制请求与请求标识">
         <h3>命令行与代码调用</h3>
         <div className="mih-page-actions">
@@ -80,10 +70,7 @@ export function IpRiskPage() {
         </div>
         <p>{expiresAt ? `复制的是当前临时调用凭据，有效至 ${new Date(expiresAt).toLocaleString()}。到期后重新复制；长期脚本请在 API Keys 获取已授权的 Live Key，替换 Authorization 的 Bearer 值。` : '复制内容包含当前 Hub Key；可直接粘贴运行，请勿公开分享。'}</p>
         <p role="status">{copyStatus}</p>
-        <h4>Idempotency-Key · 请求去重标识</h4>
-        <code>{identity || '填写有效 IP 后自动生成'}</code>
-        <p>它不是登录密钥，也不是缓存开关。相同参数重试时保留此值：已完成的请求会回放原结果，不重复查询。修改 IP、批量顺序或项目数量，应使用新值；页面会自动处理。</p>
-        <p>需要再次获取同一 IP 的新结果，点击“新请求”生成新标识，再发送或复制。结果未知时保留原标识用于核对，不要换值反复重试。命令行示例保留本页当前标识，与页面发送的是同一个请求。</p>
+        <p>复制命令可直接调用，无需填写请求去重标识。每次运行都是新请求；若返回结果未知，请保留响应中的请求编号用于核对，避免连续重试。</p>
         <details><summary>代码预览（凭据已隐藏）</summary><pre>{snippet('<HUB_API_KEY>')}</pre></details>
       </section>
       {error ? <ErrorState error={error} /> : null}

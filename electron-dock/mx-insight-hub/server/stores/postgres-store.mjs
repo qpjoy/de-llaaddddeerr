@@ -1,3 +1,4 @@
+import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
 import { readTenantAccess, writeTenantAccess, applyTenantAccess } from './tenant-service-access.mjs'
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -2623,6 +2624,7 @@ export class PostgresStore {
   }
 
   async #assertQuota(client, input) {
+    await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes)
     for (const scope of input.authorizationScopes) {
       const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
       const consumerMaxRequests = input.legacySingleScope

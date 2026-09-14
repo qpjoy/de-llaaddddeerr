@@ -201,7 +201,7 @@ test('MemoryStore replay preserves one immutable authorization edge set and one 
   ])
 })
 
-function postgresHarness({ deniedScope = null, derived = false } = {}) {
+function postgresHarness({ deniedScope = null, derived = false, keyLimit = null } = {}) {
   const calls = []
   let released = false
   const client = {
@@ -232,6 +232,8 @@ function postgresHarness({ deniedScope = null, derived = false } = {}) {
           rowCount: 1,
         }
       }
+      if (normalized.startsWith('SELECT * FROM control.api_key_access_limits')) return {rows:keyLimit ? [keyLimit] : []}
+      if (normalized.startsWith('SELECT count(*) FILTER')) return {rows:[{total:1,recent:1}]}
       if (normalized.includes('FROM usage_idempotency_bindings binding')) {
         return { rows: [], rowCount: 0 }
       }
@@ -542,4 +544,16 @@ test('PostgreSQL persists every authorization axis and rejects a revoked axis at
   } finally {
     await pool.end()
   }
+})
+
+
+test('Postgres Key limit rejects under the admission lock before inserting usage or dispatch', async () => {
+ const owner=postgresOwner()
+ for (const [total_limit,rate_limit,code] of [[1,null,'api_key_total_limit_exceeded'],[null,1,'api_key_rate_limit_exceeded']]) {
+  const harness=postgresHarness({keyLimit:{scope_type:'capability',scope_key:OPERATION,total_limit,rate_limit,window_seconds:60,revision:1}})
+  await assert.rejects(harness.store.reserve(reservationInput(owner,{requiredAuthorizationScopes:[{type:'platform',key:PLATFORM},{type:'capability',key:OPERATION}]})),{code})
+  assert.ok(harness.calls.find(call=>call.sql==='ROLLBACK'))
+  assert.ok(!harness.calls.some(call=>call.sql.startsWith('INSERT INTO usage_requests')))
+  assert.ok(harness.calls.findIndex(call=>call.sql.includes('pg_advisory_xact_lock')) < harness.calls.findIndex(call=>call.sql.includes('control.api_key_access_limits')))
+ }
 })

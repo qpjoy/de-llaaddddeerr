@@ -30,3 +30,11 @@ test('PowerShell escapes apostrophes and transmits UTF-8 JSON; unsupported forma
  assert.ok(code.includes(input.idempotencyKey))
  assert.throws(()=>requestSnippet({...input,format:'arbitrary'}))
 })
+
+test('ordinary copied IP commands omit idempotency without requiring a user placeholder', () => {
+ for (const format of ['curl','powershell','fetch','node']) {
+  const code=requestSnippet({...input,format,idempotencyKey:undefined})
+  assert.ok(!code.includes('Idempotency-Key'))
+  assert.ok(!code.includes('undefined'))
+ }
+})

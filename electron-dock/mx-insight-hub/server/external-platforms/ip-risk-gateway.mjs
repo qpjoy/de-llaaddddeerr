@@ -42,6 +42,7 @@ export class IpRiskGateway {
     }
     if (apiKey.environment === 'test' || apiKey.prefix?.startsWith('mih_test_')) throw new AppError(403, 'test_key_not_supported', 'Use a Live Hub key')
     const input = normalizeIpRiskRequest(body)
+    idempotencyKey ??= `ip-auto-${randomUUID()}`
     if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(idempotencyKey)) {
       throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key requires 8–128 safe characters')
     }
