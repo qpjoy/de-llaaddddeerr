@@ -744,6 +744,7 @@ export function createApp({
   embedding = null,
   externalPlatformAdmin = null,
   externalPlatformGateway = null,
+  ipRiskGateway = null,
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
   tikHubGateway = null,
@@ -5236,6 +5237,15 @@ export function createApp({
         sendJson(response, 200, { data: await service.ecommerceStoredItems(context, Object.fromEntries(searchParams.entries())), requestId })
         return
       }
+      if (request.method === 'POST' && ['/api/v1/data/ip/risk', '/api/v1/data/ip/risk/batch'].includes(pathname)) {
+        const context = await requirePublic(request)
+        if (!ipRiskGateway) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is unavailable')
+        const handler = pathname.endsWith('/batch') ? ipRiskGateway.batch : ipRiskGateway
+        const result = await handler.query(context, { body: await readJson(request, 4096), idempotencyKey: request.headers['idempotency-key'], path: pathname })
+        sendJson(response, result.status, result.body, { 'idempotent-replay': String(result.replay), ...(result.requestId ? { 'x-mx-insight-request-id': result.requestId } : { 'x-mx-insight-batch-id': result.batchId }), 'x-mx-insight-source-mode': result.replay ? 'idempotent_replay' : 'live' })
+        return
+      }
+
       if (request.method === 'POST' && pathname === '/api/v1/data/ecommerce/products/search') {
         const context = await requirePublic(request)
         if (!externalPlatformGateway) {

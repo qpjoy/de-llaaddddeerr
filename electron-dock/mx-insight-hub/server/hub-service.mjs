@@ -241,6 +241,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  'ip.risk.query',
   TOKENIZE_CAPABILITY,
   XIAOHONGSHU_SEARCH_OPERATION,
   XIAOHONGSHU_POST_OPERATION,

@@ -6,6 +6,9 @@ import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
+import { IpSearchAdapter } from './adapters/ipsearch.mjs'
+import { IpRiskGateway } from './external-platforms/ip-risk-gateway.mjs'
+import { IpSearchAdminService } from './external-platforms/ipsearch-admin.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { createApp } from './app.mjs'
@@ -220,7 +223,16 @@ export async function createRuntime(config = loadConfig()) {
     durable: Boolean(pool),
     providerKey: 'tikhub',
   })
+  const ipSearchCredentialStore = createExternalPlatformCredentialStore({ pool, providerKey: 'ipsearch', environmentConfigured: config.ipSearch?.configured })
+  const ipRiskGateway = new IpRiskGateway({ usageStore: store, credentialStore: ipSearchCredentialStore,
+    platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey: 'ipsearch', authorizationPlatform: 'ip_risk' }),
+    adapter: new IpSearchAdapter({ apiKey: config.ipSearch?.apiKey || '' }),
+    enabled: config.ipSearch?.enabled === true,
+    credentialConfigured: config.listenerMode === 'admin' ? config.ipSearch?.configured : undefined,
+    reservationLeaseMs: Math.max(60000, config.reservationLeaseMs),
+  })
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
+    new IpSearchAdminService(ipRiskGateway.platformStore, ipRiskGateway),
     justOnePlatformAdmin,
     tikHubPlatformAdmin,
     new NightAllPlatformAdminService({ store, config: config.nightAll }),
@@ -332,7 +344,10 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,
     segmenter,
-    externalPlatformCapabilities: externalEcommerceCapabilities,
+    externalPlatformCapabilities: async options => {
+      const existing = await externalEcommerceCapabilities(options)
+      return { ...existing, operations: { ...existing.operations, ...(await ipRiskGateway.capabilities()).operations } }
+    },
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
@@ -387,6 +402,7 @@ export async function createRuntime(config = loadConfig()) {
     embedding,
     externalPlatformAdmin,
     externalPlatformGateway,
+    ipRiskGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,
     tikHubGateway,
@@ -406,7 +422,7 @@ export async function createRuntime(config = loadConfig()) {
     search, searchReindex, embedding, externalPlatformStore,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
-    externalPlatformControlStore,
+    externalPlatformControlStore, ipRiskGateway,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
   }
 }

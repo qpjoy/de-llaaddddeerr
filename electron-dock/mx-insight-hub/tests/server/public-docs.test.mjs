@@ -1811,6 +1811,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/ecommerce/taobao/product-questions',
       '/data/ecommerce/taobao/product-reviews',
       '/data/ecommerce/taobao/shop-products',
+      '/data/ip/risk',
+      '/data/ip/risk/batch',
       '/data/mobile-commerce/items',
       '/data/post',
       '/data/posts/media',

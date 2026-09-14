@@ -324,6 +324,11 @@ export function loadConfig(environment = process.env) {
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),
     listenerMode,
+    ipSearch: {
+      enabled: environment.MX_INSIGHT_IPSEARCH_ENABLED === '1',
+      configured: environment.MX_INSIGHT_IPSEARCH_CONFIGURED === '1' || Boolean(environment.MX_INSIGHT_IPSEARCH_API_KEY?.trim()),
+      apiKey: listenerMode === 'admin' ? '' : (environment.MX_INSIGHT_IPSEARCH_API_KEY || ''),
+    },
     // Non-secret browser routing metadata. The Admin SPA receives this through
     // its authenticated session and still authenticates every public request
     // with the caller's ordinary Hub Public API key.

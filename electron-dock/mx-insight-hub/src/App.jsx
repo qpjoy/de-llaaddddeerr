@@ -2,6 +2,7 @@ import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
 import { DocsPage } from './pages-docs.jsx'
+import { IpRiskPage } from './pages-ip-risk.jsx'
 import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -339,6 +340,7 @@ const ROUTES = [
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -824,7 +826,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && route.path !== '/data-products/xiaohongshu-note' ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/xiaohongshu-note', '/data-products/ip-risk'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     theme,
     token,

@@ -84,7 +84,7 @@ const PLATFORM_GROUPS = [
     key: 'hub',
     label: 'Hub 自有数据域',
     hint: '通过 Hub API 查询已存数据',
-    members: ['public_opinion', 'source_catalog'],
+    members: ['public_opinion', 'source_catalog', 'ip_risk'],
   },
   {
     key: 'saved_records',
@@ -103,6 +103,7 @@ function platformGroupOf(platform) {
 }
 
 const PLATFORM_CATALOG = [
+  'ip_risk',
   'xiaohongshu',
   'weibo',
   'douyin',
@@ -141,6 +142,7 @@ const PLATFORM_CATALOG = [
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
+  'ip.risk.query': { label: 'IP 风险画像', endpoint: 'POST /api/v1/data/ip/risk', description: '查询 IPv4 风险画像；当前仅记录次数，不扣费', usageHint: '还需开通 ip_risk 数据域' },
   'public_opinion.diagnostics.read': { label: '舆情诊断读取' },
   'ecommerce.products.detail': { label: '电商商品详情' },
   'ecommerce.products.reviews': { label: '电商商品评价' },

@@ -1,5 +1,6 @@
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
 export const PRODUCT_ACCESS = {
+  '/data-products/ip-risk': { platform: 'ip_risk', any: ['ip.risk.query'], docs: 'ip-risk' },
   '/source-catalog': { platform: 'source_catalog', docs: 'source-catalog' },
   '/data-products/telegram': { platform: 'telegram', docs: 'telegram' },
   '/data-products/ecommerce-treasure-box': { platform: 'ecommerce', any: ['ecommerce.products.search'], docs: 'ecommerce-treasure-box' },

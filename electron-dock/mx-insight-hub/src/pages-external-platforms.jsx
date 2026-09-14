@@ -62,7 +62,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub', 'night-all'])
+const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub', 'night-all', 'ipsearch'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -2279,9 +2279,32 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   }, [range, setQuery, unsupportedProvider])
 
   if (unsupportedProvider) return <UnsupportedProvider range={range} />
+  if (provider === 'ipsearch') return <IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   if (provider === 'night-all') return <NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
   if (provider) {
     return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   }
   return <PlatformsOverview token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
+}
+
+function IpSearchPlatformDetail({ token, range, setQuery, onUnauthorized, notify }) {
+  const load = useCallback(() => adminApi.externalPlatform(token, 'ipsearch', { range }), [token, range])
+  const state = useRemoteData(load)
+  const data = state.data
+  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={() => setQuery({ provider: null, range })}>返回平台总览</button>
+    <h1>ipsearch · IP 风险画像</h1>
+    {data?.credential ? <ExternalPlatformCredentialPanel token={token} provider="ipsearch" credential={data.credential} onSaved={state.refresh} onUnauthorized={onUnauthorized} notify={notify} /> : null}
+    {state.error ? <ErrorState error={state.error} /> : null}
+    {!data ? <p>正在加载…</p> : <section className="qp-panel mih-panel"><h2>调用与持久化证据</h2>
+      <p>暂不定价、不扣费。采购费用和是否计费均保留未知值。</p>
+      <div className="qp-table-wrap"><table className="qp-table mih-table"><tbody>{[
+        ['认证后 HTTP 请求', data.httpMetrics?.authenticatedHttpRequests], ['逻辑交付及回放事件', data.provider.metrics.hubRequests],
+        ['实际调用', data.provider.metrics.upstreamCalls], ['可用响应', data.provider.metrics.usableUpstreamCalls],
+        ['结果未知', data.provider.metrics.unknownOutcomes], ['幂等回放', data.provider.metrics.idempotentReplay],
+      ].map(([label, value]) => <tr key={label}><th>{label}</th><td>{value ?? '未知'}</td></tr>)}</tbody></table></div>
+      <h3>HTTP 结果分布</h3><pre>{JSON.stringify(data.httpMetrics?.byStatus || [], null, 2)}</pre>
+      <p>{data.notes.connection}</p><p>{data.notes.budget}</p>
+      <button className="qp-button qp-button--outline" onClick={state.refresh}>刷新统计</button>
+    </section>}
+  </div>
 }

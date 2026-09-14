@@ -141,3 +141,8 @@ those paths retire one operation at a time and are not the target architecture.
 - [ADR-0014: Hub-owned static media data plane on shared object-storage infrastructure](adr/0014-hub-owned-static-media-data-plane.md)
 
 - [小红书笔记画卷：列表、详情、TikHub 兼容接口与分页](product/xiaohongshu-note-browsing.md)
+
+## IP 风险画像与后续接入
+
+- [IP 风险画像：部署、权限、计量与验证边界](operations/ip-risk.md)
+- [多语言采集契约与适配层设计](architecture/connector-contract-and-ipsearch.md)
