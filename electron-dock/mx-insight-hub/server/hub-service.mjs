@@ -1332,6 +1332,10 @@ export class HubService {
         : [],
       availableCapabilities: [
         {
+          capability: 'ip.risk.query',
+          ready: providerOperationReady(ecommerceSearch, 'ip.risk.query'),
+        },
+        {
           capability: TOKENIZE_CAPABILITY,
           ready: typeof this.segmenter?.segmentWithMeta === 'function',
         },

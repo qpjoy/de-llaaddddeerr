@@ -232,3 +232,27 @@ test('console credential save/reveal requires Admin Token; saved key powers sing
     runtime.agent.close(); await runtime.store.close()
   }
 })
+
+test('IP operation is configurable before grant and can be explicitly applied to the original Key', async () => {
+  const store = new MemoryStore()
+  let ready = false
+  const service = new HubService({ store, adapter: {}, apiKeyPepper: 'ip-config-test-pepper-at-least-32-characters',
+    externalPlatformCapabilities: async () => ({ operations: { 'ip.risk.query': { ready } } }) })
+  const tenant = await service.createTenant({ name: 'IP configuration' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'IP configuration consumer' })
+  const scope = { tenantId: tenant.id, consumerId: consumer.id }
+  await service.putPlatformConfiguration('ip_risk', { ...scope, enabled: true })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Existing IP key', platforms: ['ip_risk'], capabilities: [] })
+  const before = await service.getPlatformConfiguration(scope)
+  assert.deepEqual(before.availableCapabilities.find(item => item.capability === 'ip.risk.query'), { capability: 'ip.risk.query', ready: false })
+  assert.ok(!before.capabilityGrants.includes('ip.risk.query'))
+  ready = true
+  assert.equal((await service.getPlatformConfiguration(scope)).availableCapabilities.find(item => item.capability === 'ip.risk.query').ready, true)
+  await service.putCapabilityConfiguration('ip.risk.query', { ...scope, enabled: true })
+  assert.ok((await service.getPlatformConfiguration(scope)).capabilityGrants.includes('ip.risk.query'))
+  assert.ok(!(await service.createDemoCredential({ keyId: key.id })).access.capabilities.includes('ip.risk.query'))
+  await service.updateApiKeyScopes(key.id, { platforms: ['ip_risk'], capabilities: ['ip.risk.query'], expected: { scopeMode: key.scopeMode, platforms: key.platforms, capabilities: key.capabilities } }, 'admin-token')
+  const refreshed = await service.createDemoCredential({ keyId: key.id })
+  assert.ok(refreshed.access.capabilities.includes('ip.risk.query'))
+  assert.equal((await service.authenticate(key.secret)).apiKey.id, key.id)
+})

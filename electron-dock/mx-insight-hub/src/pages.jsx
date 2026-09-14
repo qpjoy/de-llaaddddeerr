@@ -142,7 +142,7 @@ const PLATFORM_CATALOG = [
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
-  'ip.risk.query': { label: 'IP 风险画像', endpoint: 'POST /api/v1/data/ip/risk', description: '查询 IPv4 风险画像；当前仅记录次数，不扣费', usageHint: '还需开通 ip_risk 数据域' },
+  'ip.risk.query': { label: 'IP 风险查询能力', endpoint: 'POST /api/v1/data/ip/risk', description: '查询 IPv4 风险画像；当前仅记录次数，不扣费', usageHint: '还需开通 ip_risk 数据域' },
   'public_opinion.diagnostics.read': { label: '舆情诊断读取' },
   'ecommerce.products.detail': { label: '电商商品详情' },
   'ecommerce.products.reviews': { label: '电商商品评价' },
@@ -3035,7 +3035,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
                     <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} />
-                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href="#/external-platforms?provider=tikhub">检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
+                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : '#/external-platforms?provider=tikhub'}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
                     </td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
