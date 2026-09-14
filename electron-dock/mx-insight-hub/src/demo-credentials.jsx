@@ -35,16 +35,19 @@ export function DemoCredentialProvider({ token, children }) {
 }
 export function DemoProductPage({ Page, pageProps, enabled, admin }) {
   const state = useContext(DemoContext)
-  const requested = useRef(false)
+  const requested = useRef(null)
   const [expanded, setExpanded] = useState(!admin)
   useEffect(() => {
-    if (enabled && !state.credential && !requested.current) {
-      requested.current = true
-      state.select()
+    if (!enabled) { requested.current = null; return }
+    if (!state.custom && requested.current !== Page) {
+      requested.current = Page
+      // Returning from grant/Key management must recheck the current snapshot.
+      // Keep the selected Key; never silently choose a different consumer.
+      state.select(state.credential?.keyId)
     }
-  }, [enabled, admin, state.credential])
+  }, [enabled, Page, state.custom])
   return <>
-    {enabled ? <details className="qp-panel mih-panel" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+    {enabled ? <details className="qp-panel mih-panel" open={expanded || !state.secret} onToggle={event => setExpanded(event.currentTarget.open)}>
       <summary>{admin ? '数据产品演示身份' : '当前调用身份'} · {state.busy ? '正在加载…' : state.secret ? (state.custom ? '自有 API Key' : state.credential?.name) : '请选择 Key'}</summary>
       <p>按当前账户的授权和套餐价格调用，消费记录可在账单中查看。</p>
       <DropdownField label={admin ? "演示 Key" : "我的 Key"} value={state.custom ? 'custom' : state.credential?.keyId || ''}
@@ -86,4 +89,14 @@ export function DemoAccessNotice({ operation, compatibility = false }) {
 export function useDemoAccessSnapshot() {
   const state = useContext(DemoContext)
   return state?.custom ? null : state?.credential?.access
+}
+
+export function DemoCredentialRecheck() {
+  const state = useContext(DemoContext)
+  if (!state || state.custom) return null
+  return <div className="mih-page-actions">
+    <button type="button" className="qp-button qp-button--outline" disabled={state.busy}
+      onClick={() => state.select(state.credential?.keyId)}>{state.busy ? '正在检查调用身份…' : '重新检查当前 Hub Key'}</button>
+    <a className="qp-button qp-button--outline" href={`#/api-keys?consumerId=${state.credential?.consumerId || ''}`}>查看 Key 授权</a>
+  </div>
 }

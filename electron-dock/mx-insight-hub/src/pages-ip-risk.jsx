@@ -1,13 +1,15 @@
 import { useRef, useState } from 'react'
-import { useDemoApiKey, useDemoAccessSnapshot } from './demo-credentials.jsx'
+import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck } from './demo-credentials.jsx'
 import { publicDataApi } from './api.js'
 import { ErrorState } from './components.jsx'
+import { ipRiskAccessIssues } from './demo-access.js'
 import { requestUuid } from './request-id.js'
 
 export function IpRiskPage() {
   const [key] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
-  const allowed = !!key && (!access || (access.platforms?.includes('ip_risk') && access.capabilities?.includes('ip.risk.query')))
+  const accessIssues = ipRiskAccessIssues(access)
+  const allowed = !!key && accessIssues.length === 0
   const [ip, setIp] = useState('')
   const [batch, setBatch] = useState(false)
   const [result, setResult] = useState(null)
@@ -42,7 +44,11 @@ export function IpRiskPage() {
       <aside className="mih-api-console-nav"><h2>IP 风险接口</h2><p>使用当前 Hub Key</p>{[false, true].map(mode => <button key={String(mode)} aria-pressed={batch === mode} disabled={busy} type="button" onClick={() => { setBatch(mode); setResult(null); setError(null) }}><small>POST</small>{mode ? '批量查询 IPv4 风险画像' : '查询 IPv4 风险画像'}</button>)}</aside>
       <div className="mih-api-console-main">
       <header><span className="mih-api-method">POST</span> <code>{path}</code><a href="#/docs?path=/docs/ip-risk">接口文档</a></header>
-      {!allowed ? <p role="status">当前身份尚未开通 IP 风险画像，或当前 Key 未包含此项授权。请联系管理员开通并选择已授权 Key。</p> : null}
+      {!allowed ? <div role="status" className="mih-inline-warning"><div>
+        {!key ? <p>尚未选中可用的 Hub Live Key。请在上方“调用身份 / 数据产品演示身份”中选择已授权的 Key。此处使用 Hub Live Key 的授权范围。</p> : null}
+        {accessIssues.map(issue => <p key={issue.scope}>{issue.message}</p>)}
+        <DemoCredentialRecheck />
+      </div></div> : null}
       <form onSubmit={send}>
         <h3>请求参数 · JSON Body</h3>
         <div className="qp-table-wrap"><table className="qp-table mih-table"><thead><tr><th>参数</th><th>说明</th><th>值</th></tr></thead><tbody><tr><td><code>{batch ? 'ips *' : 'ip *'}</code></td><td>{batch ? '1–100 个 IPv4，以逗号或空格分隔' : 'IPv4 地址'}</td><td><input className="qp-input" aria-label="IPv4 地址" placeholder="例如 1.1.1.1" value={ip} disabled={busy} onChange={event => { setIp(event.target.value); setResult(null); setError(null) }} /></td></tr></tbody></table></div>

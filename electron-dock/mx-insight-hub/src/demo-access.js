@@ -27,3 +27,19 @@ export function demoAccessIssues(access, operation, compatibility = false) {
   }
   return issues
 }
+
+// Provider credentials do not authorize a consumer or expand an existing Key snapshot.
+export function ipRiskAccessIssues(access) {
+  if (!access) return []
+  const issues = []
+  for (const [field, consumerField, scope, label] of [
+    ['platforms', 'consumerPlatforms', 'ip_risk', 'IP 风险画像数据域'],
+    ['capabilities', 'consumerCapabilities', 'ip.risk.query', 'IP 风险查询能力'],
+  ]) {
+    if (access[field]?.includes(scope)) continue
+    issues.push({ kind: 'authorization', scope, message: access[consumerField]?.includes(scope)
+      ? `业务已开通${label}，但当前 Hub Key 未包含该权限。请在 API Keys 中调整此 Key 的权限，或切换已授权 Key，然后重新检查。`
+      : `当前 Key 所属业务尚未开通${label}。请在开放能力中为该业务开通，然后重新检查。` })
+  }
+  return issues
+}

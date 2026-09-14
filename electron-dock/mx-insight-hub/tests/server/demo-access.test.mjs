@@ -23,3 +23,17 @@ test('native search requires both operation and compatibility grants',()=>{
  assert.deepEqual(issues.map(item=>item.scope),['social.posts.search','compat.xiaohongshu.app_v2'])
  assert.equal(demoAccessIssues({...access,capabilities:['social.posts.resolve']},'social.posts.resolve').length,0)
 })
+
+import { ipRiskAccessIssues } from '../../src/demo-access.js'
+test('IP debugger distinguishes consumer grants from stale Key snapshots and refreshed access', () => {
+ const consumerAccess = { consumerPlatforms: ['ip_risk'], consumerCapabilities: ['ip.risk.query'], platforms: [], capabilities: [] }
+ const stale = ipRiskAccessIssues(consumerAccess)
+ assert.equal(stale.length, 2)
+ assert.ok(stale.every(issue => issue.message.includes('当前 Hub Key 未包含')))
+ const fresh = { ...consumerAccess, platforms: ['ip_risk'], capabilities: ['ip.risk.query'] }
+ assert.deepEqual(ipRiskAccessIssues(fresh), [])
+ assert.deepEqual(ipRiskAccessIssues(null), []) // Manual Key remains server-validated.
+ const missing = ipRiskAccessIssues({ platforms: [], capabilities: [] })
+ assert.ok(missing.every(issue => issue.message.includes('所属业务尚未开通')))
+ assert.deepEqual(ipRiskAccessIssues({ ...fresh, capabilities: [] }).map(issue => issue.scope), ['ip.risk.query'])
+})
