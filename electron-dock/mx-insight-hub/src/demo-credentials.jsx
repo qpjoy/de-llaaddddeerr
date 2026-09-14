@@ -100,3 +100,8 @@ export function DemoCredentialRecheck() {
     <a className="qp-button qp-button--outline" href={`#/api-keys?consumerId=${state.credential?.consumerId || ''}`}>查看 Key 授权</a>
   </div>
 }
+
+export function useDemoCredentialExpiry() {
+  const state = useContext(DemoContext)
+  return state?.custom ? null : state?.credential?.expiresAt || null
+}
