@@ -455,3 +455,23 @@ test('Night-All data-search honors hasMore=false even when a stale cursor is pre
   })
   assert.deepEqual(capped.data.warnings, [])
 })
+
+test('composite search sessions may remain stable while the page advances', () => {
+  let traversal = initialTraversal()
+  let previousCursor = null
+  for (let nextPage = 2; nextPage <= 3; nextPage += 1) {
+    const params = { search_id: 'same-search', search_session_id: 'same-session', page: nextPage }
+    const result = capNightAllCompatibilityTraversal(envelope({
+      hasMore: true, paginationMode: 'composite', nextParams: params,
+      nextPage, nextCursor: null, providerCursor: null,
+    }), { operation: OPERATION, platform: PLATFORM, page: traversal.page,
+      scope: traversal.scope, codec: codec() })
+    const cursor = result.data.page.nextParams.cursor
+    assert.notEqual(cursor, previousCursor)
+    traversal = initialTraversal({ params: result.data.page.nextParams })
+    assert.equal(traversal.page, nextPage)
+    assert.equal(traversal.upstreamBody.page, nextPage)
+    assert.deepEqual(traversal.upstreamBody.params, params)
+    previousCursor = cursor
+  }
+})

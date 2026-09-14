@@ -769,7 +769,12 @@ test('a staged detail with an unconfirmed settlement closes unknown with identic
     detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, `${snippet}完整正文`)]]),
   })
   const state = fixture(adapter)
-  state.platformStore.finishProviderStepFailures.push(new Error('detail settlement acknowledgement unavailable'))
+  const diagnosticLogs = []
+  state.gateway.logger = { error: (...args) => diagnosticLogs.push(args) }
+  const failure = Object.assign(new Error('private body and secret must stay out of logs'), {
+    code: 'external_platform_evidence_conflict', detail: 'private payload',
+  })
+  state.platformStore.finishProviderStepFailures.push(failure)
 
   const response = await state.gateway.searchNotes(state.context, request({
     idempotencyKey: 'direct-detail-settlement-unknown-01',
@@ -797,6 +802,12 @@ test('a staged detail with an unconfirmed settlement closes unknown with identic
   assert.equal(unknown.errorCode, desired.errorCode)
   assert.equal(unknown.snapshot, null)
   assert.equal(unknown.ingestJob, null)
+  assert.equal(diagnosticLogs.length, 1)
+  assert.equal(diagnosticLogs[0][0].stage, 'settlement')
+  assert.equal(diagnosticLogs[0][0].providerCallId, 'provider-call-2')
+  assert.equal(diagnosticLogs[0][0].errorCode, 'external_platform_evidence_conflict')
+  assert.doesNotMatch(JSON.stringify(diagnosticLogs), /private|secret/u)
+
   assert.equal(state.platformStore.liveCommits.length, 1, 'the independent search usage remains commit-worthy')
   assert.deepEqual(state.platformStore.events.map(({ kind }) => kind), [
     'stage',

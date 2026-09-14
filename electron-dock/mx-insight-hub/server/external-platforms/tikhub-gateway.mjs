@@ -1963,11 +1963,29 @@ export class TikHubGateway {
       throw error
     }
 
+    const logDetailPersistenceFailure = (stage, settlement, error) => {
+      const identifier = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(value) ? value : null
+      // Do not serialize the error: PG detail/query and arbitrary messages may
+      // contain acquired content or credentials. Keep correlation and codes.
+      this.logger?.error?.({
+        requestId: delivery.usageRequestId,
+        providerCallId: settlement.callId,
+        stage,
+        desiredOutcome: settlement.outcome,
+        errorName: identifier(error?.name),
+        errorCode: identifier(error?.code),
+        constraint: identifier(error?.constraint),
+        table: identifier(error?.table),
+        schema: identifier(error?.schema),
+      }, 'TikHub detail persistence failed before unknown fallback')
+    }
+
     const settleDetail = async (settlement) => {
       try {
         await this.platformStore.finishProviderStep(settlement)
         return settlement.outcome
       } catch (settlementError) {
+        logDetailPersistenceFailure('settlement', settlement, settlementError)
         // finishProviderStep already reconciles a lost COMMIT acknowledgement
         // and performs at most one safe retry. If it still cannot prove the
         // requested terminal state, retain the same provider evidence while
@@ -1999,6 +2017,7 @@ export class TikHubGateway {
         await this.platformStore.stageProviderEvidence(settlement)
         return true
       } catch (stageError) {
+        logDetailPersistenceFailure('evidence-staging', settlement, stageError)
         try {
           await this.platformStore.finishProviderStep({
             ...settlement,
