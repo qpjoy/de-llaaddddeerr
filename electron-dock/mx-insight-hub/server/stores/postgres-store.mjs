@@ -2457,7 +2457,7 @@ export class PostgresStore {
         throw new AppError(402, 'insufficient_credit', 'Tenant credit is insufficient for this request')
       }
       if (error?.code === 'P0001' && error?.message === 'customer_price_unavailable') {
-        throw new AppError(503, 'customer_price_unavailable', 'The assigned plan has no published price for this operation')
+        throw new AppError(503, 'customer_price_unavailable', 'The assigned customer price book is unavailable')
       }
       throw error
     } finally {

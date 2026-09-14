@@ -1934,7 +1934,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
       <MetricCard icon={ChartLine} label="本月消费" value={billed.mixedCurrencies ? '请按币种查看明细' : formatMoneyMinor(billed.chargedMinor || 0, billed.currency || currency)} hint="当前业务实际扣款" />
       <MetricCard icon={Timer} label="待结算金额" value={account ? formatMoneyMinor(account.heldMinor, currency) : '—'} hint="结算完成后更新余额" />
     </section>
-    <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用后按以下价格扣费。' : '自动扣费尚未开通，请联系服务方确认。'}>
+    <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用后按以下价格扣费；已授权但未配置价格的接口免费，仍计入调用用量和额度。' : '自动扣费尚未开通，请联系服务方确认。'}>
       {rates.length ? <Table label="我的服务价格">
         <thead><tr><th>服务</th><th>单次价格</th><th>预计可用次数</th></tr></thead>
         <tbody>{rates.map(rate => <tr key={rate.meterKey}>
@@ -1942,7 +1942,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
           <td>{formatMoneyMinor(rate.unitPriceMinor, rate.currency || currency)} / 次</td>
           <td>{account && rate.unitPriceMinor > 0 && (rate.currency || currency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / rate.unitPriceMinor))} 次` : '—'}</td>
         </tr>)}</tbody>
-      </Table> : <EmptyState icon={Coins} title="服务价格待确认" description="请联系服务方确认此业务的价格与开通时间。" />}
+      </Table> : <EmptyState icon={Coins} title="未配置收费接口" description="已授权的接口可免费调用，仍受调用额度和速率限制。" />}
       {rates.length ? <p>预计次数仅按当前余额和单项服务价格计算；其他业务消费及调用限额会影响实际可用次数。</p> : null}
     </Panel>
     <Panel title="账户明细" subtitle="充值、扣款与待结算记录。">
@@ -2293,7 +2293,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 
       {session?.platformAdmin ? <Panel title="自动按次计费" subtitle="余额、合同价格和运行授权分别生效；充值本身不会启用扣费。">
         <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定费率' : '尚未绑定费率'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
-        <p>为不同客户使用独立套餐标识，为不同业务填写不同接口价格。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
+        <p>为不同客户使用独立套餐标识，同一套餐可配置多个业务的接口价格。已授权但未配置价格的接口免费，价格填 0 也表示免费；调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
         <button className="qp-button qp-button--primary" disabled={!canAssignPlan || !account} onClick={() => { openPlanPublisher(); setPlanForm(current => ({ ...current, key: `customer-${data.consumerId}`, name: `${selectedConsumer?.name} 专属套餐`, priceBookKey: `customer-${data.consumerId}-cny`, entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts'].map(meterKey => ({ meterKey, price: '0.10' })) })); setActivatePlan(true) }}>配置小红书专属套餐 · ¥0.10/次</button>
       </Panel> : null}
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="当前套餐与配额基线">

@@ -84,6 +84,21 @@ async function withFixture(run, { maxRequests = 100, maxPageSize = 2 } = {}) {
     platforms: ['source_catalog'],
   })
 
+  // A Xiaohongshu-only price plan must not block this authorized data product.
+  // Run the existing HTTP access, projection and quota regressions in enforced
+  // billing mode without a wallet or a source-catalog price.
+  const plan = await service.publishPlanVersion({
+    key: 'xhs-only', name: 'Xiaohongshu rates',
+    limits: { monthlyRequests: 10_000, maxPageSize: 100, burstRps: 100 },
+    priceBook: { key: 'xhs-only-cny', currency: 'CNY', defaultMultiplierPpm: 1_000_000,
+      entries: [{ meterKey: 'social.posts.search', unitPriceMinor: 10 }] },
+  }, 'test-admin')
+  const current = await service.getConsumerPlan(consumer.id)
+  await service.assignConsumerPlan(consumer.id, {
+    planVersionId: plan.versionId, expectedRevision: current.revision,
+  }, 'test-admin')
+  await service.setTenantBillingProfile(tenant.id, { mode: 'enforced' }, 'test-admin')
+
   const owner = await store.createSourceCatalogOwner(normalizeSourceCatalogOwnerCreate({
     ownerKey: 'public-owner',
     displayName: '目录负责人',

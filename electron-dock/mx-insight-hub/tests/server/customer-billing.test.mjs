@@ -659,3 +659,41 @@ test('a private 0.10 plan assignment leaves other tenant plans, wallets and admi
   assert.equal((await service.createDemoCredential()).keyId, otherKey.id)
   assert.equal(store.apiKeys.size, 2)
 })
+
+
+test('unpriced operations stay metered and free while priced operations retain wallet enforcement', async () => {
+  const { store, service, tenant, consumer } = await fixture({ unitPriceMinor: 10, multiplierPpm: 1_000_000 })
+  await service.putPlatformConfiguration('source_catalog', {
+    tenantId: tenant.id, consumerId: consumer.id, enabled: true,
+    maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100,
+  })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Mixed pricing key',
+    platforms: ['xiaohongshu', 'source_catalog'], capabilities: [] })
+  const context = await service.authenticate(key.secret)
+  const free = reserveInput(context, { meterKey: 'source_catalog', platform: 'source_catalog' })
+  assert.equal((await store.reserve(free)).kind, 'reserved')
+  await store.commitRequest(free.requestId, { responseStatus: 200, responseBody: { data: [] }, unitsActual: 1 })
+  assert.equal((await store.reserve(free)).kind, 'replay')
+  assert.equal(store.customerCharges.size, 0)
+  assert.equal((await store.usage({ tenantId: tenant.id })).requests, 1)
+  await assert.rejects(() => store.reserve(reserveInput(context)), error => error.code === 'insufficient_credit')
+
+  await service.addTenantCredit(tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Test credit' },
+    { idempotencyKey: randomUUID(), actor: 'test-admin' })
+  const anotherFree = reserveInput(context, { meterKey: 'source_catalog', platform: 'source_catalog' })
+  await store.reserve(anotherFree)
+  await store.commitRequest(anotherFree.requestId, { responseStatus: 200, responseBody: { data: [] }, unitsActual: 1 })
+  let billing = await service.getTenantBilling(tenant.id)
+  assert.equal(billing.account.availableMinor, 100)
+  assert.equal(billing.account.heldMinor, 0)
+  assert.equal(store.customerCharges.size, 0)
+
+  const paid = reserveInput(context)
+  await store.reserve(paid)
+  await store.commitRequest(paid.requestId, { responseStatus: 200, responseBody: { data: [] }, unitsActual: 1 })
+  assert.equal((await store.reserve(paid)).kind, 'replay')
+  billing = await service.getTenantBilling(tenant.id)
+  assert.equal(billing.account.availableMinor, 90)
+  assert.equal(billing.account.heldMinor, 0)
+  assert.equal(store.customerCharges.size, 1)
+})

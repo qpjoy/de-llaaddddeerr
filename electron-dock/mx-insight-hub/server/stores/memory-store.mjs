@@ -1267,16 +1267,9 @@ export class MemoryStore {
     if (!priceBook || !profile || profile.mode === 'disabled') return null
 
     const entry = priceBook.entries.find((candidate) => candidate.meterKey === record.billingMeterKey)
-    if (!entry) {
-      if (profile.mode === 'enforced') {
-        throw new AppError(503, 'customer_price_unavailable', 'The assigned plan has no published price for this operation', {
-          meterKey: record.billingMeterKey,
-          plan: plan.key,
-          version: plan.version,
-        })
-      }
-      return null
-    }
+    // A price book sets charges, not access. Unlisted operations remain metered
+    // but do not reserve or deduct customer credit.
+    if (!entry) return null
     const multiplierPpm = profile.multiplierPpm ?? priceBook.defaultMultiplierPpm
     const quoted = quotedMinor(entry.unitPriceMinor, multiplierPpm)
     const createdAt = nowIso()
