@@ -67,3 +67,22 @@ PostgreSQL 在现有 usage reservation 事务和调用者锁内核验上限，�
 ## 组合费率
 
 在套餐与配额选择调用者，点击“追加 IP 风险画像费率 · ¥0.05/次”，草稿保留已有小红书等价格。核对价格、租户倍率及启用范围后发布、分配。也可以在发布窗口下拉添加预设产品或已发布套餐。详见 [组合套餐](billing-composition.md)。
+
+## 2026-09-15 字段文档核对
+
+参考公开产品说明 https://www.ipdatacloud.com/doc/iphuaxiang/ （核对日期 2026-09-15），并以 Hub 实际契约为准。官方文档请求为 ip/key；Hub 客户只使用 Hub 身份请求 POST JSON 的 ip 或 ips，不能把供应商 key 放入 Body。官方外层 code/message（示例为 msg）不直接转发；Hub 使用 HTTP 状态、error、requestId 与版本化 envelope。
+
+| 参考字段 | Hub 单条画像路径 |
+| --- | --- |
+| proxy | data.data.proxy_type |
+| risk_score | data.data.risk_score |
+| risk_level | data.data.risk_level |
+| mb_rate | data.data.rapid_rotation_probability_percent |
+| real | data.data.human_probability_percent |
+| risk_tag[].label | data.data.risk_tags[].code |
+| risk_tag[].label_name | data.data.risk_tags[].name |
+| risk_tag[].last_time | data.data.risk_tags[].last_seen |
+
+批量成功项位于 data[i].response，内部与单条结构相同。真实返回字段取决于本次数据，不能保证完整；缺失/异常通过 null 和 warnings 表示，不能填成零。官方真人概率说明通常为 0–99%，Hub 现有解析接受 0–100%，此次仅补充说明，不更改解析、认证或计费。官方未提供统一评分区间、评级阈值与全部标签英文编码，文档不虚构这些枚举。标签时间保留文本，未声明时区。
+
+客户 HTML 与 OpenAPI 同用 server/contracts/ip-risk-docs.mjs 字段说明、结构示例；客户侧仅显示 Hub 契约。示例中的地址和风险值仅演示结构，不代表实际查询结果。核对及回归使用公开文档、模拟响应，无真实付费查询。

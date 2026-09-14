@@ -377,3 +377,36 @@ test('old Xiaohongshu-only pricing leaves IP free, while insufficient IP credit 
   await assert.rejects(paid.gateway.query(paid.context, request), { code: 'insufficient_credit', status: 402 })
   assert.equal(calls, 1)
 })
+
+
+test('documented complete risk projection is shared by single and batch responses', async () => {
+  const sample = { code: 200, data: { risk: { proxy: '是', risk_score: 90, risk_level: '中风险', mb_rate: '0.00%', real: '51%',
+    risk_tag: [{ label: 'highRiskDevice', label_name: '高危设备', last_time: '2024-05-10 12:17:26' }] } }, msg: 'success' }
+  const f = await fixture(async () => new Response(JSON.stringify(sample)))
+  const single = await f.gateway.query(f.context, request)
+  const batch = await f.gateway.batch.query(f.context, { body: { ips: ['1.1.1.1'] }, path: '/api/v1/data/ip/risk/batch' })
+  assert.deepEqual(single.body.data.data, {
+    proxy_type: '是', risk_score: 90, risk_level: '中风险', rapid_rotation_probability_percent: 0,
+    human_probability_percent: 51, risk_tags: [{ code: 'highRiskDevice', name: '高危设备', last_seen: '2024-05-10 12:17:26' }],
+  })
+  assert.deepEqual(batch.body.data[0].response.data, single.body.data)
+  assert.equal(single.body.data.status, 'success')
+  const { ipRiskExample } = await import('../../server/contracts/ip-risk-docs.mjs')
+  assert.deepEqual(single.body.data, ipRiskExample.data)
+})
+
+test('IP docs expose typed nested schemas and field explanations only to granted tenants', () => {
+  const scopes = [{ platforms: ['ip_risk'], capabilities: ['ip.risk.query'] }]
+  const document = tenantOpenApiDocument(scopes)
+  const single = document.paths['/data/ip/risk'].post.responses['200'].content['application/json']
+  const batch = document.paths['/data/ip/risk/batch'].post.responses['200'].content['application/json']
+  assert.deepEqual(batch.schema.properties.data.items.properties.response.oneOf[0], single.schema)
+  for (const field of ['proxy_type', 'risk_score', 'risk_level', 'rapid_rotation_probability_percent', 'human_probability_percent', 'risk_tags']) {
+    assert.ok(single.schema.properties.data.properties.data.properties[field].description)
+  }
+  assert.ok(document.paths['/data/ip/risk'].post.responses['402'])
+  const html = publicDocsHtmlForPath('/docs/ip-risk', { tenant: true, scopes })
+  for (const label of ['data[i].response.data.data', 'last_seen', '秒拨', 'FIELD_MISSING', 'batch_deadline_not_dispatched', 'highRiskDevice']) assert.ok(html.includes(label), label)
+  assert.ok(!/ipdatacloud|ipsearch/iu.test(html))
+  assert.equal(tenantOpenApiDocument([{ platforms: [], capabilities: [] }]).paths['/data/ip/risk'], undefined)
+})
