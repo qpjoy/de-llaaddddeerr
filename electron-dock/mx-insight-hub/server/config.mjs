@@ -1,4 +1,5 @@
 import { loadCommonConfig } from '@qpjoy/mx-common'
+import { nightAllAConfig } from './external-platforms/night-all-a.mjs'
 import { AppError } from './core/errors.mjs'
 import {
   disabledJustOneConfig,
@@ -340,6 +341,7 @@ export function loadConfig(environment = process.env) {
     reservationLeaseMs,
     storeDriver,
     databaseUrl,
+    nightAllA: nightAllAConfig(environment),
     nightAll: {
       baseUrl: environment.NIGHT_ALL_BASE_URL || 'http://127.0.0.1:13141',
       timeoutMs: nightAllTimeoutMs,

@@ -1,5 +1,7 @@
 # Prototype Instructions
 
+- 2026-09-16: Night-All-A is a separate Admin external data platform, not a replacement for historical Night-All. Hub 100.127.0.6 reaches 100.127.0.1:8100 over existing OpenVPN; Nginx is optional. Register the complete upstream API catalog while forwarding only explicit reviewed business operations. Collection triggers and database cleaning plans are separate lifecycles. Unknown async submissions must not be automatically retried. Keep all changes independent of MX-H2I login/networking.
+
 - Key “额度与用量” dialogs need a wide responsive layout: wrap metric cards by available dialog width, retain complete plan names/labels, and keep quota tables horizontally scrollable on small screens.
 
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.

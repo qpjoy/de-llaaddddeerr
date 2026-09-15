@@ -391,6 +391,11 @@ export const adminApi = {
   externalPlatforms: (token, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms`, { query },
   ),
+  nightAllADispatch: (token, operation, body, idempotencyKey) => request(
+    token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatch/${encodeURIComponent(operation)}`,
+    { method: 'POST', body, headers: { 'Idempotency-Key': idempotencyKey } },
+  ),
+  nightAllADispatchStatus: (token, id) => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches/${encodeURIComponent(id)}`),
   updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
   externalPlatform: (token, key, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}`, { query },

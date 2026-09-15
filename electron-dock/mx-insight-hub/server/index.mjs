@@ -1,5 +1,6 @@
 import { ExternalPlatformProxyStore, createTikHubProxyFetch } from './external-platforms/proxy.mjs'
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
+import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
 import { createServer } from 'node:http'
 import { createPool, createQueue } from '@qpjoy/mx-common'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
@@ -231,11 +232,13 @@ export async function createRuntime(config = loadConfig()) {
     credentialConfigured: config.listenerMode === 'admin' ? config.ipSearch?.configured : undefined,
     reservationLeaseMs: Math.max(60000, config.reservationLeaseMs),
   })
+  const nightAllA = new NightAllAService({ config: config.nightAllA, journal: new NightAllADispatchStore(pool) })
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
     new IpSearchAdminService(ipRiskGateway.platformStore, ipRiskGateway),
     justOnePlatformAdmin,
     tikHubPlatformAdmin,
     new NightAllPlatformAdminService({ store, config: config.nightAll }),
+    nightAllA,
   ])
   const externalPlatformGateway = new ExternalPlatformGateway({
     usageStore: store,
@@ -401,6 +404,7 @@ export async function createRuntime(config = loadConfig()) {
     searchReindex,
     embedding,
     externalPlatformAdmin,
+    nightAllA,
     externalPlatformGateway,
     ipRiskGateway,
     socialAccountGateway,

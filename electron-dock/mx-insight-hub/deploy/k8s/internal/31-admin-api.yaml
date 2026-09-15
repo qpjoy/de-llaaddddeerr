@@ -68,6 +68,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: mx-insight-hub-config
+            # Optional collector integration; absent means no live dispatch.
+            - secretRef:
+                name: mx-insight-hub-night-all-a
+                optional: true
             # Model API keys, keyed by whatever `apiKeyEnv` each provider in
             # MX_INSIGHT_AGENT_PROVIDERS names. envFrom rather than explicit
             # entries so adding a provider never requires editing this file --

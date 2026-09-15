@@ -1,4 +1,5 @@
 import { ExternalProxyPanel } from './external-proxy-panel.jsx'
+import { NightAllAPanel } from './night-all-a-panel.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
@@ -62,7 +63,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub', 'night-all', 'ipsearch'])
+const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub', 'night-all', 'night-all-a', 'ipsearch'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -2279,6 +2280,7 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   }, [range, setQuery, unsupportedProvider])
 
   if (unsupportedProvider) return <UnsupportedProvider range={range} />
+  if (provider === 'night-all-a') return <NightAllAPanel token={token} onUnauthorized={onUnauthorized} />
   if (provider === 'ipsearch') return <IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   if (provider === 'night-all') return <NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
   if (provider) {

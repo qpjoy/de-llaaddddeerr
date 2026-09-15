@@ -1,5 +1,8 @@
 # External data platform gateway operations
 
+Night-All-A is separately registered for VPN collector integration. See [Night-All-A integration](night-all-a.md)
+for its full Admin API catalog, fixed forwarding operations, durable command journal and database-cleaning boundary.
+
 Status: JustOne ecommerce product search and direct TikHub Xiaohongshu note acquisition implemented;
 direct TikHub search/raw and narrow single-user crawl/user-info routing are staged migrations and are not
 proved active by repository presence.

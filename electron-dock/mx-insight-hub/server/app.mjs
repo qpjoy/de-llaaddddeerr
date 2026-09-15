@@ -744,6 +744,7 @@ export function createApp({
   searchReindex = null,
   embedding = null,
   externalPlatformAdmin = null,
+  nightAllA = null,
   externalPlatformGateway = null,
   ipRiskGateway = null,
   socialAccountGateway = null,
@@ -2620,6 +2621,26 @@ export function createApp({
         return
       }
 
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/night-all-a/dispatch/:operation')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        if (!nightAllA) throw new AppError(503, 'night_all_a_disabled', 'Night-All-A 未配置')
+        const data = await nightAllA.dispatch(params.operation, await readJson(request, 65536), {
+          idempotencyKey: request.headers['idempotency-key'], actor: 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/night-all-a/dispatches/:id')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        if (!nightAllA) throw new AppError(503, 'night_all_a_disabled', 'Night-All-A 未配置')
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.id)) throw new AppError(400, 'invalid_dispatch_id', '无效请求 ID')
+        const data = await nightAllA.journal.get(params.id)
+        if (!data) throw new AppError(404, 'dispatch_not_found', '记录不存在')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {
         requireSourceAdmin(principal)
         if (!externalPlatformAdmin) {

@@ -1,0 +1,15 @@
+.mih-night-all-a { display: grid; gap: 16px; min-width: 0; }
+.mih-night-all-a > .mih-panel { gap: 12px; align-content: start; }
+.mih-night-all-a .mih-panel > p,
+.mih-night-all-a .mih-panel > h2,
+.mih-night-all-a .mih-panel > h3 { margin: 0; }
+.mih-night-all-a h2 { font-size: 19px; }
+.mih-night-all-a h3 { font-size: 15px; }
+.mih-night-all-a p { line-height: 1.65; overflow-wrap: anywhere; }
+.mih-night-all-a a { color: var(--qp-accent, #0891b2); }
+.mih-night-all-a .qp-field { display: grid; gap: 6px; min-width: 0; }
+.mih-night-all-a .qp-input { width: 100%; box-sizing: border-box; }
+.mih-night-all-a .qp-button { justify-self: start; max-width: 100%; white-space: normal; }
+.mih-night-all-a summary { cursor: pointer; padding-block: 6px; line-height: 1.6; }
+.mih-night-all-a details { min-width: 0; }
+.mih-night-all-a code { overflow-wrap: anywhere; }
