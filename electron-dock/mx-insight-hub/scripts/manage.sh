@@ -1122,7 +1122,7 @@ create_runtime_config() {
   local tikhub_user_activity_contract_verified="${MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED:-0}"
   local tikhub_search_canary_consumer_ids="${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS:-}"
   local tikhub_billing_json="${MX_INSIGHT_TIKHUB_BILLING_JSON:-}"
-  local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
+  local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-180000}"
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
   if ! public_url="$(
     MX_INSIGHT_PUBLIC_URL_VALUE="$public_url" node -e '
@@ -1310,7 +1310,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \
     --from-literal=MX_INSIGHT_STORE=postgres \
     --from-literal=NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
-    --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-30000}" \
+    --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-120000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
     --from-literal=MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     --from-literal=MX_INSIGHT_PUBLIC_URL="$public_url" \

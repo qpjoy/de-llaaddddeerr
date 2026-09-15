@@ -214,7 +214,7 @@ export function loadConfig(environment = process.env) {
   if (storeDriver === 'postgres' && !databaseUrl) {
     throw new AppError(500, 'invalid_configuration', 'DATABASE_URL is required for postgres storage')
   }
-  const nightAllTimeoutMs = positiveInteger(environment.NIGHT_ALL_TIMEOUT_MS, 30_000, 'NIGHT_ALL_TIMEOUT_MS')
+  const nightAllTimeoutMs = positiveInteger(environment.NIGHT_ALL_TIMEOUT_MS, 120_000, 'NIGHT_ALL_TIMEOUT_MS')
   // Shared data-plane configuration (Elasticsearch, queue, segmenter). Absent
   // values are not an error: every store described here is an optional
   // accelerator, and the Hub must start and serve without any of them.
@@ -290,7 +290,7 @@ export function loadConfig(environment = process.env) {
 
   const reservationLeaseMs = positiveInteger(
     environment.MX_INSIGHT_RESERVATION_LEASE_MS,
-    Math.max(150_000, nightAllTimeoutMs + 30_000),
+    Math.max(180_000, nightAllTimeoutMs + 60_000),
     'MX_INSIGHT_RESERVATION_LEASE_MS',
   )
   let justOne
