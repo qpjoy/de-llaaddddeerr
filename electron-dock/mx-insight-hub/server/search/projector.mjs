@@ -2,6 +2,7 @@ import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { buildContentDocument } from './document.mjs'
+import { describeBulkFailure } from './bulk-errors.mjs'
 import {
   purgeStaleCurrentStateCopies,
   withCurrentStateWriteFence,
@@ -406,9 +407,9 @@ export class SearchProjector {
       const isMissingDelete = descriptor.operation === 'delete' && status === 404
       const succeeded = Boolean(action) && (!action.error || isConflict || isMissingDelete)
       if (succeeded) continue
-      const error = action?.error
-        ? JSON.stringify(action.error)
-        : `missing ${descriptor.operation} result from Elasticsearch bulk response`
+      const error = describeBulkFailure(
+        action, `missing ${descriptor.operation} result from Elasticsearch bulk response`,
+      )
       for (const event of descriptor.aggregateEvents) {
         failures.set(event.id, { attempts: event.attempts, error })
       }

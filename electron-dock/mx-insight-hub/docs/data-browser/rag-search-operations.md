@@ -33,6 +33,32 @@
 
 当前 chunk schema 为 v2，增加平台类型/作者/标签过滤与 `embeddingSpace`（模型＋维度）；content 维持 v6。chunker v2 为超长无标点文本增加有界切分。历史旧 chunker 需要重切、重新向量化，未来仅 ES 投影变化应复用 PostgreSQL 向量。模型升级需新空间/索引、分批迁移与切换，不能把不同模型向量混算。
 
+## 全文重建在 `extensions` 解析失败时的恢复
+
+2026-09-17 修复：历史扩展字段可能包含超长正文或序列化 JSON。`flattened`
+把叶子值作为一个关键词索引，未设置长度上限时可能触及 Lucene 的 32,766 字节限制，
+产生 `document_parsing_exception`。中文、emoji 及控制字符转义会让错误预览特别长；
+仅凭预览不能判断是非法 JSON，需查看底层 `caused_by`。
+
+- content v6 的 `extensions` 增加 `ignore_above: 4096`。超限叶子值不参与该字段的
+  关键词检索/聚合，原有投影值仍完整保存在 ES `_source`，PostgreSQL canonical、
+  revision 和原始归档均不改写。标题、正文的全文索引和严格 HanLP 分词保持原逻辑。
+  此处不是截断内容，也不是跳过失败记录。
+- 这是可原位更新的映射参数，不升级 schema、不清空历史进度。恢复已有的未完成索引时，
+  先更新其映射，再从 PostgreSQL 保存的最后成功批次游标继续；仅更新模板不会修复已有索引。
+  若映射更新冲突，任务停止，保留游标和当前读别名。
+- 全量重建和增量 projector 的错误摘要保留索引、记录 ID、HTTP 状态及优先排列的
+  底层原因，省略巨大的值预览，避免 2,000 字符的持久化上限截掉诊断信息。
+
+上线修复后，由操作员在数据中心重新检查并显式启动严格重建。同一索引槽和同一分词
+后端的未完成任务会续接已保存的批次；失败批次会重放，不承诺从单条失败记录精确续接。
+首轮完成前不会把读别名切到部分索引。不要为此清空 PG 记录、删除当前服务索引或改动
+MX-H2I 登录/网络配置。截图中的磁盘约 90% 使用率是另一个容量问题：重建仍需容纳第二份
+投影，应先确认预检空间；本次映射修复不会释放磁盘，也不会降低 ES 水位保护。
+
+参考：[Elastic flattened 参数](https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/flattened)、
+[ignore_above 与字节长度限制](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/ignore-above.html)。
+
 ## 后台处理与隔离
 
 canonical 入库事务写入既有 outbox，触发器只对相同 record ID 合并一个持久任务，记录最高 projection revision；事务回滚时队列同步回滚。**它增加一次短小的数据库写入成本，并非零开销**，但同步响应路径不执行切片、HanLP、模型调用或 ES bulk。原公开转发、鉴权、计费和 MX-H2I 链路不依赖 retrieval Worker 就绪。

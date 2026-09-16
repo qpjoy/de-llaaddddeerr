@@ -193,7 +193,11 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
           payloadSha256: { type: 'keyword' },
         },
       },
-      extensions: { type: 'flattened' },
+      // Source text and serialized JSON can exceed Lucene's 32,766-byte term
+      // limit. Bound keyword indexing only; the complete value stays in
+      // `_source` and PostgreSQL. Leave room for UTF-8 and flattened key paths.
+      // This parameter is updateable in place, so keep the v6 resume cursor.
+      extensions: { type: 'flattened', ignore_above: 4_096 },
     },
   })
   // Content is a mutable current-state projection, not an append-only time

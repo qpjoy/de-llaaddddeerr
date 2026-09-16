@@ -14,6 +14,7 @@ import {
   fullRebuildTargetIndex,
 } from '../../server/search/index.mjs'
 import { buildContentDocument } from '../../server/search/document.mjs'
+import { JUSTONE_DATASET_ID } from '../../server/ingest/justone.mjs'
 import { authorNameQuery, SearchQueries } from '../../server/search/queries.mjs'
 import {
   DEFAULT_SEARCH_PROFILE,
@@ -1289,6 +1290,27 @@ test('content mapping carries the author fields the projector writes', () => {
   assert.equal(properties.mediaType.type, 'keyword')
   assert.equal(properties.mediaSizeBytes.type, 'long')
   assert.equal(properties.entityTypes.type, 'keyword')
+})
+
+test('oversized extension values stay complete in source with bounded keyword indexing', async () => {
+  const longText = '品牌\u0003中文😀'.repeat(6_000)
+  const extensions = { description: longText, details: { items: [longText, 'short'] }, rank: 4 }
+  assert.ok(Buffer.byteLength(longText) > 32_766, 'fixture exceeds the Lucene term byte limit')
+  const mapping = contentIndex().mappings.properties.extensions
+  assert.equal(mapping.type, 'flattened')
+  assert.equal(mapping.ignore_above, 4_096)
+  for (const datasetId of ['night-all.search.v1', JUSTONE_DATASET_ID]) {
+    const row = canonicalRow({ dataset_id: datasetId, extensions: structuredClone(extensions) })
+    const document = await buildContentDocument(row, { segmenter })
+    assert.equal(document.extensions.description, longText)
+    assert.deepEqual(
+      typeof document.extensions.details === 'string'
+        ? JSON.parse(document.extensions.details) : document.extensions.details,
+      extensions.details,
+    )
+    assert.equal(document.extensions.rank, 4)
+    assert.deepEqual(row.extensions, extensions, 'canonical data is never truncated or mutated')
+  }
 })
 
 test('chunk index is not created without configured embedding dimensions', () => {
@@ -2667,7 +2689,14 @@ test('projector failure transition is fenced by the current lease owner', async 
       async bulk() {
         return {
           errors: true,
-          items: [{ index: { _id: row.id, status: 400, error: { type: 'illegal_argument_exception' } } }],
+          items: [{ index: {
+            _id: row.id, status: 400,
+            error: {
+              type: 'document_parsing_exception',
+              reason: `failed to parse field [extensions]. Preview of field's value: '${'业务正文'.repeat(1_000)}'`,
+              caused_by: { type: 'illegal_argument_exception', reason: 'flattened value exceeds 32766 bytes' },
+            },
+          } }],
         }
       },
     },
@@ -2680,6 +2709,9 @@ test('projector failure transition is fenced by the current lease owner', async 
   assert.match(failedUpdate.sql, /status = 'claimed'/)
   assert.match(failedUpdate.sql, /locked_by = \$4/)
   assert.equal(failedUpdate.values[3], projector.workerId)
+  assert.match(failedUpdate.values[2], /32766 bytes/)
+  assert.match(failedUpdate.values[2], new RegExp(row.id))
+  assert.doesNotMatch(failedUpdate.values[2], /业务正文/)
 })
 
 test('a worker that lost its lease cannot report another owner event as delivered', async () => {
@@ -2896,9 +2928,24 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
   const harness = currentIndexHarness(indexSet, {
     'mx-insight-hub-content-v3-current': { [indexSet.readAlias]: {} },
   })
-  // The partial v5 index survived the interruption; it serves no alias.
+  // The partial index survived the interruption; it serves no alias.
   harness.client.indexExists = async (index) => index === indexSet.currentIndex
-  const remaining = canonicalRow({ id: '44444444-4444-4444-8444-444444444444' })
+  const remaining = canonicalRow({
+    id: '44444444-4444-4444-8444-444444444444',
+    extensions: { description: '中文长文本'.repeat(10_000) },
+  })
+  let mappingUpdated = false
+  harness.client.putMapping = async (index, body) => {
+    assert.equal(index, indexSet.currentIndex)
+    assert.equal(body.properties.extensions.ignore_above, 4_096)
+    mappingUpdated = true
+  }
+  const originalBulk = harness.client.bulk
+  harness.client.bulk = async (operations) => {
+    assert.equal(mappingUpdated, true, 'repair the existing mapping before resuming any writes')
+    assert.equal(operations[1].extensions.description, remaining.extensions.description)
+    return originalBulk(operations)
+  }
   const snapshot = currentSnapshotPool('FROM core.canonical_records', [remaining], {
     rebuildProgress: {
       last_record_id: '11111111-1111-4111-8111-111111111111',
@@ -2934,6 +2981,71 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
   assert.equal(progress[1].processed, 120_001)
   // The catch-up watermark is the original build start, not this attempt's.
   assert.equal(scans.at(-1).values[2].toISOString(), '2026-08-17T00:00:00.000Z')
+})
+
+test('a resumed rebuild mapping conflict preserves its cursor and serving aliases', async () => {
+  const indexSet = contentIndex()
+  const oldIndex = 'mx-insight-hub-content-v3-current'
+  const harness = currentIndexHarness(indexSet, { [oldIndex]: { [indexSet.readAlias]: {} } })
+  harness.client.indexExists = async () => true
+  harness.client.putMapping = async () => {
+    throw new ElasticsearchError(400, { error: { reason: 'incompatible content field' } })
+  }
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()], {
+    rebuildProgress: {
+      last_record_id: canonicalRow().id, processed: 120_000,
+      build_started_at: new Date('2026-08-17T00:00:00.000Z'), segmenter_backend: null,
+    },
+  })
+  const result = await ensureCurrentContentIndex({
+    client: harness.client, pool: snapshot.pool, segmenter, indexSet,
+    logger: { log() {}, warn() {} },
+  })
+  assert.equal(result.mappingConflict, 'incompatible content field')
+  assert.equal(result.rebuilt, false)
+  assert.equal(harness.calls.bulks.length, 0)
+  assert.equal(harness.calls.creates.length, 0)
+  assert.equal(harness.calls.aliasActions.length, 0)
+  assert.equal(snapshot.queries.some(({ sql }) => sql.includes('UPDATE control.search_rebuild_progress')), false)
+  assert.equal(snapshot.released, true)
+})
+
+test('snapshot failures retain document identity and root cause ahead of oversized value previews', async () => {
+  const indexSet = contentIndex()
+  const oldIndex = 'mx-insight-hub-content-v3-current'
+  const harness = currentIndexHarness(indexSet, { [oldIndex]: { [indexSet.readAlias]: {} } })
+  const row = canonicalRow()
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [row])
+  harness.client.bulk = async () => ({
+    errors: true,
+    items: [{ index: {
+      _index: indexSet.currentIndex, _id: row.id, status: 400,
+      error: {
+        type: 'document_parsing_exception',
+        reason: `failed to parse field [extensions] of type [flattened]. Preview of field's value: '${'业务正文'.repeat(10_000)}'`,
+        caused_by: {
+          type: 'illegal_argument_exception',
+          reason: 'Flattened field [extensions] contains one immense field whose keyed encoding is longer than the allowed max length of 32766 bytes. Key length: 6, value length: 120000',
+        },
+      },
+    } }],
+  })
+  await assert.rejects(() => ensureCurrentContentIndex({
+    client: harness.client, pool: snapshot.pool, segmenter, indexSet,
+    logger: { log() {}, warn() {} },
+  }), (error) => {
+    assert.ok(error.message.length <= 2_000, 'the persisted Admin error keeps all diagnostics')
+    assert.match(error.message, new RegExp(row.id))
+    assert.match(error.message, new RegExp(indexSet.currentIndex))
+    assert.match(error.message, /illegal_argument_exception/)
+    assert.match(error.message, /32766 bytes/)
+    assert.match(error.message, /value length: 120000/)
+    assert.match(error.message, /document_parsing_exception/)
+    assert.doesNotMatch(error.message, /业务正文/)
+    return true
+  })
+  assert.equal(harness.calls.aliasActions.length, 0, 'a rejected document still aborts cutover')
+  assert.equal(snapshot.queries.some(({ sql }) => sql.includes('SET last_record_id')), false)
 })
 
 test('an inactive partial rebuild never resumes across tokenizer backends', async () => {

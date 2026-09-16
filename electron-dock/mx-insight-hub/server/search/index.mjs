@@ -7,6 +7,7 @@ import { batchingSegmenter, createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { buildChunkDocument } from '../embedding/document.mjs'
 import { contentIndex, chunkIndex } from './index-definitions.mjs'
 import { buildContentDocument } from './document.mjs'
+import { describeBulkFailure } from './bulk-errors.mjs'
 import { SearchQueries } from './queries.mjs'
 import { SearchProjector } from './projector.mjs'
 import { withCurrentStateCutoverFence } from './current-state.mjs'
@@ -711,7 +712,10 @@ async function ensureCurrentStateIndex({
         mappings: targetIndexSet.mappings,
       })
       created = true
-    } else if (!resume) {
+    } else {
+      // A resumable index predates this process and may still have the mapping
+      // that rejected its next record. Apply compatible repairs before replay;
+      // changing the template alone does not update an existing partial index.
       const mappingConflict = await updateCurrentMapping(client, targetIndexSet, logger)
       if (mappingConflict) {
         return currentEnsureReport(targetIndexSet, { mappingConflict, rebuilt: false, created: false })
@@ -1167,7 +1171,7 @@ function assertSnapshotBulk(response, operationTypes, projectionName) {
       || (operationType === 'delete' && status === 404)
     )
     if (accepted) continue
-    const reason = action?.error ? JSON.stringify(action.error) : `missing ${operationType} result`
+    const reason = describeBulkFailure(action, `missing ${operationType} result`)
     throw new Error(`${projectionName} snapshot projection failed: ${reason}`)
   }
 }
