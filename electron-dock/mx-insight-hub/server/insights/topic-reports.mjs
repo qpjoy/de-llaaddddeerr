@@ -21,7 +21,6 @@ const PLATFORM_CATEGORY = Object.freeze({
   technology: '科技',
   web: '网页',
 })
-const TOPIC_REPORT_PLATFORM_SET = new Set(TOPIC_REPORT_PLATFORMS)
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const LANGUAGES = new Set(['zh-CN', 'en'])
 const SOURCE_SCOPES = new Set(['all_granted', 'selected'])
@@ -47,12 +46,12 @@ function requiredDate(value, field) {
   return parsed
 }
 
-function normalizedPlatforms(value, allowedPlatforms) {
+function normalizedPlatforms(value, allowedPlatforms, availablePlatforms) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new AppError(400, 'invalid_request', 'platforms must be a non-empty array')
   }
   const platforms = [...new Set(value.map((item) => requiredText(item, 'platform', { max: 96 }).toLowerCase()))]
-  const unknown = platforms.filter((platform) => !TOPIC_REPORT_PLATFORM_SET.has(platform))
+  const unknown = platforms.filter((platform) => !availablePlatforms.includes(platform))
   if (unknown.length > 0) {
     throw new AppError(400, 'invalid_platform', `Unsupported topic-report platforms: ${unknown.join(', ')}`)
   }
@@ -66,6 +65,7 @@ function normalizedPlatforms(value, allowedPlatforms) {
 
 export function normalizeTopicReportRequest(input, {
   allowedPlatforms = TOPIC_REPORT_PLATFORMS,
+  availablePlatforms = TOPIC_REPORT_PLATFORMS,
   now = new Date(),
 } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -100,7 +100,7 @@ export function normalizeTopicReportRequest(input, {
   if (rangeStart >= rangeEnd || rangeEnd.getTime() - rangeStart.getTime() > 366 * 24 * 60 * 60 * 1_000) {
     throw new AppError(400, 'invalid_request', 'The report time range must be positive and no longer than 366 days')
   }
-  const eligiblePlatforms = [...new Set(allowedPlatforms)].filter((platform) => TOPIC_REPORT_PLATFORM_SET.has(platform))
+  const eligiblePlatforms = [...new Set(allowedPlatforms)].filter((platform) => availablePlatforms.includes(platform))
   if (eligiblePlatforms.length === 0) {
     throw new AppError(403, 'platform_not_granted', 'A saved-record data platform grant is required')
   }
@@ -109,7 +109,7 @@ export function normalizeTopicReportRequest(input, {
     throw new AppError(400, 'invalid_request', 'sourceScope must be all_granted or selected')
   }
   const platforms = sourceScope === 'selected'
-    ? normalizedPlatforms(input.platforms, eligiblePlatforms)
+    ? normalizedPlatforms(input.platforms, eligiblePlatforms, availablePlatforms)
     : eligiblePlatforms.sort()
   const sampleLimit = input.sampleLimit == null ? DEFAULT_SAMPLE_LIMIT : Number(input.sampleLimit)
   if (!Number.isInteger(sampleLimit) || sampleLimit < 20 || sampleLimit > 500) {
@@ -534,7 +534,7 @@ export function buildTopicReport(claim, selection, { generatedAt = new Date() } 
       eventTime,
     }
   })
-  const categoryRanking = ranked(categories, 13, (key) => PLATFORM_CATEGORY[key] || key)
+  const categoryRanking = ranked(categories, categories.size, (key) => PLATFORM_CATEGORY[key] || key)
   const tagRanking = ranked(tags, 16)
   const locationRanking = ranked(locations, 10)
   const authorRanking = ranked(authors, 10)

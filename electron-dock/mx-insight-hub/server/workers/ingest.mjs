@@ -1,3 +1,5 @@
+import { CrawlerSavedRecordsPipeline } from '../ingest/crawler/pipeline.mjs'
+import { runCrawlerDiscovery } from '../ingest/crawler/discovery.mjs'
 import process from 'node:process'
 import { createPool, createQueue, runCommonMigrations, startWorker } from '@qpjoy/mx-common'
 import { NightAllAdapter } from '../adapters/night-all.mjs'
@@ -58,6 +60,7 @@ async function main() {
   const queue = createQueue({ ...config.common.queue, driver: 'postgres' }, { pool, logger })
   const backfill = new NightAllBackfill({ store, adapter, queue, logger })
   const databasePuller = new DatabaseSourcePuller({ store, queue, logger })
+  const crawlerPipeline = new CrawlerSavedRecordsPipeline({ store, queue, databasePuller })
   const sqliteApiPuller = new SQLiteApiSourcePuller({ store, queue, logger })
   const telegramSQLitePipeline = new TelegramSQLitePipeline({ store, queue, sqliteApiPuller })
   const externalSourcePuller = new ExternalSourcePuller({
@@ -212,6 +215,7 @@ async function main() {
     // Foreign-table scans are bulk I/O just like backfill. One at a time keeps
     // them from competing with latency-sensitive search-result ingestion.
     startLoop(queue, EXTERNAL_PULL_QUEUE, handleExternalPull, controller.signal, 1),
+    runCrawlerDiscovery({ pipeline: crawlerPipeline, store, signal: controller.signal, logger }),
     runExternalPullScheduler({
       store,
       queue,

@@ -5029,6 +5029,43 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   },
 }
 
+PUBLIC_OPENAPI_DOCUMENT.paths['/data/saved-records/categories'] = {
+  get: {
+    operationId: 'listSavedRecordCategories',
+    summary: '发现所有已知的数据类别及当前 Key 授权状态',
+    description: 'Returns the known category directory with stable sourceType, datasetId, platform and objectType identifiers. registered indicates an installed cleaning task; authorized indicates the current effective Key grant. Metadata visibility never grants data access. No query parameters, Idempotency-Key or usage charge. Does not trigger collection or a source scan. The directory can grow; do not hardcode category counts. It is not a source-wide completeness or freshness guarantee.',
+    responses: {
+      200: {
+        description: "Known category directory. Use authorized entries’ platform values in topic-report platforms or stored/canonical search filters.",
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/SavedRecordCategoriesEnvelope' } } },
+      },
+      ...publicErrors,
+    },
+  },
+}
+PUBLIC_OPENAPI_DOCUMENT.paths['/data/platforms'] = structuredClone(PUBLIC_OPENAPI_DOCUMENT.paths['/data/saved-records/categories'])
+PUBLIC_OPENAPI_DOCUMENT.paths['/data/platforms'].get.operationId = 'listStoredDataPlatforms'
+PUBLIC_OPENAPI_DOCUMENT.components.schemas.SavedRecordCategoriesEnvelope = {
+  type: 'object', required: ['data', 'requestId'], properties: {
+    requestId: { type: 'string' },
+    data: { type: 'object', required: ['contractVersion', 'revision', 'discoveryCheckedAt', 'scope', 'product', 'items'], properties: {
+      contractVersion: { type: 'string', const: 'mx-insight-hub.saved-record-categories.v1' },
+      revision: { type: 'string', description: 'Hash of this directory response, including current authorization flags.' },
+      discoveryCheckedAt: { type: ['string', 'null'], format: 'date-time' },
+      scope: { type: 'string', const: 'known_categories' },
+      product: { type: 'string', const: 'saved_records' },
+      items: { type: 'array', items: { type: 'object', additionalProperties: false,
+        required: ['id', 'sourceType', 'label', 'datasetId', 'platform', 'objectType', 'registered', 'authorized'],
+        properties: {
+          id: { type: 'string' }, sourceType: { type: 'string' }, label: { type: 'string' },
+          datasetId: { type: ['string', 'null'] }, platform: { type: ['string', 'null'] }, objectType: { type: 'string', const: 'saved_record' },
+          registered: { type: 'boolean' }, authorized: { type: 'boolean' },
+        },
+      } },
+    } },
+  },
+}
+
 PUBLIC_OPENAPI_DOCUMENT.paths['/data/topic-reports'] = {
   post: {
     operationId: 'createTopicReport',
@@ -5082,9 +5119,9 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
       to: { type: 'string', format: 'date-time', description: 'Required only when range=custom.' },
       sourceScope: { type: 'string', enum: ['all_granted', 'selected'], default: 'all_granted' },
       platforms: {
-        type: 'array', minItems: 1, maxItems: 13, uniqueItems: true,
-        description: 'Required when sourceScope=selected. Every value must be a granted data_center_saved_records_* platform.',
-        items: { type: 'string', pattern: '^data_center_saved_records_[a-z_]+$' },
+        type: 'array', minItems: 1, uniqueItems: true,
+        description: 'Required when sourceScope=selected. Discover values with GET /data/platforms; every value must be registered and authorized for the current Key. There is no fixed category count.',
+        items: { type: 'string', pattern: '^data_center_saved_records_[a-z][a-z0-9]*(?:_[a-z0-9]+)*$' },
       },
       sampleLimit: { type: 'integer', minimum: 20, maximum: 500, default: 240 },
     },
@@ -5134,7 +5171,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
       topic: { type: 'string' },
       language: { type: 'string' },
       window: { type: 'object', additionalProperties: true },
-      coverage: { type: 'object', additionalProperties: false, required: ['matchedRecords', 'analyzedRecords', 'evidenceRecords', 'categoryCount', 'truncated'], properties: { matchedRecords: { type: 'integer', minimum: 0 }, analyzedRecords: { type: 'integer', minimum: 0, maximum: 500 }, evidenceRecords: { type: 'integer', minimum: 0, maximum: 80 }, categoryCount: { type: 'integer', minimum: 0, maximum: 13 }, truncated: { type: 'boolean' } } },
+      coverage: { type: 'object', additionalProperties: false, required: ['matchedRecords', 'analyzedRecords', 'evidenceRecords', 'categoryCount', 'truncated'], properties: { matchedRecords: { type: 'integer', minimum: 0 }, analyzedRecords: { type: 'integer', minimum: 0, maximum: 500 }, evidenceRecords: { type: 'integer', minimum: 0, maximum: 80 }, categoryCount: { type: 'integer', minimum: 0 }, truncated: { type: 'boolean' } } },
       executiveSummary: { type: 'object', additionalProperties: true },
       timeline: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['date', 'count'], properties: { date: { type: 'string', format: 'date' }, count: { type: 'integer', minimum: 1 } } } },
       dimensions: { type: 'object', additionalProperties: true },
@@ -5169,6 +5206,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
+  { key: 'saved-record-categories', path: '/docs/saved-record-categories', label: '数据类别目录', section: '数据目录' },
   { key: 'topic-reports', path: '/docs/topic-reports', label: '专题洞察', section: '数据产品' },
   { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫', section: '平台原生接口 · JustOne' },
   { key: 'jd-native', path: '/docs/jd-native', label: '京东', section: '平台原生接口 · JustOne' },
@@ -5889,11 +5927,21 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
     <p>响应不包含 capture/source-row ID、marketplace product/shop source ID、marketplace raw label/映射状态/内部 source key、task/run/campaign、raw tags/share payload、metadata/device/<code>is_reported</code>、source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只有经审核的 <code>{id,name}</code>；未有 approved mapping 时二者均为 null。价格 amount 使用 decimal string，并返回 display/provenance；当前固定源没有 currency 字段，所以 source price 的 <code>currency=null</code>，不能猜成 CNY，只有人工 curated override 才携带已审核的三位 ISO currency。外层 <code>collectedAt</code> 是观测时间，不是实时交易报价；v1 不发布 brand 或 media 字段，未审核规格保持 null，当前源无图片时不伪造商品图。下架仅改变 storefront overlay，不删除 canonical capture。</p>
     </section>
 
+    <section class="doc-page" data-doc-page="saved-record-categories">
+    <h2>数据类别目录</h2>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/platforms</code></div><p>使用 Hub API Key 获取所有已知类别及当前授权状态；无需 Idempotency-Key，不消耗 usage unit。此接口只读 Hub 类别目录，不发起采集或源库扫描。</p></div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/platforms" \
+      -H "Authorization: Bearer $MX_INSIGHT_API_KEY"</code></pre>
+    <p><code>data.items[]</code> 返回 <code>id / sourceType / label / datasetId / platform / objectType / registered / authorized</code>。例如 <code>sourceType=news</code> 对应 <code>platform=data_center_saved_records_news</code>、<code>datasetId=data-center.saved-records.news.v1</code>。目录中的类别可持续增长，初始 13 类不是上限。</p>
+    <p><code>registered</code> 表示清洗任务已登记，<code>authorized</code> 表示当前 Key 的有效读取授权；未完成规范映射的类别，其 <code>datasetId/platform</code> 为 null。看到类别不等于获得读取权限，也不证明数据完整或最新。<code>revision</code> 可用于比较目录变化，<code>discoveryCheckedAt</code> 是最近成功发现时间。新类别需要独立授权，已有 Key 不会因目录增长而自动扩权。</p>
+    <p>专题报告的 <code>platforms</code> 填写目录返回的授权 <code>platform</code> 值；它不是表名、展示名称或 <code>sourceType</code>。单类读取使用 stored/canonical search 的 <code>platform</code>，可再用 <code>datasetId</code> 收窄。</p>
+    </section>
     <section class="doc-page" data-doc-page="topic-reports">
     <h2 id="topic-reports">专题洞察</h2>
     <div class="notice">专题报告是异步数据产品，公开合同为 <code>mx-insight-hub.data-products.topic-report.v1</code>。它只读取调用者已经获准的 <code>data_center_saved_records_*</code> canonical 数据，不调用采集源、不暴露内部连接或供应方身份，不触发 Elasticsearch 索引重建，也不调用 HanLP 分词。</div>
     <p>一个报告会返回时间趋势、类别/标签/地域/作者分布、可视化关系节点与边，以及最多 80 条可回到原文核对的公开安全证据。关系表示同一批证据中的共现强度，不是因果推断或事实认定。</p>
     <h3>1. 创建持久化任务</h3>
+    <p>先调用 <a href="/docs/saved-record-categories"><code>GET /api/v1/data/platforms</code></a>，从 <code>data.items[]</code> 中选取 <code>authorized=true</code> 的 <code>platform</code>，再填入下方 <code>platforms</code>。</p>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/topic-reports</code></div><p>要求至少一个已授权的 saved-record 平台以及唯一 <code>Idempotency-Key</code>。任务创建时固化完整授权平台集合，成功接受返回 HTTP 202，并消耗 1 个 usage unit。</p></div>
     <pre><code>REPORT=$(curl -sS -X POST "$HUB_URL/api/v1/data/topic-reports" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
@@ -5902,7 +5950,7 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
   -d '{"topic":"东南亚近期选举与外交政策变化","range":"7d","sourceScope":"all_granted","language":"zh-CN"}')
 REPORT_ID=$(printf '%s' "$REPORT" | jq -r '.data.id')
 printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.progress,requestId}'</code></pre>
-    <p><code>range</code> 支持 <code>24h|7d|30d|90d|custom</code>；custom 必须同时提供带时区的 <code>from/to</code>，最长 366 天。<code>sourceScope=selected</code> 时必须提供 1–13 个 <code>platforms</code>，且每项都必须已经在当前 API Key 的有效授权快照中。</p>
+    <p><code>range</code> 支持 <code>24h|7d|30d|90d|custom</code>；custom 必须同时提供带时区的 <code>from/to</code>，最长 366 天。<code>sourceScope=selected</code> 时必须提供至少一个目录中已登记的 <code>platforms</code>（类别数量不固定），且每项都必须已经在当前 API Key 的有效授权快照中。</p>
     <h3>2. 查询进度与结果</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/topic-reports/{id}</code></div><p>只允许创建任务的 consumer 读取；同一 consumer 轮换 Key 后仍可读取。轮询不会再次计费，也不会触发采集、模型调用或索引操作。</p></div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/topic-reports/$REPORT_ID" \
@@ -6248,7 +6296,8 @@ export function tenantDocumentPathAllowed(path, scopes) {
     else if (path.startsWith('/data/telegram/') || path.startsWith('/data/canonical/items/')) platform = 'telegram'
     else if (path.startsWith('/data/public-opinion/')) platform = 'public_opinion'
     else if (path.startsWith('/data/virtual-supermarket/')) platform = 'virtual_supermarket'
-    else if (path.startsWith('/data/topic-reports')) platform = 'topic_reports'
+    else if (['/data/platforms', '/data/saved-records/categories'].includes(path)) return scopes.length > 0
+    else if (path.startsWith('/data/topic-reports')) return scopes.some(scope => scope.platforms.some(value => /^data_center_saved_records_[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)))
     else return false
   }
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
@@ -6260,13 +6309,15 @@ const TENANT_PRODUCT_PATHS = {
   'ecommerce-treasure-box': ['/data/ecommerce/products/search'],
   'social-accounts': ['/data/social/accounts/search'],
   'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],
-  'virtual-supermarket': ['/data/virtual-supermarket/products'], 'topic-reports': ['/data/topic-reports'],
+  'saved-record-categories': ['/data/platforms', '/data/saved-records/categories'],
+  'virtual-supermarket': ['/data/virtual-supermarket/products'], 'topic-reports': ['/data/platforms', '/data/topic-reports', '/data/topic-reports/{id}'],
   'taobao-tmall': ['/data/ecommerce/taobao/product-detail', '/data/ecommerce/taobao/product-reviews', '/data/ecommerce/taobao/product-questions', '/data/ecommerce/taobao/shop-products'],
   'jd-native': [], 'xianyu-native': [], 'xiaohongshu-ec-native': [],
 }
 const tenantDocsRoute = (route, scopes) => {
   if (TENANT_HIDDEN_DOCS.has(route.key)) return false
   if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
+  if (route.key === 'topic-reports' && !tenantDocumentPathAllowed('/data/topic-reports', scopes)) return false
   const paths = route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   return paths.some(path => tenantDocumentPathAllowed(path, scopes))
 }

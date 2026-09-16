@@ -28,10 +28,8 @@ import {
   mobileCommerceSourceContractIssues,
 } from '../mobile-commerce/source-contract.mjs'
 import {
-  CRAWLER_PIPELINE_KEY,
-  CRAWLER_SOURCES,
-  CRAWLER_WRITER_CONTRACT_DIGEST,
-  CRAWLER_WRITER_CONTRACT_VERSION,
+  crawlerSourceSpecForKey,
+  crawlerWriterContractForSpec,
   crawlerSourceContractIssues,
   isCrawlerSourceKey,
 } from '../crawler/source-contract.mjs'
@@ -241,37 +239,33 @@ export async function scheduleActiveDatabaseSources({
     }
   }
 
-  const crawlerSources = CRAWLER_SOURCES.map((spec) => ({
-    spec,
-    source: sources.find((candidate) => candidate.sourceKey === spec.sourceKey),
-  }))
+  const crawlerSources = sources.filter(source => isCrawlerSourceKey(source.sourceKey))
+    .map(source => ({ spec: crawlerSourceSpecForKey(source.sourceKey), source }))
   if (crawlerSources.some(({ source }) => source?.status === 'active')) {
-    const attestation = await store.getLatestPipelineWriterContractAttestation?.(CRAWLER_PIPELINE_KEY)
-    const attested = attestation?.contractVersion === CRAWLER_WRITER_CONTRACT_VERSION
-      && attestation?.contractDigest === CRAWLER_WRITER_CONTRACT_DIGEST
-    if (attested) {
-      const dueSources = []
-      for (const { spec, source } of crawlerSources) {
-        if (
-          source?.sourceKind !== 'database'
-          || source.status !== 'active'
-          || crawlerSourceContractIssues(source, spec).length > 0
-        ) continue
-        try {
-          const cursor = await queue.getCursor(`external:${source.sourceKey}`)
-          if (isDue(source, cursor, now)) dueSources.push(source)
-        } catch (error) {
-          logger.warn?.(`[external] crawler schedule skipped ${source.sourceKey}: ${error?.message || 'cursor unavailable'}`)
-        }
+    const dueSources = []
+    for (const { spec, source } of crawlerSources) {
+      if (
+        source?.sourceKind !== 'database'
+        || source.status !== 'active'
+        || crawlerSourceContractIssues(source, spec).length > 0
+      ) continue
+      try {
+        const contract = crawlerWriterContractForSpec(spec)
+        const attestation = await store.getLatestPipelineWriterContractAttestation?.(contract.pipelineKey)
+        if (attestation?.contractVersion !== contract.version || attestation?.contractDigest !== contract.digest) continue
+        const cursor = await queue.getCursor(`external:${source.sourceKey}`)
+        if (isDue(source, cursor, now)) dueSources.push(source)
+      } catch (error) {
+        logger.warn?.(`[external] crawler schedule skipped ${source.sourceKey}: ${error?.message || 'cursor unavailable'}`)
       }
-      if (dueSources.length > 0) {
-        const jobIds = await enqueueJobsAtomically(
-          queue,
-          dueSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
-          CRAWLER_SCHEDULE_ERRORS,
-        )
-        enqueued += jobIds.filter((jobId) => jobId != null).length
-      }
+    }
+    if (dueSources.length > 0) {
+      const jobIds = await enqueueJobsAtomically(
+        queue,
+        dueSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
+        CRAWLER_SCHEDULE_ERRORS,
+      )
+      enqueued += jobIds.filter((jobId) => jobId != null).length
     }
   }
 

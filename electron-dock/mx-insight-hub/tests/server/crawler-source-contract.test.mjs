@@ -97,7 +97,7 @@ function validColumns() {
   return CRAWLER_SOURCE_COLUMN_CONTRACT.map((column) => ({ ...column }))
 }
 
-test('crawler source constants fix thirteen independently authorized leaf contracts', () => {
+test('crawler seed contracts preserve thirteen identities while reserving the extensible namespace', () => {
   assert.equal(CRAWLER_PIPELINE_KEY, 'night-all-saved-records')
   assert.equal(CRAWLER_MAPPING_VERSION, 1)
   assert.deepEqual(CRAWLER_SOURCE_TYPES, SOURCE_TYPES)
@@ -121,17 +121,17 @@ test('crawler source constants fix thirteen independently authorized leaf contra
       idColumn: 'id',
     })
     assert.equal(isCrawlerSourceKey(spec.sourceKey), true)
-    assert.equal(isCrawlerSourceKey(`night-all-saved-records-${spec.sourceType}-other`), false)
+    assert.equal(isCrawlerSourceKey(`night-all-saved-records-${spec.sourceType.replaceAll('_', '-')}-other`), true)
     assert.deepEqual(crawlerReservedScopeIssue({ datasetId: spec.datasetId }), {
       field: 'datasetId', value: spec.datasetId,
     })
     assert.deepEqual(crawlerReservedScopeIssue({ platform: spec.platform }), {
       field: 'platform', value: spec.platform,
     })
-    assert.equal(crawlerReservedScopeIssue({
+    assert.deepEqual(crawlerReservedScopeIssue({
       datasetId: `${spec.datasetId}.archive`,
       platform: `${spec.platform}_archive`,
-    }), null)
+    }), { field: 'datasetId', value: `${spec.datasetId}.archive` })
     assert.equal(Object.isFrozen(spec), true)
     assert.equal(Object.isFrozen(spec.locator), true)
   }

@@ -110,6 +110,32 @@ request `24Gi`、limit `32Gi`，JVM heap `12g`。CPU 可以在节点有余量时
 Pod 并继续挂载原 data PVC。直接在多节点 hostPath 集群运行前，必须先为 PV/Pod 固定同一节点；
 同名 hostPath 在另一节点不是同一份数据。
 
+### ES 磁盘水位
+
+`manage.sh ensure` / `deploy` 会在线应用并回读校验以下剩余空间阈值。Hub 的 Kubernetes
+`deploy` 已调用该 `ensure`，所以同步更新兄弟目录 `mx-common` 后正常部署即可生效。
+只更新 Hub 镜像或单独 `kubectl apply` 不会执行此步骤。
+
+| 水位 | 剩余容量 | 动作 |
+| --- | --- | --- |
+| low | 100 GiB | 限制分配新分片，新建主分片有例外 |
+| high | 50 GiB | 限制分配并尝试迁移；不直接禁止已有索引写入 |
+| flood-stage | 30 GiB | 对受影响索引启用写保护，恢复至 high 安全侧后自动解除 |
+
+配置源为 `scripts/elasticsearch-disk-policy.mjs`，部署主机需要 Node.js，无需安装 npm
+依赖。通过 `/_cluster/settings` 写入 persistent 设置，保留磁盘保护并仅清除这些键的
+transient 覆盖和百分比 headroom；不修改其他集群设置。回读失败会明确报告 `ensure`
+未完成，Hub 保留原来的依赖降级处理。重复部署匹配时不写入，ES 重启后设置仍保留。
+水位变更本身不滚动重启 ES、不清理数据、不启动任何索引重建或向量化。
+
+该策略按 2026-09-17 用户指定的 100/50/30 GiB 设置；Internal 已确认 kubelet
+`nodefs/imagefs.available<20Gi`，ES 写保护比磁盘驱逐提前 10 GiB。
+它按 ES 数据所在文件系统判断；同盘的 PG、WAL、镜像与日志都占用
+余量。水位调整不构成全库任务容量保证。可用 `bash scripts/manage.sh status` 查看实际值。
+不同磁盘或 kubelet 阈值的部署需重新评估并调整上述配置源。
+
+参考：[Elastic 磁盘水位](https://www.elastic.co/docs/reference/elasticsearch/configuration-reference/cluster-level-shard-allocation-routing-settings)。
+
 代码侧：
 
 ```js

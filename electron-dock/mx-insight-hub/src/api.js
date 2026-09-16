@@ -784,6 +784,10 @@ export const adminApi = {
   resetProvinceOpinionPipelineCheckpoint: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/province-opinion/checkpoint/reset`, { method: 'POST', body },
   ),
+  savedRecordCategories: (token) => request(token, `${ADMIN_ROOT}/data-products/saved-records/categories`),
+  discoverSavedRecordCategories: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/discover`, { method: 'POST' },
+  ),
   nightAllSavedRecordsPipeline: (token) => request(
     token, `${ADMIN_ROOT}/pipelines/night-all-saved-records`,
   ),

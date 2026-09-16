@@ -297,7 +297,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const sources = asList(state.data)
-  const genericSources = sources.filter((source) => !PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey))
+  const genericSources = sources.filter((source) => !(PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey) || source.sourceKey?.startsWith('night-all-saved-records-')))
 
   const openTelegramTaskDetail = (task) => {
     const sourceKey = telegramTaskSourceKey(task)
@@ -377,7 +377,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor、SQLite API、全国省份舆情、手机电商与 Night-All saved records 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor、SQLite API、全国省份舆情、手机电商与 Night-All-A saved records 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">
@@ -966,7 +966,7 @@ function nightAllSavedRecordsStatus(pipeline) {
   if (tasks.some(telegramTaskStuck)) return { status: 'down', label: '存在需恢复任务' }
   if (nightAllSavedRecordsRunning(pipeline)) return { status: 'warning', label: '正在运行' }
   if (pipeline?.status === 'active') return { status: 'active', label: '已启用' }
-  if (pipeline?.status === 'mixed') return { status: 'warning', label: '分区状态不一致' }
+  if (pipeline?.status === 'mixed') return { status: 'warning', label: '部分任务启用' }
   return { status: 'disabled', label: pipeline?.configured ? '已暂停' : '待配置' }
 }
 
@@ -986,9 +986,9 @@ function NightAllSavedRecordsPipelineCard({ pipeline, loading, error, onOpen, on
       <div className="mih-telegram-card__identity">
         <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
         <div>
-          <p className="qp-kicker">BUSINESS PIPELINE / NIGHT-ALL SAVED RECORDS</p>
-          <h2 id="night-all-saved-records-title">Night-All 数据中心清洗任务</h2>
-          <p>13 个 saved_records 叶分区独立拉取与故障隔离，统一清洗、目录归类并写入 Canonical 数据中心。</p>
+          <p className="qp-kicker">BUSINESS PIPELINE / NIGHT-ALL-A SAVED RECORDS</p>
+          <h2 id="night-all-saved-records-title">Night-All-A 数据清洗任务</h2>
+          <p>{tasks.length} 个已登记类别，自动发现新增 saved_records 叶分区；独立拉取与故障隔离，统一清洗、目录归类并写入 Canonical 数据中心。</p>
         </div>
       </div>
       {error && !pipeline ? (
@@ -998,15 +998,15 @@ function NightAllSavedRecordsPipelineCard({ pipeline, loading, error, onOpen, on
           <dl className="mih-telegram-card__facts">
             <div><dt>运行状态</dt><dd><StatusBadge status={status.status} label={status.label} /></dd></div>
             <div><dt>源库</dt><dd><code>{pipeline?.configured ? `${sourceConnection?.host || '共享数据库配置'}:${sourceConnection?.port || 5432}` : '尚未配置'}</code></dd></div>
-            <div><dt>输入任务</dt><dd>{tasks.length || 13} 个叶分区</dd></div>
+            <div><dt>输入任务</dt><dd>{tasks.length} 个叶分区</dd></div>
             <div><dt>可靠水位</dt><dd><code>(last_seen_at, id)</code></dd></div>
-            <div><dt>固定映射</dt><dd>{mapped}/{tasks.length || 13} 已批准</dd></div>
+            <div><dt>固定映射</dt><dd>{mapped}/{tasks.length} 已批准</dd></div>
             <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
             <div><dt>公开边界</dt><dd>按 source_type 独立授权</dd></div>
             <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
-            <span className="mih-source-label">默认暂停 · 源库索引、writer 与删除合同通过后才能启用</span>
+            <span className="mih-source-label">每日发现新类别 · 合同检查通过后自动清洗与索引</span>
             <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
               {loading ? '正在刷新…' : '打开任务控制'}
             </button>
@@ -1108,7 +1108,7 @@ function NightAllSavedRecordsPipelineModal({
               },
             }),
       }),
-      'Night-All 共享源库连接已验证并保存；13 个分区仍保持暂停',
+      `Night-All-A 共享源库连接已验证并保存；${tasks.length} 个分区仍保持暂停`,
     )
   }
 
@@ -1129,14 +1129,15 @@ function NightAllSavedRecordsPipelineModal({
         confirmed: writerContractConfirmed,
         contractVersion: writerContractVersion,
         contractDigest: writerContractDigest,
+        sourceContracts: writerContract.sourceContracts || [],
       } : null,
       sourceType ? { sourceType } : null,
     ),
     sourceType
       ? `${nightAllSavedRecordTypeLabel(sourceType)}分区已${nextStatus === 'active' ? '启用' : '暂停'}`
       : nextStatus === 'active'
-        ? 'Night-All 13 分区清洗任务已启用'
-        : '已安全暂停 Night-All 清洗任务',
+        ? `Night-All-A ${tasks.length} 分区清洗任务已启用`
+        : '已安全暂停 Night-All-A 清洗任务',
   )
 
   const runSync = (sourceType = null) => mutate(
@@ -1145,7 +1146,7 @@ function NightAllSavedRecordsPipelineModal({
       batchSize: 500,
       ...(sourceType ? { sourceType } : {}),
     }),
-    sourceType ? `${nightAllSavedRecordTypeLabel(sourceType)}分区同步已提交` : '13 个分区同步已分别提交',
+    sourceType ? `${nightAllSavedRecordTypeLabel(sourceType)}分区同步已提交` : `${tasks.length} 个分区同步已分别提交`,
   )
 
   const resumeFailed = () => mutate(
@@ -1166,14 +1167,14 @@ function NightAllSavedRecordsPipelineModal({
         setResetConfirmation('')
         return updated
       },
-      '13 个 checkpoint 已准备全量重扫；Canonical 仍按来源身份幂等',
+      `${tasks.length} 个 checkpoint 已准备全量重扫；Canonical 仍按来源身份幂等`,
     )
   }
 
   return (
     <Modal
-      title={pipeline.displayName || 'Night-All saved records 清洗任务'}
-      description="13 个 PostgreSQL LIST 叶分区 · 独立 checkpoint 与失败隔离 · Internal 全量落地，公开授权按 source_type 隔离"
+      title={pipeline.displayName || 'Night-All-A 数据清洗任务'}
+      description={`${tasks.length} 个已登记类别 · 独立 checkpoint 与失败隔离 · Internal 落地，公开授权按 source_type 隔离`}
       size="xlarge"
       onClose={onClose}
       footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}
@@ -1194,7 +1195,7 @@ function NightAllSavedRecordsPipelineModal({
               disabled={Boolean(busyAction) || !configured || running || !writerContractConfirmed || progress.loading || progressIssues.length > 0}
               title={!configured ? '先验证并保存源库连接' : !writerContractConfirmed ? '先确认 writer 与删除合同' : progressIssues.length > 0 ? '仍有叶分区未通过源表门禁' : ''}
               onClick={() => changeStatus('active')}>
-              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用 13 个任务'}
+              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : `启用 ${tasks.length} 个任务`}
             </button>
           )}
           {stuck ? <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={resumeFailed}>
@@ -1211,7 +1212,27 @@ function NightAllSavedRecordsPipelineModal({
 
       {actionError ? <div className="mih-telegram-card__error"><ErrorState error={actionError} /></div> : null}
 
-      <Panel title="只读源库与调度" subtitle="只配置一次传输凭据；13 个表名、Dataset、平台授权域和游标由业务版本固定">
+      <Panel title="类别自动发现" subtitle="Ingest worker 每天核对分区目录；新增类别通过合同检查后自动启用、入库并建立索引"
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction) || !configured}
+          onClick={() => { setWriterContractConfirmed(false); mutate('discover', () => adminApi.discoverSavedRecordCategories(token), '类别目录已更新；合规新类别自动启用，已有授权保持不变') }}>
+          <ArrowClockwise size={16} />{busyAction === 'discover' ? '正在发现…' : '发现新类别'}
+        </button>}>
+        <p>最近成功发现：{pipeline.discovery?.checkedAt ? formatDate(pipeline.discovery.checkedAt) : '尚未运行'}。下游使用 <code>GET /api/v1/data/platforms</code> 获取类别索引。</p>
+        {pipeline.discovery?.error ? <p role="alert">最近发现未完成：{pipeline.discovery.error}；保留上次目录，已有清洗任务继续运行。</p> : null}
+        {asList(pipeline.discovery?.warnings).map(warning => <p key={warning}>{warning}</p>)}
+        {asList(pipeline.discovery?.activationFailures).map(item => <p key={item.sourceKey} role="alert">{item.sourceType} 自动启用待重试：{item.code}。合同检查通过后自动继续，无需手动开启。</p>)}
+        <div className="mih-telegram-task-grid">
+          {asList(pipeline.discovery?.items).filter(item => item.issues?.length).map((item, index) => (
+            <article className="mih-telegram-task" key={`${item.sourceType}-${item.table}-${index}`}>
+              <header><strong>{item.sourceType ? nightAllSavedRecordTypeLabel(item.sourceType) : item.table}</strong><StatusBadge status="warning" label="待处理" /></header>
+              {item.sourceType ? <code>{item.sourceType}</code> : null}
+              <ul>{item.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
+            </article>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title="只读源库与调度" subtitle="共享只读连接；各类别拥有独立表、Dataset、授权域与游标">
         <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
           <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
             onChange={(databaseConnectionId) => setForm({ ...form, databaseConnectionId })} />
@@ -1244,9 +1265,10 @@ function NightAllSavedRecordsPipelineModal({
           <div><strong>删除合同</strong><p>禁止不可观察的硬删除；若上游无法保证，必须先改用 tombstone、change journal 或 CDC。</p></div>
           <div><strong>字段清洗</strong><p><code>published_at</code> 由固定 Asia/Shanghai 解析器处理；日期精度和异常值保留 provenance，不伪造精确时刻。</p></div>
           <div><strong>目录归类</strong><p>采集源与实际发布者分别映射权威数据源目录；未知项标记 unresolved，不按标题猜测。</p></div>
+          <div><strong>类别目录</strong><p><code>GET /api/v1/data/platforms</code> 返回类别、Dataset、platform 与当前 Key 授权状态。</p></div>
           <div><strong>对外接口</strong><p><code>POST /api/v1/data/canonical/search</code>；每个 source_type 使用独立 platform grant，类型审查前不发放公开授权。</p></div>
         </div>
-        {progress.loading && !progress.data ? <LoadingState label="正在核对 13 个叶分区" /> : null}
+        {progress.loading && !progress.data ? <LoadingState label={`正在核对 ${tasks.length} 个叶分区`} /> : null}
         {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
         {progressIssues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
           {progressIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
@@ -1255,18 +1277,18 @@ function NightAllSavedRecordsPipelineModal({
           <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
             onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
           <span>
-            <strong>我已逐项验证 13 个分区的 writer、提交顺序与删除合同</strong>
+            <strong>我已逐项验证当前 {tasks.length} 个分区的 writer、提交顺序与删除合同</strong>
             <small>合同 {writerContractVersion || '待加载'} · 摘要 {writerContractDigest?.slice(0, 12) || '待加载'}… · 确认会写入审计记录</small>
           </span>
         </label>
       </Panel>
 
-      <Panel title="13 个独立输入任务" subtitle="父表不直接读取；一个分区失败不会回滚或阻塞其他分区"
+      <Panel title={`${tasks.length} 个独立输入任务`} subtitle="父表不直接读取；一个分区失败不会回滚或阻塞其他分区"
         actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />重新核对</button>}>
         <div className="mih-telegram-task-grid">
-          {(tasks.length ? tasks : NIGHT_ALL_SAVED_RECORD_TYPES.map(([sourceType]) => ({ sourceType }))).map((task) => {
+          {tasks.map((task) => {
             const sourceType = nightAllSavedRecordTaskType(task)
-            const source = typeof task.source === 'object' ? task.source : {}
+            const source = task.source && typeof task.source === 'object' ? task.source : {}
             const spec = task.spec || task.fixedInput || {}
             const sourceKey = telegramTaskSourceKey(task) || `night-all-saved-records-${sourceType.replaceAll('_', '-')}`
             const diagnostic = progressTasks.find((item) => nightAllSavedRecordTaskType(item) === sourceType)
@@ -1332,7 +1354,7 @@ function NightAllSavedRecordsPipelineModal({
             <Warning size={24} weight="duotone" aria-hidden="true" />
             <div>
               <h3 id="night-all-saved-records-reset-title">一次性全量对齐</h3>
-              <p>统一重置 13 个 checkpoint 后会重扫全部叶表；源端缺席不会被推断为删除，Canonical 仍按 record_key 幂等。</p>
+              <p>统一重置当前 {tasks.length} 个 checkpoint 后会重扫全部叶表；源端缺席不会被推断为删除，Canonical 仍按 record_key 幂等。</p>
             </div>
           </div>
           <form className="mih-source-danger__form" onSubmit={resetCheckpoints}>
@@ -3285,7 +3307,7 @@ function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated, 
 }
 
 function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged, databaseConnections }) {
-  const managedByPipeline = PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey)
+  const managedByPipeline = (PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey) || source.sourceKey?.startsWith('night-all-saved-records-'))
   const [currentSource, setCurrentSource] = useState(source)
   const isServerPathSource = currentSource.sourceKind === 'file'
     && currentSource.connection?.fileMode === 'server_path'

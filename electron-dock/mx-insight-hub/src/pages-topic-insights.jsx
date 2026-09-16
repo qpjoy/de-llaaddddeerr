@@ -51,8 +51,8 @@ const CORE_PLATFORMS = [
 const SOURCE_OPTIONS = [
   {
     value: 'all_granted',
-    label: '全部已同步资讯（13 类）',
-    description: '覆盖新闻、财经、科技、研究、社交与网页等 canonical 数据',
+    label: '全部已登记类别',
+    description: '覆盖动态类别目录中的 canonical 数据；类别数量随清洗接入增长',
   },
   {
     value: 'editorial',

@@ -1770,8 +1770,8 @@ test('admin-token direct source routes preflight credentials and return the stor
       method: 'POST', headers,
       body: {
         sourceKey: 'warehouse-events', displayName: 'Warehouse events', sourceKind: 'database',
-        datasetId: `${reservedCrawlerScope.datasetId}.archive`,
-        platform: `${reservedCrawlerScope.platform}_archive`,
+        datasetId: 'warehouse.events.archive.v1',
+        platform: 'warehouse_events_archive',
         objectType: 'record', connection: direct,
       },
     })

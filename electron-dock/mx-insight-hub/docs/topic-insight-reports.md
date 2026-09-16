@@ -67,3 +67,14 @@ connector credential、内部源身份、数据库坐标或 lineage。
 人工编辑与审批、PDF/Slides 导出、订阅式定期报告。成本较高的模型分析应作为新的显式能力和
 独立 quota，不能悄悄加入当前 1 unit 的确定性报告。
 
+
+
+## 动态类别发现（2026-09-17）
+
+调用前通过 `GET /api/v1/data/platforms` 获取全部已知类别及当前 Key 的
+`authorized` 标记。`platforms` 使用目录返回的 `platform`，不要写死 13 类、显示名称或源表名。
+`sourceScope=selected` 要求至少一类且每类均已登记并有效授权；`all_granted` 固化创建时的
+授权集合，后续新增类别不会改变已创建任务。目录接口无 usage 计费，无需 Idempotency-Key。
+
+清洗计划来源为 Night-All-A，历史内部标识为兼容保留；公开目录与专题报告继续使用 Hub 中性合同。
+详见 [Night-All-A 清洗与发现](operations/night-all-saved-records-ingestion.md)。

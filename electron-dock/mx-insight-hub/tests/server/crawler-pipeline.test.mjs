@@ -1,3 +1,4 @@
+import { scheduleActiveDatabaseSources } from '../../server/ingest/external/scheduler.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
@@ -5,6 +6,9 @@ import {
   CRAWLER_PIPELINE_KEY,
   CRAWLER_SOURCES,
   CRAWLER_SOURCE_COLUMN_CONTRACT,
+  CRAWLER_FIELD_MAP,
+  crawlerSourceSpec,
+  crawlerWriterContractForSpec,
 } from '../../server/ingest/crawler/source-contract.mjs'
 import {
   CRAWLER_WRITER_CONTRACT_DIGEST,
@@ -90,27 +94,42 @@ function fixture() {
     saved: [],
     guards: 0,
   }
+  const extraAttestations = new Map()
+  const pendingActivation = new Set()
+  let discoveryState = null
   let attestation = null
   let importRunFailure = null
   let progressFailure = null
   let guardError = null
 
   const store = {
+    listExternalSources: async () => structuredClone([...sources.values()]),
+    getCrawlerDiscoveryState: async () => structuredClone(discoveryState),
+    saveCrawlerDiscoveryState: async state => { discoveryState = structuredClone(state) },
+    listCrawlerAutoActivationPending: async () => [...pendingActivation],
+    settleCrawlerAutoActivation: async keys => keys.forEach(key => pendingActivation.delete(key)),
+    registerCrawlerSource: async (spec, template) => {
+      if (sources.has(spec.sourceKey)) return sources.get(spec.sourceKey)
+      sources.set(spec.sourceKey, { ...structuredClone(template), ...spec, id: spec.sourceId,
+        status: 'paused', connection: { ...SHARED_CONNECTION, ...spec.locator } })
+      mappings.set(spec.sourceKey, { id: spec.mappingId, sourceId: spec.sourceId, version: 1, fieldMap: CRAWLER_FIELD_MAP })
+      pendingActivation.add(spec.sourceKey)
+    },
     getExternalSource: async (key) => structuredClone(sources.get(key) ?? null),
     getDatabaseConnection: async (id) => id === PROFILE_ID ? structuredClone(profile) : null,
     getActiveMapping: async (sourceId) => {
-      const spec = CRAWLER_SOURCES.find((candidate) => candidate.sourceId === sourceId)
+      const spec = [...sources.values()].find(candidate => candidate.id === sourceId)
       return structuredClone(activeMappings.get(spec?.sourceKey) ?? null)
     },
     listSourceMappings: async (sourceId) => {
-      const spec = CRAWLER_SOURCES.find((candidate) => candidate.sourceId === sourceId)
+      const spec = [...sources.values()].find(candidate => candidate.id === sourceId)
       return spec ? [structuredClone(mappings.get(spec.sourceKey))] : []
     },
     listImportRuns: async (sourceId) => {
       if (sourceId === importRunFailure) throw new Error('run store unavailable')
       return []
     },
-    getLatestPipelineWriterContractAttestation: async () => structuredClone(attestation),
+    getLatestPipelineWriterContractAttestation: async key => structuredClone(extraAttestations.get(key) || attestation),
     updateExternalSourcesBatch: async (updates) => {
       calls.updates.push(structuredClone(updates))
       for (const update of updates) {
@@ -121,6 +140,10 @@ function fixture() {
     },
     activateExternalSourcesWithAttestation: async (input) => {
       calls.activations.push(structuredClone(input))
+      if (input.automatic) input.sourceKeys.forEach(key => pendingActivation.delete(key))
+      for (const contract of input.additionalContracts || []) extraAttestations.set(contract.pipelineKey, {
+        contractVersion: contract.version, contractDigest: contract.digest,
+      })
       for (const sourceKey of input.sourceKeys) {
         sources.get(sourceKey).status = 'active'
         const mapping = mappings.get(sourceKey)
@@ -200,6 +223,9 @@ function fixture() {
 
   return {
     pipeline,
+    store,
+    queue,
+    databasePuller,
     sources,
     mappings,
     activeMappings,
@@ -232,7 +258,7 @@ test('crawler status is aggregated while task inspection failures remain isolate
   setup.failImportRunsFor(first.sourceId)
 
   const paused = await setup.pipeline.get()
-  assert.equal(paused.displayName, 'Night-All saved records 清洗任务')
+  assert.equal(paused.displayName, 'Night-All-A 数据清洗任务')
   assert.equal(paused.status, 'paused')
   assert.equal(paused.tasks.length, 13)
   assert.equal(paused.tasks[0].error.code, 'crawler_task_failed')
@@ -398,4 +424,72 @@ test('crawler resume, progress and reset keep per-leaf evidence independent', as
   assert.equal(reset.resets.length, 13)
   assert.equal(setup.calls.reset[0].keys.length, 13)
   assert.equal(Object.keys(setup.calls.reset[0].options.mappingOverrides).length, 13)
+})
+
+
+test('discovery auto-activates a compatible category idempotently without changing existing work or manual pauses', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const original = structuredClone([...setup.sources.values()])
+  const originalMappings = structuredClone([...setup.activeMappings.values()])
+  const spec = crawlerSourceSpec('education')
+  setup.databasePuller.discoverCrawlerCategories = async () => ({ candidates: [
+    { sourceType: 'education', table: 'public.saved_records_education', spec, issues: [] },
+    { sourceType: 'health', spec: crawlerSourceSpec('health'), issues: ['requires independent partition'] },
+  ], warnings: [] })
+  setup.descriptions.set(spec.sourceKey, { columns: validColumns(), issues: [], warnings: [] })
+  const discovered = await setup.pipeline.discover()
+  assert.equal(discovered.displayName, 'Night-All-A 数据清洗任务')
+  assert.equal(discovered.tasks.length, 14)
+  assert.equal(discovered.status, 'active')
+  assert.equal(discovered.tasks.find(task => task.sourceType === 'education').source.status, 'active')
+  assert.equal(discovered.tasks.find(task => task.sourceType === 'education').activeMapping.version, 1)
+  assert.deepEqual([...setup.sources.values()].slice(0, 13), original)
+  assert.deepEqual([...setup.activeMappings.values()].slice(0, 13), originalMappings)
+  assert.equal((await setup.pipeline.discover()).tasks.length, 14)
+  assert.equal(setup.calls.activations.length, 1)
+  assert.equal(setup.calls.activations[0].attestedBy, 'system:category-discovery')
+  assert.equal(setup.calls.activations[0].additionalContracts.length, 1)
+  assert.equal(setup.sources.has(crawlerSourceSpec('health').sourceKey), false)
+  assert.equal(discovered.discovery.items[1].registered, false)
+  const scheduled = await scheduleActiveDatabaseSources({ store: setup.store, queue: setup.queue })
+  assert.equal(scheduled.enqueued, 14)
+  assert.ok(setup.calls.enqueued.some(job => job.payload.sourceKey === spec.sourceKey))
+  await setup.pipeline.setStatus('paused', { sourceType: 'education' })
+  await setup.pipeline.discover()
+  assert.equal(setup.sources.get(spec.sourceKey).status, 'paused')
+  assert.equal(setup.calls.activations.length, 1)
+  assert.equal((await setup.pipeline.progress()).tasks.length, 14)
+})
+
+test('automatic category activation retries contract failures but never overrides a manual pause', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const spec = crawlerSourceSpec('education')
+  setup.databasePuller.discoverCrawlerCategories = async () => ({ candidates: [{ sourceType: spec.sourceType, spec, issues: [] }] })
+  setup.descriptions.set(spec.sourceKey, { columns: validColumns(), issues: ['missing cursor index'] })
+  const blocked = await setup.pipeline.discover()
+  assert.equal(setup.sources.get(spec.sourceKey).status, 'paused')
+  assert.equal(blocked.discovery.activationFailures[0].code, 'source_probe_failed')
+  setup.descriptions.set(spec.sourceKey, { columns: validColumns(), issues: [] })
+  await setup.pipeline.discover()
+  assert.equal(setup.sources.get(spec.sourceKey).status, 'active')
+  assert.equal((await setup.store.listCrawlerAutoActivationPending()).length, 0)
+})
+
+
+test('manual pause cancels a pending automatic activation even after schema recovery', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const spec = crawlerSourceSpec('education')
+  setup.databasePuller.discoverCrawlerCategories = async () => ({ candidates: [{ sourceType: spec.sourceType, spec, issues: [] }] })
+  setup.descriptions.set(spec.sourceKey, { columns: validColumns(), issues: ['index unavailable'] })
+  await setup.pipeline.discover()
+  assert.deepEqual(await setup.store.listCrawlerAutoActivationPending(), [spec.sourceKey])
+  await setup.pipeline.setStatus('paused', { sourceType: 'education' })
+  setup.descriptions.set(spec.sourceKey, { columns: validColumns(), issues: [] })
+  await setup.pipeline.discover()
+  assert.equal(setup.sources.get(spec.sourceKey).status, 'paused')
+  assert.equal(setup.calls.activations.length, 0)
+  assert.deepEqual(await setup.store.listCrawlerAutoActivationPending(), [])
 })

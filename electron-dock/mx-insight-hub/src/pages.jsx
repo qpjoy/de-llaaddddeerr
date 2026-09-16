@@ -92,7 +92,7 @@ const PLATFORM_GROUPS = [
   {
     key: 'saved_records',
     label: '存量记录 · 按栏目',
-    hint: 'Night-All 存量记录，按栏目分别授权',
+    hint: 'Night-All-A 清洗数据，按动态类别分别授权',
     prefix: 'data_center_saved_records_',
   },
 ]
@@ -142,6 +142,12 @@ const PLATFORM_CATALOG = [
   'data_center_saved_records_technology',
   'data_center_saved_records_web',
 ]
+
+function usePlatformCatalog(token, session, onUnauthorized) {
+  const load = useCallback(() => session?.platformAdmin ? adminApi.savedRecordCategories(token) : Promise.resolve(null), [token, session?.platformAdmin])
+  const state = useRemoteData(load, onUnauthorized)
+  return [...new Set([...PLATFORM_CATALOG, ...(state.data?.items || []).filter(item => item.registered).map(item => item.platform)])]
+}
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
@@ -977,6 +983,7 @@ export function MyAccessPage({ token, session, onUnauthorized }) {
 }
 
 export function ConsumersPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+  const platformCatalog = usePlatformCatalog(token, session, onUnauthorized)
   const tenantId = query.get('tenantId') || ''
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
@@ -1112,7 +1119,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
-      {session?.platformAdmin ? <><TenantMemberships token={token} tenants={tenants} /><TenantServiceAccess token={token} tenants={tenants} platforms={PLATFORM_CATALOG} capabilities={CAPABILITY_CATALOG} /></> : null}
+      {session?.platformAdmin ? <><TenantMemberships token={token} tenants={tenants} /><TenantServiceAccess token={token} tenants={tenants} platforms={platformCatalog} capabilities={CAPABILITY_CATALOG} /></> : null}
       <Panel
         title="租户"
         subtitle={`${tenants.length} 个租户`}
@@ -2708,6 +2715,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 }
 
 export function PlatformsPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+  const platformCatalog = usePlatformCatalog(token, session, onUnauthorized)
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
   const requestedContext = `${requestedTenantId}\u0000${requestedConsumerId}`
@@ -2761,7 +2769,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   const matchesFilter = (...fields) => filterTerm === '' || fields.some(
     (field) => String(field || '').toLowerCase().includes(filterTerm),
   )
-  const rows = PLATFORM_CATALOG.map((platform) => ({
+  const rows = [...new Set([...platformCatalog, ...grants])].map((platform) => ({
     platform,
     enabled: grants.has(platform),
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
@@ -2973,7 +2981,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
       <Panel
         title="API Key 可访问的数据平台 / 数据域"
-        subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用；调用者授权是上限，Key 权限需单独勾选并保存`}
+        subtitle={`${grants.size} / ${platformCatalog.length} 已启用；调用者授权是上限，Key 权限需单独勾选并保存`}
       >
         {data.consumerId ? (
           <div className="mih-capability-filter">

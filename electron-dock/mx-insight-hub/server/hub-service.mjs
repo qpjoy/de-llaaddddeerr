@@ -1,3 +1,4 @@
+import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
 import { issueDemoCredential, readDemoCredentialClaims } from './core/demo-credential.mjs'
@@ -43,7 +44,7 @@ import {
   normalizeStoredSearchQuery,
   storedSearchResponse,
 } from './data/stored-search.mjs'
-import { CRAWLER_SOURCES } from './ingest/crawler/source-contract.mjs'
+import { listCrawlerSpecs } from './ingest/crawler/source-contract.mjs'
 import {
   canonicalContextCapability,
   canonicalContextResponse,
@@ -157,7 +158,6 @@ import {
 import { createNightAllCompatibilityCursorCodec } from './external-platforms/cursor.mjs'
 import {
   normalizeTopicReportRequest,
-  TOPIC_REPORT_PLATFORMS,
   TOPIC_REPORT_USAGE_SCOPE,
 } from './insights/topic-reports.mjs'
 
@@ -1569,7 +1569,7 @@ export class HubService {
         })
       }
     }
-    const crawlerGrants = CRAWLER_SOURCES.filter((source) => canonicalGrants.includes(source.platform))
+    const crawlerGrants = (await listCrawlerSpecs(this.store)).filter((source) => canonicalGrants.includes(source.platform))
     if (crawlerGrants.length > 0) {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms)) {
@@ -2120,7 +2120,8 @@ export class HubService {
     if (!this.topicReports) {
       throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require PostgreSQL migration 067')
     }
-    const input = normalizeTopicReportRequest(body, { allowedPlatforms: TOPIC_REPORT_PLATFORMS })
+    const availablePlatforms = (await listCrawlerSpecs(this.store)).map(spec => spec.platform)
+    const input = normalizeTopicReportRequest(body, { allowedPlatforms: availablePlatforms, availablePlatforms })
     return this.topicReports.create(input, { createdBy: actor })
   }
 
@@ -3442,14 +3443,21 @@ export class HubService {
     }
   }
 
+  async adminSavedRecordCategories() { return savedRecordCategoryCatalog(this.store) }
+
+  async savedRecordCategories(context) {
+    return savedRecordCategoryCatalog(this.store, await this.#effectivePlatformGrants(context))
+  }
+
   async createTopicReport(context, { body, idempotencyKey, path }) {
     if (!this.topicReports) {
       throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require the PostgreSQL report store')
     }
     const key = requiredIdempotencyKey(idempotencyKey)
     const grants = [...new Set(await this.#effectivePlatformGrants(context))]
-    const allowedPlatforms = grants.filter((platform) => TOPIC_REPORT_PLATFORMS.includes(platform))
-    const input = normalizeTopicReportRequest(body, { allowedPlatforms })
+    const availablePlatforms = (await listCrawlerSpecs(this.store)).map(spec => spec.platform)
+    const allowedPlatforms = grants.filter((platform) => availablePlatforms.includes(platform))
+    const input = normalizeTopicReportRequest(body, { allowedPlatforms, availablePlatforms })
     const policies = await Promise.all(input.platforms.map((platform) => (
       this.#effectivePlatformPolicy(context, platform)
     )))

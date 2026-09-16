@@ -2352,6 +2352,9 @@ export class MemoryStore {
     return clone(current)
   }
 
+  async getCrawlerDiscoveryState() { return clone(this.crawlerDiscoveryState ?? null) }
+  async saveCrawlerDiscoveryState(state) { this.crawlerDiscoveryState = clone(state) }
+
   async createExternalSource({
     sourceKey,
     displayName,

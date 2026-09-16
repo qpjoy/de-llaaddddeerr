@@ -75,6 +75,7 @@ Usage: bash scripts/manage.sh <command>
 
   ensure          Reconcile the shared data plane and wait until it is healthy.
                   Safe to call on every product deploy; a healthy stack is a no-op.
+                  Reconcile/verify live ES disk watermarks (requires host Node.js).
                   Missing images are preloaded through Docker automatically.
   deploy          Alias for `ensure`.
   deploy hanlp    Build and import the model-preloaded HanLP image, deploy only
@@ -196,13 +197,8 @@ gib() {
   awk -v bytes="${1:-0}" 'BEGIN { printf "%.1f", bytes / 1073741824 }'
 }
 
-# Refuse a deploy that is one ingest away from an unallocatable shard.
-#
-# Elasticsearch stops placing shards at cluster.routing.allocation.disk.
-# watermark.high, 90% by default, and the symptom is a red index with an
-# INDEX_CREATED shard that never assigns -- which reads as a connectivity
-# problem everywhere except in the allocation explain output. Catching it here
-# names the real cause while it is still cheap to fix.
+# A host-wide usage warning, independent of ES's managed free-space policy.
+# PostgreSQL, container images and ES all consume the same filesystem here.
 check_storage_headroom() {
   local warn_percent="${MX_COMMON_DISK_WARN_PERCENT:-85}" percent probe="$HOST_DATA_ROOT"
   while [ ! -e "$probe" ] && [ "$probe" != / ]; do
@@ -216,11 +212,10 @@ check_storage_headroom() {
   [ "$percent" -lt "$warn_percent" ] && return 0
 
   warn "${HOST_DATA_ROOT} is on a filesystem that is ${percent}% full."
-  warn "  Elasticsearch refuses to allocate new shards past the 90% high watermark,"
-  warn "  and PostgreSQL has no watermark at all -- it simply fails to write."
+  warn "  Elasticsearch uses managed free-space watermarks, reconciled and verified below."
+  warn "  PostgreSQL, WAL and other workloads also consume this space."
   warn "  Relocate the shared data to a larger volume:"
   warn "    bash scripts/manage.sh migrate-storage /data/k8s/mx-runtime/mx-common/k8s"
-  [ "$percent" -ge 90 ] && warn "  Past the watermark already: new indices will not become allocatable."
   return 0
 }
 
@@ -936,6 +931,13 @@ cmd_ensure() {
     return 1
   fi
 
+  # Apply before waiting for yellow/green: unassigned shards may themselves be
+  # waiting for the old disk policy to be corrected. No ES rollout is needed.
+  if ! ensure_elasticsearch_disk_policy; then
+    warn "Elasticsearch disk policy was NOT verified; shared data plane reconcile is incomplete"
+    return 1
+  fi
+
   # Readiness of the pod is not the same as usability of the cluster; wait for
   # the cluster to actually accept requests before declaring success.
   local waited=0
@@ -973,6 +975,40 @@ es_curl() {
     kubectl -n "$NAMESPACE" exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
       curl -fsS --max-time 30 -X "$method" "http://127.0.0.1:9200${path}"
   fi
+}
+
+# Persistent cluster settings survive restarts. ConfigMap changes alone cannot
+# update a running node's subPath-mounted elasticsearch.yml, and a stale
+# transient setting would override a new persistent value.
+ensure_elasticsearch_disk_policy() {
+  local helper="${ROOT_DIR}/scripts/elasticsearch-disk-policy.mjs"
+  local path='/_cluster/settings?flat_settings=true&filter_path=persistent,transient'
+  local current body response
+  if ! command -v node >/dev/null 2>&1; then
+    warn "host Node.js is required to apply and verify the Elasticsearch disk policy"
+    return 1
+  fi
+  if ! current="$(es_curl GET "$path")"; then
+    warn "could not read Elasticsearch disk settings"
+    return 1
+  fi
+  if ! printf '%s' "$current" | node "$helper" check; then
+    body="$(node "$helper" body)" || return 1
+    if ! response="$(es_curl PUT '/_cluster/settings' "$body")"; then
+      warn "could not apply Elasticsearch disk policy"
+      return 1
+    fi
+    if ! printf '%s' "$response" | node "$helper" ack; then
+      warn "Elasticsearch did not acknowledge the disk policy; rerun ensure to reconcile"
+      return 1
+    fi
+    current="$(es_curl GET "$path")" || return 1
+    if ! printf '%s' "$current" | node "$helper" check; then
+      warn "Elasticsearch disk policy readback did not match; no success claimed"
+      return 1
+    fi
+  fi
+  say "Elasticsearch disk watermarks verified: low=100GiB, high=50GiB, flood-stage=30GiB FREE; disk protection enabled"
 }
 
 # Reconcile the snapshot repository and SLM policy.
@@ -1211,6 +1247,9 @@ cmd_status() {
   say "Elasticsearch indices:"
   kubectl -n "$NAMESPACE" exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
     curl -fsS --max-time 5 'http://127.0.0.1:9200/_cat/indices?v&s=index' 2>/dev/null || true
+  say "Elasticsearch disk settings:"
+  es_curl GET '/_cluster/settings?flat_settings=true&include_defaults=true&filter_path=*.cluster.routing.allocation.disk.*' || true
+  printf '\n'
 }
 
 cmd_health() {

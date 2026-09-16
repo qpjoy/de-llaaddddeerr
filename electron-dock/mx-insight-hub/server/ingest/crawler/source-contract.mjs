@@ -92,8 +92,15 @@ function sourceKey(sourceType) {
   return `night-all-saved-records-${sourceType.replaceAll('_', '-')}`
 }
 
-function sourceSpec(sourceType) {
-  const metadata = SOURCE_METADATA[sourceType]
+export function crawlerSourceSpec(sourceType) {
+  if (typeof sourceType !== 'string' || sourceType.length > 38 || !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(sourceType)) return null
+  const stableId = (kind) => {
+    const hex = createHash('sha256').update(`mx-insight-hub:saved-records:${kind}:${sourceType}`).digest('hex')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+  }
+  const metadata = Object.hasOwn(SOURCE_METADATA, sourceType) ? SOURCE_METADATA[sourceType] : {
+    sourceId: stableId('source'), mappingId: stableId('mapping'), displayName: `Night-All-A ${sourceType}`,
+  }
   return Object.freeze({
     sourceType,
     sourceId: metadata.sourceId,
@@ -110,11 +117,11 @@ function sourceSpec(sourceType) {
       cursorColumn: 'last_seen_at',
       idColumn: 'id',
     }),
-    displayName: metadata.displayName,
+    displayName: metadata.displayName.replace(/^Night-All /, 'Night-All-A '),
   })
 }
 
-export const CRAWLER_SOURCES = Object.freeze(CRAWLER_SOURCE_TYPES.map(sourceSpec))
+export const CRAWLER_SOURCES = Object.freeze(CRAWLER_SOURCE_TYPES.map(crawlerSourceSpec))
 
 export const CRAWLER_WRITER_CONTRACT_VERSION = 'night-all-saved-records.writer.v1'
 
@@ -135,11 +142,7 @@ export const CRAWLER_WRITER_CONTRACT_DIGEST = createHash('sha256')
   .update(JSON.stringify(CRAWLER_WRITER_CONTRACT_SUMMARY))
   .digest('hex')
 
-const CRAWLER_SOURCE_KEYS = new Set(CRAWLER_SOURCES.map((source) => source.sourceKey))
-
 const CRAWLER_SOURCE_BY_KEY = new Map(CRAWLER_SOURCES.map((source) => [source.sourceKey, source]))
-const CRAWLER_DATASET_IDS = new Set(CRAWLER_SOURCES.map((source) => source.datasetId))
-const CRAWLER_PLATFORMS = new Set(CRAWLER_SOURCES.map((source) => source.platform))
 
 export const CRAWLER_SOURCE_COLUMN_CONTRACT = Object.freeze([
   ['id', 'int4', false],
@@ -184,25 +187,28 @@ const ALLOWED_CONNECTION_FIELDS = new Set([
 ])
 
 export function isCrawlerSourceKey(value) {
-  return CRAWLER_SOURCE_KEYS.has(value)
+  return crawlerSourceSpecForKey(value) !== null
 }
 
 export function crawlerSourceSpecForKey(value) {
-  return CRAWLER_SOURCE_BY_KEY.get(value) ?? null
+  if (CRAWLER_SOURCE_BY_KEY.has(value)) return CRAWLER_SOURCE_BY_KEY.get(value)
+  if (typeof value !== 'string' || !value.startsWith(`${CRAWLER_PIPELINE_KEY}-`)) return null
+  const spec = crawlerSourceSpec(value.slice(CRAWLER_PIPELINE_KEY.length + 1).replaceAll('-', '_'))
+  return spec?.sourceKey === value ? spec : null
 }
 
 export function crawlerReservedScopeIssue({ datasetId = null, platform = null } = {}) {
-  if (CRAWLER_DATASET_IDS.has(datasetId)) {
+  if (typeof datasetId === 'string' && datasetId.startsWith('data-center.saved-records.')) {
     return { field: 'datasetId', value: datasetId }
   }
-  if (CRAWLER_PLATFORMS.has(platform)) {
+  if (typeof platform === 'string' && platform.startsWith('data_center_saved_records_')) {
     return { field: 'platform', value: platform }
   }
   return null
 }
 
 export function crawlerSourceContractIssues(source, spec) {
-  if (!spec || !CRAWLER_SOURCE_KEYS.has(spec.sourceKey)) {
+  if (!spec || !crawlerSourceSpecForKey(spec.sourceKey)) {
     return ['Crawler source specification is missing or unknown']
   }
   const expected = [
@@ -322,7 +328,7 @@ function crawlerProbeSourceIssues(source, spec) {
 }
 
 export function crawlerProbeIssues(description, spec) {
-  if (!spec || !CRAWLER_SOURCE_KEYS.has(spec.sourceKey)) {
+  if (!spec || !crawlerSourceSpecForKey(spec.sourceKey)) {
     return ['Crawler source specification is missing or unknown']
   }
   return [...new Set([
@@ -330,4 +336,39 @@ export function crawlerProbeIssues(description, spec) {
     ...crawlerProbeSourceIssues(description?.source, spec),
     ...crawlerColumnIssues(description?.columns || []),
   ])]
+}
+
+// PostgreSQL external_sources is the durable registry; never mutate a process-global list.
+export async function listCrawlerSpecs(store) {
+  const sources = await store.listExternalSources?.() || []
+  const specs = new Map(CRAWLER_SOURCES.map(spec => [spec.sourceKey, spec]))
+  for (const source of sources) {
+    const spec = crawlerSourceSpecForKey(source.sourceKey)
+    if (spec) specs.set(spec.sourceKey, spec)
+  }
+  return [...specs.values()].sort((a, b) => a.sourceType.localeCompare(b.sourceType))
+}
+
+export const CRAWLER_FIELD_MAP = Object.freeze({
+  externalId: { from: 'record_key' }, contentType: { from: 'record_type' },
+  url: { from: 'source_url' }, title: { from: 'title' }, body: { from: 'text' },
+  collectedAt: { from: 'first_seen_at', type: 'timestamp' },
+  'attributes.sourceType': { from: 'source_type' },
+  _drop: { from: ['id', 'connector_id', 'run_id', 'source_family', 'collection_mode',
+    'evidence', 'quality_status', 'source_id', 'author', 'published_at', 'metrics',
+    'media', 'attributes', 'raw', 'last_seen_at', 'created_at'] },
+})
+
+export function crawlerWriterContractForSpec(spec) {
+  if (CRAWLER_SOURCE_TYPES.includes(spec.sourceType)) return {
+    pipelineKey: CRAWLER_PIPELINE_KEY, version: CRAWLER_WRITER_CONTRACT_VERSION,
+    digest: CRAWLER_WRITER_CONTRACT_DIGEST, summary: CRAWLER_WRITER_CONTRACT_SUMMARY,
+  }
+  const summary = { ...CRAWLER_WRITER_CONTRACT_SUMMARY, inputs: [{
+    sourceType: spec.sourceType, table: `${spec.locator.schema}.${spec.locator.table}`,
+    cursor: [spec.locator.cursorColumn, spec.locator.idColumn],
+  }] }
+  return { pipelineKey: `${CRAWLER_PIPELINE_KEY}:${spec.sourceType}`,
+    version: 'saved-records.writer.v1',
+    digest: createHash('sha256').update(JSON.stringify(summary)).digest('hex'), summary }
 }

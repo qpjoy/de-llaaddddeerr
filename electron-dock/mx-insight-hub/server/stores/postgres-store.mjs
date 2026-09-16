@@ -20,9 +20,8 @@ import {
   observationHash,
   streamId,
 } from '../ingest/normalizers.mjs'
-import { CRAWLER_SOURCES } from '../ingest/crawler/source-contract.mjs'
+import { CRAWLER_FIELD_MAP } from '../ingest/crawler/source-contract.mjs'
 
-const CRAWLER_SOURCE_KEYS = Object.freeze(CRAWLER_SOURCES.map((source) => source.sourceKey))
 
 function iso(value) {
   if (value == null) return null
@@ -6424,6 +6423,71 @@ export class PostgresStore {
 
   // ---- external sources (migration 008) ----------------------------------
 
+  async getCrawlerDiscoveryState() {
+    const { rows } = await this.pool.query(
+      "SELECT state FROM catalog.saved_record_discovery WHERE pipeline_key = 'night-all-saved-records'",
+    )
+    return rows[0]?.state ?? null
+  }
+
+  async saveCrawlerDiscoveryState(state) {
+    await this.pool.query(
+      `INSERT INTO catalog.saved_record_discovery (pipeline_key, state)
+       VALUES ('night-all-saved-records', $1)
+       ON CONFLICT (pipeline_key) DO UPDATE SET state = excluded.state, updated_at = now()`, [state],
+    )
+  }
+
+  async registerCrawlerSource(spec, template) {
+    return withPgTransaction(this.pool, async client => {
+      await client.query("SET LOCAL lock_timeout = '3s'")
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', ['saved-record-discovery'])
+      const current = await client.query('SELECT * FROM catalog.external_sources WHERE source_key = $1', [spec.sourceKey])
+      if (current.rows[0]) return externalSource(current.rows[0])
+      // Match migration 066: pre-existing grants/latent snapshots must not acquire
+      // a newly registered corpus. Serialize this check with grant/key writes.
+      await client.query('LOCK TABLE platform_grants, api_key_platform_entitlements, api_keys IN SHARE MODE')
+      const conflict = await client.query(
+        `SELECT 1 FROM platform_grants WHERE lower(btrim(normalize(platform, NFKC))) = $1
+         UNION ALL
+         SELECT 1 FROM api_key_platform_entitlements e JOIN api_keys k ON k.id = e.api_key_id
+          WHERE lower(btrim(normalize(e.platform, NFKC))) = $1 AND k.scope_mode = 'snapshot'
+            AND k.status = 'active' AND k.expires_at > now()
+         UNION ALL
+         SELECT 1 FROM catalog.external_sources WHERE dataset_id = $2 OR platform = $1 LIMIT 1`,
+        [spec.platform, spec.datasetId],
+      )
+      if (conflict.rows.length) throw new AppError(409, 'crawler_scope_conflict', '类别标识已有授权或数据集占用，需先核对')
+      const { rows } = await client.query(
+        `INSERT INTO catalog.external_sources
+         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status,
+          database_connection_id, connection, sync_interval_seconds)
+         VALUES ($1,$2,$3,'database',$4,$5,$6,'paused',$7,$8,$9) RETURNING *`,
+        [spec.sourceId, spec.sourceKey, spec.displayName, spec.datasetId, spec.platform, spec.objectType,
+          template.databaseConnectionId ?? null, { ...template.connection, ...spec.locator }, template.syncIntervalSeconds ?? 300],
+      )
+      await client.query(
+        `INSERT INTO catalog.source_mappings (id, source_id, version, field_map, origin, notes)
+         VALUES ($1,$2,1,$3,'manual','Discovered category; source contract and publication review required')`,
+        [spec.mappingId, spec.sourceId, CRAWLER_FIELD_MAP],
+      )
+      await client.query('INSERT INTO catalog.saved_record_auto_activation (source_key) VALUES ($1)', [spec.sourceKey])
+      return externalSource(rows[0])
+    })
+  }
+
+  async listCrawlerAutoActivationPending() {
+    const { rows } = await this.pool.query('SELECT source_key FROM catalog.saved_record_auto_activation WHERE pending = true ORDER BY source_key')
+    return rows.map(row => row.source_key)
+  }
+
+  async settleCrawlerAutoActivation(sourceKeys, actor) {
+    await this.pool.query(
+      'UPDATE catalog.saved_record_auto_activation SET pending = false, settled_at = now(), settled_by = $2 WHERE source_key = ANY($1::text[]) AND pending = true',
+      [sourceKeys, actor],
+    )
+  }
+
   async createExternalSource({
     sourceKey,
     displayName,
@@ -7243,7 +7307,7 @@ export class PostgresStore {
                )
              )
              OR (
-               source.source_key = ANY($3::text[])
+               source.source_key ~ '^night-all-saved-records-[a-z][a-z0-9]*(-[a-z0-9]+)*$'
                AND EXISTS (
                  SELECT 1
                    FROM core.canonical_records record
@@ -7261,7 +7325,7 @@ export class PostgresStore {
                )
              )
           ORDER BY source.updated_at DESC, source.source_key`,
-        [matchKeys, entry.id, CRAWLER_SOURCE_KEYS],
+        [matchKeys, entry.id],
       ),
       this.pool.query(
         `WITH matched_record_ids AS (${matchedRecordIdsSql}
@@ -7790,6 +7854,8 @@ export class PostgresStore {
     contractSummary,
     attestedBy,
     approvals = [],
+    additionalContracts = [],
+    automatic = false,
   }) {
     return withPgTransaction(this.pool, async (client) => {
       for (const approval of approvals) {
@@ -7810,6 +7876,14 @@ export class PostgresStore {
          RETURNING *`,
         [randomUUID(), pipelineKey, contractVersion, contractDigest, contractSummary, attestedBy],
       )
+      for (const contract of additionalContracts) {
+        await client.query(
+          `INSERT INTO catalog.pipeline_writer_contract_attestations
+           (id, pipeline_key, contract_version, contract_digest, contract_summary, attested_by)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [randomUUID(), contract.pipelineKey, contract.version, contract.digest, contract.summary, attestedBy],
+        )
+      }
       const sources = []
       for (const sourceKey of sourceKeys) {
         const { rows } = await client.query(
@@ -7822,6 +7896,10 @@ export class PostgresStore {
         if (!rows[0]) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
         sources.push(externalSource(rows[0]))
       }
+      if (automatic) await client.query(
+        "UPDATE catalog.saved_record_auto_activation SET pending = false, settled_at = now(), settled_by = 'system:category-discovery' WHERE source_key = ANY($1::text[]) AND pending = true",
+        [sourceKeys],
+      )
       return {
         sources,
         attestation: pipelineWriterContractAttestation(attestationResult.rows[0]),

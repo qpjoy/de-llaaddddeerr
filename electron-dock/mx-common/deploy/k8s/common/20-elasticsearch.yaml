@@ -43,6 +43,9 @@ data:
     # deploy smoke test is actually observable.
     indices.lifecycle.poll_interval: 1m
     path.repo: ["/usr/share/elasticsearch/snapshots"]
+    # Disk watermarks are persistent cluster settings, hot-applied and verified
+    # by manage.sh ensure (scripts/elasticsearch-disk-policy.mjs). Keeping them
+    # out of this subPath-mounted file avoids an ES restart for policy changes.
 ---
 # Headless Service for peer discovery. Separate from the client Service because
 # discovery needs per-pod DNS records, which a load-balanced ClusterIP cannot

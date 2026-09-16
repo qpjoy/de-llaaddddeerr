@@ -1,13 +1,77 @@
-# Night-All saved-records ingestion
+# Night-All-A saved-records ingestion
 
 Status: repository implementation, installed paused and unapproved by default.
 Migration `066_night_all_saved_records_sources.sql` registers the fixed inputs;
 it does not connect to the source database, read a row, approve a mapping,
 activate a task or grant a Public API platform.
 
+## 2026-09-17：动态类别目录（取代下文固定 13 类的数量假设）
+
+本计划的来源是 **Night-All-A**，控制台显示“Night-All-A 数据清洗任务”。
+历史内部 `night-all-saved-records` 路径/source key 保留以兼容既有任务、映射和 checkpoint；
+它不表示现在清洗的是历史 Night-All 兼容服务。不得仅凭名称切换源库连接。
+下方 13 类是 migration 066 的初始集合，非永久枚举。
+
+- Migration `088_saved_record_discovery.sql` 只增加发现状态表，不重置现有任务或授权。
+- Ingest worker 独立发现循环每 24 小时读取 `public.saved_records` 的分区目录，Admin
+  “发现新类别”可立即执行 `POST /internal/v1/admin/pipelines/night-all-saved-records/discover`。
+  持久化最近成功发现时间，worker 重启不会重复全量发现；API/登录就绪不依赖发现循环。失败保留上次目录和已有任务。
+- 最多读取 500 个分区；超过时整次发现失败并明确报错。DEFAULT 叶分区单独执行每日 `DISTINCT source_type`，查询限时 5 秒，
+  最多返回 500 个类别；超限/超时明确提示目录不完整，不对整张父表全量扫描。
+  多值分区、非叶分区、不规范类别标识和非约定表名均展示为待处理，不自动读取。
+- 对规范 `source_type`（小写字母开头，字母/数字/单下划线分词，最长 38 字符（保持 platform 不超过现有 64 字符查询合同））、
+  单值 LIST 叶分区 `public.saved_records_<source_type>` 自动原子登记独立 source + v1 mapping。
+  登记事务暂存 **paused / unapproved** 与持久化自动启用意图，继承共享连接与周期。随后自动完成字段/分区/索引与 checkpoint 检查，批准固定映射并启用，无需管理员逐类开启；已有任务不变。
+- 数据集为 `data-center.saved-records.<source_type>.v1`，授权平台为
+  `data_center_saved_records_<source_type>`；这些是下游类别索引，而非物理 ES 索引名。
+- 新增类别继承同一源程序已核对的 writer 语义，自动过程以 `system:category-discovery` 保存该类独立合同摘要和启用记录，不冒充人工审核。没有既有 writer 确认时阻断；自动启用核对同样的
+  23 列、单值分区、唯一 `(last_seen_at,id)` 索引、watermark/提交顺序/删除合同；
+  源索引仍由源程序/源库运维准备，发现不会对只读源库执行 DDL。原来的 13 表索引脚本只覆盖初始集合。通过检查即自动进入常规增量调度、canonical 入库和 outbox → ES 索引；阻断后下一轮自动重试，也可按“发现新类别”立即重试。人工暂停会取消自动启用意图，后续发现不会擅自重启。
+- 新类别登记会检查现有 grant、活跃未过期 snapshot entitlement 及 dataset/platform 冲突；
+  发现占用时显示阻断，不把已有授权静默变成新数据权限。自动启用清洗仍不代表对外授权；公开内容沿原有发布规则并独立授予 Key 权限。
+- 普通调度、手动单类/全类同步、进度、恢复、共享配置及 checkpoint 操作均从持久化目录取类别。
+  新类别的暂停/失败不改变原有类别；所有数据沿既有 canonical → outbox → ES 流程。
+
+### 下游类别发现
+
+`GET /api/v1/data/platforms`（别名 `/api/v1/data/saved-records/categories`），需有效 Hub API Key，无需 Idempotency-Key，
+不计 usage unit，不访问源库。返回所有已知类别（含未授权类别）的中性元数据：
+
+```json
+{
+  "data": {
+    "contractVersion": "mx-insight-hub.saved-record-categories.v1",
+    "revision": "<目录及当前授权标记的 SHA-256>",
+    "discoveryCheckedAt": "2026-09-17T00:00:00.000Z",
+    "scope": "known_categories", "product": "saved_records",
+    "items": [{
+      "id": "news", "sourceType": "news", "label": "新闻资讯",
+      "datasetId": "data-center.saved-records.news.v1",
+      "platform": "data_center_saved_records_news", "objectType": "saved_record",
+      "registered": true, "authorized": true
+    }]
+  },
+  "requestId": "<请求标识>"
+}
+```
+
+`registered` 是已安装且符合逻辑合同的任务；`authorized` 是该任务与 Key 当前有效权限的交集。
+类别尚未规范映射时 datasetId/platform 为 null，authorized 为 false。目录不返回连接、表名、
+provider、source key、凭据、原始数据、checkpoint，也不保证采集完整性或新鲜度。
+看到目录不代表获得数据权限；新增 consumer grant 不扩大既有 snapshot Key，移除 grant 即时生效。
+
+专题报告 `sourceScope=selected` 使用目录中 `authorized=true` 的 `platform` 值作为数组，
+不再限制 13 项；`all_granted` 在任务创建时固化当时已登记且有效授权的全部类别。
+既有报告不因之后目录增加而改变授权范围。stored/canonical search 可复用 platform + datasetId。
+公开内容继续受 publication eligibility=candidate 过滤；未审核内容不会因为发现而公开。
+
+控制台 `/docs/saved-record-categories` 和 OpenAPI JSON 已包含接口、字段与调用方式；
+专题报告文档链接到目录。Admin 平台授权/租户服务配置也加载动态已登记类别。
+部署只需 Hub migration/API/UI/ingest worker，不涉及 Launcher、MX-H2I、VPN、DNS 或用户登录。
+
 ## 1. Scope and isolation
 
-This pipeline reads the 13 LIST leaf partitions below from the existing
+The initial pipeline reads the 13 LIST leaf partitions below from the existing
 `agent_data_crawler_platform` PostgreSQL database. It deliberately does not
 pull from the `public.saved_records` parent: each leaf owns an independent
 dataset, authorization platform, checkpoint, run history and failure state.
@@ -492,8 +556,8 @@ Public delivery needs a separate decision. Existing
 no Night-All-specific public endpoint is required. Each `source_type` has a
 unique platform precisely so an API key may be granted one reviewed class
 without receiving all 13. These Public API dataset and platform identifiers
-are provider-neutral; `Night-All` remains only an internal source/pipeline
-name. Migration 066 creates no grant.
+are provider-neutral; `Night-All-A` is the internal source/pipeline display name; legacy `night-all-*`
+identifiers remain for compatibility. Migration 066 creates no grant.
 
 The fixed cleaner marks a row as a publication candidate only when
 `record_type IN ('news', 'news.article')` and at least one canonical title or

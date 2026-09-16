@@ -1,3 +1,4 @@
+import { crawlerDiscoveryCandidates } from '../crawler/discovery.mjs'
 import { createHash } from 'node:crypto'
 import pg from 'pg'
 import { AppError } from '../../core/errors.mjs'
@@ -23,9 +24,7 @@ import {
   enrichCrawlerRecord,
 } from '../crawler/record.mjs'
 import {
-  CRAWLER_PIPELINE_KEY,
-  CRAWLER_WRITER_CONTRACT_DIGEST,
-  CRAWLER_WRITER_CONTRACT_VERSION,
+  crawlerWriterContractForSpec,
   crawlerColumnIssues,
   crawlerCursorIndexIssues,
   crawlerCursorIsFinite,
@@ -1293,6 +1292,42 @@ export class DatabaseSourcePuller {
   }
 
   /** Inspect a registered source without returning its DSN or any row values. */
+  async discoverCrawlerCategories(sourceKey) {
+    const { connection } = await this.#source(sourceKey)
+    const pool = this.poolFactory({ ...await this.#poolOptions(connection, 'mx-insight-hub-category-discovery'), statement_timeout: 5000 })
+    try {
+      const { rows } = await pool.query(`
+        SELECT c.relname AS "table", n.nspname AS schema, c.relkind AS "relationKind",
+          c.relispartition AS "isPartition",
+          NOT EXISTS (SELECT 1 FROM pg_inherits child WHERE child.inhparent = c.oid) AS "isLeaf",
+          pn.nspname AS "parentSchema", p.relname AS "parentTable", p.relkind AS "parentRelationKind",
+          pg_get_partkeydef(p.oid) AS "parentPartitionKey",
+          pg_get_expr(c.relpartbound, c.oid, true) AS "partitionBound"
+        FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_class p ON p.oid = i.inhparent JOIN pg_namespace pn ON pn.oid = p.relnamespace
+        WHERE pn.nspname = 'public' AND p.relname = 'saved_records'
+        ORDER BY n.nspname, c.relname LIMIT 501`)
+      if (rows.length === 0 || rows.length > 500) {
+        throw new AppError(409, 'crawler_discovery_incomplete', '分区目录为空或超过单次 500 个分区限制')
+      }
+      const defaultValues = []
+      const warnings = []
+      for (const relation of rows.filter(row => row.partitionBound === 'DEFAULT')) {
+        try {
+          const table = qualifiedTable({ schema: relation.schema, table: relation.table })
+          const sample = await pool.query(`SELECT DISTINCT source_type FROM ${table} LIMIT 501`)
+          defaultValues.push(...sample.rows.slice(0, 500).map(row => row.source_type))
+          if (sample.rows.length > 500) warnings.push('DEFAULT 分区类别超过 500 项，目录未完整枚举')
+          warnings.push('DEFAULT 分区发现的类别需由源程序提供符合合同的独立叶分区后自动接入')
+        } catch {
+          warnings.push('DEFAULT 分区 DISTINCT 未在查询时限内完成；类别目录可能不完整，独立叶分区发现仍然有效')
+        }
+      }
+      return { candidates: crawlerDiscoveryCandidates(rows, defaultValues), warnings }
+    } finally { await pool.end() }
+  }
+
   async describe(sourceKey, { mappingOverride = undefined } = {}) {
     const { source, mapping, connection } = await this.#source(sourceKey, { mappingOverride })
     const crawlerSpec = crawlerSourceSpecForKey(sourceKey)
@@ -2081,12 +2116,11 @@ export class DatabaseSourcePuller {
           { issues: sourceIssues },
         )
       }
-      const attestation = await this.store.getLatestPipelineWriterContractAttestation?.(
-        CRAWLER_PIPELINE_KEY,
-      )
+      const contract = crawlerWriterContractForSpec(crawlerSpec)
+      const attestation = await this.store.getLatestPipelineWriterContractAttestation?.(contract.pipelineKey)
       if (
-        attestation?.contractVersion !== CRAWLER_WRITER_CONTRACT_VERSION
-        || attestation?.contractDigest !== CRAWLER_WRITER_CONTRACT_DIGEST
+        attestation?.contractVersion !== contract.version
+        || attestation?.contractDigest !== contract.digest
       ) {
         throw new AppError(
           409,

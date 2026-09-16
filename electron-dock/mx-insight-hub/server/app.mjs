@@ -93,7 +93,8 @@ import {
 } from './ingest/crawler/pipeline.mjs'
 import {
   CRAWLER_SOURCES,
-  CRAWLER_SOURCE_TYPES,
+  crawlerSourceSpec,
+  listCrawlerSpecs,
   crawlerReservedScopeIssue,
 } from './ingest/crawler/source-contract.mjs'
 import {
@@ -1850,6 +1851,11 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-products/saved-records/categories') {
+        requirePlatformAdmin(principal)
+        sendJson(response, 200, { data: await service.adminSavedRecordCategories(), requestId })
+        return
+      }
       if (pathname === '/internal/v1/admin/data-products/topic-reports') {
         requireSourceAdmin(principal)
         if (request.method === 'GET') {
@@ -3170,6 +3176,12 @@ export function createApp({
         return
       }
 
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/discover') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await crawlerSavedRecordsPipeline.discover(), requestId })
+        return
+      }
       if (pathname === '/internal/v1/admin/pipelines/night-all-saved-records') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
@@ -3202,13 +3214,14 @@ export function createApp({
           Object.prototype.hasOwnProperty.call(body || {}, 'sourceType')
           && (
             typeof body.sourceType !== 'string'
-            || !CRAWLER_SOURCE_TYPES.includes(body.sourceType)
+            || !crawlerSourceSpec(body.sourceType)
+            || !(await listCrawlerSpecs(store)).some(spec => spec.sourceType === body.sourceType)
           )
         ) {
           throw new AppError(
             400,
             'invalid_source_type',
-            `sourceType must be one of: ${CRAWLER_SOURCE_TYPES.join(', ')}`,
+            'sourceType must be a canonical category identifier from the cleaning plan',
           )
         }
         sendJson(response, 200, {
@@ -5784,6 +5797,12 @@ export function createApp({
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && ['/api/v1/data/platforms', '/api/v1/data/saved-records/categories'].includes(pathname)) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'saved-record categories')
+        sendJson(response, 200, { data: await service.savedRecordCategories(context), requestId }, { 'cache-control': 'no-store' })
         return
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/topic-reports') {
