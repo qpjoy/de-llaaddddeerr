@@ -8,6 +8,11 @@ Hub are governed here. Night-All-specific implementation details remain in the
 Night-All repository only for explicitly transitional compatibility operations;
 those paths retire one operation at a time and are not the target architecture.
 
+## 数据浏览中心（2026-09-16）
+
+- [实现范围、数据语义与上线门槛](data-browser/README.md)
+- [Node.js Agent、Text2ES、ES 兼容升级与契约转发可行性](data-browser/agent-search-feasibility.md)
+
 ## Current delivery
 
 | Area | Current state |

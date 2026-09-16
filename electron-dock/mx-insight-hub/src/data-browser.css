@@ -1,0 +1,22 @@
+.mih-data-browser { display: grid; gap: 24px; min-width: 0; }
+.mih-browser-nav, .mih-browser-pagination, .mih-browser-media { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.mih-browser-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.mih-browser-panel, .mih-browser-account { padding: 24px; min-width: 0; }
+.mih-browser-filters { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(140px, 1fr) 120px auto; gap: 16px; align-items: end; margin-bottom: 24px; }
+.mih-browser-sub { display: block; margin-top: 6px; opacity: .65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mih-data-browser .mih-table td:first-child { min-width: 240px; max-width: 440px; white-space: normal; }
+.mih-browser-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.mih-browser-tags .qp-button { white-space: normal; overflow-wrap: anywhere; font-size: 12px; padding: 4px 8px; }
+.mih-browser-note { font-size: 13px; line-height: 1.8; opacity: .72; margin: 16px 0; }
+.mih-browser-pagination { justify-content: flex-end; margin-top: 20px; }
+.mih-browser-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.mih-browser-metrics { display: flex; gap: 16px; flex-wrap: wrap; margin: 20px 0; }
+.mih-browser-metrics > div { min-width: 100px; display: grid; gap: 8px; }
+.mih-browser-metrics strong { font-size: 22px; }
+.mih-browser-fields { margin-top: 20px; }
+.mih-browser-fields summary { cursor: pointer; padding: 12px 0; }
+.mih-browser-fields pre { max-height: 440px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 780px) { .mih-browser-summary { grid-template-columns: 1fr; } .mih-browser-filters { grid-template-columns: 1fr; } .mih-browser-panel, .mih-browser-account { padding: 16px; } }
+.mih-data-browser .mih-table-wrap { overflow-x: auto; max-width: 100%; }
+.mih-browser-media-preview { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
+.mih-browser-media-preview img, .mih-browser-media-preview video, .mih-browser-media-preview audio { max-width: 100%; max-height: 360px; object-fit: contain; }

@@ -438,6 +438,7 @@ export const adminApi = {
   ),
   fileFormatRules: (token) => request(token, `${ADMIN_ROOT}/file-format-rules`),
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
+  dataBrowser: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser`, { query }),
   dataCenter: (token, query = {}) => visibleDataCenterResponse(request(
     token,
     `${ADMIN_ROOT}/data-center`,

@@ -1,3 +1,4 @@
+import { browseData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -1594,6 +1595,13 @@ export function createApp({
           data: safe ? runtimeVisibleProjection(runtime) : runtime,
           requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-browser') {
+        requireSourceAdmin(principal)
+        const filters = parseBrowserQuery(searchParams)
+        const data = await browseData(store, filters)
+        sendJson(response, 200, { data: dataCenterVisibleProjection(data), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center') {
