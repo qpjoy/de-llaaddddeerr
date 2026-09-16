@@ -9,7 +9,7 @@ SELECT format('DROP INDEX CONCURRENTLY %I.%I', n.nspname, c.relname)
 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'core' AND NOT i.indisvalid
-AND c.relname IN ('canonical_browser_accounts_v1_idx', 'canonical_browser_event_v1_idx')
+AND c.relname IN ('canonical_browser_accounts_v1_idx', 'canonical_browser_event_v1_idx', 'canonical_browser_profiles_v1_idx')
 \gexec
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS canonical_browser_accounts_v1_idx
@@ -26,12 +26,21 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS canonical_browser_event_v1_idx
 ON core.canonical_records (event_time DESC, id DESC)
 WHERE deleted_at IS NULL;
 
+-- Profile lookup must not scan every content row of prolific accounts.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS canonical_browser_profiles_v1_idx
+ON core.canonical_records (
+  platform,
+  (CASE WHEN object_type IN ('user','account','profile') THEN NULLIF(external_id, '') ELSE NULLIF(author_external_id, '') END),
+  collected_at DESC NULLS LAST, id DESC
+)
+WHERE deleted_at IS NULL AND object_type IN ('user','account','profile');
+
 DO $$ BEGIN
   IF (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'core' AND i.indisvalid AND i.indisready
       AND i.indrelid = 'core.canonical_records'::regclass
-      AND c.relname IN ('canonical_browser_accounts_v1_idx', 'canonical_browser_event_v1_idx')) <> 2 THEN
+      AND c.relname IN ('canonical_browser_accounts_v1_idx', 'canonical_browser_event_v1_idx', 'canonical_browser_profiles_v1_idx')) <> 3 THEN
     RAISE EXCEPTION 'Data browser serving indexes are not ready';
   END IF;
 END $$;

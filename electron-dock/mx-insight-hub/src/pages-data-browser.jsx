@@ -1,114 +1,78 @@
-import { useCallback, useState } from 'react'
-import { Database, Users, FileText, Pulse } from '@phosphor-icons/react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { MagnifyingGlass, DownloadSimple, Funnel, ArrowClockwise } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
-import { DropdownField, EmptyState, ErrorState, LoadingState, MetricCard, Modal, PageHeading, formatDate, useRemoteData } from './components.jsx'
+import { DropdownField, EmptyState, ErrorState, LoadingState, PageHeading, formatDate, useRemoteData } from './components.jsx'
+import { AccountAnalysis, AccountCards, AccountHero, ContentDetail, ContentTable, downloadBrowserFile, formatNumber, platformName } from './data-browser-parts.jsx'
 import './data-browser.css'
 
-const views = [{ value: 'accounts', label: '账号大盘' }, { value: 'contents', label: '内容大盘' }, { value: 'hotspots', label: '热点线索' }]
-const safeUrl = (value) => typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null
-const asTags = (row) => (Array.isArray(row.stable_fields?.tags) ? row.stable_fields.tags : []).filter((tag) => typeof tag === 'string')
-
-function Tags({ tags, onTag }) {
-  return <div className="mih-browser-tags">{[...new Set(tags)].map((tag) => <button key={tag} className="qp-button qp-button--ghost" onClick={() => onTag(tag)}>#{tag}</button>)}</div>
-}
-function Fields({ value, title = '完整字段' }) {
-  return <details className="mih-browser-fields"><summary>{title}</summary><pre className="qp-code-block">{JSON.stringify(value, null, 2)}</pre></details>
-}
-function downloadBrowserFile(result) {
-  const url = URL.createObjectURL(new Blob([result.content], { type: result.mimeType }))
-  const anchor = document.createElement('a'); anchor.href = url; anchor.download = result.filename
-  document.body.appendChild(anchor); anchor.click(); anchor.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
-function ContentDetail({ row, token, onUnauthorized, onClose, onAccount, onTag }) {
-  const [showMedia, setShowMedia] = useState(false)
-  const [exportState, setExportState] = useState({ busy: false, error: null })
-  const exportDetail = async () => {
-    if (exportState.busy) return
-    setExportState({ busy: true, error: null })
-    try {
-      downloadBrowserFile(await adminApi.dataBrowserExport(token, { id: row.id, format: 'json', maxRows: 1 }))
-      setExportState({ busy: false, error: null })
-    } catch (error) {
-      if (error.status === 401) onUnauthorized?.(error)
-      setExportState({ busy: false, error })
-    }
-  }
-  const load = useCallback(() => adminApi.dataBrowser(token, { id: row.id }), [token, row.id])
-  const state = useRemoteData(load, onUnauthorized)
-  const item = state.data?.items?.[0] || row
-  const media = item.stable_fields?.media || {}
-  const metrics = item.stable_fields?.metrics || {}
-  return <Modal title={item.title || item.external_id || '内容详情'} size="large" onClose={onClose}>
-    {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
-    {state.loading ? <LoadingState label="正在读取完整字段" /> : null}
-    <button className="qp-button qp-button--secondary" onClick={exportDetail} disabled={exportState.busy}>{exportState.busy ? '正在导出…' : '导出此条 JSON'}</button>
-    {exportState.error ? <ErrorState error={exportState.error} /> : null}
-    <p>{item.platform} · {item.object_type} · 发布 {formatDate(item.event_time)} · 入库 {formatDate(item.collected_at)}</p>
-    <button className="qp-button qp-button--secondary" disabled={!item.account_id} onClick={() => onAccount(item)}>{item.author_name || item.account_id || '账号身份缺失'} · 查看账号</button>
-    <div className="mih-browser-metrics">{Object.entries(metrics).map(([key, value]) => <div key={key}><small>{({ likes: '点赞', comments: '评论', shares: '分享', favorites: '收藏', views: '浏览', followers: '粉丝' })[key] || key}</small><strong>{typeof value === 'object' ? JSON.stringify(value) : String(value ?? '未知')}</strong></div>)}</div>
-    <p className="mih-browser-body">{item.body || '尚未采集正文；不会自动向上游补采。'}</p>
-    <Tags tags={asTags(item)} onTag={onTag} />
-    <p className="mih-browser-note">标签来自入库内容。点击标签浏览相关内容；同标签仅代表关联线索，不代表同一事件。</p>
-    {safeUrl(item.url) ? <a className="qp-button qp-button--ghost" href={item.url} target="_blank" rel="noreferrer">打开来源</a> : null}
-    <button className="qp-button qp-button--secondary" onClick={() => setShowMedia((value) => !value)}>{showMedia ? '收起媒体预览' : '展示已采集媒体'}</button>
-    {showMedia ? <div className="mih-browser-media-preview">{['images', 'videos', 'audio'].flatMap((kind) => (Array.isArray(media[kind]) ? media[kind] : []).map((entry, index) => {
-      const url = safeUrl(typeof entry === 'string' ? entry : entry?.url)
-      if (!url) return null
-      return kind === 'images' ? <img key={`${kind}-${index}`} src={url} alt={`已采集图片 ${index + 1}（加载失败时可使用下方原始链接）`} loading="lazy" referrerPolicy="no-referrer" /> : kind === 'videos' ? <video key={`${kind}-${index}`} src={url} controls preload="none" /> : <audio key={`${kind}-${index}`} src={url} controls preload="none" />
-    }))}</div> : null}
-    <div className="mih-browser-media">{['images', 'videos', 'audio'].flatMap((kind) => (Array.isArray(media[kind]) ? media[kind] : []).map((entry, index) => {
-      const url = safeUrl(typeof entry === 'string' ? entry : entry?.url)
-      return url ? <a key={`${kind}-${index}`} href={url} target="_blank" rel="noreferrer">{kind === 'images' ? '图片' : kind === 'videos' ? '视频' : '音频'} {index + 1} ↗</a> : null
-    }))}</div>
-    {!state.loading && !state.error ? <Fields value={item} title="全部已入库字段（含媒体、评论及扩展字段，如已采集）" /> : null}
-    <section className="mih-browser-note"><strong>分析与关联</strong><p>本浏览中心尚未接入 Agent 画像、情感或事件关联分析。当前仅提供来源标签和账号身份关联；没有评论明细时，评论数不等于已采集评论。</p></section>
-  </Modal>
-}
-
+const views = [['accounts', '账号大盘'], ['contents', '内容大盘'], ['hotspots', '热点线索']]
 const emptySearch = { q: '', platform: '', objectType: '', contentType: '', from: '', to: '', tag: '', sort: 'newest' }
-const platforms = [['', '全部平台'], ['xiaohongshu', '小红书'], ['douyin', '抖音'], ['kuaishou', '快手'], ['bilibili', '哔哩哔哩'], ['weibo', '微博'], ['telegram', 'Telegram'], ['twitter', 'X / Twitter'], ['taobao', '淘宝'], ['jd', '京东'], ['mobile_commerce', '移动电商']]
+const platforms = [['', '全部平台'], ...['xiaohongshu', 'douyin', 'kuaishou', 'bilibili', 'weibo', 'telegram', 'twitter', 'taobao', 'jd', 'mobile_commerce'].map((key) => [key, platformName(key)])]
 const objectTypes = [['', '全部对象'], ['post', '帖子 / 笔记'], ['product', '商品'], ['comment', '评论'], ['message', '消息'], ['article', '文章'], ['user', '用户资料'], ['account', '账号'], ['profile', '画像资料'], ['chat', '会话']]
-const contentTypes = [['', '全部内容形态'], ['video', '视频'], ['image', '图片'], ['text', '文字'], ['note', '笔记'], ['audio', '音频'], ['link', '链接']]
-const withCustom = (pairs, value) => pairs.some(([key]) => key === value) ? pairs : [...pairs, [value, value]]
-const options = (pairs) => pairs.map(([value, label]) => ({ value, label }))
+const contentTypes = [['', '全部形态'], ['video', '视频'], ['image', '图片'], ['text', '文字'], ['note', '笔记'], ['audio', '音频'], ['link', '链接']]
+const options = (pairs, value) => (value === undefined || pairs.some(([key]) => key === value) ? pairs : [...pairs, [value, value]]).map(([value, label]) => ({ value, label }))
 
-function AccountSummary({ token, filters, onUnauthorized, onTag }) {
-  const load = useCallback(() => adminApi.dataBrowser(token, { ...filters, summary: 'true', page: 1 }), [token, filters])
-  const state = useRemoteData(load, onUnauthorized)
-  if (state.loading) return <LoadingState label="正在汇总账号标签，不影响下方内容浏览" />
-  if (state.error) return <ErrorState error={state.error} onRetry={state.refresh} />
-  const summary = state.data?.account_summary
-  return summary ? <div><p>样本发布区间：{formatDate(summary.firstPublishedAt)} — {formatDate(summary.lastPublishedAt)} · 有发布时间 {summary.datedRecords} 条</p><div className="mih-browser-tags">{summary.tags.map((entry) => <button key={entry.tag} className="qp-button qp-button--secondary" onClick={() => onTag(entry.tag)}>#{entry.tag} · {entry.records} 条 · 相关账号</button>)}</div><p className="mih-browser-note">按当前筛选的全部记录汇总。来源标签相同只代表关联候选。</p></div> : <p>暂无标签汇总</p>
+function useBrowserTotal(token, filters, ready, onUnauthorized) {
+  const { page, pageSize, sort, summary, ...scope } = filters
+  const key = JSON.stringify(scope)
+  const [state, setState] = useState({ key: '', loading: true, total: null, error: null })
+  const [revision, setRevision] = useState(0)
+  useEffect(() => {
+    if (!ready) return
+    let active = true
+    setState({ key, loading: true, total: null, error: null })
+    adminApi.dataBrowserStatistics(token, JSON.parse(key)).then((data) => {
+      if (active) setState({ ...data, key, loading: false, error: null })
+    }).catch((error) => {
+      if (error.status === 401) onUnauthorized?.(error)
+      if (active) setState({ key, loading: false, total: null, error })
+    })
+    return () => { active = false }
+  }, [token, key, ready, revision, onUnauthorized])
+  return { ...(state.key === key ? state : { loading: true, total: null, error: null }), retry: () => setRevision((v) => v + 1) }
 }
-
+function Pagination({ filters, data, total, loading, onPage }) {
+  const [jump, setJump] = useState('')
+  const pages = total.total == null ? null : Math.ceil(total.total / filters.pageSize)
+  const max = Math.min(500, pages == null ? 500 : Math.max(1, pages))
+  return <div className="mih-browser-pagination"><span>{pages === 0 ? '暂无匹配结果' : `第 ${filters.page} 页${pages == null ? '' : ` / 共 ${formatNumber(pages)} 页`}`} · 每页 {filters.pageSize} 条</span><button className="qp-button qp-button--secondary" disabled={loading || filters.page <= 1} onClick={() => onPage(filters.page - 1)}>上一页</button><button className="qp-button qp-button--secondary" disabled={loading || !data?.hasMore || filters.page >= 500} onClick={() => onPage(filters.page + 1)}>下一页</button><form onSubmit={(event) => { event.preventDefault(); const page = Number(jump); if (Number.isInteger(page) && page >= 1 && page <= max) { onPage(page); setJump('') } }}><label>跳至<input aria-label="跳转页码" className="qp-input" type="number" min={1} max={max} value={jump} onChange={(event) => setJump(event.target.value)} /></label><button className="qp-button qp-button--ghost" disabled={loading || !jump || pages === 0}>确定</button></form>{pages > 500 ? <small>共 {formatNumber(pages)} 页，直接浏览前 500 页；可缩小筛选范围。</small> : null}</div>
+}
+function AccountHeader({ token, row, onUnauthorized, onBack, onTag }) {
+  const load = useCallback(() => adminApi.dataBrowser(token, { view: 'accounts', platform: row.platform, account: row.account_id, pageSize: 1 }), [token, row.platform, row.account_id])
+  const state = useRemoteData(load, onUnauthorized)
+  return <><AccountHero row={state.loading ? row : state.data?.items?.[0] || row} onBack={onBack} onTag={onTag} onRefresh={state.refresh} />{state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}</>
+}
 export function DataBrowserPage({ token, onUnauthorized }) {
+  const resultsRef = useRef(null)
   const [filters, setFilters] = useState({ ...emptySearch, view: 'accounts', account: '', page: 1, pageSize: 20 })
   const [draft, setDraft] = useState(emptySearch)
-  const [accountName, setAccountName] = useState('')
+  const [accountRow, setAccountRow] = useState(null)
+  const [accountTab, setAccountTab] = useState('overview')
   const [selected, setSelected] = useState(null)
-  const [showSummary, setShowSummary] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   const [exportFormat, setExportFormat] = useState('csv')
   const [exportLimit, setExportLimit] = useState('200')
   const [exportState, setExportState] = useState({ busy: false, error: null, message: '' })
+  useEffect(() => { document.getElementById('mih-main-content')?.scrollIntoView({ block: 'start' }) }, [filters.view, filters.account, selected?.id])
   const filterKey = JSON.stringify(filters)
-  const load = useCallback(async () => ({ ...await adminApi.dataBrowser(token, filters), filterKey }), [token, filters, filterKey])
+  const load = useCallback(async () => ({ ...(filters.account && accountTab !== 'contents' ? { items: [] } : await adminApi.dataBrowser(token, filters)), filterKey }), [token, filters, filterKey, accountTab])
   const state = useRemoteData(load, onUnauthorized)
   const data = state.data
   const loading = state.loading || (!state.error && data?.filterKey !== filterKey)
   const items = loading || state.error ? [] : data?.items || []
-  const updateDraft = (key, value) => setDraft((current) => ({ ...current, [key]: value }))
-  const patch = (values) => { setSelected(null); setShowSummary(false); setFilters((current) => ({ ...current, ...values, page: 1 })) }
-  const navigate = (view, values = {}) => {
-    const search = { ...emptySearch, ...values }
-    setDraft(search); patch({ ...search, view, account: '', ...values })
-  }
-  const selectAccount = (row) => {
-    setAccountName(row.name || row.author_name || row.account_id)
-    navigate('contents', { platform: row.platform, account: row.account_id })
-  }
+  // Once this scope's list has loaded, count independently. Page/sort changes
+  // keep the scope ready, preserving the count instead of restarting it.
+  const scopeKey = JSON.stringify(Object.fromEntries(Object.entries(filters).filter(([k]) => !['page', 'pageSize', 'sort'].includes(k))))
+  const [readyScope, setReadyScope] = useState('')
+  useEffect(() => { if (!loading && !state.error) setReadyScope(scopeKey) }, [loading, state.error, scopeKey])
+  const total = useBrowserTotal(token, filters, readyScope === scopeKey, onUnauthorized)
+  const updateDraft = (key, value) => setDraft((v) => ({ ...v, [key]: value }))
+  const patch = (values) => { setSelected(null); setExportState((v) => ({ ...v, error: null, message: '' })); setFilters((v) => ({ ...v, ...values, page: 1 })) }
+  const navigate = (view, values = {}) => { const search = { ...emptySearch, ...values }; setDraft(search); patch({ ...search, view, account: '', ...values }); setAccountRow(null) }
+  const selectAccount = (row, tab = 'overview') => { navigate('contents', { platform: row.platform, account: row.account_id }); setAccountRow(row); setAccountTab(tab) }
   const selectTag = (tag) => navigate('contents', { tag })
+  const quick = (key, value) => { updateDraft(key, value); patch({ [key]: value }) }
+  const onPage = (page) => { setFilters((v) => ({ ...v, page })); resultsRef.current?.scrollIntoView({ block: 'start' }) }
   const exportData = async () => {
     if (exportState.busy) return
     setExportState({ busy: true, error: null, message: '' })
@@ -116,49 +80,31 @@ export function DataBrowserPage({ token, onUnauthorized }) {
       const result = await adminApi.dataBrowserExport(token, { ...filters, format: exportFormat, maxRows: Number(exportLimit) })
       downloadBrowserFile(result)
       setExportState({ busy: false, error: null, message: `已导出 ${result.exportedRows} 条${result.truncated ? '；仍有更多匹配记录，本文件不是全量导出，请缩小筛选范围。' : '；已覆盖本次筛选的全部匹配记录。'}` })
-    } catch (error) {
-      if (error.status === 401) onUnauthorized?.(error)
-      setExportState({ busy: false, error, message: '' })
-    }
+    } catch (error) { if (error.status === 401) onUnauthorized?.(error); setExportState({ busy: false, error, message: '' }) }
   }
-  return <div className="mih-data-browser">
-    <PageHeading eyebrow="DATA EXPLORER" title="数据浏览中心" description="搜索已入库的账号、内容和热点线索，查看详情并导出。" loading={loading} onRefresh={state.refresh} />
-    <div className="mih-browser-nav" role="group" aria-label="浏览类型">{views.map((view) => <button className={`qp-button ${filters.view === view.value ? 'qp-button--primary' : 'qp-button--ghost'}`} key={view.value} aria-pressed={filters.view === view.value} onClick={() => navigate(view.value)}>{view.label}</button>)}</div>
-    <div className="mih-browser-summary">
-      <MetricCard icon={filters.view === 'accounts' ? Users : filters.view === 'contents' ? FileText : Pulse} label={filters.view === 'accounts' ? '本页账号' : filters.view === 'contents' ? '本页记录' : '本页热点线索'} value={loading || state.error ? '—' : items.length} hint="先加载列表，不等待全库精确计数" />
-      <MetricCard icon={Database} label="数据来源" value="Hub 已入库" hint="浏览和导出不触发外部采集" />
-      <MetricCard icon={Pulse} label="智能分析能力" value="尚未接入" hint="画像、情感、事件关联及趋势预测" />
-    </div>
-    <details className="mih-browser-note"><summary>智能分析包含哪些内容？</summary><p>账号：内容标签画像、相似账号推荐；内容：摘要、主题和情感；热点：事件聚类、关联和趋势预测。这些分析尚未接入本浏览中心，并非有任务排队等待运行。当前已有的是入库字段、来源标签、数量统计及同标签关联候选。</p></details>
-    {filters.account ? <section className="qp-panel mih-browser-account"><p className="qp-kicker">ACCOUNT PROFILE</p><h2>{accountName}</h2><p>{filters.platform} · {filters.account}</p><p>下方可按类型、日期、关键词筛选该账号的内容，并导出。标签汇总单独加载。</p><div className="mih-browser-nav"><button className="qp-button qp-button--secondary" onClick={() => setShowSummary((value) => !value)}>{showSummary ? '收起标签汇总' : '加载账号标签汇总'}</button><button className="qp-button qp-button--ghost" onClick={() => navigate('accounts')}>返回账号大盘</button></div>{showSummary ? <AccountSummary token={token} filters={filters} onUnauthorized={onUnauthorized} onTag={(tag) => navigate('accounts', { tag })} /> : null}</section> : null}
-    {filters.tag ? <section className="qp-panel mih-browser-account"><h2>#{filters.tag} · {filters.view === 'accounts' ? '关联账号候选' : '关联内容'}</h2><p>同标签关联，保留当前列表的类型与时间筛选；不代表已经确认同一事件。</p><button className="qp-button qp-button--ghost" onClick={() => navigate('hotspots')}>返回热点线索</button></section> : null}
-    {data?.evidence?.cacheMaxAgeSeconds > 0 && !loading && !state.error ? <p className="mih-browser-note">统计时间：{formatDate(data.evidence.computedAt)} · 聚合结果最多复用 30 秒。</p> : null}
-    <section className="qp-panel mih-browser-panel">
+  if (selected) return <ContentDetail key={selected.id} row={selected} {...{ token, onUnauthorized }} onClose={() => setSelected(null)} onAccount={selectAccount} onTag={selectTag} onDetail={setSelected} />
+  return <div className={`mih-data-browser ${filters.view === "accounts" ? "is-account-list" : ""}`}>
+    {!filters.account ? <PageHeading eyebrow="DATA EXPLORER" title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。" loading={loading} onRefresh={() => { state.refresh(); total.retry() }} /> : null}
+    <nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key, label]) => <button key={key} aria-pressed={!filters.account && filters.view === key} onClick={() => navigate(key)}>{label}</button>)}<span>Hub 已入库 · 浏览不触发采集</span></nav>
+    {filters.account && accountRow ? <AccountHeader token={token} row={accountRow} onUnauthorized={onUnauthorized} onBack={() => navigate('accounts')} onTag={(tag) => navigate('accounts', { tag })} /> : null}
+    {filters.tag ? <div className="mih-browser-context"><strong>#{filters.tag}</strong><span>{filters.view === 'accounts' ? '同标签账号候选' : '关联内容'}</span><button className="qp-button qp-button--ghost" onClick={() => { updateDraft('tag', ''); patch({ tag: '' }) }}>清除标签</button></div> : null}
+    <details className="qp-panel mih-browser-panel mih-browser-search-panel" key={filters.account ? "account-filters" : "all-filters"} open={!filters.account}><summary className="mih-browser-filter-summary"><Funnel /> 筛选内容与统计范围{filters.from || filters.to ? ` · ${filters.from || "不限"} — ${filters.to || "不限"}` : " · 全部时间"}</summary>
       <form onSubmit={(event) => { event.preventDefault(); patch(draft) }}>
-        <div className="mih-browser-filters">
-          <label className="qp-field">{filters.view === 'accounts' ? '账号名称 / ID' : '标题 / 正文'}<input className="qp-input" value={draft.q} onChange={(event) => updateDraft('q', event.target.value)} placeholder="输入关键词" maxLength={200} /></label>
-          <DropdownField label="平台" value={draft.platform} disabled={Boolean(filters.account)} options={options([...platforms, ...(!platforms.some(([key]) => key === draft.platform) ? [[draft.platform, draft.platform]] : [])])} onChange={(value) => updateDraft('platform', value)} />
-          <DropdownField label="每页条数" value={String(filters.pageSize)} options={options([['10', '10 条'], ['20', '20 条'], ['50', '50 条']])} onChange={(value) => patch({ pageSize: Number(value) })} />
-          <button className="qp-button qp-button--primary" disabled={loading}>搜索</button>
-        </div>
-        <div className="mih-browser-advanced">
-          <DropdownField label="对象类型" value={draft.objectType} options={options(withCustom(objectTypes, draft.objectType))} onChange={(value) => updateDraft('objectType', value)} />
-          <DropdownField label="内容形态" value={draft.contentType} options={options(withCustom(contentTypes, draft.contentType))} onChange={(value) => updateDraft('contentType', value)} />
-          <label className="qp-field">开始日期<input className="qp-input" type="date" value={draft.from} onChange={(event) => updateDraft('from', event.target.value)} /></label>
-          <label className="qp-field">结束日期<input className="qp-input" type="date" min={draft.from || undefined} value={draft.to} onChange={(event) => updateDraft('to', event.target.value)} /></label>
-          <label className="qp-field">来源标签<input className="qp-input" value={draft.tag} maxLength={200} onChange={(event) => updateDraft('tag', event.target.value)} placeholder="精确匹配标签" /></label>
-          <DropdownField label="排序" value={draft.sort} options={options(filters.view === 'accounts' ? [['newest', '账号目录（快速）'], ['activity', '入库内容数量（全量聚合）']] : [['newest', '最新优先'], ['oldest', '最早优先']])} disabled={filters.view === 'hotspots'} onChange={(value) => updateDraft('sort', value)} />
-        </div>
-        <details className="mih-browser-note"><summary>其他平台 / 自定义类型</summary><div className="mih-browser-advanced">{[['platform', '平台标识'], ['objectType', '对象类型标识'], ['contentType', '内容形态标识']].map(([key, label]) => <label key={key} className="qp-field">{label}<input className="qp-input" disabled={key === 'platform' && Boolean(filters.account)} value={draft[key]} maxLength={100} onChange={(event) => updateDraft(key, event.target.value)} /></label>)}</div></details>
-        <div className="mih-browser-nav mih-browser-note"><span>发布时间按北京时间筛选</span>{[1, 7, 30, 90].map((days) => <button key={days} type="button" className="qp-button qp-button--ghost" onClick={() => { const now = new Date(); const to = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }); const from = new Date(now.getTime() - (days - 1) * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }); setDraft((v) => ({ ...v, from, to })) }}>近 {days} 天</button>)}<button type="button" className="qp-button qp-button--ghost" onClick={() => { const values = { ...emptySearch, platform: filters.account ? filters.platform : '' }; setDraft(values); patch(values) }}>重置筛选</button></div>
+        <div className="mih-browser-filters"><label className="qp-field">{filters.view === 'accounts' ? '账号名称 / ID' : '标题 / 正文'}<div className="mih-browser-search-input"><MagnifyingGlass /><input className="qp-input" value={draft.q} onChange={(event) => updateDraft('q', event.target.value)} placeholder={filters.view === 'accounts' ? '搜索账号名称或平台 ID' : '搜索标题、正文中的关键词'} maxLength={200} /></div></label><DropdownField label="平台" value={draft.platform} disabled={Boolean(filters.account)} options={options(platforms, draft.platform)} onChange={(value) => updateDraft('platform', value)} /><DropdownField label="对象类型" value={draft.objectType} options={options(objectTypes, draft.objectType)} onChange={(value) => updateDraft('objectType', value)} /><button className="qp-button qp-button--primary" disabled={loading}><MagnifyingGlass /> 搜索</button></div>
+        <div className="mih-browser-filter-chips" role="group" aria-label="内容形态"><span>内容形态</span>{options(contentTypes, filters.contentType).map(({ value, label }) => <button type="button" key={value} aria-pressed={filters.contentType === value} onClick={() => quick('contentType', value)}>{label}</button>)}</div>
+        <div className="mih-browser-filter-chips" role="group" aria-label="发布时间"><span>发布时间</span><button type="button" aria-pressed={!filters.from && !filters.to} onClick={() => { setDraft((v) => ({ ...v, from: '', to: '' })); patch({ from: '', to: '' }) }}>全部时间</button>{[1, 7, 30, 90].map((days) => <button key={days} type="button" onClick={() => { const now = new Date(); const to = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }); const from = new Date(now.getTime() - (days - 1) * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }); setDraft((v) => ({ ...v, from, to })); patch({ from, to }) }}>近 {days} 天</button>)}{filters.from || filters.to ? <small>{filters.from || '不限'} — {filters.to || '不限'}</small> : null}</div>
+        <details className="mih-browser-advanced-wrap"><summary><Funnel /> 更多筛选：日期、标签与自定义类型</summary><div className="mih-browser-advanced"><label className="qp-field">开始日期<input className="qp-input" type="date" value={draft.from} onChange={(event) => updateDraft('from', event.target.value)} /></label><label className="qp-field">结束日期<input className="qp-input" type="date" min={draft.from || undefined} value={draft.to} onChange={(event) => updateDraft('to', event.target.value)} /></label><label className="qp-field">来源标签<input className="qp-input" value={draft.tag} maxLength={200} onChange={(event) => updateDraft('tag', event.target.value)} placeholder="精确匹配来源标签" /></label>{[['platform', '平台标识'], ['objectType', '对象类型标识'], ['contentType', '内容形态标识']].map(([key, label]) => <label key={key} className="qp-field">{label}<input className="qp-input" disabled={key === 'platform' && Boolean(filters.account)} value={draft[key]} maxLength={100} onChange={(event) => updateDraft(key, event.target.value)} /></label>)}</div><p className="mih-browser-note">日期按北京时间筛选发布时间；无发布时间的记录只出现在全部时间中。</p><button className="qp-button qp-button--secondary">应用筛选</button></details>
+        <div className="mih-browser-applied"><span>已应用：{[filters.q && `关键词 ${filters.q}`, filters.platform && platformName(filters.platform), filters.objectType && (objectTypes.find(([key]) => key === filters.objectType)?.[1] || filters.objectType), filters.contentType && (contentTypes.find(([key]) => key === filters.contentType)?.[1] || filters.contentType), filters.tag && `#${filters.tag}`, (filters.from || filters.to) && `${filters.from || '不限'} 至 ${filters.to || '不限'}`].filter(Boolean).join(' · ') || '全部入库范围'}</span><button type="button" className="qp-button qp-button--ghost" onClick={() => { const values = { ...emptySearch, platform: filters.account ? filters.platform : '' }; setDraft(values); patch(values) }}>重置</button></div>
       </form>
-      <div className="mih-browser-export"><DropdownField label="导出格式" value={exportFormat} options={options([['csv', 'CSV（Excel）'], ['json', 'JSON（完整字段）']])} onChange={setExportFormat} /><DropdownField label="导出范围" value={exportLimit} options={options([['200', '前 200 条'], ['500', '前 500 条']])} onChange={setExportLimit} /><button className="qp-button qp-button--secondary" disabled={exportState.busy || loading || Boolean(state.error)} onClick={exportData}>{exportState.busy ? '正在生成文件…' : '导出已应用筛选'}</button><span className="mih-browser-note">从筛选结果第一条开始；内容导出包含完整正文。</span></div>
-      {exportState.error ? <ErrorState error={exportState.error} /> : null}{exportState.message ? <p role="status">{exportState.message}</p> : null}
-      {filters.view === 'hotspots' ? <p className="mih-browser-note">近 7 天至少出现 2 次的来源标签，按最近 24 小时记录数排序。日期筛选与该窗口取交集。属于需关注线索，尚未进行事件聚类或预测。</p> : null}
-      {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : loading ? <LoadingState label="正在读取入库数据" /> : !items.length ? <EmptyState title="暂无匹配的入库数据" description="调整关键词、类型、平台或时间范围。" /> : <div className="mih-table-wrap"><table className="mih-table" aria-label="数据浏览列表"><thead><tr>{(filters.view === 'accounts' ? ['账号', '平台', '匹配内容 / 总记录', '最近采集', '操作'] : filters.view === 'hotspots' ? ['标签线索', '7 天记录', '24 小时记录', '涉及平台数', '最近发布', '操作'] : ['内容', '平台 / 类型', '发布账号', '发布时间', '来源标签', '操作']).map((label) => <th key={label}>{label}</th>)}</tr></thead><tbody>{items.map((row) => filters.view === 'accounts' ? <tr key={`${row.platform}:${row.account_id}`}><td><strong>{row.name || '未采集名称'}</strong><small className="mih-browser-sub">{row.account_id}</small></td><td>{row.platform}</td><td>{row.contents} / {row.records}</td><td>{formatDate(row.updated_at)}</td><td><button className="qp-button qp-button--ghost" onClick={() => selectAccount(row)}>账号详情 →</button></td></tr> : filters.view === 'hotspots' ? <tr key={row.tag}><td><strong>#{row.tag}</strong></td><td>{row.records}</td><td>{row.recent}</td><td>{row.platforms}</td><td>{formatDate(row.updated_at)}</td><td><button className="qp-button qp-button--ghost" onClick={() => selectTag(row.tag)}>查看关联内容 →</button></td></tr> : <tr key={row.id}><td><strong>{row.title || row.external_id || '无标题'}</strong><small className="mih-browser-sub">{row.body?.slice(0, 140) || '暂无正文'}</small></td><td>{row.platform}<small className="mih-browser-sub">{row.object_type} · {row.content_type || '未分类'}</small></td><td><button className="qp-button qp-button--ghost" disabled={!row.account_id} onClick={() => selectAccount(row)}>{row.author_name || row.account_id || '身份缺失'}</button></td><td>{formatDate(row.event_time)}</td><td><Tags tags={asTags(row)} onTag={selectTag} /></td><td><button className="qp-button qp-button--ghost" onClick={() => setSelected(row)}>内容详情 →</button></td></tr>)}</tbody></table></div>}
-      <div className="mih-browser-pagination"><button className="qp-button qp-button--secondary" disabled={loading || filters.page <= 1} onClick={() => setFilters((v) => ({ ...v, page: v.page - 1 }))}>上一页</button><span>第 {filters.page} 页 · 每页 {filters.pageSize} 条</span><button className="qp-button qp-button--secondary" disabled={loading || Boolean(state.error) || !data?.hasMore || filters.page >= 500} onClick={() => setFilters((v) => ({ ...v, page: v.page + 1 }))}>下一页</button></div>
-      <p className="mih-browser-note">当前列表不计算全库总数；“下一页”依据额外读取一条记录判断。账号默认按平台及稳定 ID 排序，数量排名需显式选择。最多浏览 500 页；翻页是实时读取，导出为单次读取快照。缺少发布时间时，默认列表以采集/入库时间排序。</p>
+    </details>
+    {filters.account ? <div className="mih-browser-tabs" role="group" aria-label="账号详情分区">{[['overview', '数据概览与画像'], ['contents', '内容列表'], ['related', '关联账号']].map(([key, label]) => <button key={key} aria-pressed={accountTab === key} onClick={() => setAccountTab(key)}>{label}</button>)}</div> : null}
+    <section ref={resultsRef} className={`qp-panel mih-browser-panel mih-browser-results ${filters.account && accountTab !== "contents" ? "is-overview" : ""}`}>
+      <div className="mih-browser-results-toolbar"><div className="mih-browser-result-count" aria-live="polite"><strong>{total.total == null ? (total.loading ? '正在统计总量…' : '总量暂不可用') : `共 ${formatNumber(total.total)} ${filters.view === 'accounts' ? '个账号' : filters.view === 'hotspots' ? '个热点线索' : '条记录'}`}</strong><small>{!filters.account || accountTab === "contents" ? (total.total === 0 ? "暂无分页 · " : `第 ${filters.page} 页${total.total == null ? "" : ` / 共 ${Math.ceil(total.total / filters.pageSize)} 页`} · `) : ""}{total.error ? <button className="qp-button qp-button--ghost" onClick={total.retry}><ArrowClockwise /> 重试总量统计</button> : total.computedAt ? `统计于 ${formatDate(total.computedAt)} · 最多缓存 2 分钟` : '列表先呈现，总量独立统计'}</small></div>{!filters.account || accountTab === 'contents' ? <><DropdownField label="排序" value={filters.sort} options={options(filters.view === 'accounts' ? [['newest', '账号目录'], ['activity', '匹配记录数']] : filters.view === 'hotspots' ? [['newest', '24 小时记录数']] : [['newest', '最新优先'], ['oldest', '最早优先']])} disabled={filters.view === 'hotspots'} onChange={(value) => { updateDraft('sort', value); patch({ sort: value }) }} /><DropdownField label="每页条数" value={String(filters.pageSize)} options={options([['10', '10 条'], ['20', '20 条'], ['50', '50 条']])} onChange={(value) => patch({ pageSize: Number(value) })} /></> : null}<button className="qp-button qp-button--secondary" aria-expanded={exportOpen} onClick={() => setExportOpen((v) => !v)}><DownloadSimple /> 导出</button></div>
+      {exportOpen ? <div className="mih-browser-export"><DropdownField label="导出格式" value={exportFormat} options={options([['csv', 'CSV（Excel）'], ['json', 'JSON（完整字段）']])} onChange={setExportFormat} /><DropdownField label="导出范围" value={exportLimit} options={options([['200', '前 200 条'], ['500', '前 500 条']])} onChange={setExportLimit} /><button className="qp-button qp-button--primary" disabled={exportState.busy || loading || Boolean(state.error)} onClick={exportData}>{exportState.busy ? '正在生成文件…' : '导出已应用筛选'}</button><small>从筛选结果第一条开始，内容包含完整正文。</small></div> : null}
+      {exportState.error ? <ErrorState error={exportState.error} /> : null}{exportState.message ? <p role="status" className="mih-browser-note">{exportState.message}</p> : null}
+      {filters.account && accountTab !== 'contents' ? null : <>{filters.view === 'hotspots' ? <p className="mih-browser-note">近 7 天至少出现 2 次的来源标签，按最近 24 小时记录数排序；日期筛选与此窗口取交集。属于待关注线索，尚未进行事件聚类或预测。</p> : null}{state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : loading ? <LoadingState label="正在读取入库数据" /> : !items.length ? <EmptyState title="暂无匹配的入库数据" description="调整关键词、类型、平台或时间范围。" /> : filters.view === 'accounts' ? <AccountCards items={items} onAccount={selectAccount} onTag={(tag) => navigate('accounts', { tag })} /> : filters.view === 'contents' ? <ContentTable items={items} onDetail={setSelected} onAccount={selectAccount} onTag={selectTag} /> : <div className="mih-table-wrap"><table className="mih-table"><thead><tr>{['来源标签', '7 天记录', '24 小时记录', '涉及平台', '最近发布', ''].map((label, i) => <th key={i}>{label}</th>)}</tr></thead><tbody>{items.map((row) => <tr key={row.tag}><td><strong>#{row.tag}</strong></td><td>{formatNumber(row.records)}</td><td>{formatNumber(row.recent)}</td><td>{formatNumber(row.platforms)}</td><td>{formatDate(row.updated_at)}</td><td><button className="qp-button qp-button--ghost" onClick={() => selectTag(row.tag)}>查看关联内容 →</button></td></tr>)}</tbody></table></div>}<Pagination {...{ filters, data, total, loading, onPage }} /></>}
     </section>
-    {selected ? <ContentDetail key={selected.id} row={selected} token={token} onUnauthorized={onUnauthorized} onClose={() => setSelected(null)} onAccount={selectAccount} onTag={selectTag} /> : null}
+    {filters.account && accountTab !== 'contents' ? <AccountAnalysis {...{ token, filters, onUnauthorized }} related={accountTab === 'related'} onTag={(tag) => navigate('accounts', { tag })} /> : null}
+    <details className="mih-browser-footnote"><summary>数据与分析说明</summary><p>统计当前未删除的记录。账号以平台和稳定 ID 区分，名称相同不合并。列表实时读取，精确总数为单独统计时的结果；入库持续变化时，页数可能变化。最多直接浏览 500 页，可进一步筛选或导出。</p><p>账号卡片的标签汇总最近 20 条匹配内容；详情画像按筛选范围内全部内容的来源标签统计。Agent 主题推断、情感、受众画像、相似度和事件预测尚未接入本浏览中心，不表示已有任务排队。缺失指标显示 —。</p></details>
   </div>
 }

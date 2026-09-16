@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { AppError } from '../core/errors.mjs'
+import { accountSummarySql } from './browser-insights.mjs'
 
 const querySchema = z.object({
   view: z.enum(['accounts', 'contents', 'hotspots']).default('contents'),
@@ -32,7 +33,7 @@ const accountId = `CASE WHEN r.object_type IN ('user','account','profile') THEN 
 const accountName = `CASE WHEN r.object_type IN ('user','account','profile') THEN COALESCE(NULLIF(r.title,''), r.author_name) ELSE r.author_name END`
 const tags = `CASE WHEN jsonb_typeof(r.stable_fields->'tags') = 'array' THEN r.stable_fields->'tags' ELSE '[]'::jsonb END`
 
-export function browserStatement(filters, { fullContent = false } = {}) {
+export function browserStatement(filters, { fullContent = false, statistics = false } = {}) {
   const values = []
   const bind = (value) => { values.push(value); return `$${values.length}` }
   const conditions = ['r.deleted_at IS NULL']
@@ -50,18 +51,21 @@ export function browserStatement(filters, { fullContent = false } = {}) {
       ? `(${accountName} ILIKE ${p} OR ${accountId} ILIKE ${p})`
       : `(r.title ILIKE ${p} OR r.body ILIKE ${p})`)
   }
+  if (statistics) {
+    if (filters.view === 'accounts') conditions.push(`${accountId} IS NOT NULL`)
+    const scope = conditions.join(' AND ')
+    const rows = filters.view === 'accounts'
+      ? `SELECT r.platform, ${accountId} AS account_id FROM core.canonical_records r WHERE ${scope} GROUP BY r.platform, ${accountId}`
+      : filters.view === 'hotspots'
+        ? `SELECT tag.value FROM core.canonical_records r CROSS JOIN LATERAL jsonb_array_elements(${tags}) tag(value)
+          WHERE ${scope} AND r.event_time >= now() - interval '7 days' AND r.event_time <= now()
+          AND jsonb_typeof(tag.value) = 'string' AND length(tag.value #>> '{}') BETWEEN 1 AND 200
+          GROUP BY tag.value HAVING count(DISTINCT r.id) >= 2`
+        : `SELECT r.id FROM core.canonical_records r WHERE ${scope}`
+    return { text: `WITH matches AS NOT MATERIALIZED (${rows}) SELECT count(*)::bigint AS total FROM matches`, values }
+  }
   if (filters.summary === 'true' && filters.account && filters.view === 'contents') {
-    return { text: `WITH matches AS MATERIALIZED (
-      SELECT r.id, r.event_time, ${tags} AS tags FROM core.canonical_records r WHERE ${conditions.join(' AND ')}
-    ) SELECT NULL::int AS total, '[]'::jsonb AS items, jsonb_build_object(
-      'firstPublishedAt', min(event_time), 'lastPublishedAt', max(event_time), 'datedRecords', count(event_time),
-      'tags', (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM (
-        SELECT t.value #>> '{}' AS tag, count(DISTINCT m.id)::int AS records
-        FROM matches m CROSS JOIN LATERAL jsonb_array_elements(m.tags) t(value)
-        WHERE jsonb_typeof(t.value) = 'string' AND length(t.value #>> '{}') BETWEEN 1 AND 200
-        GROUP BY t.value ORDER BY records DESC, tag LIMIT 20
-      ) e)
-    ) AS account_summary FROM matches`, values }
+    return { text: accountSummarySql(conditions.join(' AND '), tags), values }
   }
   let statement
   if (filters.view === 'accounts') {
@@ -78,12 +82,34 @@ export function browserStatement(filters, { fullContent = false } = {}) {
     ), selected AS MATERIALIZED (
       SELECT * FROM accounts ORDER BY ${sort} LIMIT ${limit} OFFSET ${offset}
     ), page AS (
-      SELECT a.*, n.name FROM selected a LEFT JOIN LATERAL (
-        SELECT ${accountName} AS name FROM core.canonical_records r
+      SELECT a.*, n.name, n.observation, p.profile, s.sample FROM selected a LEFT JOIN LATERAL (
+        SELECT ${accountName} AS name, jsonb_build_object('tags', ${tags}, 'author', r.stable_fields->'author', 'collectedAt', r.collected_at) AS observation FROM core.canonical_records r
         WHERE ${conditions.join(' AND ')} AND r.platform = a.platform AND ${accountId} = a.account_id
           AND NULLIF(${accountName}, '') IS NOT NULL
         ORDER BY r.collected_at DESC NULLS LAST, r.id DESC LIMIT 1
-      ) n ON true
+       ) n ON true LEFT JOIN LATERAL (
+        SELECT jsonb_build_object('fields', r.stable_fields->'profile', 'metrics', r.stable_fields->'metrics',
+          'collectedAt', r.collected_at, 'id', r.id) AS profile FROM core.canonical_records r
+        WHERE r.deleted_at IS NULL AND r.platform = a.platform AND ${accountId} = a.account_id
+          AND r.object_type IN ('user','account','profile')
+        ORDER BY r.collected_at DESC NULLS LAST, r.id DESC LIMIT 1
+      ) p ON true LEFT JOIN LATERAL (
+        WITH recent AS MATERIALIZED (
+          SELECT ${tags} AS tags, r.content_type, r.object_type FROM core.canonical_records r
+          WHERE ${conditions.join(' AND ')} AND r.platform = a.platform AND ${accountId} = a.account_id
+            AND r.object_type NOT IN ('user','account','profile')
+          ORDER BY r.collected_at DESC NULLS LAST, r.id DESC LIMIT 20
+        ) SELECT jsonb_build_object('records', count(*), 'limit', 20,
+          'tags', (SELECT COALESCE(jsonb_agg(t.tag), '[]'::jsonb) FROM (
+            SELECT DISTINCT tag.value #>> '{}' AS tag FROM recent
+            CROSS JOIN LATERAL jsonb_array_elements(recent.tags) tag(value)
+            WHERE jsonb_typeof(tag.value) = 'string' AND length(tag.value #>> '{}') BETWEEN 1 AND 200
+            ORDER BY tag LIMIT 5
+          ) t), 'types', (SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+            SELECT coalesce(content_type, object_type) AS type, count(*) AS records
+            FROM recent GROUP BY coalesce(content_type, object_type) ORDER BY records DESC, type LIMIT 3
+          ) t)) AS sample FROM recent
+      ) s ON true
     ) SELECT NULL::int AS total, COALESCE(jsonb_agg(page ORDER BY ${sort}), '[]'::jsonb) AS items FROM page`, values }
   } else if (filters.view === 'hotspots') {
     conditions.push(`r.event_time >= now() - interval '7 days' AND r.event_time <= now()`)
@@ -106,7 +132,7 @@ export function browserStatement(filters, { fullContent = false } = {}) {
       WHERE ${conditions.join(' AND ')} ORDER BY ${time} ${direction}, r.id ${direction}
       LIMIT ${limit} OFFSET ${offset}
     ), page AS (
-      SELECT ${filters.id || fullContent ? 'r.*' : "r.id, r.platform, r.object_type, r.content_type, r.external_id, r.title, left(r.body, 200) AS body, r.author_external_id, r.author_name, r.event_time, r.collected_at, jsonb_build_object('tags', r.stable_fields->'tags', 'metrics', r.stable_fields->'metrics') AS stable_fields, r.current_revision, r.dataset_id"},
+      SELECT ${filters.id || fullContent ? 'r.*' : "r.id, r.platform, r.object_type, r.content_type, r.external_id, r.title, left(r.body, 200) AS body, r.author_external_id, r.author_name, r.event_time, r.collected_at, jsonb_build_object('tags', r.stable_fields->'tags', 'metrics', r.stable_fields->'metrics', 'author', r.stable_fields->'author', 'media', jsonb_build_object('coverUrl', r.stable_fields#>'{media,coverUrl}', 'images', jsonb_build_array(r.stable_fields#>'{media,images,0}'))) AS stable_fields, r.current_revision, r.dataset_id"},
         ${accountId} AS account_id, p.sort_time
       FROM page_ids p JOIN core.canonical_records r ON r.id = p.id
     ) SELECT NULL::int AS total, COALESCE(jsonb_agg(page ORDER BY sort_time ${direction}, id ${direction}), '[]'::jsonb) AS items FROM page`, values }
@@ -130,7 +156,7 @@ const MAX_CACHE_ENTRIES = 32
 const MAX_CACHE_BYTES = 2 * 1024 * 1024
 
 export async function browseData(store, filters) {
-  if (!['accounts', 'hotspots'].includes(filters.view)) return executeBrowseData(store, filters)
+  if (!['accounts', 'hotspots'].includes(filters.view) && filters.summary !== 'true') return executeBrowseData(store, filters)
   let cache = aggregateCaches.get(store)
   if (!cache) { cache = new Map(); aggregateCaches.set(store, cache) }
   const key = JSON.stringify(Object.entries(filters).sort(([a], [b]) => a.localeCompare(b)))
@@ -157,16 +183,17 @@ async function executeBrowseData(store, filters, options = {}) {
   if (!store.pool?.connect) {
     throw new AppError(503, 'data_browser_unavailable', 'Data browser requires the PostgreSQL canonical store')
   }
-  const count = activeReads.get(store) || 0
-  if (count >= 2) throw new AppError(429, 'data_browser_busy', 'Data browser is busy; retry after the current query completes')
-  activeReads.set(store, count + 1)
+  const admission = options.statistics ? activeStatistics : activeReads
+  const count = admission.get(store) || 0
+  if (count >= (options.statistics ? 1 : 2)) throw new AppError(429, 'data_browser_busy', 'Data browser is busy; retry after the current query completes')
+  admission.set(store, count + 1)
   let connection
   let destroy = false
   try {
     connection = await store.pool.connect()
     // No mutations, upstream calls, LLM or ES dependency. Bound expensive grouping.
     await connection.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-    const aggregate = ['accounts', 'hotspots'].includes(filters.view) || filters.summary === 'true' || options.fullContent
+    const aggregate = ['accounts', 'hotspots'].includes(filters.view) || filters.summary === 'true' || options.fullContent || options.statistics
     // Grouping the whole corpus has a separate bounded budget. Ordinary reads
     // and every other Hub endpoint retain their existing timeout policy.
     await connection.query(aggregate
@@ -175,6 +202,7 @@ async function executeBrowseData(store, filters, options = {}) {
     const query = browserStatement(filters, options)
     const { rows } = await connection.query(query.text, query.values)
     await connection.query('COMMIT')
+    if (options.statistics) return { total: Number(rows[0]?.total || 0), totalStatus: 'exact', computedAt: new Date().toISOString(), cacheMaxAgeSeconds: 120 }
     const result = rows[0] || { total: null, items: [] }
     const hasMore = result.items.length > filters.pageSize
     result.items = result.items.slice(0, filters.pageSize)
@@ -182,13 +210,13 @@ async function executeBrowseData(store, filters, options = {}) {
       hasMore, totalStatus: result.total == null ? 'not_computed' : 'exact',
       evidence: { source: 'postgres-canonical', analysis: 'not_integrated',
         hotspotMethod: 'source-tag-cooccurrence-v1', hotspotWindowDays: 7,
-        snapshot: 'per-request', computedAt: new Date().toISOString(), cacheMaxAgeSeconds: ['accounts', 'hotspots'].includes(filters.view) && !options.fullContent ? 30 : 0, identity: 'platform-and-external-id' } }
+        snapshot: 'per-request', computedAt: new Date().toISOString(), cacheMaxAgeSeconds: (['accounts', 'hotspots'].includes(filters.view) || filters.summary === 'true') && !options.fullContent ? 30 : 0, identity: 'platform-and-external-id' } }
   } catch (error) {
     if (connection) { try { await connection.query('ROLLBACK') } catch { destroy = true } }
     if (error.code === '57014') throw new AppError(503, 'data_browser_timeout', '数据聚合超时，请稍后重试或按平台缩小范围；本次未返回不完整统计')
     throw error
   } finally {
-    activeReads.set(store, (activeReads.get(store) || 1) - 1)
+    admission.set(store, (admission.get(store) || 1) - 1)
     connection?.release(destroy)
   }
 }
@@ -198,4 +226,27 @@ export async function exportBrowserData(store, filters, maxRows = 200) {
   // One read-only transaction produces one consistent bounded export. Never
   // concatenate changing offset pages and call that a complete snapshot.
   return executeBrowseData(store, { ...filters, page: 1, pageSize: maxRows, summary: 'false' }, { fullContent: true })
+}
+
+// Exact counts are a separate, low-concurrency request. They never hold a list
+// admission slot or block the first page. Filter identity excludes presentation.
+const activeStatistics = new WeakMap()
+const statisticsCaches = new WeakMap()
+export async function browserStatistics(store, filters) {
+  let cache = statisticsCaches.get(store)
+  if (!cache) { cache = new Map(); statisticsCaches.set(store, cache) }
+  const { page, pageSize, sort, summary, ...scope } = filters
+  const key = JSON.stringify(Object.entries(scope).sort(([a], [b]) => a.localeCompare(b)))
+  const cached = cache.get(key)
+  if (cached?.pending) return { ...await cached.pending }
+  if (cached?.expiresAt > Date.now()) return { ...cached.result }
+  cache.delete(key)
+  for (const [k, entry] of cache) if (!entry.pending && (entry.expiresAt <= Date.now() || cache.size >= 32)) cache.delete(k)
+  const pending = executeBrowseData(store, filters, { statistics: true })
+  cache.set(key, { pending })
+  try {
+    const result = await pending
+    cache.set(key, { result, expiresAt: Date.now() + 120_000 })
+    return { ...result }
+  } catch (error) { cache.delete(key); throw error }
 }

@@ -475,3 +475,77 @@ final result: passed
 4. Repeated the core flow at `390 x 844`; responsive navigation, tabs, form, task cards, and report content remained usable.
 
 final result: passed
+
+---
+
+# Data Browser Design QA — 2026-09-16
+
+## Target and scope
+
+User-selected Feigua images 2–6 define the page anatomy. The user requested a similar Hub center based on existing data, so Hub branding, navigation, Neon Void light/dark tokens and honest data coverage are retained. Feigua sales estimates, celebrity portraits, audience demographics and uncollected metrics are intentionally not copied.
+
+Source visual truth (all 1280 × 700):
+
+- Account cards: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-ca21b864-8646-4770-bc27-5ccc29fee336.png`
+- Account overview: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-99d809b4-786e-4d3e-b7ab-8292331c5cd4.png`
+- Account contents: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-b64df594-726e-4fb9-82b3-bf4b50bc0397.png`
+- Content library: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-eb923e9e-2adf-432f-a309-c768e64885b6.png`
+- Content details: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-b578fa76-7ff5-4bf9-bf64-c65853b2e985.png`
+
+Browser-rendered implementation: `http://127.0.0.1:18281/#/data-browser`, Codex in-app browser. Temporary local SQL fixture: 1,247 canonical records, 43 accounts; visible “本地验证数据 · 非线上数据” banner. No product fixture switch, real upstream calls or production data.
+
+Desktop evidence, CSS viewport and saved pixels 1280 × 700 at DPR 1:
+
+- `/tmp/hub-browser-v3-accounts.png`
+- `/tmp/hub-browser-v3-profile.png`
+- `/tmp/hub-browser-v3-account-contents.png`
+- `/tmp/hub-browser-v3-contents.png`
+- `/tmp/hub-browser-v3-detail.png`
+- `/tmp/hub-browser-v3-accounts-dark.png`
+- `/tmp/hub-browser-v3-detail-dark.png`
+
+Responsive evidence, CSS viewport and pixels 390 × 844:
+
+- `/tmp/hub-browser-v3-mobile-detail.png`
+- `/tmp/hub-browser-v3-mobile-search.png`
+
+Full-view comparisons used the source and corresponding rendered screenshot together in the same image-view tool input for account cards, account overview, account contents, content library and detail. The initial viewport-override capture was stale/cropped; it was discarded and recaptured after the browser settled. No image compositing or synthetic page screenshot was substituted.
+
+## Findings and iterations
+
+1. [P2, fixed] Account overview initially placed the long search form before useful metrics. Collapsed account-scope filters, moved followers/content/record totals into the profile header, and made its separate count/export strip compact. The corrected profile screenshot shows identity and three real metrics first, then the overview/content/related tabs and field-coverage metrics.
+2. [P2, fixed] Large generic page heading and expanded filters pushed content rows below the initial desktop viewport. Hid redundant desktop eyebrow/description, compacted search spacing, and retained only the account search row plus expandable advanced fields on the account directory. Final account-card top/bottom DOM bounds are 456/695 px at 1280 × 700; content table starts at 540 px. All search controls remain reachable. Mobile retains stacked controls.
+3. [P2, fixed] Navigating from a scrolled result could leave the new profile/detail offscreen. Added scoped scroll-to-main on view/account/detail navigation and scroll-to-results on pagination, with sticky-header clearance. Back control verified at y=84, below the 58px header.
+4. [P2, fixed] Five detail metrics initially wrapped as four plus one. Desktop now uses a five-column group; mobile uses two columns. Final detail evidence shows balanced cards.
+
+No actionable P0/P1/P2 issues remain within the implemented scope.
+
+## Required fidelity surfaces
+
+- **Typography:** shared Hub font stack, Chinese fallback and body sizes preserved. Account title, source metadata, numeric totals and section headings have distinct hierarchy. Long titles wrap/clamp in lists and remain complete in details; source IDs wrap. No Feigua font or branding is assumed available.
+- **Spacing/layout:** horizontal identity/metric/action cards, grouped profile metrics, tabbed account/content workspaces, compact faceted filters, thumbnail/author/metric table and detail author sidebar follow reference anatomy. Wider Hub navigation and multi-platform controls are intentional differences. Dense account cards retain timestamp/provenance captions that Feigua does not have.
+- **Colors/tokens:** inherited Hub cyan/teal accent and shared light/dark surfaces; chips/tabs/buttons use theme tokens. Charts update on theme change and honor reduced motion. No copied Feigua green brand assets.
+- **Assets:** real stored media URLs render through a guarded HTTP(S) presentation helper. The fixture uses an existing repository supermarket image to test thumbnail/media sizing. Missing avatars are explicitly represented by the existing Phosphor user icon, with accessible missing-data text; this is a real product empty state, not an invented portrait. Production contains no demo avatar or generated business imagery.
+- **Copy/data:** totals, current/total pages, snapshot time and partial exports are explicit. Source-tag sample counts differ from full-scope profile distributions. Zero remains zero; missing metrics remain “—”; metric sums disclose coverage. “正文预览” is an excerpt, not an AI summary. Agent portraits, audience, emotional judgment and predictive signals are explicitly unavailable.
+
+Focused checks used readable card/metric/table regions in the paired 1280px captures plus browser DOM geometry: first account card bounds, profile fact values, five detail metrics, pagination bounds and 390px document width. Additional crop images were unnecessary at this scale.
+
+## Interaction checks
+
+- 43 accounts, 20/page → 3 pages; 10/page → 5 pages; jump to page 5 returns 3 cards and disables next.
+- Total request stays independent of list loading; total and current/total pages appear at the result header and bottom pager.
+- Account profile → full-scope label distribution/metric coverage/monthly distribution → source-label related-account lookup → account contents.
+- Content library: 1,247 records → video filter 301 → keyword “逛超市” 60 → CSV UI reports 60 exported and full filter coverage.
+- Empty keyword search returns 0, no-results state and no fabricated page count; reset restores 1,247.
+- Detail → body/media loading → full fields → 5 same-tag related records → individual JSON export → return retains search.
+- Three hotspot source tags → related content list.
+- Light/dark switching and 390px detail/search layouts: document scrollWidth equals viewport width; wide result table scrolls inside its wrapper.
+- Final browser error log: empty. An earlier invalid detail ID came from a non-RFC UUID in the temporary fixture, corrected to RFC UUIDs and retested; product UUID validation remains unchanged.
+
+## Remaining limits
+
+No production deployment, production query plan/p95, online MX-H2I sign-in or live paid-provider test was performed. The SQL fixture and local 500k-record benchmark validate behavior/query shape, not online capacity. Browser captures can appear softer than the original screenshots due to in-app raster rendering; DOM text and controls were verified directly.
+
+Implementation checklist: completed local build; 104 targeted tests; typecheck; real embedded PostgreSQL counts/coverage/index DDL checks; browser interactions and image comparisons; responsive/console checks. Preserve existing Source Catalog QA above.
+
+final result: passed

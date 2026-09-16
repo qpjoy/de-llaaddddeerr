@@ -1,5 +1,5 @@
 import { formatBrowserExport } from './data/browser-export.mjs'
-import { browseData, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
+import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -1596,6 +1596,12 @@ export function createApp({
           data: safe ? runtimeVisibleProjection(runtime) : runtime,
           requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-browser/statistics') {
+        requireSourceAdmin(principal)
+        const data = await browserStatistics(store, parseBrowserQuery(searchParams))
+        sendJson(response, 200, { data: dataCenterVisibleProjection(data), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-browser/export') {
