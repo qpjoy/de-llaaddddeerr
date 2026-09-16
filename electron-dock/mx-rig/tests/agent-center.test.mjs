@@ -44,7 +44,7 @@ test('the tool catalogue reports effect, surface and whether Internal allows it'
   const { api } = await fixture(t)
   const { status, body } = await api('/api/rig/v1/tools')
   assert.equal(status, 200)
-  assert.equal(body.tools.length, 14)
+  assert.equal(body.tools.length, 15)
   const run = body.tools.find((tool) => tool.name === 'tests_run')
   assert.equal(run.effect, 'write')
   assert.equal(run.surface, 'internal')
@@ -53,7 +53,13 @@ test('the tool catalogue reports effect, surface and whether Internal allows it'
   assert.equal(click.surface, 'desktop')
   // Browser tools ship switched off; an allow-list that starts open is not one.
   assert.equal(click.allowed, false)
-  assert.ok(body.groups.test && body.groups.browser)
+  assert.ok(body.groups.test && body.groups.browser && body.groups.finding)
+  // The structured conclusion is a tool like any other: allow-listed, and
+  // read-effect because it only writes onto the mission it is recorded on.
+  const finding = body.tools.find((tool) => tool.name === 'finding_submit')
+  assert.equal(finding.effect, 'read')
+  assert.equal(finding.group, 'finding')
+  assert.equal(finding.allowed, true)
 })
 
 test('the orchestration view is served the compiled mission graph', async (t) => {

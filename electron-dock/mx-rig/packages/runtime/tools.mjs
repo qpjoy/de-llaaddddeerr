@@ -1,4 +1,5 @@
 import { RigError, validateArgs } from '../contracts/index.mjs'
+import { CONFIDENCE_KEYS, VERDICT_KEYS, normalizeFinding } from './finding.mjs'
 
 const schema = (properties, required = Object.keys(properties)) => ({
   type: 'object',
@@ -129,6 +130,45 @@ export const DEFINITIONS = [
     parameters: schema({ role: 'button 或 link', name: '精确的可访问名称' })
   },
   {
+    name: 'finding_submit',
+    title: '提交结构化结论',
+    group: 'finding',
+    description:
+      '提交一次结构化判断：结论类型、置信度、一句话摘要、引用的 run/用例 ID 与下一步。这是你自己的判断，不改变任何测试结论；证据不足时用 inconclusive。',
+    effect: 'read',
+    // Read effect on purpose: it records a claim on this mission and touches
+    // nothing outside it, so it needs no separate approval. What it does not
+    // get is trust — the references are checked against this mission's own
+    // tool results, and the UI labels the whole card as the Agent's judgement.
+    parameters: {
+      type: 'object',
+      properties: {
+        verdict: {
+          type: 'string',
+          description:
+            '结论类型：product-defect（产品缺陷）/ environment-blocked（环境受阻）/ case-issue（用例问题）/ flaky（不稳定）/ inconclusive（证据不足）',
+          enum: VERDICT_KEYS,
+          maxLength: 40
+        },
+        confidence: {
+          type: 'string',
+          description: '置信度：high / medium / low',
+          enum: CONFIDENCE_KEYS,
+          maxLength: 10
+        },
+        summary: { type: 'string', description: '一句话结论，不要复述过程', maxLength: 400 },
+        evidence: {
+          type: 'string',
+          description: '支持这个结论的具体证据，务必写出你真的读到过的 run ID / 用例 ID',
+          maxLength: 400
+        },
+        nextStep: { type: 'string', description: '一条可执行的下一步', maxLength: 400 }
+      },
+      required: ['verdict', 'confidence', 'summary', 'evidence'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'browser_fill',
     title: '填写字段',
     group: 'browser',
@@ -141,7 +181,8 @@ export const DEFINITIONS = [
 
 export const TOOL_GROUPS = Object.freeze({
   test: { title: '测试领域', where: 'Internal 测试服务' },
-  browser: { title: '浏览器操作', where: '桌面隔离浏览器' }
+  browser: { title: '浏览器操作', where: '桌面隔离浏览器' },
+  finding: { title: '结论', where: '只写进本次任务记录' }
 })
 
 export function toolByName(name) {
@@ -195,6 +236,14 @@ export class ToolExecutor {
     if (def.effect === 'write' && !context.approved)
       throw new RigError('approval_required', '本次动作尚未获准', 403)
     context.signal?.throwIfAborted()
+    // Handled in the Runtime: it records the model's own claim on this mission
+    // and calls nothing. Normalising here (rather than in the engine) keeps
+    // every tool's contract in one place.
+    if (name === 'finding_submit')
+      return {
+        finding: normalizeFinding(args),
+        note: '结论已记录。这是 Agent 的判断，不改变任何测试 Run 的状态。'
+      }
     const read = READ_ROUTES[name]
     if (read) return this.client.request(read(args), undefined, context.signal)
     if (name === 'tests_run')

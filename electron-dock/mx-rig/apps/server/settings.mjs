@@ -13,6 +13,7 @@ import {
 import { compileOrchestration } from '../../packages/runtime/orchestration-graph.mjs'
 import { DEFINITIONS } from '../../packages/runtime/tools.mjs'
 import { nextFireAt, readSchedule } from './orchestration-schedule.mjs'
+import { EMPTY_EGRESS, browserProxy, publicEgress, readEgress } from './egress-profiles.mjs'
 
 const WRITE_TOOLS = DEFINITIONS.filter((tool) => tool.effect === 'write').map((tool) => tool.name)
 
@@ -28,7 +29,11 @@ const DEFAULT_PROVIDER = Object.freeze({
   model: '',
   apiKeyEnv: 'MX_RIG_MODEL_API_KEY',
   timeoutMs: 60_000,
-  enabled: true
+  enabled: true,
+  // Streaming is the default because waiting for a whole answer with no sign
+  // of life is the worst part of using this. A gateway that cannot do it gets
+  // switched off here rather than silently failing every turn.
+  stream: true
 })
 
 function providerUrl(raw) {
@@ -68,7 +73,8 @@ function readProvider(input) {
     model,
     apiKeyEnv: input.apiKeyEnv,
     timeoutMs,
-    enabled: input.enabled !== false
+    enabled: input.enabled !== false,
+    stream: input.stream !== false
   }
 }
 
@@ -181,13 +187,19 @@ export class Settings {
         'tests_cases',
         'tests_case_results',
         'tests_artifacts',
-        'tests_runners'
+        'tests_runners',
+        // Writes nothing outside the mission it is recorded on; without it an
+        // Agent can only answer in prose. An existing deployment keeps its
+        // stored list — widening someone's allow-list on upgrade is exactly
+        // the kind of surprise this product refuses.
+        'finding_submit'
       ],
       browserOrigins: [],
       providers: [{ ...DEFAULT_PROVIDER }],
       sequence: [DEFAULT_PROVIDER.id],
       agents: mergeBuiltins([], BUILTIN_AGENTS),
-      orchestrations: mergeBuiltins([], BUILTIN_ORCHESTRATIONS)
+      orchestrations: mergeBuiltins([], BUILTIN_ORCHESTRATIONS),
+      egress: { ...EMPTY_EGRESS }
     }
     this.queue = Promise.resolve()
   }
@@ -212,9 +224,18 @@ export class Settings {
       Array.isArray(stored.sequence) && stored.sequence.length
         ? stored.sequence.filter((id) => providers.some((provider) => provider.id === id))
         : providers.map((provider) => provider.id)
+    // Forgiving on read, strict on write: a profile shape this build no longer
+    // accepts is dropped, not a reason the service refuses to start.
+    let egress = { ...EMPTY_EGRESS }
+    try {
+      egress = readEgress(stored.egress)
+    } catch {
+      console.error('已存储的出网通道配置不被当前版本接受，已按未配置处理。')
+    }
     return {
       ...stored,
       allowedTools: (stored.allowedTools || []).filter((name) => TOOL_NAMES.includes(name)),
+      egress,
       providers,
       sequence,
       agents: mergeBuiltins(Array.isArray(stored.agents) ? stored.agents : [], BUILTIN_AGENTS),
@@ -259,11 +280,30 @@ export class Settings {
     if (!agentKey) return [...allowed]
     return this.agent(agentKey).tools.filter((name) => allowed.includes(name))
   }
-  public() {
+  /**
+   * @param {object}  [options]
+   * @param {boolean} [options.egressEndpoints] Include the proxy address the
+   *   local Runtime needs to open its isolated browser. Only the operator-gated
+   *   execution surface asks for it; `/config` is readable by viewers, and an
+   *   internal proxy endpoint is not something a read-only member needs.
+   */
+  public({ egressEndpoints = false } = {}) {
     const { revision, maxTurns, allowedTools, browserOrigins } = this.value
     const chain = this.chain()
+    const egress = publicEgress(this.value.egress, {})
     return {
-      policy: { revision, maxTurns, allowedTools, browserOrigins },
+      policy: {
+        revision,
+        maxTurns,
+        allowedTools,
+        browserOrigins,
+        egress: {
+          activeId: egress.activeId,
+          model: egress.model,
+          browser: egress.browser,
+          ...(egressEndpoints ? { browserProxy: browserProxy(this.value.egress) } : {})
+        }
+      },
       model: {
         name: chain[0]?.model ?? '',
         configured: chain.length > 0,
@@ -271,8 +311,12 @@ export class Settings {
         providers: chain.map((provider) => ({
           id: provider.id,
           displayName: provider.displayName,
-          model: provider.model
-        }))
+          model: provider.model,
+          stream: provider.stream !== false
+        })),
+        // True when the first provider in the chain can stream; the workbench
+        // uses it to explain why text arrives all at once.
+        streaming: chain[0]?.stream !== false
       },
       agents: this.value.agents
         .filter((agent) => agent.enabled)
@@ -306,6 +350,24 @@ export class Settings {
           nextFireAt: nextFireAt(entry.schedule)
         }))
     }
+  }
+  /** Profiles plus the credential check, for the egress page. */
+  egress(environment = process.env) {
+    return publicEgress(this.value.egress, environment)
+  }
+  /**
+   * Switch the active channel.
+   *
+   * Goes through the ordinary update path, so it revalidates and issues a new
+   * policy revision. That invalidates any pending approval — which is the
+   * point: an approval was reviewed against the channel its action would have
+   * gone out through, and that is no longer the one in force.
+   */
+  async activateEgress(activeId) {
+    const profiles = this.value.egress?.profiles ?? []
+    if (activeId && !profiles.some((profile) => profile.id === activeId))
+      throw new RigError('invalid_egress', '出网通道不存在', 404)
+    return this.update({ ...this.value, egress: { activeId: activeId ?? null, profiles } })
   }
   async update(input) {
     const allowedTools = readTools(input.allowedTools, '工具列表')
@@ -389,6 +451,10 @@ export class Settings {
       if (!orchestrations.some((entry) => entry.key === builtin.key))
         throw new RigError('invalid_orchestration', `内置编排 ${builtin.key} 不能删除，只能停用`)
 
+    // Same convention as agents and orchestrations: an absent key keeps what
+    // is stored. Clearing every channel is `profiles: []`, said on purpose.
+    const egress = readEgress(input.egress ?? this.value.egress ?? EMPTY_EGRESS)
+
     const value = {
       revision: randomUUID(),
       maxTurns: input.maxTurns,
@@ -398,6 +464,7 @@ export class Settings {
       sequence,
       agents,
       orchestrations,
+      egress,
       model: head(providers, sequence)
     }
     const operation = this.queue.then(async () => {

@@ -15,6 +15,7 @@ const READ_ACTIONS = {
   tools: '/api/rig/v1/tools',
   graph: '/api/rig/v1/graph',
   egress: '/api/rig/v1/egress',
+  system: '/api/rig/v1/system',
   tasks: '/api/v1/tasks',
   runs: '/api/v1/runs?limit=20',
   apps: '/api/v1/apps',
@@ -178,6 +179,21 @@ app
           return client.request('/api/rig/v1/admin/providers:probe', input.body)
         case 'preview-orchestration':
           return client.request('/api/rig/v1/admin/orchestrations:preview', input.body)
+        case 'activate-egress':
+          return client.request('/api/rig/v1/admin/egress:activate', input.body)
+        case 'plan-dispatch':
+          // The surface is added here, not by the renderer: it decides whether
+          // desktop-only Agents are proposed at all.
+          return client.request('/api/rig/v1/dispatch:plan', {
+            text: String(input.body?.text ?? ''),
+            surface: 'desktop'
+          })
+        case 'system-signal':
+          return client.request('/api/rig/v1/system/signal', input.body)
+        case 'system-claim':
+          return client.request('/api/rig/v1/system/claim', input.body)
+        case 'system-seen':
+          return client.request('/api/rig/v1/system/seen', input.body)
         case 'orchestration-graph':
           return client.request(
             `/api/rig/v1/graph?orchestration=${encodeURIComponent(String(input.body?.key ?? ''))}`

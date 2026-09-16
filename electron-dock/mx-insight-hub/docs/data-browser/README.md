@@ -4,6 +4,8 @@
 
 历史评估：[高级搜索与 RAG 评估](advanced-search-rag-assessment.md)。当前实现与手动操作见 [RAG 操作及容量边界](rag-search-operations.md)，后续 [LLM Wiki 扩展预案](llm-wiki-extension.md)。线上全库重建由用户在数据中心点击，本次不自动启动。
 
+技术交流可使用 [Hub 架构图册](../architecture/atlas/index.html)：Archify 服务图、核心表关系、双索引流水线、RAG 时序及可搜索的 DDL 字典；[配套说明](../architecture/atlas/README.md)区分 ES 重建与模型向量化。
+
 ## 本次实现
 
 新增 Admin Token 专属 `/data-browser`，导航位于原 `/data-center` 之前，原数据中心保留。

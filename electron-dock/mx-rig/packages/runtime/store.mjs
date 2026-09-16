@@ -18,6 +18,8 @@ export class MissionStore {
       if (!TERMINAL.has(row.status)) {
         row.status = 'blocked'
         row.pending = null
+        // Partial text from a turn that will never finish is not an answer.
+        row.stream = null
         // Drop the graph checkpoint too: resuming an approval whose page or
         // browser context is gone would replay an action against a different
         // world than the one the user reviewed.

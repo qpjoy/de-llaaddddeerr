@@ -19,10 +19,15 @@ import { mapExternalEnvironment } from './environment.mjs'
 import { observeEgress } from './egress.mjs'
 import { ScheduleState, dueOrchestrations } from './orchestration-schedule.mjs'
 import { buildInsights } from './insights.mjs'
+import { SYSTEM_VERSION, evaluateSystem, questById, systemFacts } from './system.mjs'
+import { SystemProgress } from './system-progress.mjs'
+import { planDispatch } from './dispatch-intent.mjs'
 import { runnerIsOnline } from '../../packages/test-platform/server/runner/placement.mjs'
 import { AGENT_CATEGORIES } from './agent-presets.mjs'
 import {
   adminConfigBody,
+  dispatchPlanBody,
+  egressActivateBody,
   loginBody,
   missionApproveBody,
   missionCancelBody,
@@ -31,7 +36,10 @@ import {
   modelTurnBody,
   orchestrationPreviewBody,
   parseBody,
-  probeBody
+  probeBody,
+  systemClaimBody,
+  systemSeenBody,
+  systemSignalBody
 } from './schemas.mjs'
 import {
   NODE_TYPES,
@@ -86,6 +94,7 @@ export async function start(env = process.env, options = {}) {
   const dataRoot = resolve(env.MX_RIG_STATE_DIR || resolve(root, '.runtime/control'))
   const settings = await new Settings(resolve(dataRoot, 'settings.json')).init()
   const missions = await new MissionStore(resolve(dataRoot, 'missions')).init()
+  const progress = await new SystemProgress(resolve(dataRoot, 'system-progress.json')).init()
   const gateway = new ModelGateway(settings, options.modelOptions)
   const sessions = new Map()
   // Built once from the same module the runtime compiles, so the drawing and
@@ -323,6 +332,83 @@ export async function start(env = process.env, options = {}) {
         })
         return
       }
+      if (path.startsWith('/api/rig/v1/system')) {
+        // The tutorial is for everyone who can log in, viewers included: it
+        // teaches the product, and reading it changes nothing.
+        const state = async () => {
+          const [runs, apps, tasks, runners] = await Promise.all([
+            kernel.store.listRuns({ limit: 200 }),
+            kernel.store.listApps(),
+            kernel.store.listTasks(),
+            kernel.store.listRunners()
+          ])
+          const entry = progress.get(principal.id)
+          return evaluateSystem({
+            facts: systemFacts({
+              apps,
+              tasks,
+              runs,
+              runners: runners.map((runner) => ({ ...runner, online: runnerIsOnline(runner) })),
+              missions: missions.list(principal.id),
+              config: { ...settings.public(), egress: settings.egress(env) },
+              signals: entry.signals
+            }),
+            progress: entry
+          })
+        }
+        if (path === '/api/rig/v1/system' && req.method === 'GET') {
+          sendJson(res, 200, { system: await state() })
+          return
+        }
+        if (path === '/api/rig/v1/system/signal' && req.method === 'POST') {
+          const body = parseBody(systemSignalBody, await readJson(req, 2000))
+          await progress.signal(principal.id, body.signal)
+          sendJson(res, 200, { system: await state() })
+          return
+        }
+        if (path === '/api/rig/v1/system/claim' && req.method === 'POST') {
+          const body = parseBody(systemClaimBody, await readJson(req, 2000))
+          if (!questById(body.questId)) throw new RigError('quest_unknown', '任务不存在', 404)
+          // Verification is recomputed here, from platform state — the request
+          // only says which quest is being claimed, never that it is done.
+          const before = await state()
+          const quest = before.quests.find((entry) => entry.id === body.questId)
+          await progress.claim(principal.id, body.questId, Boolean(quest?.done))
+          sendJson(res, 200, { system: await state(), claimed: body.questId })
+          return
+        }
+        if (path === '/api/rig/v1/system/seen' && req.method === 'POST') {
+          const body = parseBody(systemSeenBody, await readJson(req, 2000))
+          await progress.seen(principal.id, body.version || SYSTEM_VERSION)
+          sendJson(res, 200, { system: await state() })
+          return
+        }
+      }
+      if (path === '/api/rig/v1/dispatch:plan' && req.method === 'POST') {
+        requireRole(principal, 'operator')
+        const body = parseBody(dispatchPlanBody, await readJson(req, 8000))
+        const [apps, tasks, runners] = await Promise.all([
+          kernel.store.listApps(),
+          kernel.store.listTasks(),
+          kernel.store.listRunners()
+        ])
+        const config = settings.public()
+        // Planning only reads catalogues the member can already see, calls no
+        // model, and starts nothing: the result is a request body they confirm.
+        sendJson(res, 200, {
+          plan: planDispatch({
+            text: body.text,
+            apps,
+            tasks: tasks.filter((task) => task.enabled !== false),
+            orchestrations: config.orchestrations,
+            agents: config.agents,
+            runnersOnline: runners.filter((runner) => runnerIsOnline(runner)).length,
+            modelConfigured: config.model.configured,
+            native: body.surface === 'desktop'
+          })
+        })
+        return
+      }
       if (path === '/api/rig/v1/graph' && req.method === 'GET') {
         // The shape the orchestration view draws comes from the compiled graph
         // the runtime executes, not from a diagram kept alongside it.
@@ -366,14 +452,25 @@ export async function start(env = process.env, options = {}) {
       if (path === '/api/rig/v1/egress' && req.method === 'GET') {
         requireRole(principal, 'operator')
         sendJson(res, 200, {
-          egress: observeEgress({ env, hostname: hostname() }),
-          note: 'MX Rig 只观测自身进程的出网环境，不设置代理、路由、DNS 或 PAC。'
+          egress: observeEgress({ env, hostname: hostname(), managed: settings.egress(env) }),
+          note: 'MX Rig 只为自己的模型调用与隔离浏览器选择通道；不设置系统代理、路由、DNS、PAC 或 NRPT。'
         })
+        return
+      }
+      if (path === '/api/rig/v1/admin/egress:activate' && req.method === 'POST') {
+        requireRole(principal, 'admin')
+        const body = parseBody(egressActivateBody, await readJson(req, 4000))
+        // A switch is a policy change: it issues a new revision, so approvals
+        // reviewed against the previous channel stop being valid.
+        const config = await settings.activateEgress(body.activeId ?? null)
+        sendJson(res, 200, { config, egress: settings.egress(env) })
         return
       }
       if (path === '/api/rig/v1/execution-config' && req.method === 'GET') {
         requireRole(principal, 'operator')
-        sendJson(res, 200, settings.public())
+        // The local Runtime needs the browser channel's address to launch its
+        // isolated browser on it; `/config` deliberately withholds endpoints.
+        sendJson(res, 200, settings.public({ egressEndpoints: true }))
         return
       }
       if (path === '/api/rig/v1/admin/config') {
@@ -406,6 +503,50 @@ export async function start(env = process.env, options = {}) {
         })
         const body = parseBody(modelTurnBody, await readJson(req, 256_000))
         sendJson(res, 200, await gateway.turn(principal.id, body, controller.signal))
+        return
+      }
+      if (path === '/api/rig/v1/model/turn:stream' && req.method === 'POST') {
+        requireRole(principal, 'operator')
+        const controller = new AbortController()
+        res.on('close', () => {
+          if (!res.writableEnded) controller.abort()
+        })
+        const body = parseBody(modelTurnBody, await readJson(req, 256_000))
+        // NDJSON, one event per line: any number of `{delta}` lines, then one
+        // `{message}` line. Headers go out on the first write, so a failure
+        // before the first token still answers with a normal status and JSON
+        // error instead of a 200 that contains an apology.
+        let open = false
+        const start = () => {
+          if (open) return
+          open = true
+          res.writeHead(200, {
+            'content-type': 'application/x-ndjson; charset=utf-8',
+            'cache-control': 'no-store',
+            // A buffering reverse proxy would turn this back into one blob.
+            'x-accel-buffering': 'no'
+          })
+        }
+        try {
+          const result = await gateway.turn(principal.id, body, controller.signal, (delta) => {
+            start()
+            res.write(`${JSON.stringify({ delta })}\n`)
+          })
+          start()
+          res.write(`${JSON.stringify(result)}\n`)
+          res.end()
+        } catch (error) {
+          if (!open) throw error
+          res.write(
+            `${JSON.stringify({
+              error: {
+                code: error.code || 'model_error',
+                message: error.status && error.status < 500 ? error.message : safeMessage(error)
+              }
+            })}\n`
+          )
+          res.end()
+        }
         return
       }
       if (path === '/api/rig/v1/logout' && req.method === 'POST') {

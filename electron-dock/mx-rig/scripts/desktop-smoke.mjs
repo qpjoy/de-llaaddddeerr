@@ -23,6 +23,9 @@ const server = await start(
     schedule: false,
     modelOptions: {
       environment: { MX_RIG_MODEL_API_KEY: 'fixture-only' },
+      // Answers with an ordinary JSON body even though the service asks for a
+      // stream: this is the gateway-ignores-streaming path, exercised here
+      // through the whole desktop stack. Real SSE is covered by browser-smoke.
       fetchImpl: async () =>
         new Response(
           JSON.stringify({
@@ -157,16 +160,37 @@ try {
       () => document.querySelector('#mission-status')?.textContent === '任务完成'
     )
     assert.equal(await page.getByRole('button', { name: '打开截图', exact: true }).count(), 1)
+    // A gateway that never streamed must leave no draft behind either.
+    assert.equal(await page.locator('.rig-stream').count(), 0)
     await page.screenshot({ path: join(qa, 'desktop-browser-agent.png') })
     console.log(
       'Packaged agent → approved tool → real browser → evidence loop passed (fixture model).'
     )
   }
+  // The system layer across the desktop's whitelisted IPC. The renderer can
+  // never name a path, so every new action has to exist in the main process
+  // table — a missing one shows up here and nowhere else.
+  await page.locator('.rig-nav__item', { hasText: '系统' }).click()
+  await page.locator('.rig-level').waitFor({ state: 'visible' })
+  // Logging in on the desktop is itself a reported side quest.
+  await page
+    .locator('.rig-quest[data-status="claimable"]', { hasText: '在桌面端登录一次' })
+    .waitFor({ state: 'visible' })
+  await page.locator('#hud-toggle').click()
+  await page.locator('#hud .rig-quest').waitFor({ state: 'visible' })
+  await page.screenshot({ path: join(qa, 'desktop-system.png') })
+  await page.locator('#hud').getByRole('button', { name: '收起', exact: true }).click()
+  const parsed = await page.evaluate(() =>
+    window.mxRig.request('plan-dispatch', { text: '跑一下桌面验收计划' })
+  )
+  assert.equal(parsed.plan.proposals[0].kind, 'workflow')
+  assert.ok(parsed.plan.proposals[0].body.taskId, '桌面端解析要拿到真实计划 ID')
+
   await page.locator('#logout').click()
   await page.locator('#login').waitFor({ state: 'visible' })
   assert.deepEqual(errors, [])
   console.log(
-    'Desktop smoke passed: login, isolated renderer, runtime worker, exact approval, real test API dispatch, settings, logout.'
+    'Desktop smoke passed: login, isolated renderer, runtime worker, exact approval, real test API dispatch, settings, the system layer over whitelisted IPC, one-line dispatch parsing, logout.'
   )
 } catch (error) {
   console.error(error)

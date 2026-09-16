@@ -77,3 +77,5 @@ electron-dock/mx-launcher/demos/*/pnpm-lock.yaml
 electron-dock/mx-launcher/demos/*/pnpm-workspace.yaml
 
 spec_docs/
+
+electron-dock/mx-insight-hub/docs/architecture/atlas/

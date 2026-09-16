@@ -90,6 +90,14 @@
           </div>
           <div class="qp-row">
             <span id="surface" class="qp-tag"></span>
+            <button
+              id="hud-toggle"
+              class="qp-button qp-button--ghost qp-button--sm rig-print-hide"
+              type="button"
+              aria-label="系统面板"
+            >
+              ⬢ 系统
+            </button>
             <button id="refresh" class="qp-button qp-button--ghost qp-button--sm" type="button">
               ↻ 刷新
             </button>
@@ -106,6 +114,9 @@
         <div id="notice" class="qp-panel qp-panel--active qp-body-2 rig-notice" role="status" hidden></div>
         <section id="view" class="rig-view"></section>
       </main>
+      <!-- The teaching panel. Outside #view on purpose: it follows the reader
+           across pages and survives every redraw. -->
+      <aside id="hud" class="rig-hud rig-print-hide" aria-label="系统面板" hidden></aside>
     </div>
     <script type="module" src="./app.js"></script>
   </body>

@@ -1,6 +1,6 @@
 # 架构与迁移决策
 
-状态：MX Rig 0.5 已实现的边界；2026-09-16。
+状态：MX Rig 0.7 已实现的边界；2026-09-16。
 
 ## 产品边界
 
@@ -15,13 +15,18 @@ flowchart TD
   G --> S[Internal Rig API]
   W[Internal Web 工作台] --> S
   S --> M[模型网关 / Provider 序列]
-  S --> A[Agent 中心：预设、工具边界、出网观测]
+  M --> U[上游网关：SSE 增量]
+  M --> X[出网通道：CONNECT 隧道或直连]
+  S --> A[Agent 中心：预设、工具边界、出网通道]
+  S --> Y[系统层：教学任务、进度、解析候选]
   S --> T[测试领域内核]
   T --> J[K8s Job / 注册的桌面 Runner]
   S --> I[Launcher 身份公开接口]
 ```
 
 桌面身份、测试平台 Runner 身份和任务执行身份不同。模型密钥仅在 Internal，Runner 获得的是测试范围凭据。网页内容、测试输出不作为新的授权来源。允许列表由 Internal 管理，实际动作前重新取得当前策略并检查角色。
+
+出网通道属于策略：它决定模型调用和隔离浏览器的请求实际从哪里出去，因此写进 `policy` 并跟着 `revision` 走。切换通道会使已发出的确认失效——那次确认是针对"这组参数 + 这条策略 + 这条出网路径"给的。通道地址只在 operator 起步的 `/execution-config` 下发，`/config`（viewer 可读）只给通道 ID。代理凭据只有环境变量名进配置，值仅在服务端进程读取，且带凭据的通道不允许作用于桌面浏览器。详见[出网通道](09-egress-channels.md)。
 
 UI 采用本地 HTML/CSS/ES modules，无远端脚本、无 Node 集成，不依赖 Quasar 构建。桌面与 Web 共用 UI 以减少两套客户端的维护成本。工作台与测试管理台现在消费同一个 Neon Void 包：`scripts/design-assets.mjs` 把安装好的 CSS 同步到 `apps/web/vendor/`，`file://` 与 HTTP 两个 surface 因此解析同一个相对路径。CSP 为 `script-src 'self'; style-src 'self'`，界面因此不使用内联样式，也不用 HTML 字符串拼接——测试输出、页面文本与模型回复都以 `textContent` 落地，不可能变成标记。
 
@@ -43,6 +48,10 @@ Mission 状态：queued / running / awaiting_approval / completed / blocked / ca
 
 测试 Run 保留旧平台的 passed / failed / flaky / blocked / expired / cancelled 等语义。Agent 的 completed 只说明编排结束。测试失败仍可产生一个成功完成分析的 Mission，二者通过 testRunId 或工具结果关联。
 
+模型回复是流式的：上游 SSE → 服务端 NDJSON（`/api/rig/v1/model/turn:stream`）→ Runtime 把增量写在任务记录的 `stream` 字段上 → 工作台用既有轮询渲染。没有向工作台推送的第二种传输，桌面与 Web 因此同一套代码；代价是分块而不是逐字。已经吐出第一个增量之后的失败不再向下一个 Provider 降级，草稿在回答到达时清空，重启时丢弃。详见 [Agent 中心](05-agent-center.md#流式输出)。
+
+结构化结论是一个普通工具（`finding_submit`）：枚举在 `validateArgs` 进门时校验，`effect: 'read'` 因为它只写本次任务记录，引用的 run/用例 ID 会与这次任务真的读到过的工具结果比对，核对发生在把提交写进对话之前。它是 Agent 的判断，不改任何测试 Run 的状态。
+
 模型提供者通过 Internal `/api/rig/v1/model/turn` 接口替换，不进入测试框架。只适配 Chat Completions 工具协议；序列内按顺序降级，用户取消不向下重试。Agent 的 persona 由服务端按 key 解析并作为第二条 system 消息附加在固定规则之后——能自带人设的客户端会让 Internal 的允许列表变成装饰品。Codex App Server、MCP 可在真实需求出现后接入，不能同时引入多套顶层恢复状态机。
 
 ## 历史代码迁入
@@ -59,6 +68,12 @@ Runtime 退出只关闭自己的隔离浏览器；不操作其他进程树和任
 
 模型调用最多 4 个并发、每用户 1 个，单请求默认 60 秒（每个 Provider 可配 5–120 秒），任务最多 30 轮，编排最多 200 步；工具及网络响应有大小上限。测试 artifact 延续字节、文件/目录数量和剩余磁盘双预算。Windows 没有 Unix inode 指标时不把 0/0 误判为耗尽；Unix inode 保护仍有效。
 
+## 系统层（教学与解析）
+
+`apps/server/system.mjs` 与 `insights.mjs` 同类：纯函数，事实进、状态出，不做 IO。它把操作教程变成带版本的任务目录，每一项的完成判定只有三个来源——平台状态、该成员自己的任务历史、界面上报——并在界面上分别标注。奖励只是进度：等级不解锁任何权限，角色仍由 Internal 判定。进度存 `.runtime/control/system-progress.json`，字段受封闭列表约束（`QUEST_IDS` / `SIGNALS`），不随流量增长。
+
+`apps/server/dispatch-intent.mjs` 把一句话解析成候选派发，同样是纯函数，且**不调用模型**：派发是写动作，确认页上的计划 ID 必须来自可核对的地方，而这个功能必须在还没有 Provider 的时候就能用。解析只读调用方本来就能看到的目录，返回的候选就是工作台将要 POST 的请求体。详见[系统层](08-system-layer.md)。
+
 ## 指标与汇报
 
 `apps/server/insights.mjs` 是纯计算：输入执行、用例、执行机，输出比率、趋势、用例健康度、覆盖与风险。它直接读内核存储，不为一个页面发一串 HTTP 往返，用例级健康度只取最近 40 次有结论的执行并在界面标明取样数。口径（`caveats`）跟着数据一起下发，避免同一套解释写在服务端和界面两处。详见 [指标与汇报](07-metrics-and-reporting.md)。
@@ -67,4 +82,4 @@ Runtime 退出只关闭自己的隔离浏览器；不操作其他进程树和任
 
 ## 尚待交付的能力
 
-原生 Windows/macOS 自动化、移动 App Runner、工具包缓存管理 UI、MCP、Hub 工具与持久流程模板尚未交付。界面可以查看和检查编排图，但还不能在界面里增删节点；节点集合由运行时定义。工具注册/参数/权限边界已具备，扩展这些能力不需要进入 Launcher 的登录或联网模块。
+原生 Windows/macOS 自动化、移动 App Runner、工具包缓存管理 UI、MCP、Hub 工具与持久流程模板尚未交付。编排可以在界面里增删节点、改连线与参数，但节点**类型**由运行时定义，作者只组合已知步骤。定时编排没有重试与告警，没有 token/费用计量，没有跨任务记忆与多 Agent 交接；流式是分块而不是逐字，结构化结论是可选的工具而不是强制的输出格式——逐环对账见 [Agent 中心](05-agent-center.md#还差哪些环)。工具注册/参数/权限边界已具备，扩展这些能力不需要进入 Launcher 的登录或联网模块。

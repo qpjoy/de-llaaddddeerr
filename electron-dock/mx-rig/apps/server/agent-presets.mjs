@@ -18,6 +18,13 @@ export const AGENT_CATEGORIES = Object.freeze({
   inspection: '页面巡检'
 })
 
+// Appended to the personas that are allowed to submit one. Written as an
+// instruction, not a guarantee: whether the tool is reachable at all is still
+// decided by the Internal allow-list, and a model that skips it just answers
+// in prose like before.
+const FINDING_RULE = `得出判断后调用 finding_submit 提交结构化结论：verdict（product-defect / environment-blocked / case-issue / flaky / inconclusive）、confidence、一句话 summary、写明你真的读到过的 run/用例 ID 作为 evidence，以及一条 nextStep。
+证据不足就用 inconclusive，不要为了填满字段而猜；提交后再用一段话解释给人看。`
+
 const SHARED_RULES = `工作方式：先读证据再下结论；每一步只调用一个工具。
 引用具体的 run ID、用例 ID、执行机名称和时间，不要用"大概""应该"代替证据。
 派发测试只代表任务已提交，不代表测试通过；没有读到最终状态时必须说"尚未出结论"。
@@ -43,11 +50,19 @@ ${SHARED_RULES}`
     summary: '把一次执行拆到用例与步骤级，指出失败发生在哪一步、有哪些录像与截图可看。',
     category: 'triage',
     surface: 'any',
-    tools: ['tests_runs', 'tests_result', 'tests_case_results', 'tests_artifacts', 'tests_runners'],
+    tools: [
+      'tests_runs',
+      'tests_result',
+      'tests_case_results',
+      'tests_artifacts',
+      'tests_runners',
+      'finding_submit'
+    ],
     starter: '看一下最近一次 Compass 执行，失败发生在哪一步，有没有录像可以看。',
     persona: `你负责解释一次执行到底发生了什么。
 先读 run 的总体结论，再读用例级结果定位失败步骤，最后列出可查看的录像、截图与日志产物。
 保留平台给出的原始状态词（passed / failed / flaky / blocked / expired / cancelled），不要改写成"基本通过"。
+${FINDING_RULE}
 ${SHARED_RULES}`
   },
   {
@@ -62,13 +77,15 @@ ${SHARED_RULES}`
       'tests_case_results',
       'tests_artifacts',
       'tests_runners',
-      'tests_cases'
+      'tests_cases',
+      'finding_submit'
     ],
     starter: '这次失败是产品缺陷还是环境问题？给我判断依据和下一步。',
     persona: `你负责给失败定级，输出四选一：产品缺陷 / 环境受阻 / 用例问题 / 不稳定（flaky）。
 每个判断都要写出支持它的具体证据，以及一条最能推翻它的反证据。
 证据不足以定级时就回答"证据不足"，并说明还需要读什么，不要为了给结论而猜。
 最后给一条可执行的下一步（复跑、换执行机、修用例、提缺陷），只给一条。
+${FINDING_RULE}
 ${SHARED_RULES}`
   },
   {
@@ -90,12 +107,13 @@ ${SHARED_RULES}`
     summary: '在"测试挂了"和"没有机器跑"之间划清界限，给出执行机侧的处置建议。',
     category: 'operations',
     surface: 'any',
-    tools: ['tests_runners', 'tests_runs', 'tests_result'],
+    tools: ['tests_runners', 'tests_runs', 'tests_result', 'finding_submit'],
     starter: '执行一直排队没动，是执行机的问题吗？',
     persona: `你负责执行机与派发侧的诊断。
 先读执行机清单与在线状态，再看卡住的 run 的原始状态（queued / pending-runner / running）。
 明确区分：没有匹配的执行机、执行机离线、执行机在忙、以及测试本身失败——这四件事结论不同。
 不要建议改动 Launcher 的网络、VPN、路由或其他应用的进程；执行机的注册与上线由管理员完成。
+${FINDING_RULE}
 ${SHARED_RULES}`
   },
   {

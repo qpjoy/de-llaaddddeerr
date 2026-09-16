@@ -725,6 +725,12 @@ body {
   --qp-data-row-min-width: 720px;
 }
 
+.rig-table[data-layout='egress-channels'] {
+  --qp-data-row-columns: minmax(200px, 1.2fr) minmax(140px, 0.8fr) minmax(140px, 0.8fr)
+    minmax(170px, 0.9fr);
+  --qp-data-row-min-width: 700px;
+}
+
 .rig-table[data-layout='egress'] {
   --qp-data-row-columns: minmax(120px, 0.6fr) minmax(220px, 1.4fr) minmax(90px, 0.5fr);
   --qp-data-row-min-width: 520px;
@@ -840,6 +846,214 @@ body {
 .rig-table[data-layout='cases'] {
   --qp-data-row-columns: minmax(160px, 1fr) minmax(130px, 0.7fr) minmax(160px, 0.9fr) minmax(110px, 0.6fr);
   --qp-data-row-min-width: 600px;
+}
+
+
+/* -- the system layer ------------------------------------------------------- */
+/* A teaching layer that behaves like the rest of the product: quest state is
+   colour, never a claim, and the floating panel can always be put away. */
+
+.rig-level {
+  display: grid;
+  gap: var(--qp-space-3);
+}
+
+.rig-xp {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  height: 10px;
+}
+
+.rig-xp__track {
+  fill: var(--qp-bg-4);
+}
+
+.rig-xp__fill {
+  fill: var(--qp-primary);
+}
+
+.rig-quests {
+  display: grid;
+  gap: var(--qp-space-3);
+}
+
+.rig-quest {
+  display: grid;
+  gap: var(--qp-space-2);
+  border: 1px solid var(--qp-line);
+  border-left-width: 3px;
+  border-radius: var(--qp-radius-sm);
+  padding: var(--qp-space-3);
+  background: var(--qp-bg-3);
+}
+
+.rig-quest[data-status='claimable'] {
+  border-left-color: var(--qp-warning);
+}
+
+.rig-quest[data-status='claimed'] {
+  border-left-color: var(--qp-success);
+  opacity: 0.78;
+}
+
+.rig-quest__head {
+  display: flex;
+  gap: var(--qp-space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.rig-quest__steps {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: var(--qp-space-5);
+}
+
+.rig-quest__evidence {
+  color: var(--qp-text-4);
+  overflow-wrap: anywhere;
+}
+
+.rig-quest__evidence[data-done='true'] {
+  color: var(--qp-text-2);
+}
+
+.rig-quest__head .qp-status {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.rig-quest__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--qp-space-2);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rig-hud {
+  position: fixed;
+  right: var(--qp-space-4);
+  bottom: var(--qp-space-4);
+  z-index: 40;
+  width: min(380px, calc(100vw - 2 * var(--qp-space-4)));
+  max-height: min(72vh, 680px);
+  overflow-y: auto;
+  border: 1px solid var(--qp-line-strong);
+  border-radius: var(--qp-radius-md);
+  padding: var(--qp-space-4);
+  background: var(--qp-bg-2);
+  box-shadow: var(--qp-shadow-drop-1);
+}
+
+.rig-hud__inner {
+  display: grid;
+  gap: var(--qp-space-3);
+}
+
+.rig-hud__head {
+  display: flex;
+  gap: var(--qp-space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.rig-hud__quest .rig-quest {
+  background: var(--qp-bg-3);
+}
+
+#hud-toggle.is-active {
+  border-color: color-mix(in srgb, var(--qp-primary) 62%, transparent);
+  color: var(--qp-primary);
+}
+
+/* -- streaming and structured findings -------------------------------------- */
+
+.rig-event[data-kind='stream'] {
+  border-left-color: var(--qp-primary);
+}
+
+/* A draft, and it should look like one: same type as the answer, dimmer, with
+   the last line still moving. */
+.rig-stream {
+  margin: 0;
+  color: var(--qp-text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rig-stream::after {
+  content: '▍';
+  color: var(--qp-primary);
+  animation: rig-caret 1s steps(2, start) infinite;
+}
+
+@keyframes rig-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rig-stream::after {
+    animation: none;
+  }
+}
+
+.rig-finding {
+  display: grid;
+  gap: var(--qp-space-3);
+  border-left: 3px solid var(--qp-line-strong);
+}
+
+.rig-finding[data-verdict='product-defect'] {
+  border-left-color: var(--qp-danger);
+}
+
+.rig-finding[data-verdict='environment-blocked'],
+.rig-finding[data-verdict='case-issue'],
+.rig-finding[data-verdict='flaky'] {
+  border-left-color: var(--qp-warning);
+}
+
+.rig-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px dashed color-mix(in srgb, var(--qp-danger) 55%, var(--qp-line));
+  border-radius: var(--qp-radius-pill);
+  padding: 2px var(--qp-space-2);
+  color: var(--qp-text-3);
+  font-family: var(--qp-font-family);
+  font-size: var(--qp-font-caption-1);
+}
+
+.rig-ref[data-seen='true'] {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--qp-success) 55%, var(--qp-line));
+  color: var(--qp-text-2);
+}
+
+/* -- conversational dispatch ------------------------------------------------ */
+
+.rig-proposal {
+  display: grid;
+  gap: var(--qp-space-2);
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  padding: var(--qp-space-3);
+  background: var(--qp-bg-3);
+}
+
+.rig-proposal[data-blocked='true'] {
+  border-color: color-mix(in srgb, var(--qp-danger) 45%, var(--qp-line));
+}
+
+.rig-proposal ul {
+  margin: 0;
+  padding-left: var(--qp-space-5);
 }
 
 /* -- print ------------------------------------------------------------------ */

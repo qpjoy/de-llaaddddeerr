@@ -14,7 +14,8 @@ export const TOOL_NAMES = [
   'browser_open',
   'browser_snapshot',
   'browser_click',
-  'browser_fill'
+  'browser_fill',
+  'finding_submit'
 ]
 
 export class RigError extends Error {
@@ -67,8 +68,15 @@ export function validateArgs(schema, args) {
       throw new RigError('invalid_arguments', `未知参数 ${key}`)
   for (const key of schema.required || [])
     if (!Object.hasOwn(args, key)) throw new RigError('invalid_arguments', `缺少参数 ${key}`)
-  for (const [key, value] of Object.entries(args))
-    text(value, key, schema.properties[key].maxLength || 4000)
+  for (const [key, value] of Object.entries(args)) {
+    const property = schema.properties[key]
+    text(value, key, property.maxLength || 4000)
+    // A closed set in the schema is a closed set at the door. Without this a
+    // tool that documents an enum would still accept anything a model wrote,
+    // and every caller would have to re-check it.
+    if (Array.isArray(property.enum) && !property.enum.includes(value))
+      throw new RigError('invalid_arguments', `${key} 只能是 ${property.enum.join(' / ')} 之一`)
+  }
   return args
 }
 

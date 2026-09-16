@@ -5,6 +5,13 @@ import { START } from '../graph/graph.mjs'
 import { applyCapture, renderTemplate, validateOrchestration } from '../graph/orchestration.mjs'
 import { buildMissionGraph } from './mission-graph.mjs'
 import { compileOrchestration } from './orchestration-graph.mjs'
+import { VERDICTS, auditFinding } from './finding.mjs'
+
+// How much of a streaming answer is kept on the mission row, and how often
+// that row is written while text is arriving. The window bounds the file; the
+// interval keeps a conversation from turning into disk traffic.
+const STREAM_WINDOW = 6000
+const STREAM_SAVE_MS = 250
 
 export class RigRuntime {
   constructor({ store, client, executor, owner }) {
@@ -27,6 +34,11 @@ export class RigRuntime {
     // Compiled orchestrations, keyed by spec key + policy revision: editing a
     // spec produces a new revision, so a stale graph can never be reused.
     this.compiled = new Map()
+    // Whether this service has the streaming turn route. Assumed, then
+    // remembered as false after one 404 — a desktop build can be newer or
+    // older than the Internal it points at.
+    this.streamRoute = true
+    this.streamSavedAt = 0
   }
   /** The compiled shape, for the orchestration centre. */
   describe() {
@@ -106,6 +118,7 @@ export class RigRuntime {
         if (process.env.MX_RIG_DEBUG_ERRORS === '1') console.error('[mx-rig]', error)
         if (row.status !== 'cancelled') {
           row.status = 'blocked'
+          row.stream = null
           await this.event(row, 'error', safeMessage(error))
         }
       } finally {
@@ -141,6 +154,58 @@ export class RigRuntime {
   /** Kept for callers and tests that only need the policy half. */
   async policy(row) {
     return (await this.config(row)).policy
+  }
+
+  /**
+   * One model turn, streaming when the service offers it.
+   *
+   * Partial text lands on the mission row (`row.stream`), which is what both
+   * workbenches already poll — so streaming needs no second transport to the
+   * UI, and the desktop and the web surface behave identically. The tradeoff
+   * is granularity: the reader sees chunks at the poll interval, not tokens.
+   */
+  async #turn(row, body, ctx) {
+    const onDelta = (text) => this.#delta(row, text)
+    try {
+      // A client without `stream` is a client that does not stream: the
+      // Runtime takes its transport as a dependency, and the non-streaming
+      // route is still the contract every embedder has to support.
+      if (this.streamRoute && typeof this.client.stream === 'function') {
+        try {
+          return await this.client.stream(
+            '/api/rig/v1/model/turn:stream',
+            body,
+            ctx.signal,
+            onDelta
+          )
+        } catch (error) {
+          // Only a missing route is a reason to fall back; anything else is a
+          // real failure and must not be retried as a second model call.
+          if (error.status !== 404) throw error
+          this.streamRoute = false
+        }
+      }
+      return await this.client.request('/api/rig/v1/model/turn', body, ctx.signal)
+    } finally {
+      // The answer (or the failure) replaces the draft; leaving half a
+      // sentence on the row would read like the result.
+      row.stream = null
+    }
+  }
+
+  #delta(row, text) {
+    const previous = row.stream?.text ?? ''
+    row.stream = {
+      turn: row.turns ?? 0,
+      text: (previous + text).slice(-STREAM_WINDOW),
+      at: new Date().toISOString()
+    }
+    const now = Date.now()
+    if (now - this.streamSavedAt < STREAM_SAVE_MS) return
+    this.streamSavedAt = now
+    // Fire and forget: the store serialises its own writes, and a dropped
+    // intermediate frame costs nothing — the next one carries the full text.
+    this.store.save(row).catch(() => {})
   }
 
   // -- graph execution --------------------------------------------------------
@@ -317,8 +382,8 @@ export class RigRuntime {
     const variables = Object.entries(state.vars)
       .map(([name, value]) => `${name} = ${value}`)
       .join('\n')
-    const { message } = await this.client.request(
-      '/api/rig/v1/model/turn',
+    const { message } = await this.#turn(
+      row,
       {
         agentKey: node.agentKey,
         messages: [
@@ -329,7 +394,7 @@ export class RigRuntime {
         ],
         tools: []
       },
-      ctx.signal
+      ctx
     )
     const answer = message.content || '模型没有返回文本。'
     await this.event(row, 'answer', answer)
@@ -355,7 +420,9 @@ export class RigRuntime {
         JSON.stringify(result).length <= 24_000 ? result : { excerpt: summary, truncated: true }
     })
     this.controller.signal.throwIfAborted()
-    row.evidence = [...(row.evidence ?? []), { tool: call.name, summary }].slice(-20)
+    await this.#record(row, call.name, result)
+    if (call.name !== 'finding_submit')
+      row.evidence = [...(row.evidence ?? []), { tool: call.name, summary }].slice(-20)
     if (call.name === 'tests_run' && result.run?.id) row.testRunId = result.run.id
     const node = spec.nodes.find((entry) => entry.id === state.sourceNode)
     const vars = Object.fromEntries(
@@ -395,14 +462,14 @@ export class RigRuntime {
     row.status = 'running'
     row.turns = state.turns + 1
     await this.event(row, 'thinking', `正在规划第 ${row.turns} 步`)
-    const { message } = await this.client.request(
-      '/api/rig/v1/model/turn',
+    const { message } = await this.#turn(
+      row,
       {
         ...(row.agentKey ? { agentKey: row.agentKey } : {}),
         messages: row.messages,
         tools: toolSchemas(this.#offeredTools(row, config))
       },
-      ctx.signal
+      ctx
     )
     ctx.signal?.throwIfAborted()
     if (!message.tool_calls?.length)
@@ -460,10 +527,35 @@ export class RigRuntime {
         JSON.stringify(result).length <= 24_000 ? result : { excerpt: summary, truncated: true }
     })
     this.controller.signal.throwIfAborted()
+    // Audited first, on purpose: the tool result is the finding itself, and
+    // once it is in the transcript every id it cites would count as "read".
+    await this.#record(row, call.name, result)
     if (row.mode === 'agent')
       row.messages.push({ role: 'tool', tool_call_id: call.id, content: summary })
     else row.testRunId = result.run?.id || null
     return {}
+  }
+
+  /**
+   * Keep a structured conclusion, with its references checked.
+   *
+   * The check is deliberately narrow: an id the model cites is marked `seen`
+   * only if it appears in something this mission actually read. That catches
+   * the cheap kind of invention and claims nothing about the reasoning.
+   */
+  async #record(row, name, result) {
+    if (name !== 'finding_submit' || !result?.finding) return
+    row.finding = auditFinding(result.finding, {
+      evidence: row.evidence ?? [],
+      messages: row.messages ?? [],
+      testRunId: row.testRunId
+    })
+    await this.event(
+      row,
+      'finding',
+      `Agent 提交了结构化结论：${VERDICTS[row.finding.verdict]?.label ?? row.finding.verdict}（置信度 ${row.finding.confidence}）`,
+      { finding: row.finding }
+    )
   }
 
   async #answer(state, ctx) {

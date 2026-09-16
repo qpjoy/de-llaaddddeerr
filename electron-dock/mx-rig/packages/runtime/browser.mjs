@@ -9,6 +9,26 @@ export class BrowserTools {
     this.browser = null
     this.page = null
     this.sequence = 0
+    // Which egress channel the live browser was launched on. A switch has to
+    // reach the browser, and the only honest way to do that is a new browser:
+    // Chromium resolves its proxy at launch, so keeping the old process and
+    // claiming the new channel would be a lie told to a page.
+    this.channel = null
+  }
+  /**
+   * The proxy the isolated browser should use, as a comparable key.
+   *
+   * It arrives inside the policy the Runtime re-reads before every action, so
+   * an admin switching channels is picked up on the next `browser_open`
+   * without the desktop having to learn a new message.
+   */
+  static channelOf(policy) {
+    const proxy = policy?.egress?.browserProxy
+    if (!proxy?.server) return { key: 'direct', proxy: null }
+    return {
+      key: `${proxy.id ?? ''}|${proxy.server}|${proxy.bypass ?? ''}`,
+      proxy: { server: proxy.server, ...(proxy.bypass ? { bypass: proxy.bypass } : {}) }
+    }
   }
   allowed(raw, policy) {
     try {
@@ -28,10 +48,17 @@ export class BrowserTools {
     if (name === 'browser_open') {
       if (!this.allowed(args.url, policy))
         throw new RigError('origin_denied', '地址不在 Internal 浏览器允许列表中', 403)
+      const channel = BrowserTools.channelOf(policy)
+      // Reopen on a channel change. The previous page belongs to the previous
+      // route; reusing it would attribute the old network path to the new one.
+      if (this.browser && this.channel !== channel.key) await this.close()
       if (!this.browser) {
         const chromium = this.launcher || (await import('playwright')).chromium
         try {
-          this.browser = await chromium.launch({ headless: false })
+          this.browser = await chromium.launch({
+            headless: false,
+            ...(channel.proxy ? { proxy: channel.proxy } : {})
+          })
         } catch {
           throw new RigError(
             'browser_unavailable',
@@ -53,6 +80,7 @@ export class BrowserTools {
         this.page = await context.newPage()
         this.page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}))
         this.page.setDefaultTimeout(15_000)
+        this.channel = channel.key
       }
       this.policy = policy
     }
@@ -107,6 +135,7 @@ export class BrowserTools {
     const browser = this.browser
     this.browser = null
     this.page = null
+    this.channel = null
     await browser?.close()
   }
 }

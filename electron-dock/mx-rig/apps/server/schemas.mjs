@@ -103,7 +103,32 @@ const providerBody = z
     model: z.string().max(200),
     apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
     timeoutMs: z.number().int().min(5_000).max(120_000),
-    enabled: z.boolean()
+    enabled: z.boolean(),
+    stream: z.boolean().optional()
+  })
+  .strict()
+
+const egressProfileBody = z
+  .object({
+    id: identifier,
+    displayName: z.string().min(1).max(60),
+    proxyUrl: z.string().min(1).max(300),
+    bypass: z.array(z.string().max(200)).max(30).optional(),
+    // A variable name, never a secret — same rule as a Provider's apiKeyEnv.
+    authEnv: z.string().max(101).optional(),
+    appliesTo: z
+      .array(z.enum(['model', 'browser']))
+      .min(1)
+      .max(2)
+      .optional(),
+    note: z.string().max(240).optional()
+  })
+  .strict()
+
+export const egressBody = z
+  .object({
+    activeId: identifier.nullable().optional(),
+    profiles: z.array(egressProfileBody).max(6)
   })
   .strict()
 
@@ -143,6 +168,7 @@ export const adminConfigBody = z
     sequence: z.array(identifier).max(8),
     agents: z.array(agentBody).max(24),
     orchestrations: z.array(orchestrationBody).max(24).optional(),
+    egress: egressBody.optional(),
     // Tolerated so the admin view can post back what it read.
     revision: z.string().max(80).optional(),
     model: z.unknown().optional()
@@ -150,6 +176,27 @@ export const adminConfigBody = z
   .strict()
 
 export const probeBody = z.object({ providerId: identifier }).strict()
+
+// -- system layer ---------------------------------------------------------------
+// The names themselves are checked against the closed lists in `system.mjs`:
+// this layer only keeps an oversized or malformed body from reaching them.
+export const systemSignalBody = z.object({ signal: z.string().min(1).max(64) }).strict()
+
+export const systemClaimBody = z.object({ questId: z.string().min(1).max(64) }).strict()
+
+export const systemSeenBody = z.object({ version: z.string().min(1).max(20) }).strict()
+
+export const dispatchPlanBody = z
+  .object({
+    text: z.string().min(1).max(2000),
+    // Which workbench is asking. It only decides whether desktop-only Agents
+    // are worth proposing; the actual surface requirement is still enforced by
+    // the tool executor at execution time.
+    surface: z.enum(['web', 'desktop']).optional()
+  })
+  .strict()
+
+export const egressActivateBody = z.object({ activeId: identifier.nullable().optional() }).strict()
 
 /** Turn a zod failure into the product's own error shape, without a stack. */
 export function parseBody(schema, value, code = 'invalid_input') {

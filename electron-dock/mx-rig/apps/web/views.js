@@ -150,6 +150,23 @@ export async function overview(ctx, mount) {
       class: 'qp-body-2 qp-muted',
       text: '每一步都读的是平台真实状态；高亮的那一步就是现在该做的事。'
     }),
+    // The banner is the five-step summary; the system layer is the same path
+    // with the actual click-by-click steps, version by version.
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('button', {
+        class: 'qp-button qp-button--outline qp-button--sm',
+        text: '按系统任务一步步做 ⬢',
+        onclick: () => ctx.go('system')
+      }),
+      ctx.state.system?.claimable.length
+        ? h('span', {
+            class: 'qp-tag qp-tag--danger',
+            text: `${ctx.state.system.claimable.length} 项可领取`
+          })
+        : null
+    ),
     h(
       'div',
       { class: 'rig-steps' },
@@ -563,6 +580,72 @@ export async function missions(ctx, mount) {
   )
 }
 
+// Labels for the structured conclusion. Mirrored from
+// `packages/runtime/finding.mjs` the same way status words are: the workbench
+// is served as plain files from apps/web and cannot import from packages/.
+const VERDICT_TEXT = {
+  'product-defect': { label: '产品缺陷', tone: 'danger' },
+  'environment-blocked': { label: '环境受阻', tone: 'warning' },
+  'case-issue': { label: '用例问题', tone: 'warning' },
+  flaky: { label: '不稳定（flaky）', tone: 'warning' },
+  inconclusive: { label: '证据不足', tone: 'default' }
+}
+const FINDING_CONFIDENCE = { high: '高', medium: '中', low: '低' }
+
+/**
+ * The Agent's own judgement, with its citations checked.
+ *
+ * Everything here is labelled as a claim. `seen` means the id appears in a
+ * tool result this mission really read — the one kind of invention the product
+ * can catch, so it is shown per reference instead of summarised away.
+ */
+function findingCard(finding) {
+  const verdict = VERDICT_TEXT[finding.verdict] ?? { label: finding.verdict, tone: 'default' }
+  const rows = [h('dt', { text: '依据' }), h('dd', { class: 'rig-wrap', text: finding.evidence })]
+  if (finding.nextStep) rows.push(h('dt', { text: '下一步' }), h('dd', { text: finding.nextStep }))
+  return h(
+    'section',
+    { class: 'qp-panel rig-finding', 'data-verdict': finding.verdict },
+    h(
+      'div',
+      { class: 'qp-row qp-row--between' },
+      h(
+        'div',
+        {},
+        h('p', { class: 'qp-caption qp-muted', text: 'AGENT 判断 · 不是测试结论' }),
+        h('h3', { class: 'qp-heading-2', text: verdict.label })
+      ),
+      h('span', {
+        class: 'qp-status',
+        'data-status': verdict.tone,
+        text: `置信度 ${FINDING_CONFIDENCE[finding.confidence] ?? finding.confidence}`
+      })
+    ),
+    h('p', { class: 'qp-body-1', text: finding.summary }),
+    h('dl', { class: 'rig-kv' }, ...rows),
+    finding.checkable
+      ? h(
+          'div',
+          { class: 'rig-chips' },
+          ...finding.references.map((reference) =>
+            h('span', {
+              class: 'rig-ref',
+              'data-seen': reference.seen ? 'true' : null,
+              title: reference.seen
+                ? '这个 ID 出现在本次任务读到的工具结果里'
+                : '这个 ID 没有出现在本次任务的工具结果里',
+              text: `${reference.id}${reference.seen ? ' ✓ 已读到' : ' ⚠ 未读到'}`
+            })
+          )
+        )
+      : h('p', { class: 'qp-caption qp-muted', text: '没有可核对的 run / 计划 ID 引用。' }),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '结论由 Agent 提交，不改变任何测试 Run 的状态。标「未读到」的引用说明它没有出现在本次任务的工具结果里，需要人工复核。'
+    })
+  )
+}
+
 function missionDetail(ctx, row) {
   const box = h('div', { class: 'rig-section' })
   box.append(
@@ -581,6 +664,7 @@ function missionDetail(ctx, row) {
       statusTag(row.status, 'mission-status')
     )
   )
+  if (row.finding) box.append(findingCard(row.finding))
   const timeline = h('div', { class: 'rig-timeline', id: 'timeline' })
   for (const event of row.events) {
     const body = h(
@@ -613,6 +697,28 @@ function missionDetail(ctx, row) {
         body
       )
     )
+  }
+  // Partial model text. It arrives on the mission row and is redrawn by the
+  // same poll as everything else, so the desktop and the web behave the same;
+  // what it is not is a token-by-token feed.
+  if (row.stream?.text) {
+    timeline.append(
+      h(
+        'article',
+        { class: 'rig-event', 'data-kind': 'stream' },
+        h('time', { text: '正在输出' }),
+        h(
+          'div',
+          { class: 'rig-event__body' },
+          h('p', {
+            class: 'qp-caption qp-muted',
+            text: `模型正在生成第 ${row.stream.turn || row.turns || 1} 步的回复`
+          }),
+          h('p', { class: 'rig-stream qp-body-2', text: row.stream.text })
+        )
+      )
+    )
+    ctx.signal?.('saw_stream')
   }
   box.append(panel(null, timeline))
 
@@ -668,6 +774,116 @@ function missionDetail(ctx, row) {
   return box
 }
 
+const CONFIDENCE_TEXT = { high: '匹配明确', medium: '可能是这个', low: '只能猜到这一步' }
+const CONFIDENCE_TONE = { high: 'success', medium: 'warning', low: 'default' }
+
+/**
+ * What the sentence was understood as — and what is still missing.
+ *
+ * The parse happens on the server without a model, so everything here is
+ * checkable: which words matched which plan, which required input has no
+ * value yet, and why a candidate is blocked. Nothing runs until one of these
+ * cards is confirmed, and the request posted is the one printed on the card.
+ */
+function proposalPanel(ctx) {
+  const plan = ctx.state.plan
+  if (!plan) return null
+  const cards = plan.proposals.map((proposal) => {
+    // Filled in on the card, not on the server: a missing plan id is the
+    // reader's decision, and it has to be visible before it is posted.
+    const body = {
+      ...proposal.body,
+      ...(proposal.body.inputs ? { inputs: { ...proposal.body.inputs } } : {})
+    }
+    const confirm = h('button', {
+      class: 'qp-button qp-button--primary qp-button--sm',
+      text: '确认派发',
+      disabled: !ctx.canRun() || Boolean(proposal.blocked)
+    })
+    const ready = () => {
+      if (proposal.kind === 'workflow') return Boolean(body.taskId)
+      if (proposal.kind === 'orchestration')
+        return proposal.missing.every((name) => Boolean(body.inputs?.[name]))
+      return true
+    }
+    const sync = () => {
+      confirm.disabled = !ctx.canRun() || Boolean(proposal.blocked) || !ready()
+    }
+    const fill = h('div', { class: 'rig-composer__controls' })
+    if (proposal.kind === 'workflow' && proposal.missing.includes('taskId')) {
+      const select = h(
+        'select',
+        { class: 'qp-select', 'aria-label': '测试计划' },
+        h('option', { value: '', text: '选择测试计划…' }),
+        ...proposal.candidates.map((entry) => h('option', { value: entry.id, text: entry.label }))
+      )
+      select.onchange = () => {
+        body.taskId = select.value || undefined
+        sync()
+      }
+      fill.append(select)
+    }
+    if (proposal.kind === 'orchestration')
+      for (const name of proposal.missing) {
+        const label = proposal.candidates.find((entry) => entry.id === name)?.label ?? name
+        const input = h('input', { class: 'qp-input', maxlength: '400', placeholder: label })
+        input.oninput = () => {
+          body.inputs = { ...(body.inputs ?? {}), [name]: input.value }
+          sync()
+        }
+        fill.append(input)
+      }
+    confirm.onclick = (event) => {
+      event.target.disabled = true
+      ctx.run(async () => {
+        const { mission } = await ctx.api('start', body)
+        ctx.state.selected = mission.id
+        ctx.state.plan = null
+        ctx.state.draft = ''
+        await ctx.refresh()
+      })
+    }
+    sync()
+    return h(
+      'article',
+      { class: 'rig-proposal', 'data-blocked': proposal.blocked ? 'true' : null },
+      h(
+        'div',
+        { class: 'qp-row qp-row--between' },
+        h('strong', { class: 'qp-body-1 qp-body-1--semibold', text: proposal.title }),
+        h('span', {
+          class: 'qp-status',
+          'data-status': CONFIDENCE_TONE[proposal.confidence],
+          text: CONFIDENCE_TEXT[proposal.confidence]
+        })
+      ),
+      h(
+        'ul',
+        { class: 'qp-body-2 qp-soft' },
+        ...proposal.because.map((line) => h('li', { text: line }))
+      ),
+      proposal.blocked ? h('p', { class: 'qp-body-2 rig-error', text: proposal.blocked }) : null,
+      ...(proposal.warnings ?? []).map((line) =>
+        h('p', { class: 'qp-caption qp-muted', text: line })
+      ),
+      fill.childElementCount ? fill : null,
+      h('pre', { class: 'qp-code-block', text: JSON.stringify(body, null, 2) }),
+      h('p', { class: 'qp-caption qp-muted', text: proposal.note }),
+      h('div', { class: 'qp-row' }, confirm)
+    )
+  })
+  return panel(
+    '这句话可以这样执行',
+    h('p', { class: 'qp-body-2 qp-muted', text: plan.note }),
+    ...(cards.length ? cards : [empty('没有候选。换个说法，或直接在下面选测试计划。')]),
+    h('button', {
+      class: 'qp-button qp-button--ghost qp-button--sm rig-inline-action',
+      text: '收起解析结果',
+      onclick: () => ctx.clearPlan()
+    })
+  )
+}
+
 function composer(ctx, selected) {
   const terminal =
     !selected || ['completed', 'failed', 'blocked', 'cancelled'].includes(selected.status)
@@ -713,6 +929,19 @@ function composer(ctx, selected) {
     !selected &&
       ctx.state.agentKey &&
       h('span', { class: 'qp-tag qp-tag--primary', text: `Agent · ${ctx.state.agentKey}` }),
+    // 对话式下任务：解析先行，执行仍然要按下面那个按钮。
+    !selected &&
+      h('button', {
+        class: 'qp-button qp-button--outline',
+        id: 'plan',
+        type: 'button',
+        text: '解析成任务 ⌕',
+        disabled: !ctx.canRun(),
+        onclick: () =>
+          textarea.value.trim()
+            ? ctx.run(() => ctx.planDispatch(textarea.value.trim()))
+            : ctx.notice('先写一句话，例如「跑一下 Compass Electron 的登录验收」。')
+      }),
     h('button', {
       class: 'qp-button qp-button--primary',
       id: 'start',
@@ -753,7 +982,8 @@ function composer(ctx, selected) {
       text: '写动作会展示具体参数，确认后才执行。任务完成不等于测试通过。'
     })
   )
-  return form
+  const parsed = selected ? null : proposalPanel(ctx)
+  return parsed ? h('div', { class: 'rig-section' }, parsed, form) : form
 }
 
 // -- tests ---------------------------------------------------------------------
@@ -1985,15 +2215,37 @@ export async function tools(ctx, mount) {
 
 // -- egress ---------------------------------------------------------------------------
 
+const ROUTE_TEXT = { 'rig-channel': 'Rig 通道', 'proxy-env': '代理环境变量', direct: '直连' }
+
 export async function egress(ctx, mount) {
   const { egress: observed, note } = await ctx.api('egress')
   mount.append(
     h('div', { class: 'qp-panel qp-panel--active' }, h('p', { class: 'qp-body-2', text: note })),
     h(
       'div',
+      { class: 'qp-metric-grid' },
+      metric(
+        '模型调用',
+        ROUTE_TEXT[observed.route.model] ?? observed.route.model,
+        '服务端发出的请求'
+      ),
+      metric(
+        '隔离浏览器',
+        ROUTE_TEXT[observed.route.browser] ?? observed.route.browser,
+        '桌面 Runtime 打开的页面'
+      ),
+      metric(
+        '环境变量观测',
+        observed.configured ? (observed.honored ? '已配置且生效' : '已配置但未生效') : '未配置',
+        observed.honored ? 'NODE_USE_ENV_PROXY=1' : 'Node fetch 不读代理变量'
+      ),
+      metric('其他一切', '由部署环境决定', 'Rig 不设置系统代理或路由')
+    ),
+    h(
+      'div',
       { class: 'rig-grid-2' },
       panel(
-        observed.effective === 'proxy-env' ? '当前出网：按代理环境变量' : '当前出网：直连',
+        observed.effective === 'proxy-env' ? '环境观测：按代理环境变量' : '环境观测：直连',
         h('p', { class: 'qp-body-2 qp-soft', text: observed.reason }),
         h(
           'dl',
@@ -2039,20 +2291,203 @@ export async function egress(ctx, mount) {
         )
       )
     ),
+    channelsEgressPanel(ctx, observed),
     panel(
-      '为什么这一页只读',
+      '这一页管什么、不管什么',
       h(
         'ul',
         { class: 'qp-body-2 qp-soft' },
         h('li', {
-          text: 'MX Rig 不拥有网络：不设置代理、路由、DNS、PAC 或 NRPT，也不接管其他应用的网络归属。'
+          text: '管：Rig 自己的两种出网请求——服务端的模型调用，和桌面 Runtime 打开的隔离浏览器。'
         }),
         h('li', {
-          text: '需要私网连通时，由管理员在部署层提供，或通过 standalone launcher 的既有能力接入。'
+          text: '不管：系统代理、路由表、DNS、PAC、NRPT，以及其他任何应用的网络归属。Rig 不拥有网络。'
         }),
-        h('li', { text: '这一页的作用是把「模型连不上」和「模型配错了」分开，让排查不靠猜。' })
+        h('li', {
+          text: '上半页始终是真实环境观测，不会因为启用了通道而改写——「模型连不上」和「模型配错了」要能分开。'
+        }),
+        h('li', {
+          text: '切换通道会产生新的策略版本：已经发出的待确认动作随之失效，需要重新发起。'
+        }),
+        h('li', {
+          text: '需要私网连通时，仍由管理员在部署层提供，或通过 standalone launcher 的既有能力接入。'
+        })
       )
     )
+  )
+}
+
+/**
+ * Rig's own channels: the switchable half.
+ *
+ * Credentials follow the Provider rule — an environment variable name is
+ * stored, the value is read in the server process, and a channel that needs
+ * one may not be used by the desktop browser at all.
+ */
+function channelsEgressPanel(ctx, observed) {
+  const admin = ctx.state.principal?.role === 'admin'
+  const managed = observed.managed
+  const profiles = managed.profiles ?? []
+  const rows = profiles.length
+    ? table(
+        [
+          {
+            title: '通道',
+            cell: (profile) =>
+              h(
+                'div',
+                {},
+                h('strong', { class: 'qp-body-2', text: profile.displayName }),
+                h('div', { class: 'qp-caption qp-muted', text: profile.proxyUrl })
+              )
+          },
+          {
+            title: '作用面',
+            cell: (profile) =>
+              h(
+                'div',
+                { class: 'rig-chips' },
+                ...profile.appliesTo.map((surface) =>
+                  h('span', {
+                    class: 'rig-chip',
+                    text: surface === 'model' ? '模型调用' : '浏览器'
+                  })
+                )
+              )
+          },
+          {
+            title: '凭据',
+            cell: (profile) =>
+              h('span', {
+                class: 'qp-status',
+                'data-status': profile.authEnv
+                  ? profile.authConfigured
+                    ? 'success'
+                    : 'warning'
+                  : 'default',
+                text: profile.authEnv
+                  ? `${profile.authEnv}${profile.authConfigured ? '' : '（未设置）'}`
+                  : '无'
+              })
+          },
+          {
+            title: '',
+            cell: (profile) =>
+              h(
+                'div',
+                { class: 'qp-row' },
+                h('button', {
+                  class: `qp-button qp-button--sm ${
+                    managed.activeId === profile.id ? 'qp-button--outline' : 'qp-button--primary'
+                  }`,
+                  text: managed.activeId === profile.id ? '当前启用' : '切到这条',
+                  disabled: !admin || managed.activeId === profile.id,
+                  onclick: () => ctx.run(() => ctx.activateEgress(profile.id))
+                }),
+                h('button', {
+                  class: 'qp-button qp-button--ghost qp-button--sm',
+                  text: '删除',
+                  disabled: !admin,
+                  onclick: () =>
+                    ctx.run(() =>
+                      ctx.saveEgress(
+                        profiles.filter((entry) => entry.id !== profile.id),
+                        managed.activeId === profile.id ? null : managed.activeId
+                      )
+                    )
+                })
+              )
+          }
+        ],
+        profiles,
+        { layout: 'egress-channels' }
+      )
+    : empty('还没有配置通道：Rig 的模型调用按环境观测走，隔离浏览器直连。')
+
+  const body = [
+    h('p', { class: 'qp-body-2 qp-muted', text: managed.route?.note ?? observed.route.note }),
+    rows,
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('button', {
+        class: 'qp-button qp-button--outline qp-button--sm',
+        text: '改为直连',
+        disabled: !admin || !managed.activeId,
+        onclick: () => ctx.run(() => ctx.activateEgress(null))
+      })
+    )
+  ]
+  if (admin) body.push(channelForm(ctx, profiles, managed.activeId))
+  else
+    body.push(
+      h('p', { class: 'qp-caption qp-muted', text: '只有管理员可以新增、删除或切换通道。' })
+    )
+  return panel('Rig 自己的通道（可实时切换）', ...body)
+}
+
+function channelForm(ctx, profiles, activeId) {
+  const field = (label, placeholder, attrs = {}) => {
+    const input = h('input', { class: 'qp-input', placeholder, maxlength: '300', ...attrs })
+    return {
+      input,
+      node: h(
+        'label',
+        { class: 'qp-field' },
+        h('span', { class: 'qp-field__label', text: label }),
+        input
+      )
+    }
+  }
+  const id = field('通道 ID', 'office-proxy')
+  const name = field('名称', '办公网代理')
+  const url = field('通道地址', 'http://127.0.0.1:7890')
+  const bypass = field('直连列表（逗号分隔）', '.internal.example.com, 10.0.0.5')
+  const auth = field('凭据环境变量名（可留空）', 'MX_RIG_EGRESS_AUTH', { maxlength: '101' })
+  const model = h('input', { type: 'checkbox', checked: true })
+  const browser = h('input', { type: 'checkbox' })
+  return h(
+    'form',
+    {
+      class: 'rig-section',
+      onsubmit: (event) => {
+        event.preventDefault()
+        const next = {
+          id: id.input.value.trim(),
+          displayName: name.input.value.trim() || id.input.value.trim(),
+          proxyUrl: url.input.value.trim(),
+          bypass: bypass.input.value
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+          ...(auth.input.value.trim() ? { authEnv: auth.input.value.trim() } : {}),
+          appliesTo: [...(model.checked ? ['model'] : []), ...(browser.checked ? ['browser'] : [])]
+        }
+        ctx.run(() => ctx.saveEgress([...profiles, next], activeId))
+      }
+    },
+    h('h3', { class: 'qp-heading-2', text: '新增通道' }),
+    h('div', { class: 'rig-grid-2' }, id.node, name.node, url.node, bypass.node, auth.node),
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('label', { class: 'qp-row' }, model, h('span', { class: 'qp-body-2', text: '模型调用' })),
+      h(
+        'label',
+        { class: 'qp-row' },
+        browser,
+        h('span', { class: 'qp-body-2', text: '隔离浏览器' })
+      )
+    ),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '地址只写 scheme://host:port，不要带凭据。socks 通道只能作用于浏览器；需要凭据的通道不能作用于浏览器。'
+    }),
+    h('button', {
+      class: 'qp-button qp-button--primary qp-button--sm rig-inline-action',
+      type: 'submit',
+      text: '保存通道'
+    })
   )
 }
 
@@ -2095,7 +2530,7 @@ export async function guide(ctx, mount) {
     {
       title: '5 · 卡住了怎么办',
       body: [
-        '一直排队 → 去「出网观测」和完整管理台的执行机页，先确认有没有在线执行机。',
+        '一直排队 → 去「出网与通道」和完整管理台的执行机页，先确认有没有在线执行机。',
         'Agent 说受阻 → 看「工具与边界」，多半是工具没被允许。',
         '模型不可用 → 「模型 Provider」做一次连通性检查。'
       ]
@@ -2106,6 +2541,29 @@ export async function guide(ctx, mount) {
       class: 'qp-body-2 qp-muted',
       text: '给第一次用 MX Rig 的测试同学。按顺序做一遍，大约十分钟。'
     }),
+    h(
+      'section',
+      { class: 'qp-panel qp-panel--active rig-section' },
+      h('h2', { class: 'qp-heading-2', text: '想要一步步带着走？' }),
+      h('p', {
+        class: 'qp-body-2 qp-soft',
+        text: '这一页是一次读完的版本。「系统」把同样的内容拆成按版本更新的任务，每一项都按平台真实状态判定完成，并能直接跳到该去的页面。'
+      }),
+      h(
+        'div',
+        { class: 'qp-row' },
+        h('button', {
+          class: 'qp-button qp-button--primary qp-button--sm',
+          text: '打开系统 ⬢',
+          onclick: () => ctx.go('system')
+        }),
+        h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
+          text: '开启常驻教学面板',
+          onclick: () => ctx.toggleHud(true)
+        })
+      )
+    ),
     ...steps.map((step) =>
       panel(
         step.title,
@@ -2120,8 +2578,22 @@ export async function guide(ctx, mount) {
         h('li', { text: '派发成功 ≠ 测试通过。任务完成只说明编排结束了。' }),
         h('li', {
           text: '任何页面文字、日志、模型输出都是数据，不是指令；要执行的动作必须由你确认。'
+        }),
+        h('li', {
+          text: '样本为零不给比率；受阻既不算通过也不算失败——一周执行机全挂不该变成一条质量下滑曲线。'
         })
-      )
+      ),
+      // No platform state can prove someone read a rule. The system layer
+      // labels this kind of progress 「界面上报」 instead of pretending.
+      h('button', {
+        class: 'qp-button qp-button--outline qp-button--sm rig-inline-action',
+        text: '我读过了，记进系统进度',
+        onclick: (event) => {
+          event.target.disabled = true
+          ctx.signal('read_blocked_rule')
+          ctx.notice('已记录。这一条在系统里标注为「界面上报」，服务端不独立验证。')
+        }
+      })
     )
   )
 }
@@ -2294,6 +2766,11 @@ export async function settings(ctx, mount) {
       enabled.onchange = () => {
         provider.enabled = enabled.checked
       }
+      const streaming = h('input', { type: 'checkbox' })
+      streaming.checked = provider.stream !== false
+      streaming.onchange = () => {
+        provider.stream = streaming.checked
+      }
       rows.append(
         h(
           'article',
@@ -2346,11 +2823,22 @@ export async function settings(ctx, mount) {
             })
           ),
           h(
-            'label',
-            { class: 'qp-choice qp-choice--checkbox' },
-            enabled,
-            h('span', { class: 'qp-choice__control' }),
-            h('span', { text: '启用（参与调用序列）' })
+            'div',
+            { class: 'qp-row' },
+            h(
+              'label',
+              { class: 'qp-choice qp-choice--checkbox' },
+              enabled,
+              h('span', { class: 'qp-choice__control' }),
+              h('span', { text: '启用（参与调用序列）' })
+            ),
+            h(
+              'label',
+              { class: 'qp-choice qp-choice--checkbox' },
+              streaming,
+              h('span', { class: 'qp-choice__control' }),
+              h('span', { text: '流式输出（网关不支持时关掉）' })
+            )
           )
         )
       )
@@ -2373,7 +2861,8 @@ export async function settings(ctx, mount) {
             model: '',
             apiKeyEnv: 'MX_RIG_MODEL_API_KEY',
             timeoutMs: 60_000,
-            enabled: true
+            enabled: true,
+            stream: true
           })
           rerender()
         }
@@ -2543,7 +3032,10 @@ export async function report(ctx, mount) {
         h('button', {
           class: 'qp-button qp-button--outline qp-button--sm',
           text: '打印 / 存 PDF',
-          onclick: () => window.print()
+          onclick: () => {
+            ctx.signal('printed_report')
+            window.print()
+          }
         })
       )
     ),
@@ -2698,4 +3190,310 @@ export async function report(ctx, mount) {
         h('pre', { class: 'qp-code-block', text: ctx.state.reportText })
       )
     )
+}
+
+// -- the system layer -----------------------------------------------------------
+// A tutorial that follows the product's own rules: every quest shows the state
+// that satisfied it, says whether that state came from the platform or from the
+// workbench reporting itself, and carries the version it shipped in.
+
+const EVIDENCE_LABEL = { platform: '平台状态', signal: '界面上报' }
+const QUEST_TONE = { claimed: 'success', claimable: 'warning', open: 'default' }
+const QUEST_TEXT = { claimed: '已领取', claimable: '可领取', open: '未完成' }
+
+/**
+ * The level bar, drawn as SVG.
+ *
+ * A width computed at runtime would have to be an inline style, and the page
+ * is served under `style-src 'self'` — so the geometry goes in attributes the
+ * stylesheet can colour, exactly like the trend chart.
+ */
+function levelBar(level) {
+  const width = 320
+  const filled = Math.max(2, Math.round(Math.min(1, Math.max(0, level.progress)) * width))
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${width} 10`,
+    width,
+    height: 10,
+    class: 'rig-xp',
+    role: 'img',
+    'aria-label': `经验 ${level.xp}${level.nextAt ? ` / ${level.nextAt}` : ''}`
+  })
+  svg.append(
+    svgEl('rect', { class: 'rig-xp__track', x: 0, y: 0, width, height: 10, rx: 5 }),
+    svgEl('rect', { class: 'rig-xp__fill', x: 0, y: 0, width: filled, height: 10, rx: 5 })
+  )
+  return svg
+}
+
+function questCard(ctx, quest, { compact = false } = {}) {
+  const jump = quest.target?.view
+  const actions = h('div', { class: 'qp-row' })
+  if (jump)
+    actions.append(
+      h('button', {
+        class: 'qp-button qp-button--outline qp-button--sm',
+        text: '前往 →',
+        onclick: () => ctx.go(jump)
+      })
+    )
+  if (quest.status === 'claimable')
+    actions.append(
+      h('button', {
+        class: 'qp-button qp-button--primary qp-button--sm',
+        text: `领取 +${quest.reward.xp}`,
+        onclick: (event) => {
+          event.target.disabled = true
+          ctx.run(() => ctx.claimQuest(quest.id))
+        }
+      })
+    )
+  return h(
+    'article',
+    { class: 'rig-quest', 'data-status': quest.status },
+    h(
+      'div',
+      { class: 'rig-quest__head' },
+      h(
+        'div',
+        {},
+        h(
+          'div',
+          { class: 'qp-row' },
+          h('strong', { class: 'qp-body-1 qp-body-1--semibold', text: quest.title }),
+          quest.isNew
+            ? h('span', { class: 'qp-tag qp-tag--primary', text: `新 · ${quest.since}` })
+            : null
+        ),
+        h('p', { class: 'qp-body-2 qp-soft', text: quest.why })
+      ),
+      h('span', {
+        class: 'qp-status',
+        'data-status': QUEST_TONE[quest.status],
+        text: QUEST_TEXT[quest.status]
+      })
+    ),
+    compact
+      ? null
+      : h(
+          'ol',
+          { class: 'rig-quest__steps qp-body-2 qp-soft' },
+          ...quest.steps.map((step) => h('li', { text: step }))
+        ),
+    h(
+      'div',
+      { class: 'rig-quest__foot' },
+      h('span', {
+        class: 'rig-quest__evidence qp-caption',
+        'data-done': quest.done ? 'true' : null,
+        text: `${EVIDENCE_LABEL[quest.evidence]}：${quest.detail}`
+      }),
+      actions
+    )
+  )
+}
+
+/**
+ * The floating teaching panel.
+ *
+ * Deliberately one quest at a time. A panel that lists everything is a second
+ * navigation menu; this one answers "what now" and gets out of the way.
+ */
+export function hudPanel(ctx) {
+  const close = h('button', {
+    class: 'qp-button qp-button--ghost qp-button--sm',
+    text: '收起',
+    onclick: () => ctx.toggleHud(false)
+  })
+  const system = ctx.state.system
+  if (!system)
+    return h(
+      'div',
+      { class: 'rig-hud__inner' },
+      h('div', { class: 'rig-hud__head' }, h('strong', { text: '⬢ 系统' }), close),
+      h('p', { class: 'qp-body-2 qp-muted', text: '系统状态还没有取到。刷新页面或稍后再看。' })
+    )
+  const quest =
+    system.quests.find((entry) => entry.id === system.next) ??
+    system.quests.find((entry) => entry.status === 'claimable') ??
+    null
+  const chapter = system.chapters.find((entry) => entry.key === quest?.chapter)
+  return h(
+    'div',
+    { class: 'rig-hud__inner' },
+    h(
+      'div',
+      { class: 'rig-hud__head' },
+      h(
+        'div',
+        {},
+        h('strong', {
+          class: 'qp-body-1 qp-body-1--semibold',
+          text: `⬢ Lv.${system.level.level} ${system.level.title}`
+        }),
+        h('div', {
+          class: 'qp-caption qp-muted',
+          text: `主线 ${system.progress.main.done}/${system.progress.main.total} · 经验 ${system.level.xp}${
+            system.level.nextAt ? ` / ${system.level.nextAt}` : ''
+          }`
+        })
+      ),
+      close
+    ),
+    levelBar(system.level),
+    quest
+      ? h(
+          'div',
+          { class: 'rig-hud__quest' },
+          chapter ? h('p', { class: 'qp-caption qp-muted', text: chapter.title }) : null,
+          questCard(ctx, quest)
+        )
+      : h('p', {
+          class: 'qp-body-2 qp-soft',
+          text: '当前没有待完成的任务。下一个版本会发布新的系统任务。'
+        }),
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('button', {
+        class: 'qp-button qp-button--ghost qp-button--sm',
+        text: '全部任务 →',
+        onclick: () => ctx.go('system')
+      }),
+      system.claimable.length
+        ? h('span', { class: 'qp-tag qp-tag--danger', text: `${system.claimable.length} 项可领取` })
+        : null
+    )
+  )
+}
+
+export async function system(ctx, mount) {
+  const { system: state } = await ctx.api('system')
+  ctx.state.system = state
+  const fresh = state.newQuests.length > 0 && state.version !== state.seenVersion
+
+  mount.append(
+    h(
+      'section',
+      { class: 'qp-panel rig-section rig-level' },
+      h(
+        'div',
+        { class: 'qp-row qp-row--between' },
+        h(
+          'div',
+          {},
+          h('p', { class: 'qp-caption qp-muted', text: `系统版本 ${state.version}` }),
+          h('h2', {
+            class: 'qp-heading-1',
+            text: `Lv.${state.level.level} ${state.level.title}`
+          }),
+          h('p', {
+            class: 'qp-body-2 qp-muted',
+            text: state.level.nextAt
+              ? `经验 ${state.level.xp} / ${state.level.nextAt} · 再领 ${
+                  state.level.nextAt - state.level.xp
+                } 点升到「${state.level.nextTitle}」`
+              : `经验 ${state.level.xp}（已是最高等级）`
+          })
+        ),
+        h(
+          'div',
+          { class: 'qp-row' },
+          h('button', {
+            class: `qp-button qp-button--sm ${ctx.state.hud ? 'qp-button--outline' : 'qp-button--primary'}`,
+            text: ctx.state.hud ? '关闭常驻面板' : '开启常驻面板',
+            onclick: () => ctx.toggleHud()
+          })
+        )
+      ),
+      levelBar(state.level),
+      h(
+        'div',
+        { class: 'qp-metric-grid' },
+        metric(
+          '主线进度',
+          `${state.progress.main.done}/${state.progress.main.total}`,
+          '按平台真实状态判定'
+        ),
+        metric('全部任务', `${state.progress.all.done}/${state.progress.all.total}`, '含支线'),
+        metric(
+          '可领取',
+          String(state.claimable.length),
+          state.claimable.length ? '领取才会加经验' : '暂时没有'
+        ),
+        metric('经验上限', String(state.totalXp), '当前版本全部任务之和')
+      )
+    )
+  )
+
+  if (fresh)
+    mount.append(
+      h(
+        'section',
+        { class: 'qp-panel qp-panel--active rig-section' },
+        h('h2', { class: 'qp-heading-2', text: `系统更新到 ${state.version}` }),
+        h('p', {
+          class: 'qp-body-2 qp-soft',
+          text: `这个版本新增 ${state.newQuests.length} 项任务，已按章节标注「新」。`
+        }),
+        h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm rig-inline-action',
+          text: '知道了，不再提示这个版本',
+          onclick: (event) => {
+            event.target.disabled = true
+            ctx.run(async () => {
+              const { system: next } = await ctx.api('system-seen', { version: state.version })
+              ctx.state.system = next
+              await ctx.render()
+            })
+          }
+        })
+      )
+    )
+
+  for (const chapter of state.chapters) {
+    const quests = chapter.quests
+      .map((id) => state.quests.find((quest) => quest.id === id))
+      .filter(Boolean)
+    mount.append(
+      panel(
+        `${chapter.title}　${chapter.done}/${chapter.total}`,
+        h('p', { class: 'qp-body-2 qp-muted', text: chapter.brief }),
+        h('div', { class: 'rig-quests' }, ...quests.map((quest) => questCard(ctx, quest)))
+      )
+    )
+  }
+
+  mount.append(
+    panel(
+      '系统更新日志',
+      ...state.changelog.map((entry) =>
+        h(
+          'article',
+          { class: 'rig-risk', 'data-level': entry.version === state.version ? 'low' : 'medium' },
+          h('strong', {
+            class: 'qp-body-1 qp-body-1--semibold',
+            text: `${entry.version} · ${entry.title}`
+          }),
+          h('p', {
+            class: 'qp-caption qp-muted',
+            text: `${entry.at} · 新增 ${entry.quests.length} 项任务`
+          }),
+          h(
+            'ul',
+            { class: 'qp-body-2 qp-soft' },
+            ...entry.notes.map((note) => h('li', { text: note }))
+          )
+        )
+      )
+    ),
+    panel(
+      '这一层不做什么',
+      h(
+        'ul',
+        { class: 'qp-body-2 qp-soft' },
+        ...state.caveats.map((line) => h('li', { text: line }))
+      )
+    )
+  )
 }

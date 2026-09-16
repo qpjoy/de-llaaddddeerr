@@ -15,6 +15,7 @@ const GET_ROUTES = {
   egress: '/api/rig/v1/egress',
   missions: '/api/rig/v1/missions',
   insights: '/api/rig/v1/insights',
+  system: '/api/rig/v1/system',
   'admin-config': '/api/rig/v1/admin/config',
   tasks: '/api/v1/tasks',
   runs: '/api/v1/runs?limit=20',
@@ -27,6 +28,11 @@ const POST_ROUTES = {
   'save-config': '/api/rig/v1/admin/config',
   probe: '/api/rig/v1/admin/providers:probe',
   'preview-orchestration': '/api/rig/v1/admin/orchestrations:preview',
+  'activate-egress': '/api/rig/v1/admin/egress:activate',
+  'plan-dispatch': '/api/rig/v1/dispatch:plan',
+  'system-signal': '/api/rig/v1/system/signal',
+  'system-claim': '/api/rig/v1/system/claim',
+  'system-seen': '/api/rig/v1/system/seen',
   start: '/api/rig/v1/missions'
 }
 const MISSION_ACTIONS = ['approve', 'cancel', 'followup']
@@ -48,6 +54,13 @@ const PAGES = [
         title: '任务工作台',
         sub: 'Agent 对话与测试工作流',
         kicker: 'AGENT WORKSPACE'
+      },
+      {
+        id: 'system',
+        glyph: '⬢',
+        title: '系统',
+        sub: '教学任务、等级与版本更新',
+        kicker: 'THE SYSTEM'
       }
     ]
   },
@@ -111,8 +124,8 @@ const PAGES = [
       {
         id: 'egress',
         glyph: '⇄',
-        title: '出网观测',
-        sub: '代理与直连的真实情况',
+        title: '出网与通道',
+        sub: '真实出网情况与 Rig 自己的通道',
         kicker: 'SYSTEM EGRESS'
       }
     ]
@@ -156,17 +169,24 @@ const state = {
   lens: 'tester',
   window: 14,
   insights: null,
+  // The system layer: quest states, level, and the floating panel's visibility.
+  system: null,
+  hud: false,
+  // A parsed one-liner waiting to be confirmed. Never executed on its own.
+  plan: null,
   polling: false,
   scroll: {}
 }
 
 const LENS_KEY = 'mx-rig.lens'
 const WINDOW_KEY = 'mx-rig.window'
+const HUD_KEY = 'mx-rig.hud'
 try {
   const savedLens = localStorage.getItem(LENS_KEY)
   if (savedLens && Object.hasOwn(views.LENSES, savedLens)) state.lens = savedLens
   const savedWindow = Number(localStorage.getItem(WINDOW_KEY))
   if ([7, 14, 30].includes(savedWindow)) state.window = savedWindow
+  state.hud = localStorage.getItem(HUD_KEY) === 'on'
 } catch {
   // Private windows and blocked site data are normal; the defaults are fine.
 }
@@ -220,6 +240,7 @@ async function run(work) {
 }
 
 function openPath(path) {
+  if (/^\/api\/v1\/runs\/[^/]+\/report$/.test(path)) signal('opened_run_report')
   if (native) return run(() => api('open-path', { path }))
   window.open(path, '_blank', 'noopener')
 }
@@ -243,6 +264,13 @@ const ctx = {
   setWindow,
   copyReport,
   triageCase,
+  signal,
+  claimQuest,
+  toggleHud,
+  planDispatch,
+  clearPlan,
+  activateEgress,
+  saveEgress,
   canRun: () => ['operator', 'admin'].includes(state.principal?.role)
 }
 
@@ -257,7 +285,77 @@ function remember(key, value) {
 function setLens(lens) {
   state.lens = lens
   remember(LENS_KEY, lens)
+  signal('lens_switched')
   render()
+}
+
+// -- the system layer ----------------------------------------------------------
+
+// Page visits the workbench is allowed to report. Everything else about a
+// quest is read from platform state on the server; these three are things the
+// server genuinely cannot see.
+const VIEW_SIGNALS = { tools: 'opened_tools', egress: 'opened_egress' }
+const reported = new Set()
+
+/**
+ * Tell the server the member did something it cannot observe.
+ *
+ * Fire-and-forget, once per session per name, and never a reason for the page
+ * to show an error: a tutorial that interrupts the work it is teaching has the
+ * priorities backwards.
+ */
+async function signal(name) {
+  if (!name || reported.has(name) || !state.principal) return
+  reported.add(name)
+  try {
+    const { system } = await api('system-signal', { signal: name })
+    state.system = system
+    renderHud()
+  } catch {
+    reported.delete(name)
+  }
+}
+
+async function claimQuest(id) {
+  const { system } = await api('system-claim', { questId: id })
+  state.system = system
+  notice(`已领取「${system.quests.find((quest) => quest.id === id)?.title ?? id}」的奖励。`)
+  await render()
+}
+
+function toggleHud(on = !state.hud) {
+  state.hud = on
+  remember(HUD_KEY, on ? 'on' : 'off')
+  if (on) signal('hud_opened')
+  renderHud()
+}
+
+async function refreshSystem() {
+  const { system } = await api('system')
+  state.system = system
+  // Mark the catalogue version as seen only once its new quests have actually
+  // been on screen; otherwise "有更新" would clear itself in the background.
+  return system
+}
+
+/**
+ * The floating teaching panel.
+ *
+ * Lives outside `#view`, so it survives every redraw and every page change —
+ * the point of it is to follow the reader around while they do the steps.
+ */
+function renderHud() {
+  const box = $('hud')
+  if (!box) return
+  const toggle = $('hud-toggle')
+  if (toggle) {
+    const pending = state.system?.claimable.length ?? 0
+    toggle.textContent = pending ? `⬢ 系统 · ${pending}` : '⬢ 系统'
+    toggle.classList.toggle('is-active', state.hud)
+  }
+  box.hidden = !state.hud || !state.principal
+  if (box.hidden) return
+  box.replaceChildren(views.hudPanel(ctx))
 }
 
 function setWindow(days) {
@@ -296,6 +394,7 @@ function reportText(insights) {
 
 async function copyReport(insights, button) {
   const text = reportText(insights)
+  signal('copied_report')
   try {
     await navigator.clipboard.writeText(text)
     notice('周报已复制到剪贴板。')
@@ -305,6 +404,61 @@ async function copyReport(insights, button) {
     state.reportText = text
     notice('剪贴板不可用，已把周报显示在页面底部，可以手动复制。')
   }
+  await render()
+}
+
+// -- conversational dispatch ---------------------------------------------------
+
+/**
+ * Parse a sentence into candidate missions.
+ *
+ * The result is a proposal, not an action: `plan.proposals[n].body` is exactly
+ * the request the composer would post, and it is only posted when the reader
+ * presses confirm on that proposal.
+ */
+async function planDispatch(text) {
+  state.plan = null
+  const { plan } = await api('plan-dispatch', { text })
+  state.plan = plan
+  signal('dispatch_planned')
+  await render()
+}
+
+function clearPlan() {
+  state.plan = null
+  render()
+}
+
+/**
+ * Save the channel list.
+ *
+ * Posts the whole admin config back, the way the settings page does: one
+ * writer, one validation path, one new policy revision.
+ */
+async function saveEgress(profiles, activeId = null) {
+  const current = await api('admin-config')
+  state.config = await api('save-config', {
+    maxTurns: current.maxTurns,
+    allowedTools: current.allowedTools,
+    browserOrigins: current.browserOrigins,
+    providers: current.providers,
+    sequence: current.sequence,
+    agents: current.agents,
+    orchestrations: current.orchestrations.map(stripServerFields),
+    egress: { activeId, profiles }
+  })
+  notice('出网通道已保存。通道只作用于 Rig 自己的模型调用与隔离浏览器。')
+  await render()
+}
+
+async function activateEgress(activeId) {
+  await api('activate-egress', { activeId: activeId ?? null })
+  state.config = await api('config')
+  notice(
+    activeId
+      ? '已切换出网通道。下一次模型调用立即生效；隔离浏览器会在下一次打开页面时重开。'
+      : '已改为直连。已发出的待确认动作会因策略版本变化失效，需要重新发起。'
+  )
   await render()
 }
 
@@ -546,6 +700,8 @@ async function render() {
   } finally {
     if (token === renderToken) mount.removeAttribute('aria-busy')
   }
+  renderHud()
+  if (Object.hasOwn(VIEW_SIGNALS, page.id)) signal(VIEW_SIGNALS[page.id])
 }
 
 async function refresh() {
@@ -587,6 +743,10 @@ async function enter(principal) {
   state.missions = missions
   const { tasks = [] } = await api('tasks').catch(() => ({ tasks: [] }))
   state.tasks = tasks
+  // The system layer must never keep someone out of the workbench: a failure
+  // here leaves the panel empty and everything else working.
+  await refreshSystem().catch(() => {})
+  if (native) signal('desktop_login')
   await render()
 }
 
@@ -606,6 +766,7 @@ $('refresh').onclick = () =>
     state.missions = (await api('missions')).missions
     await render()
   })
+$('hud-toggle').onclick = () => toggleHud()
 $('new-mission').onclick = () => {
   state.selected = null
   state.draft = ''
@@ -642,17 +803,23 @@ $('login-form').onsubmit = async (event) => {
   }
 }
 
-// Poll fast while something is actually moving, slowly when nothing is. A
-// finished workspace does not need to ask the server four times a minute.
-let idleTicks = 0
+// Poll fast while text is arriving, at walking pace while something is
+// running, and slowly when nothing is. The fast cadence is only used on the
+// workbench page, which is the only place partial text is drawn — the overview
+// re-fetches four collections per render and has no business doing that twice
+// a second.
+const TICK_MS = 700
+let ticks = 0
 setInterval(() => {
   if (!state.principal || document.hidden) return
+  ticks += 1
   const busy = state.missions.some((row) => !TERMINAL.has(row.status))
   if (!busy && state.view !== 'missions' && state.view !== 'overview') return
-  idleTicks = busy ? 0 : idleTicks + 1
-  if (!busy && idleTicks % 4 !== 0) return
+  const streaming = state.view === 'missions' && state.missions.some((row) => row.stream?.text)
+  const every = streaming ? 1 : busy ? 4 : 16
+  if (ticks % every !== 0) return
   refresh().catch((error) => notice(error.message, 'error'))
-}, 2500)
+}, TICK_MS)
 
 if (!native)
   api('me')

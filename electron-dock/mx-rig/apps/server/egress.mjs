@@ -1,11 +1,16 @@
 /**
  * What this service's own outbound calls actually do.
  *
- * Read-only on purpose. MX Rig does not own the network: it does not set a
- * proxy, a route, DNS or PAC, and it must never look like it did. The panel
- * exists so that "模型连不上" can be told apart from "模型配置错了" without
- * anyone guessing, which is exactly the question a proxied Internal deployment
- * asks first.
+ * The environment half is read-only and stays that way. MX Rig does not own
+ * the machine's network: it does not set a system proxy, a route, DNS, PAC or
+ * NRPT, and it must never look like it did. This half exists so that
+ * "模型连不上" can be told apart from "模型配置错了" without anyone guessing,
+ * which is exactly the question a proxied Internal deployment asks first.
+ *
+ * The managed half (`egress-profiles.mjs`) is the narrow thing Rig *may*
+ * decide: which proxy its own model calls and its own isolated browser use.
+ * Both are reported side by side, because the failure mode worth preventing is
+ * an operator reading one and believing the other.
  */
 const NAMES = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']
 
@@ -81,11 +86,23 @@ export function observeEgress({
   env = process.env,
   nodeVersion = process.version,
   platform = process.platform,
-  hostname = ''
+  hostname = '',
+  managed = null
 } = {}) {
   const variables = NAMES.map((name) => readVariable(env, name))
   const proxied = variables.filter((entry) => entry.name !== 'NO_PROXY' && entry.set)
   const { honored, reason } = proxyHonored(env, nodeVersion)
+  const envEffective = honored && proxied.length > 0 ? 'proxy-env' : 'direct'
+  // A managed channel wins for the two surfaces it covers: the tunnel is used
+  // explicitly by our own transport, so it does not depend on the runtime
+  // reading proxy variables at all.
+  const route = {
+    model: managed?.model ? 'rig-channel' : envEffective,
+    browser: managed?.browser ? 'rig-channel' : 'direct',
+    note: managed?.activeId
+      ? `模型与浏览器按通道「${managed.active?.displayName ?? managed.activeId}」出网；其他一切仍由部署环境决定。`
+      : '没有启用 Rig 通道：模型调用按上面的环境观测走，浏览器直连。'
+  }
   return {
     observedAt: new Date().toISOString(),
     sourceKind: 'process-env',
@@ -93,7 +110,9 @@ export function observeEgress({
     configured: proxied.length > 0,
     honored,
     reason,
-    effective: honored && proxied.length > 0 ? 'proxy-env' : 'direct',
-    variables
+    effective: envEffective,
+    variables,
+    managed: managed ?? { activeId: null, profiles: [], active: null, model: null, browser: null },
+    route
   }
 }
