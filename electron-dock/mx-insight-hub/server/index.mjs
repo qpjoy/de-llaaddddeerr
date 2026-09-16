@@ -46,6 +46,7 @@ import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
 import { PostgresAcquisitionHistoryStore } from './acquisitions/history-store.mjs'
 import { TopicReportStore } from './insights/topic-reports.mjs'
+import { NotificationService } from './notifications.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -385,6 +386,7 @@ export async function createRuntime(config = loadConfig()) {
         chunkIndexSet: search.chunkIndexSet,
       })
     : null
+  const notifications = config.listenerMode === 'public' ? null : new NotificationService(pool)
   const app = createApp({
     service,
     store,
@@ -404,6 +406,7 @@ export async function createRuntime(config = loadConfig()) {
     searchReindex,
     embedding,
     externalPlatformAdmin,
+    notifications,
     nightAllA,
     externalPlatformGateway,
     ipRiskGateway,
@@ -421,6 +424,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
+    notifications,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore,
@@ -438,7 +442,9 @@ export async function start(config = loadConfig()) {
     server.once('error', reject)
     server.listen(config.port, config.host, resolveListen)
   })
+  runtime.notifications?.start()
   const close = async () => {
+    await runtime.notifications?.close()
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()
     await runtime.store.close()

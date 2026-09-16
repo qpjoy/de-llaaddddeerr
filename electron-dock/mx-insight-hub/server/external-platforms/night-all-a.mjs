@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { AppError } from '../core/errors.mjs'
+import { slotProfile } from '../../shared/integration-slots.mjs'
 
 // Explicit method/path pairs. Documentation registration never authorizes dispatch.
 export const NIGHT_ALL_A_OPERATIONS = {
@@ -11,6 +12,9 @@ export const NIGHT_ALL_A_OPERATIONS = {
   task: ['GET', '/api/tasks/{id}'],
   runs: ['GET', '/api/runs'],
   run: ['GET', '/api/runs/{id}'],
+  runLogs: ['GET', '/api/runs/{id}/logs'],
+  runSteps: ['GET', '/api/runs/{id}/steps'],
+  runArtifacts: ['GET', '/api/runs/{id}/artifacts'],
   plans: ['GET', '/api/collection-plans'],
   plan: ['GET', '/api/collection-plans/{id}'],
   occurrences: ['GET', '/api/collection-plans/{id}/occurrences'],
@@ -57,6 +61,22 @@ export class NightAllADispatchStore {
     if (!this.pool) throw new AppError(503, 'night_all_a_journal_unavailable', '持久记录不可用')
     return (await this.pool.query('SELECT id,operation,state,response,created_at,updated_at FROM night_all_a_dispatches WHERE id=$1', [id])).rows[0] || null
   }
+  async list() {
+    if (!this.pool) return { available: false, items: [], note: 'PostgreSQL 派发记录未配置；这里不模拟历史数据。' }
+    try {
+      const result = await this.pool.query(`SELECT id,operation,actor,reason,state,created_at,updated_at,
+        CASE WHEN response IS NULL THEN NULL ELSE jsonb_build_object(
+          'upstreamStatus', response->'upstreamStatus', 'dispatchId', response->'dispatchId',
+          'data', jsonb_build_object('id', response#>'{data,id}',
+            'task', jsonb_build_object('id', response#>'{data,task,id}'),
+            'run', jsonb_build_object('id', response#>'{data,run,id}'))
+        ) END AS response
+        FROM night_all_a_dispatches ORDER BY created_at DESC,id DESC LIMIT 50`)
+      return { available: true, items: result.rows, limit: 50 }
+    } catch {
+      return { available: false, items: [], note: '派发记录暂不可读，请核对数据库和迁移；未读取上游。' }
+    }
+  }
 }
 
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
@@ -79,7 +99,7 @@ export class NightAllAService {
   async detail(key, range) {
     if (key !== this.providerKey) throw new AppError(404, 'external_platform_not_found', '平台不存在')
     const catalog = await readCatalog()
-    return { provider: (await this.overview(range)).providers[0], catalog,
+    return { provider: (await this.overview(range)).providers[0], catalog, integration: slotProfile(this.providerKey),
       connection: { baseUrl: this.config.baseUrl, enabled: this.config.enabled, writesEnabled: this.config.enabled && this.config.writesEnabled,
         configurationError: this.config.configurationError, authentication: this.config.sessionCookie ? '已配置平台会话；有效性待请求核验' : 'VPN 访问；上游若启用登录需配置平台会话与 CSRF' },
       operations: Object.entries(NIGHT_ALL_A_OPERATIONS).map(([key, [method, path]]) => ({ key, method, path })),
@@ -108,7 +128,8 @@ export class NightAllAService {
       path = template.replace('{id}', String(input.id))
     } else if (input.id !== undefined) throw invalid('该操作不接受 id')
     const catalog = await readCatalog()
-    const spec = catalog.openapi.paths[template.replace('{id}', operation === 'record' || operation === 'recordMetrics' ? '{record_id}' : operation === 'task' ? '{task_id}' : operation === 'run' ? '{run_id}' : '{plan_id}')]?.[method.toLowerCase()]
+    const idName = template.startsWith('/api/records/') ? '{record_id}' : template.startsWith('/api/tasks/') ? '{task_id}' : template.startsWith('/api/runs/') ? '{run_id}' : '{plan_id}'
+    const spec = catalog.openapi.paths[template.replace('{id}', idName)]?.[method.toLowerCase()]
     const query = input.query || {}
     if (typeof query !== 'object' || Array.isArray(query)) throw invalid('query 必须是对象')
     const allowedQuery = new Set((spec?.parameters || []).filter(p => p.in === 'query').map(p => p.name))

@@ -16,13 +16,52 @@ import { requireRole } from '../../packages/test-platform/server/identity/index.
 import { Settings } from './settings.mjs'
 import { ModelGateway } from './model.mjs'
 import { mapExternalEnvironment } from './environment.mjs'
-import { RigError, safeMessage } from '../../packages/contracts/index.mjs'
+import { observeEgress } from './egress.mjs'
+import { ScheduleState, dueOrchestrations } from './orchestration-schedule.mjs'
+import { buildInsights } from './insights.mjs'
+import { runnerIsOnline } from '../../packages/test-platform/server/runner/placement.mjs'
+import { AGENT_CATEGORIES } from './agent-presets.mjs'
+import {
+  adminConfigBody,
+  loginBody,
+  missionApproveBody,
+  missionCancelBody,
+  missionFollowupBody,
+  missionStartBody,
+  modelTurnBody,
+  orchestrationPreviewBody,
+  parseBody,
+  probeBody
+} from './schemas.mjs'
+import {
+  NODE_TYPES,
+  OrchestrationError,
+  validateOrchestration
+} from '../../packages/graph/orchestration.mjs'
+import { compileOrchestration } from '../../packages/runtime/orchestration-graph.mjs'
+import { RigError, TOOL_NAMES, safeMessage } from '../../packages/contracts/index.mjs'
 import { MissionStore } from '../../packages/runtime/store.mjs'
 import { RigRuntime } from '../../packages/runtime/engine.mjs'
 import { RigClient } from '../../packages/runtime/client.mjs'
-import { ToolExecutor } from '../../packages/runtime/tools.mjs'
+import { ToolExecutor, DEFINITIONS, TOOL_GROUPS } from '../../packages/runtime/tools.mjs'
+import { syncDesignAssets } from '../../scripts/design-assets.mjs'
+import { hostname } from 'node:os'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
+// Drawing a graph must never execute one. These handlers exist so a spec can
+// be compiled purely for its shape.
+const COMPILE_PROBE = Object.freeze({
+  prepareTool: async () => ({}),
+  branch: async () => {},
+  fanout: async () => {},
+  subflow: async () => ({}),
+  checkpoint: async () => {},
+  analyze: async () => ({}),
+  finish: async () => '',
+  act: async () => ({}),
+  rejected: async () => {},
+  conclude: async () => {}
+})
 const webRoot = fileURLToPath(new URL('../web/', import.meta.url))
 export function configuration(env = process.env) {
   const mapped = mapExternalEnvironment(env, {})
@@ -42,12 +81,21 @@ export function configuration(env = process.env) {
 
 export async function start(env = process.env, options = {}) {
   const config = options.config || configuration(env)
+  await syncDesignAssets()
   const kernel = await createRuntime(config, { schedule: options.schedule ?? true })
   const dataRoot = resolve(env.MX_RIG_STATE_DIR || resolve(root, '.runtime/control'))
   const settings = await new Settings(resolve(dataRoot, 'settings.json')).init()
   const missions = await new MissionStore(resolve(dataRoot, 'missions')).init()
   const gateway = new ModelGateway(settings, options.modelOptions)
   const sessions = new Map()
+  // Built once from the same module the runtime compiles, so the drawing and
+  // the execution can never describe different graphs.
+  const missionShape = new RigRuntime({
+    store: missions,
+    client: null,
+    executor: new ToolExecutor(null),
+    owner: 'shape'
+  }).describe()
   let origin
   const runtimeFor = (principal) => {
     const owner = principal.id
@@ -73,6 +121,46 @@ export async function start(env = process.env, options = {}) {
       })
     })
   }
+  // Unattended orchestrations. They run as the service principal, on their own
+  // runtime, and only one at a time: a schedule that overlaps itself would
+  // queue missions nobody asked for.
+  const scheduleState = await new ScheduleState(resolve(dataRoot, 'schedule.json')).init()
+  let scheduler = null
+  let scheduleRuntime = null
+  const tick = async (now = new Date()) => {
+    const due = dueOrchestrations(settings.value.orchestrations || [], scheduleState.value, now)
+    if (!due.length) return []
+    if (!scheduleRuntime) {
+      const client = new RigClient({ url: origin, token: config.adminToken })
+      scheduleRuntime = new RigRuntime({
+        store: missions,
+        client,
+        executor: new ToolExecutor(client),
+        owner: (await kernel.identity.resolve(config.adminToken, '127.0.0.1')).id
+      })
+    }
+    const started = []
+    for (const { spec, firedFor } of due) {
+      if (scheduleRuntime.active) break
+      // Recorded before the mission starts: a tick that overlaps the next one
+      // must not fire the same slot twice, even if starting fails.
+      await scheduleState.record(spec.key, firedFor)
+      try {
+        started.push(
+          await scheduleRuntime.start({
+            mode: 'orchestration',
+            goal: `定时执行编排：${spec.displayName}`,
+            orchestrationKey: spec.key,
+            inputs: {}
+          })
+        )
+      } catch (error) {
+        console.error(`定时编排 ${spec.key} 启动失败：${safeMessage(error)}`)
+      }
+    }
+    return started
+  }
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost')
     const path = url.pathname
@@ -86,7 +174,13 @@ export async function start(env = process.env, options = {}) {
         '/rig': 'index.html',
         '/rig/': 'index.html',
         '/rig/app.js': 'app.js',
-        '/rig/style.css': 'style.css'
+        '/rig/views.js': 'views.js',
+        '/rig/graph-view.js': 'graph-view.js',
+        '/rig/style.css': 'style.css',
+        // Served from the copy the design sync wrote, so the workbench and the
+        // test console cannot end up on two versions of the design system.
+        '/rig/vendor/styles.css': 'vendor/styles.css',
+        '/rig/vendor/tokens.css': 'vendor/tokens.css'
       }
       if (!files[path]) {
         res.writeHead(404)
@@ -102,6 +196,11 @@ export async function start(env = process.env, options = {}) {
             : file.endsWith('.js')
               ? 'text/javascript'
               : 'text/html; charset=utf-8',
+          // Revalidate every load. These files change with the deployment and
+          // carry no version in their path, so a heuristically cached copy
+          // leaves an operator on an older workbench than the API they are
+          // talking to.
+          'cache-control': 'no-cache',
           'content-security-policy':
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
           'x-content-type-options': 'nosniff'
@@ -128,7 +227,7 @@ export async function start(env = process.env, options = {}) {
         throw new RigError('json_required', '请求需要 JSON', 415)
       const source = directClientAddress(req)
       if (path === '/api/rig/v1/login' && req.method === 'POST') {
-        const body = await readJson(req, 16_000)
+        const body = parseBody(loginBody, await readJson(req, 16_000))
         const result = await kernel.identity.login({
           username: body.account,
           password: body.password,
@@ -147,7 +246,7 @@ export async function start(env = process.env, options = {}) {
       }
       if (path === '/api/rig/v1/native-login' && req.method === 'POST') {
         if (req.headers.origin) throw new RigError('native_only', '使用工作台登录入口', 403)
-        const body = await readJson(req, 16_000)
+        const body = parseBody(loginBody, await readJson(req, 16_000))
         const result = await kernel.identity.login({
           username: body.account,
           password: body.password,
@@ -166,6 +265,112 @@ export async function start(env = process.env, options = {}) {
         sendJson(res, 200, settings.public())
         return
       }
+      if (path === '/api/rig/v1/tools' && req.method === 'GET') {
+        const allowed = settings.value.allowedTools
+        sendJson(res, 200, {
+          groups: TOOL_GROUPS,
+          categories: AGENT_CATEGORIES,
+          tools: DEFINITIONS.map(({ name, title, group, description, effect, local }) => ({
+            name,
+            title,
+            group,
+            description,
+            effect,
+            surface: local ? 'desktop' : 'internal',
+            allowed: allowed.includes(name)
+          }))
+        })
+        return
+      }
+      if (path === '/api/rig/v1/insights' && req.method === 'GET') {
+        // Read through the kernel's store rather than over HTTP: this is one
+        // page's worth of aggregation, and a round trip per collection would
+        // make the dashboard the slowest thing in the product.
+        const days = Math.min(90, Math.max(1, Number(url.searchParams.get('window')) || 14))
+        const timeZone = url.searchParams.get('timezone') || 'Asia/Shanghai'
+        const now = new Date()
+        const [runs, apps, tasks, runners] = await Promise.all([
+          kernel.store.listRuns({ limit: 400 }),
+          kernel.store.listApps(),
+          kernel.store.listTasks(),
+          kernel.store.listRunners()
+        ])
+        const cases = (await Promise.all(apps.map((app) => kernel.store.listCases(app.id)))).flat()
+        // Case-level health reads the most recent decided runs only. The whole
+        // window would be one query per run, which is the wrong trade for a
+        // page someone refreshes.
+        const sampled = runs
+          .filter((run) => ['passed', 'failed', 'flaky'].includes(run.status))
+          .slice(0, 40)
+        const runCasesByRun = new Map(
+          await Promise.all(
+            sampled.map(async (run) => [run.id, await kernel.store.listRunCases(run.id)])
+          )
+        )
+        sendJson(res, 200, {
+          insights: buildInsights({
+            runs,
+            cases,
+            tasks,
+            apps,
+            runners: runners.map((runner) => ({ ...runner, online: runnerIsOnline(runner) })),
+            runCasesByRun,
+            windowDays: days,
+            timeZone,
+            now
+          }),
+          sampledRuns: sampled.length
+        })
+        return
+      }
+      if (path === '/api/rig/v1/graph' && req.method === 'GET') {
+        // The shape the orchestration view draws comes from the compiled graph
+        // the runtime executes, not from a diagram kept alongside it.
+        const wanted = url.searchParams.get('orchestration')
+        sendJson(res, 200, {
+          graph: wanted
+            ? compileOrchestration(settings.expanded(wanted), COMPILE_PROBE).describe()
+            : missionShape,
+          nodeTypes: NODE_TYPES
+        })
+        return
+      }
+      if (path === '/api/rig/v1/admin/orchestrations:preview' && req.method === 'POST') {
+        requireRole(principal, 'admin')
+        const body = parseBody(orchestrationPreviewBody, await readJson(req, 64_000))
+        // Compile the draft without storing it, so the editor can show the
+        // real graph and the real error while it is still being written.
+        try {
+          const { spec, expanded, warnings } = validateOrchestration(body.orchestration, {
+            toolNames: TOOL_NAMES,
+            agentKeys: settings.value.agents.map((agent) => agent.key),
+            // A draft may reference a saved subflow, so resolve against what
+            // is stored — the draft itself is not in that list yet.
+            resolve: settings.resolver()
+          })
+          sendJson(res, 200, {
+            graph: compileOrchestration(expanded, COMPILE_PROBE).describe(),
+            warnings,
+            spec
+          })
+        } catch (error) {
+          throw error instanceof OrchestrationError
+            ? new RigError('invalid_orchestration', error.message)
+            : new RigError(
+                'invalid_orchestration',
+                `编排结构无效（${error?.issues?.[0]?.path?.join('.') ?? ''}${error?.issues?.[0]?.message ?? '格式不符'}）`
+              )
+        }
+        return
+      }
+      if (path === '/api/rig/v1/egress' && req.method === 'GET') {
+        requireRole(principal, 'operator')
+        sendJson(res, 200, {
+          egress: observeEgress({ env, hostname: hostname() }),
+          note: 'MX Rig 只观测自身进程的出网环境，不设置代理、路由、DNS 或 PAC。'
+        })
+        return
+      }
       if (path === '/api/rig/v1/execution-config' && req.method === 'GET') {
         requireRole(principal, 'operator')
         sendJson(res, 200, settings.public())
@@ -178,9 +383,20 @@ export async function start(env = process.env, options = {}) {
           return
         }
         if (req.method === 'POST') {
-          sendJson(res, 200, await settings.update(await readJson(req, 16_000)))
+          const body = parseBody(adminConfigBody, await readJson(req, 256_000))
+          sendJson(res, 200, await settings.update(body))
           return
         }
+      }
+      if (path === '/api/rig/v1/admin/providers:probe' && req.method === 'POST') {
+        requireRole(principal, 'admin')
+        const body = parseBody(probeBody, await readJson(req, 4000))
+        const controller = new AbortController()
+        res.on('close', () => {
+          if (!res.writableEnded) controller.abort()
+        })
+        sendJson(res, 200, { probe: await gateway.probe(body.providerId, controller.signal) })
+        return
       }
       if (path === '/api/rig/v1/model/turn' && req.method === 'POST') {
         requireRole(principal, 'operator')
@@ -188,11 +404,8 @@ export async function start(env = process.env, options = {}) {
         res.on('close', () => {
           if (!res.writableEnded) controller.abort()
         })
-        sendJson(
-          res,
-          200,
-          await gateway.turn(principal.id, await readJson(req, 256_000), controller.signal)
-        )
+        const body = parseBody(modelTurnBody, await readJson(req, 256_000))
+        sendJson(res, 200, await gateway.turn(principal.id, body, controller.signal))
         return
       }
       if (path === '/api/rig/v1/logout' && req.method === 'POST') {
@@ -214,16 +427,21 @@ export async function start(env = process.env, options = {}) {
       await register(principal, token)
       const runtime = runtimeFor(principal)
       if (path === '/api/rig/v1/missions' && req.method === 'POST') {
-        sendJson(res, 201, { mission: await runtime.start(await readJson(req, 16_000)) })
+        const body = parseBody(missionStartBody, await readJson(req, 16_000))
+        sendJson(res, 201, { mission: await runtime.start(body) })
         return
       }
       const match = /^\/api\/rig\/v1\/missions\/([a-f0-9-]{36})\/(approve|cancel|followup)$/.exec(
         path
       )
       if (match && req.method === 'POST') {
-        const body = await readJson(req, 4000)
-        if (match[2] === 'approve' && typeof body.approved !== 'boolean')
-          throw new RigError('invalid_input', 'approved 必须为布尔值')
+        const raw = await readJson(req, 16_000)
+        const schema = {
+          approve: missionApproveBody,
+          cancel: missionCancelBody,
+          followup: missionFollowupBody
+        }[match[2]]
+        const body = parseBody(schema, raw)
         const mission =
           match[2] === 'followup'
             ? await runtime.followup(match[1], body)
@@ -249,13 +467,24 @@ export async function start(env = process.env, options = {}) {
     server.listen(config.port, config.host, yes)
   })
   origin = `http://127.0.0.1:${server.address().port}`
+  if (options.schedule ?? true)
+    scheduler = setInterval(
+      () => {
+        tick().catch((error) => console.error(`定时编排检查失败：${safeMessage(error)}`))
+      },
+      Number(env.MX_RIG_ORCHESTRATION_TICK_MS) || 30_000
+    ).unref()
   return {
     server,
     kernel,
     settings,
     missions,
     origin,
+    scheduleState,
+    tick,
     async close() {
+      if (scheduler) clearInterval(scheduler)
+      await scheduleRuntime?.close()
       kernel.stopScheduler()
       await Promise.all([...sessions.values()].map((s) => s.runtime.close()))
       await new Promise((yes) => server.close(yes))

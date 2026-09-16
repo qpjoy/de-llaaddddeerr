@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -158,3 +159,90 @@ test('the managed command dispatcher runs before the legacy interactive installe
   const legacyInstaller = scriptContent.indexOf('mkdir -p /etc/wireguard/');
   assert.ok(dispatcher > 0 && dispatcher < legacyInstaller);
 });
+
+// Exercise real transaction/filesystem behavior with fake Linux network tools.
+// These tests never modify the host network or invoke a real systemctl/wg.
+const rotationHarness = String.raw`
+  set -euo pipefail
+  QP_WG_SERVER_HOME="$1"
+  QP_WG_SERVER_CONFIG="$1/server.conf"
+  QP_WG_SERVER_ENV="$1/server.env"
+  QP_WG_SERVER_CLIENTS="$1/clients"
+  QP_WG_SERVER_DEV=qpwgs-mx
+  mkdir -p "$QP_WG_SERVER_CLIENTS"
+  printf 'ListenPort = 20000\nPrivateKey = unchanged\n' > "$QP_WG_SERVER_CONFIG"
+  printf "QP_WG_PORT='20000'\n" > "$QP_WG_SERVER_ENV"
+  printf 'Endpoint = example.com:20000\nPrivateKey = client-unchanged\n' > "$QP_WG_SERVER_CLIENTS/a.conf"
+  echo 20000 > "$1/runtime"
+  touch "$1/rule-20000"
+  qp_wg_require_root () { :; }
+  qp_wg_load_server_env () {
+    QP_WG_PORT=20000; QP_WG_PORT_RANGE=''; QP_WG_FIREWALL=iptables
+    QP_WG_SUBNET=100.127.50.0/24; QP_WG_HOST=example.com; QP_WG_WAN_IF=eth0; QP_WG_DNS=1.1.1.1
+  }
+  qp_wg_port_in_use () { [[ "$CASE" == occupied ]]; }
+  qp_wg_port_rule () {
+    case "$1" in
+      check) [[ -f "$QP_WG_SERVER_HOME/rule-$2" ]] ;;
+      add) touch "$QP_WG_SERVER_HOME/rule-$2" ;;
+      remove)
+        [[ "$CASE" != remove-failure || "$2" != 20000 ]] || return 1
+        rm -f "$QP_WG_SERVER_HOME/rule-$2" ;;
+    esac
+  }
+  wg () {
+    if [[ "$1" == show ]]; then
+      [[ "$CASE" != inactive ]] || return 1
+      if [[ "\${3:-}" == listen-port ]]; then cat "$QP_WG_SERVER_HOME/runtime"; fi
+    else
+      [[ "$CASE" != runtime-failure || "$4" != 20001 ]] || return 1
+      echo "$4" > "$QP_WG_SERVER_HOME/runtime"
+    fi
+  }
+`.replace('\\${3:-}', '${3:-}');
+
+for (const scenario of ['success', 'runtime-failure', 'write-failure', 'remove-failure', 'occupied', 'inactive']) {
+  test(`rotation transaction: ${scenario}`, () => {
+    const dir = mkdtempSync(join(testRoot, 'rotate-'));
+    const body = rotationHarness + `\nCASE=${scenario}\n` + (scenario === 'write-failure'
+      ? 'qp_wg_save_server_env () { return 1; }\n' : '') + '\nqp_wg_rotate_port --port 20001';
+    const result = runLibrary(body, [dir]);
+    const success = ['success', 'inactive'].includes(scenario);
+    assert.equal(result.status === 0, success, result.stderr + result.stdout);
+    const expected = success ? '20001' : '20000';
+    assert.match(readFileSync(join(dir, 'server.conf'), 'utf8'), new RegExp(`ListenPort = ${expected}`));
+    assert.match(readFileSync(join(dir, 'clients/a.conf'), 'utf8'), new RegExp(`example.com:${expected}`));
+    assert.match(readFileSync(join(dir, 'server.conf'), 'utf8'), /PrivateKey = unchanged/);
+    assert.equal(readFileSync(join(dir, 'runtime'), 'utf8').trim(), scenario === 'success' ? '20001' : '20000');
+    assert.equal(existsSync(join(dir, 'rule-20000')), scenario !== 'success');
+    assert.equal(existsSync(join(dir, 'rule-20001')), scenario === 'success');
+    if (!success) assert.match(readFileSync(join(dir, 'server.env'), 'utf8'), /20000/);
+  });
+}
+
+for (const scenario of ['success', 'stop-failure', 'link-remains', 'firewall-remains']) {
+  test(`uninstall preserves recovery state on incomplete cleanup: ${scenario}`, () => {
+    const dir = mkdtempSync(join(testRoot, 'uninstall-'));
+    const result = runLibrary(String.raw`
+      set -euo pipefail
+      QP_WG_SERVER_HOME="$1/state"; mkdir -p "$QP_WG_SERVER_HOME"
+      QP_WG_SERVER_CONFIG="$1/server.conf"; touch "$QP_WG_SERVER_CONFIG"
+      QP_WG_SYSCTL="$1/sysctl.conf"; touch "$QP_WG_SYSCTL"
+      QP_WG_SERVER_UNIT=wg-quick@qpwgs-mx; QP_WG_SERVER_DEV=qpwgs-mx
+      CASE="$2"
+      qp_wg_require_root () { :; }
+      qp_wg_detect_role () { echo server; }
+      qp_wg_load_server_env () { QP_WG_FIREWALL=iptables; }
+      systemctl () { [[ "$CASE" != stop-failure ]]; }
+      ip () { [[ "$CASE" == link-remains ]]; }
+      wg-quick () { return 1; }
+      iptables-save () {
+        if [[ "$CASE" == firewall-remains ]]; then echo '-A INPUT --comment "qp-wg-mx" -j ACCEPT'; fi
+      }
+      qp_wg_uninstall
+    `, [dir, scenario]);
+    assert.equal(result.status === 0, scenario === 'success', result.stderr);
+    assert.equal(existsSync(join(dir, 'server.conf')), scenario !== 'success');
+    assert.equal(existsSync(join(dir, 'state')), scenario !== 'success');
+  });
+}

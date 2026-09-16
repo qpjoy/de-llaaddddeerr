@@ -1,0 +1,23 @@
+{
+  "kind": "hub_adapter_offline_contract_and_ui",
+  "observed_on": "2026-09-16",
+  "live_queries_performed": false,
+  "scope": "Fixed HTTP forwarding, idempotent command dispatch, read-only run observation and offline UI fixtures; not production readiness",
+  "checks": {
+    "targeted_tests": "passed; PostgreSQL test skipped without configured database",
+    "full_server_regression": {
+      "passed": 1775,
+      "skipped": 14,
+      "failed": 0
+    },
+    "manifest_validation": "passed",
+    "browser_fixture_flow": "case submit, same-key replay, status/logs/steps, terminal stop, plan occurrence, history, narrow viewport"
+  },
+  "pending": [
+    "Live VPN connectivity from deployed Hub",
+    "Actual PostgreSQL journal migration and persistence test",
+    "One explicitly selected live collection",
+    "Actual database binding and ingestion verification"
+  ],
+  "implementation_sha256": "63ba3edaa22e68c60c714447d989b7d5c88a94ebadc59d388a39064119e34f5c"
+}

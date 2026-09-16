@@ -1455,6 +1455,35 @@ test('admin projection keeps unknown price/quota distinct from zero and reports 
   )
 })
 
+test('admin warns about JustOne balance after circuit expiry and clears on successful acquisition', async () => {
+  const state = await fixture({ adapter: { searchProducts: successfulResult } })
+  const admin = new ExternalPlatformAdminService({
+    store: state.platformStore, config: state.gatewayConfig, durable: false,
+  })
+  assert.deepEqual((await admin.detail('justone', '7d')).provider.alerts, [])
+  const observedAt = new Date(Date.now() - 120_000).toISOString()
+  Object.assign(state.platformStore.state, {
+    lastErrorCode: 'upstream_balance_exhausted', lastFailureAt: observedAt,
+    consecutiveFailures: 45, circuitOpenUntil: new Date(Date.now() - 60_000).toISOString(),
+  })
+  const balance = (await admin.detail('justone', '24h')).provider.alerts
+  assert.equal(balance.length, 1)
+  assert.equal(balance[0].code, 'upstream_balance_exhausted')
+  assert.equal(balance[0].observedAt, observedAt)
+  assert.match(balance[0].message, /601/u)
+  state.platformStore.state.lastErrorCode = 'upstream_token_limit_exceeded'
+  assert.match((await admin.detail('justone', '7d')).provider.alerts[0].message, /602/u)
+  state.platformStore.state.lastErrorCode = 'upstream_transport_error'
+  assert.deepEqual((await admin.detail('justone', '7d')).provider.alerts, [])
+  state.platformStore.state.lastErrorCode = 'upstream_balance_exhausted'
+  await state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: 'balance recovery', deliveryMode: 'live_only' },
+    idempotencyKey: 'balance-recovery-001',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  assert.deepEqual((await admin.detail('justone', '7d')).provider.alerts, [])
+})
+
 test('admin cost and quota forecasts fail closed while provider billing is indeterminate', async () => {
   const billing = {
     source: 'manual',

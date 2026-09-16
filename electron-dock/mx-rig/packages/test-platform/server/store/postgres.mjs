@@ -1390,7 +1390,9 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `SELECT * FROM mxt_notifications
        ${runId ? 'WHERE run_id = $2' : ''}
-       ORDER BY created_at DESC LIMIT $1`,
+       -- Tie-break on the time-prefixed id so two events written inside the
+       -- same timestamp tick still come back in a stable order.
+       ORDER BY created_at DESC, id DESC LIMIT $1`,
       runId ? [limit, runId] : [limit],
     )
     return rows.map(mapNotification)
@@ -1502,7 +1504,9 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `SELECT * FROM mxt_audit_events
        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY created_at DESC LIMIT $1`,
+       -- Tie-break on the time-prefixed id so two events written inside the
+       -- same timestamp tick still come back in a stable order.
+       ORDER BY created_at DESC, id DESC LIMIT $1`,
       values,
     )
     return rows.map(mapAuditEvent)

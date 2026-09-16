@@ -113,4 +113,6 @@ qp-tunnel-cli update-subscription --instance subscriptions
 
 # docker环境变量目录
 /etc/systemd/system/docker.service.d/
+# k8s 代理位置
+/etc/systemd/system/kubelet.service.d/proxy.conf
 ```

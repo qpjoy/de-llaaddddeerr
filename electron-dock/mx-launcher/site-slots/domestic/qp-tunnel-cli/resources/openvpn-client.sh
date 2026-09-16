@@ -759,9 +759,18 @@ unpin_server_route() {
 	IFS='|' read -r cidr gateway dev <<< "$pinned"
 	[[ -n "$cidr" ]] || return 0
 
-	if ip route del "$cidr" via "$gateway" dev "$dev" 2>/dev/null; then
-		info "Removed pinned route $cidr via $gateway dev $dev"
+	local routes
+	routes=$(ip -4 route show "$cidr") || die "Cannot inspect pinned route; state retained."
+	if ! awk -v cidr="$cidr" -v gateway="$gateway" -v dev="$dev" '
+		($1 == cidr || $1 "/32" == cidr) {
+			via=""; iface=""
+			for (i=1; i<NF; i++) { if ($i=="via") via=$(i+1); if ($i=="dev") iface=$(i+1) }
+			if (via==gateway && iface==dev) found=1
+		} END { exit !found }' <<< "$routes"; then
+		return 0 # Already absent or replaced by another owner; never delete it.
 	fi
+	ip route del "$cidr" via "$gateway" dev "$dev" || die "Could not remove pinned route; state retained."
+	info "Removed pinned route $cidr via $gateway dev $dev"
 }
 
 # ---------------------------------------------------------------------------
@@ -887,7 +896,12 @@ up() {
 			info "Started $QP_OPEN_UNIT"
 			;;
 		darwin)
-			launchctl unload "$QP_OPEN_PLIST" 2>/dev/null || true
+			if launchctl list "$QP_OPEN_PLIST_LABEL" >/dev/null 2>&1; then
+				launchctl unload "$QP_OPEN_PLIST" || die "Could not unload client; configuration retained."
+			fi
+			if launchctl list "$QP_OPEN_PLIST_LABEL" >/dev/null 2>&1; then
+				die "Client job remains loaded; configuration retained."
+			fi
 			launchctl load -w "$QP_OPEN_PLIST"
 			info "Loaded $QP_OPEN_PLIST_LABEL"
 			;;
@@ -973,12 +987,20 @@ down() {
 	require_root
 	case "$(os_kind)" in
 		linux)
-			systemctl stop "$QP_OPEN_UNIT" 2>/dev/null || true
-			systemctl disable "$QP_OPEN_UNIT" >/dev/null 2>&1 || true
+			systemctl stop "$QP_OPEN_UNIT" || die "Could not stop client; configuration and route state retained."
+			if systemctl is-active --quiet "$QP_OPEN_UNIT" || ip link show dev "$QP_OPEN_DEV" >/dev/null 2>&1; then
+				die "Client service or interface remains; configuration and route state retained."
+			fi
+			systemctl disable "$QP_OPEN_UNIT" || die "Could not disable client; configuration retained."
 			info "Stopped $QP_OPEN_UNIT"
 			;;
 		darwin)
-			launchctl unload "$QP_OPEN_PLIST" 2>/dev/null || true
+			if launchctl list "$QP_OPEN_PLIST_LABEL" >/dev/null 2>&1; then
+				launchctl unload "$QP_OPEN_PLIST" || die "Could not unload client; configuration retained."
+			fi
+			if launchctl list "$QP_OPEN_PLIST_LABEL" >/dev/null 2>&1; then
+				die "Client job remains loaded; configuration retained."
+			fi
 			info "Unloaded $QP_OPEN_PLIST_LABEL"
 			;;
 	esac
@@ -1393,7 +1415,7 @@ uninstall() {
 	done
 
 	require_root
-	down || true
+	down
 
 	case "$(os_kind)" in
 		linux)

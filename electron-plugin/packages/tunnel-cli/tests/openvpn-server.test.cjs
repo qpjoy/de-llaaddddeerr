@@ -853,3 +853,41 @@ test('firewall rules live in an instance-scoped chain so teardown is exact', () 
     }
   }
 });
+
+test('refresh atomically updates only the installed helper without restarting or rewriting PKI', () => {
+  const home = mkdtempSync(join(testRoot, 'refresh-'));
+  const fixture = createManagedServerFixture(home);
+  const helper = join(home, 'openvpn-server.sh');
+  writeFileSync(helper, '# old helper\n', { mode: 0o700 });
+  assertOk(runLibrary([home], String.raw`
+    QP_OPENS_HOME="$1"; QP_OPENS_ENV="$1/server.env"
+    require_root() { :; }
+    systemctl() { echo unexpected-systemctl >&2; return 1; }
+    refresh
+  `));
+  assert.equal(readFileSync(helper, 'utf8'), readFileSync(libraryScript, 'utf8'));
+  assert.equal(readFileSync(fixture.config, 'utf8'), fixture.originalConfig);
+  assert.equal(readFileSync(fixture.env, 'utf8'), fixture.originalEnv);
+  assert.equal(readFileSync(join(fixture.pki, 'ca.key'), 'utf8'), 'existing-ca-key\n');
+  assert.equal(statSync(helper).mode & 0o777, 0o700);
+});
+
+for (const failure of ['stop', 'interface', 'firewall']) {
+  test(`server uninstall refuses destructive cleanup after ${failure} failure`, () => {
+    const home = mkdtempSync(join(testRoot, 'uninstall-'));
+    const fixture = createManagedServerFixture(home);
+    const result = runLibrary([home, failure], String.raw`
+      QP_OPENS_HOME="$1"; QP_OPENS_ENV="$1/server.env"; CASE="$2"
+      require_root() { :; }
+      systemctl() { [[ "$CASE" != stop ]]; }
+      server_is_running() { return 1; }
+      ip() { [[ "$CASE" == interface ]]; }
+      remove_firewall() { :; }
+      iptables() { echo '-N QP-OPEN-mx'; }
+      uninstall --purge
+    `);
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(fixture.config, 'utf8'), fixture.originalConfig);
+    assert.equal(readFileSync(join(fixture.pki, 'ca.key'), 'utf8'), 'existing-ca-key\n');
+  });
+}

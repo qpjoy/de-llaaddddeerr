@@ -4,6 +4,8 @@
 
 `npm install` 安装依赖，`npm run dev` 启动 localhost:8791。随机开发口令保存在 `.runtime/dev-token`，仅用于本地。`npm run desktop` 打开 Electron，登录相同服务。工作台不自动为项目创建测试账号或运行目标测试。
 
+`dev` / `desktop` / `package` 会先跑 `scripts/design-assets.mjs`，把已安装的 `@qpjoy/ui-design-neon-void` 同步到 `apps/web/vendor/`（生成物，不入库）。该包缺失时同步跳过并沿用已有副本，服务照常启动——打包后的桌面自带这份副本。
+
 `npm run browser:install` 安装与锁定 Playwright 对应的 Chromium。若系统盘空间不足，安装和启动桌面时设置同一个 `PLAYWRIGHT_BROWSERS_PATH` 到工作盘目录。首次浏览器安装需要网络，浏览器不可用时任务应为 blocked。
 
 ## 服务配置
@@ -12,7 +14,9 @@
 
 `MX_RIG_LAUNCHER_URL` 是现有 Launcher 身份公开接口的服务端基址，不是 Rig 自身地址。没有它时，只启用 Rig 自己的 admin 口令登录，不尝试修改 Launcher 来使服务启动。
 
-模型连接配置在 Internal 页面保存，密钥通过模型配置指定的服务端环境变量注入；没有真实模型时，Agent 不伪造回答。使用测试工作流可独立验证任务执行链。
+模型连接配置在 Internal 页面保存：Provider 列表顺序即调用顺序，密钥只通过各 Provider 指定的服务端环境变量注入。改完环境变量需要重启服务。没有真实模型时，Agent 明确受阻而不是伪造回答；使用测试工作流可独立验证任务执行链。
+
+「Agent 中心 → 出网观测」只读地报告本进程看到的代理变量，凭据隐藏但如实标注是否存在。注意 Node 22 的 `fetch` 不读代理环境变量：环境里配了代理不等于服务走代理，页面会分别标注"已配置"与"是否生效"。MX Rig 不设置代理、路由、DNS、PAC 或 NRPT。
 
 ## Compose
 
@@ -27,8 +31,8 @@ Compose 不提供 Kubernetes API，因此 K8s Job 派发不可用。使用注册
 ## 验证层级
 
 - `npm run check`：源码语法和网络 owner 禁止耦合检查。
-- `npm test`：迁入的测试领域回归和新 Runtime/API/配置边界测试。
-- 浏览器 UI：本地登录、任务创建、确认与拒绝、配置、测试管理入口、刷新和证据展示。
+- `npm test`：迁入的测试领域回归，加上编排运行时、编排规格与编译、Agent 中心、出网观测、配置迁移与 API 边界测试。
+- 浏览器 UI：本地登录、任务创建、确认与拒绝、Agent 中心各页、编排中心（打开已存编排、草稿预览、被拒绝的草稿）、配置保存、测试管理入口、刷新和证据展示。
 - Electron：独立启动、IPC、子进程任务、取消、重登、浏览器隔离、关闭无残留。
 - 发布：安装包签名与真实目标机器回归。
 - 现网：隔离环境验证后再登记入口；必须另存 MX-H2I 登录和联网证据。

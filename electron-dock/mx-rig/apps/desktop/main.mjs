@@ -5,6 +5,25 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 import { RigClient } from '../../packages/runtime/client.mjs'
 import { RigError, serviceUrl } from '../../packages/contracts/index.mjs'
+import { syncDesignAssets } from '../../scripts/design-assets.mjs'
+
+// Read actions the workbench may forward. An explicit table means the renderer
+// can never name an arbitrary path, and the desktop and web surfaces cannot
+// drift into offering different data.
+const READ_ACTIONS = {
+  config: '/api/rig/v1/config',
+  tools: '/api/rig/v1/tools',
+  graph: '/api/rig/v1/graph',
+  egress: '/api/rig/v1/egress',
+  tasks: '/api/v1/tasks',
+  runs: '/api/v1/runs?limit=20',
+  apps: '/api/v1/apps',
+  runners: '/api/v1/runners'
+}
+
+// Pages the desktop will hand to the system browser. That session logs in
+// separately; nothing from this process's credentials travels with it.
+const EXTERNAL_PATHS = [/^\/test-center\/$/, /^\/api\/v1\/runs\/[A-Za-z0-9_-]{1,80}\/report$/]
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const ui = fileURLToPath(new URL('../web/index.html', import.meta.url))
@@ -125,6 +144,9 @@ function trusted(event) {
 app
   .whenReady()
   .then(async () => {
+    // A packaged build already carries the copy; in a source checkout this
+    // picks up whatever version of the design system is installed.
+    await syncDesignAssets()
     ipcMain.handle('mx-rig:request', async (event, input) => {
       trusted(event)
       if (!input || typeof input.action !== 'string')
@@ -148,17 +170,29 @@ app
           return rpc('approve', input.body)
         case 'cancel':
           return rpc('cancel', input.body)
-        case 'config':
-          return client.request('/api/rig/v1/config')
         case 'admin-config':
+          return client.request('/api/rig/v1/admin/config')
+        case 'save-config':
           return client.request('/api/rig/v1/admin/config', input.body)
-        case 'tasks':
-          return client.request('/api/v1/tasks')
-        case 'runs':
-          return client.request('/api/v1/runs?limit=20')
-        case 'test-center': {
+        case 'probe':
+          return client.request('/api/rig/v1/admin/providers:probe', input.body)
+        case 'preview-orchestration':
+          return client.request('/api/rig/v1/admin/orchestrations:preview', input.body)
+        case 'orchestration-graph':
+          return client.request(
+            `/api/rig/v1/graph?orchestration=${encodeURIComponent(String(input.body?.key ?? ''))}`
+          )
+        case 'insights': {
+          const days = Number(input.body?.window) || 14
+          return client.request(`/api/rig/v1/insights?window=${encodeURIComponent(days)}`)
+        }
+        case 'test-center':
+        case 'open-path': {
+          const path = input.action === 'test-center' ? '/test-center/' : input.body?.path || ''
+          if (!EXTERNAL_PATHS.some((pattern) => pattern.test(path)))
+            throw new RigError('invalid_path', '不允许在外部浏览器打开该地址')
           const { shell } = await import('electron')
-          await shell.openExternal(client.url + '/test-center/')
+          await shell.openExternal(client.url + path)
           return { ok: true }
         }
         case 'artifact': {
@@ -180,6 +214,8 @@ app
           return { ok: true }
         }
         default:
+          if (Object.hasOwn(READ_ACTIONS, input.action))
+            return client.request(READ_ACTIONS[input.action])
           throw new RigError('invalid_action', '未知动作')
       }
     })

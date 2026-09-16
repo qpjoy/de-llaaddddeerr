@@ -1,5 +1,8 @@
 # Night-All-A 接入（2026-09-16）
 
+管理页已升级为案例驱动的操作台：一页新闻、关键词新闻、已有计划触发；支持任务、运行、步骤日志和 Hub 操作历史。
+统一接入模型、195 材料复核和后续平台验收流程见 [Hub 数据插槽方案](../architecture/integration-slots.md)。
+
 ## 决策
 
 Night-All-A 独立登记在管理页「数据清洗中心 → 外部数据平台」。它不替换 Night-All，
@@ -62,6 +65,7 @@ Kubernetes Admin 清单已添加 optional Secret 引用；Secret 缺失也能启
 | health / connectors / sourceFamilies | GET /api/health、/connectors、/source-families | 可选 query |
 | tasks / task | GET /api/tasks、/api/tasks/{task_id} | 列表 query / 单条 id |
 | runs / run | GET /api/runs、/api/runs/{run_id} | 列表 query / 单条 id |
+| runLogs / runSteps / runArtifacts | GET /api/runs/{run_id}/logs、/steps、/artifacts | id；仅有界读取 |
 | plans / plan / occurrences | GET /api/collection-plans、/{plan_id}、/{plan_id}/occurrences | query / id |
 | records / record / recordMetrics | GET /api/records、/{record_id}、/{record_id}/metrics | query / id |
 | createTask | POST /api/tasks | body、reason、Idempotency-Key 请求头 |
@@ -99,6 +103,7 @@ Kubernetes Admin 清单已添加 optional Secret 引用；Secret 缺失也能启
 进程崩溃留下 reserved 也不自动重派；它表示可能正在运行或无法判定。
 
 `GET /internal/v1/admin/external-platforms/night-all-a/dispatches/{dispatchId}` 查看持久状态。
+`GET /internal/v1/admin/external-platforms/night-all-a/dispatches` 读取最近 50 条操作摘要，含原因、actor、派发状态和上游 ID；不访问上游，也不返回完整大响应。
 completed 只证明 HTTP 响应留存，最终采集结论看上游 Run。
 工作台在当前浏览器 sessionStorage 保留键，业务请求内容不存浏览器；跨会话仍须保存原键和 dispatchId。
 工作台提供 dispatchId 查询，可在关闭转发后核对持久状态；不要换键重提未知任务。

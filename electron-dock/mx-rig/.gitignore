@@ -5,3 +5,7 @@ dist/
 *.log
 test-results/
 playwright-report/
+
+# Generated from the installed @qpjoy/ui-design-neon-void package by
+# scripts/design-assets.mjs; never edit by hand.
+apps/web/vendor/

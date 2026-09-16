@@ -1,0 +1,13 @@
+.mih-notifications { display: grid; gap: 16px; }
+.mih-notice-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
+.mih-notice-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; padding: 20px; }
+.mih-notice-card { padding: 24px; gap: 12px; }
+.mih-notice-card h2, .mih-notice-card p { margin: 0; }
+.mih-notice-card > button { justify-self: start; }
+.mih-notice-card h2 button { font-size: inherit; white-space: normal; text-align: left; }
+.mih-notice-request, .mih-notice-timeline { overflow-wrap: anywhere; }
+.mih-notice-timeline { padding-left: 24px; }
+.mih-notice-timeline li { padding: 12px 0; }
+.mih-notice-action { margin: 20px 0; display: grid; gap: 12px; }
+.mih-notifications > p { margin: 0; line-height: 1.7; }
+@media (max-width: 640px) { .mih-notice-filters { grid-template-columns: 1fr; } .mih-notice-card { padding: 16px; } }

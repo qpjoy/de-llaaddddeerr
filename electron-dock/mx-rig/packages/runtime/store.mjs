@@ -18,6 +18,10 @@ export class MissionStore {
       if (!TERMINAL.has(row.status)) {
         row.status = 'blocked'
         row.pending = null
+        // Drop the graph checkpoint too: resuming an approval whose page or
+        // browser context is gone would replay an action against a different
+        // world than the one the user reviewed.
+        row.graph = null
         row.events.push({
           at: new Date().toISOString(),
           kind: 'interrupted',
@@ -40,7 +44,11 @@ export class MissionStore {
     return row
   }
   public(row) {
-    const { messages, ...visible } = row
+    // `messages` is the model transcript, `graph` the executor checkpoint and
+    // `evidence` the raw tool output kept for an analysis step: none is part
+    // of the workbench contract, and the UI already shows tool results as
+    // events. `trace` is kept because the orchestration view renders it.
+    const { messages, graph, evidence, ...visible } = row
     return structuredClone(visible)
   }
   async create(owner, input) {
@@ -51,13 +59,19 @@ export class MissionStore {
       owner,
       goal: input.goal,
       mode: input.mode,
+      agentKey: input.agentKey ?? null,
+      orchestrationKey: input.orchestrationKey ?? null,
+      inputs: input.inputs ?? null,
       status: 'queued',
       createdAt: new Date().toISOString(),
       events: [],
       messages: [],
       pending: null,
       result: null,
-      policyRevision: null
+      policyRevision: null,
+      trace: [],
+      evidence: [],
+      graph: null
     }
     this.rows.set(row.id, row)
     await this.save(row)

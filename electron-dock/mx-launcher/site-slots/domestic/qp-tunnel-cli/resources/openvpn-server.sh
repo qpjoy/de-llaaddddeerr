@@ -29,7 +29,7 @@ QP_OPENS_INSTANCE="${QP_OPENS_INSTANCE:-mx}"
 
 _qp_opens_command="${1:-help}"
 case "$_qp_opens_command" in
-	preflight|install|reconfigure|create|reissue|list|revoke|up|down|restart|status|logs|reachable|uninstall)
+	preflight|install|refresh|reconfigure|create|reissue|list|revoke|up|down|restart|status|logs|reachable|uninstall)
 		_qp_opens_filtered=()
 		_qp_opens_instance_arg=""
 		while [[ $# -gt 0 ]]; do
@@ -59,6 +59,7 @@ esac
 [[ "$QP_OPENS_INSTANCE" =~ ^[a-z][a-z0-9-]{0,8}$ ]] \
 	|| { echo "Error: Instance must match [a-z][a-z0-9-]{0,8}." >&2; exit 1; }
 
+QP_OPENS_SCRIPT_SOURCE="${BASH_SOURCE[0]}"
 QP_OPENS_HOME="/etc/qp-openvpn-server/$QP_OPENS_INSTANCE"
 QP_OPENS_PKI="$QP_OPENS_HOME/pki"
 QP_OPENS_CCD="$QP_OPENS_HOME/ccd"
@@ -1642,11 +1643,14 @@ down() {
 	require_root
 	load_env
 	if [[ "$QP_OPEN_RUNTIME" == docker ]]; then
-		compose down 2>/dev/null || true
+		compose down || die "Container stop failed; instance files retained."
 		info "Stopped container $QP_OPENS_CONTAINER"
 	else
-		systemctl stop "$QP_OPENS_UNIT" 2>/dev/null || true
+		systemctl stop "$QP_OPENS_UNIT" || die "Service stop failed; instance files retained."
 		info "Stopped $QP_OPENS_UNIT"
+	fi
+	if server_is_running || ip link show dev "$QP_OPENS_DEV" >/dev/null 2>&1; then
+		die "Server process or interface still exists; instance files retained."
 	fi
 }
 
@@ -1744,6 +1748,24 @@ reachable() {
 	return 1
 }
 
+refresh() {
+	[[ $# -eq 0 ]] || die "refresh accepts only --instance and --server."
+	require_root
+	load_env
+	local owned_script="$QP_OPENS_HOME/openvpn-server.sh" tmp
+	[[ -f "$owned_script" ]] || die "No installed firewall helper found; refresh applies to an existing managed helper."
+	if cmp -s "$QP_OPENS_SCRIPT_SOURCE" "$owned_script"; then
+		info "Installed firewall helper is already current."
+		return 0
+	fi
+	tmp=$(mktemp "$QP_OPENS_HOME/.openvpn-server.sh.XXXXXX")
+	if ! cp "$QP_OPENS_SCRIPT_SOURCE" "$tmp" || ! chmod 0700 "$tmp" || ! bash -n "$tmp" || ! mv -f "$tmp" "$owned_script"; then
+		rm -f "$tmp"
+		die "Could not refresh the installed firewall helper."
+	fi
+	info "Updated installed firewall helper. No service restart, configuration, PKI or live firewall changes."
+}
+
 uninstall() {
 	local purge=false
 	while [[ $# -gt 0 ]]; do
@@ -1756,13 +1778,21 @@ uninstall() {
 	require_root
 	[[ -f "$QP_OPENS_ENV" ]] && load_env || true
 
-	down 2>/dev/null || true
+	down
+	if have systemctl; then
+		systemctl stop "$QP_OPENS_FW_UNIT" || die "Firewall service stop failed; instance files retained."
+	fi
 	remove_firewall
+	local remaining_rules
+	remaining_rules=$(iptables -t nat -S) || die "Cannot verify firewall cleanup; instance files retained."
+	if awk -v chain="$QP_OPENS_CHAIN" '{ for (i=1; i<=NF; i++) if ($i == chain || $i == chain "-NAT") found=1 } END { exit !found }' <<< "$remaining_rules"; then
+		die "Instance NAT chains or references remain; instance files retained."
+	fi
 	rm -f "/etc/sysctl.d/99-qp-openvpn-$QP_OPENS_INSTANCE.conf"
 
 	if have systemctl; then
-		systemctl disable "$QP_OPENS_UNIT" >/dev/null 2>&1 || true
-		systemctl disable "$QP_OPENS_FW_UNIT" >/dev/null 2>&1 || true
+		systemctl disable "$QP_OPENS_UNIT" || die "Could not disable server unit; instance files retained."
+		systemctl disable "$QP_OPENS_FW_UNIT" || die "Could not disable firewall unit; instance files retained."
 		if [[ -z "$(ls -A /etc/qp-openvpn-server 2>/dev/null | grep -v "^$QP_OPENS_INSTANCE\$")" ]]; then
 			rm -f "$QP_OPENS_UNIT_TEMPLATE" "$QP_OPENS_FW_TEMPLATE"
 			info "Removed the shared unit templates (last instance)"
@@ -1795,6 +1825,7 @@ Usage:
   qp-tunnel-cli open list | revoke <name>
   qp-tunnel-cli open up | down | restart | status | reachable
   qp-tunnel-cli open logs [LINES]
+  qp-tunnel-cli open refresh --instance NAME
   qp-tunnel-cli open uninstall [--purge]
 
 Global option:
@@ -1825,6 +1856,7 @@ main() {
 		status) status ;;
 		logs) logs "$@" ;;
 		reachable) reachable ;;
+		refresh) refresh "$@" ;;
 		uninstall) uninstall "$@" ;;
 		firewall-up) require_root; load_env; apply_firewall ;;
 		firewall-down) require_root; remove_firewall ;;

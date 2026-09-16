@@ -11,6 +11,7 @@ export class MemoryStore {
   #apps = new Map()
   #channels = new Map()
   #auditEvents = []
+  #auditSequence = 0
   #secrets = new Map()
   #notifications = new Map()
   #suites = new Map()
@@ -794,7 +795,9 @@ export class MemoryStore {
     return clone(
       [...this.#notifications.values()]
         .filter((row) => (runId ? row.runId === runId : true))
-        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .sort(
+          (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || b.seq - a.seq,
+        )
         .slice(0, limit),
     )
   }
@@ -861,6 +864,10 @@ export class MemoryStore {
 
   async createAuditEvent(input) {
     const event = {
+      // Monotonic insertion order. `created_at` has millisecond resolution, so
+      // two events recorded in the same tick would otherwise come back in an
+      // arbitrary order and a log that reorders itself is not evidence.
+      seq: ++this.#auditSequence,
       id: newId('aud'),
       actorId: input.actorId ?? null,
       actorName: input.actorName ?? null,
@@ -886,7 +893,9 @@ export class MemoryStore {
           if (appId && event.appId !== appId) return false
           return true
         })
-        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .sort(
+          (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || b.seq - a.seq,
+        )
         .slice(0, limit),
     )
   }

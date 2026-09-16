@@ -679,6 +679,7 @@ qp_wg_replace_port_in_file () {
 	local file="$1" old_port="$2" new_port="$3" tmp
 	[[ -f "$file" ]] || return 0
 	tmp=$(mktemp "${file}.XXXXXX")
+	cp -p "$file" "$tmp"
 	sed \
 		-e "s/^ListenPort = $old_port$/ListenPort = $new_port/" \
 		-e "s/--add-port=$old_port\/udp/--add-port=$new_port\/udp/g" \
@@ -686,12 +687,27 @@ qp_wg_replace_port_in_file () {
 		-e "s/--dport $old_port /--dport $new_port /g" \
 		-e "s/^Endpoint = \(.*\):$old_port$/Endpoint = \1:$new_port/" \
 		"$file" > "$tmp"
-	chmod --reference="$file" "$tmp"
 	mv -f "$tmp" "$file"
 }
 
-qp_wg_rotate_port () {
-	local new_port="" new_range="" old_port profile active=false
+# Run in a subshell so transaction traps never leak into the caller.
+qp_wg_port_rule () {
+	local action="$1" port="$2"
+	if [[ "$QP_WG_FIREWALL" == firewalld ]]; then
+		case "$action" in
+			check) firewall-cmd --query-port="$port"/udp >/dev/null ;;
+			add) firewall-cmd --add-port="$port"/udp >/dev/null ;;
+			remove) firewall-cmd --remove-port="$port"/udp >/dev/null ;;
+		esac
+	else
+		case "$action" in check) action=-C ;; add) action=-I ;; remove) action=-D ;; esac
+		iptables "$action" INPUT -p udp --dport "$port" -m comment --comment "qp-wg-$QP_WG_INSTANCE" -j ACCEPT
+	fi
+}
+
+qp_wg_rotate_port () (
+	set -euo pipefail
+	new_port="" new_range="" old_port="" profile="" active=false
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			--port) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --port."; new_port="$2"; shift 2 ;;
@@ -718,18 +734,53 @@ qp_wg_rotate_port () {
 			|| qp_wg_die "Port $new_port is outside rotation range $QP_WG_PORT_RANGE."
 	fi
 	[[ "$new_port" != "$old_port" ]] || qp_wg_die "WireGuard already listens on UDP $old_port."
+	qp_wg_port_in_use "$new_port" && qp_wg_die "UDP port $new_port is already in use."
 	wg show "$QP_WG_SERVER_DEV" >/dev/null 2>&1 && active=true
 	if [[ "$active" == true ]]; then
-		if [[ "$QP_WG_FIREWALL" == firewalld ]]; then
-			firewall-cmd --add-port="$new_port"/udp
-			wg set "$QP_WG_SERVER_DEV" listen-port "$new_port"
-			firewall-cmd --remove-port="$old_port"/udp
-		else
-			iptables -C INPUT -p udp --dport "$new_port" -m comment --comment "qp-wg-$QP_WG_INSTANCE" -j ACCEPT 2>/dev/null \
-				|| iptables -I INPUT -p udp --dport "$new_port" -m comment --comment "qp-wg-$QP_WG_INSTANCE" -j ACCEPT
-			wg set "$QP_WG_SERVER_DEV" listen-port "$new_port"
-			iptables -D INPUT -p udp --dport "$old_port" -m comment --comment "qp-wg-$QP_WG_INSTANCE" -j ACCEPT 2>/dev/null || true
+		[[ "$(wg show "$QP_WG_SERVER_DEV" listen-port)" == "$old_port" ]] \
+			|| qp_wg_die "Runtime port differs from saved port; reconcile the instance before rotating."
+		qp_wg_port_rule check "$old_port" || qp_wg_die "Current port firewall rule is missing; repair it before rotating."
+	fi
+	backup="" committed=false changed_runtime=false added_rule=false rollback_failed=false i=0
+	files=("$QP_WG_SERVER_CONFIG" "$QP_WG_SERVER_ENV")
+	for profile in "$QP_WG_SERVER_CLIENTS"/*.conf; do
+		[[ ! -f "$profile" ]] || files+=("$profile")
+	done
+	backup=$(mktemp -d "$QP_WG_SERVER_HOME/.rotate.XXXXXX")
+	for i in "${!files[@]}"; do cp -p "${files[$i]}" "$backup/$i"; done
+	rollback_rotation () {
+		local status=$?
+		trap - EXIT HUP INT TERM
+		if [[ "$committed" != true ]]; then
+			if [[ "$changed_runtime" == true ]]; then
+				if ! qp_wg_port_rule check "$old_port"; then qp_wg_port_rule add "$old_port" || rollback_failed=true; fi
+				wg set "$QP_WG_SERVER_DEV" listen-port "$old_port" || rollback_failed=true
+				[[ "$(wg show "$QP_WG_SERVER_DEV" listen-port)" == "$old_port" ]] || rollback_failed=true
+			fi
+			if [[ "$added_rule" == true ]]; then qp_wg_port_rule remove "$new_port" || rollback_failed=true; fi
+			for i in "${!files[@]}"; do cp -p "$backup/$i" "${files[$i]}" || rollback_failed=true; done
+			[[ "$status" != 0 ]] || status=1
+			qp_wg_warn "Port rotation failed; attempted to restore UDP $old_port and saved profiles."
 		fi
+		if [[ "$rollback_failed" == true ]]; then
+			qp_wg_warn "Rollback incomplete. Retained private recovery files at $backup; inspect this instance before retrying."
+		else
+			rm -rf "$backup"
+		fi
+		exit "$status"
+	}
+	trap rollback_rotation EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+	if [[ "$active" == true ]]; then
+		if ! qp_wg_port_rule check "$new_port"; then
+			added_rule=true
+			qp_wg_port_rule add "$new_port"
+		fi
+		qp_wg_port_rule check "$new_port"
+		changed_runtime=true
+		wg set "$QP_WG_SERVER_DEV" listen-port "$new_port"
+		[[ "$(wg show "$QP_WG_SERVER_DEV" listen-port)" == "$new_port" ]]
 	fi
 	qp_wg_replace_port_in_file "$QP_WG_SERVER_CONFIG" "$old_port" "$new_port"
 	for profile in "$QP_WG_SERVER_CLIENTS"/*.conf; do
@@ -738,11 +789,17 @@ qp_wg_rotate_port () {
 	done
 	QP_WG_PORT="$new_port"
 	qp_wg_save_server_env
+	if [[ "$active" == true ]]; then
+		qp_wg_port_rule remove "$old_port"
+		if qp_wg_port_rule check "$old_port"; then qp_wg_die "Old port rule remains after rotation."; fi
+	fi
+	committed=true
+	[[ "$active" == true ]] || qp_wg_warn "Interface is stopped: configuration updated only. Run wg up --server before connecting."
 	qp_wg_info "Rotated '$QP_WG_INSTANCE' from UDP $old_port to UDP $new_port."
 	qp_wg_info "WireGuard keys were not changed."
 	[[ -n "$QP_WG_PORT_RANGE" ]] && qp_wg_info "AWS security group must allow UDP $QP_WG_PORT_RANGE."
 	qp_wg_info "Clients must update their Endpoint port and restart, or re-enroll an updated profile from $QP_WG_SERVER_CLIENTS."
-}
+)
 
 qp_wg_list_clients () {
 	local profile name ip endpoint
@@ -808,15 +865,38 @@ qp_wg_lifecycle () {
 }
 
 qp_wg_uninstall () {
-	local role unit config home
+	local role unit config home dev rules ports
 	qp_wg_require_root
 	role=$(qp_wg_detect_role)
 	if [[ "$role" == server ]]; then
-		unit="$QP_WG_SERVER_UNIT"; config="$QP_WG_SERVER_CONFIG"; home="$QP_WG_SERVER_HOME"
+		unit="$QP_WG_SERVER_UNIT"; config="$QP_WG_SERVER_CONFIG"; home="$QP_WG_SERVER_HOME"; dev="$QP_WG_SERVER_DEV"
 	else
-		unit="$QP_WG_CLIENT_UNIT"; config="$QP_WG_CLIENT_CONFIG"; home="$QP_WG_CLIENT_HOME"
+		unit="$QP_WG_CLIENT_UNIT"; config="$QP_WG_CLIENT_CONFIG"; home="$QP_WG_CLIENT_HOME"; dev="$QP_WG_CLIENT_DEV"
 	fi
-	systemctl disable --now "$unit" >/dev/null 2>&1 || true
+	systemctl stop "$unit" || qp_wg_die "Could not stop $unit. Configuration retained; inspect wg logs before retrying."
+	# wg-quick normally deletes the link and its routes. Never discard recovery
+	# configuration while a manually started or failed-stop interface survives.
+	if ip link show dev "$dev" >/dev/null 2>&1; then
+		wg-quick down "$config" || qp_wg_die "Could not remove $dev; configuration retained."
+	fi
+	if ip link show dev "$dev" >/dev/null 2>&1; then qp_wg_die "$dev still exists; configuration retained."; fi
+	if [[ "$role" == server ]]; then
+		qp_wg_load_server_env
+		if [[ "$QP_WG_FIREWALL" == firewalld ]]; then
+			ports=$(firewall-cmd --list-ports) || qp_wg_die "Cannot verify firewall ports; configuration retained."
+			if [[ " $ports " == *" $QP_WG_PORT/udp "* ]]; then qp_wg_die "UDP rule remains; configuration retained."; fi
+			rules=$(firewall-cmd --direct --get-all-rules) || qp_wg_die "Cannot verify firewall cleanup; configuration retained."
+			if grep -Fq -- "$dev" <<< "$rules" || grep -Fq -- "-s $QP_WG_SUBNET " <<< "$rules"; then
+				qp_wg_die "Firewall rules remain for $dev/$QP_WG_SUBNET; configuration retained."
+			fi
+		else
+			rules=$(iptables-save) || qp_wg_die "Cannot verify firewall cleanup; configuration retained."
+			if grep -Eq -- "--comment \"?qp-wg-$QP_WG_INSTANCE\"? " <<< "$rules"; then
+				qp_wg_die "Firewall rules remain for $dev; configuration retained."
+			fi
+		fi
+	fi
+	systemctl disable "$unit" || qp_wg_die "Could not disable $unit; configuration retained."
 	rm -f "$config"
 	[[ "$role" != server ]] || rm -f "$QP_WG_SYSCTL"
 	rm -rf "$home"

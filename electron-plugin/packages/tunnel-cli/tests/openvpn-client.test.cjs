@@ -468,3 +468,47 @@ test('preflight suggests only genuinely free candidates', () => {
   assert.doesNotMatch(suggestions, /- 100\.127\.1\.0\/24/);
   assert.match(suggestions, /- 100\.127\.2\.0\/24/);
 });
+
+for (const failure of ['stop', 'interface']) {
+  test(`client uninstall preserves state and pin when ${failure} cleanup fails`, () => {
+    const home = mkdtempSync(join(testRoot, 'uninstall-'));
+    writeFileSync(join(home, 'client.conf'), 'existing-config');
+    const result = runLibrary([home, failure], String.raw`
+      QP_OPEN_HOME="$1"; QP_OPEN_CONFIG="$1/client.conf"; CASE="$2"
+      require_root() { :; }
+      os_kind() { echo linux; }
+      systemctl() { [[ "$CASE" != stop && "$1" != is-active ]]; }
+      ip() { [[ "$CASE" == interface ]]; }
+      unpin_server_route() { echo unexpected-unpin > "$QP_OPEN_HOME/unpinned"; }
+      uninstall --purge
+    `);
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(home, 'client.conf'), 'utf8'), 'existing-config');
+    assert.equal(require('node:fs').existsSync(join(home, 'unpinned')), false);
+  });
+}
+
+for (const route of ['absent', 'other-owner', 'owned', 'delete-failure']) {
+  test(`pinned route cleanup respects exact ownership: ${route}`, () => {
+    const home = mkdtempSync(join(testRoot, 'pin-'));
+    const result = runLibrary([home, route], String.raw`
+      CASE="$2"; LOG="$1/deleted"
+      state_field() { echo '203.0.113.10/32|192.168.1.1|eth0'; }
+      ip() {
+        if [[ "$1" == -4 ]]; then
+          case "$CASE" in
+            absent) : ;;
+            other-owner) echo '203.0.113.10 via 192.168.2.1 dev eth1' ;;
+            *) echo '203.0.113.10 via 192.168.1.1 dev eth0' ;;
+          esac
+        else
+          [[ "$CASE" != delete-failure ]] || return 1
+          echo "$*" > "$LOG"
+        fi
+      }
+      unpin_server_route
+    `);
+    assert.equal(result.status === 0, route !== 'delete-failure');
+    assert.equal(require('node:fs').existsSync(join(home, 'deleted')), route === 'owned');
+  });
+}

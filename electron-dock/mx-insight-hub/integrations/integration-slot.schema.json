@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "contractVersion": {
+      "type": "string",
+      "const": "mx-hub.integration-slot.v1"
+    },
+    "slotId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "ownership": {
+      "type": "string",
+      "enum": [
+        "external_service",
+        "self_hosted",
+        "contributed_package"
+      ]
+    },
+    "adapter": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "http_service",
+            "process_job",
+            "database_pull",
+            "file_import",
+            "event_push"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "implementationRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "deploymentRef": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "activation": {
+          "type": "string",
+          "enum": [
+            "implemented_optional",
+            "candidate"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "version",
+        "implementationRef",
+        "deploymentRef",
+        "activation"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async",
+              "pull",
+              "push"
+            ]
+          },
+          "inputSchema": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "resultSchema": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "idempotency": {
+            "type": "string",
+            "enum": [
+              "hub_journal",
+              "provider_verified",
+              "none"
+            ]
+          },
+          "observation": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "status",
+                "logs",
+                "steps",
+                "artifacts",
+                "records"
+              ]
+            }
+          }
+        },
+        "required": [
+          "key",
+          "mode",
+          "inputSchema",
+          "resultSchema",
+          "idempotency",
+          "observation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dataContract": {
+      "type": "object",
+      "properties": {
+        "nativePayload": {
+          "type": "string",
+          "const": "preserved"
+        },
+        "mappingRef": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mappingStatus": {
+          "type": "string",
+          "enum": [
+            "existing_contract_recheck_binding",
+            "pending"
+          ]
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "watermark": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deletion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "ingestion": {
+          "type": "string",
+          "enum": [
+            "separate_plan",
+            "not_connected"
+          ]
+        }
+      },
+      "required": [
+        "nativePayload",
+        "mappingRef",
+        "mappingStatus",
+        "identity",
+        "watermark",
+        "deletion",
+        "ingestion"
+      ],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxConcurrent": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeoutSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maxResponseBytes": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "autoRetryAmbiguous": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "maxConcurrent",
+        "timeoutSeconds",
+        "maxResponseBytes",
+        "autoRetryAmbiguous"
+      ],
+      "additionalProperties": false
+    },
+    "evidence": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "source_review",
+              "offline_adapter",
+              "live",
+              "mapping",
+              "capacity"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "reviewed",
+              "reported",
+              "pending"
+            ]
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "kind",
+          "status",
+          "ref"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "contractVersion",
+    "slotId",
+    "displayName",
+    "ownership",
+    "adapter",
+    "capabilities",
+    "dataContract",
+    "limits",
+    "evidence"
+  ],
+  "additionalProperties": false,
+  "$id": "https://mx-insight-hub.local/contracts/integration-slot.v1.schema.json",
+  "description": "Hub reviewed slot manifest shape. Also run check-integration-slots.mjs for cross-field checks; validation does not authorize execution."
+}

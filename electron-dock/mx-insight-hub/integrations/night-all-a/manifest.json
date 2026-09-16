@@ -1,0 +1,33 @@
+{
+  "contractVersion": "mx-hub.integration-slot.v1",
+  "slotId": "night-all-a",
+  "displayName": "Night-All-A",
+  "ownership": "self_hosted",
+  "adapter": {
+    "kind": "http_service",
+    "version": "1.0.0",
+    "implementationRef": "server/external-platforms/night-all-a.mjs",
+    "deploymentRef": "optional-secret:mx-insight-hub-night-all-a",
+    "activation": "implemented_optional"
+  },
+  "capabilities": [
+    {"key": "collection.submit", "mode": "async", "inputSchema": {"$ref": "../../server/external-platforms/night-all-a-catalog.json#/openapi/components/schemas/TaskCreate"}, "resultSchema": {"type": "object", "description": "Native task/run receipt; HTTP 202 does not prove collection success"}, "idempotency": "hub_journal", "observation": ["status", "logs", "steps", "artifacts", "records"]},
+    {"key": "collection.plan.trigger", "mode": "async", "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer", "minimum": 1}}}, "resultSchema": {"type": "object", "description": "Native occurrence receipt; one occurrence may have multiple runs"}, "idempotency": "hub_journal", "observation": ["status", "logs", "steps", "records"]}
+  ],
+  "dataContract": {
+    "nativePayload": "preserved",
+    "mappingRef": "server/ingest/crawler/source-contract.mjs",
+    "mappingStatus": "existing_contract_recheck_binding",
+    "identity": "connector_id + record_type + source_id; source table id is the checkpoint tie-breaker",
+    "watermark": "last_seen_at + id, only after Writer contract verification",
+    "deletion": "No inferred hard-delete propagation; follow existing Writer contract",
+    "ingestion": "separate_plan"
+  },
+  "limits": {"maxConcurrent": 8, "timeoutSeconds": 15, "maxResponseBytes": 4194304, "autoRetryAmbiguous": false},
+  "evidence": [
+    {"kind": "source_review", "status": "reviewed", "ref": "server/external-platforms/night-all-a-catalog.json"},
+    {"kind": "offline_adapter", "status": "reviewed", "ref": "tests/server/night-all-a.test.mjs"},
+    {"kind": "live", "status": "pending", "ref": "Actual Hub VPN environment must be verified"},
+    {"kind": "mapping", "status": "pending", "ref": "Existing Writer contract; verify the actual source binding"}
+  ]
+}

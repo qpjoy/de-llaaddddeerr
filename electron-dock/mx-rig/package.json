@@ -19,10 +19,15 @@
     "package": "node scripts/package.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
-    "migrate": "node apps/server/migrate.mjs"
+    "migrate": "node apps/server/migrate.mjs",
+    "design": "node scripts/design-assets.mjs",
+    "predev": "node scripts/design-assets.mjs",
+    "predesktop": "node scripts/design-assets.mjs",
+    "prepackage": "node scripts/design-assets.mjs"
   },
   "dependencies": {
-    "playwright": "1.58.2"
+    "playwright": "1.58.2",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "electron": "34.5.8",

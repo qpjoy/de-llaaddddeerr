@@ -100,27 +100,31 @@ try {
   await page.locator('#login-form button').click()
   console.log('Submitted native login')
   await page.locator('#workspace').waitFor({ state: 'visible' })
-  await page.locator('#task option').first().waitFor({ state: 'attached' })
+  await page.getByRole('button', { name: '任务工作台', exact: false }).click()
+  await page.locator('#mode').waitFor({ state: 'visible' })
   assert.equal(await page.evaluate(() => window.mxRig.desktop), true)
   assert.equal(await page.evaluate(() => typeof window.require), 'undefined')
   const summary = await page.evaluate(() => window.mxRig.request('me'))
   assert.equal(summary.token, undefined)
   await page.screenshot({ path: join(qa, 'desktop-workspace.png') })
   await page.locator('#mode').selectOption('workflow')
+  await page.locator('#task option').first().waitFor({ state: 'attached' })
   await page.locator('#goal').fill('检查桌面工作流是否正确生成测试执行记录')
   await page.locator('#start').click()
   await page.locator('#approval').waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'desktop-approval.png') })
   await page.getByRole('button', { name: '确认执行', exact: true }).click()
   await page.waitForFunction(
-    () => document.querySelector('#mission-status').textContent === '任务完成'
+    () => document.querySelector('#mission-status')?.textContent === '任务完成'
   )
   assert.match(await page.locator('#timeline').innerText(), /不代表测试通过/)
   await page.screenshot({ path: join(qa, 'desktop-completed.png') })
   await page.locator('#goal').fill('继续分析这个测试执行；没有模型时应明确受阻')
   await page.locator('#start').click()
-  await page.waitForFunction(() => document.querySelector('#mission-status').textContent === '受阻')
-  assert.equal(await page.locator('.mission-item').count(), 1)
+  await page.waitForFunction(
+    () => document.querySelector('#mission-status')?.textContent === '受阻'
+  )
+  assert.equal(await page.locator('.rig-mission-item').count(), 1)
   await page.getByRole('button', { name: 'Internal 配置', exact: false }).click()
   await page.locator('#model-key-env').waitFor({ state: 'visible' })
   assert.equal(await page.locator('#model-key-env').inputValue(), 'MX_RIG_MODEL_API_KEY')
@@ -129,20 +133,28 @@ try {
       ...server.settings.value,
       allowedTools: ['browser_open', 'browser_snapshot'],
       browserOrigins: [server.origin],
-      model: {
-        baseUrl: 'https://fixture.invalid/v1',
-        name: 'fixture',
-        apiKeyEnv: 'MX_RIG_MODEL_API_KEY'
-      }
+      providers: [
+        {
+          id: 'primary',
+          displayName: '替身模型',
+          baseUrl: 'https://fixture.invalid/v1',
+          model: 'fixture',
+          apiKeyEnv: 'MX_RIG_MODEL_API_KEY',
+          timeoutMs: 60_000,
+          enabled: true
+        }
+      ],
+      sequence: ['primary']
     })
     await page.locator('#new-mission').click()
+    await page.locator('#mode').waitFor({ state: 'visible' })
     await page.locator('#mode').selectOption('agent')
     await page.locator('#goal').fill('验收：通过模型工具调用打开隔离浏览器')
     await page.locator('#start').click()
     await page.locator('#approval').waitFor({ state: 'visible' })
     await page.getByRole('button', { name: '确认执行', exact: true }).click()
     await page.waitForFunction(
-      () => document.querySelector('#mission-status').textContent === '任务完成'
+      () => document.querySelector('#mission-status')?.textContent === '任务完成'
     )
     assert.equal(await page.getByRole('button', { name: '打开截图', exact: true }).count(), 1)
     await page.screenshot({ path: join(qa, 'desktop-browser-agent.png') })

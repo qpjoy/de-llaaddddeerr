@@ -1,0 +1,18 @@
+{
+  "contractVersion": "mx-hub.integration-slot.v1",
+  "slotId": "market-195",
+  "displayName": "小米应用商店（195，接入候选）",
+  "ownership": "contributed_package",
+  "adapter": {"kind": "process_job", "version": "1.0.0", "implementationRef": "reviewed-package-195:adapter.py", "deploymentRef": null, "activation": "candidate"},
+  "capabilities": [
+    {"key": "app.details.collect", "mode": "async", "inputSchema": {"type": "object", "required": ["inputs"], "additionalProperties": false, "properties": {"inputs": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "string", "pattern": "^[0-9]{1,20}$"}}, "input_kind": {"const": "id", "default": "id"}, "history": {"const": false, "default": false}}}, "resultSchema": {"type": "object", "required": ["schema_version", "project_id", "source_id", "operation", "observed_at", "status", "result", "error"], "description": "Preserve the original adapter envelope; do not flatten per-item outcomes"}, "idempotency": "none", "observation": ["logs", "artifacts"]}
+  ],
+  "dataContract": {"nativePayload": "preserved", "mappingRef": null, "mappingStatus": "pending", "identity": "Proposed: xiaomi + app_id; version snapshot uses version_code plus observed_at", "watermark": null, "deletion": "A missing app response is not proof of deletion", "ingestion": "not_connected"},
+  "limits": {"maxConcurrent": 1, "timeoutSeconds": 120, "maxResponseBytes": 4194304, "autoRetryAmbiguous": false},
+  "evidence": [
+    {"kind": "source_review", "status": "reviewed", "ref": "docs/architecture/integration-slots.md#195-材料复核"},
+    {"kind": "offline_adapter", "status": "reported", "ref": "ADAPTER_VERIFICATION.json from supplied package; hashes matched"},
+    {"kind": "live", "status": "reported", "ref": "verification/independent-live.json, 2026-09-12; not revalidated by Hub"},
+    {"kind": "mapping", "status": "pending", "ref": "No Hub canonical mapping or dataset grant installed"}
+  ]
+}

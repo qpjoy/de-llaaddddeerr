@@ -822,6 +822,20 @@ A Test key is rejected before the committed-result store or media loader is touc
 
 ## 7. Cost and free-quota planning
 
+As of 2026-09-16, review of the [official catalog](https://docs.justoneapi.com/zh/api/)
+and [usage guide](https://docs.justoneapi.com/zh/usage) has not identified a documented
+account-balance query API. The Admin overview and provider detail therefore show an
+evidence-based warning when JustOne's latest provider-state error is
+`upstream_balance_exhausted` (601) or `upstream_token_limit_exceeded` (602).
+The former concerns shared account funds; the latter concerns the token spending cap.
+The warning includes the failure time and does not claim a numeric balance or advance
+low-balance detection. Circuit expiry alone does not clear it; a subsequent successful
+call clears the provider error, while a different failure replaces the latest evidence.
+Opening or refreshing these pages only reads Hub records and never probes a paid API.
+These latest-state warnings link to the [Admin notification center](notification-center.md),
+which independently collects recent balance/limit failures and retains their handling
+history. Neither surface sends email/webhook notifications or probes supplier balance.
+
 The current release has no verified JustOne balance/price/free-quota API integration. The
 `external_platform.quota_snapshots` table reserves the future evidence model, but the UI uses only reviewed
 configuration today. Do not scrape a browser dashboard or copy an undocumented value into production.

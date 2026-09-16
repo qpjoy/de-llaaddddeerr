@@ -744,6 +744,7 @@ export function createApp({
   searchReindex = null,
   embedding = null,
   externalPlatformAdmin = null,
+  notifications = null,
   nightAllA = null,
   externalPlatformGateway = null,
   ipRiskGateway = null,
@@ -2631,6 +2632,13 @@ export function createApp({
         sendJson(response, 200, { data, requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms/night-all-a/dispatches') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'night-all-a dispatch history')
+        if (!nightAllA) throw new AppError(503, 'night_all_a_disabled', 'Night-All-A 未配置')
+        sendJson(response, 200, { data: await nightAllA.journal.list(), requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/night-all-a/dispatches/:id')
       if (params && request.method === 'GET') {
         requireSourceAdmin(principal)
@@ -2639,6 +2647,28 @@ export function createApp({
         const data = await nightAllA.journal.get(params.id)
         if (!data) throw new AppError(404, 'dispatch_not_found', '记录不存在')
         sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/notifications') {
+        requireSourceAdmin(principal)
+        if (!notifications) throw new AppError(503, 'notifications_unavailable', 'Notifications are unavailable')
+        sendJson(response, 200, { data: await notifications.list(Object.fromEntries(searchParams)), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/notifications/:id')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        if (!notifications) throw new AppError(503, 'notifications_unavailable', 'Notifications are unavailable')
+        if ([...searchParams.keys()].some((key) => key !== 'before')) throw new AppError(400, 'unsupported_fields', 'Unsupported notification query')
+        sendJson(response, 200, { data: await notifications.detail(params.id, searchParams.get('before')), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/notifications/:id/actions')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'notification action')
+        if (!notifications) throw new AppError(503, 'notifications_unavailable', 'Notifications are unavailable')
+        sendJson(response, 200, { data: await notifications.act(params.id, await readJson(request, 8192)), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {

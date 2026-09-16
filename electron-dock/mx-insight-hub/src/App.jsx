@@ -59,6 +59,7 @@ import {
 import { VirtualSupermarketPage } from './pages-virtual-supermarket.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 import { ExternalPlatformsPage } from './pages-external-platforms.jsx'
+import { NotificationsPage } from './pages-notifications.jsx'
 import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
 const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((module) => ({
@@ -357,6 +358,7 @@ const ROUTES = [
   { path: '/agent/studio', label: 'Agent Studio', description: '开发、编译与管理 Agent', icon: Graph, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentStudioRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
+  { path: '/notifications', label: '通知中心', description: '告警分类、处理与追溯', icon: Pulse, group: '可观测性', component: NotificationsPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read', platformAdmin: true },
   { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '接口与文档', component: DocsPage },
 ]

@@ -17,6 +17,7 @@ class Journal {
   }
   async finish(id, state, response) { const row = [...this.rows.values()].find(row => row.id === id); Object.assign(row, { state, response }) }
   async get(id) { return [...this.rows.values()].find(row => row.id === id) }
+  async list() { return { available: true, items: [...this.rows.values()] } }
 }
 const config = nightAllAConfig({ MX_INSIGHT_NIGHT_ALL_A_ENABLED: '1', MX_INSIGHT_NIGHT_ALL_A_WRITES_ENABLED: '1' })
 const input = { body: { connector_id: 'china-news', capability: 'news.collect', parameters: {} }, reason: 'test' }
@@ -94,6 +95,22 @@ test('deadline aborts a pending submission and blocks a repeated key', async () 
   await assert.rejects(service.dispatch('createTask', input, context), { code: 'night_all_a_outcome_unknown' })
 })
 
+test('run observations use fixed read-only routes and preserve log content', async () => {
+  const calls = []
+  const service = new NightAllAService({ config, fetchImpl: async (url, options) => {
+    calls.push([String(url), options.method])
+    return new Response(JSON.stringify({ items: [{ level: 'info', message: '已保存 5 条新闻', step_id: 1 }] }))
+  } })
+  for (const operation of ['runLogs', 'runSteps', 'runArtifacts']) {
+    const result = await service.dispatch(operation, { id: 42 })
+    assert.equal(result.data.items[0].message, '已保存 5 条新闻')
+  }
+  assert.deepEqual(calls, ['logs', 'steps', 'artifacts'].map(path => [`http://100.127.0.1:8100/api/runs/42/${path}`, 'GET']))
+  await assert.rejects(service.dispatch('runLogs', { id: '../credentials' }), { code: 'invalid_night_all_a_request' })
+  assert.equal((await new NightAllADispatchStore(null).list()).available, false)
+  assert.equal((await new NightAllADispatchStore({ query: async () => { throw Error('database unavailable') } }).list()).available, false)
+})
+
 test('admin HTTP routes reject anonymous access; catalog and health do not call upstream', async () => {
   let calls = 0
   const nightAllA = new NightAllAService({ config, fetchImpl: async () => { calls++; return new Response('{"ok":true}') } })
@@ -107,6 +124,11 @@ test('admin HTTP routes reject anonymous access; catalog and health do not call 
     assert([401, 403].includes(denied.status)); assert.equal(calls, 0)
     const headers = { 'x-mx-insight-admin-token': 'test-admin' }
     assert.equal((await fetch(base + path, { headers })).status, 200)
+    const historyDenied = await fetch(base + path + '/dispatches')
+    assert([401, 403].includes(historyDenied.status))
+    const history = await fetch(base + path + '/dispatches', { headers })
+    assert.equal(history.status, 200)
+    assert.equal((await history.json()).data.available, false)
     assert.equal(calls, 0)
     const allowed = await fetch(base + path + '/dispatch/health', { method: 'POST', headers, body: '{}' })
     assert.equal(allowed.status, 200); assert.equal(calls, 1)
@@ -129,6 +151,7 @@ test('PostgreSQL journal survives service recreation and enforces unique command
     const restarted = new NightAllAService({ config, journal: new NightAllADispatchStore(client), fetchImpl })
     assert.equal((await restarted.dispatch('createTask', input, context)).replay, true)
     assert.equal((await restarted.journal.get(result.dispatchId)).state, 'completed')
+    assert.equal((await restarted.journal.list()).items[0].response.data.task.id, 7)
     assert.equal(calls, 1)
   } finally { client.release(); await pool.end() }
 })

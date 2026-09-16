@@ -42,6 +42,7 @@ const scriptCandidates = {
 const serverOnlyCommands = new Set([
   'install',
   'reconfigure',
+  'refresh',
   'create',
   'reissue',
   'list',
@@ -248,13 +249,14 @@ function openHelp(): void {
 An Oversea server accepts spokes; a spoke dials out from inside a restricted
 network and receives one stable address the Oversea host can reach back on.
 The server pushes no routes, no gateway and no DNS, and the spoke connects with
-route-nopull, so joining the link changes nothing else about its networking.
+route-nopull, preserving default routing and DNS while adding the tunnel route.
 
 Oversea server:
   qp-tunnel-cli open preflight --server [--subnet 100.127.0.0/24]
   qp-tunnel-cli open install [--subnet CIDR] [--port PORT] [--proto udp|tcp]
                              [--host ADDR] [--port-range 20000-20100]
                              [--runtime auto|docker|host]
+  qp-tunnel-cli open refresh --instance mx
   qp-tunnel-cli open reconfigure --client-to-client
   qp-tunnel-cli open reconfigure --no-client-to-client
   qp-tunnel-cli open create internal-01 [--ip 100.127.0.10] [--oversea]

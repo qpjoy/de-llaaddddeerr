@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, LoadingState, PageHeading, useRemoteData } from './components.jsx'
 import './night-all-a-panel.css'
+import { NightAllAWorkbench } from './night-all-a-workbench.jsx'
 
 const EXAMPLE = JSON.stringify({ connector_id: 'china-news', capability: 'news.collect', parameters: { platforms: ['thepaper'], limit_per_platform: 20, max_pages: 2 }, persist_results: true, max_attempts: 1 }, null, 2)
 const codeStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 480, overflow: 'auto' }
@@ -29,6 +30,7 @@ export function NightAllAPanel({ token, onUnauthorized }) {
   const load = useCallback(() => adminApi.externalPlatform(token, 'night-all-a'), [token])
   const remote = useRemoteData(load, onUnauthorized)
   const [search, setSearch] = useState('')
+  const [tab, setTab] = useState('operations')
   const [group, setGroup] = useState('all')
   const [operation, setOperation] = useState('health')
   const [id, setId] = useState('')
@@ -74,6 +76,9 @@ export function NightAllAPanel({ token, onUnauthorized }) {
     {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
     {!data && remote.loading ? <LoadingState label="读取 Night-All-A 接口目录" /> : null}
     {data ? <div className="mih-night-all-a">
+      <div className="mih-na-tabs" role="tablist" aria-label="Night-All-A 平台内容">{[['operations', '采集操作台'], ['integration', '接入方案'], ['reference', '接口与字段'], ['debug', '高级接口调试']].map(([value, label]) => <button role="tab" aria-selected={tab === value} className={`qp-button ${tab === value ? 'qp-button--primary' : 'qp-button--outline'}`} key={value} onClick={() => setTab(value)}>{label}</button>)}</div>
+      {tab === 'operations' ? <NightAllAWorkbench key={token} token={token} connection={data.connection} /> : null}
+      {tab === 'integration' ? <>
       <section className="qp-panel mih-panel"><h2>集成方案</h2>
         <p>Hub（100.127.0.6）→ OpenVPN → Night-All-A（100.127.0.1:8100）。现有 VPN 直连可用时无需增加 Nginx；若需要独立访问日志、来源 IP 限制与统一入口，可使用可选的 8101 代理。</p>
         <p>Night-All-A 负责发现连接器、异步采集、采集计划及写入内网数据库；Hub 负责受控触发、清洗映射、Canonical 入库、检索与对外数据合同。现有 Night-All 是另一条历史服务链路。</p>
@@ -90,6 +95,8 @@ export function NightAllAPanel({ token, onUnauthorized }) {
         <a className="qp-button qp-button--outline" href="#/database-connections">数据库配置</a>{' '}
         <a className="qp-button qp-button--outline" href="#/sources">清洗任务计划</a>
       </section>
+      </> : null}
+      {tab === 'debug' ?
       <section className="qp-panel mih-panel"><h2>受控调用工作台</h2><p>仅 Hub Admin Token 管理会话可用。所有请求先到 Hub；不会将浏览器的 Hub Token 转交上游。此处不会自动请求上游，也不会开放租户/Public 转发。</p>
         <DropdownField label="对接操作" value={operation} options={data.operations.map(item => ({ value: item.key, label: `${item.key} · ${item.method} ${item.path}` }))} onChange={setOperation} />
         {selected?.path.includes('{id}') ? <label className="qp-field">对象 ID<input className="qp-input" value={id} onChange={event => setId(event.target.value)} /></label> : null}
@@ -104,6 +111,8 @@ export function NightAllAPanel({ token, onUnauthorized }) {
         {error ? <><ErrorState error={error} /><pre style={codeStyle}>{JSON.stringify(error.details || {}, null, 2)}</pre></> : null}
         {result ? <pre style={codeStyle}>{JSON.stringify(result, null, 2)}</pre> : null}
       </section>
+      : null}
+      {tab === 'reference' ? <>
       <section className="qp-panel mih-panel"><h2>完整接口目录与字段</h2><p>目录涵盖业务、管理和内部接口。标记“仅登记”的接口需在 Night-All-A 管理，不可通过工作台转发。上游未定义响应模型的接口不虚构字段保证。</p>
         <label className="qp-field">搜索接口<input className="qp-input" placeholder="路径、方法或接口名称" value={search} onChange={event => setSearch(event.target.value)} /></label>
         <DropdownField label="接口分组" value={group} onChange={setGroup} options={[{ value: 'all', label: '全部接口' }, ...(data.catalog.openapi.tags || []).map(tag => ({ value: tag.name, label: `${tag.name} · ${tag.description}` }))]} />
@@ -119,6 +128,7 @@ export function NightAllAPanel({ token, onUnauthorized }) {
         })}
       </section>
       <section className="qp-panel mih-panel"><h2>业务字段与接入指南</h2>{data.catalog.guides.map(guide => <details key={guide.key}><summary>{guide.text.split('\n')[0].replace(/^# /, '')}</summary><pre style={codeStyle}>{guide.text}</pre></details>)}</section>
+      </> : null}
     </div> : null}
   </>
 }

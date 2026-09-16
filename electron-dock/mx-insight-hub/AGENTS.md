@@ -1,5 +1,9 @@
 # Prototype Instructions
 
+- 2026-09-16 notification decision: supplier balance/limit alerts belong in a Hub Admin notification center with explicit categories, durable request/call evidence and handling history. Keep acknowledgement and manual closure separate from proven upstream recovery; shared Admin Token actions must not invent a named actor. Supplier notifications stay Admin-only and independent of MX-H2I login, networking, public dispatch and billing. Do not display numeric balances or low-balance forecasts without a verified provider balance API.
+
+- 2026-09-16 follow-up: external platforms share an integration-slot presentation (ownership, execution modes, delivery, mapping and evidence) while preserving each provider's authorization/billing/runtime semantics. Night-All-A defaults to bounded cases, explicit collection triggers, task/run observation and logs; documentation is secondary. Supplier manifest/adapter/verification packages are evidence to review, never automatic execution authority. Distinguish offline validation, live collection, data completeness and Hub ingestion; treat process collectors and remote HTTP platforms as different adapters of the same management contract.
+
 - 2026-09-16: Night-All-A is a separate Admin external data platform, not a replacement for historical Night-All. Hub 100.127.0.6 reaches 100.127.0.1:8100 over existing OpenVPN; Nginx is optional. Register the complete upstream API catalog while forwarding only explicit reviewed business operations. Collection triggers and database cleaning plans are separate lifecycles. Unknown async submissions must not be automatically retried. Keep all changes independent of MX-H2I login/networking.
 
 - Key “额度与用量” dialogs need a wide responsive layout: wrap metric cards by available dialog width, retain complete plan names/labels, and keep quota tables horizontally scrollable on small screens.

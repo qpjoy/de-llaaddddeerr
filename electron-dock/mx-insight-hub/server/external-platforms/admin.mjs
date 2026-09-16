@@ -295,6 +295,18 @@ function providerProjection(analytics, todayAnalytics, config, range, now, metad
     description: metadata.description,
     capabilities: metadata.capabilities,
     marketplaces: metadata.marketplaces,
+    alerts: metadata.key === 'justone' && [
+      'upstream_balance_exhausted', 'upstream_token_limit_exceeded',
+    ].includes(analytics.state?.lastErrorCode) ? [{
+      code: analytics.state.lastErrorCode,
+      observedAt: analytics.state.lastFailureAt || null,
+      title: analytics.state.lastErrorCode === 'upstream_balance_exhausted'
+        ? 'JustOne 账户余额不足'
+        : 'JustOne Token 消费限额已达到',
+      message: analytics.state.lastErrorCode === 'upstream_balance_exhausted'
+        ? '最近一次上游失败报告账户共享余额不足（601）。请在供应商后台核对账户并充值；Hub 返回历史数据不代表实时采集成功。'
+        : '最近一次上游失败报告当前 Token 消费限额已达到（602）。请在供应商后台核对该 Token 的限额；这不等同于账户余额耗尽。',
+    }] : [],
     metrics: {
       ...totals,
       avoidedUpstreamCalls,

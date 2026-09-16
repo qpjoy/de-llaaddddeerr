@@ -1,5 +1,6 @@
 import { ExternalProxyPanel } from './external-proxy-panel.jsx'
 import { NightAllAPanel } from './night-all-a-panel.jsx'
+import { IntegrationSlotFrame, SlotTags } from './integration-slot.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
@@ -371,6 +372,7 @@ function normalizePlatform(raw = {}, fallbackKey = null) {
     summary: normalizeSummary(raw),
     cost: normalizeCost(raw),
     quota: normalizeQuota(raw),
+    alerts: firstArray(raw.alerts),
     capabilityCount: optionalNumber(raw.capabilityCount, raw.capabilitiesCount)
       ?? (capabilities.length ? capabilities.length : null),
     lastObservedAt: optionalText(
@@ -888,6 +890,7 @@ function ProviderCard({ item, range }) {
         <StatusBadge status={item.status} label={statusLabel(item.status)} />
       </header>
       <p>{item.description || '管理接口尚未提供平台说明。'}</p>
+      <SlotTags provider={item.key} />
       <dl>
         <div><dt>Hub 请求</dt><dd>{formatOptionalNumber(item.summary.hubRequests)}</dd></div>
         <div><dt>上游调用</dt><dd>{formatOptionalNumber(item.summary.upstreamCalls)}</dd></div>
@@ -904,6 +907,20 @@ function ProviderCard({ item, range }) {
       </footer>
     </article>
   )
+}
+
+function ProviderAlerts({ item }) {
+  if (!item.alerts?.length) return null
+  return item.alerts.map((alert) => (
+    <div role="alert" key={alert.code}>
+      <Panel title={alert.title} subtitle={`最近失败：${displayDate(alert.observedAt)}`}>
+        <p>{alert.message}</p>
+        <p>余额数值未知：尚未接入经核验的余额查询接口，此提醒来自实际调用错误，不是低余额预警。熔断到期不代表恢复；处理后需由新的成功调用验证。</p>
+        <a className="qp-button qp-button--outline" href="https://dashboard.justoneapi.com" target="_blank" rel="noopener noreferrer">前往 JustOne 后台</a>
+        <a className="qp-button qp-button--ghost" href="#/notifications">通知中心 · 处理与追溯</a>
+      </Panel>
+    </div>
+  ))
 }
 
 function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
@@ -929,6 +946,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
       {remote.data !== null || (!remote.loading && !remote.error) ? (
         <>
           <OverviewMetricRail overview={overview} />
+          {overview.items.map((item) => <ProviderAlerts key={item.key} item={item} />)}
           <Panel
             title="平台总览"
             subtitle="同一统计口径横向比较；详情仅在管理后端提供真实证据后展示。"
@@ -2202,6 +2220,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
               or a price book. The controls keep stable ids so every metric and
               blocker above can jump straight to the one that fixes it. */}
           <DetailMetricRail detail={detail} />
+          <ProviderAlerts item={detail} />
           <section className="mih-external-two-column">
             <TrendPanel detail={detail} />
             <CostQuotaPanel detail={detail} />
@@ -2280,11 +2299,11 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   }, [range, setQuery, unsupportedProvider])
 
   if (unsupportedProvider) return <UnsupportedProvider range={range} />
-  if (provider === 'night-all-a') return <NightAllAPanel token={token} onUnauthorized={onUnauthorized} />
-  if (provider === 'ipsearch') return <IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
-  if (provider === 'night-all') return <NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
+  if (provider === 'night-all-a') return <IntegrationSlotFrame provider={provider}><NightAllAPanel token={token} onUnauthorized={onUnauthorized} /></IntegrationSlotFrame>
+  if (provider === 'ipsearch') return <IntegrationSlotFrame provider={provider}><IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
+  if (provider === 'night-all') return <IntegrationSlotFrame provider={provider}><NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} /></IntegrationSlotFrame>
   if (provider) {
-    return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
+    return <IntegrationSlotFrame provider={provider}><PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
   }
   return <PlatformsOverview token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
 }

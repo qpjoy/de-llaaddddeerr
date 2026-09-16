@@ -298,6 +298,9 @@ export async function signInWithLauncher({ username, password }) {
 }
 
 export const adminApi = {
+  notifications: (token, query) => request(token, `${ADMIN_ROOT}/notifications`, { query }),
+  notification: (token, id, query) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}`, { query }),
+  notificationAction: (token, id, body) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}/actions`, { method: 'POST', body }),
   demoCredential: (token, keyId) => request(token, `${ADMIN_ROOT}/demo-credentials`, { method: 'POST', body: keyId ? { keyId } : {} }),
   ecommerceItems: (token, query) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { query }),
   saveEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: body.requestId ? 'PUT' : 'POST', body }),
@@ -396,6 +399,7 @@ export const adminApi = {
     { method: 'POST', body, headers: { 'Idempotency-Key': idempotencyKey } },
   ),
   nightAllADispatchStatus: (token, id) => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches/${encodeURIComponent(id)}`),
+  nightAllADispatches: token => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches`),
   updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
   externalPlatform: (token, key, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}`, { query },
