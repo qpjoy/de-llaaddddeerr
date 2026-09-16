@@ -299,6 +299,8 @@ export async function signInWithLauncher({ username, password }) {
 
 export const adminApi = {
   notifications: (token, query) => request(token, `${ADMIN_ROOT}/notifications`, { query }),
+  supplierBalances: token => request(token, `${ADMIN_ROOT}/supplier-balances`),
+  updateSupplierBalance: (token, provider, body) => request(token, `${ADMIN_ROOT}/supplier-balances/${encodeURIComponent(provider)}`, { method: 'PUT', body }),
   notification: (token, id, query) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}`, { query }),
   notificationAction: (token, id, body) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}/actions`, { method: 'POST', body }),
   demoCredential: (token, keyId) => request(token, `${ADMIN_ROOT}/demo-credentials`, { method: 'POST', body: keyId ? { keyId } : {} }),

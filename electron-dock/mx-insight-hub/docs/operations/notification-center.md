@@ -15,10 +15,10 @@ The first source is the completed JustOne provider-call ledger:
 | `upstream.token_limit` | `upstream_token_limit_exceeded` / 602 | warning |
 
 601 concerns the supplier account's shared funds; 602 concerns the token's
-cumulative spending limit. Neither is a Hub customer's wallet alert. No verified
-public balance-query API was found in JustOne's official catalog/usage guide as
-of 2026-09-16. These are observed failure alerts, not numeric balance estimates
-or advance low-balance warnings.
+cumulative spending limit. Neither is a Hub customer's wallet alert. These
+ledger-derived incidents remain distinct from the numeric balance monitor added
+on 2026-09-17 below; the earlier absence of a verified balance contract no longer
+applies to JustOne's reviewed `user/get-balance` endpoint.
 
 Incidents retain category, severity, source, credential revision scope, first/last
 occurrence, count and latest Hub request ID. Each source event retains the
@@ -79,7 +79,80 @@ All routes use the existing Admin Token header:
 Status filters are `active`, `open`, `acknowledged`, `closed`, `all`. Active includes
 open and acknowledged incidents. Counts cover all stored incidents; filters apply
 to the displayed list. PostgreSQL-less local environments show an explicit unavailable
-state. There is no email, webhook, OS push or external message delivery in this release.
+state. There is no email, webhook, OS push or external message delivery from Hub.
 
 Deploy through the existing independent Hub migration/build path. No Launcher,
 MX-H2I, VPN, DNS or shared identity rollout is required.
+
+## Supplier balance monitor (2026-09-17)
+
+Migration `090_supplier_balance_monitor.sql` adds independent policies, account
+observations and policy audit records. The Admin/combined listener owns the
+monitor; the Public listener never constructs or starts it. No customer wallet,
+dispatch, billing, circuit, identity or readiness state is changed by a probe.
+
+| Provider | Read-only contract | Currency | Warning / critical |
+| --- | --- | --- | --- |
+| JustOne | `GET https://api.justoneapi.com/user/get-balance`, `code=0`, `data.balance`, `data.currency=CNY` | CNY | strictly below 30 / 20 |
+| TikHub | `GET https://api.tikhub.io/api/v1/tikhub/user/get_user_info`, `code=200`, `user_data.balance` | USD | strictly below 5 / 3 |
+
+Contracts were adapted from the user-supplied `/tmp/fee_monitor/monitor.py`.
+A read-only `--dry-run` on 2026-09-17 confirmed JustOne's balance/currency shape;
+TikHub's local script key was missing, so its live response remains unverified
+in this environment. Never combine TikHub `free_credit` with cash or invent an
+exchange rate. This monitors account balances, not supplier tariff changes;
+the existing reviewed procurement price books continue to own endpoint prices.
+
+The schedule is fixed at **10:00 and 22:00 Asia/Shanghai every day** (two balance
+reads per provider per day), independent of server timezone. PostgreSQL calculates
+the next wall-clock slot; this is not a rolling 12-hour interval. The scheduler
+scans every 60 seconds with a five-minute dispatch grace window. Older missed
+slots after downtime are skipped. Initial deployment and saving/enabling a policy
+wait for the next slot. Each slot is consumed atomically before network I/O,
+so errors, crashes, expired leases and credential rotation cannot retry it.
+A database lease admits one probe per provider across replicas; settings changes
+invalidate in-flight results. Probes are bounded to 30 seconds / 64 KiB, reject redirects and use fixed
+origins. Existing Hub database/environment credentials are resolved at probe
+time; TikHub uses its existing System Proxy binding. No secrets or webhook URLs
+are copied from `/tmp`, stored in observations, or returned by the monitoring API.
+
+Read-only does not mean free. As of 2026-09-17, the reviewed public documentation
+does not explicitly confirm whether these specific account queries incur charges:
+[TikHub account endpoint](https://docs.tikhub.io/186826050e0) describes the response
+but no price; [JustOne's usage guide](https://docs.justoneapi.com/zh/usage) describes
+general success billing and directs users to the dashboard for endpoint prices.
+Do not apply the generic business-API rate to account queries or claim they are
+free without endpoint-specific evidence. The twice-daily schedule reduces
+scheduled balance reads from the original 48 to 2 per provider per day; it can
+delay a new low-balance alert until the next 10:00/22:00 check (up to 12 hours
+during normal operation). Policy changes do not schedule extra reads.
+The standalone Feishu script has its own schedule and, if running alongside Hub,
+adds independent supplier requests.
+
+The external-platform overview and detail show the latest balance, currency,
+thresholds and successful observation time. UI refresh reads cached Hub state
+only. Failed probes preserve the last successful balance for the same credential
+scope; results older than 24 hours or followed by failure are marked
+stale. Credential rotation hides the previous account's balance pending a new
+successful query. Missing keys and unexpected responses remain unknown, never 0.
+
+`supplier.cost` incidents merge low observations for one provider/credential
+scope. A warning becoming critical reopens an acknowledged incident for attention.
+Successful balance recovery to the warning threshold or above records a separate
+`balance_recovered` event and `recovered_at`, then closes the active incident.
+Failure, timeout, pause and a new credential cannot prove recovery. Manual closure
+retains its existing meaning; another low observation creates a new incident.
+Each monitoring event links to a persisted observation and the thresholds used.
+
+Admin Token only:
+
+- `GET /internal/v1/admin/supplier-balances` — cached observations/settings only.
+- `PUT /internal/v1/admin/supplier-balances/:provider` — `enabled`,
+  `warningThreshold`, `criticalThreshold`, `expectedRevision`. The schedule is fixed.
+
+The existing Python Feishu notifications remain independent, with their original
+thresholds/cooldown. Hub neither starts that script nor sends duplicate Feishu
+messages; changing a Hub threshold does not reconfigure the standalone script.
+Future platforms add a reviewed adapter in `balance-adapters.mjs`, a credential
+resolver/egress binding and a seeded policy; the scheduler, persistence and
+notification lifecycle are shared. Never allow an arbitrary query URL from UI.

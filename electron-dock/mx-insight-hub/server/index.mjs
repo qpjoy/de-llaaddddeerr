@@ -50,6 +50,7 @@ import { createPostgresStore } from './stores/postgres-store.mjs'
 import { PostgresAcquisitionHistoryStore } from './acquisitions/history-store.mjs'
 import { TopicReportStore } from './insights/topic-reports.mjs'
 import { NotificationService } from './notifications.mjs'
+import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -299,7 +300,8 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: tikHubCredentialStore,
   })
-  // The split Admin listener deliberately has no provider adapter or secret.
+  // The split Admin listener has no business-dispatch adapter. Its independent
+  // balance monitor may resolve a credential only for fixed account read APIs.
   // Its readiness indicator therefore uses only safe, shared credential
   // metadata; Public/combined listeners continue to verify the live resolver.
   const externalPostCapabilities = config.listenerMode === 'admin'
@@ -394,6 +396,14 @@ export async function createRuntime(config = loadConfig()) {
       })
     : null
   const notifications = config.listenerMode === 'public' ? null : new NotificationService(pool)
+  const balanceMonitor = config.listenerMode === 'public' ? null : new SupplierBalanceMonitor({
+    pool,
+    credentials: {
+      justone: { store: externalPlatformCredentialStore, environmentValue: config.justOne.token },
+      tikhub: { store: tikHubCredentialStore, environmentValue: config.tikHub.apiKey },
+    },
+    fetchers: { tikhub: tikHubProxyStore ? createTikHubProxyFetch(tikHubProxyStore) : undefined },
+  })
   const app = createApp({
     service,
     store,
@@ -416,6 +426,7 @@ export async function createRuntime(config = loadConfig()) {
     embedding,
     externalPlatformAdmin,
     notifications,
+    balanceMonitor,
     nightAllA,
     externalPlatformGateway,
     ipRiskGateway,
@@ -433,7 +444,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications,
+    notifications, balanceMonitor,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -452,7 +463,9 @@ export async function start(config = loadConfig()) {
     server.listen(config.port, config.host, resolveListen)
   })
   runtime.notifications?.start()
+  runtime.balanceMonitor?.start()
   const close = async () => {
+    await runtime.balanceMonitor?.close()
     await runtime.notifications?.close()
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()

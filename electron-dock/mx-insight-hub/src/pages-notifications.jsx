@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, Modal, PageHeading, useRemoteData } from './components.jsx'
 import './notifications.css'
+import { balanceMoney } from './supplier-balances.jsx'
 
-const categories = { 'upstream.balance': '供应商 · 账户余额', 'upstream.token_limit': '供应商 · Token 限额' }
+const categories = { 'supplier.cost': '费用告警 · 账户余额', 'upstream.balance': '供应商 · 余额耗尽错误', 'upstream.token_limit': '供应商 · Token 限额' }
 const statuses = { open: '待处理', acknowledged: '已确认', closed: '已关闭' }
 const timestamp = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Shanghai' })
 const date = (value) => value ? timestamp.format(new Date(value)) : '尚无记录'
-const sourceLabels = { observed: '上游失败', acknowledged: '管理员确认', closed: '管理员关闭' }
+const sourceLabels = { observed: '上游失败', acknowledged: '管理员确认', closed: '管理员关闭', balance_observed: '余额低于阈值', balance_recovered: '余额恢复并自动关闭' }
 
 function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
   const [before, setBefore] = useState(null)
@@ -32,15 +33,17 @@ function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
     } catch (failure) { setError(failure) }
     finally { inFlight.current = false; setBusy(false) }
   }
-  return <Modal title={incident?.title || '通知详情'} description={`事件 #${id} · 处理记录与原始调用证据`} size="large" onClose={onClose} busy={busy}>
+  return <Modal title={incident?.title || '通知详情'} description={`事件 #${id} · 处理记录与观测证据`} size="large" onClose={onClose} busy={busy}>
     {remote.error || error ? <ErrorState error={remote.error || error} /> : null}
     {!incident ? <LoadingState label="正在读取事件" /> : <>
       <div className="mih-notice-meta"><span>{categories[incident.category]}</span><strong>{statuses[incident.status]}</strong><span>累计 {incident.occurrence_count} 次</span></div>
       <p>首次发生：{date(incident.first_occurred_at)} · 最近发生：{date(incident.last_occurred_at)}</p>
-      <p>供应商：{incident.source} · 凭证范围：{incident.source_scope}</p>
-      <p>{incident.category === 'upstream.balance' ? '上游报告账户共享余额不足（601），请核对供应商账户并充值。余额数值未知。' : '上游报告 Token 累计消费限额已达到（602），请核对该 Token 限额；这不等同于账户余额耗尽。'}</p>
-      <a className="qp-button qp-button--outline" href="#/external-platforms?provider=justone" onClick={onClose}>查看供应商配置</a>
-      <p>确认表示已接手；人工关闭不证明余额或服务已恢复。重复失败会继续计入未关闭事件，关闭后再次采集到失败会建立新事件。</p>
+      <p>供应商：{incident.source}{incident.category !== 'supplier.cost' ? ` · 凭证范围：${incident.source_scope}` : ''}</p>
+      <p>{incident.category === 'supplier.cost' ? '供应商账户余额低于已配置阈值；这与 Hub 客户钱包和接口单价独立。每次查询证据见下方时间线。'
+        : incident.category === 'upstream.balance' ? '上游报告账户共享余额不足（601），请核对供应商账户并充值。此错误不包含余额数值。' : '上游报告 Token 累计消费限额已达到（602），请核对该 Token 限额；这不等同于账户余额耗尽。'}</p>
+      {incident.recovered_at ? <p role="status">余额已在 {date(incident.recovered_at)} 查询确认恢复，系统已自动关闭本事件。</p> : null}
+      <a className="qp-button qp-button--outline" href={`#/external-platforms?provider=${encodeURIComponent(incident.source)}`} onClick={onClose}>查看供应商配置</a>
+      <p>确认表示已接手；人工关闭不证明余额或服务已恢复。重复告警会继续计入未关闭事件，关闭后再次触发告警会建立新事件。</p>
       {incident.status !== 'closed' ? <div className="mih-notice-action">
         <Field label="处理说明（必填）" hint="写明核查或处理结果，不要填写密钥、密码。">
           <textarea className="qp-input" value={reason} maxLength={1000} disabled={busy} onChange={(event) => setReason(event.target.value)} rows={3} />
@@ -57,6 +60,8 @@ function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
           <div className="mih-notice-meta"><strong>{sourceLabels[event.kind]}</strong><time>{date(event.occurred_at)}</time></div>
           <small>{event.actor}{event.marketplace ? ` · ${event.marketplace}` : ''}{event.credential_revision ? ` · 凭证版本 ${event.credential_revision}` : ''}</small>
           {event.note ? <p>{event.note}</p> : null}
+          {event.evidence ? <p>余额：<strong>{balanceMoney(event.evidence.balance, event.evidence.currency)}</strong> · 提醒阈值：{balanceMoney(event.evidence.warningThreshold, event.evidence.currency)} · 严重阈值：{balanceMoney(event.evidence.criticalThreshold, event.evidence.currency)}</p> : null}
+          {event.balance_observation_id ? <p>余额采样 ID：<code>{event.balance_observation_id}</code></p> : null}
           {event.request_id ? <p>Request ID：<code>{event.request_id}</code></p> : null}
           {event.source_event_id ? <p>Provider Call ID：<code>{event.source_event_id}</code></p> : null}
         </li>)}
@@ -85,7 +90,7 @@ export function NotificationsPage({ token, onUnauthorized }) {
   const counts = remote.data?.counts || []
   const count = (value) => counts.filter((item) => item.status === value).reduce((sum, item) => sum + Number(item.count), 0)
   return <div className="mih-notifications">
-    <PageHeading eyebrow="OPERATIONS / NOTIFICATIONS" title="通知中心" description="集中查看供应商告警、记录处理过程，并追溯每一次原始请求。" loading={remote.loading} onRefresh={refresh} />
+    <PageHeading eyebrow="OPERATIONS / NOTIFICATIONS" title="通知中心" description="集中查看费用与供应商告警、记录处理过程，并追溯余额采样和原始请求。" loading={remote.loading} onRefresh={refresh} />
     <div className="mih-notice-meta" aria-label="通知统计">
       {Object.entries(statuses).map(([value, label]) => <span key={value}>{label} <strong>{count(value)}</strong></span>)}
     </div>
@@ -97,17 +102,18 @@ export function NotificationsPage({ token, onUnauthorized }) {
         { value: 'all', label: '全部分类' }, ...Object.entries(categories).map(([value, label]) => ({ value, label })),
       ]} />
     </section>
-    <p>当前接入 JustOne 余额不足与 Token 限额告警；每 30 秒采集最近 7 天内的已完成调用，每批最多 100 条。已入库的事件与处理记录持续保留。</p>
-    <p>采集状态：{({ ready: '最近批次完成', pending: '等待首次采集', error: '采集失败，当前列表可能不完整', unavailable: '未启用持久化存储' })[remote.data?.collection?.state] || '读取中'} · 最近成功：{date(remote.data?.collection?.lastSuccessAt)} · 时间均为北京时间</p>
+    <p>TikHub / JustOne 余额监控固定在北京时间每天 10:00、22:00 各检查一次，可在外部数据平台调整告警阈值。JustOne 调用失败与 Token 限额每 30 秒从账本采集；页面刷新不请求供应商。已入库的事件与处理记录持续保留。</p>
+    <p>调用账本采集状态：{({ ready: '最近批次完成', pending: '等待首次采集', error: '采集失败，当前列表可能不完整', unavailable: '未启用持久化存储' })[remote.data?.collection?.state] || '读取中'} · 最近成功：{date(remote.data?.collection?.lastSuccessAt)} · 时间均为北京时间</p>
     {remote.error ? <ErrorState error={remote.error} onRetry={refresh} /> : null}
     {remote.loading && !remote.data ? <LoadingState label="正在读取通知" /> : null}
     {remote.data?.available === false ? <p role="status">通知中心需要 PostgreSQL 持久化存储；当前环境未启用。</p> : null}
     {remote.data?.available && !remote.data.items.length ? <p role="status">当前筛选下暂无通知。此状态不代表供应商余额充足。</p> : null}
-    {(remote.data?.items || []).map((item) => <article className="qp-panel mih-panel mih-notice-card" key={item.id}>
+    {(remote.data?.items || []).map((item) => <article className={`qp-panel mih-panel mih-notice-card mih-notice-card--${item.severity}`} key={item.id}>
       <div className="mih-notice-meta"><span>{categories[item.category] || item.category}</span><strong className={`qp-tag qp-tag--${item.severity === 'critical' ? 'danger' : 'warning'}`}>{item.severity === 'critical' ? '严重' : '警告'}</strong><span>{statuses[item.status]}</span></div>
       <h2><button className="qp-button qp-button--ghost" onClick={() => setSelected(item.id)}>{item.title}</button></h2>
       <p>事件 #{item.id} · 累计 {item.occurrence_count} 次 · 最近发生 {date(item.last_occurred_at)}</p>
-      <p className="mih-notice-request">最近 Request ID：<code>{item.latest_request_id}</code></p>
+      {item.latest_request_id ? <p className="mih-notice-request">最近 Request ID：<code>{item.latest_request_id}</code></p> : null}
+      {item.recovered_at ? <p>余额已确认恢复：{date(item.recovered_at)}</p> : null}
       <button className="qp-button qp-button--outline" onClick={() => setSelected(item.id)}>查看与处理</button>
     </article>)}
     <div className="mih-notice-meta">

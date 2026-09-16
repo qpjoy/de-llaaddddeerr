@@ -2,6 +2,8 @@
 .mih-notice-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
 .mih-notice-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; padding: 20px; }
 .mih-notice-card { padding: 24px; gap: 12px; }
+.mih-notice-card--critical { border-left: 4px solid var(--qp-danger); }
+.mih-notice-card--warning { border-left: 4px solid var(--qp-warning); }
 .mih-notice-card h2, .mih-notice-card p { margin: 0; }
 .mih-notice-card > button { justify-self: start; }
 .mih-notice-card h2 button { font-size: inherit; white-space: normal; text-align: left; }

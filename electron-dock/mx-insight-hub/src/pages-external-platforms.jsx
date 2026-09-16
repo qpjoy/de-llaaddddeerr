@@ -1,4 +1,5 @@
 import { ExternalProxyPanel } from './external-proxy-panel.jsx'
+import { SupplierBalanceStatus, SupplierBalancePanel, useSupplierBalances } from './supplier-balances.jsx'
 import { NightAllAPanel } from './night-all-a-panel.jsx'
 import { IntegrationSlotFrame, SlotTags } from './integration-slot.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -877,7 +878,7 @@ function OverviewMetricRail({ overview }) {
   )
 }
 
-function ProviderCard({ item, range }) {
+function ProviderCard({ item, range, balance }) {
   const canOpen = SUPPORTED_PROVIDERS.has(item.key)
   return (
     <article className="qp-panel mih-external-provider-card">
@@ -891,6 +892,7 @@ function ProviderCard({ item, range }) {
       </header>
       <p>{item.description || '管理接口尚未提供平台说明。'}</p>
       <SlotTags provider={item.key} />
+      <SupplierBalanceStatus item={balance} />
       <dl>
         <div><dt>Hub 请求</dt><dd>{formatOptionalNumber(item.summary.hubRequests)}</dd></div>
         <div><dt>上游调用</dt><dd>{formatOptionalNumber(item.summary.upstreamCalls)}</dd></div>
@@ -915,7 +917,7 @@ function ProviderAlerts({ item }) {
     <div role="alert" key={alert.code}>
       <Panel title={alert.title} subtitle={`最近失败：${displayDate(alert.observedAt)}`}>
         <p>{alert.message}</p>
-        <p>余额数值未知：尚未接入经核验的余额查询接口，此提醒来自实际调用错误，不是低余额预警。熔断到期不代表恢复；处理后需由新的成功调用验证。</p>
+        <p>此提醒来自实际调用错误；账户余额请查看独立监控的最近查询结果。熔断到期或人工关闭不代表恢复。</p>
         <a className="qp-button qp-button--outline" href="https://dashboard.justoneapi.com" target="_blank" rel="noopener noreferrer">前往 JustOne 后台</a>
         <a className="qp-button qp-button--ghost" href="#/notifications">通知中心 · 处理与追溯</a>
       </Panel>
@@ -924,6 +926,7 @@ function ProviderAlerts({ item }) {
 }
 
 function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
+  const balances = useSupplierBalances(token, onUnauthorized)
   const load = useCallback(() => adminApi.externalPlatforms(token, { range }), [range, token])
   const remote = useRemoteData(load, onUnauthorized)
   const overview = useMemo(() => normalizeOverview(remote.data), [remote.data])
@@ -946,6 +949,8 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
       {remote.data !== null || (!remote.loading && !remote.error) ? (
         <>
           <OverviewMetricRail overview={overview} />
+          {balances.error ? <ErrorState error={balances.error} onRetry={balances.refresh} /> : null}
+          {balances.data?.available === false ? <p>余额监控需要 PostgreSQL 持久化存储。</p> : null}
           {overview.items.map((item) => <ProviderAlerts key={item.key} item={item} />)}
           <Panel
             title="平台总览"
@@ -956,7 +961,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
             {overview.items.length ? (
               <div className="mih-external-provider-grid">
                 {overview.items.map((item, index) => (
-                  <ProviderCard key={item.key || index} item={item} range={range} />
+                  <ProviderCard key={item.key || index} item={item} range={range} balance={balances.data?.items?.find(entry => entry.provider === item.key)} />
                 ))}
               </div>
             ) : (
@@ -2220,6 +2225,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
               or a price book. The controls keep stable ids so every metric and
               blocker above can jump straight to the one that fixes it. */}
           <DetailMetricRail detail={detail} />
+          <SupplierBalancePanel token={token} provider={provider} onUnauthorized={onUnauthorized} />
           <ProviderAlerts item={detail} />
           <section className="mih-external-two-column">
             <TrendPanel detail={detail} />

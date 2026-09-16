@@ -14,7 +14,7 @@ export function notificationQuery(query = {}) {
   const status = query.status || 'active'
   const category = query.category || 'all'
   const before = query.before || null
-  if (!STATUSES.includes(status) || !['all', ...Object.values(RULES).map((rule) => rule.category)].includes(category)
+  if (!STATUSES.includes(status) || !['all', 'supplier.cost', ...Object.values(RULES).map((rule) => rule.category)].includes(category)
       || (before !== null && !/^[1-9]\d{0,17}$/.test(before))) {
     throw new AppError(400, 'invalid_notification_filter', 'Invalid notification filter')
   }

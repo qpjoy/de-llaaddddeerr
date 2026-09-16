@@ -750,6 +750,7 @@ export function createApp({
   embedding = null,
   externalPlatformAdmin = null,
   notifications = null,
+  balanceMonitor = null,
   nightAllA = null,
   externalPlatformGateway = null,
   ipRiskGateway = null,
@@ -2712,6 +2713,22 @@ export function createApp({
         const data = await nightAllA.journal.get(params.id)
         if (!data) throw new AppError(404, 'dispatch_not_found', '记录不存在')
         sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/supplier-balances') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'supplier balances')
+        response.setHeader('Cache-Control', 'no-store')
+        if (!balanceMonitor) throw new AppError(503, 'balance_monitor_unavailable', '余额监控不可用')
+        sendJson(response, 200, { data: await balanceMonitor.list(), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/supplier-balances/:provider')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'supplier balance policy')
+        if (!balanceMonitor) throw new AppError(503, 'balance_monitor_unavailable', '余额监控不可用')
+        sendJson(response, 200, { data: await balanceMonitor.update(params.provider, await readJson(request, 4096)), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/notifications') {
