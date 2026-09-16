@@ -1,7 +1,8 @@
 import { RetrievalControlPanel } from './retrieval-control.jsx'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive,
+  CaretDown,
   ClockCounterClockwise,
   Database,
   FileText,
@@ -13,6 +14,7 @@ import { adminApi } from './api.js'
 import { AcquisitionHistoryPanel } from './acquisition-history.jsx'
 import { IndexingObservation } from './indexing-observation.jsx'
 import { canConfirmSearchReindex } from './search-reindex-confirmation.js'
+import './data-center.css'
 import {
   EmptyState,
   DropdownField,
@@ -282,6 +284,12 @@ function SearchLab({ capabilities, selectedProfile, execution, recordsMode, quer
 }
 
 const ACTIVE_REINDEX_STATUSES = new Set(['queued', 'running'])
+const DATA_CENTER_TABS = [
+  { id: 'records', label: '检索与筛选', icon: MagnifyingGlass },
+  { id: 'index', label: '搜索索引', icon: Stack },
+  { id: 'vectors', label: '向量化', icon: Database },
+  { id: 'acquisitions', label: '采集查询复现', icon: ClockCounterClockwise },
+]
 
 /**
  * Cycle the time column between newest, oldest and relevance.
@@ -630,6 +638,25 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
  * come from PostgreSQL, while ES remains a rebuildable serving projection.
  */
 export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
+  const [activeTab, setActiveTab] = useState('records')
+  const [visitedTabs, setVisitedTabs] = useState({ records: true })
+  const [datasetsOpen, setDatasetsOpen] = useState(false)
+  const tabButtons = useRef({})
+  const datasetSummary = useRef(null)
+  const selectTab = (id) => {
+    setActiveTab(id)
+    setVisitedTabs((visited) => visited[id] ? visited : { ...visited, [id]: true })
+  }
+  const navigateTabs = (event, index) => {
+    const nextIndex = event.key === 'ArrowRight' ? (index + 1) % DATA_CENTER_TABS.length
+      : event.key === 'ArrowLeft' ? (index + DATA_CENTER_TABS.length - 1) % DATA_CENTER_TABS.length
+        : event.key === 'Home' ? 0 : event.key === 'End' ? DATA_CENTER_TABS.length - 1 : null
+    if (nextIndex == null) return
+    event.preventDefault()
+    const id = DATA_CENTER_TABS[nextIndex].id
+    selectTab(id)
+    tabButtons.current[id]?.focus()
+  }
   const routeDatasetId = routeQuery?.get('datasetId')?.trim() || ''
   const [datasetId, setDatasetId] = useState(routeDatasetId)
   const [platform, setPlatform] = useState('')
@@ -815,7 +842,7 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   return (
-    <>
+    <div className="mih-data-center">
       <PageHeading
         eyebrow="CANONICAL DATA / LINEAGE / PROJECTION"
         title="数据中心"
@@ -831,11 +858,20 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
         <MetricCard icon={Archive} label="已删除记录" value={formatNumber(stats.deletedRecordCount ?? 0)} hint="源端 tombstone；Hub 保留证据而非物理删除" tone={stats.deletedRecordCount ? 'warning' : 'primary'} />
       </div>
 
-      <AcquisitionHistoryPanel token={token} onUnauthorized={onUnauthorized} />
+      <div className="qp-panel mih-data-center-tabs" role="tablist" aria-label="数据中心功能">
+        {DATA_CENTER_TABS.map(({ id, label, icon: Icon }, index) => (
+          <button key={id} id={`data-center-tab-${id}`} type="button" role="tab"
+            ref={(button) => { tabButtons.current[id] = button }}
+            aria-selected={activeTab === id} aria-controls={`data-center-panel-${id}`}
+            tabIndex={activeTab === id ? 0 : -1}
+            onKeyDown={(event) => navigateTabs(event, index)} onClick={() => selectTab(id)}>
+            <Icon size={18} aria-hidden="true" />{label}
+          </button>
+        ))}
+      </div>
 
-      <SearchReindexControl token={token} onUnauthorized={onUnauthorized} onReindexed={refreshAfterReindex} />
-      <RetrievalControlPanel token={token} onUnauthorized={onUnauthorized} />
-
+      <div id="data-center-panel-records" className="mih-data-center-tab-panel" role="tabpanel"
+        aria-labelledby="data-center-tab-records" hidden={activeTab !== 'records'}>
       <Panel title="检索与筛选" subtitle="浏览与游标分页走 PostgreSQL；关键词搜索优先 Elasticsearch、故障时回退 PostgreSQL，详情始终回读完整 canonical record">
         <form className="mih-data-center-search" onSubmit={search}>
           <label className="qp-field mih-data-center-search__query">
@@ -924,7 +960,16 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
       </Panel>
 
       {datasets.length ? (
-        <Panel title="数据集合" subtitle={`${formatNumber(datasets.length)} 个 canonical dataset`}>
+        <details className="qp-panel mih-data-center-datasets" open={datasetsOpen}
+          onToggle={(event) => setDatasetsOpen(event.currentTarget.open)}>
+          <summary ref={datasetSummary}>
+            <Stack size={20} aria-hidden="true" />
+            <span className="mih-data-center-datasets__label"><strong>数据集合</strong>
+              <small>{formatNumber(datasets.length)} 个数据集 · {datasetId ? `当前筛选：${datasetId}` : '当前检索全部数据集'}</small>
+            </span>
+            <span className="mih-data-center-datasets__toggle">{datasetsOpen ? '收起' : '展开'}<CaretDown size={16} aria-hidden="true" /></span>
+          </summary>
+          <div className="mih-data-center-datasets__body">
           <DataTable label="数据集目录">
             <thead><tr><th>Dataset</th><th>平台 / 类型</th><th>当前记录</th><th>修订</th><th>最近采集</th><th /></tr></thead>
             <tbody>
@@ -938,12 +983,15 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
                   <td><button className="qp-button qp-button--ghost" type="button" onClick={() => {
                     setDatasetId(dataset.datasetId)
                     resetPagination()
+                    setDatasetsOpen(false)
+                    datasetSummary.current?.focus()
                   }}>查看记录</button></td>
                 </tr>
               ))}
             </tbody>
           </DataTable>
-        </Panel>
+          </div>
+        </details>
       ) : (
         <EmptyState icon={Stack} title="还没有 canonical 数据" description="先从外部数据源导入或运行已配置的业务清洗任务。" />
       )}
@@ -1018,6 +1066,22 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
             label="canonical records 分页" />
         ) : null}
       </Panel>
+      </div>
+
+      {/* Keep visited workspaces mounted so switching tabs retains input and
+          results. Opening a tab reads status only; mutations remain explicit. */}
+      <div id="data-center-panel-index" className="mih-data-center-tab-panel" role="tabpanel"
+        aria-labelledby="data-center-tab-index" hidden={activeTab !== 'index'}>
+        {visitedTabs.index ? <SearchReindexControl token={token} onUnauthorized={onUnauthorized} onReindexed={refreshAfterReindex} /> : null}
+      </div>
+      <div id="data-center-panel-vectors" className="mih-data-center-tab-panel" role="tabpanel"
+        aria-labelledby="data-center-tab-vectors" hidden={activeTab !== 'vectors'}>
+        {visitedTabs.vectors ? <RetrievalControlPanel token={token} onUnauthorized={onUnauthorized} /> : null}
+      </div>
+      <div id="data-center-panel-acquisitions" className="mih-data-center-tab-panel" role="tabpanel"
+        aria-labelledby="data-center-tab-acquisitions" hidden={activeTab !== 'acquisitions'}>
+        {visitedTabs.acquisitions ? <AcquisitionHistoryPanel token={token} onUnauthorized={onUnauthorized} /> : null}
+      </div>
 
       {selectedRecord ? (
         <Modal title={recordTitle(selectedRecord)}
@@ -1045,6 +1109,6 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
           </div>
         </Modal>
       ) : null}
-    </>
+    </div>
   )
 }

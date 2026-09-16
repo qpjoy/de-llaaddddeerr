@@ -1,0 +1,33 @@
+.mih-data-center,
+.mih-data-center-tab-panel { display: grid; gap: 18px; min-width: 0; }
+.mih-data-center-tab-panel[hidden] { display: none; }
+.mih-data-center-tabs { display: flex; gap: 6px; padding: 6px; overflow-x: auto; }
+.mih-data-center-tabs [role="tab"] {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  flex: 1 0 auto; padding: 12px 18px; border: 1px solid transparent;
+  border-radius: var(--qp-radius-md); background: transparent; color: var(--qp-text-2);
+  font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer;
+}
+.mih-data-center-tabs [role="tab"]:hover { background: var(--qp-bg-3); color: var(--qp-text-1); }
+.mih-data-center-tabs [role="tab"][aria-selected="true"] {
+  border-color: color-mix(in srgb, var(--qp-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--qp-primary) 12%, var(--qp-bg-2));
+  color: var(--qp-primary); font-weight: 600;
+}
+.mih-data-center-tabs [role="tab"]:focus-visible,
+.mih-data-center-datasets > summary:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 2px; }
+.mih-data-center-datasets { min-width: 0; }
+.mih-data-center-datasets > summary { display: flex; align-items: center; gap: 12px; cursor: pointer; list-style: none; }
+.mih-data-center-datasets > summary::-webkit-details-marker { display: none; }
+.mih-data-center-datasets > summary > svg { color: var(--qp-primary); flex-shrink: 0; }
+.mih-data-center-datasets__label { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.mih-data-center-datasets__label strong { font-size: var(--qp-font-head-2); font-weight: 500; }
+.mih-data-center-datasets__label small { color: var(--qp-text-3); overflow-wrap: anywhere; }
+.mih-data-center-datasets__toggle { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: var(--qp-text-2); font-size: 12px; }
+.mih-data-center-datasets[open] .mih-data-center-datasets__toggle svg { transform: rotate(180deg); }
+.mih-data-center-datasets__body { margin-top: 18px; }
+@media (max-width: 640px) {
+  .mih-data-center > .mih-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mih-data-center-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
+  .mih-data-center-tabs [role="tab"] { padding: 10px 12px; }
+}
