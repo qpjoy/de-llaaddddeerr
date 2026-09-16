@@ -1016,6 +1016,7 @@ export function percent(part, total) {
 export function platformLabel(platform) {
   const labels = {
     ip_risk: 'IP 风险画像',
+    enterprise: '企业数据',
     xiaohongshu: '小红书',
     weibo: '微博',
     douyin: '抖音',

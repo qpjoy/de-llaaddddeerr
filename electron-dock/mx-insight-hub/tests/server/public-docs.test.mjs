@@ -1,3 +1,4 @@
+import { QIXIN_CATALOG } from '../../server/contracts/enterprise.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
@@ -1799,6 +1800,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(response.status, 200)
     assert.equal(document.openapi, '3.1.0')
     assert.deepEqual(paths.sort(), [
+      ...QIXIN_CATALOG.apis.map(api => `/data/enterprise/${api.api_id}/query`),
       '/acquisitions/{requestId}',
       '/data/canonical/items/{id}/context',
       '/data/canonical/items/{id}/timeline',
@@ -1855,7 +1857,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/xiaohongshu/app_v2/get_user_posted_notes',
       '/xiaohongshu/app_v2/search_notes',
       '/xiaohongshu/app_v2/search_users',
-    ])
+    ].sort())
     assert.deepEqual(Object.keys(document.components.securitySchemes).sort(), ['apiKeyHeader', 'bearerKey'])
 
     const serialized = JSON.stringify(document)

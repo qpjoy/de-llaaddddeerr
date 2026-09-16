@@ -1,3 +1,4 @@
+import { normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   ECOMMERCE_DELIVERY_MODES,
@@ -49,10 +50,10 @@ function fingerprint(value) {
   return createHash('sha256').update(canonicalJson(value)).digest('hex')
 }
 
-function providerCostControl(config, endpointKey) {
+function providerCostControl(config, endpointKey, allowZeroCost = false) {
   const billing = config?.billing || {}
   const costMinor = billing.unitCostMinorByEndpoint?.[endpointKey]
-  if (!Number.isSafeInteger(costMinor) || costMinor <= 0
+  if (!Number.isSafeInteger(costMinor) || costMinor < (allowZeroCost ? 0 : 1)
     || !Number.isSafeInteger(billing.monthlyBudgetMinor) || billing.monthlyBudgetMinor < 0
     || !Number.isSafeInteger(billing.monthlySubsidyBudgetMinor)
     || billing.monthlySubsidyBudgetMinor < 0
@@ -474,6 +475,19 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async queryEnterprise(context, { apiId, body, idempotencyKey, path }) {
+    if (this.providerKey !== 'qixin') throw new AppError(404, 'enterprise_api_not_found', 'Unknown enterprise API')
+    const request = normalizeEnterpriseRequest(apiId, body)
+    return this.#deliver(context, { body, idempotencyKey, path }, {
+      operation: enterpriseOperation(apiId), capability: ENTERPRISE_CAPABILITY,
+      authorizationPlatform: 'enterprise', datasetId: ENTERPRISE_DATASET,
+      capabilityMessage: 'Enterprise queries are not granted for this API key',
+      allowZeroCost: request.api.price === 0, billingUnknown: true,
+      normalize: () => request,
+      dispatch: ({ credential }) => this.adapter.query(apiId, body, credential),
+    })
+  }
+
   async #deliver(context, { body, idempotencyKey, retryOfRequestId, path }, plan) {
     // Operations under this provider do not all sit in the same data domain:
     // product search is `ecommerce`, account search is `social`. Grants, quota
@@ -507,7 +521,7 @@ export class ExternalPlatformGateway {
     const capabilityGrants = typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
       ? await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
       : await this.usageStore.listCapabilityGrants(context.consumer.id)
-    if (!capabilityGrants.includes(plan.operation)) {
+    if (!capabilityGrants.includes(plan.capability || plan.operation)) {
       throw new AppError(403, 'capability_not_granted', plan.capabilityMessage)
     }
     const consumerPolicy = {
@@ -602,7 +616,7 @@ export class ExternalPlatformGateway {
       meterKey: plan.operation,
       requiredAuthorizationScopes: [
         { type: 'platform', key: authorizationPlatform },
-        { type: 'capability', key: plan.operation },
+        { type: 'capability', key: plan.capability || plan.operation },
       ],
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
@@ -938,6 +952,7 @@ export class ExternalPlatformGateway {
       const costControl = providerCostControl(
         operationControl?.billing ? { billing: operationControl.billing } : this.config,
         normalized.endpointKey,
+        plan.allowZeroCost === true,
       )
       if (typeof this.platformStore.reserveProviderCostWorkflow !== 'function') {
         throw new AppError(
@@ -946,7 +961,7 @@ export class ExternalPlatformGateway {
           'Provider cost reservation is unavailable',
         )
       }
-      costReservation = await this.platformStore.reserveProviderCostWorkflow({
+      costReservation = costControl.costMinor === 0 ? null : await this.platformStore.reserveProviderCostWorkflow({
         tenantId: context.tenant.id,
         consumerId: context.consumer.id,
         apiKeyId: context.apiKey.id,
@@ -1003,8 +1018,8 @@ export class ExternalPlatformGateway {
         marketplace: normalized.marketplace,
         fingerprint: requestFingerprint,
         retryOfRequestId: validatedRetryOfRequestId,
-        costControl,
-        costReservationId: costReservation.id,
+        costControl: costControl.costMinor === 0 ? null : costControl,
+        costReservationId: costReservation?.id ?? null,
         ...(operationControl ? { operationControl } : {}),
       })
       lastDispatchEvidence = {
@@ -1027,7 +1042,7 @@ export class ExternalPlatformGateway {
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
         const unitCost = costControl.costMinor
         lastDispatchEvidence = {
-          billed: true,
+          billed: plan.billingUnknown ? null : true,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
           currency: unitCost == null ? null : costControl.currency,
@@ -1058,7 +1073,7 @@ export class ExternalPlatformGateway {
           // Official usage semantics count only code=0 as a successful billed
           // request. Monetary cost remains unknown unless a reviewed price book
           // is configured.
-          billed: true,
+          billed: plan.billingUnknown ? null : true,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
           currency: unitCost == null ? null : costControl.currency,
@@ -1071,14 +1086,14 @@ export class ExternalPlatformGateway {
               kind: 'external-platform-result',
               consumerId: context.consumer.id,
               providerKey: this.providerKey,
-              datasetId: 'ecommerce.products.v1',
-              platform: 'ecommerce',
+              datasetId: plan.datasetId || 'ecommerce.products.v1',
+              platform: authorizationPlatform,
               requestId: activeRequestId,
               queryFingerprint: requestFingerprint,
               providerCallId: call.id,
               records: result.records,
             },
-            dedupeKey: `external-platform:justone:${call.id}`,
+            dedupeKey: `external-platform:${this.providerKey}:${call.id}`,
             priority: 100,
           },
         })

@@ -81,6 +81,7 @@ async function main() {
 
   async function handleIngest(payload) {
     if (payload?.kind === 'external-platform-result') {
+      const enterprise = payload.providerKey === 'qixin' && payload.datasetId === 'enterprise.responses.v1' && payload.platform === 'enterprise'
       const justOne = payload.providerKey === 'justone'
         && payload.datasetId === 'ecommerce.products.v1'
         && payload.platform === 'ecommerce'
@@ -88,13 +89,13 @@ async function main() {
         && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID]
           .includes(payload.datasetId)
         && payload.platform === 'xiaohongshu'
-      if ((!justOne && !tikHubXiaohongshu) || !Array.isArray(payload.records)) {
+      if ((!justOne && !tikHubXiaohongshu && !enterprise) || !Array.isArray(payload.records)) {
         throw new Error('external-platform ingest payload does not match the pinned contract')
       }
-      const records = justOne
+      const records = justOne || enterprise
         ? rehydrateJustOneQueuedRecords(payload.records)
         : rehydrateTikHubXiaohongshuQueuedRecords(payload.records)
-      const connectorId = justOne ? 'external-platform:justone' : TIKHUB_XIAOHONGSHU_CONNECTOR_ID
+      const connectorId = enterprise ? 'external-platform:qixin' : justOne ? 'external-platform:justone' : TIKHUB_XIAOHONGSHU_CONNECTOR_ID
       const result = await store.ingestExternalRecords({
         datasetId: payload.datasetId,
         platform: payload.platform,

@@ -2,6 +2,7 @@
 export const SLOT_CONTRACT_VERSION = 'mx-hub.integration-slot.v1'
 export const SLOT_MODES = { sync_api: '同步 API', async_job: '异步采集', database_pull: '数据库增量', file_import: '文件导入', event_push: '事件接入', process_job: '独立进程' }
 export const PLATFORM_SLOTS = {
+  qixin: { ownership: '外部服务', modes: ['sync_api'], delivery: '完整响应 → Hub 快照 → Canonical 观察', control: '双密钥配置、逐接口运行与采购价', mapping: '企业查询响应合同；不推断企业实体', evidence: '调用记录、精确响应、交付与入库证据' },
   ipsearch: { ownership: '外部服务', modes: ['sync_api'], delivery: '请求结果与历史快照', control: 'IP 单条 / 批量查询', mapping: 'IP 风险画像合同', evidence: '调用记录、计费与结果快照' },
   justone: { ownership: '外部服务', modes: ['sync_api'], delivery: '完整上游归档 → Canonical → 检索', control: '商品搜索与受控刷新', mapping: '电商商品合同', evidence: '采购调用、缓存、交付与入库证据' },
   tikhub: { ownership: '外部服务', modes: ['sync_api'], delivery: '完整上游归档 → Canonical → 检索', control: '社交内容搜索、详情与用户', mapping: '社交内容合同', evidence: '采购调用、归档、分页与映射证据' },

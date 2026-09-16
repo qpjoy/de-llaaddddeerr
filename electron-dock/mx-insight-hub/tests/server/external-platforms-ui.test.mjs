@@ -111,7 +111,7 @@ test('external-platform page exposes JustOne, TikHub and Night-All while keeping
   assert.match(route, /platformAdmin: true/u)
   assert.match(route, /adminTokenOnly: true/u)
   assert.match(pageSource, /query\.get\('provider'\)/u)
-  assert.match(pageSource, /const SUPPORTED_PROVIDERS = new Set\(\['justone', 'tikhub', 'night-all', 'night-all-a', 'ipsearch'\]\)/u)
+  assert.match(pageSource, /const SUPPORTED_PROVIDERS = new Set\(\['qixin', 'justone', 'tikhub', 'night-all', 'night-all-a', 'ipsearch'\]\)/u)
   assert.match(pageSource, /tikhub: 'TikHub'/u)
   assert.match(pageSource, /filter\(\(item\) => SUPPORTED_PROVIDERS\.has\(item\.key\)\)/u)
   assert.match(pageSource, /hasAggregateSummary \? normalizeSummary\(payload\)/u)

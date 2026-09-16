@@ -754,6 +754,7 @@ export function createApp({
   nightAllA = null,
   externalPlatformGateway = null,
   ipRiskGateway = null,
+  enterpriseGateway = null,
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
   tikHubGateway = null,
@@ -5387,6 +5388,21 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/api/v1/data/ecommerce/products/items') {
         const context = await requirePublic(request)
         sendJson(response, 200, { data: await service.ecommerceStoredItems(context, Object.fromEntries(searchParams.entries())), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/enterprise/:apiId/query')
+      if (params && request.method === 'POST') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'enterprise query')
+        if (!enterpriseGateway) throw new AppError(503, 'enterprise_unavailable', 'Enterprise queries are unavailable')
+        const result = await enterpriseGateway.queryEnterprise(context, {
+          apiId: params.apiId, body: await readJson(request, 65536), path: `/api/v1/data/enterprise/${params.apiId}/query`,
+          idempotencyKey: request.headers['idempotency-key'],
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
         return
       }
       if (request.method === 'POST' && ['/api/v1/data/ip/risk', '/api/v1/data/ip/risk/batch'].includes(pathname)) {

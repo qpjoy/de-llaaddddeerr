@@ -1,3 +1,4 @@
+import { StructuredCredentialPanel } from './structured-credential-panel.jsx'
 import { ExternalProxyPanel } from './external-proxy-panel.jsx'
 import { SupplierBalanceStatus, SupplierBalancePanel, useSupplierBalances } from './supplier-balances.jsx'
 import { NightAllAPanel } from './night-all-a-panel.jsx'
@@ -65,7 +66,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['justone', 'tikhub', 'night-all', 'night-all-a', 'ipsearch'])
+const SUPPORTED_PROVIDERS = new Set(['qixin', 'justone', 'tikhub', 'night-all', 'night-all-a', 'ipsearch'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -98,7 +99,7 @@ function FixLink({ target, children }) {
 }
 
 function providerDisplayName(provider) {
-  return ({ justone: 'JustOne', tikhub: 'TikHub', 'night-all': 'Night-All' })[provider] || provider || '外部平台'
+  return ({ qixin: '启信慧眼', justone: 'JustOne', tikhub: 'TikHub', 'night-all': 'Night-All' })[provider] || provider || '外部平台'
 }
 
 const PROCESSING_STAGES = [
@@ -502,6 +503,7 @@ function normalizeOperations(root, fallback = {}) {
     const operationKey = optionalText(row.operationKey, row.operation, row.key) || `operation-${index + 1}`
     return {
       operationKey,
+      allowZeroCost: row.allowZeroCost === true,
       label: optionalText(
         row.label,
         labels['zh-CN'],
@@ -628,6 +630,7 @@ function normalizeDetail(payload, requestedKey) {
     ...platform,
     proxy: envelope.proxy || root.proxy || null,
     credential: {
+      fields: rawCredential.fields,
       source: optionalText(
         rawCredential.source,
         envelope.credentialSource,
@@ -1290,7 +1293,7 @@ function budgetMinorFromDraft(draft, label, unitCostMinorByEndpoint) {
   return parseCallCount(stated, label.text) * Math.max(...prices)
 }
 
-function operationPriceBookPayload(draft, endpointKeys) {
+function operationPriceBookPayload(draft, endpointKeys, allowZeroCost = false) {
   const currency = draft.currency.trim().toUpperCase()
   const pricingAsOf = draft.pricingAsOf.trim()
   if (!/^[A-Z]{3}$/u.test(currency)) throw new Error('币种必须是 3 位 ISO 代码，例如 CNY')
@@ -1299,7 +1302,7 @@ function operationPriceBookPayload(draft, endpointKeys) {
   }
   const unitCostMinorByEndpoint = Object.fromEntries(endpointKeys.map((endpointKey) => [
     endpointKey,
-    parseMinorUnit(draft.endpointPrices[endpointKey], `${endpointKey} 单次价格`, { positive: true }),
+    parseMinorUnit(draft.endpointPrices[endpointKey], `${endpointKey} 单次价格`, { positive: !allowZeroCost }),
   ]))
   return {
     currency,
@@ -1402,7 +1405,7 @@ function ExternalPlatformOperationCard({
         reason: submittedReason,
         canaryConsumerIds: desiredState === 'canary' ? submittedCanaryIds : null,
         ...(publishPriceBook ? {
-          priceBook: operationPriceBookPayload(priceDraft, operation.release.endpointKeys),
+          priceBook: operationPriceBookPayload(priceDraft, operation.release.endpointKeys, operation.allowZeroCost),
         } : {}),
       }
       await adminApi.updateExternalPlatformOperationPolicy(
@@ -1585,12 +1588,12 @@ function ExternalPlatformOperationCard({
             key={endpointKey}
             className="mih-external-operation-endpoint-price"
             label={`${endpointKey} 单次价格`}
-            hint="必须大于 0；与这个上游 endpoint 精确绑定。"
+            hint={operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
           >
             <input
               className="qp-input mih-mono"
               type="number"
-              min="1"
+              min={operation.allowZeroCost ? 0 : 1}
               step="1"
               value={priceDraft.endpointPrices[endpointKey] ?? ''}
               onChange={(event) => updateEndpointPrice(endpointKey, event.target.value)}
@@ -1882,6 +1885,9 @@ function ExternalPlatformOperationControlPanel({
   const [openKey, setOpenKey] = useState(null)
   // Keep receipts outside the revision-keyed forms that reset after a save.
   const [savedReceipts, setSavedReceipts] = useState({})
+  const [filter, setFilter] = useState('')
+  const [shown, setShown] = useState(20)
+  const filtered = operations.filter(operation => `${operation.label} ${operation.operationKey}`.toLowerCase().includes(filter.toLowerCase()))
   return (
     <Panel
       id="external-operations"
@@ -1890,9 +1896,10 @@ function ExternalPlatformOperationControlPanel({
       className="mih-external-operation-panel"
       action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
     >
+      {operations.length > 20 ? <Field label="查找接口运行配置"><input className="qp-input" type="search" value={filter} onChange={event => { setFilter(event.target.value); setShown(20) }} placeholder="输入接口名称或 ID" /></Field> : null}
       {operations.length ? (
         <div className="mih-external-operation-list">
-          {operations.map((operation) => (
+          {filtered.slice(0, shown).map((operation) => (
             <ExternalPlatformOperationRow
               key={`${operation.operationKey}:${operation.revision}:${operation.priceBook.version}`}
               token={token}
@@ -1919,6 +1926,8 @@ function ExternalPlatformOperationControlPanel({
           description="管理后端尚未返回 operation policy 证据；页面不会用默认开启状态代替。"
         />
       )}
+      {filtered.length > shown ? <button type="button" className="qp-button qp-button--outline" onClick={() => setShown(shown + 20)}>显示更多（{shown} / {filtered.length}）</button> : null}
+      {operations.length > 0 && filtered.length === 0 ? <p role="status">没有匹配的接口</p> : null}
     </Panel>
   )
 }
@@ -2206,6 +2215,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
         onRefresh={remote.refresh}
       >
         <a className="qp-button qp-button--ghost" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />平台总览</a>
+        {provider === 'qixin' ? <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/enterprise')}>企业接口文档 · 272 项</a> : null}
         {provider === 'tikhub' ? <><a className="qp-button qp-button--outline" href={publicDocsHref('/docs/tikhub/get_image_note_detail')}>小红书接口文档</a><a className="qp-button qp-button--outline" href="#/data-products/xiaohongshu-note">小红书笔记画卷</a></> : null}
         <RangeControl range={range} setQuery={setQuery} />
       </PageHeading>
@@ -2225,20 +2235,21 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
               or a price book. The controls keep stable ids so every metric and
               blocker above can jump straight to the one that fixes it. */}
           <DetailMetricRail detail={detail} />
-          <SupplierBalancePanel token={token} provider={provider} onUnauthorized={onUnauthorized} />
+          {provider !== 'qixin' ? <SupplierBalancePanel token={token} provider={provider} onUnauthorized={onUnauthorized} /> : null}
+          {provider === 'qixin' ? <StructuredCredentialPanel key={provider} token={token} provider={provider} credential={detail.credential} onSaved={remote.refresh} onUnauthorized={onUnauthorized} notify={notify} /> : null}
           <ProviderAlerts item={detail} />
           <section className="mih-external-two-column">
             <TrendPanel detail={detail} />
             <CostQuotaPanel detail={detail} />
           </section>
-          <ExternalPlatformProviderPriceBook
+          {provider !== 'qixin' ? <ExternalPlatformProviderPriceBook
             token={token}
             provider={provider}
             operations={detail.operations}
             onSaved={remote.refresh}
             onUnauthorized={onUnauthorized}
             notify={notify}
-          />
+          /> : null}
           {provider === 'tikhub' && detail.proxy ? <ExternalProxyPanel notify={notify} Panel={Panel} key={detail.proxy.revision} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           <ExternalPlatformOperationControlPanel
             token={token}
@@ -2248,16 +2259,16 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             onUnauthorized={onUnauthorized}
             notify={notify}
           />
-          <ExternalPlatformCredentialPanel
+          {provider !== 'qixin' ? <ExternalPlatformCredentialPanel
             token={token}
             provider={provider}
             credential={detail.credential}
             onSaved={remote.refresh}
             onUnauthorized={onUnauthorized}
             notify={notify}
-          />
+          /> : null}
           <ProcessingChain stages={detail.stages} />
-          <CapabilityMatrix capabilities={detail.capabilities} providerName={providerName} />
+          {provider !== 'qixin' ? <CapabilityMatrix capabilities={detail.capabilities} providerName={providerName} /> : null}
           <section className="mih-external-two-column mih-external-two-column--balanced">
             <TenantRanking tenants={detail.tenants} currency={detail.cost.currency} providerName={providerName} />
             <ProtectionPanel guardrails={detail.guardrails} notes={detail.notes} />

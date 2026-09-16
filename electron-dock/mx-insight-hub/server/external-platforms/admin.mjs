@@ -427,17 +427,18 @@ export class ExternalPlatformAdminService {
     // as dispatch does -- which is not the same thing as the provider-level
     // billing shown in the cost panel. Reporting only the latter is how an
     // operator ends up staring at "未知" while calls fail on a real budget.
+    const budgetReads = new Map()
     const operations = await Promise.all(describedOperations.map(async (operation) => {
       // priceBook here is already the effective pricing: describeProvider
       // resolves a database price book against the deployment billing exactly
       // as dispatch does, so reading it avoids re-deciding which source wins.
       const priceBook = operation.priceBook
-      const budget = typeof this.store.describeCostBudget === 'function' && priceBook
-        ? await this.store.describeCostBudget({
-            currency: priceBook.currency,
-            monthlyBudgetMinor: priceBook.monthlyBudgetMinor,
-          })
-        : null
+      const budgetKey = JSON.stringify([priceBook?.currency, priceBook?.monthlyBudgetMinor])
+      if (!budgetReads.has(budgetKey)) budgetReads.set(budgetKey,
+        typeof this.store.describeCostBudget === 'function' && priceBook
+          ? this.store.describeCostBudget({ currency: priceBook.currency, monthlyBudgetMinor: priceBook.monthlyBudgetMinor })
+          : Promise.resolve(null))
+      const budget = await budgetReads.get(budgetKey)
       return { ...operation, budget }
     }))
     const provider = providerProjection(analytics, todayAnalytics, {

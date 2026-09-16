@@ -1,3 +1,4 @@
+import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml } from './contracts/ip-risk-docs.mjs'
 import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
 import {
@@ -1232,6 +1233,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   ],
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
+    ...enterpriseOpenApiPaths(),
     '/data/ip/risk': {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
@@ -5190,6 +5192,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
 })
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
+  ...ENTERPRISE_DOC_ROUTES,
   { key: 'ip-risk', path: '/docs/ip-risk', label: 'IP 风险画像', section: '数据产品' },
   { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
@@ -6318,7 +6321,7 @@ const tenantDocsRoute = (route, scopes) => {
   if (TENANT_HIDDEN_DOCS.has(route.key)) return false
   if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
   if (route.key === 'topic-reports' && !tenantDocumentPathAllowed('/data/topic-reports', scopes)) return false
-  const paths = route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
+  const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   return paths.some(path => tenantDocumentPathAllowed(path, scopes))
 }
 
@@ -6352,6 +6355,7 @@ export function tenantOpenApiDocument(scopes) {
 }
 
 function tenantDocBody(route, scopes) {
+  if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
   const resolve = value => value?.$ref ? value.$ref.slice(2).split('/').reduce((node, key) => node?.[key], PUBLIC_OPENAPI_DOCUMENT) : value
@@ -6359,7 +6363,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'start') return '<h1>Hub 开放平台</h1><p class="lead">使用一把 Hub API Key 调用已开通的数据产品和平台接口。左侧目录展示当前账户已开放的服务；具体调用还需所选 Key 包含相应授权。</p><div class="cards"><div class="card"><strong>接口地址</strong><code>/api/v1</code></div><div class="card"><strong>认证</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>接口规范</strong><a href="/docs/openapi.json">OpenAPI JSON</a></div></div>'
   if (route.key === 'rules') return '<h2>认证与调用规则</h2><p>在 API Keys 中签发已授权的 Live Key。请求携带 <code>Authorization: Bearer YOUR_HUB_API_KEY</code> 或 <code>x-api-key</code>，使用同一 Hub 接口地址。</p><p>账户开通权限是上限；每把 Key 使用签发时选择的权限。新增能力可在 API Keys 中调整原 Key 权限，无需更换密钥；变更后即时生效。</p><h3>计费与重试</h3><p>费用以当前合同费率和账单为准。对同一请求重试时保留 Idempotency-Key 和请求参数；更换页码、游标或查询条件须使用新标识。结果不确定时先查询请求记录，避免重复提交。</p><h3>额度</h3><p>账户余额、套餐和 Key 限额共同生效。收到 429 后等待额度窗口恢复；不要连续重试。</p>'
   if (route.key === 'errors') return '<h2>错误与重试</h2><p>保留错误码与 requestId，便于排查。401：检查 Key；403：检查服务与 Key 授权；429：等待额度恢复。请求结果不确定时，使用原 Idempotency-Key 查询或重试同一请求，避免重复消费。</p>'
-  const paths = route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
+  const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
   for (const path of paths.filter(path => tenantDocumentPathAllowed(path, scopes))) {
     for (const [method, operation] of Object.entries(PUBLIC_OPENAPI_DOCUMENT.paths[path] || {})) {
@@ -6378,7 +6382,7 @@ function tenantDocBody(route, scopes) {
 
 function docsNavigation(activeKey, tenant = false, scopes) {
   let section = null
-  return PUBLIC_DOCS_ROUTES.filter(route => !tenant || tenantDocsRoute(route, scopes)).map((route) => {
+  return PUBLIC_DOCS_ROUTES.filter(route => !route.hiddenNavigation && (!tenant || tenantDocsRoute(route, scopes))).map((route) => {
     const active = route.key === activeKey
     const heading = route.section !== section
       ? `<span class="nav-section">${route.section}</span>`
@@ -6403,6 +6407,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes } = {})
     .replace(/\n\s*<section class="doc-page" data-doc-page="([^"]+)">[\s\S]*?<\/section>/g, (section, key) => (
       key === route.key ? section : ''
     ))
+  if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant })}</main>`)
   if (tenant) {
     html = html.replace(/<a href="(\/docs[^"#]*)(?:#[^"]*)?"[^>]*>([\s\S]*?)<\/a>/g, (link, path, text) => {
       const target = PUBLIC_DOCS_ROUTES.find(item => item.path === path)
@@ -6416,7 +6421,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes } = {})
     html = html.replace(/<p(?: [^>]*)?>[\s\S]*?<\/p>/g, paragraph => /供应方|供应商|上游消耗|上游调用|采购|成本证据|物理数据|外部平台凭据/.test(paragraph) ? '' : paragraph)
     html = html.split(/(<[^>]+>)/g).map(part => part.startsWith('<') ? part : part.replace(/上游/g, '数据服务').replace(/供应方/g, '服务').replace(/外部平台/g, '平台').replace(/平台原生接口 · /g, '').replace(/运维契约/g, '调用帮助')).join('')
   }
-  if (tenant) html = html.replace(/<main>[\s\S]*?<\/main>/, `<main>${tenantDocBody(route, scopes)}<footer>MX Insight Hub · Open API</footer></main>`)
+  if (tenant) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${tenantDocBody(route, scopes)}<footer>MX Insight Hub · Open API</footer></main>`)
   // Change display copy only; preserve API paths, scopes and machine identifiers.
   return html.split(/(<[^>]+>)/g).map(part => part.startsWith('<') ? part : platformDisplayName(part)).join('')
 }

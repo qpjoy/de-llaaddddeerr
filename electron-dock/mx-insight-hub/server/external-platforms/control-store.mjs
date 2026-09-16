@@ -1,3 +1,4 @@
+import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
 import { randomUUID } from 'node:crypto'
 
 import { AppError } from '../core/errors.mjs'
@@ -75,6 +76,7 @@ function justoneResourceOperationEntries() {
 }
 
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
+  qixin: Object.freeze(QIXIN_OPERATIONS),
   justone: Object.freeze([
     Object.freeze({
       operationKey: JUSTONE_OPERATION,
@@ -250,7 +252,7 @@ function normalizePriceBook(value, definition) {
   }
   const endpointPrices = Object.fromEntries(definition.endpointKeys.map((endpointKey) => {
     const valueForEndpoint = unitCosts[endpointKey]
-    if (!Number.isSafeInteger(valueForEndpoint) || valueForEndpoint <= 0) {
+    if (!Number.isSafeInteger(valueForEndpoint) || valueForEndpoint < (definition.allowZeroCost ? 0 : 1)) {
       invalid(`priceBook requires a positive safe-integer unit cost for ${endpointKey}`)
     }
     return [endpointKey, valueForEndpoint]
@@ -325,7 +327,7 @@ function priceEvidence(row, definition, config) {
         unitCostFor(billing, endpointKey),
       ]))
   const missingEndpointKeys = definition.endpointKeys.filter((endpointKey) => (
-    !Number.isSafeInteger(endpointPrices[endpointKey]) || endpointPrices[endpointKey] <= 0
+    !Number.isSafeInteger(endpointPrices[endpointKey]) || endpointPrices[endpointKey] < (definition.allowZeroCost ? 0 : 1)
   ))
   const currency = databasePriceBook ? row.priceBook.currency : billing?.currency
   const pricingAsOf = databasePriceBook ? row.priceBook.pricingAsOf : billing?.pricingAsOf
@@ -430,6 +432,7 @@ function operationView(row, definition, { config = {}, credentialConfigured = fa
   return {
     operationKey: definition.operationKey,
     label: definition.label,
+    ...(definition.allowZeroCost ? { allowZeroCost: true } : {}),
     controlSource: row.controlSource,
     desiredState,
     effectiveState,
@@ -652,7 +655,7 @@ function rowFromPostgres(row) {
   const endpointPrices = Object.fromEntries(Object.entries(row.endpoint_prices || {}).map(
     ([endpointKey, value]) => [
       endpointKey,
-      databaseSafeInteger(value, `unit price for ${endpointKey}`, { minimum: 1 }),
+      databaseSafeInteger(value, `unit price for ${endpointKey}`, { minimum: row.provider_key === 'qixin' && QIXIN_OPERATIONS.some(op => op.allowZeroCost && op.endpointKeys.includes(endpointKey)) ? 0 : 1 }),
     ],
   ))
   return {

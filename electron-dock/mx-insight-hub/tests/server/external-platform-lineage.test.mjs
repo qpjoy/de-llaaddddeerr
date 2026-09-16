@@ -67,7 +67,7 @@ test('external-platform worker contract carries gateway call lineage into canoni
   )
 
   assert.match(gateway, /kind:\s*'external-platform-result'[\s\S]*?requestId:\s*activeRequestId[\s\S]*?queryFingerprint:\s*requestFingerprint[\s\S]*?providerCallId:\s*call\.id[\s\S]*?records:\s*result\.records/u)
-  assert.match(worker, /const records = justOne\s*\?\s*rehydrateJustOneQueuedRecords\(payload\.records\)\s*:\s*rehydrateTikHubXiaohongshuQueuedRecords\(payload\.records\)[\s\S]*?records,/u)
+  assert.match(worker, /const records = justOne \|\| enterprise\s*\?\s*rehydrateJustOneQueuedRecords\(payload\.records\)\s*:\s*rehydrateTikHubXiaohongshuQueuedRecords\(payload\.records\)[\s\S]*?records,/u)
   assert.match(worker, /payload\?\.kind === 'external-platform-result'[\s\S]*?externalPlatformLineage:\s*\{[\s\S]*?requestId:\s*payload\.requestId\s*\?\?\s*null[\s\S]*?queryFingerprint:\s*payload\.queryFingerprint\s*\?\?\s*null[\s\S]*?providerCallId:\s*payload\.providerCallId\s*\?\?\s*null/u)
 })
 

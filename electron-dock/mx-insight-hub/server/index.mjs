@@ -1,3 +1,7 @@
+import { QixinAdapter } from './adapters/qixin.mjs'
+import { QixinAdminService, QIXIN_METADATA } from './external-platforms/qixin-admin.mjs'
+import { StructuredExternalPlatformCredentialStore, QIXIN_CREDENTIAL_FIELDS } from './external-platforms/structured-credentials.mjs'
+import { QIXIN_CONFIG } from './contracts/enterprise.mjs'
 import { ExternalPlatformProxyStore, createTikHubProxyFetch } from './external-platforms/proxy.mjs'
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
@@ -242,7 +246,16 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: Math.max(60000, config.reservationLeaseMs),
   })
   const nightAllA = new NightAllAService({ config: config.nightAllA, journal: new NightAllADispatchStore(pool) })
+  const qixinCredentialStore = new StructuredExternalPlatformCredentialStore({ pool, providerKey: 'qixin',
+    fields: QIXIN_CREDENTIAL_FIELDS, pepper: config.apiKeyPepper })
+  const qixinPlatformStore = createExternalPlatformStore({ pool, usageStore: store, providerKey: 'qixin', authorizationPlatform: 'enterprise' })
+  const enterpriseGateway = new ExternalPlatformGateway({ usageStore: store, platformStore: qixinPlatformStore,
+    adapter: config.listenerMode === 'admin' || !pool ? null : new QixinAdapter(), config: QIXIN_CONFIG,
+    providerKey: 'qixin', credentialStore: qixinCredentialStore, operationControlStore: externalPlatformControlStore,
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
+    new QixinAdminService({ store: qixinPlatformStore, config: QIXIN_CONFIG, credentialStore: qixinCredentialStore,
+      operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'qixin', metadata: QIXIN_METADATA }),
     new IpSearchAdminService(ipRiskGateway.platformStore, ipRiskGateway),
     justOnePlatformAdmin,
     tikHubPlatformAdmin,
@@ -359,7 +372,14 @@ export async function createRuntime(config = loadConfig()) {
     segmenter,
     externalPlatformCapabilities: async options => {
       const existing = await externalEcommerceCapabilities(options)
-      return { ...existing, operations: { ...existing.operations, ...(await ipRiskGateway.capabilities()).operations } }
+      let enterpriseReady = false
+      try {
+        const credential = await qixinCredentialStore.describeCredential('qixin')
+        const operations = await externalPlatformControlStore.describeProvider('qixin', { config: QIXIN_CONFIG, credentialConfigured: credential.credentialConfigured })
+        enterpriseReady = !!pool && operations.some(op => op.effectiveState === 'active' || (op.effectiveState === 'canary' && op.canaryConsumerIds.includes(options?.consumerId)))
+      } catch { /* Optional enterprise connector cannot block other capabilities. */ }
+      return { ...existing, operations: { ...existing.operations, ...(await ipRiskGateway.capabilities()).operations,
+        'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
@@ -430,6 +450,7 @@ export async function createRuntime(config = loadConfig()) {
     nightAllA,
     externalPlatformGateway,
     ipRiskGateway,
+    enterpriseGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,
     tikHubGateway,
@@ -450,7 +471,7 @@ export async function createRuntime(config = loadConfig()) {
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
-    externalPlatformControlStore, ipRiskGateway,
+    externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
   }
 }

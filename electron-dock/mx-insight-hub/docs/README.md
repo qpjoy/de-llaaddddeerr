@@ -149,5 +149,6 @@ those paths retire one operation at a time and are not the target architecture.
 
 ## IP 风险画像与后续接入
 
+- [企业数据 / 启信慧眼：双密钥、转发留存与接口文档](operations/enterprise-qixin.md)
 - [IP 风险画像：部署、权限、计量与验证边界](operations/ip-risk.md)
 - [多语言采集契约与适配层设计](architecture/connector-contract-and-ipsearch.md)

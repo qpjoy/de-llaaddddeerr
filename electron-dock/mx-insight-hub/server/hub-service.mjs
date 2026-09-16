@@ -242,6 +242,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  'enterprise.query',
   'ip.risk.query',
   TOKENIZE_CAPABILITY,
   XIAOHONGSHU_SEARCH_OPERATION,
@@ -1345,6 +1346,7 @@ export class HubService {
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
       availableCapabilities: [
+        { capability: 'enterprise.query', ready: providerOperationReady(ecommerceSearch, 'enterprise.query') },
         {
           capability: 'ip.risk.query',
           ready: providerOperationReady(ecommerceSearch, 'ip.risk.query'),
