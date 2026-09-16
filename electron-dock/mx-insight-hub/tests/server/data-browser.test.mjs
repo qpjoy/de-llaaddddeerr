@@ -30,7 +30,7 @@ test('SQL binds literals, scopes identity and excludes deleted records; list use
   const injection = "'; DROP TABLE core.canonical_records; --"
   const statement = browserStatement(parse(`view=accounts&platform=x&q=${encodeURIComponent(injection)}`))
   assert.ok(!statement.text.includes(injection))
-  assert.ok(statement.values.includes(injection))
+  assert.ok(statement.values.some((value) => typeof value === 'string' && value.includes('DROP TABLE')))
   assert.match(statement.text, /r.deleted_at IS NULL/)
   assert.match(statement.text, /GROUP BY r.platform/)
   assert.match(statement.text, /NULLIF\(r.author_external_id, ''\)/)
@@ -50,7 +50,7 @@ test('hotspot evidence excludes future and undated records; tags are type guarde
 test('read transaction has a timeout, releases connection, and exposes no executed Agent claim', async () => {
   const store = poolFixture()
   const result = await browseData(store, parse())
-  assert.equal(result.evidence.analysis, 'not_run')
+  assert.equal(result.evidence.analysis, 'not_integrated')
   assert.equal(result.total, 1)
   assert.match(store.calls[0].sql, /READ ONLY/)
   assert.match(store.calls[1].sql, /3000ms/)
@@ -77,6 +77,16 @@ test('browser endpoint requires Admin Token and is absent on public listener', a
       assert.ok([401, 404].includes(denied.status))
       const response = await fetch(url, { headers: { 'x-mx-insight-admin-token': 'browser-test' } })
       assert.equal(response.status, listenerMode === 'public' ? 404 : 200)
+      const exportDenied = await fetch(`${url}/export?format=csv`)
+      assert.ok([401, 404].includes(exportDenied.status))
+      const exported = await fetch(`${url}/export?view=accounts&format=json&maxRows=2`, { headers: { 'x-mx-insight-admin-token': 'browser-test' } })
+      assert.equal(exported.status, listenerMode === 'public' ? 404 : 200)
+      if (listenerMode !== 'public') {
+        const file = (await exported.json()).data
+        assert.equal(JSON.parse(file.content).items[0].name, 'A')
+        const invalid = await fetch(`${url}/export?maxRows=999999`, { headers: { 'x-mx-insight-admin-token': 'browser-test' } })
+        assert.equal(invalid.status, 400)
+      }
       if (listenerMode === 'public') assert.equal(store.calls.length, 0)
     } finally { await new Promise((resolve) => server.close(resolve)) }
   }
@@ -95,7 +105,7 @@ test('admission reserves only two browser reads and releases slots on connection
 })
 
 test('account source-tag summary uses all matching records rather than current page', () => {
-  const { text } = browserStatement(parse('view=contents&platform=x&account=a'))
+  const { text } = browserStatement(parse('view=contents&platform=x&account=a&summary=true'))
   assert.match(text, /FROM matches m CROSS JOIN/)
   assert.match(text, /AS account_summary/)
   assert.match(text, /count\(DISTINCT m.id\)/)
@@ -104,8 +114,9 @@ test('account source-tag summary uses all matching records rather than current p
 test('accounts keep only the latest name candidate instead of accumulating every historical name', () => {
   const { text } = browserStatement(parse('view=accounts'))
   assert.doesNotMatch(text, /array_agg/i)
-  assert.match(text, /max\(ARRAY\[/)
-  assert.match(text, /AT TIME ZONE 'UTC'/)
+  assert.match(text, /selected AS MATERIALIZED/)
+  assert.match(text, /LEFT JOIN LATERAL/)
+  assert.match(text, /ORDER BY r.collected_at DESC NULLS LAST, r.id DESC LIMIT 1/)
 })
 
 test('aggregate budget is isolated and completed pages are reused without sharing mutable objects', async () => {
@@ -144,4 +155,34 @@ test('aggregate cache expires and does not cross store boundaries', async (t) =>
   t.mock.timers.tick(30_001)
   await browseData(store, filters)
   assert.equal(store.calls.filter((call) => call.sql?.startsWith('WITH')).length, 2)
+})
+
+test('content page never counts or materializes all large payloads before pagination', () => {
+  const { text, values } = browserStatement(parse('view=contents&pageSize=20'))
+  assert.match(text, /page_ids AS MATERIALIZED/)
+  assert.match(text, /coalesce\(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at\)/)
+  assert.ok(text.indexOf('LIMIT') < text.indexOf('left(r.body'))
+  assert.doesNotMatch(text, /count\(\*\)/)
+  assert.ok(values.includes(21))
+})
+
+test('typed filters, local dates, wildcard literal handling and date validation', () => {
+  assert.throws(() => parse('from=2026-03-10&to=2026-03-01'), { code: 'invalid_browser_query' })
+  assert.throws(() => parse('from=2026-02-30'), { code: 'invalid_browser_query' })
+  const { text, values } = browserStatement(parse('objectType=post&contentType=video&from=2026-09-01&to=2026-09-16&q=100%25_'))
+  assert.match(text, /r.object_type = \$/)
+  assert.match(text, /r.content_type = \$/)
+  assert.match(text, /Asia\/Shanghai/)
+  assert.ok(values.includes('%100\\%\\_%'))
+})
+
+test('hasMore uses the lookahead row while total remains explicitly uncomputed', async () => {
+  const store = { pool: { async connect() { return { async query(sql) {
+    return { rows: sql.startsWith('WITH') ? [{ total: null, items: [{ id: 1 }, { id: 2 }, { id: 3 }] }] : [] }
+  }, release() {} } } } }
+  const result = await browseData(store, parse('pageSize=2'))
+  assert.equal(result.hasMore, true)
+  assert.equal(result.items.length, 2)
+  assert.equal(result.total, null)
+  assert.equal(result.totalStatus, 'not_computed')
 })

@@ -20,3 +20,7 @@
 .mih-data-browser .mih-table-wrap { overflow-x: auto; max-width: 100%; }
 .mih-browser-media-preview { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
 .mih-browser-media-preview img, .mih-browser-media-preview video, .mih-browser-media-preview audio { max-width: 100%; max-height: 360px; object-fit: contain; }
+.mih-browser-advanced { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.mih-browser-export { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; margin: 24px 0; padding-top: 16px; border-top: 1px solid var(--qp-line); }
+.mih-browser-export > .qp-field { min-width: 150px; }
+@media (max-width: 780px) { .mih-browser-advanced { grid-template-columns: 1fr; } }

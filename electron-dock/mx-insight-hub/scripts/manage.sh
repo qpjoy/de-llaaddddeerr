@@ -1957,6 +1957,17 @@ ensure_night_all_saved_records_hub_indexes() {
   fi
 }
 
+# Build the Admin account directory and recent-event indexes online.
+ensure_data_browser_serving_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/data-browser-serving-indexes.sql"
+  [ -r "$sql_file" ] || die "data browser serving-index SQL is missing: ${sql_file}"
+  say "reconciling data browser serving indexes online"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "data browser serving indexes could not be reconciled"
+  fi
+}
+
 # Reconcile the Hub-local indexes used by canonical Telegram context. This is
 # kept separate from transactional migrations because production datasets are
 # already populated and CREATE/DROP INDEX CONCURRENTLY cannot run in a
@@ -2083,6 +2094,7 @@ apply_k8s() {
   ensure_night_all_saved_records_hub_indexes
   ensure_province_opinion_serving_indexes
   ensure_canonical_context_serving_indexes
+  ensure_data_browser_serving_indexes
   ensure_api_key_quota_indexes
 
   # Public understands both grandfathered legacy keys and the new immutable

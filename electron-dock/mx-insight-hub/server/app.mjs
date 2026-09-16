@@ -1,4 +1,5 @@
-import { browseData, parseBrowserQuery } from './data/browser.mjs'
+import { formatBrowserExport } from './data/browser-export.mjs'
+import { browseData, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -1595,6 +1596,21 @@ export function createApp({
           data: safe ? runtimeVisibleProjection(runtime) : runtime,
           requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-browser/export') {
+        requireSourceAdmin(principal)
+        const format = searchParams.get('format') || 'csv'
+        const maxRows = Number(searchParams.get('maxRows') || 200)
+        if (!['csv', 'json'].includes(format) || !Number.isInteger(maxRows) || maxRows < 1 || maxRows > 500
+          || searchParams.getAll('format').length > 1 || searchParams.getAll('maxRows').length > 1) {
+          throw new AppError(400, 'invalid_browser_export', 'format must be csv/json and maxRows must be 1–500')
+        }
+        const params = new URLSearchParams(searchParams)
+        params.delete('format'); params.delete('maxRows')
+        const filters = parseBrowserQuery(params)
+        const result = dataCenterVisibleProjection(await exportBrowserData(store, filters, maxRows))
+        sendJson(response, 200, { data: formatBrowserExport(result, format, filters), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-browser') {
