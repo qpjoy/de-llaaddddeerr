@@ -11,6 +11,7 @@ import {
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { AcquisitionHistoryPanel } from './acquisition-history.jsx'
+import { IndexingObservation } from './indexing-observation.jsx'
 import { canConfirmSearchReindex } from './search-reindex-confirmation.js'
 import {
   EmptyState,
@@ -539,6 +540,7 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
                   {operation.errorCode ? <code>{operation.errorCode}</code> : null}
                 </div>
               ) : null}
+              <IndexingObservation data={operation.telemetry} kind="search" />
               <div className="mih-search-reindex__logs" aria-label="重建任务日志">
                 {logs.length ? logs.map((entry, index) => {
                   const value = typeof entry === 'string' ? { message: entry } : entry || {}

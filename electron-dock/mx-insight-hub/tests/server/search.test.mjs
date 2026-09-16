@@ -1525,9 +1525,11 @@ test('content current index atomically replaces v1-v5 read memberships with v6 P
   assert.ok(snapshot.queries.some(({ sql }) => sql.includes('pg_advisory_unlock')))
   assert.equal(snapshot.released, true)
   assert.deepEqual(progress, [
-    { projection: 'content', pass: 'build', processed: 2 },
+    { projection: 'content', pass: 'build', processed: 0, total: 2 },
+    { projection: 'content', pass: 'build', processed: 2, total: 2 },
     // One changed record, not the whole corpus over again.
-    { projection: 'content', pass: 'catch-up', processed: 1 },
+    { projection: 'content', pass: 'catch-up', processed: 0, total: null },
+    { projection: 'content', pass: 'catch-up', processed: 1, total: null },
   ])
 })
 
@@ -1560,7 +1562,7 @@ test('Projector lock heartbeat loss aborts a rebuild before alias cutover', asyn
   )
 
   assert.equal(heartbeats, 1)
-  assert.equal(harness.calls.bulks.length, 1, 'no later snapshot batch or pass runs after lock loss')
+  assert.equal(harness.calls.bulks.length, 0, 'initial progress checks the lock before any snapshot writes')
   assert.equal(harness.calls.aliasActions.length, 0, 'a task without the global lock never cuts aliases over')
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [oldIndex])
   assert.equal(snapshot.released, true)
@@ -2928,7 +2930,8 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
     'the build pass restarts after the last durably indexed record',
   )
   // Progress continues from the recorded count rather than resetting to zero.
-  assert.equal(progress[0].processed, 120_001)
+  assert.equal(progress[0].processed, 120_000, 'resume establishes a baseline before new work')
+  assert.equal(progress[1].processed, 120_001)
   // The catch-up watermark is the original build start, not this attempt's.
   assert.equal(scans.at(-1).values[2].toISOString(), '2026-08-17T00:00:00.000Z')
 })

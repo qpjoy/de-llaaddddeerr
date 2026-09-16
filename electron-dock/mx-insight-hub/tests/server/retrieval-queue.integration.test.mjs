@@ -30,6 +30,8 @@ test(
         await readFile(new URL('../../migrations/086_retrieval_jobs.sql', import.meta.url), 'utf8'),
       )
       await db.exec(await readFile(new URL('../../migrations/087_retrieval_initialization_budget.sql', import.meta.url), 'utf8'))
+      for (const file of ['026_search_reindex_operations.sql', '089_indexing_observation.sql'])
+        await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
       const jobs = new RetrievalJobs(pool),
         control = new RetrievalControl({
           pool,

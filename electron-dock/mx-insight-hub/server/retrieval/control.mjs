@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { ProgressRate, mergeWorkerMetrics } from '../ops/indexing-metrics.mjs'
 import { z } from 'zod'
 import { AppError } from '../core/errors.mjs'
 import { requireSegmenterBackend } from '../search/reindex-integrity.mjs'
@@ -13,6 +14,7 @@ export class RetrievalControl {
     this.agent = agent
     this.search = search
     this.countsCache = null
+    this.rate = new ProgressRate()
   }
   async status() {
     const [settings, counts, runs, usage, workers, failures] = await Promise.all([
@@ -23,21 +25,44 @@ export class RetrievalControl {
         "SELECT reserved_tokens FROM retrieval.daily_usage WHERE day=(now() AT TIME ZONE 'UTC')::date",
       ),
       this.pool.query(
-        "SELECT id,heartbeat_at FROM retrieval.workers WHERE heartbeat_at>now()-interval '90 seconds' ORDER BY heartbeat_at DESC",
+        "SELECT id,heartbeat_at,telemetry FROM retrieval.workers WHERE heartbeat_at>now()-interval '90 seconds' ORDER BY heartbeat_at DESC",
       ),
       this.pool.query(
         "SELECT record_id,last_error_code,updated_at FROM retrieval.jobs WHERE status='dead' ORDER BY updated_at DESC LIMIT 5",
       ),
     ])
+    const run = runs.rows[0] ? { ...runs.rows[0],
+      progress: runs.rows[0].snapshot_locked ? await this.runProgress(runs.rows[0].id, runs.rows[0].status) : null,
+    } : null
+    const telemetry = mergeWorkerMetrics(workers.rows)
+    const config = settings.rows[0], today = Number(usage.rows[0]?.reserved_tokens || 0)
+    const activeRun = run && ['scanning', 'draining'].includes(run.status)
+    const fixed = activeRun && run.snapshot_locked
+    const count = (status) => Number(counts.rows.find((row) => row.status === status)?.count || 0)
+    const blocked = !config?.enabled ? 'disabled' : config.paused ? 'paused'
+      : !this.agent?.embeddings?.available || !this.search?.chunkIndexSet ? 'unready'
+      : !workers.rows.length ? 'no_workers' : !telemetry.reportingWorkers ? 'stale'
+      : fixed && Number(run.token_budget) > 0 && (Number(run.reserved_tokens) >= Number(run.token_budget) || run.progress?.budgetBlocked) ? 'initialization_budget'
+      : !fixed && today >= Number(config.daily_token_budget) ? 'daily_budget' : null
+    const eta = activeRun && !fixed ? { seconds: null, rate: null, reason: 'legacy' }
+      : this.rate.estimate({ key: `${fixed ? run.id : 'queue'}:${config?.updated_at}`,
+        processed: fixed ? Number(run.progress?.completed || 0) + Number(run.progress?.superseded || 0) : count('done'),
+        remaining: fixed ? Number(run.progress?.pending || 0) : count('pending') + count('running'),
+        at: fixed ? this.progressCache.expires - 30000 : this.countsCache.expires - 30000,
+        blocked: blocked || (!fixed && !count('pending') && !count('running') && count('dead') ? 'failed' : null) })
     return {
+      observation: { ...telemetry, eta, scope: fixed ? 'initialization' : 'queue',
+        effectiveConcurrency: Math.min(Number(config?.max_concurrency || 0), workers.rows.length),
+        concurrencyLimit: Number(config?.max_concurrency || 0),
+        retrying: counts.rows.reduce((n, row) => n + Number(row.retrying || 0), 0),
+        budgetWaiting: counts.rows.reduce((n, row) => n + Number(row.budget_waiting || 0), 0),
+        deferred: counts.rows.reduce((n, row) => n + Number(row.deferred || 0), 0),
+        dead: count('dead') },
       settings: settings.rows[0],
       workers: workers.rows,
       failures: failures.rows,
       jobs: counts.rows,
-      run: runs.rows[0] ? {
-        ...runs.rows[0],
-        progress: runs.rows[0].snapshot_locked ? await this.runProgress(runs.rows[0].id, runs.rows[0].status) : null,
-      } : null,
+      run,
       reservedTokensToday: Number(usage.rows[0]?.reserved_tokens || 0),
       ready: Boolean(this.agent?.embeddings?.available && this.search?.chunkIndexSet),
       reason: !this.search?.chunkIndexSet
@@ -54,7 +79,12 @@ export class RetrievalControl {
   async queueCounts() {
     if (this.countsCache && this.countsCache.expires > Date.now()) return this.countsCache.value
     const value = await this.pool.query(
-      `SELECT status,count(*)::int AS count,min(updated_at) AS oldest FROM retrieval.jobs GROUP BY status`,
+      `SELECT status,count(*)::int AS count,min(updated_at) AS oldest,
+        count(*) FILTER (WHERE status='pending' AND run_at>now()) AS deferred,
+        count(*) FILTER (WHERE status='pending' AND last_error_code IN ('embedding_budget_exceeded','initialization_budget_exceeded')) AS budget_waiting,
+        count(*) FILTER (WHERE status='pending' AND last_error_code IS NOT NULL
+          AND last_error_code NOT IN ('embedding_budget_exceeded','initialization_budget_exceeded','retrieval_paused','embedding_not_ready')) AS retrying
+       FROM retrieval.jobs GROUP BY status`,
     )
     this.countsCache = { value, expires: Date.now() + 30000 }
     return value
@@ -63,9 +93,14 @@ export class RetrievalControl {
     if (this.progressCache?.runId === runId && this.progressCache.status === status && this.progressCache.expires > Date.now())
       return this.progressCache.value
     const { rows } = await this.pool.query(
-      'SELECT status,count(*)::bigint AS count FROM retrieval.run_items WHERE run_id=$1 GROUP BY status', [runId],
+      `SELECT status,count(*)::bigint AS count,
+          EXISTS (SELECT 1 FROM retrieval.jobs WHERE backfill_run_id=$1
+            AND completed_version<backfill_version AND status='pending'
+            AND last_error_code='initialization_budget_exceeded') AS budget_blocked
+         FROM retrieval.run_items WHERE run_id=$1 GROUP BY status`, [runId],
     )
-    const value = Object.fromEntries(rows.map((row) => [row.status, Number(row.count)]))
+    const value = { ...Object.fromEntries(rows.map((row) => [row.status, Number(row.count)])),
+      budgetBlocked: rows.some((row) => row.budget_blocked) }
     this.progressCache = { runId, status, expires: Date.now() + 30000, value }
     return value
   }
@@ -194,6 +229,7 @@ export class RetrievalControl {
       `UPDATE retrieval.jobs SET status='pending',attempts=0,run_at=now(),last_error_code=NULL,updated_at=now() WHERE status='dead'`,
     )
     this.countsCache = null
+    this.rate = new ProgressRate()
     return this.status()
   }
 }

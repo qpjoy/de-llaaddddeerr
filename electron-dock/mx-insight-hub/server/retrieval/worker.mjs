@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { IndexingMetrics, observeMethods, observePool } from '../ops/indexing-metrics.mjs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { AppError } from '../core/errors.mjs'
 import { estimateTokens } from '../embedding/chunker.mjs'
@@ -75,15 +76,24 @@ export async function processRetrievalJob({ jobs, pipeline, job, signal, logger 
 }
 
 export async function runRetrievalWorker({ pool, pipeline, signal, logger = console }) {
-  const jobs = new RetrievalJobs(pool)
+  const metrics = new IndexingMetrics()
+  const observedPool = observePool(pool, metrics)
+  const jobs = new RetrievalJobs(observedPool)
+  // This pipeline belongs to this worker; public search and forwarding keep
+  // their original clients. Wrappers preserve strict tokenizer / retry rules.
+  pipeline.pool = observePool(pipeline.pool, metrics)
+  pipeline.agent = observeMethods(pipeline.agent, metrics, 'embedding', ['embed'])
+  pipeline.segmenter = observeMethods(pipeline.segmenter, metrics, 'hanlp', ['segment', 'segmentWithMeta'])
+  pipeline.client = observeMethods(pipeline.client, metrics, 'elasticsearch', ['bulk', 'request'])
   const workerId = randomUUID()
   await pool.query('INSERT INTO retrieval.workers(id) VALUES($1)', [workerId])
-  let beat = Promise.resolve()
+  let beat = Promise.resolve(), reporting = false
   const timer = setInterval(() => {
-    beat = beat
-      .then(() => pool.query('UPDATE retrieval.workers SET heartbeat_at=now() WHERE id=$1', [workerId]))
-      .catch(() => {})
-  }, 30000)
+    if (reporting) return
+    reporting = true
+    beat = pool.query('UPDATE retrieval.workers SET heartbeat_at=now(),telemetry=$2::jsonb WHERE id=$1',
+      [workerId, JSON.stringify(metrics.snapshot())]).catch(() => {}).finally(() => { reporting = false })
+  }, 10000)
   timer.unref?.()
   try {
     let housekeepingAt = 0

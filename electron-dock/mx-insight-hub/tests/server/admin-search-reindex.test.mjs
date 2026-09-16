@@ -62,6 +62,11 @@ function fakeDatabase({ dropLockSessionOnUpdate = null } = {}) {
       }
       return { rows: [] }
     }
+    if (statement.startsWith('UPDATE control.search_reindex_operations SET telemetry=')) {
+      const row = state.rows.find((entry) => entry.id === values[0])
+      if (row) row.telemetry = JSON.parse(values[1])
+      return { rows: [] }
+    }
     if (statement.startsWith('UPDATE control.search_reindex_operations')) {
       const row = state.rows.find((entry) => entry.id === values[0])
       if (!row) return { rows: [] }

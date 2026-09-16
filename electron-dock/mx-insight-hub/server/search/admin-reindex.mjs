@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { IndexingMetrics, ProgressRate, observeMethods, observePool } from '../ops/indexing-metrics.mjs'
 import { describeClusterHealth } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
 import {
@@ -43,6 +44,10 @@ function publicOperation(row, extra = {}) {
     errorCode: row.error_code || null,
     errorMessage: row.error_message || null,
     logs: Array.isArray(row.logs) ? row.logs : [],
+    telemetry: row.telemetry ? { ...row.telemetry, eta: !ACTIVE_STATUSES.has(row.status)
+      ? { seconds: row.status === 'succeeded' ? 0 : null, rate: null, reason: row.status === 'succeeded' ? 'completed' : 'failed' }
+      : Date.now() - row.telemetry.sampledAt > 45_000
+        ? { seconds: null, rate: null, reason: 'stale' } : row.telemetry.eta } : null,
     ...extra,
   }
 }
@@ -425,13 +430,30 @@ export class AdminSearchReindex {
   async #run(id, preflight, lock, lockHeartbeat) {
     let lastPass = null
     const passProgress = new Map()
+    const metrics = new IndexingMetrics(this.now), rate = new ProgressRate()
+    let current = null, observation = Promise.resolve(), observing = false, lastPersistAt = -Infinity
+    const snapshot = () => ({ ...metrics.snapshot(), ...current,
+      eta: current ? rate.estimate({ key: `${current.projection}:${current.pass}`, processed: current.processed,
+        remaining: current.total == null ? null : Math.max(0, current.total - current.processed), at: this.now() })
+        : { seconds: null, rate: null, reason: 'preflight' },
+      concurrency: this.search.segmenterConcurrency || 1 })
+    // One small write per 10s; a telemetry failure never stops the rebuild.
+    const persist = (force = false) => {
+      if (observing || (!force && this.now() - lastPersistAt < 10_000)) return
+      observing = true
+      lastPersistAt = this.now()
+      observation = this.pool.query('UPDATE control.search_reindex_operations SET telemetry=$2::jsonb WHERE id=$1',
+        [id, JSON.stringify(snapshot())]).catch(() => {}).finally(() => { observing = false })
+    }
+    const timer = setInterval(persist, 10_000)
+    timer.unref?.()
     try {
       lockHeartbeat.assertHealthy()
       // A rebuild of this corpus runs for hours. Recording the denominator up
       // front is what makes it observable rather than merely long: without it
       // the UI can only show a rising count, which is indistinguishable from a
       // stall.
-      const total = await this.#projectionTotal(lock.client)
+      const total = await this.#projectionTotal(observeMethods(lock.client, metrics, 'postgres', ['query']))
       await this.#update(lock.client, id, {
         status: 'running',
         phase: 'preflight',
@@ -445,11 +467,17 @@ export class AdminSearchReindex {
         logger: this.logger,
       })
       lockHeartbeat.assertHealthy()
-      const report = await this.reconcile({ ...this.search, segmenter: strictSegmenter }, {
+      const report = await this.reconcile({ ...this.search,
+        pool: observePool(this.search.pool, metrics),
+        client: observeMethods(this.search.client, metrics, 'elasticsearch', ['request', 'bulk', 'clusterHealth', 'putIndexTemplate', 'createIndex', 'getAlias', 'indexExists', 'putMapping']),
+        segmenter: observeMethods(strictSegmenter, metrics, 'hanlp', ['segment', 'segmentWithMeta']),
+      }, {
         logger: this.logger,
         failOnError: true,
         forceFull: true,
-        onProgress: async ({ projection, pass, processed }) => {
+        onProgress: async ({ projection, pass, processed, total: phaseTotal = null }) => {
+          current = { projection, pass, processed, total: phaseTotal }
+          persist(lastPass !== `${projection}:${pass}`)
           lockHeartbeat.assertHealthy()
           if (await this.#cancelRequested(id)) {
             throw new AppError(
@@ -498,6 +526,10 @@ export class AdminSearchReindex {
         this.logger?.error?.(`[search] could not persist Admin reindex failure: ${safeMessage(updateError)}`)
       })
     } finally {
+      clearInterval(timer)
+      await observation
+      await this.pool.query('UPDATE control.search_reindex_operations SET telemetry=$2::jsonb WHERE id=$1',
+        [id, JSON.stringify(snapshot())]).catch(() => {})
       await lockHeartbeat.stop()
       await lock.release()
     }

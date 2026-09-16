@@ -742,7 +742,7 @@ async function ensureCurrentStateIndex({
     try {
       const { rows } = await connection.query(countStatement(projection))
       const counted = Number(rows[0]?.total)
-      if (Number.isFinite(counted) && counted > 0) total = counted
+      if (Number.isFinite(counted) && counted >= 0) total = counted
     } catch (error) {
       logger?.warn?.(`[search] could not size the ${projection} rebuild: ${error.message}`)
     }
@@ -829,8 +829,9 @@ function countStatement(projection) {
 function progressReporter(onProgress, projection, pass, { logger = null, total = null } = {}) {
   const startedAt = Date.now()
   let lastLoggedAt = startedAt
-  let lastLoggedCount = 0
+  let lastLoggedCount = null
   const log = (processed) => {
+    if (lastLoggedCount == null) lastLoggedCount = processed
     if (!logger?.log) return
     const now = Date.now()
     if (now - lastLoggedAt < PROGRESS_LOG_INTERVAL_MS) return
@@ -848,7 +849,7 @@ function progressReporter(onProgress, projection, pass, { logger = null, total =
   }
   return async (processed) => {
     log(processed)
-    await onProgress({ projection, pass, processed })
+    await onProgress({ projection, pass, processed, total })
   }
 }
 
@@ -971,6 +972,7 @@ async function reconcileContentSnapshot({
 }) {
   let cursor = startAfter
   let projected = Number(alreadyProcessed) || 0
+  await onProgress?.(projected)
   while (true) {
     const { rows } = await connection.query(
       `SELECT record.*,
@@ -1061,6 +1063,7 @@ async function reconcileChunkSnapshot({
 }) {
   let cursor = startAfter
   let projected = Number(alreadyProcessed) || 0
+  await onProgress?.(projected)
   while (true) {
     const { rows } = await connection.query(
       `SELECT c.id, c.record_id, c.chunk_index, c.content, c.chunker_version,

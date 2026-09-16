@@ -18,7 +18,7 @@ async function fixture(t) {
       title text,body text DEFAULT '初始化任务使用固定的文本版本，新版本与新记录使用每日增量预算。',deleted_at timestamptz);
     CREATE TABLE core.record_chunks(id uuid,record_id uuid,projection_failed_at timestamptz,projection_attempts int);
     CREATE TABLE outbox.projection_events(aggregate_type text,aggregate_id uuid,projection_revision bigint,event_type text);`)
-  for (const file of ['086_retrieval_jobs.sql', '087_retrieval_initialization_budget.sql'])
+  for (const file of ['026_search_reindex_operations.sql', '086_retrieval_jobs.sql', '087_retrieval_initialization_budget.sql', '089_indexing_observation.sql'])
     await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
   const control = new RetrievalControl({ pool, agent: { embeddings: { available: true, dimensions: 2 } }, search: {
     chunkIndexSet: { writeAlias: 'chunks', mappings: { properties: { embedding: { dims: 2 } } } },
@@ -40,6 +40,53 @@ async function fixture(t) {
   return { db, query, control, jobs, event, add, run }
 }
 const options = { skip: !process.env.MX_RETRIEVAL_TEST_PGLITE }
+
+test('ETA detects a remaining budget too small for the next batch, even before the budget is numerically exhausted', options, async (t) => {
+  const f = await fixture(t)
+  await f.add()
+  await f.control.start({ tokenBudget: 100 })
+  await f.jobs.seedBatch()
+  const job = await f.jobs.claim()
+  await f.jobs.reserveTokens(90, job, 1)
+  let failure
+  try { await f.jobs.reserveTokens(20, job, 1) } catch (error) { failure = error }
+  assert.equal(failure?.code, 'initialization_budget_exceeded')
+  await f.jobs.fail(job, failure)
+  await f.query('UPDATE retrieval.workers SET telemetry=$1::jsonb', [JSON.stringify({ sampledAt: Date.now(), stages: {}, active: [] })])
+  f.control.progressCache = null
+  const status = await f.control.status()
+  assert.equal(Number(status.run.reserved_tokens), 90)
+  assert.equal(status.run.progress.budgetBlocked, true)
+  assert.equal(status.observation.eta.reason, 'initialization_budget')
+  assert.equal(status.observation.eta.seconds, null)
+})
+
+test('initialization ETA uses fixed manifest progress, isolates daily quota and hides estimates on pause / stale worker metrics', options, async (t) => {
+  const f = await fixture(t), id = await f.add()
+  await f.add()
+  await f.control.start({ tokenBudget: 0 })
+  const run = await f.run(), config = (await f.query('SELECT * FROM retrieval.settings')).rows[0]
+  await f.query("UPDATE retrieval.run_items SET status='completed',finished_at=now() WHERE record_id=$1", [id])
+  await f.jobs.reserveTokens(1000) // Exhaust daily quota, not initialization.
+  await f.query('UPDATE retrieval.workers SET telemetry=$1::jsonb', [JSON.stringify({ sampledAt: Date.now(), stages: {
+    embedding: { calls: 3, failed: 0, ms: 600, maxMs: 250 },
+  }, active: [] })])
+  f.control.progressCache = null
+  f.control.rate.estimate({ key: `${run.id}:${config.updated_at}`, at: Date.now() - 31000, processed: 0, remaining: 2 })
+  let status = await f.control.status()
+  assert.equal(status.observation.scope, 'initialization')
+  assert.equal(status.observation.eta.reason, 'estimated')
+  assert.ok(status.observation.eta.seconds >= 30 && status.observation.eta.seconds <= 35)
+  assert.equal(status.observation.effectiveConcurrency, 1, 'two configured slots do not invent a second worker')
+  assert.equal(status.observation.stages.embedding.calls, 3)
+  status = await f.control.configure({ enabled: true, paused: true, maxConcurrency: 2, dailyTokenBudget: 1000 })
+  assert.equal(status.observation.eta.reason, 'paused')
+  assert.equal(status.observation.eta.seconds, null)
+  await f.query("UPDATE retrieval.workers SET telemetry=jsonb_set(telemetry,'{sampledAt}',to_jsonb($1::bigint))", [Date.now() - 60000])
+  status = await f.control.configure({ enabled: true, paused: false, maxConcurrency: 2, dailyTokenBudget: 1000 })
+  assert.equal(status.observation.eta.reason, 'stale')
+  assert.equal(status.observation.reportingWorkers, 0)
+})
 
 test('initialization freezes membership and versions, spends separate quota, then leaves daily processing intact', options, async (t) => {
   const f = await fixture(t)

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from './api.js'
 import { ErrorState, LoadingState, useRemoteData, formatDate } from './components.jsx'
 import './advanced-search.css'
+import { IndexingObservation } from './indexing-observation.jsx'
 const labels = { pending: '等待处理', running: '执行中', done: '已处理记录', dead: '需重试' }
 const runLabels = {
   scanning: '扫描历史记录',
@@ -241,6 +242,7 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
             <div><small>初始化剩余</small><strong>{Number(data.run.progress?.pending || 0).toLocaleString('zh-CN')}</strong></div>
             <div><small>本次已预留 / 总额度</small><strong>{Number(data.run.reserved_tokens).toLocaleString('zh-CN')} / {Number(data.run.token_budget) === 0 ? '不限额' : Number(data.run.token_budget).toLocaleString('zh-CN')}</strong></div>
           </div> : data.run ? <p className="mih-browser-note">此为升级前任务，沿用原每日预算。新启动的初始化任务才使用固定范围与独立额度。</p> : null}
+          <IndexingObservation data={data.observation} kind="vector" />
           {data.failures?.length ? (
             <details>
               <summary>最近失败记录</summary>
