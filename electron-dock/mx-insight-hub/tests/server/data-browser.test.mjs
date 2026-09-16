@@ -100,3 +100,48 @@ test('account source-tag summary uses all matching records rather than current p
   assert.match(text, /AS account_summary/)
   assert.match(text, /count\(DISTINCT m.id\)/)
 })
+
+test('accounts keep only the latest name candidate instead of accumulating every historical name', () => {
+  const { text } = browserStatement(parse('view=accounts'))
+  assert.doesNotMatch(text, /array_agg/i)
+  assert.match(text, /max\(ARRAY\[/)
+  assert.match(text, /AT TIME ZONE 'UTC'/)
+})
+
+test('aggregate budget is isolated and completed pages are reused without sharing mutable objects', async () => {
+  const store = poolFixture()
+  const filters = parse('view=accounts')
+  const first = await browseData(store, filters)
+  first.items[0].name = 'mutated by caller'
+  const second = await browseData(store, filters)
+  assert.equal(second.items[0].name, 'A')
+  assert.equal(store.calls.filter((call) => call.sql?.startsWith('WITH')).length, 1)
+  assert.match(store.calls[1].sql, /15000ms/)
+  assert.equal(second.evidence.cacheMaxAgeSeconds, 30)
+  assert.ok(second.evidence.computedAt)
+  await browseData(store, parse('view=accounts&platform=another'))
+  assert.equal(store.calls.filter((call) => call.sql?.startsWith('WITH')).length, 2)
+})
+
+test('identical aggregate requests share one query and failed work can be retried', async () => {
+  const store = poolFixture()
+  await Promise.all(Array.from({ length: 8 }, () => browseData(store, parse('view=hotspots'))))
+  assert.equal(store.calls.filter((call) => call.sql?.startsWith('WITH')).length, 1)
+  const failing = poolFixture({ failure: Object.assign(new Error('timeout'), { code: '57014' }) })
+  await assert.rejects(browseData(failing, parse('view=accounts')), { code: 'data_browser_timeout' })
+  failing.pool = poolFixture().pool
+  assert.equal((await browseData(failing, parse('view=accounts'))).total, 1)
+})
+
+test('aggregate cache expires and does not cross store boundaries', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const store = poolFixture()
+  const other = poolFixture()
+  const filters = parse('view=accounts')
+  await browseData(store, filters)
+  await browseData(other, filters)
+  assert.equal(other.calls.filter((call) => call.sql?.startsWith('WITH')).length, 1)
+  t.mock.timers.tick(30_001)
+  await browseData(store, filters)
+  assert.equal(store.calls.filter((call) => call.sql?.startsWith('WITH')).length, 2)
+})

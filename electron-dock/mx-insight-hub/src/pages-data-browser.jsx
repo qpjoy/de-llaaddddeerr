@@ -81,6 +81,7 @@ export function DataBrowserPage({ token, onUnauthorized }) {
         <div className="mih-browser-tags">{data.account_summary.tags.map((entry) => <button key={entry.tag} className="qp-button qp-button--secondary" onClick={() => { setPlatform(''); setSearch(''); patch({ view: 'accounts', tag: entry.tag, account: '', platform: '', q: '' }) }}>#{entry.tag} · {entry.records} 条 · 相关账号</button>)}</div>
       </div> : null}<button className="qp-button qp-button--ghost" onClick={() => switchView('accounts')}>返回账号大盘</button></section> : null}
     {filters.tag ? <section className="qp-panel mih-browser-account"><h2>#{filters.tag} · {filters.view === 'accounts' ? '关联账号候选' : '关联内容'}</h2><p>展示全部已入库同标签记录，包含历史记录。热点入口的统计窗口为最近 7 天。</p><button className="qp-button qp-button--ghost" onClick={() => switchView('hotspots')}>返回热点线索</button></section> : null}
+    {data?.evidence?.cacheMaxAgeSeconds > 0 && !loading && !state.error ? <p className="mih-browser-note">统计时间：{formatDate(data.evidence.computedAt)} · 聚合结果最多复用 30 秒；统计范围仍为全部匹配的入库记录。</p> : null}
     <section className="qp-panel mih-browser-panel">
       <form className="mih-browser-filters" onSubmit={(event) => { event.preventDefault(); patch({ q: search, platform }) }}>
         <label className="qp-field">{filters.view === 'accounts' ? '账号名称 / ID' : '标题 / 正文'}<input className="qp-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="输入关键词" maxLength={200} /></label>

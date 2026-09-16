@@ -44,7 +44,10 @@ export function browserStatement(filters) {
   if (filters.view === 'accounts') {
     conditions.push(`${accountId} IS NOT NULL`)
     statement = `SELECT r.platform, ${accountId} AS account_id,
-      (array_agg(${accountName} ORDER BY r.collected_at DESC, r.id DESC) FILTER (WHERE NULLIF(${accountName},'') IS NOT NULL))[1] AS name,
+      (max(ARRAY[
+        COALESCE(to_char(r.collected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US'), ''),
+        r.id::text, ${accountName}
+      ]) FILTER (WHERE NULLIF(${accountName},'') IS NOT NULL))[3] AS name,
       count(*)::int AS records,
       count(*) FILTER (WHERE r.object_type NOT IN ('user','account','profile'))::int AS contents,
       max(r.collected_at) AS updated_at
@@ -87,7 +90,38 @@ export function browserStatement(filters) {
 
 const activeReads = new WeakMap()
 
+// Aggregates inspect the complete matching corpus. Cache only bounded result
+// pages, never raw detail payloads, and coalesce identical in-flight requests.
+const aggregateCaches = new WeakMap()
+const AGGREGATE_CACHE_MS = 30_000
+const MAX_CACHE_ENTRIES = 32
+const MAX_CACHE_BYTES = 2 * 1024 * 1024
+
 export async function browseData(store, filters) {
+  if (!['accounts', 'hotspots'].includes(filters.view)) return executeBrowseData(store, filters)
+  let cache = aggregateCaches.get(store)
+  if (!cache) { cache = new Map(); aggregateCaches.set(store, cache) }
+  const key = JSON.stringify(Object.entries(filters).sort(([a], [b]) => a.localeCompare(b)))
+  const cached = cache.get(key)
+  if (cached?.pending) return structuredClone(await cached.pending)
+  if (cached?.expiresAt > Date.now()) return structuredClone(cached.result)
+  cache.delete(key)
+  // Evict settled entries only; active requests are bounded by admission below.
+  for (const [entryKey, entry] of cache) {
+    if (!entry.pending && (entry.expiresAt <= Date.now() || cache.size >= MAX_CACHE_ENTRIES)) cache.delete(entryKey)
+  }
+  const entry = { pending: executeBrowseData(store, filters) }
+  cache.set(key, entry)
+  try {
+    const result = await entry.pending
+    if (Buffer.byteLength(JSON.stringify(result)) <= MAX_CACHE_BYTES / MAX_CACHE_ENTRIES) {
+      cache.set(key, { result, expiresAt: Date.now() + AGGREGATE_CACHE_MS })
+    } else cache.delete(key)
+    return structuredClone(result)
+  } catch (error) { cache.delete(key); throw error }
+}
+
+async function executeBrowseData(store, filters) {
   if (!store.pool?.connect) {
     throw new AppError(503, 'data_browser_unavailable', 'Data browser requires the PostgreSQL canonical store')
   }
@@ -100,7 +134,12 @@ export async function browseData(store, filters) {
     connection = await store.pool.connect()
     // No mutations, upstream calls, LLM or ES dependency. Bound expensive grouping.
     await connection.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-    await connection.query("SET LOCAL statement_timeout = '3000ms'")
+    const aggregate = ['accounts', 'hotspots'].includes(filters.view)
+    // Grouping the whole corpus has a separate bounded budget. Ordinary reads
+    // and every other Hub endpoint retain their existing timeout policy.
+    await connection.query(aggregate
+      ? "SET LOCAL statement_timeout = '15000ms'"
+      : "SET LOCAL statement_timeout = '3000ms'")
     const query = browserStatement(filters)
     const { rows } = await connection.query(query.text, query.values)
     await connection.query('COMMIT')
@@ -109,10 +148,10 @@ export async function browseData(store, filters) {
       hasMore: filters.page * filters.pageSize < result.total,
       evidence: { source: 'postgres-canonical', analysis: 'not_run',
         hotspotMethod: 'source-tag-cooccurrence-v1', hotspotWindowDays: 7,
-        snapshot: 'per-request', identity: 'platform-and-external-id' } }
+        snapshot: 'per-request', computedAt: new Date().toISOString(), cacheMaxAgeSeconds: aggregate ? 30 : 0, identity: 'platform-and-external-id' } }
   } catch (error) {
     if (connection) { try { await connection.query('ROLLBACK') } catch { destroy = true } }
-    if (error.code === '57014') throw new AppError(503, 'data_browser_timeout', 'Query exceeded budget; narrow the platform or keyword filters')
+    if (error.code === '57014') throw new AppError(503, 'data_browser_timeout', '数据聚合超时，请稍后重试或按平台缩小范围；本次未返回不完整统计')
     throw error
   } finally {
     activeReads.set(store, (activeReads.get(store) || 1) - 1)
