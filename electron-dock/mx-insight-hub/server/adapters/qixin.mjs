@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { JustOneUpstreamError } from './justone.mjs'
-import { ENTERPRISE_VERSION, normalizeEnterpriseRequest } from '../contracts/enterprise.mjs'
+import { ENTERPRISE_VERSION, normalizeEnterpriseRequest, assertEnterpriseCallable } from '../contracts/enterprise.mjs'
 import { canonicalJson } from '../ingest/normalizers.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
@@ -14,6 +14,7 @@ export class QixinAdapter {
   }
   async resolveCredential() { return null }
   async query(apiId, input, { credential }) {
+    assertEnterpriseCallable(apiId)
     const normalized = normalizeEnterpriseRequest(apiId, input)
     const { api, method, query, body } = normalized
     const url = new URL(api.interface)

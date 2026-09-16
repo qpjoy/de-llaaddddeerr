@@ -1,4 +1,4 @@
-import { normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
+import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   ECOMMERCE_DELIVERY_MODES,
@@ -477,6 +477,7 @@ export class ExternalPlatformGateway {
 
   async queryEnterprise(context, { apiId, body, idempotencyKey, path }) {
     if (this.providerKey !== 'qixin') throw new AppError(404, 'enterprise_api_not_found', 'Unknown enterprise API')
+    assertEnterpriseCallable(apiId)
     const request = normalizeEnterpriseRequest(apiId, body)
     return this.#deliver(context, { body, idempotencyKey, path }, {
       operation: enterpriseOperation(apiId), capability: ENTERPRISE_CAPABILITY,

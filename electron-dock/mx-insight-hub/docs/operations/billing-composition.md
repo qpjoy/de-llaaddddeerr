@@ -23,3 +23,9 @@ API 发布 `/internal/v1/admin/plans` 可带 `components`：`{type:"feature",key
 组合来源利用已有 plan_versions.pricing JSONB；本次不新增数据库迁移，也不改历史 migration。部署仍使用 `bash scripts/manage.sh ops internal-production deploy`（已有迁移需正常完成）。更新前端和 Public/Admin 服务后，旧分配照常工作；运营在界面发布并分配新组合才应用新费率。
 
 验证使用模拟上游与内存账本，不代表真实支付或上游联调。生产 PostgreSQL 部署和实际客户改价由运营执行。
+
+## 启信宝价格模板（2026-09-17）
+
+新增 `qixin` v1 模板：260 个公开标价接口，来自逐页获取的官方价格快照，14 个面议接口禁止调用并排除。可传入 `{type:"feature",key:"qixin",version:1,multiplierPpm:1200000}` 表示官方原价加 20%；900000 表示九折。该倍率只作用于产品基础价；钱包的租户倍率仍独立生效。价格以整数分向上取整，避免浮点误差。显式完整 `entries` 仍是最终合同表，允许审阅后的逐接口修订。
+
+上限扩为 2048 项费率、发布请求 512 KiB；查看和编辑表格每页 10 行并可按名称/ID 搜索。启信宝采购价格迁移使用 092，保留已编辑操作；它不授予消费者或 Key 权限，也不自动分配客户套餐。详见 [企业数据运行文档](enterprise-qixin.md)。

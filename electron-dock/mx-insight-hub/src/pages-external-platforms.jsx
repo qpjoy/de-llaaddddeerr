@@ -1,4 +1,6 @@
 import { StructuredCredentialPanel } from './structured-credential-panel.jsx'
+import { PagedItems } from './paged-items.jsx'
+import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
 import { ExternalProxyPanel } from './external-proxy-panel.jsx'
 import { SupplierBalanceStatus, SupplierBalancePanel, useSupplierBalances } from './supplier-balances.jsx'
 import { NightAllAPanel } from './night-all-a-panel.jsx'
@@ -37,6 +39,7 @@ import {
   MetricCard,
   Modal,
   PageHeading,
+  Pagination,
   StatusBadge,
   formatDate,
   formatNumber,
@@ -504,6 +507,7 @@ function normalizeOperations(root, fallback = {}) {
     return {
       operationKey,
       allowZeroCost: row.allowZeroCost === true,
+      ...(Object.hasOwn(row, 'publicPriceMinor') ? { publicPriceMinor: optionalNumber(row.publicPriceMinor) } : {}),
       label: optionalText(
         row.label,
         labels['zh-CN'],
@@ -1373,6 +1377,8 @@ function ExternalPlatformOperationCard({
   // operator would fix them.
   const preconditionId = `operation-precondition-${operation.operationKey}`
   const actionBlockers = []
+  const negotiatedPrice = provider === 'qixin' && operation.publicPriceMinor === null
+  if (negotiatedPrice) actionBlockers.push('官网面议接口禁止调用，不能通过手工录价开启')
   if (!reason.trim() && !savedReceipt) actionBlockers.push('请先填写「变更原因」，所有状态按钮才可用（它会写入审计事件）')
   if (activationNeedsPriceBook && !publishPriceBook) {
     actionBlockers.push('「启用」「灰度」还需勾选“随本次变更发布经复核的上游价格表”并录入价目')
@@ -1436,6 +1442,7 @@ function ExternalPlatformOperationCard({
       <header>
         <div>
           <strong>{operation.label}</strong>
+          {Object.hasOwn(operation, 'publicPriceMinor') ? <small>{operation.publicPriceMinor === null ? '面议 · 禁止调用' : `官网 ¥${(operation.publicPriceMinor / 100).toFixed(2)}/次`}</small> : null}
           <small className="mih-mono">{operation.operationKey}</small>
         </div>
         <StatusBadge status={operation.effectiveState} label={`生效：${statusLabel(operation.effectiveState)}`} />
@@ -1461,7 +1468,7 @@ function ExternalPlatformOperationCard({
         </div>
       </dl>
 
-      {operation.budget?.exhausted ? (
+      {operation.budget?.exhausted && !(provider === 'qixin' && operation.budget.budgetMinor === 0) ? (
         <div className="mih-external-operation-blockers" role="status">
           <strong><WarningCircle size={16} aria-hidden="true" />月度上游预算已用完</strong>
           <ul>
@@ -1629,7 +1636,7 @@ function ExternalPlatformOperationCard({
           const needsPriceBook = ['active', 'canary'].includes(action.value)
             && activationNeedsPriceBook
             && !publishPriceBook
-          const blocked = !reason.trim() || needsPriceBook
+          const blocked = !reason.trim() || needsPriceBook || (negotiatedPrice && ['active', 'canary'].includes(action.value))
           return (
             <button
               key={action.value}
@@ -1829,27 +1836,31 @@ function ExternalPlatformOperationRow({
 }) {
   const budget = operation.budget
   const remaining = remainingCallsLabel(operation)
-  const spent = budget?.exhausted === true
+  const customerFunded = provider === 'qixin' && budget?.budgetMinor === 0
+  const zeroCost = Object.values(operation.priceBook.endpointPrices || {}).length > 0
+    && Object.values(operation.priceBook.endpointPrices).every(price => price === 0)
+  const spent = budget?.exhausted === true && !customerFunded
   return (
     <article className={`mih-external-operation-row${open ? ' is-open' : ''}`}>
       <header>
         <div className="mih-external-operation-row__name">
           <strong>{operation.label}</strong>
+          {Object.hasOwn(operation, 'publicPriceMinor') ? <small>{operation.publicPriceMinor === null ? '面议 · 禁止调用' : `官网 ¥${(operation.publicPriceMinor / 100).toFixed(2)}/次`}</small> : null}
           <small className="mih-mono">{operation.operationKey}</small>
         </div>
         <StatusBadge status={operation.effectiveState} label={`生效：${statusLabel(operation.effectiveState)}`} />
         <div className="mih-external-operation-row__budget">
           <span className={spent ? 'mih-external-budget--spent' : undefined}>
-            {budget && budget.budgetMinor !== null
+            {customerFunded ? (operation.publicPriceMinor === null ? '不可调用' : zeroCost ? '采购标价免费' : '使用客户计费套餐') : budget && budget.budgetMinor !== null
               ? `剩余 ${formatMoneyMinor(budget.remainingMinor, budget.currency)} / ${formatMoneyMinor(budget.budgetMinor, budget.currency)}`
               : '预算未配置'}
           </span>
-          {remaining ? <small>{spent ? '本月已用完' : `还可调用 ${remaining}`}</small> : null}
+          {customerFunded ? <small>{zeroCost ? '仍须明确授权' : operation.publicPriceMinor === null ? '官网未公开价格' : '未计费调用预算为 0'}</small> : remaining ? <small>{spent ? '本月已用完' : `还可调用 ${remaining}`}</small> : null}
         </div>
         {operation.blockers.length || spent ? (
           <span className="mih-external-operation-row__flag">
             <WarningCircle size={14} aria-hidden="true" />
-            {spent ? '预算已用完' : `${operation.blockers.length} 项阻断`}
+            {operation.blockers.length ? `${operation.blockers.length} 项阻断` : '预算已用完'}
           </span>
         ) : null}
         <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={onToggle}
@@ -1886,8 +1897,11 @@ function ExternalPlatformOperationControlPanel({
   // Keep receipts outside the revision-keyed forms that reset after a save.
   const [savedReceipts, setSavedReceipts] = useState({})
   const [filter, setFilter] = useState('')
-  const [shown, setShown] = useState(20)
+  const [page, setPage] = useState(1)
   const filtered = operations.filter(operation => `${operation.label} ${operation.operationKey}`.toLowerCase().includes(filter.toLowerCase()))
+  const totalPages = Math.max(1, Math.ceil(filtered.length / 10))
+  const currentPage = Math.min(page, totalPages)
+  const changePage = next => { setPage(next); setOpenKey(null) }
   return (
     <Panel
       id="external-operations"
@@ -1896,10 +1910,11 @@ function ExternalPlatformOperationControlPanel({
       className="mih-external-operation-panel"
       action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
     >
-      {operations.length > 20 ? <Field label="查找接口运行配置"><input className="qp-input" type="search" value={filter} onChange={event => { setFilter(event.target.value); setShown(20) }} placeholder="输入接口名称或 ID" /></Field> : null}
+      {operations.length > 20 ? <Field label="查找接口运行配置"><input className="qp-input" type="search" value={filter} onChange={event => { setFilter(event.target.value); changePage(1) }} placeholder="输入接口名称或 ID" /></Field> : null}
+      {provider === 'qixin' ? <p>公开标价接口默认开启，面议接口禁止调用。客户须完成调用者与 Key 授权，并分配计费套餐；未计费调用的采购预算默认 0。价格与调价在「套餐与配额」管理。</p> : null}
       {operations.length ? (
         <div className="mih-external-operation-list">
-          {filtered.slice(0, shown).map((operation) => (
+          {filtered.slice((currentPage - 1) * 10, currentPage * 10).map((operation) => (
             <ExternalPlatformOperationRow
               key={`${operation.operationKey}:${operation.revision}:${operation.priceBook.version}`}
               token={token}
@@ -1926,7 +1941,7 @@ function ExternalPlatformOperationControlPanel({
           description="管理后端尚未返回 operation policy 证据；页面不会用默认开启状态代替。"
         />
       )}
-      {filtered.length > shown ? <button type="button" className="qp-button qp-button--outline" onClick={() => setShown(shown + 20)}>显示更多（{shown} / {filtered.length}）</button> : null}
+      {operations.length > 10 ? <Pagination page={currentPage} pageSize={10} total={filtered.length} totalPages={totalPages} hasMore={currentPage < totalPages} onPageChange={changePage} label="上游接口分页" /> : null}
       {operations.length > 0 && filtered.length === 0 ? <p role="status">没有匹配的接口</p> : null}
     </Panel>
   )
@@ -1951,6 +1966,7 @@ function DetailMetricRail({ detail }) {
   )
 }
 
+const enterpriseCostNames = new Map(QIXIN_OFFICIAL_PRICES.entries.map(entry => [`enterprise.${entry.apiId}`, entry.name]))
 function CostQuotaPanel({ detail }) {
   const { cost, quota } = detail
   const hasProgress = quota.used !== null && quota.freeLimit !== null && quota.freeLimit > 0
@@ -1986,15 +2002,15 @@ function CostQuotaPanel({ detail }) {
         <div><dt>免费额度周期</dt><dd>{quota.period || UNKNOWN}</dd></div>
       </dl>
       {cost.unitPrices.length ? (
-        <Table label={`${detail.displayName || '外部平台'} 上游接口价目`}>
+        <PagedItems items={cost.unitPrices} text={entry => `${entry.endpointKey} ${enterpriseCostNames.get(entry.endpointKey) || ''}`} label="上游接口价目">{visible => <Table label={`${detail.displayName || '外部平台'} 上游接口价目`}>
           <thead><tr><th scope="col">上游接口</th><th scope="col">每次标价成本</th></tr></thead>
-          <tbody>{cost.unitPrices.map((entry) => (
+          <tbody>{visible.map(({entry}) => (
             <tr key={entry.endpointKey}>
-              <td className="mih-mono">{entry.endpointKey}</td>
+              <td>{enterpriseCostNames.get(entry.endpointKey)}<small className="mih-mono">{entry.endpointKey}</small></td>
               <td>{formatMoneyMinor(entry.unitCostMinor, cost.currency)}</td>
             </tr>
           ))}</tbody>
-        </Table>
+        </Table>}</PagedItems>
       ) : (
         <p className="mih-external-unknown">
           <WarningCircle size={16} aria-hidden="true" />

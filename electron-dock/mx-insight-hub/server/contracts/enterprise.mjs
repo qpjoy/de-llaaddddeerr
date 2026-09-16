@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { AppError } from '../core/errors.mjs'
+import { QIXIN_OFFICIAL_PRICES } from '../../shared/qixin-official-prices.mjs'
 
 export const ENTERPRISE_PLATFORM = 'enterprise'
 export const ENTERPRISE_CAPABILITY = 'enterprise.query'
@@ -9,6 +10,13 @@ export const QIXIN_CATALOG = JSON.parse(readFileSync(new URL('../external-platfo
 export const enterpriseOperation = id => `enterprise.api.${id}`
 export const enterpriseEndpoint = id => `enterprise.${id}`
 const apis = new Map(QIXIN_CATALOG.apis.map(api => [api.api_id, api]))
+const september17Contracts = new Set(['77.58', '43.82'])
+const prices = new Map(QIXIN_OFFICIAL_PRICES.entries.map(entry => [entry.apiId, entry.unitPriceMinor]))
+export const enterprisePublicPrice = id => prices.get(id) ?? null
+export function assertEnterpriseCallable(id) {
+  enterpriseApi(id)
+  if (enterprisePublicPrice(id) === null) throw new AppError(403, 'enterprise_price_negotiated', 'This enterprise API has no public price and cannot be called')
+}
 const optional = { '19.91': { query: ['match_type'] }, '42.3': { body: ['industry', 'regist_capi', 'status'] } }
 const alternatives = { '66.35': ['keyword', 'import_keyword'], '22.11': ['kind_id', 'register_no'] }
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -54,20 +62,24 @@ export function normalizeEnterpriseRequest(id, input) {
   const query = Object.fromEntries(Object.entries(input.query ?? {}).filter(([, value]) => value != null))
   const body = input.body ?? null
   return { api, method, query, body, deliveryMode, marketplace: ENTERPRISE_PLATFORM,
-    endpointKey: enterpriseEndpoint(id), endpointVersion: 'qixin-auth-v2.catalog-2026-09-01',
+    // Price publication must not change old request/cache identities.
+    endpointKey: enterpriseEndpoint(id), endpointVersion: `qixin-auth-v2.catalog-${september17Contracts.has(id) ? '2026-09-17' : '2026-09-01'}`,
     endpointContractVersion: ENTERPRISE_VERSION, fingerprintBody: { apiId: id, method, query, body },
   }
 }
 
-export const QIXIN_CONFIG = Object.freeze({ contractVerified: false, configured: false,
+export const QIXIN_CONFIG = Object.freeze({ contractVerified: true, configured: false,
   maxConcurrency: 3, maxConsumerConcurrency: 1, maxRequestsPerMinute: 30,
   freshTtlMs: 3600000, staleTtlMs: 86400000,
-  billing: { currency: 'CNY', source: 'unknown', pricingAsOf: null, freeDailyCalls: null,
-    unitCostMinorByEndpoint: {}, monthlyBudgetMinor: null, monthlySubsidyBudgetMinor: null },
+  billing: { currency: 'CNY', source: 'manual', pricingAsOf: QIXIN_OFFICIAL_PRICES.observedAt, freeDailyCalls: null,
+    unitCostMinorByEndpoint: Object.fromEntries([...prices].filter(([, price]) => price !== null).map(([id, price]) => [enterpriseEndpoint(id), price])),
+    monthlyBudgetMinor: 0, monthlySubsidyBudgetMinor: 0 },
 })
 
 export const QIXIN_OPERATIONS = QIXIN_CATALOG.apis.map(api => Object.freeze({
   operationKey: enterpriseOperation(api.api_id), label: `${api.api_id} · ${api.api_name}`,
   legacyGate: 'contractVerified', contractVersion: ENTERPRISE_VERSION,
-  endpointKeys: [enterpriseEndpoint(api.api_id)], allowZeroCost: api.price === 0,
+  endpointKeys: [enterpriseEndpoint(api.api_id)], allowZeroCost: enterprisePublicPrice(api.api_id) === 0,
+  publicPriceMinor: enterprisePublicPrice(api.api_id),
+  ...(enterprisePublicPrice(api.api_id) === null ? { dispatchBlock: 'enterprise_price_negotiated' } : {}),
 }))

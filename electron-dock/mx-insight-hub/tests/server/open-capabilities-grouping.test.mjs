@@ -38,7 +38,7 @@ test('the filter spans platforms and both capability tables', async () => {
   // Searching must not hide a platform while leaving its business operation
   // visible below, so one predicate feeds every section.
   assert.match(source, /const matchesFilter = \(\.\.\.fields\) =>/u)
-  assert.match(source, /\.filter\(\(row\) => matchesFilter\(row\.platform, platformLabel\(row\.platform\)\)\)/u)
+  assert.match(source, /\.filter\(\(row\) => matchesFilter\(row\.platform, platformLabel\(row\.platform\), row\.platform === 'enterprise' \? '启信宝 启信慧眼 qixin' : ''\)\)/u)
   assert.match(source, /const visibleCapabilityRows = capabilityRows\.filter\(\(row\) => matchesFilter\(/u)
 
   // Id and label both match, so either spelling finds the row.

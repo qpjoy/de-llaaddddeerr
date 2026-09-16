@@ -279,6 +279,9 @@ function normalizeUpdate(input, definition) {
   if (!DESIRED_STATES.has(input.desiredState)) {
     invalid('desiredState must be disabled, shadow, canary, active, or paused')
   }
+  if (definition.dispatchBlock && ['active', 'canary'].includes(input.desiredState)) {
+    throw new AppError(409, definition.dispatchBlock, '面议或未公开价格的接口不可启用')
+  }
   if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
     invalid('expectedRevision must be a non-negative safe integer')
   }
@@ -308,9 +311,9 @@ function legacyPolicyState(definition, config) {
     : { desiredState: 'active', canaryConsumerIds: [] }
 }
 
-function unitCostFor(billing, endpointKey) {
+function unitCostFor(billing, endpointKey, allowZeroCost = false) {
   const mapped = billing?.unitCostMinorByEndpoint?.[endpointKey]
-  return Number.isSafeInteger(mapped) && mapped > 0
+  return Number.isSafeInteger(mapped) && mapped >= (allowZeroCost ? 0 : 1)
     ? mapped
     : Number.isSafeInteger(billing?.unitCostMinor) && billing.unitCostMinor > 0
       ? billing.unitCostMinor
@@ -324,7 +327,7 @@ function priceEvidence(row, definition, config) {
     ? row.priceBook.endpointPrices || {}
     : Object.fromEntries(definition.endpointKeys.map((endpointKey) => [
         endpointKey,
-        unitCostFor(billing, endpointKey),
+        unitCostFor(billing, endpointKey, definition.allowZeroCost),
       ]))
   const missingEndpointKeys = definition.endpointKeys.filter((endpointKey) => (
     !Number.isSafeInteger(endpointPrices[endpointKey]) || endpointPrices[endpointKey] < (definition.allowZeroCost ? 0 : 1)
@@ -377,6 +380,7 @@ function operationView(row, definition, { config = {}, credentialConfigured = fa
     ? legacy.canaryConsumerIds
     : storedCanary
   const blockers = []
+  if (definition.dispatchBlock) blockers.push(blocker(definition.dispatchBlock, '官网价格为面议或未公开；此接口禁止调用'))
   if (config?.configurationError) {
     blockers.push(blocker(
       'provider_configuration_invalid',
@@ -432,6 +436,7 @@ function operationView(row, definition, { config = {}, credentialConfigured = fa
   return {
     operationKey: definition.operationKey,
     label: definition.label,
+    ...(Object.hasOwn(definition, 'publicPriceMinor') ? { publicPriceMinor: definition.publicPriceMinor } : {}),
     ...(definition.allowZeroCost ? { allowZeroCost: true } : {}),
     controlSource: row.controlSource,
     desiredState,
@@ -715,6 +720,7 @@ const POLICY_SELECT = `
     LEFT JOIN control.external_platform_provider_price_book_entries entry
       ON entry.provider_key = price.provider_key
      AND entry.price_book_version = price.version
+     AND (policy.provider_key <> 'qixin' OR entry.endpoint_key = ANY(release.endpoint_keys))
 `
 
 const POLICY_GROUP = `

@@ -249,14 +249,15 @@ export function Pagination({
           下一页
         </button>
         {knownPages ? (
-          <form className="qp-pagination__jump" onSubmit={submitJump}>
+          <div className="qp-pagination__jump">
             <span>跳至</span>
             <input className="qp-input qp-input--sm" type="number" min="1" max={navigablePages}
               value={jumpDraft} disabled={loading} aria-label="跳转页码"
-              onChange={(event) => setJumpDraft(event.target.value)} />
+              onChange={(event) => setJumpDraft(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); submitJump(event) } }} />
             <span>页</span>
-            <button className="qp-button qp-button--outline qp-button--sm" type="submit" disabled={loading}>跳转</button>
-          </form>
+            <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={submitJump} disabled={loading}>跳转</button>
+          </div>
         ) : null}
       </div>
     </footer>

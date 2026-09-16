@@ -1167,6 +1167,17 @@ select {
   grid-column: 1 / -1;
 }
 
+#publish-plan-form > *,
+.mih-paged-items {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mih-paged-items > .mih-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .mih-modal-backdrop {
   position: fixed;
   inset: 0;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { withIpRiskProductScopes } from '../shared/product-access.mjs'
+import { withIpRiskProductScopes, withEnterpriseProductScopes } from '../shared/product-access.mjs'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field } from './components.jsx'
 
@@ -30,7 +30,7 @@ export function TenantServiceAccess({token,tenants,platforms,capabilities}) {
     {error ? <ErrorState error={error} /> : null}
     {tenantId ? <button className="qp-button qp-button--outline" disabled={busy} onClick={()=>setReload(n=>n+1)}>重新读取当前授权</button> : null}
     {form ? <>
-      <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--outline" disabled={busy} onClick={preset}>勾选小红书笔记所需权限</button><button className="qp-button qp-button--outline" disabled={busy} onClick={()=>setForm(withIpRiskProductScopes)}>勾选 IP 风险画像所需权限</button><button className="qp-button qp-button--outline" disabled={busy} onClick={()=>setForm(f=>({...f,platforms:[],capabilities:[]}))}>清空本次勾选</button></div>
+      <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--outline" disabled={busy} onClick={preset}>勾选小红书笔记所需权限</button><button className="qp-button qp-button--outline" disabled={busy} onClick={()=>setForm(withIpRiskProductScopes)}>勾选 IP 风险画像所需权限</button><button type="button" className="qp-button qp-button--outline" disabled={busy} onClick={()=>setForm(withEnterpriseProductScopes)}>勾选启信宝所需权限</button><button className="qp-button qp-button--outline" disabled={busy} onClick={()=>setForm(f=>({...f,platforms:[],capabilities:[]}))}>清空本次勾选</button></div>
       {form.platforms.includes('ip_risk') && !form.capabilities.includes('ip.risk.query') ? <p role="status">仅勾选 ip_risk 数据域还不能使用 IP 风险画像。请同时勾选“IP 风险查询能力”，保存后租户才能看到产品和文档。</p> : null}
       <h3>数据域</h3><div className="mih-tenant-access-scopes">{platforms.map(scope=><label key={scope}><input type="checkbox" disabled={busy} checked={form.platforms.includes(scope)} onChange={e=>toggle('platforms',scope,e.target.checked)} /> {scope}</label>)}</div>
       <h3>业务操作与兼容接口</h3><div className="mih-tenant-access-scopes">{Object.entries(capabilities).map(([scope,info])=><label key={scope}><input type="checkbox" disabled={busy} checked={form.capabilities.includes(scope)} onChange={e=>toggle('capabilities',scope,e.target.checked)} /> {info.label || scope}<small>{scope}</small></label>)}</div>

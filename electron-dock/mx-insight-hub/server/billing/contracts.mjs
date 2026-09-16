@@ -88,7 +88,7 @@ export function normalizeCustomerPriceBook(input) {
   const key = String(value.key || '').trim().toLowerCase()
   assert(PRICE_BOOK_KEY_PATTERN.test(key), 400, 'invalid_request', 'priceBook.key is invalid')
   const entries = Array.isArray(value.entries) ? value.entries : null
-  assert(entries && entries.length > 0 && entries.length <= 256, 400, 'invalid_request', 'priceBook.entries must contain 1-256 rates')
+  assert(entries && entries.length > 0 && entries.length <= 2048, 400, 'invalid_request', 'priceBook.entries must contain 1-2048 rates')
   const seen = new Set()
   const normalizedEntries = entries.map((entry, index) => {
     const candidate = plainObject(entry, `priceBook.entries[${index}] must be an object`)

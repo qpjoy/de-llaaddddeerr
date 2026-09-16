@@ -2611,7 +2611,7 @@ export function createApp({
         requireNoQuery(searchParams, 'plan publication')
         sendJson(response, 201, {
           data: await service.publishPlanVersion(
-            await readJson(request, 128 * 1024),
+            await readJson(request, 512 * 1024),
             principal.memberId || principal.kind || 'admin-token',
           ),
           requestId,

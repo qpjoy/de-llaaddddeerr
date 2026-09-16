@@ -21,3 +21,10 @@ export function withIpRiskProductScopes(form) {
     capabilities: [...new Set([...form.capabilities, 'ip.risk.query'])],
   }
 }
+
+export function withEnterpriseProductScopes(form) {
+  return { ...form,
+    platforms: [...new Set([...form.platforms, 'enterprise'])],
+    capabilities: [...new Set([...form.capabilities, 'enterprise.query'])],
+  }
+}

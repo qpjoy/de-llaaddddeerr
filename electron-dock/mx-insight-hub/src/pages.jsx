@@ -1,6 +1,9 @@
+import { PagedItems } from './paged-items.jsx'
+import { QixinPricingAdjustment } from './qixin-pricing.jsx'
+import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
 import { BILLING_FEATURES, compileBillingComponents } from '../shared/billing-composition.mjs'
 import { KeyAccessLimitsPanel } from './key-access-limits.jsx'
-import { withIpRiskProductScopes } from '../shared/product-access.mjs'
+import { withIpRiskProductScopes, withEnterpriseProductScopes } from '../shared/product-access.mjs'
 import { KeyReveal } from './key-reveal.jsx'
 import { TenantServiceAccess } from './tenant-service-access.jsx'
 import { TenantMemberships } from './tenant-memberships.jsx'
@@ -343,7 +346,9 @@ function multiplierToPpm(value) {
   return Number.isSafeInteger(ppm) && ppm <= 100_000_000 ? ppm : null
 }
 
+const enterpriseMeterNames = new Map(QIXIN_OFFICIAL_PRICES.entries.map(entry => [`enterprise.api.${entry.apiId}`, `${entry.apiId} · ${entry.name}`]))
 function billingMeterLabel(meterKey) {
+  if (enterpriseMeterNames.has(meterKey)) return enterpriseMeterNames.get(meterKey)
   return ({
     'social.posts.search': '小红书笔记搜索',
     'social.posts.resolve': '小红书笔记详情',
@@ -1737,6 +1742,14 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 onClick={() => setForm(withIpRiskProductScopes)}>勾选已开通的 IP 风险画像权限</button>
               {!scopeOptions.capabilities.includes('ip.risk.query') ? <p role="status">当前调用者只有 ip_risk 数据域，尚未开通“IP 风险查询能力（ip.risk.query）”。请平台管理员在“调用者 → 租户业务开通”中补齐并保存，再重新打开此窗口。</p> : null}
             </div> : null}
+            {!rotationSource ? <div className="mih-form">
+              <button type="button" className="qp-button qp-button--outline qp-button--sm"
+                disabled={scopeLoading || !scopeOptions.platforms.includes('enterprise') || !scopeOptions.capabilities.includes('enterprise.query')}
+                onClick={() => setForm(withEnterpriseProductScopes)}>勾选已开通的启信宝权限</button>
+              <small>需要 enterprise 数据域与 enterprise.query 能力；保存后保留原 Key。</small>
+              <div className="mih-page-actions">{session?.platformAdmin ? <a className="qp-button qp-button--ghost qp-button--sm" href={`#/platforms?consumerId=${encodeURIComponent(form.consumerId)}`}>配置调用者启信宝授权</a> : null}
+              <a className="qp-button qp-button--ghost qp-button--sm" href={`#/plans?consumerId=${encodeURIComponent(form.consumerId)}`}>查看 / 配置套餐费率</a></div>
+            </div> : null}
             <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，可在此选择授权后应用到原 Key。">
               <div className="mih-key-scopes">
                 {scopeOptions.platforms.map((platform) => (
@@ -1955,14 +1968,14 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
       <MetricCard icon={Timer} label="待结算金额" value={account ? formatMoneyMinor(account.heldMinor, currency) : '—'} hint="结算完成后更新余额" />
     </section>
     <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用后按以下价格扣费；已授权但未配置价格的接口免费，仍计入调用用量和额度。' : '自动扣费尚未开通，请联系服务方确认。'}>
-      {rates.length ? <Table label="我的服务价格">
+      {rates.length ? <PagedItems items={rates} text={entry => `${entry.meterKey} ${billingMeterLabel(entry.meterKey)}`} label="服务价格">{visible => <Table label="我的服务价格">
         <thead><tr><th>服务</th><th>单次价格</th><th>预计可用次数</th></tr></thead>
-        <tbody>{rates.map(rate => <tr key={rate.meterKey}>
+        <tbody>{visible.map(({entry: rate}) => <tr key={rate.meterKey}>
           <td>{billingMeterLabel(rate.meterKey)}</td>
           <td>{formatMoneyMinor(rate.unitPriceMinor, rate.currency || currency)} / 次</td>
           <td>{account && rate.unitPriceMinor > 0 && (rate.currency || currency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / rate.unitPriceMinor))} 次` : '—'}</td>
         </tr>)}</tbody>
-      </Table> : <EmptyState icon={Coins} title="未配置收费接口" description="已授权的接口可免费调用，仍受调用额度和速率限制。" />}
+      </Table>}</PagedItems> : <EmptyState icon={Coins} title="未配置收费接口" description="已授权的接口可免费调用，仍受调用额度和速率限制。" />}
       {rates.length ? <p>预计次数仅按当前余额和单项服务价格计算；其他业务消费及调用限额会影响实际可用次数。</p> : null}
     </Panel>
     <Panel title="账户明细" subtitle="充值、扣款与待结算记录。">
@@ -2002,6 +2015,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const [creditForm, setCreditForm] = useState({ amount: '', currency: 'CNY', reason: '', externalReference: '' })
   const [profileForm, setProfileForm] = useState({ mode: 'shadow', multiplier: '1.000000' })
   const [componentChoice, setComponentChoice] = useState('feature:ip-risk')
+  const [planEntryFocus, setPlanEntryFocus] = useState(null)
   const [planForm, setPlanForm] = useState({
     key: '',
     name: '',
@@ -2119,6 +2133,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       entries: reusablePlan?.priceBook?.entries?.length ? reusablePlan.priceBook.entries.map(entry=>({meterKey:entry.meterKey,price:(entry.unitPriceMinor/100).toFixed(2)})) : [{ meterKey: '', price: '' }],
     })
     setActivatePlan(false)
+    setPlanEntryFocus(null)
     setPlanOpen(true)
   }
 
@@ -2381,6 +2396,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定费率' : '尚未绑定费率'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
         <p>为不同客户使用独立套餐标识，同一套餐可配置多个业务的接口价格。已授权但未配置价格的接口免费，价格填 0 也表示免费；调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
         <div className="mih-page-actions">
+          <button className="qp-button qp-button--outline" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={() => openFeaturePlan('qixin')}>追加启信宝费率 · 官网原价 / 统一调价</button>
           <button className="qp-button qp-button--primary" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={()=>openFeaturePlan('xiaohongshu')}>追加小红书费率 · ¥0.10/次</button>
           <button className="qp-button qp-button--outline" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={()=>openFeaturePlan('ip-risk')}>追加 IP 风险画像费率 · ¥0.05/次</button>
         </div>
@@ -2425,9 +2441,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 
       <Panel title="当前合同费率" subtitle="按 Hub 开放能力计价；供应商、采购成本与路由切换不会暴露给租户">
         {effectiveRates.length ? (
-          <Table label="当前合同费率">
+          <PagedItems key={data.consumerId} items={effectiveRates} text={entry => `${entry.meterKey} ${billingMeterLabel(entry.meterKey)}`} label="合同费率">{visible => <Table label="当前合同费率">
             <thead><tr><th>开放能力</th><th>计量键</th><th>计费单位</th><th>每次成交价</th><th>余额可调用次数</th></tr></thead>
-            <tbody>{effectiveRates.map((entry) => (
+            <tbody>{visible.map(({entry}) => (
               <tr key={entry.meterKey}>
                 <td><strong>{billingMeterLabel(entry.meterKey)}</strong></td>
                 <td><code>{entry.meterKey}</code></td>
@@ -2436,7 +2452,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 <td>{account && entry.unitPriceMinor > 0 && (entry.currency || billingCurrency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / entry.unitPriceMinor))} 次` : '—'}<small>仅按此接口估算，仍受配额与其他业务消费影响</small></td>
               </tr>
             ))}</tbody>
-          </Table>
+          </Table>}</PagedItems>
         ) : (
           <EmptyState
             icon={Coins}
@@ -2687,7 +2703,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
             <Field label="最大分页"><input className="qp-input" type="number" min="1" max="1000" value={planForm.maxPageSize} onChange={(event) => setPlanForm({ ...planForm, maxPageSize: event.target.value })} required /></Field>
             <div className="mih-form__wide">
               <DropdownField label="添加产品费率或组合已发布套餐" value={componentChoice} onChange={setComponentChoice} options={[
-                ...BILLING_FEATURES.map(item=>({value:`feature:${item.key}`,label:`${item.name} · v${item.version} · ${item.key==='ip-risk'?'¥0.05':'¥0.10'}/次`})),
+                ...BILLING_FEATURES.map(item=>({value:`feature:${item.key}`,label:`${item.name} · v${item.version} · ${item.entries.length} 项费率`})),
                 ...(data.plans?.catalog||[]).filter(plan=>plan.priceBook&&plan.versionStatus==='published').map(plan=>({value:`plan:${plan.versionId}`,label:`${plan.name} · v${plan.version}`})),
               ]}/>
               <button className="qp-button qp-button--outline" type="button" onClick={appendComponent}>添加到组合</button>
@@ -2695,18 +2711,25 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
               <p>来源：{(planForm.components||[]).map(item=>item.type==='feature' ? BILLING_FEATURES.find(feature=>feature.key===item.key)?.name : (data.plans?.catalog||[]).find(plan=>plan.versionId===item.versionId)?.name||item.versionId).join(' + ')||'手动费率'}</p>
               <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current, entries: [...current.entries.filter(entry => entry.meterKey || entry.price), ...['raw', 'crawl', 'user-info'].filter(key => !current.entries.some(entry => entry.meterKey === key)).map(meterKey => ({ meterKey, price: '' }))] }))}>添加 Night-All 三类接口费率</button>
               <p>raw、crawl、user-info 按请求计费；价格填 0 表示免费。小红书直连使用自己的 social.* 计费键；费用配置不放宽采集工作预算。</p>
-              <Table label="逐接口价格">
+              <QixinPricingAdjustment busy={Boolean(billingBusy)} currency={planForm.currency}
+                component={planForm.components?.find(item => item.type === 'feature' && item.key === 'qixin')}
+                onApply={(component, rates) => setPlanForm(current => ({ ...current,
+                  components: [...(current.components || []).filter(item => !(item.type === 'feature' && item.key === 'qixin')), component],
+                  entries: [...current.entries.filter(entry => entry.meterKey && !rates.some(rate => rate.meterKey === entry.meterKey)),
+                    ...rates.map(rate => ({ meterKey: rate.meterKey, price: (rate.unitPriceMinor / 100).toFixed(2) }))],
+                }))} />
+              <PagedItems revealItem={planEntryFocus} items={planForm.entries} text={entry => `${entry.meterKey} ${billingMeterLabel(entry.meterKey)}`} label="草案费率">{visible => <Table label="逐接口价格">
                 <thead><tr><th>开放能力计量键</th><th>每次基础价格</th><th>当前租户成交价</th><th>操作</th></tr></thead>
-                <tbody>{planForm.entries.map((entry, index) => (
+                <tbody>{visible.map(({entry, index}) => (
                   <tr key={index}>
-                    <td><input className="qp-input" value={entry.meterKey} onChange={(event) => updatePlanEntry(index, { meterKey: event.target.value.toLowerCase() })} placeholder="social.posts.resolve" required /></td>
-                    <td><input className="qp-input" type="text" inputMode="decimal" value={entry.price} onChange={(event) => updatePlanEntry(index, { price: event.target.value })} placeholder="输入合同价格" required /></td>
+                    <td><small>{billingMeterLabel(entry.meterKey)}</small><input aria-label="计量键" className="qp-input" value={entry.meterKey} onChange={(event) => updatePlanEntry(index, { meterKey: event.target.value.toLowerCase() })} placeholder="social.posts.resolve" required /></td>
+                    <td><input aria-label="基础价格" className="qp-input" type="text" inputMode="decimal" value={entry.price} onChange={(event) => updatePlanEntry(index, { price: event.target.value })} placeholder="输入合同价格" required /></td>
                     <td>{decimalToMinor(entry.price) != null && multiplierToPpm(planForm.defaultMultiplier) != null ? formatMoneyMinor(effectivePriceMinor(decimalToMinor(entry.price), billing.profile?.multiplierPpm ?? multiplierToPpm(planForm.defaultMultiplier)), planForm.currency) : '待填写'}</td>
                     <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="删除费率" disabled={planForm.entries.length <= 1} onClick={() => setPlanForm((current) => ({ ...current, entries: current.entries.filter((_, entryIndex) => entryIndex !== index) }))}><Trash size={17} aria-hidden="true" /></button></td>
                   </tr>
                 ))}</tbody>
-              </Table>
-              <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => setPlanForm((current) => ({ ...current, entries: [...current.entries, { meterKey: '', price: '' }] }))}><Plus size={16} aria-hidden="true" />增加接口费率</button>
+              </Table>}</PagedItems>
+              <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => { setPlanEntryFocus({ index: planForm.entries.length }); setPlanForm((current) => ({ ...current, entries: [...current.entries, { meterKey: '', price: '' }] })) }}><Plus size={16} aria-hidden="true" />增加接口费率</button>
             </div>
             {billingError ? <div className="mih-form__wide"><ErrorState error={billingError} /></div> : null}
           </form>
@@ -2776,7 +2799,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     enabled: grants.has(platform),
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
     explicit: policyByPlatform.has(platform),
-  })).filter((row) => matchesFilter(row.platform, platformLabel(row.platform)))
+  })).filter((row) => matchesFilter(row.platform, platformLabel(row.platform), row.platform === 'enterprise' ? '启信宝 启信慧眼 qixin' : ''))
   const groupedPlatformRows = [...PLATFORM_GROUPS, { key: 'other', label: '其他', hint: '' }]
     .map((group) => ({
       ...group,
@@ -2800,7 +2823,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     },
   }))
   const visibleCapabilityRows = capabilityRows.filter((row) => matchesFilter(
-    row.capability, row.metadata.label, row.metadata.endpoint,
+    row.capability, row.metadata.label, row.metadata.endpoint, row.capability === 'enterprise.query' ? '启信宝 启信慧眼 qixin' : '',
   ))
   const businessOperationRows = visibleCapabilityRows.filter((row) => row.metadata.group !== 'compatibility')
   const compatibilityCapabilityRows = visibleCapabilityRows.filter((row) => row.metadata.group === 'compatibility')
@@ -2846,6 +2869,32 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       if (configureTarget) setFormError(error)
       else notify(error.message || '平台更新失败', 'danger')
     } finally {
+      setBusyPlatform('')
+    }
+  }
+
+  const grantEnterprise = async () => {
+    if (!canUpdatePlatform || mutationDisabled || !data.consumerId) return
+    const targetContext = contextRef.current
+    const target = { tenantId: data.tenantId, consumerId: data.consumerId, enabled: true }
+    setBusyPlatform('enterprise')
+    try {
+      if (!grants.has('enterprise')) {
+        const policy = policyByPlatform.get('enterprise') || DEFAULT_POLICY
+        await adminApi.updatePlatform(token, 'enterprise', { ...target,
+          maxRequests: policy.maxRequests, windowSeconds: policy.windowSeconds,
+          maxPageSize: policy.maxPageSize, maxCrawlWork: policy.maxCrawlWork ?? Math.min(policy.maxPageSize, 100) })
+      }
+      if (!capabilityGrants.has('enterprise.query')) {
+        const policy = capabilityPolicyByName.get('enterprise.query') || DEFAULT_POLICY
+        await adminApi.updateCapability(token, 'enterprise.query', { ...target, maxRequests: policy.maxRequests, windowSeconds: policy.windowSeconds })
+      }
+      notify('启信宝调用者授权已开通；请在 API Keys 中勾选并保存原 Key 权限，再分配套餐。', 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      notify(`授权未全部完成：${error.message}。请刷新后补齐剩余授权。`, 'danger')
+    } finally {
+      if (contextRef.current === targetContext) state.refresh()
       setBusyPlatform('')
     }
   }
@@ -2960,6 +3009,16 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </section>
 
+      {session?.platformAdmin ? <Panel title="启信宝 · 企业数据权限" subtitle="企业数据域与查询能力同时授权，现有 Key 还需显式勾选保存；套餐只决定价格。">
+        <p>数据域 enterprise：{grants.has('enterprise') ? '已授权' : '未授权'} · 查询能力 enterprise.query：{capabilityGrants.has('enterprise.query') ? '已授权' : '未授权'}</p>
+        <div className="mih-page-actions">
+          <button type="button" className="qp-button qp-button--primary" onClick={grantEnterprise}
+            disabled={!canUpdatePlatform || mutationDisabled || !data.consumerId || (grants.has('enterprise') && capabilityGrants.has('enterprise.query'))}>授权当前调用者使用启信宝</button>
+          <a className="qp-button qp-button--outline" href={`#/api-keys?tenantId=${data.tenantId || ''}&consumerId=${data.consumerId || ''}`}>调整原 Key 权限</a>
+          <a className="qp-button qp-button--outline" href={`#/plans?tenantId=${data.tenantId || ''}&consumerId=${data.consumerId || ''}`}>追加启信宝套餐费率</a>
+        </div>
+      </Panel> : null}
+
       {session?.platformAdmin ? <section className="qp-panel mih-provider-routing-boundary" aria-label="电商能力与上游路由边界">
         <div className="mih-provider-routing-boundary__intro">
           <span><Cloud size={19} weight="duotone" aria-hidden="true" /></span>
@@ -3019,7 +3078,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
               {group.rows.map((row) => (
                 <tr key={row.platform}>
                   <td>
-                    <strong>{platformLabel(row.platform)}</strong>
+                    <strong>{row.platform === 'enterprise' && session?.platformAdmin ? '企业数据 · 启信宝' : platformLabel(row.platform)}</strong>
                     <small>{row.platform}</small>
                     {PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION[row.platform] ? (
                       <>
@@ -3100,7 +3159,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
                     <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} />
-                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : '#/external-platforms?provider=tikhub'}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
+                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : row.capability === 'enterprise.query' ? '#/external-platforms?provider=qixin' : '#/external-platforms?provider=tikhub'}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
                     </td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>

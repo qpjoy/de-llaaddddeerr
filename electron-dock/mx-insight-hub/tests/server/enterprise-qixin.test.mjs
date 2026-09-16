@@ -32,7 +32,7 @@ export async function enterpriseFixture({ fetchImpl = async () => new Response(J
   credentialStore ??= new StructuredExternalPlatformCredentialStore({ providerKey: 'qixin', fields: QIXIN_CREDENTIAL_FIELDS, pepper })
   await credentialStore.updateCredential('qixin', { credentials, expectedRevision: 0 })
   const enable = async (id = '1.31', price = 1) => control.updatePolicy('qixin', enterpriseOperation(id), {
-    desiredState: 'active', expectedRevision: 0, reason: 'Offline fixture price review',
+    desiredState: 'active', expectedRevision: (await control.describeProvider('qixin', { config: QIXIN_CONFIG, credentialConfigured: true })).find(row => row.operationKey === enterpriseOperation(id)).revision, reason: 'Offline fixture price review',
     priceBook: { currency: 'CNY', pricingAsOf: '2026-09-17T00:00:00Z', monthlyBudgetMinor: 1000, monthlySubsidyBudgetMinor: 1000, unitCostMinorByEndpoint: { [enterpriseEndpoint(id)]: price } },
   }, { runtime: { config: QIXIN_CONFIG, credentialConfigured: true } })
   if (activate) await enable()
@@ -41,9 +41,10 @@ export async function enterpriseFixture({ fetchImpl = async () => new Response(J
   return { hub, store, context, platformStore, credentialStore, control, gateway, enable, key }
 }
 
-test('all 272 catalog requests are fixed-origin and locally validated, including conditional fields', () => {
-  assert.equal(QIXIN_CATALOG.apis.length, 272)
-  assert.equal(new Set(QIXIN_CATALOG.apis.map(api => api.api_id)).size, 272)
+test('all 274 catalog requests are fixed-origin and locally validated, including conditional fields', () => {
+  assert.equal(QIXIN_CATALOG.apis.length, 274)
+  assert.equal(new Set(QIXIN_CATALOG.apis.map(api => api.api_id)).size, 274)
+  assert.equal(normalizeEnterpriseRequest('1.31', request.body).endpointVersion, 'qixin-auth-v2.catalog-2026-09-01', 'pricing must preserve existing retry/cache identities')
   for (const api of QIXIN_CATALOG.apis) {
     assert.equal(new URL(api.interface).origin, 'https://api.qixin.com')
     const make = section => Object.fromEntries(enterpriseFields(api, section).filter(f => f.required === 1).map(f => [f.name, f.type.toLowerCase() === 'number' ? 1 : '示例']))
@@ -96,10 +97,10 @@ test('signing, GET encoding, exact data retention, snapshot replay and correct i
   assert.equal(calls, 1)
 })
 
-test('saving credentials alone does not enable calls; Test or ungranted Keys never dispatch', async () => {
+test('default gates still require customer pricing or subsidy; Test or ungranted Keys never dispatch', async () => {
   let calls = 0
   const f = await enterpriseFixture({ activate: false, fetchImpl: async () => { calls++; return new Response('{}') } })
-  await assert.rejects(f.gateway.queryEnterprise(f.context, request), { code: 'external_platform_operation_disabled' })
+  await assert.rejects(f.gateway.queryEnterprise(f.context, request), { code: 'external_platform_cost_budget_exhausted' })
   await assert.rejects(f.gateway.queryEnterprise({ ...f.context, apiKey: { ...f.context.apiKey, environment: 'test' } }, request), { code: 'test_key_not_supported' })
   const empty = await f.hub.createApiKey({ consumerId: f.context.consumer.id, name: 'Empty', platforms: [], capabilities: [] })
   await assert.rejects(f.gateway.queryEnterprise(await f.hub.authenticate(empty.secret), request), { status: 403 })
@@ -184,7 +185,7 @@ test('documentation is separate, searchable and tenant-scope filtered', () => {
   assert.ok(!html.includes('api.qixin.com') && !html.includes('官网参考价'))
   assert.equal(publicDocsHtmlForPath('/docs/enterprise/1.31', { tenant: true, scopes: [] }), null)
   const allowed = tenantOpenApiDocument(scopes)
-  assert.equal(Object.keys(allowed.paths).filter(path => path.startsWith('/data/enterprise/')).length, 272)
+  assert.equal(Object.keys(allowed.paths).filter(path => path.startsWith('/data/enterprise/')).length, 274)
   assert.deepEqual(allowed.paths['/data/enterprise/1.31/query'].post.requestBody.content['application/json'].schema.required, ['query'])
   assert.deepEqual(allowed.paths['/data/enterprise/42.3/query'].post.requestBody.content['application/json'].schema.required, ['body'])
   const denied = tenantOpenApiDocument([{ platforms: ['enterprise'], capabilities: [] }, { platforms: [], capabilities: ['enterprise.query'] }])
@@ -227,6 +228,9 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   t.after(() => db.close())
   for (const directory of [new URL('../../../mx-common/migrations/', import.meta.url), new URL('../../migrations/', import.meta.url)]) {
     for (const file of (await readdir(directory)).filter(file => file.endsWith('.sql')).sort()) {
+      if (file === '092_qixin_official_prices.sql') {
+        await db.exec("UPDATE control.external_platform_operation_policies SET desired_state='paused', control_source='database', revision=1, updated_by='existing-operator' WHERE provider_key='qixin' AND operation_key='enterprise.api.1.2'")
+      }
       await db.exec('BEGIN'); await db.exec(await readFile(new URL(file, directory), 'utf8')); await db.exec('COMMIT')
     }
   }
@@ -235,11 +239,25 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   const store = new PostgresStore(pool)
   const platformStore = new PostgresExternalPlatformStore({ pool, usageStore: store, providerKey: 'qixin', authorizationPlatform: 'enterprise' })
   const control = new PostgresExternalPlatformControlStore({ pool })
+  const migrated = await control.describeProvider('qixin', { config: QIXIN_CONFIG, credentialConfigured: true })
+  assert.equal(migrated.filter(row => row.effectiveState === 'active').length, 259)
+  assert.equal(migrated.find(row => row.operationKey === 'enterprise.api.1.2').effectiveState, 'paused', 'deployment preserves operator pause')
+  assert.equal(migrated.find(row => row.operationKey === 'enterprise.api.1.2').revision, 1)
+  assert.equal(migrated.find(row => row.operationKey === 'enterprise.api.77.58').priceBook.endpointPrices['enterprise.77.58'], 10)
+  assert.ok(migrated.every(row => Object.keys(row.priceBook.endpointPrices).length <= 1), 'do not duplicate the 260-entry book into every operation payload')
   const credentialStore = new StructuredExternalPlatformCredentialStore({ pool, providerKey: 'qixin', fields: QIXIN_CREDENTIAL_FIELDS, pepper })
   const f = await enterpriseFixture({ store, platformStore, control, credentialStore })
+  const combined = await f.hub.publishPlanVersion({ key: 'pg-qixin', name: 'PG official combination',
+    components: [{ type: 'feature', key: 'qixin', version: 1, multiplierPpm: 900000 }, { type: 'feature', key: 'xiaohongshu', version: 1 }],
+    limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 }, priceBook: { key: 'pg-qixin', currency: 'CNY', defaultMultiplierPpm: 1000000 },
+  }, 'fixture')
+  assert.equal(combined.priceBook.entries.length, 264)
+  const currentPlan = await f.hub.getConsumerPlan(f.context.consumer.id)
+  await f.hub.assignConsumerPlan(f.context.consumer.id, { planVersionId: combined.versionId, expectedRevision: currentPlan.revision }, 'fixture')
+  assert.equal((await f.hub.getConsumerPlan(f.context.consumer.id)).priceBook.entries.find(entry => entry.meterKey === 'enterprise.api.47.51').unitPriceMinor, 270)
   const result = await f.gateway.queryEnterprise(f.context, request)
   assert.deepEqual(result.body.data, payload)
-  assert.equal((await query("SELECT count(*) AS count FROM control.external_platform_operation_policies WHERE provider_key='qixin'")).rows[0].count, 272)
+  assert.equal((await query("SELECT count(*) AS count FROM control.external_platform_operation_policies WHERE provider_key='qixin'")).rows[0].count, 274)
   const jobs = (await query("SELECT payload FROM mxq.jobs WHERE payload->>'providerKey'='qixin'")).rows
   assert.equal(jobs.length, 1)
   const job = jobs[0].payload
@@ -263,4 +281,35 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   const zero = await f.gateway.queryEnterprise(f.context, { ...request, apiId: '36.99', path: '/api/v1/data/enterprise/36.99/query', idempotencyKey: 'enterprise-zero-0001', body: { query: input } })
   assert.equal(zero.status, 200)
   assert.equal((await query("SELECT cost_minor FROM external_platform.provider_calls WHERE endpoint_key='enterprise.36.99'")).rows[0].cost_minor, 0)
+})
+
+test('official defaults allow granted billed requests, while negotiated APIs and missing grants never dispatch', async () => {
+  let calls = 0
+  const f = await enterpriseFixture({ activate: false, fetchImpl: async () => { calls++; return new Response(JSON.stringify(payload)) } })
+  const operations = await f.control.describeProvider('qixin', { config: QIXIN_CONFIG, credentialConfigured: true })
+  assert.equal(operations.filter(op => op.effectiveState === 'active').length, 260)
+  assert.equal(operations.filter(op => op.blockers.some(item => item.code === 'enterprise_price_negotiated')).length, 14)
+  await assert.rejects(f.control.updatePolicy('qixin', 'enterprise.api.55.82', {
+    desiredState: 'active', expectedRevision: 0, reason: 'Attempt override',
+    priceBook: { currency: 'CNY', pricingAsOf: new Date().toISOString(), monthlyBudgetMinor: 1000, monthlySubsidyBudgetMinor: 1000, unitCostMinorByEndpoint: { 'enterprise.55.82': 500 } },
+  }), { code: 'enterprise_price_negotiated' })
+  const plan = await f.hub.publishPlanVersion({ key: 'qixin-official', name: 'Official-price fixture',
+    components: [{ type: 'feature', key: 'qixin', version: 1, multiplierPpm: 1_200_000 }],
+    limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 },
+    priceBook: { key: 'qixin-official', currency: 'CNY', defaultMultiplierPpm: 1000000 },
+  }, 'fixture')
+  const current = await f.hub.getConsumerPlan(f.context.consumer.id)
+  await f.hub.assignConsumerPlan(f.context.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'fixture')
+  await f.hub.setTenantBillingProfile(f.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'fixture')
+  await f.hub.addTenantCredit(f.context.tenant.id, { amountMinor: 10000, currency: 'CNY', reason: 'Offline fixture credit' }, { idempotencyKey: 'qixin-test-credit', actor: 'fixture' })
+  await f.gateway.queryEnterprise(f.context, request)
+  assert.equal(calls, 1)
+  const billing = await f.hub.getTenantBilling(f.context.tenant.id)
+  assert.equal(billing.account.availableMinor, 10000 - plan.priceBook.entries.find(entry => entry.meterKey === 'enterprise.api.1.31').unitPriceMinor)
+  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, apiId: '55.82' }), { code: 'enterprise_price_negotiated' })
+  await assert.rejects(new QixinAdapter({ fetchImpl: () => { calls++; throw Error('must not dispatch') } }).query('55.82', {}, { credential: credentials }), { code: 'enterprise_price_negotiated' })
+  // Consumer revocation constrains an already-issued Key immediately.
+  await f.hub.putCapabilityConfiguration('enterprise.query', { tenantId: f.context.tenant.id, consumerId: f.context.consumer.id, enabled: false })
+  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, idempotencyKey: 'new-request-with-revoked-grant' }), { status: 403 })
+  assert.equal(calls, 1)
 })
