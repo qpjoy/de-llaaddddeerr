@@ -1010,7 +1010,7 @@ export const adminApi = {
   advancedSearchAnswer: (token, body) => request(token, `${ADMIN_ROOT}/data-browser/advanced/answer`, { method: 'POST', body }),
   retrievalControl: (token) => request(token, `${ADMIN_ROOT}/retrieval/control`),
   retrievalSettings: (token, body) => request(token, `${ADMIN_ROOT}/retrieval/control/settings`, { method: 'PUT', body }),
-  retrievalAction: (token, action) => request(token, `${ADMIN_ROOT}/retrieval/control/${action}`, { method: 'POST', body: {} }),
+  retrievalAction: (token, action, body = {}) => request(token, `${ADMIN_ROOT}/retrieval/control/${action}`, { method: 'POST', body }),
   retrieval: (token) => request(token, `${ADMIN_ROOT}/retrieval`),
   semanticSearch: (token, body) => request(token, `${ADMIN_ROOT}/retrieval/search`, { method: 'POST', body }),
   runtime: (token) => request(

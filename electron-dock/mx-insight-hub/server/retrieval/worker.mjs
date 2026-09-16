@@ -42,9 +42,9 @@ export async function processRetrievalJob({ jobs, pipeline, job, signal, logger 
         recordId: job.record_id,
         limit: 16,
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(60000)]),
-        beforeEmbed: async (texts) => {
+        beforeEmbed: async (texts, sourceRevision) => {
           await check()
-          await jobs.reserveTokens(texts.reduce((sum, text) => sum + estimateTokens(text), 0))
+          await jobs.reserveTokens(texts.reduce((sum, text) => sum + estimateTokens(text), 0), job, sourceRevision)
         },
       })
       if (batch.skipped) throw new AppError(503, 'embedding_not_ready', 'Embedding Sequence unavailable')

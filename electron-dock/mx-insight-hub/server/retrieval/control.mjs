@@ -3,6 +3,10 @@ import { z } from 'zod'
 import { AppError } from '../core/errors.mjs'
 import { requireSegmenterBackend } from '../search/reindex-integrity.mjs'
 
+const backfillBudgetSchema = z.object({
+  tokenBudget: z.number().int().min(0).max(1000000000).default(1000000000),
+}).strict()
+
 export class RetrievalControl {
   constructor({ pool, agent = null, search = null }) {
     this.pool = pool
@@ -30,7 +34,10 @@ export class RetrievalControl {
       workers: workers.rows,
       failures: failures.rows,
       jobs: counts.rows,
-      run: runs.rows[0] || null,
+      run: runs.rows[0] ? {
+        ...runs.rows[0],
+        progress: runs.rows[0].snapshot_locked ? await this.runProgress(runs.rows[0].id, runs.rows[0].status) : null,
+      } : null,
       reservedTokensToday: Number(usage.rows[0]?.reserved_tokens || 0),
       ready: Boolean(this.agent?.embeddings?.available && this.search?.chunkIndexSet),
       reason: !this.search?.chunkIndexSet
@@ -52,6 +59,16 @@ export class RetrievalControl {
     this.countsCache = { value, expires: Date.now() + 30000 }
     return value
   }
+  async runProgress(runId, status) {
+    if (this.progressCache?.runId === runId && this.progressCache.status === status && this.progressCache.expires > Date.now())
+      return this.progressCache.value
+    const { rows } = await this.pool.query(
+      'SELECT status,count(*)::bigint AS count FROM retrieval.run_items WHERE run_id=$1 GROUP BY status', [runId],
+    )
+    const value = Object.fromEntries(rows.map((row) => [row.status, Number(row.count)]))
+    this.progressCache = { runId, status, expires: Date.now() + 30000, value }
+    return value
+  }
   async configure(input) {
     const parsed = z
       .object({
@@ -70,6 +87,7 @@ export class RetrievalControl {
       `UPDATE retrieval.settings SET enabled=$1,paused=$2,max_concurrency=$3,daily_token_budget=$4,updated_at=now() WHERE id`,
       [v.enabled, v.paused, v.maxConcurrency, v.dailyTokenBudget],
     )
+    await this.pool.query("UPDATE retrieval.jobs SET run_at=now() WHERE status='pending' AND last_error_code='embedding_budget_exceeded'")
     return this.status()
   }
   async preflight() {
@@ -111,19 +129,53 @@ export class RetrievalControl {
       )
     }
   }
-  async start() {
+  async start(input = {}) {
+    const parsed = backfillBudgetSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(400, 'invalid_retrieval_request', '本次初始化预算须为 0–10 亿；0 表示不限额')
     if (!this.agent?.embeddings?.available || !this.search?.chunkIndexSet)
       throw new AppError(409, 'embedding_not_ready', 'Embedding 默认 Sequence 或向量索引未就绪；没有开始任务')
     const settings = (await this.pool.query('SELECT enabled,paused FROM retrieval.settings WHERE id')).rows[0]
     if (!settings?.enabled || settings.paused)
       throw new AppError(409, 'retrieval_paused', '请先启用后台向量化并解除暂停')
     await this.preflight()
+    const client = await this.pool.connect(), id = randomUUID()
     try {
-      await this.pool.query('INSERT INTO retrieval.runs(id) VALUES($1)', [randomUUID()])
+      await client.query('BEGIN')
+      // Only this explicit maintenance action gets a longer statement budget.
+      // INSERT SELECT holds no canonical row locks and copies no source bodies.
+      await client.query("SET LOCAL statement_timeout='60s'")
+      await client.query(
+        'INSERT INTO retrieval.runs(id,snapshot_locked,token_budget) VALUES($1,true,$2)',
+        [id, parsed.data.tokenBudget],
+      )
+      const captured = await client.query(
+        `INSERT INTO retrieval.run_items(run_id,record_id,source_revision,projection_revision)
+         SELECT $1,id,current_revision,projection_revision FROM core.canonical_records
+         WHERE deleted_at IS NULL AND coalesce(length(title),0)+coalesce(length(body),0)>=24`, [id],
+      )
+      await client.query(
+        `UPDATE retrieval.runs SET target_count=$2,status=CASE WHEN $2::bigint=0 THEN 'completed' ELSE 'scanning' END,
+         finished_at=CASE WHEN $2::bigint=0 THEN now() END WHERE id=$1`, [id, captured.rowCount],
+      )
+      await client.query('COMMIT')
     } catch (error) {
+      await client.query('ROLLBACK')
       if (error.code === '23505') throw new AppError(409, 'retrieval_run_active', '已有全库任务正在执行')
       throw error
+    } finally {
+      client.release()
     }
+    return this.status()
+  }
+  async configureBackfill(input) {
+    const parsed = backfillBudgetSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(400, 'invalid_retrieval_request', '本次初始化预算须为 0–10 亿；0 表示不限额')
+    const { rowCount } = await this.pool.query(
+      `UPDATE retrieval.runs SET token_budget=$1,updated_at=now()
+       WHERE snapshot_locked AND status IN ('scanning','draining')`, [parsed.data.tokenBudget],
+    )
+    if (!rowCount) throw new AppError(409, 'retrieval_run_inactive', '没有可调整额度的初始化任务')
+    await this.pool.query("UPDATE retrieval.jobs SET run_at=now() WHERE status='pending' AND last_error_code='initialization_budget_exceeded'")
     return this.status()
   }
   async cancel() {
@@ -166,20 +218,37 @@ export class RetrievalJobs {
       // Low priority history; a new outbox event promotes its record to priority 10.
       const rows = (
         await client.query(
-          run.cursor_id
+          run.snapshot_locked
+            ? `SELECT i.record_id AS id,i.projection_revision,i.status,
+                r.projection_revision AS current_projection_revision
+               FROM retrieval.run_items i LEFT JOIN core.canonical_records r ON r.id=i.record_id
+               WHERE i.run_id=$1 AND ($2::uuid IS NULL OR i.record_id>$2) ORDER BY i.record_id LIMIT $3`
+            : run.cursor_id
             ? 'SELECT id,projection_revision FROM core.canonical_records WHERE id>$1 ORDER BY id LIMIT $2'
             : 'SELECT id,projection_revision FROM core.canonical_records ORDER BY id LIMIT $1',
-          run.cursor_id ? [run.cursor_id, limit] : [limit],
+          run.snapshot_locked ? [run.id, run.cursor_id, limit] : run.cursor_id ? [run.cursor_id, limit] : [limit],
         )
       ).rows
-      if (rows.length) {
+      const pending = run.snapshot_locked ? rows.filter((r) => r.status === 'pending'
+        && String(r.projection_revision) === String(r.current_projection_revision)) : rows
+      if (pending.length) {
         await client.query(
           `INSERT INTO retrieval.jobs AS j(record_id,requested_revision,priority,backfill_run_id,backfill_version)
           SELECT id,rev,100,$3,1 FROM unnest($1::uuid[],$2::bigint[]) AS r(id,rev)
           ON CONFLICT(record_id) DO UPDATE SET requested_revision=greatest(j.requested_revision,EXCLUDED.requested_revision),
             version=j.version+1,backfill_run_id=$3,backfill_version=j.version+1,status=CASE WHEN j.status='running' THEN 'running' ELSE 'pending' END,
             priority=CASE WHEN j.status IN ('pending','running') THEN least(j.priority,EXCLUDED.priority) ELSE EXCLUDED.priority END,run_at=now(),last_error_code=NULL,attempts=0,updated_at=now()`,
-          [rows.map((r) => r.id), rows.map((r) => r.projection_revision), run.id],
+          [pending.map((r) => r.id), pending.map((r) => r.projection_revision), run.id],
+        )
+      }
+      if (run.snapshot_locked && rows.length) {
+        // Also close the capture/ingest race: an update may commit while the
+        // manifest is being inserted and its trigger cannot yet see that item.
+        await client.query(
+          `UPDATE retrieval.run_items i SET status='superseded',finished_at=now()
+           WHERE i.run_id=$1 AND i.record_id=ANY($2::uuid[]) AND i.status='pending'
+           AND NOT EXISTS(SELECT 1 FROM core.canonical_records r WHERE r.id=i.record_id AND r.projection_revision=i.projection_revision)`,
+          [run.id, rows.map((r) => r.id)],
         )
       }
       await client.query(
@@ -247,17 +316,28 @@ export class RetrievalJobs {
       WHERE record_id=$1 AND lease_token=$2 AND status='running' AND lease_until>now()`,
       [job.record_id, job.lease_token, job.version],
     )
+    await this.pool.query(
+      `UPDATE retrieval.run_items i SET status='completed',finished_at=now()
+       WHERE record_id=$1 AND projection_revision=$2 AND status='pending'
+       AND EXISTS(SELECT 1 FROM retrieval.jobs j WHERE j.record_id=$1 AND j.completed_version>=$3)
+       AND EXISTS(SELECT 1 FROM retrieval.runs r WHERE r.id=i.run_id AND r.status IN ('scanning','draining'))`,
+      [job.record_id, job.requested_revision, job.version],
+    )
   }
   async fail(job, error) {
     const transient = [
       'embedding_budget_exceeded',
+      'initialization_budget_exceeded',
       'embedding_not_ready',
       'reindex_segmenter_degraded',
       'retrieval_paused',
     ].includes(error.code)
     await this.pool.query(
       `UPDATE retrieval.jobs SET status=CASE WHEN attempts>=8 AND NOT $4 AND version=$6 THEN 'dead' ELSE 'pending' END,
-      attempts=CASE WHEN version<>$6 THEN 0 WHEN $4 THEN greatest(0,attempts-1) ELSE attempts END,run_at=now()+make_interval(secs=>$5),
+      attempts=CASE WHEN version<>$6 THEN 0 WHEN $4 THEN greatest(0,attempts-1) ELSE attempts END,
+      run_at=CASE WHEN version<>$6 THEN now()
+        WHEN $3='embedding_budget_exceeded' THEN ((now() AT TIME ZONE 'UTC')::date+1)::timestamp AT TIME ZONE 'UTC'
+        ELSE now()+make_interval(secs=>$5) END,
       lease_token=NULL,lease_until=NULL,last_error_code=$3,updated_at=now()
       WHERE record_id=$1 AND lease_token=$2 AND status='running' AND lease_until>now()`,
       [
@@ -270,8 +350,28 @@ export class RetrievalJobs {
       ],
     )
   }
-  async reserveTokens(tokens) {
+  async reserveTokens(tokens, job = null, sourceRevision = null) {
     const n = Math.ceil(tokens)
+    if (job && sourceRevision != null) {
+      const { rows: eligible } = await this.pool.query(
+        `SELECT r.id FROM retrieval.runs r JOIN retrieval.run_items i ON i.run_id=r.id
+         WHERE r.snapshot_locked AND r.status IN ('scanning','draining') AND i.status='pending'
+         AND i.record_id=$1 AND i.projection_revision=$2 AND i.source_revision=$3 LIMIT 1`,
+        [job.record_id, job.requested_revision, sourceRevision],
+      )
+      if (eligible.length) {
+        const { rows } = await this.pool.query(
+          `UPDATE retrieval.runs SET reserved_tokens=reserved_tokens+$2,updated_at=now()
+           WHERE id=$1 AND status IN ('scanning','draining')
+           AND (token_budget=0 OR reserved_tokens+$2<=token_budget)
+           AND EXISTS(SELECT 1 FROM retrieval.settings WHERE id AND enabled AND NOT paused)
+           AND EXISTS(SELECT 1 FROM retrieval.jobs WHERE record_id=$3 AND lease_token=$4 AND status='running' AND lease_until>now())
+           RETURNING reserved_tokens`, [eligible[0].id, n, job.record_id, job.lease_token],
+        )
+        if (!rows.length) throw new AppError(429, 'initialization_budget_exceeded', '初始化额度已用完或任务已暂停；可调整本次额度后继续')
+        return { scope: 'initialization', runId: eligible[0].id }
+      }
+    }
     const { rows } = await this.pool.query(
       `INSERT INTO retrieval.daily_usage AS u(day,reserved_tokens)
       SELECT (now() AT TIME ZONE 'UTC')::date,$1 FROM retrieval.settings WHERE id AND enabled AND NOT paused AND daily_token_budget>=$1
@@ -282,11 +382,14 @@ export class RetrievalJobs {
     )
     if (!rows.length)
       throw new AppError(429, 'embedding_budget_exceeded', '后台向量化已暂停或达到今日 token 预算')
+    return { scope: 'daily' }
   }
   async settleRun() {
     await this.pool
       .query(`UPDATE retrieval.runs SET status='completed',finished_at=now(),updated_at=now() WHERE status='draining'
-      AND NOT EXISTS(SELECT 1 FROM retrieval.jobs WHERE backfill_run_id=retrieval.runs.id AND completed_version<backfill_version)`)
+      AND CASE WHEN snapshot_locked THEN
+        NOT EXISTS(SELECT 1 FROM retrieval.run_items WHERE run_id=retrieval.runs.id AND status='pending')
+      ELSE NOT EXISTS(SELECT 1 FROM retrieval.jobs WHERE backfill_run_id=retrieval.runs.id AND completed_version<backfill_version) END`)
     await this.pool.query("DELETE FROM retrieval.workers WHERE heartbeat_at<now()-interval '1 day'")
     await this.pool.query(
       'DELETE FROM retrieval.search_snapshots WHERE id IN(SELECT id FROM retrieval.search_snapshots WHERE expires_at<now() LIMIT 1000)',

@@ -22,12 +22,14 @@ test(
     }
     try {
       await db.exec(`CREATE SCHEMA core;CREATE SCHEMA outbox;
-      CREATE TABLE core.canonical_records(id uuid PRIMARY KEY,projection_revision bigint);
+      CREATE TABLE core.canonical_records(id uuid PRIMARY KEY,projection_revision bigint,current_revision int DEFAULT 1,
+        title text,body text DEFAULT '这是一段用于验证历史初始化范围的已入库正文，需要满足最短可检索文本要求。',deleted_at timestamptz);
       CREATE TABLE core.record_chunks(id uuid,record_id uuid,projection_failed_at timestamptz,projection_attempts int);
       CREATE TABLE outbox.projection_events(aggregate_type text,aggregate_id uuid,projection_revision bigint,event_type text);`)
       await db.exec(
         await readFile(new URL('../../migrations/086_retrieval_jobs.sql', import.meta.url), 'utf8'),
       )
+      await db.exec(await readFile(new URL('../../migrations/087_retrieval_initialization_budget.sql', import.meta.url), 'utf8'))
       const jobs = new RetrievalJobs(pool),
         control = new RetrievalControl({
           pool,
@@ -113,7 +115,7 @@ test(
       assert.equal(tombstone.retire, true)
       await jobs.complete(tombstone)
       await control.configure({ enabled: true, paused: false, maxConcurrency: 1, dailyTokenBudget: 1000 })
-      await pool.query('INSERT INTO core.canonical_records VALUES($1,3)', [id])
+      await pool.query('INSERT INTO core.canonical_records(id,projection_revision) VALUES($1,3)', [id])
       await assert.rejects(control.start(), (e) => e.code === 'retrieval_worker_unavailable')
       await pool.query('INSERT INTO retrieval.workers(id) VALUES($1)', [randomUUID()])
       await control.start()

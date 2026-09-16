@@ -13,6 +13,8 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
   const load = useCallback(() => adminApi.retrievalControl(token), [token])
   const state = useRemoteData(load, onUnauthorized)
   const [draft, setDraft] = useState(null),
+    [initializationBudget, setInitializationBudget] = useState(1000000000),
+    [budgetRunId, setBudgetRunId] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(null),
     [confirm, setConfirm] = useState(false)
@@ -28,6 +30,13 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
     }
   }, [state.data, draft])
   useEffect(() => {
+    const run = state.data?.run
+    if (run?.snapshot_locked && run.id !== budgetRunId) {
+      setInitializationBudget(Number(run.token_budget))
+      setBudgetRunId(run.id)
+    }
+  }, [state.data?.run, budgetRunId])
+  useEffect(() => {
     const id = setInterval(() => {
       if (!document.hidden) state.refresh()
     }, 30000)
@@ -41,7 +50,8 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
       const data =
         action === 'settings'
           ? await adminApi.retrievalSettings(token, draft)
-          : await adminApi.retrievalAction(token, action)
+          : await adminApi.retrievalAction(token, action,
+            ['backfill', 'backfill-budget'].includes(action) ? { tokenBudget: initializationBudget } : {})
       state.setData(data)
       setDraft({
         enabled: data.settings.enabled,
@@ -110,7 +120,7 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
                 />
               </label>
               <label className="qp-field">
-                每日预估 token 预算
+                日常增量 token 预算 / 天
                 <input
                   className="qp-input"
                   type="number"
@@ -150,18 +160,33 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
               </div>
             ))}
             <div>
-              <small>今日已预留 token（UTC）</small>
+              <small>今日增量已预留 token（UTC）</small>
               <strong>{data.reservedTokensToday.toLocaleString('zh-CN')}</strong>
             </div>
           </div>
           <p className="mih-browser-note">
+            每日预算只用于增量，北京时间每天 08:00 进入新预算日；初始化使用下方独立额度，不占用每日预算。
             状态最多缓存 30 秒。预算是调用前的预估计数，包含失败尝试，实际供应商计费以供应商记录为准。并发还受
             Worker 副本数、HanLP 与模型服务容量约束。
           </p>
+          <div className="mih-advanced-notice">
+            <strong>历史初始化 · 固定范围、独立额度</strong>
+            <p>启动时锁定当前可检索文本的记录与版本。后续新增或更新进入日常增量，不延长本次范围；已有向量会复用。</p>
+            <label className="qp-field">
+              本次初始化 token 总额度（0 = 不限额）
+              <input className="qp-input" type="number" min={0} max={1000000000} step={1}
+                value={initializationBudget}
+                onChange={(e) => setInitializationBudget(Number(e.target.value))} />
+            </label>
+            <p className="mih-browser-note">不限额仍受供应商限流、Worker 并发和暂停设置约束，模型调用可能产生费用。任务结束后自然只剩每日增量，无需改回预算。</p>
+            {active && data.run?.snapshot_locked ? <button className="qp-button qp-button--secondary"
+              disabled={busy || !Number.isInteger(initializationBudget) || initializationBudget < 0 || initializationBudget > 1000000000}
+              onClick={() => execute('backfill-budget')}>更新本次额度并继续</button> : null}
+          </div>
           <div className="mih-retrieval-actions">
             <button
               className="qp-button qp-button--secondary"
-              disabled={busy || active || !data.ready || !data.settings.enabled || data.settings.paused}
+              disabled={busy || active || !data.ready || !data.settings.enabled || data.settings.paused || !Number.isInteger(initializationBudget) || initializationBudget < 0 || initializationBudget > 1000000000}
               onClick={() => setConfirm((v) => !v)}
             >
               全库向量化 / 补齐索引
@@ -185,12 +210,13 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
           </div>
           {confirm ? (
             <div className="mih-advanced-notice">
-              <strong>为全部当前文本建立向量索引</strong>
+              <strong>锁定当前范围并开始历史初始化</strong>
               <p>
                 此操作会调用已配置的 Embedding
                 服务，可能产生费用。历史记录分批入队，新数据优先；已有同版本向量复用。不会删除现有全文索引，也不会重新采集。短于
                 24 字符的记录保留全文检索。
               </p>
+              <p>本次总额度：{initializationBudget === 0 ? '不限额' : `${initializationBudget.toLocaleString('zh-CN')} token`}；每日增量预算保持 {Number(data.settings.daily_token_budget).toLocaleString('zh-CN')} token。</p>
               <button
                 className="qp-button qp-button--primary"
                 disabled={busy}
@@ -208,6 +234,13 @@ export function RetrievalControlPanel({ token, onUnauthorized }) {
               ? `最近任务：${runLabels[data.run.status] || data.run.status} · 已扫描 ${Number(data.run.seeded).toLocaleString('zh-CN')} 条 · 开始于 ${formatDate(data.run.started_at)}`
               : '尚未启动全库向量化任务'}
           </p>
+          {data.run?.snapshot_locked ? <div className="mih-retrieval-progress">
+            <div><small>锁定范围</small><strong>{Number(data.run.target_count).toLocaleString('zh-CN')} 条</strong></div>
+            <div><small>已处理</small><strong>{Number(data.run.progress?.completed || 0).toLocaleString('zh-CN')}</strong></div>
+            <div><small>版本变化 · 转增量</small><strong>{Number(data.run.progress?.superseded || 0).toLocaleString('zh-CN')}</strong></div>
+            <div><small>初始化剩余</small><strong>{Number(data.run.progress?.pending || 0).toLocaleString('zh-CN')}</strong></div>
+            <div><small>本次已预留 / 总额度</small><strong>{Number(data.run.reserved_tokens).toLocaleString('zh-CN')} / {Number(data.run.token_budget) === 0 ? '不限额' : Number(data.run.token_budget).toLocaleString('zh-CN')}</strong></div>
+          </div> : data.run ? <p className="mih-browser-note">此为升级前任务，沿用原每日预算。新启动的初始化任务才使用固定范围与独立额度。</p> : null}
           {data.failures?.length ? (
             <details>
               <summary>最近失败记录</summary>
