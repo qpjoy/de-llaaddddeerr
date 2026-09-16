@@ -36,6 +36,9 @@ import { AgentStudioStore } from './agent-studio/store.mjs'
 import { createSearch } from './search/index.mjs'
 import { AdminSearchReindex } from './search/admin-reindex.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
+import { createRetrievalPool } from './retrieval/pool.mjs'
+import { AdvancedSearch } from './retrieval/search.mjs'
+import { RetrievalControl } from './retrieval/control.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
 import { SQLiteApiSourcePuller } from './ingest/external/sqlite-api-source.mjs'
@@ -123,8 +126,12 @@ export async function createRuntime(config = loadConfig()) {
     managedKinds: config.listenerMode === 'public' ? [] : ['chat', 'embedding'],
   })
   // Read-only here. The API serves retrieval queries and reports pipeline
-  // status; the writing stages belong to the projector workload.
+  // status; vector writes belong to the independent retrieval workload.
   const search = pool ? createSearch({ pool, config: config.common }) : null
+  const retrievalPool = pool && config.listenerMode !== 'public'
+    ? createRetrievalPool(config.common.postgres) : null
+  const advancedSearch = retrievalPool ? new AdvancedSearch({ pool: retrievalPool, search, agent }) : null
+  const retrievalControl = retrievalPool ? new RetrievalControl({ pool: retrievalPool, search, agent }) : null
   const searchReindex = search && config.listenerMode !== 'public'
     ? new AdminSearchReindex({ search, segmenterConfig: config.common.segmenter })
     : null
@@ -404,6 +411,8 @@ export async function createRuntime(config = loadConfig()) {
     agentStudio,
     search,
     searchReindex,
+    advancedSearch,
+    retrievalControl,
     embedding,
     externalPlatformAdmin,
     notifications,
@@ -427,7 +436,7 @@ export async function createRuntime(config = loadConfig()) {
     notifications,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
-    search, searchReindex, embedding, externalPlatformStore,
+    search, searchReindex, embedding, externalPlatformStore, retrievalPool,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
     externalPlatformControlStore, ipRiskGateway,
@@ -448,6 +457,7 @@ export async function start(config = loadConfig()) {
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()
     await runtime.store.close()
+    await runtime.retrievalPool?.end()
     await runtime.pool?.end()
   }
   return { ...runtime, server, close }

@@ -1296,7 +1296,7 @@ test('chunk index is not created without configured embedding dimensions', () =>
   const withDims = chunkIndex({ dimensions: 1024 })
   assert.equal(withDims.mappings.properties.embedding.dims, 1024)
   assert.equal(withDims.mappings.properties.embedding.index, true)
-  assert.equal(withDims.currentIndex, 'mx-insight-hub-chunk-v1-current')
+  assert.equal(withDims.currentIndex, 'mx-insight-hub-chunk-v2-current')
   assert.equal(withDims.settings['index.lifecycle.name'], undefined)
 })
 
@@ -1607,7 +1607,7 @@ test('chunk current index rebuild reuses stored vectors and removes the legacy r
 
   assert.equal(harness.calls.bulks.length, 4, 'both passes replay live chunks and durable tombstones')
   const [action, document] = harness.calls.bulks[0]
-  assert.equal(action.index._index, 'mx-insight-hub-chunk-v1-current')
+  assert.equal(action.index._index, 'mx-insight-hub-chunk-v2-current')
   assert.equal(action.index._id, `${row.record_id}:0:v1`)
   assert.equal(action.index.version_type, 'external_gte')
   assert.deepEqual(document.embedding, row.vector, 'rebuild reads PostgreSQL vectors without invoking a model')

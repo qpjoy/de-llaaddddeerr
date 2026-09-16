@@ -1,3 +1,4 @@
+import { RetrievalControlPanel } from './retrieval-control.jsx'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Archive,
@@ -831,6 +832,7 @@ export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
       <AcquisitionHistoryPanel token={token} onUnauthorized={onUnauthorized} />
 
       <SearchReindexControl token={token} onUnauthorized={onUnauthorized} onReindexed={refreshAfterReindex} />
+      <RetrievalControlPanel token={token} onUnauthorized={onUnauthorized} />
 
       <Panel title="检索与筛选" subtitle="浏览与游标分页走 PostgreSQL；关键词搜索优先 Elasticsearch、故障时回退 PostgreSQL，详情始终回读完整 canonical record">
         <form className="mih-data-center-search" onSubmit={search}>

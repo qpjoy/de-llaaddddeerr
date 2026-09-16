@@ -744,6 +744,8 @@ export function createApp({
   agentStudio = null,
   search = null,
   searchReindex = null,
+  advancedSearch = null,
+  retrievalControl = null,
   embedding = null,
   externalPlatformAdmin = null,
   notifications = null,
@@ -1597,6 +1599,34 @@ export function createApp({
           requestId,
         })
         return
+      }
+      if (pathname.startsWith('/internal/v1/admin/data-browser/advanced/')) {
+        requireSourceAdmin(principal)
+        if (!advancedSearch) throw new AppError(503,'advanced_search_unavailable','高级搜索需要 PostgreSQL 和 Elasticsearch')
+        const action = pathname.slice('/internal/v1/admin/data-browser/advanced/'.length)
+        let data
+        if (request.method === 'GET' && action === 'capabilities') data = await advancedSearch.capabilities()
+        else if (request.method === 'POST' && action === 'search') data = await advancedSearch.run(await readJson(request))
+        else if (request.method === 'POST' && action === 'answer') data = await advancedSearch.answer(await readJson(request))
+        else throw new AppError(404,'not_found','Unknown search operation')
+        sendJson(response,200,{data,requestId}); return
+      }
+      if (pathname.startsWith('/internal/v1/admin/retrieval/control')) {
+        requireSourceAdmin(principal)
+        if (!retrievalControl) throw new AppError(503,'retrieval_unavailable','后台向量化需要 PostgreSQL')
+        const action = pathname.slice('/internal/v1/admin/retrieval/control'.length)
+        let data
+        if (request.method === 'GET' && !action) data = await retrievalControl.status()
+        else if (request.method === 'PUT' && action === '/settings') data = await retrievalControl.configure(await readJson(request))
+        else if (request.method === 'POST' && action === '/backfill') {
+          const body = await readJson(request)
+          if (body && Object.keys(body).length) throw new AppError(400,'invalid_retrieval_request','全库任务不接受隐式范围或模型覆盖参数')
+          data = await retrievalControl.start()
+        }
+        else if (request.method === 'POST' && action === '/cancel') data = await retrievalControl.cancel()
+        else if (request.method === 'POST' && action === '/retry') data = await retrievalControl.retry()
+        else throw new AppError(404,'not_found','Unknown retrieval operation')
+        sendJson(response,200,{data,requestId}); return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-browser/statistics') {
         requireSourceAdmin(principal)

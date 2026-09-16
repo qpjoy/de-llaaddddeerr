@@ -9,7 +9,7 @@
 // read as stale and are recomputed, rather than a corpus silently containing two
 // incompatible chunkings.
 
-export const CHUNKER_VERSION = 'mxih-chunker.v1'
+export const CHUNKER_VERSION = 'mxih-chunker.v2'
 
 // Target chunk size in approximate tokens. Small enough that a chunk is about
 // one idea (which is what makes a vector match meaningful) and large enough to
@@ -52,15 +52,22 @@ function splitSentences(text) {
 /**
  * Split text into overlapping chunks on sentence boundaries.
  *
- * A sentence longer than the target is emitted whole rather than cut mid-way:
- * a chunk that starts and ends mid-sentence embeds poorly, and one oversized
- * chunk costs less retrieval quality than several truncated ones.
+ * Ordinary sentences remain intact. Unpunctuated spans longer than 512 code
+ * points are split first, bounding model/HanLP request size without losing text.
  */
 export function chunkText(text, { targetTokens = TARGET_TOKENS, overlapTokens = OVERLAP_TOKENS } = {}) {
   const normalized = String(text ?? '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
   if (!normalized) return []
 
-  const sentences = splitSentences(normalized)
+  // Bound unpunctuated text before sentence grouping. Code-point splitting
+  // preserves surrogate pairs and caps even a pathological CJK input.
+  const sentences = splitSentences(normalized).flatMap((sentence) => {
+    const chars = [...sentence]
+    if (chars.length <= 512) return [sentence]
+    const pieces = []
+    for (let i = 0; i < chars.length; i += 512) pieces.push(chars.slice(i,i+512).join(''))
+    return pieces
+  })
   const chunks = []
   let current = []
   let currentTokens = 0

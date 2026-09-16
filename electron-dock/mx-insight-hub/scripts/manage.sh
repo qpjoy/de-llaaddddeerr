@@ -461,22 +461,22 @@ search_action() {
       fi
       # The Hub is already healthy, so do not recreate its API/login services
       # while attaching this independently restartable outbox consumer.
-      compose --profile search up -d --no-deps projector
+      compose --profile search up -d --no-deps projector retrieval
       search_compose ps
-      compose --profile search ps projector
+      compose --profile search ps projector retrieval
       say "Local Elasticsearch: http://127.0.0.1:${MX_INSIGHT_ELASTICSEARCH_PORT:-19200}"
       say "Local Kibana: http://127.0.0.1:${MX_INSIGHT_KIBANA_PORT:-15601}"
       ;;
     status)
       search_compose ps --all
-      compose --profile search ps --all projector
+      compose --profile search ps --all projector retrieval
       ;;
     logs)
       search_compose logs --tail=250 elasticsearch search-setup kibana
-      compose --profile search logs --tail=250 projector
+      compose --profile search logs --tail=250 projector retrieval
       ;;
     down)
-      compose --profile search stop projector
+      compose --profile search stop projector retrieval
       search_compose down
       say "Search projector and containers stopped; PostgreSQL outbox and Elasticsearch volumes were preserved."
       ;;
@@ -2125,6 +2125,7 @@ apply_k8s() {
   render_file "${K8S_DIR}/32-projector.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
+  render_file "${K8S_DIR}/35-retrieval.yaml" | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/40-network-policy.yaml"
 
   # The projector is scaled to match deploy-time search availability rather
@@ -2160,6 +2161,10 @@ apply_k8s() {
     deployment/mx-insight-hub-classifier --timeout=180s; then
     kubectl -n "$namespace" logs deployment/mx-insight-hub-classifier --tail=60 >&2 || true
     say "WARNING: Agent classifier did not become ready; classification backlog is retained." >&2
+  fi
+  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-retrieval
+  if ! kubectl -n "$namespace" rollout status deployment/mx-insight-hub-retrieval --timeout=180s; then
+    say "WARNING: retrieval worker is not ready; durable vector jobs remain queued. Public API stays available." >&2
   fi
   verify_hanlp_from_hub || true
   refresh_launcher_workload
@@ -2864,7 +2869,7 @@ ops_action() {
   fi
   case "$action" in
     plan)
-      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 40-network-policy.yaml; do
+      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml 40-network-policy.yaml; do
         render_file "${K8S_DIR}/${file}"
       done
       ;;

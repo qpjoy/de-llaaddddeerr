@@ -173,6 +173,17 @@ services:
     command: ["node", "server/workers/projector.mjs"]
     restart: unless-stopped
 
+  retrieval:
+    extends:
+      service: projector
+    profiles: ["search"]
+    command: ["node", "server/workers/retrieval.mjs"]
+    mem_limit: 2g
+    cpus: 2
+    depends_on:
+      app:
+        condition: service_healthy
+
   classifier:
     image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
     environment:

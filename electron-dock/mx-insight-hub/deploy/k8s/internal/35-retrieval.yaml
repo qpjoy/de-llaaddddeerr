@@ -1,0 +1,109 @@
+# Durable vector indexing; two replicas share fenced PostgreSQL record leases.
+# The database setting defaults disabled. No full backfill is started by deploy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-insight-hub-retrieval
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-retrieval
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-retrieval
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-retrieval
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: worker
+    spec:
+      # Agent Provider proxy endpoints may be host-local (for example
+      # 127.0.0.1:7890). Share the node network so embedding and Admin probes
+      # see the same proxy path; this worker still exposes no Service or port.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      # Long enough to finish a bulk batch and mark it delivered, so a rollout
+      # does not leave events to be reclaimed by lease expiry.
+      terminationGracePeriodSeconds: 60
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: retrieval
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/workers/retrieval.mjs"]
+          envFrom:
+            - configMapRef:
+                name: mx-insight-hub-config
+            # Model API keys, keyed by whatever `apiKeyEnv` each provider in
+            # MX_INSIGHT_AGENT_PROVIDERS names. envFrom rather than explicit
+            # entries so adding a provider never requires editing this file --
+            # a key that silently fails to reach the pod is indistinguishable
+            # from that provider being down.
+            - secretRef:
+                name: mx-insight-hub-model-keys
+                optional: true
+          env:
+            - name: MX_INSIGHT_LISTENER_MODE
+              value: public
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+            - name: MX_INSIGHT_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_API_KEY_PEPPER
+            - name: MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT
+          # One bounded record job per process; cluster admission is database-wide.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mx-insight-hub-retrieval
+  namespace: mx-insight-hub
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-retrieval

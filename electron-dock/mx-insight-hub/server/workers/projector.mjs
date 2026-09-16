@@ -12,10 +12,6 @@ import {
   monitorSearchReindexLock,
   requireSearchReindexLock,
 } from '../search/reindex-lock.mjs'
-import { createAgentRuntime } from '../agent/runtime.mjs'
-import { AgentSettingsStore } from '../agent/settings-store.mjs'
-import { AgentControlStore } from '../agent/control-store.mjs'
-import { EmbeddingPipeline, runEmbeddingLoop } from '../embedding/pipeline.mjs'
 
 // Projector worker entrypoint.
 //
@@ -104,44 +100,9 @@ async function main() {
   process.on('SIGTERM', () => shutdown('SIGTERM'))
   process.on('SIGINT', () => shutdown('SIGINT'))
 
-  // The embedding pipeline shares this workload because both write to
-  // Elasticsearch through the same client and index definitions. They run as
-  // independent loops so a stalled model provider cannot hold up content
-  // projection. Both writers share the strict tokenizer contract.
-  const agent = await createAgentRuntime({
-    config,
-    settingsStore: new AgentSettingsStore(pool),
-    controlStore: new AgentControlStore(pool, { deploymentEgress: config.deploymentEgress }),
-    managedKinds: ['embedding'],
-    logger,
-  })
-  const embedding = new EmbeddingPipeline({
-    pool,
-    agent,
-    client: search.client,
-    segmenter: strictProjectionSegmenter,
-    chunkIndexSet: search.chunkIndexSet,
-    logger,
-  })
-
   logger.log(`[projector] draining outbox into ${search.indexSet.writeAlias}`)
-  const loops = [runProjectorLoop(search.projector, { signal: controller.signal, logger })]
-
-  if (embedding.enabled) {
-    logger.log(`[embed] retrieval pipeline active -> ${search.chunkIndexSet.writeAlias}`)
-    loops.push(runEmbeddingLoop(embedding, { signal: controller.signal, logger }))
-  } else {
-    // Say which half is missing. "Embeddings are off" is far less useful than
-    // knowing whether it is the index or the provider that is unconfigured.
-    logger.log(
-      `[embed] retrieval pipeline idle (chunk index: ${search.chunkIndexSet ? 'configured' : 'missing MX_INSIGHT_EMBEDDING_DIMENSIONS'}, ` +
-        `provider: ${agent.embeddings?.available ? 'configured' : 'missing MX_INSIGHT_EMBEDDING_PROVIDERS'})`,
-    )
-  }
-
-  await Promise.all(loops)
-
-  agent.close()
+  // Embedding is drained by the independently budgeted retrieval workload.
+  await runProjectorLoop(search.projector, { signal: controller.signal, logger })
   await pool.end()
   logger.log('[projector] stopped')
 }

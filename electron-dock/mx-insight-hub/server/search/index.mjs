@@ -1066,7 +1066,7 @@ async function reconcileChunkSnapshot({
       `SELECT c.id, c.record_id, c.chunk_index, c.content, c.chunker_version,
               c.source_revision, c.embedding_model, c.embedding_version, c.vector,
               c.created_at, r.dataset_id, r.platform, r.external_id, r.url,
-              r.title, r.event_time
+              r.title, r.event_time,r.object_type,r.content_type,r.author_external_id,r.stable_fields
          FROM core.record_chunks c
          JOIN core.canonical_records r ON r.id = c.record_id
         WHERE c.embedded_at IS NOT NULL

@@ -48,12 +48,13 @@ test('consecutive chunks overlap so a boundary sentence stays retrievable', () =
   assert.ok(chunks[1].includes(tail.slice(0, 8)), 'the second chunk carries the first chunk\'s tail')
 })
 
-test('a single oversized sentence is emitted whole rather than cut', () => {
-  const giant = `${'长'.repeat(900)}。`
+test('unpunctuated text is bounded without losing unicode characters', () => {
+  const giant = '长'.repeat(900) + '。'
   const chunks = chunkText(giant)
-  // A chunk that starts and ends mid-sentence embeds poorly; one oversized
-  // chunk costs less than several truncated ones.
-  assert.equal(chunks.length, 1)
+  assert.ok(chunks.length > 1)
+  assert.ok(chunks.every(c => [...c].length <= 1024))
+  assert.ok(chunks.join('').includes('。'))
+  assert.ok(chunks.join('').length >= giant.length)
 })
 
 test('empty or whitespace-only text yields no chunks', () => {
@@ -133,6 +134,8 @@ test('chunk document construction is pure and carries the searchable revision', 
     embedding: [0.1, 0.2],
     embeddingModel: 'openai:text-embedding-3-small',
     embeddingVersion: 1,
+    embeddingSpace: 'text-embedding-3-small:2',
+    objectType: null, contentType: null, accountId: null, tags: [],
     chunkerVersion: CHUNKER_VERSION,
     sourceRevision: 7,
     eventTime: new Date('2026-08-10T00:00:00.000Z'),
@@ -191,10 +194,9 @@ test('re-chunking a changed record deletes the chunks it no longer reaches', asy
   const queueQuery = pool.client.queries.find(({ sql }) => sql.includes('INSERT INTO core.chunk_projection_deletes'))
   assert.match(queueQuery.sql, /c\.chunker_version <> \$3/)
   assert.match(queueQuery.sql, /c\.chunk_index >= \$4/)
-  const [recordId, chunkerVersion, revision, newCount] = deletes[0]
+  const [recordId, chunkerVersion, newCount] = deletes[0]
   assert.equal(recordId, 'r1')
   assert.equal(chunkerVersion, CHUNKER_VERSION)
-  assert.equal(revision, 5)
   // An edit that shortens a record must not leave its extra chunks behind, or
   // retrieval keeps serving text the source no longer contains.
   assert.equal(newCount, result.chunks)

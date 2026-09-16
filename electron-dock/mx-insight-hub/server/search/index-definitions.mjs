@@ -6,7 +6,7 @@ export const PRODUCT_ID = 'mx-insight-hub'
 // must be populated for existing documents. Elasticsearch can add a mapping in
 // place, but it cannot retroactively analyze old `_source` into that field.
 export const CONTENT_SCHEMA_VERSION = 6
-export const CHUNK_SCHEMA_VERSION = 1
+export const CHUNK_SCHEMA_VERSION = 2
 
 // Human names arrive as raw source text. Keep that raw value in `_source` and
 // let the multi-fields handle exact, prefix and arbitrary CJK substring
@@ -230,6 +230,11 @@ export function chunkIndex({ dimensions, numberOfReplicas = 0 } = {}) {
     properties: {
       id: { type: 'keyword' },
       recordId: { type: 'keyword' },
+      objectType: { type: 'keyword' },
+      contentType: { type: 'keyword' },
+      accountId: { type: 'keyword' },
+      tags: { type: 'keyword' },
+      embeddingSpace: { type: 'keyword' },
       chunkIndex: { type: 'integer' },
       datasetId: { type: 'keyword' },
       platform: { type: 'keyword' },

@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { MagnifyingGlass, DownloadSimple, Funnel, ArrowClockwise } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { DropdownField, EmptyState, ErrorState, LoadingState, PageHeading, formatDate, useRemoteData } from './components.jsx'
 import { AccountAnalysis, AccountCards, AccountHero, ContentDetail, ContentTable, downloadBrowserFile, formatNumber, platformName } from './data-browser-parts.jsx'
 import './data-browser.css'
 
-const views = [['accounts', '账号大盘'], ['contents', '内容大盘'], ['hotspots', '热点线索']]
+const AdvancedSearchPanel = lazy(() => import('./advanced-search.jsx'))
+const views = [['accounts', '账号大盘'], ['contents', '内容大盘'], ['hotspots', '热点线索'], ['advanced', '高级搜索']]
 const emptySearch = { q: '', platform: '', objectType: '', contentType: '', from: '', to: '', tag: '', sort: 'newest' }
 const platforms = [['', '全部平台'], ...['xiaohongshu', 'douyin', 'kuaishou', 'bilibili', 'weibo', 'telegram', 'twitter', 'taobao', 'jd', 'mobile_commerce'].map((key) => [key, platformName(key)])]
 const objectTypes = [['', '全部对象'], ['post', '帖子 / 笔记'], ['product', '商品'], ['comment', '评论'], ['message', '消息'], ['article', '文章'], ['user', '用户资料'], ['account', '账号'], ['profile', '画像资料'], ['chat', '会话']]
@@ -44,6 +45,7 @@ function AccountHeader({ token, row, onUnauthorized, onBack, onTag }) {
 }
 export function DataBrowserPage({ token, onUnauthorized }) {
   const resultsRef = useRef(null)
+  const [advanced,setAdvanced] = useState(false)
   const [filters, setFilters] = useState({ ...emptySearch, view: 'accounts', account: '', page: 1, pageSize: 20 })
   const [draft, setDraft] = useState(emptySearch)
   const [accountRow, setAccountRow] = useState(null)
@@ -55,7 +57,7 @@ export function DataBrowserPage({ token, onUnauthorized }) {
   const [exportState, setExportState] = useState({ busy: false, error: null, message: '' })
   useEffect(() => { document.getElementById('mih-main-content')?.scrollIntoView({ block: 'start' }) }, [filters.view, filters.account, selected?.id])
   const filterKey = JSON.stringify(filters)
-  const load = useCallback(async () => ({ ...(filters.account && accountTab !== 'contents' ? { items: [] } : await adminApi.dataBrowser(token, filters)), filterKey }), [token, filters, filterKey, accountTab])
+  const load = useCallback(async () => ({ ...(advanced || filters.account && accountTab !== 'contents' ? { items: [] } : await adminApi.dataBrowser(token, filters)), filterKey }), [token, filters, filterKey, accountTab, advanced])
   const state = useRemoteData(load, onUnauthorized)
   const data = state.data
   const loading = state.loading || (!state.error && data?.filterKey !== filterKey)
@@ -65,10 +67,10 @@ export function DataBrowserPage({ token, onUnauthorized }) {
   const scopeKey = JSON.stringify(Object.fromEntries(Object.entries(filters).filter(([k]) => !['page', 'pageSize', 'sort'].includes(k))))
   const [readyScope, setReadyScope] = useState('')
   useEffect(() => { if (!loading && !state.error) setReadyScope(scopeKey) }, [loading, state.error, scopeKey])
-  const total = useBrowserTotal(token, filters, readyScope === scopeKey, onUnauthorized)
+  const total = useBrowserTotal(token, filters, !advanced && readyScope === scopeKey, onUnauthorized)
   const updateDraft = (key, value) => setDraft((v) => ({ ...v, [key]: value }))
   const patch = (values) => { setSelected(null); setExportState((v) => ({ ...v, error: null, message: '' })); setFilters((v) => ({ ...v, ...values, page: 1 })) }
-  const navigate = (view, values = {}) => { const search = { ...emptySearch, ...values }; setDraft(search); patch({ ...search, view, account: '', ...values }); setAccountRow(null) }
+  const navigate = (view, values = {}) => { if(view==='advanced'){setAdvanced(true);return}setAdvanced(false); const search = { ...emptySearch, ...values }; setDraft(search); patch({ ...search, view, account: '', ...values }); setAccountRow(null) }
   const selectAccount = (row, tab = 'overview') => { navigate('contents', { platform: row.platform, account: row.account_id }); setAccountRow(row); setAccountTab(tab) }
   const selectTag = (tag) => navigate('contents', { tag })
   const quick = (key, value) => { updateDraft(key, value); patch({ [key]: value }) }
@@ -82,6 +84,7 @@ export function DataBrowserPage({ token, onUnauthorized }) {
       setExportState({ busy: false, error: null, message: `已导出 ${result.exportedRows} 条${result.truncated ? '；仍有更多匹配记录，本文件不是全量导出，请缩小筛选范围。' : '；已覆盖本次筛选的全部匹配记录。'}` })
     } catch (error) { if (error.status === 401) onUnauthorized?.(error); setExportState({ busy: false, error, message: '' }) }
   }
+  if (advanced) return <div className="mih-data-browser"><PageHeading title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='advanced'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><AdvancedSearchPanel token={token} onUnauthorized={onUnauthorized} onAccount={selectAccount} onTag={selectTag}/></Suspense></div>
   if (selected) return <ContentDetail key={selected.id} row={selected} {...{ token, onUnauthorized }} onClose={() => setSelected(null)} onAccount={selectAccount} onTag={selectTag} onDetail={setSelected} />
   return <div className={`mih-data-browser ${filters.view === "accounts" ? "is-account-list" : ""}`}>
     {!filters.account ? <PageHeading eyebrow="DATA EXPLORER" title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。" loading={loading} onRefresh={() => { state.refresh(); total.retry() }} /> : null}

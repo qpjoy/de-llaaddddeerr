@@ -2,6 +2,8 @@
 
 日期：2026-09-16。最新状态见文末“账号总览、内容画像与独立精确计数”；其余修复记录保留为历史。本文区分已经实现、待验证和规划，参考项目文档中的目标不代表 Hub 当前能力。
 
+历史评估：[高级搜索与 RAG 评估](advanced-search-rag-assessment.md)。当前实现与手动操作见 [RAG 操作及容量边界](rag-search-operations.md)，后续 [LLM Wiki 扩展预案](llm-wiki-extension.md)。线上全库重建由用户在数据中心点击，本次不自动启动。
+
 ## 本次实现
 
 新增 Admin Token 专属 `/data-browser`，导航位于原 `/data-center` 之前，原数据中心保留。

@@ -13,6 +13,7 @@
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "start": "node server/index.mjs",
     "projector": "node server/workers/projector.mjs",
+    "retrieval:worker": "node server/workers/retrieval.mjs",
     "ingest": "node server/workers/ingest.mjs",
     "classifier": "node server/workers/classifier.mjs",
     "migrate": "node server/migrate.mjs",

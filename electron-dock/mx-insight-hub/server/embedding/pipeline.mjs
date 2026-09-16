@@ -49,12 +49,13 @@ export class EmbeddingPipeline {
    * and retrieval keeps returning text the source no longer contains — a
    * failure that looks like a model problem and is really a bookkeeping one.
    */
-  async materializeChunks({ limit = CHUNK_BATCH } = {}) {
+  async materializeChunks({ limit = CHUNK_BATCH, recordId = null } = {}) {
     const { rows } = await this.pool.query(
       `SELECT r.id, r.dataset_id, r.platform, r.external_id, r.url, r.title,
               r.body, r.event_time, r.current_revision
          FROM core.canonical_records r
         WHERE r.deleted_at IS NULL
+          ${recordId ? 'AND r.id = $3::uuid' : ''}
           AND coalesce(length(r.body), 0) + coalesce(length(r.title), 0) >= 24
           AND NOT EXISTS (
             SELECT 1 FROM core.record_chunks c
@@ -64,7 +65,7 @@ export class EmbeddingPipeline {
           )
         ORDER BY r.id
         LIMIT $1`,
-      [limit, CHUNKER_VERSION],
+      recordId ? [limit, CHUNKER_VERSION, recordId] : [limit, CHUNKER_VERSION],
     )
     // Deleted records and records shortened below the retrieval threshold do
     // not appear in the materialisation query. They still need their existing
@@ -73,11 +74,12 @@ export class EmbeddingPipeline {
       `SELECT r.id, r.current_revision
          FROM core.canonical_records r
         WHERE EXISTS (SELECT 1 FROM core.record_chunks c WHERE c.record_id = r.id)
+          ${recordId ? 'AND r.id = $2::uuid' : ''}
           AND (r.deleted_at IS NOT NULL
                OR coalesce(length(r.body), 0) + coalesce(length(r.title), 0) < 24)
         ORDER BY r.id
         LIMIT $1`,
-      [limit],
+      recordId ? [limit, recordId] : [limit],
     )
     if (rows.length === 0 && retired.length === 0) {
       return { records: 0, chunks: 0, removed: 0, deletionsQueued: 0 }
@@ -146,15 +148,14 @@ export class EmbeddingPipeline {
           retainedCount: chunks.length,
         })
 
-        // Remove anything from a previous revision or a previous chunker, plus
+        // Retain same-text vectors across revisions; remove an old chunker and
         // any trailing chunk index the new content no longer reaches.
         const deleted = await client.query(
           `DELETE FROM core.record_chunks
             WHERE record_id = $1
               AND (chunker_version <> $2
-                   OR source_revision IS DISTINCT FROM $3
-                   OR chunk_index >= $4)`,
-          [record.id, CHUNKER_VERSION, record.current_revision, chunks.length],
+                   OR chunk_index >= $3)`,
+          [record.id, CHUNKER_VERSION, chunks.length],
         )
         removed += deleted.rowCount
 
@@ -167,12 +168,11 @@ export class EmbeddingPipeline {
                content = EXCLUDED.content,
                token_count = EXCLUDED.token_count,
                source_revision = EXCLUDED.source_revision,
-               -- Content changed, so any existing vector is now for text that
-               -- is gone. Clearing these two columns is what re-queues the
-               -- chunk for stages 2 and 3.
-               embedding_model = NULL,
-               embedding_version = NULL,
-               embedded_at = NULL,
+               -- Preserve same-text vectors; changed content is re-embedded.
+               embedding_model = CASE WHEN existing.content = EXCLUDED.content THEN existing.embedding_model END,
+               embedding_version = CASE WHEN existing.content = EXCLUDED.content THEN existing.embedding_version END,
+               embedded_at = CASE WHEN existing.content = EXCLUDED.content THEN existing.embedded_at END,
+               vector = CASE WHEN existing.content = EXCLUDED.content THEN existing.vector END,
                projected_at = NULL,
                projection_attempts = 0,
                projection_last_error = NULL,
@@ -241,7 +241,7 @@ export class EmbeddingPipeline {
    * makes stage 3 replayable, and it means rebuilding the search index never
    * requires paying the model again.
    */
-  async embedPending({ limit = EMBED_BATCH } = {}) {
+  async embedPending({ limit = EMBED_BATCH, recordId = null, beforeEmbed = null, signal = null } = {}) {
     if (!this.agent?.embeddings?.available) return { embedded: 0, skipped: 'no embedding provider' }
 
     const { rows } = await this.pool.query(
@@ -249,15 +249,17 @@ export class EmbeddingPipeline {
          FROM core.record_chunks c
          JOIN core.canonical_records r ON r.id = c.record_id
         WHERE c.embedded_at IS NULL
+          ${recordId ? 'AND r.id = $2::uuid' : ''}
           AND r.deleted_at IS NULL
           AND c.source_revision = r.current_revision
         ORDER BY c.created_at
         LIMIT $1`,
-      [limit],
+      recordId ? [limit, recordId] : [limit],
     )
     if (rows.length === 0) return { embedded: 0 }
 
-    const result = await this.agent.embed(rows.map((row) => row.content))
+    if (beforeEmbed) await beforeEmbed(rows.map((row) => row.content))
+    const result = await this.agent.embed(rows.map((row) => row.content), signal ? { signal } : {})
     const model = `${result.provider}:${result.model}`
 
     let embedded = 0
@@ -302,43 +304,47 @@ export class EmbeddingPipeline {
    * — so re-projection overwrites rather than duplicating, and a chunker version
    * bump lands in distinct documents that can be cleaned up separately.
    */
-  async projectPending({ limit = CHUNK_BATCH } = {}) {
+  async projectPending({ limit = CHUNK_BATCH, recordId = null } = {}) {
     if (!this.enabled) return { projected: 0, skipped: 'chunk index not configured' }
 
     const { rows } = await this.pool.query(
       `SELECT c.id, c.record_id, c.chunk_index, c.content, c.chunker_version,
               c.source_revision, c.embedding_model, c.embedding_version, c.vector,
-              r.dataset_id, r.platform, r.external_id, r.url, r.title, r.event_time
+              r.dataset_id, r.platform, r.external_id, r.url, r.title, r.event_time,
+              r.object_type,r.content_type,r.author_external_id,r.stable_fields
          FROM core.record_chunks c
          JOIN core.canonical_records r ON r.id = c.record_id
-        WHERE c.embedded_at IS NOT NULL AND c.projected_at IS NULL
+        WHERE c.embedded_at IS NOT NULL AND (c.projected_at IS NULL OR c.projection_schema <> 2)
+          ${recordId ? 'AND r.id = $2::uuid' : ''}
           AND c.projection_failed_at IS NULL
           AND r.deleted_at IS NULL
           AND c.source_revision = r.current_revision
         ORDER BY c.embedded_at
         LIMIT $1`,
-      [limit],
+      recordId ? [limit, recordId] : [limit],
     )
     if (rows.length === 0) return { projected: 0 }
 
     const projections = []
     let failedCount = 0
-    for (const row of rows) {
-      try {
-        const tokens = await this.segmenter.segment(row.content)
-        projections.push({
-          id: `${row.record_id}:${row.chunk_index}:${row.chunker_version}`,
-          version: Number(row.source_revision),
-          row,
-          document: buildChunkDocument(row, {
-            tokens,
-            createdAt: new Date().toISOString(),
-          }),
-        })
-      } catch (error) {
-        if (isRetryableSegmenterIntegrityError(error)) throw error
-        await this.#markProjectionFailure(row, error)
-        failedCount += 1
+    // Concurrent callers are coalesced by the strict HanLP batching wrapper.
+    // Only 16 texts are in flight; inference capacity remains owned by HanLP.
+    for (let offset = 0; offset < rows.length; offset += 16) {
+      const batch = rows.slice(offset, offset + 16)
+      const results = await Promise.allSettled(batch.map(row => this.segmenter.segment(row.content)))
+      for (const [index, result] of results.entries()) {
+        const row = batch[index]
+        if (result.status === 'rejected') {
+          if (isRetryableSegmenterIntegrityError(result.reason)) throw result.reason
+          await this.#markProjectionFailure(row, result.reason)
+          failedCount += 1
+        } else {
+          projections.push({
+            id: `${row.record_id}:${row.chunk_index}:${row.chunker_version}`,
+            version: Number(row.source_revision), row,
+            document: buildChunkDocument(row, { tokens: result.value, createdAt: new Date().toISOString() }),
+          })
+        }
       }
     }
 
@@ -395,7 +401,7 @@ export class EmbeddingPipeline {
     if (projected.length > 0) {
       const result = await this.pool.query(
         `UPDATE core.record_chunks AS chunk
-            SET projected_at = now(), projection_attempts = 0,
+            SET projected_at = now(), projection_schema = 2, projection_attempts = 0,
                 projection_last_error = NULL, projection_failed_at = NULL
            FROM unnest($1::uuid[], $2::bigint[]) AS done(id, source_revision)
           WHERE chunk.id = done.id
@@ -423,7 +429,7 @@ export class EmbeddingPipeline {
               END
         WHERE chunk.id = $1
           AND chunk.source_revision = $2
-          AND chunk.projected_at IS NULL
+          AND (chunk.projected_at IS NULL OR chunk.projection_schema <> 2)
         RETURNING chunk.projection_failed_at`,
       [row.id, row.source_revision, message, CHUNK_PROJECTION_MAX_ATTEMPTS],
     )
@@ -532,10 +538,13 @@ export class EmbeddingPipeline {
   async status() {
     const { rows } = await this.pool.query(`
       SELECT
-        (SELECT count(*) FROM core.records_needing_chunks)::int AS records_pending_chunks,
+        (SELECT count(*) FROM core.canonical_records r WHERE r.deleted_at IS NULL
+          AND coalesce(length(r.body),0)+coalesce(length(r.title),0)>=24
+          AND NOT EXISTS(SELECT 1 FROM core.record_chunks c WHERE c.record_id=r.id
+            AND c.source_revision=r.current_revision AND c.chunker_version='${CHUNKER_VERSION}'))::int AS records_pending_chunks,
         (SELECT count(*) FROM core.record_chunks WHERE embedded_at IS NULL)::int AS chunks_pending_embedding,
         (SELECT count(*) FROM core.record_chunks
-          WHERE embedded_at IS NOT NULL AND projected_at IS NULL
+          WHERE embedded_at IS NOT NULL AND (projected_at IS NULL OR projection_schema <> 2)
             AND projection_failed_at IS NULL)::int AS chunks_pending_projection,
         (SELECT count(*) FROM core.record_chunks WHERE projection_failed_at IS NOT NULL)::int AS chunks_projection_failed,
         (SELECT count(*) FROM core.chunk_projection_deletes WHERE projected_at IS NULL)::int AS chunks_pending_deletion,
