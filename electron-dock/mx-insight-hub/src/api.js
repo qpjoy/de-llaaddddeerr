@@ -203,6 +203,7 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  enterpriseQuery: (key, apiId, body, options) => publicDataRequest(key, `/api/v1/data/enterprise/${encodeURIComponent(apiId)}/query`, { ...options, method: 'POST', body }),
   ipRiskBatch: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk/batch', { ...options, method: 'POST', body }),
   ipRisk: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk', { ...options, method: 'POST', body }),
   sourceCatalog: (apiKey, query = {}) => publicDataRequest(apiKey, `/api/v1/data/source-catalog${queryString(query)}`),
