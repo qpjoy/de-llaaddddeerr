@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { createApp } from '../../server/app.mjs'
 import { QixinAdminService, QIXIN_METADATA } from '../../server/external-platforms/qixin-admin.mjs'
 import { QixinAdapter } from '../../server/adapters/qixin.mjs'
+import { normalizeRelayBase } from '../../server/external-platforms/egress-relay.mjs'
 import { QIXIN_CATALOG, QIXIN_CONFIG, enterpriseOperation, enterpriseEndpoint, normalizeEnterpriseRequest, enterpriseFields } from '../../server/contracts/enterprise.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
@@ -400,4 +401,61 @@ test('official defaults allow granted billed requests, while negotiated APIs and
   await f.hub.putCapabilityConfiguration('enterprise.query', { tenantId: f.context.tenant.id, consumerId: f.context.consumer.id, enabled: false })
   await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, idempotencyKey: 'new-request-with-revoked-grant' }), { status: 403 })
   assert.equal(calls, 1)
+})
+
+test('an egress relay moves only the transport hop and leaves the catalogue allowlist intact', async () => {
+  let seen = null
+  const adapter = new QixinAdapter({
+    resolveEgressBase: async () => 'http://10.88.0.1:8081/u/qixin',
+    fetchImpl: async (url, init) => {
+      seen = { url: new URL(url), headers: init.headers }
+      return new Response(JSON.stringify({ status: '200', data: {} }))
+    },
+  })
+  await adapter.query('1.31', { query: { keyword: '明天' } }, { credential: credentials })
+  assert.equal(seen.url.origin, 'http://10.88.0.1:8081')
+  assert.equal(seen.url.pathname, '/u/qixin/APIService/v2/search/advSearch')
+  assert.equal(seen.url.searchParams.get('keyword'), '明天')
+  // The signature travels in headers and binds neither Host nor path, so the
+  // relay must leave it byte for byte identical.
+  assert.equal(seen.headers.appkey, credentials.appkey)
+  assert.equal(seen.headers['Auth-Version'], '2.0')
+  assert.equal(typeof seen.headers.sign, 'string')
+})
+
+test('no egress relay keeps the direct upstream URL', async () => {
+  for (const resolveEgressBase of [null, async () => '', async () => null]) {
+    let seen = null
+    const adapter = new QixinAdapter({ resolveEgressBase, fetchImpl: async url => {
+      seen = new URL(url)
+      return new Response(JSON.stringify({ status: '200', data: {} }))
+    } })
+    await adapter.query('1.31', { query: { keyword: '明天' } }, { credential: credentials })
+    assert.equal(seen.origin, 'https://api.qixin.com')
+    assert.equal(seen.pathname, '/APIService/v2/search/advSearch')
+  }
+})
+
+test('the relay base is resolved per query, so a saved change applies without a restart', async () => {
+  const seen = []
+  let base = ''
+  const adapter = new QixinAdapter({
+    resolveEgressBase: async () => base,
+    fetchImpl: async url => { seen.push(new URL(url).origin); return new Response(JSON.stringify({ status: '200', data: {} })) },
+  })
+  const input = { query: { keyword: '明天' } }
+  await adapter.query('1.31', input, { credential: credentials })
+  base = 'http://10.88.0.1:8081/u/qixin'
+  await adapter.query('1.31', input, { credential: credentials })
+  base = ''
+  await adapter.query('1.31', input, { credential: credentials })
+  assert.deepEqual(seen, ['https://api.qixin.com', 'http://10.88.0.1:8081', 'https://api.qixin.com'])
+})
+
+test('a relay base must be absolute and carry no query, credentials or fragment', () => {
+  assert.equal(normalizeRelayBase('  http://10.88.0.1:8081/u/qixin/  '), 'http://10.88.0.1:8081/u/qixin')
+  assert.equal(normalizeRelayBase(''), null)
+  for (const bad of ['/u/qixin', 'ftp://host/u', 'http://a:b@host/u', 'http://host/u?x=1', 'http://host/u#f']) {
+    assert.equal(normalizeRelayBase(bad), undefined, bad)
+  }
 })

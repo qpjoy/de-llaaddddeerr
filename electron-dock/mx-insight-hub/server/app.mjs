@@ -2898,6 +2898,16 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/egress-relay')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform egress relay update')
+        if (!externalPlatformAdmin?.updateEgressRelay) throw new AppError(503, 'egress_relay_unavailable', 'Egress relay unavailable')
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.updateEgressRelay(params.provider, await readJson(request, 8192)), requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider')
       if (request.method === 'GET' && params) {
         requireSourceAdmin(principal)

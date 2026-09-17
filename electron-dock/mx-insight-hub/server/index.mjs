@@ -3,6 +3,7 @@ import { QixinAdminService, QIXIN_METADATA } from './external-platforms/qixin-ad
 import { StructuredExternalPlatformCredentialStore, QIXIN_CREDENTIAL_FIELDS } from './external-platforms/structured-credentials.mjs'
 import { QIXIN_CONFIG } from './contracts/enterprise.mjs'
 import { ExternalPlatformProxyStore, createTikHubProxyFetch } from './external-platforms/proxy.mjs'
+import { ExternalPlatformEgressRelayStore } from './external-platforms/egress-relay.mjs'
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
 import { createServer } from 'node:http'
@@ -249,13 +250,19 @@ export async function createRuntime(config = loadConfig()) {
   const qixinCredentialStore = new StructuredExternalPlatformCredentialStore({ pool, providerKey: 'qixin',
     fields: QIXIN_CREDENTIAL_FIELDS, pepper: config.apiKeyPepper })
   const qixinPlatformStore = createExternalPlatformStore({ pool, usageStore: store, providerKey: 'qixin', authorizationPlatform: 'enterprise' })
+  const qixinEgressRelayStore = pool
+    ? new ExternalPlatformEgressRelayStore(pool, { providerKey: 'qixin', environmentFallback: config.enterpriseEgressBase })
+    : null
   const enterpriseGateway = new ExternalPlatformGateway({ usageStore: store, platformStore: qixinPlatformStore,
-    adapter: config.listenerMode === 'admin' || !pool ? null : new QixinAdapter(), config: QIXIN_CONFIG,
+    adapter: config.listenerMode === 'admin' || !pool
+      ? null
+      : new QixinAdapter({ resolveEgressBase: () => qixinEgressRelayStore.relayBase() }), config: QIXIN_CONFIG,
     providerKey: 'qixin', credentialStore: qixinCredentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
     new QixinAdminService({ store: qixinPlatformStore, config: QIXIN_CONFIG, credentialStore: qixinCredentialStore,
-      operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'qixin', metadata: QIXIN_METADATA }),
+      operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'qixin', metadata: QIXIN_METADATA,
+      egressRelayStore: qixinEgressRelayStore }),
     new IpSearchAdminService(ipRiskGateway.platformStore, ipRiskGateway),
     justOnePlatformAdmin,
     tikHubPlatformAdmin,

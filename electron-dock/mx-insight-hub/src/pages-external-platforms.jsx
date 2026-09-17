@@ -2,6 +2,7 @@ import { StructuredCredentialPanel } from './structured-credential-panel.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
 import { ExternalProxyPanel } from './external-proxy-panel.jsx'
+import { EgressRelayPanel } from './egress-relay-panel.jsx'
 import { SupplierBalanceStatus, SupplierBalancePanel, useSupplierBalances } from './supplier-balances.jsx'
 import { NightAllAPanel } from './night-all-a-panel.jsx'
 import { IntegrationSlotFrame, SlotTags } from './integration-slot.jsx'
@@ -2267,6 +2268,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             notify={notify}
           /> : null}
           {provider === 'tikhub' && detail.proxy ? <ExternalProxyPanel notify={notify} Panel={Panel} key={detail.proxy.revision} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
+          {detail.egressRelay ? <EgressRelayPanel notify={notify} Panel={Panel} key={`egress-${detail.egressRelay.revision}`} token={token} provider={provider} relay={detail.egressRelay} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           <ExternalPlatformOperationControlPanel
             token={token}
             provider={provider}

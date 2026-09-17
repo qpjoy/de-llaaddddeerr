@@ -8,9 +8,24 @@ import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-js
 const hash = value => createHash('sha256').update(value).digest('hex')
 const accepted = new Set([200, 201, 202, 203, 206])
 
+// Only the transport hop moves. The catalogue URL is still validated against the
+// allowlist below; this rewrites where the request is *sent* so it leaves through
+// the Domestic edge and the upstream sees a fixed public egress IP. Qixin's
+// Auth 2.0 sign is md5(appkey + timestamp + secret_key) and binds neither Host
+// nor path, so relaying cannot invalidate it. See docs/operations/system-proxy.md.
+const relayUrl = (base, target) => {
+  const relay = new URL(base)
+  relay.pathname = `${relay.pathname.replace(/\/+$/, '')}${target.pathname}`
+  relay.search = target.search
+  return relay.toString()
+}
+
 export class QixinAdapter {
-  constructor({ fetchImpl = fetch, timeoutMs = 30000, maxResponseBytes = 16 * 1024 * 1024, clock = Date.now } = {}) {
-    Object.assign(this, { fetchImpl, timeoutMs, maxResponseBytes, clock })
+  // resolveEgressBase is awaited per query, not read once at construction, so
+  // an operator's save in the admin console applies to the next request.
+  constructor({ fetchImpl = fetch, timeoutMs = 30000, maxResponseBytes = 16 * 1024 * 1024, clock = Date.now,
+    resolveEgressBase = null } = {}) {
+    Object.assign(this, { fetchImpl, timeoutMs, maxResponseBytes, clock, resolveEgressBase })
   }
   async resolveCredential() { return null }
   async query(apiId, input, { credential }) {
@@ -21,6 +36,11 @@ export class QixinAdapter {
     if (url.origin !== 'https://api.qixin.com' || url.username || url.password || url.search || url.hash) throw new Error('Enterprise endpoint is not allowlisted')
     if (!credential?.appkey || !credential?.secret_key) throw new Error('Enterprise credential is unavailable')
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value))
+    // Before the try block, with the other preflight throws: an unreadable
+    // egress setting must not be silently downgraded to a direct call that the
+    // upstream then rejects on its allowlist.
+    const egressBase = this.resolveEgressBase ? await this.resolveEgressBase() : ''
+    const requestUrl = egressBase ? relayUrl(egressBase, url) : url.toString()
     const timestamp = String(this.clock())
     const sign = createHash('md5').update(credential.appkey + timestamp + credential.secret_key).digest('hex')
     const redactors = [credential.appkey, credential.secret_key, sign].map(createCredentialEchoRedactor)
@@ -34,7 +54,7 @@ export class QixinAdapter {
       return error
     }
     try {
-      const response = await this.fetchImpl(url.toString(), { method, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
+      const response = await this.fetchImpl(requestUrl, { method, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
         headers: { 'Auth-Version': '2.0', appkey: credential.appkey, timestamp, sign, Accept: 'application/json',
           ...(body ? { 'Content-Type': 'application/json; charset=utf-8' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),

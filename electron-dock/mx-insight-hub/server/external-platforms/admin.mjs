@@ -359,11 +359,13 @@ export class ExternalPlatformAdminService {
     credentialStore = null,
     operationControlStore = null,
     proxyStore = null,
+    egressRelayStore = null,
     durable = false,
     providerKey = 'justone',
     metadata = null,
   }) {
     this.proxyStore = proxyStore
+    this.egressRelayStore = egressRelayStore
     this.store = store
     this.config = config
     this.credentialStore = credentialStore
@@ -495,6 +497,14 @@ export class ExternalPlatformAdminService {
     return this.proxyStore.update(input)
   }
 
+  // Separate from updateProxy: that one picks a forward proxy for a dispatcher,
+  // this one records where the request is sent so an edge can relay it.
+  async updateEgressRelay(providerKey, input) {
+    this.#assertProvider(providerKey)
+    if (!this.egressRelayStore) throw new AppError(503, 'egress_relay_unavailable', 'Egress relay settings unavailable')
+    return this.egressRelayStore.update(input)
+  }
+
   async detail(providerKey, rangeValue) {
     this.#assertProvider(providerKey)
     const { now, range, analytics, provider, credential, operations } = await this.#data(rangeValue)
@@ -505,6 +515,7 @@ export class ExternalPlatformAdminService {
       provider,
       credential,
       proxy: this.proxyStore ? await this.proxyStore.describe() : null,
+      egressRelay: this.egressRelayStore ? await this.egressRelayStore.describe() : null,
       operations,
       pipeline: [
         {
@@ -784,6 +795,10 @@ export class MultiExternalPlatformAdminService {
 
   updateProxy(providerKey, input) {
     return this.#service(providerKey).updateProxy(providerKey, input)
+  }
+
+  updateEgressRelay(providerKey, input) {
+    return this.#service(providerKey).updateEgressRelay(providerKey, input)
   }
 
   detail(providerKey, rangeValue) {

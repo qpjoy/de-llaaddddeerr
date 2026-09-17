@@ -270,6 +270,11 @@ export function loadConfig(environment = process.env) {
   const deploymentEgress = parseDeploymentEgressSnapshot(
     environment.MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT,
   )
+  // Enterprise egress relay. The database row written from the admin console is
+  // authoritative; this is only read when migration 096 has not been applied,
+  // so a binary can bootstrap ahead of it and an emergency rollback needs no
+  // database write.
+  const enterpriseEgressBase = environment.MX_ENTERPRISE_EGRESS_BASE?.trim() || ''
 
   // Federated identity through MX Launcher's User Center. Absent configuration
   // simply disables the federated path; the admin token keeps working, which is
@@ -321,6 +326,7 @@ export function loadConfig(environment = process.env) {
     launcher,
     agent,
     deploymentEgress,
+    enterpriseEgressBase,
     embedding: common.embedding,
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),
