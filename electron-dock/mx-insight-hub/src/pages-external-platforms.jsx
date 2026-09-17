@@ -634,6 +634,9 @@ function normalizeDetail(payload, requestedKey) {
   return {
     ...platform,
     proxy: envelope.proxy || root.proxy || null,
+    // normalizeDetail is an allowlist: a field the server sends but this
+    // object does not name never reaches the page.
+    egressRelay: envelope.egressRelay || root.egressRelay || null,
     credential: {
       fields: rawCredential.fields,
       source: optionalText(
