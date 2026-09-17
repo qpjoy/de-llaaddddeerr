@@ -7,6 +7,8 @@ import {
   TOPIC_REPORT_CONTRACT_VERSION,
   buildTopicReport,
   normalizeTopicReportRequest,
+  normalizeTopicReportQuery,
+  TopicReportStore,
 } from '../../server/insights/topic-reports.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
@@ -174,6 +176,11 @@ test('public topic report HTTP flow freezes ownership, meters once, and replays 
       reports.set(id, { report, owner })
       return report
     },
+    async list(options) {
+      assert.equal(options.consumerId, owner.id)
+      assert.equal(options.keyword, '产业')
+      return { items: [...reports.values()].filter(entry => entry.owner.consumerId === options.consumerId).map(entry => entry.report), page: options.page, limit: options.limit, hasMore: false }
+    },
     async get(id, { consumerId }) {
       const entry = reports.get(id)
       return entry?.owner?.consumerId === consumerId ? entry.report : null
@@ -230,6 +237,11 @@ test('public topic report HTTP flow freezes ownership, meters once, and replays 
     assert.equal(detail.response.status, 200)
     assert.equal(detail.payload.data.id, accepted.payload.data.id)
 
+    const listed = await call(baseUrl, '/api/v1/data/topic-reports?keyword=%E4%BA%A7%E4%B8%9A&page=1&limit=10', { headers: { authorization: `Bearer ${ownerKey.secret}` } })
+    assert.equal(listed.response.status, 200)
+    assert.equal(listed.payload.data.items.length, 1)
+    const keywordConflict = await call(baseUrl, '/api/v1/data/topic-reports', { method: 'POST', headers, body: { ...body, keywords: ['选举'] } })
+    assert.equal(keywordConflict.response.status, 409)
     const hidden = await call(baseUrl, `/api/v1/data/topic-reports/${accepted.payload.data.id}`, {
       headers: { authorization: `Bearer ${strangerKey.secret}` },
     })
@@ -242,4 +254,32 @@ test('public topic report HTTP flow freezes ownership, meters once, and replays 
     assert.equal(conflict.response.status, 409)
     assert.equal(conflict.payload.error.code, 'idempotency_conflict')
   })
+})
+
+
+test('explicit keywords and pagination reject invalid values', () => {
+  const request = normalizeTopicReportRequest({ topic: '产业趋势', keywords: [' AI ', 'AI', '芯片'], matchMode: 'all' })
+  assert.deepEqual(request.keywords, ['AI', '芯片'])
+  assert.equal(request.matchMode, 'all')
+  for (const extra of [{ keywords: 'AI' }, { keywords: [''] }, { keywords: Array(13).fill('AI') }, { matchMode: 'maybe' }]) {
+    assert.throws(() => normalizeTopicReportRequest({ topic: '产业趋势', ...extra }), { status: 400 })
+  }
+  for (const query of [{ page: 0 }, { limit: 101 }, { page: 1.5 }, { status: 'unknown' }, { consumerId: 'other' }]) {
+    assert.throws(() => normalizeTopicReportQuery(query), { status: 400 })
+  }
+})
+
+test('report SQL binds ownership, literal filters, paging and keyword conjunction', async () => {
+  const calls = []
+  const store = new TopicReportStore({ async query(sql, values) { calls.push({ sql, values }); return { rows: [] } } })
+  const page = await store.list({ consumerId: 'owner', topic: '选举', keyword: '%', status: 'succeeded', platform: NEWS, limit: 10, page: 2 })
+  assert.deepEqual(page, { items: [], page: 2, limit: 10, hasMore: false })
+  assert.deepEqual(calls[0].values, ['owner', '选举', '%', 'succeeded', NEWS, 11, 10])
+  assert.match(calls[0].sql, /consumer_id = \$1::uuid/u)
+  assert.match(calls[0].sql, /strpos/u)
+  await store.selectEvidence({ topic: 'unused', keywords: ['100%', 'A_B'], match_mode: 'all', authorized_platforms: [NEWS], range_start: '2026-09-01', range_end: '2026-09-02', sample_limit: 20 })
+  assert.equal(calls[1].values[3], '100\\%')
+  assert.equal(calls[1].values[4], 'A\\_B')
+  assert.match(calls[1].sql, /AND \(record.title/u)
+  assert.doesNotMatch(calls[1].sql, /unused/u)
 })

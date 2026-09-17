@@ -1270,6 +1270,7 @@ export class TikHubGateway {
     path,
     responseMode = 'modern',
     fingerprintBody = null,
+    acquisitionRequest = null,
     enrichment = {},
     replayWindowMs = null,
   }) {
@@ -1387,6 +1388,10 @@ export class TikHubGateway {
       })
       durableRequestId = reservation.request?.id || requestId
       ownsReservation = reservation.kind === 'reserved'
+      if (ownsReservation && acquisitionRequest && this.usageStore.saveAcquisitionRequest) {
+        // Save before any upstream work; only the validated compatibility branch supplies this envelope.
+        await this.usageStore.saveAcquisitionRequest(durableRequestId, acquisitionRequest)
+      }
       if (reservation.kind === 'conflict') {
         throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
       }

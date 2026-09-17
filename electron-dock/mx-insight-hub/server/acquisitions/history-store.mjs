@@ -244,6 +244,7 @@ export class PostgresAcquisitionHistoryStore {
         requestEvidence: {
           idempotencyKey: root.idempotency_key,
           fingerprint: root.fingerprint,
+          request: root.acquisition_request || null,
         },
         costLineage: {
           providerCalls: providerRows.map(providerCall),
@@ -305,6 +306,7 @@ export class PostgresAcquisitionHistoryStore {
       `/* acquisition-history:root */
        SELECT usage.id, usage.tenant_id, usage.consumer_id, usage.api_key_id,
               usage.idempotency_key, usage.fingerprint, usage.platform,
+              usage.acquisition_request,
               usage.capability, usage.billing_meter_key, usage.status,
               usage.units_reserved, usage.units_actual, usage.response_status,
               usage.response_body, usage.response_body IS NOT NULL AS has_response_body,

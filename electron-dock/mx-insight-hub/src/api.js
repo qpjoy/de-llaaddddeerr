@@ -71,12 +71,14 @@ export function publicDocsHref(path = '/docs') {
 }
 
 export class ApiError extends Error {
-  constructor({ status = 0, code = 'request_failed', message = 'Request failed', requestId, details, reason } = {}) {
+  constructor({ status = 0, code = 'request_failed', message = 'Request failed', requestId, details, reason, responseBody, evidence } = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.requestId = requestId
+    this.responseBody = responseBody
+    this.evidence = evidence
     this.details = details
     // A rejection explains itself in the same vocabulary a degraded delivery
     // uses, so failure and fallback can be triaged the same way.
@@ -173,6 +175,8 @@ async function publicDataRequest(apiKey, path, {
       requestId: evidence.requestId,
       details: payload?.error?.details,
       reason: evidence.reason,
+      responseBody: payload,
+      evidence,
     })
   }
   return { payload, evidence, status: response.status }
@@ -203,6 +207,9 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  acquisitionComparison: (apiKey, body, idempotencyKey) => publicDataRequest(
+    apiKey, '/api/v1/night-all/search/raw', { method: 'POST', body, idempotencyKey },
+  ),
   enterpriseQuery: (key, apiId, body, options) => publicDataRequest(key, `/api/v1/data/enterprise/${encodeURIComponent(apiId)}/query`, { ...options, method: 'POST', body }),
   ipRiskBatch: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk/batch', { ...options, method: 'POST', body }),
   ipRisk: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk', { ...options, method: 'POST', body }),
@@ -583,11 +590,12 @@ export const adminApi = {
     `${ADMIN_ROOT}/data-products/telegram/items/${encodeURIComponent(id)}/context`,
     { query },
   ),
-  topicReports: (token, { limit = 30 } = {}) => request(
+  topicReports: (token, query = {}) => request(
     token,
     `${ADMIN_ROOT}/data-products/topic-reports`,
-    { query: { limit } },
+    { query },
   ),
+  topicReportCategories: (token) => request(token, `${ADMIN_ROOT}/data-products/saved-records/categories`),
   createTopicReport: (token, body) => request(
     token,
     `${ADMIN_ROOT}/data-products/topic-reports`,

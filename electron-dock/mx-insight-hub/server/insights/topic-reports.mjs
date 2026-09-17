@@ -40,7 +40,7 @@ function requiredText(value, field, { min = 1, max = 300 } = {}) {
 
 function requiredDate(value, field) {
   const parsed = new Date(value)
-  if (!value || Number.isNaN(parsed.getTime())) {
+  if (typeof value !== 'string' || !/T.*(?:Z|[+-]\d{2}:\d{2})$/iu.test(value) || Number.isNaN(parsed.getTime())) {
     throw new AppError(400, 'invalid_request', `${field} must be an RFC3339 timestamp`)
   }
   return parsed
@@ -72,13 +72,17 @@ export function normalizeTopicReportRequest(input, {
     throw new AppError(400, 'invalid_request', 'JSON object body is required')
   }
   const allowedFields = new Set([
-    'topic', 'language', 'range', 'from', 'to', 'sourceScope', 'platforms', 'sampleLimit',
+    'topic', 'keywords', 'matchMode', 'language', 'range', 'from', 'to', 'sourceScope', 'platforms', 'sampleLimit',
   ])
   const unsupported = Object.keys(input).filter((field) => !allowedFields.has(field))
   if (unsupported.length > 0) {
     throw new AppError(400, 'unsupported_fields', `Unsupported topic report fields: ${unsupported.join(', ')}`)
   }
   const topic = requiredText(input.topic, 'topic', { min: 2, max: 300 })
+  if (input.keywords != null && (!Array.isArray(input.keywords) || input.keywords.length > 12)) throw new AppError(400, 'invalid_request', 'keywords must be an array of at most 12 strings')
+  const keywords = [...new Set((input.keywords || []).map(value => requiredText(value, 'keyword', { max: 80 })))]
+  const matchMode = input.matchMode ?? 'any'
+  if (!['any', 'all'].includes(matchMode)) throw new AppError(400, 'invalid_request', 'matchMode must be any or all')
   const language = input.language == null ? 'zh-CN' : requiredText(input.language, 'language', { max: 16 })
   if (!LANGUAGES.has(language)) {
     throw new AppError(400, 'invalid_request', 'language must be zh-CN or en')
@@ -117,6 +121,7 @@ export function normalizeTopicReportRequest(input, {
   }
   return {
     topic,
+    ...(keywords.length ? { keywords, matchMode } : {}),
     language,
     range,
     rangeStart: rangeStart.toISOString(),
@@ -125,6 +130,18 @@ export function normalizeTopicReportRequest(input, {
     platforms,
     sampleLimit,
   }
+}
+
+export function normalizeTopicReportQuery(input = {}) {
+  const supported = ['limit', 'page', 'topic', 'keyword', 'status', 'platform']
+  if (Object.keys(input).some(key => !supported.includes(key))) throw new AppError(400, 'unsupported_fields', 'Unsupported topic report query fields')
+  const limit = Number(input.limit ?? 30)
+  const page = Number(input.page ?? 1)
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(page) || page < 1 || page > 10000) throw new AppError(400, 'invalid_request', 'limit must be 1-100 and page 1-10000')
+  const result = { limit, page }
+  for (const key of ['topic', 'keyword', 'status', 'platform']) result[key] = input[key] == null || input[key] === '' ? '' : requiredText(input[key], key, { max: key === 'platform' ? 96 : 300 })
+  if (result.status && !['queued', 'running', 'succeeded', 'failed'].includes(result.status)) throw new AppError(400, 'invalid_request', 'Invalid report status')
+  return result
 }
 
 function iso(value) {
@@ -145,6 +162,8 @@ function topicReportRow(row, { includeOwner = false } = {}) {
     id: row.id,
     contractVersion: TOPIC_REPORT_CONTRACT_VERSION,
     topic: row.topic,
+    keywords: row.keywords || [],
+    matchMode: row.match_mode || 'any',
     language: row.language,
     range: { from: iso(row.range_start), to: iso(row.range_end) },
     sourceScope: {
@@ -181,8 +200,8 @@ export class TopicReportStore {
     const { rows } = await this.pool.query(
       `INSERT INTO insights.topic_reports
          (id, tenant_id, consumer_id, api_key_id, created_by, topic, language,
-          range_start, range_end, source_scope, authorized_platforms, sample_limit)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text[], $12)
+          range_start, range_end, source_scope, authorized_platforms, sample_limit, keywords, match_mode)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text[], $12, $13::text[], $14)
        RETURNING *`,
       [
         id,
@@ -197,6 +216,8 @@ export class TopicReportStore {
         input.sourceScope,
         input.platforms,
         input.sampleLimit,
+        input.keywords || [],
+        input.matchMode || 'any',
       ],
     )
     return topicReportRow(rows[0], { includeOwner: !owner })
@@ -215,15 +236,18 @@ export class TopicReportStore {
     return topicReportRow(rows[0], { includeOwner })
   }
 
-  async list({ limit = 30 } = {}) {
-    const boundedLimit = Math.min(Math.max(Number(limit) || 30, 1), 100)
+  async list({ limit = 30, page = 1, topic = '', keyword = '', status = '', platform = '', consumerId = null, includeOwner = false } = {}) {
+    const values = [consumerId, topic, keyword, status, platform, limit + 1, (page - 1) * limit]
     const { rows } = await this.pool.query(
       `SELECT * FROM insights.topic_reports
-        ORDER BY created_at DESC, id DESC
-        LIMIT $1`,
-      [boundedLimit],
+        WHERE ($1::uuid IS NULL OR consumer_id = $1::uuid)
+          AND ($2 = '' OR strpos(lower(topic), lower($2)) > 0)
+          AND ($3 = '' OR strpos(lower(topic || ' ' || array_to_string(keywords, ' ')), lower($3)) > 0)
+          AND ($4 = '' OR status = $4)
+          AND ($5 = '' OR $5 = ANY(authorized_platforms))
+        ORDER BY created_at DESC, id DESC LIMIT $6 OFFSET $7`, values,
     )
-    return rows.map((row) => topicReportRow(row, { includeOwner: true }))
+    return { items: rows.slice(0, limit).map(row => topicReportRow(row, { includeOwner })), page, limit, hasMore: rows.length > limit }
   }
 
   async claimNext({ workerId, leaseSeconds = 300 } = {}) {
@@ -348,12 +372,12 @@ export class TopicReportStore {
   }
 
   async selectEvidence(claim) {
-    const terms = topicSearchTerms(claim.topic)
+    const terms = claim.keywords?.length ? claim.keywords.map(value => ({ value, weight: 3 })) : topicSearchTerms(claim.topic)
     const values = [
       claim.authorized_platforms,
       claim.range_start,
       claim.range_end,
-      ...terms.map((term) => term.value),
+      ...terms.map((term) => term.value.replace(/[\\%_]/gu, value => `\\${value}`)),
       claim.sample_limit,
     ]
     const termStart = 4
@@ -379,7 +403,7 @@ export class TopicReportStore {
           AND record.stable_fields #>> '{crawler,publication,eligibility}' = 'candidate'
           AND coalesce(record.event_time, record.collected_at, record.last_seen_at) >= $2::timestamptz
           AND coalesce(record.event_time, record.collected_at, record.last_seen_at) <= $3::timestamptz
-          AND (${predicates.join('\n               OR ')})
+          AND (${predicates.join(claim.keywords?.length && claim.match_mode === 'all' ? '\n               AND ' : '\n               OR ')})
         ORDER BY (${scores.join('\n                + ')}) DESC,
                  coalesce(record.event_time, record.collected_at, record.last_seen_at) DESC,
                  record.id DESC
@@ -584,7 +608,8 @@ export function buildTopicReport(claim, selection, { generatedAt = new Date() } 
     methodology: {
       dataBasis: 'postgresql_canonical_truth',
       projectionDependency: 'none',
-      matching: 'bounded_phrase_and_term_evidence_v1',
+      matching: claim.keywords?.length ? 'literal_keywords_v1' : 'bounded_phrase_and_term_evidence_v1',
+      matchMode: claim.keywords?.length ? claim.match_mode || 'any' : 'any',
       matchedTerms: selection.terms,
       publicationVisibility: 'candidate_only',
       sampleLimit: claim.sample_limit,

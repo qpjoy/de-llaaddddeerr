@@ -5838,6 +5838,11 @@ export function createApp({
         sendJson(response, 200, { data: await service.savedRecordCategories(context), requestId }, { 'cache-control': 'no-store' })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/topic-reports') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, { data: await service.listTopicReports(context, Object.fromEntries(searchParams.entries())), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
       if (request.method === 'POST' && pathname === '/api/v1/data/topic-reports') {
         const context = await requirePublic(request)
         const result = await service.createTopicReport(context, {

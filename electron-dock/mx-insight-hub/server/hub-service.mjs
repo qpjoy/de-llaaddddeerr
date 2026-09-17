@@ -158,6 +158,7 @@ import {
 import { createNightAllCompatibilityCursorCodec } from './external-platforms/cursor.mjs'
 import {
   normalizeTopicReportRequest,
+  normalizeTopicReportQuery,
   TOPIC_REPORT_USAGE_SCOPE,
 } from './insights/topic-reports.mjs'
 
@@ -2131,18 +2132,14 @@ export class HubService {
     if (!this.topicReports) {
       throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require PostgreSQL migration 067')
     }
-    const unsupported = Object.keys(queryInput || {}).filter((field) => field !== 'limit')
-    if (unsupported.length > 0) {
-      throw new AppError(400, 'unsupported_fields', `Unsupported topic report query fields: ${unsupported.join(', ')}`)
-    }
-    const limit = queryInput?.limit == null ? 30 : Number(queryInput.limit)
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      throw new AppError(400, 'invalid_request', 'limit must be an integer from 1 to 100')
-    }
-    return {
-      contractVersion: 'mx-insight-hub.data-products.topic-report.v1',
-      items: await this.topicReports.list({ limit }),
-    }
+    return { contractVersion: 'mx-insight-hub.data-products.topic-report.v1',
+      ...await this.topicReports.list({ ...normalizeTopicReportQuery(queryInput), includeOwner: true }) }
+  }
+
+  async listTopicReports(context, queryInput = {}) {
+    if (!this.topicReports) throw new AppError(503, 'topic_reports_unavailable', 'Topic reports require PostgreSQL')
+    return { contractVersion: 'mx-insight-hub.data-products.topic-report.v1',
+      ...await this.topicReports.list({ ...normalizeTopicReportQuery(queryInput), consumerId: context.consumer.id }) }
   }
 
   async adminTopicReport(id) {
@@ -3487,6 +3484,7 @@ export class HubService {
         path,
         body: {
           topic: input.topic,
+          ...(input.keywords?.length ? { keywords: input.keywords, matchMode: input.matchMode } : {}),
           language: input.language,
           range: input.range,
           ...(input.range === 'custom' ? {
@@ -3978,6 +3976,7 @@ export class HubService {
         idempotencyKey,
         path,
         responseMode: 'legacy',
+        acquisitionRequest: { method: 'POST', path: '/api/v1/night-all/search/raw', body: structuredClone(body) },
         fingerprintBody: {
           contractVersion: 'mx-insight-hub.night-all-compat.v1',
           ...normalized.upstreamBody,

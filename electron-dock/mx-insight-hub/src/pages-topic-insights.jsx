@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowSquareOut,
   CalendarBlank,
@@ -30,6 +30,7 @@ const RANGE_OPTIONS = [
   { value: '24h', label: '近 24 小时', description: '捕捉正在形成的短周期主题' },
   { value: '7d', label: '近 7 天', description: '适合热点回顾与专题简报' },
   { value: '30d', label: '近 30 天', description: '观察月度趋势与来源差异' },
+  { value: 'custom', label: '自定义时间' },
   { value: '90d', label: '近 90 天', description: '适合政策与行业变化复盘' },
 ]
 
@@ -38,28 +39,7 @@ const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
 ]
 
-const CORE_PLATFORMS = [
-  'data_center_saved_records_news',
-  'data_center_saved_records_media',
-  'data_center_saved_records_local_news',
-  'data_center_saved_records_hotspot',
-  'data_center_saved_records_finance',
-  'data_center_saved_records_technology',
-  'data_center_saved_records_research',
-]
-
-const SOURCE_OPTIONS = [
-  {
-    value: 'all_granted',
-    label: '全部已登记类别',
-    description: '覆盖动态类别目录中的 canonical 数据；类别数量随清洗接入增长',
-  },
-  {
-    value: 'editorial',
-    label: '新闻与主流行业资讯',
-    description: '聚焦新闻、媒体、地方、热点、财经、科技与研究',
-  },
-]
+const SOURCE_OPTIONS = [{ value: 'all_granted', label: '全部已登记类别' }, { value: 'selected', label: '选择数据类别' }]
 
 const STATUS_LABELS = {
   queued: '排队中',
@@ -222,6 +202,22 @@ function TopicReportResult({ task }) {
 export function TopicInsightsPage({ token, onUnauthorized, notify }) {
   const [tab, setTab] = useState('create')
   const [topic, setTopic] = useState('')
+  const [keywords, setKeywords] = useState('')
+  const [matchMode, setMatchMode] = useState('any')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [categories, setCategories] = useState([])
+  const [platforms, setPlatforms] = useState([])
+  const [categorySearch, setCategorySearch] = useState('')
+  const [draftQuery, setDraftQuery] = useState('')
+  const [query, setQuery] = useState({ keyword: '', status: '', platform: '', page: 1 })
+  const [hasMore, setHasMore] = useState(false)
+  const requestSequence = useRef(0)
+  useEffect(() => {
+    let active = true
+    adminApi.topicReportCategories(token).then(data => { if (active) setCategories((data.items || []).filter(item => item.registered)) }).catch(caught => { if (active) setError(caught) })
+    return () => { active = false }
+  }, [token])
   const [range, setRange] = useState('7d')
   const [sourceScope, setSourceScope] = useState('all_granted')
   const [language, setLanguage] = useState('zh-CN')
@@ -232,20 +228,24 @@ export function TopicInsightsPage({ token, onUnauthorized, notify }) {
   const [error, setError] = useState(null)
 
   const load = useCallback(async ({ quiet = false } = {}) => {
+    const sequence = ++requestSequence.current
     if (!quiet) setLoading(true)
     try {
-      const data = await adminApi.topicReports(token, { limit: 40 })
+      const data = await adminApi.topicReports(token, { ...query, limit: 10 })
+      if (sequence !== requestSequence.current) return
+      setHasMore(data.hasMore === true)
       const next = data?.items || []
       setTasks(next)
       setSelectedId((current) => current && next.some((item) => item.id === current) ? current : next[0]?.id || null)
       setError(null)
     } catch (caught) {
+      if (sequence !== requestSequence.current) return
       if (caught?.status === 401) onUnauthorized?.(caught)
       setError(caught)
     } finally {
-      if (!quiet) setLoading(false)
+      if (sequence === requestSequence.current) setLoading(false)
     }
-  }, [onUnauthorized, token])
+  }, [onUnauthorized, token, query])
 
   useEffect(() => { load() }, [load])
   const hasActiveTask = tasks.some((task) => ['queued', 'running'].includes(task.status))
@@ -266,12 +266,16 @@ export function TopicInsightsPage({ token, onUnauthorized, notify }) {
         topic: topic.trim(),
         range,
         language,
-        sourceScope: sourceScope === 'editorial' ? 'selected' : 'all_granted',
-        ...(sourceScope === 'editorial' ? { platforms: CORE_PLATFORMS } : {}),
+        sourceScope,
+        ...(sourceScope === 'selected' ? { platforms } : {}),
+        ...(keywords.trim() ? { keywords: keywords.split(/[,，;；\n]+/u).map(value => value.trim()).filter(Boolean), matchMode } : {}),
+        ...(range === 'custom' ? { from: new Date(from).toISOString(), to: new Date(to).toISOString() } : {}),
       }
       const created = await adminApi.createTopicReport(token, body)
       setTasks((current) => [created, ...current.filter((item) => item.id !== created.id)])
       setSelectedId(created.id)
+      setDraftQuery('')
+      setQuery({ keyword: '', status: '', platform: '', page: 1 })
       setTab('progress')
       setTopic('')
       notify?.('专题报告已进入队列，将直接读取已清洗的 canonical 数据', 'success')
@@ -309,23 +313,35 @@ export function TopicInsightsPage({ token, onUnauthorized, notify }) {
           {tab === 'create' ? (
             <form className="mih-topic-form" onSubmit={submit}>
               <label className="qp-field">
-                <span className="qp-field__label">新闻主题</span>
+                <span className="qp-field__label">主题 / 问题</span>
                 <textarea value={topic} maxLength={300} rows={5} placeholder="例如：东南亚近期选举与外交政策变化" onChange={(event) => setTopic(event.target.value)} />
                 <span className="mih-topic-character-count">{topic.length}/300</span>
               </label>
+              <label className="qp-field"><span className="qp-field__label">关键词（可选，最多 12 个，以逗号分隔）</span><input className="qp-input" value={keywords} onChange={event => setKeywords(event.target.value)} placeholder="选举，东南亚" /></label>
+              <p className="mih-topic-form__note">主题描述研究问题；填写关键词后按关键词筛选标题与正文，不再自动拆解主题。数据类别用于限定来源。</p>
+              <DropdownField label="关键词匹配" value={matchMode} options={[{ value: 'any', label: '包含任一关键词' }, { value: 'all', label: '包含全部关键词' }]} onChange={setMatchMode} />
               <DropdownField label="时间范围" value={range} options={RANGE_OPTIONS} onChange={setRange} leadingIcon={Clock} />
+              {range === 'custom' ? <><label className="qp-field">开始时间<input className="qp-input" aria-label="开始时间" type="datetime-local" required value={from} onChange={event => setFrom(event.target.value)} /></label><label className="qp-field">结束时间<input className="qp-input" aria-label="结束时间" type="datetime-local" required value={to} onChange={event => setTo(event.target.value)} /></label></> : null}
               <DropdownField label="来源范围" value={sourceScope} options={SOURCE_OPTIONS} onChange={setSourceScope} leadingIcon={GlobeHemisphereWest} />
+              {sourceScope === 'selected' ? <fieldset><legend>数据类别（platforms）</legend><input className="qp-input" aria-label="搜索数据类别" placeholder="搜索数据类别" value={categorySearch} onChange={event => setCategorySearch(event.target.value)} />{categories.filter(item => `${item.label} ${item.platform}`.toLowerCase().includes(categorySearch.toLowerCase())).map(item => <label key={item.platform} style={{ display: 'block', marginTop: 8 }}><input type="checkbox" checked={platforms.includes(item.platform)} onChange={event => setPlatforms(current => event.target.checked ? [...current, item.platform] : current.filter(value => value !== item.platform))} /> {item.label}</label>)}<small>已选择 {platforms.length} 类</small></fieldset> : null}
               <DropdownField label="报告语言" value={language} options={LANGUAGE_OPTIONS} onChange={setLanguage} leadingIcon={FileText} />
-              <button className="qp-button qp-button--primary mih-topic-submit" type="submit" disabled={submitting || topic.trim().length < 2}>
+              <button className="qp-button qp-button--primary mih-topic-submit" type="submit" disabled={submitting || topic.trim().length < 2 || (sourceScope === 'selected' && !platforms.length)}>
                 <Sparkle size={18} weight="fill" aria-hidden="true" />{submitting ? '正在提交…' : '提交生成'}
               </button>
               <p className="mih-topic-form__note">报告直接读取 PostgreSQL canonical truth，不触发 Elasticsearch 重建，也不调用 HanLP。</p>
             </form>
           ) : (
             <div className="mih-topic-task-list">
+              <form onSubmit={event => { event.preventDefault(); setQuery(current => ({ ...current, keyword: draftQuery.trim(), page: 1 })) }}>
+                <label className="qp-field">搜索主题 / 关键词<input className="qp-input" aria-label="搜索主题或关键词" value={draftQuery} maxLength={300} onChange={event => setDraftQuery(event.target.value)} /></label>
+                <button type="submit" className="qp-button qp-button--outline">搜索报告</button>
+              </form>
+              <DropdownField label="任务状态" value={query.status} options={[{ value: '', label: '全部状态' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))]} onChange={status => setQuery(current => ({ ...current, status, page: 1 }))} />
+              <DropdownField label="数据类别" value={query.platform} options={[{ value: '', label: '全部类别' }, ...categories.map(item => ({ value: item.platform, label: item.label }))]} onChange={platform => setQuery(current => ({ ...current, platform, page: 1 }))} />
+              <div role="navigation" aria-label="报告分页" style={{ display: 'flex', alignItems: 'center', gap: 12 }}><button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={loading || query.page === 1} onClick={() => setQuery(current => ({ ...current, page: current.page - 1 }))}>上一页</button><span>第 {query.page} 页</span><button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={loading || !hasMore || query.page >= 10000} onClick={() => setQuery(current => ({ ...current, page: current.page + 1 }))}>下一页</button></div>
               {loading && !tasks.length ? <LoadingState label="正在读取专题任务" /> : null}
               {error ? <ErrorState error={error} onRetry={() => load()} /> : null}
-              {!loading && !error && !tasks.length ? <EmptyState icon={FileText} title="还没有专题任务" description="创建第一个专题报告后，进度会显示在这里。" /> : null}
+              {!loading && !error && !tasks.length ? <EmptyState icon={FileText} title="没有匹配的专题任务" description="调整搜索词、状态或数据类别，或创建新的专题报告。" /> : null}
               {tasks.map((task) => (
                 <button type="button" key={task.id} className={task.id === selectedId ? 'is-active' : ''} onClick={() => setSelectedId(task.id)}>
                   <span><strong>{task.topic}</strong><small>{formatDateTime(task.createdAt)} · {PHASE_LABELS[task.phase] || task.phase}</small></span>

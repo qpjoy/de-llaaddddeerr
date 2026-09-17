@@ -1469,6 +1469,18 @@ export class MemoryExternalPlatformStore {
         deliverySourceMode: 'stale',
         capturedAt: currentSnapshot.capturedAt,
       })
+    } else if (this.providerKey === 'qixin' && outcome === 'rejected') {
+      // No enterprise result was delivered. Keep the error for exact replay
+      // while releasing the customer hold; supplier billing remains unknown.
+      await this.usageStore.releaseRequest(delivery.usageRequestId, errorCode, {
+        responseStatus: failureResponseStatus,
+        responseBody: failureResponseBody || {
+          error: { code: errorCode, message: 'External data platform rejected the request' },
+        },
+        upstreamLatencyMs: latencyMs,
+        deliverySourceMode: 'live',
+        capturedAt: iso(responseArchive?.capturedAt ?? new Date()),
+      })
     } else if (this.providerKey === 'ipsearch' && (outcome === 'rejected' || outcome === 'succeeded_unusable')) {
       // A definitive failed IP query has no customer delivery to charge.
       await this.usageStore.releaseRequest(delivery.usageRequestId, errorCode)
@@ -3559,7 +3571,7 @@ export class PostgresExternalPlatformStore {
               latencyMs,
               responseArchive?.capturedAt ?? new Date(),
               errorCode,
-              this.providerKey === 'ipsearch',
+              this.providerKey === 'ipsearch' || (this.providerKey === 'qixin' && outcome === 'rejected'),
             ],
           )
         : await client.query(

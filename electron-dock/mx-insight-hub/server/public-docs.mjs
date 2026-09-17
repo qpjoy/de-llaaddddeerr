@@ -5069,6 +5069,16 @@ PUBLIC_OPENAPI_DOCUMENT.components.schemas.SavedRecordCategoriesEnvelope = {
 }
 
 PUBLIC_OPENAPI_DOCUMENT.paths['/data/topic-reports'] = {
+  get: {
+    operationId: 'listTopicReports', summary: 'Search and paginate this consumer’s topic reports', tags: ['Data products'], security: [{ bearerKey: [] }],
+    parameters: [
+      ...['topic', 'keyword', 'platform'].map(name => ({ name, in: 'query', schema: { type: 'string', maxLength: name === 'platform' ? 96 : 300 } })),
+      { name: 'status', in: 'query', schema: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed'] } },
+      { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 10000, default: 1 } },
+      { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 30 } },
+    ],
+    responses: { 200: { description: 'Consumer-owned tasks, newest first; no usage charge.', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { items: { type: 'array', items: { $ref: '#/components/schemas/TopicReportTask' } }, page: { type: 'integer' }, limit: { type: 'integer' }, hasMore: { type: 'boolean' } } }, requestId: { type: 'string' } } } } } } },
+  },
   post: {
     operationId: 'createTopicReport',
     summary: 'Create an asynchronous topic insight report',
@@ -5114,7 +5124,9 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
   CreateTopicReportRequest: {
     type: 'object', additionalProperties: false, required: ['topic'],
     properties: {
-      topic: { type: 'string', minLength: 2, maxLength: 300 },
+      topic: { type: 'string', minLength: 2, maxLength: 300, description: 'Research question. Used for automatic term matching only when keywords are omitted.' },
+      keywords: { type: 'array', maxItems: 12, items: { type: 'string', minLength: 1, maxLength: 80 }, description: 'Literal case-insensitive title/body keywords. Overrides automatic topic tokenization.' },
+      matchMode: { type: 'string', enum: ['any', 'all'], default: 'any' },
       language: { type: 'string', enum: ['zh-CN', 'en'], default: 'zh-CN' },
       range: { type: 'string', enum: ['24h', '7d', '30d', '90d', 'custom'], default: '7d' },
       from: { type: 'string', format: 'date-time', description: 'Required only when range=custom.' },
@@ -5132,6 +5144,8 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
     type: 'object', additionalProperties: false,
     required: ['id', 'contractVersion', 'topic', 'language', 'range', 'sourceScope', 'sampleLimit', 'status', 'phase', 'progress', 'result', 'error', 'createdAt', 'startedAt', 'completedAt'],
     properties: {
+      keywords: { type: 'array', items: { type: 'string' } },
+      matchMode: { type: 'string', enum: ['any', 'all'] },
       id: { type: 'string', format: 'uuid' },
       contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.topic-report.v1' },
       topic: { type: 'string' },
@@ -5943,6 +5957,15 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
     <h2 id="topic-reports">专题洞察</h2>
     <div class="notice">专题报告是异步数据产品，公开合同为 <code>mx-insight-hub.data-products.topic-report.v1</code>。它只读取调用者已经获准的 <code>data_center_saved_records_*</code> canonical 数据，不调用采集源、不暴露内部连接或供应方身份，不触发 Elasticsearch 索引重建，也不调用 HanLP 分词。</div>
     <p>一个报告会返回时间趋势、类别/标签/地域/作者分布、可视化关系节点与边，以及最多 80 条可回到原文核对的公开安全证据。关系表示同一批证据中的共现强度，不是因果推断或事实认定。</p>
+    <p><strong>主题不等于 platforms：</strong><code>topic</code> 是研究问题；<code>keywords</code> 是要匹配的内容词；<code>platforms</code> 是新闻、财经、科技等数据来源类别。</p>
+    <table><thead><tr><th>参数</th><th>用途</th></tr></thead><tbody>
+    <tr><td>topic（必填）</td><td>2–300 字主题；未提供 keywords 时自动拆词检索。</td></tr>
+    <tr><td>keywords（可选）</td><td>最多 12 个、每个 1–80 字；按标题或正文的字面子串匹配，忽略大小写。填写后替代主题自动拆词。</td></tr>
+    <tr><td>matchMode</td><td>any（默认）匹配任一关键词；all 要求全部关键词。</td></tr>
+    <tr><td>range / from / to</td><td>24h、7d（默认）、30d、90d、custom；自定义使用带时区时间。</td></tr>
+    <tr><td>sourceScope / platforms</td><td>all_granted（默认）或 selected + 授权类别数组。</td></tr>
+    <tr><td>sampleLimit / language</td><td>分析样本 20–500（默认 240）；zh-CN（默认）或 en。</td></tr>
+    </tbody></table>
     <h3>1. 创建持久化任务</h3>
     <p>先调用 <a href="/docs/saved-record-categories"><code>GET /api/v1/data/platforms</code></a>，从 <code>data.items[]</code> 中选取 <code>authorized=true</code> 的 <code>platform</code>，再填入下方 <code>platforms</code>。</p>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/topic-reports</code></div><p>要求至少一个已授权的 saved-record 平台以及唯一 <code>Idempotency-Key</code>。任务创建时固化完整授权平台集合，成功接受返回 HTTP 202，并消耗 1 个 usage unit。</p></div>
@@ -5950,7 +5973,7 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: topic-report-$(uuidgen)" \
-  -d '{"topic":"东南亚近期选举与外交政策变化","range":"7d","sourceScope":"all_granted","language":"zh-CN"}')
+  -d '{"topic":"东南亚近期选举与外交政策变化","keywords":["东南亚","选举"],"matchMode":"all","range":"7d","sourceScope":"all_granted","language":"zh-CN"}')
 REPORT_ID=$(printf '%s' "$REPORT" | jq -r '.data.id')
 printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.progress,requestId}'</code></pre>
     <p><code>range</code> 支持 <code>24h|7d|30d|90d|custom</code>；custom 必须同时提供带时区的 <code>from/to</code>，最长 366 天。<code>sourceScope=selected</code> 时必须提供至少一个目录中已登记的 <code>platforms</code>（类别数量不固定），且每项都必须已经在当前 API Key 的有效授权快照中。</p>
@@ -5966,6 +5989,10 @@ printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.pr
       <tr><td><code>succeeded / complete</code></td><td>消费 <code>result</code>；同一结果可用于网页、报告卡片或关系图 renderer。</td></tr>
       <tr><td><code>failed</code></td><td>保留 error code；使用新的 Idempotency-Key 创建新任务。</td></tr>
     </tbody></table>
+    <h3>搜索与分页查询已有报告</h3>
+    <p><code>GET /api/v1/data/topic-reports</code> 支持 <code>topic</code>（主题子串）、<code>keyword</code>（主题或已保存关键词子串）、<code>status</code>、<code>platform</code>、<code>page</code>（1–10000）和 <code>limit</code>（1–100，默认 30）。条件取交集，只返回当前 consumer 的任务。此查询不创建任务、不收费。</p>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/topic-reports" -H "Authorization: Bearer $MX_INSIGHT_API_KEY" --data-urlencode "keyword=选举" --data-urlencode "status=succeeded" --data-urlencode "page=1" --data-urlencode "limit=10"</code></pre>
+    <p>返回 <code>data.items / page / limit / hasMore</code>；hasMore=true 时递增 page。按创建时间倒序实时分页，新任务插入可能移动页边界，可按 id 去重。报告分页不是原始数据全集分页，单报告 evidence 最多 80 条，coverage 显示匹配及分析样本数量。</p>
     <h3>3. 外部数据产品实现</h3>
     <p>表单提交后保存 report id，每 2–5 秒读取任务状态；完成后用 <code>executiveSummary</code> 做摘要、<code>timeline</code> 做趋势图、<code>dimensions</code> 做排行、<code>associations.nodes/edges</code> 做关系视图、<code>evidence</code> 做证据列表。必须同时展示 <code>methodology.limitations</code>，并允许用户回到 evidence URL 核验。不要把共现边改写成因果或人物关系。</p>
     <div class="notice">报告以任务运行时可见的 canonical 数据为准。后续新增同步记录不会改写旧结果；要获得新快照，请用新的 Idempotency-Key 创建新任务。</div>

@@ -165,6 +165,78 @@ test('unknown outcome blocks automatic redispatch; rejected payload is archived'
   assert.equal(denied.platformStore.restrictedResponseArchives.size, 1)
 })
 
+async function verifyRejectedEnterpriseBilling(f, upstream) {
+  const plan = await f.hub.publishPlanVersion({ key: 'qixin-failure-billing', name: 'Failure billing fixture',
+    components: [{ type: 'feature', key: 'qixin', version: 1 }],
+    limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 },
+    priceBook: { key: 'qixin-failure-billing', currency: 'CNY', defaultMultiplierPpm: 1000000 },
+  }, 'fixture')
+  const current = await f.hub.getConsumerPlan(f.context.consumer.id)
+  await f.hub.assignConsumerPlan(f.context.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'fixture')
+  await f.hub.setTenantBillingProfile(f.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'fixture')
+  await f.hub.addTenantCredit(f.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Synthetic failure billing test' },
+    { idempotencyKey: 'qixin-failure-credit', actor: 'fixture' })
+  const initialCalls = upstream.calls
+  const failedRequest = { ...request, idempotencyKey: 'enterprise-whitelist-failed',
+    body: { query: { keyword: '白名单测试企业' }, deliveryMode: 'refresh' } }
+  upstream.response = { status: '104', message: '未添加IP白名单' }
+  let failedId
+  await assert.rejects(f.gateway.queryEnterprise(f.context, failedRequest), error => {
+    assert.equal(error.code, 'external_platform_rejected')
+    failedId = error.details.requestId
+    return true
+  })
+  const failed = await f.store.getUsageRequestForRetry(failedId, f.context.consumer.id)
+  assert.equal(failed.status, 'released')
+  assert.equal(failed.responseStatus, 502)
+  assert.equal(failed.responseBody.error.code, 'external_platform_rejected')
+  let billing = await f.hub.getTenantBilling(f.context.tenant.id)
+  assert.equal(billing.account.availableMinor, 100)
+  assert.equal(billing.account.heldMinor, 0)
+  assert.equal(billing.ledger.filter(entry => entry.usageRequestId === failedId && entry.kind === 'release').length, 1)
+  assert.equal(billing.ledger.filter(entry => entry.usageRequestId === failedId && entry.kind === 'capture').length, 0)
+  // Even after fixing the upstream, the old key replays its original failure.
+  upstream.response = payload
+  await assert.rejects(f.gateway.queryEnterprise(f.context, failedRequest), error => {
+    assert.equal(error.details.requestId, failedId)
+    assert.equal(error.code, 'external_platform_rejected')
+    return true
+  })
+  assert.equal(upstream.calls, initialCalls + 1)
+  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...failedRequest,
+    body: { ...failedRequest.body, query: { keyword: '不同查询' } } }), { code: 'idempotency_conflict' })
+  assert.equal(upstream.calls, initialCalls + 1)
+  // A deliberately new request may dispatch and charge once after recovery.
+  const success = await f.gateway.queryEnterprise(f.context, { ...failedRequest, idempotencyKey: 'enterprise-whitelist-fixed' })
+  assert.equal(success.status, 200)
+  assert.notEqual(success.requestId, failedId)
+  assert.equal(upstream.calls, initialCalls + 2)
+  billing = await f.hub.getTenantBilling(f.context.tenant.id)
+  assert.equal(billing.account.availableMinor, 99)
+  assert.equal(billing.account.heldMinor, 0)
+  // Ambiguous dispatch remains frozen and cannot automatically run again.
+  upstream.response = new Error('synthetic timeout')
+  const unknownRequest = { ...failedRequest, idempotencyKey: 'enterprise-unknown-billing',
+    body: { ...failedRequest.body, query: { keyword: '超时测试企业' } } }
+  await assert.rejects(f.gateway.queryEnterprise(f.context, unknownRequest), { code: 'external_platform_outcome_unknown' })
+  await assert.rejects(f.gateway.queryEnterprise(f.context, unknownRequest), { code: 'request_outcome_unknown' })
+  assert.equal(upstream.calls, initialCalls + 3)
+  billing = await f.hub.getTenantBilling(f.context.tenant.id)
+  assert.equal(billing.account.availableMinor, 98)
+  assert.equal(billing.account.heldMinor, 1)
+  return failedId
+}
+
+test('enterprise whitelist rejection releases customer funds and replays without paid redispatch', async () => {
+  const upstream = { calls: 0, response: payload }
+  const f = await enterpriseFixture({ fetchImpl: async () => {
+    upstream.calls++
+    if (upstream.response instanceof Error) throw upstream.response
+    return new Response(JSON.stringify(upstream.response))
+  } })
+  await verifyRejectedEnterpriseBilling(f, upstream)
+})
+
 test('reviewed zero-cost result endpoint, no-data and pending responses have explicit semantics', async () => {
   const f = await enterpriseFixture({ activate: false, fetchImpl: async () => new Response(JSON.stringify({ status: '202', data: { report_id: 'report-1' } })) })
   await f.enable('36.99', 0)
@@ -246,7 +318,12 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   assert.equal(migrated.find(row => row.operationKey === 'enterprise.api.77.58').priceBook.endpointPrices['enterprise.77.58'], 10)
   assert.ok(migrated.every(row => Object.keys(row.priceBook.endpointPrices).length <= 1), 'do not duplicate the 260-entry book into every operation payload')
   const credentialStore = new StructuredExternalPlatformCredentialStore({ pool, providerKey: 'qixin', fields: QIXIN_CREDENTIAL_FIELDS, pepper })
-  const f = await enterpriseFixture({ store, platformStore, control, credentialStore })
+  const upstream = { calls: 0, response: payload }
+  const f = await enterpriseFixture({ store, platformStore, control, credentialStore, fetchImpl: async () => {
+    upstream.calls++
+    if (upstream.response instanceof Error) throw upstream.response
+    return new Response(JSON.stringify(upstream.response))
+  } })
   const combined = await f.hub.publishPlanVersion({ key: 'pg-qixin', name: 'PG official combination',
     components: [{ type: 'feature', key: 'qixin', version: 1, multiplierPpm: 900000 }, { type: 'feature', key: 'xiaohongshu', version: 1 }],
     limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 }, priceBook: { key: 'pg-qixin', currency: 'CNY', defaultMultiplierPpm: 1000000 },
@@ -281,6 +358,17 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   const zero = await f.gateway.queryEnterprise(f.context, { ...request, apiId: '36.99', path: '/api/v1/data/enterprise/36.99/query', idempotencyKey: 'enterprise-zero-0001', body: { query: input } })
   assert.equal(zero.status, 200)
   assert.equal((await query("SELECT cost_minor FROM external_platform.provider_calls WHERE endpoint_key='enterprise.36.99'")).rows[0].cost_minor, 0)
+  const failedId = await verifyRejectedEnterpriseBilling(f, upstream)
+  const charge = (await query('SELECT status, charged_minor FROM billing.customer_charges WHERE usage_request_id=$1', [failedId])).rows[0]
+  assert.equal(charge.status, 'released')
+  assert.equal(Number(charge.charged_minor), 0)
+  const archivedFailure = (await query(`SELECT call.outcome, call.billed, raw.parsed_payload
+    FROM external_platform.provider_calls call JOIN control.external_platform_restricted_raw_responses raw
+      ON raw.provider_call_id = call.id WHERE call.usage_request_id=$1`, [failedId])).rows
+  assert.equal(archivedFailure.length, 1)
+  assert.equal(archivedFailure[0].outcome, 'rejected')
+  assert.equal(archivedFailure[0].billed, null, 'customer release does not invent supplier billing evidence')
+  assert.equal(archivedFailure[0].parsed_payload.status, '104')
 })
 
 test('official defaults allow granted billed requests, while negotiated APIs and missing grants never dispatch', async () => {

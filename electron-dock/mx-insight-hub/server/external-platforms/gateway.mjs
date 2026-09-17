@@ -627,6 +627,9 @@ export class ExternalPlatformGateway {
       // key means this HTTP call is a new billable intent; only explicit key
       // reuse is idempotent.
       replayWindowMs: null,
+      // A definitive enterprise rejection releases the wallet hold, but the
+      // same caller intent must still replay its saved error without dispatch.
+      replayReleasedFailures: this.providerKey === 'qixin',
     })
     durableRequestId = reservation.request?.id || requestId
     ownsReservation = reservation.kind === 'reserved'

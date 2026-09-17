@@ -509,6 +509,7 @@ test('legacy routing limits direct TikHub to a single raw query and its own cont
     idempotencyKey: 'legacy-direct-query',
     path: LEGACY_PATHS.raw,
     responseMode: 'legacy',
+    acquisitionRequest: { method: 'POST', path: LEGACY_PATHS.raw, body: { platform: 'xiaohongshu', query: 'single query' } },
     fingerprintBody: {
       contractVersion: 'mx-insight-hub.night-all-compat.v1',
       platform: 'xiaohongshu',
@@ -528,6 +529,7 @@ test('legacy routing limits direct TikHub to a single raw query and its own cont
     idempotencyKey: 'legacy-direct-details',
     path: LEGACY_PATHS.raw,
     responseMode: 'legacy',
+    acquisitionRequest: { method: 'POST', path: LEGACY_PATHS.raw, body: { platform: 'xiaohongshu', query: 'complete details', includeDetails: true, maxEnrichItems: 12 } },
     fingerprintBody: {
       contractVersion: 'mx-insight-hub.night-all-compat.v1',
       platform: 'xiaohongshu',

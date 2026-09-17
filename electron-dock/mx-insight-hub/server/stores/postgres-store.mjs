@@ -2328,6 +2328,14 @@ export class PostgresStore {
     return requestRecord(rows[0]) || null
   }
 
+  async saveAcquisitionRequest(id, request) {
+    await this.pool.query(
+      `UPDATE public.usage_requests SET acquisition_request = $2::jsonb
+        WHERE id = $1 AND status = 'reserved' AND acquisition_request IS NULL`,
+      [id, JSON.stringify(request)],
+    )
+  }
+
   async reserve(input) {
     if (Boolean(input.platform) === Boolean(input.capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
@@ -2381,7 +2389,10 @@ export class PostgresStore {
         // mutable usage row can never be rebound to a different API key.
         if (existing.apiKeyId !== input.apiKeyId) kind = 'conflict'
         else if (existing.fingerprint !== input.fingerprint) kind = 'conflict'
-        else if (existing.status === 'committed' && !replayExpired(existing, input.replayWindowMs)) {
+        else if ((existing.status === 'committed'
+          || (input.replayReleasedFailures && existing.status === 'released'
+            && existing.responseStatus >= 400 && existing.responseStatus <= 599))
+          && !replayExpired(existing, input.replayWindowMs)) {
           kind = 'replay'
         } else if (existing.status === 'reserved') kind = 'in_progress'
         else if (existing.status === 'unknown') kind = 'unknown'
@@ -3177,7 +3188,15 @@ export class PostgresStore {
     }, { outcomeUnknownCode: 'compatibility_delivery_outcome_unknown' })
   }
 
-  releaseRequest(id, errorCode) {
+  releaseRequest(id, errorCode, response = null) {
+    if (response) return this.#updateRequest(
+      `UPDATE usage_requests SET status = 'released', error_code = $2, completed_at = now(),
+         response_status = $3, response_body = $4, units_actual = 0,
+         upstream_latency_ms = $5, delivery_source_mode = $6, response_captured_at = $7
+       WHERE id = $1 AND status = 'reserved' RETURNING *`,
+      [id, errorCode, response.responseStatus, response.responseBody,
+        response.upstreamLatencyMs, response.deliverySourceMode, response.capturedAt],
+    )
     return this.#updateRequest(
       `UPDATE usage_requests SET status = 'released', error_code = $2, completed_at = now()
        WHERE id = $1 AND status = 'reserved' RETURNING *`,

@@ -65,6 +65,7 @@ function rootRow(overrides = {}) {
     consumer_id: randomUUID(),
     api_key_id: randomUUID(),
     idempotency_key: 'note-detail-1',
+    acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw', body: { platform: 'xiaohongshu', keyword: 'example' } },
     fingerprint: 'a'.repeat(64),
     platform: null,
     capability: 'social.posts.resolve',
@@ -406,6 +407,7 @@ test('Admin acquisition history includes owner and provider cost lineage without
 
   assert.equal(result.owner.consumerId, root.consumer_id)
   assert.equal(result.requestEvidence.fingerprint, root.fingerprint)
+  assert.deepEqual(result.requestEvidence.request, root.acquisition_request)
   assert.equal(result.items[0].connectorId, 'external-platform:tikhub')
   assert.equal(result.items[0].datasetId, 'tikhub.xiaohongshu.note.v1')
   assert.deepEqual(result.items[0].normalizedPayload, item.normalized_payload)

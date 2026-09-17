@@ -13033,3 +13033,49 @@ button.mih-catalog-status {
 .mih-table[aria-label="API Key 列表"] td:nth-child(3) { min-width: 160px; }
 .mih-table[aria-label="API Key 列表"] td:nth-child(4) { min-width: 200px; max-width: 340px; }
 .mih-table[aria-label="API Key 列表"] .qp-button { white-space: nowrap; }
+
+.mih-acquisition-comparison {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  min-width: 0;
+}
+
+.mih-acquisition-comparison h3,
+.mih-acquisition-comparison h4,
+.mih-acquisition-comparison p {
+  margin: 0;
+}
+
+.mih-acquisition-comparison header {
+  display: grid;
+  gap: 8px;
+}
+
+.mih-acquisition-comparison h3 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.mih-acquisition-comparison p {
+  color: var(--qp-text-3);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.mih-acquisition-comparison > button {
+  justify-self: start;
+}
+
+.mih-acquisition-comparison textarea {
+  font-family: monospace;
+  resize: vertical;
+  min-height: 170px;
+  line-height: 1.6;
+}
+
+.mih-acquisition-comparison article {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}

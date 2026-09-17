@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ClockCounterClockwise, Coins, Database, Receipt } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { AcquisitionComparison } from './acquisition-comparison.jsx'
 import { ErrorState, MetricCard, StatusBadge, formatDate, formatNumber } from './components.jsx'
 
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -58,15 +59,19 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [comparing, setComparing] = useState(false)
+  const lookupLock = useRef(false)
 
   const lookup = async (event) => {
     event.preventDefault()
+    if (comparing || lookupLock.current) return
     const normalized = requestId.trim()
     if (!REQUEST_ID_PATTERN.test(normalized)) {
       setData(null)
       setError(new Error('请输入完整的 Hub requestId（UUID）'))
       return
     }
+    lookupLock.current = true
     setLoading(true)
     setError(null)
     try {
@@ -76,6 +81,7 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
       setError(lookupError)
       if ([401, 403].includes(lookupError?.status)) onUnauthorized?.()
     } finally {
+      lookupLock.current = false
       setLoading(false)
     }
   }
@@ -94,18 +100,18 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
       <header className="mih-panel__header">
         <div>
           <h2>采集查询复现</h2>
-          <p>按 requestId 回看当时交付的原始响应、顺序、canonical 修订与上下游计费证据；只读，不会重新调用上游。</p>
+          <p>按 requestId 回看当时交付的原始响应、顺序、canonical 修订与上下游计费证据；复现为只读；下方“新请求对比”仅在手动发送时调用接口。</p>
         </div>
       </header>
 
       <form className="mih-data-center-search" onSubmit={lookup}>
         <label className="qp-field mih-data-center-search__query">
           <span className="qp-field__label">Hub requestId</span>
-          <input className="qp-input" value={requestId} spellCheck="false"
+          <input className="qp-input" value={requestId} spellCheck="false" disabled={loading || comparing}
             placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             onChange={(event) => setRequestId(event.target.value)} />
         </label>
-        <button className="qp-button" type="submit" disabled={loading}>
+        <button className="qp-button" type="submit" disabled={loading || comparing}>
           {loading ? '正在查询' : '复现已交付结果'}
         </button>
       </form>
@@ -126,6 +132,7 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
           </div>
 
           <dl className="mih-search-reindex__facts">
+            <div><dt>原 requestId / 幂等键</dt><dd><code>{data.requestId}</code><br /><code>{data.requestEvidence?.idempotencyKey || '—'}</code></dd></div>
             <div><dt>请求归属</dt><dd>{data.owner?.tenantName || data.owner?.tenantId || '—'} / {data.owner?.consumerName || data.owner?.consumerId || '—'}</dd></div>
             <div><dt>交付响应哈希</dt><dd><code>{data.delivered?.responseHash || '—'}</code></dd></div>
             <div><dt>计费价格表</dt><dd>{data.customerCharge?.priceBookKey ? `${data.customerCharge.priceBookKey} · v${data.customerCharge.priceBookVersion}` : '—'}</dd></div>
@@ -164,7 +171,7 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
                   <tr key={call.id}>
                     <td><strong>{call.providerKey}</strong><small>{call.requestCall ? '本次调用' : '历史交付源'} · {call.contractVersion || '—'} · 凭证 r{call.providerCredentialRevision ?? '—'}</small></td>
                     <td>{call.operation || '—'}<small>{call.endpointKey || '—'} · 价格表 v{call.providerPriceBookVersion ?? '—'}</small></td>
-                    <td><StatusBadge status={call.outcome || 'unknown'} /> <small>HTTP {call.httpStatus || '—'}</small></td>
+                    <td><StatusBadge status={call.outcome || 'unknown'} /> <small>HTTP {call.httpStatus || '—'} · {call.errorCode || '无错误码'}</small></td>
                     <td>{callCost(call)}<small>{call.costKind || '—'}</small></td>
                     <td>{formatDate(call.completedAt || call.startedAt)}</td>
                   </tr>
@@ -172,6 +179,7 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
               </table>
             </div>
           ) : null}
+          <AcquisitionComparison key={data.requestId} token={token} original={data} onBusyChange={setComparing} />
         </div>
       ) : null}
     </section>

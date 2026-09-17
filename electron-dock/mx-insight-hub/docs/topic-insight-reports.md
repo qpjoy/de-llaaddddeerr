@@ -78,3 +78,20 @@ connector credential、内部源身份、数据库坐标或 lineage。
 
 清洗计划来源为 Night-All-A，历史内部标识为兼容保留；公开目录与专题报告继续使用 Hub 中性合同。
 详见 [Night-All-A 清洗与发现](operations/night-all-saved-records-ingestion.md)。
+
+## 主题、关键词与分页（2026-09-17）
+
+`platforms` 表示数据来源类别，不是研究主题。POST 必填 `topic`，可选 `keywords`
+（最多 12 个，每个 1–80 字）和 `matchMode=any|all`。关键词填写后以标题/正文的
+不区分大小写字面子串匹配替代主题自动拆词；未填时保持原来的主题匹配逻辑。
+新增 migration 093 保存关键词，旧报告兼容空关键词。
+
+GET `/api/v1/data/topic-reports?keyword=选举&status=succeeded&page=1&limit=10`
+搜索当前 consumer 的已有报告，支持 topic、keyword、status、platform 组合筛选，返回
+items/page/limit/hasMore。topic 匹配报告主题，keyword 匹配主题或保存的关键词；
+这些条件不搜索报告全文，也不会创建新报告。查询与翻页不计费、不触发上游采集。
+实时倒序分页期间新增任务可能移动页边界，调用方按 id 去重。单报告证据最多 80 条，
+分页报告列表不代表分页遍历原始数据全集。原始数据查询使用 canonical search 合同。
+
+Hub 页面支持动态类别多选、自定义时间、关键词匹配模式与报告搜索分页。
+所有改动限定 Hub 专题链路；MX-H2I 登录、网络及 Launcher 身份路径不变。

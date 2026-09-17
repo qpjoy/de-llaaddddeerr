@@ -31,6 +31,29 @@ Hub 外部数据平台新增启信慧眼；接口说明统一位于「接口文�
 
 默认技术上限为供应商并发 3、单消费者并发 1、每分钟 30 次；30 秒超时、响应上限 16 MiB。仅接受固定 `https://api.qixin.com` 目录地址，禁止重定向和自定义 URL、Headers。供应商是否真实扣费记录为未知，采购成本按已审核价格估计。未知调用结果阻止自动重发。
 
+## 104 白名单拒绝与失败计费排查
+
+上游 HTTP 200 不代表查询成功。已观测到 `status=104`、`message=未添加IP白名单`：应在该组 AppKey 的供应商账户中添加 Hub 请求的公网出口 IP。错误堆栈中 `connect ... IP:443` 的 IP 是探测服务目标地址，不是 Hub 出口，不能用于白名单。
+
+如果 `api.ipify.org` 不可达，可在服务器从实际 Public API 容器查询 IPIP 的出口观察接口（[服务说明](https://www.ipip.net/myip.html)）。这不是企业查询，不发送任何平台密钥：
+
+```bash
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-public \
+  -c api -- node --input-type=module -e '
+const r = await fetch("http://myip.ipip.net", {
+  signal: AbortSignal.timeout(10000)
+});
+if (!r.ok) throw new Error(`HTTP ${r.status}`);
+console.log(await r.text());
+'
+```
+
+若网络按目标分流，查询服务看到的出口只能参考，应以启信宝调用日志中记录的来源 IP，或访问 `api.qixin.com` 时实际使用的 NAT 出口为准。探测失败不需要修改 MX-H2I 的 DNS、代理或登录配置。
+
+明确拒绝且没有存量结果交付的企业请求，保存失败响应并将用量记为 `released`，客户冻结金额释放；采购账单是否收费仍为未知。相同 Idempotency-Key 返回原错误和原 Request ID，不再访问供应商。白名单修复后由用户显式选择「以当前参数新建请求」，才重新查询和计费。超时等未知结果仍为 `unknown` 并保留冻结。成功、无数据和异步已受理的既有收费规则保持不变。
+
+此修复不改写旧账本。旧版本可能将明确拒绝记为 `committed`，并在 enforced 模式扣费；应按 Request ID 核对 `billing.customer_charges`。确认为误扣时，管理员可在「套餐与配额」选择对应租户，通过「人工充值」按实际误扣金额补偿入账，原因及外部关联号填写原请求号；提交前核对是否已补偿，保留原扣款与补偿两条记录，不直接 UPDATE 余额或历史 charge。新代码需要正常部署后才在线上生效。
+
 ## 对外调用与数据留存
 
 「数据产品 → 企业数据」默认打开接口调试，沿用当前 Hub Key 的调用身份；租户导航需要同一调用者同时开通 enterprise 与 enterprise.query，实际请求再检查原 Key 的权限。调试表单从已认证的 OpenAPI 读取接口、字段和开放状态，按名称/ID 搜索、分类及每页 10 项展示。只在点击发送时调用，不自动查企业、翻页或轮询；相同参数的重试和 tab 切换保留当前页面内的幂等标识。切换 Key 会清空请求与响应，浏览器刷新或离开页面后应使用已保存的 requestId/Idempotency-Key 核对，不能假定页面会恢复请求。

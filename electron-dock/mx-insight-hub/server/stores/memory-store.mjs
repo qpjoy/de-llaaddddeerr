@@ -1386,6 +1386,11 @@ export class MemoryStore {
     charge.settledAt = settledAt
   }
 
+  async saveAcquisitionRequest(id, request) {
+    const row = this.requests.get(id)
+    if (row?.status === 'reserved' && !row.acquisitionRequest) row.acquisitionRequest = clone(request)
+  }
+
   async reserve({
     requestId,
     idempotencyKey,
@@ -1402,6 +1407,7 @@ export class MemoryStore {
     apiKeyQuota = null,
     authorizationPlatforms = null,
     replayWindowMs = null,
+    replayReleasedFailures = false,
     meterKey = null,
     requiredAuthorizationScopes: suppliedAuthorizationScopes = null,
   }) {
@@ -1434,7 +1440,10 @@ export class MemoryStore {
       // The caller must use a new idempotency key for that new business key.
       if (existing.apiKeyId !== apiKeyId) return { kind: 'conflict', request: clone(existing) }
       if (existing.fingerprint !== fingerprint) return { kind: 'conflict', request: clone(existing) }
-      if (existing.status === 'committed' && !replayExpired(existing, replayWindowMs)) {
+      if ((existing.status === 'committed'
+        || (replayReleasedFailures && existing.status === 'released'
+          && existing.responseStatus >= 400 && existing.responseStatus <= 599))
+        && !replayExpired(existing, replayWindowMs)) {
         return { kind: 'replay', request: clone(existing) }
       }
       if (existing.status === 'reserved') return { kind: 'in_progress', request: clone(existing) }
@@ -2092,10 +2101,18 @@ export class MemoryStore {
     }
   }
 
-  async releaseRequest(id, errorCode) {
+  async releaseRequest(id, errorCode, response = null) {
     const record = this.#requestInState(id, ['reserved'])
     this.#settleCustomerCharge(record, 'released')
     Object.assign(record, { status: 'released', errorCode, completedAt: nowIso() })
+    if (response) Object.assign(record, {
+      responseStatus: response.responseStatus,
+      responseBody: clone(response.responseBody),
+      unitsActual: 0,
+      upstreamLatencyMs: response.upstreamLatencyMs,
+      deliverySourceMode: response.deliverySourceMode,
+      capturedAt: response.capturedAt,
+    })
     return clone(record)
   }
 
