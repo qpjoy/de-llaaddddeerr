@@ -3186,8 +3186,13 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             properties: {
               raw_info: { type: 'string', contentMediaType: 'application/json', description: 'JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged.' },
               raw_data: { type: 'string', contentMediaType: 'application/json', description: 'JSON-string array retained for compatibility. Hub-native Xiaohongshu raw uses the same type; Night-All-owned results remain unchanged.' },
-              page: { type: 'object', additionalProperties: true, description: 'Business-neutral pagination controls. Historical provider continuation is replaced by an encrypted mxnc1 Hub cursor and page 15 is terminal; content fields are not filtered or truncated.' },
-              meta: { type: 'object', additionalProperties: true },
+              page: { type: 'object', additionalProperties: true, description: 'Business-neutral pagination controls. Historical provider continuation is replaced by an encrypted mxnc1 Hub cursor and page 15 is terminal; content fields are not filtered or truncated. page.returnedCount is the producer\'s own declaration: trust the length of the raw_data/raw_info array, and see the COUNT_DECLARATION_MISMATCH warning.' },
+              meta: { type: 'object', additionalProperties: true, description: 'meta.resultCount is the delivered row count and meta.duplicateCount is how many rows page-level de-duplication removed from that same collection, so resultCount + duplicateCount is what the provider produced for this page. A short page is therefore distinguishable from a de-duplicated one without guessing.' },
+              warnings: {
+                type: 'array',
+                description: 'Producer warnings, plus Hub audit notes. COUNT_DECLARATION_MISMATCH means a declared count (page.returnedCount, meta.resultCount, meta.rawDataCount or meta.rawInfoCount) disagrees with the rows this envelope actually carries; the historical Night-All path declares its page count before de-duplicating raw_data. Hub never edits the declared counts or the rows. Billing already follows the delivered rows, so this warning is a data-quality signal and does not by itself mark the delivery partial.',
+                items: { type: 'object', additionalProperties: true, required: ['code', 'message'], properties: { code: { type: 'string' }, message: { type: 'string' } } },
+              },
             },
           },
           requestId: { type: 'string' },

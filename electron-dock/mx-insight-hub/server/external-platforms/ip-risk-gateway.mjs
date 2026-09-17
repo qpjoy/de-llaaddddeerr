@@ -3,6 +3,7 @@ import { AppError } from '../core/errors.mjs'
 import { IpRiskBatch } from './ip-risk-batch.mjs'
 import { IpSearchEvents } from './ipsearch-events.mjs'
 import { IP_RISK_PLATFORM, IP_RISK_OPERATION, IP_RISK_VERSION, normalizeIpRiskRequest } from '../contracts/ip-risk.mjs'
+import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
 
 export class IpRiskGateway {
   constructor({ usageStore, platformStore, adapter, credentialStore = null, enabled = false, credentialConfigured = adapter.configured, reservationLeaseMs = 60000 }) {
@@ -55,6 +56,7 @@ export class IpRiskGateway {
       platform: IP_RISK_PLATFORM,
       // Unlisted meters remain free; assigned explicit prices use the existing wallet ledger.
       meterKey: IP_RISK_OPERATION,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       requiredAuthorizationScopes: [{ type: 'platform', key: IP_RISK_PLATFORM }, { type: 'capability', key: IP_RISK_OPERATION }],
       unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart: new Date(Date.now() - policy.windowSeconds * 1000), maxRequests: policy.maxRequests, replayWindowMs: null,

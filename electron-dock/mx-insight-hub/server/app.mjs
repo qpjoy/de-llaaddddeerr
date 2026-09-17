@@ -1692,7 +1692,26 @@ export function createApp({
         })
         return
       }
-      let params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId')
+      let params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/verify-request')
+      if (request.method === 'POST' && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'acquisition request verification')
+        if (!acquisitionHistory?.verifyRequest) {
+          throw new AppError(
+            503,
+            'acquisition_history_unavailable',
+            'Acquisition history requires the PostgreSQL store',
+          )
+        }
+        // Read-only: it recomputes a fingerprint and never dispatches, bills
+        // or mutates the historical run.
+        sendJson(response, 200, {
+          data: await acquisitionHistory.verifyRequest(params.requestId, await readJson(request, 64 * 1024)),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId')
       if (request.method === 'GET' && params) {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'acquisition history lookup')
@@ -5280,6 +5299,7 @@ export function createApp({
         const result = await tikHubGateway.officialXiaohongshu(context, {
           endpointName: officialXiaohongshuEndpoint.name,
           query,
+          method: request.method,
           idempotencyKey: request.headers['idempotency-key'],
           path: pathname,
         })

@@ -28,6 +28,14 @@ function iso(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
+// Written in the same INSERT as the reservation, so the parameters of a paid
+// request exist before any upstream work and can never be rewritten by a later
+// replay of the same Idempotency-Key.
+function acquisitionRequestValue(input) {
+  return input.acquisitionRequest ? JSON.stringify(input.acquisitionRequest) : null
+}
+
+
 function sourceCatalogComparableName(value) {
   return String(value || '').normalize('NFKC').trim().toLocaleLowerCase('zh-CN')
 }
@@ -2402,8 +2410,8 @@ export class PostgresStore {
             `INSERT INTO usage_requests
                (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
                 platform, capability, billing_meter_key, authorization_scopes,
-                status, units_reserved, lease_expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12)
+                status, units_reserved, lease_expires_at, acquisition_request)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12, $13::jsonb)
              RETURNING *`,
             [
               input.requestId,
@@ -2418,6 +2426,7 @@ export class PostgresStore {
               JSON.stringify(authorizationScopes),
               input.unitsReserved,
               input.leaseExpiresAt,
+              acquisitionRequestValue(input),
             ],
           )
           await client.query(
@@ -2438,8 +2447,8 @@ export class PostgresStore {
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
             platform, capability, billing_meter_key, authorization_scopes,
-            status, units_reserved, lease_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12)
+            status, units_reserved, lease_expires_at, acquisition_request)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12, $13::jsonb)
          RETURNING *`,
         [
           input.requestId,
@@ -2454,6 +2463,7 @@ export class PostgresStore {
           JSON.stringify(authorizationScopes),
           input.unitsReserved,
           input.leaseExpiresAt,
+          acquisitionRequestValue(input),
         ],
       )
       await client.query(

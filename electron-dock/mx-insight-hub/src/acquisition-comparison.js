@@ -8,7 +8,7 @@ export function canCompareAcquisition(data) {
       && call.providerKey === 'tikhub' && call.operation === 'social.posts.search'))
 }
 
-export function createAcquisitionComparison(data, bodyText, idempotencyKey) {
+export function createAcquisitionComparison(data, bodyText, idempotencyKey, { verifiedBody = null } = {}) {
   if (!canCompareAcquisition(data)) throw new Error('目前支持 TikHub 小红书 raw 搜索的请求对比。')
   let body
   try { body = JSON.parse(bodyText) } catch { throw new Error('请输入有效的原请求 JSON。') }
@@ -30,8 +30,13 @@ export function createAcquisitionComparison(data, bodyText, idempotencyKey) {
   return {
     idempotencyKey, originalRequestId: data.requestId, keyId: data.owner.apiKeyId,
     body, path: ACQUISITION_COMPARISON_PATH,
+    // 'verified' means the pasted body reproduced the historical request
+    // fingerprint exactly; 'manual' stays an unproven reconstruction.
     parameterSource: data.requestEvidence?.request && JSON.stringify(body) === JSON.stringify(data.requestEvidence.request.body)
-      ? 'saved' : 'manual',
+      ? 'saved'
+      : verifiedBody && JSON.stringify(body) === verifiedBody
+        ? 'verified'
+        : 'manual',
   }
 }
 
@@ -39,4 +44,10 @@ export function comparisonOutcome(delivered) {
   const code = delivered?.body?.error?.code
   return ['request_in_progress', 'request_outcome_unknown', 'external_platform_outcome_unknown', 'external_platform_call_persistence_unknown', 'internal_error'].includes(code)
     || !delivered?.body ? 'uncertain' : 'received'
+}
+
+export const PARAMETER_SOURCE_LABELS = {
+  saved: '保存的原参数',
+  verified: '已校验与原请求一致',
+  manual: '手动参数',
 }

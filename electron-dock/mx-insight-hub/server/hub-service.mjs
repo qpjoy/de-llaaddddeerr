@@ -150,6 +150,8 @@ import {
   MAX_CRAWL_WORK,
   staleSnapshotAgeSeconds,
 } from './data/night-all-compat.mjs'
+import { withNightAllLegacyCountWarning } from './contracts/night-all-count-audit.mjs'
+import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
 import {
   capNightAllCompatibilityTraversal,
   capNightAllDataSearchTraversal,
@@ -285,7 +287,9 @@ function providerOperationReady(providerCapability, operationKey) {
     : Boolean(providerCapability?.ready)
 }
 
-function canonicalPlatform(value) {
+// Exported so evidence surfaces canonicalize a candidate platform exactly as
+// the dispatch path did; a second alias table would silently drift.
+export function canonicalPlatform(value) {
   const platform = requiredString(value, 'platform').toLowerCase()
   return PLATFORM_ALIASES.get(platform) || platform
 }
@@ -1845,6 +1849,11 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       capability: TOKENIZE_CAPABILITY,
+      // Tokenize deliberately retains no caller text: the submitted string is
+      // the sensitive payload itself, and its usage evidence is asserted to be
+      // free of it. Reproduction here means re-submitting the text, not
+      // reading it back out of the ledger.
+      acquisitionRequest: null,
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3196,6 +3205,7 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3361,6 +3371,7 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       capability: CANONICAL_SEARCH_USAGE_SCOPE,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3500,6 +3511,7 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       capability: TOPIC_REPORT_USAGE_SCOPE,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -3679,6 +3691,9 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       ...(capability ? { capability } : { platform }),
+      // A stored read has no upstream body; the normalized filter set is
+      // exactly what a reproduction needs.
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'GET', path, body: fingerprintBody }),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -4012,6 +4027,7 @@ export class HubService {
       meterKey: normalized.platform === 'xiaohongshu'
         ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
         : operation,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       ...(normalized.platform === 'xiaohongshu' ? {
         requiredAuthorizationScopes: [
           { type: 'platform', key: normalized.platform },
@@ -4107,7 +4123,7 @@ export class HubService {
         body: traversal.upstreamBody,
         businessId: context.consumer.businessId,
       })
-      const responseBody = capNightAllCompatibilityTraversal(upstream.payload, {
+      const traversedBody = capNightAllCompatibilityTraversal(upstream.payload, {
         operation,
         platform: normalized.platform,
         page: traversal.page,
@@ -4115,6 +4131,11 @@ export class HubService {
         codec: compatibilityCursorCodec,
         upstreamBody: traversal.upstreamBody,
       })
+      // Night-All declares page.returnedCount before its own raw_data
+      // de-duplication, so a delivered envelope can contradict itself. Record
+      // the discrepancy on the response that gets archived; never rewrite the
+      // acquired rows or the upstream count fields themselves.
+      const responseBody = withNightAllLegacyCountWarning(traversedBody)
       const businessOutcome = nightAllCompatibilityBusinessOutcome(responseBody)
       const capturedAt = new Date()
       const staleUntil = new Date(capturedAt.getTime() + nightAllCompatibilityFallbackWindowMs(operation))
@@ -4239,7 +4260,10 @@ export class HubService {
           }
           return {
             status: 200,
-            body: snapshot.responseBody,
+            // The stored snapshot may predate the count audit; reconcile the
+            // body that is actually delivered so a caller sees the same
+            // warning whether the page came from upstream or from fallback.
+            body: withNightAllLegacyCountWarning(snapshot.responseBody),
             requestId: activeRequestId,
             replay: false,
             sourceMode: 'stale',
@@ -4433,6 +4457,7 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       ...(platform === 'xiaohongshu' ? {
         meterKey: XIAOHONGSHU_SEARCH_OPERATION,
         requiredAuthorizationScopes: [

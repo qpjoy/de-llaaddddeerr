@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { canonicalJson } from '../ingest/normalizers.mjs'
+import { nightAllLegacyCountAudit } from '../contracts/night-all-count-audit.mjs'
+import { verifyAcquisitionRequestCandidate } from './request-verification.mjs'
+import { canonicalPlatform } from '../hub-service.mjs'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const CONTRACT_VERSION = 'mx-insight-hub.acquisition-query-run.v1'
@@ -254,6 +257,36 @@ export class PostgresAcquisitionHistoryStore {
     })
   }
 
+  /**
+   * Prove (or disprove) that a candidate body is the one this run was
+   * dispatched with, using the reservation fingerprint that every run has.
+   *
+   * This is the only reproduction evidence available for a run recorded before
+   * request bodies were stored, and it never reveals the original parameters:
+   * an operator can confirm a reconstruction, not extract one.
+   */
+  async verifyRequest(requestId, candidate) {
+    requireUuid(requestId, 'request_id')
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new AppError(400, 'invalid_request', 'A candidate request object is required')
+    }
+    const root = await withReadSnapshot(this.pool, (client) => this.#getRoot(client, requestId))
+    if (!root) {
+      throw new AppError(404, 'acquisition_query_run_not_found', 'Acquisition query run not found')
+    }
+    return {
+      requestId: root.id,
+      savedRequest: root.acquisition_request || null,
+      ...verifyAcquisitionRequestCandidate({
+        storedFingerprint: root.fingerprint,
+        path: candidate.path,
+        body: candidate.body,
+        businessId: root.consumer_business_id,
+        canonicalizePlatform: canonicalPlatform,
+      }),
+    }
+  }
+
   #assertDelivered(root) {
     if (!root) {
       throw new AppError(404, 'acquisition_query_run_not_found', 'Acquisition query run not found')
@@ -289,6 +322,10 @@ export class PostgresAcquisitionHistoryStore {
         responseHash: deliveredResponseSemanticSha256(root.response_body),
         responseHashContract: 'sha256-canonical-json-v1',
         responseBody: root.response_body,
+        // Recomputed from the archived body on every read, so a delivery made
+        // before this audit existed is reconciled too. null means the body is
+        // not a Night-All standard raw envelope and has nothing to reconcile.
+        countAudit: nightAllLegacyCountAudit(root.response_body),
         gatewayEvents: gatewayRows.map((row) => gatewayEvent(row, admin)),
       },
       customerCharge: customerCharge(root),

@@ -726,3 +726,31 @@
     grid-column: 1 / -1;
   }
 }
+
+/* Probe policy is edited both here and on a service binding; one style keeps
+   the two surfaces recognisably the same control. */
+.mih-proxy-probe {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px 14px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--qp-line);
+  border-radius: 10px;
+  background: var(--qp-bg-2);
+}
+
+.mih-proxy-probe > legend {
+  padding: 0 6px;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--qp-text-3);
+}
+
+.mih-proxy-probe > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: 0.82rem;
+}

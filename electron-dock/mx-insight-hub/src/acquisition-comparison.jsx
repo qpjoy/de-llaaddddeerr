@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { adminApi, publicDataApi } from './api.js'
 import { ErrorState } from './components.jsx'
-import { ACQUISITION_COMPARISON_PATH, canCompareAcquisition, createAcquisitionComparison, comparisonOutcome } from './acquisition-comparison.js'
+import { ACQUISITION_COMPARISON_PATH, PARAMETER_SOURCE_LABELS, canCompareAcquisition, createAcquisitionComparison, comparisonOutcome } from './acquisition-comparison.js'
 
 export function AcquisitionComparison({ token, original, onBusyChange }) {
   const [bodyText, setBodyText] = useState(() => original.requestEvidence?.request
@@ -9,6 +9,10 @@ export function AcquisitionComparison({ token, original, onBusyChange }) {
   const [attempts, setAttempts] = useState([])
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
+  // A verified body is one that reproduced the historical request fingerprint,
+  // which is the only proof available for a run recorded without its body.
+  const [verified, setVerified] = useState(null)
+  const [verifying, setVerifying] = useState(false)
   const lock = useRef(false)
   const last = attempts.at(-1)
   const unresolved = last?.state === 'uncertain'
@@ -22,7 +26,9 @@ export function AcquisitionComparison({ token, original, onBusyChange }) {
     if (lock.current) return
     let attempt
     try {
-      attempt = retry || createAcquisitionComparison(original, bodyText, `compare-${crypto.randomUUID()}`)
+      attempt = retry || createAcquisitionComparison(original, bodyText, `compare-${crypto.randomUUID()}`, {
+        verifiedBody: verified?.match ? verified.body : null,
+      })
     } catch (caught) { setError(caught); return }
     lock.current = true
     setBusy(true)
@@ -62,18 +68,41 @@ export function AcquisitionComparison({ token, original, onBusyChange }) {
     }
   }
 
+  // Read-only: it recomputes a fingerprint server-side and never dispatches.
+  const verify = async () => {
+    if (busy || verifying) return
+    let body
+    try { body = JSON.parse(bodyText) } catch { setError(new Error('请输入有效的原请求 JSON。')); return }
+    setVerifying(true)
+    setError(null)
+    setVerified(null)
+    try {
+      const result = await adminApi.verifyAcquisitionRequest(token, original.requestId, {
+        path: ACQUISITION_COMPARISON_PATH, body,
+      })
+      setVerified({ ...result, body: JSON.stringify(body) })
+    } catch (caught) { setError(caught); if (caught.status === 401) onBusyChange(false) }
+    finally { setVerifying(false) }
+  }
+
   if (!supported) return <p>当前记录不支持参数重发；保留只读复现。现支持 TikHub 小红书单关键词 raw 搜索。</p>
   return <section className="qp-search-lab mih-acquisition-comparison">
     <header><h3>新请求对比</h3><p>旧记录保持原样。使用原 API Key 的当前权限、配额与价格重新请求，可能再次计费；新幂等键不保证一定调用上游，仍遵循现有缓存与路由策略。</p></header>
     <p>原 requestId：<code>{original.requestId}</code><br />原幂等键：<code>{original.requestEvidence?.idempotencyKey || '—'}</code></p>
     <p>POST <code>{ACQUISITION_COMPARISON_PATH}</code> · 原 Key <code>{original.owner.apiKeyPrefix || original.owner.apiKeyId}…{original.owner.apiKeyLastFour || ''}</code></p>
     <label className="qp-field"><span className="qp-field__label">请求参数 JSON</span><textarea className="qp-input" aria-label="请求参数 JSON" rows={9} value={bodyText} disabled={busy || unresolved} onChange={event => setBodyText(event.target.value)} placeholder={'{"platform":"xiaohongshu","keyword":"原关键词","page":1,"count":20}'} /></label>
-    <p>{original.requestEvidence?.request ? '已载入保存的原参数；修改后的请求会标注为手动参数。' : '这条历史记录未保存请求体，无法从指纹恢复。请粘贴原始 JSON；手动参数不宣称与历史请求完全一致。'}</p>
+    <p>{original.requestEvidence?.request ? '已载入保存的原参数；修改后的请求会标注为手动参数。' : '这条历史记录未保存请求体。请粘贴候选 JSON 并先校验：校验只比对指纹，不调用上游、不计费；校验通过即可证明与历史请求完全一致，未校验的手动参数不作此声明。'}</p>
+    <button className="qp-button qp-button--outline" type="button" disabled={busy || verifying || !bodyText.trim()} onClick={verify}>{verifying ? '校验中…' : '校验参数是否与历史请求一致（只读，不计费）'}</button>
+    {verified ? <p role="status">{verified.match
+      ? '校验通过：该 JSON 规范化后与历史请求指纹完全一致。'
+      : verified.rejected
+        ? `无法校验：${verified.rejected.message}`
+        : '校验不通过：该 JSON 不是本次历史请求的参数。指纹不可逆，系统不会反推原参数。'}</p> : null}
     {error ? <ErrorState error={error} /> : null}
     <button className="qp-button qp-button--primary" type="button" disabled={busy || unresolved || !bodyText.trim()} onClick={() => send()}>{busy ? '请求处理中…' : '发送新请求并对比（可能计费）'}</button>
     {unresolved ? <p role="alert">未收到明确响应，结果未知。保留本次参数与幂等键；请使用下方同键查询/重试，不要重复创建新请求。</p> : null}
     {attempts.map((attempt, index) => <article className="qp-panel mih-panel" key={attempt.idempotencyKey}>
-      <h4>对比请求 {index + 1} · {attempt.parameterSource === 'saved' ? '保存的原参数' : '手动参数'}</h4>
+      <h4>对比请求 {index + 1} · {PARAMETER_SOURCE_LABELS[attempt.parameterSource] || '手动参数'}</h4>
       <dl className="mih-search-reindex__facts">
         <div><dt>原 requestId</dt><dd><code>{attempt.originalRequestId}</code></dd></div>
         <div><dt>新 requestId</dt><dd><code>{attempt.delivered?.evidence?.requestId || (attempt.state === 'sending' ? '等待响应' : '尚未获得')}</code></dd></div>

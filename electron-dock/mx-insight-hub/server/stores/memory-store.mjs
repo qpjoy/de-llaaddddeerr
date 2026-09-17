@@ -1409,6 +1409,7 @@ export class MemoryStore {
     replayWindowMs = null,
     replayReleasedFailures = false,
     meterKey = null,
+    acquisitionRequest = null,
     requiredAuthorizationScopes: suppliedAuthorizationScopes = null,
   }) {
     if (Boolean(platform) === Boolean(capability)) {
@@ -1466,6 +1467,7 @@ export class MemoryStore {
           capability: capability ?? null,
           billingMeterKey: usageMeterKey({ meterKey, capability, platform }),
           status: 'reserved',
+          acquisitionRequest: acquisitionRequest ? clone(acquisitionRequest) : null,
           unitsReserved,
           unitsActual: null,
           responseStatus: null,
@@ -1504,6 +1506,7 @@ export class MemoryStore {
       capability: capability ?? null,
       billingMeterKey: usageMeterKey({ meterKey, capability, platform }),
       status: 'reserved',
+      acquisitionRequest: acquisitionRequest ? clone(acquisitionRequest) : null,
       unitsReserved,
       unitsActual: null,
       responseStatus: null,

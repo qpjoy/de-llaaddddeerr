@@ -465,6 +465,11 @@ export const adminApi = {
     token,
     `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}`,
   ),
+  verifyAcquisitionRequest: (token, requestId, candidate) => request(
+    token,
+    `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/verify-request`,
+    { method: 'POST', body: candidate },
+  ),
   searchReindex: (token) => request(token, `${ADMIN_ROOT}/search/reindex`),
   cancelSearchReindex: (token) => request(
     token, `${ADMIN_ROOT}/search/reindex/cancel`, { method: 'POST' },

@@ -480,3 +480,61 @@ test('repeatable-read history queries are serialized on one PostgreSQL client', 
     'commit',
   ])
 })
+
+test('a delivered Night-All envelope is reconciled against the rows it carries', async () => {
+  const rows = Array.from({ length: 11 }, (_, index) => ({ content_id: `note-${index}`, url: `https://x/${index}` }))
+  const root = rootRow({
+    response_body: {
+      data: {
+        platform: 'xiaohongshu',
+        raw_info: '[]',
+        raw_data: JSON.stringify(rows),
+        // Night-All declares this page count before de-duplicating raw_data,
+        // so a delivered envelope can contradict itself.
+        page: { page: 1, pageSize: 20, returnedCount: 20, hasMore: true },
+        meta: { responseShape: 'standard_raw_payload', rawDataCount: 11, rawInfoCount: 0, resultCount: 11 },
+      },
+    },
+  })
+  const pool = connectedPool({ root: [root], items: [], 'gateway-events': [] })
+  const result = await new PostgresAcquisitionHistoryStore(pool).getPublicDeliveredRun({
+    requestId: root.id, consumerId: root.consumer_id, apiKeyId: root.api_key_id,
+  })
+  assert.equal(result.delivered.countAudit.consistent, false)
+  assert.equal(result.delivered.countAudit.actual.rawDataCount, 11)
+  assert.deepEqual([...result.delivered.countAudit.mismatches], [
+    { field: 'page.returnedCount', declared: 20, actual: 11 },
+  ])
+})
+
+test('a delivered body that is not a legacy envelope has no count audit', async () => {
+  const root = rootRow()
+  const pool = connectedPool({ root: [root], items: [], 'gateway-events': [] })
+  const result = await new PostgresAcquisitionHistoryStore(pool).getPublicDeliveredRun({
+    requestId: root.id, consumerId: root.consumer_id, apiKeyId: root.api_key_id,
+  })
+  assert.equal(result.delivered.countAudit, null)
+})
+
+test('a candidate request is verified against the stored fingerprint without dispatching', async () => {
+  const { nightAllCompatibilityRequestFingerprint } = await import('../../server/acquisitions/request-verification.mjs')
+  const { canonicalPlatform } = await import('../../server/hub-service.mjs')
+  const body = { platform: 'xiaohongshu', keyword: '旅游', page: 1, count: 20 }
+  const root = rootRow({
+    acquisition_request: null,
+    fingerprint: nightAllCompatibilityRequestFingerprint({
+      path: '/api/v1/night-all/search/raw', body, businessId: 'consumer-a', canonicalizePlatform: canonicalPlatform,
+    }).fingerprint,
+  })
+  const pool = connectedPool({ root: [root] })
+  const store = new PostgresAcquisitionHistoryStore(pool)
+  const matched = await store.verifyRequest(root.id, { path: '/api/v1/night-all/search/raw', body })
+  assert.equal(matched.match, true)
+  assert.equal(matched.savedRequest, null)
+  const mismatched = await store.verifyRequest(root.id, {
+    path: '/api/v1/night-all/search/raw', body: { ...body, keyword: '不同关键词' },
+  })
+  assert.equal(mismatched.match, false)
+  // Verification is read-only: no items, gateway, provider or connector reads.
+  assert.deepEqual([...new Set(pool.queries.map((entry) => entry.kind))].sort(), ['begin', 'commit', 'root'])
+})

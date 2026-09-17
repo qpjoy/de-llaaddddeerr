@@ -22,6 +22,7 @@ import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createExternalPlatformCursorCodec } from './cursor.mjs'
 import { describeDeliveryReason } from './delivery-reason.mjs'
+import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
@@ -615,6 +616,7 @@ export class ExternalPlatformGateway {
       apiKeyId: context.apiKey.id,
       platform: authorizationPlatform,
       meterKey: plan.operation,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       requiredAuthorizationScopes: [
         { type: 'platform', key: authorizationPlatform },
         { type: 'capability', key: plan.capability || plan.operation },

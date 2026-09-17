@@ -30,6 +30,7 @@ import {
 import { TIKHUB_XIAOHONGSHU_CONNECTOR_ID } from '../ingest/tikhub-xiaohongshu.mjs'
 import { createExternalPlatformCursorCodec } from './cursor.mjs'
 import { providerCostControl } from './tikhub-gateway.mjs'
+import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
 
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
@@ -341,6 +342,7 @@ export class TikHubUserInfoGateway {
         apiKeyId: context.apiKey.id,
         platform: XIAOHONGSHU_PLATFORM,
         meterKey: gatewayOperation,
+        acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
         requiredAuthorizationScopes: [
           { type: 'platform', key: XIAOHONGSHU_PLATFORM },
           { type: 'capability', key: gatewayOperation },

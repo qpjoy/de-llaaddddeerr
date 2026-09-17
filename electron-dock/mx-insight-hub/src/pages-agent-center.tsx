@@ -113,13 +113,54 @@ type ProxyEndpoint = {
   revision: number
 }
 
+type ProbePolicy = {
+  timeoutMs: number | null
+  attempts: number | null
+  cacheTtlMs: number | null
+}
+
 type ProxySequence = {
   sequenceKey: string
   displayName: string
   proxyKeys: string[]
   directFallback: boolean
   enabled: boolean
+  probePolicy?: ProbePolicy
   revision: number
+}
+
+// Probe policy describes the route's own reachability check, so it is
+// maintained here alongside the endpoints. A service may still override it on
+// its own binding; blank means inherit rather than zero.
+const PROBE_POLICY_FIELDS: { key: keyof ProbePolicy, label: string, min: number, max: number, hint: string }[] = [
+  { key: 'timeoutMs', label: '单次探测超时（毫秒）', min: 1000, max: 60000,
+    hint: '留空继承应用默认 15000ms。设得低于链路真实握手耗时会把正常出口判成不可达。' },
+  { key: 'attempts', label: '每个出口探测次数', min: 1, max: 5,
+    hint: '留空继承应用默认 2 次。仅重试探测，付费请求仍然只发一次。' },
+  { key: 'cacheTtlMs', label: '探测结果复用时长（毫秒）', min: 0, max: 600000,
+    hint: '留空继承应用默认 0（每次调用都探测）。复用会跳过探测，付费失败时证据从「明确未计费」降级为「计费未知」。' },
+]
+
+function probeDraftFrom(policy?: ProbePolicy) {
+  return {
+    timeoutMs: policy?.timeoutMs == null ? '' : String(policy.timeoutMs),
+    attempts: policy?.attempts == null ? '' : String(policy.attempts),
+    cacheTtlMs: policy?.cacheTtlMs == null ? '' : String(policy.cacheTtlMs),
+  }
+}
+
+function probePolicyFromDraft(draft: Record<string, string>) {
+  const policy: Record<string, number | null> = {}
+  for (const field of PROBE_POLICY_FIELDS) {
+    const text = String(draft[field.key] ?? '').trim()
+    if (!text) { policy[field.key] = null; continue }
+    const parsed = Number(text)
+    if (!Number.isSafeInteger(parsed) || parsed < field.min || parsed > field.max) {
+      throw new Error(`${field.label} 需为 ${field.min}–${field.max} 之间的整数，或留空继承。`)
+    }
+    policy[field.key] = parsed
+  }
+  return policy
 }
 
 type ProxyDeleteTarget =
@@ -692,6 +733,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   const state = useRemoteData(load, onUnauthorized) as any
   const [endpointDraft, setEndpointDraft] = useState({ proxyKey: '', displayName: '', proxyUrl: '', enabled: true, revision: 0 })
   const [sequenceDraft, setSequenceDraft] = useState({ sequenceKey: '', displayName: '', proxyKeys: [] as string[], directFallback: false, enabled: true, revision: 0 })
+  const [probeDraft, setProbeDraft] = useState<Record<string, string>>(() => probeDraftFrom())
   const [policyDraft, setPolicyDraft] = useState({ egressMode: 'inherit' as EgressMode, sequenceKey: '', revision: 0 })
   const [policyEditing, setPolicyEditing] = useState(false)
   const [confirmPolicyEdit, setConfirmPolicyEdit] = useState(false)
@@ -802,6 +844,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
 
   const newProxySequence = () => {
     setSequenceDraft({ sequenceKey: '', displayName: '', proxyKeys: [], directFallback: false, enabled: true, revision: 0 })
+    setProbeDraft(probeDraftFrom())
     setError(null)
   }
 
@@ -845,6 +888,8 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
       setError(new Error(`请先解除 Proxy Sequence 绑定再停用：${sequenceDraftReferenceLabels.join('、')}`))
       return
     }
+    let probePolicy: Record<string, number | null>
+    try { probePolicy = probePolicyFromDraft(probeDraft) } catch (invalid: any) { setError(invalid); return }
     setBusy('sequence')
     setError(null)
     const submitted = { ...sequenceDraft, proxyKeys: [...sequenceDraft.proxyKeys] }
@@ -856,6 +901,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
         proxyKeys: submitted.proxyKeys,
         directFallback: submitted.directFallback,
         enabled: submitted.enabled,
+        probePolicy,
       })
       setSequenceDraft((current) => current.sequenceKey === submitted.sequenceKey
         ? { ...current, revision: saved.revision }
@@ -1326,7 +1372,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
                   ? `${llmSequenceRefs.length} 个 LLM Sequence 使用`
                   : providerRefs.length ? `${providerRefs.length} 个 Provider 兼容绑定` : '未绑定'}</small></span>
                 <div>
-                  <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${sequence.displayName}`} disabled={!canEdit || Boolean(busy)} onClick={() => { setSequenceDraft({ ...sequence }); setError(null) }}><PencilSimple size={16} /></button>
+                  <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${sequence.displayName}`} disabled={!canEdit || Boolean(busy)} onClick={() => { setSequenceDraft({ ...sequence }); setProbeDraft(probeDraftFrom(sequence.probePolicy)); setError(null) }}><PencilSimple size={16} /></button>
                   <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`删除 ${sequence.displayName}`} disabled={!canEdit || Boolean(busy)} onClick={() => removeProxySequence(sequence)}><Trash size={16} /></button>
                 </div>
               </article>
@@ -1339,6 +1385,17 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
             <Field label="Sequence Key" hint=""><input className="qp-input" value={sequenceDraft.sequenceKey} disabled={!canEdit || Boolean(busy) || sequenceDraft.revision > 0} placeholder="agent-proxy-primary" onChange={(event) => setSequenceDraft({ ...sequenceDraft, sequenceKey: event.target.value })} /></Field>
             <Field label="显示名称" hint=""><input className="qp-input" value={sequenceDraft.displayName} disabled={!canEdit || Boolean(busy)} placeholder="Agent Proxy Sequence" onChange={(event) => setSequenceDraft({ ...sequenceDraft, displayName: event.target.value })} /></Field>
             <label className="mih-agent-center-check"><input type="checkbox" checked={sequenceDraft.directFallback} disabled={!canEdit || Boolean(busy)} onChange={(event) => setSequenceDraft({ ...sequenceDraft, directFallback: event.target.checked })} />代理传输均失败后允许 Pod / Node 系统出网</label>
+            <fieldset className="mih-proxy-probe">
+              <legend>连通性探测策略</legend>
+              <p>每次业务调用前按序验证出口；这里是本序列的默认值，服务可在自己的绑定处覆盖。目标返回的任何状态都算可达，只有代理自身的 407/502/503/504 才判定出口不可用。</p>
+              {PROBE_POLICY_FIELDS.map((field) => (
+                <Field key={field.key} label={field.label} hint={field.hint}>
+                  <input className="qp-input" type="number" inputMode="numeric" min={field.min} max={field.max}
+                    value={probeDraft[field.key]} disabled={!canEdit || Boolean(busy)} placeholder="继承"
+                    onChange={(event) => setProbeDraft((current) => ({ ...current, [field.key]: event.target.value }))} />
+                </Field>
+              ))}
+            </fieldset>
             <label className="mih-agent-center-check"><input type="checkbox" checked={sequenceDraft.enabled}
               disabled={!canEdit || Boolean(busy) || (sequenceDraft.enabled && sequenceDraftReferenceLabels.length > 0)}
               onChange={(event) => setSequenceDraft({ ...sequenceDraft, enabled: event.target.checked })} />启用 Sequence</label>

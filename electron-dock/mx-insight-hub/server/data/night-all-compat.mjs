@@ -1,5 +1,6 @@
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from '../core/errors.mjs'
 import { NIGHT_ALL_LEGACY_OPERATIONS, parseNightAllLegacyArray } from '../contracts/night-all-legacy.mjs'
+import { NIGHT_ALL_COUNT_MISMATCH_WARNING } from '../contracts/night-all-count-audit.mjs'
 
 const COMMON_FIELDS = new Set([
   'businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page',
@@ -374,8 +375,14 @@ export function nightAllCompatibilityBusinessOutcome(payload) {
   // that deterministically returned no usable rows. That empty answer is a
   // valid last-good value; treating it as partial could resurrect older,
   // non-empty results during a later outage.
+  //
+  // COUNT_DECLARATION_MISMATCH is a Hub-added audit note about the envelope's
+  // own count fields. The delivered rows are unchanged by it, so it must not
+  // reclassify a complete delivery, shorten its fallback window or alter the
+  // billing units derived from those same rows.
+  const informationalCodes = new Set(['STANDARD_PAYLOAD_EMPTY', NIGHT_ALL_COUNT_MISMATCH_WARNING])
   const substantiveWarnings = warnings.filter((warning) => (
-    (typeof warning === 'string' ? warning : warning?.code) !== 'STANDARD_PAYLOAD_EMPTY'
+    !informationalCodes.has(typeof warning === 'string' ? warning : warning?.code)
   ))
   const partial = substantiveWarnings.length > 0
     || results.some((entry) => entry?.error || entry?.success === false)

@@ -94,6 +94,9 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
   ))
   const requestConnectorCalls = connectorCalls.filter((call) => call.requestCall === true)
   const items = asArray(data?.items)
+  // Recomputed server-side from the archived response, so it is also present
+  // on deliveries that predate the audit. Absent for non-legacy bodies.
+  const countAudit = data?.delivered?.countAudit || null
 
   return (
     <section className="qp-panel mih-panel">
@@ -137,6 +140,13 @@ export function AcquisitionHistoryPanel({ token, onUnauthorized }) {
             <div><dt>交付响应哈希</dt><dd><code>{data.delivered?.responseHash || '—'}</code></dd></div>
             <div><dt>计费价格表</dt><dd>{data.customerCharge?.priceBookKey ? `${data.customerCharge.priceBookKey} · v${data.customerCharge.priceBookVersion}` : '—'}</dd></div>
             <div><dt>合同版本</dt><dd><code>{data.contractVersion || '—'}</code></dd></div>
+            {countAudit ? <div><dt>条数核查</dt><dd>{countAudit.consistent
+              ? `一致 · 实际交付 ${formatNumber(countAudit.actual.primaryCount)} 条`
+              : `不一致 · 实际交付 ${formatNumber(countAudit.actual.primaryCount)} 条`}
+              {countAudit.consistent ? null : <><br />{countAudit.mismatches.map((entry) => (
+                <small key={entry.field}>{entry.field} 声明 {formatNumber(entry.declared)} / 实际 {formatNumber(entry.actual)}</small>
+              ))}</>}
+            </dd></div> : null}
           </dl>
 
           <details className="qp-search-lab" open>

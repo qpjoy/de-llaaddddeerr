@@ -123,6 +123,32 @@ function proxyEndpointRow(row) {
   }
 }
 
+// Connectivity-probe policy belongs to the route that owns the latency, not
+// to each service that borrows it. NULL means "inherit the application
+// default" so an untouched Sequence keeps behaving exactly as before.
+const PROBE_POLICY_BOUNDS = Object.freeze({
+  timeoutMs: { min: 1_000, max: 60_000 },
+  attempts: { min: 1, max: 5 },
+  cacheTtlMs: { min: 0, max: 600_000 },
+})
+
+function probePolicyInput(input) {
+  if (input == null) return { timeoutMs: null, attempts: null, cacheTtlMs: null }
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    invalid('invalid_agent_proxy', 'probePolicy must be an object or null')
+  }
+  const normalized = {}
+  for (const [field, range] of Object.entries(PROBE_POLICY_BOUNDS)) {
+    const value = input[field]
+    if (value == null) { normalized[field] = null; continue }
+    if (!Number.isSafeInteger(value) || value < range.min || value > range.max) {
+      invalid('invalid_agent_proxy', `probePolicy.${field} must be an integer between ${range.min} and ${range.max}`)
+    }
+    normalized[field] = value
+  }
+  return normalized
+}
+
 function proxySequenceRow(row) {
   return {
     sequenceKey: row.sequence_key,
@@ -130,6 +156,11 @@ function proxySequenceRow(row) {
     proxyKeys: row.proxy_keys || [],
     directFallback: row.direct_fallback === true,
     enabled: row.enabled !== false,
+    probePolicy: {
+      timeoutMs: row.probe_timeout_ms ?? null,
+      attempts: row.probe_attempts ?? null,
+      cacheTtlMs: row.probe_cache_ttl_ms ?? null,
+    },
     revision: Number(row.revision),
     updatedBy: row.updated_by ?? null,
     updatedAt: iso(row.updated_at),
@@ -610,7 +641,8 @@ async function lockAndVerifyProviderRoutes(client, {
   }
   const sequences = sequenceKeys.length > 0
     ? await client.query(
-        `SELECT sequence_key, proxy_keys, direct_fallback, enabled
+        `SELECT sequence_key, proxy_keys, direct_fallback, enabled,
+                probe_timeout_ms, probe_attempts, probe_cache_ttl_ms
            FROM control.agent_proxy_sequences
           WHERE sequence_key = ANY($1::text[])
           ORDER BY sequence_key
@@ -791,7 +823,8 @@ export class AgentControlStore {
           )
           const proxySequences = await client.query(
             `SELECT sequence_key, display_name, proxy_keys, direct_fallback,
-                    enabled, revision, updated_by, updated_at
+                    enabled, probe_timeout_ms, probe_attempts, probe_cache_ttl_ms,
+                    revision, updated_by, updated_at
                FROM control.agent_proxy_sequences
               ORDER BY display_name, sequence_key`,
           )
@@ -1345,6 +1378,7 @@ export class AgentControlStore {
     })
     const directFallback = input?.directFallback ?? true
     const enabled = input?.enabled ?? true
+    const probePolicy = probePolicyInput(input?.probePolicy)
     if (typeof directFallback !== 'boolean' || typeof enabled !== 'boolean') {
       invalid('invalid_agent_proxy', 'directFallback and enabled must be boolean')
     }
@@ -1443,19 +1477,25 @@ export class AgentControlStore {
       const saved = await client.query(
         `INSERT INTO control.agent_proxy_sequences
            (sequence_key, display_name, proxy_keys, direct_fallback,
-            enabled, revision, updated_by, updated_at)
-         VALUES ($1, $2, $3::text[], $4, $5, 1, $6, now())
+            enabled, probe_timeout_ms, probe_attempts, probe_cache_ttl_ms,
+            revision, updated_by, updated_at)
+         VALUES ($1, $2, $3::text[], $4, $5, $7, $8, $9, 1, $6, now())
          ON CONFLICT (sequence_key) DO UPDATE SET
            display_name = EXCLUDED.display_name,
            proxy_keys = EXCLUDED.proxy_keys,
            direct_fallback = EXCLUDED.direct_fallback,
            enabled = EXCLUDED.enabled,
+           probe_timeout_ms = EXCLUDED.probe_timeout_ms,
+           probe_attempts = EXCLUDED.probe_attempts,
+           probe_cache_ttl_ms = EXCLUDED.probe_cache_ttl_ms,
            revision = control.agent_proxy_sequences.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = now()
          RETURNING sequence_key, display_name, proxy_keys, direct_fallback,
-                   enabled, revision, updated_by, updated_at`,
-        [sequenceKey, displayName, proxyKeys, directFallback, enabled, updatedBy],
+                   enabled, probe_timeout_ms, probe_attempts, probe_cache_ttl_ms,
+                   revision, updated_by, updated_at`,
+        [sequenceKey, displayName, proxyKeys, directFallback, enabled, updatedBy,
+         probePolicy.timeoutMs, probePolicy.attempts, probePolicy.cacheTtlMs],
       )
       await client.query('COMMIT')
       return proxySequenceRow(saved.rows[0])
@@ -1549,7 +1589,8 @@ export class AgentControlStore {
         `DELETE FROM control.agent_proxy_sequences
           WHERE sequence_key = $1
         RETURNING sequence_key, display_name, proxy_keys, direct_fallback,
-                  enabled, revision, updated_by, updated_at`,
+                  enabled, probe_timeout_ms, probe_attempts, probe_cache_ttl_ms,
+                  revision, updated_by, updated_at`,
         [sequenceKey],
       )
       await client.query('COMMIT')

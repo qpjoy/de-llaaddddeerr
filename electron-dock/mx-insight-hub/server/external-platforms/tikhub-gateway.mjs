@@ -52,6 +52,7 @@ import {
   NIGHT_ALL_COMPAT_DATASET_ID,
   normalizeNightAllLegacyPayload,
 } from '../ingest/legacy-night-all.mjs'
+import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
 
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
@@ -716,6 +717,7 @@ export class TikHubGateway {
   async officialXiaohongshu(context, {
     endpointName,
     query,
+    method = 'GET',
     idempotencyKey,
     path,
   }) {
@@ -817,6 +819,7 @@ export class TikHubGateway {
         apiKeyId: context.apiKey.id,
         platform: XIAOHONGSHU_PLATFORM,
         meterKey: endpoint.operation,
+        acquisitionRequest: acquisitionRequestSnapshot({ method, path, body: query }),
         requiredAuthorizationScopes: [
           { type: 'platform', key: XIAOHONGSHU_PLATFORM },
           { type: 'capability', key: endpoint.operation },
@@ -1376,6 +1379,10 @@ export class TikHubGateway {
         apiKeyId: context.apiKey.id,
         platform: XIAOHONGSHU_PLATFORM,
         meterKey: XIAOHONGSHU_SEARCH_OPERATION,
+        // The compatibility route supplies the caller's own validated body;
+        // otherwise the normalized search body is what a reproduction needs.
+        acquisitionRequest: acquisitionRequest
+          ?? acquisitionRequestSnapshot({ method: 'POST', path, body }),
         requiredAuthorizationScopes: [
           { type: 'platform', key: XIAOHONGSHU_PLATFORM },
           { type: 'capability', key: XIAOHONGSHU_SEARCH_OPERATION },
@@ -1388,10 +1395,9 @@ export class TikHubGateway {
       })
       durableRequestId = reservation.request?.id || requestId
       ownsReservation = reservation.kind === 'reserved'
-      if (ownsReservation && acquisitionRequest && this.usageStore.saveAcquisitionRequest) {
-        // Save before any upstream work; only the validated compatibility branch supplies this envelope.
-        await this.usageStore.saveAcquisitionRequest(durableRequestId, acquisitionRequest)
-      }
+      // The request parameters were written by the reservation INSERT itself,
+      // so they exist before any upstream work and a later replay of the same
+      // Idempotency-Key cannot rewrite them.
       if (reservation.kind === 'conflict') {
         throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
       }
@@ -2403,6 +2409,7 @@ export class TikHubGateway {
         apiKeyId: context.apiKey.id,
         platform: XIAOHONGSHU_PLATFORM,
         meterKey: XIAOHONGSHU_POST_OPERATION,
+        acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
         requiredAuthorizationScopes: [
           { type: 'platform', key: XIAOHONGSHU_PLATFORM },
           { type: 'capability', key: XIAOHONGSHU_POST_OPERATION },

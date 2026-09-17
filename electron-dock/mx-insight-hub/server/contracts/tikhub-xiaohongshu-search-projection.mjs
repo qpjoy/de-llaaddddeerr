@@ -449,6 +449,11 @@ export function toNightAllXiaohongshuRawEnvelope(projectionOrPublicBody, {
         rawInfoCount: 0,
         rawDataCount: rows.length,
         resultCount: rows.length,
+        // The Hub-direct projection maps provider notes one-to-one and rejects
+        // an envelope it cannot map, so it never removes rows. Reporting the
+        // field keeps `returnedCount + duplicateCount` meaningful on both this
+        // route and the historical Night-All passthrough.
+        duplicateCount: 0,
         status: data.status,
         providerCalls: data.meta.providerCalls ?? 0,
         durationMs: data.meta.durationMs ?? 0,

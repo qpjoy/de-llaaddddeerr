@@ -1089,28 +1089,37 @@ test('console activation dispatches with env gates closed and pause stops the sa
   assert.equal(adapter.calls.search.length, 1)
 })
 
-test('raw comparison parameters are persisted before dispatch; persistence failure cannot buy an upstream call', async () => {
+test('request parameters are reserved with the paid request, never after dispatch', async () => {
   const state = fixture(adapterFor({ notes: [] }))
   const acquisitionRequest = { method: 'POST', path: '/api/v1/night-all/search/raw', body: { platform: 'xiaohongshu', keyword: '旅游', count: 20 } }
-  const saved = []
-  state.usageStore.saveAcquisitionRequest = async (id, body) => {
-    assert.equal(state.adapter.calls.search.length, 0)
-    saved.push({ id, body })
-  }
   await state.gateway.searchNotes(state.context, {
     body: { platform: 'xiaohongshu', query: '旅游', pageSize: 20 },
     idempotencyKey: 'compare-save-test', path: '/api/v1/night-all/search/raw',
     responseMode: 'legacy', acquisitionRequest,
   })
-  assert.equal(saved.length, 1)
-  assert.deepEqual(saved[0].body, acquisitionRequest)
-  assert.equal(saved[0].id, state.usageStore.reservations[0].requestId)
+  // The envelope travels in the reservation itself, so the parameters are
+  // committed in the same statement that authorizes the paid dispatch.
+  assert.deepEqual(state.usageStore.reservations[0].acquisitionRequest, acquisitionRequest)
+
+  // A route that supplies no compatibility envelope still records the body it
+  // validated, so every paid acquisition is reproducible.
+  const derived = fixture(adapterFor({ notes: [] }))
+  await derived.gateway.searchNotes(derived.context, {
+    body: { platform: 'xiaohongshu', query: '旅游', pageSize: 20 },
+    idempotencyKey: 'derived-save-test', path: '/api/v1/data/social/posts/search',
+  })
+  assert.deepEqual(derived.usageStore.reservations[0].acquisitionRequest, {
+    method: 'POST',
+    path: '/api/v1/data/social/posts/search',
+    body: { platform: 'xiaohongshu', query: '旅游', pageSize: 20 },
+  })
+
+  // A reservation that never lands cannot buy an upstream call.
   const failed = fixture(adapterFor({ notes: [] }))
-  failed.usageStore.saveAcquisitionRequest = async () => { throw new Error('storage unavailable') }
+  failed.usageStore.reserve = async () => { throw new Error('storage unavailable') }
   await assert.rejects(failed.gateway.searchNotes(failed.context, {
     body: { platform: 'xiaohongshu', query: '旅游', pageSize: 20 },
     idempotencyKey: 'compare-save-failed', path: '/api/v1/night-all/search/raw', acquisitionRequest,
   }))
   assert.equal(failed.adapter.calls.search.length, 0)
-  assert.equal(failed.usageStore.released.length, 1)
 })
