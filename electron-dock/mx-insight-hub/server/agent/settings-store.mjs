@@ -655,6 +655,18 @@ export class AgentSettingsStore {
    * fails closed. Database-backed settings deliberately ignore the environment
    * value because their own persisted snapshot is authoritative.
    */
+  async listEmbeddingProfiles() {
+    try {
+      const { rows } = await this.pool.query(
+        'SELECT id, display_name AS "displayName", model, dimensions FROM control.embedding_profiles ORDER BY sort_order,id',
+      )
+      return rows
+    } catch (error) {
+      if (error.code === '42P01') return [] // Rolling deployment before migration 101.
+      throw error
+    }
+  }
+
   async ensureEnvironmentEmbeddingLock({ model, dimensions }) {
     if (typeof model !== 'string' || !model.trim()) invalid('embedding model is required')
     if (!Number.isInteger(dimensions) || dimensions <= 0) invalid('embedding dimensions must be a positive integer')

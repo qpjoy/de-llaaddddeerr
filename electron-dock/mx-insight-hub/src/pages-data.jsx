@@ -4393,6 +4393,7 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         proxySequences={proxySequences}
         proxyEndpoints={proxyEndpoints}
         inheritedEmbeddingProviders={embeddingProviders}
+        embeddingProfiles={agent.embeddingProfiles}
         embeddingCapabilities={agent.embeddingCapabilities}
       /> : null}
       {section === 'providers' ? <AgentProviderPanel
@@ -4412,6 +4413,7 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         proxyEndpoints={proxyEndpoints}
         chatProviders={chatProviders}
         chatProviderSource={chatSetting.source}
+        embeddingProfiles={agent.embeddingProfiles}
         embeddingCapabilities={agent.embeddingCapabilities}
       /> : null}
       {section === 'runtime' ? pipelines.map((pipeline) => (
@@ -4473,7 +4475,7 @@ function AgentProviderPanel({
   kind, title, subtitle, setting, providers, canEdit, onSave,
   onTest, testingProvider, providerTests, onReveal, llmSequences = [], proxySequences = [], proxyEndpoints = [],
   chatProviders = [], chatProviderSource = 'environment', inheritedEmbeddingProviders = [],
-  embeddingCapabilities = null,
+  embeddingCapabilities = null, embeddingProfiles = [],
 }) {
   const sourceLabel = setting.source === 'database' ? '数据库' : '环境变量'
   const [editor, setEditor] = useState(null)
@@ -4722,6 +4724,7 @@ function AgentProviderPanel({
         chatProviders={chatProviders}
         chatProviderSource={chatProviderSource}
         embeddingCapabilities={embeddingCapabilities}
+        embeddingProfiles={embeddingProfiles}
         setting={setting}
         busy={savingAction === 'editor'}
         headingRef={editorHeadingRef}
@@ -5132,7 +5135,7 @@ function normalizeProviderDrafts(providers, {
 
 function ProviderEditor({
   kind, editor, proxySequences, proxyEndpoints, chatProviders = [], chatProviderSource = 'environment',
-  embeddingCapabilities = null, setting, busy, headingRef, onChange, onCancel, onSubmit,
+  embeddingCapabilities = null, embeddingProfiles = [], setting, busy, headingRef, onChange, onCancel, onSubmit,
 }) {
   const provider = editor.draft
   const isEmbedding = kind === 'embedding'
@@ -5268,13 +5271,25 @@ function ProviderEditor({
               disabled={busy || editor.mode === 'edit'} value={provider.id} onChange={(event) => onChange({ id: event.target.value })} />
           </Field>
           <Field label="显示名称"><input className="qp-input" required maxLength="120" disabled={busy} value={provider.displayName} onChange={(event) => onChange({ displayName: event.target.value })} /></Field>
+          {isEmbedding ? <DropdownField
+            label="模型与维度预设"
+            value={embeddingProfiles.find((p) => p.model === provider.model && String(p.dimensions) === String(provider.dimensions))?.id || 'custom'}
+            options={[{ value: 'custom', label: '自定义模型与维度' }, ...embeddingProfiles.map((p) => ({ value: p.id, label: p.displayName }))]}
+            disabled={busy}
+            hint="预设由部署迁移写入数据库。保存启用的 Provider 后锁定索引空间；仍需验证并设置默认 Sequence。1024 维要求模型服务也输出 1024 维。"
+            onChange={(id) => {
+              const preset = embeddingProfiles.find((p) => p.id === id)
+              if (preset) onChange({ model: preset.model, dimensions: String(preset.dimensions) })
+              else onChange({ model: '', dimensions: '' })
+            }}
+          /> : null}
           <Field label={isEmbedding ? 'Embedding 模型' : '模型'}><input className="qp-input" required maxLength="200" disabled={busy} value={provider.model} onChange={(event) => isEmbedding ? changeEmbeddingModel(event.target.value) : onChange({ model: event.target.value })} /></Field>
           {!isEmbedding ? <DropdownField label="调用协议" value={provider.protocol}
             onChange={(protocol) => onChange({ protocol })} options={PROVIDER_PROTOCOL_OPTIONS} disabled={busy} /> : null}
           <Field label="Catalog 排序值" hint="仅决定目录顺序；保存时按数值从小到大排序，不设置系统默认"><input className="qp-input" type="number" min="0" max="10000" step="1" required disabled={busy} value={provider.priority} onChange={(event) => onChange({ priority: event.target.value })} /></Field>
           {isEmbedding ? <Field label="Dimensions" hint={modelDefaultDimensions
             ? `当前 Router 不发送 dimensions 参数；${provider.model} 使用默认返回维度 ${modelDefaultDimensions}。`
-            : '未知或自建网关请填写预期返回维度，并以连接测试结果为准；改变向量空间前必须 reindex。'}>
+            : '未知或自建网关请填写预期返回维度，并以连接测试结果为准；保存后索引维度从数据库配置自动生效；已锁定的模型/维度不能直接切换，需要受控重算。'}>
             <input className="qp-input" type="number" min="1" step="1" required
               disabled={busy || Boolean(modelDefaultDimensions)} value={modelDefaultDimensions || provider.dimensions}
               onChange={(event) => onChange({ dimensions: event.target.value })} />

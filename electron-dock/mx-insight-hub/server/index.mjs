@@ -420,7 +420,7 @@ export async function createRuntime(config = loadConfig()) {
         agent,
         client: search.client,
         segmenter: search.segmenter,
-        chunkIndexSet: search.chunkIndexSet,
+        getChunkIndexSet: () => search.chunkIndexSet,
       })
     : null
   const notifications = config.listenerMode === 'public' ? null : new NotificationService(pool)

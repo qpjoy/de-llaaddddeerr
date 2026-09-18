@@ -1,3 +1,4 @@
+import { AppError } from '../core/errors.mjs'
 import {
   createElasticsearchClient,
   describeClusterHealth,
@@ -34,18 +35,23 @@ export function createSearch({ pool, config, logger = console }) {
   const client = createElasticsearchClient(config.elasticsearch)
   const segmenter = createSegmenter(config.segmenter, { logger })
   const indexSet = contentIndex({ numberOfReplicas: config.elasticsearch.numberOfReplicas })
-  const chunks = chunkIndex({
+  const getChunks = () => chunkIndex({
     dimensions: config.embedding?.dimensions,
     numberOfReplicas: config.elasticsearch.numberOfReplicas,
   })
-  const queries = new SearchQueries({ pool, client, segmenter, indexSet, chunkIndexSet: chunks, logger })
+  const queries = new SearchQueries({ pool, client, segmenter, indexSet, chunkIndexSet: getChunks(), logger })
+
+  Object.defineProperty(queries, 'chunkIndexSet', { get: getChunks })
 
   return {
     client,
     pool,
     segmenter,
     indexSet,
-    chunkIndexSet: chunks,
+    get chunkIndexSet() { return getChunks() },
+    async prepareEmbeddingIndex() {
+      return prepareEmptyChunkIndex({ pool, client, indexSet: getChunks() })
+    },
     // Only the bulk rebuild uses this; live projector traffic stays one call at
     // a time so an interactive search never queues behind a rebuild's fan-out.
     segmenterConcurrency: config.segmenter?.concurrency || 1,
@@ -56,7 +62,7 @@ export function createSearch({ pool, config, logger = console }) {
     // method access or a second query implementation; ordinary search keeps
     // using `queries` and is unchanged.
     postgresQueries: client
-      ? new SearchQueries({ pool, client: null, segmenter, indexSet, chunkIndexSet: chunks, logger })
+      ? new SearchQueries({ pool, client: null, segmenter, indexSet, chunkIndexSet: getChunks(), logger })
       : queries,
     projector: client
       ? new SearchProjector({ pool, client, segmenter, indexSet, logger })
@@ -1178,4 +1184,45 @@ function assertSnapshotBulk(response, operationTypes, projectionName) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Explicit first enable: create only an empty vector index, never replay or replace data. */
+export async function prepareEmptyChunkIndex({ pool, client, indexSet }) {
+  if (!client || !indexSet) return
+  const connection = await pool.connect()
+  const lockName = `${CURRENT_REBUILD_LOCK_PREFIX}${indexSet.readAlias}`
+  let locked = false
+  try {
+    await connection.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [lockName])
+    locked = true
+    try {
+      const mapping = await client.request('GET', `/${encodeURIComponent(indexSet.writeAlias)}/_mapping`)
+      const values = Object.values(mapping)
+      if (!values.length || values.some((value) =>
+        value.mappings?.properties?.embedding?.dims !== indexSet.mappings.properties.embedding.dims
+        || !value.mappings?.properties?.embeddingSpace)) {
+        throw new AppError(409, 'embedding_dimension_mismatch', '现有向量索引映射与数据库配置不一致；请先完成受控索引迁移')
+      }
+      return
+    } catch (error) {
+      if (error.status !== 404 && error.statusCode !== 404) throw error
+    }
+    const { rows } = await connection.query(
+      'SELECT EXISTS(SELECT 1 FROM core.record_chunks WHERE embedded_at IS NOT NULL) AS has_vectors',
+    )
+    if (rows[0]?.has_vectors || await client.indexExists(indexSet.currentIndex)) {
+      throw new AppError(409, 'embedding_index_recovery_required', '已有向量或待恢复索引；请先显式恢复索引，未替换任何数据')
+    }
+    await putCurrentIndexTemplate(client, indexSet)
+    await client.createIndex(indexSet.currentIndex, {
+      settings: indexSet.settings, mappings: indexSet.mappings,
+      aliases: {
+        [indexSet.readAlias]: {},
+        [indexSet.writeAlias]: { is_write_index: true },
+      },
+    })
+  } finally {
+    if (locked) await connection.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockName]).catch(() => {})
+    connection.release()
+  }
 }

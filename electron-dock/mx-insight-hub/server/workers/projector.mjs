@@ -1,3 +1,4 @@
+import { AgentSettingsStore } from '../agent/settings-store.mjs'
 import process from 'node:process'
 import { createPool, runCommonMigrations } from '@qpjoy/mx-common'
 import { loadConfig } from '../config.mjs'
@@ -30,6 +31,13 @@ async function main() {
   }
 
   const pool = createPool(config.common.postgres, { applicationName: 'mx-insight-hub-projector' })
+  const embeddingSetting = await new AgentSettingsStore(pool).loadSetting('embedding')
+  if (embeddingSetting.source === 'database' && embeddingSetting.lockedEmbeddingDimensions) {
+    Object.assign(config.common.embedding, {
+      model: embeddingSetting.lockedEmbeddingModel,
+      dimensions: embeddingSetting.lockedEmbeddingDimensions,
+    })
+  }
   const search = createSearch({ pool, config: config.common, logger })
 
   if (!search.client) {

@@ -35,7 +35,7 @@ export async function main(config = loadConfig()) {
       pool,
       agent,
       client: search.client,
-      chunkIndexSet: search.chunkIndexSet,
+      getChunkIndexSet: () => search.chunkIndexSet,
       segmenter,
     })
     await runRetrievalWorker({ pool, pipeline, signal: controller.signal })

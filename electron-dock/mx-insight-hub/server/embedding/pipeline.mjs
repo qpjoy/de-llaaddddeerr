@@ -25,12 +25,14 @@ const EMBED_BATCH = 32
 const CHUNK_PROJECTION_MAX_ATTEMPTS = 5
 
 export class EmbeddingPipeline {
-  constructor({ pool, agent, client, segmenter, chunkIndexSet, logger = console }) {
+  constructor({ pool, agent, client, segmenter, chunkIndexSet, getChunkIndexSet = null, logger = console }) {
     this.pool = pool
     this.agent = agent
     this.client = client
     this.segmenter = segmenter
-    this.chunkIndexSet = chunkIndexSet
+    Object.defineProperty(this, 'chunkIndexSet', {
+      get: getChunkIndexSet || (() => chunkIndexSet),
+    })
     this.logger = logger
   }
 

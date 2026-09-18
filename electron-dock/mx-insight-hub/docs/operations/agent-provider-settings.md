@@ -245,6 +245,26 @@ environment 链的显式期望值参与启动校验。
 使旧 PG 向量失效、全量重新 embedding、验证召回质量，然后切换 alias。该流程完成前
 不要只改 `MX_INSIGHT_EMBEDDING_DIMENSIONS`。
 
+## 无 .env 的本机 Embedding 接入（migration 101）
+
+正常 `ops internal-production deploy` 自动迁移数据库预设：Qwen3-Embedding-0.6B 的 512 / 1024 维。
+迁移只增加可选预设，不创建账号、不读取 mx-embedding 的 Key、不设置默认 Sequence、不启用后台任务。
+重部署不会覆盖既有 Provider 或向量空间锁。旧环境配置保留兼容；数据库管理的模型和维度优先。
+
+在 Agent 中心 → LLM Provider → Embedding Provider 新建独立配置，选择「模型与维度预设」
+中的本机 Qwen 512 维（或自定义），填写 `http://127.0.0.1:18210/v1`、Bearer Key。
+此地址适用于同机 internal-production 的 hostNetwork Admin / retrieval worker，不适用于其他节点或普通桥接容器。
+1024 维预设不会改变模型服务配置；必须先让服务实际输出 1024 维，连接测试会检查一致性。
+
+保存启用的 Provider 后，既有数据库事务锁持久化模型和维度，Admin 立即应用，Worker 轮询采用，
+搜索和向量投影读取同一配置，不需要设置 `MX_INSIGHT_EMBEDDING_MODEL / DIMENSIONS` 或重启。
+已锁定空间仍禁止直接换模型/维度（即使同维度模型也不能混用）；预设不是重算/迁移按钮。
+
+随后创建仅含本 Provider 的 Embedding Sequence，选择「Pod/Node 系统出网」，验证并设为 Embedding 业务默认。
+到数据中心显式启用后台向量化时，检查现有 ES 映射；若首次索引不存在且没有已有向量/待恢复索引，
+只创建空索引与别名，不扫描或回填语料。若发现不兼容映射或待恢复状态则拒绝启用，要求显式恢复索引。
+历史全量仍必须单独点击启动。无需重建全文索引，也不修改 Launcher、MX-H2I 登录或网络。
+
 ## Environment 回滚
 
 现有 `MX_INSIGHT_AGENT_PROVIDERS`、`MX_INSIGHT_EMBEDDING_PROVIDERS` 和模型 Key

@@ -118,6 +118,8 @@ export class RetrievalControl {
     const v = parsed.data
     if (v.enabled && (!this.agent?.embeddings?.available || !this.search?.chunkIndexSet))
       throw new AppError(409, 'embedding_not_ready', '先配置并验证 Embedding Sequence 及向量维度')
+    // Explicit enable is allowed to prepare an empty schema, never replay the corpus.
+    if (v.enabled) await this.search?.prepareEmbeddingIndex?.()
     await this.pool.query(
       `UPDATE retrieval.settings SET enabled=$1,paused=$2,max_concurrency=$3,daily_token_budget=$4,updated_at=now() WHERE id`,
       [v.enabled, v.paused, v.maxConcurrency, v.dailyTokenBudget],

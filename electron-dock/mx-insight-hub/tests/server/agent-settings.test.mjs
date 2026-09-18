@@ -68,6 +68,7 @@ function databaseHarness() {
       return { rows: [], rowCount: 0 }
     }
 
+    if (text.includes('FROM control.embedding_profiles')) return { rows: [] }
     if (text.includes('FROM control.agent_provider_settings')) {
       const kind = params[0]
         || (text.includes("kind = 'embedding'") ? 'embedding'
@@ -4171,4 +4172,37 @@ test('Agent default clear and Proxy DELETE routes require admin and preserve def
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
+})
+
+test('database embedding selection configures the index without environment dimensions and survives refresh', async () => {
+  const harness = databaseHarness()
+  const settingsStore = new AgentSettingsStore(harness.pool)
+  const runtimeConfig = config({ embedding: { model: null, dimensions: null } })
+  runtimeConfig.common = { embedding: runtimeConfig.embedding }
+  const runtime = await new AgentRuntime({
+    config: runtimeConfig, settingsStore, logger: quiet, refreshIntervalMs: 0,
+  }).start()
+  await runtime.updateSetting('embedding', {
+    expectedRevision: 0, source: 'database',
+    providers: [provider({
+      id: 'local', model: 'Qwen/Qwen3-Embedding-0.6B', dimensions: 512, authMode: 'none',
+    })],
+  })
+  assert.equal(runtimeConfig.common.embedding.dimensions, 512)
+  assert.equal(runtimeConfig.common.embedding.model, 'Qwen/Qwen3-Embedding-0.6B')
+  assert.equal(runtime.status().embeddingIndex.dimensions, 512)
+  await assert.rejects(() => runtime.updateSetting('embedding', {
+    expectedRevision: 1, source: 'database',
+    providers: [provider({
+      id: 'local', model: 'Qwen/Qwen3-Embedding-0.6B', dimensions: 1024, authMode: 'none',
+    })],
+  }))
+  runtime.close()
+  const restartedConfig = config({ embedding: { model: 'stale-env-model', dimensions: 1024 } })
+  const restarted = await new AgentRuntime({
+    config: restartedConfig, settingsStore, logger: quiet, refreshIntervalMs: 0,
+  }).start()
+  assert.equal(restartedConfig.embedding.dimensions, 512)
+  assert.equal(restartedConfig.embedding.model, 'Qwen/Qwen3-Embedding-0.6B')
+  restarted.close()
 })

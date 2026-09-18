@@ -187,6 +187,7 @@ export class AgentRuntime {
   #agent
   #timer = null
   #refreshing = null
+  #embeddingProfiles = []
   #settings = new Map()
   #needsApply = new Set()
   #probeStates = new Map()
@@ -208,6 +209,7 @@ export class AgentRuntime {
     nowFn = Date.now,
   }) {
     this.config = config
+    this.environmentEmbedding = { ...config.embedding }
     this.settingsStore = settingsStore
     this.controlStore = controlStore
     this.managedKinds = new Set(managedKinds)
@@ -259,7 +261,7 @@ export class AgentRuntime {
         try {
           const providers = parseEnvironmentEmbeddingProviders(
             this.config.agent.embeddingProviders,
-            this.config.embedding,
+            this.environmentEmbedding,
           )
           if (providers.length > 0) {
             await this.settingsStore.ensureEnvironmentEmbeddingLock({
@@ -316,7 +318,7 @@ export class AgentRuntime {
     const current = await this.settingsStore.loadSetting(kind)
     if (current.source !== 'environment') return false
     const parsed = kind === 'embedding'
-      ? parseEnvironmentEmbeddingProviders(this.config.agent.embeddingProviders, this.config.embedding)
+      ? parseEnvironmentEmbeddingProviders(this.config.agent.embeddingProviders, this.environmentEmbedding)
       : parseProviderConfig(this.config.agent.chatProviders, { kind: 'chat' })
     if (parsed.length === 0) return false
     const providers = parsed.map((provider, priority) => {
@@ -424,6 +426,8 @@ export class AgentRuntime {
         : emptyControl,
     ])
     return {
+      embeddingProfiles: this.managedKinds.has('embedding')
+        ? await this.settingsStore.listEmbeddingProfiles?.() || [] : [],
       chat: coherentChatRuntime.setting,
       embedding: embeddingRuntime.setting,
       credentials: {
@@ -464,6 +468,12 @@ export class AgentRuntime {
   }
 
   #applySnapshot(snapshot) {
+    // The persisted space lock is authoritative for database-managed providers.
+    // Keep legacy environment expectations only until the first database selection.
+    const space = snapshot.embedding.source === 'database' && snapshot.embedding.lockedEmbeddingDimensions
+      ? { model: snapshot.embedding.lockedEmbeddingModel, dimensions: snapshot.embedding.lockedEmbeddingDimensions }
+      : this.config.embedding
+
     const chat = !this.managedKinds.has('chat')
       ? environmentSetting('chat', null, snapshot.chat)
       : snapshot.chat.source === 'database'
@@ -474,23 +484,29 @@ export class AgentRuntime {
       : snapshot.embedding.source === 'database'
       ? databaseSetting(
           'embedding', snapshot.embedding, snapshot.credentials.embedding,
-          this.config.embedding?.dimensions ?? null,
+          space?.dimensions ?? null,
           snapshot.dependencies?.embedding,
         )
       : environmentSetting(
           'embedding', this.config.agent.embeddingProviders, snapshot.embedding,
-          this.config.embedding,
+          this.environmentEmbedding,
         )
 
     const agent = createAgentFromProviders({
       chatProviders: this.#withProxyRoutes(chat.providers, snapshot.control?.chat),
       embeddingProviders: this.#withProxyRoutes(embedding.providers, snapshot.control?.embedding),
-      expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
+      expectedEmbeddingDimensions: space?.dimensions ?? null,
       logger: this.logger,
       fetchImpl: this.fetchImpl,
     })
     // Swap only after every provider and the complete agent constructed. Calls
     // already in flight retain the previous immutable object.
+    if (space) {
+      this.config.embedding = this.config.embedding || {}
+      Object.assign(this.config.embedding, space)
+      if (this.config.common) this.config.common.embedding = this.config.embedding
+    }
+    this.#embeddingProfiles = snapshot.embeddingProfiles || []
     this.#agent = agent
     this.#settings = new Map([
       ['chat', chat.setting],
@@ -586,7 +602,7 @@ export class AgentRuntime {
     if (kind === 'embedding' && input?.source === 'database') {
       const environmentProviders = parseEnvironmentEmbeddingProviders(
         this.config.agent.embeddingProviders,
-        this.config.embedding,
+        this.environmentEmbedding,
       )
       if (environmentProviders.length > 0) {
         embeddingBaseline = {
@@ -598,7 +614,7 @@ export class AgentRuntime {
     if (kind === 'embedding' && input?.source === 'environment') {
       environmentEmbeddingProviders = parseEnvironmentEmbeddingProviders(
         this.config.agent.embeddingProviders,
-        this.config.embedding,
+        this.environmentEmbedding,
       ).map((provider) => ({ model: provider.model, dimensions: provider.dimensions }))
     }
     const updated = await this.settingsStore.updateSetting(kind, input, {
@@ -1342,6 +1358,8 @@ export class AgentRuntime {
   status() {
     return {
       ...this.#agent.status(),
+      embeddingProfiles: this.#embeddingProfiles,
+      embeddingIndex: { ...this.config.embedding },
       embeddingCapabilities: publicEmbeddingCapabilityCatalog(),
       settings: {
         chat: this.#settings.get('chat'),
