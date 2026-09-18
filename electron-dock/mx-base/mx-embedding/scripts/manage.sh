@@ -4,7 +4,13 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="$(cd "$APP_DIR/.." && pwd)"
 source "$BASE_DIR/scripts/gpu-common.sh"
 source "$BASE_DIR/scripts/deploy-confirm.sh"
+# Keep explicitly supplied download settings, even an empty proxy to request direct access.
+download_overrides=()
+for key in MX_EMBEDDING_PROXY MX_EMBEDDING_PIP_INDEX; do
+  if [[ ${!key+x} ]]; then download_overrides+=("$key=${!key}"); fi
+done
 if [ -f "$APP_DIR/.env" ]; then set -a; source "$APP_DIR/.env"; set +a; fi
+for setting in ${download_overrides[@]+"${download_overrides[@]}"}; do export "$setting"; done
 gpu_config
 compose() { docker compose --project-directory "$APP_DIR" -f "$APP_DIR/compose.yml" "$@"; }
 init() {

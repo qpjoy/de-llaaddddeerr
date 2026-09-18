@@ -8,6 +8,15 @@ services:
     build:
       context: .
       args:
+        # Explicit values override Docker client proxy defaults, including empty values.
+        HTTP_PROXY: ${MX_EMBEDDING_PROXY:-}
+        HTTPS_PROXY: ${MX_EMBEDDING_PROXY:-}
+        http_proxy: ${MX_EMBEDDING_PROXY:-}
+        https_proxy: ${MX_EMBEDDING_PROXY:-}
+        ALL_PROXY: ''
+        all_proxy: ''
+        NO_PROXY: localhost,127.0.0.1
+        no_proxy: localhost,127.0.0.1
         PIP_INDEX_URL: ${MX_EMBEDDING_PIP_INDEX:-https://pypi.org/simple}
     restart: unless-stopped
     ports:

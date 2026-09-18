@@ -38,7 +38,15 @@ deploy 执行前要求输入完整的 `yes`，其他输入或 EOF 取消；重�
 
 修改配置后使用 `deploy` 应用；`restart` 只重启保存的配置。GPU 改动后普通 start/restart 会拒绝旧 UUID，要求重新部署。两服务部署操作通过主机 `/var/lock/mx-base-gpu.lock` 串行化，同一主机应由同一运维用户执行；不要直接 `docker compose up` 绕过启动检查。首次拉取可能耗时，日志不代表健康，默认等待最多 30 分钟。
 
-国内下载可以设置可信的 Hugging Face-compatible `MX_EMBEDDING_HF_ENDPOINT`，或将**完整模型快照**预先放到模型缓存目录下，设置 `MX_EMBEDDING_MODEL_PATH=/models/<目录>`。离线快照必须与上面的固定版本一致；服务不验证整个快照的文件摘要，运维需核对来源。不要把普通 Chat 模型放在这个目录。代理仅通过 `MX_EMBEDDING_PROXY` 传给本容器；不会修改宿主机代理。
+国内下载可以设置可信的 Hugging Face-compatible `MX_EMBEDDING_HF_ENDPOINT`，或将**完整模型快照**预先放到模型缓存目录下，设置 `MX_EMBEDDING_MODEL_PATH=/models/<目录>`。离线快照必须与上面的固定版本一致；服务不验证整个快照的文件摘要，运维需核对来源。不要把普通 Chat 模型放在这个目录。`MX_EMBEDDING_PROXY` 同时用于 pip 构建阶段和运行时模型下载，显式覆盖 Docker 客户端默认构建代理；留空表示这两个阶段直连。不会修改 Docker daemon 或宿主机代理，基础镜像拉取仍使用 daemon 的配置。命令行提供的 `MX_EMBEDDING_PROXY` 和 `MX_EMBEDDING_PIP_INDEX` 优先于本服务的 `.env`（包括显式空代理）。
+
+例如宿主机 HTTP/混合代理在 `192.168.1.2:7788`，且允许 Docker 容器网络访问：
+
+```bash
+MX_EMBEDDING_PROXY=http://192.168.1.2:7788 bash scripts/manage.sh deploy mx-embedding
+```
+
+不要为默认桥接网络填写 `127.0.0.1:7788`：它指向构建/运行容器自身。如果代理只监听宿主机回环地址，需要先使其在容器可达的受控地址提供服务；仅改 URL 不能改变监听配置。pip 的 `ProxyError / Connection refused` 后跟 `No matching distribution` 时，先排查代理连接，不应据此更换依赖版本。
 
 ## Hub 接入
 
