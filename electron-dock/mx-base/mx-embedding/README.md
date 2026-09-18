@@ -25,7 +25,7 @@
 
 ```bash
 cp .env.gpu.example .env.gpu                 # 仅首次；已有配置不要覆盖
-cp mx-embedding/.env.example mx-embedding/.env
+# 默认部署无需创建 mx-embedding/.env；需要其他高级配置时才使用
 bash scripts/manage.sh doctor mx-embedding
 bash scripts/manage.sh deploy mx-embedding
 bash scripts/manage.sh test mx-embedding     # 显式调用真实模型进行验收
@@ -43,8 +43,14 @@ deploy 执行前要求输入完整的 `yes`，其他输入或 EOF 取消；重�
 例如宿主机 HTTP/混合代理在 `192.168.1.2:7788`，且允许 Docker 容器网络访问：
 
 ```bash
-MX_EMBEDDING_PROXY=http://192.168.1.2:7788 bash scripts/manage.sh deploy mx-embedding
+bash scripts/manage.sh deploy mx-embedding --proxy http://192.168.1.2:7788
+# 后续自动复用
+bash scripts/manage.sh deploy mx-embedding
+# 切回直连并记住
+bash scripts/manage.sh deploy mx-embedding --direct
 ```
+
+下载参数在确认部署并通过 GPU / Compose 配置检查后自动保存到本机 `.env.download`（权限 600，不入 Git、不进入镜像构建上下文），即使后续下载失败仍保留，便于重试。无需手动编辑 `.env`。优先级：部署参数 > 命令行环境变量 > 自动保存设置 > `.env` > 默认值。`--pip-index URL` 同样保存。自动保存不等于代理已连通；不会自动更改代理监听或防火墙。
 
 不要为默认桥接网络填写 `127.0.0.1:7788`：它指向构建/运行容器自身。如果代理只监听宿主机回环地址，需要先使其在容器可达的受控地址提供服务；仅改 URL 不能改变监听配置。pip 的 `ProxyError / Connection refused` 后跟 `No matching distribution` 时，先排查代理连接，不应据此更换依赖版本。
 

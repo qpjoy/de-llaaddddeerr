@@ -3,3 +3,5 @@ secrets
 __pycache__
 tests
 .venv
+
+.env.download*

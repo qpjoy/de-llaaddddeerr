@@ -22,6 +22,7 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh gpu [编号或UUID] # 只读查看 GPU PID、显存、进程、容器和服务归属
   bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
   bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
+  bash scripts/manage.sh deploy mx-embedding --proxy http://<宿主机IP>:7788 # 自动保存下载设置
   bash scripts/manage.sh deploy jenkins   # 显式启用可选构建基础设施
   bash scripts/manage.sh <操作> <应用>
 

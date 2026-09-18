@@ -1,3 +1,5 @@
 .env.gpu
 **/__pycache__/
 **/*.pyc
+
+mx-embedding/.env.download*
