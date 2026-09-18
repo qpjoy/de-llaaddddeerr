@@ -111,18 +111,23 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
   const check = async () => { await due(); await monitor.checkProvider('justone') }
   try {
     await db.exec('CREATE SCHEMA external_platform')
-    for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql']) {
+    for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql',
+      '097_hourly_balance_check.sql', '098_feishu_balance_alerts.sql', '099_balance_feishu_webhook.sql',
+      '100_probe_failure_and_recovery_alerts.sql']) {
       await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
     }
-    // Wall-clock times remain in Asia/Shanghai even on a differently zoned DB.
+    // 097 lowers the JustOne seed to 5/3; this case exercises threshold
+    // behaviour itself, so pin the policy it asserts against, revision intact.
+    await db.exec("UPDATE external_platform.balance_monitors SET warning_threshold=30, critical_threshold=20 WHERE provider_key='justone'")
+    // Wall-clock hours remain in Asia/Shanghai even on a differently zoned DB.
     await db.exec("SET TIME ZONE 'America/Los_Angeles'")
     for (const [input, expected] of [
       ['2026-09-17T01:59:59.999Z', '2026-09-17T02:00:00.000Z'],
-      ['2026-09-17T02:00:00.000Z', '2026-09-17T14:00:00.000Z'],
+      ['2026-09-17T02:00:00.000Z', '2026-09-17T03:00:00.000Z'],
       ['2026-09-17T13:59:59.999Z', '2026-09-17T14:00:00.000Z'],
-      ['2026-09-17T14:00:00.000Z', '2026-09-18T02:00:00.000Z'],
-      ['2026-12-31T14:00:00.000Z', '2027-01-01T02:00:00.000Z'],
-      ['2028-02-28T14:00:00.000Z', '2028-02-29T02:00:00.000Z'],
+      ['2026-09-17T14:00:00.000Z', '2026-09-17T15:00:00.000Z'],
+      ['2026-12-31T15:59:59.999Z', '2026-12-31T16:00:00.000Z'],
+      ['2028-02-28T15:59:59.999Z', '2028-02-28T16:00:00.000Z'],
     ]) {
       const next = (await db.query('SELECT external_platform.next_balance_check($1::timestamptz) AS next', [input])).rows[0].next
       assert.equal(new Date(next).toISOString(), expected)
@@ -140,10 +145,17 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     let dto = (await monitor.list()).items.find(item => item.provider === 'justone')
     assert.equal(dto.state, 'ready')
     assert.equal(Number(dto.balance), 25)
-    assert.deepEqual(dto.schedule, { timeZone: 'Asia/Shanghai', times: ['10:00', '22:00'] })
-    assert.ok([2, 14].includes(new Date(dto.nextCheckAt).getUTCHours()))
-    assert.equal(new Date(dto.nextCheckAt).getUTCMinutes(), 0)
+    assert.deepEqual(dto.schedule, { timeZone: 'Asia/Shanghai', cadence: 'hourly' })
+    const nextCheck = new Date(dto.nextCheckAt)
+    assert.equal(nextCheck.getUTCMinutes(), 0)
+    assert.equal(nextCheck.getUTCSeconds(), 0)
+    assert.ok(nextCheck > new Date() && nextCheck - Date.now() <= 60 * 60 * 1000, 'the next slot is within the hour')
     assert.doesNotMatch(JSON.stringify(dto), /secret-1|credential_scope/)
+    // The seeded bot hook is policy, but it is still a credential: the DTO says
+    // only that one is set, plus a tail short enough to tell two bots apart.
+    assert.equal(dto.feishu.configured, true)
+    assert.equal(dto.feishu.hint, '…0c2fb1')
+    assert.doesNotMatch(JSON.stringify(dto), /open\.feishu\.cn|1790e6fa/, 'the hook never leaves the service')
     const replica = new SupplierBalanceMonitor({ pool, credentials, fetchers })
     await replica.checkProvider('justone')
     assert.equal(calls, 1, 'restart respects the persisted next check')
@@ -162,12 +174,35 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     assert.equal(Number(dto.balance), 19.99)
     assert.equal(dto.state, 'stale')
     assert.equal((await notices.detail(incidentId)).incident.status, 'open', 'failure is not recovery')
+    // One failed probe can be a blip and stays quiet; a second in a row means
+    // the monitor is blind, which is itself worth waking someone for.
+    const unreadable = async () => (await db.query(
+      "SELECT * FROM notifications.incidents WHERE code='supplier_balance_unreadable' ORDER BY id")).rows
+    assert.equal((await unreadable()).length, 0, 'a single failed probe is not an incident')
+    await check()
+    let blind = await unreadable()
+    assert.equal(blind.length, 1, 'two consecutive failures open an unreadable incident')
+    assert.equal(blind[0].severity, 'warning')
+    assert.equal(blind[0].source, 'justone')
+    assert.match(blind[0].title, /查询失败/)
+    const blindEvents = await notices.detail(blind[0].id)
+    assert.equal(blindEvents.events[0].kind, 'probe_failed')
+    assert.equal(blindEvents.events[0].evidence.errorCode, 'balance_network_error')
+    assert.doesNotMatch(JSON.stringify(blindEvents.events), /secret-1/, 'a failure never carries the credential')
+    await check()
+    blind = await unreadable()
+    assert.equal(blind.length, 1, 'further failures merge into the open incident')
+    assert.equal(Number(blind[0].occurrence_count), 2)
     const failedCalls = calls
     await replica.checkProvider('justone')
     assert.equal(calls, failedCalls, 'failure waits for the next fixed slot')
     fail = false
     amount = '30'
     await check()
+    blind = await unreadable()
+    assert.equal(blind[0].status, 'closed', 'a successful read closes the unreadable incident')
+    assert.ok(blind[0].recovered_at, 'closure records a recovery time so it can be announced')
+    assert.equal((await notices.detail(blind[0].id)).events[0].kind, 'probe_recovered')
     detail = await notices.detail(incidentId)
     assert.equal(detail.incident.status, 'closed')
     assert.ok(detail.incident.recovered_at)
@@ -195,7 +230,32 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     assert.equal(calls, before, 'paused schedules do not probe')
     await assert.rejects(monitor.update('justone', policy), { status: 409 })
     assert.equal((await db.query('SELECT actor FROM external_platform.balance_monitor_settings_events')).rows[0].actor, 'admin-token')
+    // Saving thresholds without naming the hook must not disturb it; an explicit
+    // value replaces it and an explicit empty string stops notifying that group.
+    const storedHook = async () => (await db.query(
+      "SELECT feishu_webhook FROM external_platform.balance_monitors WHERE provider_key='justone'")).rows[0].feishu_webhook
+    const seededHook = await storedHook()
+    assert.ok(seededHook)
     await monitor.update('justone', { ...policy, expectedRevision: 1 })
+    assert.equal(await storedHook(), seededHook, 'an ordinary save leaves the hook alone')
+    for (const bad of ['http://open.feishu.cn/open-apis/bot/v2/hook/x', 'https://evil.invalid/x', 'https://open.feishu.cn/open-apis/bot/v2/hook/x?y=1']) {
+      await assert.rejects(monitor.update('justone', { ...policy, expectedRevision: 2, feishuWebhook: bad }),
+        { status: 400, code: 'invalid_feishu_webhook' })
+    }
+    assert.equal(await storedHook(), seededHook, 'a rejected hook never reaches the row')
+    const replacement = 'https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555'
+    let saved = await monitor.update('justone', { ...policy, expectedRevision: 2, feishuWebhook: replacement })
+    assert.equal(await storedHook(), replacement)
+    assert.equal(saved.feishu.hint, '…555555')
+    saved = await monitor.update('justone', { ...policy, expectedRevision: 3, feishuWebhook: '' })
+    assert.equal(await storedHook(), null, 'an explicit empty value clears the hook')
+    assert.deepEqual(saved.feishu, { configured: false, hint: null })
+    const audit = JSON.stringify((await db.query('SELECT settings FROM external_platform.balance_monitor_settings_events')).rows)
+    assert.doesNotMatch(audit, /open\.feishu\.cn|11111111/, 'the audit trail records what changed, not the hook')
+    assert.match(audit, /"feishuWebhook":"unchanged"/)
+    assert.match(audit, /"feishuWebhook":"cleared"/)
+    // Restore the seeded hook and the revision the rest of this case expects.
+    await db.exec(`UPDATE external_platform.balance_monitors SET feishu_webhook='${seededHook}', revision=2 WHERE provider_key='justone'`)
     await monitor.checkProvider('justone')
     assert.equal(calls, before, 'saving/enabling does not add an off-schedule call')
     await due()

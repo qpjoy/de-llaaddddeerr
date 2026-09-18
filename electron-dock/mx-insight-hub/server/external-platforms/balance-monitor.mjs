@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { BALANCE_PROVIDERS, balanceLevel, decimalAmount, queryProviderBalance } from './balance-adapters.mjs'
+import { BALANCE_INCIDENT_CODE, PROBE_INCIDENT_CODE, feishuWebhook, webhookHint } from '../notifications-feishu.mjs'
 
 export function balancePolicy(input) {
-  const fields = ['enabled', 'warningThreshold', 'criticalThreshold', 'expectedRevision']
+  const fields = ['enabled', 'warningThreshold', 'criticalThreshold', 'expectedRevision', 'feishuWebhook']
   try {
     if (!input || Array.isArray(input) || Object.keys(input).some(key => !fields.includes(key))
       || typeof input.enabled !== 'boolean'
@@ -11,8 +12,19 @@ export function balancePolicy(input) {
     const warning = decimalAmount(input.warningThreshold)
     const critical = decimalAmount(input.criticalThreshold)
     if (critical.units < 0n || warning.units <= critical.units) throw Error()
-    return { ...input, warningThreshold: warning.text, criticalThreshold: critical.text }
-  } catch { throw new AppError(400, 'invalid_balance_policy', '有效阈值需满足 0 ≤ 严重阈值 < 提醒阈值；固定北京时间每天 10:00、22:00 检查') }
+    // Absent means "leave the stored hook alone": the console never receives the
+    // current value, so it cannot echo one back on an ordinary threshold save.
+    // An explicit empty string clears it and stops notifying that group.
+    const webhook = 'feishuWebhook' in input
+      ? { set: true, value: feishuWebhook(input.feishuWebhook) }
+      : { set: false, value: null }
+    return { ...input, warningThreshold: warning.text, criticalThreshold: critical.text, webhook }
+  } catch (error) {
+    if (error?.code === 'invalid_feishu_webhook') {
+      throw new AppError(400, 'invalid_feishu_webhook', '飞书机器人地址需为 https://open.feishu.cn/open-apis/bot/v2/hook/<id>，留空表示不修改')
+    }
+    throw new AppError(400, 'invalid_balance_policy', '有效阈值需满足 0 ≤ 严重阈值 < 提醒阈值；固定北京时间每小时整点检查')
+  }
 }
 
 const iso = value => value ? new Date(value).toISOString() : null
@@ -67,7 +79,10 @@ export class SupplierBalanceMonitor {
         provider: row.provider_key, displayName: BALANCE_PROVIDERS[row.provider_key].name,
         currency: row.currency, enabled: row.enabled, revision: row.revision,
         warningThreshold: row.warning_threshold, criticalThreshold: row.critical_threshold,
-        schedule: { timeZone: 'Asia/Shanghai', times: ['10:00', '22:00'] },
+        schedule: { timeZone: 'Asia/Shanghai', cadence: 'hourly' },
+        // The hook is secret-bearing, so only whether one is set and a short
+        // tail to tell two bots apart ever leave the service.
+        feishu: { configured: Boolean(row.feishu_webhook), hint: webhookHint(row.feishu_webhook) },
         balance: hasBalance ? row.last_balance : null,
         level: hasBalance ? balanceLevel(row.last_balance, row.warning_threshold, row.critical_threshold) : 'unknown',
         state: !row.enabled ? 'paused' : !credential ? 'error' : !credential.value ? 'unconfigured'
@@ -88,13 +103,20 @@ export class SupplierBalanceMonitor {
     await this.transaction(async client => {
       const result = await client.query(`UPDATE external_platform.balance_monitors
         SET enabled=$2, warning_threshold=$3, critical_threshold=$4,
+          feishu_webhook=CASE WHEN $6 THEN $7 ELSE feishu_webhook END,
           revision=revision+1, next_check_at=external_platform.next_balance_check(now()),
           lease_token=NULL, lease_until=NULL, updated_at=now()
         WHERE provider_key=$1 AND revision=$5 RETURNING revision`, [provider, policy.enabled,
-        policy.warningThreshold, policy.criticalThreshold, policy.expectedRevision])
+        policy.warningThreshold, policy.criticalThreshold, policy.expectedRevision,
+        policy.webhook.set, policy.webhook.value])
       if (!result.rowCount) throw new AppError(409, 'balance_policy_conflict', '监控设置已变化，请刷新后重试')
+      // The audit record keeps what changed, never the hook itself.
+      const { webhook, feishuWebhook: _raw, ...audited } = policy
       await client.query(`INSERT INTO external_platform.balance_monitor_settings_events(provider_key,revision,settings)
-        VALUES ($1,$2,$3::jsonb)`, [provider, result.rows[0].revision, JSON.stringify(policy)])
+        VALUES ($1,$2,$3::jsonb)`, [provider, result.rows[0].revision, JSON.stringify({
+        ...audited,
+        feishuWebhook: !webhook.set ? 'unchanged' : webhook.value ? `set:${webhookHint(webhook.value)}` : 'cleared',
+      })])
     })
     return (await this.list()).items.find(item => item.provider === provider)
   }
@@ -156,16 +178,58 @@ export class SupplierBalanceMonitor {
           last_success_at=CASE WHEN $6::numeric IS NOT NULL THEN $3 WHEN credential_scope=$5 THEN last_success_at ELSE NULL END,
           lease_token=NULL, lease_until=NULL
         WHERE provider_key=$1 AND lease_token=$2`, [provider, lease, at, result.errorCode ?? null, scope, result.balance ?? null])
-      if (result.balance == null) return // Unknown is neither zero nor recovery.
+      if (result.balance == null) {
+        // Unknown is neither zero nor recovery, but it is not nothing either: a
+        // monitor that cannot read a balance has stopped protecting anything.
+        await this.recordProbeFailure(client, row, { id, at, scope, errorCode: result.errorCode })
+        return
+      }
+      await this.recordProbeRecovery(client, row, { id, at })
       await this.recordAlert(client, row, { id, at, scope, balance: result.balance })
     })
+  }
+
+  // One failed probe is usually a blip; two in a row means someone has to look.
+  // `row` is the pre-update snapshot, so its error code is the previous attempt's
+  // and no extra counter column is needed.
+  async recordProbeFailure(client, row, observation) {
+    const { id, at, scope, errorCode } = observation
+    if (!row.last_error_code) return
+    const evidence = JSON.stringify({ errorCode: errorCode || 'balance_query_failed',
+      currency: row.currency, lastSuccessAt: row.last_success_at })
+    const title = `${BALANCE_PROVIDERS[row.provider_key].name} 账户余额查询失败`
+    const result = await client.query(`INSERT INTO notifications.incidents
+      (category,severity,source,source_scope,code,title,first_occurred_at,last_occurred_at)
+      VALUES ('supplier.cost','warning',$1,$2,$3,$4,$5,$5)
+      ON CONFLICT (source,source_scope,code) WHERE status <> 'closed'
+      DO UPDATE SET occurrence_count=notifications.incidents.occurrence_count+1,
+        last_occurred_at=EXCLUDED.last_occurred_at,updated_at=now() RETURNING id`,
+    [row.provider_key, scope, PROBE_INCIDENT_CODE, title, at])
+    await client.query(`INSERT INTO notifications.events
+      (incident_id,kind,actor,balance_observation_id,evidence,occurred_at)
+      VALUES ($1,'probe_failed','monitor:balance',$2,$3::jsonb,$4)`, [result.rows[0].id, id, evidence, at])
+  }
+
+  // Any successful read proves the monitor works again, including after the
+  // credential was replaced, so this closes by provider rather than by scope.
+  async recordProbeRecovery(client, row, { id, at }) {
+    const open = await client.query(`SELECT id FROM notifications.incidents
+      WHERE source=$1 AND code=$2 AND status <> 'closed' FOR UPDATE`, [row.provider_key, PROBE_INCIDENT_CODE])
+    for (const incident of open.rows) {
+      await client.query(`UPDATE notifications.incidents
+        SET status='closed',recovered_at=$2,updated_at=now() WHERE id=$1`, [incident.id, at])
+      await client.query(`INSERT INTO notifications.events
+        (incident_id,kind,actor,balance_observation_id,evidence,occurred_at)
+        VALUES ($1,'probe_recovered','monitor:balance',$2,$3::jsonb,$4)`,
+      [incident.id, id, JSON.stringify({ currency: row.currency }), at])
+    }
   }
 
   async recordAlert(client, row, observation) {
     const { id, at, scope, balance } = observation
     const level = balanceLevel(balance, row.warning_threshold, row.critical_threshold)
     const existing = await client.query(`SELECT * FROM notifications.incidents
-      WHERE source=$1 AND source_scope=$2 AND code='supplier_balance_low' AND status <> 'closed' FOR UPDATE`, [row.provider_key, scope])
+      WHERE source=$1 AND source_scope=$2 AND code=$3 AND status <> 'closed' FOR UPDATE`, [row.provider_key, scope, BALANCE_INCIDENT_CODE])
     let incident = existing.rows[0]
     if (level === 'healthy' && !incident) return
     const evidence = JSON.stringify({ balance, currency: row.currency, level,
@@ -176,13 +240,13 @@ export class SupplierBalanceMonitor {
       const title = `${BALANCE_PROVIDERS[row.provider_key].name} 账户余额${level === 'critical' ? '严重不足' : '偏低'}`
       const result = await client.query(`INSERT INTO notifications.incidents
         (category,severity,source,source_scope,code,title,first_occurred_at,last_occurred_at)
-        VALUES ('supplier.cost',$1,$2,$3,'supplier_balance_low',$4,$5,$5)
+        VALUES ('supplier.cost',$1,$2,$3,$6,$4,$5,$5)
         ON CONFLICT (source,source_scope,code) WHERE status <> 'closed'
         DO UPDATE SET severity=EXCLUDED.severity,title=EXCLUDED.title,
           status=CASE WHEN notifications.incidents.severity='warning' AND EXCLUDED.severity='critical'
             THEN 'open' ELSE notifications.incidents.status END,
           occurrence_count=notifications.incidents.occurrence_count+1,
-          last_occurred_at=EXCLUDED.last_occurred_at,updated_at=now() RETURNING *`, [level, row.provider_key, scope, title, at])
+          last_occurred_at=EXCLUDED.last_occurred_at,updated_at=now() RETURNING *`, [level, row.provider_key, scope, title, at, BALANCE_INCIDENT_CODE])
       incident = result.rows[0]
     }
     await client.query(`INSERT INTO notifications.events

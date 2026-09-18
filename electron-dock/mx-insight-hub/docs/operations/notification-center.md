@@ -79,7 +79,9 @@ All routes use the existing Admin Token header:
 Status filters are `active`, `open`, `acknowledged`, `closed`, `all`. Active includes
 open and acknowledged incidents. Counts cover all stored incidents; filters apply
 to the displayed list. PostgreSQL-less local environments show an explicit unavailable
-state. There is no email, webhook, OS push or external message delivery from Hub.
+state. Hub sends no email or OS push. The one outbound channel is the Feishu
+bot delivery for supplier balance incidents described below; ledger-derived
+incidents stay in this center.
 
 Deploy through the existing independent Hub migration/build path. No Launcher,
 MX-H2I, VPN, DNS or shared identity rollout is required.
@@ -93,7 +95,7 @@ dispatch, billing, circuit, identity or readiness state is changed by a probe.
 
 | Provider | Read-only contract | Currency | Warning / critical |
 | --- | --- | --- | --- |
-| JustOne | `GET https://api.justoneapi.com/user/get-balance`, `code=0`, `data.balance`, `data.currency=CNY` | CNY | strictly below 30 / 20 |
+| JustOne | `GET https://api.justoneapi.com/user/get-balance`, `code=0`, `data.balance`, `data.currency=CNY` | CNY | strictly below 5 / 3 |
 | TikHub | `GET https://api.tikhub.io/api/v1/tikhub/user/get_user_info`, `code=200`, `user_data.balance` | USD | strictly below 5 / 3 |
 
 Contracts were adapted from the user-supplied `/tmp/fee_monitor/monitor.py`.
@@ -103,9 +105,9 @@ in this environment. Never combine TikHub `free_credit` with cash or invent an
 exchange rate. This monitors account balances, not supplier tariff changes;
 the existing reviewed procurement price books continue to own endpoint prices.
 
-The schedule is fixed at **10:00 and 22:00 Asia/Shanghai every day** (two balance
+The schedule is fixed at **every hour on the hour, Asia/Shanghai** (24 balance
 reads per provider per day), independent of server timezone. PostgreSQL calculates
-the next wall-clock slot; this is not a rolling 12-hour interval. The scheduler
+the next wall-clock slot; this is not a rolling 60-minute interval. The scheduler
 scans every 60 seconds with a five-minute dispatch grace window. Older missed
 slots after downtime are skipped. Initial deployment and saving/enabling a policy
 wait for the next slot. Each slot is consumed atomically before network I/O,
@@ -122,12 +124,14 @@ does not explicitly confirm whether these specific account queries incur charges
 but no price; [JustOne's usage guide](https://docs.justoneapi.com/zh/usage) describes
 general success billing and directs users to the dashboard for endpoint prices.
 Do not apply the generic business-API rate to account queries or claim they are
-free without endpoint-specific evidence. The twice-daily schedule reduces
-scheduled balance reads from the original 48 to 2 per provider per day; it can
-delay a new low-balance alert until the next 10:00/22:00 check (up to 12 hours
-during normal operation). Policy changes do not schedule extra reads.
-The standalone Feishu script has its own schedule and, if running alongside Hub,
-adds independent supplier requests.
+free without endpoint-specific evidence. Migration `097_hourly_balance_check.sql`
+raises scheduled balance reads from 2 back to 24 per provider per day (2026-09-18),
+which bounds a new low-balance alert to the next hourly check (up to 60 minutes
+during normal operation) at 12x the twice-daily query cost. Policy changes do not
+schedule extra reads.
+The standalone `/tmp/fee_monitor` script is superseded by this monitor plus the
+Feishu delivery below. Do not run it alongside Hub: it would add independent
+supplier requests and double-post to the same group.
 
 The external-platform overview and detail show the latest balance, currency,
 thresholds and successful observation time. UI refresh reads cached Hub state
@@ -148,11 +152,101 @@ Admin Token only:
 
 - `GET /internal/v1/admin/supplier-balances` — cached observations/settings only.
 - `PUT /internal/v1/admin/supplier-balances/:provider` — `enabled`,
-  `warningThreshold`, `criticalThreshold`, `expectedRevision`. The schedule is fixed.
+  `warningThreshold`, `criticalThreshold`, `expectedRevision`. The schedule is fixed;
+  the DTO reports it as `{ timeZone: 'Asia/Shanghai', cadence: 'hourly' }`.
 
-The existing Python Feishu notifications remain independent, with their original
-thresholds/cooldown. Hub neither starts that script nor sends duplicate Feishu
-messages; changing a Hub threshold does not reconfigure the standalone script.
+## Feishu delivery (2026-09-18)
+
+Migration `098_feishu_balance_alerts.sql` adds delivery state and `notified` /
+`notify_failed` timeline events. `server/notifications-feishu.mjs` ports the
+reviewed standalone script's rules, with state in PostgreSQL rather than its
+`state.json`, so reminders survive restarts and are not duplicated by a replica:
+
+- A new `supplier_balance_low` incident is delivered on the next pass (≤30s).
+- While it stays open, at most one reminder per hour per incident.
+- Escalation from warning to critical is delivered immediately; a de-escalation
+  back to warning waits out the window.
+- Recovery closes the incident. A later drop is a new incident and alerts at once
+  rather than inheriting a cooldown.
+- Only a bot reply of `code: 0` starts the cooldown. An HTTP error, a rejection,
+  an oversized or non-JSON body and a timeout are all retried on the next pass.
+  A persistently broken hook records one `notify_failed` per hour, not one per
+  pass.
+
+## Unreadable balances and recovery (2026-09-18)
+
+Migration `100_probe_failure_and_recovery_alerts.sql` closes two gaps that both
+ended in silence.
+
+**A monitor that cannot read a balance now says so.** A failed probe used to
+record an error code and stop there, so an expired credential or a broken egress
+left the card stale and nobody was told. A failed probe now opens a
+`supplier_balance_unreadable` incident (`supplier.cost`, warning), delivered by
+the same notifier under the same rules. It opens on the **second consecutive**
+failure, not the first: one blip is noise, two in a row means the monitor has
+stopped protecting anything. The previous attempt's error code on the monitor row
+provides that, so no counter column exists to drift. The message names the error
+code and the last successful read, and never renders an unknown balance as a
+number. A low-balance incident stays open independently -- a failed probe still
+cannot prove recovery.
+
+Any successful read closes the unreadable incident, including after the
+credential was replaced, so it closes by provider rather than by credential scope.
+
+**Recovery is announced.** Closing a balance or probe incident records
+`recovered_at`, and the notifier delivers one recovery message. Two guards keep
+it honest: only an incident whose problem was actually delivered
+(`notified_at IS NOT NULL`) produces a recovery, so the group is never told that
+something it never heard about has cleared; and only a monitor-recorded recovery
+counts, because a manual closure in this center leaves `recovered_at` null.
+`recovery_notified_at` makes it exactly once. A balance recovery quotes the
+restored balance; a probe recovery claims nothing about the balance, only that
+reads work again.
+
+When both recoveries for one provider are pending in the same pass, only the
+balance message is sent: a restored balance already proves reads work, so two
+messages would describe one event. The probe recovery is marked delivered and
+recorded as `notify_merged`, which is what keeps it from resurfacing as a second
+message on a later pass. A probe recovery with no balance recovery behind it is
+still delivered on its own.
+
+The new timeline kinds (`probe_failed`, `probe_recovered`, `notify_merged`)
+appear in the incident detail alongside `notified` / `notify_failed`.
+
+Each provider has its own bot in the shared group. The hook is **operator policy
+on the balance monitor row, not deployment environment**: migration
+`099_balance_feishu_webhook.sql` adds the column and seeds the two groups that
+the standalone script already notified, so the first deploy is not silent, and
+`PUT /internal/v1/admin/supplier-balances/:provider` accepts a `feishuWebhook`
+field. The notifier re-reads the column on every pass, so an edit in 外部数据平台
+takes effect on the next pass without restarting or redeploying anything. Only
+the Admin listener delivers; Public never does, because two senders would
+double-post. Both bots are keyword-gated on `额度`, which is why the first message
+line carries it.
+
+`feishuWebhook` is optional on save. Omitting it leaves the stored hook alone --
+the console never receives the current value, so an ordinary threshold save
+cannot echo a stale one back. An explicit empty string clears it and stops
+notifying that group. A malformed value is rejected with `invalid_feishu_webhook`
+and never reaches the row.
+
+**Providers are fully isolated**: a missing, invalid or unreachable hook for one
+platform never stops the other's alert and never consumes its reminder window;
+the blocked platform records a `notify_failed` event instead of going silent. An
+unset hook leaves that platform's alerts in this center only.
+
+A hook is secret-bearing. It is stored in the Hub database like other
+UI-managed source credentials, and is never logged, never returned by an API,
+never copied into an observation and never written to the settings audit trail --
+that records `unchanged` / `set:<tail>` / `cleared`. The monitoring DTO exposes
+only `feishu.configured` plus a six-character tail, enough to tell two bots apart.
+Because the seeds live in a tracked migration, treat the seeded hooks as
+published to anyone with repository access; rotate the bot in Feishu and save the
+new hook in the console if that matters. Delivery is not a readiness dependency
+and cannot change dispatch, billing, MX-H2I login or networking.
+
+Migration `097` aligns JustOne's warning line with the original script's 5 CNY
+and keeps a 3 CNY critical tier, matching TikHub's existing 5/3 USD shape.
 Future platforms add a reviewed adapter in `balance-adapters.mjs`, a credential
 resolver/egress binding and a seeded policy; the scheduler, persistence and
 notification lifecycle are shared. Never allow an arbitrary query URL from UI.

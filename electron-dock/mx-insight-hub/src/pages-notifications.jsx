@@ -8,7 +8,7 @@ const categories = { 'supplier.cost': '费用告警 · 账户余额', 'upstream.
 const statuses = { open: '待处理', acknowledged: '已确认', closed: '已关闭' }
 const timestamp = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Shanghai' })
 const date = (value) => value ? timestamp.format(new Date(value)) : '尚无记录'
-const sourceLabels = { observed: '上游失败', acknowledged: '管理员确认', closed: '管理员关闭', balance_observed: '余额低于阈值', balance_recovered: '余额恢复并自动关闭' }
+const sourceLabels = { observed: '上游失败', acknowledged: '管理员确认', closed: '管理员关闭', balance_observed: '余额低于阈值', balance_recovered: '余额恢复并自动关闭', notified: '飞书群已通知', notify_failed: '飞书通知失败', probe_failed: '余额查询失败', probe_recovered: '余额查询已恢复', notify_merged: '已并入余额恢复通知' }
 
 function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
   const [before, setBefore] = useState(null)
@@ -102,7 +102,7 @@ export function NotificationsPage({ token, onUnauthorized }) {
         { value: 'all', label: '全部分类' }, ...Object.entries(categories).map(([value, label]) => ({ value, label })),
       ]} />
     </section>
-    <p>TikHub / JustOne 余额监控固定在北京时间每天 10:00、22:00 各检查一次，可在外部数据平台调整告警阈值。JustOne 调用失败与 Token 限额每 30 秒从账本采集；页面刷新不请求供应商。已入库的事件与处理记录持续保留。</p>
+    <p>TikHub / JustOne 余额监控固定在北京时间每小时整点检查一次，可在外部数据平台调整告警阈值。JustOne 调用失败与 Token 限额每 30 秒从账本采集；页面刷新不请求供应商。已入库的事件与处理记录持续保留。</p>
     <p>调用账本采集状态：{({ ready: '最近批次完成', pending: '等待首次采集', error: '采集失败，当前列表可能不完整', unavailable: '未启用持久化存储' })[remote.data?.collection?.state] || '读取中'} · 最近成功：{date(remote.data?.collection?.lastSuccessAt)} · 时间均为北京时间</p>
     {remote.error ? <ErrorState error={remote.error} onRetry={refresh} /> : null}
     {remote.loading && !remote.data ? <LoadingState label="正在读取通知" /> : null}

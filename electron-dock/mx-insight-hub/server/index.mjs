@@ -55,6 +55,7 @@ import { createPostgresStore } from './stores/postgres-store.mjs'
 import { PostgresAcquisitionHistoryStore } from './acquisitions/history-store.mjs'
 import { TopicReportStore } from './insights/topic-reports.mjs'
 import { NotificationService } from './notifications.mjs'
+import { FeishuAlertNotifier } from './notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -431,6 +432,11 @@ export async function createRuntime(config = loadConfig()) {
     },
     fetchers: { tikhub: tikHubProxyStore ? createTikHubProxyFetch(tikHubProxyStore) : undefined },
   })
+  // Admin owns delivery, like the collectors above. The Public listener must
+  // never construct it: two senders would double-post to the same group. The
+  // bot hooks are read from the database on every pass, so an operator's edit
+  // takes effect without restarting anything.
+  const feishuAlerts = config.listenerMode === 'public' ? null : new FeishuAlertNotifier({ pool })
   const app = createApp({
     service,
     store,
@@ -472,7 +478,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, balanceMonitor,
+    notifications, balanceMonitor, feishuAlerts,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -492,7 +498,9 @@ export async function start(config = loadConfig()) {
   })
   runtime.notifications?.start()
   runtime.balanceMonitor?.start()
+  runtime.feishuAlerts?.start()
   const close = async () => {
+    await runtime.feishuAlerts?.close()
     await runtime.balanceMonitor?.close()
     await runtime.notifications?.close()
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))

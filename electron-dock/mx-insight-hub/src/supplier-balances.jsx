@@ -29,10 +29,11 @@ export function SupplierBalanceStatus({ item }) {
   return <section className={`mih-balance mih-balance--${item.level}`} aria-label={`${item.displayName} 账户余额`}>
     <div className="mih-balance-heading"><span>供应商账户余额</span><strong>{alerting ? <WarningCircle size={16} aria-hidden="true" /> : null}{levels[item.level]}</strong></div>
     <b className="mih-balance-amount">{balanceMoney(item.balance, item.currency)}</b>
-    <p className="mih-balance-state">{states[item.state]} · 每天 10:00、22:00 检查（北京时间）</p>
+    <p className="mih-balance-state">{states[item.state]} · 每小时整点检查（北京时间）</p>
     <small>最近成功：{item.lastSuccessAt ? balanceDate.format(new Date(item.lastSuccessAt)) : '尚无成功查询'}</small>
     {item.nextCheckAt ? <small>下次检查：{balanceDate.format(new Date(item.nextCheckAt))}（北京时间）</small> : null}
     <small>提醒 &lt; {balanceMoney(item.warningThreshold, item.currency)} · 严重 &lt; {balanceMoney(item.criticalThreshold, item.currency)}</small>
+    <small>飞书告警：{item.feishu?.configured ? `已配置 ${item.feishu?.hint}` : '未配置，仅记录到通知中心'}</small>
     {['stale', 'error', 'paused'].includes(item.state) ? <p>显示最近已知余额，当前余额尚未确认。</p> : null}
     {item.errorCode ? <small>查询状态：{item.errorCode}</small> : null}
     {alerting ? <a href="#/notifications" className="mih-balance-link">查看费用告警与处理记录 →</a> : null}
@@ -43,6 +44,10 @@ function BalancePolicyForm({ item, token, onSaved, onUnauthorized }) {
   const [enabled, setEnabled] = useState(item.enabled)
   const [warning, setWarning] = useState(decimalText(item.warningThreshold))
   const [critical, setCritical] = useState(decimalText(item.criticalThreshold))
+  // The stored hook is never sent to the browser, so an empty box means "leave
+  // it alone". Clearing is therefore an explicit choice, not an empty save.
+  const [webhook, setWebhook] = useState('')
+  const [clearWebhook, setClearWebhook] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const inFlight = useRef(false)
@@ -52,8 +57,10 @@ function BalancePolicyForm({ item, token, onSaved, onUnauthorized }) {
     inFlight.current = true
     setBusy(true); setError(null)
     try {
+      const changed = clearWebhook ? { feishuWebhook: '' } : webhook.trim() ? { feishuWebhook: webhook.trim() } : {}
       await adminApi.updateSupplierBalance(token, item.provider, { enabled, warningThreshold: warning,
-        criticalThreshold: critical, expectedRevision: item.revision })
+        criticalThreshold: critical, expectedRevision: item.revision, ...changed })
+      setWebhook(''); setClearWebhook(false)
       onSaved()
     } catch (failure) { if (failure.status === 401) onUnauthorized?.(); setError(failure) }
     finally { inFlight.current = false; setBusy(false) }
@@ -63,8 +70,15 @@ function BalancePolicyForm({ item, token, onSaved, onUnauthorized }) {
       <Field label={`提醒阈值（${item.currency}）`}><input className="qp-input" inputMode="decimal" value={warning} disabled={busy} onChange={event => setWarning(event.target.value)} /></Field>
       <Field label={`严重阈值（${item.currency}）`}><input className="qp-input" inputMode="decimal" value={critical} disabled={busy} onChange={event => setCritical(event.target.value)} /></Field>
     </div>
+    <Field label="飞书机器人地址">
+      <input className="qp-input" type="url" inputMode="url" value={webhook} disabled={busy || clearWebhook}
+        placeholder={item.feishu?.configured ? `已配置 ${item.feishu?.hint} · 留空表示不修改` : '未配置，余额告警仅留在通知中心'}
+        onChange={event => setWebhook(event.target.value)} />
+    </Field>
     <label className="mih-balance-enabled"><input type="checkbox" checked={enabled} disabled={busy} onChange={event => setEnabled(event.target.checked)} />启用余额监控</label>
-    <p>固定北京时间每天 10:00、22:00 各检查一次。保存设置后等待下一个检查时刻。</p>
+    {item.feishu?.configured ? <label className="mih-balance-enabled"><input type="checkbox" checked={clearWebhook} disabled={busy}
+      onChange={event => { setClearWebhook(event.target.checked); if (event.target.checked) setWebhook('') }} />清除飞书地址（保存后该平台不再发送群消息）</label> : null}
+    <p>固定北京时间每小时整点检查一次。保存设置后等待下一个检查时刻。飞书地址保存后立即生效，无需重启。</p>
     <p>按平台原币比较，严格低于阈值才告警。TikHub 的免费调用额度不计入现金余额。</p>
     {error ? <ErrorState error={error} /> : null}
     <button className="qp-button qp-button--primary" disabled={busy} type="submit">{busy ? '保存中…' : '保存监控设置'}</button>
