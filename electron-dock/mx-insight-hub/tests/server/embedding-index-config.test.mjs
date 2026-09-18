@@ -27,20 +27,25 @@ test('search and an already constructed worker adopt database dimensions without
 test('first enable creates only an empty index and refuses incompatible or recoverable data', async () => {
   const { prepareEmptyChunkIndex, chunkIndex } = await import('../../server/search/index.mjs')
   const indexSet = chunkIndex({ dimensions: 512 })
-  for (const scenario of ['new', 'ready', 'wrong-dimensions', 'vectors', 'unaliased']) {
+  for (const scenario of ['new', 'ready', 'wrong-dimensions', 'vectors', 'unaliased', 'missing-empty', 'missing-populated', 'wrong-backend', 'hanlp-down']) {
     const calls = []
     const pool = { async connect() { return {
       async query(sql) {
         calls.push(sql)
+        if (sql.includes('SELECT segmenter_backend')) return { rows: [{
+          segmenter_backend: scenario === 'ready' ? 'hanlp' : scenario === 'wrong-backend' ? 'fallback' : null,
+        }] }
         return { rows: [{ has_vectors: scenario === 'vectors' }] }
       }, release() {},
     } } }
     const client = {
-      async request(method) {
+      async request(method, path) {
+        if (path.endsWith('/_refresh')) { assert.equal(method, 'POST'); return {} }
         assert.equal(method, 'GET')
-        if (['ready', 'wrong-dimensions'].includes(scenario)) return {
-          existing: { mappings: { properties: {
-            embedding: { dims: scenario === 'ready' ? 512 : 1024 },
+        if (path.endsWith('/_count')) return { count: scenario === 'missing-populated' ? 1 : 0 }
+        if (['ready', 'wrong-dimensions', 'missing-empty', 'missing-populated', 'wrong-backend', 'hanlp-down'].includes(scenario)) return {
+          [indexSet.currentIndex]: { mappings: { properties: {
+            embedding: { dims: scenario === 'wrong-dimensions' ? 1024 : 512 },
             embeddingSpace: { type: 'keyword' },
           } } },
         }
@@ -55,8 +60,10 @@ test('first enable creates only an empty index and refuses incompatible or recov
         assert.equal(body.aliases[indexSet.writeAlias].is_write_index, true)
       },
     }
-    const operation = () => prepareEmptyChunkIndex({ pool, client, indexSet })
-    if (['wrong-dimensions', 'vectors', 'unaliased'].includes(scenario)) {
+    const operation = () => prepareEmptyChunkIndex({ pool, client, indexSet, segmenter: {
+      async segmentWithMeta() { return { backendUsed: scenario === 'hanlp-down' ? 'fallback' : 'hanlp' } },
+    } })
+    if (['wrong-dimensions', 'vectors', 'unaliased', 'missing-populated', 'wrong-backend', 'hanlp-down'].includes(scenario)) {
       await assert.rejects(operation)
       assert.ok(!calls.includes('create'))
     } else {
@@ -64,6 +71,9 @@ test('first enable creates only an empty index and refuses incompatible or recov
       assert.equal(calls.includes('create'), scenario === 'new')
     }
     assert.ok(calls.some((call) => call.includes('pg_advisory_unlock')))
-    assert.ok(!calls.some((call) => /DELETE|UPDATE|INSERT|canonical_records/.test(call)))
+    assert.ok(!calls.some((call) => /DELETE|canonical_records/.test(call)))
+    const writes = calls.filter((call) => call.includes('INSERT INTO control.search_rebuild_progress'))
+    assert.equal(writes.length, ['new', 'missing-empty'].includes(scenario) ? 1 : 0)
+    assert.ok(writes.every((call) => !call.includes('reconciled_through')))
   }
 })

@@ -50,7 +50,7 @@ export function createSearch({ pool, config, logger = console }) {
     indexSet,
     get chunkIndexSet() { return getChunks() },
     async prepareEmbeddingIndex() {
-      return prepareEmptyChunkIndex({ pool, client, indexSet: getChunks() })
+      return prepareEmptyChunkIndex({ pool, client, indexSet: getChunks(), segmenter })
     },
     // Only the bulk rebuild uses this; live projector traffic stays one call at
     // a time so an interactive search never queues behind a rebuild's fan-out.
@@ -1187,7 +1187,7 @@ function escapeRegExp(value) {
 }
 
 /** Explicit first enable: create only an empty vector index, never replay or replace data. */
-export async function prepareEmptyChunkIndex({ pool, client, indexSet }) {
+export async function prepareEmptyChunkIndex({ pool, client, indexSet, segmenter }) {
   if (!client || !indexSet) return
   const connection = await pool.connect()
   const lockName = `${CURRENT_REBUILD_LOCK_PREFIX}${indexSet.readAlias}`
@@ -1195,34 +1195,74 @@ export async function prepareEmptyChunkIndex({ pool, client, indexSet }) {
   try {
     await connection.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [lockName])
     locked = true
-    try {
-      const mapping = await client.request('GET', `/${encodeURIComponent(indexSet.writeAlias)}/_mapping`)
-      const values = Object.values(mapping)
-      if (!values.length || values.some((value) =>
-        value.mappings?.properties?.embedding?.dims !== indexSet.mappings.properties.embedding.dims
-        || !value.mappings?.properties?.embeddingSpace)) {
-        throw new AppError(409, 'embedding_dimension_mismatch', '现有向量索引映射与数据库配置不一致；请先完成受控索引迁移')
+    return await withCurrentStateCutoverFence({ connection, indexSet }, async () => {
+      let mapping = null
+      try {
+        mapping = await client.request('GET', `/${encodeURIComponent(indexSet.writeAlias)}/_mapping`)
+      } catch (error) {
+        if (error.status !== 404 && error.statusCode !== 404) throw error
       }
-      return
-    } catch (error) {
-      if (error.status !== 404 && error.statusCode !== 404) throw error
-    }
-    const { rows } = await connection.query(
-      'SELECT EXISTS(SELECT 1 FROM core.record_chunks WHERE embedded_at IS NOT NULL) AS has_vectors',
-    )
-    if (rows[0]?.has_vectors || await client.indexExists(indexSet.currentIndex)) {
-      throw new AppError(409, 'embedding_index_recovery_required', '已有向量或待恢复索引；请先显式恢复索引，未替换任何数据')
-    }
-    await putCurrentIndexTemplate(client, indexSet)
-    await client.createIndex(indexSet.currentIndex, {
-      settings: indexSet.settings, mappings: indexSet.mappings,
-      aliases: {
-        [indexSet.readAlias]: {},
-        [indexSet.writeAlias]: { is_write_index: true },
-      },
+      if (mapping) {
+        const entries = Object.entries(mapping)
+        if (entries.length !== 1 || entries.some(([, value]) =>
+          value.mappings?.properties?.embedding?.dims !== indexSet.mappings.properties.embedding.dims
+          || !value.mappings?.properties?.embeddingSpace)) {
+          throw new AppError(409, 'embedding_dimension_mismatch', '现有向量索引映射与数据库配置不一致；请先完成受控索引迁移')
+        }
+        const indexName = entries[0][0]
+        const { rows } = await connection.query(
+          'SELECT segmenter_backend FROM control.search_rebuild_progress WHERE index_name=$1', [indexName],
+        )
+        if (rows[0]?.segmenter_backend === 'hanlp') return
+        // Never relabel an existing non-HanLP or populated index. A missing
+        // marker can be repaired only for our empty initial concrete index.
+        if (rows[0]?.segmenter_backend || indexName !== indexSet.currentIndex) {
+          throw new AppError(409, 'search_index_backend_mismatch', '向量索引分词后端不一致；需要显式重建，未修改来源记录')
+        }
+        const refreshed = await client.request('POST', `/${encodeURIComponent(indexName)}/_refresh`)
+        if (refreshed?._shards?.failed > 0) throw new AppError(503, 'embedding_index_probe_failed', '索引刷新未完整成功；未修改来源记录')
+        const count = await client.request('GET', `/${encodeURIComponent(indexName)}/_count`)
+        if (count.count !== 0 || count._shards?.failed > 0) {
+          throw new AppError(409, 'search_index_backend_mismatch', '已有向量索引文档但缺少分词来源；拒绝直接补标记，请显式重建索引')
+        }
+      } else {
+        const { rows } = await connection.query(
+          'SELECT EXISTS(SELECT 1 FROM core.record_chunks WHERE embedded_at IS NOT NULL) AS has_vectors',
+        )
+        if (rows[0]?.has_vectors || await client.indexExists(indexSet.currentIndex)) {
+          throw new AppError(409, 'embedding_index_recovery_required', '已有向量或待恢复索引；请先显式恢复索引，未替换任何数据')
+        }
+      }
+      const backend = await observedBackend(segmenter)
+      if (backend !== 'hanlp') {
+        throw new AppError(409, 'reindex_segmenter_degraded', 'HanLP 实测未通过；未登记向量索引分词来源')
+      }
+      if (!mapping) {
+        await putCurrentIndexTemplate(client, indexSet)
+        await client.createIndex(indexSet.currentIndex, {
+          settings: indexSet.settings, mappings: indexSet.mappings,
+          aliases: {
+            [indexSet.readAlias]: {},
+            [indexSet.writeAlias]: { is_write_index: true },
+          },
+        })
+      }
+      // This records the backend for future writes, NOT a corpus replay watermark.
+      // PG may already hold embeddings awaiting their first ES projection.
+      await connection.query(
+        `INSERT INTO control.search_rebuild_progress(index_name,projection,segmenter_backend)
+         VALUES($1,'chunks',$2)
+         ON CONFLICT(index_name) DO UPDATE SET segmenter_backend=EXCLUDED.segmenter_backend,updated_at=now()
+         WHERE control.search_rebuild_progress.segmenter_backend IS NULL`,
+        [indexSet.currentIndex, backend],
+      )
     })
   } finally {
-    if (locked) await connection.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockName]).catch(() => {})
-    connection.release()
+    let cleanupError
+    if (locked) {
+      try { await connection.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockName]) }
+      catch (error) { cleanupError = error }
+    }
+    connection.release(cleanupError)
   }
 }
