@@ -49,13 +49,28 @@ def container_description(c):
         safe_label(c['Name'].lstrip('/')), safe_label(config.get('Image', '未知')), safe_label(service or '未标注'))
 
 
+def reserves_gpu(c, card):
+    host = c.get('HostConfig') or {}
+    requests = host.get('DeviceRequests') or []
+    reserved = any(r.get('Count', 0) != 0 or any(
+        d in card[:2] for d in (r.get('DeviceIDs') or [])) for r in requests)
+    visible = next((v.split('=', 1)[1] for v in (c.get('Config', {}).get('Env') or [])
+                    if v.startswith('NVIDIA_VISIBLE_DEVICES=')), '')
+    return reserved or (host.get('Runtime') == 'nvidia' and (
+        visible == 'all' or any(d in card[:2] for d in visible.split(','))))
+
+
 def describe_process(pid, containers, cache=None):
     if not str(pid).isdigit():
         return '进程归属未知'
     try:
         name = Path('/proc/{}/comm'.format(pid)).read_text().strip()
+    except FileNotFoundError:
+        name = '当前 /proc 中不存在该 PID（可能退出或 PID 命名空间不同）'
+    except PermissionError:
+        name = '无权限读取 /proc/{}/comm'.format(pid)
     except OSError:
-        name = '未知/已退出/无权限'
+        name = '读取 /proc 失败'
     prefix = '进程={}'.format(safe_label(name))
     ids = process_container(pid)
     running = [c for c in containers if c.get('State', {}).get('Running')]
@@ -78,7 +93,7 @@ def describe_process(pid, containers, cache=None):
         cgroup = ''
     units = re.findall(r'/system.slice/([^/\n]+\.service)(?:/|$)', cgroup, re.M)
     if units:
-        return '{} · systemd={} · 容器归属未确认'.format(prefix, safe_label(','.join(sorted(set(units)))))
+        return '{} · systemd={}（仅进程归组，不等于业务服务名） · 容器归属未确认'.format(prefix, safe_label(','.join(sorted(set(units)))))
     return '{} · 服务归属未确认（进程退出、权限不足或非 Docker 服务）'.format(prefix)
 
 
@@ -103,6 +118,9 @@ def report(selector=None):
     cache = {}
     for card in cards:
         print('GPU {} ({}) · 显示活跃={} · 显示模式={}'.format(*card))
+        reservations = [c for c in containers if c.get('State', {}).get('Running') and reserves_gpu(c, card)]
+        for c in reservations:
+            print('  容器设备申请：{}（仅配置关联，不证明下列 PID 属于它）'.format(container_description(c)))
         matching = [r for r in rows if len(r) == 4 and r[0] == card[1]]
         if not matching:
             print('  未报告计算进程；不代表没有图形进程或容器预留')
@@ -146,14 +164,7 @@ def check(app):
             raise ValueError(f'容器名称 {name} 已被非本应用使用')
         if not c.get('State', {}).get('Running'):
             continue
-        requests = c.get('HostConfig', {}).get('DeviceRequests') or []
-        reserves = any(r.get('Count', 0) != 0 or any(
-            d in (target[0], target[1]) for d in (r.get('DeviceIDs') or [])) for r in requests)
-        visible = next((v.split('=', 1)[1] for v in (c.get('Config', {}).get('Env') or [])
-                        if v.startswith('NVIDIA_VISIBLE_DEVICES=')), '')
-        if c.get('HostConfig', {}).get('Runtime') == 'nvidia':
-            reserves = reserves or visible == 'all' or any(d in (target[0], target[1]) for d in visible.split(','))
-        if reserves and not own:
+        if reserves_gpu(c, target) and not own:
             raise ValueError(f'GPU {target[0]} 已被容器 {name} 申请；{container_description(c)}；先显式停止该服务或换卡')
         if own:
             owned_ids.add(c['Id'])

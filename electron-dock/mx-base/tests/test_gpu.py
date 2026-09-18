@@ -91,6 +91,22 @@ class GpuTests(unittest.TestCase):
         with patch.object(gpu.Path, 'read_text', return_value='0::/system.slice/inference.service\n'):
             self.assertIn('systemd=inference.service', gpu.describe_process('123', []))
 
+    def test_invisible_pid_does_not_inherit_container_reservation(self):
+        self.containers = [{'Id': 'a' * 64, 'Name': '/mx-ocr-api', 'State': {'Running': True},
+                            'Config': {'Image': 'mx-ocr/api', 'Labels': {'com.mx-base.app': 'mx-ocr'}},
+                            'HostConfig': {'DeviceRequests': [{'Count': 0, 'DeviceIDs': ['GPU-2']}]}}]
+        self.processes = 'GPU-2,2491332,[Not Found],1356'
+        output = io.StringIO()
+        with patch.object(gpu.Path, 'read_text', side_effect=FileNotFoundError()), redirect_stdout(output):
+            gpu.report('2')
+        self.assertIn('容器设备申请：容器=mx-ocr-api', output.getvalue())
+        self.assertIn('不证明下列 PID 属于它', output.getvalue())
+        self.assertIn('当前 /proc 中不存在该 PID', output.getvalue())
+        self.assertIn('服务归属未确认', output.getvalue())
+        self.processes = 'GPU-2,2491332'
+        with patch.object(gpu.Path, 'read_text', side_effect=FileNotFoundError()):
+            with self.assertRaisesRegex(ValueError, '未证明属于'): gpu.check('mx-ocr')
+
     def test_top_multiple_columns_and_cgroup_worker_race(self):
         self.assertEqual(gpu.top_pids('UID PID PPID CMD\nroot 2491332 1 python\n'), {'2491332'})
         self.assertEqual(gpu.top_pids('PID\n  123\n'), {'123'})
