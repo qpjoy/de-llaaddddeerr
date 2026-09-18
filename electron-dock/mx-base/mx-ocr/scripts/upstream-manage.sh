@@ -834,7 +834,14 @@ wait_ready() {
 }
 
 print_endpoints() {
-  local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}')"; ip="${ip:-<服务器IP>}"
+  local ip="$BIND"
+  case "$BIND" in
+    0.0.0.0)
+      ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+      ip="${ip:-<服务器IP>}"
+      ;;
+    127.*|localhost) dim '  仅本机访问；其他机器访问需设置 BIND=0.0.0.0 后重新 deploy';;
+  esac
   echo
   printf '  %s界面%s   http://%s:%s/\n'             "$c_grn" "$c_off" "$ip" "$PORT"
   printf '  %sAPI %s   POST http://%s:%s/api/ocr\n' "$c_grn" "$c_off" "$ip" "$PORT"

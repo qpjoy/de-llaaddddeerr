@@ -5,7 +5,7 @@
 | 应用 | 职责 | 部署与状态 |
 | --- | --- | --- |
 | mx-static | 多媒体持久采集、缓存、文件读取与签名预览 | 独立 Docker Compose，writer + reader，默认 18200 / 18201 |
-| mx-ocr | 图片文字提取、文档精修与 Web 调试 | 独立 Docker，默认 GPU 2，127.0.0.1:8710 |
+| mx-ocr | 图片文字提取、文档精修与 Web 调试 | 独立 Docker，默认 GPU 2，0.0.0.0:8710 |
 | mx-embedding | Qwen3-Embedding-0.6B 文本向量服务 | 独立 Docker Compose，默认 GPU 1，127.0.0.1:18210 |
 | jenkins | 可选的制品构建 | 原 Kubernetes `mx-base` namespace，默认 NodePort 30880，未自动启用 |
 
@@ -46,7 +46,7 @@ Jenkins 使用相同的 `操作 jenkins`；额外支持 `password jenkins`、`ag
 - [mx-embedding 部署/API/Hub 接入](mx-embedding/README.md)
 - [GPU 服务边界与管理决策](docs/adr/0004-gpu-base-services.md)
 
-新服务默认仅监听回环地址。跨容器/主机调用须选择受控内网入口；Embedding 有独立 Bearer Key，OCR 沿用上游接口与调参能力，应由入口限制访问。没有自动配置 Hub 默认模型、索引维度或发起历史向量化。
+OCR 默认监听 0.0.0.0:8710，支持内网其他机器访问；Embedding 保持回环监听，跨容器/主机调用须选择受控内网入口；Embedding 有独立 Bearer Key，OCR 沿用上游接口与调参能力，应由入口限制访问。没有自动配置 Hub 默认模型、索引维度或发起历史向量化。
 
 ## 首次部署 mx-static
 

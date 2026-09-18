@@ -3,10 +3,13 @@ set -Eeuo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="$(cd "$APP_DIR/.." && pwd)"
 source "$BASE_DIR/scripts/gpu-common.sh"
+# Explicit command-line BIND must win over an older .env containing loopback.
+bind_override="${BIND-}"
 if [ -f "$APP_DIR/.env" ]; then set -a; source "$APP_DIR/.env"; set +a; fi
+[ -z "$bind_override" ] || BIND="$bind_override"
 gpu_config
 export PROJECT=mx-ocr GPU_ID="$MX_BASE_OCR_GPU"
-export BIND="${BIND:-127.0.0.1}" PORT="${PORT:-8710}" STRICT_PORT=1
+export BIND="${BIND:-0.0.0.0}" PORT="${PORT:-8710}" STRICT_PORT=1
 export CPU_LIMIT="${CPU_LIMIT:-16}" MEM_LIMIT="${MEM_LIMIT:-16g}"
 export UVICORN_WORKERS="${UVICORN_WORKERS:-2}" WORKERS_FAST="${WORKERS_FAST:-2}"
 export OMP_THREADS="${OMP_THREADS:-4}" ORT_INTRA="${ORT_INTRA:-4}"
