@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MX OCR</title>
+<style>
+:root{
+  --bg:#f7f7f5; --panel:#fff; --line:#e3e3df; --fg:#1c1c1a; --dim:#76766f;
+  --accent:#3d6df0; --ok:#1a8a52; --warn:#b8730a; --err:#c0392b; --code:#f1f1ee;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#17171a;--panel:#1f1f23;--line:#33333a;--fg:#e8e8e4;--dim:#93939c;
+        --accent:#7aa0ff;--ok:#4ec98a;--warn:#e0a44a;--err:#f0736a;--code:#26262c;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 20px 60px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+h1{font-size:19px;margin:0;letter-spacing:-.01em}
+.sub{color:var(--dim);font-size:13px}
+.badge{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);color:var(--dim)}
+.bar{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:14px 0 18px;
+  padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:10px;font-size:12.5px}
+.bar b{font-weight:600}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.dot.on{background:var(--ok)} .dot.off{background:var(--err)} .dot.wait{background:var(--warn)}
+#drop{border:1.5px dashed var(--line);border-radius:12px;background:var(--panel);
+  padding:34px 20px;text-align:center;cursor:pointer;transition:.15s}
+#drop:hover,#drop.hot{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 6%,var(--panel))}
+#drop h2{margin:0 0 6px;font-size:15px;font-weight:600}
+#drop p{margin:0;color:var(--dim);font-size:12.5px}
+.opts{display:flex;gap:18px;flex-wrap:wrap;margin:12px 2px;font-size:12.5px;color:var(--dim)}
+.opts label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.engsel{display:flex;gap:0;margin:14px 0 0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.engsel button{flex:1;padding:10px 14px;border:0;background:var(--panel);color:var(--fg);
+  cursor:pointer;font-size:13px;text-align:left;border-right:1px solid var(--line)}
+.engsel button:last-child{border-right:0}
+.engsel button:disabled{opacity:.4;cursor:not-allowed}
+.engsel button.on{background:color-mix(in srgb,var(--accent) 12%,var(--panel));
+  box-shadow:inset 3px 0 0 var(--accent)}
+.engsel b{display:block;font-size:13px;margin-bottom:2px}
+.engsel span{display:block;font-size:11.5px;color:var(--dim);font-weight:400}
+.res{margin-top:20px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.tabs{display:flex;gap:2px;padding:8px 8px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.tab{padding:7px 14px;font-size:12.5px;border:0;background:none;color:var(--dim);
+  cursor:pointer;border-radius:8px 8px 0 0}
+.tab.on{color:var(--fg);background:var(--bg);font-weight:600}
+.pane{padding:18px 22px;max-height:66vh;overflow:auto}
+.pane[hidden]{display:none}
+.meta{display:flex;gap:20px;flex-wrap:wrap;padding:10px 22px;font-size:12px;
+  color:var(--dim);border-top:1px solid var(--line);background:var(--bg)}
+pre{background:var(--code);padding:14px;border-radius:8px;overflow:auto;font-size:12.5px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;margin:0;white-space:pre-wrap;word-break:break-word}
+.md h1,.md h2,.md h3{margin:1.2em 0 .5em;line-height:1.3}
+.md h1{font-size:20px}.md h2{font-size:17px}.md h3{font-size:15px}
+.md p{margin:.6em 0}
+.md code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:12.5px}
+.md table{border-collapse:collapse;margin:1em 0;font-size:13px;display:block;overflow-x:auto;max-width:100%}
+.md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+.md th{background:var(--code);font-weight:600}
+.md ul,.md ol{margin:.6em 0;padding-left:1.6em}
+.md hr{border:0;border-top:1px solid var(--line);margin:1.4em 0}
+.err{color:var(--err);padding:16px 22px;font-size:13px;white-space:pre-wrap}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.hint{margin-top:26px;color:var(--dim);font-size:12.5px}
+.hint pre{margin-top:8px;background:var(--panel);border:1px solid var(--line)}
+details.tune{margin:14px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+details.tune>summary{padding:10px 14px;font-size:12.5px;cursor:pointer;color:var(--dim);
+  list-style:none;display:flex;align-items:center;gap:8px}
+details.tune>summary::-webkit-details-marker{display:none}
+details.tune>summary::before{content:"B8";transition:.15s;display:inline-block}
+details.tune[open]>summary::before{transform:rotate(90deg)}
+details.tune[open]>summary{border-bottom:1px solid var(--line);color:var(--fg);font-weight:600}
+.tunebody{padding:14px 16px 16px}
+.presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.presets button{font-size:12px;padding:5px 14px;border:1px solid var(--line);border-radius:20px;
+  background:var(--bg);color:var(--fg);cursor:pointer}
+.presets button:hover{border-color:var(--accent);color:var(--accent)}
+.presets button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.knob{display:grid;grid-template-columns:110px 1fr 78px;gap:12px;align-items:center;margin:12px 0}
+.knob label{font-size:12.5px}
+.knob .hint{grid-column:1/-1;font-size:11.5px;color:var(--dim);margin:-4px 0 2px;line-height:1.5}
+.knob input[type=range]{width:100%;accent-color:var(--accent)}
+.knob output{font-size:12.5px;font-family:ui-monospace,Menlo,Consolas,monospace;text-align:right}
+.knob.needs-apply output{color:var(--warn);font-weight:600}
+.applybar{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap;
+  padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
+.applybar button{font-size:12.5px;padding:6px 16px;border-radius:8px;border:1px solid var(--accent);
+  background:var(--accent);color:#fff;cursor:pointer}
+.applybar button:disabled{opacity:.4;cursor:default}
+.usage-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.usage-tabs button{font-size:12px;padding:5px 12px;border:1px solid var(--line);
+  border-radius:20px;background:var(--bg);color:var(--fg);cursor:pointer}
+.usage-tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#usageCode{max-height:none}
+button.copy{float:right;font-size:11.5px;padding:3px 10px;border:1px solid var(--line);
+  background:var(--panel);color:var(--dim);border-radius:6px;cursor:pointer}
+
+/* ---- 服务能力报告 ---- */
+.capgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+  gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.capcell{background:var(--panel);padding:13px 15px}
+.capcell .k{font-size:11px;color:var(--dim);margin-bottom:5px}
+.capcell .v{font-size:20px;font-weight:600;letter-spacing:-.02em;line-height:1.15;
+  font-variant-numeric:tabular-nums}
+.capcell .v small{font-size:12px;font-weight:400;color:var(--dim);margin-left:2px}
+.capcell .n{font-size:11px;color:var(--dim);margin-top:4px}
+.capnote{margin-top:12px;padding:12px 14px;background:var(--code);border-radius:8px;font-size:12.5px}
+.capnote b{font-weight:600}
+.capnote table{width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}
+.capnote td{padding:5px 0;vertical-align:top;border-top:1px solid var(--line)}
+.capnote td:first-child{width:112px;color:var(--dim);white-space:nowrap;padding-right:10px}
+.capnote tr:first-child td{border-top:0}
+.capwarn{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>MX OCR</h1>
+  <span class="sub" id="modelName">加载中…</span>
+  <span class="badge" id="benchBadge">OmniDocBench v1.6 · 96.3%</span>
+</header>
+
+<div class="bar" id="statusBar"><span class="dot wait"></span>正在连接服务…</div>
+
+<div class="engsel" id="engsel">
+  <button data-e="fast"><b>快速 · fast</b><span>PP-OCRv6，几百 ms，纯文字提取。爬虫批量用这个</span></button>
+  <button data-e="quality"><b>最优 · quality</b><span>PaddleOCR-VL 96.3%，含版面表格与 PDF，慢</span></button>
+</div>
+
+<div id="drop">
+  <h2>拖入图片（可多选）</h2>
+  <p>可一次拖多个 · 点击选择 · Ctrl+V 粘贴 · png / jpg / webp / tiff</p>
+  <input type="file" id="file" hidden multiple accept=".png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff,.pdf">
+</div>
+
+<div class="opts">
+  <label><input type="checkbox" id="mergeTables" checked> 合并跨页表格</label>
+  <label><input type="checkbox" id="includeJson" checked> 返回结构化 JSON</label>
+</div>
+
+<details class="tune" id="tune">
+  <summary>识别参数 <span id="tuneSummary" style="font-weight:400"></span></summary>
+  <div class="tunebody">
+    <div class="presets" id="presets">
+      <button data-p="accurate">精准</button>
+      <button data-p="balanced">均衡</button>
+      <button data-p="fast">快速</button>
+    </div>
+
+    <div class="knob">
+      <div class="hint">版面检测阈值 —— 调高只保留高置信度的块，块变少、更快，但可能漏掉边角内容</div>
+      <label for="kLayout">版面阈值</label>
+      <input type="range" id="kLayout" min="0.05" max="0.95" step="0.05" value="0.5">
+      <output id="oLayout">0.50</output>
+    </div>
+
+    <div class="knob">
+      <div class="hint">送进 VLM 的像素上限 —— 大图先降采样，块少了每块也小，最直接的提速手段</div>
+      <label for="kPixels">最大像素</label>
+      <input type="range" id="kPixels" min="0" max="8000000" step="200000" value="0">
+      <output id="oPixels">不限</output>
+    </div>
+
+    <div class="knob">
+      <div class="hint">单个块生成 token 的上限 —— 防止个别块跑飞把整页拖死</div>
+      <label for="kTokens">单块 token</label>
+      <input type="range" id="kTokens" min="0" max="4096" step="128" value="0">
+      <output id="oTokens">不限</output>
+    </div>
+
+    <div class="knob" id="knobConc">
+      <div class="hint">同时发给 VLM 的块数 —— <b>影响最大的一项</b>。官方默认串行，
+        vLLM 的连续批处理完全用不上。改这项要重建流水线，后台进行、不中断服务</div>
+      <label for="kConc">VLM 并发</label>
+      <input type="range" id="kConc" min="1" max="32" step="1" value="8">
+      <output id="oConc">8</output>
+    </div>
+
+    <div class="applybar">
+      <button id="applyBtn" disabled>应用并发设置</button>
+      <span id="applyNote">上面三项即时生效，无需应用</span>
+    </div>
+  </div>
+</details>
+
+<div class="res" id="res" hidden>
+  <div class="tabs">
+    <button class="tab on" data-p="render">渲染结果</button>
+    <button class="tab" data-p="source">Markdown 源码</button>
+    <button class="tab" data-p="json">结构化 JSON</button>
+  </div>
+  <div class="pane md" id="pane-render"></div>
+  <div class="pane" id="pane-source" hidden><button class="copy" data-c="source">复制</button><pre id="srcText"></pre></div>
+  <div class="pane" id="pane-json" hidden><button class="copy" data-c="json">复制</button><pre id="jsonText"></pre></div>
+  <div class="meta" id="meta"></div>
+</div>
+
+<details class="tune" id="cap" open>
+  <summary>服务能力 <span style="font-weight:400" id="capSummary">· 给团队看</span></summary>
+  <div class="tunebody">
+    <div class="capgrid" id="capGrid"></div>
+    <div class="capnote" id="capOverflow"></div>
+  </div>
+</details>
+
+<details class="tune" id="usage" open>
+  <summary>接口用法 <span style="font-weight:400">· 爬虫接入看这里</span></summary>
+  <div class="tunebody">
+    <p style="margin:0 0 12px;font-size:12.5px;color:var(--dim)">
+      服务地址 <code id="host">…</code>。四种传参方式同一个端点，按场景选：
+    </p>
+
+    <div class="usage-tabs" id="usageTabs">
+      <button class="on" data-u="url">URL（爬虫首选）</button>
+      <button data-u="file">上传文件</button>
+      <button data-u="b64">base64</button>
+      <button data-u="async">异步队列</button>
+    </div>
+
+    <pre id="usageCode"></pre>
+
+    <p style="margin:12px 0 0;font-size:12px;color:var(--dim)" id="usageNote"></p>
+  </div>
+</details>
+
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const drop = $('#drop'), fileInput = $('#file');
+let last = null;
+
+document.getElementById('host').textContent = location.host;
+
+/* ---------- 极简 markdown 渲染：够看表格和标题，不引任何外部依赖 ---------- */
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function inline(s){
+  return esc(s)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*]+)\*/g,'$1<em>$2</em>');
+}
+function renderMd(src){
+  const lines = (src||'').split(/\r?\n/);
+  const out = []; let i = 0;
+  while(i < lines.length){
+    const ln = lines[i];
+    if(/^\s*$/.test(ln)){ i++; continue; }
+    if(/^```/.test(ln)){
+      const buf=[]; i++;
+      while(i<lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++; out.push('<pre>'+esc(buf.join('\n'))+'</pre>'); continue;
+    }
+    const h = ln.match(/^(#{1,6})\s+(.*)$/);
+    if(h){ const l=Math.min(h[1].length,3); out.push(`<h${l}>${inline(h[2])}</h${l}>`); i++; continue; }
+    if(/^\s*([-*_])\1{2,}\s*$/.test(ln)){ out.push('<hr>'); i++; continue; }
+    // 表格：| a | b |  紧跟分隔行
+    if(/^\s*\|/.test(ln) && i+1<lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i+1])){
+      const cells = r => r.replace(/^\s*\|/,'').replace(/\|\s*$/,'').split('|').map(c=>c.trim());
+      const head = cells(ln); i += 2;
+      const body = [];
+      while(i<lines.length && /^\s*\|/.test(lines[i])) body.push(cells(lines[i++]));
+      out.push('<table><thead><tr>' + head.map(c=>`<th>${inline(c)}</th>`).join('') +
+        '</tr></thead><tbody>' +
+        body.map(r=>'<tr>'+r.map(c=>`<td>${inline(c)}</td>`).join('')+'</tr>').join('') +
+        '</tbody></table>');
+      continue;
+    }
+    if(/^\s*([-*+]|\d+\.)\s+/.test(ln)){
+      const ol = /^\s*\d+\./.test(ln), items = [];
+      while(i<lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i]))
+        items.push(lines[i++].replace(/^\s*([-*+]|\d+\.)\s+/,''));
+      out.push(`<${ol?'ol':'ul'}>` + items.map(t=>`<li>${inline(t)}</li>`).join('') + `</${ol?'ol':'ul'}>`);
+      continue;
+    }
+    const buf = [];
+    while(i<lines.length && !/^\s*$/.test(lines[i]) && !/^\s*[#|`]/.test(lines[i])) buf.push(lines[i++]);
+    out.push('<p>'+inline(buf.join(' '))+'</p>');
+  }
+  return out.join('\n');
+}
+
+
+
+/* ---------- 接口用法 ---------- */
+function usageSnippets(){
+  const H = location.host, E = ENGINE || 'fast';
+  return {
+    url: {
+      // 一律写成单行：模板字符串里行尾的反斜杠是「续行符」，会把反斜杠和换行
+      // 一起吃掉，示例就断了。单行既没这个坑，复制粘贴也直接能跑。
+      code:
+`# 爬虫已经有 URL 了，直接给 URL —— 省掉「先下载再上传」这一趟往返
+curl -X POST 'http://${H}/api/ocr?engine=${E}' -H 'Content-Type: application/json' -d '{"url":"https://example.com/a.jpg"}'
+
+# 一次多个（最多 32 个），返回 {"count":n,"items":[...]}
+curl -X POST 'http://${H}/api/ocr?engine=${E}' -H 'Content-Type: application/json' -d '{"urls":["https://a.com/1.jpg","https://a.com/2.jpg"]}'`,
+      note: '服务端去抓图。想限制可抓域名：部署时传 OCR_FETCH_ALLOW_HOSTS=a.com,b.com'
+    },
+    file: {
+      code:
+`# 本地文件，最省带宽
+curl -F 'file=@page.png' 'http://${H}/api/ocr?engine=${E}'
+
+# 一次多个（最多 32 个）—— 批量小需求用这个，一次请求拿全部结果
+curl -F 'file=@a.png' -F 'file=@b.png' -F 'file=@c.png' 'http://${H}/api/ocr?engine=${E}'
+
+# 大批量走异步：多文件也能投队列
+curl -F 'file=@a.png' -F 'file=@b.png' 'http://${H}/api/ocr/async?engine=${E}'
+
+# 不要结构化 JSON（省带宽，只要 markdown）
+curl -F 'file=@a.png' 'http://${H}/api/ocr?engine=${E}&include_json=false'`,
+      note: '多文件一次请求返回 {"count":n,"items":[...]}，单个失败不影响其余。界面也支持一次拖多个。裸 body：curl --data-binary @a.png -H "X-Filename: a.png"'
+    },
+    b64: {
+      code:
+`# 图片已经在内存里、调用方只发 JSON 时用这个
+curl -X POST 'http://${H}/api/ocr?engine=${E}' -H 'Content-Type: application/json' -d '{"image_base64":"iVBORw0KGgo..."}'
+
+# data URI 也认
+#   {"image_base64":"data:image/png;base64,iVBORw0..."}
+# 多个用 images_base64: [...]`,
+      note: 'base64 会让体积涨约 33%，能用 URL 或文件就别用它'
+    },
+    async: {
+      code:
+`# 投递后立刻返回 job id，连接不占着 —— 爬虫大批量用这个
+curl -X POST 'http://${H}/api/ocr/async?engine=${E}' -H 'Content-Type: application/json' -d '{"urls":["https://a.com/1.jpg","https://a.com/2.jpg"]}'
+# -> 202 {"jobs":[{"id":"ab12...","state":"queued"}],"queued":3}
+
+# 取结果
+curl 'http://${H}/api/jobs/ab12...'
+# -> {"state":"done","result":{...}}  |  queued / running / failed
+
+# 队列概况
+curl 'http://${H}/api/jobs'`,
+      note: '队列满会返回 429 —— 那是明确的背压信号，退避重试即可，别硬冲'
+    }
+  };
+}
+
+function paintUsage(){
+  const key = document.querySelector('#usageTabs button.on').dataset.u;
+  const snip = usageSnippets()[key];
+  $('#usageCode').textContent = snip.code;
+  $('#usageNote').textContent = snip.note;
+}
+document.querySelectorAll('#usageTabs button').forEach(function(b){
+  b.onclick = function(){
+    document.querySelectorAll('#usageTabs button').forEach(function(x){ x.classList.remove('on'); });
+    b.classList.add('on');
+    paintUsage();
+  };
+});
+
+/* ---------- 引擎选择 ---------- */
+let ENGINE = null;              // 当前选择
+let AVAILABLE = [];             // 本次部署实际具备的引擎（由 /api/info 给出）
+
+function paintEngines(){
+  document.querySelectorAll('#engsel button').forEach(function(b){
+    const has = AVAILABLE.includes(b.dataset.e);
+    b.disabled = !has;
+    b.classList.toggle('on', has && b.dataset.e === ENGINE);
+    b.title = has ? '' : '本次部署（TIER）不含该引擎，用 TIER=full 部署即可两者都有';
+  });
+  // 只有 quality 支持 PDF，据此调整提示与 accept
+  const pdf = ENGINE === 'quality';
+  $('#drop').querySelector('h2').textContent = pdf ? '拖入图片或 PDF' : '拖入图片';
+  $('#drop').querySelector('p').textContent =
+    '可一次拖多个 · 点击选择 · Ctrl+V 粘贴 · png / jpg / webp / tiff' + (pdf ? ' / pdf' : '');
+  $('#file').accept = '.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff' + (pdf ? ',.pdf' : '');
+  $('#file').multiple = true;
+  // 参数面板只对 quality 有意义
+  $('#tune').style.display = (ENGINE === 'quality') ? '' : 'none';
+  try{ localStorage.setItem('knock-ocr-engine', ENGINE); }catch(_){}
+  paintUsage();
+}
+
+document.querySelectorAll('#engsel button').forEach(function(b){
+  b.onclick = function(){ if(!b.disabled){ ENGINE = b.dataset.e; paintEngines(); } };
+});
+
+/* ---------- 参数面板 ---------- */
+const PRESETS = {
+  accurate: {layout:0.30, pixels:0,       tokens:0,    conc:8 },
+  balanced: {layout:0.50, pixels:3000000, tokens:2048, conc:12},
+  fast:     {layout:0.65, pixels:1600000, tokens:1024, conc:16},
+};
+const K = {layout:$('#kLayout'), pixels:$('#kPixels'), tokens:$('#kTokens'), conc:$('#kConc')};
+const O = {layout:$('#oLayout'), pixels:$('#oPixels'), tokens:$('#oTokens'), conc:$('#oConc')};
+let serverConc = null;   // 服务端当前生效的并发，用来判断要不要点「应用」
+let lastOk = 0;          // 上次成功拿到状态的时间戳
+
+function mp(v){ return v ? (v/1e6).toFixed(1).replace(/[.]0$/,'') + 'M' : '不限'; }
+
+function paintKnobs(){
+  O.layout.textContent = (+K.layout.value).toFixed(2);
+  O.pixels.textContent = mp(+K.pixels.value);
+  O.tokens.textContent = +K.tokens.value ? K.tokens.value : '不限';
+  O.conc.textContent   = K.conc.value;
+
+  const dirty = serverConc !== null && +K.conc.value !== serverConc;
+  $('#knobConc').classList.toggle('needs-apply', dirty);
+  $('#applyBtn').disabled = !dirty;
+  $('#applyNote').textContent = dirty
+    ? '服务端当前是 ' + serverConc + '，点应用后台重建流水线'
+    : '上面三项即时生效，无需应用';
+
+  $('#tuneSummary').textContent =
+    '· 阈值 ' + (+K.layout.value).toFixed(2) + ' · 像素 ' + mp(+K.pixels.value) +
+    ' · 并发 ' + K.conc.value;
+
+  try{
+    localStorage.setItem('knock-ocr-tune', JSON.stringify(
+      Object.fromEntries(Object.entries(K).map(function(e){ return [e[0], e[1].value]; }))));
+  }catch(_){}
+
+  document.querySelectorAll('#presets button').forEach(function(b){
+    const p = PRESETS[b.dataset.p];
+    b.classList.toggle('on',
+      +K.layout.value === p.layout && +K.pixels.value === p.pixels &&
+      +K.tokens.value === p.tokens && +K.conc.value === p.conc);
+  });
+}
+
+Object.values(K).forEach(function(el){ el.addEventListener('input', paintKnobs); });
+
+document.querySelectorAll('#presets button').forEach(function(b){
+  b.onclick = function(){
+    const p = PRESETS[b.dataset.p];
+    K.layout.value = p.layout; K.pixels.value = p.pixels;
+    K.tokens.value = p.tokens; K.conc.value = p.conc;
+    paintKnobs();
+  };
+});
+
+$('#applyBtn').onclick = async function(){
+  $('#applyBtn').disabled = true;
+  $('#applyNote').textContent = '正在重建流水线…';
+  try{
+    const r = await fetch('/api/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({vl_rec_max_concurrency: +K.conc.value})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || r.statusText);
+    serverConc = (d.tuning && d.tuning.vl_rec_max_concurrency) || +K.conc.value;
+    $('#applyNote').textContent = d.note || '已应用';
+  }catch(err){
+    $('#applyNote').textContent = '应用失败：' + err.message;
+  }
+  poll();
+};
+
+try{
+  const saved = JSON.parse(localStorage.getItem('knock-ocr-tune') || 'null');
+  if(saved) Object.entries(K).forEach(function(e){
+    if(saved[e[0]] != null) e[1].value = saved[e[0]];
+  });
+}catch(_){}
+paintKnobs();
+
+/* 当前滑块 -> 查询串，逐请求生效 */
+function tuneQuery(){
+  const q = ['layout_threshold=' + (+K.layout.value)];
+  if(+K.pixels.value) q.push('max_pixels=' + (+K.pixels.value));
+  if(+K.tokens.value) q.push('max_new_tokens=' + (+K.tokens.value));
+  return q.join('&');
+}
+
+/* ---------- 状态 ---------- */
+// 「服务能力」那块报告。数字全部来自服务端实时状态 + 部署时传进来的实际配额，
+// 不在前端写死，免得改了部署参数界面还挂着旧承诺。
+function paintCapacity(d){
+  const c = d.capacity || {}, jobs = d.jobs || {};
+  const cores = c.cpu_limit && c.host_cpus
+      ? `${c.cpu_limit}<small>/${c.host_cpus} 核</small>` : '—';
+  const gpu = c.gpu_id !== '' && c.gpu_id != null
+      ? `GPU ${c.gpu_id}<small> · 1 张</small>` : `不用<small> GPU</small>`;
+  const rps = c.rated_rps || 0;
+  const daily = rps ? (rps * 86400 * 0.5 / 10000).toFixed(0) : '—';
+
+  $('#capGrid').innerHTML = [
+    ['建议并发', `${c.rated_concurrency||'—'}`, '实测拐点，调用方按这个限流'],
+    ['该并发下吞吐', `${rps||'—'}<small>req/s</small>`, `约 ${daily} 万图/天（按半天满载）`],
+    ['CPU 占用', cores, c.cpuset ? `绑核 ${c.cpuset}` : '时间片配额，空闲时不占'],
+    ['内存上限', `${c.mem_limit||'—'}`, c.host_mem_gb ? `整机 ${c.host_mem_gb}G` : ''],
+    ['显卡占用', gpu, `整机 4 张，只用 1 张`],
+    ['流水线', `${c.pipelines_total||'—'}`, `${c.uvicorn_workers||'?'} 进程 × 每进程 ${
+        ((d.pools||{})[ENGINE]||{}).size || '?'} 条`],
+  ].map(([k,v,n]) =>
+    `<div class="capcell"><div class="k">${k}</div><div class="v">${v}</div>` +
+    (n ? `<div class="n">${n}</div>` : '') + `</div>`).join('');
+
+  // 超量怎么处理 —— 两个端点的行为完全不同，写清楚免得爬虫那边猜。
+  const pend = jobs.pending || 0, capn = jobs.capacity || 0;
+  const busy = capn && pend / capn > 0.8;
+  $('#capOverflow').innerHTML =
+    `<b>爬虫量超了会怎样</b>` +
+    `<table><tbody>` +
+    `<tr><td>同步接口</td><td><code>/api/ocr</code> 没有队列。流水线占满后新请求<b>排队等</b>，` +
+      `不丢也不拒——所以超量表现为延迟变长，不是报错。压到远超 ${c.rated_concurrency||24} 时延迟会明显劣化。</td></tr>` +
+    `<tr><td>异步接口</td><td><code>/api/ocr/async</code> 进队列，深度 <b>${capn||'—'}</b>，` +
+      `${jobs.workers||'—'} 个消费线程。<b>队满直接返 429</b>，这是明确的背压信号：` +
+      `请退避重试，别原地重发。结果保留 ${Math.round((jobs.ttl_s||0)/60)} 分钟。</td></tr>` +
+    `<tr><td>当前队列</td><td class="${busy?'capwarn':''}"><b>${pend}</b> / ${capn||'—'} 待处理` +
+      (busy ? ' · 已超八成，接近背压' : '') + `</td></tr>` +
+    `<tr><td>建议做法</td><td>大批量走异步接口 + 收到 429 就退避；` +
+      `重复图很多的话缓存会直接命中，比推理快两个数量级。</td></tr>` +
+    `</tbody></table>`;
+
+  $('#capSummary').textContent =
+    `· 建议并发 ${c.rated_concurrency||'—'} → ${rps||'—'} req/s`;
+}
+
+async function poll(){
+  try{
+    const r = await fetch('/api/info'); const d = await r.json();
+    // JSON 解析成功 = 服务确实答话了。lastOk 记的是「连得上」，不是「渲染成功」——
+    // 放在函数末尾的话，下面任何一处渲染报错都会被误报成「连接服务失败」，
+    // 让人去查一个根本不存在的网络问题。（真踩过：一个写错的 id 害我查了半天。）
+    lastOk = Date.now();
+    AVAILABLE = Object.keys(d.engines || {});
+    if(ENGINE === null){
+      let saved = null; try{ saved = localStorage.getItem('knock-ocr-engine'); }catch(_){}
+      ENGINE = AVAILABLE.includes(saved) ? saved : (d.default_engine || AVAILABLE[0]);
+    }
+    if(!AVAILABLE.includes(ENGINE)) ENGINE = d.default_engine || AVAILABLE[0];
+    paintEngines();
+
+    const eng = (d.engines || {})[ENGINE] || {};
+    $('#modelName').textContent =
+      '档位 ' + d.tier + ' · ' + (eng.label || ENGINE);
+    // device 取的是 ONNX Runtime 实际用的 provider，不是环境变量回显 ——
+    // 挂了卡但静默回落 CPU 时，这里会老实显示 CPU。
+    $('#benchBadge').textContent =
+      ENGINE === 'quality' ? 'OmniDocBench v1.6 · 96.3%'
+                           : 'PP-OCRv6 · ONNX · ' + (eng.device === 'cuda' ? 'CUDA' : 'CPU');
+    if(d.tuning && d.tuning.vl_rec_max_concurrency != null){
+      const sc = d.tuning.vl_rec_max_concurrency;
+      if(serverConc === null){ serverConc = sc; K.conc.value = sc; }
+      else serverConc = sc;
+      paintKnobs();
+    }
+    const pools = d.pools || {};
+    const p = pools[ENGINE] || {};
+    const vlm = d.vlm_backend || {};
+    const m = (d.metrics || {})[ENGINE] || {};
+    const cache = d.cache || {};
+    const needVlm = (ENGINE === 'quality');
+    $('#statusBar').innerHTML =
+      (needVlm
+        ? `<span><span class="dot ${vlm.reachable?'on':'off'}"></span>VLM 后端 <b>${vlm.reachable?'在线':'离线'}</b></span>`
+        : `<span><span class="dot on"></span><b>${
+            eng.device === 'cuda' ? 'GPU 直连' : '纯 CPU'}</b>，无外部依赖</span>`) +
+      `<span><span class="dot ${p.ready>0?'on':'wait'}"></span>流水线 <b>${p.ready||0}/${p.size||0}</b>（空闲 ${p.idle||0}）</span>` +
+      `<span>累计 <b>${m.total||0}</b> 次` + (m.failed ? ` · 失败 ${m.failed}` : '') + `</span>` +
+      (m.p50_ms ? `<span>P50 <b>${m.p50_ms}</b>ms · P95 <b>${m.p95_ms}</b>ms</span>` : '') +
+      (cache.enabled ? `<span title="sha256 内容寻址去重">缓存 <b>${cache.size}</b>/${cache.capacity}` +
+        (cache.hit_rate != null ? ` · 命中 <b>${(cache.hit_rate*100).toFixed(0)}%</b>` : '') + `</span>` : '');
+    paintCapacity(d);
+  }catch(e){
+    // 一次轮询失败不该把状态整个抹掉 —— 服务通常还好好的，
+    // 只是这一次请求超时/被挤掉了。保留上次数据，角落里提示一下。
+    const ago = lastOk ? Math.round((Date.now()-lastOk)/1000) : null;
+    const note = lastOk
+      ? `<span style="color:var(--warn)" title="${String(e).slice(0,200)}">状态 ${ago}s 未刷新</span>`
+      : `<span style="color:var(--err)" title="${String(e).slice(0,200)}">连接服务失败，点这里看原因</span>`;
+    const bar = $('#statusBar');
+    const old = bar.querySelector('.stale');
+    if(old) old.remove();
+    const span = document.createElement('span');
+    span.className = 'stale';
+    span.innerHTML = note;
+    if(!lastOk) bar.innerHTML = '';
+    bar.appendChild(span);
+  }
+}
+poll(); setInterval(poll, 4000);
+
+/* ---------- 上传 ---------- */
+drop.onclick = () => fileInput.click();
+fileInput.onchange = e => e.target.files.length && sendMany([...e.target.files]);
+['dragenter','dragover'].forEach(t => drop.addEventListener(t, e=>{e.preventDefault();drop.classList.add('hot');}));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e=>{e.preventDefault();drop.classList.remove('hot');}));
+drop.addEventListener('drop', e => e.dataTransfer.files.length && sendMany([...e.dataTransfer.files]));
+window.addEventListener('paste', e => {
+  const imgs = [...e.clipboardData.items]
+    .filter(it => it.type.startsWith('image/')).map(it => it.getAsFile());
+  if(imgs.length) sendMany(imgs);
+});
+
+/* 批量：客户端按并发上限并行发，逐个回填 —— 既有实时进度，
+   也真实压到服务端的流水线池上，看到的耗时就是它的实际表现。
+   （接口本身也支持一次多文件：-F file=@a -F file=@b，那种是一次请求返回全部） */
+const UI_CONCURRENCY = 4;
+let batch = [];
+
+function fmtKB(n){ return (n/1024).toFixed(0) + ' KB'; }
+
+function renderBatch(){
+  const done = batch.filter(x => x.state === 'done').length;
+  const fail = batch.filter(x => x.state === 'failed').length;
+  const rows = batch.map((x, i) => {
+    const cls = x.state === 'failed' ? 'style="color:var(--err)"' : '';
+    const st = {queued:'排队', running:'识别中…', done:'完成', failed:'失败'}[x.state];
+    return `<tr data-i="${i}" ${x.state === 'done' ? 'class="pick"' : ''} ${cls}>
+      <td>${esc(x.file.name || '粘贴的图片')}</td>
+      <td>${fmtKB(x.file.size)}</td>
+      <td>${x.state === 'running' ? '<span class="spin"></span> ' : ''}${st}</td>
+      <td>${x.ms != null ? x.ms + ' ms' : '-'}</td>
+      <td>${x.chars != null ? x.chars : '-'}</td>
+      <td>${x.cached ? '<span style="color:var(--ok)">命中</span>' : ''}</td>
+    </tr>` + (x.err ? `<tr ${cls}><td colspan="6" style="font-size:11.5px">${esc(x.err)}</td></tr>` : '');
+  }).join('');
+
+  $('#pane-render').innerHTML =
+    `<p style="margin:0 0 10px">共 <b>${batch.length}</b> 个 · 完成 <b>${done}</b>` +
+    (fail ? ` · <span style="color:var(--err)">失败 ${fail}</span>` : '') +
+    (done ? ` · 合计 <b>${batch.reduce((s,x)=>s+(x.ms||0),0)}</b> ms` : '') +
+    `<span style="color:var(--dim)"> · 点完成的行看结果</span></p>` +
+    `<table><thead><tr><th>文件</th><th>大小</th><th>状态</th><th>耗时</th><th>字符</th><th>缓存</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>`;
+
+  $('#pane-render').querySelectorAll('tr.pick').forEach(tr => {
+    tr.style.cursor = 'pointer';
+    tr.onclick = () => showOne(batch[+tr.dataset.i]);
+  });
+}
+
+function showOne(x){
+  if(!x || !x.data) return;
+  const d = x.data, tm = d.timings || {};
+  $('#srcText').textContent = d.markdown || '';
+  $('#jsonText').textContent = JSON.stringify(d.result ?? {}, null, 2);
+  $('#meta').innerHTML =
+    `<span>${esc(d.filename || '')}</span>` +
+    `<span>引擎 <b>${d.engine||'-'}</b></span>` +
+    (d.cached ? `<span style="color:var(--ok)"><b>缓存命中</b></span>` : '') +
+    `<span>页数 <b>${d.pages}</b></span>` +
+    `<span>字符 <b>${(d.markdown||'').length}</b></span>` +
+    `<span title="服务端接收请求体的时间">接收 <b>${tm.receive_ms ?? '-'}</b> ms</span>` +
+    `<span title="等待空闲流水线的时间，高说明并发打满了">排队 <b>${tm.queue_ms ?? '-'}</b> ms</span>` +
+    `<span title="真正的识别耗时">推理 <b>${tm.infer_ms ?? '-'}</b> ms</span>` +
+    `<span style="color:var(--dim)">${d.request_id}</span>`;
+  show('source');
+  $('#pane-source').scrollTop = 0;
+}
+
+async function sendMany(files){
+  if(files.length === 1) return send(files[0]);
+  batch = files.map(f => ({file:f, state:'queued', ms:null, chars:null, data:null, err:null}));
+  $('#res').hidden = false;
+  show('render');
+  $('#meta').textContent = '';
+  renderBatch();
+
+  let idx = 0;
+  const t0 = performance.now();
+  async function worker(){
+    while(idx < batch.length){
+      const x = batch[idx++];
+      x.state = 'running'; renderBatch();
+      try{
+        const d = await postOne(x.file);
+        Object.assign(x, {state:'done', data:d, ms:Math.round(d.elapsed_ms),
+                          chars:(d.markdown||'').length, cached:!!d.cached});
+      }catch(e){
+        Object.assign(x, {state:'failed', err:String(e.message || e)});
+      }
+      renderBatch();
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(UI_CONCURRENCY, batch.length)}, worker));
+  const wall = performance.now() - t0;
+  const okN = batch.filter(x => x.state === 'done').length;
+  $('#meta').innerHTML =
+    `<span>批量 <b>${batch.length}</b> 个</span>` +
+    `<span>成功 <b>${okN}</b></span>` +
+    `<span>墙钟 <b>${wall.toFixed(0)}</b> ms</span>` +
+    `<span title="客户端并发 ${UI_CONCURRENCY}">吞吐 <b>${(okN / (wall/1000)).toFixed(2)}</b> 张/秒</span>`;
+  poll();
+}
+
+async function postOne(f){
+  const fd = new FormData(); fd.append('file', f, f.name || 'paste.png');
+  let qs = `?merge_tables=${$('#mergeTables').checked}&include_json=${$('#includeJson').checked}`;
+  if(ENGINE) qs += '&engine=' + ENGINE;
+  if(ENGINE === 'quality') qs += '&' + tuneQuery();
+  const r = await fetch('/api/ocr' + qs, {method:'POST', body:fd});
+  const txt = await r.text();
+  if(!r.ok){
+    let msg = txt; try{ msg = JSON.parse(txt).detail || txt; }catch(_){}
+    throw new Error(String(msg).slice(0, 300));
+  }
+  return JSON.parse(txt);
+}
+
+async function send(f){
+  $('#res').hidden = false;
+  show('render');
+  $('#pane-render').innerHTML = `<p><span class="spin"></span> 正在识别 <b>${f.name||'粘贴的图片'}</b>（${(f.size/1024).toFixed(0)} KB）…</p>`;
+  $('#meta').textContent = '';
+  const fd = new FormData(); fd.append('file', f, f.name || 'paste.png');
+  let qs = `?merge_tables=${$('#mergeTables').checked}&include_json=${$('#includeJson').checked}`;
+  if(ENGINE) qs += '&engine=' + ENGINE;
+  if(ENGINE === 'quality') qs += '&' + tuneQuery();   // 调参只对 quality 生效
+  const t0 = performance.now();
+  try{
+    const r = await fetch('/api/ocr' + qs, {method:'POST', body:fd});
+    const txt = await r.text();
+    if(!r.ok){
+      let msg = txt; try{ msg = JSON.parse(txt).detail || txt; }catch(_){}
+      $('#pane-render').innerHTML = `<div class="err">${esc(String(msg))}</div>`;
+      return;
+    }
+    const d = JSON.parse(txt); last = d;
+    $('#pane-render').innerHTML = renderMd(d.markdown) || '<p style="color:var(--dim)">未识别到内容</p>';
+    $('#srcText').textContent = d.markdown || '';
+    $('#jsonText').textContent = JSON.stringify(d.result ?? {}, null, 2);
+    const chars = (d.markdown||'').length;
+    const tm = d.timings || {};
+    $('#meta').innerHTML =
+      `<span>引擎 <b>${d.engine||'-'}</b></span>` +
+      (d.cached ? `<span style="color:var(--ok)"><b>缓存命中</b></span>` : '') +
+      `<span>页数 <b>${d.pages}</b></span>` +
+      `<span>字符 <b>${chars}</b></span>` +
+      `<span>端到端 <b>${(performance.now()-t0).toFixed(0)}</b> ms</span>` +
+      `<span title="服务端接收请求体的时间">接收 <b>${tm.receive_ms ?? '-'}</b> ms</span>` +
+      `<span title="等待空闲流水线的时间，高说明并发打满了">排队 <b>${tm.queue_ms ?? '-'}</b> ms</span>` +
+      `<span title="版面分析 + VLM 逐块生成，这里才是大头">推理 <b>${tm.infer_ms ?? '-'}</b> ms</span>` +
+      `<span style="color:var(--dim)">${d.request_id}</span>`;
+    poll();
+  }catch(err){
+    $('#pane-render').innerHTML = `<div class="err">请求失败：${esc(String(err))}</div>`;
+  }
+}
+
+/* ---------- tabs ---------- */
+function show(name){
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b.dataset.p===name));
+  ['render','source','json'].forEach(p => $('#pane-'+p).hidden = (p!==name));
+}
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => show(b.dataset.p));
+document.querySelectorAll('.copy').forEach(b => b.onclick = async ev => {
+  ev.stopPropagation();
+  const t = b.dataset.c === 'source' ? $('#srcText').textContent : $('#jsonText').textContent;
+  try{ await navigator.clipboard.writeText(t); b.textContent='已复制'; setTimeout(()=>b.textContent='复制',1200); }
+  catch(_){ b.textContent='复制失败'; setTimeout(()=>b.textContent='复制',1200); }
+});
+</script>
+</body>
+</html>

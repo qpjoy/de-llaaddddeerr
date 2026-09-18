@@ -1,0 +1,61 @@
+name: mx-embedding
+services:
+  api:
+    image: mx-base/mx-embedding:0.1.0
+    container_name: mx-embedding-api
+    labels:
+      com.mx-base.app: mx-embedding
+    build:
+      context: .
+      args:
+        PIP_INDEX_URL: ${MX_EMBEDDING_PIP_INDEX:-https://pypi.org/simple}
+    restart: unless-stopped
+    ports:
+      - '${MX_EMBEDDING_BIND:-127.0.0.1}:${MX_EMBEDDING_PORT:-18210}:8000'
+    cpus: ${MX_EMBEDDING_CPUS:-4}
+    mem_limit: ${MX_EMBEDDING_MEMORY:-8g}
+    shm_size: 1g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${GPU_UUID:?Use scripts/manage.sh to validate and resolve GPU allocation}']
+              capabilities: [gpu]
+    environment:
+      API_KEY_FILE: /run/secrets/api-key
+      MODEL_PATH: ${MX_EMBEDDING_MODEL_PATH:-Qwen/Qwen3-Embedding-0.6B}
+      MODEL_REVISION: ${MX_EMBEDDING_REVISION:-97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3}
+      DIMENSIONS: ${MX_EMBEDDING_DIMENSIONS:-512}
+      MAX_LENGTH: ${MX_EMBEDDING_MAX_LENGTH:-2048}
+      MAX_BATCH: ${MX_EMBEDDING_MAX_BATCH:-16}
+      TOKEN_BUDGET: ${MX_EMBEDDING_TOKEN_BUDGET:-8192}
+      MICRO_BATCH: ${MX_EMBEDDING_MICRO_BATCH:-4}
+      DTYPE: ${MX_EMBEDDING_DTYPE:-bfloat16}
+      CPU_THREADS: ${MX_EMBEDDING_CPUS:-4}
+      GPU_MEMORY_FRACTION: ${MX_EMBEDDING_GPU_FRACTION:-0.25}
+      HF_ENDPOINT: ${MX_EMBEDDING_HF_ENDPOINT:-https://huggingface.co}
+      http_proxy: ${MX_EMBEDDING_PROXY:-}
+      https_proxy: ${MX_EMBEDDING_PROXY:-}
+      HTTP_PROXY: ${MX_EMBEDDING_PROXY:-}
+      HTTPS_PROXY: ${MX_EMBEDDING_PROXY:-}
+      all_proxy: ''
+      ALL_PROXY: ''
+      no_proxy: localhost,127.0.0.1
+      NO_PROXY: localhost,127.0.0.1
+    volumes:
+      - '${MX_EMBEDDING_MODELS_PATH:-/srv/mx-embedding/models}:/models'
+    secrets:
+      - source: api-key
+        target: api-key
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+secrets:
+  api-key:
+    file: ./secrets/api-key

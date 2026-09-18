@@ -23,22 +23,24 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh deploy jenkins   # 显式启用可选构建基础设施
   bash scripts/manage.sh <操作> <应用>
 
-应用：mx-static (Docker Compose)、jenkins (Kubernetes mx-base namespace)
+应用：mx-static / mx-ocr / mx-embedding (Docker)、jenkins (Kubernetes mx-base namespace)
 通用操作：status / deploy / start / stop / restart / logs / doctor
 mx-static：init / jobs / storage / attach / detach（项目任务计数；失败任务通过 API 查询/重试）
+mx-ocr：stats / disk / test / bench / compare；mx-embedding：stats / test
 jenkins：password / agent-cmd
-stop/down 保留数据、队列、凭据；没有一键删除数据或全停命令。
+stop/down 保留持久数据、模型缓存、凭据；OCR 内存任务不保留。没有一键删除数据或全停命令。
 
+GPU 分配：mx-base/.env.gpu；各 GPU 服务配置在自己的 .env。
 配置：mx-base/.env.internal；mx-static 的存储/Compose 配置可放 mx-static/.env。
 检查输出中的 Docker/Kubernetes context。本机状态不等于生产状态；不可访问显示 UNKNOWN。
 HELP
 }
 choose_app() {
-  [ -t 0 ] || die '非交互调用必须指定应用：deploy mx-static 或 deploy jenkins'
-  printf '\n1) mx-static — 多媒体存储/缓存\n2) jenkins — 可选构建服务\n0) 取消\n' >&2
+  [ -t 0 ] || die '非交互调用必须指定应用：deploy <mx-static|mx-ocr|mx-embedding|jenkins>'
+  printf '\n1) mx-static — 多媒体存储/缓存\n2) jenkins — 可选构建服务\n3) mx-ocr — GPU OCR\n4) mx-embedding — GPU 文本向量\n0) 取消\n' >&2
   local answer
   read -r -p '选择应用: ' answer
-  case "$answer" in 1) APP=mx-static;; 2) APP=jenkins;; 0|'') exit 0;; *) die '无效选择';; esac
+  case "$answer" in 1) APP=mx-static;; 2) APP=jenkins;; 3) APP=mx-ocr;; 4) APP=mx-embedding;; 0|'') exit 0;; *) die '无效选择';; esac
 }
 contexts() {
   say "执行主机：$(hostname)"
@@ -48,6 +50,7 @@ contexts() {
 status_app() {
   local app="$1" output
   case "$app" in
+    mx-ocr|mx-embedding) bash "$ROOT_DIR/$app/scripts/manage.sh" status;;
     mx-static)
       say 'mx-static [Compose]'
       if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then say 'UNKNOWN：Docker 不可访问'; return; fi
@@ -121,6 +124,11 @@ static_jobs() {
 }
 run_app() {
   local action="$1" app="$2"
+  shift 2
+  if [[ "$app" = mx-ocr || "$app" = mx-embedding ]]; then
+    bash "$ROOT_DIR/$app/scripts/manage.sh" "$action" "$@"
+    return
+  fi
   case "$app" in mx-static|jenkins) ;; *) die "未知应用：$app";; esac
   case "$action" in status) status_app "$app"; return;; doctor) contexts; status_app "$app"; if [ "$app" = mx-static ]; then compose config --quiet; fi; return;; esac
   if [ "$app" = jenkins ]; then
@@ -148,20 +156,27 @@ run_app() {
     *) die "mx-static 不支持 $action";;
   esac
 }
-load_env
 ACTION="${1:-}"; APP="${2:-}"
+if [ "$#" -ge 2 ]; then shift 2; else set --; fi
 case "$ACTION" in -h|--help|help) usage; exit 0;; esac
 if [ -z "$ACTION" ]; then
   if [ ! -t 0 ]; then usage; exit 0; fi
-  contexts; status_app mx-static; status_app jenkins; choose_app
-  printf '\n1) status  2) deploy  3) start  4) stop  5) restart  6) logs  7) doctor  8) jobs  9) storage  10) attach NAS  11) detach NAS (mx-static)\n'
+  contexts; (load_env; status_app mx-static; status_app jenkins); status_app mx-ocr; status_app mx-embedding; choose_app
+  printf '\n1) status  2) deploy  3) start  4) stop  5) restart  6) logs  7) doctor  8) jobs  9) storage  10) attach NAS  11) detach NAS (mx-static)  12) stats (GPU)  13) test (GPU)\n'
   read -r -p '选择操作（回车取消）: ' answer
-  case "$answer" in 1) ACTION=status;; 2) ACTION=deploy;; 3) ACTION=start;; 4) ACTION=stop;; 5) ACTION=restart;; 6) ACTION=logs;; 7) ACTION=doctor;; 8) ACTION=jobs;; 9) ACTION=storage;; 10) ACTION=attach;; 11) ACTION=detach;; '') exit 0;; *) die '无效操作';; esac
+  case "$answer" in 1) ACTION=status;; 2) ACTION=deploy;; 3) ACTION=start;; 4) ACTION=stop;; 5) ACTION=restart;; 6) ACTION=logs;; 7) ACTION=doctor;; 8) ACTION=jobs;; 9) ACTION=storage;; 10) ACTION=attach;; 11) ACTION=detach;; 12) ACTION=stats;; 13) ACTION=test;; '') exit 0;; *) die '无效操作';; esac
 fi
 case "$ACTION" in status|list|apps)
   contexts
-  if [ -n "$APP" ]; then run_app status "$APP"; else status_app mx-static; status_app jenkins; fi
+  if [ -n "$APP" ]; then
+    case "$APP" in mx-static|jenkins) load_env;; esac
+    run_app status "$APP"
+  else
+    (load_env; status_app mx-static; status_app jenkins)
+    status_app mx-ocr; status_app mx-embedding
+  fi
   exit 0;;
 esac
 [ -n "$APP" ] || choose_app
-run_app "$ACTION" "$APP"
+case "$APP" in mx-static|jenkins) load_env;; esac
+run_app "$ACTION" "$APP" "$@"

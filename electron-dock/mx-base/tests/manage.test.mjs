@@ -9,6 +9,10 @@ test('application manager selects one app, preserves credentials/data and report
   const root = mkdtempSync(join(tmpdir(), 'mx-base-manager-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   cpSync(new URL('../scripts', import.meta.url), join(root, 'scripts'), { recursive: true })
+  for (const app of ['mx-ocr', 'mx-embedding']) {
+    mkdirSync(join(root, app, 'scripts'), { recursive: true })
+    cpSync(new URL(`../${app}/scripts/manage.sh`, import.meta.url), join(root, app, 'scripts/manage.sh'))
+  }
   mkdirSync(join(root, 'mx-static')); mkdirSync(join(root, 'bin'))
   const log = join(root, 'calls')
   writeFileSync(join(root, 'bin/docker'), `#!/bin/sh

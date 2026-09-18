@@ -1,0 +1,7 @@
+# 服务器是 Linux，脚本必须是 LF，否则 bash 会报 $'\r': command not found
+*.sh    text eol=lf
+*.py    text eol=lf
+Dockerfile* text eol=lf
+*.Dockerfile text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf

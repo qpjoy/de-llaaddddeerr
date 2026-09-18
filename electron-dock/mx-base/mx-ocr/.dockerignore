@@ -1,0 +1,8 @@
+.env
+.deploy
+__pycache__
+**/__pycache__
+*.pyc
+output
+docs
+tests
