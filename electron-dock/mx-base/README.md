@@ -38,7 +38,7 @@ Jenkins 使用相同的 `操作 jenkins`；额外支持 `password jenkins`、`ag
 
 ## GPU 基础能力
 
-统一显卡分配在 `.env.gpu`（模板 `.env.gpu.example`），默认显示器 GPU 3、OCR GPU 2、Embedding GPU 1。启动前检查显示输出、GPU UUID 冲突、其他容器申请和计算进程；检查失败不会杀进程或抢卡。必须在 GPU 主机本地执行，不用本机 nvidia-smi 检查远程 Docker。
+统一显卡分配在 `.env.gpu`（模板 `.env.gpu.example`），默认显示器 GPU 3、OCR GPU 2、Embedding GPU 1。启动前检查显示输出、GPU UUID 冲突、其他容器申请和计算进程；检查失败不会杀进程或抢卡。必须在 GPU 主机本地执行，不用本机 nvidia-smi 检查远程 Docker。宿主机 GPU 管理脚本兼容 Python 3.6+，无需升级系统 Python；模型服务使用容器内独立的 Python 环境。
 
 各服务 `.env` 只保存自己的资源、端口、模型路径。`deploy` 应用变更；`start/restart` 使用已保存配置；`stop` 保留容器、模型文件和 Key，释放运行中的占用。默认不提供删除模型或所有服务一键全停；需要再次部署时无需重新下载已缓存模型。OCR 识别队列属于内存状态，停止前需收集结果。
 

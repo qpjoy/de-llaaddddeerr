@@ -9,7 +9,7 @@ deadline = time.monotonic() + 1800
 while time.monotonic() < deadline:
     try:
         state = json.loads(subprocess.check_output(
-            ['docker', 'inspect', '--format', '{{json .State}}', sys.argv[1]], text=True, timeout=10))
+            ['docker', 'inspect', '--format', '{{json .State}}', sys.argv[1]], universal_newlines=True, timeout=10))
     except (subprocess.SubprocessError, ValueError):
         sys.exit('无法读取容器状态；请检查 status/logs')
     if not state.get('Running'):

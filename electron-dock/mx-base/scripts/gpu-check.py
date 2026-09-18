@@ -9,7 +9,7 @@ import sys
 
 
 def command(*args):
-    return subprocess.check_output(args, text=True, timeout=15).strip()
+    return subprocess.check_output(args, universal_newlines=True, timeout=15).strip()
 
 
 def check(app):
