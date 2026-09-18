@@ -571,7 +571,6 @@ cmd_build() {
 }
 
 start_vllm() {
-  docker rm -f "$C_VLLM" >/dev/null 2>&1 || true
   local net=(--network "$NET")
   if [ "$HOST_NET" = "1" ]; then
     # 代理只监听 127.0.0.1 时，容器必须共享宿主机网络才连得上
@@ -603,7 +602,6 @@ start_vllm() {
 
 start_api() {
   local dev="$1"
-  docker rm -f "$C_API" >/dev/null 2>&1 || true
   say "启动 API + Web 服务（版面分析设备：$dev）"
   # 和 vLLM 容器一样必须显式接管代理变量，否则会继承 docker 注入的 127.0.0.1:7788，
   # 下版面分析模型时四个源全部走那个不存在的代理 -> 流水线一条都建不起来。
@@ -852,21 +850,22 @@ print_endpoints() {
 }
 
 # ---------------------------------------------------------------- 命令
-# deploy 是幂等的：先清掉上一次的容器，再按当前配置重建重启。
+# deploy 可重复执行：准备成功后，只替换归属已核验的本服务容器。
 # 反复跑、改了配置再跑、上次跑挂了再跑，都用这一条。
 cmd_deploy() {
   cmd_preflight
   cmd_pull
   cmd_build
   ensure_net
-  # Switching from quality/full to fast must also release the old VLM container.
-  if ! uses_vllm; then docker rm -f "$C_VLLM" >/dev/null 2>&1 || true; fi
-
   local dev="cpu"
   if uses_vllm; then
     dev="$(resolve_device)"
-    start_vllm
   fi
+  # Recheck after slow pulls/builds. Failures before here leave the old service running.
+  python3 "$ROOT/../scripts/gpu-check.py" mx-ocr >/dev/null
+  python3 "$ROOT/../scripts/retire-container.py" mx-ocr "$C_API"
+  python3 "$ROOT/../scripts/retire-container.py" mx-ocr "$C_VLLM"
+  if uses_vllm; then start_vllm; fi
   start_api "$dev"
 
   if wait_ready; then

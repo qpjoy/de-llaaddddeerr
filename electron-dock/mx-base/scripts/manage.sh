@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATIC_DIR="$ROOT_DIR/mx-static"
+source "$ROOT_DIR/scripts/deploy-confirm.sh"
 say() { printf '[mx-base] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
@@ -18,6 +19,7 @@ usage() {
 mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh                  # 交互式应用/操作选择（非终端显示帮助）
   bash scripts/manage.sh status           # 所有应用的实际状态和当前上下文
+  bash scripts/manage.sh gpu [编号或UUID] # 只读查看 GPU PID、显存、进程、容器和服务归属
   bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
   bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
   bash scripts/manage.sh deploy jenkins   # 显式启用可选构建基础设施
@@ -144,7 +146,7 @@ run_app() {
   need docker
   case "$action" in
     init) init_static;;
-    deploy) init_static; compose config --quiet; compose up -d --build --wait --wait-timeout 120 writer reader; status_app mx-static;;
+    deploy) confirm_deploy mx-static; init_static; compose config --quiet; compose up -d --build --wait --wait-timeout 120 writer reader; status_app mx-static;;
     start) compose start writer reader;;
     stop|down) detach_nas || true; compose stop --timeout 40 writer reader; say '已停止 mx-static，所有容器、数据与队列保留';;
     restart) compose restart --timeout 40 writer reader;;
@@ -159,6 +161,13 @@ run_app() {
 ACTION="${1:-}"; APP="${2:-}"
 if [ "$#" -ge 2 ]; then shift 2; else set --; fi
 case "$ACTION" in -h|--help|help) usage; exit 0;; esac
+if [ "$ACTION" = gpu ]; then
+  if [ -n "$APP" ]; then
+    exec python3 "$ROOT_DIR/scripts/gpu-check.py" --report "$APP" "$@"
+  else
+    exec python3 "$ROOT_DIR/scripts/gpu-check.py" --report
+  fi
+fi
 if [ -z "$ACTION" ]; then
   if [ ! -t 0 ]; then usage; exit 0; fi
   contexts; (load_env; status_app mx-static; status_app jenkins); status_app mx-ocr; status_app mx-embedding; choose_app

@@ -53,5 +53,5 @@ class Python36HostTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
     def test_host_helpers_have_python36_syntax(self):
-        for name in ('gpu-check.py', 'check-saved-gpu.py', 'wait-healthy.py'):
+        for name in ('gpu-check.py', 'check-saved-gpu.py', 'wait-healthy.py', 'retire-container.py'):
             ast.parse((SCRIPTS / name).read_text(), feature_version=(3, 6))

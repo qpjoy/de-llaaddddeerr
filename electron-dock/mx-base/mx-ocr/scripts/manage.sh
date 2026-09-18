@@ -3,6 +3,7 @@ set -Eeuo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="$(cd "$APP_DIR/.." && pwd)"
 source "$BASE_DIR/scripts/gpu-common.sh"
+source "$BASE_DIR/scripts/deploy-confirm.sh"
 # Explicit command-line BIND must win over an older .env containing loopback.
 bind_override="${BIND-}"
 if [ -f "$APP_DIR/.env" ]; then set -a; source "$APP_DIR/.env"; set +a; fi
@@ -21,6 +22,7 @@ containers() {
 }
 case "$action" in
   deploy|start|restart)
+    if [ "$action" = deploy ]; then confirm_deploy mx-ocr; fi
     gpu_admit mx-ocr
     export GPU_ID="$GPU_UUID"
     # Redeploy is explicit; ordinary start never pulls, builds or changes saved settings.

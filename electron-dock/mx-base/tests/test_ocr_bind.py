@@ -15,6 +15,7 @@ class OcrBindTests(unittest.TestCase):
             (root/'scripts').mkdir()
             (root/'mx-ocr/scripts').mkdir(parents=True)
             shutil.copy(BASE/'scripts/gpu-common.sh', root/'scripts')
+            shutil.copy(BASE/'scripts/deploy-confirm.sh', root/'scripts')
             shutil.copy(BASE/'mx-ocr/scripts/manage.sh', root/'mx-ocr/scripts')
             (root/'mx-ocr/scripts/upstream-manage.sh').write_text('printf "%s" "$BIND"\n')
             env = {k: v for k, v in os.environ.items() if k != 'BIND'}

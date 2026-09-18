@@ -59,10 +59,19 @@ class LifecycleTests(unittest.TestCase):
                     'MX_EMBEDDING_MODELS_PATH': str(self.root/'models'), 'DOCKER_HOST': '',
                     'MX_BASE_DISPLAY_GPU': '3', 'MX_BASE_OCR_GPU': '2', 'MX_BASE_EMBEDDING_GPU': '1'}
 
-    def run_manager(self, action, app='mx-embedding'):
+    def run_manager(self, action, app='mx-embedding', answer='yes\n'):
         self.env['TEST_APP'] = app
         return subprocess.run(['bash', str(self.root/'scripts/manage.sh'), action, app],
-                              env=self.env, text=True, capture_output=True)
+                              env=self.env, text=True, capture_output=True, input=answer)
+
+    def test_deploy_cancellation_does_not_touch_docker_or_gpu(self):
+        for app in ('mx-ocr', 'mx-embedding'):
+            for answer in ('', 'no\n', 'YES\n'):
+                self.calls.write_text('')
+                result = self.run_manager('deploy', app, answer=answer)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('已取消', result.stderr)
+                self.assertEqual(self.calls.read_text(), '')
 
     def test_stop_requires_no_gpu_and_does_not_delete_or_stop_neighbors(self):
         for app in ('mx-embedding', 'mx-ocr'):

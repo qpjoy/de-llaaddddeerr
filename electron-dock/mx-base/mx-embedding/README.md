@@ -34,7 +34,7 @@ bash scripts/manage.sh stop mx-embedding     # 释放运行资源，缓存/Key �
 bash scripts/manage.sh start mx-embedding    # 使用已保存的容器配置，无构建/拉取
 ```
 
-首次 deploy 创建 `secrets/api-key`，重复部署不轮换。需要 Docker Compose v2、Python 3、Linux flock、openssl。缓存目录应放在有容量的模型盘；API 容器以 root 加载只读 secret，capabilities 全部移除。不能把 1.2 GB 模型文件视为总磁盘需求：运行镜像、下载/编译缓存另需空间；PG/ES 向量存储仍在 Hub 数据盘。
+deploy 执行前要求输入完整的 `yes`，其他输入或 EOF 取消；重复执行由 Compose 更新同一服务，可能发生短暂中断，不保证自动回滚。首次 deploy 创建 `secrets/api-key`，重复部署不轮换。需要 Docker Compose v2、Python 3、Linux flock、openssl。缓存目录应放在有容量的模型盘；API 容器以 root 加载只读 secret，capabilities 全部移除。不能把 1.2 GB 模型文件视为总磁盘需求：运行镜像、下载/编译缓存另需空间；PG/ES 向量存储仍在 Hub 数据盘。
 
 修改配置后使用 `deploy` 应用；`restart` 只重启保存的配置。GPU 改动后普通 start/restart 会拒绝旧 UUID，要求重新部署。两服务部署操作通过主机 `/var/lock/mx-base-gpu.lock` 串行化，同一主机应由同一运维用户执行；不要直接 `docker compose up` 绕过启动检查。首次拉取可能耗时，日志不代表健康，默认等待最多 30 分钟。
 

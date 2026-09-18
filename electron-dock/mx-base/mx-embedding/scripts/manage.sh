@@ -3,6 +3,7 @@ set -Eeuo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="$(cd "$APP_DIR/.." && pwd)"
 source "$BASE_DIR/scripts/gpu-common.sh"
+source "$BASE_DIR/scripts/deploy-confirm.sh"
 if [ -f "$APP_DIR/.env" ]; then set -a; source "$APP_DIR/.env"; set +a; fi
 gpu_config
 compose() { docker compose --project-directory "$APP_DIR" -f "$APP_DIR/compose.yml" "$@"; }
@@ -24,6 +25,7 @@ status() {
 }
 case "${1:-help}" in
   deploy)
+    confirm_deploy mx-embedding
     gpu_admit mx-embedding
     init
     compose config --quiet

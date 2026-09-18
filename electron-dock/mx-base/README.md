@@ -18,6 +18,8 @@ mx-common 复用代码；mx-test-framework 调度测试和构建作业；mx-insi
 ```sh
 bash scripts/manage.sh                  # 展示状态 → 选择应用 → 选择操作
 bash scripts/manage.sh status           # 当前主机 / Docker / Kubernetes 上下文及所有登记应用
+bash scripts/manage.sh gpu              # 所有 GPU 的计算进程与服务归属
+bash scripts/manage.sh gpu 2            # 只检查 GPU 2（也支持完整 UUID）
 bash scripts/manage.sh deploy           # 交互选择，非交互必须指定应用
 bash scripts/manage.sh deploy mx-static # 生成首次凭据、准备目录、构建、等待健康
 bash scripts/manage.sh jobs mx-static   # 项目任务状态计数、writer 内存缓存指标
@@ -35,6 +37,12 @@ bash scripts/manage.sh start mx-ocr      # 恢复保存的容器配置，不重�
 ```
 
 Jenkins 使用相同的 `操作 jenkins`；额外支持 `password jenkins`、`agent-cmd jenkins`。不提供全量部署、全停或删除数据命令。Docker 不可用、集群访问失败显示 UNKNOWN；只有查询成功且没有对应资源才显示 NOT DEPLOYED。`status` 只读，不会启用任何应用。Jenkins 停止仅缩容为零。
+
+Docker 应用（mx-static、mx-ocr、mx-embedding）的 `deploy` 执行前均要求输入完整的 `yes`；其他输入或 EOF 取消且不执行部署。重复执行会更新同一服务，不创建另一套实例，也不轮换已有凭据/删除模型缓存。它不是无中断发布：OCR 会先准备镜像，再核验并停止本服务旧容器、重新创建并等待健康；替换后的启动失败不保证自动回滚。构建失败时 OCR 旧服务保持运行。
+
+GPU 校验按容器名称和应用标签识别归属，兼容 `docker top` 多列输出，并通过主机 cgroup 核验新建 Worker。`yes` 不会跳过显示器保护或授权终止其他应用进程；无法证明属于本应用的 PID 仍会拒绝并打印原因。
+
+`gpu` 是只读诊断：显示 GPU 编号/UUID、显示状态、计算进程 PID/显存、进程名以及能核验的容器名、镜像、mx-base/Compose/Kubernetes 服务标签；非 Docker 进程尝试显示 systemd unit。按 cgroup 或 docker top 关联，不凭 Python 进程名称猜服务。无法查询时明确显示归属未确认，不输出命令行参数和环境变量。NVIDIA 计算进程列表不包含全部图形进程，不能据此断言显卡空闲。部署拒绝提示也会带上可查到的占用服务。
 
 ## GPU 基础能力
 

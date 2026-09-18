@@ -30,7 +30,7 @@ echo 'mx-base-jenkins 0/0'
 `, { mode: 0o755 })
   const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, MOCK_LOG: log,
     MX_STATIC_DATA_PATH: join(root, 'data'), MX_STATIC_STATE_PATH: join(root, 'state') }
-  const run = (...args) => spawnSync('bash', [join(root, 'scripts/manage.sh'), ...args], { env, encoding: 'utf8' })
+  const run = (...args) => spawnSync('bash', [join(root, 'scripts/manage.sh'), ...args], { env, encoding: 'utf8', input: 'yes\n' })
   let result = run('status'); assert.equal(result.status, 0); assert.match(result.stdout, /mock-cluster/); assert.match(result.stdout, /healthy/)
   assert.notEqual(run('deploy').status, 0)
   assert.notEqual(run('deploy', 'all').status, 0)
