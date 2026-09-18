@@ -5327,7 +5327,9 @@ function ProviderEditor({
             <Warning size={17} aria-hidden="true" />{effectiveEmbeddingCapability.reason} 可以保存，但加入业务 Sequence 前必须执行 Embedding 连接测试。
           </p> : null}
           {(!isEmbedding || provider.connectionMode === DEDICATED_CONNECTION) ? <>
-            <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥">
+            <Field label="Base URL" className="mih-agent-provider-editor__wide" hint={isEmbedding
+              ? '本机服务可用 http://127.0.0.1:18210/v1（Hub 须与服务共享宿主机网络）；远程服务仍须 HTTPS。修改后需重新输入密钥或明确清除旧密钥。'
+              : '修改后必须重新输入密钥或明确清除旧密钥'}>
               <input className="qp-input" type="url" required disabled={busy} value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => {
                 const baseUrl = event.target.value
                 const defaultDimensions = isEmbedding

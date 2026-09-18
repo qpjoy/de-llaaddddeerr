@@ -28,7 +28,7 @@ export function assertProviderKind(kind) {
   return kind
 }
 
-function normalizeBaseUrl(value, index) {
+function normalizeBaseUrl(value, index, kind) {
   if (typeof value !== 'string' || !value.trim()) invalid(`provider[${index}].baseUrl is required`)
   const raw = value.trim()
   let url
@@ -37,9 +37,13 @@ function normalizeBaseUrl(value, index) {
   } catch {
     invalid(`provider[${index}].baseUrl must be a valid URL`)
   }
-  // Database-managed credentials may only be sent over TLS. Static environment
-  // providers retain their existing compatibility rules in parseProviderConfig.
-  if (url.protocol !== 'https:') invalid(`provider[${index}].baseUrl must use https`)
+  // Admin-managed local Embedding runs on this node's loopback listener.
+  // Keep the existing TLS / DNS policy for Chat and all non-loopback endpoints.
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
+  const localEmbedding = kind === 'embedding' && ['127.0.0.1', '::1'].includes(hostname)
+  if (url.protocol !== 'https:' && !(localEmbedding && url.protocol === 'http:')) {
+    invalid(`provider[${index}].baseUrl must use https (local Embedding may use http://127.0.0.1 or http://[::1])`)
+  }
   if (url.username || url.password) invalid(`provider[${index}].baseUrl must not contain userinfo`)
   // URL.search/hash are empty for a bare trailing "?"/"#". Reject the
   // delimiters in the original input too so the no-query/no-fragment contract
@@ -48,11 +52,10 @@ function normalizeBaseUrl(value, index) {
   if (raw.includes('#')) invalid(`provider[${index}].baseUrl must not contain a fragment`)
   // DNS treats a trailing dot as the same absolute hostname. Canonicalize it
   // before the localhost check so `localhost.` cannot bypass the policy.
-  const hostname = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
-  if (isIP(hostname) || hostname === 'localhost' || hostname.endsWith('.localhost')) {
+  if (!localEmbedding && (isIP(hostname) || hostname === 'localhost' || hostname.endsWith('.localhost'))) {
     invalid(`provider[${index}].baseUrl must not use localhost or an IP literal`)
   }
-  url.hostname = hostname
+  url.hostname = isIP(hostname) === 6 ? `[${hostname}]` : hostname
 
   const path = url.pathname.replace(/\/+$/, '')
   for (const endpoint of ENDPOINT_PATHS) {
@@ -182,7 +185,7 @@ function normalizeProvider(entry, index, kind) {
       model: entry.model.trim(),
       connection,
       ...(!inherited ? {
-        baseUrl: normalizeBaseUrl(entry.baseUrl, index),
+        baseUrl: normalizeBaseUrl(entry.baseUrl, index, kind),
         protocol,
         proxySequenceKey,
         timeoutMs,

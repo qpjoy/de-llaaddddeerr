@@ -4206,3 +4206,55 @@ test('database embedding selection configures the index without environment dime
   assert.equal(restartedConfig.embedding.model, 'Qwen/Qwen3-Embedding-0.6B')
   restarted.close()
 })
+
+test('database Embedding accepts loopback HTTP without loosening remote or Chat URL rules', () => {
+  const normalize = (baseUrl, kind = 'embedding') => normalizeDatabaseProviders([
+    provider({ baseUrl, model: 'Qwen/Qwen3-Embedding-0.6B', dimensions: 512, apiKey: 'local-test-key' }),
+  ], { kind })
+  for (const baseUrl of ['http://127.0.0.1:18210/v1', 'http://[::1]:18210/v1']) {
+    assert.equal(normalize(baseUrl)[0].provider.baseUrl, baseUrl)
+    assert.throws(() => normalize(baseUrl, 'chat'))
+  }
+  for (const baseUrl of [
+    'http://models.example.com/v1', 'http://192.168.1.2:18210/v1',
+    'http://169.254.169.254/v1', 'http://0.0.0.0:18210/v1',
+    'http://127.0.0.1.example.com/v1', 'ftp://127.0.0.1:18210/v1',
+    'http://user:pass@127.0.0.1:18210/v1',
+    'http://127.0.0.1:18210/v1?key=secret', 'http://127.0.0.1:18210/v1#fragment',
+    'http://127.0.0.1:18210/v1/embeddings',
+  ]) assert.throws(() => normalize(baseUrl), undefined, baseUrl)
+})
+
+test('local Qwen Provider can be created, refreshed and probed with Bearer authentication', async () => {
+  const harness = databaseHarness()
+  let requested = false
+  const runtime = await new AgentRuntime({
+    config: config({ embedding: { model: null, dimensions: null } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    logger: quiet, refreshIntervalMs: 0, probeCooldownMs: 0,
+    fetchImpl: async (url, options) => {
+      requested = true
+      assert.equal(String(url), 'http://127.0.0.1:18210/v1/embeddings')
+      assert.equal(options.headers.authorization, 'Bearer local-test-key')
+      assert.equal(options.redirect, 'error')
+      const body = JSON.parse(options.body)
+      assert.equal(body.model, 'Qwen/Qwen3-Embedding-0.6B')
+      return new Response(JSON.stringify({
+        data: body.input.map((_, index) => ({ index, embedding: Array(512).fill(0.1) })),
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  }).start()
+  await runtime.updateSetting('embedding', {
+    source: 'database', expectedRevision: 0,
+    providers: [provider({
+      id: 'local-qwen3', baseUrl: 'http://127.0.0.1:18210/v1',
+      model: 'Qwen/Qwen3-Embedding-0.6B', dimensions: 512, apiKey: 'local-test-key',
+    })],
+  })
+  assert.equal(runtime.status().settings.embedding.source, 'database')
+  assert.ok(!JSON.stringify(runtime.status()).includes('local-test-key'))
+  const result = await runtime.testProvider({ kind: 'embedding', providerId: 'local-qwen3' })
+  assert.equal(result.ok, true)
+  assert.equal(requested, true)
+  runtime.close()
+})
