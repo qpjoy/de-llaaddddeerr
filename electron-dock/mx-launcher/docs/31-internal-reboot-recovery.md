@@ -149,8 +149,10 @@ test -s scripts/restore-confirmed-mx-data.sh && bash scripts/restore-confirmed-m
    保留原命令及参数、PVC 和 Secret 引用，并通过 resourceVersion 防止覆盖并发修改。
 4. 普通卸载并重新 bind `/var/lib/mx-launcher` 到最新树，只修改其 fstab 条目，保留
    containerd、kubelet、etcd 的当前挂载；不删改 PV/PVC，不覆盖两份原始数据树。
-5. 启动 PostgreSQL，先排除错误密码也可登录的情况，再以只读事务验证实际 API 环境
-   中的 SMH、SQB 和对应凭据记录，最后启动 API 和此前运行的 host runner。
+5. 启动 PostgreSQL，通过不挂载数据卷的临时客户端 Pod 连接现有数据库 Service。
+   核对 Service 只指向当前 PG Pod，再以只读事务验证实际 API 环境中的 SMH、SQB
+   和对应凭据记录，最后启动 API 和此前运行的 host runner。临时 Pod 使用现有 Secret
+   引用，不把凭据写入命令行或输出；不改 `pg_hba.conf`。
 
 备份完成后，最新数据树成为运行目录，数据库正常启动和业务运行会写入该目录；切换前
 副本仍保留。副本在同一磁盘，不能替代异机备份。不会 initdb、改密码、执行数据库迁移、
@@ -166,6 +168,32 @@ WAL 都已保留，禁止直接替换在线 etcd。服务返回后还需实际�
 旧版脚本报“缺少已有数据启动保护；未停止服务”时，只完成预检与配置备份，还未切换
 挂载或停止工作负载。更新脚本后可重跑上述命令；它会在冷备、停库后补充保护，兼容
 镜像默认入口和分别配置在 `command` / `args` 中的入口，不再依靠固定字符串识别。
+
+### 数据已切换，停在密码验证时：只续接检查和 API 启动
+
+2026-09-21 的恢复已把挂载切到 `/data/k8s/mx-runtime/mx-launcher`，PostgreSQL Ready，
+但旧版脚本在 `127.0.0.1` 上用错误密码也能连接，因此停在 `verify-business-data`。
+这只能证明该连接没有验证所给密码，不能证明数据库内容有问题或服务间连接也免密。
+PostgreSQL 根据连接类型、客户端地址、数据库和用户选择首条匹配规则，参见
+[PostgreSQL 16 认证规则](https://www.postgresql.org/docs/16/auth-pg-hba-conf.html)。
+
+此时不能重跑从头切换的命令。更新代码后，在同一服务器运行：
+
+```bash
+bash scripts/restore-confirmed-mx-data.sh --finish \
+  /data/mx-recovery/confirmed-cutover.2VZC9C
+```
+
+`--finish` 使用指定恢复目录里的配置、PG 启动保护和备份校验记录，核对当前挂载、
+PV/PVC、PG Pod、Service、API 配置和数据库 Secret；只允许 API 当前仍为零副本。
+不会再复制正在运行的数据库、停库、修改挂载或恢复 Secret。临时客户端做密码负向探测，
+但不会因为现有认证规则接受错误密码而修改规则；会明确报告“密码有效性未被证明”，
+与“实际连接和业务标记核验通过”分开记录。连接失败、数据库指向不符、用户/凭据缺失
+仍然阻止 API 启动。业务核验通过后再核对工作负载，带版本条件将 API 从 0 恢复到 1。
+
+新脚本会保存 host runner 停机前是否运行。旧恢复目录没有该记录时保持 host runner
+当前状态，输出后续核实提示，不擅自启动未知状态的主机服务。飞书、旧 Ops Token、
+恢复身份记录和员工实际登录验收仍是后续步骤。
 
 ### 尚未确认数据来源时的只读清单
 

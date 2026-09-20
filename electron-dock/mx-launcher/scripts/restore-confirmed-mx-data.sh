@@ -25,6 +25,26 @@ done
 exec 9>/run/mx-launcher-deploy.lock
 flock -n 9 || fail '另一个 deploy/恢复正在运行。'
 export MX_RESTORE_OLD MX_RESTORE_NEW MX_RESTORE_TARGET MX_RESTORE_ETCD
+MX_RESTORE_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+[ -f "$MX_RESTORE_SCRIPT_DIR/restore-confirmed-mx-data-finish.mjs" ] || fail '缺少续接验证脚本，请完整更新本次提交。'
+mx_finish_restore() {
+  MX_RESTORE_PHASE=finish-latest-services
+  node "$MX_RESTORE_SCRIPT_DIR/restore-confirmed-mx-data-finish.mjs" "$MX_RESTORE_WORK"
+  if [ -f "$MX_RESTORE_WORK/runner-was-active" ]; then
+    if [ "$(cat "$MX_RESTORE_WORK/runner-was-active")" = 1 ]; then systemctl start mx-internal-host-runner.service; fi
+  else
+    echo '旧脚本未记录 host runner 停机前状态；本次保持其当前状态，后续单独核实。'
+  fi
+  MX_RESTORE_PHASE=complete
+  echo "两份原目录及备份均保留：$MX_RESTORE_WORK"
+  echo '飞书/旧 Ops Token 与恢复身份记录尚待处理；此时不要运行 deploy。'
+}
+if [ "${1:-}" = --finish ] && [ "$#" = 2 ]; then
+  MX_RESTORE_WORK="$2"
+  mx_finish_restore
+  exit 0
+fi
+[ "$#" = 0 ] || fail '用法：本脚本 [--finish /data/mx-recovery/confirmed-cutover.XXXXXX]'
 
 node <<'CHECK_SOURCE'
 const fs = require('node:fs');
@@ -171,8 +191,9 @@ MX_RESTORE_PHASE=pause-internal
 MX_RESTORE_RUNNER_ACTIVE=0
 if systemctl is-active --quiet mx-internal-host-runner.service; then
   MX_RESTORE_RUNNER_ACTIVE=1
-  systemctl stop mx-internal-host-runner.service
 fi
+printf '%s\n' "$MX_RESTORE_RUNNER_ACTIVE" > "$MX_RESTORE_WORK/runner-was-active"
+if [ "$MX_RESTORE_RUNNER_ACTIVE" = 1 ]; then systemctl stop mx-internal-host-runner.service; fi
 mxk scale deployment/mx-launcher-internal --current-replicas=1 --replicas=0
 if [ -n "$(mxk get pod -l app.kubernetes.io/name=mx-launcher-internal -o name)" ]; then
   kubectl --request-timeout=200s -n "$MX_RESTORE_NS" wait --for=delete pod \
@@ -251,49 +272,4 @@ findmnt -T "$MX_RESTORE_TARGET" -o TARGET,SOURCE,FSTYPE
 MX_RESTORE_PHASE=start-postgres
 mxk scale statefulset/mx-internal-postgres --current-replicas=0 --replicas=1
 kubectl --request-timeout=260s -n "$MX_RESTORE_NS" rollout status statefulset/mx-internal-postgres --timeout=240s
-MX_RESTORE_PHASE=verify-business-data
-if mxk exec mx-internal-postgres-0 -- sh -ec '
-  unset PGHOST PGHOSTADDR PGSERVICE PGSERVICEFILE
-  export PGPASSWORD="mx-cutover-intentionally-invalid-${POSTGRES_PASSWORD}"
-  export PGCONNECT_TIMEOUT=5 PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=10000"
-  exec psql -X -qAt -w -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1"
-' > "$MX_RESTORE_WORK/negative-auth.private.log" 2>&1; then
-  fail '错误密码也被接受，无法证明原凭据有效；API 保持停止，不修改 pg_hba.conf。'
-fi
-mxk exec -i mx-internal-postgres-0 -- sh -ec '
-  unset PGHOST PGHOSTADDR PGSERVICE PGSERVICEFILE
-  export PGPASSWORD="$POSTGRES_PASSWORD"
-  export PGCONNECT_TIMEOUT=5 PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=10000"
-  exec psql -X -qAt -w -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1
-' > "$MX_RESTORE_WORK/records.json" 2> "$MX_RESTORE_WORK/database-check.private.log" <<'SQL'
-BEGIN READ ONLY;
-SELECT coalesce(json_agg(s), '[]'::json) FROM (
-  SELECT u.environment, count(*) AS users, max(u.updated_at) AS latest_user_row,
-    bool_or(lower(u.data->>'account')='smh' OR lower(u.data->>'displayName')='smh') AS has_smh,
-    bool_or(lower(u.data->>'account')='sqb' OR lower(u.data->>'displayName')='sqb') AS has_sqb,
-    bool_or((lower(u.data->>'account')='smh' OR lower(u.data->>'displayName')='smh') AND c.id IS NOT NULL) AS smh_has_credential,
-    bool_or((lower(u.data->>'account')='sqb' OR lower(u.data->>'displayName')='sqb') AND c.id IS NOT NULL) AS sqb_has_credential,
-    count(*) FILTER (WHERE c.id IS NOT NULL) AS users_with_credentials
-  FROM mx_platform_records u
-  LEFT JOIN mx_platform_records c ON c.kind='iam-user-credential' AND c.environment=u.environment AND c.id=u.id
-  WHERE u.kind='iam-user' GROUP BY u.environment
-) s;
-ROLLBACK;
-SQL
-node - "$MX_RESTORE_WORK" <<'CHECK_MARKERS'
-const fs=require('node:fs'),d=process.argv[2];
-const config=JSON.parse(fs.readFileSync(d+'/config.before.json','utf8'));
-const rows=JSON.parse(fs.readFileSync(d+'/records.json','utf8'));
-console.log(JSON.stringify(rows,null,2));
-const env=config.data.MX_ENVIRONMENT||'shadow';
-if(!rows.some(row=>row.environment===env&&row.has_smh&&row.has_sqb&&row.smh_has_credential&&row.sqb_has_credential)) throw Error('实际 API 环境未同时找到 SMH/SQB 及凭据；API 保持停止，未自动选择其它库');
-CHECK_MARKERS
-
-MX_RESTORE_PHASE=start-internal-api
-mxk scale deployment/mx-launcher-internal --current-replicas=0 --replicas=1
-kubectl --request-timeout=260s -n "$MX_RESTORE_NS" rollout status deployment/mx-launcher-internal --timeout=240s
-if [ "$MX_RESTORE_RUNNER_ACTIVE" = 1 ]; then systemctl start mx-internal-host-runner.service; fi
-MX_RESTORE_PHASE=complete
-echo '最新业务库已挂载，SMH/SQB 已核实，Internal API 已恢复。'
-echo "两份原目录都保留；备份：$MX_RESTORE_WORK"
-echo '飞书/旧 Ops Token 尚需从 latest-etcd 副本恢复；恢复身份记录也须据此更新。此时不要运行 deploy。'
+mx_finish_restore

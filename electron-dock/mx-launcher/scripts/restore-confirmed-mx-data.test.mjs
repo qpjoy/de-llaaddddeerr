@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { spawnSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
+import { assertRecords, assertWorkloads, authenticationSummary, databaseTarget, probeManifest, psqlScript, summarySQL } from './restore-confirmed-mx-data-finish.mjs';
 
 const script = fs.readFileSync(new URL('./restore-confirmed-mx-data.sh', import.meta.url), 'utf8');
 const block = name => script.split(`<<'${name}'\n`)[1].split(`\n${name}\n`)[0];
@@ -162,16 +163,79 @@ test('guard patch requires zero replicas, no Pod, unchanged workload and checks 
 });
 
 test('business validation requires both known users and credentials in the actual API environment', () => {
+  const row = { environment: 'shadow', has_smh: true, has_sqb: true, smh_has_credential: true, sqb_has_credential: true };
+  const report = { server_address: '10.244.0.7', database: 'mx_internal_shadow', records: [row] };
+  const run = value => assertRecords(value, 'shadow', '10.244.0.7', 'mx_internal_shadow');
+  run(report);
+  for (const bad of [{ records: [{ ...row, environment: 'other' }] }, { records: [{ ...row, sqb_has_credential: false }] }, { records: [] }, { server_address: '10.244.0.8' }, { database: 'old_database' }]) {
+    assert.throws(() => run({ ...report, ...bad }));
+  }
+});
+
+test('resume requires the latest ready Pod, original bindings and unchanged stopped API', () => {
   const f = fixture();
   try {
-    f.save();
-    const row = { environment: 'shadow', has_smh: true, has_sqb: true, smh_has_credential: true, sqb_has_credential: true };
-    const run = rows => { fs.writeFileSync(join(f.dir, 'records.json'), JSON.stringify(rows)); return f.run('CHECK_MARKERS'); };
-    run([row]);
-    assert.throws(() => run([{ ...row, environment: 'other' }]), /API 保持停止/);
-    assert.throws(() => run([{ ...row, sqb_has_credential: false }]), /API 保持停止/);
-    assert.throws(() => run([]), /API 保持停止/);
+    const saved = { api: f.objects.api, pg: f.objects.pg, config: f.objects.config, secret: f.objects.secrets.items[0], service: f.objects.service,
+      pvc: f.objects.pvc.items[0], pv: f.objects.pv.items[0] };
+    saved.service.metadata = { uid: 'service-uid' };
+    saved.pv.metadata.uid = 'pv-uid';
+    const current = structuredClone(saved);
+    current.api.spec.replicas = 0;
+    current.pod = { metadata: { uid: 'pod-uid', ownerReferences: [{ uid: 'pg-uid' }] }, spec: { nodeName: 'mx-internal-server',
+      volumes: [{ name: 'postgres-data', persistentVolumeClaim: { claimName: saved.pvc.metadata.name } }] },
+    status: { podIP: '10.244.0.7', conditions: [{ type: 'Ready', status: 'True' }] } };
+    current.slices = { items: [{ endpoints: [{ conditions: { ready: true }, targetRef: { uid: 'pod-uid' }, addresses: ['10.244.0.7'] }] }] };
+    assertWorkloads(saved, current);
+    for (const mutate of [
+      v => { v.api.spec.replicas = 1; },
+      v => { v.pg.spec.replicas = 0; },
+      v => { v.pg.metadata.uid = 'other'; },
+      v => { v.secret.data.PG_PASSWORD = 'different'; },
+      v => { v.config.data.MX_ENVIRONMENT = 'other'; },
+      v => { v.slices.items[0].endpoints.push({ conditions: { ready: true }, targetRef: { uid: 'old-pod' }, addresses: ['10.244.0.8'] }); },
+      v => { v.pvc.metadata.uid = 'new-pvc'; },
+      v => { v.pv.spec.hostPath.path = '/old'; }
+    ]) {
+      const changed = structuredClone(current); mutate(changed);
+      assert.throws(() => assertWorkloads(saved, changed));
+    }
   } finally { f.close(); }
+});
+
+test('client probes the API database Service without attaching storage or weakening authentication', () => {
+  const f = fixture();
+  try {
+    const target = databaseTarget(f.objects.secrets.items[0], f.objects.service);
+    assert.deepEqual(target, { host: 'mx-internal-postgres', database: 'mx_internal_shadow' });
+    const pod = probeManifest('mx-pg-recovery-test', f.objects.pg.spec.template, target.host);
+    assert.equal(pod.spec.volumes, undefined);
+    assert.equal(pod.spec.hostNetwork, undefined);
+    assert.equal(pod.spec.automountServiceAccountToken, false);
+    assert.equal(pod.spec.containers[0].env[0].value, 'mx-internal-postgres');
+    assert.equal(pod.spec.containers[0].env.find(e => e.name === 'PGPASSWORD').valueFrom.secretKeyRef.key, 'PG_PASSWORD');
+    assert.equal(pod.metadata.labels['app.kubernetes.io/name'], undefined);
+    assert.equal(pod.spec.containers[0].securityContext.readOnlyRootFilesystem, true);
+    assert.doesNotMatch(JSON.stringify(pod), /not-a-real-password|volumeMounts|"PGDATA"|127\.0\.0\.1/);
+    assert.match(psqlScript(), /default_transaction_read_only=on/);
+    assert.match(psqlScript(), /PGPASSFILE=\/dev\/null/);
+    assert.match(psqlScript(), /PGSSLMODE=disable/);
+    assert.match(psqlScript(true), /intentionally-invalid/);
+    assert.match(summarySQL, /^BEGIN READ ONLY;/);
+    assert.match(summarySQL, /ROLLBACK;$/);
+    assert.doesNotMatch(summarySQL, /passwordHash|INSERT|UPDATE|DELETE|ALTER|CREATE/);
+    const remote = structuredClone(f.objects.secrets.items[0]);
+    remote.data.DATABASE_URL = Buffer.from('postgres://app:not-a-real-password@unrelated/mx_internal_shadow').toString('base64');
+    assert.throws(() => databaseTarget(remote, f.objects.service));
+  } finally { f.close(); }
+});
+
+test('trust is reported without claiming password validity; transport failure is not a password rejection', () => {
+  assert.match(authenticationSummary({ status: 0 }), /未证明密码校验生效/);
+  assert.match(authenticationSummary({ status: 2, stderr: 'FATAL: password authentication failed for user "private"' }), /已拒绝错误密码/);
+  assert.match(authenticationSummary({ status: 2, stderr: 'connection timeout with secret text' }), /不能据此判断/);
+  assert.doesNotMatch(authenticationSummary({ status: 2, stderr: 'connection timeout with secret text' }), /secret text/);
+  assert.ok(script.indexOf('if [ "${1:-}" = --finish ]') < script.indexOf("node <<'CHECK_SOURCE'"));
+  assert.match(script, /node "\$MX_RESTORE_SCRIPT_DIR\/restore-confirmed-mx-data-finish\.mjs" "\$MX_RESTORE_WORK"/);
 });
 
 test('fstab update changes only the confirmed bind source and refuses a concurrent edit', () => {
