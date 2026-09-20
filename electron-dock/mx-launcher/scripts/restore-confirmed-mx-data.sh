@@ -74,6 +74,7 @@ mkdir -p /data/mx-recovery
 MX_RESTORE_WORK=$(mktemp -d /data/mx-recovery/confirmed-cutover.XXXXXX)
 export MX_RESTORE_WORK
 echo "私有备份目录：$MX_RESTORE_WORK"
+docker image inspect "$MX_RESTORE_IMAGE" --format '{{json .Config}}' > "$MX_RESTORE_WORK/image.before.json"
 cp -a /etc/fstab "$MX_RESTORE_WORK/fstab.before"
 mxk get deployment mx-launcher-internal -o json > "$MX_RESTORE_WORK/api.before.json"
 mxk get statefulset mx-internal-postgres -o json > "$MX_RESTORE_WORK/pg.before.json"
@@ -103,9 +104,6 @@ for(const [variable,key] of [['POSTGRES_USER','PG_USER'],['POSTGRES_PASSWORD','P
   if(ref?.name!=='mx-launcher-db'||ref.key!==key) throw Error('PostgreSQL Secret 引用与预期不符');
 }
 if(!p.volumeMounts?.some(x=>x.name==='postgres-data'&&x.mountPath==='/var/lib/postgresql/data'&&!x.subPath&&!x.subPathExpr)) throw Error('PGDATA 挂载与预期不符');
-// A stopped workload must never get initdb permission when restarted.
-const command=p.command?.join(' ')||'';
-if(!command.includes('PG_VERSION')||!command.includes('global/pg_control')||!command.includes('exit 1')||!command.includes('exec docker-entrypoint.sh postgres')||p.args?.length) throw Error('缺少已有数据启动保护；未停止服务');
 const claims=[['postgres-data-mx-internal-postgres-0','mx-internal-postgres-local-pv','postgres'],['mx-launcher-internal-ssh','mx-launcher-internal-ssh-local-pv','internal-ssh'],['mx-launcher-release-artifacts','mx-launcher-release-artifacts-local-pv','release-artifacts'],['mx-launcher-site-slots','mx-launcher-site-slots-local-pv','site-slots']];
 for(const [claim,volume,suffix] of claims) {
   const pvc=get('pvc').items.find(x=>x.metadata.name===claim),pv=get('pv').items.find(x=>x.metadata.name===volume);
@@ -132,8 +130,26 @@ for(const pod of get('pods').items) {
   const expected=pod.metadata.namespace===ns&&pod.spec.nodeName==='mx-internal-server'&&pod.metadata.ownerReferences?.some(o=>(o.kind==='StatefulSet'&&o.uid===pg.metadata.uid)||(o.kind==='ReplicaSet'&&pod.metadata.labels?.['app.kubernetes.io/name']==='mx-launcher-internal'));
   if(!expected) throw Error('存在其它数据卷使用者：'+pod.metadata.namespace+'/'+pod.metadata.name);
 }
-console.log('PV/PVC、启动保护、单节点和工作负载检查通过；现有绑定保持不变。');
+console.log('PV/PVC、单节点和工作负载检查通过；将在停库后补齐启动保护，现有绑定保持不变。');
 CHECK_WORKLOADS
+
+node - "$MX_RESTORE_WORK" <<'PLAN_GUARD'
+const fs=require('node:fs'),d=process.argv[2];
+const read=n=>JSON.parse(fs.readFileSync(d+'/'+n+'.before.json','utf8'));
+const p=read('pg').spec.template.spec.containers.find(x=>x.name==='postgres'),image=read('image');
+const vector=v=>v==null?[]:Array.isArray(v)&&v.every(x=>typeof x==='string')?v:(()=>{throw Error('启动命令不是合法参数数组');})();
+const command=vector(p.command),args=vector(p.args);
+// CRI: an explicit command replaces the image entrypoint and its default CMD.
+// With no explicit command, retain the image entrypoint and selected/default args.
+const original=command.length?[...command,...args]:[...vector(image.Entrypoint),...(args.length?args:vector(image.Cmd))];
+if(!original.length || !original[0]) throw Error('无法确定现有启动命令；未停止服务');
+const guarded={
+  command:['sh','-ec','test "$(cat "$PGDATA/PG_VERSION")" = 16 && test -s "$PGDATA/global/pg_control" && test -d "$PGDATA/base" || { echo "Existing PostgreSQL 16 data missing; initialization refused" >&2; exit 1; }; exec "$@"','mx-existing-data-guard'],
+  args:original
+};
+fs.writeFileSync(d+'/pg-guard.plan.json',JSON.stringify(guarded),{mode:0o600,flag:'wx'});
+console.log('已准备启动保护：保留原启动命令和参数，此时不修改工作负载。');
+PLAN_GUARD
 
 mx_hash_tree() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum); }
 mx_backup_tree() {
@@ -169,6 +185,40 @@ fi
 [ ! -e "$MX_RESTORE_OLD/k8s/postgres/pgdata/postmaster.pid" ] || fail '原 PostgreSQL 未正常停止；不复制运行中的数据。'
 MX_RESTORE_PHASE=backup-previous
 mx_backup_tree "$MX_RESTORE_OLD" previous-mx-launcher
+
+MX_RESTORE_PHASE=install-postgres-guard
+node - "$MX_RESTORE_WORK" <<'INSTALL_GUARD'
+const fs=require('node:fs'),{spawnSync}=require('node:child_process'),{isDeepStrictEqual}=require('node:util'),d=process.argv[2];
+const before=JSON.parse(fs.readFileSync(d+'/pg.before.json','utf8'));
+const guard=JSON.parse(fs.readFileSync(d+'/pg-guard.plan.json','utf8'));
+const call=args=>{
+  const r=spawnSync('kubectl',['--request-timeout=20s','-n','mx-internal-shadow',...args],{encoding:'utf8',timeout:30000,maxBuffer:8*1024*1024});
+  if(r.error||r.status!==0) {
+    fs.writeFileSync(d+'/pg-guard.private.log',r.stderr||'',{mode:0o600});
+    throw Error('PostgreSQL 启动保护读写失败；服务保持停止，未切换挂载');
+  }
+  return JSON.parse(r.stdout);
+};
+const current=call(['get','statefulset','mx-internal-postgres','-o','json']);
+const expected=JSON.parse(JSON.stringify(before.spec));expected.replicas=0;
+if(current.metadata.uid!==before.metadata.uid||current.metadata.deletionTimestamp||!isDeepStrictEqual(current.spec,expected)) throw Error('StatefulSet 未停止或配置被并发更改；不覆盖');
+const pods=call(['get','pods','-o','json']).items;
+if(pods.some(p=>p.metadata.ownerReferences?.some(o=>o.uid===current.metadata.uid))) throw Error('PostgreSQL Pod 尚未完全退出；不修改模板');
+const index=current.spec.template.spec.containers.findIndex(x=>x.name==='postgres');
+const patch=[
+  {op:'test',path:'/metadata/uid',value:current.metadata.uid},
+  {op:'test',path:'/metadata/resourceVersion',value:current.metadata.resourceVersion},
+  {op:'test',path:'/spec/replicas',value:0},
+  ...Object.entries(guard).map(([key,value])=>({op:'add',path:'/spec/template/spec/containers/'+index+'/'+key,value}))
+];
+const path=d+'/pg-guard.patch.json';
+fs.writeFileSync(path,JSON.stringify(patch),{mode:0o600,flag:'wx'});
+const result=call(['patch','statefulset','mx-internal-postgres','--type=json','--patch-file',path,'-o','json']);
+fs.writeFileSync(d+'/pg.guarded.json',JSON.stringify(result),{mode:0o600});
+Object.assign(expected.template.spec.containers[index],guard);
+if(result.metadata.uid!==before.metadata.uid||!isDeepStrictEqual(result.spec,expected)) throw Error('启动保护写后校验失败；未切换挂载');
+console.log('PostgreSQL 已在零副本状态补齐启动保护，原启动参数/PVC/Secret 保留。');
+INSTALL_GUARD
 
 MX_RESTORE_PHASE=change-mount
 umount "$MX_RESTORE_TARGET"

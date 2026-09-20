@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { spawnSync } from 'node:child_process';
+import { isDeepStrictEqual } from 'node:util';
 
 const script = fs.readFileSync(new URL('./restore-confirmed-mx-data.sh', import.meta.url), 'utf8');
 const block = name => script.split(`<<'${name}'\n`)[1].split(`\n${name}\n`)[0];
@@ -17,6 +18,7 @@ function fixture() {
   for (const name of suffixes) fs.mkdirSync(join(dir, 'latest/k8s', name), { recursive: true });
   const env = (name, key = name) => ({ name, valueFrom: { secretKeyRef: { name: 'mx-launcher-db', key } } });
   const objects = {
+    image: { Entrypoint: ['docker-entrypoint.sh'], Cmd: ['postgres'] },
     api: { metadata: { uid: 'api-uid' }, spec: { replicas: 1, template: { spec: {
       containers: [{ name: 'internal-api', env: ['DATABASE_URL', 'DATABASE_HOST', 'PG_USER', 'PG_PASSWORD', 'PG_DB'].map(x => env(x)) }],
       volumes: claimNames.slice(1).map(claimName => ({ persistentVolumeClaim: { claimName } }))
@@ -54,11 +56,10 @@ test('one-time script passes Bash syntax checking', () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('cutover accepts matching bindings; rejects wrong PV path, lost binding, missing guard, other writers and remote DB', () => {
+test('cutover accepts matching bindings; rejects wrong PV path, lost binding, other writers and remote DB', () => {
   const mutations = [
     [f => { f.objects.pv.items[0].spec.hostPath.path = '/wrong'; }, /PV\/PVC/],
     [f => { f.objects.pv.items[0].spec.claimRef.uid = 'different'; }, /PV\/PVC/],
-    [f => { delete f.objects.pg.spec.template.spec.containers[0].command; }, /启动保护/],
     [f => { f.objects.controllers.items.push({ kind: 'CronJob', spec: { suspend: false } }); }, /CronJob/],
     [f => { f.objects.secrets.items[0].data.DATABASE_URL = Buffer.from('postgres://app:not-a-real-password@unrelated:5432/mx_internal_shadow').toString('base64'); }, /指向\/凭据/],
     [f => { f.objects.pods.items.push({ metadata: { namespace: 'other', name: 'writer' }, status: { phase: 'Running' }, spec: { volumes: [{ hostPath: { path: '/data/k8s/mx-runtime/mx-launcher/k8s/postgres' } }] } }); }, /其它数据卷使用者/]
@@ -69,6 +70,95 @@ test('cutover accepts matching bindings; rejects wrong PV path, lost binding, mi
     const f = fixture();
     try { mutate(f); f.save(); assert.throws(() => f.run('CHECK_WORKLOADS'), expected); } finally { f.close(); }
   }
+});
+
+test('missing guard passes preflight; planned guard preserves default, custom and split command arguments', () => {
+  for (const [override, expected] of [
+    [{}, ['docker-entrypoint.sh', 'postgres']],
+    [{ args: ['postgres', '-c', 'shared_buffers=128MB'] }, ['docker-entrypoint.sh', 'postgres', '-c', 'shared_buffers=128MB']],
+    [{ command: ['sh', '-ec', 'exec docker-entrypoint.sh postgres'] }, ['sh', '-ec', 'exec docker-entrypoint.sh postgres']],
+    [{ command: ['sh'], args: ['-ec', 'test -d "$PGDATA/base"; exec docker-entrypoint.sh postgres'] }, ['sh', '-ec', 'test -d "$PGDATA/base"; exec docker-entrypoint.sh postgres']]
+  ]) {
+    const f = fixture();
+    try {
+      const p = f.objects.pg.spec.template.spec.containers[0];
+      delete p.command;
+      Object.assign(p, override);
+      f.save();
+      f.run('CHECK_WORKLOADS');
+      f.run('PLAN_GUARD');
+      const guard = JSON.parse(fs.readFileSync(join(f.dir, 'pg-guard.plan.json')));
+      assert.deepEqual(guard.args, expected);
+      assert.match(guard.command[2], /initialization refused/);
+      assert.deepEqual(JSON.parse(fs.readFileSync(join(f.dir, 'pg.before.json'))), f.objects.pg);
+    } finally { f.close(); }
+  }
+});
+
+test('actual shell guard rejects incomplete PGDATA before executing original argv, preserving argument boundaries', () => {
+  const f = fixture();
+  try {
+    const p = f.objects.pg.spec.template.spec.containers[0];
+    p.command = [process.execPath, '-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))'];
+    p.args = ['--', 'a value with spaces', '$(not-a-shell-command)', '"quotes"'];
+    f.save(); f.run('PLAN_GUARD');
+    const guard = JSON.parse(fs.readFileSync(join(f.dir, 'pg-guard.plan.json')));
+    const pg = join(f.dir, 'pgdata');
+    fs.mkdirSync(join(pg, 'global'), { recursive: true });
+    const run = () => spawnSync(guard.command[0], [...guard.command.slice(1), ...guard.args], { encoding: 'utf8', env: { ...process.env, PGDATA: pg } });
+    for (const version of ['', '15\n', '16\n']) {
+      fs.writeFileSync(join(pg, 'PG_VERSION'), version);
+      const result = run();
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+    }
+    fs.writeFileSync(join(pg, 'global/pg_control'), 'control fixture');
+    fs.mkdirSync(join(pg, 'base'));
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), p.args.slice(1));
+  } finally { f.close(); }
+});
+
+test('guard patch requires zero replicas, no Pod, unchanged workload and checks the returned spec', () => {
+  for (const scenario of ['success', 'running', 'changed', 'replaced', 'pod', 'conflict', 'bad-response']) {
+    const f = fixture();
+    try {
+      f.save(); f.run('PLAN_GUARD');
+      const current = structuredClone(f.objects.pg);
+      current.spec.replicas = scenario === 'running' ? 1 : 0;
+      current.metadata.resourceVersion = '42';
+      if (scenario === 'changed') current.spec.template.spec.containers[0].image = 'unexpected:17';
+      if (scenario === 'replaced') current.metadata.uid = 'other';
+      let mutations = 0;
+      const exec = (command, args) => {
+        assert.equal(command, 'kubectl');
+        let output;
+        if (args.includes('patch')) {
+          mutations++;
+          const patch = JSON.parse(fs.readFileSync(args[args.indexOf('--patch-file') + 1], 'utf8'));
+          assert.deepEqual(patch.slice(0, 3), [
+            { op: 'test', path: '/metadata/uid', value: 'pg-uid' },
+            { op: 'test', path: '/metadata/resourceVersion', value: '42' },
+            { op: 'test', path: '/spec/replicas', value: 0 }
+          ]);
+          assert.ok(patch.slice(3).every(op => /^\/spec\/template\/spec\/containers\/0\/(command|args)$/.test(op.path)));
+          if (scenario === 'conflict') return { status: 1, stderr: 'conflict' };
+          output = structuredClone(current);
+          for (const op of patch.slice(3)) output.spec.template.spec.containers[0][op.path.split('/').at(-1)] = op.value;
+          if (scenario === 'bad-response') output.spec.replicas = 1;
+        } else if (args.includes('pods')) {
+          output = { items: scenario === 'pod' ? [{ metadata: { ownerReferences: [{ uid: 'pg-uid' }] } }] : [] };
+        } else { output = current; }
+        return { status: 0, stdout: JSON.stringify(output) };
+      };
+      const run = () => f.run('INSTALL_GUARD', { require: name => ({ 'node:fs': fs, 'node:child_process': { spawnSync: exec }, 'node:util': { isDeepStrictEqual } })[name] });
+      if (scenario === 'success') { run(); assert.equal(mutations, 1); }
+      else { assert.throws(run); assert.equal(mutations, ['conflict', 'bad-response'].includes(scenario) ? 1 : 0); }
+    } finally { f.close(); }
+  }
+  assert.ok(script.indexOf('mx_backup_tree "$MX_RESTORE_OLD" previous-mx-launcher') < script.indexOf('MX_RESTORE_PHASE=install-postgres-guard'));
+  assert.ok(script.indexOf('\nINSTALL_GUARD\n') < script.indexOf('MX_RESTORE_PHASE=change-mount'));
 });
 
 test('business validation requires both known users and credentials in the actual API environment', () => {

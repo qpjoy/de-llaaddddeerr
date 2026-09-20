@@ -141,10 +141,12 @@ test -s scripts/restore-confirmed-mx-data.sh && bash scripts/restore-confirmed-m
 执行内容：
 
 1. 核对源目录、未运行状态、PG control 的干净关闭状态、没有外部 PGDATA 符号链接；
-   核对单节点、现有 PV/PVC 绑定、Retain、API 数据库连接目标、已有数据启动保护。
+   核对单节点、现有 PV/PVC 绑定、Retain、API 数据库连接目标，并准备已有数据启动保护。
 2. 在 `/data/mx-recovery/confirmed-cutover.*` 保存 fstab、工作负载和私有 Secret 备份，
    完整复制最新 MX 数据树和最新 etcd 数据树，逐文件 SHA-256 比较原件和副本。
 3. 暂停 MX host runner、Internal API 和 PostgreSQL，等待正常退出，再冷备旧数据树。
+   确认 StatefulSet 为零副本且 Pod 已退出后，为现有启动命令增加外层 PGDATA 检查；
+   保留原命令及参数、PVC 和 Secret 引用，并通过 resourceVersion 防止覆盖并发修改。
 4. 普通卸载并重新 bind `/var/lib/mx-launcher` 到最新树，只修改其 fstab 条目，保留
    containerd、kubelet、etcd 的当前挂载；不删改 PV/PVC，不覆盖两份原始数据树。
 5. 启动 PostgreSQL，先排除错误密码也可登录的情况，再以只读事务验证实际 API 环境
@@ -160,6 +162,13 @@ test -s scripts/restore-confirmed-mx-data.sh && bash scripts/restore-confirmed-m
 WAL 都已保留，禁止直接替换在线 etcd。服务返回后还需实际验收员工登录，并恢复和验收
 飞书登录。最后核对并迁移 `/var/lib/mx-launcher-recovery` 的旧身份记录和 Secret 快照，
 保留原记录。完成之前不再次运行 deploy，也不删除旧恢复记录来绕过身份校验。
+
+旧版脚本报“缺少已有数据启动保护；未停止服务”时，只完成预检与配置备份，还未切换
+挂载或停止工作负载。更新脚本后可重跑上述命令；它会在冷备、停库后补充保护，兼容
+镜像默认入口和分别配置在 `command` / `args` 中的入口，不再依靠固定字符串识别。
+
+### 尚未确认数据来源时的只读清单
+
 先运行只读清单（无需构建或 deploy）：
 
 ```bash
