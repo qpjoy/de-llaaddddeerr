@@ -18,6 +18,7 @@ import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs
 import { createInterface } from 'node:readline/promises'
 import { homedir, hostname, platform, arch } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // Where the runner keeps its credentials. Small, and belongs with the user.
 const CONFIG_DIR = join(homedir(), '.mx-rig-runner')
@@ -78,7 +79,7 @@ async function saveConfig(patch) {
   return merged
 }
 
-async function api(config, method, path, { body, token, raw, headers = {} } = {}) {
+async function api(config, method, path, { body, token, raw, headers = {}, signal } = {}) {
   const response = await fetch(`${config.server.replace(/\/$/u, '')}${path}`, {
     method,
     headers: {
@@ -88,13 +89,17 @@ async function api(config, method, path, { body, token, raw, headers = {} } = {}
     },
     body: raw ? body : body ? JSON.stringify(body) : undefined,
     duplex: raw ? 'half' : undefined,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000),
+    redirect: 'error',
   })
   if (response.status === 204) return null
   const text = await response.text()
   const payload = text ? JSON.parse(text) : null
   if (!response.ok) {
     const error = payload?.error
-    throw new Error(`${error?.message ?? response.statusText}${error?.hint ? `\n  提示：${error.hint}` : ''}`)
+    throw Object.assign(new Error(`${error?.message ?? response.statusText}${error?.hint ? `\n  提示：${error.hint}` : ''}`), {
+      status: response.status, code: error?.code,
+    })
   }
   return payload
 }
@@ -245,7 +250,7 @@ async function readJunitFiles(dir) {
 }
 
 /** Walk a directory and upload every file, preserving relative paths. */
-async function uploadArtifacts(config, runId, runToken, dir) {
+async function uploadArtifacts(config, runId, runToken, dir, signal) {
   const files = []
   const walk = async (current) => {
     for (const entry of await readdir(current, { withFileTypes: true })) {
@@ -258,6 +263,7 @@ async function uploadArtifacts(config, runId, runToken, dir) {
 
   let uploaded = 0
   for (const file of files) {
+    signal?.throwIfAborted()
     const relativePath = relative(dir, file).split(sep).join('/')
     const info = await stat(file)
     if (info.size === 0) continue
@@ -267,6 +273,7 @@ async function uploadArtifacts(config, runId, runToken, dir) {
         raw: true,
         body: createReadStream(file),
         headers: { 'content-length': String(info.size) },
+        signal,
       })
       uploaded += 1
     } catch (error) {
@@ -288,13 +295,14 @@ async function uploadArtifacts(config, runId, runToken, dir) {
  * The clone is cached per app under ~/.mxt/checkouts and updated in place:
  * a fresh clone of a large repository on every run is minutes of nothing.
  */
-async function prepareCheckout({ repoUrl, ref, appSlug, gitToken }) {
+async function prepareCheckout({ repoUrl, ref, appSlug, gitToken, signal }) {
+  signal?.throwIfAborted()
   if (!repoUrl) return { dir: resolve(argValue('workdir') || process.cwd()), gitSha: null }
 
   const dir = join(dataDir(), 'checkouts', appSlug || 'app')
   await mkdir(dir, { recursive: true })
   const git = async (args, allowFail = false) => {
-    const code = await runCommand(['git', ...args], { cwd: dir, env: process.env, quiet: true })
+    const code = await runCommand(['git', ...args], { cwd: dir, env: process.env, quiet: true, signal })
     if (code !== 0 && !allowFail) throw new Error(`git ${args[0]} 失败（退出码 ${code}）`)
     return code
   }
@@ -327,7 +335,7 @@ async function prepareCheckout({ repoUrl, ref, appSlug, gitToken }) {
 }
 
 /** One lockfile, one package manager — never cross-fall-back. */
-async function installDependencies(dir, env) {
+async function installDependencies(dir, env, signal) {
   const has = async (name) => {
     try {
       await stat(join(dir, name))
@@ -336,9 +344,9 @@ async function installDependencies(dir, env) {
       return false
     }
   }
-  if (await has('pnpm-lock.yaml')) return runCommand(['pnpm', 'install', '--frozen-lockfile'], { cwd: dir, env })
-  if (await has('package-lock.json')) return runCommand(['npm', 'ci', '--no-audit', '--no-fund'], { cwd: dir, env })
-  if (await has('yarn.lock')) return runCommand(['yarn', 'install', '--frozen-lockfile'], { cwd: dir, env })
+  if (await has('pnpm-lock.yaml')) return runCommand(['pnpm', 'install', '--frozen-lockfile'], { cwd: dir, env, signal })
+  if (await has('package-lock.json')) return runCommand(['npm', 'ci', '--no-audit', '--no-fund'], { cwd: dir, env, signal })
+  if (await has('yarn.lock')) return runCommand(['yarn', 'install', '--frozen-lockfile'], { cwd: dir, env, signal })
   if (await has('package.json')) {
     say('  ! package.json 没有锁文件，拒绝安装未锁定的依赖树')
     return 2
@@ -363,7 +371,8 @@ async function installDependencies(dir, env) {
 // all along; the server even says so in a comment. The unit test passed because
 // it downloaded with the runner token, which is what real code should have
 // been doing.
-async function downloadPackage(config, { url, sha256, filename }) {
+async function downloadPackage(config, { url, sha256, filename }, signal) {
+  signal?.throwIfAborted()
   const dir = join(dataDir(), 'packages')
   await mkdir(dir, { recursive: true })
   const target = join(dir, filename || 'app-package')
@@ -371,6 +380,7 @@ async function downloadPackage(config, { url, sha256, filename }) {
   say(`  下载被测安装包 ${filename ?? url}`)
   const response = await fetch(url, {
     headers: config.runnerToken ? { authorization: `Bearer ${config.runnerToken}` } : {},
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
   })
   if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`)
   const bytes = Buffer.from(await response.arrayBuffer())
@@ -408,7 +418,8 @@ async function downloadPackage(config, { url, sha256, filename }) {
  * executable inside it is *discovered* rather than named — an app's file names
  * differ per project, per version and per platform.
  */
-async function preparePackage(pkg, file) {
+async function preparePackage(pkg, file, signal) {
+  signal?.throwIfAborted()
   const key = (pkg.sha256 || '').slice(0, 12) || 'unknown'
   const root = join(dataDir(), 'apps', key)
   const marker = join(root, '.mxt-installed')
@@ -428,13 +439,13 @@ async function preparePackage(pkg, file) {
 
   await rm(root, { recursive: true, force: true })
   await mkdir(root, { recursive: true })
-  const executable = await installPackage(file, root)
+  const executable = await installPackage(file, root, signal)
   await writeFile(marker, executable, 'utf8')
   say(`  已安装被测应用 → ${executable}`)
   return executable
 }
 
-async function installPackage(file, root) {
+async function installPackage(file, root, signal) {
   const lower = file.toLowerCase()
 
   if (process.platform === 'win32' && lower.endsWith('.exe')) {
@@ -442,7 +453,7 @@ async function installPackage(file, root) {
     // and, per NSIS, must come last and must NOT be quoted — it consumes the
     // rest of the command line verbatim. Node would add quotes of its own, so
     // the line is built here and passed through unmodified.
-    await runInstaller(`"${file}" /S /D=${root}`)
+    await runInstaller(`"${file}" /S /D=${root}`, signal)
     return findExecutable(root, ['uninstall', '卸载'])
   }
 
@@ -452,11 +463,11 @@ async function installPackage(file, root) {
     // real detail instead of on "not implemented".
     const mount = join(root, 'mnt')
     await mkdir(mount, { recursive: true })
-    await runInstaller(`hdiutil attach "${file}" -nobrowse -readonly -mountpoint "${mount}"`)
+    await runInstaller(`hdiutil attach "${file}" -nobrowse -readonly -mountpoint "${mount}"`, signal)
     try {
       const bundle = (await readdir(mount)).find((entry) => entry.endsWith('.app'))
       if (!bundle) throw new Error('这个 .dmg 里没有找到 .app')
-      await runInstaller(`cp -R "${join(mount, bundle)}" "${root}"`)
+      await runInstaller(`cp -R "${join(mount, bundle)}" "${root}"`, signal)
     } finally {
       await runInstaller(`hdiutil detach "${mount}"`).catch(() => {})
     }
@@ -472,7 +483,7 @@ async function installPackage(file, root) {
   if (process.platform === 'linux' && lower.endsWith('.appimage')) {
     const target = join(root, 'app.AppImage')
     await copyFile(file, target)
-    await runInstaller(`chmod +x "${target}"`)
+    await runInstaller(`chmod +x "${target}"`, signal)
     return target
   }
 
@@ -484,30 +495,14 @@ async function installPackage(file, root) {
   )
 }
 
-function runInstaller(commandLine) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(commandLine, {
-      shell: true,
-      windowsVerbatimArguments: true,
-      stdio: 'ignore',
-      env: systemPath(process.env),
-    })
-    // A silent installer that is waiting for something will never finish, and a
-    // hung run is harder to diagnose than a failed one.
-    const timer = setTimeout(() => {
-      child.kill()
-      reject(new Error(`安装超时（5 分钟）：${commandLine}`))
-    }, 5 * 60_000)
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolvePromise()
-      else reject(new Error(`安装命令失败（退出码 ${code}）：${commandLine}`))
-    })
+async function runInstaller(commandLine, signal) {
+  const timeout = AbortSignal.timeout(300_000)
+  const code = await runCommand([commandLine], {
+    shell: true, windowsVerbatimArguments: true, quiet: true,
+    env: systemPath(process.env),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   })
+  if (code !== 0) throw new Error(`安装命令失败（退出码 ${code}）`)
 }
 
 /** The one executable in an install directory that is the application itself. */
@@ -532,8 +527,21 @@ async function findExecutable(root, excludeWords) {
   )
 }
 
-function runCommand(command, { cwd, env, quiet = false, onLine = null }) {
-  return new Promise((resolvePromise) => {
+export function runCommand(
+  command,
+  {
+    cwd,
+    env,
+    quiet = false,
+    onLine = null,
+    signal,
+    shell = process.platform === 'win32',
+    windowsVerbatimArguments = false,
+    killGraceMs = 1000,
+  },
+) {
+  signal?.throwIfAborted()
+  return new Promise((resolvePromise, reject) => {
     const child = spawn(command[0], command.slice(1), {
       cwd,
       env,
@@ -545,18 +553,120 @@ function runCommand(command, { cwd, env, quiet = false, onLine = null }) {
       // Windows needs a shell to resolve `pnpm` to `pnpm.cmd`. Safe because the
       // platform's allowlist rejects any argument containing shell
       // metacharacters before the command ever reaches a runner.
-      shell: process.platform === 'win32',
+      shell,
+      windowsVerbatimArguments,
+      // Own a process group, never signal a user's existing Electron/browser.
+      detached: process.platform !== 'win32',
     })
+    let stopping = null
+    const stop = () => {
+      if (stopping || !child.pid) return
+      stopping = stopProcessTree(child.pid, killGraceMs)
+      // The close handler below observes the error without an unhandled rejection.
+      stopping.catch(() => {})
+    }
+    signal?.addEventListener('abort', stop, { once: true })
+    if (signal?.aborted) stop()
     if (onLine && child.stdout) {
       forwardLines(child.stdout, process.stdout, (line) => onLine(line, 'stdout'))
       forwardLines(child.stderr, process.stderr, (line) => onLine(line, 'stderr'))
     }
     child.on('error', (error) => {
+      signal?.removeEventListener('abort', stop)
       console.error(`[mxt-runner] 无法启动命令：${error.message}`)
       resolvePromise(2)
     })
-    child.on('close', (code) => resolvePromise(code ?? 2))
+    child.on('close', async (code) => {
+      signal?.removeEventListener('abort', stop)
+      try {
+        // Wait for the forced tree cleanup even when the parent exits first.
+        if (stopping)
+          await stopping.catch((error) => {
+            throw Object.assign(error, { code: 'stop_unconfirmed' })
+          })
+        signal?.throwIfAborted()
+        resolvePromise(code ?? 2)
+      } catch (error) {
+        reject(error)
+      }
+    })
   })
+}
+
+async function stopProcessTree(pid, graceMs) {
+  if (process.platform === 'win32') {
+    await new Promise((resolvePromise, reject) => {
+      const child = spawn(
+        join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'),
+        ['/PID', String(pid), '/T', '/F'],
+        { stdio: 'ignore', windowsHide: true },
+      )
+      child.once('error', reject)
+      child.once('close', (code) =>
+        code === 0 ? resolvePromise() : reject(new Error('无法确认执行进程树已停止')),
+      )
+    })
+    return
+  }
+  const kill = (signal) => {
+    try {
+      process.kill(-pid, signal)
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error
+    }
+  }
+  kill('SIGTERM')
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, graceMs))
+  kill('SIGKILL')
+}
+
+/** A lost lease must stop work, even when the control plane is unreachable. */
+export function watchLease({ heartbeat, leaseSeconds, intervalMs = 5000 }) {
+  const controller = new AbortController()
+  let deadline = Date.now() + leaseSeconds * 1000
+  let closed = false
+  let timer
+  let expiry
+  const expire = () => {
+    clearTimeout(expiry)
+    expiry = setTimeout(
+      () => controller.abort(new Error('执行租约已失效，停止本次进程')),
+      Math.max(1, deadline - Date.now()),
+    )
+    expiry.unref?.()
+  }
+  const poll = async () => {
+    if (closed || controller.signal.aborted) return
+    try {
+      const result = await heartbeat(
+        AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(Math.min(5000, leaseSeconds * 1000)),
+        ]),
+      )
+      if (closed || controller.signal.aborted) return
+      const renewed = Date.parse(result?.leaseUntil)
+      if (Number.isFinite(renewed)) deadline = renewed
+      expire()
+    } catch (error) {
+      if ([401, 403, 409].includes(error.status))
+        controller.abort(new Error('执行已取消或执行权限已失效'))
+    }
+    if (!closed && !controller.signal.aborted) {
+      timer = setTimeout(poll, Math.min(intervalMs, (leaseSeconds * 1000) / 3))
+      timer.unref?.()
+    }
+  }
+  expire()
+  return {
+    signal: controller.signal,
+    ready: poll(),
+    close() {
+      closed = true
+      clearTimeout(timer)
+      clearTimeout(expiry)
+    },
+  }
 }
 
 /**
@@ -762,7 +872,7 @@ function systemPath(env) {
   return { ...env, [key]: [current, ...missing].filter(Boolean).join(';') }
 }
 
-async function executeOnce(config) {
+export async function executeOnce(config) {
   const claimed = await api(config, 'POST', '/runner/v1/runs:claim', {
     token: config.runnerToken,
     body: { runnerId: config.runnerId },
@@ -791,165 +901,205 @@ async function executeOnce(config) {
   delete childEnv.MXT_APP_SHA256
   delete childEnv.MX_AUTO_APP_SHA256
   const reporter = createReporter(config, runId, runToken)
-  const heartbeat = setInterval(() => {
-    api(config, 'POST', `/runner/v1/runs/${runId}/heartbeat`, { token: runToken }).catch(() => {})
-  }, 60_000)
-  heartbeat.unref?.()
-
-  let exitCode = 2
-  let blockedReason = null
-  let gitSha = null
-  try {
-    // Everything up to the test command is infrastructure: if any of it fails
-    // the run is `blocked`, not a red test. Confusing the two is how a team
-    // learns to ignore red.
-    reporter.stage('checkout')
-    const checkout = await prepareCheckout({
-      repoUrl: claimed.app?.repoUrl ?? null,
-      ref: claimed.sourceRef ?? null,
-      appSlug: env.MXT_APP,
-      gitToken: process.env.MXT_GIT_TOKEN,
-    })
-    gitSha = checkout.gitSha
-    if (gitSha) say(`  检出 ${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}`)
-    reporter.stage('checkout', 'ok', gitSha ? `${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}` : '本地目录')
-
-    // The suite's workingDir is the project root inside the checkout, so one
-    // runner can serve several suites of a monorepo.
-    const workDir = claimed.suite?.workingDir
-      ? resolve(checkout.dir, claimed.suite.workingDir)
-      : checkout.dir
-    if (!workDir.startsWith(checkout.dir)) {
-      throw new Error(`suite 的 workingDir 指向了检出目录之外：${claimed.suite.workingDir}`)
-    }
-
-    if (claimed.appPackage?.url) {
-      // Desktop suites test a built installer, not the source tree. The path is
-      // handed to the suite so its spec can launch exactly this build.
-      reporter.stage('launch', 'started', `下载安装包 ${claimed.appPackage.filename ?? ''}`.trim())
-      const downloaded = await downloadPackage(config, claimed.appPackage)
-      // What the suite gets is a launchable application, not the delivery
-      // format it arrived in.
-      childEnv.MXT_APP_PATH = await preparePackage(claimed.appPackage, downloaded)
-      if (claimed.appPackage.sha256) {
-        const verifiedDigest = claimed.appPackage.sha256.toLowerCase()
-        // This is the digest of the downloaded installer/package. Do not hash
-        // the extracted executable and present that as release provenance.
-        childEnv.MXT_APP_SHA256 = verifiedDigest
-        childEnv.MX_AUTO_APP_SHA256 = verifiedDigest
-      }
-      reporter.stage('launch', 'ok')
-    }
-
-    if (claimed.app?.repoUrl) {
-      reporter.stage('install')
-      const installCode = await installDependencies(workDir, childEnv)
-      if (installCode !== 0) throw new Error(`依赖安装失败（退出码 ${installCode}）`)
-      reporter.stage('install', 'ok')
-    }
-
-    if (!command || command.length === 0) {
-      throw new Error('这条 suite 没有配置执行命令')
-    }
-
-    // Credentials for the application under test, fetched with the run-scoped
-    // token. Merged into the child's environment only — never printed, never
-    // written to disk, and gone when the process exits. A failure here is
-    // `blocked`: a suite that asked for a password and started without it fails
-    // inside a login form, and the report would blame the login page.
-    const secrets = await api(config, 'GET', `/runner/v1/runs/${runId}/secrets`, {
-      token: runToken,
-    }).catch((error) => {
-      throw new Error(`无法获取被测应用的密钥：${error.message}`)
-    })
-    const secretCount = Object.keys(secrets?.secrets ?? {}).length
-    if (secretCount > 0) {
-      Object.assign(childEnv, secrets.secrets)
-      say(`  已注入 ${secretCount} 个密钥`)
-    }
-
-    say(`  执行：${command.join(' ')}（工作目录 ${workDir}）`)
-    reporter.stage('execute')
-    exitCode = await runCommand(command, {
-      cwd: workDir,
-      env: childEnv,
-      onLine: (line, stream) => reporter.line(line, stream),
-    })
-    reporter.stage('execute', exitCode === 0 ? 'ok' : 'failed', `退出码 ${exitCode}`)
-
-    // A build suite produces a file, not a result. Copy it where the platform
-    // looks so the normal artifact upload carries it — the platform hashes what
-    // it receives rather than trusting a digest computed here.
-    if (exitCode === 0 && claimed.suite?.kind === 'build') {
-      const collected = await collectBuildArtifact({
-        workDir,
-        pattern: claimed.suite.artifactPath,
-        artifactsDir,
-      })
-      say(collected ? `  已收集产物 ${collected}` : '  ! 构建命令成功，但没有匹配到产物')
-    }
-  } catch (error) {
-    blockedReason = error.message
-    exitCode = 2
-    say(`  ⚠ ${blockedReason}`)
-    // Which stage broke is the whole question when a run comes back blocked,
-    // and it is answered here rather than left to be read out of a log.
-    reporter.stage(reporter.openStage, 'failed', blockedReason)
-  }
-  clearInterval(heartbeat)
-
-  reporter.stage('upload')
-  const count = await uploadArtifacts(config, runId, runToken, artifactsDir)
-  if (count > 0) say(`  已上传 ${count} 个产物`)
-  reporter.stage('upload', 'ok', `${count} 个文件`)
-  await reporter.close()
-
-  const body = { exitCode }
-  let summary = null
-  try {
-    summary = JSON.parse(await readFile(join(artifactsDir, 'summary.json'), 'utf8'))
-  } catch {
-    // Not an error yet — the suite may have written JUnit instead, which is the
-    // format every framework can produce without knowing this platform exists.
-  }
-  if (summary) {
-    body.summary = summary
-  } else {
-    const junit = await readJunitFiles(join(artifactsDir, 'junit'))
-    if (junit.length > 0) {
-      body.junit = junit
-    } else {
-      // Reporting nothing is itself a result. Leaving the run to time out would
-      // give the run page no explanation at all.
-      body.summary = {
-        schemaVersion: 2,
-        runId,
-        app: env.MXT_APP,
-        status: 'blocked',
-        totals: { tests: 0 },
-        blockedReason: blockedReason || '执行结束但既没有 summary.json 也没有 junit/*.xml',
-      }
-    }
-  }
-  if (gitSha) {
-    // Reported at the top level, not only inside the summary.
-    //
-    // A `kind: build` run has no summary at all, so the previous
-    // `gitSha && body.summary` guard silently dropped the provenance for
-    // exactly the runs where it matters most: the installer that comes out is
-    // handed to testers, and "which commit is this 200 MB file" has to be
-    // answerable. It was recorded as `{}`.
-    body.sourceRef = { ref: claimed.sourceRef ?? null, gitSha }
-    if (body.summary) body.summary.sourceRef = { ...(body.summary.sourceRef || {}), ...body.sourceRef }
-  }
-
-  const result = await api(config, 'POST', `/runner/v1/runs/${runId}:complete`, {
-    token: runToken,
-    body,
+  const lease = watchLease({
+    leaseSeconds: claimed.leaseSeconds || 60,
+    heartbeat: (signal) =>
+      api(config, 'POST', `/runner/v1/runs/${runId}/heartbeat`, { token: runToken, signal }),
   })
-  const label = { passed: '✓ 通过', failed: '✗ 失败', blocked: '⚠ 受阻', flaky: '~ 不稳定' }
-  say(`${label[result.run.status] ?? result.run.status}  ${config.server}/runs/${runId}`)
-  return true
+  const { signal } = lease
+  let stopUnconfirmed = false
+
+  try {
+    let exitCode = 2
+    let blockedReason = null
+    let gitSha = null
+    try {
+      await lease.ready
+      signal.throwIfAborted()
+      // Everything up to the test command is infrastructure: if any of it fails
+      // the run is `blocked`, not a red test. Confusing the two is how a team
+      // learns to ignore red.
+      reporter.stage('checkout')
+      const checkout = await prepareCheckout({
+        repoUrl: claimed.app?.repoUrl ?? null,
+        ref: claimed.sourceRef ?? null,
+        appSlug: env.MXT_APP,
+        gitToken: process.env.MXT_GIT_TOKEN,
+        signal,
+      })
+      gitSha = checkout.gitSha
+      if (gitSha) say(`  检出 ${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}`)
+      reporter.stage(
+        'checkout',
+        'ok',
+        gitSha ? `${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}` : '本地目录',
+      )
+
+      // The suite's workingDir is the project root inside the checkout, so one
+      // runner can serve several suites of a monorepo.
+      const workDir = claimed.suite?.workingDir
+        ? resolve(checkout.dir, claimed.suite.workingDir)
+        : checkout.dir
+      if (
+        relative(checkout.dir, workDir).startsWith('..') ||
+        relative(checkout.dir, workDir).startsWith(sep)
+      ) {
+        throw new Error(`suite 的 workingDir 指向了检出目录之外：${claimed.suite.workingDir}`)
+      }
+
+      if (claimed.appPackage?.url) {
+        // Desktop suites test a built installer, not the source tree. The path is
+        // handed to the suite so its spec can launch exactly this build.
+        reporter.stage(
+          'launch',
+          'started',
+          `下载安装包 ${claimed.appPackage.filename ?? ''}`.trim(),
+        )
+        const downloaded = await downloadPackage(config, claimed.appPackage, signal)
+        // What the suite gets is a launchable application, not the delivery
+        // format it arrived in.
+        childEnv.MXT_APP_PATH = await preparePackage(claimed.appPackage, downloaded, signal)
+        if (claimed.appPackage.sha256) {
+          const verifiedDigest = claimed.appPackage.sha256.toLowerCase()
+          // This is the digest of the downloaded installer/package. Do not hash
+          // the extracted executable and present that as release provenance.
+          childEnv.MXT_APP_SHA256 = verifiedDigest
+          childEnv.MX_AUTO_APP_SHA256 = verifiedDigest
+        }
+        reporter.stage('launch', 'ok')
+      }
+
+      if (claimed.app?.repoUrl) {
+        reporter.stage('install')
+        const installCode = await installDependencies(workDir, childEnv, signal)
+        if (installCode !== 0) throw new Error(`依赖安装失败（退出码 ${installCode}）`)
+        reporter.stage('install', 'ok')
+      }
+
+      if (!command || command.length === 0) {
+        throw new Error('这条 suite 没有配置执行命令')
+      }
+
+      // Credentials for the application under test, fetched with the run-scoped
+      // token. Merged into the child's environment only — never printed, never
+      // written to disk, and gone when the process exits. A failure here is
+      // `blocked`: a suite that asked for a password and started without it fails
+      // inside a login form, and the report would blame the login page.
+      const secrets = await api(config, 'GET', `/runner/v1/runs/${runId}/secrets`, {
+        token: runToken,
+        signal,
+      }).catch((error) => {
+        throw new Error(`无法获取被测应用的密钥：${error.message}`)
+      })
+      const secretCount = Object.keys(secrets?.secrets ?? {}).length
+      if (secretCount > 0) {
+        Object.assign(childEnv, secrets.secrets)
+        say(`  已注入 ${secretCount} 个密钥`)
+      }
+
+      say(`  执行：${command.join(' ')}（工作目录 ${workDir}）`)
+      reporter.stage('execute')
+      exitCode = await runCommand(command, {
+        cwd: workDir,
+        env: childEnv,
+        onLine: (line, stream) => reporter.line(line, stream),
+        signal,
+      })
+      reporter.stage('execute', exitCode === 0 ? 'ok' : 'failed', `退出码 ${exitCode}`)
+
+      // A build suite produces a file, not a result. Copy it where the platform
+      // looks so the normal artifact upload carries it — the platform hashes what
+      // it receives rather than trusting a digest computed here.
+      if (exitCode === 0 && claimed.suite?.kind === 'build') {
+        const collected = await collectBuildArtifact({
+          workDir,
+          pattern: claimed.suite.artifactPath,
+          artifactsDir,
+        })
+        say(collected ? `  已收集产物 ${collected}` : '  ! 构建命令成功，但没有匹配到产物')
+      }
+    } catch (error) {
+      stopUnconfirmed = error.code === 'stop_unconfirmed'
+      blockedReason = error.message
+      exitCode = 2
+      say(`  ⚠ ${blockedReason}`)
+      // Which stage broke is the whole question when a run comes back blocked,
+      // and it is answered here rather than left to be read out of a log.
+      reporter.stage(reporter.openStage, 'failed', blockedReason)
+    }
+    if (signal.aborted) {
+      await reporter.close()
+      say(
+        stopUnconfirmed
+          ? '无法确认进程树已停止；请检查执行机'
+          : '本次执行已停止；不会覆盖平台的取消结论',
+      )
+      return true
+    }
+
+    reporter.stage('upload')
+    const count = await uploadArtifacts(config, runId, runToken, artifactsDir, signal)
+    if (count > 0) say(`  已上传 ${count} 个产物`)
+    reporter.stage('upload', 'ok', `${count} 个文件`)
+    await reporter.close()
+
+    const body = { exitCode }
+    let summary = null
+    try {
+      summary = JSON.parse(await readFile(join(artifactsDir, 'summary.json'), 'utf8'))
+    } catch {
+      // Not an error yet — the suite may have written JUnit instead, which is the
+      // format every framework can produce without knowing this platform exists.
+    }
+    if (summary) {
+      body.summary = summary
+    } else {
+      const junit = await readJunitFiles(join(artifactsDir, 'junit'))
+      if (junit.length > 0) {
+        body.junit = junit
+      } else {
+        // Reporting nothing is itself a result. Leaving the run to time out would
+        // give the run page no explanation at all.
+        body.summary = {
+          schemaVersion: 2,
+          runId,
+          app: env.MXT_APP,
+          status: 'blocked',
+          totals: { tests: 0 },
+          blockedReason: blockedReason || '执行结束但既没有 summary.json 也没有 junit/*.xml',
+        }
+      }
+    }
+    if (gitSha) {
+      // Reported at the top level, not only inside the summary.
+      //
+      // A `kind: build` run has no summary at all, so the previous
+      // `gitSha && body.summary` guard silently dropped the provenance for
+      // exactly the runs where it matters most: the installer that comes out is
+      // handed to testers, and "which commit is this 200 MB file" has to be
+      // answerable. It was recorded as `{}`.
+      body.sourceRef = { ref: claimed.sourceRef ?? null, gitSha }
+      if (body.summary)
+        body.summary.sourceRef = { ...(body.summary.sourceRef || {}), ...body.sourceRef }
+    }
+
+    const result = await api(config, 'POST', `/runner/v1/runs/${runId}:complete`, {
+      token: runToken,
+      body,
+      signal,
+    })
+    const label = { passed: '✓ 通过', failed: '✗ 失败', blocked: '⚠ 受阻', flaky: '~ 不稳定' }
+    say(`${label[result.run.status] ?? result.run.status}  ${config.server}/runs/${runId}`)
+    return true
+  } finally {
+    lease.close()
+    await reporter.close()
+    if (signal.aborted && !stopUnconfirmed)
+      await api(config, 'POST', `/runner/v1/runs/${runId}:stopped`, {
+        token: runToken,
+        body: { scope: process.platform === 'win32' ? 'process-tree' : 'process-group' },
+      }).catch(() => {})
+  }
 }
 
 async function cmdWatch({ once = false } = {}) {
@@ -1000,16 +1150,18 @@ Windows 上通常是系统盘，一个应用就要几 GB。用别的盘：
   # 或永久设置 MXT_RUNNER_DATA_DIR=E:/mxt-runner
 `
 
-const command = process.argv[2]
-try {
-  if (command === 'enroll') await cmdEnroll()
-  else if (command === 'uninstall') await cmdUninstall()
-  else if (command === 'login') await cmdLogin()
-  else if (command === 'register') await cmdRegister()
-  else if (command === 'watch') await cmdWatch()
-  else if (command === 'once') await cmdWatch({ once: true })
-  else if (command === 'status') await cmdStatus()
-  else console.log(usage)
-} catch (error) {
-  die(error.message)
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const command = process.argv[2]
+  try {
+    if (command === 'enroll') await cmdEnroll()
+    else if (command === 'uninstall') await cmdUninstall()
+    else if (command === 'login') await cmdLogin()
+    else if (command === 'register') await cmdRegister()
+    else if (command === 'watch') await cmdWatch()
+    else if (command === 'once') await cmdWatch({ once: true })
+    else if (command === 'status') await cmdStatus()
+    else console.log(usage)
+  } catch (error) {
+    die(error.message)
+  }
 }

@@ -204,6 +204,7 @@ function mapRun(row) {
     caseFilter: row.case_filter ?? null,
     runnerId: row.runner_id,
     runTokenSha256: row.run_token_sha256,
+    cancellation: row.cancellation ?? null,
     artifacts: row.artifacts ?? {},
     totals: row.totals ?? {},
     catalog: row.catalog ?? {},
@@ -766,7 +767,7 @@ export class PostgresStore {
     return rows.map(mapRun)
   }
 
-  async updateRun(id, patch) {
+  async updateRun(id, patch, expectedStatuses = null) {
     const columns = {
       status: 'status',
       runnerId: 'runner_id',
@@ -778,7 +779,7 @@ export class PostgresStore {
       targetUrl: 'target_url',
       runTokenSha256: 'run_token_sha256',
     }
-    const jsonColumns = { totals: 'totals', catalog: 'catalog', artifacts: 'artifacts' }
+    const jsonColumns = { totals: 'totals', catalog: 'catalog', artifacts: 'artifacts', cancellation: 'cancellation' }
     const assignments = []
     const values = [id]
     for (const [key, column] of Object.entries(columns)) {
@@ -792,10 +793,13 @@ export class PostgresStore {
       assignments.push(`${column} = $${values.length}::jsonb`)
     }
     if (assignments.length === 0) return this.getRun(id)
+    const guard = expectedStatuses ? ` AND status = ANY($${values.push(expectedStatuses)}::text[])` : ''
     const { rows } = await this.pool.query(
-      `UPDATE mxt_runs SET ${assignments.join(', ')} WHERE id = $1 RETURNING *`,
+      `UPDATE mxt_runs SET ${assignments.join(', ')} WHERE id = $1${guard} RETURNING *`,
       values,
     )
+    if (expectedStatuses && !rows[0])
+      throw new AppError(409, 'run_state_changed', '执行状态已改变，请重新读取')
     return rows[0] ? mapRun(rows[0]) : null
   }
 
@@ -869,7 +873,7 @@ export class PostgresStore {
            -- The credential dies with the run: a crashed-and-restarted runner
            -- must not be able to rewrite a result already recorded.
            lease_until = NULL, run_token_sha256 = NULL
-         WHERE id = $1 RETURNING *`,
+         WHERE id = $1 AND status IN ('queued', 'pending-runner', 'running') RETURNING *`,
         [
           runId,
           run.status,
@@ -882,9 +886,12 @@ export class PostgresStore {
           JSON.stringify(run.sourceRef ?? {}),
         ],
       )
-      if (!rows[0]) return null
+      if (!rows[0]) throw new AppError(409, 'run_already_finished', '执行已结束，不能覆盖结果')
+      if (payload.latestPackage)
+        await client.query('UPDATE mxt_apps SET latest_package = $2::jsonb, updated_at = now() WHERE id = $1',
+          [rows[0].app_id, JSON.stringify(payload.latestPackage)])
 
-      // A retried complete must not double-insert. Delete first, then write.
+      // Only the winner of the guarded transition may replace result rows.
       await client.query('DELETE FROM mxt_run_cases WHERE run_id = $1', [runId])
       await client.query('DELETE FROM mxt_steps WHERE run_id = $1', [runId])
 

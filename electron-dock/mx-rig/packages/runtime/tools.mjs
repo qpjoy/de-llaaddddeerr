@@ -1,5 +1,6 @@
 import { RigError, validateArgs } from '../contracts/index.mjs'
 import { CONFIDENCE_KEYS, VERDICT_KEYS, normalizeFinding } from './finding.mjs'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 const schema = (properties, required = Object.keys(properties)) => ({
   type: 'object',
@@ -53,6 +54,26 @@ export const DEFINITIONS = [
     description: '读取测试执行及证据；保留 failed、blocked、flaky 等原始结论。',
     effect: 'read',
     parameters: schema({ runId: '测试 run ID' })
+  },
+  {
+    name: 'tests_wait',
+    title: '等待执行结果',
+    group: 'test',
+    description:
+      '有界等待测试进入终态（最长 30 秒）。超时返回原始状态和 timedOut=true，可再次等待；等待超时不等于测试失败。cancelled 不代表进程已停止，请核对 cancellation.stopState。',
+    effect: 'read',
+    parameters: {
+      ...schema({ runId: '测试 run ID' }),
+      properties: {
+        ...schema({ runId: '测试 run ID' }).properties,
+        timeoutMs: {
+          type: 'integer',
+          minimum: 1000,
+          maximum: 30000,
+          description: '本次等待毫秒数，默认 10000'
+        }
+      }
+    }
   },
   {
     name: 'tests_cases',
@@ -246,6 +267,7 @@ export class ToolExecutor {
       }
     const read = READ_ROUTES[name]
     if (read) return this.client.request(read(args), undefined, context.signal)
+    if (name === 'tests_wait') return waitForRun(this.client, args, context.signal)
     if (name === 'tests_run')
       return this.client.request(
         `/api/v1/tasks/${encodeURIComponent(args.taskId)}:run`,
@@ -262,5 +284,38 @@ export class ToolExecutor {
   }
   async close() {
     await this.browser?.close()
+  }
+}
+
+const RUN_TERMINAL = new Set([
+  'passed',
+  'failed',
+  'flaky',
+  'blocked',
+  'expired',
+  'timeout',
+  'cancelled'
+])
+
+export async function waitForRun(client, { runId, timeoutMs = 10000 }, signal, pollMs = 1000) {
+  const deadline = AbortSignal.timeout(timeoutMs)
+  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline
+  let latest = null
+  try {
+    while (true) {
+      combined.throwIfAborted()
+      latest = await client.request(
+        `/api/v1/runs/${encodeURIComponent(runId)}`,
+        undefined,
+        combined
+      )
+      if (RUN_TERMINAL.has(latest.run?.status))
+        return { ...latest, wait: { terminal: true, timedOut: false } }
+      await sleep(pollMs, undefined, { signal: combined })
+    }
+  } catch (error) {
+    signal?.throwIfAborted()
+    if (!deadline.aborted) throw error
+    return { ...(latest ?? { run: null, runId }), wait: { terminal: false, timedOut: true } }
   }
 }

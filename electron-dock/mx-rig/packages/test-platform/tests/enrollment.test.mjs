@@ -65,7 +65,7 @@ test('the install scripts and the runner they install need no credentials', asyn
   assert.equal(runner.status, 200)
   assert.match(runner.body, /mxt-runner/u)
   const staleDigestRemoval = runner.body.indexOf('delete childEnv.MXT_APP_SHA256')
-  const packageDownload = runner.body.indexOf('await downloadPackage(config, claimed.appPackage)')
+  const packageDownload = runner.body.indexOf('await downloadPackage(config, claimed.appPackage, signal)')
   const verifiedDigestInjection = runner.body.indexOf('childEnv.MXT_APP_SHA256 = verifiedDigest')
   assert.ok(staleDigestRemoval !== -1 && staleDigestRemoval < packageDownload)
   assert.ok(packageDownload < verifiedDigestInjection)

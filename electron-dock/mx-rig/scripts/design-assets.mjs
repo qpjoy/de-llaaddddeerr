@@ -16,32 +16,43 @@ export const DESIGN_FILES = ['tokens.css', 'styles.css']
  * Returns false when the package is not installed (a packaged desktop build
  * already carries the copy) so callers can continue rather than fail to boot.
  */
-export async function syncDesignAssets() {
+export async function syncDesignAssets({ readOnly = false, vendor = VENDOR, sourcePaths } = {}) {
   let sources
   try {
-    sources = DESIGN_FILES.map((file) =>
-      fileURLToPath(import.meta.resolve(`@qpjoy/ui-design-neon-void/${file}`))
-    )
+    sources =
+      sourcePaths ??
+      DESIGN_FILES.map((file) =>
+        fileURLToPath(import.meta.resolve(`@qpjoy/ui-design-neon-void/${file}`))
+      )
   } catch {
+    if (readOnly) {
+      // Packaged applications can carry only the already generated copy.
+      for (const file of DESIGN_FILES) await readFile(resolve(vendor, file), 'utf8')
+    }
     return false
   }
-  await mkdir(VENDOR, { recursive: true })
+  if (!readOnly) await mkdir(vendor, { recursive: true })
   for (const [index, source] of sources.entries()) {
     const body = await readFile(source, 'utf8')
-    const target = resolve(VENDOR, DESIGN_FILES[index])
+    const target = resolve(vendor, DESIGN_FILES[index])
     let current = null
     try {
       current = await readFile(target, 'utf8')
     } catch {
       /* first run */
     }
-    if (current !== body) await writeFile(target, body)
+    if (current !== body) {
+      if (readOnly) throw new Error(`设计资源缺失或过期：${DESIGN_FILES[index]}；请重新构建镜像`)
+      await writeFile(target, body)
+    }
   }
   return true
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const copied = await syncDesignAssets()
+  if (!copied && process.argv.includes('--required'))
+    throw new Error('构建缺少 @qpjoy/ui-design-neon-void；拒绝生成不完整镜像')
   console.log(
     copied
       ? `Neon Void 设计系统已同步到 apps/web/vendor/（${DESIGN_FILES.join('、')}）`

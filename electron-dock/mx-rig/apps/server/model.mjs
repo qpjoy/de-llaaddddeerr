@@ -241,7 +241,8 @@ export class ModelGateway {
     let text = ''
     let buffered = ''
     let size = 0
-    for await (const chunk of response.body) {
+    let finished = false
+    stream: for await (const chunk of response.body) {
       size += chunk.length
       if (size > 512_000) throw new RigError('model_limit', '模型响应超过上限', 502)
       buffered += decoder.decode(chunk, { stream: true })
@@ -253,16 +254,25 @@ export class ModelGateway {
         // Comments (`:` keep-alives) and blank separators are part of SSE.
         if (!line.startsWith('data:')) continue
         const frame = line.slice(5).trim()
-        if (!frame || frame === '[DONE]') continue
+        if (!frame) continue
+        if (frame === '[DONE]') {
+          finished = true
+          break stream
+        }
         let parsed
         try {
           parsed = JSON.parse(frame)
         } catch {
-          // One malformed frame is not worth losing the turn over; the final
-          // shape check below still has to pass.
-          continue
+          throw new RigError('model_response', '模型流包含损坏的 JSON，无法确认完整结果', 502)
         }
-        const delta = parsed.choices?.[0]?.delta
+        if (parsed.error) throw new RigError('model_response', '模型流返回了错误', 502)
+        const choice = parsed.choices?.[0]
+        if (choice?.finish_reason != null) {
+          if (!['stop', 'tool_calls'].includes(choice.finish_reason))
+            throw new RigError('model_incomplete', '模型输出未正常完成，请重试', 502)
+          finished = true
+        }
+        const delta = choice?.delta
         if (typeof delta?.content === 'string' && delta.content) {
           text += delta.content
           onDelta(delta.content)
@@ -278,6 +288,8 @@ export class ModelGateway {
         }
       }
     }
+    if (!finished)
+      throw new RigError('model_incomplete', '模型流在最终完成标记之前中断', 502)
     return accept(
       {
         choices: [

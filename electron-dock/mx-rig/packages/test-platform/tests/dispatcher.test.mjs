@@ -298,6 +298,7 @@ function reconcileStore(runs) {
   return {
     updates,
     listRuns: async ({ status }) => runs.filter((run) => run.status === status),
+    getRun: async (id) => runs.find((run) => run.id === id),
     updateRun: async (id, patch) => updates.push([id, patch]),
   }
 }
@@ -401,6 +402,7 @@ test('a run that can never start says so instead of sitting in the queue', async
       status === 'queued' ? [{ id: 'trun_9', appId: app.id, suiteId: suite.id }] : [],
     getSuite: async () => ({ ...suite, runnerKind: 'server' }),
     getApp: async () => app,
+    getRun: async () => ({ id: 'trun_9', status: 'running' }),
     updateRun: async (id, patch) => updates.push([id, patch]),
   }
   const dispatched = await dispatchQueued({
@@ -417,8 +419,8 @@ test('a run that can never start says so instead of sitting in the queue', async
     logger: { error() {} },
   })
   assert.deepEqual(dispatched, [])
-  assert.equal(updates[0][1].status, 'blocked')
-  assert.match(updates[0][1].blockedReason, /403/u)
+  assert.equal(updates.at(-1)[1].status, 'blocked')
+  assert.match(updates.at(-1)[1].blockedReason, /403/u)
 })
 
 test('the global server-run cap leaves excess work queued', async () => {

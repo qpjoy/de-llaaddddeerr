@@ -24,7 +24,9 @@
  * testable without a server.
  */
 
-export const SYSTEM_VERSION = '0.7'
+import { PRODUCT_VERSION } from '../../packages/contracts/version.mjs'
+
+export const SYSTEM_VERSION = PRODUCT_VERSION
 
 /**
  * What the workbench is allowed to report about itself.
@@ -630,6 +632,17 @@ export const QUESTS = [
  * read what changed instead of re-scanning the whole catalogue.
  */
 export const CHANGELOG = [
+  {
+    version: PRODUCT_VERSION,
+    at: '2026-09-21',
+    title: '测试工具接口与执行可靠性',
+    notes: [
+      '新增独立 MCP 入口，可由 Codex 调用测试查询、派发、等待与取消；所有操作仍受 Internal 策略和账号权限约束。',
+      '取消记录区分请求与停止回执，等待超时保留原始执行状态，迟到结果不能覆盖取消状态。',
+      '修复模型断流、结论引用自证、统计窗口和只读容器设计资源问题。'
+    ],
+    quests: []
+  },
   {
     version: '0.7',
     at: '2026-09-16',

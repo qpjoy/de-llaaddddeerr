@@ -270,7 +270,8 @@ export function buildInsights({
   const durations = inWindow
     .map((run) => run.durationMs)
     .filter((value) => Number.isFinite(value) && value > 0)
-  const health = caseHealth(runCasesByRun)
+  const windowIds = new Set(inWindow.map((run) => run.id))
+  const health = caseHealth(new Map([...runCasesByRun].filter(([id]) => windowIds.has(id))))
   const cover = coverage(cases)
   const machines = fleet(runners, now)
   const pending = {
@@ -297,7 +298,7 @@ export function buildInsights({
     caveats: [
       `统计窗口为最近 ${windowDays} 天，按 ${timeZone} 的自然日分桶。`,
       '通过率的分母只含 passed / failed / flaky；受阻（blocked）单独计，不算通过也不算失败。',
-      '用例级健康度只统计窗口内最近若干次执行，样本少时不代表趋势。'
+      '服务最多读取最近 200 次执行，用例级健康度只取窗口内最近 40 次已判断执行；达到上限时不是全量统计。'
     ]
   }
 }

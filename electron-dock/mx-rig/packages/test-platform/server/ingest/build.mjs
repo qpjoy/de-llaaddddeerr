@@ -55,7 +55,7 @@ export async function findBuildArtifact(artifacts, runId) {
 /**
  * @returns {{status, blockedReason, package}} the run's outcome
  */
-export async function completeBuildRun({ store, artifacts, run, exitCode, config }) {
+export async function completeBuildRun({ artifacts, run, exitCode, config }) {
   if (exitCode !== 0) {
     return {
       status: exitCode === 2 ? 'blocked' : 'failed',
@@ -96,6 +96,6 @@ export async function completeBuildRun({ store, artifacts, run, exitCode, config
     buildRunId: run.id,
     publishedAt: new Date().toISOString(),
   }
-  await store.setLatestPackage(run.appId, pkg)
+  // Published with the guarded run completion, never before cancellation wins.
   return { status: 'passed', blockedReason: null, package: pkg }
 }

@@ -37,7 +37,7 @@ export const BUILTIN_AGENTS = Object.freeze([
     summary: '按被测应用挑选合适的冒烟计划，确认执行机就绪后派发，并跟到 run 出结论。',
     category: 'orchestration',
     surface: 'any',
-    tools: ['tests_apps', 'tests_list', 'tests_runners', 'tests_run', 'tests_result'],
+    tools: ['tests_apps', 'tests_list', 'tests_runners', 'tests_run', 'tests_result', 'tests_wait'],
     starter: '帮我为 Compass 选一个冒烟计划，确认执行机就绪后派发，并告诉我 run ID。',
     persona: `你负责把一次冒烟测试从"想跑"带到"已经有结论"。
 顺序固定：先看应用与套件，再看可用的测试计划，再确认有在线执行机，最后才派发。

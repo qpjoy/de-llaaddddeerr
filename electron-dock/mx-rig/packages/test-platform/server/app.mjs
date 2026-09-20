@@ -1947,16 +1947,25 @@ export function createApp({
       handler: async ({ params, principal }) => {
         requireRole(principal, 'operator')
         const run = await requireRun(params.runId)
-        if (['passed', 'failed', 'flaky', 'blocked', 'expired', 'cancelled'].includes(run.status)) {
+        if (['passed', 'failed', 'flaky', 'blocked', 'expired', 'timeout', 'cancelled'].includes(run.status)) {
           throw new AppError(409, 'run_not_cancellable', `这次执行已经是「${run.status}」，不能取消`)
         }
+        const requestedAt = new Date().toISOString()
+        const cancelled = await store.updateRun(run.id, {
+          status: 'cancelled',
+          finishedAt: requestedAt,
+          cancellation: {
+            requestedAt,
+            stopState: run.status === 'running' || run.runTokenSha256 ? 'requested' : 'not-started',
+            acknowledgedAt: null,
+          },
+        }, [run.status])
+        await recordRunEvents(run.id, [normalizeRunEvent({ kind: 'run.finished', status: 'cancelled' })])
         return {
           status: 200,
           body: {
-            run: await store.updateRun(run.id, {
-              status: 'cancelled',
-              finishedAt: new Date().toISOString(),
-            }),
+            run: cancelled,
+            note: '取消请求已记录；正在执行的进程是否停止请查看 cancellation.stopState。',
           },
         }
       },
@@ -2249,7 +2258,7 @@ export function createApp({
           throw new AppError(409, 'run_not_running', `这次执行是「${run.status}」，无法续租`)
         }
         const leaseUntil = new Date(Date.now() + config.runLeaseMs).toISOString()
-        await store.updateRun(run.id, { leaseUntil })
+        await store.updateRun(run.id, { leaseUntil }, ['running'])
         // Renewing the lease is also the machine saying it is alive. Without
         // this, a runner that is busy for twenty minutes shows as offline for
         // nineteen of them, because only the idle claim poll used to touch it.
@@ -2259,10 +2268,30 @@ export function createApp({
     },
     {
       method: 'POST',
+      pattern: '/runner/v1/runs/:runId:stopped',
+      auth: 'runScope',
+      handler: async ({ run, body }) => {
+        if (run.status !== 'cancelled')
+          throw new AppError(409, 'run_not_cancelled', '仅接受已取消执行的停止回执')
+        const stopped = await store.updateRun(run.id, {
+          cancellation: {
+            ...run.cancellation,
+            stopState: 'stopped',
+            scope: enumValue(body, 'scope', ['process-group', 'process-tree']),
+            acknowledgedAt: run.cancellation?.acknowledgedAt ?? new Date().toISOString(),
+          },
+          leaseUntil: null,
+        }, ['cancelled'])
+        if (run.runnerId) await store.touchRunner(run.runnerId, 'idle')
+        return { status: 200, body: { run: stopped } }
+      },
+    },
+    {
+      method: 'POST',
       pattern: '/runner/v1/runs/:runId/events',
       auth: 'runScope',
       handler: async ({ run, body }) => {
-        if (['passed', 'failed', 'flaky', 'blocked', 'expired', 'cancelled'].includes(run.status)) {
+        if (['passed', 'failed', 'flaky', 'blocked', 'expired', 'timeout', 'cancelled'].includes(run.status)) {
           // Refusing beats appending. A run whose result is recorded has a
           // timeline that is finished; letting a straggling batch extend it
           // would put events after the end of the run.
@@ -2314,7 +2343,7 @@ export function createApp({
     },
   ]
 
-  const TERMINAL_RUN_STATUS = ['passed', 'failed', 'flaky', 'blocked', 'expired', 'cancelled']
+  const TERMINAL_RUN_STATUS = ['passed', 'failed', 'flaky', 'blocked', 'expired', 'timeout', 'cancelled']
   const SSE_HEARTBEAT_MS = 15_000
 
   /**
@@ -2854,10 +2883,14 @@ async function completeBuild({ store, artifacts, run, exitCode, config, sourceRe
       runTokenSha256: null,
     },
     cases: [],
+    latestPackage: outcome.package,
   })
 }
 
 export async function completeRun({ store, artifacts, run, body, config = null }) {
+  const current = await store.getRun(run.id)
+  if (!current || !['queued', 'pending-runner', 'running'].includes(current.status))
+    throw new AppError(409, 'run_already_finished', '执行已结束，不能覆盖结果')
   const exitCode = Number.isInteger(body?.exitCode) ? body.exitCode : null
 
   // A build run takes a different path entirely. It has no cases, so running it

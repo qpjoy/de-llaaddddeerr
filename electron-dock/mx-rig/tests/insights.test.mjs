@@ -59,6 +59,22 @@ test('only runs inside the window are counted', () => {
   assert.ok(ordered[0].finishedAt > ordered[1].finishedAt)
 })
 
+test('case health and risk cards exclude old failures even when a caller supplies them', () => {
+  const runs = [run('failed', 30), run('failed', 31)]
+  const report = buildInsights({
+    runs,
+    now: NOW,
+    windowDays: 7,
+    runCasesByRun: new Map(runs.map((entry) => [entry.id, [{ caseId: 'login', status: 'failed' }]]))
+  })
+  assert.equal(report.verdicts.total, 0)
+  assert.deepEqual(report.cases.alwaysFailing, [])
+  assert.equal(
+    report.risks.some((risk) => risk.kind === 'case'),
+    false
+  )
+})
+
 test('the trend has one bucket per day including days with no runs', () => {
   const buckets = trend([run('passed', 0), run('failed', 0), run('passed', 2)], {
     from: new Date(NOW.getTime() - 3 * 86_400_000),

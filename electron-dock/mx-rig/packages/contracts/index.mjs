@@ -6,6 +6,7 @@ export const TOOL_NAMES = [
   'tests_runs',
   'tests_run',
   'tests_result',
+  'tests_wait',
   'tests_cases',
   'tests_case_results',
   'tests_artifacts',
@@ -70,7 +71,10 @@ export function validateArgs(schema, args) {
     if (!Object.hasOwn(args, key)) throw new RigError('invalid_arguments', `缺少参数 ${key}`)
   for (const [key, value] of Object.entries(args)) {
     const property = schema.properties[key]
-    text(value, key, property.maxLength || 4000)
+    if (property.type === 'integer') {
+      if (!Number.isInteger(value) || value < property.minimum || value > property.maximum)
+        throw new RigError('invalid_arguments', `${key} 超出允许的整数范围`)
+    } else text(value, key, property.maxLength || 4000)
     // A closed set in the schema is a closed set at the door. Without this a
     // tool that documents an enum would still accept anything a model wrote,
     // and every caller would have to re-check it.

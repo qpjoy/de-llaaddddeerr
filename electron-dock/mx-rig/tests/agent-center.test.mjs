@@ -44,7 +44,7 @@ test('the tool catalogue reports effect, surface and whether Internal allows it'
   const { api } = await fixture(t)
   const { status, body } = await api('/api/rig/v1/tools')
   assert.equal(status, 200)
-  assert.equal(body.tools.length, 15)
+  assert.equal(body.tools.length, 16)
   const run = body.tools.find((tool) => tool.name === 'tests_run')
   assert.equal(run.effect, 'write')
   assert.equal(run.surface, 'internal')

@@ -784,6 +784,7 @@ finish "$MXT_EXIT"
     const body = await response.json()
     return (body.items ?? []).map((job) => ({
       runId: job.metadata?.labels?.['mxt.run-id'] ?? null,
+      uid: job.metadata?.uid,
       failed: Number(job.status?.failed ?? 0) > 0,
       succeeded: Number(job.status?.succeeded ?? 0) > 0,
       // Kubernetes states the reason on the Job condition when it gave up —
@@ -793,6 +794,23 @@ finish "$MXT_EXIT"
         (job.status?.conditions ?? []).find((condition) => condition.type === 'Failed')?.reason ??
         null,
     }))
+  }
+
+  async cancel(runId, uid) {
+    const { token } = await this.#credentials()
+    const name = `mxt-run-${runId.replace(/[^a-z0-9-]/giu, '').toLowerCase()}`.slice(0, 63)
+    const response = await this.fetchImpl(
+      `${this.apiBase}/apis/batch/v1/namespaces/${this.namespace}/jobs/${name}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ propagationPolicy: 'Foreground', ...(uid ? { preconditions: { uid } } : {}) }),
+        signal: AbortSignal.timeout(15_000),
+      },
+    )
+    if (!response.ok && response.status !== 404)
+      throw new Error(`Kubernetes rejected Job cancellation: ${response.status}`)
+    // A successful DELETE is a request, not a receipt that Pods have stopped.
   }
 
   async dispatch({ run, suite, app, env, runToken, apiBase }) {
@@ -852,6 +870,31 @@ export async function reconcileServerRuns({ store, dispatcher, logger = console 
     return []
   }
 
+  for (const job of jobs) {
+    if (!job.runId) continue
+    const run = await store.getRun(job.runId)
+    if (!run || !['cancelled', 'expired', 'timeout'].includes(run.status)) continue
+    try {
+      await dispatcher.cancel(run.id, job.uid)
+      await store.updateRun(run.id, {
+        cancellation: { ...run.cancellation, backend: 'kubernetes', stopState: 'stopping' },
+      }, [run.status])
+    } catch (error) {
+      logger?.error?.(`[reconcile] cancellation pending for ${run.id}: ${error.message}`)
+    }
+  }
+  const present = new Set(jobs.map((job) => job.runId))
+  for (const status of ['cancelled', 'expired', 'timeout']) {
+    for (const run of await store.listRuns({ status, limit: 200 })) {
+      if (run.cancellation?.backend !== 'kubernetes' || run.cancellation.stopState !== 'stopping' || present.has(run.id)) continue
+      await store.updateRun(run.id, {
+        cancellation: { ...run.cancellation, stopState: 'stopped', scope: 'kubernetes-job', acknowledgedAt: new Date().toISOString() },
+        runTokenSha256: null,
+        leaseUntil: null,
+      }, [status])
+    }
+  }
+
   const failedByRun = new Map()
   for (const job of jobs) {
     if (job.runId && job.failed) failedByRun.set(job.runId, job.reason)
@@ -869,7 +912,7 @@ export async function reconcileServerRuns({ store, dispatcher, logger = console 
       // Clearing the token stops a container that somehow survives from writing
       // a result into a run that has already been closed out.
       runTokenSha256: null,
-    })
+    }, ['running'])
     logger?.log?.(`[reconcile] ${run.id} -> blocked (${reason ?? 'job failed'})`)
     reconciled.push(run.id)
   }
@@ -937,6 +980,11 @@ export async function dispatchQueued({
     const app = await store.getApp(run.appId)
     try {
       const runToken = await issueRunToken(run)
+      await store.updateRun(run.id, {
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        leaseUntil: new Date(Date.now() + config.runLeaseMs).toISOString(),
+      }, ['queued', 'pending-runner'])
       await dispatcher.dispatch({
         run,
         suite,
@@ -944,11 +992,6 @@ export async function dispatchQueued({
         env: await buildEnv({ run, suite, app }),
         runToken,
         apiBase: config.selfUrl,
-      })
-      await store.updateRun(run.id, {
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        leaseUntil: new Date(Date.now() + config.runLeaseMs).toISOString(),
       })
       dispatched.push(run.id)
       activeServerRuns += 1
@@ -960,12 +1003,14 @@ export async function dispatchQueued({
         { kind: 'stage', payload: { stage: 'claim', status: 'ok', detail: dispatcher.imageFor(suite) } },
       ])
     } catch (error) {
+      const current = await store.getRun(run.id)
+      if (!current || ['cancelled', 'expired', 'timeout'].includes(current.status)) continue
       logger?.error?.(`[dispatcher] ${run.id} failed: ${error.message}`)
       await store.updateRun(run.id, {
         status: 'blocked',
         finishedAt: new Date().toISOString(),
         blockedReason: `无法创建执行任务：${error.message}`.slice(0, 500),
-      })
+      }, ['queued', 'pending-runner', 'running'])
       await onProgress?.(run.id, [
         { kind: 'stage', payload: { stage: 'claim', status: 'failed', detail: error.message } },
       ])

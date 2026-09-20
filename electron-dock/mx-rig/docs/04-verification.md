@@ -1,5 +1,11 @@
 # 验证记录
 
+## 2026-09-21：MCP 工具入口与可靠性
+
+`npm run check`：122 个模块通过语法与网络所有权耦合检查。`npm test`：430 项通过，0 failed / skipped。新增 MCP stdio 到真实临时 Rig API 的读/写/权限/策略回归、有界等待、实际 Runner 取消回执、父/孙进程组清理、K8s 删除确认与调度竞争、SSE 截断、finding 自证、窗口外用例与生产只读资源测试。
+
+未运行真实账号/模型、Windows 终止、K8s 集群、PostgreSQL 迁移和 Docker 镜像验收；没有操作 MX-H2I 登录/联网、生产数据库或在线注册信息。代码检查与接入方式见 [工具接口与可靠性改进](11-tool-interface-and-reliability.md)。
+
 ## 0.7（流式输出与结构化结论）
 
 日期：2026-09-16。环境同 0.6。

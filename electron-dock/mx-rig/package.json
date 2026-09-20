@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/mx-rig",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "private": true,
   "description": "MX Rig desktop agent workbench and independent Internal test control plane.",
   "author": "QPJoy",
@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "server": "node apps/server/index.mjs",
+    "mcp": "node bin/mx-rig-mcp.mjs",
     "desktop": "electron apps/desktop/main.mjs",
     "test": "node scripts/test.mjs",
     "test:kernel": "node scripts/test.mjs kernel",
@@ -26,6 +27,7 @@
     "prepackage": "node scripts/design-assets.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
     "playwright": "1.58.2",
     "zod": "^4.6.5"
   },

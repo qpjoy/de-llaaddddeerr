@@ -66,15 +66,25 @@ export function normalizeFinding(args) {
 export function auditFinding(finding, { evidence = [], messages = [], testRunId = null } = {}) {
   // Agent missions keep tool output in the model transcript; authored
   // orchestrations keep it in `evidence`. Both are "what this mission read".
+  // Only platform observations count. Claims and web page text are untrusted,
+  // even when they quote a real-looking ID. Associate each result with the
+  // preceding call (IDs may be reused by a gateway).
+  const observed = []
+  const calls = new Map()
+  for (const entry of messages) {
+    if (entry.role === 'assistant')
+      for (const call of entry.tool_calls ?? []) calls.set(call.id, call.function?.name)
+    if (entry.role === 'tool' && calls.get(entry.tool_call_id)?.startsWith('tests_'))
+      observed.push(String(entry.content ?? ''))
+  }
   const haystack = [
-    ...evidence.map((entry) => `${entry.tool} ${entry.summary}`),
-    ...messages
-      .filter((entry) => entry.role === 'tool')
-      .map((entry) => String(entry.content ?? '')),
+    ...evidence.filter((entry) => entry.tool?.startsWith('tests_')).map((entry) => entry.summary),
+    ...observed,
     testRunId ?? ''
   ].join('\n')
+  const seen = new Set(haystack.match(REFERENCE) ?? [])
   const ids = [...new Set((finding.evidence.match(REFERENCE) ?? []).slice(0, 12))]
-  const references = ids.map((id) => ({ id, seen: haystack.includes(id) }))
+  const references = ids.map((id) => ({ id, seen: seen.has(id) }))
   return {
     ...finding,
     references,

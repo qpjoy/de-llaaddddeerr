@@ -393,9 +393,11 @@ export class MemoryStore {
     )
   }
 
-  async updateRun(id, patch) {
+  async updateRun(id, patch, expectedStatuses = null) {
     const run = this.#runs.get(id)
     if (!run) return null
+    if (expectedStatuses && !expectedStatuses.includes(run.status))
+      throw new AppError(409, 'run_state_changed', '执行状态已改变，请重新读取')
     Object.assign(run, patch)
     return clone(run)
   }
@@ -434,10 +436,16 @@ export class MemoryStore {
   async completeRun(runId, payload) {
     const run = this.#runs.get(runId)
     if (!run) return null
+    if (!['queued', 'pending-runner', 'running'].includes(run.status))
+      throw new AppError(409, 'run_already_finished', '执行已结束，不能覆盖结果')
     Object.assign(run, payload.run)
     // The credential dies with the run: a crashed-and-restarted runner must not
     // be able to rewrite a result that is already recorded.
     run.runTokenSha256 = null
+    if (payload.latestPackage) {
+      const app = this.#apps.get(run.appId)
+      if (app) app.latestPackage = clone(payload.latestPackage)
+    }
     this.#runCases = this.#runCases.filter((entry) => entry.runId !== runId)
     this.#steps = this.#steps.filter((entry) => entry.runId !== runId)
     for (const testCase of payload.cases) {

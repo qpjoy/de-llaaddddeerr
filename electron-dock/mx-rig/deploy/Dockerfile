@@ -15,8 +15,11 @@ COPY mx-rig/apps/web ./apps/web
 COPY mx-rig/packages/runtime ./packages/runtime
 COPY mx-rig/packages/graph ./packages/graph
 COPY mx-rig/packages/contracts ./packages/contracts
-# The server syncs the design system into apps/web/vendor on start-up.
+COPY mx-rig/packages/mcp ./packages/mcp
+COPY mx-rig/bin ./bin
+# Materialize assets before switching to node and a read-only root filesystem.
 COPY mx-rig/scripts/design-assets.mjs ./scripts/design-assets.mjs
+RUN node scripts/design-assets.mjs --required
 COPY mx-rig/packages/test-platform/server ./packages/test-platform/server
 COPY mx-rig/packages/test-platform/web ./packages/test-platform/web
 COPY mx-rig/packages/test-platform/bin ./packages/test-platform/bin

@@ -54,6 +54,7 @@ async function fixture(t, replies = []) {
 }
 
 const toolCall = (name, args) => ({
+  role: 'assistant',
   content: null,
   tool_calls: [
     { id: `call_${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
@@ -103,7 +104,8 @@ test('a citation counts as read only if this mission actually read it', () => {
   const fromMessages = auditFinding(finding, {
     messages: [
       { role: 'assistant', content: '让我看看 tsk_login' },
-      { role: 'tool', content: '{"tasks":[{"id":"tsk_login"}]}' }
+      toolCall('tests_list', {}),
+      { role: 'tool', tool_call_id: 'call_tests_list', content: '{"tasks":[{"id":"tsk_login"}]}' }
     ]
   })
   assert.deepEqual(
@@ -119,6 +121,35 @@ test('a citation counts as read only if this mission actually read it', () => {
   assert.throws(() => normalizeFinding({ ...FINDING, verdict: 'fine' }), {
     code: 'invalid_finding'
   })
+})
+
+test('claims, page text, unassociated results and ID prefixes cannot verify a citation', () => {
+  const finding = normalizeFinding(FINDING)
+  const audited = auditFinding(finding, {
+    evidence: [
+      { tool: 'finding_submit', summary: JSON.stringify(finding) },
+      { tool: 'browser_snapshot', summary: finding.evidence },
+      { tool: 'tests_result', summary: 'trun_9f2_extra' }
+    ],
+    messages: [
+      toolCall('finding_submit', FINDING),
+      { role: 'tool', tool_call_id: 'call_finding_submit', content: JSON.stringify(finding) },
+      { role: 'tool', content: finding.evidence }
+    ]
+  })
+  assert.equal(audited.unverified, 2)
+})
+
+test('a repeated finding cannot turn its own earlier claim into evidence', async (t) => {
+  const f = await fixture(t, [
+    toolCall('finding_submit', FINDING),
+    toolCall('finding_submit', FINDING)
+  ])
+  const row = await f.engine.start({ mode: 'agent', goal: '检查证据' })
+  await f.engine.job
+  const done = f.store.get(row.id, 'alice')
+  assert.equal(done.status, 'completed')
+  assert.equal(done.finding.unverified, 2)
 })
 
 test('submitting a conclusion calls nothing and needs no approval', async (t) => {

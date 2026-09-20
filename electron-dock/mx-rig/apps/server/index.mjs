@@ -18,7 +18,7 @@ import { ModelGateway } from './model.mjs'
 import { mapExternalEnvironment } from './environment.mjs'
 import { observeEgress } from './egress.mjs'
 import { ScheduleState, dueOrchestrations } from './orchestration-schedule.mjs'
-import { buildInsights } from './insights.mjs'
+import { buildInsights, runsInWindow } from './insights.mjs'
 import { SYSTEM_VERSION, evaluateSystem, questById, systemFacts } from './system.mjs'
 import { SystemProgress } from './system-progress.mjs'
 import { planDispatch } from './dispatch-intent.mjs'
@@ -89,7 +89,7 @@ export function configuration(env = process.env) {
 
 export async function start(env = process.env, options = {}) {
   const config = options.config || configuration(env)
-  await syncDesignAssets()
+  await syncDesignAssets({ readOnly: env.NODE_ENV === 'production' })
   const kernel = await createRuntime(config, { schedule: options.schedule ?? true })
   const dataRoot = resolve(env.MX_RIG_STATE_DIR || resolve(root, '.runtime/control'))
   const settings = await new Settings(resolve(dataRoot, 'settings.json')).init()
@@ -299,7 +299,7 @@ export async function start(env = process.env, options = {}) {
         const timeZone = url.searchParams.get('timezone') || 'Asia/Shanghai'
         const now = new Date()
         const [runs, apps, tasks, runners] = await Promise.all([
-          kernel.store.listRuns({ limit: 400 }),
+          kernel.store.listRuns({ limit: 200 }),
           kernel.store.listApps(),
           kernel.store.listTasks(),
           kernel.store.listRunners()
@@ -308,7 +308,10 @@ export async function start(env = process.env, options = {}) {
         // Case-level health reads the most recent decided runs only. The whole
         // window would be one query per run, which is the wrong trade for a
         // page someone refreshes.
-        const sampled = runs
+        const sampled = runsInWindow(runs, {
+          from: new Date(now.getTime() - days * 86_400_000),
+          to: now
+        })
           .filter((run) => ['passed', 'failed', 'flaky'].includes(run.status))
           .slice(0, 40)
         const runCasesByRun = new Map(
@@ -328,7 +331,8 @@ export async function start(env = process.env, options = {}) {
             timeZone,
             now
           }),
-          sampledRuns: sampled.length
+          sampledRuns: sampled.length,
+          sample: { runLimit: 200, caseRunLimit: 40, potentiallyTruncated: runs.length === 200 }
         })
         return
       }

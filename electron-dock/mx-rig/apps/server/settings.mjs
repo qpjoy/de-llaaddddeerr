@@ -184,6 +184,7 @@ export class Settings {
         'tests_runs',
         'tests_run',
         'tests_result',
+        'tests_wait',
         'tests_cases',
         'tests_case_results',
         'tests_artifacts',

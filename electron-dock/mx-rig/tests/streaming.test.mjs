@@ -33,6 +33,50 @@ const sse = (frames) =>
   )
 const say = (content) => ({ choices: [{ delta: { content } }] })
 
+test('SSE cannot turn an EOF, malformed frame or token limit into a completed answer', async () => {
+  const partialTool = {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_1',
+              function: { name: 'tests_result', arguments: '{"runId":"trun_123"}' }
+            }
+          ]
+        }
+      }
+    ]
+  }
+  for (const body of [
+    `data: ${JSON.stringify(say('partial'))}\n\n`,
+    `data: ${JSON.stringify(partialTool)}\n\n`,
+    'data: {broken}\n\ndata: [DONE]\n\n',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\ndata: [DONE]\n\n`,
+    'data: {"error":{"message":"do not expose provider details"}}\n\ndata: [DONE]\n\n'
+  ]) {
+    const gateway = new ModelGateway(await settingsWith([provider()]), {
+      environment: { MX_RIG_MODEL_API_KEY: 'fixture' },
+      fetchImpl: async () =>
+        new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+    })
+    await assert.rejects(
+      () =>
+        gateway.turn(
+          'alice',
+          {
+            messages: [{ role: 'user', content: 'go' }],
+            tools: [{ type: 'function', function: { name: 'tests_result' } }]
+          },
+          undefined,
+          () => {}
+        ),
+      (error) => ['model_incomplete', 'model_response'].includes(error.code)
+    )
+  }
+})
+
 async function settingsWith(providers) {
   const settings = await new Settings(await file()).init()
   await settings.update({
