@@ -17,6 +17,7 @@ say() { printf '▸ %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 source "$SCRIPT_DIR/launcher-build-proxy.sh"
+source "$SCRIPT_DIR/k8s-production-recovery.sh"
 
 MX_MANAGE_SENSITIVE_TEMP_DIR=""
 manage_cleanup_sensitive_temp_dir() {
@@ -216,10 +217,10 @@ need_kubectl() {
 
 k8s_crictl() {
   command -v crictl >/dev/null 2>&1 || return 127
-  if [ -S /run/containerd/containerd.sock ]; then
+  if [ -S "${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" ]; then
     crictl \
-      --runtime-endpoint=unix:///run/containerd/containerd.sock \
-      --image-endpoint=unix:///run/containerd/containerd.sock \
+      --runtime-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" \
+      --image-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" \
       "$@"
     return
   fi
@@ -1039,6 +1040,14 @@ k8s_repair_flannel_cni() {
     die "Flannel rollout failed"
   fi
   if ! k8s_wait_flannel_subnet_env; then
+    if [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ]; then
+      say "Flannel is rolled out but its host subnet lease is missing; restart Flannel once"
+      kubectl -n kube-flannel rollout restart daemonset/kube-flannel-ds
+      if kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="$timeout" \
+        && k8s_wait_flannel_subnet_env; then
+        return 0
+      fi
+    fi
     k8s_flannel_diagnostics
     die "Flannel did not create /run/flannel/subnet.env"
   fi
@@ -1407,24 +1416,25 @@ shadow_image_build_impl() {
   shadow_image_cleanup
 }
 
-containerd_import_docker_image() {
+containerd_import_docker_image() (
   local image="$1"
   local safe archive refs
   command -v docker >/dev/null 2>&1 || die "docker is required to export $image"
   command -v ctr >/dev/null 2>&1 || die "ctr is required to import $image into containerd"
-  docker image inspect "$image" >/dev/null
+  docker image inspect "$image" >/dev/null || return 1
   safe="${image//\//_}"
   safe="${safe//:/_}"
-  archive="${TMPDIR:-/tmp}/mx-k8s-image-${safe}.tar"
+  archive="$(mktemp "${TMPDIR:-/tmp}/mx-k8s-image-${safe}.XXXXXX")" || return 1
+  trap 'rm -f -- "$archive"' EXIT
   say "import $image into containerd namespace k8s.io"
+  docker save "$image" -o "$archive" || return 1
+  k8s_ctr images import "$archive" || return 1
   rm -f "$archive"
-  docker save "$image" -o "$archive"
-  ctr -n k8s.io images import "$archive"
-  rm -f "$archive"
-  containerd_ensure_image_refs "$image"
-  refs="$(containerd_present_image_refs "$image" | tr '\n' ' ')"
+  containerd_ensure_image_refs "$image" || return 1
+  refs="$(containerd_present_image_refs "$image" | tr '\n' ' ')" || return 1
   say "containerd image refs ready: $refs"
-}
+  k8s_verify_cri_image "$image"
+)
 
 containerd_image_ref_aliases() {
   local image="$1"
@@ -1443,7 +1453,7 @@ containerd_image_ref_aliases() {
 
 containerd_image_ref_present() {
   local ref="$1"
-  ctr -n k8s.io images ls -q | grep -Fx -- "$ref" >/dev/null 2>&1
+  k8s_ctr images ls -q | grep -Fx -- "$ref" >/dev/null 2>&1
 }
 
 containerd_present_image_refs() {
@@ -1492,7 +1502,7 @@ containerd_ensure_image_refs() {
         continue
       fi
       say "tag containerd image $source as $ref"
-      ctr -n k8s.io images tag "$source" "$ref" >/dev/null
+      k8s_ctr images tag "$source" "$ref" >/dev/null
     fi
   done < <(containerd_image_ref_aliases "$image")
 }
@@ -2458,6 +2468,10 @@ k8s_rollout_status() {
     kubectl -n "$ns" rollout status "$kind/$name" --timeout="$timeout"
     return
   fi
+  if k8s_reimport_missing_workload_images "$ns" "$kind" "$name"; then
+    kubectl -n "$ns" rollout status "$kind/$name" --timeout="$timeout"
+    return
+  fi
   return 1
 }
 
@@ -2727,6 +2741,9 @@ k8s_apply() {
   ns="$(k8s_namespace "$target")"
   dir="$(k8s_manifest_dir "$target")"
   need_kubectl
+  if [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ]; then
+    k8s_production_recovery_state host
+  fi
   K8S_INTERNAL_API_RESTARTED=0
   K8S_SECRET_BUNDLE_VERSION=""
   K8S_SECRET_BUNDLE_CHANGED_COUNT=0
@@ -2767,7 +2784,14 @@ k8s_apply() {
   say "ensure local persistent volumes; preserve existing sources and bindings"
   k8s_local_pvs ensure "$dir"
   say "apply postgres service/statefulset"
-  kubectl apply --validate=false -f "$dir/20-postgres.yaml"
+  if [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ]; then
+    k8s_production_recovery_state checkpoint
+    # Recheck immediately before applying the workload; mounts may have changed
+    # during a long build. This also preserves credentials on partial deploys.
+    k8s_apply_production_postgres "$dir/20-postgres.yaml"
+  else
+    kubectl apply --validate=false -f "$dir/20-postgres.yaml"
+  fi
   say "apply coredns writer rbac"
   kubectl apply --validate=false -f "$dir/25-coredns-rbac.yaml"
   say "apply host runner rbac"
@@ -5687,6 +5711,11 @@ Notes:
   - qpjoy/mx-launcher-server:shadow is local-only. Deploy does not push it to
     Docker Hub; it imports and verifies the image in containerd k8s.io after
     Docker build.
+  - On an existing single-node Linux host, deploy verifies original mounts and
+    PostgreSQL identity, starts inactive host services, repairs invalid kubelet
+    client credentials against the existing CA, and restores missing Secrets
+    from /var/lib/mx-launcher-recovery without replacing live credentials.
+    Wrong/missing disks, an empty database or a different cluster stop recovery.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
   - Set MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:7788 on the Linux host to
@@ -5899,8 +5928,12 @@ ops_internal_production() {
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
       launcher_with_build_proxy internal_production_predeploy_gate
+      k8s_prepare_production_host
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready
+      k8s_recover_production_node
+      k8s_production_recovery_state restore
+      k8s_production_recovery_state checkpoint
       say "preflight server/.env and current K8s Secret state"
       k8s_preflight_secret_bundle "$(k8s_namespace internal-shadow)"
       k8s_release_oss_secret_dry_run "$(k8s_namespace internal-shadow)"
@@ -5908,6 +5941,8 @@ ops_internal_production() {
       k8s_local_pvs preflight "$(k8s_manifest_dir internal-shadow)"
       say "recover Kubernetes networking before image build"
       k8s_recover_cluster_network
+      k8s_require_production_node_ready
+      k8s_production_disk_preflight
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build
@@ -5944,6 +5979,9 @@ ops_internal_production() {
         say "deploy MX Insight Hub after MX Launcher is ready"
         ops_insight_hub deploy
       fi
+      k8s_production_recovery_state checkpoint
+      k8s_production_auth_smoke
+      say "Internal Ops Token retained in Secret mx-internal-ops; use the current token in Admin (never printed by deploy)"
       say "internal-production deploy OK"
       ;;
     apply)

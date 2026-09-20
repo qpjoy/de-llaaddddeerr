@@ -4,6 +4,14 @@
 K8s。第一版目标是 Internal shadow：`mx-launcher/server` + PostgreSQL + TypeORM
 migration + smoke。
 
+## 搬迁或重启恢复
+
+已部署过的单节点生产主机，继续使用 `ops internal-production deploy`。
+它现在会先校验原数据挂载与数据库身份、恢复节点认证和缺失凭据、核对 CRI 镜像，再执行部署。
+首次运行建立 root 私有恢复记录；后续只补回缺失 Secret，不覆盖当前值，不自动初始化空库。
+完整事故归纳、命令、停止条件与备份要求见
+[Internal 搬迁与重启恢复](./31-internal-reboot-recovery.md)。
+
 ## 一句话
 
 Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“期望状态”，由集群持续
@@ -44,7 +52,7 @@ Compose 里环境变量都写在一个 service 下。K8s 中要拆开：
   `mx-internal-ops/token` 注入 `MX_INTERNAL_OPS_TOKEN`；调用方通过
   `x-mx-ops-token` header 提交，不能把它放入 ConfigMap。
 
-正式 Internal 只需把本次首次创建或明确轮换的敏感输入写在被 gitignore 的
+新安装或明确轮换的敏感输入写在被 gitignore 的
 `server/.env`，然后运行正常部署命令。已有健康集群通常不需要重复填写任何 Secret：
 
 ```bash
@@ -55,7 +63,8 @@ bash scripts/manage.sh ops internal-production deploy
 部署脚本只解析已知变量，不会 `source` 或执行 `.env`。调用进程中的同名环境变量优先于
 文件；文件中省略的值保留集群现有 key。文件存在时必须是 regular file，且 POSIX 权限不能
 向 group/other 开放（通常为 `0600`），否则 fail closed。不要为了让 deploy “完整”而把
-线上 Secret 抄回 `.env`。统一输入不会把凭据合并成一个大 Secret，运行时仍按权限和轮换
+线上 Secret 抄回 `.env`。已有数据库的生产恢复入口若同时缺少原 DB/Ops Secret 和恢复快照，
+会提前停止；下表的首次生成行为仅适用于受控的新安装路径。统一输入不会把凭据合并成一个大 Secret，运行时仍按权限和轮换
 边界物化为：
 
 | K8s Secret | `server/.env` 输入 | ensure 行为 |

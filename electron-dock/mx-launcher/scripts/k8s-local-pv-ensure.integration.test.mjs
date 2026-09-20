@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { guardPostgres } from './k8s-postgres-recovery.mjs';
 import { parseManifestObjects } from './k8s-local-pv-ensure.mjs';
 
 const exec = promisify(execFile);
@@ -23,10 +24,14 @@ test('real kubectl renders four YAML documents and the CLI preserves recovered s
       let body;
       if (req.method === 'GET') {
         if (path === '/api') body = { apiVersion: 'v1', kind: 'APIVersions', versions: ['v1'] };
-        else if (path === '/apis') body = { apiVersion: 'v1', kind: 'APIGroupList', groups: [] };
+        else if (path === '/apis') body = { apiVersion: 'v1', kind: 'APIGroupList', groups: [{ name: 'apps', versions: [{ groupVersion: 'apps/v1', version: 'v1' }], preferredVersion: { groupVersion: 'apps/v1', version: 'v1' } }] };
         else if (path === '/api/v1') body = { apiVersion: 'v1', kind: 'APIResourceList', groupVersion: 'v1', resources: [
+          { name: 'services', singularName: 'service', namespaced: true, kind: 'Service', verbs: ['get', 'create'] },
           { name: 'persistentvolumes', singularName: 'persistentvolume', namespaced: false, kind: 'PersistentVolume', verbs: ['get', 'create'], shortNames: ['pv'] },
           { name: 'persistentvolumeclaims', singularName: 'persistentvolumeclaim', namespaced: true, kind: 'PersistentVolumeClaim', verbs: ['get'], shortNames: ['pvc'] }
+        ] };
+        else if (path === '/apis/apps/v1') body = { apiVersion: 'v1', kind: 'APIResourceList', groupVersion: 'apps/v1', resources: [
+          { name: 'statefulsets', singularName: 'statefulset', namespaced: true, kind: 'StatefulSet', verbs: ['get', 'create'] }
         ] };
         else body = pvs.get(path) ?? pvcs.get(path);
       }
@@ -73,6 +78,15 @@ process.exit(result.status ?? 1);
         apiVersion: 'v1', kind: 'PersistentVolumeClaim', metadata: { ...claim },
         spec: { volumeName: pg.metadata.name }, status: { phase: 'Bound' }
       });
+      const postgresManifest = fileURLToPath(new URL('../deploy/k8s/internal-shadow/20-postgres.yaml', import.meta.url));
+      const rendered = await exec(wrapper, ['create', '--dry-run=client', '--validate=false', '-f', postgresManifest, '-o', 'json'], options);
+      const postgresObjects = parseManifestObjects(rendered.stdout);
+      const guarded = guardPostgres(postgresObjects, 'mx-internal-server');
+      assert.equal(guarded.items.length, 2);
+      const originalSet = postgresObjects.find(item => item.kind === 'StatefulSet');
+      const guardedSet = guarded.items.find(item => item.kind === 'StatefulSet');
+      assert.deepEqual(guardedSet.spec.volumeClaimTemplates, originalSet.spec.volumeClaimTemplates);
+      assert.match(guardedSet.spec.template.spec.containers[0].command[2], /initialization refused/);
       const before = structuredClone([...pvs.values()]);
       for (const action of ['preflight', 'ensure']) {
         const result = await exec(process.execPath, [helper, action, manifest], options);

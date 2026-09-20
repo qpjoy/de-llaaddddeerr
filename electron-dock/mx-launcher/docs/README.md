@@ -14,6 +14,9 @@
 
 相关专题：
 
+- [31-internal-reboot-recovery.md](./31-internal-reboot-recovery.md)：
+  Internal 服务器搬迁/重启的 deploy 恢复、原数据与凭据保护、失败停止条件和现场验收。
+
 - [30-mx-rig-product-boundary.md](./30-mx-rig-product-boundary.md)：
   MX Rig 独立产品工作区、测试领域内核迁入与 Launcher 测试中心入口边界；取代旧 AutoTest 的产品发展方向，不改 MX-H2I 登录和联网实现。
 
