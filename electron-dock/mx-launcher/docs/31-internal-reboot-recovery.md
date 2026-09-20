@@ -201,6 +201,42 @@ PostgreSQL Pod/数据库”。验证 SQL 的 `inet_server_addr()::text` 会保�
 当前状态，输出后续核实提示，不擅自启动未知状态的主机服务。飞书、旧 Ops Token、
 恢复身份记录和员工实际登录验收仍是后续步骤。
 
+### 最新业务库恢复成功后：提取原飞书及 Ops 凭据
+
+现场已确认 Service 拒绝错误密码、正确凭据连接最新库成功，`shadow` 环境有 51 个用户、
+45 条用户凭据，SMH/SQB 及各自凭据均存在，最新用户行时间为 2026-09-18。API 已恢复运行。
+这些结果证明连接和记录来源已核实，不等于实际用户密码登录或飞书授权已经验收。
+此时不要再次执行切换或 `--finish`，也不要因凭据数少于用户数而重置密码。
+
+代码同步到服务器后，运行以下检查，提取原认证配置并生成不含值的摘要：
+
+```bash
+bash scripts/inspect-confirmed-mx-auth.sh \
+  /data/mx-recovery/confirmed-cutover.2VZC9C
+```
+
+脚本校验本次 `latest-etcd` 的三份 SHA-256 记录及实际文件内容，将完整树（包括 WAL）
+复制到新的 `auth-inspect.XXXXXX/etcd-working`。只在这个可丢弃的工作副本上运行本地缓存
+`registry.k8s.io/etcd:3.6.8-0`；容器没有外部网络、宿主端口、生产挂载或控制面凭据，
+`--force-new-cluster` 只用于隔离副本。结束时停掉并移除本次临时容器，保留所有文件和日志。
+依据 [etcd 恢复文档](https://etcd.io/docs/v3.6/op-guide/recovery/)，只复制 backend 的
+`member/snap/db` 可能遗漏 WAL 内已提交的数据，因此本步骤保留并回放完整树。
+
+仅读取同命名空间四个精确键：`mx-internal-ops`、`mx-feishu-oauth`、
+`mx-sdk-service-account-secrets`、`mx-launcher-db`。解析 Kubernetes protobuf/JSON，
+核对资源类型和命名空间，拒绝密文、损坏数据或其它资源。私有原值文件权限为 0600，
+不带旧 UID/resourceVersion；终端只显示字段存在状态以及是否与当前配置一致。
+数据库 Secret 仅比较三项凭据，不用历史 Pod IP 覆盖当前可用的 Service 地址。
+
+摘要还包括私有 env/当前 shell 是否会覆盖原凭据、host runner 当前状态，以及旧恢复身份
+与当前挂载是否一致。本命令不写 Kubernetes、不重启 API/数据库、不改挂载/fstab，
+不修改 `/var/lib/mx-launcher-recovery`。空值覆盖也会单独标记；报告中的 `unverified`
+表示相应检查未完成，不能当作一致。仅反馈终端摘要，不上传 `.private.*`、Secret 或 `.env`。
+
+待现场摘要确认原凭据齐全后，下一步才是备份当前配置、选择性恢复原认证 Secret、
+让 API 加载原凭据并验收两种登录；保留旧身份记录后再更新恢复检查点。
+**提取完成不代表凭据已写回，尚不能再次 deploy。**
+
 ### 尚未确认数据来源时的只读清单
 
 先运行只读清单（无需构建或 deploy）：
