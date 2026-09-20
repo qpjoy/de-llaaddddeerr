@@ -5509,7 +5509,7 @@ k8s_restart_internal_api() {
 
 k8s_apply_internal_gateway() {
   local target="$1"
-  local ns dir file upstream tmp
+  local ns dir file upstream tmp version
   ns="$(k8s_namespace "$target")"
   dir="$(k8s_manifest_dir "$target")"
   file="$dir/45-internal-gateway.yaml"
@@ -5527,36 +5527,31 @@ k8s_apply_internal_gateway() {
   tmp="$(mktemp -d)"
   kubectl -n "$ns" get configmap mx-internal-gateway-caddy -o go-template='{{ index .data "Caddyfile" }}' >"$tmp/Caddyfile"
   kubectl -n "$ns" get configmap mx-internal-gateway-caddy -o go-template='{{ index .data "mx-gateway-routes.json" }}' >"$tmp/mx-gateway-routes.json"
-  awk -v upstream="$upstream" '
-    BEGIN { replaced = 0 }
-    !replaced && /^[[:space:]]*reverse_proxy[[:space:]].*:18090[[:space:]]*$/ {
-      indent = $0
-      sub(/reverse_proxy.*/, "", indent)
-      print indent "reverse_proxy " upstream
-      replaced = 1
-      next
-    }
-    { print }
-    END {
-      if (!replaced) {
-        exit 2
-      }
-    }
-  ' "$tmp/Caddyfile" >"$tmp/Caddyfile.next" || {
+  node "$SCRIPT_DIR/k8s-gateway-caddyfile.mjs" \
+    "$tmp/Caddyfile" "$tmp/Caddyfile.next" "$upstream" || {
     rm -rf "$tmp"
     die "failed to patch internal gateway Caddyfile upstream"
   }
-  say "set internal gateway upstream: $upstream"
-  kubectl -n "$ns" create configmap mx-internal-gateway-caddy \
-    --from-file=Caddyfile="$tmp/Caddyfile.next" \
-    --from-file=mx-gateway-routes.json="$tmp/mx-gateway-routes.json" \
-    --dry-run=client -o yaml | kubectl apply --validate=false -f -
-  kubectl -n "$ns" label configmap mx-internal-gateway-caddy \
-    app.kubernetes.io/name=mx-internal-gateway \
-    app.kubernetes.io/part-of=mx-3ks \
-    mx.qpjoy.com/component=internal-gateway \
-    --overwrite >/dev/null
-  kubectl -n "$ns" rollout restart daemonset/mx-internal-gateway >/dev/null 2>&1 || true
+  if cmp -s "$tmp/Caddyfile" "$tmp/Caddyfile.next"; then
+    say "internal gateway upstream already configured: $upstream"
+  else
+    say "set internal gateway upstream: $upstream"
+    kubectl -n "$ns" create configmap mx-internal-gateway-caddy \
+      --from-file=Caddyfile="$tmp/Caddyfile.next" \
+      --from-file=mx-gateway-routes.json="$tmp/mx-gateway-routes.json" \
+      --dry-run=client -o yaml | kubectl apply --validate=false -f -
+    kubectl -n "$ns" label configmap mx-internal-gateway-caddy \
+      app.kubernetes.io/name=mx-internal-gateway \
+      app.kubernetes.io/part-of=mx-3ks \
+      mx.qpjoy.com/component=internal-gateway \
+      --overwrite >/dev/null
+  fi
+  # The gateway copies its Caddyfile at startup. A stable template annotation
+  # reloads changed config once and also resumes a deploy interrupted after the
+  # ConfigMap write. Comparing ConfigMap contents alone would miss that case.
+  version="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$tmp/Caddyfile.next")"
+  kubectl -n "$ns" patch daemonset mx-internal-gateway --type=merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"mx.qpjoy.com/gateway-caddyfile-sha256\":\"$version\"}}}}}" >/dev/null
   rm -rf "$tmp"
 }
 

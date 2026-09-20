@@ -763,6 +763,19 @@ bash scripts/manage.sh ops internal-production predeploy
 PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接通过
 `http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
 Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18090`。
+Internal Caddy 可以与宿主机 Nginx 共存：如果宿主机 `80` 已被占用，Caddy 启动脚本会
+跳过可选的 `:80` 站点，保留应用路由端口 `8008` 和 Internal API 入口 `18090`。
+已有 Nginx 是否向这两个端口转发，以现场 Nginx 配置为准；更新 Caddy upstream 不需要
+修改 Nginx 的监听、证书或反代。直接访问 `http://10.88.88.88:18090/admin/` 使用的是
+Internal 的 `18090` 入口，不能据此判断请求经过了 Nginx。
+
+部署刷新 Caddy 时只替换 `:18090` 站点中 Internal API 的 upstream，兼容旧版单行
+`reverse_proxy` 和当前两条带配置块的规则，同时保留 Domestic edge 与直接请求各自的
+`header_up` 策略、已有应用路由和监听端口。upstream 未变化时不重复写 ConfigMap；
+DaemonSet 通过 Caddyfile 内容版本触发滚动更新，同一版本不强制重启，也能续接配置
+已写入但滚动更新尚未触发的中断部署。无法识别的布局会停止，避免部分改写。旧脚本在带 `{` 的规则上可能报
+`failed to patch internal gateway Caddyfile upstream`，这类情况应更新部署脚本。
+
 该命令不会配置 Domestic 的 `h2i.minsight-ai.com` 证书/vhost；发布新版 MX-H2I 前还必须
 让 official/Compass nginx 持有 443，通过共享 Docker network 反代
 `mx-domestic-edge:8088`，并按 `docs/24-mx-h2i-feishu-login.md` 的公网 HTTPS 步骤实测。
