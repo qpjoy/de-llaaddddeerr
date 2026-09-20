@@ -172,6 +172,24 @@ test('business validation requires both known users and credentials in the actua
   }
 });
 
+test('query returns bare IP addresses; identity checks still reject a different Pod, database or malformed result', () => {
+  // PostgreSQL inet::text includes /32 (IPv4) or /128 (IPv6), unlike podIP.
+  // Keep this SQL contract checked alongside strict address comparisons.
+  assert.match(summarySQL, /'server_address', host\(inet_server_addr\(\)\)/);
+  assert.doesNotMatch(summarySQL, /inet_server_addr\(\)::text/);
+  const row = { environment: 'shadow', has_smh: true, has_sqb: true, smh_has_credential: true, sqb_has_credential: true };
+  for (const ip of ['10.244.0.7', 'fd00::7']) {
+    const report = { server_address: ip, database: 'mx_internal_shadow', records: [row] };
+    const run = value => assertRecords(value, 'shadow', ip, 'mx_internal_shadow');
+    run(report);
+    assert.throws(() => run({ ...report, server_address: ip + (ip.includes(':') ? '/128' : '/32') }), /服务端 IP/);
+    assert.throws(() => run({ ...report, server_address: '10.244.0.8' }), /服务端 IP/);
+    assert.throws(() => run({ ...report, database: 'another_database' }), /PG_DB/);
+    assert.throws(() => run({ ...report, records: {} }), /不是数组/);
+    assert.throws(() => run(null), /不是有效对象/);
+  }
+});
+
 test('resume requires the latest ready Pod, original bindings and unchanged stopped API', () => {
   const f = fixture();
   try {

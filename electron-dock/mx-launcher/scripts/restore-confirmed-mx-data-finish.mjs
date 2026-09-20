@@ -13,8 +13,9 @@ const ROOT = '/data/k8s/mx-runtime/mx-launcher';
 const TARGET = '/var/lib/mx-launcher';
 const same = isDeepStrictEqual;
 const fail = message => { throw new Error(message); };
+// Casting inet to text retains /32 or /128. Kubernetes podIP is a bare address.
 export const summarySQL = `BEGIN READ ONLY;
-SELECT json_build_object('server_address', inet_server_addr()::text, 'database', current_database(),
+SELECT json_build_object('server_address', host(inet_server_addr()), 'database', current_database(),
  'records', (SELECT coalesce(json_agg(s), '[]'::json) FROM (
   SELECT u.environment, count(*) AS users, max(u.updated_at) AS latest_user_row,
     bool_or(lower(u.data->>'account')='smh' OR lower(u.data->>'displayName')='smh') AS has_smh,
@@ -92,7 +93,10 @@ exec psql -X -qAt -w -v ON_ERROR_STOP=1`;
 }
 
 export function assertRecords(report, environment, podIP, database) {
-  if (report.server_address !== podIP || report.database !== database || !Array.isArray(report.records)) fail('查询没有连接到已核实的 PostgreSQL Pod/数据库');
+  if (!report || typeof report !== 'object') fail('数据库查询结果不是有效对象；API 保持停止');
+  if (report.server_address !== podIP) fail('数据库返回的服务端 IP 与已核实的 Pod IP 不一致；API 保持停止');
+  if (report.database !== database) fail('数据库返回的名称与原 Secret 中 PG_DB 不一致；API 保持停止');
+  if (!Array.isArray(report.records)) fail('数据库用户汇总不是数组；API 保持停止');
   if (!report.records.some(row => row.environment === environment && row.has_smh === true && row.has_sqb === true &&
       row.smh_has_credential === true && row.sqb_has_credential === true)) fail('实际 API 环境未同时找到 SMH/SQB 及凭据；API 保持停止');
 }
@@ -148,9 +152,12 @@ function main(work) {
     console.log(authenticationSummary(negative));
     const output = checked(['exec', '-i', name, '-c', 'client', '--', 'sh', '-ec', psqlScript()], summarySQL, 'database-read');
     const report = JSON.parse(output);
-    writeFileSync(`${work}/records.json`, JSON.stringify(report.records), { mode: 0o600 });
+    writeFileSync(`${work}/finish-database-report.private.json`, JSON.stringify(report), { mode: 0o600 });
+    if (Array.isArray(report?.records)) {
+      writeFileSync(`${work}/records.json`, JSON.stringify(report.records), { mode: 0o600 });
+      console.log(JSON.stringify(report.records, null, 2));
+    }
     assertRecords(report, current.config.data.MX_ENVIRONMENT || 'shadow', current.pod.status.podIP, target.database);
-    console.log(JSON.stringify(report.records, null, 2));
     const latest = load(); assertWorkloads(saved, latest);
     if (latest.pod.metadata.uid !== current.pod.metadata.uid) fail('校验期间 PostgreSQL Pod 已更换；请重新执行续接检查');
     const patch = [{ op: 'test', path: '/metadata/uid', value: latest.api.metadata.uid },
