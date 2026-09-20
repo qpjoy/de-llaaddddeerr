@@ -1625,7 +1625,8 @@ MX Launcher K8s deployment plan: $target
 Namespace: $ns
 
 Order:
-  1. Validate every configured server/.env Secret contract without changing K8s.
+  1. Validate existing local PV/PVC bindings and every configured server/.env
+     Secret contract without changing storage or credentials.
   2. Apply namespace.
   3. Apply Internal API ServiceAccount.
   4. Apply non-secret config ConfigMap.
@@ -2300,23 +2301,9 @@ k8s_select_internal_api_gateway_upstream() {
   return 1
 }
 
-k8s_repair_released_local_pv() {
-  local pv="$1"
-  local phase
-  phase="$(kubectl get pv "$pv" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  case "$phase" in
-    Released|Failed)
-      say "repair released local PV $pv ($phase); hostPath data is retained"
-      kubectl delete pv "$pv" --ignore-not-found
-      ;;
-  esac
-}
-
-k8s_repair_internal_local_pvs() {
-  k8s_repair_released_local_pv mx-internal-postgres-local-pv
-  k8s_repair_released_local_pv mx-launcher-internal-ssh-local-pv
-  k8s_repair_released_local_pv mx-launcher-release-artifacts-local-pv
-  k8s_repair_released_local_pv mx-launcher-site-slots-local-pv
+k8s_local_pvs() {
+  local action="$1" dir="$2"
+  node "$SCRIPT_DIR/k8s-local-pv-ensure.mjs" "$action" "$dir/18-local-pv.yaml"
 }
 
 k8s_job_diagnostics() {
@@ -2747,6 +2734,8 @@ k8s_apply() {
   k8s_repair_kubeadm_endpoint
   k8s_recover_cluster_network
   k8s_recover_cluster_dns
+  say "preflight local PV/PVC identities"
+  k8s_local_pvs preflight "$dir"
   say "preflight server/.env Secret contracts"
   k8s_preflight_secret_bundle "$ns"
   k8s_release_oss_secret_dry_run "$ns"
@@ -2775,9 +2764,8 @@ k8s_apply() {
   k8s_ensure_secret_bundle "$ns"
   say "materialize release OSS secret"
   k8s_prepare_release_oss_secret "$ns"
-  say "apply local persistent volumes"
-  k8s_repair_internal_local_pvs
-  kubectl apply --validate=false -f "$dir/18-local-pv.yaml"
+  say "ensure local persistent volumes; preserve existing sources and bindings"
+  k8s_local_pvs ensure "$dir"
   say "apply postgres service/statefulset"
   kubectl apply --validate=false -f "$dir/20-postgres.yaml"
   say "apply coredns writer rbac"
@@ -5921,6 +5909,8 @@ ops_internal_production() {
       say "preflight server/.env and current K8s Secret state"
       k8s_preflight_secret_bundle "$(k8s_namespace internal-shadow)"
       k8s_release_oss_secret_dry_run "$(k8s_namespace internal-shadow)"
+      say "preflight local PV/PVC identities before image build"
+      k8s_local_pvs preflight "$(k8s_manifest_dir internal-shadow)"
       say "recover Kubernetes networking before image build"
       k8s_recover_cluster_network
       say "build Internal image"

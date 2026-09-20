@@ -137,14 +137,25 @@ Postgres 不能像普通 API 那样随便换身份、换盘，所以使用 State
 “服务重启但数据仍在”的真实部署场景。
 
 裸 kubeadm 单节点通常没有默认 StorageClass。`18-local-pv.yaml` 会为 Internal CentOS
-测试/正式主机创建三个 hostPath PV：
+测试/正式主机创建四个 hostPath PV：
 
 - `mx-internal-postgres-local-pv` -> `/var/lib/mx-launcher/k8s/postgres`
 - `mx-launcher-internal-ssh-local-pv` -> `/var/lib/mx-launcher/k8s/internal-ssh`
+- `mx-launcher-release-artifacts-local-pv` -> `/var/lib/mx-launcher/k8s/release-artifacts`
 - `mx-launcher-site-slots-local-pv` -> `/var/lib/mx-launcher/k8s/site-slots`
 
-它们使用 `Retain` 回收策略，`down` 不删除宿主机目录。`deploy` 会自动修复
-`Released` 状态的本地 PV 对象，再重新绑定 PVC。`site-slots` PV 持久化
+它们使用 `Retain` 回收策略，`down` 不删除宿主机目录。`deploy` 在构建前只读校验
+PV/PVC，并在应用存储时再次检查：只创建缺失的 PV；已有 PV 校验通过后原样复用，
+不 apply、删除、替换或清除 `claimRef`。恢复过程中创建的 `hostPath.type: Directory`
+与仓库模板的 `DirectoryOrCreate` 都可复用，现有类型、路径、节点亲和性、容量、UID
+和 PVC 绑定保持不变，避免 `persistentvolumesource is immutable` 错误。
+
+路径、回收策略、存储类型、预留目标或 PVC UID 不匹配，以及 PV 为 `Released/Failed`
+或正在删除时，部署会停止并指出具体 PV。API 读取失败也会停止，不会被当成资源缺失。
+这类情况需要先核实存储和绑定关系，不能通过删 PV/PVC 或 `replace --force` 绕过；
+原先自动删除并重建 `Released/Failed` PV 的行为已移除。
+
+`site-slots` PV 持久化
 Domestic WG materialize、Internal handoff 和 gateway 相关运行态 artifacts，避免
 K8s Pod 重建后重复手工生成。
 
