@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, linkSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { VOLUMES, validateReport, replacementVolumes, databaseCredential, postgresGuard, HUB_DEPLOYMENTS, withPatchFile, command, commandDescription, validateResumeState, validateResumeResources } from '../scripts/recover-retained-storage.mjs'
+import { VOLUMES, validateReport, replacementVolumes, databaseCredential, postgresGuard, HUB_DEPLOYMENTS, withPatchFile, command, commandDescription, validateResumeState, validateResumeResources, validateOnlineRecoveryState, validateOnlineRecoveryResources, podProgress, restoreSearchAndApis } from '../scripts/recover-retained-storage.mjs'
 
 const retained = '/data/k8s/mx-runtime/mx-common/k8s'
 const report = { source: retained, control: ['Database system identifier: 7671038612254789664'],
@@ -261,4 +261,143 @@ test('resume CLI refuses multiple recovery directories before reading files or c
   assert.equal(result.status, 2)
   assert.match(result.stdout, /Usage:/)
   assert.equal(result.stderr, '')
+})
+
+
+const originalIdentifier = '7671038612254789664'
+function onlineResources() {
+  const r = resumeResources()
+  const expected = replacementVolumes(r.saved.pvs, r.saved.common.items.filter(v => v.kind === 'PersistentVolumeClaim'), retained, 'original-node')
+  r.current.pvs = expected.map(([pv]) => ({ ...pv, metadata: { ...pv.metadata, uid: `new-${pv.metadata.name}` }, status: { phase: 'Bound' } }))
+  r.current.claims = expected.map(([, pvc]) => ({ ...pvc, metadata: { ...pvc.metadata, uid: `new-${pvc.metadata.name}` }, status: { phase: 'Bound' } }))
+  r.current.pvs.forEach((pv, i) => { pv.spec.claimRef.uid = r.current.claims[i].metadata.uid })
+  for (const value of r.current.storage) {
+    const postgres = value.metadata.name.endsWith('-postgres')
+    const container = { name: postgres ? 'postgres' : 'elasticsearch', image: postgres ? 'pgvector/pgvector:pg16' : 'docker.elastic.co/elasticsearch/elasticsearch:9.4.2' }
+    const before = r.saved.common.items.find(v => v.metadata.name === value.metadata.name)
+    before.spec.template = { spec: { containers: [structuredClone(container)] } }
+    if (postgres) container.command = postgresGuard(originalIdentifier)
+    value.spec.replicas = 1
+    value.spec.template = { spec: { containers: [container] } }
+    value.metadata.generation = 3
+    value.status = { readyReplicas: postgres ? 1 : 0, observedGeneration: 3 }
+    if (!postgres) value.spec.template.spec.initContainers = [{ name: 'verify-retained-data',
+      command: ['sh', '-ec', 'test -d /retained/_state || test -d /retained/nodes/0/_state'],
+      volumeMounts: [{ name: 'data', mountPath: '/retained', readOnly: true }] }]
+  }
+  return r
+}
+
+test('online continuation accepts only database-verified or search-verified checkpoints', () => {
+  const state = { originalRoot: retained, previousRoot: '/var/lib/mx-common/k8s', originalSystemIdentifier: originalIdentifier }
+  for (const phase of ['original-database-verified-hub-password-aligned', 'original-search-verified']) {
+    assert.doesNotThrow(() => validateOnlineRecoveryState({ ...state, phase }, originalIdentifier))
+  }
+  for (const phase of ['both-storage-copies-preserved', 'retained-volumes-bound', 'data-and-api-restored-workers-paused']) {
+    assert.throws(() => validateOnlineRecoveryState({ ...state, phase }, originalIdentifier))
+  }
+  assert.throws(() => validateOnlineRecoveryState({ ...state, phase: 'original-search-verified' }, '9999999999999'))
+})
+
+test('online continuation accepts the exact rebound storage and guarded live PG without requiring ES readiness', () => {
+  const r = onlineResources(), before = structuredClone(r)
+  assert.doesNotThrow(() => validateOnlineRecoveryResources(r.saved, r.current, originalIdentifier, 'original-node'))
+  assert.deepEqual(r, before)
+  assert.throws(() => validateResumeResources(r.saved, r.current), 'pre-rebind route must still reject this state')
+})
+
+test('online continuation rejects wrong paths, claims, node, guards, live writers, credentials or replaced workloads', () => {
+  for (const mutate of [
+    r => { r.current.pvs[0].spec.hostPath.path = '/var/lib/mx-common/k8s/postgres/data' },
+    r => { r.current.pvs[0].spec.hostPath.type = 'DirectoryOrCreate' },
+    r => { r.current.pvs[0].spec.persistentVolumeReclaimPolicy = 'Delete' },
+    r => { r.current.pvs[0].spec.claimRef.uid = 'other-claim' },
+    r => { r.current.pvs[0].metadata.deletionTimestamp = 'now' },
+    r => { r.current.pvs[0].status.phase = 'Released' },
+    r => { r.current.pvs[0].spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values = ['other-node'] },
+    r => { r.current.claims[0].spec.volumeName = 'other-volume' },
+    r => { r.current.claims[0].metadata.namespace = 'mx-launcher' },
+    r => { r.current.claims[0].spec.storageClassName = 'dynamic' },
+    r => { r.current.claims.pop() },
+    r => { r.current.storage[0].status.readyReplicas = 0 },
+    r => { delete r.current.storage[0].status.observedGeneration },
+    r => { r.current.storage[0].spec.template.spec.containers[0].command = ['postgres'] },
+    r => { r.current.storage[0].metadata.uid = 'recreated' },
+    r => { r.current.storage[1].spec.template.spec.initContainers = [] },
+    r => { r.current.storage[1].spec.template.spec.containers[0].image = 'elasticsearch:other' },
+    r => { r.current.hub[0].spec.replicas = 1 },
+    r => { r.current.hub[2].spec.replicas = 1 },
+    r => { r.current.secret.data.key = 'SyntheticSecret' },
+  ]) {
+    const r = onlineResources(); mutate(r)
+    assert.throws(() => validateOnlineRecoveryResources(r.saved, r.current, originalIdentifier, 'original-node'), error => !error.message.includes('SyntheticSecret'))
+  }
+})
+
+test('progress reports container state without exposing spec, raw error messages or credentials', () => {
+  const pod = { metadata: { name: 'mx-common-elasticsearch-0' }, spec: { secret: 'SyntheticSecret' }, status: {
+    phase: 'Pending', initContainerStatuses: [{ name: 'verify-retained-data', state: { terminated: { reason: 'Completed', exitCode: 0, message: 'SyntheticSecret' } } }],
+    containerStatuses: [{ name: 'elasticsearch', restartCount: 0, state: { waiting: { reason: 'PodInitializing', message: 'SyntheticSecret' } } }],
+  } }
+  const progress = podProgress(pod)
+  assert.equal(progress.init[0].exitCode, 0)
+  assert.equal(progress.containers[0].state, 'PodInitializing')
+  assert.doesNotMatch(JSON.stringify(progress), /SyntheticSecret/)
+})
+
+test('final recovery phase gates API start on schema/auth checks and never mutates storage or database credentials', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mx-final-recovery-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const trace = join(root, 'trace.jsonl')
+  const stub = `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.MX_RECOVERY_TEST_TRACE, JSON.stringify(args)+'\\n');
+const out = value => process.stdout.write(JSON.stringify(value));
+if(args.includes('get') && args.includes('statefulset')) out({metadata:{generation:1},status:{observedGeneration:1,readyReplicas:1}});
+else if(args.includes('get') && args.includes('deployment')) out({metadata:{generation:1},status:{observedGeneration:1,availableReplicas:1}});
+else if(args.includes('get') && args.includes('pod')) out({status:{phase:'Succeeded'}});
+else if(args.includes('exec') && args.at(-1).includes('/_cluster/health')) out({status:'green'});
+else if(args.includes('exec') && args.at(-1).includes('/_cat/indices')) out([{index:'mx-insight-hub-content-v6-current','docs.count':'2548317','store.size':'55gb'}]);
+else if(args.includes('logs')) out({schemaCompatible:process.env.MX_RECOVERY_TEST_SCHEMA==='pass',productDatabaseAuthentication:true});
+else if(args.includes('create')) {const pod=JSON.parse(fs.readFileSync(0,'utf8'));if(pod.kind!=='Pod'||!pod.metadata.name.startsWith('mx-insight-hub-recovery-')) process.exit(44);}
+else if(args.includes('delete') && args.includes('pod')) {}
+else if(args.includes('scale') && args.some(a=>a==='deployment/mx-insight-hub-public'||a==='deployment/mx-insight-hub-admin')) {}
+else {console.error('Unexpected operation');process.exit(45);}
+`
+  writeFileSync(join(root, 'kubectl'), stub, { mode: 0o755 })
+  const checked = spawnSync(process.execPath, ['--check', join(root, 'kubectl')], { encoding: 'utf8' })
+  assert.equal(checked.status, 0, checked.stderr)
+  const savedEnv = { ...process.env }, savedFetch = globalThis.fetch
+  t.mock.method(console, 'log', () => {})
+  try {
+    process.env.PATH = `${root}:${process.env.PATH}`
+    process.env.MX_RECOVERY_TEST_TRACE = trace
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: { tenants: 9, consumers: 10, activeApiKeys: 10 } }) })
+    const input = { hub: [{ metadata: { name: 'mx-insight-hub-public' }, spec: { template: { spec: { containers: [{ image: 'synthetic/hub:test' }] } } } }],
+      node: { metadata: { name: 'original-node' } }, secret: { data: { MX_INSIGHT_ADMIN_TOKEN: Buffer.from('synthetic-token').toString('base64') } },
+      summary: { tenants: 9, consumers: 10 }, checkpoint: () => {} }
+    for (const schema of ['fail', 'pass']) {
+      process.env.MX_RECOVERY_TEST_SCHEMA = schema
+      writeFileSync(trace, '')
+      if (schema === 'fail') await assert.rejects(restoreSearchAndApis(input), /cannot safely serve this schema/)
+      else await restoreSearchAndApis(input)
+      const commands = readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      const scales = commands.filter(args => args.includes('scale'))
+      assert.equal(scales.length, schema === 'pass' ? 2 : 0)
+      for (const args of commands) {
+        assert.ok(!args.includes('patch') && !args.includes('psql'))
+        if (args.includes('delete')) assert.ok(args.includes('pod'))
+        if (args.includes('scale')) assert.ok(args.some(a => ['deployment/mx-insight-hub-public', 'deployment/mx-insight-hub-admin'].includes(a)))
+      }
+      assert.equal(commands.filter(args => args.includes('delete') && args.includes('pod')).length, 1)
+    }
+  } finally {
+    process.env.PATH = savedEnv.PATH
+    for (const name of ['MX_RECOVERY_TEST_TRACE', 'MX_RECOVERY_TEST_SCHEMA']) {
+      if (savedEnv[name] === undefined) delete process.env[name]
+      else process.env[name] = savedEnv[name]
+    }
+    globalThis.fetch = savedFetch
+  }
 })

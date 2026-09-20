@@ -140,3 +140,31 @@ node scripts/recover-retained-storage.mjs --resume-before-rebind \
 不要重新执行完整恢复或 deploy，应先核查实际绑定。该入口不是任意阶段的自动续跑。
 
 Node 子进程管道的限制见 [Node.js stdio 文档](https://nodejs.org/api/child_process.html#optionsstdio)。
+
+
+## PostgreSQL 已核验后，ES 启动超时的续跑
+
+现场已到 `original-database-verified-hub-password-aligned`：三组卷已换绑到原盘，
+原 PostgreSQL 已在线核对 9 租户、10 调用者、13 Key、最新请求和 4 个 Pepper 样本。
+ES 镜像导入后，`verify-retained-data` init 容器 exitCode=0 只证明原 metadata
+目录检查通过，不代表主容器已经启动。`PodInitializing` 不能用索引大小解释。
+使用当前 Pod UID 筛选事件，避免混入上一代同名 Pod 的失败；再查看 CRI 镜像缓存。
+不要重新跑完整恢复或 `--resume-before-rebind`。
+
+确认 ES 主容器可启动后，在服务器拉取已提交的代码，在 Hub 目录执行：
+
+```bash
+node scripts/recover-retained-storage.mjs --resume-after-database \
+  /data/.mx-hub-recovery-ljwH6x
+```
+
+该入口只接受数据库已核验或原搜索已核验的检查点。它核对原宿主机/挂载盘、
+三组 Retain + Directory 卷绑定和节点约束、现有两个 StatefulSet 的 UID/镜像/启动保护、
+停止的 Hub 配置及未变化的 Secret；再从在线 PostgreSQL 读取原 system identifier、
+历史计数及 Pepper 样本，并确认重启全量索引仍关闭。在线 PG 的 control file 会自然变化，
+因此此入口不再拿它与离线副本比较，也不要求正在运行的数据库处于 clean shutdown。
+
+入口不会停止或重新启动 PostgreSQL，不再变更 PV/PVC，不再对齐密码或执行迁移。
+它继续等待 ES 和原索引，验证部署镜像的 schema/产品密码，最后恢复 Admin/Public，
+四类后台 worker 仍暂停。ES 等待阶段每 30 秒打印容器状态；失败仍保留在线旧库和副本。
+验证失败不绕过检查；如当前 Hub 已有新请求或配置改变，应另行核对而非强制续跑。
