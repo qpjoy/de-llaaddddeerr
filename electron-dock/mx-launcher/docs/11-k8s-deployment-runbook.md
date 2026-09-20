@@ -503,15 +503,15 @@ systemctl enable --now docker || true
 重新初始化集群并部署 MX：
 
 ```bash
-export NO_PROXY="${NO_PROXY:-},localhost,127.0.0.1,::1,192.168.1.4,192.168.0.0/16,192.168.224.0/20,192.168.240.0/20,.svc,.cluster.local"
+export MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 # 改成服务器当前 LAN IP
+export NO_PROXY="${NO_PROXY:-},localhost,127.0.0.1,::1,$MX_K8S_APISERVER_ADVERTISE_ADDRESS,192.168.0.0/16,192.168.224.0/20,192.168.240.0/20,.svc,.cluster.local"
 export no_proxy="$NO_PROXY"
 
 POD_CIDR=192.168.224.0/20 \
 SERVICE_CIDR=192.168.240.0/20 \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
-bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1 --reinit
+bash scripts/install-k8s-centos.sh --advertise-address "$MX_K8S_APISERVER_ADVERTISE_ADDRESS" --allow-cgroup-v1 --reinit
 
-MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \
 MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
 MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
@@ -524,6 +524,64 @@ CIDR 和集群域名同时补进 `NO_PROXY`、`no_proxy`。这是必要的：服
 耗时的 Docker 构建前和 Flannel/apply 前各完成一次 API Server 探活；探活失败会输出
 本机 6443/2379/2380 监听和 control-plane 容器摘要，然后立即停止。只有明确由外层环境
 统一管理代理绕行时，才使用 `MX_K8S_CONFIGURE_NO_PROXY=0` 关闭自动补齐。
+
+**搬机或 LAN IP 改变时，优先运行地址修复，不需要执行上面的 `--reinit`。** 在当前
+单控制面 kubeadm 主机上，`MX_K8S_APISERVER_ADVERTISE_ADDRESS` 同时用于已有的
+控制面/kubeconfig 修复、kube-proxy API 地址和 Flannel 直连 API 环境变量。未指定时，
+继续兼容 `K8S_APISERVER_ADVERTISE_ADDRESS`，再自动检测 LAN IP。示例：
+
+```bash
+TMPDIR=/data/tmp \
+MX_K8S_OS_HOSTNAME=mx-internal-server \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
+bash scripts/manage.sh ops internal-production repair-network
+```
+
+`repair-network` 会依次检查/修复控制面、kube-proxy、Flannel、API Service 和 CoreDNS。
+它不执行 MX 镜像构建、应用部署、数据库迁移、Secret 生成或 PVC 变更。`deploy` 和
+`apply` 也包含同一套网络修复；正常部署仍可使用原来的一条命令：
+
+```bash
+TMPDIR=/data/tmp \
+MX_K8S_OS_HOSTNAME=mx-internal-server \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
+bash scripts/manage.sh ops internal-production deploy
+```
+
+网络修复有以下边界：
+
+- kube-proxy：先验证新 API 的 TLS 和 `/readyz`，再仅替换
+  `kube-system/kube-proxy` ConfigMap 中 `kubeconfig.conf` 的 `server`。保留 CA、
+  tokenFile、Pod CIDR、代理模式等配置；使用资源版本检查避免覆盖并发修改。
+  首次由此脚本接管时会通过 Pod 模板摘要触发一次滚动更新，保证进程读取当前地址；
+  后续配置相同不再重启，ConfigMap 已改但滚动更新中断时可重试。
+- Flannel：即使 DaemonSet 已 Ready，也核对 API 地址。已有 DaemonSet 原地更新，
+  不因搬机下载最新版 manifest；显式设置镜像仓库/版本时仍保留原有覆盖能力。
+  等待滚动更新完成和 `subnet.env` 落盘。
+- 备份：变更前分别保存到 `/etc/kubernetes/mx-kube-proxy-endpoint-*` 和
+  `/etc/kubernetes/mx-flannel-endpoint-*`，目录 `0700`、文件 `0600`。可用
+  `MX_K8S_ENDPOINT_BACKUP_DIR=/data/mx-recovery` 更改备份父目录。
+- 就绪检查：从实际 `default/kubernetes` Service 读取 ClusterIP，绕过 HTTP 代理，
+  保持 TLS 校验并请求 `/readyz`；失败会在镜像构建前停止。CoreDNS 在运行时镜像
+  预载后、数据库迁移前检查。Pod 显示 Running 本身不足以证明 Service 转发正常。
+- 适用范围：默认修复本机 kubeadm 的标准、单 cluster kube-proxy kubeconfig。
+  外部管理 kube-proxy 或使用其他 Service 实现时，可以设置 `MX_K8S_REPAIR_KUBE_PROXY=0`；
+  API Service 探活仍会执行。Flannel 专用的 `MX_K8S_FLANNEL_APISERVER_HOST/PORT`
+  仍优先于通用 IP，通常无需设置。`MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT=0` 仅关闭
+  控制面文件修复，不关闭组件地址同步。
+
+地址修复不会从缺失的 etcd 记录中找回业务配置。如果恢复库的记录时间与最近实际使用
+不符，或者原先使用的飞书配置缺失，应先运行 `repair-network` 并确认原实例/数据来源，
+再进行完整 `deploy`。不要通过重置数据库、重建集群或生成替代凭据绕过这一确认。
+
+部署网络回归检查（使用模拟 API，不修改集群）：
+
+```bash
+node --test scripts/k8s-kube-proxy-endpoint.test.mjs \
+  scripts/manage-k8s-network.test.mjs scripts/manage-internal-production-predeploy.test.mjs
+```
 
 可在服务器上单独确认直连与 kubeconfig 是否正常：
 

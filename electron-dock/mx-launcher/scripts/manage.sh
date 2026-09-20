@@ -96,7 +96,7 @@ Usage:
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
   bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down
-  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-cni|down
+  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
@@ -835,16 +835,51 @@ k8s_wait_control_plane_observers() {
   return 1
 }
 
+k8s_repair_kube_proxy_endpoint() {
+  [ "${MX_K8S_REPAIR_KUBE_PROXY:-1}" = "1" ] || return 0
+  [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
+  local host
+  host="$(k8s_detect_lan_ip | head -n 1)"
+  say "synchronize kube-proxy API endpoint with $host:6443"
+  node "$ROOT/scripts/k8s-kube-proxy-endpoint.mjs" "$host" "${MX_K8S_ENDPOINT_BACKUP_DIR:-/etc/kubernetes}"
+  kubectl -n kube-system rollout status daemonset/kube-proxy \
+    --timeout="${MX_K8S_KUBE_PROXY_ROLLOUT_TIMEOUT:-180s}"
+}
+
+k8s_require_api_service_ready() {
+  [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
+  local service_ip attempts i
+  service_ip="$(kubectl --request-timeout=15s -n default get service kubernetes -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$service_ip" ] && [ "$service_ip" != None ] || die "Kubernetes API Service has no ClusterIP"
+  attempts="${MX_K8S_API_SERVICE_WAIT_ATTEMPTS:-12}"
+  say "verify Kubernetes API through Service $service_ip:443"
+  for i in $(seq 1 "$attempts"); do
+    if NO_PROXY="$(k8s_append_no_proxy_entries "${NO_PROXY:-}" "$service_ip")" \
+      no_proxy="$(k8s_append_no_proxy_entries "${no_proxy:-}" "$service_ip")" \
+      kubectl --server="https://$service_ip:443" --insecure-skip-tls-verify=false \
+        --request-timeout=5s get --raw=/readyz >/dev/null 2>&1; then
+      say "Kubernetes API Service forwarding and TLS check OK"
+      return 0
+    fi
+    say "API Service not ready: $i/$attempts"
+    [ "$i" = "$attempts" ] || sleep 2
+  done
+  kubectl --request-timeout=15s -n kube-system get pods -l k8s-app=kube-proxy -o wide || true
+  die "Kubernetes API Service is unreachable; check kube-proxy endpoint/logs and Service routing before deploying MX"
+}
+
+k8s_recover_cluster_network() {
+  k8s_repair_kube_proxy_endpoint
+  k8s_repair_flannel_cni
+  k8s_require_api_service_ready
+}
+
 k8s_flannel_url() {
   echo "${K8S_FLANNEL_URL:-${MX_K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}}"
 }
 
 k8s_flannel_subnet_ready() {
   [ -s "${MX_K8S_FLANNEL_SUBNET_ENV:-/run/flannel/subnet.env}" ]
-}
-
-k8s_flannel_daemonset_ready() {
-  kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="${1:-5s}" >/dev/null 2>&1
 }
 
 k8s_flannel_diagnostics() {
@@ -883,15 +918,27 @@ k8s_wait_flannel_subnet_env() {
 
 k8s_repair_flannel_apiserver_env() {
   [ "${MX_K8S_FLANNEL_DIRECT_APISERVER:-1}" = "1" ] || return 0
-  local host port
+  local host port current backup_dir
   host="${MX_K8S_FLANNEL_APISERVER_HOST:-$(k8s_detect_lan_ip | head -n 1)}"
   port="${MX_K8S_FLANNEL_APISERVER_PORT:-6443}"
   if ! k8s_is_usable_lan_ip "$host"; then
-    say "skip Flannel direct apiserver env; cannot detect a usable LAN IP"
+    die "cannot detect a usable Flannel API IP; set MX_K8S_APISERVER_ADVERTISE_ADDRESS"
+  fi
+  current="$(kubectl --request-timeout=15s -n kube-flannel get daemonset kube-flannel-ds \
+    -o jsonpath='{range .spec.template.spec.containers[?(@.name=="kube-flannel")].env[*]}{.name}={.value}{"\n"}{end}')"
+  if printf '%s\n' "$current" | grep -Fxq "KUBERNETES_SERVICE_HOST=$host" && \
+    printf '%s\n' "$current" | grep -Fxq "KUBERNETES_SERVICE_PORT=$port"; then
+    say "Flannel API endpoint already matches: $host:$port"
     return 0
   fi
+  kubectl --server="https://$host:$port" --insecure-skip-tls-verify=false \
+    --request-timeout=15s get --raw=/readyz >/dev/null
+  backup_dir="$(umask 077; mkdir -p "${MX_K8S_ENDPOINT_BACKUP_DIR:-/etc/kubernetes}"; \
+    mktemp -d "${MX_K8S_ENDPOINT_BACKUP_DIR:-/etc/kubernetes}/mx-flannel-endpoint-XXXXXX")"
+  (umask 077; kubectl --request-timeout=15s -n kube-flannel get daemonset kube-flannel-ds -o json > "$backup_dir/daemonset-before.json")
+  say "Flannel configuration backup: $backup_dir"
   say "point Flannel at kube-apiserver $host:$port"
-  kubectl -n kube-flannel set env daemonset/kube-flannel-ds -c kube-flannel \
+  kubectl --request-timeout=15s -n kube-flannel set env daemonset/kube-flannel-ds -c kube-flannel \
     "KUBERNETES_SERVICE_HOST=$host" \
     "KUBERNETES_SERVICE_PORT=$port"
 }
@@ -957,21 +1004,23 @@ k8s_patch_flannel_pod_cidr() {
 k8s_repair_flannel_cni() {
   [ "${MX_K8S_REPAIR_FLANNEL:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
-  local url repo version cni_version timeout flannel_cidr_patched
+  local url repo version cni_version timeout flannel_cidr_patched flannel_daemonset
   timeout="${MX_K8S_FLANNEL_ROLLOUT_TIMEOUT:-300s}"
   k8s_patch_flannel_pod_cidr
   flannel_cidr_patched="${K8S_FLANNEL_POD_CIDR_PATCHED:-0}"
-  if [ "$flannel_cidr_patched" != "1" ] && k8s_flannel_subnet_ready && k8s_flannel_daemonset_ready 5s; then
-    return 0
+  # A ready host-network Pod can still be using a stale direct API address.
+  # Repair existing resources in place; an IP move must not upgrade Flannel.
+  flannel_daemonset="$(kubectl --request-timeout=15s -n kube-flannel get daemonset kube-flannel-ds --ignore-not-found -o name)"
+  if [ -z "$flannel_daemonset" ]; then
+    url="$(k8s_flannel_url)"
+    say "install missing Flannel CNI: $url"
+    kubectl apply --validate=false -f "$url"
+    k8s_patch_flannel_pod_cidr
+    flannel_cidr_patched="${K8S_FLANNEL_POD_CIDR_PATCHED:-0}"
   fi
-  url="$(k8s_flannel_url)"
   repo="${K8S_FLANNEL_IMAGE_REPOSITORY:-${MX_K8S_FLANNEL_IMAGE_REPOSITORY:-}}"
   version="${K8S_FLANNEL_VERSION:-${MX_K8S_FLANNEL_VERSION:-v0.28.5}}"
   cni_version="${K8S_FLANNEL_CNI_PLUGIN_VERSION:-${MX_K8S_FLANNEL_CNI_PLUGIN_VERSION:-v1.9.1-flannel1}}"
-  say "repair Flannel CNI"
-  say "apply Flannel manifest: $url"
-  kubectl apply --validate=false -f "$url"
-  k8s_patch_flannel_pod_cidr
   if [ -n "$repo" ]; then
     say "override Flannel images with $repo"
     kubectl -n kube-flannel set image daemonset/kube-flannel-ds \
@@ -979,13 +1028,13 @@ k8s_repair_flannel_cni() {
       "install-cni=${repo}/flannel:${version}" \
       "kube-flannel=${repo}/flannel:${version}"
   fi
-  if kubectl -n kube-flannel get daemonset kube-flannel-ds >/dev/null 2>&1; then
-    k8s_repair_flannel_apiserver_env
-    kubectl -n kube-flannel rollout restart daemonset/kube-flannel-ds || true
-    if ! kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="$timeout"; then
-      k8s_flannel_diagnostics
-      die "Flannel rollout failed"
-    fi
+  k8s_repair_flannel_apiserver_env
+  if [ "$flannel_cidr_patched" = "1" ]; then
+    kubectl -n kube-flannel rollout restart daemonset/kube-flannel-ds
+  fi
+  if ! kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="$timeout"; then
+    k8s_flannel_diagnostics
+    die "Flannel rollout failed"
   fi
   if ! k8s_wait_flannel_subnet_env; then
     k8s_flannel_diagnostics
@@ -2675,7 +2724,7 @@ k8s_apply() {
   K8S_SECRET_BUNDLE_CHANGED_COUNT=0
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
   k8s_repair_kubeadm_endpoint
-  k8s_repair_flannel_cni
+  k8s_recover_cluster_network
   k8s_recover_cluster_dns
   say "preflight server/.env Secret contracts"
   k8s_preflight_secret_bundle "$ns"
@@ -5623,6 +5672,7 @@ Commands:
   bash scripts/manage.sh ops internal-production gateway-smoke
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures
   bash scripts/manage.sh ops internal-production reinit-kubeadm
+  bash scripts/manage.sh ops internal-production repair-network
   bash scripts/manage.sh ops internal-production repair-cni
   bash scripts/manage.sh ops internal-production down
 
@@ -5639,6 +5689,15 @@ Notes:
     /etc/kubernetes and kubeconfig before the first kubectl apply. Override the
     detected IP with MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.x.x, or disable
     this guard with MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT=0.
+  - The same IP also updates kube-proxy's ConfigMap and Flannel's API env.
+    Configuration is backed up under /etc/kubernetes (override with
+    MX_K8S_ENDPOINT_BACKUP_DIR). kube-proxy uses a configuration hash to roll
+    out once and resume interrupted repairs. Disable its endpoint repair with
+    MX_K8S_REPAIR_KUBE_PROXY=0 for externally managed Service networking.
+    Deploy checks API Service forwarding before image build, then waits for
+    CoreDNS after runtime image preload and before database migrations.
+    repair-network runs this recovery independently, without deploying MX or
+    changing application Secrets, PVCs, database records or WireGuard settings.
   - Production commands add the apiserver and Kubernetes local ranges to both
     NO_PROXY and no_proxy so kubectl never sends the private control-plane
     endpoint through HTTPS_PROXY/ALL_PROXY. Disable with
@@ -5649,9 +5708,11 @@ Notes:
     identity pinned through kubelet --hostname-override, so a router/hostname
     change does not create a second Node. Only set MX_K8S_NODE_NAME for a
     planned Kubernetes node identity migration.
-  - On kubeadm Internal hosts, deploy also repairs Flannel before Internal
-    workloads start when /run/flannel/subnet.env is missing or the daemonset is
-    not ready. Disable with MX_K8S_REPAIR_FLANNEL=0, override the manifest with
+  - On kubeadm Internal hosts, deploy synchronizes Flannel's API address even
+    when the daemonset is already ready, then waits for /run/flannel/subnet.env.
+    Existing Flannel resources are repaired in place; the manifest is only
+    installed if the daemonset is missing. Disable with MX_K8S_REPAIR_FLANNEL=0,
+    override the manifest with
     MX_K8S_FLANNEL_URL=/path/to/kube-flannel.yml, or set
     MX_K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel when GHCR is blocked.
     When the Kubernetes service VIP is not reachable yet, deploy points Flannel
@@ -5834,6 +5895,8 @@ ops_internal_production() {
       say "preflight server/.env and current K8s Secret state"
       k8s_preflight_secret_bundle "$(k8s_namespace internal-shadow)"
       k8s_release_oss_secret_dry_run "$(k8s_namespace internal-shadow)"
+      say "recover Kubernetes networking before image build"
+      k8s_recover_cluster_network
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build
@@ -5901,13 +5964,21 @@ ops_internal_production() {
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-cni"
       ops_internal_production_repair_cni
       ;;
+    repair-network)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-network"
+      k8s_repair_kubeadm_endpoint
+      k8s_require_apiserver_ready
+      k8s_recover_cluster_network
+      k8s_recover_cluster_dns
+      say "Kubernetes network recovery OK; MX application and data were not deployed"
+      ;;
     down)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production down"
       ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-network|repair-cni|down"
       ;;
   esac
 }
