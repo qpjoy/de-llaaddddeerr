@@ -96,7 +96,9 @@ for (const mode of ['get-fails', 'put-fails', 'unacknowledged', 'malformed-ack',
 
 test('ensure reconciles disk policy before waiting for red-cluster recovery and reports policy failure', async () => {
   const shell = `source "$1"
-    need() { :; }; resolve_host_data_root() { :; }; ensure_vm_max_map_count() { :; }
+    # This fixture tests disk-policy ordering; storage identity has separate
+    # filesystem/Kubernetes tests and must never inspect the host running it.
+    need() { :; }; resolve_host_data_root() { :; }; storage_preflight() { :; }; ensure_vm_max_map_count() { :; }
     check_storage_headroom() { :; }; report_capacity() { :; }; report_image_readiness() { :; }
     kubectl() { :; }; ensure_secret() { :; }; ensure_storage() { :; }; apply_manifests() { :; }
     allow_client_namespace() { :; }; wait_ready() { :; }; ensure_snapshot_policy() { :; }

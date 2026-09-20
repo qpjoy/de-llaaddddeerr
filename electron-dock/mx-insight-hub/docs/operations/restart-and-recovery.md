@@ -1,5 +1,7 @@
 # 停机后恢复服务与 2026-09-21 恢复复盘
 
+日常部署固定信息与最新检查结论集中在 [mx-insight.deploy.md](../../mx-insight.deploy.md)；本页保留事故证据和恢复经过。
+
 ## 已恢复的范围
 
 本次服务器回传的最终阶段为 `data-and-api-restored-workers-paused`：

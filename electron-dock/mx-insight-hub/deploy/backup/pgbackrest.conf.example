@@ -1,0 +1,35 @@
+# DESIGN TEMPLATE ONLY. Not mounted or enabled by ordinary Hub deploy.
+# Requires a PG16+pgvector+pgBackRest image, matching recovery image, private
+# config/Secret, persistent archive_command settings and a restore drill.
+# Replace REPLACE_* values. Never commit the filled configuration.
+[global]
+repo1-type=s3
+repo1-path=/mx/internal-production/pgbackrest
+repo1-s3-bucket=REPLACE_BUCKET
+repo1-s3-endpoint=oss-REPLACE_REGION.aliyuncs.com
+repo1-s3-region=REPLACE_REGION
+repo1-s3-uri-style=host
+repo1-storage-verify-tls=y
+repo1-cipher-type=aes-256-cbc
+# Supply PGBACKREST_REPO1_CIPHER_PASS, PGBACKREST_REPO1_S3_KEY and
+# PGBACKREST_REPO1_S3_KEY_SECRET via private runtime Secret; NOT CLI arguments.
+repo1-bundle=y
+repo1-block=y
+repo1-retention-full=4
+repo1-retention-diff=7
+compress-type=zst
+compress-level=3
+process-max=2
+start-fast=n
+archive-async=n
+archive-timeout=300
+log-level-console=info
+log-level-file=off
+# Do not set archive-push-queue-max: dropping WAL to fit a cap breaks PITR.
+
+[mx-common]
+pg1-path=/var/lib/postgresql/data/pgdata
+pg1-port=5432
+pg1-socket-path=/var/run/postgresql
+pg1-user=mx_common
+pg1-database=mx_common

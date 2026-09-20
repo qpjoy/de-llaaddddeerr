@@ -34,16 +34,39 @@ export function fsRepository({ location = '/usr/share/elasticsearch/snapshots' }
   }
 }
 
-/** S3-compatible repository, for when off-node durability actually exists. */
-export function s3Repository({ bucket, basePath = 'mx-common/elasticsearch', endpoint, pathStyleAccess = true }) {
+/** Named S3 client; credentials belong in the Elasticsearch keystore. */
+export function s3ClientSettings({ client = 'mx_backup', endpoint, region, pathStyleAccess = false } = {}) {
+  if (!/^[a-z][a-z0-9_]*$/.test(client)) throw new Error('invalid S3 client name')
+  let url
+  try { url = new URL(endpoint) } catch { throw new Error('S3 endpoint must be a complete HTTP(S) URL') }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+    || url.search || url.hash || url.pathname !== '/') throw new Error('invalid S3 endpoint; credentials and paths are not allowed')
+  if (!/^[a-z0-9-]+$/.test(region ?? '')) throw new Error('explicit S3 signing region is required')
+  if (typeof pathStyleAccess !== 'boolean') throw new Error('S3 path style must be a boolean')
+  if (/(^|\.)aliyuncs\.com$/.test(url.hostname) && (pathStyleAccess || url.protocol !== 'https:')) {
+    throw new Error('Alibaba OSS requires HTTPS and virtual-hosted access (path style false)')
+  }
+  return {
+    [`s3.client.${client}.endpoint`]: url.origin,
+    [`s3.client.${client}.region`]: region,
+    [`s3.client.${client}.path_style_access`]: pathStyleAccess,
+  }
+}
+
+/** S3 repository API settings; endpoint/region are CLIENT settings in ES 9. */
+export function s3Repository({ bucket, basePath = 'mx-common/elasticsearch', client = 'mx_backup', readonly = false } = {}) {
   if (!bucket) throw new Error('an S3 repository requires a bucket')
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error('invalid S3 bucket')
+  if (!/^[a-z][a-z0-9_]*$/.test(client)) throw new Error('invalid S3 client name')
+  if (!/^[a-zA-Z0-9_/-]+$/.test(basePath) || basePath.startsWith('/') || basePath.endsWith('/') || basePath.includes('//')) {
+    throw new Error('S3 base path must be an explicit non-root prefix')
+  }
+  if (typeof readonly !== 'boolean') throw new Error('S3 readonly must be a boolean')
   return {
     type: 's3',
     settings: {
-      bucket,
-      base_path: basePath,
-      compress: true,
-      ...(endpoint ? { endpoint, path_style_access: pathStyleAccess } : {}),
+      bucket, base_path: basePath, client, readonly, compress: true,
+      max_snapshot_bytes_per_sec: '40mb', max_restore_bytes_per_sec: '80mb',
     },
   }
 }
@@ -146,26 +169,31 @@ export async function snapshotHealth(client, { policyName = 'mx-common-daily', s
     const policy = policies?.[policyName]
     if (!policy) return { configured: false, healthy: false, reason: 'policy is not registered' }
 
-    const lastSuccess = policy.last_success?.time
-    const lastFailure = policy.last_failure?.time
-    const ageHours = lastSuccess ? (Date.now() - Number(lastSuccess)) / 3_600_000 : null
-
-    return {
-      configured: true,
-      // Never taken a snapshot yet is not healthy, it is unproven.
-      healthy: ageHours !== null && ageHours <= staleAfterHours,
-      lastSuccessAt: lastSuccess ? new Date(Number(lastSuccess)).toISOString() : null,
-      lastSuccessAgeHours: ageHours === null ? null : Math.round(ageHours * 10) / 10,
-      lastFailureAt: lastFailure ? new Date(Number(lastFailure)).toISOString() : null,
-      snapshotsTaken: policy.stats?.snapshots_taken ?? 0,
-      snapshotsFailed: policy.stats?.snapshots_failed ?? 0,
-      reason: ageHours === null
-        ? 'no successful snapshot has been taken yet'
-        : ageHours > staleAfterHours
-          ? `last successful snapshot was ${Math.round(ageHours)}h ago`
-          : 'ok',
-    }
+    return describeSnapshotPolicy(policy, { staleAfterHours })
   } catch (error) {
     return { configured: false, healthy: false, reason: error.message }
+  }
+}
+
+/** Pure, redacted policy evaluation. One ancient success is not backup health. */
+export function describeSnapshotPolicy(policy, { staleAfterHours = 36, now = Date.now() } = {}) {
+  if (!Number.isFinite(staleAfterHours) || staleAfterHours <= 0) throw new Error('invalid snapshot freshness threshold')
+  if (!policy) return { configured: false, healthy: false, reason: 'policy is not registered' }
+  const success = Number(policy.last_success?.time)
+  const failure = Number(policy.last_failure?.time)
+  const valid = Number.isFinite(success) && success > 0 && success <= now
+  const age = valid ? (now - success) / 3_600_000 : null
+  const recentFailure = Number.isFinite(failure) && failure > 0 && (!valid || failure >= success)
+  return {
+    configured: true,
+    healthy: valid && age <= staleAfterHours && !recentFailure,
+    lastSuccessAt: valid ? new Date(success).toISOString() : null,
+    lastSuccessAgeHours: age === null ? null : Math.round(age * 10) / 10,
+    lastFailureAt: Number.isFinite(failure) && failure > 0 && failure <= now ? new Date(failure).toISOString() : null,
+    snapshotsTaken: policy.stats?.snapshots_taken ?? 0,
+    snapshotsFailed: policy.stats?.snapshots_failed ?? 0,
+    reason: !valid ? 'no successful snapshot with a valid timestamp'
+      : recentFailure ? 'latest attempt failed after the last success'
+      : age > staleAfterHours ? `last successful snapshot was ${Math.round(age)}h ago` : 'ok',
   }
 }

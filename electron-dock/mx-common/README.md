@@ -173,3 +173,11 @@ Hub 的 `deploy` 会自动调用它，不需要手动执行。
 ## 依赖健康契约
 
 `postgres` 是 required，其余全是 optional。required 失败才影响 readiness——让 Elasticsearch 拖垮 readiness 探针会把「搜索降级但能用」变成「API 直接下线」，这正是 ADR-0005 和 Launcher 集成契约明令禁止的。`runProbes` 返回的 `degraded` 字段让运维仍然看得到 optional 依赖挂了。
+
+## 备份责任与检查
+
+PG 是多个产品共享的物理实例；整机物理恢复和 Hub 单产品恢复必须区分。ES 默认快照在同机，不能覆盖丢机/坏盘。PG 物理增量与 WAL、OSS、密钥托管、TB 级容量及新机恢复的统一说明见 [Hub 备份操作档案](../mx-insight-hub/docs/operations/backup-restore.md)。
+
+`bash scripts/manage.sh snapshot status` 现在校验最近成功时间（默认 36 小时）及其后的失败；配置存在或很久以前成功过不会通过。可用 `MX_COMMON_SNAPSHOT_STALE_HOURS` 调整阈值。日常 ensure 对快照配置失败仍只警告，服务成功不代表备份成功。
+
+ES S3 endpoint/region/path-style 应在命名 client 配置中，凭据在持久 keystore；repository 只引用 client。`node scripts/print-snapshot-config.mjs client` 可生成非密钥 client 配置，默认 `mx_backup`。这是待部署配置，当前清单不自动注入 S3 client/keystore；旧 S3 配置使用者需要一并迁移，不能仅设置 Bucket。默认 filesystem 行为不变。

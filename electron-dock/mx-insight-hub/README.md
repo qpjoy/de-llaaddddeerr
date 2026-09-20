@@ -1,5 +1,7 @@
 # MX Insight Hub
 
+Internal 部署与重启先看 [mx-insight.deploy.md](mx-insight.deploy.md)：共享数据归属、原盘位置、凭据、单命令恢复及验收边界。
+
 MX Insight Hub is an independently deployed data control plane and data center.
 It turns Hub-managed provider connectors and stored datasets into stable,
 key-scoped APIs with tenant-scoped identities, consumers, grants, quotas,
@@ -50,6 +52,8 @@ Night-All lineage retains complete parsed JSON and legacy raw strings; Hub-nativ
 provider calls additionally archive exact bounded response bytes in restricted
 storage. API keys, Authorization/Cookie material and other request secrets are
 kept out of business responses, ordinary UI and logs.
+
+> 备份/换机：[备份与 OSS](docs/operations/backup-restore.md)、[新机器恢复](docs/operations/new-host-restore.md)。配置导出不包含数据库；离机 PG/WAL 接入状态以备份文档为准。
 
 ## Current authorization and delivery model
 

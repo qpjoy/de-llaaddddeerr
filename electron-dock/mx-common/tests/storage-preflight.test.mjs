@@ -144,3 +144,68 @@ test('rendered PostgreSQL guard passes original server arguments and refuses a m
   assert.equal(valid.status, 0, valid.stderr);
   assert.equal(valid.stdout, 'postgres\n-c\nshared_buffers=2GB\n');
 });
+
+test('provision refuses missing retained databases and credentials before any SQL or Secret write', () => {
+  for (const [retained, state, expected] of [[true, 't|f', 78], [true, 'f|t', 78], [true, 'f|f', 78], [false, 't|t', 78], [false, 'f|t', 78], [true, 't|t', 0], [false, 'f|f', 0]]) {
+    const result = bash(`
+need() { :; }; resolve_host_data_root() { :; }
+kubectl() {
+  if [[ "$*" == *'get secret'* ]]; then ${retained ? "printf 'VGVzdFBhc3N3b3Jk'" : ':'};
+  else echo 'SECRET_WRITE' >&2; cat >/dev/null; fi
+}
+psql_super() {
+  if [[ "$*" == *'-Atc'* ]]; then printf '%s' '${state}';
+  else echo 'SQL_WRITE' >&2; cat >/dev/null; fi
+}
+cmd_provision mx-insight-hub TestPassword`);
+    assert.equal(result.status, expected, `${retained}/${state}: ${result.stderr}`);
+    if (expected) {
+      assert.doesNotMatch(result.stderr, /SECRET_WRITE|SQL_WRITE/);
+      assert.doesNotMatch(result.stderr, /TestPassword/);
+    } else {
+      assert.match(result.stderr, /SECRET_WRITE/); assert.match(result.stderr, /SQL_WRITE/);
+    }
+  }
+});
+
+test('down waits for actual Pod exit, and cannot report success on Kubernetes failure', () => {
+  for (const failure of ['', 'read', 'scale', 'wait']) {
+    const r = bash(`
+need() { :; }
+kubectl() {
+  echo "KUBE $*" >&2
+  case "$*" in
+    *'get pods'*) echo pod/retained;;
+    *'get '*) ${failure === 'read' ? 'return 1' : 'echo existing'};;
+    *'scale '*) ${failure === 'scale' ? 'return 1' : ':'};;
+    *'wait '*) ${failure === 'wait' ? 'return 1' : ':'};;
+  esac
+}
+cmd_down`);
+    assert.equal(r.status, failure ? 1 : 0, r.stderr);
+    if (failure) assert.doesNotMatch(r.stdout, /shared workloads stopped/);
+    else assert.match(r.stderr, /wait --for=delete pods/);
+    assert.doesNotMatch(r.stderr, /delete (pv|pvc|namespace|secret)|mx-launcher/);
+  }
+});
+
+test('first-install planning requires a mounted data filesystem too', async () => {
+  const { validateDataMount } = await import('../scripts/storage-preflight.mjs');
+  for (const root of ['/data', '/data/k8s/mx-runtime/mx-common/k8s']) {
+    assert.throws(() => validateDataMount(root, { target: '/', uuid: 'root' }), /not mounted/);
+    validateDataMount(root, { target: '/data', uuid: 'original-data-fs' });
+  }
+  assert.throws(() => validateDataMount('/var/lib/mx-common/k8s', { target: '/' }), /UUID/);
+});
+
+test('startup probes grant slow storage recovery a longer budget than CLI readiness', () => {
+  for (const name of ['10-postgres.yaml', '20-elasticsearch.yaml']) {
+    const yaml = fs.readFileSync(new URL(`../deploy/k8s/common/${name}`, import.meta.url), 'utf8');
+    const startup = yaml.split('          startupProbe:')[1].split('          readinessProbe:')[0];
+    const period = Number(startup.match(/periodSeconds: (\d+)/)[1]);
+    const failures = Number(startup.match(/failureThreshold: (\d+)/)[1]);
+    assert.ok(period * failures >= 1800);
+    assert.match(yaml, /terminationGracePeriodSeconds: 120/);
+    if (name.includes('postgres')) assert.match(startup, /pg_isready -h 127\.0\.0\.1/);
+  }
+});

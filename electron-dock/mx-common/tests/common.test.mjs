@@ -3,7 +3,7 @@ import test from 'node:test'
 import { loadCommonConfig, productDatabaseName, ConfigError } from '../src/config.mjs'
 import { defineIndexSet, defaultIlmPolicy } from '../src/elasticsearch/index-manager.mjs'
 import { nameField, vectorField } from '../src/elasticsearch/analysis.mjs'
-import { dailySnapshotPolicy, s3Repository, snapshotHealth } from '../src/elasticsearch/snapshots.mjs'
+import { dailySnapshotPolicy, s3Repository, s3ClientSettings, describeSnapshotPolicy, snapshotHealth } from '../src/elasticsearch/snapshots.mjs'
 import { BullmqQueue, createQueue, PostgresQueue } from '../src/queue/index.mjs'
 import { batchingSegmenter, HanlpSegmenter } from '../src/segmenter/index.mjs'
 import {
@@ -200,9 +200,11 @@ test('cluster state is excluded so a restore cannot clobber another cluster', ()
 
 test('an S3 repository requires a bucket rather than defaulting to something', () => {
   assert.throws(() => s3Repository({}), /requires a bucket/)
-  const repo = s3Repository({ bucket: 'mx-backups', endpoint: 'http://minio:9000' })
+  const repo = s3Repository({ bucket: 'mx-backups', client: 'mx_backup' })
   assert.equal(repo.type, 's3')
-  assert.equal(repo.settings.path_style_access, true)
+  assert.equal(repo.settings.client, 'mx_backup')
+  assert.equal(repo.settings.endpoint, undefined)
+  assert.equal(repo.settings.path_style_access, undefined)
 })
 
 test('snapshot health treats "never succeeded" as unhealthy, not unknown', async () => {
@@ -1470,4 +1472,64 @@ test('native jieba calls are serialized', async () => {
   await Promise.all(['a', 'b', 'c', 'd'].map((text) => segmenter.segment(text)))
   // Concurrent cutAsync crashed the process with SIGSEGV once an hour.
   assert.equal(peak, 1)
+})
+
+// Object-store configuration must not confuse ES client and repository settings.
+test('OSS client uses TLS and virtual hosted style, with explicit signing region', () => {
+  const options = { endpoint: 'https://oss-cn-hangzhou.aliyuncs.com', region: 'cn-hangzhou' }
+  assert.deepEqual(s3ClientSettings(options), {
+    's3.client.mx_backup.endpoint': options.endpoint,
+    's3.client.mx_backup.region': 'cn-hangzhou',
+    's3.client.mx_backup.path_style_access': false,
+  })
+  assert.throws(() => s3ClientSettings({ ...options, pathStyleAccess: true }), /virtual-hosted/)
+  assert.throws(() => s3ClientSettings({ ...options, endpoint: 'http://oss-cn-hangzhou.aliyuncs.com' }), /HTTPS/)
+  assert.throws(() => s3ClientSettings({ ...options, region: '' }), /region/)
+})
+test('S3 settings reject credentials, paths and invalid client names', () => {
+  for (const endpoint of ['https://key:secret@example.com', 'https://example.com/bucket', 'https://example.com?key=secret']) {
+    assert.throws(() => s3ClientSettings({ endpoint, region: 'cn-hangzhou' }), /invalid S3 endpoint/)
+  }
+  assert.throws(() => s3ClientSettings({ client: 'bad\nclient' }), /client/)
+  assert.throws(() => s3Repository({ bucket: 'backups', basePath: '/' }), /prefix/)
+  assert.equal(s3Repository({ bucket: 'backups', readonly: true }).settings.readonly, true)
+})
+test('SLM future timestamps or a failure after a success are not healthy', () => {
+  const now = Date.now()
+  assert.equal(describeSnapshotPolicy({ last_success: { time: now + 1000 } }, { now }).healthy, false)
+  assert.equal(describeSnapshotPolicy({ last_success: { time: now - 5000 }, last_failure: { time: now - 1000 } }, { now }).healthy, false)
+  assert.equal(describeSnapshotPolicy({ last_success: { time: now - 1000 }, last_failure: { time: now - 5000 } }, { now }).healthy, true)
+  assert.equal(describeSnapshotPolicy({ last_success: { time: 'garbage' } }, { now }).healthy, false)
+})
+
+test('snapshot status CLI fails for stale or failed policies without printing private errors', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const { fileURLToPath } = await import('node:url')
+  const manage = fileURLToPath(new URL('../scripts/manage.sh', import.meta.url))
+  const shell = 'source "$1"; es_curl() { printf "%s" "$MX_SNAPSHOT_TEST_POLICY"; }; snapshot_status'
+  const now = Date.now()
+  for (const [policy, expected] of [
+    [{ last_success: { time: now - 48 * 3600000 } }, 1],
+    [{ last_success: { time: now - 5000 }, last_failure: { time: now - 1000, details: 'PRIVATE_ERROR' } }, 1],
+    [{ last_success: { time: now - 1000 } }, 0],
+  ]) {
+    const result = spawnSync('bash', ['-c', shell, '_', manage], { encoding: 'utf8', env: {
+      ...process.env, MX_COMMON_SNAPSHOT_POLICY: 'test-policy', MX_COMMON_SNAPSHOT_STALE_HOURS: '36',
+      MX_SNAPSHOT_TEST_POLICY: JSON.stringify({ 'test-policy': policy }),
+    } })
+    assert.equal(result.status, expected, result.stderr)
+    assert.doesNotMatch(result.stdout + result.stderr, /PRIVATE_ERROR/)
+  }
+})
+test('OSS generator emits client settings separately and rejects string truthiness mistakes', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const { fileURLToPath } = await import('node:url')
+  const renderer = fileURLToPath(new URL('../scripts/print-snapshot-config.mjs', import.meta.url))
+  const env = { ...process.env, MX_COMMON_SNAPSHOT_S3_ENDPOINT: 'https://oss-cn-hangzhou.aliyuncs.com',
+    MX_COMMON_SNAPSHOT_S3_REGION: 'cn-hangzhou', MX_COMMON_SNAPSHOT_S3_PATH_STYLE: 'false', MX_COMMON_SNAPSHOT_S3_CLIENT: 'mx_backup' }
+  const result = spawnSync(process.execPath, [renderer, 'client'], { encoding: 'utf8', env })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout)['s3.client.mx_backup.path_style_access'], false)
+  const invalid = spawnSync(process.execPath, [renderer, 'client'], { encoding: 'utf8', env: { ...env, MX_COMMON_SNAPSHOT_S3_PATH_STYLE: '0' } })
+  assert.notEqual(invalid.status, 0)
 })

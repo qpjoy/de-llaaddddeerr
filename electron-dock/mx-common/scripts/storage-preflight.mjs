@@ -53,6 +53,36 @@ export function verifyReceipt(previous, current) {
   }
 }
 
+export function validateDataMount(root, mount) {
+  assert(mount?.uuid && mount?.target, 'cannot identify data filesystem UUID');
+  assert(!(root === '/data' || root.startsWith('/data/')) || mount.target !== '/',
+    '/data is not mounted; refusing the root filesystem');
+}
+
+function recordIdentity(receiptFile, current) {
+  const directory = path.dirname(receiptFile);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = path.join(directory, `.storage-identity-${process.pid}-${Date.now()}.tmp`);
+  try {
+    const descriptor = fs.openSync(temporary, 'wx', 0o600);
+    try {
+      fs.writeFileSync(descriptor, `${JSON.stringify(current, null, 2)}\n`);
+      fs.fsyncSync(descriptor);
+    } finally { fs.closeSync(descriptor); }
+    // Publish a complete receipt without overwriting an existing identity.
+    // An interrupted write can leave only an unreferenced temporary file.
+    try { fs.linkSync(temporary, receiptFile); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      verifyReceipt(JSON.parse(fs.readFileSync(receiptFile, 'utf8')), current);
+    }
+    const directoryDescriptor = fs.openSync(directory, 'r');
+    try { fs.fsyncSync(directoryDescriptor); } finally { fs.closeSync(directoryDescriptor); }
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
 function run(command, args) {
   try { return execFileSync(command, args, { encoding: 'utf8', timeout: 25000, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
   catch { throw new Error(`${command} storage inspection failed; no fallback to an empty directory`); }
@@ -66,6 +96,11 @@ export function preflight(root, receiptFile, { platform = process.platform, comm
   const get = (...args) => getResource(command, ...args);
   assert(platform === 'linux', 'local storage preflight must run on the Linux Kubernetes node');
   assert(path.isAbsolute(root) && path.normalize(root) === root && root !== '/', 'invalid data root');
+  const mountFor = dir => {
+    const result = JSON.parse(command('findmnt', ['--json', '--target', dir, '--output', 'TARGET,UUID'])).filesystems;
+    assert(result.length === 1 && result[0].uuid, 'cannot identify data filesystem UUID');
+    return result[0];
+  };
   const previous = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   const pvs = volumes.map(([name]) => get('pv', name)).filter(Boolean);
   const pvcs = volumes.map(([, claim]) => get('pvc', claim, 'mx-common')).filter(Boolean);
@@ -86,6 +121,9 @@ export function preflight(root, receiptFile, { platform = process.platform, comm
     assert(!fs.existsSync(`${root}/elasticsearch/data/_state`) && !fs.existsSync(`${root}/elasticsearch/data/nodes/0/_state`), 'retained Elasticsearch exists without PV metadata');
     assert(!get('secret', 'mx-insight-hub-secrets', 'mx-insight-hub'), 'retained Hub credentials exist but data volumes are missing; explicit storage recovery required');
     assert(!get('secret', 'mx-common-secrets', 'mx-common'), 'retained database credentials exist but volumes are missing');
+    let ancestor = root;
+    while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
+    validateDataMount(root, mountFor(ancestor));
     return { mode: 'fresh' };
   }
   const nodes = JSON.parse(command('kubectl', ['--request-timeout=20s', 'get', 'nodes', '-o', 'json'])).items;
@@ -95,13 +133,8 @@ export function preflight(root, receiptFile, { platform = process.platform, comm
   assert(node === os.hostname() || nodes[0].status.addresses.some(a => a.type === 'InternalIP' && addresses.includes(a.address)), 'kubectl points to another host');
   validateBindings(pvs, pvcs, root, node);
   assert(fs.realpathSync(root) === root, 'data root must be canonical; refusing a changed symlink');
-  const mountFor = dir => {
-    const result = JSON.parse(command('findmnt', ['--json', '--target', dir, '--output', 'TARGET,UUID'])).filesystems;
-    assert(result.length === 1 && result[0].uuid, 'cannot identify data filesystem UUID');
-    return result[0];
-  };
   const mount = mountFor(root);
-  assert(!root.startsWith('/data/') || mount.target !== '/', '/data is not mounted; refusing the root filesystem');
+  validateDataMount(root, mount);
   for (const [, , suffix] of volumes) {
     const dir = `${root}/${suffix}`;
     assert(fs.realpathSync(dir) === dir, `${suffix}: changed symlink`);
@@ -110,6 +143,8 @@ export function preflight(root, receiptFile, { platform = process.platform, comm
   }
   const pgdata = `${root}/postgres/data/pgdata`;
   assert(fs.realpathSync(pgdata) === pgdata, 'PGDATA must not be a symlink');
+  const pgMount = mountFor(pgdata);
+  assert(pgMount.uuid === mount.uuid && pgMount.target === mount.target, 'PGDATA has an unexpected nested mount');
   const identifier = postgresIdentifier(fs.readFileSync(`${pgdata}/global/pg_control`), fs.readFileSync(`${pgdata}/PG_VERSION`, 'utf8'));
   assert(fs.statSync(`${pgdata}/base`).isDirectory(), 'PostgreSQL base directory missing');
   assert(fs.existsSync(`${root}/elasticsearch/data/_state`) || fs.existsSync(`${root}/elasticsearch/data/nodes/0/_state`), 'retained Elasticsearch metadata missing');
@@ -121,8 +156,7 @@ export function preflight(root, receiptFile, { platform = process.platform, comm
   const current = { version: 1, mode: 'local', root, node, identifier, mountTarget: mount.target, filesystemUUID: mount.uuid };
   verifyReceipt(previous, current);
   if (!previous) {
-    fs.mkdirSync(path.dirname(receiptFile), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(receiptFile, `${JSON.stringify(current, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    recordIdentity(receiptFile, current);
   }
   return current;
 }

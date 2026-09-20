@@ -1934,14 +1934,15 @@ MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT="$(cat "$daemon_proxy_secret_marker")" nod
 '
 rm -f -- "$daemon_proxy_secret_marker"
 
-for agent_manifest in 31-admin-api.yaml 32-projector.yaml 34-classifier.yaml; do
+# Public uses the snapshot for the existing TikHub inherited proxy policy.
+# It remains a Secret-scoped application input, never global process proxy env.
+for agent_manifest in 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 34-classifier.yaml; do
   grep -q 'name: MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT' "$ROOT_DIR/deploy/k8s/internal/$agent_manifest"
   grep -q 'key: MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT' "$ROOT_DIR/deploy/k8s/internal/$agent_manifest"
 done
 if rg -q 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT' \
-  "$ROOT_DIR/deploy/k8s/internal/30-public-api.yaml" \
   "$ROOT_DIR/deploy/k8s/internal/33-ingest.yaml"; then
-  printf 'not ok - Docker daemon proxy snapshot escaped the Agent workloads\n' >&2
+  printf 'not ok - Docker daemon proxy snapshot escaped the egress-consuming workloads\n' >&2
   exit 1
 fi
 runtime_config_function="$(sed -n '/^create_runtime_config() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
@@ -1949,7 +1950,7 @@ if grep -Eq -- '--from-literal=(HTTP_PROXY|HTTPS_PROXY|NO_PROXY)=' <<<"$runtime_
   printf 'not ok - Docker daemon proxy was injected as a process-wide proxy variable\n' >&2
   exit 1
 fi
-printf 'ok - Docker daemon proxy snapshot is Secret-wired only to Agent workloads\n'
+printf 'ok - Docker daemon proxy snapshot is Secret-wired to Agent and Public egress consumers\n'
 
 # The production loader sources this example as Bash. Quote JSON as one value;
 # otherwise Bash strips its inner quotes before the runtime validator sees it.
@@ -2596,9 +2597,9 @@ search_lifecycle_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-search-lifecyc
   search_action up
 )
 assert_eq \
-  $'wait_http=http://127.0.0.1:18180/health/live|1\nsearch_compose=up -d\nwait_http=http://127.0.0.1:19200|120\nsearch_compose=ps --all -q search-setup\ndocker=inspect --format {{.State.Status}} {{.State.ExitCode}} search-setup-id\ncompose=--profile search up -d --no-deps projector\nsearch_compose=ps\ncompose=--profile search ps projector' \
+  $'wait_http=http://127.0.0.1:18180/health/live|1\nsearch_compose=up -d\nwait_http=http://127.0.0.1:19200|120\nsearch_compose=ps --all -q search-setup\ndocker=inspect --format {{.State.Status}} {{.State.ExitCode}} search-setup-id\ncompose=--profile search up -d --no-deps projector retrieval\nsearch_compose=ps\ncompose=--profile search ps projector retrieval' \
   "$(cat "$search_lifecycle_marker")" \
-  'search setup succeeds before the optional projector starts'
+  'search setup succeeds before the optional projector and retrieval workers start'
 rm -f -- "$search_lifecycle_marker"
 
 failed_search_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-search-failure.XXXXXX")"

@@ -24,6 +24,7 @@ DEPLOY_DOCKER_IMAGE_ID=""
 DEPLOY_PREVIOUS_DOCKER_IMAGE_ID=""
 DEPLOY_PULLED_RUNTIME_IMAGE=""
 DEPLOY_LOCK_DIR=""
+DEPLOY_LOCK_FD_OPEN=0
 DEPLOY_K8S_NODE_NAME=""
 DEPLOY_FROZEN_ADMIN=0
 DEPLOY_MIGRATION_JOB_ACTIVE=0
@@ -214,7 +215,7 @@ cleanup_deploy_runtime() {
     case "$DEPLOY_LOCK_DIR" in
       "${RUNTIME_DIR}/internal-production-deploy.lock")
         if [ "$lock_owner" = "$$" ]; then
-          rm -f -- "${DEPLOY_LOCK_DIR}/pid" || true
+          rm -f -- "${DEPLOY_LOCK_DIR}/pid" "${DEPLOY_LOCK_DIR}/boot-id" || true
           rmdir -- "$DEPLOY_LOCK_DIR" 2>/dev/null || true
         fi
         ;;
@@ -223,6 +224,11 @@ cleanup_deploy_runtime() {
         ;;
     esac
     DEPLOY_LOCK_DIR=""
+  fi
+  if [ "$DEPLOY_LOCK_FD_OPEN" = 1 ]; then
+    flock -u 9 || true
+    exec 9>&-
+    DEPLOY_LOCK_FD_OPEN=0
   fi
   exit "$status"
 }
@@ -238,33 +244,56 @@ init_deploy_runtime() {
   trap 'exit 143' TERM
 }
 
+deployment_boot_id() {
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    cat /proc/sys/kernel/random/boot_id
+  fi
+}
+
 acquire_deploy_lock() {
   local lock="${RUNTIME_DIR}/internal-production-deploy.lock"
-  local owner=""
+  local owner="" previous_boot="" current_boot=""
   mkdir -p "$RUNTIME_DIR"
+  # Serialize stale-directory handling on the production Linux node. The
+  # kernel releases this lock after power loss; never delete its inode.
+  if [ "$(uname -s)" = Linux ]; then
+    need flock
+    exec 9>"${RUNTIME_DIR}/internal-production-deploy.flock"
+    flock -n 9 || die "another internal-production deployment holds the process lock"
+    DEPLOY_LOCK_FD_OPEN=1
+  fi
+  current_boot="$(deployment_boot_id)"
   if ! mkdir "$lock" 2>/dev/null; then
+    [ ! -L "$lock" ] || die "deploy lock must not be a symlink"
     if [ -r "${lock}/pid" ]; then
       IFS= read -r owner <"${lock}/pid" || true
     fi
-    case "$owner" in
-      ""|*[!0-9]*)
-        die "deploy lock $lock is invalid; inspect it before retrying"
-        ;;
-      *)
-        if kill -0 "$owner" 2>/dev/null; then
-          die "another internal-production deployment is running (PID $owner)"
-        fi
-        ;;
-    esac
-    say "remove stale deploy lock left by PID $owner"
-    rm -f -- "${lock}/pid"
-    rmdir -- "$lock" 2>/dev/null \
-      || die "could not remove stale deploy lock $lock"
-    mkdir "$lock" 2>/dev/null \
-      || die "another internal-production deployment acquired the lock"
+    if [ -r "${lock}/boot-id" ]; then
+      IFS= read -r previous_boot <"${lock}/boot-id" || true
+    fi
+    if [ -n "$current_boot" ] && [ -n "$previous_boot" ] && [ "$current_boot" != "$previous_boot" ]; then
+      say "reclaim deploy lock from a previous host boot (its PID may have been reused)"
+    else
+      case "$owner" in
+        ""|*[!0-9]*) die "deploy lock $lock is invalid; inspect it before retrying" ;;
+        *)
+          if kill -0 "$owner" 2>/dev/null; then
+            die "another internal-production deployment/recovery is running (PID $owner)"
+          fi
+          ;;
+      esac
+      say "remove stale deploy lock left by PID $owner"
+    fi
+    rm -f -- "${lock}/pid" "${lock}/boot-id"
+    rmdir -- "$lock" 2>/dev/null || die "could not remove stale deploy lock $lock"
+    mkdir "$lock" 2>/dev/null || die "another internal-production deployment acquired the lock"
   fi
-  printf '%s\n' "$$" >"${lock}/pid" \
-    || die "could not record deploy lock owner"
+  # Record boot before PID: after a power loss even an incomplete PID write is
+  # reclaimable, whereas an ambiguous same-boot/recovery lock is left alone.
+  if [ -n "$current_boot" ]; then
+    printf '%s\n' "$current_boot" >"${lock}/boot-id" || die "could not record deploy boot identity"
+  fi
+  printf '%s\n' "$$" >"${lock}/pid" || die "could not record deploy lock owner"
   DEPLOY_LOCK_DIR="$lock"
 }
 
@@ -485,6 +514,10 @@ search_action() {
 }
 
 require_production_env() {
+  case "${MX_INSIGHT_REQUIRE_SEARCH:-1}" in
+    0|1) : ;;
+    *) die "MX_INSIGHT_REQUIRE_SEARCH must be 0 or 1" ;;
+  esac
   # ops_action loads .env.internal once, after preserving any explicit command
   # environment overrides. Do not source it again here or a one-shot emergency
   # gate/token decision can be silently reverted to the persisted value.

@@ -1,5 +1,7 @@
 # Internal Kubernetes deployment
 
+The operational entry point is [mx-insight.deploy.md](../../mx-insight.deploy.md), including the retained data inventory and restart checks.
+
 For routine shutdown/restart, dependency bring-up, retained-storage guards and
 the September recovery evidence, see [restart and recovery](restart-and-recovery.md).
 Normal deploy now requires search and all Hub workloads ready by default; a

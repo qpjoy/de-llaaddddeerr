@@ -117,7 +117,9 @@ Environment:
   MX_COMMON_DISK_WARN_PERCENT   Warn above this disk usage during deploy (default 85)
   MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 1200)
   MX_COMMON_SNAPSHOT_SCHEDULE   SLM cron (default "0 30 1 * * ?", 01:30 daily)
-  MX_COMMON_SNAPSHOT_S3_BUCKET  Store snapshots off-node instead of on this host
+  MX_COMMON_SNAPSHOT_S3_BUCKET  Target off-node repository (requires configured ES S3 client/keystore)
+  MX_COMMON_SNAPSHOT_S3_CLIENT  Configured ES client name (default mx_backup)
+  MX_COMMON_SNAPSHOT_STALE_HOURS Snapshot status freshness threshold (default 36)
   MX_COMMON_ELASTICSEARCH_IMAGE Mirror override (default docker.elastic.co/...:9.4.2)
   MX_COMMON_POSTGRES_IMAGE      Mirror override (default pgvector/pgvector:pg16)
   MX_COMMON_REDIS_IMAGE         Mirror override (default redis:7.4-alpine)
@@ -946,6 +948,10 @@ hanlp_is_healthy() {
 
 cmd_ensure() {
   need kubectl
+  case "$WAIT_TIMEOUT" in
+    ''|*[!0-9]*) die "MX_COMMON_WAIT_TIMEOUT must be a positive integer" ;;
+  esac
+  [ "$WAIT_TIMEOUT" -gt 0 ] || die "MX_COMMON_WAIT_TIMEOUT must be greater than zero"
   local target_namespaces="${MX_COMMON_CLIENT_NAMESPACES:-mx-insight-hub}"
 
   if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
@@ -1121,7 +1127,7 @@ ensure_snapshot_policy() {
     # that distinction is exactly what gets forgotten between now and an outage.
     say "NOTE: snapshots are stored on this node. They protect against index"
     say "      loss and bad mappings, NOT against losing the machine. Set"
-    say "      MX_COMMON_SNAPSHOT_S3_BUCKET for off-node durability."
+    say "      MX_COMMON_SNAPSHOT_S3_BUCKET and configure the ES S3 client/keystore for off-node snapshots."
   fi
 }
 
@@ -1134,13 +1140,8 @@ snapshot_status() {
     printf 'snapshot policy %s is not registered\n' "$policy_name"
     return 1
   fi
-  printf '%s\n' "$policy"
-  # A policy that exists but has never succeeded is the failure this catches:
-  # "configured" and "working" are not the same claim.
-  case "$policy" in
-    *'"last_success"'*) return 0 ;;
-    *) printf 'WARNING: %s has never completed a snapshot successfully\n' "$policy_name" >&2; return 1 ;;
-  esac
+  need node
+  printf '%s' "$policy" | node "${ROOT_DIR}/scripts/inspect-snapshot-policy.mjs" "$policy_name"
 }
 
 cmd_snapshot() {
@@ -1217,18 +1218,23 @@ cmd_provision() {
 
   # Reuse retained credentials. A missing Secret is not permission to rotate
   # a role that already exists, even when an explicit password was supplied.
-  local stored_password existing_role
+  local stored_password existing_state
   stored_password="$(kubectl -n "$NAMESPACE" get secret "$secret_name" \
     --ignore-not-found -o jsonpath='{.data.password}' | base64 -d)" \
     || storage_guard_failed "cannot read product credential; password generation refused"
+  # Existing credentials are evidence of an existing product, never permission
+  # to recreate a dropped/missing database with an empty schema.
+  existing_state="$(psql_super mx_common -Atc "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${identifier}'), EXISTS (SELECT 1 FROM pg_database WHERE datname = '${identifier}')")" \
+    || storage_guard_failed "cannot inspect existing product role/database"
   if [ -n "$stored_password" ]; then
+    [ "$existing_state" = 't|t' ] \
+      || storage_guard_failed "retained product credential exists but its role/database is missing; empty database creation refused"
     [ -z "$password" ] || [ "$password" = "$stored_password" ] \
       || storage_guard_failed "explicit product password differs from its retained Secret; rotation refused"
     password="$stored_password"
   else
-    existing_role="$(psql_super mx_common -Atc "SELECT 1 FROM pg_roles WHERE rolname = '${identifier}'")" \
-      || storage_guard_failed "cannot inspect existing product role"
-    [ -z "$existing_role" ] || storage_guard_failed "product role exists but its Secret is missing; automatic password rotation refused"
+    [ "$existing_state" = 'f|f' ] \
+      || storage_guard_failed "product role/database exists but its Secret is missing; automatic password rotation refused"
     if [ -z "$password" ]; then
       password="$(generate_password)"
       say "generated a database password for ${product_id}" >&2
@@ -1846,11 +1852,22 @@ report_capacity() {
 
 cmd_down() {
   need kubectl
-  kubectl -n "$NAMESPACE" scale statefulset/mx-common-elasticsearch --replicas=0 >/dev/null 2>&1 || true
-  kubectl -n "$NAMESPACE" scale deployment/mx-common-redis --replicas=0 >/dev/null 2>&1 || true
-  kubectl -n "$NAMESPACE" scale deployment/mx-common-hanlp --replicas=0 >/dev/null 2>&1 || true
-  kubectl -n "$NAMESPACE" scale statefulset/mx-common-postgres --replicas=0 >/dev/null 2>&1 || true
-  say "shared workloads scaled to zero. PVCs, PVs, indices and the namespace were preserved."
+  local resource existing remaining
+  for resource in statefulset/mx-common-elasticsearch deployment/mx-common-redis deployment/mx-common-hanlp statefulset/mx-common-postgres; do
+    existing="$(kubectl -n "$NAMESPACE" get "$resource" --ignore-not-found -o name)" \
+      || die "cannot inspect $resource; shared shutdown is incomplete"
+    [ -n "$existing" ] || continue
+    kubectl -n "$NAMESPACE" scale "$resource" --replicas=0 >/dev/null \
+      || die "cannot stop $resource; shared shutdown is incomplete"
+  done
+  local selector='app.kubernetes.io/name in (mx-common-postgres,mx-common-elasticsearch,mx-common-redis,mx-common-hanlp)'
+  remaining="$(kubectl -n "$NAMESPACE" get pods -l "$selector" -o name)" \
+    || die "cannot confirm shared Pods stopped"
+  if [ -n "$remaining" ]; then
+    kubectl -n "$NAMESPACE" wait --for=delete pods -l "$selector" --timeout=180s \
+      || die "shared Pods have not stopped; leave volumes and data in place"
+  fi
+  say "shared workloads stopped. PVCs, PVs, indices and the namespace were preserved."
 }
 
 cmd_logs() {

@@ -173,6 +173,14 @@ spec:
               value: "-Xms12g -Xmx12g"
             - name: TZ
               value: Asia/Shanghai
+          # Allow crash/WAL or index recovery before liveness may restart it.
+          # This 30-minute container-start budget is separate from CLI waiting.
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
           readinessProbe:
             httpGet:
               path: /_cluster/health?local=true

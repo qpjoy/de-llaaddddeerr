@@ -27,7 +27,7 @@ for (const [label, h, p, d, match] of [
 });
 
 const manage = fileURLToPath(new URL('../scripts/manage.sh', import.meta.url));
-function bash(script) { return spawnSync('bash', ['-c', `source "$1"\n${script}`, 'fixture', manage], { encoding: 'utf8' }); }
+function bash(script, environment = {}) { return spawnSync('bash', ['-c', `source "$1"\n${script}`, 'fixture', manage], { encoding: 'utf8', env: { ...process.env, ...environment } }); }
 
 test('normal deploy refuses a degraded dependency before product provisioning', () => {
   const r = bash(`
@@ -79,5 +79,45 @@ need() { :; }; kubectl() { printf '%s' "$MX_INSIGHT_SYNC_LAUNCHER"; }
 ops_action internal-production status`);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, explicit === '1' ? '11' : '00');
+  }
+});
+
+test('rebooted deploy lock is reclaimed despite PID reuse, while active same-boot/recovery owners stay protected', async t => {
+  const os = await import('node:os'); const path = await import('node:path');
+  for (const previous of ['old-boot', 'current-boot', 'legacy']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mx-hub-lock-test-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const lock = path.join(root, 'internal-production-deploy.lock'); fs.mkdirSync(lock);
+    // A real live PID simulates both PID reuse and an active recovery process.
+    fs.writeFileSync(path.join(lock, 'pid'), `${process.pid}\n`);
+    if (previous !== 'legacy') fs.writeFileSync(path.join(lock, 'boot-id'), `${previous}\n`);
+    const result = bash(`
+RUNTIME_DIR="$MX_TEST_LOCK_ROOT"
+deployment_boot_id() { echo current-boot; }
+acquire_deploy_lock`, { MX_TEST_LOCK_ROOT: root });
+    assert.equal(result.status, previous === 'old-boot' ? 0 : 1, result.stderr);
+    if (previous === 'old-boot') {
+      assert.equal(fs.readFileSync(path.join(lock, 'boot-id'), 'utf8'), 'current-boot\n');
+      assert.notEqual(fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim(), String(process.pid));
+    } else assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim(), String(process.pid));
+  }
+});
+
+test('successful deploy obeys dependency order; a failed credential gate cannot start services', () => {
+  for (const reject of [false, true]) {
+    const result = bash(`
+load_env_file() { :; }; need() { :; }; require_production_env() { MX_INSIGHT_API_KEY_PEPPER=fixture; }
+require_single_k8s_node() { :; }; init_deploy_runtime() { :; }; acquire_deploy_lock() { :; }
+validate_existing_runtime_secret() { echo OLD_SECRET; }
+node() { echo CREDENTIAL_GATE; ${reject ? 'return 78' : ':'}; }
+ensure_shared_data_plane() { echo COMMON_READY; }
+disable_projector_startup_rebuild_for_deploy() { echo INCREMENTAL_ONLY; }
+build_and_import_image() { echo BUILD; }; apply_k8s() { echo HUB_READY; }
+k8s_smoke() { echo API_CHECK; }; ensure_default_api_key() { :; }; seed_default_price_books() { :; }; print_deploy_summary() { :; }
+unset MX_INSIGHT_REQUIRE_SEARCH
+ops_action internal-production deploy`);
+    assert.equal(result.status, reject ? 78 : 0, result.stderr);
+    if (reject) assert.equal(result.stdout, 'OLD_SECRET\nCREDENTIAL_GATE\n');
+    else assert.match(result.stdout, /^OLD_SECRET\nCREDENTIAL_GATE\nCOMMON_READY\nINCREMENTAL_ONLY\nBUILD\nHUB_READY\nAPI_CHECK\n.*all six Hub workloads are ready/);
   }
 });

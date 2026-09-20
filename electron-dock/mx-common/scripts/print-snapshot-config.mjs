@@ -7,7 +7,7 @@
 // in manage.sh, which needs no port-forward and no cluster credentials on the
 // operator's machine. This script is the seam between the two.
 //
-// Usage: node scripts/print-snapshot-config.mjs repository|policy <name>
+// Usage: node scripts/print-snapshot-config.mjs repository|policy|client <name>
 // Import the leaf module, never the package barrel.
 //
 // This script runs on the OPERATOR'S HOST during `ensure`, where mx-common has
@@ -18,6 +18,7 @@
 import {
   fsRepository,
   s3Repository,
+  s3ClientSettings,
   dailySnapshotPolicy,
   DEFAULT_REPOSITORY,
 } from '../src/elasticsearch/snapshots.mjs'
@@ -32,7 +33,7 @@ function repository() {
     return s3Repository({
       bucket,
       basePath: process.env.MX_COMMON_SNAPSHOT_S3_BASE_PATH || undefined,
-      endpoint: process.env.MX_COMMON_SNAPSHOT_S3_ENDPOINT || undefined,
+      client: process.env.MX_COMMON_SNAPSHOT_S3_CLIENT || undefined,
     })
   }
   return fsRepository({ location: process.env.MX_COMMON_SNAPSHOT_PATH || undefined })
@@ -49,7 +50,19 @@ function policy() {
   })
 }
 
-if (what === 'repository') process.stdout.write(JSON.stringify(repository()))
+function client() {
+  const pathStyle = process.env.MX_COMMON_SNAPSHOT_S3_PATH_STYLE ?? 'false'
+  if (!['true', 'false'].includes(pathStyle)) throw new Error('MX_COMMON_SNAPSHOT_S3_PATH_STYLE must be true or false')
+  return s3ClientSettings({
+    client: process.env.MX_COMMON_SNAPSHOT_S3_CLIENT || undefined,
+    endpoint: process.env.MX_COMMON_SNAPSHOT_S3_ENDPOINT,
+    region: process.env.MX_COMMON_SNAPSHOT_S3_REGION,
+    pathStyleAccess: pathStyle === 'true',
+  })
+}
+
+if (what === 'client') process.stdout.write(JSON.stringify(client()))
+else if (what === 'repository') process.stdout.write(JSON.stringify(repository()))
 else if (what === 'policy') process.stdout.write(JSON.stringify(policy()))
 else {
   process.stderr.write(`unknown target: ${what || '(none)'}${name ? ` ${name}` : ''}\n`)

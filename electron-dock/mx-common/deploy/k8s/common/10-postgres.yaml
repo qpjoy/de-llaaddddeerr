@@ -49,6 +49,7 @@ spec:
         app.kubernetes.io/part-of: mx-common
         mx-common.io/service: postgres
     spec:
+      terminationGracePeriodSeconds: 120
       serviceAccountName: mx-common
       automountServiceAccountToken: false
       tolerations:
@@ -117,6 +118,14 @@ spec:
             # systematically over-prices index scans.
             - -c
             - random_page_cost=1.1
+          # Allow crash/WAL or index recovery before liveness may restart it.
+          # This 30-minute container-start budget is separate from CLI waiting.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U mx_common -d mx_common -t 3"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U mx_common -d mx_common"]
