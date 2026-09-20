@@ -38,6 +38,10 @@ if (tool === 'ctr') {
   process.exit();
 }
 const action = args.slice(0,2).join(' ');
+if (action === 'buildx build' && args.some(arg => arg.includes('host-gateway'))) {
+  console.error('host-gateway is not supported by the docker-container driver');
+  process.exit(32);
+}
 if (action === 'context inspect') console.log(e.MX_TEST_DOCKER_ENDPOINT || 'unix:///var/run/docker.sock');
 else if (args[0] === 'version') console.log('linux/amd64');
 else if (action === 'buildx version') console.log('buildx test');
@@ -129,6 +133,8 @@ test('custom proxy covers artifacts, registry-token client, buildkitd and RUN; p
     assert.ok(!create.args.includes('--use'));
     const build = calls.find(c => c.args[0] === 'buildx' && c.args[1] === 'build');
     for (const flag of ['--load','--builder','--network','--allow','network.host','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']) assert.ok(build.args.includes(flag), flag);
+    assert.equal(build.args[build.args.indexOf('--network') + 1], 'host');
+    assert.ok(!build.args.some(arg => arg.includes('host-gateway')), 'host networking reaches the proxy without the unsupported host-gateway lookup');
     assert.equal(build.env.MX_SHADOW_NPM_REGISTRY, 'https://registry.example.test');
     assert.ok(build.args.includes('qpjoy/mx-launcher-server:shadow'));
     assert.equal(calls.at(-1).args[0], 'test-after');

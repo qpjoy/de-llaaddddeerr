@@ -778,11 +778,16 @@ bash scripts/manage.sh ops internal-production deploy
 例如 Clash 的 HTTP/mixed 端口。该变量覆盖构建子进程的大小写 HTTP/HTTPS/ALL_PROXY
 和 npm 代理，作用于 predeploy 的 Corepack、制品准备、BuildKit 的基础镜像请求、
 客户端的 registry token 请求以及 Dockerfile 构建步骤。代理不会写入应用运行时配置。
+该参数不改变 MX-H2I 用户流量的 WireGuard / Hysteria2 / Mihomo 链路，也不修改登录
+配置、系统路由或数据库；独立 BuildKit 容器保留的代理设置仅用于后续构建。
 
 启用后要求本机 Linux Docker Engine 和 buildx 插件，使用独立的 `docker-container`
 构建器及 host 网络，因此 `127.0.0.1` 指向部署主机。相同代理配置复用构建器，修改
 代理或绕行列表后使用另一个构建器；不切换 Docker 默认构建器，不修改或重启 Docker /
 containerd。原有 `MX_SHADOW_BUILDKIT_*` 清理参数在这里仅作用于选定构建器的缓存。
+构建代理使用 `127.0.0.1` 或实际可达的主机地址，不依赖 `host.docker.internal`。
+此路径不传 `host.docker.internal:host-gateway`，避免独立构建器报
+`host-gateway is not supported by the docker-container driver`。
 
 首次使用若缺少 BuildKit 镜像，脚本用带指定代理的 `ctr` 客户端下载，再加载到 Docker；
 containerd 2.x 自动加 `--local`，1.x 使用客户端原有下载路径。缺少的 PostgreSQL /

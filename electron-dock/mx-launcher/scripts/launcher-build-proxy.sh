@@ -123,12 +123,13 @@ launcher_build_internal_with_proxy() {
     } catch { console.error("cannot resolve the Internal build registry from Compose configuration"); process.exit(1); }
   ')"
   say "build Internal with scoped proxy builder: $MX_LAUNCHER_PROXY_BUILDER"
+  # Both buildkitd and RUN use host networking, so the local proxy is reachable
+  # directly. docker-container cannot resolve Docker's host-gateway alias.
   MX_SHADOW_NPM_REGISTRY="$registry" docker buildx build \
     --builder "$MX_LAUNCHER_PROXY_BUILDER" --network host --allow network.host \
     --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg ALL_PROXY --build-arg NO_PROXY \
     --build-arg http_proxy --build-arg https_proxy --build-arg all_proxy --build-arg no_proxy \
     --build-arg MX_SHADOW_NPM_REGISTRY \
-    --add-host host.docker.internal:host-gateway \
     --tag qpjoy/mx-launcher-server:shadow --file "$ROOT/server/Dockerfile" --load "$ROOT/server"
 }
 
