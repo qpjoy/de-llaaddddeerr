@@ -237,6 +237,53 @@ bash scripts/inspect-confirmed-mx-auth.sh \
 让 API 加载原凭据并验收两种登录；保留旧身份记录后再更新恢复检查点。
 **提取完成不代表凭据已写回，尚不能再次 deploy。**
 
+### 已找回原凭据：恢复认证并建立检查点
+
+2026-09-21 的现场提取目录为
+`/data/mx-recovery/confirmed-cutover.2VZC9C/auth-inspect.jHEIk8`。结果确认：
+
+- 原 `mx-internal-ops/token` 齐全，当前集群值与原值不同。
+- 原飞书 App ID、App Secret、租户允许列表齐全，当前飞书 Secret 缺失。
+- 原数据库三项凭据与当前一致，保留当前已验证可用的 Service 地址和整个数据库 Secret。
+- SDK Secret 在原备份和当前集群均不存在，不生成替代值。
+- 私有 env 和 shell 没有上述认证覆盖项；尚无恢复身份检查点。
+- 原 native host runner 服务为 enabled，但 inactive；旧切换未保存停机前状态。
+
+更新代码后，在同一服务器运行：
+
+```bash
+bash scripts/restore-confirmed-mx-auth.sh \
+  /data/mx-recovery/confirmed-cutover.2VZC9C/auth-inspect.jHEIk8
+```
+
+脚本在同一 deploy 锁下执行，先核对提取的原记录、最新 bind/fstab、数据库 Secret、
+PV/PVC、当前 Service 和 API 配置。若已有检查点，只接受与当前身份一致的记录，
+不会删除记录绕过检查。将本次工作负载和当前凭据备份到新的私有 `auth-restore.*` 目录，
+并持久化后，才按 UID/resourceVersion 条件恢复 Ops Token、创建缺失的飞书 Secret。
+不会覆盖提取后发生的其它凭据变更；当前已是原值时跳过该项。若 API 调用中断，可以用
+同一命令续跑；部分成功不自动回滚为临时 Token 或删除飞书 Secret。
+
+两个认证 Secret 通过校验后，给现有 API Deployment 添加恢复注解以加载环境变量。
+这会滚动更新 API，期间可能短暂影响接口；不会停止或重建 PostgreSQL，
+也不会改用户密码、数据库数据、PV/PVC、挂载或控制面 etcd。脚本从就绪 API 内部验证：
+实际加载原凭据、旧 Ops Token 可访问受保护管理接口、飞书配置 enabled、只读连接仍指向
+当前 PG Pod/数据库、SMH/SQB 及凭据存在。验证失败保留当前服务和备份，不盲目回切。
+
+上述检查通过后，以当前最新数据目录建立 `/var/lib/mx-launcher-recovery` 的首份身份
+和 Secret 检查点；后续重跑保留已有历史代次。普通重启/deploy 在未显式轮换配置时复用
+原凭据，缺失的 Secret 从匹配身份的私有检查点补回。若挂载、CA、节点或数据库身份不符，
+仍然停止而不是自动选旧库或生成新 Token。检查点是本机文件，需要随迁移保留并做异机备份；
+不能保证在原值及其所有备份都丢失时恢复凭据。
+
+最后检查 native host runner：只接受本项目安装的标准 Node 监听服务、原 unit 已 enabled、
+没有 drop-in/额外启动钩子或未加载的 unit 修改，并且 19190 未占用，才执行 `systemctl start`。
+只检查 GET `/healthz`，不执行安装、WireGuard/DNS/Nginx apply 或路由清理。不符合条件时
+输出 `needs_review` 并保持当前配置；不会把 runner 未完成误报为整个服务恢复成功。
+
+看到原 Ops 验证、飞书 enabled、最新业务库核验和检查点成功后，仍需实际验收员工原密码登录、
+飞书授权登录、原 Admin Token 及原联网功能。**通过验收后可恢复日常 deploy；无需为本次
+Secret 恢复再构建镜像或重新切库。** 不把 `.private.*`、Secret 或 `.env` 上传到反馈或 Git。
+
 ### 尚未确认数据来源时的只读清单
 
 先运行只读清单（无需构建或 deploy）：
