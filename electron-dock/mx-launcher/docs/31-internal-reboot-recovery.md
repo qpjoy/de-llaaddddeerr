@@ -96,7 +96,7 @@ API/RBAC 错误不会触发盲目换证书。初次安装失败回退配置并�
 通过其它工具轮换 Secret 后，应再次 deploy 更新恢复记录。若要撤销凭据，应明确轮换为新值；
 单纯删除受保护的 Secret 后运行 deploy，会按本恢复约定补回旧值。
 
-本次实际落盘关系：
+本次恢复初期接到旧库的落盘关系（不是后来确认的最新目录）：
 
 - PostgreSQL：`/var/lib/mx-launcher/k8s/postgres/pgdata`，通过挂载落到
   `/data/mx-runtime/mx-launcher/k8s/postgres/pgdata`。
@@ -118,6 +118,48 @@ API/RBAC 错误不会触发盲目换证书。初次安装失败回退配置并�
 到了这份旧数据。原凭据可连接、PGDATA 完整，都不足以判定生产库来源正确。
 
 这时暂停 deploy、迁移和用户管理写入，不清理镜像/容器/卷，也不要直接启动任何离线原件。
+
+### 用户已确认最新目录：本次单独切换数据挂载
+
+2026-09-21 已明确确认最新数据位于
+`/data/k8s/mx-runtime/mx-launcher/k8s/postgres/pgdata`。原入口与
+`/data/mx-runtime/mx-launcher/k8s/postgres/pgdata` 是同一设备/inode；最新目录则是
+另一份物理目录。两份 PG system identifier 相同，只说明来自同一个初始化实例。
+`/etc/fstab` 仍绑定到旧树，解释了恢复后账号缺失，而不是 PVC UID 改变导致密码失效。
+
+这次已确认的切换使用独立命令，不让 deploy 自动猜选历史副本：
+
+```bash
+# 在本机 push、服务器 pull 同一 feat/mx_insight_hub 后，进入 mx-launcher 目录。
+test -s scripts/restore-confirmed-mx-data.sh && bash scripts/restore-confirmed-mx-data.sh
+```
+
+脚本固定本次已确认的路径和候选 PGDATA 设备/inode，不能用于其它机器或再次迁移。
+需要在原服务器以 root 运行，沿用已恢复的 Kubernetes、Docker 和 PostgreSQL 16 镜像。
+有服务停机窗口；执行前不要同时 deploy、运行迁移或进行后台管理写入。
+
+执行内容：
+
+1. 核对源目录、未运行状态、PG control 的干净关闭状态、没有外部 PGDATA 符号链接；
+   核对单节点、现有 PV/PVC 绑定、Retain、API 数据库连接目标、已有数据启动保护。
+2. 在 `/data/mx-recovery/confirmed-cutover.*` 保存 fstab、工作负载和私有 Secret 备份，
+   完整复制最新 MX 数据树和最新 etcd 数据树，逐文件 SHA-256 比较原件和副本。
+3. 暂停 MX host runner、Internal API 和 PostgreSQL，等待正常退出，再冷备旧数据树。
+4. 普通卸载并重新 bind `/var/lib/mx-launcher` 到最新树，只修改其 fstab 条目，保留
+   containerd、kubelet、etcd 的当前挂载；不删改 PV/PVC，不覆盖两份原始数据树。
+5. 启动 PostgreSQL，先排除错误密码也可登录的情况，再以只读事务验证实际 API 环境
+   中的 SMH、SQB 和对应凭据记录，最后启动 API 和此前运行的 host runner。
+
+备份完成后，最新数据树成为运行目录，数据库正常启动和业务运行会写入该目录；切换前
+副本仍保留。副本在同一磁盘，不能替代异机备份。不会 initdb、改密码、执行数据库迁移、
+合并新旧库或把整份最新 etcd 覆盖到当前控制面。旧库里在事故排查期间产生的记录保留
+在旧树中，不自动合并。失败会报告阶段和备份位置，不盲目重新启动 API 或自动回切。
+
+**这一步只恢复最新业务库及同树的 SSH/站点/发布文件，尚未恢复飞书或旧 Ops Token。**
+这些凭据需要从此次保存的 `latest-etcd` 副本中选择性取回；当前完整 etcd 数据树及其
+WAL 都已保留，禁止直接替换在线 etcd。服务返回后还需实际验收员工登录，并恢复和验收
+飞书登录。最后核对并迁移 `/var/lib/mx-launcher-recovery` 的旧身份记录和 Secret 快照，
+保留原记录。完成之前不再次运行 deploy，也不删除旧恢复记录来绕过身份校验。
 先运行只读清单（无需构建或 deploy）：
 
 ```bash
