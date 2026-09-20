@@ -67,6 +67,8 @@ validate_elasticsearch_heap() {
 say() { printf '[mx-common] %s\n' "$*"; }
 warn() { printf '[mx-common] WARN: %s\n' "$*" >&2; }
 die() { printf '[mx-common] ERROR: %s\n' "$*" >&2; exit 1; }
+# Products may tolerate optional search outages, but never storage ambiguity.
+storage_guard_failed() { printf '[mx-common] STORAGE GUARD: %s\n' "$*" >&2; exit 78; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
 usage() {
@@ -143,17 +145,36 @@ EOF
 # records where the bytes are, so that is what gets believed. An explicit
 # environment variable still wins, for a first install or a deliberate override.
 resolve_host_data_root() {
-  [ -n "${MX_COMMON_HOST_DATA_ROOT:-}" ] && return 0
   command -v kubectl >/dev/null 2>&1 || return 0
-  local recorded
-  recorded="$(kubectl get pv mx-common-postgres-data \
-    -o jsonpath='{.spec.hostPath.path}' 2>/dev/null || true)"
-  case "$recorded" in
-    */postgres/data)
-      HOST_DATA_ROOT="${recorded%/postgres/data}"
-      HOST_DATA_ROOT_ORIGINAL="$HOST_DATA_ROOT"
-      ;;
-  esac
+  local recorded retained
+  if [ -z "${MX_COMMON_HOST_DATA_ROOT:-}" ]; then
+    recorded="$(kubectl get pv mx-common-postgres-data --ignore-not-found \
+      -o jsonpath='{.spec.hostPath.path}')" \
+      || storage_guard_failed "cannot read the current PostgreSQL PV; refusing a default-path fallback"
+    case "$recorded" in
+      */postgres/data)
+        HOST_DATA_ROOT="${recorded%/postgres/data}"
+        HOST_DATA_ROOT_ORIGINAL="$HOST_DATA_ROOT"
+        ;;
+    esac
+  fi
+  # Lost PV metadata must not silently initialize a second database on /.
+  # Never pick a retained copy automatically: credentials and writers must be
+  # reconciled by the explicit recovery procedure first.
+  if [ "$HOST_DATA_ROOT" = /var/lib/mx-common/k8s ]; then
+    for retained in /data/k8s/mx-runtime/mx-common/k8s /data/mx-runtime/mx-common/k8s; do
+      if retained_postgres_conflicts "$retained" "$HOST_DATA_ROOT"; then
+        storage_guard_failed "retained PostgreSQL exists at $retained but the PV selects the default directory; recover the retained volumes before deploying (do not use relocate)"
+      fi
+    done
+  fi
+}
+
+retained_postgres_conflicts() {
+  local retained="$1" current="$2"
+  [ -s "$retained/postgres/data/pgdata/PG_VERSION" ] \
+    && [ -s "$retained/postgres/data/pgdata/global/pg_control" ] \
+    && ! [ "$retained/postgres/data/pgdata/global/pg_control" -ef "$current/postgres/data/pgdata/global/pg_control" ]
 }
 
 # Every retained local PV, as: pv-name claim-name size sub-path owner mode.
@@ -892,12 +913,12 @@ hanlp_is_healthy() {
 
 cmd_ensure() {
   need kubectl
-  resolve_host_data_root
   local target_namespaces="${MX_COMMON_CLIENT_NAMESPACES:-mx-insight-hub}"
 
   if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
     die "MX_COMMON_HANLP_ENABLED is no longer a standalone deploy switch; run 'bash scripts/manage.sh deploy hanlp', then run ensure without that variable"
   fi
+  resolve_host_data_root
 
   if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 && es_is_healthy; then
     say "shared data plane is already healthy; reconciling declaratively (no restart unless a manifest changed)"
@@ -1136,6 +1157,7 @@ generate_password() {
 # can capture the DSN with a plain command substitution.
 cmd_provision() {
   need kubectl
+  resolve_host_data_root
   local product_id="$1"
   local password="${2:-}"
   [ -n "$product_id" ] || die "usage: manage.sh provision <productId> [password]"

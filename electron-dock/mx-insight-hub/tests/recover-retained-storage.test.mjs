@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, linkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, linkSync, existsSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { VOLUMES, validateReport, replacementVolumes, databaseCredential, postgresGuard, HUB_DEPLOYMENTS } from '../scripts/recover-retained-storage.mjs'
+import { VOLUMES, validateReport, replacementVolumes, databaseCredential, postgresGuard, HUB_DEPLOYMENTS, withPatchFile, command, commandDescription, validateResumeState, validateResumeResources } from '../scripts/recover-retained-storage.mjs'
 
 const retained = '/data/k8s/mx-runtime/mx-common/k8s'
 const report = { source: retained, control: ['Database system identifier: 7671038612254789664'],
@@ -150,4 +150,115 @@ test('retained-directory detection distinguishes a separate old database from th
   assert.equal(check().status, 0, 'separate retained data must stop default initialization')
   rmSync(target); linkSync(file, target)
   assert.equal(check().status, 1, 'same files through an alias must not be mistaken for a second database')
+})
+
+
+test('kubectl input is a private real file readable by a subprocess and removed on success or failure', () => {
+  let file
+  const value = { spec: { replicas: 0 } }
+  const output = withPatchFile(value, path => {
+    file = path
+    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assert.equal(statSync(dirname(path)).mode & 0o777, 0o700)
+    const child = spawnSync(process.execPath, ['-e', "process.stdout.write(require('node:fs').readFileSync(process.argv[1]))", path], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+    assert.equal(child.status, 0, child.stderr)
+    return JSON.parse(child.stdout)
+  })
+  assert.deepEqual(output, value)
+  assert.equal(existsSync(file), false)
+  assert.throws(() => withPatchFile(value, path => { file = path; throw new Error('synthetic kubectl failure') }), /synthetic kubectl failure/)
+  assert.equal(existsSync(file), false)
+})
+
+test('real kubectl local strategic merge preserves PostgreSQL image and arguments while adding the guard', t => {
+  if (spawnSync('kubectl', ['version', '--client'], { encoding: 'utf8' }).error?.code === 'ENOENT') return t.skip('kubectl not installed')
+  const root = mkdtempSync(join(tmpdir(), 'mx-kubectl-local-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const file = join(root, 'statefulset.json')
+  const container = { name: 'postgres', image: 'synthetic/pg:16', args: ['-c', 'max_connections=200'] }
+  writeFileSync(file, JSON.stringify({ apiVersion: 'apps/v1', kind: 'StatefulSet', metadata: { name: 'mx-common-postgres' },
+    spec: { replicas: 0, template: { spec: { containers: [container] } } } }))
+  const guard = postgresGuard('7671038612254789664')
+  const result = withPatchFile({ spec: { template: { spec: { containers: [{ name: 'postgres', command: guard }] } } } },
+    path => spawnSync('kubectl', ['patch', '--local', '-f', file, '--type=strategic', '--patch-file', path, '-o', 'json'], { encoding: 'utf8' }))
+  assert.equal(result.status, 0, result.stderr)
+  const patched = JSON.parse(result.stdout)
+  assert.equal(patched.spec.replicas, 0)
+  assert.deepEqual(patched.spec.template.spec.containers, [{ ...container, command: guard }])
+})
+
+test('failed-command summary names the Kubernetes action but excludes payloads and private child output', () => {
+  assert.equal(commandDescription('kubectl', ['--request-timeout=20s', '-n', 'mx-common', 'patch', 'statefulset', 'mx-common-postgres', '--patch', 'SyntheticSecret']),
+    'kubectl patch statefulset mx-common-postgres')
+  assert.equal(commandDescription('kubectl', ['--request-timeout=20s', '-n', 'mx-common', 'exec', '-i', 'statefulset/mx-common-postgres', '--', 'psql']),
+    'kubectl database operation')
+  assert.throws(() => command(process.execPath, ['-e', "console.error('SyntheticSecret'); process.exit(7)"], 'SyntheticInput'), error => {
+    assert.match(error.message, /exit 7/)
+    assert.doesNotMatch(error.message, /SyntheticSecret|SyntheticInput|console.error/)
+    return true
+  })
+})
+
+function resumeResources() {
+  const { pvs, claims } = resources()
+  for (const pv of pvs) { pv.metadata.uid = `uid-${pv.metadata.name}`; pv.status = { phase: 'Bound' } }
+  for (const pvc of claims) { pvc.kind = 'PersistentVolumeClaim'; pvc.metadata.uid = `uid-${pvc.metadata.name}`; pvc.status = { phase: 'Bound' } }
+  const hub = HUB_DEPLOYMENTS.map(name => ({ kind: 'Deployment', metadata: { name, uid: `uid-${name}` }, spec: { replicas: 1, template: { spec: { containers: [{ image: 'hub:original' }] } } } }))
+  const storage = ['mx-common-postgres', 'mx-common-elasticsearch'].map(name => ({ kind: 'StatefulSet', metadata: { name, uid: `uid-${name}` }, spec: { replicas: 1 } }))
+  const secret = { kind: 'Secret', metadata: { name: 'mx-insight-hub-secrets', uid: 'hub-secret' }, data: { key: 'synthetic-only' } }
+  const productSecret = { kind: 'Secret', metadata: { name: 'mx-common-db-mx-insight-hub', uid: 'product-secret' }, data: { password: 'synthetic-only' } }
+  const saved = structuredClone({ pvs, hub: { items: [...hub, secret] }, common: { items: [...storage, ...claims, productSecret] } })
+  for (const value of [...hub, ...storage]) value.spec.replicas = 0
+  return { saved, current: { hub, storage, pvs, claims, secret, productSecret } }
+}
+
+test('resume accepts only completed pre-rebinding checkpoints for the original database', () => {
+  const state = { phase: 'both-storage-copies-preserved', originalRoot: retained, previousRoot: '/var/lib/mx-common/k8s', originalSystemIdentifier: '7671038612254789664' }
+  for (const phase of ['both-storage-copies-preserved', 'storage-bindings-verified', 'postgres-startup-guard-installed', 'storage-startup-guards-installed']) {
+    assert.doesNotThrow(() => validateResumeState({ ...state, phase }, state.originalSystemIdentifier))
+  }
+  for (const change of [{ phase: 'preflight' }, { phase: 'hub-stopped-current-db-empty' }, { phase: 'retained-volumes-bound' },
+    { phase: 'replacing-binding-mx-common-postgres-data' }, { originalRoot: '/other' }, { previousRoot: '/other' }, { originalSystemIdentifier: 'wrong' }]) {
+    assert.throws(() => validateResumeState({ ...state, ...change }, state.originalSystemIdentifier))
+  }
+})
+
+test('resume validates stopped workloads, exact bindings and credential continuity without modifying the snapshots', () => {
+  const { saved, current } = resumeResources()
+  const before = structuredClone({ saved, current })
+  assert.doesNotThrow(() => validateResumeResources(saved, current))
+  assert.deepEqual({ saved, current }, before)
+})
+
+test('resume refuses a partial volume deletion/rebind, restarted/recreated workload, rollout or changed Secret', () => {
+  for (const mutate of [
+    r => { r.current.pvs.pop() },
+    r => { r.current.pvs[0].metadata.deletionTimestamp = '2026-09-21' },
+    r => { r.current.pvs[0].metadata.uid = 'recreated' },
+    r => { r.current.pvs[0].spec.hostPath.path = `${retained}/postgres/data` },
+    r => { r.current.pvs[0].status.phase = 'Released' },
+    r => { r.current.claims.pop() },
+    r => { r.current.claims[0].metadata.deletionTimestamp = '2026-09-21' },
+    r => { r.current.claims[0].metadata.uid = 'recreated' },
+    r => { r.current.hub[2].spec.replicas = 1 },
+    r => { r.current.hub[0].metadata.uid = 'recreated' },
+    r => { r.current.hub[0].spec.template.spec.containers[0].image = 'hub:new' },
+    r => { r.current.storage[0].spec.replicas = 1 },
+    r => { r.current.storage[1].metadata.uid = 'recreated' },
+    r => { r.current.secret.data.key = 'different-secret' },
+    r => { r.current.productSecret.data.password = 'different-secret' },
+    r => { r.current.secret.metadata.uid = 'recreated' },
+  ]) {
+    const r = resumeResources(); mutate(r)
+    assert.throws(() => validateResumeResources(r.saved, r.current), error => !error.message.includes('different-secret'))
+  }
+})
+
+
+test('resume CLI refuses multiple recovery directories before reading files or contacting a cluster', () => {
+  const result = spawnSync(process.execPath, ['scripts/recover-retained-storage.mjs', '--resume-before-rebind',
+    '/nonexistent/recovery-a', '/nonexistent/recovery-b'], { encoding: 'utf8' })
+  assert.equal(result.status, 2)
+  assert.match(result.stdout, /Usage:/)
+  assert.equal(result.stderr, '')
 })

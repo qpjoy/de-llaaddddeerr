@@ -107,3 +107,36 @@ node scripts/recover-retained-storage.mjs \
 
 参考：[PostgreSQL pg_controldata](https://www.postgresql.org/docs/16/app-pgcontroldata.html)、
 [Kubernetes Retain PV](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#retain)。
+
+
+## 备份完成、重绑卷之前的失败续跑
+
+若旧脚本输出 `both-storage-copies-preserved` 后仅显示
+`kubectl --request-timeout=20s failed; private output withheld`，这不是数据丢失结论，
+也无法仅凭这个阶段判定 PV 是否已开始变化：旧阶段覆盖了多条 Kubernetes 命令。
+已发现旧代码把 Node 子进程 stdin 当作 `/dev/stdin` 文件交给 `kubectl --patch-file`；
+Linux 上该描述符可能是 socket，重新打开会失败。现在使用权限 0600 的真实临时文件，
+执行后清理；添加启动保护和每组卷重绑分别记录阶段。终端失败消息包含操作/资源及退出码，
+原始 stdout/stderr 只保存到恢复目录的 `command-error-*.json`，不要粘贴这些私有文件。
+
+在提交并拉取本次修正后，使用原恢复目录（不是 inspection 目录）续跑：
+
+```bash
+node scripts/recover-retained-storage.mjs --resume-before-rebind \
+  /data/.mx-hub-recovery-XXXXXX
+```
+
+此命令只接受备份完成至卷重绑之前的检查点。续跑在任何集群写入前验证：
+
+- 原单节点、挂载盘、PG16 system identifier 和正常关闭状态仍成立；
+- 六个 Hub Deployment 与 PG/ES 均为 0 副本且无存活 Pod；
+- PV/PVC 的 UID、spec、Bound 状态与原快照一致，且没有删除标记；
+- Hub 部署配置及两个产品凭据 Secret 与原快照一致；
+- 两份 PostgreSQL 副本均存在，control file 与各自原目录相同，ES/快照目录保留，
+  原目录和副本没有被存活 Pod、容器或主机进程使用。
+
+通过后直接继续安装启动保护和旧卷恢复，不重新复制 85 GB，也不重启空库。
+任何卷已经删除、换绑或进入 Terminating，均拒绝这个续跑入口；不要移除 finalizer，
+不要重新执行完整恢复或 deploy，应先核查实际绑定。该入口不是任意阶段的自动续跑。
+
+Node 子进程管道的限制见 [Node.js stdio 文档](https://nodejs.org/api/child_process.html#optionsstdio)。

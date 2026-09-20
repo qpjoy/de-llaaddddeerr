@@ -4,10 +4,11 @@
 import { execFileSync } from 'node:child_process'
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync,
+  realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
-import { hostname, networkInterfaces } from 'node:os'
+import { hostname, networkInterfaces, tmpdir } from 'node:os'
+import { isDeepStrictEqual } from 'node:util'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -83,12 +84,39 @@ export function postgresGuard(identifier) {
     '--']
 }
 
-function command(binary, args, input, timeout = 30_000) {
+let failureDirectory
+let failureNumber = 0
+
+export function commandDescription(binary, args) {
+  if (binary !== 'kubectl') return `${binary} operation`
+  const index = args.findIndex(arg => ['get', 'patch', 'create', 'delete', 'scale', 'exec', 'logs'].includes(arg))
+  if (index < 0) return 'kubectl operation'
+  const action = args[index]
+  if (action === 'exec') return args.includes('psql') ? 'kubectl database operation' : 'kubectl container operation'
+  // Only resource words, never payloads, URLs, arguments after -- or child output.
+  const words = args.slice(index + 1, index + 3).filter(word => /^[a-zA-Z0-9][a-zA-Z0-9.,_/-]*$/.test(word))
+  return ['kubectl', action, ...words].join(' ')
+}
+
+export function command(binary, args, input, timeout = 30_000) {
   try {
     return execFileSync(binary, args, { input, encoding: 'utf8', timeout,
       maxBuffer: 16 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, LC_ALL: 'C' } }).trim()
-  } catch { throw new Error(`${binary} ${args.includes('psql') ? 'database operation' : args[0]} failed; private output withheld`) }
+  } catch (error) {
+    const operation = commandDescription(binary, args)
+    const status = Number.isInteger(error.status) ? `exit ${error.status}` : 'no exit status'
+    let detail = ''
+    if (failureDirectory) {
+      const file = join(failureDirectory, `command-error-${Date.now()}-${++failureNumber}.json`)
+      try {
+        persist(file, { operation, status: error.status, code: error.code, signal: error.signal,
+          stdout: error.stdout?.toString(), stderr: error.stderr?.toString() })
+        detail = `; private diagnostic: ${file} (do not paste its contents)`
+      } catch { detail = '; private diagnostic could not be saved' }
+    }
+    throw new Error(`${operation} failed (${status}); private output withheld${detail}`)
+  }
 }
 function kube(args, input, timeout) { return command('kubectl', ['--request-timeout=20s', ...args], input, timeout) }
 function get(ns, kind) { return JSON.parse(kube([...(ns ? ['-n', ns] : []), 'get', ...kind.split(' '), '-o', 'json'])) }
@@ -96,7 +124,20 @@ function persist(file, value) {
   writeFileSync(`${file}.tmp`, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flush: true })
   renameSync(`${file}.tmp`, file)
 }
-function patch(ns, kind, name, value) { kube(['-n', ns, 'patch', kind, name, '--type=strategic', '--patch-file=/dev/stdin'], JSON.stringify(value)) }
+// Node child stdio can be a socket on Linux: reopening /dev/stdin as a file
+// fails with ENXIO. kubectl --patch-file needs a real private file instead.
+export function withPatchFile(value, use) {
+  const directory = mkdtempSync(join(tmpdir(), 'mx-hub-recovery-input-'))
+  chmodSync(directory, 0o700)
+  try {
+    const file = join(directory, 'input.json')
+    writeFileSync(file, JSON.stringify(value), { mode: 0o600 })
+    return use(file)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+}
+function patch(ns, kind, name, value) {
+  return withPatchFile(value, file => kube(['-n', ns, 'patch', kind, name, '--type=strategic', '--patch-file', file]))
+}
 function psql(sql, database = 'mx_insight_hub') {
   return kube(['-n', 'mx-common', 'exec', '-i', 'statefulset/mx-common-postgres', '--',
     'psql', '-X', '-w', '-qAt', '-U', 'mx_common', '-d', database, '-v', 'ON_ERROR_STOP=1'], sql, 60_000)
@@ -166,7 +207,55 @@ try {
 finally { await pool.end(); }
 `
 
-export async function recover(reportPath) {
+const RESUMABLE_PHASES = ['both-storage-copies-preserved', 'storage-bindings-verified',
+  'postgres-startup-guard-installed', 'storage-startup-guards-installed']
+
+export function validateResumeState(state, identifier) {
+  if (!RESUMABLE_PHASES.includes(state.phase) || state.originalRoot !== RETAINED_ROOT
+      || state.previousRoot !== DEFAULT_ROOT || state.originalSystemIdentifier !== identifier) {
+    throw new Error('Resume requires a completed backup before any volume replacement; inspect the recorded stage')
+  }
+}
+
+export function validateResumeResources(saved, current) {
+  for (const name of HUB_DEPLOYMENTS) {
+    const before = saved.hub.items.find(r => r.kind === 'Deployment' && r.metadata.name === name)
+    const now = current.hub.find(r => r.metadata.name === name)
+    if (!before?.metadata.uid || now?.metadata.uid !== before.metadata.uid || now.spec.replicas !== 0) {
+      throw new Error(`Resume refused: ${name} was recreated or is not stopped`)
+    }
+    const { replicas: oldReplicas, ...oldSpec } = before.spec
+    const { replicas: newReplicas, ...newSpec } = now.spec
+    if (!isDeepStrictEqual(oldSpec, newSpec)) throw new Error(`Resume refused: ${name} deployment configuration changed`)
+  }
+  for (const name of ['mx-common-postgres', 'mx-common-elasticsearch']) {
+    const before = saved.common.items.find(r => r.kind === 'StatefulSet' && r.metadata.name === name)
+    const now = current.storage.find(r => r.metadata.name === name)
+    if (!before?.metadata.uid || now?.metadata.uid !== before.metadata.uid || now.spec.replicas !== 0) {
+      throw new Error(`Resume refused: ${name} was recreated or is not stopped`)
+    }
+  }
+  for (const [pvName, pvcName] of VOLUMES) {
+    const oldPv = saved.pvs.find(r => r.metadata.name === pvName)
+    const pv = current.pvs.find(r => r.metadata.name === pvName)
+    const oldPvc = saved.common.items.find(r => r.kind === 'PersistentVolumeClaim' && r.metadata.name === pvcName)
+    const pvc = current.claims.find(r => r.metadata.name === pvcName)
+    if (!oldPv?.metadata.uid || pv?.metadata.uid !== oldPv.metadata.uid || pv.metadata.deletionTimestamp
+        || !oldPvc?.metadata.uid || pvc?.metadata.uid !== oldPvc.metadata.uid || pvc.metadata.deletionTimestamp
+        || pv.status?.phase !== 'Bound' || pvc.status?.phase !== 'Bound'
+        || !isDeepStrictEqual(oldPv.spec, pv.spec) || !isDeepStrictEqual(oldPvc.spec, pvc.spec)) {
+      throw new Error(`Resume refused: ${pvName} binding changed or is being deleted; do not force finalizers`)
+    }
+  }
+  for (const [snapshot, secret] of [[saved.hub, current.secret], [saved.common, current.productSecret]]) {
+    const before = snapshot.items.find(r => r.kind === 'Secret' && r.metadata.name === secret.metadata.name)
+    if (!before?.metadata.uid || before.metadata.uid !== secret.metadata.uid || !isDeepStrictEqual(before.data, secret.data)) {
+      throw new Error('Resume refused: a Hub credential Secret changed; values withheld')
+    }
+  }
+}
+
+export async function recover(reportPath, resumeDirectory) {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) throw new Error('Run on the Internal Linux host as root')
   process.umask(0o077)
   const report = JSON.parse(readFileSync(reportPath, 'utf8'))
@@ -200,7 +289,8 @@ export async function recover(reportPath) {
   if (!existsSync(join(esData, '_state')) && !existsSync(join(esData, 'nodes/0/_state'))) throw new Error('Retained Elasticsearch metadata is missing')
   unusedRoot(root, pvs, get('', 'pods -A').items)
   const secret = get('mx-insight-hub', 'secret mx-insight-hub-secrets')
-  const password = databaseCredential(secret, get('mx-common', 'secret mx-common-db-mx-insight-hub'))
+  const productSecret = get('mx-common', 'secret mx-common-db-mx-insight-hub')
+  const password = databaseCredential(secret, productSecret)
   const pepper = Buffer.from(secret.data.MX_INSIGHT_API_KEY_PEPPER || '', 'base64').toString()
   if (pepper.length < 32 || !secret.data.MX_INSIGHT_ADMIN_TOKEN) throw new Error('Current Hub Pepper or Admin Token is missing; values withheld')
   const postgres = get('mx-common', 'statefulset mx-common-postgres')
@@ -213,54 +303,97 @@ export async function recover(reportPath) {
   if (!control.split('\n').some(line => /^Database system identifier:\s+/.test(line) && line.endsWith(identifier))
       || !/^Database cluster state:\s+shut down$/m.test(control)) throw new Error('Original PostgreSQL identity or clean shutdown no longer matches')
 
+  let saved, previousState, resumeRoot
+  const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex')
+  if (resumeDirectory) {
+    resumeRoot = resolve(resumeDirectory)
+    if (realpathSync(resumeRoot) !== resumeRoot || !/^\/data\/\.mx-hub-recovery-[a-zA-Z0-9]+$/.test(resumeRoot)
+        || statSync(resumeRoot).uid !== 0 || (statSync(resumeRoot).mode & 0o077) !== 0) {
+      throw new Error('Resume requires the original root-private recovery directory on /data')
+    }
+    const read = file => JSON.parse(readFileSync(join(resumeRoot, file), 'utf8'))
+    previousState = read('state.json')
+    validateResumeState(previousState, identifier)
+    saved = { pvs: read('volumes.json'), common: read('mx-common.json'), hub: read('mx-insight-hub.json') }
+    if (!isDeepStrictEqual(read('inspection.json'), report)) throw new Error('Resume inspection report changed')
+    validateResumeResources(saved, { hub, storage: [postgres, elasticsearch], pvs, claims, secret, productSecret })
+    if (nonterminal(get('mx-insight-hub', 'pods').items).length
+        || get('mx-common', 'pods').items.some(p => /^(mx-common-postgres|mx-common-elasticsearch)-\d+$/.test(p.metadata.name))) {
+      throw new Error('Resume refused: Hub or database Pods still exist')
+    }
+    unusedRoot(DEFAULT_ROOT, pvs, get('', 'pods -A').items)
+    for (const [source, copy] of [[root, 'retained-before-recovery'], [DEFAULT_ROOT, 'default-before-recovery']]) {
+      const copyRoot = join(resumeRoot, copy)
+      for (const [, , suffix] of VOLUMES) {
+        const path = join(copyRoot, suffix)
+        if (!statSync(path).isDirectory() || realpathSync(path) !== path) throw new Error('Recovery copy is missing or redirected')
+      }
+      validateLayout(join(copyRoot, 'postgres/data/pgdata'))
+      const suffix = 'postgres/data/pgdata/global/pg_control'
+      if (hash(join(source, suffix)) !== hash(join(copyRoot, suffix))) throw new Error('Database control changed since backup; resume refused')
+      unusedRoot(copyRoot, pvs, get('', 'pods -A').items)
+    }
+  }
+
   const runtime = join(dirname(fileURLToPath(import.meta.url)), '../.runtime')
   mkdirSync(runtime, { recursive: true })
   const lock = join(runtime, 'internal-production-deploy.lock')
   try { mkdirSync(lock, { mode: 0o700 }) } catch { throw new Error('Deploy/recovery lock exists; inspect it before retrying') }
   writeFileSync(join(lock, 'pid'), String(process.pid), { mode: 0o600 })
-  const backup = mkdtempSync('/data/.mx-hub-recovery-')
+  const backup = resumeRoot || mkdtempSync('/data/.mx-hub-recovery-')
   chmodSync(backup, 0o700)
-  const state = { phase: 'preflight', originalRoot: root, originalSystemIdentifier: identifier,
+  const state = previousState || { phase: 'preflight', originalRoot: root, originalSystemIdentifier: identifier,
     previousRoot: DEFAULT_ROOT, originalReplicas: Object.fromEntries(hub.map(d => [d.metadata.name, d.spec.replicas ?? 1])) }
   const checkpoint = phase => { state.phase = phase; persist(join(backup, 'state.json'), state); console.log(`Recovery stage: ${phase}`) }
   let changed = false
   let probe
   console.log(`Private recovery directory: ${backup}. Do not share its files.`)
+  failureDirectory = backup
   try {
-    for (const namespace of ['mx-common', 'mx-insight-hub']) {
-      persist(join(backup, `${namespace}.json`), get(namespace, 'deployments,statefulsets,services,configmaps,secrets,pvc,jobs,networkpolicies'))
+    if (resumeRoot) {
+      // Repeat object checks under the deploy lock; do not recopy data or start
+      // the empty database just to reconstruct a completed checkpoint.
+      validateResumeResources(saved, { hub: get('mx-insight-hub', 'deployments').items,
+        storage: get('mx-common', 'statefulsets').items, pvs: get('', 'pv').items,
+        claims: get('mx-common', 'pvc').items, secret: get('mx-insight-hub', 'secret mx-insight-hub-secrets'),
+        productSecret: get('mx-common', 'secret mx-common-db-mx-insight-hub') })
+      changed = true
+      console.log('Verified stopped workloads, unchanged original bindings/credentials and preserved database copies; continuing before volume replacement.')
+    } else {
+      for (const namespace of ['mx-common', 'mx-insight-hub']) {
+        persist(join(backup, `${namespace}.json`), get(namespace, 'deployments,statefulsets,services,configmaps,secrets,pvc,jobs,networkpolicies'))
+      }
+      persist(join(backup, 'volumes.json'), pvs.filter(pv => VOLUMES.some(([name]) => name === pv.metadata.name)))
+      persist(join(backup, 'inspection.json'), report)
+      changed = true
+      await stopHub()
+      const otherDatabases = JSON.parse(psql(`SELECT coalesce(json_agg(datname), '[]'::json) FROM pg_database
+        WHERE NOT datistemplate AND datname NOT IN ('postgres','mx_common','mx_insight_hub');`, 'mx_common'))
+      if (otherDatabases.length) throw new Error('The current shared instance contains another product database; cross-product recovery review required')
+      const current = JSON.parse(psql(`BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; ${hasDataSQL} COMMIT;`))
+      if (current.records || current.requests) throw new Error('Current default-path database now has business data; preserve and reconcile both databases before switching')
+      const currentIndices = JSON.parse(kube(['-n', 'mx-common', 'exec', 'statefulset/mx-common-elasticsearch', '-c', 'elasticsearch', '--',
+        'curl', '-fsS', '--max-time', '10', 'http://127.0.0.1:9200/_cat/indices?format=json&h=index']))
+      if (currentIndices.some(index => !index.index.startsWith('mx-insight-hub-') && !index.index.startsWith('.'))) {
+        throw new Error('The current Elasticsearch contains another product index; cross-product recovery review required')
+      }
+      checkpoint('hub-stopped-current-db-empty')
+      for (const name of ['mx-common-postgres', 'mx-common-elasticsearch']) kube(['-n', 'mx-common', 'scale', `statefulset/${name}`, '--replicas=0'])
+      await until(() => !get('mx-common', 'pods').items.some(p => /^(mx-common-postgres|mx-common-elasticsearch)-\d+$/.test(p.metadata.name)), 'shared database Pods did not stop')
+      unusedRoot(root, get('', 'pv').items, get('', 'pods -A').items)
+      unusedRoot(DEFAULT_ROOT, get('', 'pv').items, get('', 'pods -A').items)
+      const originalCopy = join(backup, 'retained-before-recovery')
+      const freshCopy = join(backup, 'default-before-recovery')
+      mkdirSync(originalCopy, { mode: 0o700 }); mkdirSync(freshCopy, { mode: 0o700 })
+      for (const part of ['postgres', 'elasticsearch']) {
+        // Old volumes use same-filesystem reflink exclusively. Source bytes and
+        // both copies survive all subsequent credential/PV changes.
+        command('cp', ['-a', '--reflink=always', '--', join(root, part), join(originalCopy, part)], undefined, 600_000)
+        command('cp', ['-a', '--reflink=auto', '--', join(DEFAULT_ROOT, part), join(freshCopy, part)], undefined, 600_000)
+      }
+      if (hash(join(pgdata, 'global/pg_control')) !== hash(join(originalCopy, 'postgres/data/pgdata/global/pg_control'))) throw new Error('Original control file changed during backup')
+      checkpoint('both-storage-copies-preserved')
     }
-    persist(join(backup, 'volumes.json'), pvs.filter(pv => VOLUMES.some(([name]) => name === pv.metadata.name)))
-    persist(join(backup, 'inspection.json'), report)
-    changed = true
-    await stopHub()
-    const otherDatabases = JSON.parse(psql(`SELECT coalesce(json_agg(datname), '[]'::json) FROM pg_database
-      WHERE NOT datistemplate AND datname NOT IN ('postgres','mx_common','mx_insight_hub');`, 'mx_common'))
-    if (otherDatabases.length) throw new Error('The current shared instance contains another product database; cross-product recovery review required')
-    const current = JSON.parse(psql(`BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; ${hasDataSQL} COMMIT;`))
-    if (current.records || current.requests) throw new Error('Current default-path database now has business data; preserve and reconcile both databases before switching')
-    const currentIndices = JSON.parse(kube(['-n', 'mx-common', 'exec', 'statefulset/mx-common-elasticsearch', '-c', 'elasticsearch', '--',
-      'curl', '-fsS', '--max-time', '10', 'http://127.0.0.1:9200/_cat/indices?format=json&h=index']))
-    if (currentIndices.some(index => !index.index.startsWith('mx-insight-hub-') && !index.index.startsWith('.'))) {
-      throw new Error('The current Elasticsearch contains another product index; cross-product recovery review required')
-    }
-    checkpoint('hub-stopped-current-db-empty')
-    for (const name of ['mx-common-postgres', 'mx-common-elasticsearch']) kube(['-n', 'mx-common', 'scale', `statefulset/${name}`, '--replicas=0'])
-    await until(() => !get('mx-common', 'pods').items.some(p => /^(mx-common-postgres|mx-common-elasticsearch)-\d+$/.test(p.metadata.name)), 'shared database Pods did not stop')
-    unusedRoot(root, get('', 'pv').items, get('', 'pods -A').items)
-    unusedRoot(DEFAULT_ROOT, get('', 'pv').items, get('', 'pods -A').items)
-    const originalCopy = join(backup, 'retained-before-recovery')
-    const freshCopy = join(backup, 'default-before-recovery')
-    mkdirSync(originalCopy, { mode: 0o700 }); mkdirSync(freshCopy, { mode: 0o700 })
-    for (const part of ['postgres', 'elasticsearch']) {
-      // Old volumes use same-filesystem reflink exclusively. Source bytes and
-      // both copies survive all subsequent credential/PV changes.
-      command('cp', ['-a', '--reflink=always', '--', join(root, part), join(originalCopy, part)], undefined, 600_000)
-      command('cp', ['-a', '--reflink=auto', '--', join(DEFAULT_ROOT, part), join(freshCopy, part)], undefined, 600_000)
-    }
-    const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex')
-    if (hash(join(pgdata, 'global/pg_control')) !== hash(join(originalCopy, 'postgres/data/pgdata/global/pg_control'))) throw new Error('Original control file changed during backup')
-    checkpoint('both-storage-copies-preserved')
     if (nonterminal(get('mx-insight-hub', 'pods').items).length
         || get('mx-common', 'pods').items.some(p => /^(mx-common-postgres|mx-common-elasticsearch)-\d+$/.test(p.metadata.name))) {
       throw new Error('A writer restarted during backup; no bindings will be changed')
@@ -271,9 +404,11 @@ export async function recover(reportPath) {
         throw new Error('Storage bindings changed during backup; stop concurrent deployment before proceeding')
       }
     }
+    checkpoint('storage-bindings-verified')
     patch('mx-common', 'statefulset', 'mx-common-postgres', { spec: { template: { spec: {
       containers: [{ name: 'postgres', command: postgresGuard(identifier) }],
     } } } })
+    checkpoint('postgres-startup-guard-installed')
     patch('mx-common', 'statefulset', 'mx-common-elasticsearch', { spec: { template: { spec: {
       initContainers: [{ name: 'verify-retained-data', image: pgImage, imagePullPolicy: 'IfNotPresent',
         command: ['sh', '-ec', 'test -d /retained/_state || test -d /retained/nodes/0/_state'],
@@ -281,9 +416,11 @@ export async function recover(reportPath) {
         resources: { requests: { cpu: '10m', memory: '16Mi' }, limits: { cpu: '100m', memory: '64Mi' } },
         volumeMounts: [{ name: 'data', mountPath: '/retained', readOnly: true }] }],
     } } } })
+    checkpoint('storage-startup-guards-installed')
     // Delete only these three Retain bindings. Never delete/overwrite a host
     // directory, Secret, namespace or a Launcher resource.
     for (const [pv, pvc] of replacements) {
+      checkpoint(`replacing-binding-${pv.metadata.name}`)
       kube(['-n', 'mx-common', 'delete', 'pvc', pvc.metadata.name, '--wait=true', '--timeout=120s'], undefined, 140_000)
       kube(['delete', 'pv', pv.metadata.name, '--wait=true', '--timeout=120s'], undefined, 140_000)
       kube(['create', '-f', '-'], JSON.stringify(pv))
@@ -368,6 +505,7 @@ export async function recover(reportPath) {
     console.error(`Recovery stopped at ${state.phase}. No automatic rollback. Originals and backups remain at their recorded paths.`)
     throw error
   } finally {
+    failureDirectory = undefined
     if (probe) { try { kube(['-n', 'mx-insight-hub', 'delete', 'pod', probe, '--ignore-not-found', '--wait=true', '--timeout=30s'], undefined, 45_000) } catch { console.error('Inspection Pod cleanup failed; inspect its status.') } }
     if (readFileSync(join(lock, 'pid'), 'utf8') === String(process.pid)) { unlinkSync(join(lock, 'pid')); rmdirSync(lock) }
     console.log(`Recovery record: ${backup}/state.json (private; do not paste Secret backups).`)
@@ -375,14 +513,20 @@ export async function recover(reportPath) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length !== 3 || process.argv[2] === '--help') {
-    console.log('Usage: node scripts/recover-retained-storage.mjs /data/.mx-hub-inspect-XXXXXX/report.json')
-    console.log('Explicit production recovery: stop Hub, preserve both data directories, rebind three Retain volumes, verify old data/credentials, restore APIs. Background workers remain paused.')
-    if (process.argv.length !== 3) process.exitCode = 2
-  } else {
-    try { await recover(process.argv[2]) } catch (error) {
+  const args = process.argv.slice(2)
+  if ((args.length === 1 && args[0] !== '--help' && !args[0].startsWith('--'))
+      || (args.length === 2 && args[0] === '--resume-before-rebind')) {
+    try {
+      const resume = args[0] === '--resume-before-rebind' ? resolve(args[1]) : undefined
+      await recover(resume ? join(resume, 'inspection.json') : args[0], resume)
+    } catch (error) {
       console.error(error.constructor === Error && !error.code ? error.message : 'Recovery stopped during validation; private details withheld')
       process.exitCode = 1
     }
+  } else {
+    console.log('Usage: node scripts/recover-retained-storage.mjs /data/.mx-hub-inspect-XXXXXX/report.json')
+    console.log('Resume only BEFORE bindings change: node scripts/recover-retained-storage.mjs --resume-before-rebind /data/.mx-hub-recovery-XXXXXX')
+    console.log('Explicit production recovery: stop Hub, preserve both data directories, rebind three Retain volumes, verify old data/credentials, restore APIs. Background workers remain paused.')
+    if (!(args.length === 1 && args[0] === '--help')) process.exitCode = 2
   }
 }
