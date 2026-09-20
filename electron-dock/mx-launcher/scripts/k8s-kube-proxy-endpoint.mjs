@@ -1,13 +1,56 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { isIPv4 } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const ENDPOINT_ANNOTATION = 'mx.qpjoy.com/kube-proxy-endpoint-sha256';
+
+export function parseKubeconfig(content, run, tempRoot = tmpdir()) {
+  if (typeof content !== 'string' || !content.trim()) throw new Error('kube-proxy kubeconfig.conf is missing or empty');
+  // Node's child stdio may be a socket on Linux. Reopening it as /dev/stdin
+  // can fail with ENXIO even though spawnSync({ input }) works on macOS.
+  const work = mkdtempSync(join(tempRoot, 'mx-kube-proxy-parse-'));
+  try {
+    const path = join(work, 'kubeconfig.conf');
+    writeFileSync(path, content, { mode: 0o600, flag: 'wx' });
+    return JSON.parse(run([`--kubeconfig=${path}`, 'config', 'view', '--raw', '-o', 'json'], 'parse-kube-proxy-kubeconfig'));
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+export function runKubectl(args, stage, diagnosticsRoot, spawn = spawnSync) {
+  console.log(`kube-proxy: ${stage}`);
+  const result = spawn('kubectl', args, { encoding: 'utf8', timeout: 25000, maxBuffer: 8 * 1024 * 1024 });
+  if (!result.error && result.status === 0) return result.stdout;
+  // Errors can echo kubeconfig/patch credentials. Persist raw details privately
+  // and print only a fixed category, stage and exit status.
+  const raw = `${result.error?.code ?? ''}\n${result.stderr ?? ''}`;
+  let category = 'kubectl-error';
+  if (/ENXIO|no such device or address/i.test(raw)) category = 'input-file-unreadable';
+  else if (/ETIMEDOUT|timed out|deadline exceeded/i.test(raw)) category = 'timeout';
+  else if (/x509|tls:|certificate/i.test(raw)) category = 'tls-verification';
+  else if (/Forbidden|Unauthorized|provide credentials/i.test(raw)) category = 'authentication-or-permission';
+  else if (/NotFound|not found/i.test(raw)) category = 'resource-not-found';
+  else if (/Conflict|object has been modified|test failed|test operation/i.test(raw)) category = 'concurrent-change';
+  else if (/connection refused|no route to host|network is unreachable/i.test(raw)) category = 'connection-failed';
+  else if (/ENOENT/.test(raw)) category = 'kubectl-not-found';
+  let diagnostic = 'private diagnostics unavailable';
+  try {
+    mkdirSync(diagnosticsRoot, { recursive: true, mode: 0o700 });
+    const work = mkdtempSync(join(diagnosticsRoot, 'mx-kube-proxy-error-'));
+    const path = join(work, 'kubectl-error.json');
+    writeFileSync(path, JSON.stringify({ stage, status: result.status, signal: result.signal,
+      spawnError: result.error?.code, stdout: result.stdout, stderr: result.stderr }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    diagnostic = `private diagnostics: ${path} (do not upload)`;
+  } catch { /* Keep the original failure actionable even when backup storage is unavailable. */ }
+  throw new Error(`${stage}: ${category} (exit ${result.status ?? 'none'}); ${diagnostic}`);
+}
 
 export function apiEndpoint(host) {
   if (!isIPv4(host) || /^(0|127|169\.254)\./.test(host)) {
@@ -62,11 +105,11 @@ export function repairEndpoint(host, backupRoot, run) {
   const endpoint = apiEndpoint(host);
   // Use the repaired direct endpoint even while the Kubernetes Service is down.
   const base = [`--server=${endpoint}`, '--insecure-skip-tls-verify=false', '--request-timeout=15s'];
-  run([...base, 'get', '--raw=/readyz']);
-  const cm = JSON.parse(run([...base, '-n', 'kube-system', 'get', 'configmap', 'kube-proxy', '-o', 'json']));
-  const ds = JSON.parse(run([...base, '-n', 'kube-system', 'get', 'daemonset', 'kube-proxy', '-o', 'json']));
+  run([...base, 'get', '--raw=/readyz'], 'check-api-readyz');
+  const cm = JSON.parse(run([...base, '-n', 'kube-system', 'get', 'configmap', 'kube-proxy', '-o', 'json'], 'read-kube-proxy-configmap'));
+  const ds = JSON.parse(run([...base, '-n', 'kube-system', 'get', 'daemonset', 'kube-proxy', '-o', 'json'], 'read-kube-proxy-daemonset'));
   // Parsing is local and never authenticates as kube-proxy or prints its token.
-  const config = JSON.parse(run(['--kubeconfig=/dev/stdin', 'config', 'view', '--raw', '-o', 'json'], cm.data?.['kubeconfig.conf']));
+  const config = parseKubeconfig(cm.data?.['kubeconfig.conf'], run);
   const plan = planEndpointRepair(cm, ds, config, host);
   if (!plan.configPatch && !plan.rolloutPatch) {
     console.log(`kube-proxy already configured for ${endpoint}`);
@@ -84,23 +127,19 @@ export function repairEndpoint(host, backupRoot, run) {
   console.log(`kube-proxy configuration backup: ${work}`);
   if (plan.configPatch) {
     const path = save('configmap-patch.json', plan.configPatch);
-    run([...base, '-n', 'kube-system', 'patch', 'configmap', 'kube-proxy', '--type=json', '--patch-file', path]);
+    run([...base, '-n', 'kube-system', 'patch', 'configmap', 'kube-proxy', '--type=json', '--patch-file', path], 'patch-kube-proxy-configmap');
   }
   if (plan.rolloutPatch) {
     const path = save('daemonset-patch.json', plan.rolloutPatch);
-    run([...base, '-n', 'kube-system', 'patch', 'daemonset', 'kube-proxy', '--type=merge', '--patch-file', path]);
+    run([...base, '-n', 'kube-system', 'patch', 'daemonset', 'kube-proxy', '--type=merge', '--patch-file', path], 'rollout-kube-proxy');
   }
   console.log(`kube-proxy endpoint synchronized: ${endpoint}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    repairEndpoint(process.argv[2] ?? '', process.argv[3] ?? '/etc/kubernetes', (args, input) => {
-      const result = spawnSync('kubectl', args, { input, encoding: 'utf8', timeout: 25000, maxBuffer: 8 * 1024 * 1024 });
-      // kubectl errors can echo patches containing kubeconfig credentials.
-      if (result.error || result.status !== 0) throw new Error('kubectl read/patch failed; check API access and concurrent changes, then retry');
-      return result.stdout;
-    });
+    const backupRoot = process.argv[3] ?? '/etc/kubernetes';
+    repairEndpoint(process.argv[2] ?? '', backupRoot, (args, stage) => runKubectl(args, stage, backupRoot));
   } catch (error) {
     // JSON parse errors can include raw credential material, so never print them.
     console.error(`kube-proxy endpoint repair failed: ${error instanceof SyntaxError ? 'invalid resource JSON' : error.message}`);

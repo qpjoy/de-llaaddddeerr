@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { apiEndpoint, planEndpointRepair, repairEndpoint } from './k8s-kube-proxy-endpoint.mjs';
+import { apiEndpoint, parseKubeconfig, planEndpointRepair, repairEndpoint, runKubectl } from './k8s-kube-proxy-endpoint.mjs';
 
 function fixture(server = 'https://192.168.1.4:6443') {
   const kubeconfig = `apiVersion: v1
@@ -98,14 +98,17 @@ test('invalid targets and ambiguous/nonstandard resources fail closed', () => {
 });
 
 function mockKubectl(state, calls, fail = '') {
-  return (args, input) => {
+  return (args, stage) => {
     calls.push(args);
     if (args.includes('--raw=/readyz')) {
       if (fail === 'tls') throw new Error('TLS failure');
       return 'ok';
     }
     if (args.includes('view')) {
-      assert.equal(input, state.cm.data['kubeconfig.conf']);
+      assert.equal(stage, 'parse-kube-proxy-kubeconfig');
+      const path = args.find(a => a.startsWith('--kubeconfig=')).slice('--kubeconfig='.length);
+      assert.ok(statSync(path).isFile(), 'Linux requires a regular file, not child /dev/stdin');
+      assert.equal(readFileSync(path, 'utf8'), state.cm.data['kubeconfig.conf']);
       return JSON.stringify(state.config);
     }
     const kind = args.includes('configmap') ? 'cm' : 'ds';
@@ -148,7 +151,7 @@ test('repair backs up before patching, retries interrupted rollout and then is i
     repairEndpoint('192.168.1.2', dir, mockKubectl(state, calls));
     assert.equal(calls.filter(a => a.includes('patch')).length, 0);
     assert.equal(readdirSync(dir).length, backupCount);
-    assert.ok(calls.every(a => a.includes('--kubeconfig=/dev/stdin') ||
+    assert.ok(calls.every(a => a.some(arg => arg.startsWith('--kubeconfig=')) ||
       (a.includes('--server=https://192.168.1.2:6443') && a.includes('--insecure-skip-tls-verify=false'))));
     assert.ok(calls.every(a => !a.some(x => /secret|postgres|pvc|delete|apply/.test(x))));
   } finally {
@@ -168,16 +171,77 @@ test('a failed API check or conflicting ConfigMap never triggers a rollout', () 
   }
 });
 
-test('kubectl can parse the untouched and repaired kubeconfig locally through stdin', t => {
+test('kubectl can parse the untouched and repaired kubeconfig from a regular file', t => {
   const state = fixture();
-  const parse = input => spawnSync('kubectl', ['--kubeconfig=/dev/stdin', 'config', 'view', '--raw', '-o', 'json'], { input, encoding: 'utf8' });
-  const before = parse(state.cm.data['kubeconfig.conf']);
-  if (before.error?.code === 'ENOENT') return t.skip('kubectl not installed');
-  assert.equal(before.status, 0, before.stderr);
-  const parsed = JSON.parse(before.stdout);
+  const availability = spawnSync('kubectl', ['version', '--client'], { encoding: 'utf8' });
+  if (availability.error?.code === 'ENOENT') return t.skip('kubectl not installed');
+  const run = args => {
+    const result = spawnSync('kubectl', args, { encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const parsed = parseKubeconfig(state.cm.data['kubeconfig.conf'], run);
   const plan = planEndpointRepair(state.cm, state.ds, parsed, '192.168.1.2');
-  const after = parse(plan.configPatch.at(-1).value);
-  assert.equal(after.status, 0, after.stderr);
+  const after = parseKubeconfig(plan.configPatch.at(-1).value, run);
   parsed.clusters[0].cluster.server = 'https://192.168.1.2:6443';
-  assert.deepEqual(JSON.parse(after.stdout), parsed);
+  assert.deepEqual(after, parsed);
+});
+
+test('parser uses a private regular file and removes it on success, command error and invalid JSON', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mx kubeconfig test-'));
+  try {
+    for (const outcome of ['success', 'command-error', 'invalid-json']) {
+      let path;
+      const run = (args, stage) => {
+        assert.equal(stage, 'parse-kube-proxy-kubeconfig');
+        path = args[0].slice('--kubeconfig='.length);
+        assert.ok(path.startsWith(root));
+        assert.ok(statSync(path).isFile());
+        assert.equal(statSync(join(path, '..')).mode & 0o777, 0o700);
+        assert.equal(statSync(path).mode & 0o777, 0o600);
+        assert.equal(readFileSync(path, 'utf8'), fixture().cm.data['kubeconfig.conf']);
+        assert.deepEqual(args.slice(1), ['config', 'view', '--raw', '-o', 'json']);
+        if (outcome === 'command-error') throw new Error('simulated kubectl failure');
+        return outcome === 'invalid-json' ? '{invalid' : JSON.stringify(fixture().config);
+      };
+      if (outcome === 'success') assert.deepEqual(parseKubeconfig(fixture().cm.data['kubeconfig.conf'], run, root), fixture().config);
+      else assert.throws(() => parseKubeconfig(fixture().cm.data['kubeconfig.conf'], run, root));
+      assert.ok(path);
+      assert.equal(existsSync(path), false);
+      assert.deepEqual(readdirSync(root), []);
+    }
+    assert.throws(() => parseKubeconfig(undefined, () => assert.fail('must not run kubectl'), root), /missing or empty/);
+    assert.deepEqual(readdirSync(root), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('kubectl failures identify their stage while raw credential material stays in private diagnostics', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mx-kubectl-error-test-'));
+  try {
+    const secret = 'TEST-PRIVATE-CREDENTIAL-MUST-NOT-BE-PRINTED';
+    const cases = [
+      ['parse-kube-proxy-kubeconfig', 'open /dev/stdin: no such device or address', 'input-file-unreadable'],
+      ['read-kube-proxy-configmap', 'Error from server (Forbidden)', 'authentication-or-permission'],
+      ['patch-kube-proxy-configmap', 'Error from server (Conflict)', 'concurrent-change'],
+      ['check-api-readyz', 'x509: certificate signed by unknown authority', 'tls-verification']
+    ];
+    for (const [stage, detail, category] of cases) {
+      const stderr = `${detail}\n${secret}`;
+      assert.throws(() => runKubectl(['test-only'], stage, root, () => ({ status: 1, stdout: secret, stderr })), error => {
+        assert.match(error.message, new RegExp(`${stage}: ${category} \\(exit 1\\)`));
+        assert.ok(!error.message.includes(secret));
+        assert.ok(!error.message.includes(detail));
+        assert.match(error.message, /do not upload/);
+        return true;
+      });
+    }
+    const diagnostics = readdirSync(root);
+    assert.equal(diagnostics.length, cases.length);
+    for (const folder of diagnostics) {
+      const path = join(root, folder, 'kubectl-error.json');
+      assert.equal(statSync(join(root, folder)).mode & 0o777, 0o700);
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      assert.ok(JSON.parse(readFileSync(path, 'utf8')).stderr.includes(secret));
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

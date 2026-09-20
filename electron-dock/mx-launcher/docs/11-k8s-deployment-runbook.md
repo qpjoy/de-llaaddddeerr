@@ -563,6 +563,10 @@ bash scripts/manage.sh ops internal-production deploy
 - 备份：变更前分别保存到 `/etc/kubernetes/mx-kube-proxy-endpoint-*` 和
   `/etc/kubernetes/mx-flannel-endpoint-*`，目录 `0700`、文件 `0600`。可用
   `MX_K8S_ENDPOINT_BACKUP_DIR=/data/mx-recovery` 更改备份父目录。
+- kubeconfig 解析：使用 `TMPDIR` 下独立 `0700` 目录中的 `0600` 普通文件，
+  完成或失败后清理，避免 Linux 下 Node 子进程的 `/dev/stdin` 无法作为文件打开。
+  失败时终端只显示具体步骤、错误类别和退出码；原始错误保存在备份父目录的
+  `mx-kube-proxy-error-*/kubectl-error.json`，可能包含凭据，不要上传此私有文件。
 - 就绪检查：从实际 `default/kubernetes` Service 读取 ClusterIP，绕过 HTTP 代理，
   保持 TLS 校验并请求 `/readyz`；失败会在镜像构建前停止。CoreDNS 在运行时镜像
   预载后、数据库迁移前检查。Pod 显示 Running 本身不足以证明 Service 转发正常。
