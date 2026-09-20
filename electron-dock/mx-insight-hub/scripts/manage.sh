@@ -1485,7 +1485,7 @@ ensure_build_proxy_builder() {
 # MX_INSIGHT_REQUIRE_SEARCH=1 to invert that for environments where search is
 # considered part of the product's minimum viable surface.
 ensure_shared_data_plane() {
-  local manage="${MX_COMMON_DIR}/scripts/manage.sh"
+  local manage="${MX_COMMON_DIR}/scripts/manage.sh" shared_status
   if [ ! -x "$manage" ] && [ ! -f "$manage" ]; then
     say "mx-common is not present at ${MX_COMMON_DIR}; skipping shared data plane"
     MX_INSIGHT_SEARCH_READY=0
@@ -1500,6 +1500,10 @@ ensure_shared_data_plane() {
     MX_INSIGHT_SEARCH_READY=1
     say "shared data plane is healthy"
   else
+    shared_status=$?
+    if [ "$shared_status" -eq 78 ]; then
+      die "mx-common storage identity is unresolved; refusing database provisioning and Hub rollout"
+    fi
     MX_INSIGHT_SEARCH_READY=0
     if [ "${MX_INSIGHT_REQUIRE_SEARCH:-0}" = "1" ]; then
       die "shared data plane is unhealthy and MX_INSIGHT_REQUIRE_SEARCH=1"
@@ -2927,12 +2931,34 @@ ops_action() {
       reindex_search
       ;;
     down)
-      kubectl -n mx-insight-hub scale \
-        deployment/mx-insight-hub-admin deployment/mx-insight-hub-public --replicas=0
-      say "Hub API workloads scaled to zero. PostgreSQL, PVC, namespace, and Secrets were preserved."
+      stop_hub_workloads
       ;;
     *) usage; exit 2 ;;
   esac
+}
+
+stop_hub_workloads() {
+  local workloads name remaining selector
+  # Admin/Public alone are not a shutdown: the independent workers still write
+  # to PostgreSQL, dispatch source pulls and process paid model jobs.
+  workloads="$(kubectl -n mx-insight-hub get deployments -o name)" || return 1
+  for name in $workloads; do
+    case "$name" in
+      deployment.apps/mx-insight-hub-*|deployment/mx-insight-hub-*)
+        kubectl -n mx-insight-hub scale "$name" --replicas=0 || return 1
+        ;;
+      *) die "unexpected workload in Hub namespace: $name; shutdown stopped" ;;
+    esac
+  done
+  selector='app.kubernetes.io/name in (mx-insight-hub-admin,mx-insight-hub-public,mx-insight-hub-ingest,mx-insight-hub-projector,mx-insight-hub-classifier,mx-insight-hub-retrieval)'
+  remaining="$(kubectl -n mx-insight-hub get pods -l "$selector" -o name)" || return 1
+  if [ -n "$remaining" ]; then
+    if ! kubectl -n mx-insight-hub wait --for=delete pods -l "$selector" --timeout=180s; then
+      remaining="$(kubectl -n mx-insight-hub get pods -l "$selector" -o name)" || return 1
+      [ -z "$remaining" ] || return 1
+    fi
+  fi
+  say "Hub APIs and background workers stopped. Shared databases, PVCs and Secrets were preserved."
 }
 
 main() {
