@@ -70,6 +70,19 @@ spec:
         - name: postgres
           image: pgvector/pgvector:pg16
           imagePullPolicy: IfNotPresent
+          # Rendered from verified storage before the entrypoint can run initdb.
+          command:
+            - sh
+            - -ec
+            - |
+              if [ 'MX_COMMON_PG_ID_PLACEHOLDER' != unmanaged ]; then
+                test "$(cat "$PGDATA/PG_VERSION")" = 16 && test -d "$PGDATA/base" &&
+                test "$(LC_ALL=C pg_controldata "$PGDATA" | awk -F ': *' '$1 == "Database system identifier" {print $2}')" = 'MX_COMMON_PG_ID_PLACEHOLDER' || {
+                  echo 'Retained PG16 identity missing; initialization refused' >&2; exit 1;
+                }
+              fi
+              exec docker-entrypoint.sh postgres "$@"
+            - mx-common-postgres
           ports:
             - name: postgres
               containerPort: 5432

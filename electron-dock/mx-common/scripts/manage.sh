@@ -21,7 +21,7 @@ HOST_DATA_ROOT="${MX_COMMON_HOST_DATA_ROOT:-/var/lib/mx-common/k8s}"
 # Captured before any relocation rebinds HOST_DATA_ROOT, so the migration can
 # still name the directory the operator must reclaim by hand.
 HOST_DATA_ROOT_ORIGINAL="$HOST_DATA_ROOT"
-WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-300}"
+WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-1200}"
 HANLP_WAIT_TIMEOUT="${MX_COMMON_HANLP_WAIT_TIMEOUT:-900}"
 
 # Image references, overridable for mirrors or air-gapped nodes. These registries
@@ -115,7 +115,7 @@ Optional components (off by default):
 Environment:
   MX_COMMON_HOST_DATA_ROOT      Host path for local PVs (default /var/lib/mx-common/k8s)
   MX_COMMON_DISK_WARN_PERCENT   Warn above this disk usage during deploy (default 85)
-  MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 300)
+  MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 1200)
   MX_COMMON_SNAPSHOT_SCHEDULE   SLM cron (default "0 30 1 * * ?", 01:30 daily)
   MX_COMMON_SNAPSHOT_S3_BUCKET  Store snapshots off-node instead of on this host
   MX_COMMON_ELASTICSEARCH_IMAGE Mirror override (default docker.elastic.co/...:9.4.2)
@@ -168,6 +168,18 @@ resolve_host_data_root() {
       fi
     done
   fi
+}
+
+# Receipt lives outside the checkout and the data mount. Losing /data must not
+# turn a restart into first-install initialization. No secrets are stored here.
+storage_preflight() {
+  need node
+  local evidence
+  evidence="$(node "${ROOT_DIR}/scripts/storage-preflight.mjs" "$HOST_DATA_ROOT" \
+    /var/lib/mx-common/storage-identity.json)" || storage_guard_failed "storage preflight failed; no data service was changed"
+  MX_COMMON_STORAGE_MODE="$(printf '%s' "$evidence" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>console.log(JSON.parse(s).mode))')"
+  MX_COMMON_EXPECTED_PG_SYSTEM_ID="$(printf '%s' "$evidence" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>console.log(JSON.parse(s).identifier ?? "unmanaged"))')"
+  say "storage preflight: ${MX_COMMON_STORAGE_MODE}; selected root ${HOST_DATA_ROOT}" >&2
 }
 
 retained_postgres_conflicts() {
@@ -533,7 +545,10 @@ ensure_local_pv() {
     || die "cannot create host path ${host_path}"
   ensure_host_path_ownership "$host_path" "$owner" "$mode" || true
 
-  if kubectl get pv "$pv_name" >/dev/null 2>&1; then
+  local existing_pv
+  existing_pv="$(kubectl get pv "$pv_name" --ignore-not-found -o name)" \
+    || storage_guard_failed "cannot inspect PV ${pv_name}"
+  if [ -n "$existing_pv" ]; then
     local phase
     phase="$(kubectl get pv "$pv_name" -o jsonpath='{.status.phase}')"
     case "$phase" in
@@ -561,19 +576,33 @@ spec:
   storageClassName: ""
   hostPath:
     path: ${host_path}
-    type: DirectoryOrCreate
+    type: Directory
   claimRef:
     namespace: ${NAMESPACE}
     name: ${claim_name}
 EOF
+  kubectl create -f - <<EOF >/dev/null
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${claim_name}
+  namespace: ${NAMESPACE}
+spec:
+  storageClassName: ""
+  volumeName: ${pv_name}
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: ${size}
+EOF
 }
 
 ensure_storage() {
-  if has_default_storage_class; then
+  if [ "${MX_COMMON_STORAGE_MODE:-}" != local ] && has_default_storage_class; then
     say "default StorageClass present; using dynamic provisioning"
     return 0
   fi
-  say "no default StorageClass; provisioning retained local PVs"
+  say "using retained local PVs (a new default StorageClass cannot replace them)"
   # Owners mirror each pod's securityContext. PostgreSQL additionally refuses to
   # start unless PGDATA's parent is 0700 or 0750.
   ensure_local_pv mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data 999:999 0700
@@ -596,9 +625,12 @@ manifest_list() {
 }
 
 ensure_secret() {
-  if kubectl -n "$NAMESPACE" get secret mx-common-secrets >/dev/null 2>&1; then
-    return 0
-  fi
+  local existing
+  existing="$(kubectl -n "$NAMESPACE" get secret mx-common-secrets --ignore-not-found -o name)" \
+    || storage_guard_failed "cannot inspect PostgreSQL Secret; generation refused"
+  if [ -n "$existing" ]; then return 0; fi
+  [ "${MX_COMMON_STORAGE_MODE:-}" != local ] \
+    || storage_guard_failed "retained PostgreSQL Secret is missing; generation refused"
   local password="${MX_COMMON_POSTGRES_PASSWORD:-}"
   if [ -z "$password" ]; then
     password="$(generate_password)"
@@ -628,6 +660,7 @@ render_manifest() {
       -e "s#mx-common-hanlp:local#${HANLP_IMAGE}#g" \
       -e "s#MX_COMMON_HANLP_IMAGE_ID_PLACEHOLDER#${hanlp_image_id}#g" \
       -e "s#MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER#${hanlp_node_name}#g" \
+      -e "s#MX_COMMON_PG_ID_PLACEHOLDER#${MX_COMMON_EXPECTED_PG_SYSTEM_ID:-unmanaged}#g" \
       -e "s#-Xms12g -Xmx12g#-Xms${ELASTICSEARCH_HEAP} -Xmx${ELASTICSEARCH_HEAP}#g" \
       "$1"
 }
@@ -746,7 +779,7 @@ pod_progress() {
 # unable to tell that apart from a crash loop is not.
 wait_ready() {
   local kind="$1" name="$2" required="${3:-required}"
-  local waited=0 interval=5 reason progress last_progress=""
+  local waited=0 started=$SECONDS interval=5 reason progress last_progress=""
 
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
     if kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout=3s >/dev/null 2>&1; then
@@ -787,7 +820,7 @@ wait_ready() {
     fi
 
     sleep "$interval"
-    waited=$((waited + interval))
+    waited=$((SECONDS - started))
   done
 
   warn "${name} did not become ready in ${WAIT_TIMEOUT}s"
@@ -919,6 +952,7 @@ cmd_ensure() {
     die "MX_COMMON_HANLP_ENABLED is no longer a standalone deploy switch; run 'bash scripts/manage.sh deploy hanlp', then run ensure without that variable"
   fi
   resolve_host_data_root
+  storage_preflight
 
   if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 && es_is_healthy; then
     say "shared data plane is already healthy; reconciling declaratively (no restart unless a manifest changed)"
@@ -934,17 +968,18 @@ cmd_ensure() {
   ensure_secret
   ensure_storage
   apply_manifests
+  kubectl -n "$NAMESPACE" scale statefulset/mx-common-postgres statefulset/mx-common-elasticsearch deployment/mx-common-redis --replicas=1 >/dev/null
 
   for namespace in $target_namespaces; do
     allow_client_namespace "$namespace"
   done
 
   local failed=0
-  # PostgreSQL is the only hard requirement: it holds every product's
-  # transactional truth. Elasticsearch failing is a search degradation.
+  # A successful reconcile means all core dependencies are usable. Callers
+  # may explicitly choose a degraded deployment, but it must not look healthy.
   wait_ready statefulset mx-common-postgres || failed=1
-  wait_ready statefulset mx-common-elasticsearch || warn "elasticsearch is not ready; products run with search degraded"
-  wait_ready deployment mx-common-redis || warn "redis is not ready; products fall back to their PostgreSQL queue"
+  wait_ready statefulset mx-common-elasticsearch || failed=1
+  wait_ready deployment mx-common-redis || failed=1
 
   if [ "$failed" -ne 0 ]; then
     warn "a required shared component did not become ready"
@@ -971,6 +1006,16 @@ cmd_ensure() {
     health_json
     return 1
   fi
+
+  # On first installation, enroll the newly initialized identity and render
+  # guards before future unattended Pod restarts can initialize empty storage.
+  if [ "${MX_COMMON_STORAGE_MODE:-}" = fresh ]; then
+    storage_preflight
+    apply_manifests
+    wait_ready statefulset mx-common-postgres || return 1
+    wait_ready statefulset mx-common-elasticsearch || return 1
+  fi
+  resume_existing_hanlp || return 1
 
   # Backups reconcile after the cluster is confirmed usable: registering a
   # repository against a cluster that is still forming just fails.
@@ -1170,16 +1215,24 @@ cmd_provision() {
   identifier="$(product_identifier "$product_id")"
   secret_name="mx-common-db-${product_id}"
 
-  # The generated password is stored in the shared namespace so re-provisioning
-  # is idempotent. Regenerating it on every deploy would rotate the credential
-  # out from under running product pods.
-  if [ -z "$password" ]; then
-    password="$(kubectl -n "$NAMESPACE" get secret "$secret_name" \
-      -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
-  fi
-  if [ -z "$password" ]; then
-    password="$(generate_password)"
-    say "generated a database password for ${product_id}" >&2
+  # Reuse retained credentials. A missing Secret is not permission to rotate
+  # a role that already exists, even when an explicit password was supplied.
+  local stored_password existing_role
+  stored_password="$(kubectl -n "$NAMESPACE" get secret "$secret_name" \
+    --ignore-not-found -o jsonpath='{.data.password}' | base64 -d)" \
+    || storage_guard_failed "cannot read product credential; password generation refused"
+  if [ -n "$stored_password" ]; then
+    [ -z "$password" ] || [ "$password" = "$stored_password" ] \
+      || storage_guard_failed "explicit product password differs from its retained Secret; rotation refused"
+    password="$stored_password"
+  else
+    existing_role="$(psql_super mx_common -Atc "SELECT 1 FROM pg_roles WHERE rolname = '${identifier}'")" \
+      || storage_guard_failed "cannot inspect existing product role"
+    [ -z "$existing_role" ] || storage_guard_failed "product role exists but its Secret is missing; automatic password rotation refused"
+    if [ -z "$password" ]; then
+      password="$(generate_password)"
+      say "generated a database password for ${product_id}" >&2
+    fi
   fi
   case "$password" in
     *[!A-Za-z0-9]*) die "password must be alphanumeric so it is safe in SQL literals and DSNs" ;;
@@ -1191,8 +1244,8 @@ cmd_provision() {
     --from-literal=username="$identifier" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  # Role first. ALTER on the existing branch keeps the stored secret and the
-  # live credential in agreement even if one of them was changed by hand.
+  # Role first. Reapply only the already retained credential; a missing or
+  # conflicting Secret requires explicit recovery rather than silent rotation.
   psql_super mx_common >/dev/null <<SQL
 DO \$provision\$
 BEGIN
@@ -1361,26 +1414,46 @@ cmd_preload() {
       say "already imported: ${image}"
       continue
     fi
-    say "pulling ${image}"
-    if ! docker pull "$image"; then
-      warn "could not pull ${image}"
-      failed=1
-      continue
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      say "pulling ${image} (Docker registry access; Hub build proxy does not configure this daemon)"
+      if ! docker pull "$image"; then
+        warn "could not pull ${image}; preload a compatible image or configure a registry mirror"
+        failed=1
+        continue
+      fi
+    else
+      say "using cached Docker image: ${image}"
     fi
-    local archive
-    archive="$(mktemp -t mx-common-image.XXXXXX).tar"
-    docker image save -o "$archive" "$image"
+    # Stream to containerd: no second large archive on the root filesystem.
     if [ "$(id -u)" -eq 0 ]; then
-      ctr -n k8s.io images import "$archive"
+      if ! docker image save "$image" | ctr -n k8s.io images import -; then
+        failed=1; continue
+      fi
     else
       need sudo
-      sudo ctr -n k8s.io images import "$archive"
+      if ! docker image save "$image" | sudo ctr -n k8s.io images import -; then
+        failed=1; continue
+      fi
     fi
-    rm -f -- "$archive"
+    if ! containerd_has_image "$image"; then
+      warn "import did not make ${image} available to Kubernetes"
+      failed=1; continue
+    fi
     say "imported ${image}"
   done < <(images_in_use)
-  [ "$failed" -eq 0 ] || die "one or more images could not be pulled"
+  [ "$failed" -eq 0 ] || return 1
   say "all shared data-plane images are present on this node"
+}
+
+# Restart an already installed tokenizer after `down`; do not rebuild models or
+# introduce HanLP to a deployment that never used it.
+resume_existing_hanlp() {
+  local existing
+  existing="$(kubectl -n "$NAMESPACE" get deployment mx-common-hanlp --ignore-not-found -o name)" || return 1
+  [ -n "$existing" ] || return 0
+  kubectl -n "$NAMESPACE" scale "$existing" --replicas=1 >/dev/null || return 1
+  wait_ready deployment mx-common-hanlp || return 1
+  hanlp_is_healthy || return 1
 }
 
 ensure_hanlp_builder() {

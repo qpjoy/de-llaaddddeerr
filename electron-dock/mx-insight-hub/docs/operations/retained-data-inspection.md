@@ -1,12 +1,16 @@
 # 旧数据目录与当前空库的隔离核验
 
+本次旧库、索引和 API 已恢复；最终证据、仍暂停的 worker 与之后的正常重启入口见
+[停机后恢复服务与复盘](restart-and-recovery.md)。以下记录保留用于异常恢复，日常重启不重跑恢复脚本。
+
 2026-09-21 服务器输出确认：当前 mx-common PV 位于根分区
 `/var/lib/mx-common/k8s`，Hub 数据库仅 18 MB、无请求和 canonical 记录。
 原 `/data/k8s/mx-runtime/mx-common/k8s` 位于 `/dev/nvme0n1p1`，仍保有约
 31 GB PostgreSQL 和 55 GB Elasticsearch 文件。这证明数据目录没有接回，
 但不证明旧文件完整或业务记录已经恢复。
 
-生产 deploy 只从现有 PV 找回迁移后的路径；PV 元数据丢失时会回到默认路径。
+故障发生时，生产 deploy 只从现有 PV 找回迁移后的路径；PV 元数据丢失时会回到默认路径。
+当前版本已增加存储身份与凭据保护，不能确认原存储时停止部署。
 不要使用 `relocate` 或 `migrate-storage` 接回旧数据：这些命令会从当前目录向目标
 目录复制文件，可能覆盖旧库。也不要运行 reset、清理、全量索引或重新采集。
 

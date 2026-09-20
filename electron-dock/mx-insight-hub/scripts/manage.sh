@@ -1487,9 +1487,7 @@ ensure_build_proxy_builder() {
 ensure_shared_data_plane() {
   local manage="${MX_COMMON_DIR}/scripts/manage.sh" shared_status
   if [ ! -x "$manage" ] && [ ! -f "$manage" ]; then
-    say "mx-common is not present at ${MX_COMMON_DIR}; skipping shared data plane"
-    MX_INSIGHT_SEARCH_READY=0
-    return 0
+    die "mx-common is not present at ${MX_COMMON_DIR}; restore the sibling directory before deploying"
   fi
 
   say "reconciling shared data plane (mx-common)"
@@ -1505,7 +1503,7 @@ ensure_shared_data_plane() {
       die "mx-common storage identity is unresolved; refusing database provisioning and Hub rollout"
     fi
     MX_INSIGHT_SEARCH_READY=0
-    if [ "${MX_INSIGHT_REQUIRE_SEARCH:-0}" = "1" ]; then
+    if [ "${MX_INSIGHT_REQUIRE_SEARCH:-1}" = "1" ]; then
       die "shared data plane is unhealthy and MX_INSIGHT_REQUIRE_SEARCH=1"
     fi
     say "WARNING: shared data plane is degraded; continuing with search degraded." >&2
@@ -2042,6 +2040,18 @@ decommission_local_postgres() {
   say "retired local PostgreSQL removed."
 }
 
+restore_worker_replicas() {
+  local namespace=mx-insight-hub worker_manifest
+  # Recovery/down deliberately scales workers to zero. Restore the versioned
+  # replica counts even when apply has no replica diff against last-applied.
+  for worker_manifest in 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml; do
+    local worker_name worker_replicas
+    worker_name="$(awk '/^  name: / {print $2; exit}' "${K8S_DIR}/${worker_manifest}")"
+    worker_replicas="$(awk '/^  replicas: / {print $2; exit}' "${K8S_DIR}/${worker_manifest}")"
+    kubectl -n "$namespace" scale "deployment/$worker_name" --replicas="$worker_replicas"
+  done
+}
+
 apply_k8s() {
   local namespace="mx-insight-hub"
   # Disable before changing any Hub resource. Repeat immediately before the
@@ -2104,6 +2114,7 @@ apply_k8s() {
   # Public understands both grandfathered legacy keys and the new immutable
   # snapshots, so it must become ready before the new Admin can mint snapshots.
   render_file "${K8S_DIR}/30-public-api.yaml" | kubectl apply -f -
+  kubectl -n "$namespace" scale deployment/mx-insight-hub-public --replicas=1
   kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-public
   if ! kubectl -n "$namespace" rollout status \
     deployment/mx-insight-hub-public --timeout=300s; then
@@ -2112,6 +2123,7 @@ apply_k8s() {
   fi
 
   render_file "${K8S_DIR}/31-admin-api.yaml" | kubectl apply -f -
+  kubectl -n "$namespace" scale deployment/mx-insight-hub-admin --replicas=1
   kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-admin
   if ! kubectl -n "$namespace" rollout status \
     deployment/mx-insight-hub-admin --timeout=300s; then
@@ -2131,6 +2143,8 @@ apply_k8s() {
   render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/35-retrieval.yaml" | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/40-network-policy.yaml"
+
+  restore_worker_replicas
 
   # The projector is scaled to match deploy-time search availability rather
   # than starting a strict reconcile against a cluster already known to be
@@ -2170,7 +2184,16 @@ apply_k8s() {
   if ! kubectl -n "$namespace" rollout status deployment/mx-insight-hub-retrieval --timeout=180s; then
     say "WARNING: retrieval worker is not ready; durable vector jobs remain queued. Public API stays available." >&2
   fi
-  verify_hanlp_from_hub || true
+  local incomplete=0 worker
+  for worker in admin public ingest projector classifier retrieval; do
+    if ! kubectl -n "$namespace" rollout status "deployment/mx-insight-hub-$worker" --timeout=10s; then
+      incomplete=1
+    fi
+  done
+  verify_hanlp_from_hub || incomplete=1
+  if [ "$incomplete" -ne 0 ] && [ "${MX_INSIGHT_REQUIRE_SEARCH:-1}" = 1 ]; then
+    die "Hub APIs may be available, but service restoration is incomplete; inspect workloads and rerun deploy (no data rollback performed)"
+  fi
   refresh_launcher_workload
 }
 
@@ -2805,8 +2828,12 @@ ops_action() {
   # explicitly passes 0 so it cannot unexpectedly roll the login control plane.
   if [ "$sync_launcher_override_set" = 1 ]; then
     MX_INSIGHT_SYNC_LAUNCHER="$sync_launcher_override"
-    export MX_INSIGHT_SYNC_LAUNCHER
+  else
+    # A stale .env.internal must not turn ordinary Hub recovery into a login
+    # control-plane rollout. Launcher delegation explicitly exports 1.
+    MX_INSIGHT_SYNC_LAUNCHER=0
   fi
+  export MX_INSIGHT_SYNC_LAUNCHER
   if [ "$justone_token_override_set" = 1 ]; then
     MX_INSIGHT_JUSTONE_TOKEN="$justone_token_override"
     export MX_INSIGHT_JUSTONE_TOKEN
@@ -2884,6 +2911,10 @@ ops_action() {
       require_single_k8s_node
       init_deploy_runtime
       acquire_deploy_lock
+      validate_existing_runtime_secret
+      MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER" \
+        MX_INSIGHT_POSTGRES_PASSWORD="${MX_INSIGHT_POSTGRES_PASSWORD:-}" \
+        node "${ROOT_DIR}/scripts/runtime-credentials-preflight.mjs"
       ensure_shared_data_plane
       # Make the deploy schema-only/incremental before spending time building
       # and importing the image. Strict rebuild remains an explicit UI/CLI job.
@@ -2894,7 +2925,11 @@ ops_action() {
       ensure_default_api_key
       seed_default_price_books
       print_deploy_summary
-      say "Internal production deploy OK."
+      if [ "${MX_INSIGHT_REQUIRE_SEARCH:-1}" = 1 ]; then
+        say "Internal production deploy OK; dependencies and all six Hub workloads are ready."
+      else
+        say "Internal production deploy finished with degraded-mode permission; inspect workload status before calling restoration complete."
+      fi
       ;;
     apply)
       require_production_env
@@ -2903,6 +2938,10 @@ ops_action() {
       require_single_k8s_node
       init_deploy_runtime
       acquire_deploy_lock
+      validate_existing_runtime_secret
+      MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER" \
+        MX_INSIGHT_POSTGRES_PASSWORD="${MX_INSIGHT_POSTGRES_PASSWORD:-}" \
+        node "${ROOT_DIR}/scripts/runtime-credentials-preflight.mjs"
       ensure_shared_data_plane
       apply_k8s
       k8s_smoke

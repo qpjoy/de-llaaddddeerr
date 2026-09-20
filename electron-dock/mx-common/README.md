@@ -59,6 +59,10 @@ bash scripts/manage.sh down      # 只缩容，保留 PVC/PV/索引
 
 `ensure` 会自己处理单节点 kubeadm 上的两个硬性前提：`vm.max_map_count`（ES 不满足就起不来，需要节点 root 权限，所以在这里设而不是塞一个 privileged init container）和无默认 StorageClass 时的 Retain hostPath PV 绑定。
 
+正常 Hub `deploy` 已调用 `ensure`，因此停止的共享服务无需提前手动启动。当前版本先核对本地卷绑定、磁盘 UUID 与 PG16 身份，在 `/var/lib/mx-common/storage-identity.json` 保留无密钥记录；不明存储、缺失旧文件或 Secret 返回 78，调用方不得将其当成搜索降级。需要在 Linux 节点以能读取 PGDATA 的 root 身份执行，并保留该身份记录。普通工作负载缺失可重建；PV/PVC 元数据丢失需要显式恢复，不自动初始化第二个库。
+
+核心服务默认等待上限改为 1200 秒（`MX_COMMON_WAIT_TIMEOUT`），镜像优先从 Docker 缓存导入 containerd。已安装的 HanLP 会在 `ensure` 中恢复副本数并等待健康；首次安装或被删除的 HanLP Deployment 仍使用下面的独立部署命令。首次接入新版启动保护会滚动 PG/ES，后续配置不变不会额外重启。完整边界和本次恢复证据见[停机恢复复盘](../mx-insight-hub/docs/operations/restart-and-recovery.md)。
+
 PostgreSQL / Elasticsearch / Redis 是核心组件，随 `ensure` 一起部署。HanLP 使用独立的幂等部署目标：
 
 ```bash

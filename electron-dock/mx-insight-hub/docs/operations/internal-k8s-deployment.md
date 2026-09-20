@@ -1,5 +1,10 @@
 # Internal Kubernetes deployment
 
+For routine shutdown/restart, dependency bring-up, retained-storage guards and
+the September recovery evidence, see [restart and recovery](restart-and-recovery.md).
+Normal deploy now requires search and all Hub workloads ready by default; a
+missing/wrong data mount or retained credential is a hard stop.
+
 ## Layout
 
 The `mx-insight-hub` namespace contains only Hub workloads and their runtime
