@@ -24,6 +24,11 @@ function fixture() {
   mkdirSync(bin);
   const corepack = join(bin, 'corepack');
   writeFileSync(corepack, `#!/bin/sh
+if [ -n "\${MX_MANAGE_PREDEPLOY_EXPECT_PROXY:-}" ]; then
+  [ "$HTTP_PROXY" = "$MX_MANAGE_PREDEPLOY_EXPECT_PROXY" ] &&
+  [ "$https_proxy" = "$MX_MANAGE_PREDEPLOY_EXPECT_PROXY" ] &&
+  [ "$npm_config_https_proxy" = "$MX_MANAGE_PREDEPLOY_EXPECT_PROXY" ] || exit 29
+fi
 printf '%s\\n' "$*" >> "$MX_MANAGE_PREDEPLOY_TEST_LOG"
 case "$*" in
   *release-sdk-publisher.test.ts*) exit "\${MX_MANAGE_PREDEPLOY_TEST_RELEASE_STATUS:-0}" ;;
@@ -78,6 +83,20 @@ test('predeploy stops before typecheck when the focused release test fails', () 
     const calls = readFileSync(files.log, 'utf8').trim().split('\n');
     assert.equal(calls.length, 1);
     assert.match(calls[0], /release-sdk-publisher\.test\.ts/);
+  } finally {
+    files.cleanup();
+  }
+});
+
+test('predeploy Corepack receives the explicit build proxy', () => {
+  const files = fixture();
+  try {
+    const result = runPredeploy({ ...files.env,
+      HTTP_PROXY: 'http://old.proxy:1000', https_proxy: 'http://old.proxy:1000',
+      MX_LAUNCHER_BUILD_PROXY: 'http://127.0.0.1:7788',
+      MX_MANAGE_PREDEPLOY_EXPECT_PROXY: 'http://127.0.0.1:7788' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(files.log, 'utf8').trim().split('\n').length, 2);
   } finally {
     files.cleanup();
   }

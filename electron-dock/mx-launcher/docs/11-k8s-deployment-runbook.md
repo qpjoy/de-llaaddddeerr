@@ -761,6 +761,44 @@ Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18
 代理/TUN 出站能力。可通过 `MX_K8S_PRELOAD_RUNTIME_IMAGES=0` 关闭，或用
 `MX_K8S_RUNTIME_IMAGES="..."` 覆盖镜像列表。
 
+当本机默认代理有问题，或构建停在 `auth.docker.io/token` / 基础镜像元数据请求时，
+在 Linux 部署主机上显式设置本次构建代理：
+
+```bash
+TMPDIR=/data/tmp \
+MX_K8S_OS_HOSTNAME=mx-internal-server \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
+MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:7788 \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
+bash scripts/manage.sh ops internal-production deploy
+```
+
+`MX_LAUNCHER_BUILD_PROXY` 接受 HTTP(S) 代理地址；代理必须已经在部署主机上可用，
+例如 Clash 的 HTTP/mixed 端口。该变量覆盖构建子进程的大小写 HTTP/HTTPS/ALL_PROXY
+和 npm 代理，作用于 predeploy 的 Corepack、制品准备、BuildKit 的基础镜像请求、
+客户端的 registry token 请求以及 Dockerfile 构建步骤。代理不会写入应用运行时配置。
+
+启用后要求本机 Linux Docker Engine 和 buildx 插件，使用独立的 `docker-container`
+构建器及 host 网络，因此 `127.0.0.1` 指向部署主机。相同代理配置复用构建器，修改
+代理或绕行列表后使用另一个构建器；不切换 Docker 默认构建器，不修改或重启 Docker /
+containerd。原有 `MX_SHADOW_BUILDKIT_*` 清理参数在这里仅作用于选定构建器的缓存。
+
+首次使用若缺少 BuildKit 镜像，脚本用带指定代理的 `ctr` 客户端下载，再加载到 Docker；
+containerd 2.x 自动加 `--local`，1.x 使用客户端原有下载路径。缺少的 PostgreSQL /
+CoreDNS / Caddy 镜像也走这条路径，已缓存镜像直接复用。临时镜像归档使用 `TMPDIR`，
+成功或失败均清理；下载缓存位于独立的 `mx-launcher-build-proxy` containerd namespace。
+Buildx 首次启动仍可能尝试更新 BuildKit 镜像；更新失败时可使用已预载的本地镜像。
+默认 BuildKit 镜像为 `moby/buildkit:buildx-stable-1`，可用 `MX_LAUNCHER_BUILDKIT_IMAGE`
+指定已有镜像或镜像源。`ctr` 预载不读取 Docker 的私有仓库登录配置，私有镜像应先安全地
+预载到本机 Docker。此过程不修改应用 Secret、PV/PVC 或数据库数据。
+
+构建代理默认绕过 localhost、RFC1918 内网、`.svc` 和 `.cluster.local`，不继承可能把
+公网请求全部绕过的 `NO_PROXY=*`。企业仓库需要直连时可设置
+`MX_LAUNCHER_BUILD_NO_PROXY` 完整覆盖构建绕行列表。上述环境只在构建/预载子进程生效，
+Kubernetes API 的代理绕行仍由现有 `MX_K8S_CONFIGURE_NO_PROXY` 逻辑管理。
+不设置 `MX_LAUNCHER_BUILD_PROXY` 时沿用原有 Compose 构建与 Docker 拉取行为。
+
 Internal server 镜像构建时，Corepack 下载 pnpm 与随后 `pnpm install` 默认统一使用
 `https://registry.npmmirror.com`，避免容器构建网络无法访问
 `registry.npmjs.org` 时停在 `corepack prepare`。需要改用企业仓库或官方源时，在
@@ -784,8 +822,9 @@ MX_SHADOW_REFRESH_QP_TUNNEL_CLI_FROM_NPM=0 \
 该变量不关闭隧道功能，也不跳过 server predeploy 门禁；后续本地 fallback 版本同步逻辑仍按
 现有规则执行。不要长期固定为 `0`，否则 Domestic 离线 fallback 可能落后于新发布版本。
 
-若构建容器完全没有直连出站，而宿主机代理只监听
-`127.0.0.1:7788`，可让 build stage 使用宿主网络：
+未启用 `MX_LAUNCHER_BUILD_PROXY` 时，仍可单独通过以下旧参数为 Dockerfile 构建步骤
+指定宿主机代理。它们不负责 BuildKit 拉取基础镜像和 registry token 的代理；这两处
+失败时应使用上面的 `MX_LAUNCHER_BUILD_PROXY`：
 
 ```bash
 MX_SHADOW_BUILD_NETWORK=host \

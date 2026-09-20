@@ -16,6 +16,8 @@ shift || true
 say() { printf '▸ %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
+source "$SCRIPT_DIR/launcher-build-proxy.sh"
+
 MX_MANAGE_SENSITIVE_TEMP_DIR=""
 manage_cleanup_sensitive_temp_dir() {
   if [ -n "$MX_MANAGE_SENSITIVE_TEMP_DIR" ]; then
@@ -1388,9 +1390,20 @@ shadow_image_admin_assets() {
 }
 
 shadow_image_build() {
+  launcher_with_build_proxy shadow_image_build_impl
+}
+
+shadow_image_build_impl() {
+  if [ -n "${MX_LAUNCHER_BUILD_PROXY:-}" ]; then
+    launcher_ensure_proxy_builder
+  fi
   shadow_image_artifacts
   shadow_image_admin_assets
-  (cd server && docker compose -f docker-compose.shadow.yml build internal)
+  if [ -n "${MX_LAUNCHER_BUILD_PROXY:-}" ]; then
+    launcher_build_internal_with_proxy
+  else
+    (cd server && docker compose -f docker-compose.shadow.yml build internal)
+  fi
   shadow_image_cleanup
 }
 
@@ -1525,8 +1538,12 @@ k8s_preload_runtime_images() {
   command -v docker >/dev/null 2>&1 || die "docker is required to preload K8s runtime images"
   for image in $images; do
     if ! docker image inspect "$image" >/dev/null 2>&1; then
-      say "pull K8s runtime image through Docker: $image"
-      docker pull "$image"
+      if [ -n "${MX_LAUNCHER_BUILD_PROXY:-}" ]; then
+        launcher_with_build_proxy launcher_proxy_pull_image "$image"
+      else
+        say "pull K8s runtime image through Docker: $image"
+        docker pull "$image"
+      fi
     fi
     containerd_import_docker_image "$image"
   done
@@ -1546,10 +1563,14 @@ shadow_image_cleanup() {
       || say "image cleanup skipped"
     if [ "$prune_cache" != "0" ]; then
       say "cleanup old BuildKit cache (until=$cache_until, keep=$keep_storage)"
-      docker builder prune -f \
-        --filter "until=$cache_until" \
-        --keep-storage "$keep_storage" >/dev/null \
-        || say "BuildKit cache cleanup skipped"
+      if [ -n "${MX_LAUNCHER_PROXY_BUILDER:-}" ]; then
+        launcher_prune_proxy_builder || say "proxy builder cache cleanup skipped"
+      else
+        docker builder prune -f \
+          --filter "until=$cache_until" \
+          --keep-storage "$keep_storage" >/dev/null \
+          || say "BuildKit cache cleanup skipped"
+      fi
     fi
   fi
 }
@@ -5685,6 +5706,11 @@ Notes:
     Docker build.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
+  - Set MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:7788 on the Linux host to
+    override the build proxy for Corepack/npm, registry tokens and BuildKit.
+    This uses a scoped host-network buildx builder. Uncached bootstrap/runtime
+    images are fetched by ctr and loaded into Docker, without daemon changes.
+    MX_LAUNCHER_BUILD_NO_PROXY overrides the build-only bypass list.
   - On kubeadm Internal hosts, deploy auto-repairs stale LAN IPs in
     /etc/kubernetes and kubeconfig before the first kubectl apply. Override the
     detected IP with MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.x.x, or disable
@@ -5884,12 +5910,12 @@ ops_internal_production() {
       ;;
     predeploy)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production predeploy"
-      internal_production_predeploy_gate
+      launcher_with_build_proxy internal_production_predeploy_gate
       ;;
     deploy|cycle)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
-      internal_production_predeploy_gate
+      launcher_with_build_proxy internal_production_predeploy_gate
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready
       say "preflight server/.env and current K8s Secret state"
