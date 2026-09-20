@@ -40,6 +40,8 @@ platform. New Launcher solution design and implementation should happen here.
 
 ## Documents
 
+- [mx-launcher.deploy.md](mx-launcher.deploy.md) - current production paths,
+  deployment commands, migration incident findings, and retained recovery backups.
 - `docs/00-delivery-plan.md` - executable implementation phases.
 - `docs/01-windows-uac-service-model.md` - UAC, service, signing, and update
   model.
