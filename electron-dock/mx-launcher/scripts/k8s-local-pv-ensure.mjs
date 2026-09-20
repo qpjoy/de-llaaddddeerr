@@ -69,12 +69,43 @@ export function runKubectl(args, input) {
   return result.stdout;
 }
 
+export function parseManifestObjects(output) {
+  // kubectl create prints one JSON object per YAML document. Frame complete
+  // objects without mistaking braces or escaped quotes inside strings for JSON
+  // boundaries, then let JSON.parse validate every complete document.
+  const documents = [];
+  let start = -1, depth = 0, inString = false, escaped = false;
+  for (let i = 0; i < output.length; i++) {
+    const char = output[i];
+    if (start === -1) {
+      if (/\s/.test(char)) continue;
+      if (char !== '{') throw new Error(`invalid local PV manifest JSON at offset ${i}`);
+      start = i;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') inString = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) {
+      documents.push(JSON.parse(output.slice(start, i + 1)));
+      start = -1;
+    }
+  }
+  if (start !== -1) throw new Error('incomplete local PV manifest JSON');
+  return documents.flatMap(document => {
+    if (document.kind !== 'List') return [document];
+    if (!Array.isArray(document.items)) throw new Error('invalid local PV manifest List.items');
+    return document.items;
+  });
+}
+
 export function ensureLocalPvs(action, manifest, run = runKubectl, log = console.log) {
   if (!['preflight', 'ensure'].includes(action) || !manifest) {
     throw new Error('usage: k8s-local-pv-ensure.mjs preflight|ensure <PV manifest>');
   }
-  const rendered = JSON.parse(run(['create', '--dry-run=client', '--validate=false', '-f', manifest, '-o', 'json']));
-  const items = rendered.kind === 'List' ? rendered.items : [rendered];
+  const items = parseManifestObjects(run(['create', '--dry-run=client', '--validate=false', '-f', manifest, '-o', 'json']));
   if (!Array.isArray(items) || !items.length) throw new Error('local PV manifest is empty');
   const seen = new Set();
   const plan = items.map(desired => {

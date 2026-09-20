@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { checkVolume, ensureLocalPvs } from './k8s-local-pv-ensure.mjs';
+import { checkVolume, ensureLocalPvs, parseManifestObjects } from './k8s-local-pv-ensure.mjs';
 
 function fixture() {
   const desired = { apiVersion: 'v1', kind: 'PersistentVolume',
@@ -38,7 +38,10 @@ function fakeCluster(items, pvs = [], pvcs = [], fail = () => {}) {
   const run = (args, input) => {
     calls.push({ args, input });
     fail(args);
-    if (args[0] === 'create' && args.includes('--dry-run=client')) return JSON.stringify({ kind: 'List', items });
+    if (args[0] === 'create' && args.includes('--dry-run=client')) {
+      // kubectl create prints each resource independently, not a single List.
+      return items.map(item => JSON.stringify(item, null, 4)).join('\n') + '\n';
+    }
     if (args[0] === 'get' && args[1] === 'pv') return JSON.stringify(state.pvs.get(args[2])) ?? '';
     if (args[0] === 'get' && args[1] === 'pvc') return JSON.stringify(state.pvcs.get(`${args[4]}/${args[2]}`)) ?? '';
     if (args[0] === 'create' && !args.some(a => a.startsWith('--dry-run'))) {
@@ -52,6 +55,32 @@ function fakeCluster(items, pvs = [], pvcs = [], fail = () => {}) {
   };
   return { run, state, calls, writes };
 }
+
+test('manifest parser accepts single objects, Lists and consecutive pretty-printed JSON documents', () => {
+  const { desired } = fixture();
+  desired.metadata.annotations = { nested: JSON.stringify({ text: 'braces }{ and quotes " plus slash \\' }) };
+  const second = structuredClone(desired);
+  second.metadata.name = 'second-pv';
+  const one = JSON.stringify(desired, null, 4), two = JSON.stringify(second, null, 4);
+  assert.deepEqual(parseManifestObjects(one), [desired]);
+  for (const separator of ['', '\n', '\r\n \t']) {
+    assert.deepEqual(parseManifestObjects(` \n${one}${separator}${two}\n`), [desired, second]);
+  }
+  assert.deepEqual(parseManifestObjects(JSON.stringify({ kind: 'List', items: [desired, second] })), [desired, second]);
+});
+
+test('malformed or truncated manifest output fails before reading or changing any PV', () => {
+  const { desired } = fixture();
+  const first = JSON.stringify(desired);
+  for (const output of [first + '\n{"kind":', first + '\nwarning text', first + '\n{"bad":}',
+    first + '\n{"kind":"List","items":null}', '']) {
+    const calls = [];
+    const run = args => { calls.push(args); return output; };
+    assert.throws(() => ensureLocalPvs('ensure', 'manifest.yaml', run, () => {}));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes('--dry-run=client'));
+  }
+});
 
 test('recovered Directory PV is preserved verbatim, including UID, binding, node affinity and capacity', () => {
   for (const type of ['Directory', 'DirectoryOrCreate']) {
