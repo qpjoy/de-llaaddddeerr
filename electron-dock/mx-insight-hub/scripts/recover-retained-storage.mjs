@@ -281,14 +281,33 @@ export function validateOnlineRecoveryResources(saved, current, identifier, node
   for (const [expectedPv, expectedPvc] of expected) {
     const pv = current.pvs.find(r => r.metadata.name === expectedPv.metadata.name)
     const pvc = current.claims.find(r => r.metadata.name === expectedPvc.metadata.name)
-    if (!pv || !pvc || pv.metadata.deletionTimestamp || pvc.metadata.deletionTimestamp
-        || pv.status?.phase !== 'Bound' || pvc.status?.phase !== 'Bound'
-        || !pvc.metadata.uid || pvc.metadata.namespace !== 'mx-common'
-        || pv.spec.claimRef?.uid !== pvc.metadata.uid || pv.spec.claimRef?.namespace !== 'mx-common'
-        || pv.spec.claimRef?.name !== pvc.metadata.name
-        || Object.keys(expectedPv.spec).filter(key => key !== 'claimRef').some(key => !isDeepStrictEqual(pv.spec[key], expectedPv.spec[key]))
-        || Object.keys(expectedPvc.spec).some(key => !isDeepStrictEqual(pvc.spec[key], expectedPvc.spec[key]))) {
-      throw new Error(`Online continuation refused: ${expectedPv.metadata.name} is not bound to the verified retained directory`)
+    const differences = []
+    if (!pv) differences.push('pv.missing')
+    if (!pvc) differences.push('pvc.missing')
+    if (pv && pvc) {
+      if (pv.metadata.deletionTimestamp) differences.push('pv.metadata.deletionTimestamp')
+      if (pvc.metadata.deletionTimestamp) differences.push('pvc.metadata.deletionTimestamp')
+      if (pv.status?.phase !== 'Bound') differences.push('pv.status.phase')
+      if (pvc.status?.phase !== 'Bound') differences.push('pvc.status.phase')
+      if (!pvc.metadata.uid) differences.push('pvc.metadata.uid')
+      if (pvc.metadata.namespace !== 'mx-common') differences.push('pvc.metadata.namespace')
+      if (pv.spec.claimRef?.uid !== pvc.metadata.uid) differences.push('pv.spec.claimRef.uid')
+      if (pv.spec.claimRef?.namespace !== 'mx-common') differences.push('pv.spec.claimRef.namespace')
+      if (pv.spec.claimRef?.name !== pvc.metadata.name) differences.push('pv.spec.claimRef.name')
+      for (const key of Object.keys(expectedPv.spec).filter(key => key !== 'claimRef')) {
+        // PV StorageClassName is a Go string with json omitempty: the API omits
+        // an empty class. PVC uses a *string instead; keep its explicit empty
+        // value strict so default-class assignment cannot pass this check.
+        const actual = key === 'storageClassName' && pv.spec[key] === undefined ? '' : pv.spec[key]
+        if (!isDeepStrictEqual(actual, expectedPv.spec[key])) differences.push(`pv.spec.${key}`)
+      }
+      for (const key of Object.keys(expectedPvc.spec)) {
+        if (!isDeepStrictEqual(pvc.spec[key], expectedPvc.spec[key])) differences.push(`pvc.spec.${key}`)
+      }
+    }
+    if (differences.length) {
+      // Fixed field names only; never dump resource objects or their values.
+      throw new Error(`Online continuation refused: ${expectedPv.metadata.name} retained binding validation failed; mismatched fields: ${differences.join(', ')}`)
     }
   }
   for (const name of ['mx-common-postgres', 'mx-common-elasticsearch']) {

@@ -168,3 +168,17 @@ node scripts/recover-retained-storage.mjs --resume-after-database \
 它继续等待 ES 和原索引，验证部署镜像的 schema/产品密码，最后恢复 Admin/Public，
 四类后台 worker 仍暂停。ES 等待阶段每 30 秒打印容器状态；失败仍保留在线旧库和副本。
 验证失败不绕过检查；如当前 Hub 已有新请求或配置改变，应另行核对而非强制续跑。
+
+
+### 在线续跑的 PV 空存储类误判修正
+
+Kubernetes 的 PV `spec.storageClassName` 使用 `string` + JSON `omitempty`，
+创建时传入 `""` 后，API 读取结果会省略这个字段。先前续跑脚本逐字段严格比较
+`undefined` 和 `""`，即使实际旧卷已正确绑定也会误拒绝，统一报成目录不符。
+本地回归测试已复现并修正：仅 PV 的该字段将省略值视为无存储类。
+PVC 的显式 `storageClassName: ""` 继续严格要求，因为省略 PVC 字段可能触发默认类。
+路径、Directory 类型、Retain、绑定 UID、节点、容量、访问模式等检查保持不变。
+任何剩余差异现在会打印具体字段名，不打印 Secret、对象正文或字段值。
+服务器只读绑定输出仍需核验；不要把所有同类拒绝都当成这个误判，或修改卷绕过检查。
+
+参考：[Kubernetes API 类型定义](https://github.com/kubernetes/api/blob/master/core/v1/types.go)。

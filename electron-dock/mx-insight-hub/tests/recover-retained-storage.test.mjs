@@ -267,7 +267,7 @@ test('resume CLI refuses multiple recovery directories before reading files or c
 const originalIdentifier = '7671038612254789664'
 function onlineResources() {
   const r = resumeResources()
-  const expected = replacementVolumes(r.saved.pvs, r.saved.common.items.filter(v => v.kind === 'PersistentVolumeClaim'), retained, 'original-node')
+  const expected = structuredClone(replacementVolumes(r.saved.pvs, r.saved.common.items.filter(v => v.kind === 'PersistentVolumeClaim'), retained, 'original-node'))
   r.current.pvs = expected.map(([pv]) => ({ ...pv, metadata: { ...pv.metadata, uid: `new-${pv.metadata.name}` }, status: { phase: 'Bound' } }))
   r.current.claims = expected.map(([, pvc]) => ({ ...pvc, metadata: { ...pvc.metadata, uid: `new-${pvc.metadata.name}` }, status: { phase: 'Bound' } }))
   r.current.pvs.forEach((pv, i) => { pv.spec.claimRef.uid = r.current.claims[i].metadata.uid })
@@ -399,5 +399,40 @@ else {console.error('Unexpected operation');process.exit(45);}
       else process.env[name] = savedEnv[name]
     }
     globalThis.fetch = savedFetch
+  }
+})
+
+
+test('online continuation accepts API-omitted empty PV storageClassName while keeping explicit classless PVCs', () => {
+  const r = onlineResources()
+  for (const pv of r.current.pvs) delete pv.spec.storageClassName
+  assert.doesNotThrow(() => validateOnlineRecoveryResources(r.saved, r.current, originalIdentifier, 'original-node'))
+  assert.ok(r.current.pvs.every(pv => !Object.hasOwn(pv.spec, 'storageClassName')), 'validation must not mutate API objects')
+})
+
+
+test('binding diagnostics name the exact failed fields and do not relax class, path, ownership or node checks', () => {
+  const cases = [
+    [r => { r.current.pvs[0].spec.storageClassName = 'dynamic'; }, 'pv.spec.storageClassName'],
+    [r => { delete r.current.claims[0].spec.storageClassName; }, 'pvc.spec.storageClassName'],
+    [r => { r.current.claims[0].spec.storageClassName = null; }, 'pvc.spec.storageClassName'],
+    [r => { r.current.claims[0].spec.storageClassName = 'dynamic'; }, 'pvc.spec.storageClassName'],
+    [r => { r.current.pvs[0].spec.hostPath.path = '/SyntheticPrivatePath'; }, 'pv.spec.hostPath'],
+    [r => { r.current.pvs[0].spec.claimRef.uid = 'SyntheticPrivateUid'; }, 'pv.spec.claimRef.uid'],
+    [r => { r.current.pvs[0].metadata.deletionTimestamp = 'now'; }, 'pv.metadata.deletionTimestamp'],
+    [r => { r.current.pvs[0].spec.persistentVolumeReclaimPolicy = 'Delete'; }, 'pv.spec.persistentVolumeReclaimPolicy'],
+    [r => { delete r.current.pvs[0].spec.nodeAffinity; }, 'pv.spec.nodeAffinity'],
+    [r => { r.current.pvs[0].spec.capacity.storage = '1Gi'; }, 'pv.spec.capacity'],
+  ]
+  for (const [mutate, field] of cases) {
+    const r = onlineResources()
+    // Exercise every remaining protection with the API's omitted empty PV class.
+    for (const pv of r.current.pvs) delete pv.spec.storageClassName
+    mutate(r)
+    assert.throws(() => validateOnlineRecoveryResources(r.saved, r.current, originalIdentifier, 'original-node'), error => {
+      assert.ok(error.message.includes(`mismatched fields: ${field}`), error.message)
+      assert.doesNotMatch(error.message, /SyntheticPrivate/)
+      return true
+    })
   }
 })
