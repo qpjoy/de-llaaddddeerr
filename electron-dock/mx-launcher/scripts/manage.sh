@@ -5928,6 +5928,7 @@ ops_internal_production() {
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
       launcher_with_build_proxy internal_production_predeploy_gate
+      export MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS="${MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS:-local-password,feishu}"
       k8s_prepare_production_host
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready

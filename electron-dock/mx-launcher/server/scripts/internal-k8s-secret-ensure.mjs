@@ -197,6 +197,23 @@ export function planInternalK8sSecrets({
   };
 }
 
+// Production recovery declares which login providers must survive redeploy.
+// Check planned resources so original values supplied privately in .env can
+// repair a missing Secret; never generate substitute Feishu credentials.
+export function assertRequiredLoginProviders(plan, rawProviders) {
+  if (rawProviders === undefined) return;
+  const providers = String(rawProviders).split(',').map(value => value.trim());
+  if (!providers.length || providers.some(value => !['local-password', 'feishu'].includes(value))) {
+    throw new Error('MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS must contain local-password and/or feishu');
+  }
+  if (providers.includes('feishu')) {
+    const secret = plan.resources.find(item => item.metadata.name === 'mx-feishu-oauth');
+    if (!secret || ['app-id', 'app-secret', 'tenant-keys'].some(key => !secret.data[key])) {
+      throw new Error('required Feishu login is not configured; restore the original mx-feishu-oauth Secret or provide the original MX_FEISHU_APP_ID, MX_FEISHU_APP_SECRET and MX_FEISHU_ALLOWED_TENANT_KEYS in the private server env file; deploy stopped before application changes');
+    }
+  }
+}
+
 export function formatReadySummary(versionDigest, changedCount = 0) {
   const digest = String(versionDigest).replace(/^sha256-/, '');
   if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('version digest must be a SHA-256 hex digest');
@@ -886,6 +903,7 @@ function main() {
   const existingSecrets = fetchExistingSecrets(namespace);
   assertDatabaseSecretStorageConsistency(namespace, existingSecrets, environment);
   const plan = planInternalK8sSecrets({ namespace, environment, existingSecrets });
+  assertRequiredLoginProviders(plan, process.env.MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS);
   if (command === 'ensure') {
     applySecretPlan(plan);
     const appliedSecrets = fetchExistingSecrets(namespace);

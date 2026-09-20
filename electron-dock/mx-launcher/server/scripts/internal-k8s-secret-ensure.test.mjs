@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import {
+  assertRequiredLoginProviders,
   canonicalizeSdkServiceAccountSecrets,
   formatReadySummary,
   hasRetainedPostgresHostData,
@@ -25,6 +26,60 @@ import {
 
 const namespace = 'mx-internal-shadow';
 const deterministicSecret = () => 'generated-secret-000000000000000000000000';
+
+test('required Feishu login cannot be silently omitted; password-only and legacy callers remain explicit', () => {
+  const plan = planInternalK8sSecrets({ namespace, environment: environment(), existingSecrets: {}, randomSecret: deterministicSecret });
+  assert.throws(() => assertRequiredLoginProviders(plan, 'local-password,feishu'), /required Feishu login is not configured/);
+  assert.doesNotThrow(() => assertRequiredLoginProviders(plan, 'local-password'));
+  assert.doesNotThrow(() => assertRequiredLoginProviders(plan, undefined));
+  for (const invalid of ['', 'feishu,', 'password', 'unknown']) {
+    assert.throws(() => assertRequiredLoginProviders(plan, invalid), /MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS/);
+  }
+});
+
+test('original Feishu values supplied privately pass the gate and remain unchanged on redeploy', () => {
+  const initial = planInternalK8sSecrets({ namespace, environment: environment(
+    'MX_FEISHU_APP_ID=cli_original\nMX_FEISHU_APP_SECRET=original-secret\nMX_FEISHU_ALLOWED_TENANT_KEYS=original-tenant\n'
+  ), existingSecrets: {}, randomSecret: deterministicSecret });
+  assertRequiredLoginProviders(initial, 'local-password,feishu');
+  const observed = Object.fromEntries(initial.resources.map(item => [item.metadata.name, item]));
+  const repeated = planInternalK8sSecrets({ namespace, environment: environment(), existingSecrets: observed,
+    randomSecret: () => { throw new Error('must not rotate keys'); } });
+  assertRequiredLoginProviders(repeated, 'local-password,feishu');
+  assert.deepEqual(resource(repeated, 'mx-feishu-oauth').data, observed['mx-feishu-oauth'].data);
+  assert.equal(repeated.changedCount, 0);
+});
+
+test('required login gate fails preflight and ensure before any Kubernetes mutation', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mx-required-login-'));
+  const initial = planInternalK8sSecrets({ namespace, environment: environment(), existingSecrets: {}, randomSecret: deterministicSecret });
+  try {
+    writeFileSync(join(directory, 'state.json'), JSON.stringify(Object.fromEntries(initial.resources.map(item => [item.metadata.name, item]))));
+    writeFileSync(join(directory, 'kubectl'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FAKE_CALLS, JSON.stringify(args) + '\\n');
+if (!args.includes('get')) { process.stderr.write('UNEXPECTED_WRITE'); process.exit(2); }
+const state = JSON.parse(fs.readFileSync(process.env.FAKE_STATE));
+const item = state[args[args.indexOf('secret') + 1]];
+if (item && args.includes('secret')) { console.log(JSON.stringify(item)); }
+else { process.stderr.write('Error from server (NotFound)'); process.exit(1); }
+`, { mode: 0o700 });
+    const env = { ...process.env, PATH: `${directory}${delimiter}${process.env.PATH || ''}`,
+      FAKE_CALLS: join(directory, 'calls'), FAKE_STATE: join(directory, 'state.json'),
+      MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS: 'local-password,feishu' };
+    for (const key of ['MX_FEISHU_APP_ID', 'MX_FEISHU_APP_SECRET', 'MX_FEISHU_ALLOWED_TENANT_KEYS']) delete env[key];
+    for (const action of ['preflight', 'ensure']) {
+      const result = spawnSync(process.execPath, [new URL('./internal-k8s-secret-ensure.mjs', import.meta.url).pathname,
+        action, namespace, join(directory, 'missing.env')], { env, encoding: 'utf8' });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /required Feishu login is not configured/);
+    }
+    const calls = readFileSync(join(directory, 'calls'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(calls.length >= 8);
+    assert.ok(calls.every(args => args.includes('get')));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 function environment(fileContent = '', processEnvironment = {}) {
   return resolveKnownEnvironment(parseEnvFile(fileContent), processEnvironment);

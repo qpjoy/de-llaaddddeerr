@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +82,7 @@ if containerd_import_docker_image postgres:16-alpine; then echo UNEXPECTED_SUCCE
 
 test('production host/identity/credential gates precede network, images and migrations', () => {
   const deploy = manage.match(/    deploy\|cycle\)\n([\s\S]*?)\n    apply\)/)[1];
+  assert.match(deploy, /export MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS="\$\{MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS:-local-password,feishu\}"/);
   const ordered = ['internal_production_predeploy_gate', 'k8s_prepare_production_host', 'k8s_repair_kubeadm_endpoint',
     'k8s_recover_production_node', 'k8s_production_recovery_state restore', 'k8s_production_recovery_state checkpoint',
     'k8s_preflight_secret_bundle', 'k8s_local_pvs preflight', 'k8s_recover_cluster_network', 'k8s_require_production_node_ready',
@@ -101,6 +102,31 @@ test('production host/identity/credential gates precede network, images and migr
     assert.equal(result.status, 24);
     assert.doesNotMatch(result.stdout, /UNEXPECTED_BUILD/);
   }
+});
+
+test('post-deploy check cannot pass when required Feishu runtime configuration is disabled', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'mx-login-readiness-'));
+  try {
+    writeFileSync(join(temp, 'k8s-recovery-state.mjs'), `
+import { spawnSync } from 'node:child_process';
+export function run(command, args, input) {
+  if (args.includes('get')) return JSON.stringify({data:{token:Buffer.from('private-token').toString('base64')}});
+  if (!args.includes('exec') || input !== 'private-token') throw new Error();
+  const program = args[args.indexOf('-e')+1];
+  const mock = 'globalThis.fetch = async (url) => ({status:200,ok:true,body:{cancel:async()=>{}},json:async()=>({config:{enabled:process.env.FEISHU_READY === "true"}})});';
+  const child = spawnSync(process.execPath, ['-e', mock + program], {input,encoding:'utf8'});
+  if (child.status !== 0) throw new Error();
+  return child.stdout;
+}`);
+    for (const [required, enabled, expected] of [
+      ['local-password,feishu', 'true', 0], ['local-password,feishu', 'false', 1], ['local-password', 'false', 0]
+    ]) {
+      const result = shell(`${fn('k8s_production_auth_smoke')}\nk8s_namespace() { echo mx-internal-shadow; }\nk8s_production_auth_smoke`,
+        { SCRIPT_DIR: temp, MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS: required, FEISHU_READY: enabled });
+      assert.equal(result.status, expected, result.stderr);
+      assert.doesNotMatch(result.stdout + result.stderr, /private-token/);
+    }
+  } finally { rmSync(temp, { recursive: true, force: true }); }
 });
 
 test('reboot-lost Flannel lease gets one bounded Flannel restart only in production recovery', () => {

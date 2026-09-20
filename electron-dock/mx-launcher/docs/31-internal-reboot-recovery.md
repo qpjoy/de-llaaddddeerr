@@ -38,7 +38,8 @@ IP 改变时修改 `MX_K8S_APISERVER_ADVERTISE_ADDRESS`。如下载需要代理�
 | PostgreSQL `FailedCreatePodSandBox` | Flannel API 不可达或 `/run/flannel/subnet.env` 缺失 | 修复 Flannel API；已就绪但租约仍缺失时，限一次重启 Flannel 并等待；不手写租约 |
 | Pod 已 Running 但服务不可达 | kube-proxy / DNS 链路异常 | 验证 Service 转发，等待 CoreDNS，最后检查应用健康与就绪接口 |
 | `mx-launcher-db missing`、旧 Ops Token 失效 | PGDATA 仍在，etcd 中的 Secret 丢失，之前 deploy 为缺失的 Ops Secret 生成了新值 | 同集群/原数据身份下从私有恢复记录补回缺失 Secret；不覆盖已有 Secret；首次无备份又缺原 DB/Ops Secret 时停止 |
-| 飞书、SDK 或 OSS 配置缺失 | 配置/凭据可能仅存在 K8s Secret，未保存在 `.env` | 保存并恢复曾经存在的对应 Secret；从未观察到的配置无法恢复，明确提示飞书配置未受保护 |
+| 飞书、SDK 或 OSS 配置缺失 | 配置/凭据可能仅存在 K8s Secret，未保存在 `.env` | 保存并恢复曾经存在的对应 Secret；从未观察到的配置无法恢复。生产 deploy 默认要求飞书配置齐全，缺失时在构建和应用部署前停止 |
+| 员工 `invalid credentials` | 当前数据库中账号不存在/歧义、不活跃、凭据缺失或密码不匹配；也可能连接到旧库 | 用只读诊断核对实际 API 数据库和账号，不能通过换 PVC、重置用户或自动选库解决 |
 | PV `immutable` 错误 | 已恢复 PV 的 `Directory` 与模板 `DirectoryOrCreate` 不同 | 校验并保留现有 PV；不自动删除 `Released/Failed` PV，不清除 claimRef |
 | `Unexpected non-whitespace ... JSON` | kubectl 对多份 YAML 输出连续 JSON 文档 | 按文档解析，兼容 List；错误时停止而不创建部分 PV |
 | `ErrImageNeverPull` / 镜像已导入却找不到 | 镜像进入错误运行时，或被 kubelet GC 回收；事故时磁盘使用 94% | 发现 kubelet 的真实 CRI socket；导入后比对 Docker/CRI image ID；rollout 失败且本地缓存镜像缺失时补导一次 |
@@ -57,11 +58,11 @@ IP 改变时修改 `MX_K8S_APISERVER_ADVERTISE_ADDRESS`。如下载需要代理�
 3. 修复 API 地址、kubelet 认证、kube-proxy、Flannel；确认原节点 Ready。
 4. 所有关键 Secret 完整读取成功后，才决定是否补回缺失值。API 超时/拒绝访问不是“缺失”。
    校验原 cluster UID，缺失 Secret 用 `create`，不会 `replace` 已存在的值。
-5. 建立私有凭据快照；校验 Secret 输入与 PV/PVC；检查磁盘压力，再构建和导入镜像。
+5. 建立私有凭据快照；校验 Secret 输入、所需登录配置与 PV/PVC；检查磁盘压力，再构建和导入镜像。
 6. 在应用工作负载前再次检查原磁盘身份。给 PostgreSQL StatefulSet 加入原节点约束与
    启动检查，只有现存 PostgreSQL 16 数据目录、control file、base 目录齐全才进入原入口。
    这个检查保留在工作负载内，因此后续 kubelet 重启 Pod 时也禁止初始化空库。
-7. 等待数据库、执行既有迁移、等待 API/Caddy、健康检查和只读 Ops 鉴权，保存最终快照。
+7. 等待数据库、执行既有迁移、等待 API/Caddy、健康检查、只读 Ops 鉴权和所需飞书配置检查，保存最终快照。
 
 不会自动 `kubeadm reset`、恢复整个 etcd、换 CA、选择某个历史数据库副本、初始化空库、
 删 PV/PVC/卷、降低磁盘回收阈值、清用户数据，或为了绕过鉴权生成新 Ops Token。
@@ -105,6 +106,43 @@ API/RBAC 错误不会触发盲目换证书。初次安装失败回退配置并�
 验证到同一个 PG system identifier，只证明数据库实例身份；不能证明业务记录是最新、完整的。
 本次曾出现记录更新时间与用户最近使用时间不符的疑问，不能以 deploy OK 替代数据完整性核验。
 
+## 员工/飞书登录失败时
+
+PVC UID 是 Kubernetes 资源标识，不参与用户密码校验。当前实现将员工密码的 scrypt 哈希、
+盐和参数一起保存在 PostgreSQL 的 `iam-user-credential` 记录中；正常重启和 deploy 不会
+重新生成这些密码。Ops Token 是管理接口的独立凭据，换它不会直接造成员工 `invalid credentials`
+或 `Feishu OAuth is not configured`。
+
+密码登录按大小写精确解析账号（含旧别名），同一环境有重复匹配也拒绝登录。先核对账号是否存在、
+是否 active、是否有 local-password 凭据，再核对数据库来源和修改时间。记录最新时间曾停在
+7 月 2 日，而实际使用到 9 月，这个疑点必须继续核实；不要先改密码来掩盖旧库/错库问题。
+
+更新代码后，在部署服务器的 `electron-dock/mx-launcher` 目录运行；无需重新构建或 deploy：
+
+```bash
+node scripts/k8s-login-diagnose.mjs SMH
+```
+
+命令读取原 PV/PVC、飞书 Secret 的字段存在状态，以及各 Ready Internal API Pod **实际使用的**
+数据库地址（去掉用户名/密码）、环境、数据库实例标识、账号匹配数、状态、凭据存在状态和时间。
+SQL 使用只读事务，不提交登录、不调用会写审计的密码校验方法、不读取/输出密码哈希值。
+它还在 `server/.env*`、`/var/lib/mx-launcher-recovery` 及已知 `/data/mx-recovery` 子目录查找
+飞书恢复线索，只输出字段是否存在；这不是全盘扫描或凭据有效性验证。输出可以用于排查，私有源文件不能贴出。
+
+飞书启动报未配置时，需要恢复**原飞书应用**的 App ID、App Secret 和租户允许列表。
+先核对历史 Secret/私有 env/恢复快照；若未备份这些值，需要从原应用的管理配置中找回。
+不要通过创建另一个应用、随意生成新密钥或换 PVC 处理。核实后，把原值补入服务器私有
+`server/.env` 的 `MX_FEISHU_APP_ID`、`MX_FEISHU_APP_SECRET`、
+`MX_FEISHU_ALLOWED_TENANT_KEYS`，保持权限 `0600`，再执行正常 deploy；不能把这些值提交 Git。
+原飞书重定向白名单也需要保持有效。
+
+生产 deploy 默认 `MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS=local-password,feishu`，与本系统两种
+登录都在使用的要求一致。飞书配置缺失时不再仅警告并继续部署；原值可从已保存的 Secret 快照恢复，
+或由私有 env 补齐后通过检查。**当前没有备份的原配置，脚本不能凭空找回。**
+只有确实从未使用飞书的其它安装，才可明确设为 `local-password`；不要以此绕过本次登录故障。
+普通 `k8s apply` 不设置该变量时保持原行为。部署末尾还读取运行中 API 的飞书公开配置确认 enabled，
+但不会模拟真实员工密码或飞书授权，因此仍需本人做端到端验收。
+
 ## 成功后的确认
 
 正常日志应包括原挂载验证、kubelet 认证验证、CRI 镜像验证、private recovery checkpoint、
@@ -116,7 +154,7 @@ kubectl --request-timeout=15s -n mx-internal-shadow get secret mx-internal-ops \
   -o go-template='{{index .data "token" | base64decode}}{{"\n"}}'
 ```
 
-最终健康检查和 Ops 鉴权不等于真实用户密码/飞书端到端验收。搬迁后仍需用测试用户分别验证
+最终健康检查、Ops 鉴权和飞书 enabled 不等于真实用户密码/飞书端到端验收。搬迁后仍需用测试用户分别验证
 这两种登录及 MX-H2I 原联网功能，特别是公网回调、Nginx、DNS 或外部飞书配置也发生变化时。
 
 实现与验证参考：

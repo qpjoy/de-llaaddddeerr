@@ -147,21 +147,27 @@ k8s_production_auth_smoke() {
   const { pathToFileURL } = require('node:url');
   const { run } = await import(pathToFileURL(`${process.argv[2]}/k8s-recovery-state.mjs`));
   const ns = process.argv[3];
+  const requireFeishu = (process.env.MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS || 'local-password,feishu').split(',').map(v => v.trim()).includes('feishu');
   const secret = JSON.parse(run('kubectl', ['--request-timeout=15s', '-n', ns, 'get', 'secret', 'mx-internal-ops', '-o', 'json']));
   const token = Buffer.from(secret.data.token, 'base64').toString('utf8');
   if (!token) throw new Error();
   run('kubectl', ['--request-timeout=20s', '-n', ns, 'exec', '-i', 'deployment/mx-launcher-internal', '--', 'node', '-e', `
+    const requireFeishu = ${JSON.stringify(requireFeishu)};
     let token=''; process.stdin.on('data', c=>token+=c); process.stdin.on('end', async()=>{
       try {
         const result = await fetch('http://127.0.0.1:18090/internal/v1/user-center/roles', {
           headers: {'x-mx-ops-token':token}, signal:AbortSignal.timeout(10000)
         });
         await result.body?.cancel();
-        if (result.status !== 200) process.exitCode=1;
+        if (result.status !== 200) { process.exitCode=1; return; }
+        if (requireFeishu) {
+          const response = await fetch('http://127.0.0.1:18090/internal/v1/sdk/oauth/feishu/config', { signal:AbortSignal.timeout(10000) });
+          if (!response.ok || (await response.json()).config?.enabled !== true) process.exitCode=1;
+        }
       } catch { process.exitCode=1; }
     });
   `], token);
-  console.log('current Ops Secret accepted by the running Internal API (read-only check)');
-})().catch(() => { console.error('Ops authentication check failed; inspect Secret/Pod consistency; no token printed or rotated'); process.exitCode=1; });
+  console.log('current Ops Secret accepted' + (requireFeishu ? '; Feishu configuration enabled' : '') + ' (read-only check; real user login still requires acceptance testing)');
+})().catch(() => { console.error('Ops/required-login readiness check failed; inspect Secret/Pod and Feishu configuration; no credentials printed or rotated'); process.exitCode=1; });
 NODE
 }

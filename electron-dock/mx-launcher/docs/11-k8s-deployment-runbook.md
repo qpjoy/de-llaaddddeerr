@@ -9,6 +9,8 @@ migration + smoke。
 已部署过的单节点生产主机，继续使用 `ops internal-production deploy`。
 它现在会先校验原数据挂载与数据库身份、恢复节点认证和缺失凭据、核对 CRI 镜像，再执行部署。
 首次运行建立 root 私有恢复记录；后续只补回缺失 Secret，不覆盖当前值，不自动初始化空库。
+生产恢复默认要求员工密码和飞书两种登录配置，飞书缺失会在构建/应用部署前停止。
+登录失败时先运行 `node scripts/k8s-login-diagnose.mjs SMH` 做只读核对；PVC UID 不是密码密钥。
 完整事故归纳、命令、停止条件与备份要求见
 [Internal 搬迁与重启恢复](./31-internal-reboot-recovery.md)。
 
