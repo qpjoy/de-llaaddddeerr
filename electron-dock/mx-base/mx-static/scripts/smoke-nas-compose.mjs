@@ -10,18 +10,19 @@ for(const path of ['data','state','secrets','nas'])await mkdir(join(root,path))
 const token='test'.repeat(16),headers={authorization:`Bearer ${token}`},project=`mx-static-nas-test-${process.pid}`
 await writeFile(join(root,'secrets/projects.json'),JSON.stringify({test:{read:token,write:token}}),{mode:0o444})
 await writeFile(join(root,'secrets/signing-key'),token,{mode:0o444})
+await writeFile(join(root,'secrets/admin-token'), token, {mode:0o444})
 await writeFile(join(root,'nas/.mx-static-volume-id'),'nas-test',{mode:0o444})
 await writeFile(join(root,'test.json'),JSON.stringify({services:{writer:{healthcheck:{interval:'1s'}},reader:{healthcheck:{interval:'1s'}}}}))
 const env={...process.env,MX_STATIC_DATA_PATH:join(root,'data'),MX_STATIC_STATE_PATH:join(root,'state'),MX_STATIC_SECRETS_PATH:join(root,'secrets'),MX_STATIC_WRITER_PORT:'0',MX_STATIC_READER_PORT:'0',MX_STATIC_NAS_PATH:join(root,'nas'),MX_STATIC_NAS_VOLUME_ID:'nas-test',MX_STATIC_NAS_REQUIRE_NFS:'false',MX_STATIC_CACHE_TTL_MS:'0'}
 const docker=args=>execFileSync('docker',args,{env,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:120000}).trim()
 const compose=args=>docker(['compose','--project-directory',dir,'-f',join(dir,'compose.yml'),'-f',join(dir,'compose.nas.yml'),'-f',join(root,'test.json'),'--profile','nas','-p',project,...args])
-const control=action=>compose(['exec','-T','writer','node','mx-base/mx-static/src/archive-control.mjs',action,'nas-test'])
+const control=action=>compose(['exec','-T','writer','node','src/archive-control.mjs',action,'nas-test'])
 async function until(check){for(let i=0;i<100;i++){if(await check())return;await new Promise(r=>setTimeout(r,200))}throw Error('NAS smoke condition timed out')}
 try {
  docker(['volume','create',project+'-state'])
  env.MX_STATIC_STATE_PATH=docker(['volume','inspect',project+'-state','--format','{{.Mountpoint}}'])
- docker(['run','--rm','--user','0','-v',project+'-state:/state','mx-static:0.3.0','chown','1000:1000','/state'])
- docker(['run','--rm','--user','0','-v',`${root}:/fixture`,'mx-static:0.3.0','chown','1000:1000','/fixture/data','/fixture/state','/fixture/nas'])
+ docker(['run','--rm','--user','0','-v',project+'-state:/state','mx-static:0.7.0','chown','1000:1000','/state'])
+ docker(['run','--rm','--user','0','-v',`${root}:/fixture`,'mx-static:0.7.0','chown','1000:1000','/fixture/data','/fixture/state','/fixture/nas'])
  compose(['up','-d','--no-build','--wait','writer','reader'])
  const writer='http://'+compose(['port','writer','18200']),reader='http://'+compose(['port','reader','18200'])
  const ids=compose(['ps','-q','writer','reader'])

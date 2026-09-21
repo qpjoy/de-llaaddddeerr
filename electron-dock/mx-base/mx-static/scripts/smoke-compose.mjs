@@ -11,6 +11,7 @@ for (const path of ['data','state','secrets']) await mkdir(join(root,path))
 const token = 'test'.repeat(16)
 await writeFile(join(root,'secrets/projects.json'), JSON.stringify({test:{read:token,write:token}}), {mode:0o444})
 await writeFile(join(root,'secrets/signing-key'), token, {mode:0o444})
+await writeFile(join(root,'secrets/admin-token'), token, {mode:0o444})
 const env = {...process.env, MX_STATIC_DATA_PATH:join(root,'data'), MX_STATIC_STATE_PATH:join(root,'state'), MX_STATIC_SECRETS_PATH:join(root,'secrets'), MX_STATIC_WRITER_PORT:'0', MX_STATIC_READER_PORT:'0', MX_STATIC_PUBLIC_URL:'http://preview.invalid'}
 const project = `mx-static-smoke-${process.pid}`
 const docker = args => execFileSync('docker',args,{env,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim()
@@ -18,8 +19,8 @@ const compose = args => docker(['compose','--project-directory',dir,'-f',join(di
 try {
  docker(['volume','create',project+'-state'])
  env.MX_STATIC_STATE_PATH=docker(['volume','inspect',project+'-state','--format','{{.Mountpoint}}'])
- docker(['run','--rm','--user','0','-v',project+'-state:/state','mx-static:0.3.0','chown','1000:1000','/state'])
- docker(['run','--rm','--user','0','-v',`${root}:/fixture`,'mx-static:0.3.0','chown','-R','1000:1000','/fixture/data','/fixture/state'])
+ docker(['run','--rm','--user','0','-v',project+'-state:/state','mx-static:0.7.0','chown','1000:1000','/state'])
+ docker(['run','--rm','--user','0','-v',`${root}:/fixture`,'mx-static:0.7.0','chown','-R','1000:1000','/fixture/data','/fixture/state'])
  console.log(compose(['config','--quiet']))
  compose(['up','-d','--no-build','--wait','--wait-timeout','100'])
  const url = name => 'http://' + compose(['port',name,'18200'])

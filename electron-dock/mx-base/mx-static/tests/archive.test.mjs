@@ -58,7 +58,7 @@ test('corrupt NAS copy never permits local eviction; missing identity never writ
  t.after(()=>worker.stop());f.catalog.setEnabled(true,'nas-01')
  await until(worker,()=>f.catalog.get(meta.key).mirrored===1 && !worker.child)
  await writeFile(join(f.nas,'objects',meta.key),'corrupt')
- assert.equal(f.catalog.request(meta.key,'evict'),true)
+ assert.equal(f.catalog.request(meta.key,'evict'),null)
  await until(worker,()=>Boolean(f.catalog.get(meta.key).error) && !worker.child)
  assert.deepEqual(await readFile(join(f.local,'objects',meta.key)),png)
  await rm(join(f.nas,'.mx-static-volume-id'))

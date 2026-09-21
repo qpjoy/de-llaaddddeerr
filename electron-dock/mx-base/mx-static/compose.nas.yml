@@ -1,7 +1,7 @@
 # Optional attachment only. The HTTP writer/reader NEVER mount /nas.
 services:
   archive:
-    image: mx-static:0.3.0
+    image: mx-static:0.7.0
     profiles: [nas]
     init: true
     restart: "no" # Attach only after NFS is ready; never couple host boot to NAS.
@@ -9,17 +9,24 @@ services:
     user: "${MX_STATIC_UID:-1000}:${MX_STATIC_GID:-1000}"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 256m
+    mem_limit: 512m # Headroom for MX_STATIC_NAS_CONCURRENCY streams.
     cpus: 0.5
     pids_limit: 64
     stop_grace_period: 5s
-    command: [node, mx-base/mx-static/src/archive-worker.mjs]
+    command: [node, src/archive-worker.mjs]
     environment:
       MX_STATIC_STATE_DIR: /state
-      MX_STATIC_NAS_VOLUME_ID: ${MX_STATIC_NAS_VOLUME_ID:?Set the persistent NAS volume identity}
+      MX_STATIC_NAS_VOLUME_ID: ${MX_STATIC_NAS_VOLUME_ID:-}
       MX_STATIC_NAS_IDLE_TIMEOUT_MS: ${MX_STATIC_NAS_IDLE_TIMEOUT_MS:-15000}
       MX_STATIC_NAS_MAX_JOB_MS: ${MX_STATIC_NAS_MAX_JOB_MS:-900000}
       MX_STATIC_NAS_REQUIRE_NFS: ${MX_STATIC_NAS_REQUIRE_NFS:-true}
+      # Small-file NFS writes are latency bound: one job at a time leaves the
+      # link idle. Concurrency lives inside the single child, never as more
+      # processes. Measure with scripts/nas-bench.mjs before changing.
+      MX_STATIC_NAS_CONCURRENCY: ${MX_STATIC_NAS_CONCURRENCY:-4}
+      # always | sample | never -- the far-side read-back after each write.
+      # Eviction always verifies, whatever this says.
+      MX_STATIC_NAS_VERIFY: ${MX_STATIC_NAS_VERIFY:-always}
     volumes:
       - type: bind
         source: ${MX_STATIC_DATA_PATH:-/srv/mx-static/data}
@@ -30,7 +37,7 @@ services:
         target: /state
         bind: {create_host_path: false}
       - type: bind
-        source: ${MX_STATIC_NAS_PATH:?Set an existing mounted NFS directory}
+        source: ${MX_STATIC_NAS_PATH:-/dev/null}
         target: /nas
         bind: {create_host_path: false}
     logging:

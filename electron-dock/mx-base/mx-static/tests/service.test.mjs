@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { createStaticService } from '../src/service.mjs'
-import { withStaticArchive } from '../../../mx-insight-hub/server/external-platforms/static-client.mjs'
+import { withStaticArchive } from '../src/client.mjs'
 const write = 'w'.repeat(32), read = 'r'.repeat(32)
 const projects = { 'mx-insight-hub': { write, read }, other: { write: 'o'.repeat(32), read: 'p'.repeat(32) } }
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1kAAAAASUVORK5CYII=', 'base64')
@@ -49,7 +49,7 @@ test('archives exact bytes, survives a new process reader, enforces project auth
 test('refresh falls back to disk and Hub consumes verified bytes through its existing loader', async t => {
   let offline = false
   const { url } = await setup(t, { queueOptions: { maxAttempts: 1 }, loader: async () => { if (offline) throw Error('offline'); return { body: png, contentType: 'image/png' } } })
-  const loader = withStaticArchive(() => { throw Error('fallback must not run') }, { baseUrl: url, token: write })
+  const loader = withStaticArchive(() => { throw Error('fallback must not run') }, { baseUrl: url, token: write, project: 'mx-insight-hub' })
   assert.deepEqual((await loader('https://cdn.example/one', { cacheScope: 'tenant' })).body, png)
   await ingest(url, { url: 'https://cdn.example/refresh' })
   offline = true
@@ -107,11 +107,11 @@ test('16 concurrent images are durably queued, duplicate requests coalesce, pend
 })
 test('RAM expiry reloads durable bytes without upstream and capacity rejection does not erase accepted jobs', async t => {
   let calls = 0
-  const { url, start } = await setup(t, { cacheOptions: { ttlMs: 25 }, loader: async () => { calls++; return { body: png, contentType: 'image/png' } } })
+  const { url, start } = await setup(t, { cacheOptions: { ttlMs: 300 }, loader: async () => { calls++; return { body: png, contentType: 'image/png' } } })
   const meta = await ingest(url, { url: 'https://cdn.example/cache' }).then(r => r.json())
   await fetch(url + meta.previewUrl).then(r => r.arrayBuffer())
   assert.equal((await fetch(url + meta.previewUrl)).headers.get('x-mx-static-cache'), 'memory')
-  await new Promise(r => setTimeout(r, 35))
+  await new Promise(r => setTimeout(r, 400)) // Comfortably past the TTL, not racing it.
   const disk = await fetch(url + meta.previewUrl)
   assert.equal(disk.headers.get('x-mx-static-cache'), 'disk')
   assert.deepEqual(Buffer.from(await disk.arrayBuffer()), png); assert.equal(calls, 1)
@@ -121,12 +121,18 @@ test('RAM expiry reloads durable bytes without upstream and capacity rejection d
   assert.equal((await ingest(paused, { url: 'https://cdn.example/paused' }).then(r => r.json())).id, one.id)
 })
 test('response deadline is bounded while accepted background work survives', async t => {
-  const { url } = await setup(t, { ioTimeoutMs: 25, loader: async () => {
+  const { url, start } = await setup(t, { ioTimeoutMs: 25, loader: async () => {
     await new Promise(resolve=>setTimeout(resolve,100)); return {body:png,contentType:'image/png'}
   } })
   const response=await ingest(url,{url:'https://cdn.example/slow'})
   assert.equal(response.status,503);assert.equal((await response.json()).error.code,'storage_io_timeout')
   assert.equal((await fetch(url+'/static/health')).status,200)
-  await new Promise(resolve=>setTimeout(resolve,200))
-  assert.equal((await ingest(url,{url:'https://cdn.example/slow',mode:'cache_only'})).status,200)
+  // Survival is checked from a service with an ordinary deadline: the 25 ms
+  // budget above is the subject of the first assertion, not of this one.
+  const witness=await start({ ioTimeoutMs: 10000, workerEnabled: false })
+  for (let attempt=0;attempt<50;attempt++) {
+    if ((await ingest(witness,{url:'https://cdn.example/slow',mode:'cache_only'})).status===200) return
+    await new Promise(resolve=>setTimeout(resolve,20))
+  }
+  assert.fail('accepted job never became durably readable')
 })

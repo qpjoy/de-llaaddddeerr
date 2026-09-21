@@ -1,4 +1,32 @@
+# Credentials and host-specific configuration; keep the documented template.
 secrets/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime media, control databases and local diagnostic reports.
 data/
 state/
+/reports/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.log
+*.pid
+*.part
+
+# Dependencies, coverage and local editor/OS artifacts.
+node_modules/
+coverage/
+.nyc_output/
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak

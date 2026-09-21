@@ -70,12 +70,20 @@ status_app() {
   esac
 }
 nas_compose() { docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas "$@"; }
-storage_control() { compose exec -T writer node mx-base/mx-static/src/archive-control.mjs "$@"; }
+storage_control() { compose run --rm --no-deps -T writer node src/archive-control.mjs "$@"; }
 attach_nas() {
-  need timeout; need findmnt
+  need timeout; need findmnt; need python3
   [ -n "${MX_STATIC_NAS_PATH:-}" ] && [ -n "${MX_STATIC_NAS_VOLUME_ID:-}" ] || die '请配置 NAS_PATH 与 NAS_VOLUME_ID，并在 NAS 创建同值 .mx-static-volume-id'
   local filesystem
-  filesystem="$(timeout -k 1 5 findmnt -n -o FSTYPE -T "$MX_STATIC_NAS_PATH")" || die 'NAS 挂载查询失败/超时；主服务未操作'
+  [[ "$MX_STATIC_NAS_PATH" = /* ]] || die 'NAS_PATH 必须为绝对路径'
+  # Inspect the mount table, never stat/canonicalize a possibly stalled NFS path.
+  filesystem="$(timeout -k 1 5 findmnt --json --list --nocanonicalize -o TARGET,FSTYPE | python3 -c '
+import json, os, sys
+path = os.path.normpath(sys.argv[1])
+mounts = [entry for entry in json.load(sys.stdin)["filesystems"]
+          if path == entry["target"] or path.startswith(entry["target"].rstrip("/") + "/")]
+print(max(mounts, key=lambda entry: len(entry["target"]))["fstype"] if mounts else "")
+' "$MX_STATIC_NAS_PATH")" || die 'NAS 挂载查询失败/超时；主服务未操作'
   case "$filesystem" in nfs|nfs4) ;; *) die 'NAS_PATH 不是已挂载 NFS；拒绝写入空挂载目录';; esac
   storage_control attach "$MX_STATIC_NAS_VOLUME_ID"
   if ! timeout -k 1 30 docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas up -d --no-deps --force-recreate archive; then
@@ -86,11 +94,9 @@ attach_nas() {
 }
 detach_nas() {
   storage_control detach
-  if [ -n "${MX_STATIC_NAS_PATH:-}" ] && [ -n "${MX_STATIC_NAS_VOLUME_ID:-}" ]; then
-    need timeout
-    if ! timeout -k 1 10 docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas stop --timeout 2 archive; then
-      say 'NAS 已逻辑脱离；归档容器停止超时，可能有内核 NFS 等待。不要反复创建替代进程；检查 NFS 恢复情况。'
-    fi
+  need timeout
+  if ! timeout -k 1 10 docker compose --project-directory "$STATIC_DIR" -f "$STATIC_DIR/compose.yml" -f "$STATIC_DIR/compose.nas.yml" --profile nas stop --timeout 2 archive; then
+    say 'NAS 已逻辑脱离；归档容器停止超时，可能有内核 NFS 等待。不要反复创建替代进程；检查 NFS 恢复情况。'
   fi
 }
 init_static() {
@@ -109,8 +115,11 @@ init_static() {
   if [ ! -f "$secret_dir/signing-key" ]; then
     (umask 077; set -o noclobber; openssl rand -hex 32 > "$secret_dir/signing-key")
   fi
-  if [ "$(id -u)" = 0 ]; then chown "$uid:$gid" "$data" "$state" "$secret_dir/projects.json" "$secret_dir/signing-key"; fi
-  chmod 0440 "$secret_dir/projects.json" "$secret_dir/signing-key"
+  if [ ! -f "$secret_dir/admin-token" ]; then
+    (umask 077; set -o noclobber; openssl rand -hex 32 > "$secret_dir/admin-token")
+  fi
+  if [ "$(id -u)" = 0 ]; then chown "$uid:$gid" "$data" "$state" "$secret_dir/projects.json" "$secret_dir/signing-key" "$secret_dir/admin-token"; fi
+  chmod 0440 "$secret_dir/projects.json" "$secret_dir/signing-key" "$secret_dir/admin-token"
   say "已准备 data=$data state=$state；保留现有凭据。容器 UID/GID=$uid:$gid"
 }
 static_jobs() {

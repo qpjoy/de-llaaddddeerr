@@ -69,6 +69,8 @@ bash scripts/manage.sh status
 
 当前暂停 Hub 接入，先验收独立静态服务。可选 NAS 使用 `attach mx-static` / `detach mx-static` / `storage mx-static`，不会替换主服务数据卷。详细步骤、接口、故障恢复和 NAS 管理见 [mx-static 运维文档](mx-static/docs/README.md)。首次部署需保证主机有 Docker Compose v2、镜像仓库网络和足够磁盘空间。
 
+2026-09-21：mx-static 从与 knock-nas 完全相同的 0.3.0 快照升级到其 0.7.0，实现已归并至本目录并适配统一入口。保留 Docker 部署、本机 SQLite/SSD 和独立 NAS 归档；宿主 Nginx 发文件是默认关闭的可选优化。[来源与部署决策](mx-static/docs/deployment-decision.md)、[存储迁移与只读排查](mx-static/docs/storage-migration.md)。升级旧实例前先停止写入并备份；新的管理界面 admin-token 会幂等补建，原读写令牌与 signing-key 保留。
+
 ## 目录边界
 
 - `scripts/manage.sh`：应用选择和通用入口；`scripts/apps/jenkins.sh` 保留 Jenkins 原有生命周期实现。

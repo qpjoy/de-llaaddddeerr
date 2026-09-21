@@ -5,6 +5,13 @@ export class MediaCache {
     Object.assign(this, { maxBytes, maxObjectBytes, ttlMs, maxEntries, now })
     this.entries = new Map(); this.bytes = 0; this.hits = 0; this.misses = 0
   }
+  // Limits are adjustable while the process runs; shrinking prunes immediately.
+  configure({ maxBytes = this.maxBytes, maxObjectBytes = this.maxObjectBytes, ttlMs = this.ttlMs, maxEntries = this.maxEntries } = {}) {
+    if (![maxBytes, maxObjectBytes, ttlMs, maxEntries].every(n => Number.isSafeInteger(n) && n >= 0)) return false
+    Object.assign(this, { maxBytes, maxObjectBytes, ttlMs, maxEntries })
+    this.prune()
+    return true
+  }
   delete(key) { const entry = this.entries.get(key); if (entry) this.bytes -= entry.body.length; this.entries.delete(key) }
   get(key) {
     const entry = this.entries.get(key)

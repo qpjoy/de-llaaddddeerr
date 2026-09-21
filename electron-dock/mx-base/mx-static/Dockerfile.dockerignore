@@ -1,11 +1,3 @@
 **
-!mx-insight-hub/
-!mx-insight-hub/server/
-!mx-insight-hub/server/external-platforms/
-!mx-insight-hub/server/external-platforms/media.mjs
-!mx-insight-hub/server/core/
-!mx-insight-hub/server/core/errors.mjs
-!mx-base/
-!mx-base/mx-static/
-!mx-base/mx-static/src/
-!mx-base/mx-static/src/*.mjs
+!src/
+!src/*.mjs

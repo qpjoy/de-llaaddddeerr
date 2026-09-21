@@ -14,6 +14,7 @@ test('application manager selects one app, preserves credentials/data and report
     cpSync(new URL(`../${app}/scripts/manage.sh`, import.meta.url), join(root, app, 'scripts/manage.sh'))
   }
   mkdirSync(join(root, 'mx-static')); mkdirSync(join(root, 'bin'))
+  writeFileSync(join(root, 'bin/timeout'), '#!/bin/sh\nshift 3\nexec "$@"\n', { mode: 0o755 })
   const log = join(root, 'calls')
   writeFileSync(join(root, 'bin/docker'), `#!/bin/sh
 printf '%s\\n' "$*" >> "$MOCK_LOG"
@@ -36,8 +37,10 @@ echo 'mx-base-jenkins 0/0'
   assert.notEqual(run('deploy', 'all').status, 0)
   result = run('deploy', 'mx-static'); assert.equal(result.status, 0, result.stderr)
   const keys = readFileSync(join(root, 'mx-static/secrets/projects.json'), 'utf8')
+  const admin = readFileSync(join(root, 'mx-static/secrets/admin-token'), 'utf8')
   assert.equal(run('deploy', 'mx-static').status, 0)
   assert.equal(readFileSync(join(root, 'mx-static/secrets/projects.json'), 'utf8'), keys)
+  assert.equal(readFileSync(join(root, 'mx-static/secrets/admin-token'), 'utf8'), admin)
   assert.equal(run('stop', 'mx-static').status, 0)
   assert.equal(run('stop', 'jenkins').status, 0)
   const calls = readFileSync(log, 'utf8')
@@ -45,7 +48,10 @@ echo 'mx-base-jenkins 0/0'
   assert.match(calls, /scale deployment\/mx-base-jenkins --replicas=0/)
   assert.doesNotMatch(calls, /down -v|delete namespace|delete pvc/)
   writeFileSync(join(root, 'bin/timeout'), '#!/bin/sh\nshift 3\nexec "$@"\n', { mode: 0o755 })
-  writeFileSync(join(root, 'bin/findmnt'), '#!/bin/sh\necho "${MOCK_FS:-ext4}"\n', { mode: 0o755 })
+  writeFileSync(join(root, 'bin/findmnt'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$MOCK_LOG"
+printf '{"filesystems":[{"target":"%s","fstype":"%s"}]}\\n' "$MX_STATIC_NAS_PATH" "\${MOCK_FS:-ext4}"
+`, { mode: 0o755 })
   env.MX_STATIC_NAS_PATH = join(root, 'nas'); env.MX_STATIC_NAS_VOLUME_ID = 'nas-test'
   assert.notEqual(run('attach', 'mx-static').status, 0)
   env.MOCK_FS = 'nfs4'
@@ -56,6 +62,13 @@ echo 'mx-base-jenkins 0/0'
   assert.match(nasCalls, /--no-deps --force-recreate archive/)
   assert.match(nasCalls, /stop --timeout 2 archive/)
   assert.doesNotMatch(nasCalls, /restart|stop --timeout 40|up.*writer reader/)
+  assert.match(nasCalls, /--json --list --nocanonicalize -o TARGET,FSTYPE/)
+  assert.match(nasCalls, /run --rm --no-deps -T writer node src\/archive-control.mjs/)
+  assert.doesNotMatch(nasCalls, /node mx-base\/mx-static|findmnt.* -T /)
+  delete env.MX_STATIC_NAS_PATH; delete env.MX_STATIC_NAS_VOLUME_ID
+  const beforeDetach = readFileSync(log, 'utf8').length
+  assert.equal(run('detach', 'mx-static').status, 0)
+  assert.match(readFileSync(log, 'utf8').slice(beforeDetach), /stop --timeout 2 archive/)
   env.MOCK_OFFLINE = '1'
   result = run('status'); assert.match(result.stdout, /UNKNOWN/); assert.doesNotMatch(result.stdout, /NOT DEPLOYED/)
 })
