@@ -22,3 +22,5 @@ sudo bash scripts/nas-audit.sh media
 三个命令均只读，不挂载、不复制、不删除、不重启服务。第一条会读取少量 NAS 目录元数据，第三条会扫描两个指定 SSD 卷的文件元数据。详细前提、输出说明和边界见 [nas_docs/README.md](nas_docs/README.md)。本轮先检查，原 Docker volumes 和旧媒体完整保留。
 
 诊断输出保存到 `reports/`，现场配置可保存到 `nas_docs/local/`，两者均已加入 `.gitignore`。代码和迁移文档通过 Git 分发，不需要压缩包。
+
+2026-09-22 三份现场报告已回传：[结论与下一步](nas_docs/evidence/2026-09-22-live-findings.md)。临时文件占两个 raw_media 目录约 67.35%，不自动删除。新增的 `sudo bash scripts/nas-probe.sh permissions --write-test` 是独立显式写探测，只创建并清理自己的约 4 KiB 测试对象，详见 [探测说明](nas_docs/README.md#下一步独立权限写探测)。

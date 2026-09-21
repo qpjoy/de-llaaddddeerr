@@ -1,21 +1,21 @@
-# Delta 原始媒体迁移方案（现场方案 v3，2026-09-22）
+# Delta 原始媒体迁移方案（现场方案 v4，2026-09-22）
 
-状态：已读取本机 Delta_Pub 全部现有分支快照、远端 po-infra 的 feat/new_delta 分支提交 cdf3e649d685ba708daae83ef8b81318d2bcfa24（2026-09-18）及用户提供的服务器输出；没有连接或修改服务器。架构、迁移对象和验收步骤已确定。运行镜像与已审查源码、实际部署环境文件尚需对应，本文不是可以直接执行的一键迁移脚本。所有检查门槛通过后才进入写入、停机和切换阶段。
+状态：已读取本机 Delta_Pub 全部现有分支快照、远端 po-infra 的 feat/new_delta 分支提交 cdf3e649d685ba708daae83ef8b81318d2bcfa24（2026-09-18）及用户提供的服务器输出；没有连接或修改服务器。架构、迁移对象和验收步骤已确定。最新回传已对应关键代码哈希、镜像身份和两套 env-file；线上 tasks.py 与本地不同，NAS 写入/属性保留尚未验证。详见 [现场结论](../evidence/2026-09-22-live-findings.md)。本文不是可以直接执行的一键迁移脚本。独立权限探测、小批复制等门槛通过后，才进入全量复制；停机和切换另按验收步骤推进。
 
 用户已明确要求：先复制到 NAS，再切换；迁移期间保留原 Docker volumes 和旧媒体。本方案不执行源数据删除，空间回收仅列为以后单独决定的阶段。
 
 ## 1. 已确认的范围
 
-| 线上实例 | 原 named volume | 原始媒体目录实际占用 | NAS 目标（拟建） |
+| 线上实例 | 原 named volume | 原始媒体目录此前 du 占用 | NAS 目标（拟建） |
 | --- | --- | --- | --- |
 | delta_59202 | delta_59202_media_data | 930 GiB | /mnt/nas/mx-internal-server/data/docker/media-volumes/delta_59202_media_data/data_hub_raw_media |
 | mx_data | po_infra_media_data | 498 GiB | /mnt/nas/mx-internal-server/data/docker/media-volumes/po_infra_media_data/data_hub_raw_media |
 
 来源目录分别为 `/data/docker/volumes/<卷名>/_data/data_hub_raw_media`。两个原始媒体目录约 1.39 TiB，占两个卷几乎全部空间；du 输出经过取整，不应据此计算精确回收量。源卷 Driver=local、Options=null。整个卷不可删除，卷内其余 agent 目录仍需留在 SSD。
 
-NAS 为 `nas-storage:/volume1/data1`，当前 NFSv3 挂载 `/mnt/nas`，29 TiB 量级容量、已用 833 GiB、可用约 29 TiB。导出根目录 uid/gid=0:0、mode=777 **不证明**应用 UID/GID 可写或 rsync 可保留 owner/ACL。存储池健康、配额、快照和独立备份状态仍待 NAS 管理端确认。
+NAS 为 `nas-storage:/volume1/data1`，当前 NFSv3 挂载 `/mnt/nas`。最新 layout 报告可用 30,956,811,976,704 bytes（约 28.16 TiB）；主机子目录为 1003:10 / 2750，拟用 data/ 及两套目标不存在。导出根目录 uid/gid=0:0、mode=777 **不证明**应用 UID/GID 可写或 rsync 可保留 owner/ACL。存储池健康、配额、快照和独立备份状态仍待 NAS 管理端确认。
 
-主机有 128 个逻辑 CPU、251 GiB 内存，/data 已用 97%、剩余约 59 GiB。保留旧副本不会释放空间；预复制和校验期间需限制媒体增长，不能在 /data 额外打一个 1.4 TiB 备份包。按 50 MiB/s 粗算，单遍复制 1,428 GiB 就需约 8 小时，校验再读两端，实际耗时取决于文件数量、NFS 和业务竞争。
+主机有 128 个逻辑 CPU、251 GiB 内存；此前 /data 已用 97%、剩余约 59 GiB，最新剩余空间需重新读取 df。保留旧副本不会释放空间；预复制和校验期间需限制媒体增长，不能在 /data 额外打一个 1.4 TiB 备份包。按 50 MiB/s 粗算，单遍复制 1,428 GiB 就需约 8 小时，校验再读两端，实际耗时取决于文件数量、NFS 和业务竞争。
 
 ## 2. 仓库、分支与线上部署不匹配
 
@@ -44,7 +44,7 @@ NAS 为 `nas-storage:/volume1/data1`，当前 NFSv3 挂载 `/mnt/nas`，29 TiB �
 
 2026-09-22 再次核对用户本机 `/Users/qpjoy/workspace/mingxi/po-infra`：分支和提交一致，上述 7 个关键文件的 Git blob 哈希全部匹配。工作区中的两个修改来自克隆时 GetUserInfo.py/GetUserinfo.py/getuserinfo.py 大小写碰撞警告，本轮未重置或改动它们；生产迁移使用 Linux 上的卷，不能把 macOS 的 media/ 当作完整源数据。
 
-根据最新目录截图，将此前拟定的 `/mnt/nas/delta-media/...` 布局更新为第 1 节的 `/mnt/nas/mx-internal-server/data/docker/media-volumes/...`。截图只证实 NAS 主机目录下有 shared_archives/shared_dir/shared_media；data/docker/k8s 的具体状态仍需 `layout` 报告确认。路径仅为拟用，脚本不会创建或覆盖。
+根据最新目录截图，将此前拟定的 `/mnt/nas/delta-media/...` 布局更新为第 1 节的 `/mnt/nas/mx-internal-server/data/docker/media-volumes/...`。最新 layout 已证实 NAS 主机目录下有 shared_archives/shared_dir/shared_media，data/ 本身及拟用的子目录不存在。路径仍为拟用，只读审计脚本不会创建或覆盖；新增权限探测也只使用独立随机测试目录。
 
 本次不改 Delta_Pub 分支，不用其部署脚本替换完整平台，也不把存储切换与拉取新镜像、构建、代码升级、数据库 schema 迁移混在一起。最终改动应落在真实完整平台的部署配置分支，并固定线上原镜像。
 
@@ -63,17 +63,17 @@ NAS 为 `nas-storage:/volume1/data1`，当前 NFSv3 挂载 `/mnt/nas`，29 TiB �
 - `data_hub/api.py:2452-2478` 从相对路径形成 /media/ URL；`deploy/nginx/templates/default.conf.template:13-19` 已直接 alias /app/media/。保留子路径后不需要批量改数据库路径或加一个新的静态服务器。这段现有 Nginx location 自身没有鉴权指令；保持现有外层访问控制，不因迁移扩大公网访问面。
 - 这个下载链路当前直接写目标目录，切换后临时下载也写 NAS；不会自动获得“SSD 下载/处理后归档”的工作流。后续再改为 SSD 暂存时必须按下述同文件系统发布规则处理，不能只改 mkstemp 的 dir。
 - 本机完整 checkout 还确认 `spiders/media_storage.py` 有独立的 `/shared_media` 存储链路，与 data_hub_raw_media 不同。NAS 的 shared_media 目录是否属于它尚未证明，本次不合并、不迁移它。
-- `data_hub/tasks.py:74-106` 的下载任务在 tasks 队列，soft/hard 时间限制分别 120/150 秒。不要误以为只停止 worker-agent-data-hub 就停止了媒体下载；普通 worker 消费 tasks。NFS 卡顿可能与时间限制、downloading 状态的恢复相互影响，需验证。
+- 本地基准 `data_hub/tasks.py:74-106` 的下载任务在 tasks 队列，soft/hard 时间限制分别 120/150 秒；最新采样线上 tasks.py 哈希不同，路由和限制必须以运行版本重新核对。不要误以为只停止 worker-agent-data-hub 就停止了媒体下载；普通 worker 消费 tasks。NFS 卡顿可能与时间限制、downloading 状态的恢复相互影响，需验证。
 - `scripts/run_web.sh:4-6` 启动时会执行 migrate、bootstrap_admin、collectstatic；`run_worker.sh:4-5` 默认会 recover_stale_agent_runs --requeue。必须固定原镜像、核对待执行迁移并保留原环境，切换前先做数据库检查点；不能把重建容器当作完全没有数据库副作用。
 - `docker-compose.ghcr.yml:557-565` 用 MEDIA_VOLUME_NAME 等变量显式命名卷，默认媒体卷为 po_infra_media_data；delta_59202 尤其不能漏掉它原来的 env-file。`deploy_public_ghcr.sh` 还会 pull/build、初始化模型/任务并更新配置，本次不调用这个通用部署脚本。
 
-### 3.2 临时文件占用风险：已在隔离测试复现
+### 3.2 临时文件占用风险：隔离复现已与线上关键代码对应
 
-`media_storage.py:127-129` 只在目标不存在时 replace；目标已存在时，成功路径没有删除新下载的 tmp，清理代码仅在异常路径。用原函数、模拟 HTTP/数据库、独立临时目录做了两次相同内容的成功下载，结果为 **1 个正式文件 + 1 个遗留 raw-media-*.tmp**。这证明本次读取分支存在泄漏路径，但尚不证明线上镜像相同或临时文件占据大部分空间。函数也没有显式 fsync；本次不能宣称数据落盘持久性已额外加强。
+`media_storage.py:127-129` 只在目标不存在时 replace；目标已存在时，成功路径没有删除新下载的 tmp，清理代码仅在异常路径。用原函数、模拟 HTTP/数据库、独立临时目录做了两次相同内容的成功下载，结果为 **1 个正式文件 + 1 个遗留 raw-media-*.tmp**。最新报告中，两套实例各 web 和 worker-agent-data-hub 的此文件哈希均与该代码一致，确认采样运行代码存在相同泄漏路径。两个 raw_media 目录合计 1,426.04 GiB，其中 tmp 为 960.46 GiB（67.35%）；但不能断言全部 tmp 都由该缺陷造成或全部可删。函数也没有显式 fsync；本次不能宣称数据落盘持久性已额外加强。
 
-迁移前运行 `scripts/nas-audit.sh media` 统计每个卷中临时文件、其他文件、超过 24 小时临时文件的数量/逻辑字节，以及最大的 20 个文件。它只扫描 SSD 元数据，跳过软链接和其他设备，不读取文件内容或删除文件。临时文件年限不能证明无人使用，正常下载/中断任务也可能留下它们。按用户要求第一份预复制保留全部文件，不凭名称排除 .tmp，也不顺带修复线上程序；后续如需清理，先比对正式文件哈希、数据库引用和在途任务，再独立处理。
+用户已运行 `scripts/nas-audit.sh media`：两次扫描均无错误，未发现多硬链接或跳过路径；精确统计见 [现场结论](../evidence/2026-09-22-live-findings.md)。这个命令用于统计每个卷中临时文件、其他文件、超过 24 小时临时文件的数量/逻辑字节，以及最大的 20 个文件。它只扫描 SSD 元数据，跳过软链接和其他设备，不读取文件内容或删除文件。临时文件年限不能证明无人使用，正常下载/中断任务也可能留下它们。按用户要求第一份预复制保留全部文件，不凭名称排除 .tmp，也不顺带修复线上程序；后续如需清理，先比对正式文件哈希、数据库引用和在途任务，再独立处理。
 
-运行版本匹配后仍需验收的边界：
+关键文件匹配后仍需验收的边界（tasks.py 差异、线上脏工作区和其他入口并未因此消失）：
 
 1. 原始媒体下载/上传入口、命名和去重规则、数据库保存绝对路径还是相对路径、Nginx alias/鉴权/Range 行为。
 2. 临时下载和最终文件分别写在哪里；对跨 SSD/NFS 的 `os.rename`、`os.replace`、`Path.rename`、硬链接、目录交换等操作做检查。保持相同字符串路径并不保证跨挂载边界原子操作仍可用。
@@ -87,10 +87,10 @@ mx-static 可继续部署在独立目录，不能让它同时管理、淘汰 Del
 
 ## 4. 实施前检查门槛
 
-- 运行`scripts/nas-audit.sh deployment`：只读版本、相关容器、镜像身份、进程 UID/GID、checkout 元信息及 Kubernetes 路径，不输出完整 Env 或 Secret。kubectl 无权限/无命令不等于没有 Kubernetes 消费者。
+- deployment 已回传；[现场结论](../evidence/2026-09-22-live-findings.md) 固定本次 image ID、env-file、服务与版本。服务器 d29a0bc2 checkout 有未提交修改，运行 tasks.py 不同于本地 cdf3e649，不使用本机代码盲目重建。正式切换前检查库存是否变化；kubectl 无权限/无命令不等于没有 Kubernetes 消费者。
 - 从真实部署上下文取得两套实例的 env-file 路径与完整 Compose 文件顺序。原环境文件只在服务器保留，不上传凭据。分别渲染最终 Compose，核对父卷名称、子目录、端口、镜像、网络及 DB/Redis 均正确；只存储改动进入 diff。
 - 确认 Docker/Compose/systemd/rsync 版本及 SELinux 策略；不能用最新文档假定 EL8 上每个选项可用。NFS 的 SELinux 访问应按实际策略配置，不对整个导出盲目加 `:Z`、不关闭 SELinux。
-- NAS 管理端确认存储池/磁盘健康、配额、空闲容量和备份。先以真实应用 UID/GID 在独立测试目录验证 create/read/rename/delete（只清理刚创建的测试文件）、并发和大文件读取；测试不会使用业务旧文件。
+- NAS 管理端确认存储池/磁盘健康、配额、空闲容量和备份。先运行 `sudo bash scripts/nas-probe.sh permissions --write-test`，以采样应用的 0:0 身份在独立新目录测试 4 KiB 写入、fsync、rename/read 和 mode/mtime/chown，仅清理自己的测试对象。通过后再验证实际容器 UID/GID、Nginx 读取、代表性大文件和并发；小探测不能替代这些验收。
 - 用代表性小批文件做复制、权限/校验和验证，再开始全量。NFS root squash 可能阻止 chown，不能忽略 rsync 的权限错误；按真实 UID/GID 和 NAS 导出策略解决，不默认 chmod 777 或递归改写源数据权限。
 - 确定两个实例的业务优先级与维护窗口，一次只切一个。若业务风险相当，可先试 498 GiB 的 mx_data；不能仅因它较小就断定可随意停机。
 
@@ -177,18 +177,22 @@ NAS 同池 snapshot 可用于快速撤销误操作，但不是独立备份。旧
 
 ## 9. 当前交付和下一步
 
-已交付架构、明确源/目标、完整迁移/回滚步骤、Compose 覆盖模板、源码哈希、只读部署采集器及媒体统计脚本。尚未生成可直接部署的 systemd unit 或实际复制脚本，因为运行版本匹配、env-file、版本兼容和 NAS 权限门槛未闭环；不提供源数据删除脚本。补齐后应生成每套实例独立的命令清单并在临时隔离目录/栈验证，再安排生产切换。
+已交付架构、明确源/目标、迁移/回滚步骤、Compose 覆盖模板、源码基准、现场证据和探测工具。用户已回传三份只读诊断，NAS 空间和目标无重名已确认，关键下载代码泄漏与线上采样一致；临时文件不自动清理。
 
-用户提交到 Git 并在服务器更新对应分支后，在 mx-static 项目目录依次运行以下只读命令，不上传压缩包：
+下一步在用户提交并通过 Git 更新服务器上的 mx-static 后，运行：
 
 ```bash
-sudo bash scripts/nas-audit.sh layout
-sudo bash scripts/nas-audit.sh deployment
-sudo bash scripts/nas-audit.sh media
+df -hT /data
+df -i /data
+sudo bash scripts/nas-probe.sh permissions --write-test
 ```
+
+前两条只读，最后一条只创建/清理新的约 4 KiB 测试对象，不碰原卷或旧 NAS 文件。完整输出和判读见 [现场结论](../evidence/2026-09-22-live-findings.md)。NAS hard I/O 卡住时不要并发重试。无需马上重复全量元数据扫描。
+
+尚未生成生产 systemd unit 或实际复制入口：NAS 权限/属性保留和真实容器访问尚未闭环，启动监督也需隔离验收。权限结果出来后先确定目标目录 owner/mode 和复制选项，进行小批复制验证，再按实例串行限速预复制全部 raw_media（含 tmp）。预复制可早于正式切换，但最终停写、内容校验、备份与 NAS-aware 启动检查必须在切换前完成。不提供源数据删除脚本。
 
 方案、模板和脚本统一维护在 mx-base/mx-static，随 Git 提交分发。服务器实际输出、现场环境配置和迁移检查点只写入已忽略的 reports/ 或 nas_docs/local/，不提交凭据或运行报告。不上传压缩包、不从本机复制业务媒体，也不修改 Delta_Pub 或 po-infra 当前工作区。
 
-本地验证：入口和诊断代码通过 Bash 与 Python 3.6 语法检查；部署采集器用模拟 Docker 数据确认只输出白名单环境字段；媒体扫描器在临时目录验证统计、跳过软链接和拒绝 NFS 源。使用真实 po-infra Compose 文件及本地 Compose v2.34.0，分别验证两套实例覆盖合并：10 个媒体消费者均增加正确子挂载，gateway 只读，原挂载/镜像/DB/Redis 定义保持不变。运行镜像、Linux 旧版 Compose、真实 NFS/权限/业务恢复尚未在生产验证。临时文件泄漏复现使用原函数和模拟 HTTP/数据库，未改项目应用代码。
+本地验证：入口和诊断代码通过 Bash 与 Python 3.6 语法检查；部署采集器用模拟 Docker 数据确认只输出白名单环境字段；媒体扫描器在临时目录验证统计、跳过软链接和拒绝 NFS 源。使用真实 po-infra Compose 文件及本地 Compose v2.34.0，分别验证两套实例覆盖合并：10 个媒体消费者均增加正确子挂载，gateway 只读，原挂载/镜像/DB/Redis 定义保持不变。最新现场回传已对应运行镜像和关键文件，但 Linux 上最终 Compose 合并、真实 NFS 写入/权限/业务恢复尚未在生产验证。新增写探测经过挂载不符、设备不符、软链接、chown/fsync 失败、只清理自身对象的本地回归；这些测试不连接 NAS。临时文件泄漏复现使用原函数和模拟 HTTP/数据库，未改项目应用代码。
 
 参考：[Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)、[Compose volumes](https://docs.docker.com/reference/compose-file/services/#volumes)、[Compose merge](https://docs.docker.com/reference/compose-file/merge/)、[Docker restart](https://docs.docker.com/engine/containers/start-containers-automatically/)、[systemd mount](https://github.com/systemd/systemd/blob/main/man/systemd.mount.xml)、[NFS](https://man7.org/linux/man-pages/man5/nfs.5.html)、[rsync](https://download.samba.org/pub/rsync/rsync.1)。文档语义须与现场旧版本一起核对。
