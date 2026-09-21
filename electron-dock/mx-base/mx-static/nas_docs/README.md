@@ -1,13 +1,14 @@
 # NAS 迁移运维入口
 
-本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
+本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 
 ## 当前目标与状态
 
-先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS，校验、停写并切换后，继续保留原卷和原数据。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**本轮没有迁移、删除、挂载或重启服务器服务。**
+先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS。用户最新安排：先 po_infra，再 delta；po_infra 可安排 10–30 分钟维护窗口。原数据保留到校验、切换和业务验收通过，之后用户已授权回收对应旧 raw_media；原 named volume 和其他目录保留。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**本轮没有迁移、删除、挂载或重启服务器服务。**
 
 - 最新现场结论：[运行版本、临时文件占用和权限门槛](evidence/2026-09-22-live-findings.md)。两个目录合计 1,426.04 GiB，其中 tmp 960.46 GiB；保留全部文件，不凭名称清理。
-- 两卷小批复制均已通过（28.89 / 149.18 MiB），下一步：[最多 2 GiB 的短时吞吐测试](operations/sample-copy.md)。权限探测和原小批测试无需重复，不启动全量迁移。
+- 两卷小批复制及 delta 短时吞吐均已通过：1.513 GiB / 31.708 秒，rsync 阶段 55.401 MiB/s。下一步：[两晚分卷执行与在线预复制](operations/two-night-migration.md)，无需重复试拷；po_infra 单遍算术外推约 2.55 小时，不是完整迁移时长承诺。
+- 用户确认 NAS 没有独立备份；[NAS 端只读检查与 OSS 费用](operations/nas-health-and-oss.md) 记录健康探测、恢复限制及预算，不自动购买/上传。
 - 默认方向调整：[原生存储、启动边界与数据库扩展](operations/storage-platform.md)。优先 Docker NFS volume / K8s PV/CSI，保持 Docker 全局 NAS 依赖禁用。
 - [旧 host-bind 启动方案](operations/boot-and-recovery.md) 仅作为兼容备选，不再默认每业务一套 systemd 控制程序。
 - 主记录：[Delta 原始媒体迁移](migrations/2026-09-22-delta-raw-media.md)。
@@ -36,7 +37,7 @@
   uv-cache/
 ```
 
-最新 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，4 KiB 探测和两卷共 16 个文件的复制/基础属性校验已通过；容器访问与持续吞吐仍待验证。按用户建议拟建结构：
+最近一次 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，4 KiB 探测、两卷小样本及 delta 32 文件短时吞吐已通过；容器访问与整卷持续吞吐仍待验证。按用户建议拟建结构：
 
 ```text
 /mnt/nas/mx-internal-server/data/
@@ -69,6 +70,7 @@ sudo bash scripts/nas-audit.sh media
 | layout | 本机 `/data`、`docker`、`k8s` 一级名称，以及 NAS 中几个固定目录；每次列表至多 50 个名称 | 现存目录、拟用目标是否冲突、uid/gid/mode、是否有软链接 |
 | deployment | 容器元信息、源文件哈希、进程 UID/GID、版本和 Kubernetes 路径 | 两套实例的身份、所有潜在消费者、线上代码是否与审查基准一致 |
 | media | 两个已知本地卷的 raw_media 子树，只读文件元数据，降低扫描调度优先级 | 临时文件数量/逻辑字节、最大的 20 个文件、扫描错误 |
+| network | 到 NAS 的本机路由、相关 NIC/sysfs 和本机内核 NFS 计数，不访问 NAS 文件 | 协商速率、下层设备、挂载参数和累计错误；不是峰值带宽测试 |
 
 layout 先读取内核挂载表，只允许已挂载到 `/mnt/nas` 的指定 NFS 导出；未挂载、只有 automount、导出不符时拒绝访问 NAS 目录。发现路径经过软链接就跳过；不 mkdir、不遍历整个 NAS、不做 du。**hard NFS 的元数据读取仍可能等待，普通 timeout 不保证终止 D 状态进程；卡住时不要重复启动扫描，先报告位置。**
 

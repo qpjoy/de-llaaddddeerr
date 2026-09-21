@@ -4,13 +4,15 @@ set -euo pipefail
 
 usage() {
   cat <<'HELP'
-Usage: bash scripts/nas-audit.sh <layout|deployment|media>
+Usage: bash scripts/nas-audit.sh <layout|deployment|media|network>
   layout      Inspect /data and a few fixed NAS paths; no recursive NAS scan.
               Refuse NAS inspection unless /mnt/nas is the expected NFS export.
   deployment  Docker consumers, versions, source hashes, UID/GID and K8s paths.
               Does not print full environment variables or Secret contents.
   media       Low-priority metadata scan of the two known local media volumes.
               Report temp files and largest files; no file-content reads.
+  network     Local route/NIC link settings and /proc NFS counters for /mnt/nas.
+              No NAS file reads or traffic test; optional ip/ethtool, no installs.
 
 Run on the Linux Docker host. Requires Python 3.6+; deployment/media need Docker.
 No mode mounts, copies, deletes, changes permissions or restarts services.
@@ -21,7 +23,7 @@ HELP
 
 case "${1:-help}" in
   -h|--help|help) usage; exit 0 ;;
-  layout|deployment|media) mode=$1 ;;
+  layout|deployment|media|network) mode=$1 ;;
   *) usage >&2; exit 2 ;;
 esac
 [[ $# == 1 ]] || { usage >&2; exit 2; }

@@ -1,8 +1,8 @@
-# Delta 原始媒体迁移方案（现场方案 v7，2026-09-22）
+# Delta 原始媒体迁移方案（现场方案 v8，2026-09-22）
 
-状态：已读取本机 Delta_Pub 全部现有分支快照、远端 po-infra 的 feat/new_delta 分支提交 cdf3e649d685ba708daae83ef8b81318d2bcfa24（2026-09-18）及用户提供的服务器输出；没有连接或修改服务器。架构、迁移对象和验收步骤已确定。最新回传已对应关键代码哈希、镜像身份和两套 env-file；线上 tasks.py 与本地不同；NAS 的 4 KiB 探测和两卷共 16 个文件的小批复制均已通过；下一步最多 2 GiB 的短时吞吐与阶段耗时测试，尚不进行全量迁移。详见 [现场结论](../evidence/2026-09-22-live-findings.md)。本文不是可以直接执行的一键迁移脚本。独立权限探测、小批复制等门槛通过后，才进入全量复制；停机和切换另按验收步骤推进。
+状态：已读取本机 Delta_Pub 全部现有分支快照、远端 po-infra 的 feat/new_delta 分支提交 cdf3e649d685ba708daae83ef8b81318d2bcfa24（2026-09-18）及用户提供的服务器输出；没有连接或修改服务器。架构、迁移对象和验收步骤已确定。最新回传已对应关键代码哈希、镜像身份和两套 env-file；线上 tasks.py 与本地不同；NAS 的 4 KiB 探测、两卷小样本及 delta 1.513 GiB 短时吞吐均已通过；下一步先在线预复制 po_infra。详见 [现场结论](../evidence/2026-09-22-live-findings.md)。本文不是一键切换脚本。完整预复制入口已提供；逐文件核验清单、最终切换/回收入口仍待实现和现场验收，当前不能进入停写窗口。
 
-用户已明确要求：先复制到 NAS，再切换；迁移期间保留原 Docker volumes 和旧媒体。本方案不执行源数据删除，空间回收仅列为以后单独决定的阶段。
+用户最新要求：先复制到 NAS，再切换和恢复任务；今晚先 po_infra，允许 10–30 分钟维护窗口，验收后已授权回收对应 SSD 旧媒体，另一卷作为次晚 Part 2。复制期间保留全部原数据；任何阶段均不删除整个 named volume。实际命令与当前实现边界见 [两晚执行说明](../operations/two-night-migration.md)。
 
 ## 1. 已确认的范围
 
@@ -13,9 +13,9 @@
 
 来源目录分别为 `/data/docker/volumes/<卷名>/_data/data_hub_raw_media`。两个原始媒体目录约 1.39 TiB，占两个卷几乎全部空间；du 输出经过取整，不应据此计算精确回收量。源卷 Driver=local、Options=null。整个卷不可删除，卷内其余 agent 目录仍需留在 SSD。
 
-NAS 为 `nas-storage:/volume1/data1`，当前 NFSv3 挂载 `/mnt/nas`。最新 layout 报告可用 30,956,811,976,704 bytes（约 28.16 TiB）；主机子目录为 1003:10 / 2750，拟用 data/ 及两套目标不存在。导出根目录 uid/gid=0:0、mode=777 **不证明**应用 UID/GID 可写或 rsync 可保留 owner/ACL。存储池健康、配额、快照和独立备份状态仍待 NAS 管理端确认。
+NAS 为 `nas-storage:/volume1/data1`，当前 NFSv3 挂载 `/mnt/nas`。最新 layout 报告可用 30,956,811,976,704 bytes（约 28.16 TiB）；主机子目录为 1003:10 / 2750，拟用 data/ 及两套目标不存在。导出根目录 uid/gid=0:0、mode=777 **不证明**应用 UID/GID 可写或 rsync 可保留 owner/ACL。用户已确认没有独立备份；存储池健康、底层文件系统、配额和快照仍待 [NAS 管理端检查](../operations/nas-health-and-oss.md)。
 
-主机有 128 个逻辑 CPU、251 GiB 内存；最新 /data 已用 97%、剩余 58G，inode 已用 3%。保留旧副本不会释放空间；预复制和校验期间需限制媒体增长，不能在 /data 额外打一个 1.4 TiB 备份包。按 50 MiB/s 粗算，单遍复制 1,428 GiB 就需约 8 小时，校验再读两端，实际耗时取决于文件数量、NFS 和业务竞争。
+主机有 128 个逻辑 CPU、251 GiB 内存；最新 /data 已用 97%、剩余 58G，inode 已用 3%。保留旧副本不会释放空间；预复制和校验期间需限制媒体增长，不能在 /data 额外打一个 1.4 TiB 备份包。按短测 55.401 MiB/s 外推，po_infra 单遍约 2.55 小时，delta 约 4.77 小时；这是历史容量的算术外推，校验还需读两端，不能承诺今晚完整切换/回收一定四小时结束。
 
 ## 2. 仓库、分支与线上部署不匹配
 
@@ -92,9 +92,9 @@ mx-static 可继续部署在独立目录，不能让它同时管理、淘汰 Del
 - deployment 已回传；[现场结论](../evidence/2026-09-22-live-findings.md) 固定本次 image ID、env-file、服务与版本。服务器 d29a0bc2 checkout 有未提交修改，运行 tasks.py 不同于本地 cdf3e649，不使用本机代码盲目重建。正式切换前检查库存是否变化；kubectl 无权限/无命令不等于没有 Kubernetes 消费者。
 - 从真实部署上下文取得两套实例的 env-file 路径与完整 Compose 文件顺序。原环境文件只在服务器保留，不上传凭据。分别渲染最终 Compose，核对父卷名称、子目录、端口、镜像、网络及 DB/Redis 均正确；只存储改动进入 diff。
 - 确认 Docker/Compose/systemd/rsync 版本及 SELinux 策略；不能用最新文档假定 EL8 上每个选项可用。NFS 的 SELinux 访问应按实际策略配置，不对整个导出盲目加 `:Z`、不关闭 SELinux。
-- NAS 管理端确认存储池/磁盘健康、配额、空闲容量和备份。用户已运行 `sudo bash scripts/nas-probe.sh permissions --write-test`，四项通过且测试对象已清理。两卷 [小批复制](../operations/sample-copy.md) 已验证 16 个文件的内容和基础属性；仍需短时吞吐、实际容器 UID/GID、Nginx 读取、代表性大文件和并发验证，不能用样本替代这些验收。
+- NAS 管理端确认存储池/磁盘健康、配额、空闲容量和备份。用户已运行 `sudo bash scripts/nas-probe.sh permissions --write-test`，四项通过且测试对象已清理。两卷 [小批复制及短时吞吐](../operations/sample-copy.md) 已验证样本内容和基础属性；仍需整卷持续吞吐、实际容器 UID/GID、Nginx 读取和并发验证，不能用样本替代这些验收。
 - 用代表性小批文件做复制、权限/校验和验证，再开始全量。NFS root squash 可能阻止 chown，不能忽略 rsync 的权限错误；按真实 UID/GID 和 NAS 导出策略解决，不默认 chmod 777 或递归改写源数据权限。
-- 确定两个实例的业务优先级与维护窗口，一次只切一个。若业务风险相当，可先试 498 GiB 的 mx_data；不能仅因它较小就断定可随意停机。
+- 已确定先 mx_data，用户允许 10–30 分钟维护窗口；一次只切一个。后台预复制可以在线运行，最终维护窗口开始前仍须完成所有前置验收。
 
 ## 5. 开机、NAS 晚启动与运行期中断
 
@@ -123,31 +123,15 @@ nas-storage:/volume1/data1 /mnt/nas nfs rw,_netdev,nofail,x-systemd.automount,ha
 
 1. 冻结本次部署版本、记录镜像身份和原配置。先阻止会让剩余 58G 快速耗尽的批量采集，规划单批带宽和现场观察；不顺带执行 prune。
 2. 创建目标实例独立目录及迁移记录，先验证确实位于预期 NFS 导出。所有准备、复制和检查都经挂载保护，不允许 mkdir 在未挂载的 `/mnt/nas` 上静默落到本地。
-3. 推荐通过已经审核且固定镜像的复制工具容器挂源 named volume 为只读、NAS 目标为可写；源卷必须先 inspect 存在，避免拼错名称创建空卷。只复制其中 raw_media 子目录。工具镜像及 rsync 支持在切换前准备，不现场拉取任意 latest 镜像。不直接重排 Docker 的 `_data` 或做宿主机覆盖挂载。
-
-   如果“复制一份”还希望包含整个媒体卷，可另外在 NAS 的迁移备份目录保存完整卷副本；这两个卷除 raw_media 外的数据量很小。完整卷备份不作为应用的新 `/app/media` 挂载，且在线复制 agent 文件仍需停写后的最终同步才形成一致检查点。无论复制范围如何，原卷和原始媒体均保留。
-4. 预复制可以在线限速进行；用同一 job 独立保存日志及退出码，任何 vanished/权限/读写错误均记录并解决，在线副本尚不是一致备份。示意：
-
-```bash
-# /source 为原 named volume 的只读挂载；/target 为本实例 NAS raw_media 目录。
-# 先核实确实需要且支持硬链接、ACL、xattr；下面不盲目添加 -HAX。
-rsync -a --numeric-ids --info=progress2 --bwlimit=51200 /source/data_hub_raw_media/ /target/
-```
+3. 当前执行入口为 [受控完整预复制](../operations/two-night-migration.md)：systemd 临时单元只读约束 /data，Python 固定本机 Docker API 和源卷身份，原生 rsync 直接复制到保持 fd 打开的 NAS 目标。没有工具镜像拉取，不重排 Docker `_data`，不在宿主机覆盖挂载。整树复制含 tmp，60 MiB/s 限速，与样本工具共享锁；只有该作业 marker 匹配时可续跑。
+4. 预复制可在线进行，记录单元结果与 marker，任何 vanished/权限/读写错误均记录并解决。退出 0 仅表示本轮预复制完成，`cutover_ready=false`、`reclaim_ready=false`。此时不删原文件，也不把在线副本当作一致备份；需要完成内容校验及完整文件集合核对。
 
 5. 停写窗口先关闭入口及外部生产者、停止 beat，依据真实 Celery 配置/长任务状态选择完成在途任务或受控重试；不能只看容器退出码就断言任务没有丢失。待任务稳定后停止所有 9 个可写服务，gateway 也切到维护入口或停止，保证验证期间没有新流量。确认宿主机/Kubernetes 无其他写入。不要 `down -v`，不清空 Redis 队列，也不停止整个 Docker daemon。
 6. 保留 PostgreSQL 运行，使用原生一致备份（如 pg_dump），与媒体停写检查点一起记录。队列/任务状态也要纳入恢复说明。备份不写入即将耗尽的 /data；优先独立备份介质，若先落 NAS，仍需独立备份策略和访问保护。pg_dump 完成不等于恢复验证通过；至少检查归档可读，并安排隔离数据库恢复演练。
-7. 最终同步使用 checksum，避免在线预复制中的同大小/同时间戳变化被 quick-check 漏过：
+7. 本次允许的 10–30 分钟停写窗口不能容纳未测量的全量 NAS checksum。切换前需完成逐文件预核验及源/目标身份清单，停写后重新枚举完整集合、识别新增/改变/删除，并对变化内容重新复制核验。没有代码或快照证明不可变时，不凭文件名或秒级 mtime 跳过读取。该验证清单和最终增量入口尚未实现/现场验证；不能仅凭预复制成功进入维护窗口。
+8. 如果未能建立可信的预核验依据，安全退路是保持 SSD 服务并延期，或另约足够长的停写窗口做完整 checksum；不能为赶时间省略校验。最终要求两端内容、文件集合、软链接与所需元数据无未解释差异，记录相对路径、文件数、字节和内容校验结果。NAS 多余文件须核对后隔离，不直接删除或重新暴露给业务；du 或文件数量相同不等于完整。
 
-```bash
-rsync -ac --numeric-ids --info=progress2 --bwlimit=51200 /source/data_hub_raw_media/ /target/
-rsync -anc --numeric-ids --delete --itemize-changes /source/data_hub_raw_media/ /target/
-```
-
-最后一条**必须保留 `-n`**：`--delete` 只在 dry-run 中报告目标额外文件，实际不删除。同步命令不带 delete/inplace/remove-source-files。目标额外文件可能是在预复制期间被源端删除的内容，须核对清单后移至 NAS 隔离区，不能让它们未经评估重新暴露给业务；再校验至无差异。属性差异也必须解释，不能把无内容差异当成权限正确。若使用 H/A/X，最终同步与校验都保持相同选项。
-
-8. 要求最终退出码均为 0、内容/文件集合/软链接和所需元数据无未解释差异，再出具两端相对路径、文件数、逻辑字节及内容校验记录。`du` 实际块数可因不同文件系统而不同，不能只比 du 或文件数量判断完整。校验期间源和目标保持停写。
-
-若停写窗口不足以完成全量 checksum，需先从真实代码证明已完成媒体不可变，再设计预先校验的不可变批次与最终增量；当前不能预设这个条件成立。
+10–30 分钟从停止写入/任务开始计算，不是只有最后一条 Compose 命令的时间。维护前需确认正在运行的长任务能结束或按业务语义受控恢复；超过预定窗口且尚未产生 NAS 新写入时恢复 SSD 服务，不强杀任务。
 
 ## 7. Compose 切换与业务验收
 
@@ -168,7 +152,7 @@ rsync -anc --numeric-ids --delete --itemize-changes /source/data_hub_raw_media/ 
 
 用测试栈先验收“NAS 先启动”“主机先启动/NAS 延迟”“NAS 缺席时拒绝服务且不落盘”“Docker 重启”“运行期 NAS 断线并恢复”，通过后才安排生产维护窗口验证重启。不能为了演练直接对正在承载业务的 /mnt/nas 强制卸载。
 
-## 8. 回滚和以后单独决定的空间回收
+## 8. 回滚和验收后的空间回收
 
 切换前：SSD 始终为权威源；复制失败只暂停迁移，不破坏原服务数据。
 
@@ -176,7 +160,7 @@ rsync -anc --numeric-ids --delete --itemize-changes /source/data_hub_raw_media/ 
 
 切换后已有 NAS 新写入：先停写，NAS 是权威源；比较新建、修改和删除清单，在空间足够且校验通过后将增量合回 SSD，保留冲突副本并处理删除语义，再切回。/data 最新剩余 58G，不能假定一定有空间；不足时优先修复 NAS 服务或加临时存储。NAS 不可访问时不能宣称无损切回旧 SSD；必须等待可读或依据业务确认的备份/RPO 恢复。
 
-旧数据清理单独进行，绝不删除整个 named volume。先完成业务观察、独立可恢复备份、检查所有容器确实使用 NAS，确认没有外部消费者和旧文件句柄。通过受控挂载原卷的维护工具只处理旧 raw_media 子目录内容，防止命令路径解析到 NAS 子挂载；保留父卷与必要挂载点。没有把自动删除命令放进本方案。
+旧数据清理单独进行，绝不删除整个 named volume。先完成业务观察、全部校验和备份风险记录，检查所有容器确实使用 NAS，确认没有外部消费者和旧文件句柄。当前无独立备份，清理后 NAS 将成为唯一副本，无法保证 NAS 整机故障恢复；建议先建立独立备份，不能把该建议写成已经完成的事实。通过受控挂载原卷的维护工具只处理旧 raw_media 子目录内容，防止命令路径解析到 NAS 子挂载；保留父卷与必要挂载点。没有把自动删除命令放进本方案。
 
 NAS 同池 snapshot 可用于快速撤销误操作，但不是独立备份。旧副本留在 SSD 时仍占 1.39 TiB；删除后才可能释放相应块空间，硬链接或未关闭句柄会影响实际回收。第二套实例复制/切换沿用第一套验收结果，但重新完成其自己的停写、数据库检查点、内容校验与路径核对。
 
@@ -184,18 +168,12 @@ NAS 同池 snapshot 可用于快速撤销误操作，但不是独立备份。旧
 
 已交付架构、明确源/目标、迁移/回滚步骤、Compose 覆盖模板、源码基准、现场证据和探测工具。用户已回传三份只读诊断，NAS 空间和目标无重名已确认，关键下载代码泄漏与线上采样一致；临时文件不自动清理。
 
-用户已回传权限探测和两卷小批复制，均通过，无需重复。po_infra 28.89 MiB / 42.358 秒，delta_59202 149.18 MiB / 16.804 秒；这些是限速 10 MiB/s 下的复制校验阶段耗时，不能推断峰值。下一步提交并通过 Git 更新服务器上的 mx-static 后，只运行一轮：
+用户已回传权限探测、两卷小批复制及 delta 32 文件吞吐，均通过，无需重复。完整预复制入口 `scripts/nas-precopy.sh` 已补齐，按 [两晚执行说明](../operations/two-night-migration.md) 先处理 po_infra，保持全部原数据，不停止业务。可同步返回 `nas-audit.sh network` 及 [NAS 端只读检查](../operations/nas-health-and-oss.md)。
 
-```bash
-sudo bash scripts/nas-sample-copy.sh delta_59202_media_data --throughput-test
-```
-
-此次最多选择 32 个 32–128 MiB 的旧文件、合计 2 GiB，rsync 限速 100 MiB/s；复制阶段软预算 600 秒，在文件之间检查，不承诺强制终止 hard NFS I/O。保留源文件和独立测试副本，输出逐文件阶段耗时，不创建正式目标、不删除、不切换。详见 [小批与短时吞吐说明](../operations/sample-copy.md)。贴回完整输出及最新 df -hT /data，不并发重试或同时运行另一卷。
-
-实际全量复制入口与最终启动恢复策略仍待后续实施：小批真实文件复制已完成，持续吞吐、原生 NFS volume 的现场故障测试和容器访问尚未完成。短时测试后再评估尽量四小时的目标是否可达，结合容量/备份条件准备独立正式目标和全量预复制全部 raw_media（含 tmp）。预复制可早于正式切换，停写完整校验、备份与所选平台的启动/故障恢复验收必须在切换前完成；不提供源数据删除脚本。
+下一现场检查点是完整预复制单元结果、marker、最新 SSD 余量和 NAS 后端信息。逐文件预核验、停写最终同步、原生 NFS 容器/故障恢复验证、切换及旧媒体清理工具尚未完成；不能用本轮结果代替这些验收。本轮没有自动切换/删除入口，不承诺单遍 2.55 小时等于全部迁移工期。
 
 方案、模板和脚本统一维护在 mx-base/mx-static，随 Git 提交分发。服务器实际输出、现场环境配置和迁移检查点只写入已忽略的 reports/ 或 nas_docs/local/，不提交凭据或运行报告。不上传压缩包、不从本机复制业务媒体，也不修改 Delta_Pub 或 po-infra 当前工作区。
 
-本地验证：入口和诊断代码通过 Bash 与 Python 3.6 语法检查；部署采集器用模拟 Docker 数据确认只输出白名单环境字段；媒体扫描器在临时目录验证统计、跳过软链接和拒绝 NFS 源。使用真实 po-infra Compose 文件及本地 Compose v2.34.0，分别验证两套实例覆盖合并：10 个媒体消费者均增加正确子挂载，gateway 只读，原挂载/镜像/DB/Redis 定义保持不变。最新现场回传已对应运行镜像和关键文件，NAS 的小文件写入/0:0 owner 保留也已由用户验证；Linux 上两卷共 16 个文件的复制已通过；最终 Compose 合并、持续吞吐、容器权限及业务恢复仍待现场验收。新增写探测经过挂载不符、设备不符、软链接、chown/fsync 失败、只清理自身对象的本地回归；这些测试不连接 NAS。临时文件泄漏复现使用原函数和模拟 HTTP/数据库，未改项目应用代码。
+本地验证：入口和诊断代码通过 Bash 与 Python 3.6 语法检查；部署采集器用模拟 Docker 数据确认只输出白名单环境字段；媒体扫描器在临时目录验证统计、跳过软链接和拒绝 NFS 源。使用真实 po-infra Compose 文件及本地 Compose v2.34.0，分别验证两套实例覆盖合并：10 个媒体消费者均增加正确子挂载，gateway 只读，原挂载/镜像/DB/Redis 定义保持不变。最新现场回传已对应运行镜像和关键文件，NAS 的小文件写入/0:0 owner 保留也已由用户验证；Linux 上两卷共 16 个文件的复制已通过；delta 短时吞吐也已通过；最终 Compose 合并、整卷持续吞吐、容器权限及业务恢复仍待现场验收。新增写探测经过挂载不符、设备不符、软链接、chown/fsync 失败、只清理自身对象的本地回归；这些测试不连接 NAS。临时文件泄漏复现使用原函数和模拟 HTTP/数据库，未改项目应用代码。
 
 参考：[Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)、[Compose volumes](https://docs.docker.com/reference/compose-file/services/#volumes)、[Compose merge](https://docs.docker.com/reference/compose-file/merge/)、[Docker restart](https://docs.docker.com/engine/containers/start-containers-automatically/)、[systemd mount](https://github.com/systemd/systemd/blob/main/man/systemd.mount.xml)、[NFS](https://man7.org/linux/man-pages/man5/nfs.5.html)、[rsync](https://download.samba.org/pub/rsync/rsync.1)。文档语义须与现场旧版本一起核对。
