@@ -214,7 +214,7 @@ class VerificationTests(unittest.TestCase):
                     (verify.os, 'geteuid', {'return_value': 0}),
                     (verify, 'check_host', {'return_value': None}),
                     (verify, 'checked_root', {'return_value': str(self.source)}),
-                    (verify, 'check_consumers', {'return_value': 'fixture'}),
+                    (verify, 'check_consumers', {'side_effect': lambda *a, **kw: ('fixture', []) if kw.get('with_records') else 'fixture'}),
                     (verify, 'open_parent', {'side_effect': lambda: os.dup(self.target_fd)}),
                     (verify, 'open_job', {'side_effect': job}),
                     (verify, 'read_state', {'return_value': state}),

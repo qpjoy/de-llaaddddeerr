@@ -12,7 +12,7 @@ import time
 import uuid
 
 from permissions import emit, open_parent
-from precopy import check_host, check_consumers, child_directory, open_job, SERVICES
+from precopy import check_host, check_consumers, child_directory, open_job, inspect_containers, SERVICES
 from media import checked_root
 from sample_copy import DIR_FLAGS
 
@@ -170,6 +170,20 @@ def private_write(fd, name, value):
         stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
 
 
+def deployment_changes(starting_files, current_files, before, after):
+    old = {record['service']: record for record in before}
+    new = {record['service']: record for record in after}
+    changes = []
+    for name in sorted(set(old) | set(new)):
+        fields = [key for key in ('id', 'image', 'mounts')
+                  if old.get(name, {}).get(key) != new.get(name, {}).get(key)]
+        if fields:
+            changes.append({'service': name, 'fields': fields})
+    return {'config_files_changed': sorted(path for path in set(starting_files) | set(current_files)
+                                          if starting_files.get(path) != current_files.get(path)),
+            'consumers_changed': changes}
+
+
 def main():
     if sys.argv[1:] != [VOLUME, '--prepare'] or not sys.platform.startswith('linux') or os.geteuid() != 0:
         raise SystemExit('Use sudo bash scripts/nas-cutover-prepare.sh po_infra_media_data --prepare on Linux.')
@@ -186,12 +200,12 @@ def main():
         source = os.open(checked_root(VOLUME), DIR_FLAGS); held.append(source)
         if os.fstat(source).st_dev != os.stat('/dev/nvme0n1p1').st_rdev:
             raise RuntimeError('Source is not the expected SSD.')
-        fingerprint = check_consumers(VOLUME)
+        containers = inspect_containers()
+        fingerprint, records = check_consumers(VOLUME, containers=containers, with_records=True)
         parent = open_parent(); held.append(parent)
-        job, target, state = open_job(parent, VOLUME, source, fingerprint, create=False); held.extend((job, target))
+        job, target, state = open_job(parent, VOLUME, source, fingerprint, create=False, records=records); held.extend((job, target))
         if state.get('phase') != 'precopy_pass_complete' or state.get('last_exit_code') != 0:
             raise RuntimeError('Successful pre-copy required; full SHA256 is NOT required.')
-        containers = json.loads(run(['docker', 'inspect'] + run(['docker', 'ps', '-aq']).split()))
         consumers = {c['Config']['Labels']['com.docker.compose.service']: c for c in containers
                      if any(m.get('Name') == VOLUME for m in c.get('Mounts', []))}
         starting_files = file_hashes()
@@ -210,6 +224,8 @@ def main():
         report_path = '/var/lib/mx-static/nas-cutover/' + name
         private_write(output, 'containers.private.json', consumers)
         private_write(output, 'compose.rendered.private.json', config)
+        private_write(output, 'deployment-before.private.json',
+                      {'config_files_sha256': starting_files, 'consumers': records})
         code_changes = {}
         for name, c in consumers.items():
             if name != 'gateway':
@@ -225,6 +241,8 @@ def main():
                     differences.append({'service': name, 'reason': 'startup_script_changed'})
         if any(code_changes.values()):
             differences.append({'reason': 'writable_app_code_requires_review'})
+        private_write(output, 'review-items.json',
+                      {'review_items': differences, 'writable_app_code': code_changes})
         existing = run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).splitlines()
         if NFS_VOLUME not in existing:
             args = ['docker', 'volume', 'create', '--driver', 'local']
@@ -237,19 +255,26 @@ def main():
             '--no-healthcheck', '--user', '0:0', '--entrypoint', 'python',
             '--mount', 'type=volume,src=' + NFS_VOLUME + ',dst=/nas,volume-nocopy',
             consumers['web']['Image'], '-c', PROBE, str(state['target_inode'])], timeout=None))
+        private_write(output, 'docker-nfs-probe.json', probe)
+        emit('cutover_probe_result', **probe)
         overlay = candidate(consumers)
         private_write(output, 'compose.nas.override.json', overlay)
         merged = json.loads(run(compose_command() + ['-f', report_path + '/compose.nas.override.json', 'config', '--format', 'json']))
         private_write(output, 'compose.nas.rendered.private.json', merged)
         validate_merged(config, merged, overlay)
         files = file_hashes()
-        if files != starting_files or check_consumers(VOLUME) != fingerprint:
-            raise RuntimeError('Deployment changed during preparation; keep artifacts and rerun after it is stable.')
+        _, current_records = check_consumers(VOLUME, with_records=True)
+        drift = deployment_changes(starting_files, files, records, current_records)
+        private_write(output, 'deployment-check.json', drift)
+        if drift['config_files_changed'] or drift['consumers_changed']:
+            emit('cutover_deployment_changed', **drift)
+            raise RuntimeError('Deployment changed during preparation; see cutover_deployment_changed fields.')
         result = {'schema': 1, 'time_unix': time.time(), 'volume': VOLUME, 'precopy_state': state,
                   'verification_policy': 'rsync-transfer-checksum-and-final-offline-quick-check',
                   'full_sha256_required': False, 'report_directory': report_path,
                   'docker_nfs_probe': probe, 'review_items': differences, 'writable_app_code': code_changes,
-                  'config_files_sha256': files, 'production_stopped': False, 'cutover_ready': False,
+                  'config_files_sha256': files, 'consumer_fingerprint_normalized': fingerprint,
+                  'production_stopped': False, 'cutover_ready': False,
                   'reclaim_ready': False, 'media_services': sorted(consumers),
                   'note': 'Preparation only. Final stopped-writer sync, consumer recreation and acceptance still required.'}
         private_write(output, 'prepare-result.json', result); os.fsync(output)

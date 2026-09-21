@@ -2,6 +2,8 @@
 """Guarded online rsync pre-copy. No stop, cutover, deletion or reclamation."""
 import fcntl
 import hashlib
+import itertools
+import math
 import json
 import os
 import re
@@ -46,9 +48,18 @@ def source_identity(fd):
     return {'device': info.st_dev, 'inode': info.st_ino}
 
 
-def check_consumers(volume):
+def inspect_containers():
     ids = subprocess.check_output(['docker', 'ps', '-aq'], universal_newlines=True, timeout=30).split()
-    containers = json.loads(subprocess.check_output(['docker', 'inspect'] + ids, timeout=30)) if ids else []
+    return json.loads(subprocess.check_output(['docker', 'inspect'] + ids, timeout=30)) if ids else []
+
+
+def records_digest(records):
+    return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+
+
+def check_consumers(volume, containers=None, with_records=False):
+    if containers is None:
+        containers = inspect_containers()
     selected = []
     destination = MEDIA_ROOT + '/' + volume + '/data_hub_raw_media'
     nas_volume = PROJECTS[volume] + '_raw_media_nfs_v1'
@@ -67,11 +78,41 @@ def check_consumers(volume):
         parents = [m for m in mounts if m.get('Name') == volume and m.get('Destination') == '/app/media']
         if len(parents) != 1 or any(m.get('Destination', '').startswith('/app/media/data_hub_raw_media') for m in mounts):
             raise RuntimeError('Source consumer has changed media mounts; refuse pre-copy.')
-        selected.append({'id': container['Id'], 'service': service, 'image': container['Image'], 'mounts': mounts})
+        selected.append({'id': container['Id'], 'service': service, 'image': container['Image'],
+                         'mounts': sorted(mounts, key=lambda m: json.dumps(m, sort_keys=True))})
     if len(selected) != len(SERVICES) or {c['service'] for c in selected} != SERVICES:
         raise RuntimeError('Expected exactly ten consumers for this instance; inspect deployment first.')
     selected.sort(key=lambda c: c['service'])
-    return hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
+    fingerprint = records_digest(selected)
+    return (fingerprint, selected) if with_records else fingerprint
+
+
+def matches_fingerprint(expected, fingerprint, records=None):
+    if expected == fingerprint:
+        return True
+    if (records is None or records_digest(records) != fingerprint
+            or not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected)):
+        return False
+    # Schema 1 markers recorded unsorted Docker Mounts arrays. Prove an exact
+    # old hash match by varying ONLY array order; never replace/rebase a marker.
+    # This deployment normally has 2!*3! = 12 variants. Bound work before
+    # materializing permutations; unexpected complexity needs manual review.
+    count = 1
+    for record in records:
+        size = len(record['mounts'])
+        if size > 6:
+            raise RuntimeError('Legacy mount-order matching exceeds its limit; review deployment.')
+        count *= math.factorial(size)
+        if count > 4096:
+            raise RuntimeError('Legacy mount-order matching exceeds its limit; review deployment.')
+    choices = [itertools.permutations(record['mounts']) for record in records]
+    for ordering in itertools.product(*choices):
+        variant = [dict(record, mounts=list(mounts)) for record, mounts in zip(records, ordering)]
+        if records_digest(variant) == expected:
+            emit('consumer_fingerprint_legacy_match',
+                 note='Exact old marker hash matched after Mounts order normalization; marker unchanged.')
+            return True
+    return False
 
 
 def child_directory(parent, name, create=False):
@@ -124,7 +165,7 @@ def write_state(job_fd, state):
     os.fsync(job_fd)
 
 
-def open_job(parent_fd, volume, source_fd, fingerprint, create):
+def open_job(parent_fd, volume, source_fd, fingerprint, create, records=None):
     opened = []
     try:
         current = parent_fd
@@ -146,7 +187,7 @@ def open_job(parent_fd, volume, source_fd, fingerprint, create):
             state = read_state(job_fd)  # No marker: refuse, even if the directory looks empty.
             if (state.get('schema') != 1 or state.get('volume') != volume
                     or state.get('source_identity') != source_identity(source_fd)
-                    or state.get('consumer_fingerprint') != fingerprint
+                    or not matches_fingerprint(state.get('consumer_fingerprint'), fingerprint, records)
                     or state.get('target') != MEDIA_ROOT + '/' + volume + '/data_hub_raw_media'
                     or state.get('phase') not in ('prepared', 'precopy_running', 'precopy_pass_complete', 'precopy_failed')
                     or state.get('cutover_ready') is not False or state.get('reclaim_ready') is not False):
@@ -228,14 +269,14 @@ def main():
             raise RuntimeError('Source descriptor is not on the expected SSD.')
         if os.fstat(source).st_uid != 0 or os.fstat(source).st_mode & 0o022:
             raise RuntimeError('Source root ownership/mode needs review before creating a resumable target.')
-        fingerprint = check_consumers(volume)
+        fingerprint, records = check_consumers(volume, with_records=True)
         parent = open_parent()
         held.append(parent)
         if mode == '--copy':
             capacity = os.fstatvfs(parent)
             if capacity.f_bavail * capacity.f_frsize < 2 * 1024 ** 4:
                 raise RuntimeError('Less than 2 TiB NAS free space; review capacity/quota before copying.')
-        job, target, state = open_job(parent, volume, source, fingerprint, create=mode == '--copy')
+        job, target, state = open_job(parent, volume, source, fingerprint, create=mode == '--copy', records=records)
         held.extend((job, target))
         if mode == '--status':
             emit('precopy_state', **state)

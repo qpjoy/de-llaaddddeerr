@@ -40,6 +40,23 @@ sudo bash scripts/nas-cutover-prepare.sh po_infra_media_data --prepare
 
 退出 0 表示本次准备检查通过，退出 2 表示有配置/运行代码需要核对；两者都没有停止业务或执行切换。`cutover_ready=false`、`reclaim_ready=false` 继续保留，因为尚未停写做最终同步。这里的准备结果取代“必须先全量 SHA256 完成”的要求；**不是再要求一次审批**，需要现场结果是为了确认此前没有测试过的 Docker 子目录挂载及实际部署状态。
 
+## 准备末尾误报“Deployment changed”的修复
+
+2026-09-22 的一次现场准备在隔离探针和 Compose 合并检查之后报出 `Deployment changed during preparation`。旧版把配置文件哈希变化与消费者指纹变化合成了一条错误，且没有记录两次快照差异，因此仅凭旧日志不能断定现场是哪一种变化。
+
+已复现脚本缺陷：消费者指纹直接散列 `docker inspect` 的 `Mounts` 数组；相同挂载仅返回顺序变化就得到不同指纹。Docker 26.1.3 的 `GetMountPoints()` 遍历 map 构造数组，没有在返回前排序。[Moby 26.1.3 源码](https://github.com/moby/moby/blob/v26.1.3/container/container_unix.go#L409-L425)
+
+修复只把挂载数组规范排序，保留每个挂载的全部字段以及容器 ID、服务名、镜像 ID。新指纹稳定；已完成预复制的旧 marker 不改写。旧指纹不一致时，仅在本机内存中枚举挂载顺序、重新计算旧算法哈希，要求找到与 marker **完全相同**的哈希才兼容通过。枚举限制为总计 4096 种，单容器最多 6 个挂载，超出就拒绝；不会用“看起来相似”替代身份检查，也不读取媒体内容。
+
+更新服务器脚本后，直接重跑前面的 `--prepare`。已创建的 `mx_data_raw_media_nfs_v1` 会核对并复用，不需要删卷、改 marker、重复制或重启 Docker。新版输出和私有记录包括：
+
+- `consumer_fingerprint_legacy_match`：只有挂载顺序不同的旧算法哈希已精确匹配，旧记录保持原样。
+- `cutover_probe_result` / `docker-nfs-probe.json`：探针结束立即保存与输出，后面的检查失败也保留结果。
+- `cutover_deployment_changed` / `deployment-check.json`：列出变化的配置文件路径，以及服务的 `id`、`image`、`mounts` 中哪些字段改变，不输出凭据值。
+- `deployment-before.private.json`：本次开始时的配置文件哈希与规范化消费者记录；`review-items.json` 保存需核对的配置/代码项目。
+
+只回传终端 JSON 摘要。不要贴 `containers.private.json` 或 rendered Compose，它们含运行凭据。若仍然失败，以新版明确列出的变化为依据处理，不注释身份检查，也不使用失败目录里的候选文件直接切换。
+
 ## 候选覆盖配置的具体变化
 
 生成 `compose.nas.override.json`，只能作为原两份 Compose 的最后一份覆盖文件，并保持原 `--project-directory`、`-p mx_data`、`--env-file`。自动合并检查确认 PostgreSQL/Redis、其他环境、端口、SSD 父卷及静态卷没有变化。
@@ -65,6 +82,8 @@ sudo bash scripts/nas-cutover-prepare.sh po_infra_media_data --prepare
 
 ## 本地验证
 
-64 项 NAS 测试通过，其中新增 7 项覆盖原卷与目标定义拒绝、原配置/环境漂移的脱敏输出、镜像与挂载覆盖范围、Compose 合并不得修改数据库/父卷/其他环境、私有文件排他写入、CLI 范围限制、隔离探针只读写删除自身文件与身份拒绝。
+70 项 NAS 测试通过。准备工具的 7 项初始测试覆盖原卷与目标定义拒绝、原配置/环境漂移的脱敏输出、镜像与挂载覆盖范围、Compose 合并不得修改数据库/父卷/其他环境、私有文件排他写入、CLI 范围限制、隔离探针只读写删除自身文件与身份拒绝。
 
 用本机 po-infra 的真实两份 Compose 文件及示例环境，在 Compose v2.34.0 中完成合并核验；Python 3.6 语法/API 兼容检查和 Bash 语法检查通过。没有本机 Docker daemon/NFS/EL8 现场执行，不能把这些测试写成生产已切换。服务器 Compose 2.27 与实际 NFS 结果由准备工具现场检查。
+
+本次另增 6 项回归测试：复现旧算法对挂载顺序敏感；穷举现有部署形状的 12 种旧顺序并确认 marker 字节不变；真实 ID/镜像/挂载字段变化及兼容枚举上限拒绝；模拟完整准备流程分别验证仅顺序变化成功、真实容器变化失败、配置文件变化输出脱敏路径。完整流程测试使用临时目录和模拟 Docker/NFS，未操作生产。

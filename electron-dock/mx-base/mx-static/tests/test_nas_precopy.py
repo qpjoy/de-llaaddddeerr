@@ -1,5 +1,8 @@
 """Isolated local fixtures for the full pre-copy guard; no Docker/NAS access."""
 import json
+import copy
+import itertools
+import hashlib
 import contextlib
 import io
 import os
@@ -169,6 +172,78 @@ class PrecopyTests(unittest.TestCase):
                          (self.source / 'video/raw-media-live.tmp').read_bytes())
         self.assertEqual((self.source / 'video/a.mp4').read_bytes(), before[Path('video/a.mp4')])
         self.assertFalse(precopy.read_state(job)['reclaim_ready'])
+
+
+    def multi_mount_consumers(self):
+        result = []
+        for service in sorted(precopy.SERVICES):
+            mounts = [{'Type': 'volume', 'Name': 'po_infra_media_data',
+                       'Source': '/data/docker/volumes/po_infra_media_data/_data',
+                       'Destination': '/app/media', 'RW': service != 'gateway',
+                       'Mode': 'ro' if service == 'gateway' else 'rw',
+                       'Driver': 'local', 'Propagation': ''}]
+            if service in ('web', 'gateway'):
+                mounts.append({'Type': 'volume', 'Name': 'static_data', 'Destination': '/app/staticfiles'})
+            if service == 'gateway':
+                mounts.append({'Type': 'bind', 'Source': '/deploy/nginx', 'Destination': '/etc/nginx/templates'})
+            result.append({'Id': service, 'Image': 'sha256:fixture', 'Name': service,
+                           'Config': {'Labels': {'com.docker.compose.project': 'mx_data',
+                                                 'com.docker.compose.service': service}},
+                           'Mounts': mounts})
+        return result
+
+    def test_mount_and_inspect_order_do_not_change_fingerprint(self):
+        before = self.multi_mount_consumers()
+        after = copy.deepcopy(before[::-1])
+        for c in after: c['Mounts'].reverse()
+        def old_hash(containers):
+            records = [{'id': c['Id'], 'service': c['Config']['Labels']['com.docker.compose.service'],
+                        'image': c['Image'], 'mounts': c['Mounts']} for c in containers]
+            return hashlib.sha256(json.dumps(sorted(records, key=lambda c: c['service']), sort_keys=True).encode()).hexdigest()
+        self.assertNotEqual(old_hash(before), old_hash(after))  # Reproduce old bug.
+        untouched = copy.deepcopy(before)
+        self.assertEqual(precopy.check_consumers('po_infra_media_data', containers=before),
+                         precopy.check_consumers('po_infra_media_data', containers=after))
+        self.assertEqual(before, untouched)
+
+    def test_every_legacy_order_resumes_without_rewriting_marker(self):
+        containers = self.multi_mount_consumers()
+        fingerprint, records = precopy.check_consumers('po_infra_media_data', containers=containers, with_records=True)
+        job, _, state = self.job(fingerprint=fingerprint)
+        for ordering in itertools.product(*(itertools.permutations(c['mounts']) for c in records)):
+            variant = [dict(c, mounts=list(m)) for c, m in zip(records, ordering)]
+            state['consumer_fingerprint'] = hashlib.sha256(json.dumps(variant, sort_keys=True).encode()).hexdigest()
+            precopy.write_state(job, state)
+            marker = self.parent / 'data/docker/media-volumes/po_infra_media_data' / precopy.MARKER
+            old_bytes = marker.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()):
+                fresh_job, fresh_target, loaded = precopy.open_job(
+                    self.parent_fd, 'po_infra_media_data', self.source_fd, fingerprint, False, records=records)
+            self.opened.extend((fresh_job, fresh_target))
+            self.assertEqual(loaded, state)
+            self.assertEqual(marker.read_bytes(), old_bytes)
+            self.assertFalse(loaded['cutover_ready'])
+            self.assertFalse(loaded['reclaim_ready'])
+
+    def test_legacy_compatibility_refuses_changed_fields_and_unbound_records(self):
+        _, records = precopy.check_consumers('po_infra_media_data', containers=self.multi_mount_consumers(), with_records=True)
+        old = copy.deepcopy(records)
+        for c in old: c['mounts'].reverse()
+        expected = precopy.records_digest(old)
+        changes = [('id', 'new-id'), ('image', 'new-image'), ('service', 'new-service')]
+        for key, value in changes:
+            changed = copy.deepcopy(records); changed[0][key] = value
+            self.assertFalse(precopy.matches_fingerprint(expected, precopy.records_digest(changed), changed))
+        for key in records[0]['mounts'][0]:
+            changed = copy.deepcopy(records); changed[0]['mounts'][0][key] = 'changed'
+            self.assertFalse(precopy.matches_fingerprint(expected, precopy.records_digest(changed), changed), key)
+        for mounts in ([], records[0]['mounts'] * 2):
+            changed = copy.deepcopy(records); changed[0]['mounts'] = mounts
+            self.assertFalse(precopy.matches_fingerprint(expected, precopy.records_digest(changed), changed))
+        self.assertFalse(precopy.matches_fingerprint(expected, 'unrelated-current-fingerprint', records))
+        too_many = [dict(records[0], mounts=[{}] * 7)]
+        with self.assertRaisesRegex(RuntimeError, 'limit'):
+            precopy.matches_fingerprint(expected, precopy.records_digest(too_many), too_many)
 
     def test_consumers_refuse_nas_child_mount_or_missing_service(self):
         containers = []

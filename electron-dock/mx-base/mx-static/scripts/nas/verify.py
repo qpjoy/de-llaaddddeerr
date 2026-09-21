@@ -254,10 +254,10 @@ def main():
         info = os.fstat(source)
         if info.st_dev != os.stat('/dev/nvme0n1p1').st_rdev or info.st_uid != 0 or info.st_mode & 0o022:
             raise RuntimeError('Unexpected SSD source identity or unsafe root ownership/mode.')
-        fingerprint = check_consumers(volume)
+        fingerprint, records = check_consumers(volume, with_records=True)
         parent = open_parent()
         held.append(parent)
-        job, target, state = open_job(parent, volume, source, fingerprint, create=False)
+        job, target, state = open_job(parent, volume, source, fingerprint, create=False, records=records)
         held.extend((job, target))
         require_complete(state)
         reports = open_reports()
@@ -284,7 +284,7 @@ def main():
             held.append(fresh_source)
             fresh_parent = open_parent()
             held.append(fresh_parent)
-            fresh_job, fresh_target, fresh_state = open_job(fresh_parent, volume, fresh_source, fingerprint, create=False)
+            fresh_job, fresh_target, fresh_state = open_job(fresh_parent, volume, fresh_source, fingerprint, create=False, records=records)
             held.extend((fresh_job, fresh_target))
             if (fresh_state != state or
                     (os.fstat(fresh_target).st_dev, os.fstat(fresh_target).st_ino) !=

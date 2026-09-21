@@ -14,14 +14,20 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts/nas'))
 import cutover_prepare as prepare
+import precopy
 
 
 def fixtures():
     consumers = {}
     services = {}
     for name in prepare.SERVICES:
-        consumers[name] = {'Image': 'sha256:' + 'a' * 64, 'State': {'Running': True},
+        consumers[name] = {'Id': name, 'Mounts': [
+            {'Name': prepare.VOLUME, 'Destination': '/app/media'},
+            {'Name': 'fixture_static', 'Destination': '/app/staticfiles'}], 'Image': 'sha256:' + 'a' * 64, 'State': {'Running': True},
                           'Config': {'Env': ['MX_WEB_WORKERS=4', 'KEEP_SECRET=literal$value'], 'Labels': {
+                              'com.docker.compose.project': 'mx_data',
+                              'com.docker.compose.service': name,
+                              'com.docker.compose.config-hash': 'fixture-hash',
                               'com.docker.compose.project.working_dir': prepare.DEPLOY,
                               'com.docker.compose.project.config_files': ','.join(prepare.FILES),
                               'com.docker.compose.project.environment_file': prepare.ENV_FILE}}}
@@ -33,6 +39,114 @@ def fixtures():
 
 
 class CutoverPrepareTests(unittest.TestCase):
+
+    def run_preparation(self, container_change=False, file_change=False):
+        # Run the complete control flow with real private report files and fd
+        # guards, but mocked Docker/NFS. No daemon or production path access.
+        from types import SimpleNamespace
+        consumers, original = fixtures()
+        overlay = prepare.candidate(consumers)
+        merged = copy.deepcopy(original)
+        merged['volumes'].update(overlay['volumes'])
+        for name, change in overlay['services'].items():
+            merged['services'][name]['image'] = change['image']
+            merged['services'][name]['volumes'] += change['volumes']
+            if 'environment' in change: merged['services'][name]['environment'].update(change['environment'])
+            if 'command' in change: merged['services'][name]['command'] = change['command']
+        before = list(consumers.values())
+        after = copy.deepcopy(before[::-1])
+        for c in after: c['Mounts'].reverse()
+        if container_change:
+            next(c for c in after if c['Id'] == 'web')['Id'] = 'recreated-web'
+        probe = {'docker_nfs_mount': True, 'same_target_inode': True, 'root_4k_write_read': True}
+        def docker(args, **kwargs):
+            if args[:2] == ['docker', 'compose']:
+                if '--hash' in args:
+                    return '\n'.join(name + ' fixture-hash' for name in prepare.SERVICES)
+                return json.dumps(merged if any(arg.endswith('/compose.nas.override.json') for arg in args) else original)
+            if args[:2] == ['docker', 'diff']: return ''
+            if args[:2] == ['docker', 'exec']: return json.dumps(prepare.SCRIPT_HASHES)
+            if args[:3] == ['docker', 'volume', 'ls']: return prepare.NFS_VOLUME
+            if args[:3] == ['docker', 'volume', 'inspect']:
+                return json.dumps([{'Name': prepare.NFS_VOLUME, 'Driver': 'local', 'Options': prepare.OPTIONS}])
+            if args[:2] == ['docker', 'run']: return json.dumps(probe)
+            self.fail('Unexpected Docker operation: ' + repr(args[:3]))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root/'var/lib').mkdir(parents=True)
+            source = root/'source'; source.mkdir()
+            real_open, real_stat, real_fstat = os.open, os.stat, os.fstat
+            def opened(path, *args, **kw):
+                if path == '/': path = str(root)
+                if path == '/run/lock/mx-static-nas-sample.lock': path = str(root/'lock')
+                return real_open(path, *args, **kw)
+            def inspected(path, *args, **kw):
+                if path == '/dev/nvme0n1p1': return SimpleNamespace(st_rdev=real_stat(str(source)).st_dev)
+                return real_stat(path, *args, **kw)
+            def fd_info(fd):
+                info = real_fstat(fd)
+                fields = {key: getattr(info, key) for key in dir(info) if key.startswith('st_')}
+                fields['st_uid'] = 0
+                return SimpleNamespace(**fields)
+            def job(*args, **kw):
+                return (real_open(str(source), prepare.DIR_FLAGS), real_open(str(source), prepare.DIR_FLAGS),
+                        {'phase': 'precopy_pass_complete', 'last_exit_code': 0, 'target_inode': real_stat(str(source)).st_ino})
+            first_files = {prepare.ENV_FILE: 'initial-secret-hash'}
+            final_files = {prepare.ENV_FILE: 'changed-secret-hash'} if file_change else dict(first_files)
+            output = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                patches = [(prepare.sys, 'argv', ['prepare.py', prepare.VOLUME, '--prepare']),
+                           (prepare.sys, 'platform', 'linux')]
+                for obj, name, value in patches: stack.enter_context(patch.object(obj, name, value))
+                patches = [(prepare, 'check_host', {'return_value': None}),
+                           (prepare, 'checked_root', {'return_value': str(source)}),
+                           (prepare, 'inspect_containers', {'return_value': before}),
+                           (precopy, 'inspect_containers', {'return_value': after}),
+                           (prepare, 'open_parent', {'side_effect': lambda: real_open(str(source), prepare.DIR_FLAGS)}),
+                           (prepare, 'open_job', {'side_effect': job}),
+                           (prepare, 'file_hashes', {'side_effect': [first_files, final_files]}),
+                           (prepare.os, 'geteuid', {'return_value': 0}),
+                           (prepare.os, 'open', {'side_effect': opened}),
+                           (prepare.os, 'stat', {'side_effect': inspected}),
+                           (prepare.os, 'fstat', {'side_effect': fd_info}),
+                           (prepare, 'run', {'side_effect': docker})]
+                for obj, name, kw in patches: stack.enter_context(patch.object(obj, name, **kw))
+                stack.enter_context(contextlib.redirect_stdout(output))
+                status = prepare.main()
+            report = next((root/'var/lib/mx-static/nas-cutover').iterdir())
+            artifacts = {p.name: json.loads(p.read_text()) for p in report.iterdir()}
+            self.assertEqual(artifacts['docker-nfs-probe.json'], probe)
+            self.assertIn('review-items.json', artifacts)
+            self.assertIn('deployment-before.private.json', artifacts)
+            return status, [json.loads(line) for line in output.getvalue().splitlines()], artifacts
+
+    def test_complete_prepare_accepts_mount_order_changes(self):
+        status, events, artifacts = self.run_preparation()
+        self.assertEqual(status, 0)
+        self.assertEqual(events[-1]['event'], 'cutover_prepare_result')
+        self.assertEqual(events[-1]['review_items'], [])
+        self.assertFalse(events[-1]['production_stopped'])
+        self.assertFalse(events[-1]['cutover_ready'])
+        self.assertFalse(events[-1]['reclaim_ready'])
+        self.assertEqual(artifacts['deployment-check.json'], {'config_files_changed': [], 'consumers_changed': []})
+
+    def test_complete_prepare_reports_real_consumer_drift(self):
+        status, events, artifacts = self.run_preparation(container_change=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(events[-1]['event'], 'cutover_prepare_failed')
+        drift = next(e for e in events if e['event'] == 'cutover_deployment_changed')
+        self.assertEqual(drift['consumers_changed'], [{'service': 'web', 'fields': ['id']}])
+        self.assertEqual(drift['config_files_changed'], [])
+        self.assertNotIn('prepare-result.json', artifacts)
+
+    def test_complete_prepare_reports_config_drift_without_values(self):
+        status, events, artifacts = self.run_preparation(file_change=True)
+        self.assertEqual(status, 1)
+        drift = next(e for e in events if e['event'] == 'cutover_deployment_changed')
+        self.assertEqual(drift['config_files_changed'], [prepare.ENV_FILE])
+        self.assertEqual(drift['consumers_changed'], [])
+        self.assertNotIn('secret', json.dumps(events))
+        self.assertNotIn('prepare-result.json', artifacts)
+
     def test_wrong_volume_definition_never_accepted(self):
         base = {'Name': prepare.NFS_VOLUME, 'Driver': 'local', 'Options': prepare.OPTIONS}
         prepare.validate_volume(base)
