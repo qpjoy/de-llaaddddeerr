@@ -24,3 +24,5 @@ sudo bash scripts/nas-audit.sh media
 诊断输出保存到 `reports/`，现场配置可保存到 `nas_docs/local/`，两者均已加入 `.gitignore`。代码和迁移文档通过 Git 分发，不需要压缩包。
 
 2026-09-22 三份现场报告已回传：[结论与下一步](nas_docs/evidence/2026-09-22-live-findings.md)。临时文件占两个 raw_media 目录约 67.35%，不自动删除。新增的 `sudo bash scripts/nas-probe.sh permissions --write-test` 是独立显式写探测，只创建并清理自己的约 4 KiB 测试对象，详见 [探测说明](nas_docs/README.md#下一步独立权限写探测)。
+
+权限探测已回传并通过；下一步使用 [小批复制工具](nas_docs/operations/sample-copy.md)，无需重复探测。多项目改为优先原生存储声明，见 [复制速度、Docker/K8s 存储与数据库扩展](nas_docs/operations/storage-platform.md)；旧 host-bind 启动方案仅作备选。

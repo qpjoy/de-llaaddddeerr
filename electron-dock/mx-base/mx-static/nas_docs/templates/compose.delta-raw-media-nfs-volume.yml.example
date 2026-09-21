@@ -1,0 +1,43 @@
+# REVIEW CANDIDATE ONLY: not a production cutover command.
+# Alternative to compose.delta-raw-media-nas.yml.example; NEVER combine them.
+# The external volume must already be verified as an NFS-backed volume pointing
+# at this instance's completely copied and validated raw-media directory.
+# Inherit the original restart policy. Initial mount-failure retry is NOT
+# guaranteed by Docker restart policy; see operations/storage-platform.md.
+# Keep the full original Compose file order, project, env-file, images and parent
+# /app/media volume. This adds only the child mount for every media consumer.
+x-raw-media-nfs: &raw-media-nfs
+  type: volume
+  source: delta_raw_media_nfs
+  target: /app/media/data_hub_raw_media
+  volume:
+    nocopy: true
+
+services:
+  web:
+    volumes: [*raw-media-nfs]
+  worker:
+    volumes: [*raw-media-nfs]
+  beat:
+    volumes: [*raw-media-nfs]
+  worker-agent-short:
+    volumes: [*raw-media-nfs]
+  worker-agent-long:
+    volumes: [*raw-media-nfs]
+  worker-agent-interactive:
+    volumes: [*raw-media-nfs]
+  worker-agent-data-hub:
+    volumes: [*raw-media-nfs]
+  worker-strategy-draft:
+    volumes: [*raw-media-nfs]
+  chat-gateway:
+    volumes: [*raw-media-nfs]
+  gateway:
+    volumes:
+      - <<: *raw-media-nfs
+        read_only: true
+
+volumes:
+  delta_raw_media_nfs:
+    external: true
+    name: ${DELTA_NAS_RAW_VOLUME_NAME:?set the verified per-instance external NFS volume name}

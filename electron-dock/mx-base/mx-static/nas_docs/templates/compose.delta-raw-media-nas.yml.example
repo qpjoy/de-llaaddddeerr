@@ -1,3 +1,5 @@
+# LEGACY HOST-BIND ALTERNATIVE; native NFS candidate is in compose.delta-raw-media-nfs-volume.yml.example.
+# Never combine the two overlays. Not the multi-project default.
 # REVIEW TEMPLATE ONLY. Do not apply before the runbook gates pass.
 # Append to the FULL original Compose file list with the ORIGINAL project and env files.
 # Service names must first match com.docker.compose.service in the live inventory.

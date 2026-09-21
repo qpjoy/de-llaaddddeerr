@@ -1,14 +1,17 @@
 # NAS 迁移运维入口
 
-本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
+本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 
 ## 当前目标与状态
 
 先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS，校验、停写并切换后，继续保留原卷和原数据。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**本轮没有迁移、删除、挂载或重启服务器服务。**
 
 - 最新现场结论：[运行版本、临时文件占用和权限门槛](evidence/2026-09-22-live-findings.md)。两个目录合计 1,426.04 GiB，其中 tmp 960.46 GiB；保留全部文件，不凭名称清理。
+- 下一步：[小批复制验证](operations/sample-copy.md)，权限探测已通过，无需重复。
+- 默认方向调整：[原生存储、启动边界与数据库扩展](operations/storage-platform.md)。优先 Docker NFS volume / K8s PV/CSI，保持 Docker 全局 NAS 依赖禁用。
+- [旧 host-bind 启动方案](operations/boot-and-recovery.md) 仅作为兼容备选，不再默认每业务一套 systemd 控制程序。
 - 主记录：[Delta 原始媒体迁移](migrations/2026-09-22-delta-raw-media.md)。
-- 候选覆盖文件：[Compose 子目录挂载模板](templates/compose.delta-raw-media-nas.yml.example)，暂不应用；启动监督、路径身份、权限和运行版本核对通过后才生效。
+- 候选覆盖文件：[Docker 原生 NFS 子卷](templates/compose.delta-raw-media-nfs-volume.yml.example)；[旧 host-bind 子挂载](templates/compose.delta-raw-media-nas.yml.example) 为备选，两者不能叠加。均需完整校验及现场启动故障测试后才可应用。
 - 源码基准：[po-infra cdf3e649 的关键文件 SHA256](evidence/po-infra-cdf3e649-sha256.json)。最新现场报告中五个采样文件与基准匹配（含 media_storage.py），tasks.py 不同；不能宣称整个版本一致。
 
 ## 已看到的目录与拟用目录
@@ -33,7 +36,7 @@
   uv-cache/
 ```
 
-最新 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，写入和 owner 保留待验证。按用户建议拟建结构：
+最新 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，4 KiB 探测的写入和 0:0 owner 保留已通过；代表性文件复制及容器访问待验证。按用户建议拟建结构：
 
 ```text
 /mnt/nas/mx-internal-server/data/
@@ -85,20 +88,24 @@ media/spiders_src/getuserinfo.py
 
 默认不区分大小写的 macOS 文件系统无法同时正确呈现这三个路径；当前两处 Git 修改与截图警告相符。本轮不重置、不提交这些变化，不从本机 `media/` 作为迁移源。需要对照它们时读取 `git show HEAD:<精确路径>`；构建 Linux 发布物时使用区分大小写的干净 checkout。该问题与 NAS 迁移分开处理，绝不据此改名生产文件。
 
-## 下一步：独立权限写探测
+## 下一步：小批复制，不切换服务
 
-三份只读输出已经回传，不必立即重复扫描。先获取当前 SSD 余量，再做一次独立写探测：
+三份只读输出和权限写探测均已回传。4 KiB 测试四项全部通过；/data 剩余 58G，inode 只用了 3%。不必重复全量扫描或写探测。通过 Git 更新 mx-static 后，先执行：
 
 ```bash
-df -hT /data
-df -i /data
-sudo bash scripts/nas-probe.sh permissions --write-test
+sudo bash scripts/nas-sample-copy.sh po_infra_media_data --copy-test
 ```
 
-最后一条**会写入约 4 KiB 测试数据**，与只读 nas-audit 分开。它核对指定 NFS 导出和设备，拒绝软链接；仅在现有主机目录下新建 `.mx-static-probe-<随机值>`，测试写入/fsync/rename/read、mode/mtime/chown 0:0，之后只清理自己的文件和空目录。不创建 data/ 或迁移目录，不修改旧文件、权限或挂载。运行中不得卸载/替换 NAS 挂载；hard NFS 可能等待，不并发重试。
+退出码 0 且最后 `sample_result.passed=true` 后，再执行：
 
-请回传完整输出。任一操作或清理失败返回非零退出码，留下具体阶段/路径。全部通过仍不等于允许直接切换：还需 NAS 健康/配额/备份、最终目录授权、小批 rsync 属性与 SHA256、真实容器读写、启动监督验收。root 映射/chown 失败时不绕过，不对旧共享目录执行 chmod/chown；[现场结论](evidence/2026-09-22-live-findings.md) 有详细判读。
+```bash
+sudo bash scripts/nas-sample-copy.sh delta_59202_media_data --copy-test
+```
 
-复制和权限策略按回传结果确定。保留原卷，先复制全部 raw_media（含 tmp）；没有自动迁移或业务清理入口。线上代码存在临时文件泄漏，建议单独保存现场源码并修复发布；不能把代码升级混入存储切换。
+**这两条会复制少量真实媒体到新的 NAS 私有测试目录**，最多 8 个文件/选择时 256 MiB，每次 rsync 限速 10 MiB/s；串行运行。源只读打开，正式文件与旧 tmp 都可取样。校验 SHA256、size/UID/GID/mode/秒级 mtime，并拒绝复制期间源文件变化。工具保留测试副本与 result.json，不删除、不改容器挂载，不创建正式迁移目标。完整范围、错误处理与边界见 [小批复制说明](operations/sample-copy.md)。
 
-本地回归：`python3 -B -m unittest discover -s tests -p 'test_nas*.py'`。测试只使用临时目录和模拟工具，不连接服务器或 NAS。
+请贴回完整输出；若 hard NFS 卡住，保留最后阶段，不强制卸载或重复启动。小批通过后再建立每卷独立正式目标，预复制全部 raw_media（含 tmp），原卷继续保留。正式切换还需停写完整校验、NAS 健康/配额/备份及 [平台存储与故障恢复](operations/storage-platform.md) 验收。
+
+`nas-probe.sh permissions --write-test` 仍保留为需要重新确认身份时使用的独立 4 KiB 探测；当前不要重复。线上临时文件泄漏修复独立发布，不与存储切换混做。
+
+本地回归：`python3 -B -m unittest discover -s tests -p 'test_nas*.py'`。测试使用临时目录、模拟工具以及可用时的本地 rsync，不连接生产服务器或 NAS。

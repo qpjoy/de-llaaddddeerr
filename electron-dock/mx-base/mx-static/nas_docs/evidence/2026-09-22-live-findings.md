@@ -88,12 +88,12 @@ gateway       sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a
 
 此次报告没有重新验证开机挂载配置。此前 fstab 已注释、Docker 的 NAS drop-in 为 .bak、无 automount 的风险仍未闭环：当前可访问不等于重启后可用。完整复制可先做，正式切换仍等待每套媒体服务独立的 NAS 挂载检查与启动/故障恢复演练。保留 hard NFS；NAS 离线时 I/O 可持续等待，重复启动探测或普通 timeout 不能解决 D 状态。[NFS 客户端手册](https://man7.org/linux/man-pages/man5/nfs.5.html)
 
-从 Git 更新 mx-static 后，在该项目目录依次运行，回传输出：
+## 权限探测回传：已通过，进入小批复制
 
-```bash
-df -hT /data
-df -i /data
-sudo bash scripts/nas-probe.sh permissions --write-test
-```
+用户随后回传 `/data` 剩余 **58G、97% 已用**，inode **3% 已用**。`permissions --write-test` 的 io_passed、metadata_passed、root_owner_preservation、cleanup_passed 均为 true，测试目录已清理。新文件为 uid=0/gid=10（父目录 setgid 继承），chmod/mtime 通过，chown 后确认为 0:0。
 
-不必立即再扫描 50 万个文件。权限输出回来后确定专用目标目录的 owner/mode 与复制选项，再做小批复制并核对权限和 SHA256；通过后按实例串行、限速预复制全部 raw_media。复制期间原卷继续保留，停写后的最终校验通过前不切换服务。NAS 健康、配额和可恢复备份状态请一并记录；本轮没有提供会停机、重建或清理业务数据的命令。
+这说明此次 root 写入、rename/read、fsync 和基础属性设置均可用，不需要再改旧目录权限，也不必重复该探测。它不证明所有 ACL/xattr、真实容器访问或机械盘持续吞吐。
+
+用户决定**不恢复 Docker 全局 NAS 依赖**。fstab 取消注释是否已执行未收到回执；重启行为另按 [启动与恢复设计](../operations/boot-and-recovery.md) 验收。
+
+下一步运行 [小批复制工具](../operations/sample-copy.md)，先 po_infra_media_data，成功后再 delta_59202_media_data。每次最多 8 个文件/选择时 256 MiB、rsync 限速 10 MiB/s，包含可选到的正式文件与旧 tmp；独立 NAS 测试副本及校验报告保留，不切换服务、不删除源数据。通过后继续准备正式全量预复制，仍需 NAS 健康、配额和备份信息。
