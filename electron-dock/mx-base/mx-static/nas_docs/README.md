@@ -8,7 +8,7 @@
 
 - 最新现场结论：[运行版本、临时文件占用和权限门槛](evidence/2026-09-22-live-findings.md)。两个目录合计 1,426.04 GiB，其中 tmp 960.46 GiB；保留全部文件，不凭名称清理。
 - 两卷小批复制及 delta 短时吞吐均已通过：1.513 GiB / 31.708 秒，rsync 阶段 55.401 MiB/s。执行流程见 [两晚分卷执行与在线预复制](operations/two-night-migration.md)，无需重复试拷；po_infra 单遍算术外推约 2.55 小时，不是完整迁移时长承诺。
-- 用户确认 NAS 没有独立备份，最新决定暂缓阿里云备份；下一步先做 [NAS 后端验证](operations/nas-health-and-oss.md) 和服务器链路检查。OSS 价格仅保留为历史预算，不作为本轮前置条件。
+- 用户确认 NAS 没有独立备份，最新决定暂缓阿里云备份；服务器链路已确认千兆全双工，/data 剩余 57G；群晖管理凭据遗忘且 SSH 超时，后端健康暂未确认。用户要求先开始 [po_infra 在线预复制](operations/two-night-migration.md)，不再等待管理端登录；[后端检查](operations/nas-health-and-oss.md) 留待具备访问条件时补充。OSS 价格仅保留为历史预算，不作为本轮前置条件。
 - 默认方向调整：[原生存储、启动边界与数据库扩展](operations/storage-platform.md)。优先 Docker NFS volume / K8s PV/CSI，保持 Docker 全局 NAS 依赖禁用。
 - [旧 host-bind 启动方案](operations/boot-and-recovery.md) 仅作为兼容备选，不再默认每业务一套 systemd 控制程序。
 - 主记录：[Delta 原始媒体迁移](migrations/2026-09-22-delta-raw-media.md)。

@@ -164,3 +164,21 @@ rsync 耗时包含文件传输和其内部操作；单独 fsync 几乎无耗时�
 ## 最新范围：先验证 NAS，暂缓 OSS
 
 用户明确本轮不去阿里云备份，先验证 NAS。当前使用 NAS 管理端只读检查和服务器 network 模式补充后端/链路信息；已通过的基础写入、小样本与短时吞吐不重复。OSS 费用保留为历史参考，不作为本轮前置条件。继续按原计划先 po_infra、再 delta，逐卷预复制、核验和切换，当前无独立备份的事实不因健康探测通过而改变。
+
+## 服务器链路回传：千兆全双工，待 NAS 后端信息
+
+- Python 3.6.8 下 network 模式成功。到 192.168.1.3 的路由为 `dev eno2 src 192.168.1.2`；服务器 eno2 为 up、1000 Mb/s、full duplex、MTU 1500。未报告 lower 接口，缺少 bonding/slaves 文件本身不是故障。
+- 1 Gb/s 原始线速换算约 119.2 MiB/s，实际文件吞吐还受协议、NAS 和文件分布影响。此前 rsync 55.4 MiB/s 未达到这个理论值，但不能仅凭一轮短测确定瓶颈，也不能保证调参会达到线速。
+- 本机网卡累计 rx_errors=0、tx_errors=0、rx_dropped=592950、tx_dropped=0。缺少同一时间窗的增量，无法将 dropped 归因于本次复制；rx_dropped 包含收到但未交付处理的包，也不等同于线缆错误。[Linux 计数定义](https://docs.kernel.org/networking/statistics.html)
+- /mnt/nas 为预期导出 `nas-storage:/volume1/data1`，NFSv3、hard、TCP、rsize/wsize=524288、timeo=600、retrans=2。mountstats 的 age=117453 秒（约 32.6 小时），这些是该挂载的累计统计，不是单次吞吐测试窗口；本轮不据此调整挂载、网卡或清计数。
+- 最新 df：/data XFS，1.9T、已用 1.8T、可用 **57G、97%**；此前为取整 58G，不能由两份取整快照计算增长速率。尚未回传正式预复制结果，不能把 NAS 的可用性等同于迁移完成或 SSD 已回收。
+
+用户目前远程登录 192.168.1.2；NAS 为 192.168.1.3。下一步从服务器使用 NAS 自己的账号 SSH 登录并回传只读后端信息；SSH 是否开启、账号和管理网页端口尚未知。操作见 [NAS 访问与验证](../operations/nas-health-and-oss.md)。OSS 仍暂缓。
+
+## 最新决定：群晖管理访问暂缓，启动 po_infra 预复制
+
+用户截图：在服务器执行 `ssh -o ConnectTimeout=10 minsight@192.168.1.3`，返回 `connect to host 192.168.1.3 port 22: Connection timed out`；未进入认证阶段，不能据此判断账号密码是否正确。随后用户确认 NAS 是新购四盘位群晖，具体型号未知，管理账号/密码已遗忘，要求在没有实质阻碍时开始迁移。
+
+依据已通过的 NFS 挂载身份、root 写入/属性、样本内容校验及短时吞吐，开始第一卷 po_infra_media_data 的受控在线预复制，全部原数据保留，不等待 NAS SSH 或云端备份。本轮不再扩展端口探测/尝试账号，不重置 NAS 或停生产服务。底层健康、快照状态继续标记未确认，不能因设备新购或品牌而推断健康。
+
+执行入口为 [两晚分卷安排](../operations/two-night-migration.md)，无限时单卷预复制。尚未收到该正式作业的启动/完成回传，因此不记录为已执行或已成功。预复制后仍需完整校验、最终同步、挂载与任务恢复验收，才能按已授权范围回收旧 SSD 媒体。
