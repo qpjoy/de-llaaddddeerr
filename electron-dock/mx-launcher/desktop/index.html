@@ -187,20 +187,26 @@
           </div>
         </nav>
 
-        <label class="server-field">
-          <span>MX Server</span>
-          <input id="server-input" placeholder="http://127.0.0.1:18090" />
-        </label>
-        <label class="server-field ops-token-field">
-          <span>Internal Ops Token</span>
-          <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
-          <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
-        </label>
+        <section class="sidebar-connection" aria-label="Internal connection">
+          <label class="server-field">
+            <span>MX Server</span>
+            <input id="server-input" placeholder="http://127.0.0.1:18090" />
+          </label>
+          <form id="ops-token-form" class="server-field ops-token-field">
+            <label for="ops-token-input">Internal Ops Token</label>
+            <div class="ops-token-controls">
+              <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
+              <button id="ops-token-apply" class="primary-button" type="submit" aria-label="应用 Internal Ops Token">应用</button>
+            </div>
+            <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
+            <small id="ops-token-feedback" role="status" aria-live="polite" hidden></small>
+          </form>
 
-        <div class="sidebar-status">
-          <span id="connection-state" class="state-chip">Ready</span>
-          <span id="platform-status">Waiting for service</span>
-        </div>
+          <div class="sidebar-status">
+            <span id="connection-state" class="state-chip">Ready</span>
+            <span id="platform-status">Waiting for service</span>
+          </div>
+        </section>
 
         <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true">收起 ←</button>
       </aside>

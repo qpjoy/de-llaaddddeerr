@@ -523,6 +523,9 @@ const h2oNetwork = document.getElementById('h2o-network');
 const launcherFoundationOverview = document.getElementById('launcher-foundation-overview');
 const serverInput = document.getElementById('server-input');
 const opsTokenInput = document.getElementById('ops-token-input');
+const opsTokenForm = document.getElementById('ops-token-form');
+const opsTokenApply = document.getElementById('ops-token-apply');
+const opsTokenFeedback = document.getElementById('ops-token-feedback');
 const platformStatus = document.getElementById('platform-status');
 const appRefresh = document.getElementById('app-refresh');
 const adminRefresh = document.getElementById('admin-refresh');
@@ -750,6 +753,13 @@ serverInput.addEventListener('change', () => {
 if (opsTokenInput) {
   opsTokenInput.addEventListener('input', () => {
     bindOpsTokenToCurrentServer();
+  });
+}
+
+if (opsTokenForm) {
+  opsTokenForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void applyOpsToken();
   });
 }
 
@@ -1279,6 +1289,7 @@ async function refreshAdmin() {
       renderEmptyPipeline();
     }
     setConnection('connected', 'Connected', `${dashboard.overview.siteId} / ${dashboard.overview.storeDriver}`);
+    return true;
   } catch (error) {
     if (!isLauncherNetworkRequestScopeCurrent(launcherNetworkRequestScope)) return;
     if (state.setupRun.active) {
@@ -1311,6 +1322,7 @@ async function refreshAdmin() {
     state.overseaOverviewError = error.message;
     renderAdminError(error);
     setConnection('error', 'Offline', 'Admin API unavailable');
+    return false;
   }
 }
 
@@ -4491,7 +4503,46 @@ function synchronizeLauncherNetworkServerScope(value) {
 function clearOpsToken() {
   if (opsTokenInput) opsTokenInput.value = '';
   opsTokenBinding = null;
+  setOpsTokenFeedback();
   clearSystemSubscriptionSecrets();
+}
+
+function setOpsTokenFeedback(kind = '', message = '') {
+  if (!opsTokenFeedback) return;
+  opsTokenFeedback.textContent = message;
+  opsTokenFeedback.dataset.kind = kind;
+  opsTokenFeedback.hidden = !message;
+}
+
+async function applyOpsToken() {
+  if (opsTokenApply.disabled) return;
+  // Read the field explicitly: autofill may not dispatch an input event.
+  bindOpsTokenToCurrentServer();
+  const binding = opsTokenBinding;
+  if (!binding) {
+    setOpsTokenFeedback('error', '请填写有效的 MX Server 和 Internal Ops Token。');
+    return;
+  }
+  opsTokenApply.disabled = true;
+  opsTokenApply.textContent = '应用中';
+  setOpsTokenFeedback('', '正在验证 Token…');
+  try {
+    await fetchJson('/internal/v1/user-center/roles');
+    if (opsTokenBinding !== binding) return;
+    state.userCenter.feedback = null;
+    const refreshed = await refreshAdmin();
+    if (opsTokenBinding !== binding) return;
+    setOpsTokenFeedback(
+      refreshed ? 'success' : 'error',
+      refreshed ? 'Token 已应用，管理数据已刷新。' : 'Token 已验证，但管理数据刷新失败，请重试。'
+    );
+  } catch {
+    if (opsTokenBinding !== binding) return;
+    setOpsTokenFeedback('error', '应用失败，请检查 Token、MX Server 和网络后重试。');
+  } finally {
+    opsTokenApply.disabled = false;
+    opsTokenApply.textContent = '应用';
+  }
 }
 
 function clearSystemSubscriptionSecrets() {
@@ -4503,6 +4554,7 @@ function clearSystemSubscriptionSecrets() {
 }
 
 function bindOpsTokenToCurrentServer() {
+  setOpsTokenFeedback();
   const token = String(opsTokenInput?.value || '').trim();
   if (!token) {
     opsTokenBinding = null;

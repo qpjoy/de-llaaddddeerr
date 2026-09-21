@@ -9,6 +9,16 @@ Feishu 用户显示、产品级用户 ban/unban、blocked inventory、匿名 Pro
 静态 lease 与实时 WireGuard 状态的区分，以及未来安全下线状态机见
 [28-mx-h2i-connection-operations-and-anonymous-governance.md](./28-mx-h2i-connection-operations-and-anonymous-governance.md)。
 
+## 当前 Admin 侧栏交互（2026-09-21）
+
+- `Internal Ops Token` 支持点击“应用”或在输入框内按 Enter，显式读取当前输入值，
+  解决部分浏览器自动填充未触发输入事件的问题。按钮先通过只读受保护接口验证 token，
+  再重新请求 Admin 数据；过程中禁用重复提交，并在侧栏显示成功或失败结果。
+- token 只存在当前页面内存，仍绑定当前 MX Server；修改服务器地址会清空 token，
+  刷新/重启后需要重新输入。按钮不修改用户凭据、SDK 登录或 MX-H2I 联网配置。
+- 连接设置集中在侧栏底部，token 输入和按钮同排，减少字段之间的空白。
+  展开导航统一使用外层滚动；低高度桌面窗口缩小留白，窄屏限制导航区高度，保证配置入口可达。
+
 ## 目标
 
 MX Launcher 的平台边界保持三层：

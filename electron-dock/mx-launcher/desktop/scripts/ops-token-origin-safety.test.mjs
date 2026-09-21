@@ -37,9 +37,19 @@ function functionSource(source, name) {
 
 const serverInput = { value: 'https://internal.example:443' };
 const opsTokenInput = { value: 'session-secret' };
+const opsTokenApply = { disabled: false, textContent: '应用' };
+const opsTokenFeedback = { textContent: '', dataset: {}, hidden: true };
+const requests = [];
+let requestResponse = Promise.resolve({ roles: [] });
+let refreshCount = 0;
+let refreshResult = true;
 const security = Function(
   'serverInput',
   'opsTokenInput',
+  'opsTokenApply',
+  'opsTokenFeedback',
+  'fetchJson',
+  'refreshAdmin',
   `
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
 ${functionSource(rendererSource, 'isLocalStaticAdminBaseUrl')}
@@ -59,10 +69,13 @@ ${functionSource(rendererSource, 'isOpsProtectedInternalRequest')}
 ${functionSource(rendererSource, 'normalizedInternalServerEndpoint')}
 ${functionSource(rendererSource, 'clearSystemSubscriptionSecrets')}
 ${functionSource(rendererSource, 'clearOpsToken')}
+${functionSource(rendererSource, 'setOpsTokenFeedback')}
+async ${functionSource(rendererSource, 'applyOpsToken')}
 ${functionSource(rendererSource, 'bindOpsTokenToCurrentServer')}
 ${functionSource(rendererSource, 'clearOpsTokenIfServerBaseChanged')}
 ${functionSource(rendererSource, 'opsTokenForRequest')}
 return {
+  applyOpsToken,
   bindOpsTokenToCurrentServer,
   clearOpsTokenIfServerBaseChanged,
   isOpsProtectedInternalRequest,
@@ -75,7 +88,13 @@ return {
   setDrawer: (value) => { state.userCenter.drawer = value; }
 };
 `
-)(serverInput, opsTokenInput);
+)(serverInput, opsTokenInput, opsTokenApply, opsTokenFeedback, (path) => {
+  requests.push({ path, token: security.opsTokenForRequest(new URL(path, serverInput.value), 'GET') });
+  return requestResponse;
+}, async () => {
+  refreshCount += 1;
+  return refreshResult;
+});
 
 security.bindOpsTokenToCurrentServer();
 assert.deepEqual(security.binding(), {
@@ -258,5 +277,55 @@ assert.match(
 );
 assert.match(htmlSource, /id="ops-token-input"[^>]*type="password"[^>]*autocomplete="off"/);
 assert.match(htmlSource, /Bound to the current MX Server origin; changing MX Server clears it\./);
+
+// Programmatic autofill deliberately dispatches no input event.
+serverInput.value = 'https://internal.example';
+opsTokenInput.value = 'autofilled-secret';
+await security.applyOpsToken();
+assert.deepEqual(requests.at(-1), {
+  path: '/internal/v1/user-center/roles',
+  token: 'autofilled-secret'
+});
+assert.equal(refreshCount, 1, 'explicit apply refreshes protected Admin data');
+assert.equal(opsTokenFeedback.dataset.kind, 'success');
+assert.equal(opsTokenApply.disabled, false);
+
+requestResponse = Promise.reject(new Error('unauthorized'));
+await security.applyOpsToken();
+assert.equal(opsTokenFeedback.dataset.kind, 'error', 'invalid credentials must not report success');
+assert.equal(refreshCount, 1, 'failed verification does not refresh the dashboard');
+assert.equal(opsTokenApply.disabled, false, 'failed requests can be retried');
+assert.ok(!opsTokenFeedback.textContent.includes('autofilled-secret'));
+
+requestResponse = Promise.resolve({ roles: [] });
+refreshResult = false;
+await security.applyOpsToken();
+assert.equal(opsTokenFeedback.dataset.kind, 'error', 'dashboard failure must not report a successful refresh');
+refreshResult = true;
+
+let resolveVerification;
+requestResponse = new Promise((resolve) => { resolveVerification = resolve; });
+const pendingApply = security.applyOpsToken();
+const requestCount = requests.length;
+assert.equal(opsTokenApply.disabled, true);
+await security.applyOpsToken();
+assert.equal(requests.length, requestCount, 'repeated submits cannot start concurrent verification');
+serverInput.value = 'https://other-internal.example';
+security.clearOpsTokenIfServerBaseChanged();
+const refreshesBeforeServerChange = refreshCount;
+resolveVerification({ roles: [] });
+await pendingApply;
+assert.equal(refreshCount, refreshesBeforeServerChange, 'an old-server verification cannot trigger a new-server refresh');
+assert.equal(opsTokenFeedback.hidden, true, 'stale completion cannot restore cleared feedback');
+assert.equal(opsTokenInput.value, '');
+assert.equal(opsTokenApply.disabled, false);
+
+await security.applyOpsToken();
+assert.equal(requests.length, requestCount, 'empty tokens do not send a request');
+assert.equal(opsTokenFeedback.dataset.kind, 'error');
+serverInput.value = 'not a URL';
+opsTokenInput.value = 'invalid-endpoint-secret';
+await security.applyOpsToken();
+assert.equal(requests.length, requestCount, 'invalid server addresses do not send a token');
 
 console.log('OK Internal ops token stays bound to one protected Internal origin');
