@@ -84,6 +84,8 @@ function validatedContinuation(state, { operation, platform, scope }) {
   if (state.continuation.type === 'params') {
     const value = state.continuation.value
     if (!record(value) || Object.keys(value).length === 0) invalidCursor()
+    const cursor = state.continuation.cursor
+    if (cursor != null && (typeof cursor !== 'string' || !cursor || cursor.length > 8_192)) invalidCursor()
     const requestPage = state.continuation.requestPage
     if (
       requestPage != null
@@ -95,6 +97,7 @@ function validatedContinuation(state, { operation, platform, scope }) {
       page: state.page,
       type: 'params',
       value: structuredClone(value),
+      cursor: cursor ?? null,
       requestPage: requestPage ?? null,
     }
   }
@@ -136,7 +139,8 @@ export function prepareNightAllCompatibilityTraversal({
     ? paramsCursor
     : null
 
-  if (wrappedTop && wrappedParams) invalidCursor()
+  // Old clients may send the retained params alias alongside the canonical cursor.
+  if (wrappedTop && wrappedParams && wrappedTop !== wrappedParams) invalidCursor()
   if (topCursor && !wrappedTop) {
     invalidCursor('Historical provider cursors cannot prove the 15-page boundary; restart from page 1')
   }
@@ -166,6 +170,7 @@ export function prepareNightAllCompatibilityTraversal({
     if (continuation.params) body.params = continuation.params
   } else if (continuation.type === 'params') {
     body.params = continuation.value
+    if (continuation.cursor != null) body.cursor = continuation.cursor
     if (continuation.requestPage != null) body.page = continuation.requestPage
   } else {
     body.page = continuation.value
@@ -255,13 +260,25 @@ export function capNightAllCompatibilityTraversal(payload, {
 
   let continuation = null
   let responseField = null
-  if (mode === 'composite' && upstreamParams) {
+  if ((mode === 'composite' || mode === 'compound') && upstreamParams) {
+    const params = structuredClone(upstreamParams)
+    if (mode === 'compound' && record(upstreamBody?.params)) {
+      // Keep query filters across pages, but never revive stale continuation state.
+      for (const [key, value] of Object.entries(upstreamBody.params)) {
+        if (!hasContinuationParams({ [key]: value }) && !Object.hasOwn(params, key)) {
+          params[key] = structuredClone(value)
+        }
+      }
+    }
     continuation = {
       type: 'params',
-      value: upstreamParams,
+      value: params,
+      // Night-All compound pages keep cursor separate from search_id/backtrace.
+      ...(mode === 'compound' && upstreamCursor ? { cursor: upstreamCursor } : {}),
       ...(nextPage == null ? {} : { requestPage: nextPage }),
     }
-    responseField = 'params'
+    // Preserve the existing public cursor shape for compound-page collectors.
+    responseField = mode === 'compound' && upstreamCursor ? 'cursor' : 'params'
   } else if (upstreamCursor) {
     const stableParams = record(upstreamBody?.params) && !hasContinuationParams(upstreamBody.params)
       ? structuredClone(upstreamBody.params)
@@ -307,8 +324,9 @@ export function capNightAllCompatibilityTraversal(payload, {
     page.nextPage = null
     page.paginationMode = 'cursor'
   } else {
-    page.nextCursor = null
-    page.providerCursor = null
+    // All callers can use nextCursor; keep the old composite alias during migration.
+    page.nextCursor = wrapped
+    page.providerCursor = wrapped
     page.nextParams = { cursor: wrapped }
     page.nextPage = null
     page.paginationMode = 'composite'

@@ -184,8 +184,8 @@ test('offset pagination hides provider params and restores params plus page inte
 
   assert.deepEqual(capped.data.acquired, original.data.acquired)
   assert.equal(capped.data.page.nextPage, null)
-  assert.equal(capped.data.page.nextCursor, null)
-  assert.equal(capped.data.page.providerCursor, null)
+  assert.equal(capped.data.page.nextCursor, capped.data.page.nextParams.cursor)
+  assert.equal(capped.data.page.providerCursor, capped.data.page.nextCursor)
   assert.equal(capped.data.page.paginationMode, 'composite')
   assert.deepEqual(Object.keys(capped.data.page.nextParams), ['cursor'])
   assert.ok(capped.data.page.nextParams.cursor.startsWith(NIGHT_ALL_COMPATIBILITY_CURSOR_PREFIX))
@@ -474,4 +474,112 @@ test('composite search sessions may remain stable while the page advances', () =
     assert.deepEqual(traversal.upstreamBody.params, params)
     previousCursor = cursor
   }
+})
+
+
+test('Douyin compound pagination preserves the cursor and search context inside the public cursor', () => {
+  const options = { operation: 'raw', platform: 'douyin', codec: codec() }
+  const request = { platform: 'douyin', query: '智象大模型', count: 20 }
+  const initial = prepareNightAllCompatibilityTraversal({ ...options, upstreamBody: request })
+  // Night-All emits compound (not composite) and keeps the primary cursor
+  // separate from nextParams when search_id/backtrace are present.
+  const providerParams = { search_id: 'douyin-search-1', backtrace: 'douyin-backtrace-1' }
+  const original = envelope({
+    hasMore: true,
+    paginationMode: 'compound',
+    nextCursor: '8',
+    providerCursor: '8',
+    nextParams: providerParams,
+    nextPage: null,
+  })
+  const snapshot = structuredClone(original)
+  const capped = capNightAllCompatibilityTraversal(original, {
+    ...options, page: initial.page, scope: initial.scope,
+  })
+
+  // Keep the existing public single-cursor shape so collectors do not need
+  // a coordinated release to retain the previously dropped provider params.
+  assert.equal(capped.data.page.paginationMode, 'cursor')
+  assert.equal(capped.data.page.nextParams, null)
+  assert.ok(capped.data.page.nextCursor.startsWith(NIGHT_ALL_COMPATIBILITY_CURSOR_PREFIX))
+  assert.doesNotMatch(capped.data.page.nextCursor, /douyin-search|douyin-backtrace/u)
+  const next = prepareNightAllCompatibilityTraversal({
+    ...options, upstreamBody: { ...request, cursor: capped.data.page.nextCursor },
+  })
+  assert.equal(next.page, 2)
+  assert.deepEqual(next.upstreamBody, { ...request, cursor: '8', params: providerParams })
+  assert.deepEqual(original, snapshot)
+  assert.equal(capped.data.raw_info, original.data.raw_info)
+  assert.equal(capped.data.raw_data, original.data.raw_data)
+
+  const terminal = capNightAllCompatibilityTraversal(original, {
+    ...options, page: 15, scope: initial.scope,
+  })
+  assert.equal(terminal.data.page.hasMore, false)
+  assert.equal(terminal.data.page.nextCursor, null)
+  assert.equal(terminal.data.page.nextParams, null)
+})
+
+test('params continuations reject malformed optional primary cursors', () => {
+  const traversal = initialTraversal()
+  for (const cursor of [8, '', true, {}]) {
+    const token = codec().encode({
+      contract: 'mx-insight-hub.night-all-compatibility-cursor.v1',
+      operation: OPERATION, platform: PLATFORM, scope: traversal.scope, page: 2,
+      continuation: { type: 'params', value: { search_id: 'search-1' }, cursor },
+    })
+    assertInvalidCursor(() => initialTraversal({ cursor: token }))
+  }
+})
+
+
+test('compound pagination keeps filters over multiple pages and replaces continuation state', () => {
+  const options = { operation: 'raw', platform: 'douyin', codec: codec() }
+  const request = { platform: 'douyin', query: '智象大模型', count: 20 }
+  const filters = { sort_type: '2', publish_time: '7' }
+  let traversal = prepareNightAllCompatibilityTraversal({
+    ...options, upstreamBody: { ...request, params: filters },
+  })
+  for (const [index, cursor] of ['8', '16'].entries()) {
+    const params = { search_id: 'same-search', backtrace: `backtrace-${index}` }
+    // A continuation present on page 2 but absent from page 3 must not be revived.
+    if (index === 0) params.search_session_id = 'previous-session'
+    const result = capNightAllCompatibilityTraversal(envelope({
+      hasMore: true, paginationMode: 'compound', nextCursor: cursor,
+      providerCursor: cursor, nextParams: params, nextPage: null,
+    }), { ...options, page: traversal.page, scope: traversal.scope,
+      upstreamBody: traversal.upstreamBody })
+    traversal = prepareNightAllCompatibilityTraversal({
+      ...options, upstreamBody: { ...request, cursor: result.data.page.nextCursor },
+    })
+    assert.equal(traversal.page, index + 2)
+    assert.deepEqual(traversal.upstreamBody, {
+      ...request, cursor, params: { ...filters, ...params },
+    })
+  }
+})
+
+
+test('uniform cursor and legacy params alias restore the same composite continuation', () => {
+  const first = initialTraversal()
+  const capped = capNightAllCompatibilityTraversal(envelope({
+    hasMore: true, paginationMode: 'composite',
+    nextParams: { offset: 20, search_id: 'search-1' }, nextPage: 2,
+  }), { operation: OPERATION, platform: PLATFORM, page: first.page,
+    scope: first.scope, codec: codec() })
+  const cursor = capped.data.page.nextCursor
+  assert.ok(cursor?.startsWith(NIGHT_ALL_COMPATIBILITY_CURSOR_PREFIX))
+  assert.equal(cursor, capped.data.page.nextParams.cursor)
+  const canonical = initialTraversal({ cursor })
+  assert.deepEqual(initialTraversal({ params: { cursor } }), canonical)
+  assert.deepEqual(initialTraversal({ cursor, params: { cursor } }), canonical)
+  assert.equal(canonical.page, 2)
+  assert.deepEqual(canonical.upstreamBody.params, { offset: 20, search_id: 'search-1' })
+  assert.equal(canonical.upstreamBody.page, 2)
+
+  const different = capNightAllCompatibilityTraversal(envelope({
+    hasMore: true, paginationMode: 'cursor', nextCursor: 'another-provider-cursor',
+  }), { operation: OPERATION, platform: PLATFORM, page: first.page,
+    scope: first.scope, codec: codec() }).data.page.nextCursor
+  assertInvalidCursor(() => initialTraversal({ cursor, params: { cursor: different } }))
 })

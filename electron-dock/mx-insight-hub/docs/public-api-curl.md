@@ -1287,11 +1287,16 @@ Hub-native 子集会稳定返回 `400 invalid_user_profile_url`（非官方小�
 `400 cursor_page_mismatch`（显式 page 与 direct crawl cursor 冲突）或
 `404 user_not_found`（无法解析目标用户）。
 
-三条历史执行路径的 cursor/composite/page/offset continuation 统一由 Hub 加密包装为 `mxnc1`，并绑定
-consumer、operation、platform、稳定 query/account scope 和下一页。cursor/page 响应把密文放在
-`data.page.nextCursor` 并对外标记为 cursor mode；composite/offset 响应放在
-`data.page.nextParams.cursor` 并对外标记为 composite mode。裸 `nextPage` 和 offset 不会暴露。调用方只原样回传这个
-Hub cursor，不得解码或把 Night-All/provider continuation 拼回 `params`。每个下一页必须生成
+三条历史执行路径的 cursor/compound/composite/page/offset continuation 统一由 Hub 加密包装为
+`mxnc1`，并绑定 consumer、operation、platform、稳定 query/account scope 和下一页。
+所有可继续的分页形态统一从 `data.page.nextCursor` 读取 Hub 游标，下一次原样放入请求的
+顶层 `cursor`，保持原查询条件和条数不变。调用方不按平台或 `paginationMode` 拼装续页参数，
+也不自行递增上游页码。Hub 内部负责还原主游标、搜索会话、offset 或页码。
+
+为兼容既有客户端，composite/offset 响应仍保留 `data.page.nextParams.cursor` 和原有
+`paginationMode`；该字段是同一个 Hub 游标的旧入口，不是另一组上游参数。旧调用方式继续可用；
+若请求同时携带顶层 cursor 和 params.cursor，两者必须完全相同。裸 `nextPage` 和 offset
+不会暴露。不得解码游标或把 Night-All/provider continuation 拼回 `params`。每个下一页必须生成
 新的 `Idempotency-Key`；同一页的完全相同传输重试才复用原 Key。
 
 所有遍历最多 15 页。第 15 页将 `hasMore` 置为 `false`，并清空 `nextCursor`、

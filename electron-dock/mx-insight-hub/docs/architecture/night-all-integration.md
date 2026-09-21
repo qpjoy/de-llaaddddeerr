@@ -92,10 +92,38 @@ The three compatibility operations and every non-Telegram Night-All-backed
 After page 1, Hub encrypts the complete cursor, composite/offset `nextParams`, or
 next page number inside an `mxnc1` cursor. Authenticated state binds the consumer,
 operation, platform, stable query/account scope and next page, so it cannot cross
-any of those boundaries. Page continuations are publicly projected as cursor
-mode; offset continuations as composite mode, so no bare `nextPage` or offset
-leaves Hub. `/data/search` uses operation `data-search`; the three compatibility
-routes use their respective `raw`, `crawl` or `user-info` operation.
+any of those boundaries. Every compatibility continuation now has a canonical
+`data.page.nextCursor`: clients return it unchanged as the top-level request
+`cursor`, regardless of platform or pagination mode. Composite/offset responses
+retain their old `nextParams: { cursor }` alias and mode for existing callers;
+both aliases decode identically, and conflicting aliases fail closed. No bare
+`nextPage` or offset leaves Hub. `/data/search` retains its own versioned
+`pageInfo.nextCursor` envelope and uses operation `data-search`; the three
+compatibility routes use their respective `raw`, `crawl` or `user-info` operation.
+
+The contract owner is Hub. Legacy TikHub wire-parameter mapping currently runs
+inside Night-All; Hub-native connectors own their own mapping. A caller never
+constructs supplier pagination fields. Adaptation and verification must be scoped
+by provider + platform + operation + endpoint/version, not provider alone:
+
+| Current keyword-search endpoint family | Internal continuation examples |
+| --- | --- |
+| Douyin video V1 / general V2 | cursor + search_id + backtrace |
+| TikTok web general | offset + search_id |
+| Zhihu article V3 | offset + search_hash_id |
+| Instagram general V3 | next_max_id + rank_token |
+| Xiaohongshu app V2 search | page + search_id |
+| Weibo realtime / Bilibili general | page |
+| WeChat search V2 | offset |
+| Reddit dynamic / YouTube general / Kuaishou comprehensive | endpoint-specific opaque token |
+
+This table describes the local reviewed catalog and offline fixtures, not current
+supplier health. It does not extend a search contract to comments, user posts,
+other API versions or another endpoint of the same platform. Adapters must preserve
+query filters, session state, terminal signals and endpoint identity. A continuation
+cannot be assumed portable between fallback endpoints. This change fixes state
+loss and the public cursor entry point; it does not rewrite Night-All's existing
+candidate-fallback policy or assert that its endpoints share a search session.
 
 Each next page is a new business request and uses a new `Idempotency-Key`; an
 exact transport retry of the same page reuses that page's key. Page 15 is

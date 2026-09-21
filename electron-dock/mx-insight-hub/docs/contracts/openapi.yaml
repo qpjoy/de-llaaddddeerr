@@ -3990,10 +3990,12 @@ paths:
         comment controls, params, explicit cache age,
         concurrency, non-20 pages and plural queries remain on
         the historical compatibility path. That path replaces provider cursor,
-        composite, page or offset continuation controls with a consumer/operation/
+        compound, composite, page or offset continuation controls with a consumer/operation/
         platform/query-scoped encrypted mxnc1 cursor carrying the next page
-        number. Public page mode becomes cursor mode, public offset mode becomes
-        composite mode, and page 15 is terminal. Pre-migration raw provider
+        number. Every continuation is available as data.page.nextCursor and is
+        returned unchanged as the request cursor. Composite/offset responses
+        retain their nextParams.cursor alias and mode for legacy clients; both
+        cursor aliases must match when sent together. Page 15 is terminal. Pre-migration raw provider
         cursors/continuation params return
         400 invalid_cursor and must restart without a cursor and with a new
         Idempotency-Key. The direct projection keeps raw_info
@@ -8543,7 +8545,7 @@ components:
           oneOf:
             - { type: integer, minimum: 1, maximum: 15 }
             - { type: string, pattern: "^(?:[1-9]|1[0-5])$" }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: "Opaque Hub cursor returned by the preceding page. Historical raw provider cursors return invalid_cursor; restart without cursor and use a new Idempotency-Key." }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: "Return data.page.nextCursor unchanged here for every compatibility pagination mode. Historical raw provider cursors return invalid_cursor; restart without cursor and use a new Idempotency-Key." }
         concurrency:
           oneOf:
             - { type: integer, minimum: 1, maximum: 20 }
@@ -8566,7 +8568,7 @@ components:
             - { type: integer, minimum: 1, maximum: 5 }
             - { type: string, pattern: "^[1-5]$" }
         activityTypes: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
-        params: { type: object, additionalProperties: true, description: "Safe non-continuation platform values are accepted on page one. For continuation, return the exact Hub-issued nextParams object (currently {cursor: mxnc1...}); raw provider continuation material fails closed. Rejected keys and workload overrides are listed by x-mx-rejected-params." }
+        params: { type: object, additionalProperties: true, description: "Safe non-continuation platform values are accepted on page one. All next pages can use the top-level cursor from data.page.nextCursor. The Hub-issued nextParams object (currently {cursor: mxnc1...}) remains a legacy alias; if both cursor entries are sent they must match. Raw provider continuation material fails closed. Rejected keys and workload overrides are listed by x-mx-rejected-params." }
     NightAllLegacyEnvelope:
       type: object
       additionalProperties: true
