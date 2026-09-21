@@ -7,7 +7,7 @@
 先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS。用户最新安排：先 po_infra，再 delta；po_infra 可安排 10–30 分钟维护窗口。后台预复制不设四小时退出，优先完成单卷；真实复制错误仍报告失败。原数据保留到校验、切换和业务验收通过，之后用户已授权回收对应旧 raw_media；原 named volume 和其他目录保留。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**用户已完成第一卷在线预复制；尚未切换生产、删除原数据或回收 SSD。**
 
 - 最新现场结论：[运行版本、临时文件占用和权限门槛](evidence/2026-09-22-live-findings.md)。两个目录合计 1,426.04 GiB，其中 tmp 960.46 GiB；保留全部文件，不凭名称清理。
-- 第一卷 po_infra 预复制已成功：497.71 GiB，3 小时 10 分 35 秒，退出 0；两项 ready 仍为 false。下一步执行 [在线全量 SHA256 校验](operations/online-verification.md)，保留本地清单，暂不停止业务或开始第二卷。不限速续跑选项留在 [复制文档](operations/two-night-migration.md)，这次无需为改速率重跑已完成的复制。
+- 第一卷 po_infra 预复制已成功：497.71 GiB，3 小时 10 分 35 秒，退出 0。**最新决定：用户取消额外全量 SHA256 复读，采用 [rsync 增量同步与切换流程](operations/rsync-cutover.md)**。先停止校验单元，运行 `scripts/nas-cutover-prepare.sh po_infra_media_data --prepare` 检查 Docker NFS 子卷并生成固定镜像的候选配置；再安排停写、最终逐路径检查和业务切换。原 SSD 副本保留至验收，第二卷暂不启动。[SHA256 工具](operations/online-verification.md) 保留为可选检查，不再作为硬性前置条件。
 - 两卷小批复制及 delta 短时吞吐均已通过：1.513 GiB / 31.708 秒，rsync 阶段 55.401 MiB/s。执行流程见 [两晚分卷执行与在线预复制](operations/two-night-migration.md)，无需重复试拷；po_infra 单遍算术外推约 2.55 小时，不是完整迁移时长承诺。
 - 用户确认 NAS 没有独立备份，最新决定暂缓阿里云备份；服务器链路已确认千兆全双工，/data 剩余 57G；群晖管理凭据遗忘且 SSH 超时，后端健康暂未确认。用户要求先开始 [po_infra 在线预复制](operations/two-night-migration.md)，不再等待管理端登录；[后端检查](operations/nas-health-and-oss.md) 留待具备访问条件时补充。OSS 价格仅保留为历史预算，不作为本轮前置条件。
 - 默认方向调整：[原生存储、启动边界与数据库扩展](operations/storage-platform.md)。优先 Docker NFS volume / K8s PV/CSI，保持 Docker 全局 NAS 依赖禁用。

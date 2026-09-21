@@ -1,5 +1,7 @@
 # po_infra 第一卷预复制后的在线完整校验
 
+**当前此工具为可选项：用户已明确取消额外全量 SHA256 复读，改按 [rsync 常规切换流程](rsync-cutover.md) 准备切换。先停止 `mx-nas-verify-po-1.service`，保留局部报告，不再要求运行完下文流程。这里的历史操作说明不覆盖用户的新决定。**
+
 ## 已收到的结果
 
 2026-09-22 用户回传 `mx-nas-part1-po.service: Succeeded.`，作业 `1e9cdad9efd741338d3fdcb82f327ba5`，`last_exit_code=0`、`phase=precopy_pass_complete`。总文件大小 534,415,703,995 bytes，约 497.71 GiB；北京时间 03:04:04.524 至 06:14:39.778，共 3 小时 10 分 35 秒。总大小除以时长约 44.57 MiB/s，是整轮等效吞吐，不是瞬时网卡速率。
