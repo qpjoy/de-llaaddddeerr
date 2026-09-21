@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 // Bump when the mapping below changes so revisions record which parser produced
 // them and historical rows can be recomputed selectively.
-export const PARSER_VERSION = 'mxih-normalizer.v1'
+export const PARSER_VERSION = 'mxih-normalizer.v2'
 export const SCHEMA_VERSION = 'content.v1'
 export const DATASET_ID = 'night-all.search.v1'
 export const CONNECTOR_ID = 'night-all'
@@ -139,11 +139,9 @@ const PLATFORM_HOOKS = {
     return record
   },
   twitter(record, item) {
-    // Tweets have no title; surface a trimmed body prefix so list views and the
-    // ES `title` field are not empty.
-    if (!record.title && record.body) {
-      record.title = record.body.length > 80 ? `${record.body.slice(0, 80)}…` : record.body
-    }
+    // Tweets have no source title. Older Night-All rows may still carry a
+    // generated display label; retain that evidence in rawItem, not title.
+    record.title = null
     if (!record.contentType) record.contentType = 'tweet'
     const handle = text(item?.author?.handle) || text(item?.author?.username)
     if (handle) record.stableFields.author.handle = handle
@@ -195,7 +193,12 @@ export function normalizeSearchPayload(payload, platform) {
     }
     record.rank = index + 1
     record.rawItem = item
-    record.payloadSha256 = sha256(canonicalJson(contentPayload(item)))
+    // Re-observing an older Twitter row must also revise/reindex its corrected
+    // title, even when the upstream payload itself has not changed.
+    const content = contentPayload(item)
+    record.payloadSha256 = sha256(canonicalJson(platform === 'twitter'
+      ? { parserVersion: PARSER_VERSION, content }
+      : content))
     records.push(record)
   }
   return { records, skipped }

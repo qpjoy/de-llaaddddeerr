@@ -1,9 +1,9 @@
 import { parseNightAllLegacyArray } from '../contracts/night-all-legacy.mjs'
-import { applyMapping, CHUNKER_VERSION } from './external/mapping.mjs'
+import { applyMapping, CHUNKER_VERSION, refreshMappedPayloadSha256 } from './external/mapping.mjs'
 
 export const NIGHT_ALL_COMPAT_DATASET_ID = 'night-all.compat.v1'
 export const NIGHT_ALL_COMPAT_CONNECTOR_ID = 'night-all-legacy'
-export const NIGHT_ALL_COMPAT_PARSER_VERSION = `${CHUNKER_VERSION}:night-all-legacy.v1`
+export const NIGHT_ALL_COMPAT_PARSER_VERSION = `${CHUNKER_VERSION}:night-all-legacy.v2`
 
 const CONTENT_FIELD_MAP = {
   externalId: { from: [
@@ -85,6 +85,13 @@ function decorate(record, raw, kind, { connectorId, parserVersion }) {
       ?? raw.avatar_url
       ?? raw.avatarUrl
       ?? null
+  }
+  if (kind === 'content' && record.platform === 'twitter') {
+    record.title = null
+    // The canonical digest must describe the corrected fields. Keep the raw
+    // payload and its independent digest intact for historical evidence.
+    delete record.payloadSha256
+    refreshMappedPayloadSha256(record)
   }
   return record
 }

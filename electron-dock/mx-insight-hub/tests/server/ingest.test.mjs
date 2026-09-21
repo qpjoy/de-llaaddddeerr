@@ -72,12 +72,13 @@ test('items without an external id are skipped rather than given a synthetic key
   assert.equal(records[0].externalId, 'note-1')
 })
 
-test('twitter items get a title derived from the body', () => {
+test('twitter items keep title empty and retain the body', () => {
   const { records } = normalizeSearchPayload(
     { data: { items: [{ externalId: 't-1', text: 'hello world', author: { id: 'a' } }] } },
     'twitter',
   )
-  assert.equal(records[0].title, 'hello world')
+  assert.equal(records[0].title, null)
+  assert.equal(records[0].body, 'hello world')
   assert.equal(records[0].contentType, 'tweet')
 })
 
