@@ -1,5 +1,7 @@
 """Isolated local fixtures for the full pre-copy guard; no Docker/NAS access."""
 import json
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
@@ -105,6 +107,41 @@ class PrecopyTests(unittest.TestCase):
         self.assertTrue(command[-2].endswith('/'))
         self.assertTrue(command[-1].endswith('/'))
 
+    def test_unlimited_only_changes_bandwidth_and_reuses_same_job(self):
+        _, target, state = self.job()
+        limited = precopy.copy_command(self.source_fd, target, state)
+        unlimited = precopy.copy_command(self.source_fd, target, state, unlimited=True)
+        self.assertEqual(unlimited, ['--bwlimit=0' if arg == '--bwlimit=61440' else arg for arg in limited])
+        self.assertFalse(state['cutover_ready'])
+        self.assertFalse(state['reclaim_ready'])
+        self.assertEqual(self.job()[2]['job_id'], state['job_id'])
+
+    def test_shell_rejects_unlimited_for_status_or_arbitrary_extra_args(self):
+        script = str(ROOT / 'scripts/nas-precopy.sh')
+        for args in (['po_infra_media_data', '--status', '--unlimited'],
+                     ['po_infra_media_data', '--copy', '--delete'],
+                     ['po_infra_media_data', '--copy', '--unlimited', '--unlimited']):
+            result = subprocess.run(['bash', script] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(result.returncode, 2)
+
+    def test_progress_is_readable_bounded_and_preserves_error_exit(self):
+        # Actual child output with CR progress, a non-UTF8 byte, and exit 24.
+        child = ("import sys; "
+                 "[sys.stdout.buffer.write(('%d 50%% 55.0MB/s 0:00:01\\r' % n).encode()) for n in range(100)]; "
+                 "sys.stdout.buffer.write(b'Total transferred file size: 100 bytes\\n'); "
+                 "sys.stdout.flush(); sys.stderr.buffer.write(b'rsync: vanished \\xff\\n'); sys.exit(24)")
+        capture = io.StringIO()
+        with contextlib.redirect_stdout(capture), patch.object(precopy.time, 'monotonic', return_value=100):
+            status = precopy.run_rsync([sys.executable, '-c', child], ())
+        records = [json.loads(line) for line in capture.getvalue().splitlines()]
+        self.assertEqual(status, 24)
+        updates = [r for r in records if r['event'] == 'rsync_progress']
+        self.assertEqual(len(updates), 2)  # First and final, not 100 journal entries.
+        self.assertTrue(updates[-1]['text'].startswith('99 '))
+        self.assertTrue(any(r['text'].startswith('Total transferred') for r in records))
+        self.assertTrue(any(r['text'].startswith('rsync: vanished') for r in records))
+        self.assertNotIn('\r', capture.getvalue())
+
     @unittest.skipUnless(shutil.which('rsync'), 'rsync unavailable')
     def test_real_rsync_precopy_keeps_source_and_resumes_without_overwriting_unrelated_files(self):
         job, target, state = self.job()
@@ -117,14 +154,16 @@ class PrecopyTests(unittest.TestCase):
             return str(self.source if fd == self.source_fd else target_path)
         with patch.object(precopy, 'descriptor_path', side_effect=local_descriptor):
             command = precopy.copy_command(self.source_fd, target, state)
-        # macOS rsync 2.6.9 lacks progress2; test actual copying with other flags.
-        command = [arg for arg in command if arg != '--info=progress2']
+        # macOS rsync 2.6.9 lacks these log flags; keep all copying options.
+        command = [arg for arg in command if arg not in ('--info=progress2', '--outbuf=N')]
         first = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(first.returncode, 0, first.stderr)
         (target_path / 'unrelated-retain').write_bytes(b'do not delete')
         (self.source / 'video/raw-media-live.tmp').write_bytes(b'changed source is copied on next pass')
-        second = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(second.returncode, 0, second.stderr)
+        command = ['--bwlimit=0' if arg == '--bwlimit=61440' else arg for arg in command]
+        with contextlib.redirect_stdout(io.StringIO()):
+            second_status = precopy.run_rsync(command, (self.source_fd, target))
+        self.assertEqual(second_status, 0)
         self.assertEqual((target_path / 'unrelated-retain').read_bytes(), b'do not delete')
         self.assertEqual((target_path / 'video/raw-media-live.tmp').read_bytes(),
                          (self.source / 'video/raw-media-live.tmp').read_bytes())

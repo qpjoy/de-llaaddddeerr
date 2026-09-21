@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -167,17 +168,50 @@ def open_job(parent_fd, volume, source_fd, fingerprint, create):
         raise
 
 
-def copy_command(source_fd, target_fd, state):
-    return ['rsync', '-a', '--numeric-ids', '--one-file-system', '--info=progress2', '--stats',
-            '--bwlimit=61440', '--partial-dir=.mx-static-partial-' + state['job_id'], '--',
+def copy_command(source_fd, target_fd, state, unlimited=False):
+    return ['rsync', '-a', '--numeric-ids', '--one-file-system', '--info=progress2', '--stats', '--outbuf=N',
+            '--bwlimit=0' if unlimited else '--bwlimit=61440',
+            '--partial-dir=.mx-static-partial-' + state['job_id'], '--',
             descriptor_path(source_fd) + '/', descriptor_path(target_fd) + '/']
 
 
+def run_rsync(command, pass_fds):
+    # rsync progress uses carriage returns. Decode them as lines, then emit JSON
+    # so journald does not collect giant non-printable "blob data" records.
+    environment = dict(os.environ, LC_ALL='C')
+    progress = re.compile(r'^\s*[0-9,]+\s+[0-9]+%\s+\S+/s\s+')
+    last_progress = float('-inf')
+    pending = None
+    with subprocess.Popen(command, pass_fds=pass_fds, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, universal_newlines=True,
+                          encoding='utf-8', errors='replace', bufsize=1,
+                          env=environment) as process:
+        for raw in iter(lambda: process.stdout.readline(16384), ''):
+            line = raw.strip()
+            if not line:
+                continue
+            if progress.match(line):
+                pending = line
+                now = time.monotonic()
+                if now - last_progress >= 5:
+                    emit('rsync_progress', text=pending)
+                    pending = None
+                    last_progress = now
+            else:
+                # Never suppress errors or the final --stats output.
+                emit('rsync_output', text=line)
+        if pending is not None:
+            emit('rsync_progress', text=pending)
+        return process.wait()
+
+
 def main():
-    if (len(sys.argv) != 3 or sys.argv[1] not in VOLUMES or sys.argv[2] not in ('--copy', '--status')
+    if (len(sys.argv) not in (3, 4) or sys.argv[1] not in VOLUMES or sys.argv[2] not in ('--copy', '--status')
+            or (len(sys.argv) == 4 and (sys.argv[2] != '--copy' or sys.argv[3] != '--unlimited'))
             or not sys.platform.startswith('linux') or os.geteuid() != 0):
-        raise SystemExit('Use sudo bash scripts/nas-precopy.sh <known-volume> --copy|--status on Linux.')
-    volume, mode = sys.argv[1:]
+        raise SystemExit('Use sudo bash scripts/nas-precopy.sh <known-volume> --copy [--unlimited] or --status on Linux.')
+    volume, mode = sys.argv[1:3]
+    unlimited = len(sys.argv) == 4
     held = []
     try:
         check_host()
@@ -206,16 +240,18 @@ def main():
         if mode == '--status':
             emit('precopy_state', **state)
             return 0
-        state.update(phase='precopy_running', started_at_unix=time.time(), last_exit_code=None)
+        state.update(phase='precopy_running', started_at_unix=time.time(), last_exit_code=None,
+                     bandwidth_limit_mib_per_second=0 if unlimited else 60)
         write_state(job, state)
-        emit('precopy_start', target=state['target'], bandwidth_limit_mib_per_second=60,
+        emit('precopy_start', target=state['target'], bandwidth_limit_mib_per_second=0 if unlimited else 60,
+             bandwidth_unlimited=unlimited,
              note='Online pre-copy only. No stop, cutover or deletion. Keep all original files.')
-        result = subprocess.run(copy_command(source, target, state), pass_fds=(source, target, lock))
-        state.update(last_exit_code=result.returncode, finished_at_unix=time.time(),
-                     phase='precopy_pass_complete' if result.returncode == 0 else 'precopy_failed')
+        exit_code = run_rsync(copy_command(source, target, state, unlimited=unlimited), (source, target, lock))
+        state.update(last_exit_code=exit_code, finished_at_unix=time.time(),
+                     phase='precopy_pass_complete' if exit_code == 0 else 'precopy_failed')
         write_state(job, state)
         emit('precopy_result', **state)
-        return 0 if result.returncode == 0 else 1
+        return 0 if exit_code == 0 else 1
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         emit('precopy_refused_or_failed', error=str(exc),
              note='Keep source and target. No cutover/reclamation. An interrupted marker is not completion.')

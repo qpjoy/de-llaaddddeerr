@@ -2,9 +2,12 @@
 set -euo pipefail
 usage() {
   cat <<'HELP'
-Usage: sudo bash scripts/nas-precopy.sh <po_infra_media_data|delta_59202_media_data> --copy|--status
+Usage: sudo bash scripts/nas-precopy.sh <po_infra_media_data|delta_59202_media_data> --copy [--unlimited]
+       sudo bash scripts/nas-precopy.sh <known-volume> --status
 --copy creates/resumes this volume's guarded NAS target and copies ALL raw media,
 including tmp, at up to 60 MiB/s. This is a FULL ONLINE PRE-COPY, not a small test.
+--unlimited removes the rsync bandwidth cap for this invocation only.
+It does not change an already running copy. All storage guards still apply.
 --status reads an existing job; it refuses while another copy/test holds the lock.
 Never stops containers, cuts over storage, deletes originals or reclaims space.
 No built-in deadline: the documented run uses RuntimeMaxSec=infinity.
@@ -13,7 +16,7 @@ An exit-0 pre-copy is NOT a consistent final backup or permission to delete SSD 
 HELP
 }
 case "${1:-help}" in -h|--help|help) usage; exit 0 ;; esac
-[[ $# == 2 ]] || { usage >&2; exit 2; }
+[[ $# == 2 || ( $# == 3 && "${2:-}" == --copy && "${3:-}" == --unlimited ) ]] || { usage >&2; exit 2; }
 case "$1" in po_infra_media_data|delta_59202_media_data) ;; *) usage >&2; exit 2 ;; esac
 case "$2" in --copy|--status) ;; *) usage >&2; exit 2 ;; esac
 [[ "$(uname -s)" == Linux && "$EUID" == 0 ]] || { echo 'Run as root on the Linux Docker host.' >&2; exit 2; }

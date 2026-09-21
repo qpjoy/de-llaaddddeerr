@@ -182,3 +182,25 @@ rsync 耗时包含文件传输和其内部操作；单独 fsync 几乎无耗时�
 依据已通过的 NFS 挂载身份、root 写入/属性、样本内容校验及短时吞吐，开始第一卷 po_infra_media_data 的受控在线预复制，全部原数据保留，不等待 NAS SSH 或云端备份。本轮不再扩展端口探测/尝试账号，不重置 NAS 或停生产服务。底层健康、快照状态继续标记未确认，不能因设备新购或品牌而推断健康。
 
 执行入口为 [两晚分卷安排](../operations/two-night-migration.md)，无限时单卷预复制。尚未收到该正式作业的启动/完成回传，因此不记录为已执行或已成功。预复制后仍需完整校验、最终同步、挂载与任务恢复验收，才能按已授权范围回收旧 SSD 媒体。
+
+## 正式预复制启动与进度显示回传
+
+用户已运行无截止时限的 systemd-run，得到 `Running as unit: mx-nas-part1-po.service`。随后 03:04:23–03:05:01 的 journal 截图持续出现 `[48.0K blob data]`/`[47.9K blob data]`，当时尚未提供展开后的 rsync 字节、速率、进度或最后退出结果。不能从 blob 大小推断速度、数据损坏或整卷完成。
+
+用户询问能否不限速。已增加显式 `--unlimited`（rsync bwlimit=0），保留原默认值与所有存储检查；旧进程不能靠改脚本热调速。新增日志转为单行 JSON，进度约每 5 秒输出，保留错误/统计与 rsync 退出码。具体旧日志展开、受控停止复制单元并沿同一目标续跑的命令见 [执行文档](../operations/two-night-migration.md)。此修改未确认在服务器应用，不会将源码修改记录成现场已经不限速。
+
+随后展开日志截图显示 `7,932,663,327  1%  35.95MB/s  0:03:30 (xfr#92649, to-chk=101256/193909)`，下一行仅显示 `7,932,702,365`。已累计传输约 7.39 GiB，截图时持续传输，尚未收到最终退出码或 `precopy_result`。文件数量多而字节占比低，当前阶段小文件较多；显示速率低于默认上限，不能据此断言取消限速能明显提速，后续大文件阶段仍需观察。该输出不是完整内容校验、切换或 SSD 清理凭据。
+
+## 第一卷正式预复制成功回传
+
+用户随后回传 `total size is 534,415,703,995 speedup is 1.00`、完整 `precopy_result` 和 `mx-nas-part1-po.service: Succeeded.`：
+
+- volume=`po_infra_media_data`，job_id=`1e9cdad9efd741338d3fdcb82f327ba5`。
+- phase=`precopy_pass_complete`，last_exit_code=0，cutover_ready=false，reclaim_ready=false。
+- source_identity：device=66309、inode=1083500031；target_inode=384598076。
+- consumer_fingerprint=`f3f3605e8e80453b3b86e50b465b3fab0b4e0d1b3fdb05731576b749f7e3c7e4`。
+- target=`/mnt/nas/mx-internal-server/data/docker/media-volumes/po_infra_media_data/data_hub_raw_media`。
+- started_at_unix=1790017444.5244474，finished_at_unix=1790028879.777642；北京时间 2026-09-22 03:04:04.524 至 06:14:39.778。
+- 历时 11,435.253 秒（3 小时 10 分 35 秒）；总文件大小约 497.71 GiB，按总大小/总时间计算等效 44.57 MiB/s，不等同于网卡瞬时吞吐或已做 SHA256 验收。
+
+第一卷在线复制已实际完成，原 SSD 数据仍保留，不能记录为业务已切换或空间已回收。未收到新的 df，不能假定仍有 57G 可用。下一步为 [在线完整内容校验](../operations/online-verification.md)，工具已经本地实现并测试，尚未取得现场校验结果；不为了取消限速重新跑本轮复制，不并发启动第二卷。
