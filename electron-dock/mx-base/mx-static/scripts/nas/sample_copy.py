@@ -47,7 +47,10 @@ def select_sample(root_fd):
         try:
             if os.fstat(folder).st_dev != device:
                 raise RuntimeError('Refused source submount: ' + category)
-            with os.scandir(folder) as entries:
+            # scandir accepts directory fds only since Python 3.7. On Linux
+            # 3.6, /proc still pins the scan to this checked, open directory.
+            scan_path = folder if os.scandir in os.supports_fd else descriptor_path(folder)
+            with os.scandir(scan_path) as entries:
                 for entry in entries:
                     if examined >= MAX_ENTRIES:
                         break

@@ -90,6 +90,37 @@ class SampleTests(unittest.TestCase):
                 self.selection()
         self.assertEqual(list(self.nas.iterdir()), [])
 
+    def test_python36_scandir_uses_pinned_path_and_retains_sample_limits(self):
+        formal = old_file(self.source / 'video/formal', b'formal sample', formal=True)
+        temporary = old_file(self.source / 'video/raw-media-old.tmp', b'temp sample')
+        (self.source / 'video/raw-media-link.tmp').symlink_to(temporary)
+        old_file(self.source / 'video/raw-media-large.tmp', b'x' * 100)
+        (self.source / 'video/raw-media-young.tmp').write_bytes(b'new')
+        native_scandir = os.scandir
+        scanned = []
+
+        def legacy_scandir(path):
+            if isinstance(path, int):
+                raise TypeError('scandir: path should be string, bytes, os.PathLike or None, not int')
+            prefix = '/proc/{}/fd/'.format(os.getpid())
+            self.assertTrue(path.startswith(prefix), path)
+            fd = int(path[len(prefix):])
+            self.assertEqual(os.fstat(fd).st_ino, (self.source / 'video').stat().st_ino)
+            scanned.append(path)
+            # Linux exercises the real /proc path. Darwin has no procfs; use
+            # the fd encoded in that path for this temporary-directory fixture.
+            return native_scandir(path if sys.platform.startswith('linux') else fd)
+
+        with patch.object(sample.os, 'supports_fd', os.supports_fd - {native_scandir}), \
+                patch.object(sample.os, 'scandir', new=legacy_scandir), \
+                patch.object(sample, 'MAX_FILE', 20), patch.object(sample, 'MAX_TOTAL', 24):
+            selected, examined = self.selection()
+        self.assertTrue(scanned)
+        self.assertEqual({item[1] for item in selected}, {formal.name, temporary.name})
+        self.assertEqual(sum(item[2][2] for item in selected), 24)
+        self.assertEqual(examined, 5)
+        self.assertEqual(list(self.nas.iterdir()), [])
+
     def test_replaced_source_is_refused_before_rsync(self):
         path = old_file(self.source / 'video/raw-media-old.tmp')
         selected, examined = self.selection()

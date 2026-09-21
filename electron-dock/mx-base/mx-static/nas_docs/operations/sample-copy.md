@@ -44,4 +44,14 @@ sudo bash scripts/nas-sample-copy.sh delta_59202_media_data --copy-test
 
 本地验证覆盖真实 rsync 小文件往返、大小/年龄/链接边界、源文件被替换或并发修改、正式文件内容不符、rsync 失败、保留错误清单和命令参数。当前本机为 macOS，真实 rsync 测试版本是 2.6.9；生产 Linux 的 `/proc`、rsync 3.1.3 与 NFS 组合以本次现场执行为准。本地测试不连接生产服务器或 NAS。
 
+## 已修复：旧版 Python 的采样错误
+
+现场首次运行在 `select_sample` 的 `os.scandir(folder)` 报 `TypeError: ... not int`，尚未执行 `open_parent()` 或创建 NAS 测试目录，也未复制或修改源媒体文件。锁随进程退出释放，无需删除锁文件或清理 NAS。
+
+这是脚本声明支持 Python 3.6 却使用了 Python 3.7 才加入的 scandir 文件描述符参数导致的兼容性遗漏。[Python 官方说明](https://docs.python.org/3/library/os.html#os.scandir)
+
+已按 `os.supports_fd` 检测能力：支持时保持目录 fd 扫描，否则通过 `/proc/<pid>/fd/<fd>` 的字符串路径访问同一个已经校验并保持打开的目录。不退回未经固定的业务路径，不需要升级服务器 Python。新增回归模拟旧版 API，先复现原报错，再验证正式/tmp 文件选择、链接排除和大小边界。macOS 下只模拟 procfs 路径的 fd 映射，不把它当成真实 Linux Python 3.6/NFS 验证。
+
+将修复提交并同步到服务器后，重新执行本页第一条小批测试命令；仍为最多 256 MiB、8 个文件，尚不进行全量迁移。
+
 10 MiB/s 仅用于此次小批验证，不是全量复制的固定限制。930 GiB 在 10/50/100 MiB/s 下单遍约需 26.5/5.3/2.6 小时，未计校验与业务争用；具体调速和多项目存储扩展见 [统一存储方案](storage-platform.md)。
