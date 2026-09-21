@@ -37,6 +37,15 @@
 
 ## 真实部署身份
 
+依据原始 deployment 回传逐个核对 20 个媒体消费者，两卷均属于 po-infra 完整平台的部署，分别对应两个 Compose 项目：
+
+| 媒体卷 | Compose 项目 | 媒体消费者 | 应用镜像引用 |
+| --- | --- | ---: | --- |
+| po_infra_media_data | mx_data | 10 | ghcr.io/mingxiinfo/po-infra:feat-new_delta |
+| delta_59202_media_data | delta_59202 | 10 | po-infra-local:delta-59202-feat-new_delta |
+
+每套包含 9 个应用写入服务与 1 个只读 Nginx gateway；gateway 使用自己的 Nginx 镜像。两套环境文件和媒体卷分别独立，不能因为同属 po-infra 就认为数据重复、合并 NAS 目标或删除其中一卷。它们不是本机 Delta_Pub 精简发行版的媒体卷。以下为同一次现场快照，后续变更仍需重新核对。
+
 | 项目 | env-file（服务器本地） | Compose 文件，按顺序 |
 | --- | --- | --- |
 | mx_data | /home/lcy/test/Delta/mx_data/deploy/.env.ghcr | docker-compose.ghcr.yml、docker-compose.local-build.yml |
@@ -147,3 +156,11 @@ rsync 耗时包含文件传输和其内部操作；单独 fsync 几乎无耗时�
 用户已明确：今晚先完成较小/较快一卷，验证切换与业务恢复后释放该卷 SSD 旧媒体；另一个卷明晚 Part 2。po_infra/mx_data 可安排 10–30 分钟维护窗口。确定先 po_infra、再 delta，不并发争抢未经证实的 NAS 带宽。全部 tmp 仍保留到迁移验收，不按年龄清理。
 
 用户确认没有独立备份，只知道通过 NFS 使用 NAS；实际后端文件系统、阵列与快照未确认。已加入 [NAS 健康检查和 OSS 预算](../operations/nas-health-and-oss.md)。约定先 [在线预复制](../operations/two-night-migration.md)，此步骤不等于最终一致副本，也不释放 SSD 空间。逐文件验证清单、停写最终增量、切换/恢复与回收入口尚未实现或现场验收；不能凭 rsync 退出 0 清理旧数据。用户已条件授权最终验收后的旧 raw_media 清理，原卷及其他目录仍保留。
+
+## 最新执行约束：取消四小时自动停止
+
+用户明确要求尽量快且保障一个卷复制完，不再设置严格四小时退出。新建复制单元使用 `RuntimeMaxSec=infinity`；复制程序原本没有全量截止计时，因此无需修改 Python 复制逻辑。保持单卷、60 MiB/s 限速、保留源数据和错误检查。此变化不放宽 10–30 分钟维护窗口，也不等于自动切换或清理；若已用旧参数启动，先读取实际单元状态，不能把文档修改视为服务器配置已经更新。
+
+## 最新范围：先验证 NAS，暂缓 OSS
+
+用户明确本轮不去阿里云备份，先验证 NAS。当前使用 NAS 管理端只读检查和服务器 network 模式补充后端/链路信息；已通过的基础写入、小样本与短时吞吐不重复。OSS 费用保留为历史参考，不作为本轮前置条件。继续按原计划先 po_infra、再 delta，逐卷预复制、核验和切换，当前无独立备份的事实不因健康探测通过而改变。

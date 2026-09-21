@@ -7,7 +7,8 @@ Usage: sudo bash scripts/nas-precopy.sh <po_infra_media_data|delta_59202_media_d
 including tmp, at up to 60 MiB/s. This is a FULL ONLINE PRE-COPY, not a small test.
 --status reads an existing job; it refuses while another copy/test holds the lock.
 Never stops containers, cuts over storage, deletes originals or reclaims space.
-No built-in deadline: use the documented supervised run. Hard NFS may block.
+No built-in deadline: the documented run uses RuntimeMaxSec=infinity.
+Copy errors still fail the job; hard NFS may block.
 An exit-0 pre-copy is NOT a consistent final backup or permission to delete SSD data.
 HELP
 }
