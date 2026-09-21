@@ -1,0 +1,45 @@
+# REVIEW TEMPLATE ONLY. Do not apply before the runbook gates pass.
+# Append to the FULL original Compose file list with the ORIGINAL project and env files.
+# Service names must first match com.docker.compose.service in the live inventory.
+# Keep existing /app/media volumes; this adds a child mount only.
+# restart:no requires the NAS-aware systemd supervisor described in the runbook.
+x-raw-media: &raw-media
+  type: bind
+  source: ${DELTA_NAS_RAW_MEDIA_PATH:?set the reviewed NAS raw media directory}
+  target: /app/media/data_hub_raw_media
+  bind:
+    create_host_path: false
+
+services:
+  web:
+    restart: "no"
+    volumes: [*raw-media]
+  worker:
+    restart: "no"
+    volumes: [*raw-media]
+  beat:
+    restart: "no"
+    volumes: [*raw-media]
+  worker-agent-short:
+    restart: "no"
+    volumes: [*raw-media]
+  worker-agent-long:
+    restart: "no"
+    volumes: [*raw-media]
+  worker-agent-interactive:
+    restart: "no"
+    volumes: [*raw-media]
+  worker-agent-data-hub:
+    restart: "no"
+    volumes: [*raw-media]
+  worker-strategy-draft:
+    restart: "no"
+    volumes: [*raw-media]
+  chat-gateway:
+    restart: "no"
+    volumes: [*raw-media]
+  gateway:
+    restart: "no"
+    volumes:
+      - <<: *raw-media
+        read_only: true

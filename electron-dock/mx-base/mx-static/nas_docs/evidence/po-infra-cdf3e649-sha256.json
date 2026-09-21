@@ -1,0 +1,14 @@
+{
+  "repository": "mingxiinfo/po-infra",
+  "branch": "feat/new_delta",
+  "commit": "cdf3e649d685ba708daae83ef8b81318d2bcfa24",
+  "files": {
+    "data_hub/media_storage.py": "0c4047f2be731c5e29ed9f42e1f13468511e0f36eaced07cb25b89a8aa61c891",
+    "data_hub/tasks.py": "ea95e6d10b0903032c8b27f7c0fb783ff830654647a18ff77d262d89e73ba2c3",
+    "data_hub/services.py": "3a54cfbdecbdf133b3b5a6fafdc31fdf3378568dca5b12464d44664b2a59b830",
+    "mx_data/settings.py": "1444415a24f96162ed2e7e687bf9ba4060ce15105a2fee66e3bd62522bd4e7ef",
+    "scripts/run_web.sh": "f68d58be0ead560c3b06eac4b7c79dfc845fb218fc48f1c704492783f07fa91b",
+    "scripts/run_worker.sh": "fd211830a63045583a8c4917ba86d457a116f2d513872ae0552736a2041f4573",
+    "deploy/nginx/templates/default.conf.template": "ecad1882a87dd122274c02bbf0006de4b22e64cc9d700579cddf9f5fadb91f6d"
+  }
+}

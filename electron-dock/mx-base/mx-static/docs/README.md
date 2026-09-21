@@ -2,7 +2,7 @@
 
 版本 0.7.0，2026-09-13。用户确认尚未线上部署。本服务负责多媒体字节与读取，不负责 Hub 租户授权、付费数据采集或 MX-H2I 登录/联网。当前是单主机持久服务；NAS 是可选归档层，不是 HTTP 主存储。Hub 接入已暂停。本文描述当前实现的行为与边界；目标负载下的吞吐代价、瓶颈与优化清单见 [容量与吞吐](capacity.md)，控制面数据库的作用/上限/是否换 PostgreSQL 见 [控制面](control-plane.md)。
 
-现有 Docker 存储盘扩容、媒体迁往 NAS、fstab/systemd 排查与重启策略，先看 [SSD/NAS 存储迁移方案](storage-migration.md)。该方案区分现场待确认事项与代码已实现能力，提供只读诊断命令；媒体目录迁移可与本项目并行存在。
+现有 Docker 存储盘扩容和媒体迁往 NAS，先看 [NAS 迁移入口与现场记录](../nas_docs/README.md)。迁移文档和工具统一在本项目维护，通过 Git 分发；当前 Delta 排查使用 `scripts/nas-audit.sh`。fstab/systemd 背景与通用原则见 [SSD/NAS 通用方案](storage-migration.md)。媒体目录迁移与本项目静态文件服务可以并行部署。
 
 2026-09-21：由 `knock-nas/fdc2f16` 归并到 mx-base，原来的 25 个文件与 knock-nas 初始 0.3.0 完全相同。此次补齐旧库升级及统一管理入口兼容，生产默认保留 Docker；可选宿主 Nginx 直接发文件。详见 [代码来源与部署决策](deployment-decision.md)。
 
