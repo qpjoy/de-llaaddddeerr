@@ -7,7 +7,7 @@
 先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS，校验、停写并切换后，继续保留原卷和原数据。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**本轮没有迁移、删除、挂载或重启服务器服务。**
 
 - 最新现场结论：[运行版本、临时文件占用和权限门槛](evidence/2026-09-22-live-findings.md)。两个目录合计 1,426.04 GiB，其中 tmp 960.46 GiB；保留全部文件，不凭名称清理。
-- 下一步：[小批复制验证](operations/sample-copy.md)，权限探测已通过，无需重复。
+- 两卷小批复制均已通过（28.89 / 149.18 MiB），下一步：[最多 2 GiB 的短时吞吐测试](operations/sample-copy.md)。权限探测和原小批测试无需重复，不启动全量迁移。
 - 默认方向调整：[原生存储、启动边界与数据库扩展](operations/storage-platform.md)。优先 Docker NFS volume / K8s PV/CSI，保持 Docker 全局 NAS 依赖禁用。
 - [旧 host-bind 启动方案](operations/boot-and-recovery.md) 仅作为兼容备选，不再默认每业务一套 systemd 控制程序。
 - 主记录：[Delta 原始媒体迁移](migrations/2026-09-22-delta-raw-media.md)。
@@ -36,7 +36,7 @@
   uv-cache/
 ```
 
-最新 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，4 KiB 探测的写入和 0:0 owner 保留已通过；代表性文件复制及容器访问待验证。按用户建议拟建结构：
+最新 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，4 KiB 探测和两卷共 16 个文件的复制/基础属性校验已通过；容器访问与持续吞吐仍待验证。按用户建议拟建结构：
 
 ```text
 /mnt/nas/mx-internal-server/data/

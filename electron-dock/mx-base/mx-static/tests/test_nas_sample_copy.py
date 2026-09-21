@@ -45,10 +45,10 @@ class SampleTests(unittest.TestCase):
     def selection(self):
         return sample.select_sample(self.source_fd)
 
-    def run_copy(self, selected, examined):
+    def run_copy(self, selected, examined, **options):
         with contextlib.redirect_stdout(io.StringIO()):
             return sample.copy_sample('po_infra_media_data', self.source_fd, self.nas_fd,
-                                      selected, examined, self.lock_fd)
+                                      selected, examined, self.lock_fd, **options)
 
     def descriptor_for_local_test(self, fd):
         if sys.platform.startswith('linux'):
@@ -68,6 +68,12 @@ class SampleTests(unittest.TestCase):
             result = self.run_copy(*self.selection())
         self.assertTrue(result['passed'], result)
         self.assertEqual(len(result['files']), 2)
+        self.assertEqual(result['verified_bytes'], sum(p.stat().st_size for p in (formal, temporary)))
+        self.assertEqual(result['bandwidth_limit_mib_per_second'], 10)
+        self.assertGreater(result['rsync_only_mib_per_second'], 0)
+        self.assertGreater(result['verified_mib_per_second'], 0)
+        for item in result['files']:
+            self.assertGreaterEqual(item['timings']['total_seconds'], item['timings']['rsync_seconds'])
         for path, expected in before.items():
             self.assertEqual((path.read_bytes(), sample.signature(path.stat())), expected)
         directory = next(self.nas.iterdir())
@@ -89,6 +95,62 @@ class SampleTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'No suitable files'):
                 self.selection()
         self.assertEqual(list(self.nas.iterdir()), [])
+
+    def test_throughput_selection_caps_bytes_files_and_skips_small_files(self):
+        # Sparse local fixtures only; no multi-GiB allocation or copying.
+        for index, mib in enumerate([64] * 40 + [16, 129]):
+            path = self.source / 'video' / ('raw-media-{}.tmp'.format(index))
+            with path.open('wb') as stream:
+                stream.truncate(mib * 1024 * 1024)
+            os.utime(str(path), (int(time.time()) - 90000,) * 2)
+        selected, examined = sample.select_sample(self.source_fd, min_file=32 * 1024 * 1024,
+                                                   max_files=32, max_total=2 * 1024 ** 3)
+        self.assertEqual(examined, 42)
+        self.assertEqual(len(selected), 32)
+        self.assertEqual(sum(item[2][2] for item in selected), 2 * 1024 ** 3)
+        self.assertTrue(all(item[2][2] == 64 * 1024 * 1024 for item in selected))
+        selected, _ = sample.select_sample(self.source_fd, min_file=32 * 1024 * 1024,
+                                            max_files=3, max_total=128 * 1024 * 1024)
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(list(self.nas.iterdir()), [])
+
+    @unittest.skipUnless(shutil.which('rsync'), 'rsync unavailable')
+    def test_throughput_copy_keeps_verification_and_forwards_rate(self):
+        path = old_file(self.source / 'video/raw-media-old.tmp')
+        with patch.object(sample, 'descriptor_path', side_effect=self.descriptor_for_local_test), \
+                patch.object(sample, 'rsync_file', wraps=sample.rsync_file) as copier:
+            result = self.run_copy(*self.selection(), bandwidth_kib=102400,
+                                   max_seconds=600, test_mode='throughput-test')
+        self.assertTrue(result['passed'], result)
+        self.assertEqual(result['bandwidth_limit_mib_per_second'], 100)
+        self.assertEqual(result['test_mode'], 'throughput-test')
+        self.assertEqual(copier.call_args[1]['bandwidth_kib'], 102400)
+        self.assertEqual(path.read_bytes(), b'media fixture')
+        self.assertEqual(result['files'][0]['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_soft_budget_retains_verified_copy_and_stops_before_next_file(self):
+        paths = [old_file(self.source / 'video' / ('raw-media-{}.tmp'.format(i))) for i in range(2)]
+        selected, examined = self.selection()
+        clock = [0.0]
+
+        def copy_fixture(root_fd, destination_fd, item, index, lock_fd, **options):
+            path = self.source / item[0] / item[1]
+            target = next(self.nas.iterdir()) / ('{:02d}-{}'.format(index, item[1]))
+            shutil.copy2(path, target)
+            clock[0] = 601.0
+            return {'attributes': sample.attributes(path.stat()),
+                    'timings': dict.fromkeys(('source_sha256_seconds', 'rsync_seconds', 'fsync_seconds',
+                                             'destination_sha256_seconds', 'metadata_and_other_seconds'), 1.0)}
+
+        with patch.object(sample.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(sample, 'copy_one', side_effect=copy_fixture) as copier:
+            result = self.run_copy(selected, examined, max_seconds=600, test_mode='throughput-test')
+        self.assertFalse(result['passed'])
+        self.assertTrue(result['time_budget_exceeded'])
+        self.assertEqual(copier.call_count, 1)
+        self.assertEqual(len(result['files']), 1)
+        self.assertEqual(len(list(next(self.nas.iterdir()).iterdir())), 2)
+        self.assertTrue(all(path.read_bytes() == b'media fixture' for path in paths))
 
     def test_python36_scandir_uses_pinned_path_and_retains_sample_limits(self):
         formal = old_file(self.source / 'video/formal', b'formal sample', formal=True)
@@ -149,7 +211,7 @@ class SampleTests(unittest.TestCase):
 
     def test_content_change_during_copy_fails_even_if_sample_matches_old_bytes(self):
         path = old_file(self.source / 'video/raw-media-old.tmp')
-        def copying(src, dest, name, lock):
+        def copying(src, dest, name, lock, bandwidth_kib=10240):
             target = next(self.nas.iterdir()) / name
             shutil.copy2(path, target)
             path.write_bytes(b'new business content')
@@ -161,7 +223,7 @@ class SampleTests(unittest.TestCase):
 
     def test_same_size_destination_corruption_fails_checksum(self):
         path = old_file(self.source / 'video/raw-media-old.tmp', b'original')
-        def copying(src, dest, name, lock):
+        def copying(src, dest, name, lock, bandwidth_kib=10240):
             target = next(self.nas.iterdir()) / name
             target.write_bytes(b'corrupt!')
             shutil.copystat(path, target)
@@ -174,7 +236,7 @@ class SampleTests(unittest.TestCase):
     def test_permission_difference_is_not_ignored(self):
         path = old_file(self.source / 'video/raw-media-old.tmp')
         path.chmod(0o644)
-        def copying(src, dest, name, lock):
+        def copying(src, dest, name, lock, bandwidth_kib=10240):
             target = next(self.nas.iterdir()) / name
             shutil.copy2(path, target)
             target.chmod(0o600)
@@ -192,10 +254,14 @@ class SampleTests(unittest.TestCase):
         self.assertEqual(run.call_args[1]['pass_fds'], (10, 11, 12))
         for forbidden in ('--delete', '--remove-source-files', '--inplace', '--append'):
             self.assertNotIn(forbidden, args)
+        with patch.object(sample.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            sample.rsync_file(10, 11, '01-file.mp4', 12, bandwidth_kib=102400)
+        self.assertIn('--bwlimit=102400', run.call_args[0][0])
 
     def test_entry_rejects_arbitrary_volume_or_missing_flag(self):
         script = str(ROOT / 'scripts/nas-sample-copy.sh')
-        for arguments, status in [(['--help'], 0), (['po_infra_media_data'], 2), (['wrong', '--copy-test'], 2)]:
+        for arguments, status in [(['--help'], 0), (['po_infra_media_data'], 2), (['wrong', '--copy-test'], 2),
+                                  (['wrong', '--throughput-test'], 2), (['po_infra_media_data', '--unlimited'], 2)]:
             result = subprocess.run(['bash', script] + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.assertEqual(result.returncode, status)
 

@@ -94,6 +94,28 @@ gateway       sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a
 
 这说明此次 root 写入、rename/read、fsync 和基础属性设置均可用，不需要再改旧目录权限，也不必重复该探测。它不证明所有 ACL/xattr、真实容器访问或机械盘持续吞吐。
 
-用户决定**不恢复 Docker 全局 NAS 依赖**。fstab 取消注释是否已执行未收到回执；重启行为另按 [启动与恢复设计](../operations/boot-and-recovery.md) 验收。
+用户决定**不恢复 Docker 全局 NAS 依赖**。fstab 取消注释是否已执行未收到回执；后续按 [原生存储与启动边界](../operations/storage-platform.md) 验收，原 host-bind 启动方案为兼容备选。
 
-下一步运行 [小批复制工具](../operations/sample-copy.md)，先 po_infra_media_data，成功后再 delta_59202_media_data。每次最多 8 个文件/选择时 256 MiB、rsync 限速 10 MiB/s，包含可选到的正式文件与旧 tmp；独立 NAS 测试副本及校验报告保留，不切换服务、不删除源数据。通过后继续准备正式全量预复制，仍需 NAS 健康、配额和备份信息。
+该阶段随后已执行两卷 [小批复制工具](../operations/sample-copy.md)，结果如下。仍需 NAS 健康、配额和备份信息。
+
+## 小批复制回传：两卷均通过，尚未测持续吞吐
+
+| 卷 | 检查一级条目 | 复制文件 | 选择/验证字节 | 复制校验阶段秒数 | passed |
+| --- | ---: | ---: | ---: | ---: | --- |
+| po_infra_media_data | 4,395 | 8（正式 4、tmp 4） | 30,288,366（28.89 MiB） | 42.358 | true |
+| delta_59202_media_data | 2,607 | 8（正式 4、tmp 4） | 156,421,768（149.18 MiB） | 16.804 | true |
+
+两次挂载均为 `/mnt/nas nas-storage:/volume1/data1 nfs 0:656`。16 个文件的 SHA256、正式文件哈希命名、size、uid/gid=0:0、mode=0644、秒级 mtime 和源文件稳定性检查全部通过。首次旧版 Python scandir 错误已在本次现场运行中越过。
+
+NAS 保留的测试目录（各自有 result.json）：
+
+```text
+/mnt/nas/mx-internal-server/.mx-static-copy-check-po_infra_media_data-42d7ab59e1de45f299572acac5216ea6
+/mnt/nas/mx-internal-server/.mx-static-copy-check-delta_59202_media_data-434482b6b66f462f9acbabb2a0391aa9
+```
+
+没有正式目标创建、容器切换或源文件删除。这些目录是平铺样本，不能作为新媒体根。权限证明仅限所选文件，不延伸到其他身份/ACL 或容器。
+
+elapsed 不含选样与 NAS 父目录打开，包含逐文件 rsync、fsync、元数据和哈希。第一卷均摊约 0.68 MiB/s，第二卷约 8.88 MiB/s；由于 10 MiB/s 限速、样本小且没有分阶段时钟，不能把这些数字当作 NAS 最大吞吐，也不能确定第一卷较慢是机械盘唤醒、网络还是其他原因。
+
+用户要求先测试，并希望后续耗时尽量不超过四小时。下一步仅运行单卷、最多 2 GiB / 32 个较大文件的 `--throughput-test`，限速 100 MiB/s，复制阶段 600 秒软预算，输出复制/落盘/哈希阶段耗时；hard NFS 阻塞不受该软预算强制终止。实际全量迁移和故障恢复仍未开始。

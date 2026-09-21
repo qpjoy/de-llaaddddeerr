@@ -1,6 +1,6 @@
-# Delta 原始媒体迁移方案（现场方案 v6，2026-09-22）
+# Delta 原始媒体迁移方案（现场方案 v7，2026-09-22）
 
-状态：已读取本机 Delta_Pub 全部现有分支快照、远端 po-infra 的 feat/new_delta 分支提交 cdf3e649d685ba708daae83ef8b81318d2bcfa24（2026-09-18）及用户提供的服务器输出；没有连接或修改服务器。架构、迁移对象和验收步骤已确定。最新回传已对应关键代码哈希、镜像身份和两套 env-file；线上 tasks.py 与本地不同；NAS 的 4 KiB 写入/基础属性/0:0 owner 保留探测已通过，下一步小批复制验证。详见 [现场结论](../evidence/2026-09-22-live-findings.md)。本文不是可以直接执行的一键迁移脚本。独立权限探测、小批复制等门槛通过后，才进入全量复制；停机和切换另按验收步骤推进。
+状态：已读取本机 Delta_Pub 全部现有分支快照、远端 po-infra 的 feat/new_delta 分支提交 cdf3e649d685ba708daae83ef8b81318d2bcfa24（2026-09-18）及用户提供的服务器输出；没有连接或修改服务器。架构、迁移对象和验收步骤已确定。最新回传已对应关键代码哈希、镜像身份和两套 env-file；线上 tasks.py 与本地不同；NAS 的 4 KiB 探测和两卷共 16 个文件的小批复制均已通过；下一步最多 2 GiB 的短时吞吐与阶段耗时测试，尚不进行全量迁移。详见 [现场结论](../evidence/2026-09-22-live-findings.md)。本文不是可以直接执行的一键迁移脚本。独立权限探测、小批复制等门槛通过后，才进入全量复制；停机和切换另按验收步骤推进。
 
 用户已明确要求：先复制到 NAS，再切换；迁移期间保留原 Docker volumes 和旧媒体。本方案不执行源数据删除，空间回收仅列为以后单独决定的阶段。
 
@@ -92,7 +92,7 @@ mx-static 可继续部署在独立目录，不能让它同时管理、淘汰 Del
 - deployment 已回传；[现场结论](../evidence/2026-09-22-live-findings.md) 固定本次 image ID、env-file、服务与版本。服务器 d29a0bc2 checkout 有未提交修改，运行 tasks.py 不同于本地 cdf3e649，不使用本机代码盲目重建。正式切换前检查库存是否变化；kubectl 无权限/无命令不等于没有 Kubernetes 消费者。
 - 从真实部署上下文取得两套实例的 env-file 路径与完整 Compose 文件顺序。原环境文件只在服务器保留，不上传凭据。分别渲染最终 Compose，核对父卷名称、子目录、端口、镜像、网络及 DB/Redis 均正确；只存储改动进入 diff。
 - 确认 Docker/Compose/systemd/rsync 版本及 SELinux 策略；不能用最新文档假定 EL8 上每个选项可用。NFS 的 SELinux 访问应按实际策略配置，不对整个导出盲目加 `:Z`、不关闭 SELinux。
-- NAS 管理端确认存储池/磁盘健康、配额、空闲容量和备份。用户已运行 `sudo bash scripts/nas-probe.sh permissions --write-test`，四项通过且测试对象已清理。现在使用 [小批复制工具](../operations/sample-copy.md) 验证真实文件内容和属性，之后再验证实际容器 UID/GID、Nginx 读取、代表性大文件和并发；小探测不能替代这些验收。
+- NAS 管理端确认存储池/磁盘健康、配额、空闲容量和备份。用户已运行 `sudo bash scripts/nas-probe.sh permissions --write-test`，四项通过且测试对象已清理。两卷 [小批复制](../operations/sample-copy.md) 已验证 16 个文件的内容和基础属性；仍需短时吞吐、实际容器 UID/GID、Nginx 读取、代表性大文件和并发验证，不能用样本替代这些验收。
 - 用代表性小批文件做复制、权限/校验和验证，再开始全量。NFS root squash 可能阻止 chown，不能忽略 rsync 的权限错误；按真实 UID/GID 和 NAS 导出策略解决，不默认 chmod 777 或递归改写源数据权限。
 - 确定两个实例的业务优先级与维护窗口，一次只切一个。若业务风险相当，可先试 498 GiB 的 mx_data；不能仅因它较小就断定可随意停机。
 
@@ -184,18 +184,18 @@ NAS 同池 snapshot 可用于快速撤销误操作，但不是独立备份。旧
 
 已交付架构、明确源/目标、迁移/回滚步骤、Compose 覆盖模板、源码基准、现场证据和探测工具。用户已回传三份只读诊断，NAS 空间和目标无重名已确认，关键下载代码泄漏与线上采样一致；临时文件不自动清理。
 
-用户已回传权限探测，四项全部通过；无需重复。下一步提交并通过 Git 更新服务器上的 mx-static 后，先运行：
+用户已回传权限探测和两卷小批复制，均通过，无需重复。po_infra 28.89 MiB / 42.358 秒，delta_59202 149.18 MiB / 16.804 秒；这些是限速 10 MiB/s 下的复制校验阶段耗时，不能推断峰值。下一步提交并通过 Git 更新服务器上的 mx-static 后，只运行一轮：
 
 ```bash
-sudo bash scripts/nas-sample-copy.sh po_infra_media_data --copy-test
+sudo bash scripts/nas-sample-copy.sh delta_59202_media_data --throughput-test
 ```
 
-退出码 0 且最后 passed=true 后，再对 delta_59202_media_data 运行同一工具。每次最多 8 个文件/选择时 256 MiB，rsync 限速 10 MiB/s，校验内容与基础属性并保留独立测试副本，不创建正式目标、不删除、不切换。详见 [小批复制说明](../operations/sample-copy.md)。NAS hard I/O 卡住时不要并发重试。
+此次最多选择 32 个 32–128 MiB 的旧文件、合计 2 GiB，rsync 限速 100 MiB/s；复制阶段软预算 600 秒，在文件之间检查，不承诺强制终止 hard NFS I/O。保留源文件和独立测试副本，输出逐文件阶段耗时，不创建正式目标、不删除、不切换。详见 [小批与短时吞吐说明](../operations/sample-copy.md)。贴回完整输出及最新 df -hT /data，不并发重试或同时运行另一卷。
 
-实际全量复制入口与最终启动恢复策略仍待后续实施：小批真实文件复制、原生 NFS volume 的现场故障测试和容器访问尚未完成。两卷样本通过后，按已验证的权限/复制参数建立独立目标并准备全量预复制全部 raw_media（含 tmp）。预复制可早于正式切换，停写完整校验、备份与所选平台的启动/故障恢复验收必须在切换前完成；不提供源数据删除脚本。
+实际全量复制入口与最终启动恢复策略仍待后续实施：小批真实文件复制已完成，持续吞吐、原生 NFS volume 的现场故障测试和容器访问尚未完成。短时测试后再评估尽量四小时的目标是否可达，结合容量/备份条件准备独立正式目标和全量预复制全部 raw_media（含 tmp）。预复制可早于正式切换，停写完整校验、备份与所选平台的启动/故障恢复验收必须在切换前完成；不提供源数据删除脚本。
 
 方案、模板和脚本统一维护在 mx-base/mx-static，随 Git 提交分发。服务器实际输出、现场环境配置和迁移检查点只写入已忽略的 reports/ 或 nas_docs/local/，不提交凭据或运行报告。不上传压缩包、不从本机复制业务媒体，也不修改 Delta_Pub 或 po-infra 当前工作区。
 
-本地验证：入口和诊断代码通过 Bash 与 Python 3.6 语法检查；部署采集器用模拟 Docker 数据确认只输出白名单环境字段；媒体扫描器在临时目录验证统计、跳过软链接和拒绝 NFS 源。使用真实 po-infra Compose 文件及本地 Compose v2.34.0，分别验证两套实例覆盖合并：10 个媒体消费者均增加正确子挂载，gateway 只读，原挂载/镜像/DB/Redis 定义保持不变。最新现场回传已对应运行镜像和关键文件，NAS 的小文件写入/0:0 owner 保留也已由用户验证；Linux 上最终 Compose 合并、代表性复制、容器权限及业务恢复仍待现场验收。新增写探测经过挂载不符、设备不符、软链接、chown/fsync 失败、只清理自身对象的本地回归；这些测试不连接 NAS。临时文件泄漏复现使用原函数和模拟 HTTP/数据库，未改项目应用代码。
+本地验证：入口和诊断代码通过 Bash 与 Python 3.6 语法检查；部署采集器用模拟 Docker 数据确认只输出白名单环境字段；媒体扫描器在临时目录验证统计、跳过软链接和拒绝 NFS 源。使用真实 po-infra Compose 文件及本地 Compose v2.34.0，分别验证两套实例覆盖合并：10 个媒体消费者均增加正确子挂载，gateway 只读，原挂载/镜像/DB/Redis 定义保持不变。最新现场回传已对应运行镜像和关键文件，NAS 的小文件写入/0:0 owner 保留也已由用户验证；Linux 上两卷共 16 个文件的复制已通过；最终 Compose 合并、持续吞吐、容器权限及业务恢复仍待现场验收。新增写探测经过挂载不符、设备不符、软链接、chown/fsync 失败、只清理自身对象的本地回归；这些测试不连接 NAS。临时文件泄漏复现使用原函数和模拟 HTTP/数据库，未改项目应用代码。
 
 参考：[Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)、[Compose volumes](https://docs.docker.com/reference/compose-file/services/#volumes)、[Compose merge](https://docs.docker.com/reference/compose-file/merge/)、[Docker restart](https://docs.docker.com/engine/containers/start-containers-automatically/)、[systemd mount](https://github.com/systemd/systemd/blob/main/man/systemd.mount.xml)、[NFS](https://man7.org/linux/man-pages/man5/nfs.5.html)、[rsync](https://download.samba.org/pub/rsync/rsync.1)。文档语义须与现场旧版本一起核对。
