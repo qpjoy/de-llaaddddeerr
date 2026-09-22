@@ -211,7 +211,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
 
   return <section className={`mih-commerce-manager mih-xhs-browser ${view === 'list' ? 'mih-xhs-list-view' : ''}`}>
     <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'api'} onClick={() => setView('api')}>接口调试</button><button aria-pressed={view === 'list'} onClick={() => setView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => setView('mobile')}>Mobile 视图</button></nav>
-    <div className="mih-api-console-tab" hidden={view !== 'api'}><XiaohongshuConsole apiKey={apiKey} /></div>
+    <div className="mih-api-console-tab" hidden={view !== 'api'}><XiaohongshuConsole apiKey={apiKey} admin={session?.platformAdmin === true} /></div>
     <aside className="qp-panel mih-commerce-filters" style={view === 'api' ? { display: 'none' } : undefined}>
       <h2>笔记列表</h2>
       <p>{isAdmin ? '当前管理会话读取 Hub 已存笔记。上划加载历史，点击展开正文和标签。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>

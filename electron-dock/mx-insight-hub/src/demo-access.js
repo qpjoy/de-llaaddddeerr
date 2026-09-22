@@ -15,17 +15,19 @@ export function demoAccessIssues(access, operation, compatibility = false) {
   if (!access.platforms?.includes('xiaohongshu')) {
     issues.push({ kind: 'authorization', scope: 'xiaohongshu', message:
       access.consumerPlatforms?.includes('xiaohongshu')
-        ? '当前 Key 未包含小红书数据授权。请切换已授权 Key，或创建包含小红书的新 Key。'
+        ? '当前 Key 未包含小红书数据授权。请在 API Keys 中调整当前 Key 的权限，或切换已授权 Key，然后重新检查。'
         : '当前业务尚未开通小红书数据，请联系管理员开通。' })
   }
   for (const scope of [operation, ...(compatibility ? ['compat.xiaohongshu.app_v2'] : [])]) {
     if (access.capabilities?.includes(scope)) continue
     issues.push({ kind: 'authorization', scope, message: access.consumerCapabilities?.includes(scope)
-      ? `当前 Key 未包含${LABELS[scope] || scope}授权。请在新 Key 中勾选此项。`
+      ? `业务已开通${LABELS[scope] || scope}，但当前 Key 未包含该权限。请在 API Keys 中调整当前 Key 的权限，或切换已授权 Key，然后重新检查。`
       : `当前业务尚未开通${LABELS[scope] || scope}，请联系管理员。` })
   }
   if (access.operations?.[operation]?.ready === false) {
-    issues.push({ kind: 'runtime', scope: operation, message: `${LABELS[operation] || operation}服务暂不可用，请联系管理员恢复。其他已开通服务不受影响。` })
+    const state = access.operations[operation].effectiveState
+    const reason = { disabled: '运行开关关闭', paused: '服务已暂停', blocked: '运行前置条件未满足', shadow: '当前仅处于校验状态', canary: '当前调用者未进入灰度范围' }[state] || '服务暂不可用'
+    issues.push({ kind: 'runtime', scope: operation, message: `${LABELS[operation] || operation}：${reason}。业务授权、Key 权限和运行配置独立，请联系管理员处理。其他已开通服务不受影响。` })
   }
   return issues
 }

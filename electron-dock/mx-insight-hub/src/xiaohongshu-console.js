@@ -1,3 +1,5 @@
+import { demoAccessIssues } from './demo-access.js'
+
 export const XHS_CONSOLE_ENDPOINTS = [
   { id: 'post', label: '按链接获取笔记', path: '/api/v1/data/post', capability: 'social.posts.resolve', fields: [
     ['url', '笔记链接', 'string', true], ['deliveryMode', '交付方式', ['cache_first', 'cache_only', 'refresh', 'live_only'], false, 'cache_first'],
@@ -17,6 +19,25 @@ export const XHS_CONSOLE_ENDPOINTS = [
   { id: 'get_user_info', label: '获取用户资料', capability: 'social.users.resolve', fields: [['user_id', '用户 ID', 'string'], ['share_text', '主页分享链接或文本', 'string']], oneOf: ['user_id', 'share_text'] },
   { id: 'get_user_posted_notes', label: '获取用户笔记', capability: 'social.users.posts', fields: [['user_id', '用户 ID', 'string'], ['share_text', '主页分享链接或文本', 'string'], ['cursor', '下一页游标', 'string']], oneOf: ['user_id', 'share_text'] },
 ].map(endpoint => ({ ...endpoint, path: endpoint.path || `/api/v1/xiaohongshu/app_v2/${endpoint.id}`, compatibility: endpoint.id !== 'post' && !endpoint.research }))
+
+// Admins can inspect the whole contract catalogue without expanding the selected
+// Key's scopes. Tenant discovery remains limited to that Key's authorization.
+export function visibleConsoleEndpoints(access, admin = false) {
+  return XHS_CONSOLE_ENDPOINTS.filter(endpoint => admin || access === null || (access
+    && !demoAccessIssues(access, endpoint.capability, endpoint.compatibility).some(issue => issue.kind === 'authorization')))
+}
+
+export function consoleCurl(endpoint, body) {
+  if (!XHS_CONSOLE_ENDPOINTS.includes(endpoint)) throw new Error('请选择 Hub 小红书接口')
+  const quotedBody = JSON.stringify(body, null, 2).replaceAll("'", "'\\''")
+  return [
+    `curl -X POST "$HUB_URL${endpoint.path}"`,
+    '  -H "Authorization: Bearer $HUB_KEY"',
+    '  -H "Content-Type: application/json"',
+    '  -H "Idempotency-Key: xhs-example-request-001"',
+    `  --data '${quotedBody}'`,
+  ].join(' \\\n')
+}
 
 export function consoleBody(endpoint, values) {
   if (!XHS_CONSOLE_ENDPOINTS.includes(endpoint)) throw new Error('请选择 Hub 小红书接口')

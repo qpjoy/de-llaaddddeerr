@@ -1897,6 +1897,7 @@ function ExternalPlatformOperationControlPanel({
   token,
   provider,
   operations,
+  selectedOperation,
   onSaved,
   onUnauthorized,
   notify,
@@ -1908,6 +1909,16 @@ function ExternalPlatformOperationControlPanel({
   const [savedReceipts, setSavedReceipts] = useState({})
   const [filter, setFilter] = useState('')
   const [page, setPage] = useState(1)
+  const selectedIndex = operations.findIndex(operation => operation.operationKey === selectedOperation)
+  useEffect(() => {
+    if (selectedIndex < 0) return
+    setFilter('')
+    setPage(Math.floor(selectedIndex / 10) + 1)
+    setOpenKey(selectedOperation)
+  }, [selectedOperation, selectedIndex])
+  useEffect(() => {
+    if (selectedOperation && openKey === selectedOperation) jumpToControl(`operation-${selectedOperation}`)
+  }, [selectedOperation, openKey, page])
   const filtered = operations.filter(operation => `${operation.label} ${operation.operationKey}`.toLowerCase().includes(filter.toLowerCase()))
   const totalPages = Math.max(1, Math.ceil(filtered.length / 10))
   const currentPage = Math.min(page, totalPages)
@@ -2224,7 +2235,7 @@ function NightAllPlatformDetail({ token, range, setQuery, onUnauthorized }) {
   </>
 }
 
-function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, notify }) {
+function PlatformDetail({ token, range, provider, selectedOperation, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.externalPlatform(token, provider, { range }), [provider, range, token])
   const remote = useRemoteData(load, onUnauthorized)
   const detail = useMemo(() => normalizeDetail(remote.data, provider), [provider, remote.data])
@@ -2282,6 +2293,7 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, noti
             token={token}
             provider={provider}
             operations={detail.operations}
+            selectedOperation={selectedOperation}
             onSaved={remote.refresh}
             onUnauthorized={onUnauthorized}
             notify={notify}
@@ -2347,7 +2359,7 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   if (provider === 'ipsearch') return <IntegrationSlotFrame provider={provider}><IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
   if (provider === 'night-all') return <IntegrationSlotFrame provider={provider}><NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} /></IntegrationSlotFrame>
   if (provider) {
-    return <IntegrationSlotFrame provider={provider}><PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
+    return <IntegrationSlotFrame provider={provider}><PlatformDetail token={token} range={range} provider={provider} selectedOperation={query.get('operation')} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
   }
   return <PlatformsOverview token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
 }
