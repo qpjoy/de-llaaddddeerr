@@ -101,6 +101,10 @@ both aliases decode identically, and conflicting aliases fail closed. No bare
 `pageInfo.nextCursor` envelope and uses operation `data-search`; the three
 compatibility routes use their respective `raw`, `crawl` or `user-info` operation.
 
+The downstream calling standard, including first/next-page examples, stop rules
+and exact-page retry identity, is documented in
+[Hub cursor standard](../api/hub-cursor-standard.md).
+
 The contract owner is Hub. Legacy TikHub wire-parameter mapping currently runs
 inside Night-All; Hub-native connectors own their own mapping. A caller never
 constructs supplier pagination fields. Adaptation and verification must be scoped

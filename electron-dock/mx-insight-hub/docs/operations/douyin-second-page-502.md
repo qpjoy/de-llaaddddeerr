@@ -105,6 +105,21 @@ node scripts/verify-night-all-pagination.mjs /Users/qpjoy/workspace/mingxi/Night
 
 ### 区分运行版本与旧游标（不付费）
 
+2026-09-22T12:08:59Z 用户返回的 Hub v2 诊断明确显示：
+
+- runtimeHost=mx-internal-server；所测代码 preservesCursor=true，但 preservesSearchId /
+  preservesBacktrace 均为 false。该运行实例尚不具备本地 d2cceed8 的完整 compound 处理，
+  不能再仅归因为旧游标。该主机名本身不证明部署方式或其他副本状态。
+- 历史 token 已通过该 consumer 的认证解密，platform/operation 匹配，page=2、
+  type=cursor、numericCursor=8，没有 search_id/backtrace。缺上下文已由解密证实，
+  不再只是长度 353 的猜测；但供应商 400 的具体解释仍未取得。
+- 先将包含修复的 Hub 代码更新到实际运行服务、核对所有副本三项 probe 均为 true，
+  再为受影响查询建立新的首屏/游标链；新代码不会修复已持久化的旧 token。
+- 用户允许必要时在 Hub 或 Night-All 修改上游适配；本问题已有 Hub 修复足以保留
+  Night-All 返回的上下文，本轮不为相同缺陷重复修改 Night-All。
+
+下游统一调用规则与示例见 [Hub 游标标准](../api/hub-cursor-standard.md)。
+
 本轮增强 [Hub 诊断脚本](../../scripts/diagnose-douyin-request.sh)（diagnosticVersion=2）。
 注意该脚本在有 kubectl 权限的 Hub 管理机执行，与 Night-All 的 v4 脚本是不同脚本。
 它读取既有请求快照，并在 Pod 内用该 consumer 的 codec 验证/解密 cursor；只输出结构、
