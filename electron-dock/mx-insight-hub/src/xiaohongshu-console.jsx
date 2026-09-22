@@ -36,6 +36,7 @@ export function XiaohongshuConsole({ apiKey }) {
     try {
       const response = endpoint.id === 'post'
         ? await publicDataApi.xiaohongshuPost(apiKey, body, { idempotencyKey: identity })
+        : endpoint.research ? await publicDataApi.xiaohongshuResearch(apiKey, endpoint.id, body, { idempotencyKey: identity })
         : await publicDataApi.xiaohongshuNative(apiKey, endpoint.id, body, { idempotencyKey: identity })
       setResult({ ...response, request, duration: Math.round(performance.now() - started) })
     } catch (failure) {
@@ -48,6 +49,7 @@ export function XiaohongshuConsole({ apiKey }) {
     <div className="mih-api-console-main">
       <header><span className="mih-api-method">POST</span><code>{endpoint?.path || '/api/v1/…'}</code><button className="qp-button qp-button--primary" disabled={busy || !body || !apiKey || !!issues.length} onClick={() => void send()}>{busy ? '正在发送…' : previous ? '重放 / 重试同一请求' : '发送请求'}</button></header>
       <p>认证：当前选择的 Hub Key · 成功调用按套餐计费。修改参数表示新的查询；同参数重复发送使用原幂等标识。</p>
+      {endpoint?.notice ? <p className="mih-inline-warning">{endpoint.notice}</p> : null}
       {issues.map(issue => <p className="mih-inline-warning" key={issue.scope}>{issue.message}</p>)}
       <h3>请求参数 · JSON Body</h3>
       <div className="qp-table-wrap"><table className="qp-table mih-table"><thead><tr><th>参数</th><th>说明</th><th>值</th></tr></thead><tbody>{endpoint?.fields.map(([key, label, type, required]) => <tr key={key}><td><code>{key}</code>{required ? ' *' : ''}</td><td>{label}</td><td>{Array.isArray(type) ? <DropdownField label={label} value={values[key] || ''} disabled={busy} onChange={value => setDrafts(current => ({ ...current, [endpoint.id]: { ...values, [key]: value } }))} options={[{ value: '', label: '不传此参数' }, ...type.map(value => ({ value, label: value }))]} /> : <input className="qp-input" aria-label={label} type={type === 'number' ? 'number' : 'text'} min={type === 'number' ? 1 : undefined} max={type === 'number' ? 15 : undefined} disabled={busy} value={values[key] || ''} placeholder={required ? '必填' : '留空不传'} onChange={event => setDrafts(current => ({ ...current, [endpoint.id]: { ...values, [key]: event.target.value } }))} />}</td></tr>)}</tbody></table></div>

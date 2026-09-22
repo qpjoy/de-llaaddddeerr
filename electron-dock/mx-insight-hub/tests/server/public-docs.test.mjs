@@ -936,7 +936,7 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
       'compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize',
       'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read',
       'social.posts.resolve', 'social.posts.search', 'social.users.resolve',
-      'social.users.posts',
+      'social.users.posts', 'social.posts.analytics', 'social.comments.list',
     ],
   )
 
@@ -1187,7 +1187,7 @@ function assertPublicOpinionContract(document) {
     'compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize',
     'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read',
     'social.posts.resolve', 'social.posts.search', 'social.users.resolve',
-    'social.users.posts',
+    'social.users.posts', 'social.posts.analytics', 'social.comments.list',
   ])
   assert.deepEqual(
     capabilitiesExample.data.capabilities.find(
@@ -1853,6 +1853,9 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/search/{operation}',
       '/tools/tokenize',
       '/usage',
+      '/data/xiaohongshu/notes/detail',
+      '/data/xiaohongshu/notes/comments',
+      '/xiaohongshu/pgy/get_note_detail',
       '/xiaohongshu/app/get_note_info',
       '/xiaohongshu/app_v2/get_image_note_detail',
       '/xiaohongshu/app_v2/get_user_info',

@@ -1773,3 +1773,24 @@ curl -sS -i --get \
 逻辑请求、customer charge 或上游调用。**当前实现对日期解析及 `from <= to` 仍存在
 校验缺口**；无效日期或反向区间的行为不是稳定公开契约，客户端不能依赖它一定
 返回 `400`。认证缺失或无效时返回 `401`。
+
+
+## 小红书：搜索结果再取阅读量与评论
+
+关键词列表可通过已授权搜索接口使用 `sort_type=popularity_descending` 或 `comment_descending`。从列表取出笔记 ID 后分别调用：
+
+```bash
+curl -sS -X POST "$HUB_URL/api/v1/data/xiaohongshu/notes/detail" \
+  -H "Authorization: Bearer $HUB_KEY" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: note-analytics-001' \
+  --data '{"note_id":"6a20edfa0000000021020951"}'
+
+curl -sS -X POST "$HUB_URL/api/v1/data/xiaohongshu/notes/comments" \
+  -H "Authorization: Bearer $HUB_KEY" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: note-comments-page-001' \
+  --data '{"note_id":"6a20edfa0000000021020951","sort":"hot"}'
+```
+
+详情需 `social.posts.analytics`，评论需 `social.comments.list`；两者同时需 `xiaohongshu` 平台授权，业务和所用 Key 都须开通。阅读量在 `data.item.metrics.views`，曝光量在 `impressions`；缺失为 null。建议新详情请求间隔至少 5 秒。有效 no_data 也计一次成功请求，不自动重试。
+
+评论每页单独调用/计费；只有 `data.nextCursor` 非空才继续，把它作为 `cursor` 传回并使用新的 Idempotency-Key，note_id/sort 不变，最多 15 页。网络失败或结果不明保留原请求参数和幂等键，通过 Hub 请求记录查询状态；不要循环创建新键重试。

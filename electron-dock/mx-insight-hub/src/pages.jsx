@@ -187,6 +187,8 @@ const CAPABILITY_CATALOG = {
     endpoint: 'GET /api/v1/data/public-opinion/regions/{regionCode}/items',
     usageHint: '还必须同时授予 public_opinion 平台；默认不向新调用者开放',
   },
+  'social.posts.analytics': { label: '小红书详情与阅读量', description: '按笔记 ID 获取正文、媒体和阅读/曝光等指标；建议间隔至少 5 秒', endpoint: 'POST /api/v1/data/xiaohongshu/notes/detail', usageHint: '需同时授予 xiaohongshu 平台及当前 Key；不会自动开通' },
+  'social.comments.list': { label: '小红书笔记评论', description: '显式获取一页评论，按最新或最热排序；每页独立计费', endpoint: 'POST /api/v1/data/xiaohongshu/notes/comments', usageHint: '需同时授予 xiaohongshu 平台及当前 Key；不会自动开通' },
   'social.posts.resolve': {
     label: '社交笔记详情',
     description: '按官方笔记链接获取正文、作者、标签、互动量与媒体清单；可能产生外部数据成本',
@@ -352,6 +354,8 @@ function billingMeterLabel(meterKey) {
   return ({
     'social.posts.search': '小红书笔记搜索',
     'social.posts.resolve': '小红书笔记详情',
+    'social.posts.analytics': '小红书详情与阅读量',
+    'social.comments.list': '小红书笔记评论',
     'social.users.resolve': '小红书用户资料',
     'social.users.posts': '小红书用户笔记',
     'ecommerce.products.search': '电商商品搜索',

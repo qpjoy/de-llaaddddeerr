@@ -1,3 +1,4 @@
+import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml } from './contracts/ip-risk-docs.mjs'
@@ -1234,6 +1235,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   ],
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
+    ...xhsResearchPaths,
+    '/xiaohongshu/pgy/get_note_detail': { post: { ...xhsResearchPaths['/data/xiaohongshu/notes/detail'].post, operationId: 'xiaohongshuNoteAnalyticsAlias', description: '与 /data/xiaohongshu/notes/detail 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
     '/data/ip/risk': {
       post: {
@@ -4921,7 +4924,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   properties: {
                     capability: {
                       type: 'string',
-                      enum: ['compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read', 'social.posts.resolve', 'social.posts.search', 'social.users.resolve', 'social.users.posts'],
+                      enum: ['compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read', 'social.posts.resolve', 'social.posts.search', 'social.users.resolve', 'social.users.posts', 'social.posts.analytics', 'social.comments.list'],
                     },
                     ready: { type: 'boolean' },
                   },
@@ -5872,7 +5875,8 @@ curl -sS -X POST "$HUB_URL/api/v1/xiaohongshu/app/get_note_info" \
       <tr><td><code>get_user_posted_notes</code></td><td><code>user_id|share_text,cursor</code></td><td><code>social.users.posts</code></td></tr>
     </tbody></table>
     <p>完整路径均位于 <code>/api/v1/xiaohongshu/app_v2/</code>。三个 identity 入口都要求对应的 <code>note_id|share_text</code> 或 <code>user_id|share_text</code> 至少提供一个；同时给出时分别以 <code>note_id</code> 或 <code>user_id</code> 优先，并用该规范化 selector 绑定幂等与快照 identity。<code>page</code> 只允许 1..15；用户笔记翻页必须原样返回 Hub 签发的不透明 <code>cursor</code>，第 15 页强制终止。每个 App V2 endpoint 都有独立的兼容合同和“endpoint + 规范化 query”幂等域，不是下方 canonical 三入口的第四种别名；不要跨 endpoint 复用 <code>Idempotency-Key</code>。</p>
-    <p>响应保留正文、标题、作者、标签、互动、媒体签名 URL、<code>params</code>、<code>search_id</code> 和 <code>search_session_id</code> 等上游业务字段。Hub 不做字段级长度截断；搜索接口自身可能返回官方预览，调用详情接口获取完整正文。只有上游意外回显的当前 Hub→上游 credential 会按精确值移除；请求的 Authorization、Cookie 或 API key 不会复制到响应。受限 raw archive 保存原始响应字节。<code>Idempotency-Key</code> 可选；省略时每次 HTTP 调用都生成唯一内部 key，独立记录 usage/计费，即使命中缓存也不合并。只有调用方显式复用相同幂等 key 才视为传输重试。</p>
+    <p>响应保留正文、标题、作者、标签、互动、媒体签名 URL、<code>params</code>、<code>search_id</code> 和 <code>search_session_id</code> 等业务字段。Hub 不做字段级长度截断；搜索接口自身可能返回预览，调用详情接口获取完整正文。外部服务的请求标识、路由、支持与文档链接等传输元数据从公开交付移除；意外回显的当前连接凭据按精确值移除，请求的 Authorization、Cookie 或 API key 不会复制到响应。受限 raw archive 保存原始响应字节。<code>Idempotency-Key</code> 可选；省略时每次 HTTP 调用都生成唯一内部 key，独立记录 usage/计费，即使命中缓存也不合并。只有调用方显式复用相同幂等 key 才视为传输重试。</p>
+    ${xhsResearchGuide}
     <h3>3. 每次调用消耗什么</h3>
     <p>一次请求最多产生两笔计量：<strong>Hub 请求</strong>（这条数据产品的服务用量）和<strong>上游调用</strong>（向外部供应方的实际付费采集）。两者不是一回事——命中缓存仍是一笔 Hub 请求，但不产生上游消耗。</p>
     <table><thead><tr><th>deliveryMode</th><th>行为</th><th>Hub 请求</th><th>上游调用</th></tr></thead><tbody>
@@ -6390,7 +6394,7 @@ const TENANT_PRODUCT_PATHS = {
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
   'source-catalog': ['/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
-  'xiaohongshu-note': ['/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
+  'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
   'ecommerce-treasure-box': ['/data/ecommerce/products/search'],
   'social-accounts': ['/data/social/accounts/search'],
   'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],
@@ -6447,10 +6451,12 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'errors') return '<h2>错误与重试</h2><p>保留错误码与 requestId，便于排查。401：检查 Key；403：检查服务与 Key 授权；429：等待额度恢复。请求结果不确定时，使用原 Idempotency-Key 查询或重试同一请求，避免重复消费。</p>'
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
+  if (route.key === 'xiaohongshu-note' && Object.keys(xhsResearchPaths).every(path => tenantDocumentPathAllowed(path, scopes))) html += xhsResearchGuide
   for (const path of paths.filter(path => tenantDocumentPathAllowed(path, scopes))) {
     for (const [method, operation] of Object.entries(PUBLIC_OPENAPI_DOCUMENT.paths[path] || {})) {
       if (!['get', 'post'].includes(method)) continue
       html += `<h3><code>${method.toUpperCase()} /api/v1${escape(path)}</code></h3>`
+      if (xhsResearchPaths[path]) html += `<p>${escape(copy(operation.description))}</p>`
       const params = (operation.parameters || []).map(resolve).filter(Boolean).map(param => ({ name: param.name, required: param.required, schema: resolve(param.schema), description: param.description }))
       const body = resolve(operation.requestBody?.content?.['application/json']?.schema)
       if (body?.properties) for (const [name, schema] of Object.entries(body.properties)) params.push({ name, required: body.required?.includes(name), schema: resolve(schema), description: schema.description })

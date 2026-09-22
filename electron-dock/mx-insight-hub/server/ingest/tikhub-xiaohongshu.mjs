@@ -81,6 +81,8 @@ export function createTikHubXiaohongshuRecord(item, {
   const storedItem = canonicalItem(item)
   const rawItem = structuredClone(storedItem)
   const metrics = {
+    ...(storedItem.metrics?.views == null ? {} : { views: storedItem.metrics.views }),
+    ...(storedItem.metrics?.impressions == null ? {} : { impressions: storedItem.metrics.impressions }),
     ...(storedItem.metrics?.liked == null ? {} : { likes: storedItem.metrics.liked }),
     ...(storedItem.metrics?.comments == null ? {} : { comments: storedItem.metrics.comments }),
     ...(storedItem.metrics?.shared == null ? {} : { shares: storedItem.metrics.shared }),

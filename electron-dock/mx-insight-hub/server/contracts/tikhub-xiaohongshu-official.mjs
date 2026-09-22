@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { XHS_RESEARCH_ENDPOINTS, normalizeXhsResearchRequest } from './xiaohongshu-research.mjs'
 
 import {
   TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
@@ -47,6 +48,7 @@ const SEARCH_NOTE_TYPES = new Set(['不限', '视频笔记', '普通笔记', '�
 const SEARCH_NOTE_TIME_FILTERS = new Set(['不限', '一天内', '一周内', '半年内'])
 
 export const TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS = Object.freeze({
+  ...XHS_RESEARCH_ENDPOINTS,
   detail: Object.freeze({
     name: 'detail',
     endpointKey: TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
@@ -99,7 +101,7 @@ export const TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS = Object.freeze({
 
 export const TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINT_BY_PATH = Object.freeze(
   Object.fromEntries(Object.values(TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS)
-    .map((endpoint) => [endpoint.path, endpoint])),
+    .flatMap((endpoint) => [endpoint.path, ...(endpoint.aliases || [])].map(path => [path, endpoint]))),
 )
 
 export class TikHubXiaohongshuOfficialContractError extends Error {
@@ -210,6 +212,7 @@ function postedNotesRequest(query, decodeCursor) {
 
 export function normalizeTikHubXiaohongshuOfficialRequest(endpointName, query, { decodeCursor } = {}) {
   const endpoint = TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS[endpointName]
+  if (endpoint?.research) return normalizeXhsResearchRequest(endpoint, query, { decodeCursor })
   if (!endpoint) invalid('unsupported_endpoint', 'Xiaohongshu App V2 endpoint is not supported')
   if (!record(query)) invalid('invalid_request', 'query must be an object')
   const unsupported = Object.keys(query).filter((field) => !endpoint.fields.includes(field))

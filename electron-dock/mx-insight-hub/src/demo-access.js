@@ -1,4 +1,6 @@
 const LABELS = {
+  'social.posts.analytics': '详情与阅读量',
+  'social.comments.list': '笔记评论',
   'social.posts.search': '笔记搜索',
   'social.posts.resolve': '笔记详情',
   'social.users.resolve': '用户资料',

@@ -8,7 +8,7 @@ export function storedNote(row) {
     author: { id: row.authorExternalId, name: row.authorName },
     tags: fields.tags || [],
     media: fields.media?.items || (fields.media?.images || []).map(url => ({ type: 'image', url })),
-    metrics: { liked: metrics.likes, collected: metrics.bookmarks, comments: metrics.comments, shared: metrics.shares },
+    metrics: { views: metrics.views, impressions: metrics.impressions, liked: metrics.likes, collected: metrics.bookmarks, comments: metrics.comments, shared: metrics.shares },
     publishedAt: row.eventTime, collectedAt: row.collectedAt,
     bodyCompleteness: row.extensions?.bodyCompleteness || 'unverified_complete',
   }
@@ -25,7 +25,7 @@ export function nativeNote(note) {
     author: { id: note.user?.user_id, name: note.user?.nickname },
     tags: (note.tag_list || note.tags || []).map(tag => typeof tag === 'string' ? tag : tag.name).filter(Boolean),
     media: images.map(image => ({ type: 'image', url: typeof image === 'string' ? image : image.url_default || image.urlDefault || image.url || image.url_size_large || image.url_size_medium || image.info_list?.[0]?.url || image.infoList?.[0]?.url })).filter(image => image.url),
-    metrics: {}, bodyCompleteness: 'provider_preview',
+    metrics: { liked: note.interact_info?.liked_count ?? note.liked_count ?? null, collected: note.interact_info?.collected_count ?? note.collected_count ?? null, comments: note.interact_info?.comment_count ?? note.comment_count ?? null, views: null }, bodyCompleteness: 'provider_preview',
   }
 }
 

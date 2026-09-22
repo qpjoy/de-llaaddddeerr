@@ -11,10 +11,12 @@ export const XHS_CONSOLE_ENDPOINTS = [
     ['source', '来源参数', 'string'], ['ai_mode', 'AI 模式', ['0', '1']],
   ] },
   { id: 'get_image_note_detail', label: '按 ID 获取图文笔记', capability: 'social.posts.resolve', fields: [['note_id', '笔记 ID', 'string'], ['share_text', '分享链接或文本', 'string']], oneOf: ['note_id', 'share_text'] },
+  { id: 'note_detail', label: '详情与阅读量', path: '/api/v1/data/xiaohongshu/notes/detail', capability: 'social.posts.analytics', research: true, notice: '建议两次新查询间隔至少 5 秒，频繁查询可能受限。当前仅提示，不自动排队、等待或重试。阅读量缺失显示为 null；查无结果也计一次成功请求。', fields: [['note_id', '笔记 ID', 'string', true]] },
+  { id: 'note_comments', label: '获取笔记评论', path: '/api/v1/data/xiaohongshu/notes/comments', capability: 'social.comments.list', research: true, notice: '每次只获取一页评论，下一页使用返回的 nextCursor 和新的请求标识；不自动翻页。', fields: [['note_id', '笔记 ID', 'string', true], ['sort', '排序', ['latest', 'hot'], false, 'latest'], ['cursor', '下一页游标', 'string']] },
   { id: 'search_users', label: '搜索用户', capability: 'social.users.resolve', fields: [['keyword', '关键词', 'string', true], ['page', '页码', 'number', false, 1], ['search_id', '搜索标识（续页）', 'string'], ['source', '来源参数', 'string']] },
   { id: 'get_user_info', label: '获取用户资料', capability: 'social.users.resolve', fields: [['user_id', '用户 ID', 'string'], ['share_text', '主页分享链接或文本', 'string']], oneOf: ['user_id', 'share_text'] },
   { id: 'get_user_posted_notes', label: '获取用户笔记', capability: 'social.users.posts', fields: [['user_id', '用户 ID', 'string'], ['share_text', '主页分享链接或文本', 'string'], ['cursor', '下一页游标', 'string']], oneOf: ['user_id', 'share_text'] },
-].map(endpoint => ({ ...endpoint, path: endpoint.path || `/api/v1/xiaohongshu/app_v2/${endpoint.id}`, compatibility: endpoint.id !== 'post' }))
+].map(endpoint => ({ ...endpoint, path: endpoint.path || `/api/v1/xiaohongshu/app_v2/${endpoint.id}`, compatibility: endpoint.id !== 'post' && !endpoint.research }))
 
 export function consoleBody(endpoint, values) {
   if (!XHS_CONSOLE_ENDPOINTS.includes(endpoint)) throw new Error('请选择 Hub 小红书接口')

@@ -5303,6 +5303,9 @@ export function createApp({
         ? TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINT_BY_PATH[pathname]
         : null
       if (officialXiaohongshuEndpoint) {
+        if (officialXiaohongshuEndpoint.research && request.method !== 'POST') {
+          throw new AppError(405, 'method_not_allowed', 'Use JSON POST for this endpoint')
+        }
         const context = await requirePublic(request)
         if (!tikHubGateway || typeof tikHubGateway.officialXiaohongshu !== 'function') {
           throw new AppError(503, 'external_platform_unavailable', 'External Xiaohongshu acquisition is unavailable')

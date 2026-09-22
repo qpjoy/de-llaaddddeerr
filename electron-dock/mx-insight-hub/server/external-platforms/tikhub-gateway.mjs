@@ -1,3 +1,4 @@
+import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { AppError } from '../core/errors.mjs'
@@ -61,7 +62,9 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const SOCIAL_POST_MEDIA_PATH = '/api/v1/data/posts/media'
 const SOCIAL_POST_PATH = '/api/v1/data/post'
 const SEARCH_SNAPSHOT_CONTRACT = 'mx-insight-hub.xiaohongshu-search-snapshot.v1'
+
 const TIKHUB_OPERATION_KEYS = Object.freeze([
+  ...XHS_RESEARCH_OPERATIONS,
   XIAOHONGSHU_POST_OPERATION,
   XIAOHONGSHU_SEARCH_OPERATION,
   XIAOHONGSHU_USER_INFO_OPERATION,
@@ -87,6 +90,8 @@ function legacyOperationReadiness(config, credentialReady, consumerId) {
     String(candidate).toLowerCase() === String(consumerId).toLowerCase()
   )))
   return {
+    ...Object.fromEntries(Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => [endpoint.operation,
+      providerReady && config?.researchContractVerified === true && Number.isSafeInteger(config?.billing?.unitCostMinorByEndpoint?.[endpoint.endpointKey]) && config.billing.unitCostMinorByEndpoint[endpoint.endpointKey] > 0])),
     [XIAOHONGSHU_POST_OPERATION]: providerReady,
     [XIAOHONGSHU_SEARCH_OPERATION]: providerReady
       && config?.searchContractVerified !== false
@@ -230,7 +235,7 @@ function officialResult(body, requestId, replay, sourceMode, capturedAt, originS
     status: 200,
     // Provider-shaped compatibility responses intentionally keep the acquired
     // business envelope. Hub request/source metadata is carried in headers.
-    body: structuredClone(body),
+    body: publicXiaohongshuEnvelope(body),
     requestId,
     replay,
     sourceMode,
@@ -238,6 +243,14 @@ function officialResult(body, requestId, replay, sourceMode, capturedAt, originS
     staleAgeSeconds: captured ? Math.max(0, Math.floor((Date.now() - captured) / 1_000)) : null,
     ...(originSourceMode ? { originSourceMode } : {}),
   }
+}
+
+// Retain the business envelope, never the provider's transport identity/links.
+// Apply on reads too so pre-existing snapshots obey the public boundary.
+function publicXiaohongshuEnvelope(body) {
+  const result = structuredClone(body)
+  for (const field of ['request_id', 'router', 'support', 'docs', 'cache_url', 'message', 'message_zh', 'cache_message', 'cache_message_zh', 'time_zone']) delete result[field]
+  return result
 }
 
 function officialRawItemCount(endpointName, payload) {
@@ -602,7 +615,7 @@ export class TikHubGateway {
         credentialRevision: credential?.revision ?? null,
       })
     }
-    if (this.config?.[legacyGate] === false) {
+    if (this.config?.[legacyGate] === false || (XHS_RESEARCH_OPERATIONS.includes(operationKey) && this.config?.[legacyGate] !== true)) {
       throw new AppError(
         503,
         'external_platform_contract_unverified',
@@ -692,7 +705,7 @@ export class TikHubGateway {
         operationDetail = {}
       }
     }
-    const ready = TIKHUB_OPERATION_KEYS.every((operationKey) => readiness[operationKey] === true)
+    const ready = TIKHUB_OPERATION_KEYS.filter(key => !XHS_RESEARCH_OPERATIONS.includes(key)).every((operationKey) => readiness[operationKey] === true)
     return {
       platform: XIAOHONGSHU_PLATFORM,
       ready,
@@ -732,9 +745,11 @@ export class TikHubGateway {
         throw new AppError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8-128 safe characters')
       }
       const endpoint = TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS[endpointName]
-      if (!endpoint || endpoint.path !== path) {
+      if (!endpoint || (endpoint.path !== path && !endpoint.aliases?.includes(path))) {
         throw new AppError(404, 'not_found', 'Xiaohongshu App V2 endpoint was not found')
       }
+      const allowStoredFallback = !endpoint.liveOnly
+      const requiredCapabilities = endpoint.research ? [endpoint.operation] : [XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY, endpoint.operation]
       const grants = typeof this.usageStore.listEffectiveGrants === 'function'
         ? await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
         : await this.usageStore.listGrants(context.consumer.id)
@@ -744,7 +759,7 @@ export class TikHubGateway {
       const capabilityGrants = typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
         ? await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
         : await this.usageStore.listCapabilityGrants(context.consumer.id)
-      const missingCapability = [XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY, endpoint.operation]
+      const missingCapability = requiredCapabilities
         .find((capability) => !capabilityGrants.includes(capability))
       if (missingCapability) {
         throw new AppError(403, 'capability_not_granted', `${missingCapability} is not granted`)
@@ -772,13 +787,13 @@ export class TikHubGateway {
         ...((await this.usageStore.getPolicy(context.consumer.id, XIAOHONGSHU_PLATFORM)) || {}),
       }
       let codec = null
-      if (endpointName === 'get_user_posted_notes') {
+      if (endpointName === 'get_user_posted_notes' || endpointName === 'note_comments') {
         if (typeof this.apiKeyPepper !== 'string' || !this.apiKeyPepper) {
           throw new AppError(503, 'external_platform_unavailable', 'External pagination signing is unavailable')
         }
         const secret = createHash('sha256')
           .update(this.apiKeyPepper)
-          .update('\u0000xiaohongshu-app-v2-user-posts\u0000')
+          .update(endpointName === 'note_comments' ? `\u0000xiaohongshu-comments\u0000${context.apiKey.id}\u0000` : '\u0000xiaohongshu-app-v2-user-posts\u0000')
           .digest('hex')
         codec = createExternalPlatformCursorCodec(secret, context.consumer.id)
       }
@@ -795,9 +810,9 @@ export class TikHubGateway {
       }
       const requestFingerprint = fingerprint({
         method: 'GET',
-        path,
+        path: endpoint.path,
         query: normalized.publicQuery,
-        contractVersion: TIKHUB_XIAOHONGSHU_OFFICIAL_CONTRACT_VERSION,
+        contractVersion: normalized.contractVersion,
       })
       const requestId = randomUUID()
       const effectiveKey = suppliedKey
@@ -822,8 +837,7 @@ export class TikHubGateway {
         acquisitionRequest: acquisitionRequestSnapshot({ method, path, body: query }),
         requiredAuthorizationScopes: [
           { type: 'platform', key: XIAOHONGSHU_PLATFORM },
-          { type: 'capability', key: endpoint.operation },
-          { type: 'capability', key: XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY },
+          ...requiredCapabilities.map(key => ({ type: 'capability', key })),
         ],
         unitsReserved: 1,
         leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
@@ -884,7 +898,7 @@ export class TikHubGateway {
 
       const activeRequestId = reservation.request.id
       const now = new Date()
-      let snapshot = await this.platformStore.snapshotFor({
+      let snapshot = endpoint.liveOnly ? null : await this.platformStore.snapshotFor({
         consumerId: context.consumer.id,
         operation: endpoint.operation,
         fingerprint: dispatchFingerprint,
@@ -894,7 +908,7 @@ export class TikHubGateway {
           delivery,
           snapshot,
           sourceMode: 'fresh_cache',
-          responseBody: snapshot.responseBody,
+          responseBody: publicXiaohongshuEnvelope(snapshot.responseBody),
           usageUnitsActual: 1,
         })
         ownsReservation = false
@@ -926,7 +940,7 @@ export class TikHubGateway {
             delivery,
             snapshot,
             sourceMode: 'stored_fallback',
-            responseBody: snapshot.responseBody,
+            responseBody: publicXiaohongshuEnvelope(snapshot.responseBody),
             usageUnitsActual: 1,
           })
           ownsReservation = false
@@ -957,13 +971,13 @@ export class TikHubGateway {
           operation: endpoint.operation,
           fingerprint: dispatchFingerprint,
           endpointKey: endpoint.endpointKey,
-          contractVersion: TIKHUB_XIAOHONGSHU_OFFICIAL_CONTRACT_VERSION,
+          contractVersion: normalized.contractVersion,
           ownerRequestId: activeRequestId,
           expiresAt: new Date(Date.now() + this.reservationLeaseMs),
         })
         ownsLease = lease === true || lease?.kind === 'acquired'
         if (!ownsLease) {
-          snapshot = await this.platformStore.snapshotFor({
+          snapshot = endpoint.liveOnly ? null : await this.platformStore.snapshotFor({
             consumerId: context.consumer.id,
             operation: endpoint.operation,
             fingerprint: dispatchFingerprint,
@@ -975,7 +989,7 @@ export class TikHubGateway {
               delivery,
               snapshot,
               sourceMode,
-              responseBody: snapshot.responseBody,
+              responseBody: publicXiaohongshuEnvelope(snapshot.responseBody),
               usageUnitsActual: 1,
             })
             ownsReservation = false
@@ -999,7 +1013,7 @@ export class TikHubGateway {
               delivery,
               snapshot,
               sourceMode: 'stored_fallback',
-              responseBody: snapshot.responseBody,
+              responseBody: publicXiaohongshuEnvelope(snapshot.responseBody),
               usageUnitsActual: 1,
             })
             ownsReservation = false
@@ -1052,7 +1066,7 @@ export class TikHubGateway {
           apiKeyId: context.apiKey.id,
           usageRequestId: activeRequestId,
           operation: endpoint.operation,
-          contractVersion: TIKHUB_XIAOHONGSHU_OFFICIAL_CONTRACT_VERSION,
+          contractVersion: normalized.contractVersion,
           endpointKey: endpoint.endpointKey,
           endpointVersion: endpoint.endpointVersion,
           marketplace: XIAOHONGSHU_PLATFORM,
@@ -1101,19 +1115,21 @@ export class TikHubGateway {
             endpointName,
             upstream.payload,
           )
-          const projection = endpointName === 'get_user_posted_notes' && !documentedServiceError
+          const projection = endpoint.research
+            ? { payload: projectXhsResearch(upstream.payload, normalized, capturedAt, { encodeCursor: codec?.encode }) }
+            : endpointName === 'get_user_posted_notes' && !documentedServiceError
             ? projectTikHubXiaohongshuOfficialPostedNotes(upstream.payload, normalized, {
                 encodeCursor: codec.encode,
               })
             : { payload: upstream.payload }
-          const records = officialCanonicalRecords(
+          const records = endpoint.research ? xhsResearchRecords(projection.payload, normalized) : officialCanonicalRecords(
             normalized,
             upstream.payload,
             capturedAt,
             resolved.value,
           )
-          const responseBody = projection.payload
-          const itemCount = officialRawItemCount(endpointName, upstream.payload)
+          const responseBody = publicXiaohongshuEnvelope(projection.payload)
+          const itemCount = endpoint.research ? (projection.payload.data.item ? 1 : projection.payload.data.items?.length || 0) : officialRawItemCount(endpointName, upstream.payload)
           const freshTtlMs = endpointName === 'search_notes'
             ? (this.config.searchFreshTtlMs ?? this.config.freshTtlMs)
             : this.config.freshTtlMs
@@ -1135,7 +1151,7 @@ export class TikHubGateway {
               payload: {
                 kind: 'external-platform-result',
                 providerKey: TIKHUB_PROVIDER_KEY,
-                datasetId: endpointName === 'get_user_info'
+                datasetId: endpointName === 'note_comments' ? 'social.comments.v1' : endpointName === 'get_user_info'
                   ? NIGHT_ALL_COMPAT_DATASET_ID
                   : TIKHUB_XIAOHONGSHU_DATASET_ID,
                 platform: XIAOHONGSHU_PLATFORM,
@@ -1262,6 +1278,9 @@ export class TikHubGateway {
       }
       if (!(error instanceof AppError)) {
         this.logger?.error?.({ requestId: durableRequestId, error }, 'TikHub official gateway request failed')
+      }
+      if (XHS_RESEARCH_ENDPOINTS[endpointName] && error instanceof AppError && error.status >= 500) {
+        throw withRequestId(new AppError(error.status, error.code, 'The requested Xiaohongshu service is unavailable'), durableRequestId)
       }
       throw withRequestId(error, durableRequestId)
     }

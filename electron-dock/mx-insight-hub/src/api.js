@@ -252,6 +252,11 @@ export const publicDataApi = {
     `/api/v1/xiaohongshu/app_v2/${encodeURIComponent(endpoint)}`,
     { method: 'POST', body, idempotencyKey, signal },
   ),
+  xiaohongshuResearch: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => {
+    const paths = { note_detail: 'detail', note_comments: 'comments' }
+    if (!Object.hasOwn(paths, endpoint)) throw new Error('Unknown Xiaohongshu endpoint')
+    return publicDataRequest(apiKey, `/api/v1/data/xiaohongshu/notes/${paths[endpoint]}`, { method: 'POST', body, idempotencyKey, signal })
+  },
   xiaohongshuNote: (apiKey, body, { idempotencyKey, retryOfRequestId, signal } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/xiaohongshu/app/get_note_info',

@@ -1,3 +1,4 @@
+import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_VERSION } from '../contracts/xiaohongshu-research.mjs'
 import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
 import { randomUUID } from 'node:crypto'
 
@@ -98,6 +99,10 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
     }),
   ]),
   tikhub: Object.freeze([
+    ...Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => Object.freeze({
+      operationKey: endpoint.operation, label: endpoint.label, legacyGate: endpoint.gate,
+      contractVersion: XHS_RESEARCH_VERSION, endpointKeys: Object.freeze([endpoint.endpointKey]),
+    })),
     Object.freeze({
       operationKey: SOCIAL_ACCOUNT_SEARCH_OPERATION,
       label: '社交账号搜索',

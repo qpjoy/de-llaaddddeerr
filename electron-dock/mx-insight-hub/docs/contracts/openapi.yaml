@@ -38,6 +38,671 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/xiaohongshu/notes/detail:
+    post:
+      operationId: xiaohongshuNoteAnalytics
+      tags:
+      - Data products
+      summary: 获取笔记详情与阅读量
+      description: 仅接受 JSON POST；使用已授权的 Live Hub Key，业务与 Key 都必须有 xiaohongshu 平台和本操作权限。每个新请求实时获取一次，不自动缓冲、排队、重试或翻页。相同
+        Idempotency-Key 与相同参数重放不再次采集/计费，参数变化必须换标识。成功返回（含 no_data）计一次用量，按当前已发布并分配的套餐计费；新能力不会自动授权或改价。交付标识、时间与来源模式见
+        x-mx-insight-request-id / x-mx-insight-captured-at / x-mx-insight-source-mode
+        响应头。 建议两次新查询间隔至少 5 秒；频繁请求可能受限，此建议不代表服务保证。阅读量 metrics.views 与曝光量 metrics.impressions
+        分开；未提供用 null，不猜测或用点赞数替代。meta.tagsAvailable=false 时不要当作无标签，可继续使用完整正文与标签接口。查无结果返回
+        meta.status=no_data、data.item=null，仍计一次成功调用；不要因此自动重试。
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - social.posts.analytics
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: 重试必须保留；省略时每次均视为新请求。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - note_id
+              properties:
+                note_id:
+                  type: string
+                  pattern: ^[0-9a-fA-F]{24}$
+            example:
+              note_id: 6a20edfa0000000021020951
+      responses:
+        '200':
+          description: 成功交付或已确认无数据；metadata 不包含外部服务身份。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - code
+                - data
+                - meta
+                properties:
+                  code:
+                    const: 200
+                  data:
+                    type: object
+                    properties:
+                      item:
+                        type:
+                        - object
+                        - 'null'
+                        properties:
+                          platform:
+                            const: xiaohongshu
+                          externalId:
+                            type: string
+                          url:
+                            type: string
+                          title:
+                            type:
+                            - string
+                            - 'null'
+                          text:
+                            type:
+                            - string
+                            - 'null'
+                          type:
+                            type:
+                            - string
+                            - 'null'
+                          publishedAt:
+                            type:
+                            - string
+                            - 'null'
+                          collectedAt:
+                            type: string
+                            format: date-time
+                          tags:
+                            type: array
+                            items:
+                              type: string
+                          author:
+                            type: object
+                            properties:
+                              id:
+                                type:
+                                - string
+                                - 'null'
+                              name:
+                                type:
+                                - string
+                                - 'null'
+                              avatarUrl:
+                                type:
+                                - string
+                                - 'null'
+                          media:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                type:
+                                  enum:
+                                  - image
+                                  - video
+                                url:
+                                  type: string
+                                width:
+                                  type:
+                                  - integer
+                                  - 'null'
+                                  minimum: 0
+                                  description: null 表示未提供，0 表示实际为零。
+                                height:
+                                  type:
+                                  - integer
+                                  - 'null'
+                                  minimum: 0
+                                  description: null 表示未提供，0 表示实际为零。
+                          metrics:
+                            type: object
+                            properties:
+                              views:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              impressions:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              liked:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              collected:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              comments:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              shared:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                  meta:
+                    type: object
+                    properties:
+                      status:
+                        enum:
+                        - ok
+                        - no_data
+                      collectedAt:
+                        type: string
+                        format: date-time
+                      tagsAvailable:
+                        type: boolean
+                      recommendedIntervalSeconds:
+                        const: 5
+        '400':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '405':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /data/xiaohongshu/notes/comments:
+    post:
+      operationId: xiaohongshuNoteComments
+      tags:
+      - Data products
+      summary: 获取笔记评论
+      description: 仅接受 JSON POST；使用已授权的 Live Hub Key，业务与 Key 都必须有 xiaohongshu 平台和本操作权限。每个新请求实时获取一次，不自动缓冲、排队、重试或翻页。相同
+        Idempotency-Key 与相同参数重放不再次采集/计费，参数变化必须换标识。成功返回（含 no_data）计一次用量，按当前已发布并分配的套餐计费；新能力不会自动授权或改价。交付标识、时间与来源模式见
+        x-mx-insight-request-id / x-mx-insight-captured-at / x-mx-insight-source-mode
+        响应头。 仅 nextCursor 非空时继续；meta.paginationStatus=unknown 或 limit_reached 时停止。hasMore=null
+        表示无法确认。评论总量与当前页数量不同；回复仅含已返回部分。
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - social.comments.list
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: 重试必须保留；省略时每次均视为新请求。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - note_id
+              properties:
+                note_id:
+                  type: string
+                  pattern: ^[0-9a-fA-F]{24}$
+                sort:
+                  type: string
+                  enum:
+                  - latest
+                  - hot
+                  default: latest
+                cursor:
+                  type: string
+                  maxLength: 8192
+                  description: 首屏省略。续页原样传入 data.nextCursor，保留 note_id/sort 并使用新的 Idempotency-Key。游标绑定当前
+                    Key 与笔记/排序，最多 15 页。
+            example:
+              note_id: 6a20edfa0000000021020951
+              sort: hot
+      responses:
+        '200':
+          description: 成功交付或已确认无数据；metadata 不包含外部服务身份。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - code
+                - data
+                - meta
+                properties:
+                  code:
+                    const: 200
+                  data:
+                    type: object
+                    properties:
+                      noteId:
+                        type: string
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            noteId:
+                              type: string
+                            text:
+                              type: string
+                            liked:
+                              type:
+                              - integer
+                              - 'null'
+                              minimum: 0
+                              description: null 表示未提供，0 表示实际为零。
+                            publishedAt:
+                              type:
+                              - string
+                              - 'null'
+                            author:
+                              type: object
+                              properties:
+                                id:
+                                  type:
+                                  - string
+                                  - 'null'
+                                name:
+                                  type:
+                                  - string
+                                  - 'null'
+                                avatarUrl:
+                                  type:
+                                  - string
+                                  - 'null'
+                            media:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  type:
+                                    enum:
+                                    - image
+                                    - video
+                                  url:
+                                    type: string
+                                  width:
+                                    type:
+                                    - integer
+                                    - 'null'
+                                    minimum: 0
+                                    description: null 表示未提供，0 表示实际为零。
+                                  height:
+                                    type:
+                                    - integer
+                                    - 'null'
+                                    minimum: 0
+                                    description: null 表示未提供，0 表示实际为零。
+                            replyCount:
+                              type:
+                              - integer
+                              - 'null'
+                              minimum: 0
+                              description: null 表示未提供，0 表示实际为零。
+                            replies:
+                              type: array
+                              description: 本次返回的部分内嵌回复；不保证等于 replyCount。
+                              items:
+                                type: object
+                      nextCursor:
+                        type:
+                        - string
+                        - 'null'
+                      hasMore:
+                        type:
+                        - boolean
+                        - 'null'
+                  meta:
+                    type: object
+                    properties:
+                      status:
+                        enum:
+                        - ok
+                        - no_data
+                      collectedAt:
+                        type: string
+                        format: date-time
+                      page:
+                        type: integer
+                        minimum: 1
+                        maximum: 15
+                      paginationStatus:
+                        enum:
+                        - continuable
+                        - exhausted
+                        - unknown
+                        - limit_reached
+        '400':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '405':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /xiaohongshu/pgy/get_note_detail:
+    post:
+      operationId: xiaohongshuNoteAnalyticsAlias
+      tags:
+      - Data products
+      summary: 获取笔记详情与阅读量
+      description: 与 /data/xiaohongshu/notes/detail 相同的 JSON POST 合同、授权和幂等身份。
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - social.posts.analytics
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: 重试必须保留；省略时每次均视为新请求。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - note_id
+              properties:
+                note_id:
+                  type: string
+                  pattern: ^[0-9a-fA-F]{24}$
+            example:
+              note_id: 6a20edfa0000000021020951
+      responses:
+        '200':
+          description: 成功交付或已确认无数据；metadata 不包含外部服务身份。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - code
+                - data
+                - meta
+                properties:
+                  code:
+                    const: 200
+                  data:
+                    type: object
+                    properties:
+                      item:
+                        type:
+                        - object
+                        - 'null'
+                        properties:
+                          platform:
+                            const: xiaohongshu
+                          externalId:
+                            type: string
+                          url:
+                            type: string
+                          title:
+                            type:
+                            - string
+                            - 'null'
+                          text:
+                            type:
+                            - string
+                            - 'null'
+                          type:
+                            type:
+                            - string
+                            - 'null'
+                          publishedAt:
+                            type:
+                            - string
+                            - 'null'
+                          collectedAt:
+                            type: string
+                            format: date-time
+                          tags:
+                            type: array
+                            items:
+                              type: string
+                          author:
+                            type: object
+                            properties:
+                              id:
+                                type:
+                                - string
+                                - 'null'
+                              name:
+                                type:
+                                - string
+                                - 'null'
+                              avatarUrl:
+                                type:
+                                - string
+                                - 'null'
+                          media:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                type:
+                                  enum:
+                                  - image
+                                  - video
+                                url:
+                                  type: string
+                                width:
+                                  type:
+                                  - integer
+                                  - 'null'
+                                  minimum: 0
+                                  description: null 表示未提供，0 表示实际为零。
+                                height:
+                                  type:
+                                  - integer
+                                  - 'null'
+                                  minimum: 0
+                                  description: null 表示未提供，0 表示实际为零。
+                          metrics:
+                            type: object
+                            properties:
+                              views:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              impressions:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              liked:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              collected:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              comments:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                              shared:
+                                type:
+                                - integer
+                                - 'null'
+                                minimum: 0
+                                description: null 表示未提供，0 表示实际为零。
+                  meta:
+                    type: object
+                    properties:
+                      status:
+                        enum:
+                        - ok
+                        - no_data
+                      collectedAt:
+                        type: string
+                        format: date-time
+                      tagsAvailable:
+                        type: boolean
+                      recommendedIntervalSeconds:
+                        const: 5
+        '400':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '405':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /data/ecommerce/products/items:
     get:
       tags:
@@ -1884,7 +2549,7 @@ paths:
                           additionalProperties: false
                           required: [capability, ready]
                           properties:
-                            capability: { type: string, enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts] }
+                            capability: { type: string, enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts, social.posts.analytics, social.comments.list] }
                             ready: { type: boolean }
                   requestId: { type: string }
               example:
@@ -7371,7 +8036,7 @@ components:
             grants. Omission is empty unless scopePreset=legacy_all.
           items:
             type: string
-            enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts]
+            enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts, social.posts.analytics, social.comments.list]
     ApiKeyMetadata:
       type: object
       required:

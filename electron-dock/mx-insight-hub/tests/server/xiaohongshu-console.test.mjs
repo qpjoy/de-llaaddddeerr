@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { XHS_CONSOLE_ENDPOINTS as endpoints, consoleBody, consoleRequestIdentity } from '../../src/xiaohongshu-console.js'
 import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 test('console exposes only fixed Hub POST contracts with known parameters', () => {
-  assert.equal(endpoints.length, 6)
+  assert.equal(endpoints.length, 8)
   for (const endpoint of endpoints) {
     const operation = PUBLIC_OPENAPI_DOCUMENT.paths[endpoint.path.replace('/api/v1', '')]?.post
     assert.ok(operation, endpoint.path)

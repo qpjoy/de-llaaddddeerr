@@ -76,6 +76,8 @@ function formatDate(value) {
 
 function metricEntries(metrics = {}) {
   return [
+    ['阅读', metrics.views],
+    ['曝光', metrics.impressions],
     ['点赞', metrics.liked],
     ['收藏', metrics.collected],
     ['评论', metrics.comments],
@@ -139,9 +141,11 @@ function NoteScroll({ result, apiKey, mediaEnabled = true, directImages = false 
       </div>
     )
   }
-  const media = (mediaEnabled && Array.isArray(item.media) ? item.media : [])
+  const images = (mediaEnabled && Array.isArray(item.media) ? item.media : [])
     .filter((entry) => entry?.type === 'image' && entry.url)
-    .slice(0, 20)
+  const media = directImages ? images : images.slice(0, 20)
+  const videos = (directImages && mediaEnabled && Array.isArray(item.media) ? item.media : [])
+    .filter(entry => entry?.type === 'video' && /^https:\/\//i.test(entry.url || ''))
   return (
     <article className="mih-xhs-scroll">
       <header>
@@ -169,6 +173,7 @@ function NoteScroll({ result, apiKey, mediaEnabled = true, directImages = false 
           ))}
         </div>
       ) : null}
+      {videos.map((video, index) => <video key={video.url} controls preload="none" src={video.url} aria-label={`笔记视频 ${index + 1}`} style={{ width: '100%', borderRadius: '12px' }} />)}
       <p className="mih-xhs-body">{item.text || '该笔记没有可展示的正文。'}</p>
       {item.tags?.length ? (
         <div className="mih-xhs-tags" aria-label="笔记标签">
@@ -329,7 +334,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
       <PageHeading
         eyebrow="DATA PRODUCT / XIAOHONGSHU NOTE"
         title="小红书笔记画卷"
-        description="搜索笔记或输入分享链接，查看正文、作者、图片和标签。"
+        description="按关键词发现热门笔记，查看正文、媒体、阅读量和评论。"
       >
         <a className="qp-button qp-button--outline" href="#/api-keys">签发 / 轮换 API Key</a>
         {session?.platformAdmin ? <a className="qp-button qp-button--outline" href="#/platforms">查看开放能力</a> : null}

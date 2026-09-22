@@ -25,6 +25,7 @@ import {
 } from './contracts/tikhub-xiaohongshu-search.mjs'
 import { XIAOHONGSHU_USER_INFO_OPERATION } from './contracts/tikhub-xiaohongshu-user-info.mjs'
 import { XIAOHONGSHU_CRAWL_OPERATION } from './contracts/tikhub-xiaohongshu-user-posts.mjs'
+import { XHS_RESEARCH_OPERATIONS } from './contracts/xiaohongshu-research.mjs'
 import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY } from './contracts/tikhub-xiaohongshu-official.mjs'
 import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
@@ -247,6 +248,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  ...XHS_RESEARCH_OPERATIONS,
   'enterprise.query',
   'ip.risk.query',
   TOKENIZE_CAPABILITY,
@@ -270,6 +272,7 @@ const NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES = Object.freeze({
   'user-info': XIAOHONGSHU_USER_INFO_OPERATION,
 })
 const XIAOHONGSHU_ACQUISITION_CAPABILITIES = new Set([
+  ...XHS_RESEARCH_OPERATIONS,
   XIAOHONGSHU_SEARCH_OPERATION,
   XIAOHONGSHU_POST_OPERATION,
   XIAOHONGSHU_USER_INFO_OPERATION,
@@ -1372,6 +1375,7 @@ export class HubService {
             && typeof this.store.listAdminPublicOpinionBrowseRecords === 'function'
             && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function',
         },
+        ...XHS_RESEARCH_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(xiaohongshuAcquisition, capability) })),
         {
           capability: XIAOHONGSHU_POST_OPERATION,
           ready: providerOperationReady(xiaohongshuAcquisition, XIAOHONGSHU_POST_OPERATION),

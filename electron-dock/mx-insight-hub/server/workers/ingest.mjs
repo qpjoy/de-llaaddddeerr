@@ -86,7 +86,7 @@ async function main() {
         && payload.datasetId === 'ecommerce.products.v1'
         && payload.platform === 'ecommerce'
       const tikHubXiaohongshu = payload.providerKey === 'tikhub'
-        && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID]
+        && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID, 'social.comments.v1']
           .includes(payload.datasetId)
         && payload.platform === 'xiaohongshu'
       if ((!justOne && !tikHubXiaohongshu && !enterprise) || !Array.isArray(payload.records)) {

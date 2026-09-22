@@ -23,6 +23,31 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   const [error, setError] = useState(saved.error || null)
   const identity = useRef(saved.identity || null)
   const lock = useRef(false)
+  const analyticsIssues = useDemoAccess('social.posts.analytics')
+  const commentIssues = useDemoAccess('social.comments.list')
+  const [research, setResearch] = useState(saved.research || {})
+  const [researchError, setResearchError] = useState(saved.researchError || null)
+  const [commentSort, setCommentSort] = useState(saved.commentSort || 'latest')
+  const researchRequests = useRef(saved.researchRequests || new Map())
+  saved.researchRequests = researchRequests.current
+  const requestResearch = async (endpoint, cursor = null, fresh = false) => {
+    if (lock.current || !apiKey.trim() || (endpoint === 'note_detail' ? analyticsIssues : commentIssues).length) return
+    const body = { note_id: item.externalId, ...(endpoint === 'note_comments' ? { sort: commentSort, ...(cursor ? { cursor } : {}) } : {}) }
+    const fingerprint = JSON.stringify([endpoint, body])
+    if (fresh) researchRequests.current.delete(fingerprint)
+    const idempotencyKey = researchRequests.current.get(fingerprint) || `xhs-research-${requestUuid()}`
+    researchRequests.current.set(fingerprint, idempotencyKey)
+    lock.current = true; setBusy(true); setResearchError(null); saved.researchError = null
+    try {
+      const response = await publicDataApi.xiaohongshuResearch(apiKey.trim(), endpoint, body, { idempotencyKey })
+      // Replaying the same page replaces it instead of duplicating comments.
+      const pages = endpoint === 'note_comments' ? { ...(cursor ? saved.research?.commentPages : {}), [fingerprint]: response.payload.data.items } : saved.research?.commentPages
+      const next = { ...saved.research, [endpoint]: response, commentPages: pages }
+      saved.research = next
+      if (alive.current) setResearch(next)
+    } catch (failure) { saved.researchError = failure; if (alive.current) setResearchError(failure) }
+    finally { lock.current = false; if (alive.current) setBusy(false) }
+  }
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const url = item.url || `https://www.xiaohongshu.com/explore/${item.externalId}`
@@ -38,19 +63,46 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
     } catch (failure) { saved.error = failure; if (alive.current) setError(failure) }
     finally { lock.current = false; if (alive.current) setBusy(false) }
   }
+  const analytics = research.note_detail?.payload?.data?.item
+  const original = result?.payload?.data?.item || item
+  const displayed = analytics ? { ...original, ...Object.fromEntries(Object.entries(analytics).filter(([, value]) => value != null)),
+    tags: research.note_detail.payload.meta.tagsAvailable ? analytics.tags : original.tags,
+    media: analytics.media?.length ? analytics.media : original.media,
+    metrics: { ...original.metrics, ...analytics.metrics },
+  } : original
   return <Modal title={item.title || '笔记详情'} size="xlarge" closeOnBackdrop={false} closeOnEscape={false} busy={busy} onClose={onClose} footer={<button className="qp-button" disabled={busy} onClick={onClose}>关闭</button>}>
     <p>{item.bodyCompleteness === 'provider_preview' ? '列表预览可能不含完整正文和标签。' : '展示当前 Hub 已存版本，完整性以采集结果为准。'} 获取完整详情优先读缓存，必要时采集，可能计费。</p>
     <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim()} onClick={() => void resolve()}>{busy ? '正在读取详情…' : error ? '重试同一详情请求' : '获取完整正文与标签'}</button>
     <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || Boolean(error)} onClick={() => void resolve('live_only')}>重新采集完整笔记（可能计费）</button></div>
     <p>重新查询会获取最新正文、标签和全部图片地址；图片重试只重新加载已有图片。</p>
+    <section className="qp-panel" aria-label="详情与阅读量">
+      <h3>详情与阅读量</h3>
+      <p>获取正文、媒体、阅读量和曝光量。结构化标签可能缺失，可用上方完整正文入口补充。建议两次新查询间隔至少 5 秒；当前仅提示，不自动排队或重试。</p>
+      <DemoAccessNotice operation="social.posts.analytics" />
+      <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim() || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail')}>获取详情与阅读量</button>
+      <button className="qp-button qp-button--outline" disabled={busy || !!researchError || !research.note_detail || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail', null, true)}>重新查询阅读量（可能计费）</button></div>
+      {research.note_detail ? <><p>阅读量：{analytics?.metrics?.views ?? '未提供'} · 曝光量：{analytics?.metrics?.impressions ?? '未提供'}。{!analytics ? '本次查询无结果，请勿自动重试。' : '正文与指标按各次返回展示；未提供的标签保留已有结果。'}</p><DeliveryEvidence evidence={research.note_detail.evidence} /></> : null}
+    </section>
     <div className="mih-xhs-detail-actions"><label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
     <button className="qp-button qp-button--outline" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button></div>
     <p>关闭后再次打开会保留本页会话中的详情与请求状态；刷新页面后清空。</p>
     {error ? <ErrorState error={error} /> : null}
+    {researchError ? <ErrorState error={researchError} /> : null}
     <DeliveryEvidence evidence={result?.evidence} error={error} />
-    <NoteScroll key={imageRevision} result={result || { payload: { data: { item: { ...item, media: [] } } } }} apiKey={apiKey} mediaEnabled={images} directImages />
-    {!result ? <div className="mih-xhs-gallery" aria-label={`笔记图片，共 ${item.media?.length || 0} 张`}>{item.media?.map((media, index) => <figure key={`${imageRevision}:${index}`}><BusinessImage className="mih-xhs-note-image" url={media.url} enabled={images} alt={`笔记媒体 ${index + 1}`} /><figcaption>{index + 1} / {item.media.length}</figcaption></figure>)}</div> : null}
+    <NoteScroll key={imageRevision} result={{ payload: { data: { item: displayed } } }} apiKey={apiKey} mediaEnabled={images} directImages />
+    <section className="qp-panel" aria-label="笔记评论"><h3>笔记评论</h3><p>每次只请求一页，成功调用按套餐计费。内嵌回复仅展示本次已获取部分。</p>
+      <DemoAccessNotice operation="social.comments.list" />
+      <DropdownField label="评论排序" disabled={busy} value={commentSort} options={[{ value: 'latest', label: '最新' }, { value: 'hot', label: '最热' }]} onChange={value => { saved.commentSort = value; setCommentSort(value); const next = { ...research, note_comments: null, commentPages: {} }; saved.research = next; setResearch(next) }} />
+      <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!commentIssues.length} onClick={() => void requestResearch('note_comments')}>获取 / 重试首屏评论</button>
+      <button className="qp-button qp-button--outline" disabled={busy || !research.note_comments?.payload?.data?.nextCursor || !!commentIssues.length} onClick={() => void requestResearch('note_comments', research.note_comments.payload.data.nextCursor)}>加载下一页评论（可能计费）</button></div>
+      {research.note_comments ? <><DeliveryEvidence evidence={research.note_comments.evidence} /><p>{research.note_comments.payload.data.hasMore === false ? '已无后续评论。' : research.note_comments.payload.data.nextCursor ? '可手动加载下一页。' : '分页信息未提供或已达 15 页上限，不会自动续查。'}</p></> : null}
+      {Object.values(research.commentPages || {}).flat().map(comment => <Comment key={comment.id} comment={comment} />)}
+    </section>
   </Modal>
+}
+
+function Comment({ comment }) {
+  return <article className="qp-panel"><strong>{comment.author?.name || '匿名用户'}</strong><small> · 点赞 {comment.liked ?? '未提供'} · 回复 {comment.replyCount ?? '未提供'}</small><p style={{ whiteSpace: 'pre-wrap' }}>{comment.text}</p>{comment.replies?.map(reply => <Comment key={reply.id} comment={reply} />)}</article>
 }
 
 export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEvidence }) {
@@ -65,6 +117,8 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   const [listPage, setListPage] = useState(1)
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('search_notes')
+  const [sortType, setSortType] = useState('popularity_descending')
+  const [timeFilter, setTimeFilter] = useState('不限')
   const operation = kind === 'search_notes' ? 'social.posts.search' : 'social.users.posts'
   const accessIssues = useDemoAccess(operation, true)
   const [selector, setSelector] = useState('')
@@ -91,7 +145,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   const lastPull = useRef(0)
   const lastAcquire = useRef(0)
   const rulerNavigation = useRef(false)
-  const scope = `${apiKey}|${kind}|${selector}`
+  const scope = `${apiKey}|${kind}|${selector}|${sortType}|${timeFilter}`
   const currentScope = useRef(scope)
   currentScope.current = scope
 
@@ -134,7 +188,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     if (next === null) return
     const ownScope = scope
     const body = next || (kind === 'search_notes'
-      ? { keyword: selector.trim(), page: 1, sort_type: 'time_descending', note_type: '普通笔记' }
+      ? { keyword: selector.trim(), page: 1, sort_type: sortType, time_filter: timeFilter, note_type: '普通笔记' }
       : /^[0-9a-f]{24}$/i.test(selector.trim()) ? { user_id: selector.trim() } : { share_text: selector.trim() })
     // Failed or ambiguous delivery retains exactly the same identity. There is
     // no timer retry and a gesture never retries a failed paid operation.
@@ -168,6 +222,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       <hr /><h3>查询笔记</h3>
       <DropdownField label="查询方式" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
       <Field label={kind === 'search_notes' ? '查询关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
+      {kind === 'search_notes' ? <><DropdownField label="笔记排序" value={sortType} disabled={acquiring} onChange={setSortType} options={[{ value: 'popularity_descending', label: '最热 · 按点赞' }, { value: 'time_descending', label: '最新' }, { value: 'comment_descending', label: '评论最多' }, { value: 'general', label: '综合' }]} /><DropdownField label="发布时间" value={timeFilter} disabled={acquiring} onChange={setTimeFilter} options={['不限', '一天内', '一周内', '半年内'].map(value => ({ value, label: value }))} /><p>按关键词与互动排序发现热门笔记，不代表全站热榜。阅读量和评论内容需进入详情显式查询。</p></> : null}
       <p>每页查询计为一次调用，费用以当前套餐为准；最多查询 15 页。</p>
       <DemoAccessNotice operation={operation} compatibility />
       <label><input type="checkbox" checked={armed} disabled={accessIssues.length > 0 || acquiring || !apiKey.trim() || !selector.trim()} onChange={event => setArmed(event.target.checked)} /> 允许下拉采集下一页（可能计费）</label>

@@ -67,6 +67,7 @@ export const EXTERNAL_PLATFORM_CAPABILITY_MATRIX = [
 ]
 
 export const TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX = [
+  ...[ ['social.posts.analytics', '详情与阅读量', 'get_note_detail', 'PGY'], ['social.comments.list', '笔记评论', 'get_note_comments', 'App V2'] ].map(([capability, label, upstreamEndpoint, upstreamVersion]) => ({ capability, label, upstreamEndpoint, upstreamVersion, hubContractVersion: 'mx-insight-hub.xiaohongshu-research.v1', providerMapping: 'direct_versioned_adapter', scope: 'xiaohongshu', status: 'implemented', fallback: 'none', note: '新操作独立放行和定价；显式请求，不自动重试或获取下一页。' })),
   {
     capability: 'social.posts.search',
     label: '小红书笔记搜索',
@@ -133,6 +134,8 @@ const TIKHUB_METADATA = Object.freeze({
   capabilities: [
     'social.posts.search',
     'social.posts.resolve',
+    'social.posts.analytics',
+    'social.comments.list',
     'social.users.resolve',
     'social.users.posts',
   ],

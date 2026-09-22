@@ -1,3 +1,4 @@
+import { XHS_RESEARCH_ENDPOINTS } from '../contracts/xiaohongshu-research.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createHash } from 'node:crypto'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
@@ -58,6 +59,10 @@ export const TIKHUB_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 export const TIKHUB_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 const OFFICIAL_APP_V2_ENDPOINTS = Object.freeze({
+  ...Object.fromEntries(Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => [endpoint.endpointKey, {
+    path: endpoint.providerPath, method: endpoint.providerMethod, version: endpoint.endpointVersion,
+    fields: endpoint.name === 'note_detail' ? ['note_id'] : ['note_id', 'cursor', 'index', 'pageArea', 'sort_strategy'],
+  }])),
   [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: Object.freeze({
     path: TIKHUB_XIAOHONGSHU_ENDPOINT_PATH,
     version: TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION,
@@ -393,9 +398,11 @@ async function requestTikHubJson(
   resolvedCredential,
   capturedAt,
   endpointVersion,
+  method = 'GET',
 ) {
+  const billedOnHttp200 = path === XHS_RESEARCH_ENDPOINTS.note_detail.providerPath
   const url = new URL(path, adapter.baseUrl)
-  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value)
+  if (method === 'GET') for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), adapter.timeoutMs)
   const attemptedAt = capturedAt || new Date()
@@ -403,8 +410,10 @@ async function requestTikHubJson(
     let response
     try {
       response = await adapter.fetchImpl(url.toString(), {
-        method: 'GET',
+        method,
+        ...(method === 'POST' ? { body: JSON.stringify(query) } : {}),
         headers: {
+          ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
           accept: 'application/json',
           authorization: `Bearer ${resolvedCredential}`,
           'user-agent': HUB_USER_AGENT,
@@ -458,7 +467,7 @@ async function requestTikHubJson(
       }
       throw upstreamError(
         'TikHub rejected the request',
-        httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null),
+        { ...httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null), ...(billedOnHttp200 && httpStatus === 400 ? { billed: false } : {}) },
         {
           ...archiveEvidence({
             raw,
@@ -485,7 +494,7 @@ async function requestTikHubJson(
     } catch (error) {
       const contractFailure = error instanceof BodyLimitError || error instanceof BodyEncodingError
       throw upstreamError('TikHub response could not be read safely', {
-        outcome: contractFailure ? 'succeeded_unusable' : 'unknown', httpStatus, billed: null,
+        outcome: contractFailure ? 'succeeded_unusable' : 'unknown', httpStatus, billed: billedOnHttp200 && httpStatus === 200 ? true : null,
         errorCode: error instanceof BodyLimitError
           ? 'upstream_response_too_large'
           : error instanceof BodyEncodingError ? 'invalid_upstream_encoding'
@@ -518,7 +527,7 @@ async function requestTikHubJson(
     let raw
     try { raw = parseJsonText(body.text) } catch {
       throw upstreamError('TikHub returned invalid JSON', {
-        outcome: 'succeeded_unusable', httpStatus, billed: null,
+        outcome: 'succeeded_unusable', httpStatus, billed: billedOnHttp200 && httpStatus === 200 ? true : null,
         errorCode: 'invalid_upstream_json', affectsCircuit: true,
       }, {
         ...archiveEvidence({
@@ -559,7 +568,7 @@ async function requestTikHubJson(
     if (!Number.isInteger(raw?.code)) {
       throw upstreamError('TikHub response omitted its business status', {
         outcome: 'succeeded_unusable', httpStatus, businessCode: null,
-        billed: null, errorCode: 'invalid_upstream_contract', affectsCircuit: true,
+        billed: billedOnHttp200 && httpStatus === 200 ? true : null, errorCode: 'invalid_upstream_contract', affectsCircuit: true,
       }, persisted('succeeded_unusable'))
     }
     if (raw.code !== 200) {
@@ -571,7 +580,7 @@ async function requestTikHubJson(
       const recognizedBusinessFailure = [400, 401, 402, 403, 404, 405, 408, 422, 429]
         .includes(businessCode)
       throw upstreamError('TikHub returned a business error', {
-        outcome: 'rejected', httpStatus, businessCode, billed: null,
+        outcome: billedOnHttp200 ? 'succeeded_unusable' : 'rejected', httpStatus, businessCode, billed: billedOnHttp200 && httpStatus === 200 ? true : null,
         errorCode: globalCapacityFailure ? 'upstream_rate_limited'
           : globalCredentialFailure ? 'upstream_auth_or_balance_unavailable'
             : routeContractFailure ? 'upstream_endpoint_unavailable'
@@ -678,6 +687,7 @@ export class TikHubAdapter {
       resolvedCredential,
       capturedAt,
       endpoint.version,
+      endpoint.method,
     )
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     return securedProviderResult({

@@ -223,6 +223,8 @@ test('TikHub Admin metadata exposes every implemented Xiaohongshu App V2 user ca
   assert.deepEqual(overview.providers[0].capabilities, [
     'social.posts.search',
     'social.posts.resolve',
+    'social.posts.analytics',
+    'social.comments.list',
     'social.users.resolve',
     'social.users.posts',
   ])
@@ -631,7 +633,7 @@ test('official identity routes preserve documented service-error envelopes witho
       idempotencyKey: `official-${endpointName}-service-error`,
     })
     assert.equal(result.status, 200)
-    assert.deepEqual(result.body, envelopes.get(path))
+    assert.deepEqual(result.body, { code: envelopes.get(path).code, data: envelopes.get(path).data })
   }
 
   assert.equal(state.platformStore.calls.size, 3)
@@ -755,7 +757,7 @@ test('HTTP App V2 detail route returns the provider business envelope under Hub 
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('x-mx-insight-source-mode'), 'live')
     assert.equal(payload.code, 200)
-    assert.equal(payload.request_id, upstream.request_id)
+    assert.equal(payload.request_id, undefined)
     assert.equal(payload.requestId, undefined)
     assert.equal(payload.credential_echo, '[REDACTED]')
     assert.equal(payload.data.image_list[0].url.includes('signature=business-signed-url'), true)

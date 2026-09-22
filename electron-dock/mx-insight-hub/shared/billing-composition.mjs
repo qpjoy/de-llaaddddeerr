@@ -1,4 +1,7 @@
 import { QIXIN_OFFICIAL_PRICES } from './qixin-official-prices.mjs'
+const XHS_V1 = { key: 'xiaohongshu', version: 1, name: '小红书笔记', currency: 'CNY',
+  entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts']
+    .map(meterKey => ({ meterKey, unitPriceMinor: 10, billingUnit: 'request' })) }
 export const BILLING_FEATURES = [
   {
     key: 'qixin', version: QIXIN_OFFICIAL_PRICES.version, name: '启信宝真实价格套餐', currency: 'CNY',
@@ -11,8 +14,8 @@ export const BILLING_FEATURES = [
     entries: [{ meterKey: 'ip.risk.query', unitPriceMinor: 5, billingUnit: 'request' }],
   },
   {
-    key: 'xiaohongshu', version: 1, name: '小红书笔记', currency: 'CNY',
-    entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts']
+    key: 'xiaohongshu', version: 2, name: '小红书笔记画卷', currency: 'CNY',
+    entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts', 'social.posts.analytics', 'social.comments.list']
       .map(meterKey => ({ meterKey, unitPriceMinor: 10, billingUnit: 'request' })),
   },
 ]
@@ -28,7 +31,7 @@ export function compileBillingComponents(components, plans, currency, finalEntri
   for (const component of components) {
     let source, id, reference
     if (component?.type === 'feature' && Object.keys(component).every(key => ['type', 'key', 'version', 'multiplierPpm'].includes(key))) {
-      source = BILLING_FEATURES.find(item => item.key === component.key && item.version === component.version)
+      source = [...BILLING_FEATURES, XHS_V1].find(item => item.key === component.key && item.version === component.version)
       id = `feature:${component.key}:${component.version}`
       if (source) reference = { type: 'feature', key: source.key, version: source.version, name: source.name }
     } else if (component?.type === 'plan' && Object.keys(component).every(key => ['type', 'versionId'].includes(key))) {

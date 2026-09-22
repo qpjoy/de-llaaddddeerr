@@ -1,4 +1,47 @@
-# 小红书笔记画卷与平台接口（2026-09-13）
+# 小红书笔记画卷：热点、阅读量与评论（2026-09-23）
+
+本次仅修改 MX Insight Hub。MX Launcher / MX-H2I 登录、Internal 配置、联网、DNS、WireGuard 均不修改。
+
+## 产品合同
+
+| 用途 | Hub JSON POST | 必需能力（还需 xiaohongshu 平台） |
+| --- | --- | --- |
+| 关键词笔记列表 | `/api/v1/xiaohongshu/app_v2/search_notes` | `social.posts.search` + `compat.xiaohongshu.app_v2` |
+| 正文、标签与图片 | `/api/v1/data/post` 或原 `app/get_note_info` | `social.posts.resolve` |
+| 详情、阅读量与曝光量 | `/api/v1/data/xiaohongshu/notes/detail` | `social.posts.analytics` |
+| 评论列表 | `/api/v1/data/xiaohongshu/notes/comments` | `social.comments.list` |
+
+详情另提供 `/api/v1/xiaohongshu/pgy/get_note_detail` 的 JSON POST 别名，和中立入口共享规范化参数、幂等和计费身份。请求仅传 `note_id`，不接受供应方、URL、凭据或任意路由。GET 不支持。
+
+搜索界面提供按点赞热度/最新/评论最多排序及发布时间过滤。它表示关键词相关热门笔记，不声称全站热榜。搜索结果不自动补查阅读量或评论，用户明确选择笔记后独立查询。
+
+### 为什么保留原详情按钮
+
+核对 [PGY 详情官方合同](https://docs.tikhub.io/479321007e0)：`data.data` 可提供 `content`、作者、`imagesList`、`videoInfo`、`readNum`、`impNum`、`likeNum`、`favNum`、`cmtNum`；没有承诺结构化标签或评论内容。因此新增入口可渲染已提供的正文、媒体和指标，但不能无条件替代完整正文/标签操作。`meta.tagsAvailable=false` 表示没提供标签，画卷保留当前会话已取得的标签。
+
+阅读量映射 `metrics.views`，曝光量映射 `metrics.impressions`，与点赞/评论独立；未提供的指标为 `null`，真实零保留 `0`。详情按本次观测写入 `social.posts.v1`，评论及内嵌回复写入 `social.comments.v1`。原始响应字节留在受限归档，公开响应、错误、头部和文档使用 Hub 合同。
+
+新详情和评论每个新请求直接采集一次；仅既有的幂等保护可重放，不新增请求缓存/缓冲、定时等待或后台重试。界面和文档仅建议新详情查询间隔至少 5 秒；这是操作建议，不能保证接口不会限流。结果不确定时保留同一幂等标识。
+
+[评论官方合同](https://docs.tikhub.io/420136394e0) 的 cursor/index/pageArea 被封装为 Hub 加密游标；下游只接收 `nextCursor`，绑定 consumer、Key、note_id、sort，最多 15 页。缺失/冲突/未前进的分页信息不猜测续页。每页使用新 Idempotency-Key；打开弹窗、关闭重开、切换视图和滚动都不自动采集新评论。内嵌回复不代表完整二级评论遍历。
+
+## 价格、权限与上线
+
+- `103_xiaohongshu_research.sql` 只新增两项独立操作的合同/控制记录，默认 `disabled`。不开通任何消费者/Key 权限，不更改旧操作的状态。既有部署环境开关也不会隐式开放新操作。
+- 在“外部数据平台”分别审核并填写两项采购单价/币种/预算，再显式启用；不把旧图文详情的采购成本猜作新接口成本。缺少凭据、成本或放行只阻止对应新操作。
+- 在“开放能力”显式开通业务与目标 Key 的新能力；原 Key 可以通过现有权限编辑流程增补，无需变动 MX-H2I 用户身份。
+- “追加小红书费率”打开 v2 草稿：原四项加上阅读量和评论，均为现有模板价 CNY 10 分/成功请求。v1 仍为四项不可变模板；已有发布套餐和调用者绑定保持不变。运营需发布新版本并分配到目标调用者后生效。授权但未定价的操作仍按既有免费规则处理，不隐式收费。
+- PGY 官方合同明确 HTTP 200（含查无数据）产生采购成本、HTTP 400 不产生采购成本。有效无结果交付 `meta.status=no_data` 计一次 Hub 成功请求；幂等重放不重复扣款。已计采购成本但无法规范化的响应保留证据并返回失败，不能伪装成功空列表。
+- 原 App V2 业务字段保留；供应方 `request_id/router/docs/support/cache_url/message` 等传输元数据从公开交付移除，Hub 请求 ID 取响应头。旧快照重放也经过相同边界。
+
+验证使用本地内存服务与合成响应，未执行真实付费调用、线上迁移或部署。真实返回字段覆盖率与线上 PostgreSQL 入库需要启用前核验。
+
+本次验证：服务端回归 1974 通过、26 跳过（未配置 PostgreSQL 集成测试库），类型检查、生产构建与 4 项 Sites 测试通过。现有 Playwright/Chromium 对 1440×1000 桌面及 390×844 手机视口验证了调试器幂等重放、旧正文与新指标并存、评论两页、弹窗重开不采集和无横向溢出；无应用脚本错误。本地预览存在 favicon 404，不影响业务流程。
+
+---
+
+## 历史实现（2026-09-13；与上文冲突时以上文为准）
+
 
 本期复用 Hub 的 TikHub 网关、独立操作放行、凭据、成本准入、归档与 canonical 入库。只改变 Hub；不修改 Launcher、MX-H2I、用户登录、DNS 或 WireGuard。
 
