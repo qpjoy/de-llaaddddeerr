@@ -13079,3 +13079,16 @@ button.mih-catalog-status {
   gap: 16px;
   min-width: 0;
 }
+
+/* Source contracts and stored-source registration remain separate from coverage. */
+.mih-connection-controls { display: grid; grid-template-columns: 2fr repeat(3, minmax(0, 1fr)); gap: 16px; padding: 0 22px 18px; }
+.mih-connection-checkbox { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--qp-text-2); }
+.mih-connection-table { min-width: 850px; }
+.mih-connection-table td { white-space: normal; overflow-wrap: anywhere; }
+.mih-connection-table td:first-child { max-width: 220px; }
+.mih-connection-table td:nth-child(4) { min-width: 240px; max-width: 380px; }
+.mih-connection-notes { padding: 0 22px 18px; color: var(--qp-text-3); font-size: 12px; }
+.mih-connection-notes a { color: var(--qp-primary); }
+.mih-connection-detail code { overflow-wrap: anywhere; }
+@media (max-width: 850px) { .mih-connection-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 500px) { .mih-connection-controls { grid-template-columns: minmax(0, 1fr); } }

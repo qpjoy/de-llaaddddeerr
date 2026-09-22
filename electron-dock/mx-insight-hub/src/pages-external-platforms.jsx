@@ -1,3 +1,4 @@
+import { useSourceConnections } from './source-connections.jsx'
 import { StructuredCredentialPanel } from './structured-credential-panel.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
@@ -889,7 +890,9 @@ function OverviewMetricRail({ overview }) {
   )
 }
 
-function ProviderCard({ item, range, balance }) {
+function ProviderCard({ item, range, balance, connections }) {
+  const sourceLabel = ({ tikhub: "T 平台", qixin: "启信慧眼（启信宝）" })[item.key] || item.displayName
+  const routes = connections?.routes.filter(route => route.sourceProviderLabel === sourceLabel)
   const canOpen = SUPPORTED_PROVIDERS.has(item.key)
   return (
     <article className="qp-panel mih-external-provider-card">
@@ -903,6 +906,7 @@ function ProviderCard({ item, range, balance }) {
       </header>
       <p>{item.description || '管理接口尚未提供平台说明。'}</p>
       <SlotTags provider={item.key} />
+      {routes ? <div><p>已核对 {routes.length} 条接口 / 清洗路径</p><a className="qp-button qp-button--outline qp-button--sm" href={`#/source-catalog?connectionSource=${encodeURIComponent(sourceLabel)}`}>查看平台、来源与默认路径</a></div> : <small>接入路径尚未加载</small>}
       <SupplierBalanceStatus item={balance} />
       <dl>
         <div><dt>Hub 请求</dt><dd>{formatOptionalNumber(item.summary.hubRequests)}</dd></div>
@@ -937,6 +941,7 @@ function ProviderAlerts({ item }) {
 }
 
 function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
+  const connections = useSourceConnections(token, onUnauthorized)
   const balances = useSupplierBalances(token, onUnauthorized)
   const load = useCallback(() => adminApi.externalPlatforms(token, { range }), [range, token])
   const remote = useRemoteData(load, onUnauthorized)
@@ -955,6 +960,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
         <RangeControl range={range} setQuery={setQuery} />
       </PageHeading>
 
+      {connections.error ? <ErrorState error={connections.error} onRetry={connections.refresh} /> : null}
       {remote.loading && !remote.data ? <LoadingState label="正在读取外部数据平台" /> : null}
       {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
       {remote.data !== null || (!remote.loading && !remote.error) ? (
@@ -972,7 +978,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
             {overview.items.length ? (
               <div className="mih-external-provider-grid">
                 {overview.items.map((item, index) => (
-                  <ProviderCard key={item.key || index} item={item} range={range} balance={balances.data?.items?.find(entry => entry.provider === item.key)} />
+                  <ProviderCard key={item.key || index} item={item} range={range} connections={connections.data} balance={balances.data?.items?.find(entry => entry.provider === item.key)} />
                 ))}
               </div>
             ) : (

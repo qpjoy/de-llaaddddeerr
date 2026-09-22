@@ -1,3 +1,4 @@
+import { SourceConnectionsPanel, useSourceConnections } from './source-connections.jsx'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
@@ -1830,7 +1831,15 @@ function PlansPage({ snapshot }) {
   )
 }
 
-function SourceConnectionsDashboard({ snapshot }) {
+function SourceConnectionsDashboard({ snapshot, token, onUnauthorized, initialProvider = '' }) {
+  const connections = useSourceConnections(token, onUnauthorized)
+  const routesByKey = new Map()
+  for (const route of connections.data?.routes || []) {
+    for (const key of route.catalogKeys) {
+      if (!routesByKey.has(key)) routesByKey.set(key, [])
+      routesByKey.get(key).push(route)
+    }
+  }
   const [category, setCategory] = useState('')
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
@@ -1848,15 +1857,17 @@ function SourceConnectionsDashboard({ snapshot }) {
   const currentPage = Math.min(page, totalPages)
   const percent = count => items.length ? `${(count / items.length * 100).toFixed(1)}%` : '0%'
   return <div className="mih-source-connections">
+    <SourceConnectionsPanel key={initialProvider} state={connections} initialProvider={initialProvider} />
+    <h2>目录覆盖与接入线索</h2>
     <section className="mih-metric-grid" aria-label="平台与来源覆盖概况">
       <MetricCard icon={Database} label="平台与来源" value={formatNumber(items.length)} hint={`${categories.length} 个分类 · 不含归档`} />
-      <MetricCard icon={CheckCircle} tone="success" label="平台已覆盖" value={formatNumber(covered)} hint={`占比 ${percent(covered)}`} />
-      <MetricCard icon={CirclesThree} tone="info" label="部分能力覆盖" value={formatNumber(partial)} hint={`占比 ${percent(partial)}`} />
+      <MetricCard icon={CheckCircle} tone="success" label="目录标记已覆盖" value={formatNumber(covered)} hint={`占比 ${percent(covered)}`} />
+      <MetricCard icon={CirclesThree} tone="info" label="目录标记部分覆盖" value={formatNumber(partial)} hint={`占比 ${percent(partial)}`} />
       <MetricCard icon={Compass} tone="warning" label="未覆盖 / 待核验" value={formatNumber(items.length - covered - partial)} hint={`占比 ${percent(items.length - covered - partial)}`} />
     </section>
     <section className="qp-panel mih-source-connection-list">
       <header className="mih-source-connection-toolbar">
-        <div><h2>平台接入目录</h2><p>覆盖状态取自目录；建议接入方式与待核验能力单独标注。</p></div>
+        <div><h2>平台接入目录</h2><p>覆盖状态为人工目录记录；已实现路径按稳定 ID 关联，不能用覆盖标记推断实时可用。</p></div>
         <label className="mih-source-connection-search"><MagnifyingGlass size={18} /><input className="qp-input" aria-label="搜索平台或来源" placeholder="搜索平台或来源" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></label>
       </header>
       <div className="mih-source-connection-filters">
@@ -1868,7 +1879,7 @@ function SourceConnectionsDashboard({ snapshot }) {
           <td>{(currentPage - 1) * 15 + index + 1}</td><td><strong>{item.canonicalName}</strong><small>{item.majorCategory || '未分类'}</small></td>
           <td><CatalogBadge dimension="coverage" value={item.coverageStatus} /><small>{optionLabel(DELIVERY_OPTIONS, item.deliveryStatus)}</small></td>
           <td><div className="mih-source-cell-tags">{(item.monitorableContent || []).slice(0, 3).map(value => <span key={value}>{value}</span>)}</div><small>{item.reviewStatus === 'verified' ? '字段已核验' : '目录能力待核验'}{item.monitorableContent?.length > 3 ? ` · 共 ${item.monitorableContent.length} 项` : ''}</small></td>
-          <td><div className="mih-source-cell-tags">{(item.connectorHints || []).map(value => { const hint = connectorHint(item, value); return <span key={value} title={hint.title}>{hint.label}</span> })}</div><small>{item.suggestedAccess?.length ? `建议：${item.suggestedAccess.join(' / ')}` : '暂无接入方式记录'}</small></td>
+          <td>{routesByKey.has(item.sourceKey) ? <small><strong>{routesByKey.get(item.sourceKey).length} 条已实现路径</strong> · {[...new Set(routesByKey.get(item.sourceKey).map(route => route.sourceProviderLabel))].join(" / ")}</small> : <small>{connections.data ? "暂无已核对的实现路径" : "实现路径尚未加载"}</small>}<div className="mih-source-cell-tags">{(item.connectorHints || []).map(value => { const hint = connectorHint(item, value); return <span key={value} title={hint.title}>{hint.label}</span> })}</div><small>{item.suggestedAccess?.length ? `建议：${item.suggestedAccess.join(' / ')}` : '暂无接入方式记录'}</small></td>
           <td><button className="qp-button qp-button--ghost qp-button--sm" onClick={() => setDetail(item)}>查看详情<ArrowRight size={14} /></button></td>
         </tr>)}
       </tbody></table></div>
@@ -1879,6 +1890,7 @@ function SourceConnectionsDashboard({ snapshot }) {
       <div className="mih-form"><div><CatalogBadge dimension="coverage" value={detail.coverageStatus} /> <CatalogBadge dimension="delivery" value={detail.deliveryStatus} /></div>
         <h3>能力与内容</h3><p>{detail.monitorableContent?.join('、') || '尚未记录'}</p><p>{detail.reviewStatus === 'verified' ? '字段已核验' : '这些内容来自目录，仍需核验实际覆盖能力。'}</p>
         <h3>接入方式</h3><p>{detail.connectorHints?.map(value => connectorHint(detail, value).label).join('、') || '暂无接入线索'}</p><p>建议方式：{detail.suggestedAccess?.join('、') || '尚未记录'}</p>
+        <h3>已实现路径</h3>{routesByKey.has(detail.sourceKey) ? <ul>{routesByKey.get(detail.sourceKey).map(route => <li key={route.id}>{route.sourceProviderLabel} · {route.operation}：{route.defaultRule}</li>)}</ul> : <p>暂无已核对的实现路径；接入线索不构成可调用证明。</p>}
         <h3>接入与数据证据</h3>{detail.evidenceRefs?.length ? <ul>{detail.evidenceRefs.map((ref, i) => <li key={i}>{ref.label || ref.key}</li>)}</ul> : <p>尚未绑定数据集或实施证据。</p>}
         <p>{detail.notes}</p>
       </div>
@@ -1909,7 +1921,7 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
       ? { eyebrow: 'TAXONOMY / OWNERS / FIELDS', title: '分类与字段治理', description: '集中管理大类、场景、区域和负责人，并与平台实测证据拆开治理。' }
       : section === 'plans'
         ? { eyebrow: 'ACQUIRE / CLEAN / ARCHIVE / PUBLISH', title: '计划与实施证据', description: '目录说明“做什么”，计划说明“怎么做”，Agent 只是可审核的受控步骤。' }
-        : { eyebrow: 'SOURCE CATALOG / COVERAGE / EVIDENCE', title: '数据源覆盖总览', description: '基于 215 条权威目录观察覆盖、优先级、实施阶段、负责人和字段核验。' }
+        : { eyebrow: 'SOURCE CATALOG / COVERAGE / EVIDENCE', title: '数据源覆盖总览', description: '基于当前权威目录观察覆盖、优先级、实施阶段、负责人和字段核验。' }
 
   const openCatalog = (view = 'all', termKind = null, termValue = null) => {
     setCatalogViewRequest(view)
@@ -1927,7 +1939,7 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
       </nav>
 
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
-      {section === 'connections' ? <SourceConnectionsDashboard snapshot={snapshot} /> : null}
+      {section === 'connections' ? <SourceConnectionsDashboard snapshot={snapshot} token={token} onUnauthorized={onUnauthorized} initialProvider={query.get("connectionSource") || ""} /> : null}
       {section === 'overview' ? <SourceCatalogOverview snapshot={snapshot} onOpenCatalog={openCatalog} /> : null}
       {section === 'catalog' ? <SourceCatalogTable snapshot={snapshot} token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} requestedView={catalogViewRequest} onRequestedViewHandled={() => setCatalogViewRequest('')} requestedTermKind={requestedTermKind} requestedTermValue={requestedTermValue} /> : null}
       {section === 'taxonomy' ? <TaxonomyPage token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} onOpenCatalog={(termKind, termValue) => openCatalog(REFERENCE_VIEW.id, termKind, termValue)} /> : null}
