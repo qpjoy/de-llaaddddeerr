@@ -4258,22 +4258,28 @@ paths:
       - Search
       operationId: aggregateDataSearch
       summary: Search latest or stored data across one, several or all authorized platforms
-      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with
-        bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[]
-        or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to
+      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded
+        concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or
+        omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to
         discover logical platform identifiers; clients never choose a provider. Only existing platform and
         operation entitlements apply. Telegram, published opinion and saved categories are stored-only;
         refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence;
-        the parent adds no customer purchase charge. A refresh response is a bounded first-page window,
-        not exhaustive pagination; sources[].hasMore discloses further source pages. pageSize applies to
-        stored mode only; live post operations fetch 20 items and product operations use their existing
-        bounded page sizes. mode=stored performs one filtered canonical search, returns an opaque nextCursor
-        and omits exact totals. objectTypes and platform selections are OR within a group; tags require
-        every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude
-        undated records. Current live routes reject non-empty tags/date filters before any acquisition.
-        Reuse the same Idempotency-Key and body for retries; a new key intentionally starts new paid acquisition.
-        Parent replay never expires or redispatches children. Partial and unknown outcomes are explicit
-        source statuses. Ingestion after live delivery is asynchronous.'
+        the parent adds no customer purchase charge. Each refresh page acquires at most one page per
+        continuing source. Return data.pageInfo.nextCursor unchanged with the same
+        query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed
+        sources are not restarted. No exact total is promised. The opaque cursor references committed Hub
+        evidence and binds the identity and query scope; missing evidence fails closed. Child cursors
+        retain their existing route and page limits. sources[].carried marks a source not called in this
+        batch; its counts describe its last acquired page. pageSize applies to stored mode only; live post
+        operations fetch 20 items and product operations use their existing bounded page sizes.
+        mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact
+        totals. objectTypes and platform selections are OR within a group; tags require every exact tag.
+        Date bounds are inclusive publication times, must include a timezone, and exclude undated records.
+        Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same
+        Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to
+        start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a
+        continuation with a different parent key still reuses the same round/page children. Partial and
+        unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.'
       parameters:
       - name: Idempotency-Key
         in: header
@@ -4354,7 +4360,7 @@ paths:
                 cursor:
                   type: string
                   maxLength: 8192
-                  description: Stored-mode continuation only.
+                  description: "Opaque continuation in refresh or stored mode. Return unchanged with the same query scope and original Key. Omit to start a new search round."
             example:
               query: 新能源汽车
               mode: refresh

@@ -88,3 +88,11 @@ export function createNightAllCompatibilityCursorCodec(secret, consumerId) {
     keyLabel: 'night-all-compatibility-cursor-aes-gcm',
   })
 }
+
+export function createAggregateCursorCodec(secret, identity) {
+  return createScopedCursorCodec(secret, identity, {
+    prefix: 'mxag1',
+    aadLabel: 'aggregate-search-cursor',
+    keyLabel: 'aggregate-search-cursor-aes-gcm',
+  })
+}

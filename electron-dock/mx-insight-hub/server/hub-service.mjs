@@ -1,4 +1,4 @@
-import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate } from './data/aggregate-search.mjs'
+import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage } from './data/aggregate-search.mjs'
 import { nightAllFailureEvidence } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
@@ -3293,7 +3293,7 @@ export class HubService {
     const { sources } = await this.aggregateSources(context)
     const aggregate = normalizeAggregateRequest(body, sources)
     return this.canonicalSearch(context, {
-      body: { query: aggregate.query, pageSize: aggregate.pageSize, ...(aggregate.cursor ? { cursor: aggregate.cursor } : {}) },
+      body: { query: aggregate.query, pageSize: aggregate.pageSize, ...(aggregate.cursor && aggregate.mode === 'stored' ? { cursor: aggregate.cursor } : {}) },
       idempotencyKey, path, aggregate, originalBody: body, products,
     })
   }
@@ -3461,21 +3461,26 @@ export class HubService {
       if (aggregate) {
         responseBody.data = aggregateResponse(responseBody.data, aggregate)
         if (aggregate.mode === 'refresh') {
+          const page = await aggregateLivePage(aggregate, { context, store: this.store, secret: this.apiKeyPepper })
           acquisitionStarted = true
-          const refreshed = await refreshAggregate(aggregate, {
-            requestId: activeRequestId,
+          const refreshed = await refreshAggregate({ ...aggregate, routes: page.routes }, {
+            requestId: page.rootId || activeRequestId, pageIndex: page.pageIndex,
             search: input => this.search(context, { ...input, liveOnly: true }),
             products: input => products ? products(context, input) : Promise.reject(new AppError(503, 'source_unavailable', 'Product search is unavailable')),
           })
           const items = refreshed.items
           const livePlatforms = new Set(aggregate.routes.map(route => route.platform))
           const skipped = aggregate.platforms.filter(platform => !livePlatforms.has(platform)).map(platform => ({ platform, mode: 'refresh', status: 'unsupported', code: 'no_matching_live_operation' }))
+          const sources = [...refreshed.sources, ...page.carriedSources, ...(page.pageIndex === 1 ? skipped : [])]
+          const hasMore = refreshed.sources.some(source => source.hasMore)
           responseBody.data = { ...responseBody.data, items,
-            sources: [...refreshed.sources, ...skipped],
+            sources,
             searchMode: 'live', durationMs: Math.round(performance.now() - startedAt),
-            status: !skipped.length && refreshed.sources.every(source => ['ok', 'empty'].includes(source.status)) ? 'ok' : 'partial',
-            pageInfo: { pageIndex: 1, returnedCount: items.length, hasMore: false, nextCursor: null, window: 'first_page_per_source' },
-            warnings: [...responseBody.data.warnings, { code: 'bounded_refresh_window', message: 'One first page per eligible live source; additional source pages are not acquired. Canonical ingestion is asynchronous. Use stored mode to browse indexed data.' }],
+            status: sources.every(source => ['ok', 'empty'].includes(source.status)) ? 'ok' : 'partial',
+            pageInfo: { pageIndex: page.pageIndex, returnedCount: items.length, hasMore,
+              nextCursor: hasMore ? page.nextCursor(activeRequestId) : null,
+              window: page.pageIndex === 1 ? 'first_page_per_source' : 'next_page_per_source' },
+            warnings: [...responseBody.data.warnings, { code: 'bounded_refresh_window', message: 'One page per continuing live source. Return nextCursor unchanged to acquire the next window; omit cursor with a new Idempotency-Key to refresh. No exact total or stored fallback. Ingestion is asynchronous.' }],
           }
         }
       }

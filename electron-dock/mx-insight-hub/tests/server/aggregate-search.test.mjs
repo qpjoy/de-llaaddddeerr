@@ -184,3 +184,102 @@ test('new HTTP routes require an API key, and expose both sources and actual liv
     assert.equal((await response.json()).data.items.length, 1)
   } finally { await new Promise(resolve => server.close(resolve)) }
 })
+
+test('live continuation advances only unfinished sources, binds identity/scope and replays each paid page', async () => {
+  const { service, context, adapter, store } = await setup({ platforms: ['weibo', 'douyin'] })
+  const calls = []
+  adapter.search = async ({ body }) => {
+    calls.push(body)
+    const page = Number(body.cursor || 1)
+    return { payload: { data: { items: [{ id: `${body.platform}-${page}`, title: `Page ${page}` }], pageInfo: {
+      hasMore: body.platform === 'weibo' && page < 3, nextCursor: body.platform === 'weibo' && page < 3 ? String(page + 1) : null,
+    } } }, raw: {} }
+  }
+  const path = '/api/v1/data/aggregate/search', body = { query: 'news', platforms: ['weibo', 'douyin'] }
+  const first = await service.aggregateSearch(context, { path, body, idempotencyKey: 'paged-live-first' })
+  const cursor = first.body.data.pageInfo.nextCursor
+  assert.match(cursor, /^mxag1\./)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.ok(cursor.length < 1024)
+  assert.equal(first.body.data.sources.find(source => source.platform === 'douyin').hasMore, false)
+  const secondInput = { path, body: { ...body, cursor }, idempotencyKey: 'paged-live-second' }
+  const second = await service.aggregateSearch(context, secondInput)
+  assert.equal(second.body.data.pageInfo.pageIndex, 2)
+  assert.deepEqual(second.body.data.items.map(item => item.externalId), ['weibo-2'])
+  assert.equal(second.body.data.sources.find(source => source.platform === 'douyin').carried, true)
+  assert.deepEqual(calls.map(call => [call.platform, call.cursor || '1']), [['douyin', '1'], ['weibo', '1'], ['weibo', '2']])
+  assert.equal((await service.aggregateSearch(context, secondInput)).replay, true)
+  // Even a client submitting a new parent key for the same cursor must reuse
+  // the stable child page, including after the normal fresh replay TTL.
+  const pageChild = [...store.requests.values()].find(row => row.acquisitionRequest?.body?.type === 'stable')
+  assert.ok(pageChild)
+  pageChild.createdAt = '2020-01-01T00:00:00.000Z'
+  const fork = await service.aggregateSearch(context, { ...secondInput, idempotencyKey: 'paged-live-second-again' })
+  assert.equal(calls.length, 3)
+  const third = await service.aggregateSearch(context, { path, body: { ...body, cursor: second.body.data.pageInfo.nextCursor }, idempotencyKey: 'paged-live-third' })
+  assert.equal(third.body.data.pageInfo.pageIndex, 3)
+  assert.equal(third.body.data.pageInfo.hasMore, false)
+  assert.equal(third.body.data.pageInfo.nextCursor, null)
+  await service.aggregateSearch(context, { path, body: { ...body, cursor: fork.body.data.pageInfo.nextCursor }, idempotencyKey: 'paged-live-third-again' })
+  assert.equal(calls.length, 4, 'forked parent cursors keep the same root/page child identity')
+  for (const changed of [{ query: 'changed' }, { platforms: ['weibo'] }, { objectTypes: ['post'] }, { pageSize: 10 }, { cursor: `${cursor}x` }]) {
+    await assert.rejects(service.aggregateSearch(context, { ...secondInput, body: { ...secondInput.body, ...changed }, idempotencyKey: `bad-cursor-${JSON.stringify(changed).length}` }), { code: 'invalid_cursor' })
+  }
+  const otherKey = await service.createApiKey({ consumerId: context.consumer.id, name: 'other', platforms: ['weibo', 'douyin'] })
+  await assert.rejects(service.aggregateSearch(await service.authenticate(otherKey.secret), { ...secondInput, idempotencyKey: 'cross-key-live-cursor' }), { code: 'invalid_cursor' })
+  assert.equal(calls.length, 4)
+  await service.aggregateSearch(context, { path, body, idempotencyKey: 'paged-live-refresh' })
+  assert.equal(calls.length, 6, 'explicit cursor-less refresh starts a new round')
+})
+
+test('live pagination does not advertise guessed continuations or retry unknown sources', async () => {
+  const { service, context, adapter } = await setup({ platforms: ['weibo', 'douyin', 'bilibili'] })
+  const calls = []
+  adapter.search = async ({ body }) => {
+    calls.push(body.platform)
+    if (body.platform === 'douyin') throw new AppError(502, 'upstream_outcome_unknown', 'ambiguous')
+    return { payload: { data: { items: [{ id: body.cursor || 'one' }], pageInfo: {
+      hasMore: !body.cursor, nextCursor: body.platform === 'weibo' && !body.cursor ? 'next' : null,
+    } } }, raw: {} }
+  }
+  const path = '/api/v1/data/aggregate/search', body = { query: 'news' }
+  const first = await service.aggregateSearch(context, { path, body, idempotencyKey: 'partial-live-first' })
+  assert.equal(first.body.data.status, 'partial')
+  const second = await service.aggregateSearch(context, { path, body: { ...body, cursor: first.body.data.pageInfo.nextCursor }, idempotencyKey: 'partial-live-second' })
+  assert.deepEqual(calls, ['bilibili', 'douyin', 'weibo', 'weibo'])
+  assert.equal(second.body.data.sources.find(row => row.platform === 'douyin').carried, true)
+  assert.equal(second.body.data.status, 'partial')
+  assert.equal(second.body.data.pageInfo.nextCursor, null)
+})
+
+test('live continuation fails closed if a committed child is missing, without dispatching any source', async () => {
+  const { service, context, adapter, store } = await setup()
+  let calls = 0
+  adapter.search = async () => { calls++; return { payload: { data: { items: [{ id: 'one' }], pageInfo: { hasMore: true, nextCursor: 'next' } } }, raw: {} } }
+  const path = '/api/v1/data/aggregate/search', body = { query: 'news', platforms: ['weibo'] }
+  const first = await service.aggregateSearch(context, { path, body, idempotencyKey: 'missing-child-first' })
+  store.requests.delete(first.body.data.sources[0].requestId)
+  await assert.rejects(service.aggregateSearch(context, { path, body: { ...body, cursor: first.body.data.pageInfo.nextCursor }, idempotencyKey: 'missing-child-next' }), { code: 'aggregate_continuation_unavailable' })
+  assert.equal(calls, 1)
+})
+
+test('product continuation restores its own page cursor without exposing it or changing the product request contract', async () => {
+  const { service, context, store } = await setup({ platforms: ['ecommerce'], capabilities: ['ecommerce.products.search'] })
+  const requests = []
+  const products = async (ctx, input) => {
+    requests.push(input.body)
+    const first = !input.body.cursor
+    const requestId = first ? id : '22222222-2222-4222-8222-222222222222'
+    const responseBody = { data: { items: [{ id: first ? 'product-one' : 'product-two', title: 'Shoes' }], page: { hasMore: first, nextCursor: first ? 'opaque-product-page-2' : null } } }
+    // Simulate the existing product gateway's committed delivery evidence.
+    store.requests.set(requestId, { id: requestId, tenantId: ctx.tenant.id, consumerId: ctx.consumer.id, apiKeyId: ctx.apiKey.id, status: 'committed', responseStatus: 200, responseBody })
+    return { status: 200, requestId, body: responseBody }
+  }
+  const input = { path: '/api/v1/data/aggregate/search', body: { query: 'shoes', platforms: ['taobao'] }, products }
+  const first = await service.aggregateSearch(context, { ...input, idempotencyKey: 'product-page-first' })
+  assert.doesNotMatch(JSON.stringify(first.body), /opaque-product-page-2/)
+  const second = await service.aggregateSearch(context, { ...input, body: { ...input.body, cursor: first.body.data.pageInfo.nextCursor }, idempotencyKey: 'product-page-second' })
+  assert.deepEqual(requests[1], { marketplace: 'taobao', query: 'shoes', deliveryMode: 'live_only', cursor: 'opaque-product-page-2' })
+  assert.equal(second.body.data.pageInfo.nextCursor, null)
+  assert.equal(second.body.data.items[0].externalId, 'taobao:product-two')
+})

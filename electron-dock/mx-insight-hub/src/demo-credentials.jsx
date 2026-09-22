@@ -36,7 +36,7 @@ export function DemoCredentialProvider({ token, children }) {
   return <DemoContext.Provider value={{ credential, secret, select, custom, setCustom, setManual,
     manual, error, busy, identity: custom ? `custom:${manual}` : credential?.keyId || 'none' }}>{children}</DemoContext.Provider>
 }
-export function DemoProductPage({ Page, pageProps, enabled, admin }) {
+export function DemoProductPage({ Page, pageProps, enabled, admin, compact = false }) {
   const state = useContext(DemoContext)
   const requested = useRef(null)
   const [expanded, setExpanded] = useState(!admin)
@@ -50,8 +50,8 @@ export function DemoProductPage({ Page, pageProps, enabled, admin }) {
     }
   }, [enabled, Page, state.custom])
   return <>
-    {enabled ? <details className="qp-panel mih-panel" open={expanded || !state.secret} onToggle={event => setExpanded(event.currentTarget.open)}>
-      <summary>{admin ? '数据产品演示身份' : '当前调用身份'} · {state.busy ? '正在加载…' : state.secret ? (state.custom ? '自有 API Key' : state.credential?.name) : '请选择 Key'}</summary>
+    {enabled ? <details className={`qp-panel mih-panel${compact ? ' mih-demo-identity--compact' : ''}`} open={expanded || (!compact && !state.secret)} onToggle={event => setExpanded(event.currentTarget.open)}>
+      <summary>{admin && !compact ? '数据产品演示身份' : '当前调用身份'} · {state.busy ? '正在加载…' : state.secret ? (state.custom ? '自有 API Key' : state.credential?.name) : '请选择 Key'}</summary>
       <p>按当前账户的授权和套餐价格调用，消费记录可在账单中查看。</p>
       <DropdownField label={admin ? "演示 Key" : "我的 Key"} value={state.custom ? 'custom' : state.credential?.keyId || ''}
         disabled={state.busy} onChange={value => {

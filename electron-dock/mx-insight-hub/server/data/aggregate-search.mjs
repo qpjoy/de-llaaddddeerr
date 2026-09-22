@@ -3,6 +3,7 @@ import { AppError } from '../core/errors.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { JUSTONE_ENDPOINTS } from '../contracts/justone.mjs'
 import { publicStoredSearchItem } from './stored-search.mjs'
+import { createAggregateCursorCodec } from '../external-platforms/cursor.mjs'
 
 export const AGGREGATE_CONTRACT = 'mx-insight-hub.aggregate-search.v1'
 export const AGGREGATE_TYPES = ['post', 'article', 'message', 'chat', 'comment', 'product', 'account', 'user', 'profile', 'saved_record', 'commerce_capture', 'opinion_item']
@@ -72,7 +73,6 @@ export function normalizeAggregateRequest(body, sources) {
   const pageSize = body.pageSize ?? 20
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) fail('pageSize must be between 1 and 100')
   if (body.cursor != null && (typeof body.cursor !== 'string' || !body.cursor || body.cursor.length > 8192)) fail('Invalid cursor')
-  if (mode === 'refresh' && body.cursor) fail('refresh acquires one bounded first-page window; use stored mode to browse ingested data')
   // None of the currently pinned live contracts can enforce a Hub tag or date
   // predicate. Reject before reservation/dispatch rather than pay then discard.
   if (mode === 'refresh' && (filters.tags.length || filters.from || filters.to)) throw new AppError(400, 'refresh_filters_unsupported', 'Live sources do not support Hub tags/date filters; use stored mode or remove these filters')
@@ -92,6 +92,52 @@ export function aggregateResponse(data, query) {
 }
 
 const scalar = value => typeof value === 'string' ? value : null
+
+// A cursor references committed Hub evidence, not an expanding bundle of
+// provider cursors. It is encrypted and bound to the original Key and scope.
+export async function aggregateLivePage(query, { context, store, secret }) {
+  const codec = createAggregateCursorCodec(secret, `${context.tenant.id}:${context.consumer.id}:${context.apiKey.id}`)
+  const { cursor, ...scope } = query
+  const binding = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+  const invalid = () => { throw new AppError(400, 'invalid_cursor', 'Live cursor is invalid for this identity or search; start a new search without cursor') }
+  let previous = null, rootId = null
+  if (cursor) {
+    let decoded
+    try { decoded = codec.decode(cursor) } catch { invalid() }
+    if (decoded.binding !== binding || !/^[a-f0-9-]{36}$/.test(decoded.requestId || '') || !/^[a-f0-9-]{36}$/.test(decoded.rootId || '')) invalid()
+    const record = await store.getUsageRequestForRetry(decoded.requestId, context.consumer.id)
+    previous = record?.responseBody?.data
+    if (record?.apiKeyId !== context.apiKey.id || record?.tenantId !== context.tenant.id || record?.status !== 'committed'
+      || previous?.contractVersion !== AGGREGATE_CONTRACT || previous.mode !== 'refresh'
+      || previous.pageInfo?.nextCursor !== cursor || !previous.pageInfo.hasMore) invalid()
+    rootId = decoded.rootId
+  }
+  const pageIndex = previous ? previous.pageInfo.pageIndex + 1 : 1
+  const routes = previous ? await Promise.all(query.routes.flatMap(route => {
+    const source = previous.sources.find(row => row.id === route.id)
+    if (!source?.hasMore || !['ok', 'empty', 'partial'].includes(source.status)) return []
+    return [(async () => {
+      const child = await store.getUsageRequestForRetry(source.requestId, context.consumer.id)
+      const next = liveContinuation(child?.responseBody?.data)
+      if (child?.apiKeyId !== context.apiKey.id || child?.tenantId !== context.tenant.id || child?.status !== 'committed' || !next) {
+        throw new AppError(409, 'aggregate_continuation_unavailable', 'Committed source continuation is unavailable; no source was dispatched')
+      }
+      return { ...route, cursor: next }
+    })()]
+  })) : query.routes
+  if (!routes.length) invalid()
+  return {
+    routes, pageIndex, rootId,
+    carriedSources: previous?.sources.filter(source => !routes.some(route => route.id === source.id)).map(source => ({ ...source, carried: true })) || [],
+    nextCursor: requestId => codec.encode({ binding, requestId, rootId: rootId || requestId }),
+  }
+}
+
+function liveContinuation(data) {
+  const page = data?.pageInfo ?? data?.page
+  return data?.items?.length && page?.hasMore !== false && typeof page?.nextCursor === 'string' && page.nextCursor ? page.nextCursor : null
+}
+
 function liveItem(item, route, requestId) {
   const externalId = scalar(item.externalId) || scalar(item.id)
   if (!externalId) return null
@@ -108,7 +154,7 @@ function liveItem(item, route, requestId) {
   return { ...publicStoredSearchItem(row), acquisitionRequestId: requestId }
 }
 
-export async function refreshAggregate(query, { requestId, search, products, concurrency = 3 }) {
+export async function refreshAggregate(query, { requestId, search, products, concurrency = 3, pageIndex = 1 }) {
   const outcomes = new Array(query.routes.length)
   let index = 0
   await Promise.all(Array.from({ length: Math.min(concurrency, query.routes.length) }, async () => {
@@ -116,11 +162,11 @@ export async function refreshAggregate(query, { requestId, search, products, con
       const slot = index++
       const route = query.routes[slot]
       const started = performance.now()
-      const idempotencyKey = `agg-${requestId}-${createHash('sha256').update(route.id).digest('hex').slice(0, 12)}`
+      const idempotencyKey = `agg-${requestId}-${pageIndex > 1 ? `p${pageIndex}-` : ''}${createHash('sha256').update(route.id).digest('hex').slice(0, 12)}`
       try {
         const result = route.kind === 'products'
-          ? await products({ body: { marketplace: route.marketplace, query: query.query, deliveryMode: 'live_only' }, idempotencyKey, path: '/api/v1/data/ecommerce/products/search' })
-          : await search({ body: { platform: route.platform, query: query.query, pageSize: 20 }, idempotencyKey, path: '/api/v1/data/search' })
+          ? await products({ body: { marketplace: route.marketplace, query: query.query, deliveryMode: 'live_only', ...(route.cursor ? { cursor: route.cursor } : {}) }, idempotencyKey, path: '/api/v1/data/ecommerce/products/search' })
+          : await search({ body: { platform: route.platform, query: query.query, pageSize: 20, ...(route.cursor ? { cursor: route.cursor, type: 'stable' } : {}) }, idempotencyKey, path: '/api/v1/data/search' })
         if (result.status >= 400) throw new AppError(result.status, 'source_request_failed', 'Source request failed', { requestId: result.requestId })
         const data = result.body?.data
         if (!Array.isArray(data?.items)) throw new AppError(502, 'invalid_source_response', 'Source did not return a search result', { requestId: result.requestId })
@@ -128,7 +174,8 @@ export async function refreshAggregate(query, { requestId, search, products, con
         outcomes[slot] = {
           source: { id: route.id, platform: route.platform, label: route.label, mode: 'refresh', operation: route.operation,
             status: data.status === 'partial' ? 'partial' : items.length ? 'ok' : 'empty', requestId: result.requestId, returnedCount: items.length,
-            hasMore: data.pageInfo?.hasMore ?? data.page?.hasMore ?? null, replay: result.replay === true,
+            hasMore: Boolean(liveContinuation(data)), replay: result.replay === true,
+            ...((data.pageInfo?.hasMore ?? data.page?.hasMore) && !liveContinuation(data) ? { continuationUnavailable: true } : {}),
             durationMs: Math.round(performance.now() - started) }, items,
         }
       } catch (error) {
