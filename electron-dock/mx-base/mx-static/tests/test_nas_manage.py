@@ -111,6 +111,7 @@ class ManagerTests(unittest.TestCase):
 
     def test_boot_units_are_persistent_boot_only_and_never_run_copy_or_reclaim(self):
         files=manager.unit_files();service=files[manager.UNIT+'.service'];timer=files[manager.UNIT+'.timer']
+        self.assertIn('\nType=simple\n',service);self.assertNotIn('\nType=oneshot\n',service)
         self.assertIn('RemainAfterExit=yes',service);self.assertIn('Restart=on-failure',service)
         self.assertIn('RestartSec=60s',service);self.assertIn('OnBootSec=60s',timer)
         self.assertNotIn('OnUnitInactiveSec',timer);self.assertNotIn('RequiresMountsFor',service)
@@ -211,7 +212,8 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(set(json.loads(installed.stdout)['projects']),{'infra','delta'})
             self.assertFalse(list((runtime/'current').rglob('.env')))
             self.assertEqual(json.loads((config/'auto.json').read_text())['enabled_parts'],[])
-            self.assertEqual(run.call_args_list,[mock.call(['systemctl','daemon-reload'])])
+            self.assertEqual(run.call_args_list[0].args[0][:3],['systemd-analyze','--man=no','verify'])
+            self.assertEqual(run.call_args_list[1:],[mock.call(['systemctl','daemon-reload'])])
             self.assertEqual(stat_mode(config/'auto.json'),0o600)
 
 

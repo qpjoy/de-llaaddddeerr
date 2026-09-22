@@ -30,7 +30,9 @@ def units(text):
     for chunk in text.strip().split('\n\n'):
         values=dict(l.split('=',1) for l in chunk.splitlines() if '=' in l)
         if not values:continue
-        state='未安装' if values.get('LoadState')=='not-found' else values.get('ActiveState','?')+'/'+values.get('SubState','?')
+        load=values.get('LoadState')
+        state={'not-found':'未安装','bad-setting':'配置错误 (bad-setting)','error':'加载失败','masked':'已屏蔽'}.get(load)
+        if state is None:state=values.get('ActiveState','?')+'/'+values.get('SubState','?')
         rows.append([values.get('Id','?'),state,values.get('UnitFileState') or '—'])
     return table(['系统服务','状态','开机设置'],rows)
 

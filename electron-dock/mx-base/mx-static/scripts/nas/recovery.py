@@ -105,7 +105,7 @@ def enable_migrated(manager):
     if blocked:raise RuntimeError('存在未通过检查的项目；策略未修改，先查看统一检查结果。')
     policy=dict(policy,mode='migrated',suspended=False)
     save(manager,policy)
-    manager.run(['systemctl','enable','--now',manager.UNIT+'.timer'])
+    manager.enable_timer()
     emit('nas_recovery_policy',mode='migrated',disabled_parts=policy.get('disabled_parts',[]),
          note='已启用统一策略：每次开机核对已登记的成功迁移；保留项目暂停项，不启动未审核项目。')
 

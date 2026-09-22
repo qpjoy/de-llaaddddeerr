@@ -88,6 +88,8 @@ Docker daemon 本身启动时尝试挂载失败的容器仍可能有等待；本
 
 ## 安装持久开机恢复
 
+兼容修复：EL8/systemd 239 不允许 oneshot + Restart，当前模板采用 `Type=simple`。install 在替换单元前调用服务器的 `systemd-analyze verify`；simple 的 active/running 代表恢复检查正在执行，成功后才为 active/exited。见 [故障与修复记录](systemd-239-recovery-fix.md)。
+
 先同步本轮 mx-static 修改到服务器，查看登记并执行只读检查：
 
 ```bash

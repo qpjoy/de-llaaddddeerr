@@ -39,8 +39,20 @@ def run(args, timeout=45):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True, timeout=timeout)
     if result.returncode:
-        # Docker/Compose errors may contain environment values; keep output private.
-        raise RuntimeError('{} failed (exit {}); inspect its journal locally.'.format(args[0], result.returncode))
+        # Keep complete systemd diagnostics private; previously stderr was lost.
+        message='{} failed (exit {})'.format(args[0],result.returncode)
+        if args[0] in ('systemctl','systemd-analyze'):
+            fd=secure_directory('/var/log/mx-static-nas')
+            name='systemd-error-'+uuid.uuid4().hex+'.json'
+            try:
+                prep.private_write(fd,name,{'command':args,'exit':result.returncode,
+                    'stdout':result.stdout[-32768:],'stderr':result.stderr[-32768:],
+                    'truncated':len(result.stdout)>32768 or len(result.stderr)>32768})
+                os.fsync(fd)
+            finally:os.close(fd)
+            message+='；完整诊断（最多各 32 KiB）：/var/log/mx-static-nas/'+name
+        else:message+='; inspect its journal locally.'  # Docker/Compose can quote secrets.
+        raise RuntimeError(message)
     return result.stdout
 
 
@@ -289,6 +301,8 @@ def install_auto():
                 try:os.fsync(fd)
                 finally:os.close(fd)
             os.rename(str(temporary),str(release))
+        run(['systemd-analyze','--man=no','verify']+
+            [str(release/'deploy/nas'/name) for name in unit_files()])
         for name,content in unit_files().items():
             try:
                 old=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=unitfd)
@@ -313,6 +327,12 @@ def install_auto():
         for fd in (rootfd,configfd,unitfd):os.close(fd)
 
 
+def enable_timer():
+    try:run(['systemctl','enable','--now',UNIT+'.timer'])
+    except (OSError,RuntimeError,subprocess.SubprocessError) as exc:
+        raise RuntimeError('恢复策略已保存，但 timer 启用/启动未完成，尚不能确认恢复生效。'+str(exc))
+
+
 def set_auto(part,profile,enabled):
     if part!='part1':raise RuntimeError('Automatic recovery is currently registered only for Part 1.')
     if enabled:
@@ -331,7 +351,7 @@ def set_auto(part,profile,enabled):
     try:cutover.atomic_json(fd,'auto.json',value)
     finally:os.close(fd)
     if enabled and not value.get('suspended',False):
-        run(['systemctl','enable','--now',UNIT+'.timer'])
+        enable_timer()
     elif not parts and value.get('mode','explicit')=='explicit':
         run(['systemctl','disable','--now',UNIT+'.timer'])
         run(['systemctl','stop',UNIT+'.service'])

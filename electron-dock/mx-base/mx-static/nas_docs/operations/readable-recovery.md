@@ -1,5 +1,7 @@
 # 易读输出与已迁移项目的统一恢复
 
+后续现场发现旧模板与 systemd 239 不兼容；已改为 simple 并加入服务器端 verify。安装/启用失败处理见 [修复记录](systemd-239-recovery-fix.md)，不能仅凭策略“已纳入”或 timer enabled 判定成功。
+
 ## 本次现场回传
 
 2026-09-22 的输出确认：infra 十个媒体消费者仍挂载 `mx_data_raw_media_nfs_v1`，容器 running，有健康检查的服务 healthy；PostgreSQL/Redis 正常。宿主机 NFS 挂载匹配，采集时 D 状态进程数为 0。`mx-static-nas-boot.service` 和 `.timer` 都是 `not-found`，恢复列表为空；不能声称已配置开机补启动。`/data` 可用约 64.88 GiB，第一卷仍待业务验收，没有 SSD 回收完成记录。
