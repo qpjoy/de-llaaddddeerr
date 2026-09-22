@@ -1,5 +1,7 @@
 # NAS 迁移运维入口
 
+当前进度：第一卷准备已通过，执行入口见 [Part 1 切换与恢复](operations/part1-cutover.md)。它执行停写增量同步、NAS 子卷切换、健康与媒体 Range 检查；本轮保留 SSD，尚未释放空间。以下早期探测步骤保留作历史参考，不必重复执行。
+
 本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`，在线完整内容校验入口为 `bash scripts/nas-verify.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 
 ## 当前目标与状态

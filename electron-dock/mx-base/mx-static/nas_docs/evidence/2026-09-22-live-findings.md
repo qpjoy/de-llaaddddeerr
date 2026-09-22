@@ -214,3 +214,12 @@ rsync 耗时包含文件传输和其内部操作；单独 fsync 几乎无耗时�
 用户确认首次限速 60 MiB/s 的完整 rsync 未中断且成功，明确要求取消全量内容比对并开始切换准备。已接受该决定：独立 SHA256 不再是切换硬性门槛，使用 rsync 自带传输校验、停写最终增量和逐路径 quick-check，再做挂载/业务验收；原 SSD 副本暂留。已提供停止校验单元的命令，但尚未收到停止回执或任何生产切换结果。
 
 新增 [切换准备入口](../operations/rsync-cutover.md)：检查/创建新的 Docker 原生 NFS 卷、隔离 4 KiB 读写试挂、核对实际部署，生成固定镜像和 NAS 子挂载候选覆盖文件。原 Web 启动会 migrate/bootstrap_admin/collectstatic，bootstrap_admin 会 set_password；候选用相同 gunicorn 参数跳过初始化。Worker 候选设置 MX_RECOVER_STALE_AGENT_RUNS=0，避免本次重建额外扫描并重新入队旧任务。尚未应用覆盖配置；停写最终同步、挂载切换、任务恢复和空间回收仍待现场执行，不能记为已完成。
+
+
+## 第一卷切换准备通过（用户回传）
+
+报告目录 `/var/lib/mx-static/nas-cutover/po_infra_media_data-830225384207402a8ba23a2364d252d1`；`time_unix=1790034838.6539922`。Docker NFS 实际挂载、目标 inode 384598076、root 4 KiB 写读全部通过；`review_items=[]`，九个应用消费者的可写代码差异均为空。旧指纹经纯 Mounts 顺序兼容精确匹配，新规范化指纹为 `a5ed37346ebec398c8295dc2ed58b44394fba76a06a23e5079ecf4ef917f570c`。
+
+预复制 job 仍为 `1e9cdad9efd741338d3fdcb82f327ba5`，SSD 源身份为 device 66309 / inode 1083500031，源卷 `po_infra_media_data`。没有停止业务、切换数据源或释放 SSD，`cutover_ready=false`、`reclaim_ready=false`。此结果支持进入已经约定的维护流程，不代表 NAS RAID/快照/独立备份健康已确认。
+
+下一步执行 `nas-cutover.sh`，详见 [Part 1 操作文档](../operations/part1-cutover.md)。新增工具已本地测试，尚无生产执行回传。
