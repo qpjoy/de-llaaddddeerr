@@ -26,7 +26,19 @@ function Call({ call, provider }) {
         ['归档证据', call.hasRestrictedArchive ? '已保存受限响应' : call.hasArchive ? '已保存响应元数据' : '未记录']] : []),
     ]}/>
     {provider && !call.message ? <p className="mih-diagnostic-note">{call.messageEvidence === 'restricted_message_not_exposed' ? '受限响应已保存；该消息尚未通过安全展示规则，界面仅展示业务码，不返回原始正文。' : '没有可展示的上游消息，不能据此推断具体根因。'}</p> : null}
-    {!provider ? <p className="mih-diagnostic-note">此连接器的完整错误正文未接入诊断；可按上游 ID 与调用时间继续查日志。</p> : null}
+    {!provider && call.failureEvidence ? <section aria-label="Night-All 错误链">
+      <h4>Night-All 错误链</h4>
+      <p className="mih-diagnostic-note">以下为保存的结构化证据。说明由错误码映射，不是上游原文；任意消息、参数和密钥不展示。</p>
+      {call.failureEvidence.errors.map((entry, index) => <div className="mih-diagnostic-call" key={index}>
+        <Facts entries={[
+          ['证据位置', entry.path], ['内层错误码', entry.code], ['内层 HTTP', entry.httpStatus],
+          ['候选端点', entry.endpointId], ['关联 requestId', entry.requestId],
+        ]}/>
+        <p>{entry.message || '该层没有已识别的错误说明；请结合关联日志核对。'}</p>
+      </div>)}
+      {!call.failureEvidence.errors.length ? <p>上游未提供可保存的结构化内层错误；需要关联日志。</p> : null}
+      {call.failureEvidence.truncated ? <p>错误链已达到采样上限，不代表完整失败链。</p> : null}
+    </section> : !provider ? <p className="mih-diagnostic-note">此历史调用未保存结构化错误链；可按上游 ID 与调用时间继续查日志。升级不会补回旧请求正文。</p> : null}
   </article>
 }
 

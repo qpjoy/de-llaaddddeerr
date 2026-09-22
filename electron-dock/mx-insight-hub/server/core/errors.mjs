@@ -9,11 +9,13 @@ export class AppError extends Error {
 }
 
 export class UpstreamRejectedError extends Error {
-  constructor(status, body) {
+  constructor(status, body, correlation = {}) {
     super(`Night-All rejected the request with HTTP ${status}`)
     this.name = 'UpstreamRejectedError'
     this.status = status
     this.body = body
+    this.upstreamRequestId = correlation.requestId || null
+    this.upstreamTraceId = correlation.traceId || null
   }
 }
 

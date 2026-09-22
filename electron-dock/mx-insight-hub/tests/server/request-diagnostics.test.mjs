@@ -66,6 +66,17 @@ test('connector failures preserve correlation while committed fallback remains a
   assert.match(run.guidance, /正文未接入/)
 })
 
+test('diagnostics exposes a projected connector error chain without raw fields from stored JSON', async () => {
+  const f = fixture({ providers: [], connectors: [{ id: 'connector', failure_evidence: {
+    version: 1, requestId: 'req_nested', rawBody: 'SECRET',
+    errors: [{ path: '$.error', code: 'TIKHUB_ALL_ENDPOINTS_FAILED', message: 'SECRET', headers: { token: 'SECRET' } }],
+  } }] })
+  const run = (await lookupRequestDiagnostics(f.pool, id)).runs[0]
+  assert.equal(run.connectorCalls[0].failureEvidence.errors[0].code, 'TIKHUB_ALL_ENDPOINTS_FAILED')
+  assert.match(run.guidance, /结构化错误链/)
+  assert.doesNotMatch(JSON.stringify(run), /SECRET|rawBody|headers/)
+})
+
 test('missing records return empty results, and both match and call limits disclose truncation', async () => {
   assert.deepEqual((await lookupRequestDiagnostics(fixture({ matches: [] }).pool, id)).runs, [])
   const f = fixture({ matches: Array.from({ length: 21 }, () => ({ id })), providers: Array.from({ length: 51 }, (_, i) => ({ id: String(i) })) })

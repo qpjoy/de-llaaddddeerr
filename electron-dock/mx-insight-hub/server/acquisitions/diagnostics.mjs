@@ -1,4 +1,5 @@
 import { AppError } from '../core/errors.mjs'
+import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const LIMIT = 20
@@ -18,6 +19,7 @@ function advice(request, providers, connectors) {
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
   if (request.status === 'unknown' || providers.some(p => p.outcome === 'unknown')) return '存在未知调用结果。保留原请求身份，先核对上游记录与结算，不自动重发。'
+  if (connectors.some(c => c.failure_evidence)) return '已保留 Night-All 结构化错误链。查看候选端点和内层错误码；缺失的字段不推测，多个端点失败不等同于已确认唯一根因。'
   if (connectors.some(c => c.error_code)) return '已保存连接器错误码和上游关联 ID；完整上游错误正文未接入本诊断，请按该 ID 和调用时间核对上游日志。'
   if (request.status === 'committed') return 'Hub 已提交响应。上游失败可能已由存量结果回退；请结合交付来源和响应 HTTP 状态判断。下游入库校验结果不在本诊断范围。'
   return '请结合 Hub 状态、上游业务码和调用时间继续排查；缺少调用记录不能单独证明上游未执行。'
@@ -74,8 +76,8 @@ export async function lookupRequestDiagnostics(pool, input) {
       const connectors = (await client.query(`/* request-diagnostics:connectors */
         SELECT id, operation, platform, outcome, http_status, failure_kind,
           error_code, upstream_request_id, upstream_trace_id, upstream_latency_ms,
-          started_at, completed_at
-        FROM serving.connector_calls WHERE usage_request_id = $1
+          started_at, completed_at, to_jsonb(c)->'failure_evidence' AS failure_evidence
+        FROM serving.connector_calls c WHERE usage_request_id = $1
         ORDER BY started_at, id LIMIT 51`, [id])).rows
       const charges = (await client.query(`/* request-diagnostics:charges */
         SELECT status, enforcement_mode, quoted_minor::text, charged_minor::text,
@@ -106,6 +108,7 @@ export async function lookupRequestDiagnostics(pool, input) {
           httpStatus: c.http_status, failureKind: text(c.failure_kind), errorCode: text(c.error_code),
           upstreamRequestId: text(c.upstream_request_id), upstreamTraceId: text(c.upstream_trace_id),
           latencyMs: c.upstream_latency_ms, startedAt: c.started_at, completedAt: c.completed_at,
+          failureEvidence: projectNightAllFailureEvidence(c.failure_evidence),
         })),
         callsTruncated: providers.length > CALL_LIMIT || connectors.length > CALL_LIMIT,
         customerCharge: charges[0] ? {

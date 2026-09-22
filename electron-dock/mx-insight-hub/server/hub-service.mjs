@@ -1,3 +1,4 @@
+import { nightAllFailureEvidence } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
@@ -4188,6 +4189,11 @@ export class HubService {
         staleAgeSeconds: 0,
       }
     } catch (error) {
+      const failureLatency = Math.round(performance.now() - startedAt)
+      if (error instanceof UpstreamRejectedError && this.store.recordConnectorFailureEvidence) {
+        // Diagnostic persistence must not alter paid dispatch, fallback or settlement.
+        await this.store.recordConnectorFailureEvidence(call.id, nightAllFailureEvidence(error)).catch(() => {})
+      }
       if (canUseNightAllCompatibilityFallback(error)) {
         let snapshot
         try {
@@ -4202,12 +4208,12 @@ export class HubService {
             outcome: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
             httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
             businessStatus: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
-            upstreamLatencyMs: Math.round(performance.now() - startedAt),
+            upstreamLatencyMs: failureLatency,
             errorCode: evidence.errorCode,
             failureKind: compatibilityFailureKind(error),
             sourceMode: 'live',
-            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? null : null,
-            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? null : null,
+            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
+            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null,
           }).catch(() => {})
           if (error instanceof UpstreamAmbiguousError) {
             await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown').catch(() => {})
@@ -4223,7 +4229,7 @@ export class HubService {
         }
         if (snapshot) {
           const evidence = compatibilityUpstreamEvidence(error)
-          const upstreamLatencyMs = Math.round(performance.now() - startedAt)
+          const upstreamLatencyMs = failureLatency
           const staleAgeSeconds = staleSnapshotAgeSeconds(snapshot)
           commitEvidence = {
             outcome: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
@@ -4233,8 +4239,8 @@ export class HubService {
             errorCode: evidence.errorCode,
             failureKind: compatibilityFailureKind(error),
             sourceMode: 'live',
-            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? null : null,
-            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? null : null,
+            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
+            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null,
           }
           commitAttempted = true
           try {
@@ -4279,12 +4285,12 @@ export class HubService {
           outcome: error instanceof UpstreamAmbiguousError ? 'unknown' : 'failed',
           httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
           businessStatus: error instanceof UpstreamAmbiguousError ? 'unknown' : 'failed',
-          upstreamLatencyMs: Math.round(performance.now() - startedAt),
+          upstreamLatencyMs: failureLatency,
           errorCode: evidence.errorCode,
           failureKind: compatibilityFailureKind(error),
           sourceMode: 'live',
-          nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? null : null,
-          nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? null : null,
+          nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
+          nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null,
         }).catch(() => {})
       }
       if (error instanceof UpstreamRejectedError) {
@@ -4314,7 +4320,7 @@ export class HubService {
       }
       await this.store.finishConnectorCall(call.id, {
         outcome: 'failed',
-        upstreamLatencyMs: Math.round(performance.now() - startedAt),
+        upstreamLatencyMs: failureLatency,
         errorCode: 'internal_error',
         failureKind: 'internal',
         sourceMode: 'live',

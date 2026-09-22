@@ -1,3 +1,4 @@
+import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
 import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1904,6 +1905,11 @@ export class MemoryStore {
     }
     this.connectorCalls.set(id, record)
     return clone(record)
+  }
+
+  async recordConnectorFailureEvidence(id, evidence) {
+    const call = this.connectorCalls.get(id)
+    if (call && !call.failureEvidence) call.failureEvidence = projectNightAllFailureEvidence(evidence)
   }
 
   async finishConnectorCall(id, {

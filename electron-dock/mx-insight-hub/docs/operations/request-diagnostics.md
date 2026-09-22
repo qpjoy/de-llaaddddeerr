@@ -29,14 +29,24 @@ Qixin 非成功调用的受限归档仅允许 SQL 投影两条已核实的固定
 生效；应用层再次白名单校验。其他消息显示“受限响应已保存，消息未开放”，保留业务码。
 这不是通用 raw-response 接口，也不解除已有受限原始响应访问规则。
 
-第一版不增加采集链路的错误捕获。Night-All 已保存的连接器状态、错误码与关联 ID
-可以查询，未落库的完整错误不能补造；po-infra 入库时间校验、采集 Run 和平台隔离
-不在 Hub 请求账本中，界面明确提示需查下游/上游日志。
+Night-All legacy 兼容调用的明确 HTTP 拒绝，自 migration 102 起补充结构化错误链：
+顶层/候选端点错误码、内层 HTTP 状态（仅上游提供时）、端点 ID、关联 ID 和层级位置。
+只遍历 error/details/cause/errors/endpointTrace/attempts，最多 16 项、6 层，超限明确标记。
+错误说明由固定错误码映射，不是原始 message；不保存任意 message、stderr、正文或凭据。
+原错误缺少的字段不会推断补齐，也不会把多个候选端点失败解释为唯一根因。
+
+非 JSON 或损坏 JSON 的 HTTP 拒绝也保留响应头 requestId/traceId。
+该增强仅记录证据，不改变公共 night_all_rejected、HTTP 状态映射、回退与扣费。
+证据独立限时写入（SQL 1 秒、锁等待 500 毫秒），写入失败不阻止原有结算；
+未迁移时原调用继续原有行为，诊断显示证据缺失。读取兼容 migration 102 之前的表结构。
+旧请求不会补回内层错误。po-infra 入库校验、采集 Run 和平台隔离仍不在 Hub 请求账本中。
 
 ## 部署
 
 正常构建并更新 Hub Admin API 与前端，无须重启或改动 Launcher。
-没有新增表、字段或历史数据回填。已有数据库需具备当前 Hub migrations，诊断所用
+migration 102 增加可空的 connector failure_evidence 字段，不回填历史记录；
+约束使用 NOT VALID 避免部署时扫描历史账本，仍检查新写入。
+已有数据库需具备当前 Hub migrations，诊断所用
 数据库角色须可读取账本与受限归档；权限不足时返回 503，不扩大数据库授权。
 
 大型账本上线前，由运维使用既有安全数据库连接方式执行：

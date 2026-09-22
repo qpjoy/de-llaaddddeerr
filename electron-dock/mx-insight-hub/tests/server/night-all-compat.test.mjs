@@ -505,6 +505,11 @@ async function compatibilityFixture({
     async legacySearch({ body, businessId }) {
       calls += 1
       assert.equal(businessId, 'compat-consumer')
+      if (mode === 'nested-failure') throw new UpstreamRejectedError(502, {
+        requestId: 'req_nested', error: { code: 'TIKHUB_ALL_ENDPOINTS_FAILED', details: {
+          errors: [{ code: 'TIKHUB_HTTP_ERROR', endpointId: 'douyin_search_fetch_video_search_v1', message: 'apiKey=SECRET' }],
+        } },
+      })
       if (mode === 'unavailable') throw new UpstreamRejectedError(503, { requestId: 'failed-upstream' })
       if (mode === 'timeout') throw new UpstreamAmbiguousError('timeout', { name: 'AbortError' })
       if (mode === 'contract') {
@@ -871,6 +876,35 @@ test('compatibility fallback never crosses an exact request fingerprint', async 
     (error) => error?.status === 502 && error?.code === 'night_all_rejected',
   )
   assert.equal(fixture.store.compatibilitySnapshots.size, 1)
+})
+
+test('compatibility failure evidence is stored before rejection and never changes public error or released usage', async () => {
+  const fixture = await compatibilityFixture()
+  fixture.setMode('nested-failure')
+  await assert.rejects(compatibilityCall(fixture, 'nested-failure'), error => {
+    assert.equal(error.code, 'night_all_rejected')
+    assert.equal(error.status, 502)
+    assert.equal(error.details.upstreamStatus, 502)
+    assert.doesNotMatch(JSON.stringify(error.details), /SECRET|TIKHUB/)
+    return true
+  })
+  const call = [...fixture.store.connectorCalls.values()].at(-1)
+  assert.equal(call.failureEvidence.requestId, 'req_nested')
+  assert.ok(call.failureEvidence.errors.some(e => e.code === 'TIKHUB_HTTP_ERROR'))
+  assert.doesNotMatch(JSON.stringify(call.failureEvidence), /SECRET/)
+  assert.equal([...fixture.store.requests.values()].at(-1).status, 'released')
+  assert.equal(fixture.calls(), 1)
+})
+
+test('diagnostic persistence failure never prevents normal stale delivery or adds dispatches', async () => {
+  const fixture = await compatibilityFixture()
+  await compatibilityCall(fixture, 'before-diagnostic-failure')
+  fixture.store.recordConnectorFailureEvidence = async () => { throw new Error('missing migration') }
+  fixture.setMode('nested-failure')
+  const stale = await compatibilityCall(fixture, 'after-diagnostic-failure')
+  assert.equal(stale.sourceMode, 'stale')
+  assert.equal(fixture.store.requests.get(stale.requestId).status, 'committed')
+  assert.equal(fixture.calls(), 2)
 })
 
 test('a fallback lookup failure closes ambiguous evidence and holds usage unknown', async () => {

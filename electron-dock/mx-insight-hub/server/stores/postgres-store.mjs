@@ -1,3 +1,4 @@
+import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
 import { readTenantAccess, writeTenantAccess, applyTenantAccess } from './tenant-service-access.mjs'
 import { randomUUID } from 'node:crypto'
@@ -2939,6 +2940,18 @@ export class PostgresStore {
       [id, consumerId, requestId, operation, fingerprint, platform, sourceMode],
     )
     return connectorCallRecord(rows[0])
+  }
+
+  async recordConnectorFailureEvidence(id, evidence) {
+    const safe = projectNightAllFailureEvidence(evidence)
+    if (!safe) return
+    // A missing migration or busy database must not prevent normal settlement.
+    return withPgTransaction(this.pool, async client => {
+      await client.query("SET LOCAL statement_timeout = '1s'")
+      await client.query("SET LOCAL lock_timeout = '500ms'")
+      await client.query(`UPDATE serving.connector_calls SET failure_evidence = $2::jsonb
+        WHERE id = $1 AND failure_evidence IS NULL`, [id, JSON.stringify(safe)])
+    })
   }
 
   async finishConnectorCall(id, {

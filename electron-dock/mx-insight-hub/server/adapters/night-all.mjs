@@ -105,6 +105,7 @@ export class NightAllAdapter {
       }
 
       const contentType = response.headers.get('content-type') || ''
+      const correlation = { requestId: response.headers.get('x-request-id'), traceId: response.headers.get('x-trace-id') }
       if (!contentType.toLowerCase().includes('application/json')) {
         if (response.ok) {
           throw new UpstreamAmbiguousError(
@@ -112,7 +113,7 @@ export class NightAllAdapter {
             invalidUpstreamResponse('invalid_upstream_content_type'),
           )
         }
-        throw new UpstreamRejectedError(response.status, { code: 'invalid_upstream_content_type' })
+        throw new UpstreamRejectedError(response.status, { code: 'invalid_upstream_content_type' }, correlation)
       }
       let payload
       try {
@@ -130,10 +131,10 @@ export class NightAllAdapter {
             invalidUpstreamResponse('invalid_upstream_json'),
           )
         }
-        if (error instanceof SyntaxError) payload = null
+        if (error instanceof SyntaxError) payload = { code: 'invalid_upstream_json' }
         else throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
       }
-      if (!response.ok) throw new UpstreamRejectedError(response.status, payload)
+      if (!response.ok) throw new UpstreamRejectedError(response.status, payload, correlation)
       if (!payload || typeof payload !== 'object' || (validate && !validate(payload))) {
         throw new UpstreamAmbiguousError(
           'Night-All returned an invalid success envelope; outcome is unknown',
