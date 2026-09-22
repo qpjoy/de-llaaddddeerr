@@ -1,0 +1,11 @@
+# Managed by mx-static scripts/manage.sh nas auto-install
+[Unit]
+Description=Start registered NAS recovery after boot
+
+[Timer]
+OnBootSec=60s
+AccuracySec=10s
+Unit=mx-static-nas-boot.service
+
+[Install]
+WantedBy=timers.target

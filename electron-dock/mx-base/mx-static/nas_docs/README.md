@@ -1,5 +1,9 @@
 # NAS 迁移运维入口
 
+先读 [生产数据安全约定](SAFETY.md) 和 [多项目 NAS 管理结构](operations/nas-platform.md)。推荐二级入口：`nas host ...`、`nas infra ...`、`nas delta ...`、`nas recovery ...`；旧 part1/part2 命令保留兼容。
+
+统一入口已加入 `bash scripts/manage.sh nas`，配置和运维全部保留在 mx-static。查看 [统一管理、部署配置与开机恢复](operations/unified-management.md)。它自动定位成功报告和 NAS override；持久恢复须在服务器显式安装/启用，之前的 systemd-run 任务仍是临时任务。
+
 当前进度：第一卷 `po_infra_media_data` 已成功切换 NAS，服务恢复与媒体 Range 检查通过；等待业务验收，SSD 旧副本仍保留。只读清单已通过；业务验收正常后执行 [第一卷 SSD 回收](operations/part1-reclaim.md)。清单依据见 [只读空间回收清单](operations/part1-reclaim-plan.md)。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行已经完成的切换。
 
 本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`，在线完整内容校验入口为 `bash scripts/nas-verify.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
@@ -93,24 +97,16 @@ media/spiders_src/getuserinfo.py
 
 默认不区分大小写的 macOS 文件系统无法同时正确呈现这三个路径；当前两处 Git 修改与截图警告相符。本轮不重置、不提交这些变化，不从本机 `media/` 作为迁移源。需要对照它们时读取 `git show HEAD:<精确路径>`；构建 Linux 发布物时使用区分大小写的干净 checkout。该问题与 NAS 迁移分开处理，绝不据此改名生产文件。
 
-## 下一步：小批复制，不切换服务
-
-三份只读输出和权限写探测均已回传。4 KiB 测试四项全部通过；/data 剩余 58G，inode 只用了 3%。不必重复全量扫描或写探测。通过 Git 更新 mx-static 后，先执行：
+## 当前建议的只读检查
 
 ```bash
-sudo bash scripts/nas-sample-copy.sh po_infra_media_data --copy-test
+bash scripts/manage.sh nas project list
+bash scripts/manage.sh nas host status
+bash scripts/manage.sh nas infra status
+bash scripts/manage.sh nas infra deployment audit
+bash scripts/manage.sh nas infra permissions check
 ```
 
-退出码 0 且最后 `sample_result.passed=true` 后，再执行：
-
-```bash
-sudo bash scripts/nas-sample-copy.sh delta_59202_media_data --copy-test
-```
-
-**这两条会复制少量真实媒体到新的 NAS 私有测试目录**，最多 8 个文件/选择时 256 MiB，每次 rsync 限速 10 MiB/s；串行运行。源只读打开，正式文件与旧 tmp 都可取样。校验 SHA256、size/UID/GID/mode/秒级 mtime，并拒绝复制期间源文件变化。工具保留测试副本与 result.json，不删除、不改容器挂载，不创建正式迁移目标。完整范围、错误处理与边界见 [小批复制说明](operations/sample-copy.md)。
-
-请贴回完整输出；若 hard NFS 卡住，保留最后阶段，不强制卸载或重复启动。小批通过后再建立每卷独立正式目标，预复制全部 raw_media（含 tmp），原卷继续保留。正式切换还需停写完整校验、NAS 健康/配额/备份及 [平台存储与故障恢复](operations/storage-platform.md) 验收。
-
-`nas-probe.sh permissions --write-test` 仍保留为需要重新确认身份时使用的独立 4 KiB 探测；当前不要重复。线上临时文件泄漏修复独立发布，不与存储切换混做。
+第一卷已切换，早期小批复制、预复制与切换命令是历史流程，不重复执行。当前只读清单已通过；业务验收正常后才单独运行 `nas infra task part1 cleanup --business-accepted`。第二卷使用 `nas delta task part2 copy --unlimited` 预复制，不能提前清理。安装/启用恢复见 [统一管理](operations/unified-management.md)，NAS 进程与多项目分工见 [平台结构](operations/nas-platform.md)。
 
 本地回归：`python3 -B -m unittest discover -s tests -p 'test_nas*.py'`。测试使用临时目录、模拟工具以及可用时的本地 rsync，不连接生产服务器或 NAS。

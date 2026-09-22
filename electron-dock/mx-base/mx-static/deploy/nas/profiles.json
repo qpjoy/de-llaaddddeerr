@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "host": "mx-internal-server",
+  "parts": {
+    "part1": {
+      "project": "mx_data",
+      "volume": "po_infra_media_data",
+      "nfs_volume": "mx_data_raw_media_nfs_v1",
+      "report": "/var/lib/mx-static/nas-cutover/po_infra_media_data-830225384207402a8ba23a2364d252d1",
+      "plan": "/var/lib/mx-static/nas-cutover/po_infra_media_data-830225384207402a8ba23a2364d252d1/reclaim-plan-6e889ff90c744504a739a40d6eb6d102",
+      "storage_file": "part1.storage.json"
+    },
+    "part2": {
+      "project": "delta_59202",
+      "volume": "delta_59202_media_data",
+      "nfs_volume": "delta_59202_raw_media_nfs_v1",
+      "report": null,
+      "plan": null,
+      "storage_file": null
+    }
+  },
+  "host_policy": "hosts/mx-internal-server.json",
+  "project_catalog": {
+    "infra": "projects/infra.json",
+    "delta": "projects/delta.json"
+  }
+}

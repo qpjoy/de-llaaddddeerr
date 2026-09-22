@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "delta",
+  "compose_project": "delta_59202",
+  "adapter": "precopy-only",
+  "tasks": [
+    "part2"
+  ],
+  "capabilities": [
+    "status",
+    "locate",
+    "logs",
+    "copy"
+  ],
+  "ownership": {
+    "operator": "root",
+    "application_uid_gid": "inspect-at-runtime",
+    "recursive_permission_repair": false,
+    "gateway_access": "read-only"
+  },
+  "data_policy": {
+    "nas_authoritative": false,
+    "automatic_cleanup": false,
+    "reuse_static_archive": false
+  }
+}

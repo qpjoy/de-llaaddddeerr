@@ -1,0 +1,16 @@
+# Managed by mx-static scripts/manage.sh nas auto-install
+[Unit]
+Description=Recover registered NAS media containers after boot
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /usr/local/lib/mx-static-nas/current/scripts/nas/manage.py _auto-recover
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=infinity
+TimeoutStopSec=90s
+UMask=0077

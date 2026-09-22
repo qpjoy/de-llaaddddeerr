@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "infra",
+  "compose_project": "mx_data",
+  "adapter": "infra-v1",
+  "tasks": [
+    "part1"
+  ],
+  "capabilities": [
+    "status",
+    "locate",
+    "logs",
+    "copy",
+    "plan",
+    "reclaim",
+    "recover",
+    "redeploy",
+    "permissions",
+    "deployment-audit"
+  ],
+  "ownership": {
+    "operator": "root",
+    "application_uid_gid": "inspect-at-runtime",
+    "recursive_permission_repair": false,
+    "gateway_access": "read-only"
+  },
+  "data_policy": {
+    "nas_authoritative": true,
+    "automatic_cleanup": false,
+    "reuse_static_archive": false
+  }
+}

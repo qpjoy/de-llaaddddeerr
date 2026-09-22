@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "host": "mx-internal-server",
+  "nas_ip": "192.168.1.3",
+  "mountpoint": "/mnt/nas",
+  "exports": [
+    "nas-storage:/volume1/data1",
+    "192.168.1.3:/volume1/data1"
+  ],
+  "docker_root": "/data/docker",
+  "local_data": "/data",
+  "managed_units": [
+    "mnt-nas.mount",
+    "nfs-client.target",
+    "rpc-statd.service",
+    "mx-static-nas-boot.service",
+    "mx-static-nas-boot.timer"
+  ],
+  "policy": {
+    "force_unmount": false,
+    "global_docker_nas_dependency": false,
+    "reboot_from_cli": false,
+    "automatic_reclaim": false
+  }
+}

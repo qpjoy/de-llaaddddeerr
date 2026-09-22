@@ -1,0 +1,140 @@
+{
+  "services": {
+    "web": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "worker": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "beat": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "worker-agent-short": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "worker-agent-long": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "worker-agent-interactive": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "worker-agent-data-hub": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "worker-strategy-draft": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "chat-gateway": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": false,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    },
+    "gateway": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mx_static_raw_media_nfs",
+          "target": "/app/media/data_hub_raw_media",
+          "read_only": true,
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "mx_static_raw_media_nfs": {
+      "external": true,
+      "name": "mx_data_raw_media_nfs_v1"
+    }
+  }
+}

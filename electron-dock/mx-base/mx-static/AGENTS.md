@@ -1,0 +1,27 @@
+# mx-static NAS production safety
+
+The NAS tooling is a production data-management component. Read `nas_docs/SAFETY.md` and the selected project/task registration before changing migration, recovery, permission or cleanup behavior.
+
+## Established production state
+
+- On 2026-09-22, `po_infra_media_data/data_hub_raw_media` (task `part1`, project `infra`, Compose `mx_data`) successfully switched to the NAS. The NAS may contain newer writes than SSD. It is the authoritative source for that subtree.
+- The latest confirmed SSD cleanup inventory contains 194,686 files; no cleanup completion or business acceptance has been received in this session. Do not infer either from a successful copy/check/prepare.
+- `delta_59202_media_data` (task `part2`, project `delta`) has no reviewed cutover or cleanup record yet. Do not reuse Part 1 identities or configuration.
+- User preference: NAS policy, tools and project-specific operations live in mx-static; do not modify po-infra for this work. The user uses root to operate tools and distributes changes through Git. Runtime reports and credentials stay private on the server.
+
+## Required behavior
+
+1. Preserve existing successful reports, NAS marker, volume IDs, paths and cleanup ledgers. Do not silently rebase identity/configuration checks, move live data, or convert a retained SSD copy back into the authority.
+2. Default to read-only diagnostics. Write probes require their explicit flag and may clean up only the exact probe they created. Never recursively chmod/chown live media, use chmod 777, change NAS squash/export policy, force-unmount, switch hard NFS to soft, or restart all Docker services as a generic fix.
+3. Destructive cleanup is restricted to an exact verified manifest after business acceptance, with rechecks and durable progress. Never delete a Docker volume, database/queue data or another project's data as part of media cleanup. File name/age alone (including `.tmp`) is not deletion authorization.
+4. Existing user authorization remains valid: do not introduce repeated approval prompts, a cloud-backup requirement or a full SHA256 reread gate for the accepted Part 1 workflow. Required business acceptance is an operational fact, not something to assume.
+5. Recovery only starts the registered existing NAS consumers; it must not copy old SSD over live NAS, create a local fallback, purge tasks, or force-restart running NFS-blocked processes. Preserve independent SSD databases/queues.
+6. Add new projects through `deploy/nas` registrations and a reviewed adapter. A catalog entry is not authorization for a generic migration/deletion engine. Keep old CLI forms compatible while jobs may be running.
+7. Root operator access does not prove application access. Check the application's container identity and actual bounded I/O, keep gateway readers read-only, and change permission policy only through a separately scoped plan.
+8. mx-static's archive worker has its own object/manifest ownership. Never attach it to an existing business raw-media directory as if that directory were an initialized archive. Preserve one clearly defined writer/cleanup owner per namespace.
+
+## Verification and operations
+
+Use `bash scripts/manage.sh nas` as the public interface. Keep app-specific checks in `scripts/nas/projects/`, host diagnostics in `scripts/nas/host.py`, and declarations in `deploy/nas/`. Runtime receipts/credentials are not Git artifacts.
+
+Run meaningful NAS regression tests (`python3 -B -m unittest discover -s tests -p 'test_nas*.py'`), Bash syntax and Python 3.6 compatibility checks after safety-critical changes. Real local file tests do not prove EL8/NFS/systemd reboot behavior; state the tested boundary. Do not perform an online restart, outage drill, cleanup or installation merely to validate local code.

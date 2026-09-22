@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # One entry point for deploying and operating mx-static. Every command is
-# idempotent; none of them ever deletes stored objects, manifests or job
-# history, and none of them widens permissions.
+# idempotent for the static server. NAS migration commands below have separate
+# explicit maintenance/business-acceptance gates for production operations.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
+
+# NAS operations must work without Node, mx-static .env or the static service.
+if [[ "${1:-}" == nas ]]; then
+  shift
+  exec python3 -B "$here/scripts/nas/manage.py" "$@"
+fi
 
 version="$(node -p "require('./package.json').version")"
 image="mx-static:${version}"
@@ -191,6 +197,7 @@ case "${1:-help}" in
     cat <<USAGE
 mx-static $version
 
+  nas       NAS migration, recovery and boot management (nas --help)
   deploy    build, migrate, start, prune superseded images, report status
   status    container state and live capacity
   logs [n]  follow logs
