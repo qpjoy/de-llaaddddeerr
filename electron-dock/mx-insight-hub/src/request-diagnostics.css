@@ -1,0 +1,20 @@
+.mih-request-diagnostics { padding: 24px; min-width: 0; }
+.mih-request-diagnostics header p, .mih-diagnostic-note { color: var(--qp-text-3); line-height: 1.7; }
+.mih-diagnostic-form { display: flex; align-items: end; gap: 16px; margin: 24px 0 12px; }
+.mih-diagnostic-form label { display: grid; gap: 10px; flex: 1; min-width: 0; }
+.mih-diagnostic-form button { flex-shrink: 0; }
+.mih-diagnostic-run { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--qp-line); }
+.mih-diagnostic-run h3 { font-size: 16px; }
+.mih-request-diagnostics code, .mih-diagnostic-facts dd { overflow-wrap: anywhere; }
+.mih-diagnostic-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 24px; }
+.mih-diagnostic-facts dt { color: var(--qp-text-3); font-size: 12px; margin-bottom: 6px; }
+.mih-diagnostic-facts dd { margin: 0; font-size: 14px; }
+.mih-diagnostic-call { padding: 18px; margin: 16px 0; border: 1px solid var(--qp-line); border-radius: 10px; }
+.mih-diagnostic-call h4 { margin-top: 0; }
+.mih-diagnostic-guidance { padding: 16px; border-left: 3px solid var(--qp-accent, #15caba); line-height: 1.7; background: var(--qp-bg-2); }
+.mih-diagnostic-empty { padding: 28px 0; color: var(--qp-text-3); line-height: 1.7; }
+@media (max-width: 700px) {
+  .mih-request-diagnostics { padding: 16px; }
+  .mih-diagnostic-form { flex-direction: column; align-items: stretch; }
+  .mih-diagnostic-facts { grid-template-columns: minmax(0, 1fr); }
+}

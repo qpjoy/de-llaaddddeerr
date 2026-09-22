@@ -10,6 +10,54 @@ const API_KEY = 'mih_live_acquisition_history_test'
 const CONSUMER_ID = randomUUID()
 const API_KEY_ID = randomUUID()
 
+test('request diagnostics is explicit, admin-token only, no-store and hidden on Public listener', async () => {
+  const calls = []
+  const acquisitionHistory = { async getAdminDiagnostics(identifier) {
+    calls.push(identifier)
+    return { identifier, runs: [] }
+  } }
+  const server = await listen(fixtureApp({ acquisitionHistory }))
+  const publicServer = await listen(fixtureApp({ acquisitionHistory, listenerMode: 'public' }))
+  const unavailableServer = await listen(fixtureApp())
+  const path = '/internal/v1/admin/request-diagnostics/req_abc_123'
+  const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+  try {
+    assert.equal((await fetch(server.baseUrl + path)).status, 401)
+    const keyResponse = await fetch(server.baseUrl + path, { headers: { authorization: `Bearer ${API_KEY}` } })
+    assert.ok([401, 403].includes(keyResponse.status))
+    assert.equal(calls.length, 0)
+    const response = await fetch(server.baseUrl + path, { headers })
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get('cache-control'), /no-store/)
+    assert.equal((await response.json()).data.identifier, 'req_abc_123')
+    assert.equal((await fetch(server.baseUrl + path + '?raw=true', { headers })).status, 400)
+    assert.equal((await fetch(publicServer.baseUrl + path, { headers })).status, 404)
+    assert.equal((await fetch(unavailableServer.baseUrl + path, { headers })).status, 503)
+    assert.deepEqual(calls, ['req_abc_123'])
+  } finally {
+    await Promise.all([server.close(), publicServer.close(), unavailableServer.close()])
+  }
+})
+
+test('Launcher sessions including platform administrators cannot access request diagnostics', async () => {
+  const server = await listen(fixtureApp({
+    identity: { enabled: true, async resolve(token) {
+      return { kind: 'launcher-user', memberId: token, platformAdmin: token === 'platform-admin',
+        capabilities: [], memberships: [], tenantIds: token === 'platform-admin' ? null : [] }
+    } },
+    acquisitionHistory: { async getAdminDiagnostics() { assert.fail('diagnostics accessed') } },
+  }))
+  try {
+    for (const token of ['tenant-admin', 'platform-admin']) {
+      const response = await fetch(`${server.baseUrl}/internal/v1/admin/request-diagnostics/req_abc_123`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      assert.equal(response.status, 403)
+      assert.equal((await response.json()).error.code, 'admin_token_required')
+    }
+  } finally { await server.close() }
+})
+
 async function listen(app) {
   const server = createServer(app)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -19,7 +67,7 @@ async function listen(app) {
   }
 }
 
-function fixtureApp({ listenerMode = 'combined', acquisitionHistory = null } = {}) {
+function fixtureApp({ listenerMode = 'combined', acquisitionHistory = null, identity = null } = {}) {
   return createApp({
     service: {
       async authenticate(secret) {
@@ -31,6 +79,7 @@ function fixtureApp({ listenerMode = 'combined', acquisitionHistory = null } = {
     adapter: {},
     adminToken: ADMIN_TOKEN,
     acquisitionHistory,
+    identity,
     listenerMode,
     logger: { error() {} },
   })

@@ -4,6 +4,7 @@ import { canonicalJson } from '../ingest/normalizers.mjs'
 import { nightAllLegacyCountAudit } from '../contracts/night-all-count-audit.mjs'
 import { verifyAcquisitionRequestCandidate } from './request-verification.mjs'
 import { canonicalPlatform } from '../hub-service.mjs'
+import { lookupRequestDiagnostics } from './diagnostics.mjs'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const CONTRACT_VERSION = 'mx-insight-hub.acquisition-query-run.v1'
@@ -205,6 +206,10 @@ export class PostgresAcquisitionHistoryStore {
       throw new TypeError('PostgresAcquisitionHistoryStore requires a PostgreSQL pool')
     }
     this.pool = pool
+  }
+
+  async getAdminDiagnostics(identifier) {
+    return lookupRequestDiagnostics(this.pool, identifier)
   }
 
   async getPublicDeliveredRun({ requestId, consumerId, apiKeyId }) {

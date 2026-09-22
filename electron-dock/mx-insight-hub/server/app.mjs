@@ -1692,7 +1692,19 @@ export function createApp({
         })
         return
       }
-      let params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/verify-request')
+      let params = routeMatch(pathname, '/internal/v1/admin/request-diagnostics/:identifier')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'request diagnostics')
+        if (!acquisitionHistory?.getAdminDiagnostics) {
+          throw new AppError(503, 'request_diagnostics_unavailable', '请求诊断需要 PostgreSQL 历史证据')
+        }
+        sendJson(response, 200, {
+          data: await acquisitionHistory.getAdminDiagnostics(params.identifier), requestId,
+        }, { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/verify-request')
       if (request.method === 'POST' && params) {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'acquisition request verification')

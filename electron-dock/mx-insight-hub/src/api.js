@@ -106,9 +106,10 @@ async function parsePayload(response) {
 // One header carries either credential. The server compares it against the
 // admin token first and only offers a non-matching value to Launcher, so the
 // console does not need to know which kind of session it holds.
-async function request(token, path, { method = 'GET', body, query, raw, contentType, headers } = {}) {
+async function request(token, path, { method = 'GET', body, query, raw, contentType, headers, signal } = {}) {
   const response = await fetch(`${API_BASE}${path}${queryString(query)}`, {
     method,
+    signal,
     headers: {
       accept: 'application/json',
       'x-mx-insight-admin-token': token,
@@ -451,6 +452,7 @@ export const adminApi = {
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
   dataBrowserStatistics: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser/statistics`, { query }),
   dataBrowserExport: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser/export`, { query }),
+  requestDiagnostics: (token, identifier, { signal } = {}) => request(token, `${ADMIN_ROOT}/request-diagnostics/${encodeURIComponent(identifier)}`, { signal }),
   dataBrowser: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser`, { query }),
   dataCenter: (token, query = {}) => visibleDataCenterResponse(request(
     token,
