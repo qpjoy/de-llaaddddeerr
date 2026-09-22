@@ -1,5 +1,7 @@
 # 第一卷：执行切换并恢复媒体业务
 
+现场结果更新：`mx-nas-cutover-po-2` 已成功完成，`phase=running_on_nas`；不要再次执行本页 `--cutover`。记录的执行阶段约 2 分 40 秒，SSD 原副本仍在；继续 [业务验收与只读空间清单](part1-reclaim-plan.md)。
+
 适用范围仅为 `mx_data` / `po_infra_media_data`。已回传成功准备目录：
 
 ```text

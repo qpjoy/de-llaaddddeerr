@@ -223,3 +223,17 @@ rsync 耗时包含文件传输和其内部操作；单独 fsync 几乎无耗时�
 预复制 job 仍为 `1e9cdad9efd741338d3fdcb82f327ba5`，SSD 源身份为 device 66309 / inode 1083500031，源卷 `po_infra_media_data`。没有停止业务、切换数据源或释放 SSD，`cutover_ready=false`、`reclaim_ready=false`。此结果支持进入已经约定的维护流程，不代表 NAS RAID/快照/独立备份健康已确认。
 
 下一步执行 `nas-cutover.sh`，详见 [Part 1 操作文档](../operations/part1-cutover.md)。新增工具已本地测试，尚无生产执行回传。
+
+
+## 第一卷正式切换成功（用户回传）
+
+最初 `mx-nas-cutover-po-1` 因服务器缺少新脚本退出 127，没有进入迁移逻辑。用户同步脚本后启动 `mx-nas-cutover-po-2`，本次日志最终为 `Succeeded` 和 `cutover_result.phase=running_on_nas`。
+
+- 沿用报告 `/var/lib/mx-static/nas-cutover/po_infra_media_data-830225384207402a8ba23a2364d252d1`。
+- 在线增量：781 个新文件，422,488,713 字节（402.92 MiB）；最终停写同步传输 0 个文件、0 字节。
+- 最终树包含 194,686 个普通文件、4 个目录，总逻辑字节 534,838,192,708（498.11 GiB）。元数据检查 issues=0，`final_sync_passed=true`，NFS 身份检查通过，`quarantined_roots=0`。
+- 十个媒体消费者已创建并按序启动，HTTP 服务健康检查通过，一个已有视频 1024 字节 Range 读回返回 206 并匹配。PostgreSQL、Redis 保持原容器身份。
+- `started_at_unix=1790036533.3219838`，`updated_at_unix=1790036693.634978`，差值 160.313 秒。该段包含在线补增量，不等于精确停机时长。
+- `nas_may_have_writes=true`、`business_acceptance_pending=true`、`reclaim_ready=false`。SSD 未删除，也未收到最新 df；不能宣称空间已经释放。NAS RAID/快照/独立备份健康未因此得到确认。
+
+后续业务抽查和原 SSD 回收范围见 [只读清单](../operations/part1-reclaim-plan.md)。已经发出业务验收信息请求，尚未收到答案；新增脚本只生成私有元数据清单，不改验收状态或删除数据。

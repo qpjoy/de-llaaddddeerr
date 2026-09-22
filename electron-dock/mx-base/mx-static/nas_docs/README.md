@@ -1,21 +1,21 @@
 # NAS 迁移运维入口
 
-当前进度：第一卷准备已通过，执行入口见 [Part 1 切换与恢复](operations/part1-cutover.md)。它执行停写增量同步、NAS 子卷切换、健康与媒体 Range 检查；本轮保留 SSD，尚未释放空间。以下早期探测步骤保留作历史参考，不必重复执行。
+当前进度：第一卷 `po_infra_media_data` 已成功切换 NAS，服务恢复与媒体 Range 检查通过；等待业务验收，SSD 旧副本仍保留。下一步见 [只读空间回收清单](operations/part1-reclaim-plan.md)。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行已经完成的切换。
 
 本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`，在线完整内容校验入口为 `bash scripts/nas-verify.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 
 ## 当前目标与状态
 
-先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS。用户最新安排：先 po_infra，再 delta；po_infra 可安排 10–30 分钟维护窗口。后台预复制不设四小时退出，优先完成单卷；真实复制错误仍报告失败。原数据保留到校验、切换和业务验收通过，之后用户已授权回收对应旧 raw_media；原 named volume 和其他目录保留。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**用户已完成第一卷在线预复制；尚未切换生产、删除原数据或回收 SSD。**
+先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS。用户最新安排：先 po_infra，再 delta；po_infra 可安排 10–30 分钟维护窗口。后台预复制不设四小时退出，优先完成单卷；真实复制错误仍报告失败。原数据保留到校验、切换和业务验收通过，之后用户已授权回收对应旧 raw_media；原 named volume 和其他目录保留。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**第一卷已完成预复制和生产切换；业务验收待回传，尚未删除原数据或回收 SSD。**
 
 - 最新现场结论：[运行版本、临时文件占用和权限门槛](evidence/2026-09-22-live-findings.md)。两个目录合计 1,426.04 GiB，其中 tmp 960.46 GiB；保留全部文件，不凭名称清理。
-- 第一卷 po_infra 预复制已成功：497.71 GiB，3 小时 10 分 35 秒，退出 0。**最新决定：用户取消额外全量 SHA256 复读，采用 [rsync 增量同步与切换流程](operations/rsync-cutover.md)**。先停止校验单元，运行 `scripts/nas-cutover-prepare.sh po_infra_media_data --prepare` 检查 Docker NFS 子卷并生成固定镜像的候选配置；再安排停写、最终逐路径检查和业务切换。原 SSD 副本保留至验收，第二卷暂不启动。[SHA256 工具](operations/online-verification.md) 保留为可选检查，不再作为硬性前置条件。
+- 第一卷 po_infra 预复制成功：497.71 GiB，3 小时 10 分 35 秒，退出 0。之后按用户选择，采用 rsync 传输校验加停写最终逐路径 quick-check，已完成 NAS 切换；本轮约 2 分 40 秒，包含在线补增量。十个媒体服务恢复、已有视频 Range 读回通过，PostgreSQL/Redis 保持原容器身份。现在执行 [业务验收和只读空间清单](operations/part1-reclaim-plan.md)，不重复预复制、准备或切换；第二卷暂不启动。[SHA256 工具](operations/online-verification.md) 保留为可选检查，不是本轮硬性前置条件。
 - 两卷小批复制及 delta 短时吞吐均已通过：1.513 GiB / 31.708 秒，rsync 阶段 55.401 MiB/s。执行流程见 [两晚分卷执行与在线预复制](operations/two-night-migration.md)，无需重复试拷；po_infra 单遍算术外推约 2.55 小时，不是完整迁移时长承诺。
-- 用户确认 NAS 没有独立备份，最新决定暂缓阿里云备份；服务器链路已确认千兆全双工，/data 剩余 57G；群晖管理凭据遗忘且 SSH 超时，后端健康暂未确认。用户要求先开始 [po_infra 在线预复制](operations/two-night-migration.md)，不再等待管理端登录；[后端检查](operations/nas-health-and-oss.md) 留待具备访问条件时补充。OSS 价格仅保留为历史预算，不作为本轮前置条件。
+- 用户确认 NAS 没有独立备份，最新决定暂缓阿里云备份；服务器链路已确认千兆全双工，切换前最近一次 /data 回传为剩余 67G；群晖管理凭据遗忘且 SSH 超时，后端健康暂未确认。用户先前要求不等待管理端登录开展迁移，目前第一卷已切换；[后端检查](operations/nas-health-and-oss.md) 留待具备访问条件时补充。OSS 价格仅保留为历史预算，不作为本轮前置条件。
 - 默认方向调整：[原生存储、启动边界与数据库扩展](operations/storage-platform.md)。优先 Docker NFS volume / K8s PV/CSI，保持 Docker 全局 NAS 依赖禁用。
 - [旧 host-bind 启动方案](operations/boot-and-recovery.md) 仅作为兼容备选，不再默认每业务一套 systemd 控制程序。
 - 主记录：[Delta 原始媒体迁移](migrations/2026-09-22-delta-raw-media.md)。
-- 候选覆盖文件：[Docker 原生 NFS 子卷](templates/compose.delta-raw-media-nfs-volume.yml.example)；[旧 host-bind 子挂载](templates/compose.delta-raw-media-nas.yml.example) 为备选，两者不能叠加。均需完整校验及现场启动故障测试后才可应用。
+- 候选覆盖文件：[Docker 原生 NFS 子卷](templates/compose.delta-raw-media-nfs-volume.yml.example)；[旧 host-bind 子挂载](templates/compose.delta-raw-media-nas.yml.example) 为备选，两者不能叠加。通用示例仍须按实际部署核对；第一卷采用成功报告内专用 override，主机重启/NAS 晚启动演练尚未完成。
 - 源码基准：[po-infra cdf3e649 的关键文件 SHA256](evidence/po-infra-cdf3e649-sha256.json)。最新现场报告中五个采样文件与基准匹配（含 media_storage.py），tasks.py 不同；不能宣称整个版本一致。
 
 ## 已看到的目录与拟用目录
@@ -40,15 +40,15 @@
   uv-cache/
 ```
 
-最近一次 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` **不存在**，其下拟用目标也不存在。主机根目录为 1003:10 / 2750，4 KiB 探测、两卷小样本及 delta 32 文件短时吞吐已通过；容器访问与整卷持续吞吐仍待验证。按用户建议拟建结构：
+最初 layout 确认 NAS 的 `/mnt/nas/mx-internal-server/data/` 不存在；本轮第一卷已在该层级创建目标并成为正式媒体读写来源。主机根目录为 1003:10 / 2750，4 KiB 探测、两卷小样本及 delta 32 文件短时吞吐已通过；po_infra 整卷复制与 Docker NFS 访问也已验证。目录规划及本轮落地位置如下：
 
 ```text
 /mnt/nas/mx-internal-server/data/
   docker/
-    media-volumes/             # 拟建，按真实卷名隔离
-      delta_59202_media_data/
+    media-volumes/             # 第一卷已创建，按真实卷名隔离
+      delta_59202_media_data/  # 第二卷整卷迁移未开始
         data_hub_raw_media/
-      po_infra_media_data/
+      po_infra_media_data/     # 第一卷已切换
         data_hub_raw_media/
   k8s/                         # 预留；本次不迁 Kubernetes
   mx-static/                   # 预留独立归档位置，须另行配置 attach
