@@ -1,3 +1,4 @@
+import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml } from './contracts/ip-risk-docs.mjs'
 import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
@@ -1791,6 +1792,35 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: storedSearchResponse, ...publicErrors },
+      },
+    },
+    '/data/aggregate/sources': {
+      get: {
+        tags: ['Search'], operationId: 'aggregateSearchSources', summary: 'List searchable Hub platforms for the current API key',
+        description: 'Read-only discovery. Includes stored and authorized live operations, never grants new access or contacts a data service. Ecommerce marketplaces are separate logical platforms backed by the existing ecommerce scope.',
+        responses: { 200: { description: 'data.sources: platform, label, stored, refresh, objectTypes, routes' }, ...publicErrors },
+      },
+    },
+    '/data/aggregate/search': {
+      post: {
+        tags: ['Search'], operationId: 'aggregateDataSearch', summary: 'Search latest or stored data across one, several or all authorized platforms',
+        description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence; the parent adds no customer purchase charge. A refresh response is a bounded first-page window, not exhaustive pagination; sources[].hasMore discloses further source pages. pageSize applies to stored mode only; live post operations fetch 20 items and product operations use their existing bounded page sizes. mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same Idempotency-Key and body for retries; a new key intentionally starts new paid acquisition. Parent replay never expires or redispatches children. Partial and unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.',
+        parameters: [idempotencyParameter],
+        requestBody: { required: true, content: { 'application/json': { schema: {
+          type: 'object', additionalProperties: false, required: ['query'], properties: {
+            query: { type: 'string', minLength: 1, maxLength: 200 },
+            mode: { type: 'string', enum: ['refresh', 'stored'], default: 'refresh' },
+            platforms: { type: 'array', maxItems: 100, items: { type: 'string' }, description: 'Empty means all authorized searchable platforms.' },
+            objectTypes: { type: 'array', items: { type: 'string', enum: AGGREGATE_TYPES } },
+            filters: { type: 'object', additionalProperties: false, properties: {
+              tags: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 200 } },
+              from: { type: 'string', format: 'date-time' }, to: { type: 'string', format: 'date-time' },
+            } },
+            pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: 'Stored page size, subject to the current key policy.' },
+            cursor: { type: 'string', maxLength: 8192, description: 'Stored-mode continuation only.' },
+          },
+        }, example: { query: '新能源汽车', mode: 'refresh', platforms: ['weibo', 'xiaohongshu'], objectTypes: ['post'] } } } },
+        responses: { 200: { description: 'data: contractVersion, mode, query, scope, filters, items (safe unified fields), sources (status/requestId/returnedCount/hasMore), pageInfo, warnings. source statuses: ok, empty, unsupported, not_authorized, unavailable, unknown; partial does not imply complete coverage.' }, ...publicErrors },
       },
     },
     '/data/canonical/search': {
@@ -5239,6 +5269,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'tikhub-search_users', path: '/docs/tikhub/search_users', label: '搜索用户', section: '平台原生接口 · TikHub / 小红书' },
   { key: 'tikhub-get_user_info', path: '/docs/tikhub/get_user_info', label: '获取用户信息', section: '平台原生接口 · TikHub / 小红书' },
   { key: 'tikhub-get_user_posted_notes', path: '/docs/tikhub/get_user_posted_notes', label: '获取用户笔记列表', section: '平台原生接口 · TikHub / 小红书' },
+  { key: 'aggregate-search', path: '/docs/aggregate-search', label: '聚合数据搜索', section: '通用能力' },
   { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
   { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
   { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
@@ -6003,6 +6034,21 @@ printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.pr
     <div class="notice">报告以任务运行时可见的 canonical 数据为准。后续新增同步记录不会改写旧结果；要获得新快照，请用新的 Idempotency-Key 创建新任务。</div>
     </section>
 
+    <section class="doc-page" data-doc-page="aggregate-search">
+    <h2>聚合数据搜索</h2>
+    <p>一个 Hub 接口搜索最新与存量数据，不要求调用方适配数据产品或来源实现。</p>
+    <p>先用 <code>GET /api/v1/data/aggregate/sources</code> 获取当前 Key 可搜索的平台；<code>platforms</code> 省略或为空表示全部授权平台，也可传一个或多个标识。淘宝、天猫、京东等可单独选择，继续使用原电商权限。</p>
+    <pre><code>POST /api/v1/data/aggregate/search
+Authorization: Bearer &lt;HUB_API_KEY&gt;
+Idempotency-Key: &lt;本次查询唯一标识&gt;
+
+{"query":"新能源汽车","mode":"refresh","platforms":["weibo","xiaohongshu"],"objectTypes":["post"]}</code></pre>
+    <p><code>refresh</code> 是默认模式，按匹配的实时接口各取第一页，不回退存量。社交内容每源 20 条，商品保持既有每页上限；这是一轮有界结果窗口，不是各来源全量。仅存量来源、不支持的操作、失败和未知结果分别见 <code>data.sources</code>。</p>
+    <p><code>stored</code> 搜索已入库数据，支持 <code>filters.tags[] / from / to</code>、条目类型多选和平台多选。标签同时匹配，日期包含边界且必须带时区；没有发布时间的记录不匹配日期筛选。实时模式遇到非空日期或标签条件直接拒绝，不会忽略条件后采集。</p>
+    <p>存量每页 <code>pageSize</code> 默认 20；用原条件加 <code>data.pageInfo.nextCursor</code> 和新的幂等标识取下一页。为减少等待，不统计精确总量。实时内容异步入库，刚返回的内容可能暂未出现在存量索引。</p>
+    <p>实时请求沿用各接口授权和套餐计费。<code>data.sources[].requestId</code> 可关联请求和用量记录；同一个父请求标识永久回放本次结果，不重复派发。需要新一轮数据时明确使用新的标识。来源结果未知时不要自动新建请求。</p>
+    </section>
+
     <section class="doc-page" data-doc-page="search">
     <h2 id="search">通用搜索</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>通过 Hub 的外部数据平台网关检索商品。需要 <code>ecommerce</code> 数据域与 <code>ecommerce.products.search</code> 业务操作双授权；公开合同不会暴露外部平台身份、凭据、接口地址或原始响应。</p></div>
@@ -6331,6 +6377,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
     else if (path.startsWith('/data/telegram/') || path.startsWith('/data/canonical/items/')) platform = 'telegram'
     else if (path.startsWith('/data/public-opinion/')) platform = 'public_opinion'
     else if (path.startsWith('/data/virtual-supermarket/')) platform = 'virtual_supermarket'
+    else if (path.startsWith('/data/aggregate/')) return scopes.some(scope => scope.platforms.some(platform => ['ecommerce', 'telegram', 'public_opinion', 'mobile_commerce', 'social', 'xiaohongshu', 'weibo', 'douyin', 'bilibili', 'kuaishou', 'facebook', 'instagram', 'reddit', 'twitter', 'tiktok', 'youtube', 'zhihu', 'wechat_mp', 'wechat_search'].includes(platform) || /^data_center_saved_records_/.test(platform)))
     else if (['/data/platforms', '/data/saved-records/categories'].includes(path)) return scopes.length > 0
     else if (path.startsWith('/data/topic-reports')) return scopes.some(scope => scope.platforms.some(value => /^data_center_saved_records_[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)))
     else return false
@@ -6338,6 +6385,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
   'source-catalog': ['/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],

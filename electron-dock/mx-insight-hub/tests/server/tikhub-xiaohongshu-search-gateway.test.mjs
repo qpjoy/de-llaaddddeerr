@@ -839,6 +839,16 @@ test('a fresh search snapshot returns without any second search or detail provid
   assert.equal(state.platformStore.cacheCommits.length, 1)
 })
 
+test('aggregate liveOnly search bypasses a fresh snapshot without changing ordinary cached search', async () => {
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '实时完整正文')] })
+  const state = fixture(adapter)
+  await state.gateway.searchNotes(state.context, request())
+  const fresh = await state.gateway.searchNotes(state.context, request({ idempotencyKey: 'aggregate-live-only-search', liveOnly: true }))
+  assert.equal(fresh.sourceMode, 'live')
+  assert.equal(adapter.calls.search.length, 2)
+  assert.equal(state.platformStore.cacheCommits.length, 0)
+})
+
 test('stale detail snapshots are not silently merged into a new search observation', async () => {
   const snippet = '旧'.repeat(60)
   const failingDetailIds = new Set()

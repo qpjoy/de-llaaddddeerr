@@ -1,0 +1,24 @@
+.mih-aggregate { display: grid; gap: 20px; min-width: 0; }
+.mih-aggregate h2 { margin: 0 0 8px; }
+.mih-aggregate-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; flex-wrap: wrap; }
+.mih-aggregate-heading code { overflow-wrap: anywhere; font-size: 12px; }
+.mih-aggregate form { display: grid; gap: 18px; }
+.mih-aggregate .mih-browser-filter-chips { margin-bottom: 20px; }
+.mih-aggregate-choices { display: flex; gap: 12px; flex-wrap: wrap; padding: 16px; border: 1px solid var(--qp-border, #47556940); border-radius: 12px; min-width: 0; }
+.mih-aggregate-choices legend { padding: 0 6px; }
+.mih-aggregate-choices label { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--qp-border, #47556940); border-radius: 8px; cursor: pointer; }
+.mih-aggregate-choices label:has(input:checked) { border-color: var(--qp-primary, #098a80); background: #0b9c8914; }
+.mih-aggregate-choices input { width: 16px; height: 16px; accent-color: var(--qp-primary, #098a80); }
+.mih-aggregate-choices small { display: block; opacity: .65; font-size: 11px; }
+.mih-aggregate-filters { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 16px; }
+.mih-aggregate-api { margin-top: 20px; }
+.mih-aggregate-api pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; font-size: 13px; }
+.mih-aggregate-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 20px 0; }
+.mih-aggregate-sources > div { display: grid; gap: 6px; border: 1px solid var(--qp-border, #47556940); border-radius: 10px; padding: 12px; }
+.mih-aggregate-sources small { overflow-wrap: anywhere; opacity: .7; }
+.mih-aggregate-results { display: grid; gap: 12px; margin: 20px 0; }
+.mih-aggregate-results article { padding: 20px; border: 1px solid var(--qp-border, #47556940); border-radius: 12px; min-width: 0; }
+.mih-aggregate-results article p { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.mih-aggregate-results footer { display: flex; justify-content: space-between; gap: 12px; }
+@media (max-width: 900px) { .mih-aggregate-filters { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 600px) { .mih-aggregate-filters { grid-template-columns: 1fr; } .mih-aggregate-choices { gap: 8px; padding: 10px; } }

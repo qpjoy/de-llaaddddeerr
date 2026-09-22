@@ -5874,6 +5874,24 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/aggregate/sources') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'aggregate sources')
+        sendJson(response, 200, { data: await service.aggregateSources(context), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/aggregate/search') {
+        const context = await requirePublic(request)
+        const result = await service.aggregateSearch(context, {
+          body: await readJson(request, 64 * 1024),
+          idempotencyKey: request.headers['idempotency-key'], path: pathname,
+          products: externalPlatformGateway ? (ctx, input) => externalPlatformGateway.search(ctx, input) : null,
+        })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+        })
+        return
+      }
       if (request.method === 'POST' && pathname === '/api/v1/data/canonical/search') {
         const context = await requirePublic(request)
         const result = await service.canonicalSearch(context, {

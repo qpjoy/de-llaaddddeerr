@@ -1276,6 +1276,7 @@ export class TikHubGateway {
     acquisitionRequest = null,
     enrichment = {},
     replayWindowMs = null,
+    liveOnly = false,
   }) {
     let durableRequestId = null
     let ownsReservation = false
@@ -1357,7 +1358,7 @@ export class TikHubGateway {
       const requestFingerprint = fingerprint({
         method: 'POST',
         path,
-        body: fingerprintBody || normalized.fingerprintBody,
+        body: { ...(fingerprintBody || normalized.fingerprintBody), ...(liveOnly ? { deliveryMode: 'live_only' } : {}) },
       })
       // Public route aliases keep their own idempotency identity, while the
       // provider query has one shared cache/lease identity. This prevents the
@@ -1450,6 +1451,7 @@ export class TikHubGateway {
 
       const activeRequestId = reservation.request.id
       const selectSnapshot = (snapshot) => {
+        if (liveOnly) return null
         const projected = searchSnapshotProjection(snapshot, responseMode, {
           storedCodec,
           deliveryCodec: codec,

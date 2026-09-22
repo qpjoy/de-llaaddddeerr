@@ -1,3 +1,4 @@
+import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate } from './data/aggregate-search.mjs'
 import { nightAllFailureEvidence } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
@@ -3282,7 +3283,22 @@ export class HubService {
     }
   }
 
-  async canonicalSearch(context, { body, idempotencyKey, path }) {
+  async aggregateSources(context) {
+    return { contractVersion: 'mx-insight-hub.aggregate-sources.v1', sources: aggregateSourceCatalog(
+      await this.#effectivePlatformGrants(context), await this.#effectiveCapabilityGrants(context), await listCrawlerSpecs(this.store),
+    ) }
+  }
+
+  async aggregateSearch(context, { body, idempotencyKey, path, products }) {
+    const { sources } = await this.aggregateSources(context)
+    const aggregate = normalizeAggregateRequest(body, sources)
+    return this.canonicalSearch(context, {
+      body: { query: aggregate.query, pageSize: aggregate.pageSize, ...(aggregate.cursor ? { cursor: aggregate.cursor } : {}) },
+      idempotencyKey, path, aggregate, originalBody: body, products,
+    })
+  }
+
+  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products }) {
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -3298,7 +3314,7 @@ export class HubService {
       assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
       assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
     }
-    if (!this.searchQueries?.searchContent) {
+    if (aggregate?.mode !== 'refresh' && !this.searchQueries?.searchContent) {
       throw new AppError(503, 'canonical_search_unavailable', 'Canonical search requires the PostgreSQL search layer')
     }
     const policies = await Promise.all(grants.map((name) => this.#effectivePlatformPolicy(context, name)))
@@ -3323,13 +3339,15 @@ export class HubService {
     const query = normalizeCanonicalSearchQuery(
       { ...body, platform },
       {
-        platforms: grants,
+        platforms: aggregate?.authorizationPlatforms ?? grants,
+        ...(aggregate ? { aggregateScope: { contract: 'aggregate.v1', platforms: aggregate.platforms, objectTypes: aggregate.objectTypes, ...aggregate.filters } } : {}),
         maxPageSize: policy.maxPageSize,
         cursorSecret: this.apiKeyPepper,
       },
     )
     const resultType = resolveResultType(body)
     const fingerprintBody = {
+      ...(aggregate ? { aggregate } : {}),
       query: query.query,
       platform: query.platform,
       platforms: query.platforms,
@@ -3372,14 +3390,14 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       capability: CANONICAL_SEARCH_USAGE_SCOPE,
-      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body: originalBody }),
       unitsReserved: 1,
-      leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      leaseExpiresAt: new Date(Date.now() + (aggregate?.mode === 'refresh' ? Math.max(this.reservationLeaseMs, 600_000) : this.reservationLeaseMs)),
       windowStart,
       maxRequests: policy.maxRequests,
       apiKeyQuota,
       authorizationPlatforms: grants,
-      replayWindowMs: replayWindowFor(resultType),
+      replayWindowMs: aggregate ? null : replayWindowFor(resultType),
     })
 
     if (reservation.kind === 'conflict') {
@@ -3407,11 +3425,12 @@ export class HubService {
     const activeRequestId = reservation.request.id
     const startedAt = performance.now()
     let commitAttempted = false
+    let acquisitionStarted = false
     try {
       // Dataset/object filters narrow the already-authorized platform set; they
       // never replace it. The common projection produces one globally ranked
       // result list rather than merging incomparable per-source scores.
-      const result = await this.searchQueries.searchContent(query.query, {
+      const result = aggregate?.mode === 'refresh' ? { mode: 'live', items: [], hasMore: false } : await this.searchQueries.searchContent(query.query, {
         sort: query.sort,
         platforms: query.platforms,
         datasetId: query.datasetId,
@@ -3419,7 +3438,10 @@ export class HubService {
         size: query.pageSize,
         cursor: query.cursor,
         searchProfile: query.searchProfile,
-        trackTotalHits: true,
+        trackTotalHits: !aggregate,
+        ...(aggregate ? { skipTotalHits: true } : {}),
+        ...(aggregate ? { objectTypes: aggregate.objectTypes, tags: aggregate.filters.tags, marketplaces: aggregate.marketplaces,
+          fromTime: aggregate.filters.from, toTime: aggregate.filters.to } : {}),
         ...(query.platforms.includes(PUBLIC_OPINION_PLATFORM)
           ? { publicOpinionVisibility: query.publicOpinionVisibility }
           : {}),
@@ -3436,16 +3458,37 @@ export class HubService {
         }),
         requestId: activeRequestId,
       }
+      if (aggregate) {
+        responseBody.data = aggregateResponse(responseBody.data, aggregate)
+        if (aggregate.mode === 'refresh') {
+          acquisitionStarted = true
+          const refreshed = await refreshAggregate(aggregate, {
+            requestId: activeRequestId,
+            search: input => this.search(context, { ...input, liveOnly: true }),
+            products: input => products ? products(context, input) : Promise.reject(new AppError(503, 'source_unavailable', 'Product search is unavailable')),
+          })
+          const items = refreshed.items
+          const livePlatforms = new Set(aggregate.routes.map(route => route.platform))
+          const skipped = aggregate.platforms.filter(platform => !livePlatforms.has(platform)).map(platform => ({ platform, mode: 'refresh', status: 'unsupported', code: 'no_matching_live_operation' }))
+          responseBody.data = { ...responseBody.data, items,
+            sources: [...refreshed.sources, ...skipped],
+            searchMode: 'live', durationMs: Math.round(performance.now() - startedAt),
+            status: !skipped.length && refreshed.sources.every(source => ['ok', 'empty'].includes(source.status)) ? 'ok' : 'partial',
+            pageInfo: { pageIndex: 1, returnedCount: items.length, hasMore: false, nextCursor: null, window: 'first_page_per_source' },
+            warnings: [...responseBody.data.warnings, { code: 'bounded_refresh_window', message: 'One first page per eligible live source; additional source pages are not acquired. Canonical ingestion is asynchronous. Use stored mode to browse indexed data.' }],
+          }
+        }
+      }
       commitAttempted = true
       await this.store.commitRequest(activeRequestId, {
         responseStatus: 200,
         responseBody,
-        unitsActual: Math.max(1, responseBody.data.items.length),
+        unitsActual: aggregate?.mode === 'refresh' ? 0 : Math.max(1, responseBody.data.items.length),
         upstreamLatencyMs: Math.round(performance.now() - startedAt),
       })
       return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
     } catch (error) {
-      if (commitAttempted) {
+      if (commitAttempted || acquisitionStarted) {
         await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
         throw error
       }
@@ -4330,7 +4373,7 @@ export class HubService {
     }
   }
 
-  async search(context, { body, idempotencyKey, path }) {
+  async search(context, { body, idempotencyKey, path, liveOnly = false }) {
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -4424,7 +4467,8 @@ export class HubService {
         idempotencyKey,
         path,
         responseMode: 'modern',
-        fingerprintBody: { ...fingerprintQuery, type: resultType },
+        fingerprintBody: { ...fingerprintQuery, type: resultType, ...(liveOnly ? { deliveryMode: 'live_only' } : {}) },
+        liveOnly,
         enrichment: {},
         replayWindowMs: replayWindowFor(resultType),
       })

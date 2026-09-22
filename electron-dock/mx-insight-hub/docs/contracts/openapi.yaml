@@ -4186,6 +4186,242 @@ paths:
         "410": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /data/aggregate/sources:
+    get:
+      tags:
+      - Search
+      operationId: aggregateSearchSources
+      summary: List searchable Hub platforms for the current API key
+      description: Read-only discovery. Includes stored and authorized live operations, never grants new
+        access or contacts a data service. Ecommerce marketplaces are separate logical platforms backed
+        by the existing ecommerce scope.
+      responses:
+        '200':
+          description: 'data.sources: platform, label, stored, refresh, objectTypes, routes'
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '410':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /data/aggregate/search:
+    post:
+      tags:
+      - Search
+      operationId: aggregateDataSearch
+      summary: Search latest or stored data across one, several or all authorized platforms
+      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with
+        bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[]
+        or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to
+        discover logical platform identifiers; clients never choose a provider. Only existing platform and
+        operation entitlements apply. Telegram, published opinion and saved categories are stored-only;
+        refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence;
+        the parent adds no customer purchase charge. A refresh response is a bounded first-page window,
+        not exhaustive pagination; sources[].hasMore discloses further source pages. pageSize applies to
+        stored mode only; live post operations fetch 20 items and product operations use their existing
+        bounded page sizes. mode=stored performs one filtered canonical search, returns an opaque nextCursor
+        and omits exact totals. objectTypes and platform selections are OR within a group; tags require
+        every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude
+        undated records. Current live routes reject non-empty tags/date filters before any acquisition.
+        Reuse the same Idempotency-Key and body for retries; a new key intentionally starts new paid acquisition.
+        Parent replay never expires or redispatches children. Partial and unknown outcomes are explicit
+        source statuses. Ingestion after live delivery is asynchronous.'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API
+          key that created its usage record. Reuse it only with that same API key when retrying the exact
+          same path and normalized body; another API key, a new path, body or page requires a new Idempotency-Key.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - query
+              properties:
+                query:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                mode:
+                  type: string
+                  enum:
+                  - refresh
+                  - stored
+                  default: refresh
+                platforms:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: string
+                  description: Empty means all authorized searchable platforms.
+                objectTypes:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                    - post
+                    - article
+                    - message
+                    - chat
+                    - comment
+                    - product
+                    - account
+                    - user
+                    - profile
+                    - saved_record
+                    - commerce_capture
+                    - opinion_item
+                filters:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    tags:
+                      type: array
+                      maxItems: 10
+                      items:
+                        type: string
+                        maxLength: 200
+                    from:
+                      type: string
+                      format: date-time
+                    to:
+                      type: string
+                      format: date-time
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 20
+                  description: Stored page size, subject to the current key policy.
+                cursor:
+                  type: string
+                  maxLength: 8192
+                  description: Stored-mode continuation only.
+            example:
+              query: 新能源汽车
+              mode: refresh
+              platforms:
+              - weibo
+              - xiaohongshu
+              objectTypes:
+              - post
+      responses:
+        '200':
+          description: 'data: contractVersion, mode, query, scope, filters, items (safe unified fields),
+            sources (status/requestId/returnedCount/hasMore), pageInfo, warnings. source statuses: ok, empty,
+            unsupported, not_authorized, unavailable, unknown; partial does not imply complete coverage.'
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '410':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /data/canonical/search:
     post:
       operationId: searchCanonicalData

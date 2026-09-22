@@ -7,6 +7,9 @@ export function useDemoApiKey() {
   const context = useContext(DemoContext)
   return [context?.secret || '', context?.setManual || (() => {})]
 }
+export function useDemoIdentity() {
+  return useContext(DemoContext)?.identity || 'none'
+}
 export function DemoCredentialProvider({ token, children }) {
   const [credential, setCredential] = useState(null)
   const [manual, setManual] = useState('')

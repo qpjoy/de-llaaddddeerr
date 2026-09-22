@@ -208,6 +208,8 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  aggregateSources: apiKey => publicDataRequest(apiKey, '/api/v1/data/aggregate/sources'),
+  aggregateSearch: (apiKey, body, idempotencyKey) => publicDataRequest(apiKey, '/api/v1/data/aggregate/search', { method: 'POST', body, idempotencyKey }),
   acquisitionComparison: (apiKey, body, idempotencyKey) => publicDataRequest(
     apiKey, '/api/v1/night-all/search/raw', { method: 'POST', body, idempotencyKey },
   ),

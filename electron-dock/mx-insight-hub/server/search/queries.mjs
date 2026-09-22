@@ -736,6 +736,9 @@ export class SearchQueries {
     datasetId = null,
     datasetIds = null,
     objectType = null,
+    objectTypes = null,
+    tags = null,
+    marketplaces = null,
     authorExternalId = null,
     chatId = null,
     fromTime = null,
@@ -746,6 +749,7 @@ export class SearchQueries {
     searchProfile = null,
     strictRelevance = undefined,
     trackTotalHits = false,
+    skipTotalHits = false,
     oneShot = false,
     sort = 'relevance',
     publicOpinionVisibility = null,
@@ -771,7 +775,7 @@ export class SearchQueries {
     }
     if (!this.client || cursor?.mode === 'postgres') {
       const result = await this.#searchContentPostgres(query, {
-        platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
+        platform, platforms, datasetId, datasetIds, objectType, objectTypes, tags, marketplaces, authorExternalId, chatId,
         fromTime, toTime, limit, cursor, offset: normalizedOffset,
         includeTotal: trackTotalHits || normalizedOffset != null,
         requestedProfile,
@@ -800,7 +804,7 @@ export class SearchQueries {
           `[search] ${CONTENT_INDEX_SCHEMA} is not active; using PostgreSQL publication visibility`,
         )
         const result = await this.#searchContentPostgres(query, {
-          platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
+          platform, platforms, datasetId, datasetIds, objectType, objectTypes, tags, marketplaces, authorExternalId, chatId,
           fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
@@ -870,6 +874,12 @@ export class SearchQueries {
         ...(datasetId ? [{ term: { datasetId } }] : []),
         ...(Array.isArray(datasetIds) && datasetIds.length > 0 ? [{ terms: { datasetId: datasetIds } }] : []),
         ...(objectType ? [{ term: { objectType } }] : []),
+        ...(objectTypes?.length ? [{ terms: { objectType: objectTypes } }] : []),
+        ...(tags || []).map(tag => ({ term: { tags: tag } })),
+        ...(marketplaces?.length ? [{ bool: { minimum_should_match: 1, should: [
+          { bool: { must_not: [{ term: { platform: 'ecommerce' } }] } },
+          ...marketplaces.map(marketplace => ({ prefix: { externalId: `${marketplace}:` } })),
+        ] } }] : []),
         ...(authorExternalId ? [{ term: { authorExternalId } }] : []),
         ...(chatId ? [{ term: { chatId } }] : []),
         ...((fromTime || toTime) ? [{
@@ -885,7 +895,7 @@ export class SearchQueries {
       ]
       const response = await this.client.request('POST', '/_search', {
         size: normalizedOffset == null ? limit + 1 : limit,
-        ...((trackTotalHits || normalizedOffset != null) ? { track_total_hits: true } : {}),
+        ...(skipTotalHits ? { track_total_hits: false } : (trackTotalHits || normalizedOffset != null) ? { track_total_hits: true } : {}),
         pit: { id: pitId, keep_alive: SEARCH_PIT_KEEP_ALIVE },
         ...(cursor?.searchAfter ? { search_after: cursor.searchAfter } : {}),
         ...(normalizedOffset != null ? { from: normalizedOffset } : {}),
@@ -922,8 +932,8 @@ export class SearchQueries {
       if (normalizedOffset != null || oneShot || !hasMore) await this.#closeSearchPit(currentPitId)
       return {
         mode: 'elasticsearch',
-        total,
-        totalRelation: response.hits?.total?.relation ?? 'eq',
+        total: skipTotalHits ? null : total,
+        totalRelation: skipTotalHits ? 'unknown' : response.hits?.total?.relation ?? 'eq',
         hasMore,
         nextCursor: hasMore && normalizedOffset == null && !oneShot ? {
           mode: 'elasticsearch',
@@ -958,7 +968,7 @@ export class SearchQueries {
       if (error instanceof ElasticsearchUnavailableError) {
         this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL content search')
         const result = await this.#searchContentPostgres(query, {
-          platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
+          platform, platforms, datasetId, datasetIds, objectType, objectTypes, tags, marketplaces, authorExternalId, chatId,
           fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
@@ -1058,6 +1068,9 @@ export class SearchQueries {
     datasetId,
     datasetIds,
     objectType,
+    objectTypes,
+    tags,
+    marketplaces,
     authorExternalId,
     chatId,
     fromTime,
@@ -1093,6 +1106,8 @@ export class SearchQueries {
     const crawlerPublicationPredicate = crawlerPublicationVisibility
       ? `AND ${postgresCrawlerPublicationPredicate(crawlerPublicationVisibility)}`
       : ''
+    const facetValues = objectTypes?.length || tags?.length || marketplaces?.length ? [JSON.stringify({ objectTypes: objectTypes || [], tags: tags || [], marketplaces: marketplaces || [] })] : []
+    const facetPredicate = facetValues.length ? aggregateFacetPredicate(visibilityParameter + (publicOpinionVisibility ? 1 : 0)) : ''
     const { rows } = await this.pool.query(
       `WITH matching AS (
          SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
@@ -1119,6 +1134,7 @@ export class SearchQueries {
             AND ($12::text[] IS NULL OR platform = ANY($12::text[]))
             ${crawlerPublicationPredicate}
             ${publicationPredicate}
+            ${facetPredicate}
        )
        SELECT *
          FROM matching
@@ -1148,6 +1164,7 @@ export class SearchQueries {
         offset == null ? limit + 1 : limit,
         ...(offset != null ? [offset] : []),
         ...(publicOpinionVisibility ? [JSON.stringify(publicOpinionVisibility)] : []),
+        ...facetValues,
       ],
     )
     let exactTotal = null
@@ -1155,7 +1172,7 @@ export class SearchQueries {
       exactTotal = rows.length > 0
         ? Number(rows[0].total_count)
         : await this.#countContentPostgres(query, {
-            platform, platforms, datasetId, datasetIds, objectType,
+            platform, platforms, datasetId, datasetIds, objectType, objectTypes, tags, marketplaces,
             authorExternalId, chatId, fromTime, toTime,
             publicOpinionVisibility,
             crawlerPublicationVisibility,
@@ -1231,6 +1248,9 @@ export class SearchQueries {
     datasetId,
     datasetIds,
     objectType,
+    objectTypes,
+    tags,
+    marketplaces,
     authorExternalId,
     chatId,
     fromTime,
@@ -1249,6 +1269,8 @@ export class SearchQueries {
     const crawlerPublicationPredicate = crawlerPublicationVisibility
       ? `AND ${postgresCrawlerPublicationPredicate(crawlerPublicationVisibility)}`
       : ''
+    const facetValues = objectTypes?.length || tags?.length || marketplaces?.length ? [JSON.stringify({ objectTypes: objectTypes || [], tags: tags || [], marketplaces: marketplaces || [] })] : []
+    const facetPredicate = facetValues.length ? aggregateFacetPredicate(publicOpinionVisibility ? 12 : 11) : ''
     const { rows } = await this.pool.query(
       `SELECT count(*)::bigint AS total_count
          FROM core.canonical_records
@@ -1269,12 +1291,14 @@ export class SearchQueries {
           AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
           AND ($10::text[] IS NULL OR platform = ANY($10::text[]))
           ${crawlerPublicationPredicate}
-          ${publicationPredicate}`,
+          ${publicationPredicate}
+          ${facetPredicate}`,
       [
         query, platform, datasetId, datasetIds, objectType, authorExternalId,
         chatId, fromTime, toTime,
         Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
         ...(publicOpinionVisibility ? [JSON.stringify(publicOpinionVisibility)] : []),
+        ...facetValues,
       ],
     )
     return Number(rows[0]?.total_count ?? 0)
@@ -1294,4 +1318,15 @@ function isExpiredSearchPit(error) {
   if (!(error instanceof ElasticsearchError)) return false
   const detail = JSON.stringify(error.body || {})
   return error.status === 404 || /search_context_missing_exception|no search context found/i.test(detail)
+}
+
+// Values are JSON parameters, never SQL identifiers or interpolated user text.
+function aggregateFacetPredicate(parameter) {
+  const value = `$${parameter}::jsonb`
+  return `AND (COALESCE(jsonb_array_length(${value}->'objectTypes'), 0) = 0
+    OR object_type IN (SELECT jsonb_array_elements_text(${value}->'objectTypes')))
+    AND (CASE WHEN jsonb_typeof(stable_fields->'tags') = 'array' THEN stable_fields->'tags' ELSE '[]'::jsonb END)
+      @> COALESCE(NULLIF(${value}->'tags', 'null'::jsonb), '[]'::jsonb)
+    AND (COALESCE(jsonb_array_length(${value}->'marketplaces'), 0) = 0 OR platform <> 'ecommerce'
+      OR split_part(external_id, ':', 1) IN (SELECT jsonb_array_elements_text(${value}->'marketplaces')))`
 }

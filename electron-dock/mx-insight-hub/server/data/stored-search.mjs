@@ -211,6 +211,7 @@ function canonicalQueryBinding(query) {
       // let a caller flip the order and keep paging from a position computed
       // under the previous one, silently skipping and repeating rows.
       requestedSort: query.sort,
+      ...(query.aggregateScope ? { aggregateScope: query.aggregateScope } : {}),
       ...(query.crawlerPublicationVisibility ? {
         crawlerPublicationVisibility: query.crawlerPublicationVisibility,
       } : {}),
@@ -422,6 +423,7 @@ export function normalizeCanonicalSearchQuery(input, {
   platforms,
   maxPageSize = 100,
   cursorSecret,
+  aggregateScope = null,
 } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new AppError(400, 'invalid_request', 'JSON object body is required')
@@ -453,6 +455,7 @@ export function normalizeCanonicalSearchQuery(input, {
     sort: sortValue(input.sort),
     publicOpinionVisibility: publicOpinionVisibility(input, platform),
     crawlerPublicationVisibility: crawlerPublicationVisibility(platform ? [platform] : platformScope),
+    ...(aggregateScope ? { aggregateScope } : {}),
   }
   const cursorBinding = canonicalQueryBinding(normalized)
   const cursorToken = stringValue(input.cursor, 'cursor', 8_192)
