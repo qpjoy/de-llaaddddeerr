@@ -12916,6 +12916,13 @@ button.mih-catalog-status {
 .mih-xhs-browser label { line-height: 1.7; }
 
 .mih-xhs-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
+.mih-xhs-detail-toolbar { margin-top: 0; }
+.mih-xhs-detail-toolbar small, .mih-xhs-comments small { color: var(--qp-text-3); }
+.mih-xhs-detail-options { margin: 20px 0; }
+.mih-xhs-detail-options summary, .mih-xhs-comments summary { cursor: pointer; padding: 8px 0; }
+.mih-xhs-detail-options section { margin: 16px 0; }
+.mih-xhs-history-status { min-height: 64px; display: flex; align-items: center; justify-content: center; }
+.mih-xhs-browser .mih-commerce-phone-feed { overflow-anchor: none; scrollbar-gutter: stable; }
 .mih-xhs-link-entry { margin-bottom: 24px; }
 .mih-xhs-link-entry > summary { cursor: pointer; font-weight: 600; padding: 12px 0; }
 .mih-tenant-access-scopes { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; margin-bottom: 20px; }
@@ -12978,7 +12985,7 @@ button.mih-catalog-status {
 .mih-xhs-list-title > span { width: 64px; height: 72px; overflow: hidden; flex-shrink: 0; border-radius: 6px; }
 .mih-xhs-list-title img { width: 100%; height: 100%; object-fit: cover; }
 .mih-xhs-list-title strong { max-width: 360px; white-space: normal; }
-.mih-xhs-list-pages { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 16px 0; }
+.mih-xhs-list-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 16px 0; }
 
 .mih-api-console-tab { grid-column: 1 / -1; min-width: 0; }
 .mih-api-console { display: grid; grid-template-columns: 220px minmax(0, 1fr); overflow: hidden; padding: 0; }

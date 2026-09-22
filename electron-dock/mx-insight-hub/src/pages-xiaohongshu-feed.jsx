@@ -1,12 +1,12 @@
 import { XiaohongshuConsole } from './xiaohongshu-console.jsx'
 import { FeedRuler } from './feed-ruler.jsx'
-import { useDemoAccess, DemoAccessNotice } from './demo-credentials.jsx'
+import { useDemoAccess, useDemoIdentity, DemoAccessNotice } from './demo-credentials.jsx'
 import { requestUuid } from './request-id.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ImageSquare } from '@phosphor-icons/react'
 import { adminApi, publicDataApi } from './api.js'
 import { DropdownField, ErrorState, Field, Modal } from './components.jsx'
-import { mergeNotes, nativeNotePage, storedNote } from './xiaohongshu-feed.js'
+import { mergeNotes, nativeNotePage, storedNote, claimNoteOpenRequest, mergeNoteDetail } from './xiaohongshu-feed.js'
 
 export function BusinessImage({ url, enabled, alt, className }) {
   const [failed, setFailed] = useState(false)
@@ -23,6 +23,7 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   const [error, setError] = useState(saved.error || null)
   const identity = useRef(saved.identity || null)
   const lock = useRef(false)
+  const resolveIssues = useDemoAccess('social.posts.resolve')
   const analyticsIssues = useDemoAccess('social.posts.analytics')
   const commentIssues = useDemoAccess('social.comments.list')
   const [research, setResearch] = useState(saved.research || {})
@@ -52,7 +53,7 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const url = item.url || `https://www.xiaohongshu.com/explore/${item.externalId}`
   const resolve = async (deliveryMode = 'cache_first') => {
-    if (lock.current || !apiKey.trim()) return
+    if (lock.current || !apiKey.trim() || resolveIssues.length) return
     lock.current = true; setBusy(true); setError(null)
     try {
       identity.current ||= { key: `xhs-detail-${requestUuid()}`, deliveryMode }
@@ -63,40 +64,58 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
     } catch (failure) { saved.error = failure; if (alive.current) setError(failure) }
     finally { lock.current = false; if (alive.current) setBusy(false) }
   }
+  // Opening a card is the user's request. Claim it before dispatch so Strict
+  // Mode, credential renewal and reopening never initiate another paid call.
+  useEffect(() => {
+    const operation = claimNoteOpenRequest(saved, { apiKey, analyticsIssues, resolveIssues })
+    if (operation === 'note_detail') void requestResearch('note_detail')
+    if (operation === 'resolve') void resolve()
+  }, [apiKey, saved, analyticsIssues.length, resolveIssues.length])
   const analytics = research.note_detail?.payload?.data?.item
-  const original = result?.payload?.data?.item || item
-  const displayed = analytics ? { ...original, ...Object.fromEntries(Object.entries(analytics).filter(([, value]) => value != null)),
-    tags: research.note_detail.payload.meta.tagsAvailable ? analytics.tags : original.tags,
-    media: analytics.media?.length ? analytics.media : original.media,
-    metrics: { ...original.metrics, ...analytics.metrics },
-  } : original
+  const displayed = mergeNoteDetail(result?.payload?.data?.item || item, research.note_detail?.payload)
+  const primary = saved.openOperation || (!analyticsIssues.length ? 'note_detail' : 'resolve')
+  const primaryIssues = primary === 'note_detail' ? analyticsIssues : resolveIssues
+  const primaryError = primary === 'note_detail' ? researchError : error
+  const primaryResult = primary === 'note_detail' ? research.note_detail : result
+  const refresh = () => primary === 'note_detail'
+    ? requestResearch('note_detail', null, Boolean(primaryResult) && !primaryError)
+    : resolve(primaryResult && !primaryError ? 'live_only' : 'cache_first')
   return <Modal title={item.title || '笔记详情'} size="xlarge" closeOnBackdrop={false} closeOnEscape={false} busy={busy} onClose={onClose} footer={<button className="qp-button" disabled={busy} onClick={onClose}>关闭</button>}>
-    <p>{item.bodyCompleteness === 'provider_preview' ? '列表预览可能不含完整正文和标签。' : '展示当前 Hub 已存版本，完整性以采集结果为准。'} 获取完整详情优先读缓存，必要时采集，可能计费。</p>
-    <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim()} onClick={() => void resolve()}>{busy ? '正在读取详情…' : error ? '重试同一详情请求' : '获取完整正文与标签'}</button>
-    <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || Boolean(error)} onClick={() => void resolve('live_only')}>重新采集完整笔记（可能计费）</button></div>
-    <p>重新查询会获取最新正文、标签和全部图片地址；图片重试只重新加载已有图片。</p>
-    <section className="qp-panel" aria-label="详情与阅读量">
-      <h3>详情与阅读量</h3>
-      <p>获取正文、媒体、阅读量和曝光量。结构化标签可能缺失，可用上方完整正文入口补充。建议两次新查询间隔至少 5 秒；当前仅提示，不自动排队或重试。</p>
-      <DemoAccessNotice operation="social.posts.analytics" />
-      <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--primary" disabled={busy || !apiKey.trim() || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail')}>获取详情与阅读量</button>
-      <button className="qp-button qp-button--outline" disabled={busy || !!researchError || !research.note_detail || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail', null, true)}>重新查询阅读量（可能计费）</button></div>
-      {research.note_detail ? <><p>阅读量：{analytics?.metrics?.views ?? '未提供'} · 曝光量：{analytics?.metrics?.impressions ?? '未提供'}。{!analytics ? '本次查询无结果，请勿自动重试。' : '正文与指标按各次返回展示；未提供的标签保留已有结果。'}</p><DeliveryEvidence evidence={research.note_detail.evidence} /></> : null}
-    </section>
-    <div className="mih-xhs-detail-actions"><label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
-    <button className="qp-button qp-button--outline" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button></div>
-    <p>关闭后再次打开会保留本页会话中的详情与请求状态；刷新页面后清空。</p>
+    <div className="mih-xhs-detail-actions mih-xhs-detail-toolbar">
+      <span role="status">{busy ? '正在加载…' : primaryResult ? '详情已加载' : '当前已存笔记'}</span>
+      <button className="qp-button qp-button--outline qp-button--sm" disabled={busy || !apiKey.trim() || !!primaryIssues.length} onClick={() => void refresh()}>{primaryError ? '重试详情' : primaryResult ? '刷新详情' : '加载详情'}</button>
+      <small>{primary === 'note_detail' ? '按套餐计费 · 新查询建议间隔至少 5 秒' : '缓存优先，采集按套餐计费'}</small>
+    </div>
+    {!apiKey.trim() ? <p role="status">正在等待调用身份。</p> : primaryIssues.length && !primaryResult ? <p role="status">当前详情服务不可用，先展示已存内容。可在下方“更多操作与请求记录”中查看原因。</p> : null}
     {error ? <ErrorState error={error} /> : null}
     {researchError ? <ErrorState error={researchError} /> : null}
-    <DeliveryEvidence evidence={result?.evidence} error={error} />
+    {research.note_detail && !analytics ? <p role="status">本次未返回详情，保留已存内容。</p> : null}
     <NoteScroll key={imageRevision} result={{ payload: { data: { item: displayed } } }} apiKey={apiKey} mediaEnabled={images} directImages />
-    <section className="qp-panel" aria-label="笔记评论"><h3>笔记评论</h3><p>每次只请求一页，成功调用按套餐计费。内嵌回复仅展示本次已获取部分。</p>
-      <DemoAccessNotice operation="social.comments.list" />
-      <DropdownField label="评论排序" disabled={busy} value={commentSort} options={[{ value: 'latest', label: '最新' }, { value: 'hot', label: '最热' }]} onChange={value => { saved.commentSort = value; setCommentSort(value); const next = { ...research, note_comments: null, commentPages: {} }; saved.research = next; setResearch(next) }} />
-      <div className="mih-xhs-detail-actions"><button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!commentIssues.length} onClick={() => void requestResearch('note_comments')}>获取 / 重试首屏评论</button>
-      <button className="qp-button qp-button--outline" disabled={busy || !research.note_comments?.payload?.data?.nextCursor || !!commentIssues.length} onClick={() => void requestResearch('note_comments', research.note_comments.payload.data.nextCursor)}>加载下一页评论（可能计费）</button></div>
-      {research.note_comments ? <><DeliveryEvidence evidence={research.note_comments.evidence} /><p>{research.note_comments.payload.data.hasMore === false ? '已无后续评论。' : research.note_comments.payload.data.nextCursor ? '可手动加载下一页。' : '分页信息未提供或已达 15 页上限，不会自动续查。'}</p></> : null}
-      {Object.values(research.commentPages || {}).flat().map(comment => <Comment key={comment.id} comment={comment} />)}
+    <details className="mih-xhs-detail-options"><summary>更多操作与请求记录</summary>
+      <div className="mih-xhs-detail-actions"><label><input type="checkbox" checked={images} onChange={event => onImagesChange(event.target.checked)} /> 显示笔记图片</label>
+        <button className="qp-button qp-button--outline qp-button--sm" disabled={!images} onClick={() => setImageRevision(value => value + 1)}>重新加载图片</button></div>
+      <section aria-label="正文与标签"><h3>正文与标签</h3>
+        <DemoAccessNotice operation="social.posts.resolve" />
+        <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!resolveIssues.length} onClick={() => void resolve()}>{error ? '重试正文请求' : '补充完整正文与标签'}</button>
+        {result || error ? <DeliveryEvidence evidence={result?.evidence} error={error} /> : null}
+      </section>
+      <section aria-label="详情与阅读量"><h3>详情与阅读量</h3>
+        <p>新查询建议间隔至少 5 秒，按套餐计费。未提供的结构化标签保留已有结果。</p>
+        <DemoAccessNotice operation="social.posts.analytics" />
+        <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail', null, !!research.note_detail && !researchError)}>{research.note_detail ? '刷新阅读量' : '获取详情与阅读量'}</button>
+        {research.note_detail ? <DeliveryEvidence evidence={research.note_detail.evidence} /> : null}
+      </section>
+    </details>
+    <section className="qp-panel mih-xhs-comments" aria-label="笔记评论"><h3>笔记评论</h3>
+      {commentIssues.length ? <details><summary>评论暂不可用 · 查看原因</summary><DemoAccessNotice operation="social.comments.list" /></details> : <>
+        <div className="mih-xhs-detail-actions"><DropdownField label="评论排序" disabled={busy} value={commentSort} options={[{ value: 'latest', label: '最新' }, { value: 'hot', label: '最热' }]} onChange={value => { saved.commentSort = value; setCommentSort(value); const next = { ...research, note_comments: null, commentPages: {} }; saved.research = next; setResearch(next) }} />
+          <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim()} onClick={() => void requestResearch('note_comments')}>加载评论</button>
+          {research.note_comments?.payload?.data?.nextCursor ? <button className="qp-button qp-button--outline" disabled={busy} onClick={() => void requestResearch('note_comments', research.note_comments.payload.data.nextCursor)}>下一页评论</button> : null}
+          <small>每页按套餐计费</small>
+        </div>
+        {Object.values(research.commentPages || {}).flat().map(comment => <Comment key={comment.id} comment={comment} />)}
+        {research.note_comments ? <><p>{research.note_comments.payload.data.hasMore === false ? '已无后续评论。' : research.note_comments.payload.data.nextCursor ? '可加载下一页。' : '暂无后续分页信息。'}</p><details><summary>评论请求记录</summary><DeliveryEvidence evidence={research.note_comments.evidence} /></details></> : null}
+      </>}
     </section>
   </Modal>
 }
@@ -106,8 +125,9 @@ function Comment({ comment }) {
 }
 
 export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEvidence }) {
-  const details = useRef({ apiKey, notes: new Map() })
-  if (details.current.apiKey !== apiKey) details.current = { apiKey, notes: new Map() }
+  const identity = useDemoIdentity()
+  const details = useRef({ identity, notes: new Map() })
+  if (details.current.identity !== identity) details.current = { identity, notes: new Map() }
   const detailState = id => {
     if (!details.current.notes.has(id)) details.current.notes.set(id, {})
     return details.current.notes.get(id)
@@ -144,8 +164,8 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   const wheel = useRef(0)
   const lastPull = useRef(0)
   const lastAcquire = useRef(0)
-  const rulerNavigation = useRef(false)
-  const scope = `${apiKey}|${kind}|${selector}|${sortType}|${timeFilter}`
+  const historyScrollIntent = useRef(false)
+  const scope = `${identity}|${kind}|${selector}|${sortType}|${timeFilter}`
   const currentScope = useRef(scope)
   currentScope.current = scope
 
@@ -160,19 +180,19 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       const items = result.items.map(storedNote)
       setRows(previous => after ? mergeNotes(previous, items) : items)
       setCursor(result.pageInfo.nextCursor || null)
+      if (!after) { setListPage(1); if (viewport.current) viewport.current.scrollTop = 0 }
+      return items
     } catch (failure) { if (epoch === historyEpoch.current) setError(failure) }
     finally { if (epoch === historyEpoch.current) { historyBusy.current = false; setLoading(false) } }
-  }, [isAdmin, token, query, pageSize])
+  }, [isAdmin, token, query, pageSize, identity])
   useEffect(() => {
-    historyEpoch.current += 1; historyBusy.current = false; setRows([]); setCursor(null); setSelected(null)
+    historyEpoch.current += 1; historyBusy.current = false; historyScrollIntent.current = false; setListPage(1); setRows([]); setCursor(null); setSelected(null)
     const timer = setTimeout(() => void load(), 250)
     return () => { clearTimeout(timer); historyEpoch.current += 1 }
   }, [load])
   useEffect(() => {
     overflow.current = []; pending.current = null; setNext(undefined); setArmed(false); setAcquireError(null); setEvidence(null)
   }, [scope])
-  // Identity changes must also discard live results and open detail content.
-  useEffect(() => { setRows([]); setSelected(null); void load() }, [apiKey])
 
   const present = () => {
     setListPage(1)
@@ -208,13 +228,27 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     lastPull.current = Date.now(); void acquire()
   }
   const more = () => { if (cursor && !loading && !error) void load(cursor) }
+  const changeView = value => { historyScrollIntent.current = false; setView(value) }
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / Number(pageSize)))
+  const currentPage = Math.min(listPage, totalPages)
+  const changeListPage = async direction => {
+    const target = currentPage + direction
+    if (target > totalPages) {
+      if (!cursor || loading || historyBusy.current) return
+      const items = await load(cursor)
+      if (!items?.length) return
+    }
+    setListPage(target)
+    if (viewport.current) viewport.current.scrollTop = 0
+  }
 
   return <section className={`mih-commerce-manager mih-xhs-browser ${view === 'list' ? 'mih-xhs-list-view' : ''}`}>
-    <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'api'} onClick={() => setView('api')}>接口调试</button><button aria-pressed={view === 'list'} onClick={() => setView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => setView('mobile')}>Mobile 视图</button></nav>
+    <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'api'} onClick={() => changeView('api')}>接口调试</button><button aria-pressed={view === 'list'} onClick={() => changeView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => changeView('mobile')}>Mobile 视图</button></nav>
     <div className="mih-api-console-tab" hidden={view !== 'api'}><XiaohongshuConsole apiKey={apiKey} admin={session?.platformAdmin === true} /></div>
     <aside className="qp-panel mih-commerce-filters" style={view === 'api' ? { display: 'none' } : undefined}>
       <h2>笔记列表</h2>
-      <p>{isAdmin ? '当前管理会话读取 Hub 已存笔记。上划加载历史，点击展开正文和标签。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>
+      <p>{isAdmin ? '读取 Hub 已存笔记；列表按页浏览，Mobile 上划加载历史。点击笔记直接加载详情。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>
       {isAdmin ? <><Field label="查找 Hub 已存笔记"><input className="qp-input" value={query} onChange={event => setQuery(event.target.value)} maxLength={500} /></Field>
         <button className="qp-button qp-button--outline" disabled={loading || acquiring} onClick={() => void load()}>刷新 Hub 历史</button></> : null}
       <DropdownField label="每批展示数量" value={pageSize} onChange={setPageSize} options={['10', '20', '50'].map(value => ({ value, label: `${value} 篇` }))} />
@@ -222,7 +256,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       <hr /><h3>查询笔记</h3>
       <DropdownField label="查询方式" value={kind} disabled={acquiring} onChange={setKind} options={[{ value: 'search_notes', label: '关键词搜索 · 图文笔记' }, { value: 'get_user_posted_notes', label: '用户笔记列表' }]} />
       <Field label={kind === 'search_notes' ? '查询关键词' : '用户 ID / 主页分享链接'}><input className="qp-input" value={selector} disabled={acquiring} onChange={event => setSelector(event.target.value)} maxLength={500} /></Field>
-      {kind === 'search_notes' ? <><DropdownField label="笔记排序" value={sortType} disabled={acquiring} onChange={setSortType} options={[{ value: 'popularity_descending', label: '最热 · 按点赞' }, { value: 'time_descending', label: '最新' }, { value: 'comment_descending', label: '评论最多' }, { value: 'general', label: '综合' }]} /><DropdownField label="发布时间" value={timeFilter} disabled={acquiring} onChange={setTimeFilter} options={['不限', '一天内', '一周内', '半年内'].map(value => ({ value, label: value }))} /><p>按关键词与互动排序发现热门笔记，不代表全站热榜。阅读量和评论内容需进入详情显式查询。</p></> : null}
+      {kind === 'search_notes' ? <><DropdownField label="笔记排序" value={sortType} disabled={acquiring} onChange={setSortType} options={[{ value: 'popularity_descending', label: '最热 · 按点赞' }, { value: 'time_descending', label: '最新' }, { value: 'comment_descending', label: '评论最多' }, { value: 'general', label: '综合' }]} /><DropdownField label="发布时间" value={timeFilter} disabled={acquiring} onChange={setTimeFilter} options={['不限', '一天内', '一周内', '半年内'].map(value => ({ value, label: value }))} /><p>按关键词与互动排序发现热门笔记，不代表全站热榜。点击笔记加载详情，评论按需展开。</p></> : null}
       <p>每页查询计为一次调用，费用以当前套餐为准；最多查询 15 页。</p>
       <DemoAccessNotice operation={operation} compatibility />
       <label><input type="checkbox" checked={armed} disabled={accessIssues.length > 0 || acquiring || !apiKey.trim() || !selector.trim()} onChange={event => setArmed(event.target.checked)} /> 允许下拉采集下一页（可能计费）</label>
@@ -234,31 +268,30 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
     <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation" style={view === 'api' ? { display: 'none' } : undefined}><div className="mih-commerce-phone">
       <header><span>MX · 小红书笔记</span><strong>笔记画卷</strong><small>{rows.length} 篇已加载</small></header>
       <div className="mih-commerce-phone-actions"><span>{armed ? '下拉采集下一页' : '下拉采集未开启'}</span><span>{isAdmin ? '上划读取 Hub 历史' : '本次查询结果'}</span></div>
-      <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表" onKeyDown={() => { rulerNavigation.current = false }}
-        onScroll={() => { const node = viewport.current; if (!rulerNavigation.current && node.scrollTop > 0 && node.scrollHeight - node.scrollTop - node.clientHeight < 160) more() }}
-        onWheel={event => { rulerNavigation.current = false; if (event.deltaY < 0 && viewport.current.scrollTop <= 0) { wheel.current -= event.deltaY; if (wheel.current >= 140) { wheel.current = 0; pull() } } else wheel.current = 0 }}
-        onTouchStart={event => { rulerNavigation.current = false; touch.current = viewport.current.scrollTop <= 0 ? event.touches[0].clientY : null }}
+      <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表" aria-busy={loading} onKeyDown={event => { if (['ArrowDown', 'PageDown', 'End', ' '].includes(event.key)) historyScrollIntent.current = true }}
+        onScroll={() => { const node = viewport.current; if (view === 'mobile' && historyScrollIntent.current && node.scrollTop > 0 && node.scrollHeight - node.scrollTop - node.clientHeight < 160) { historyScrollIntent.current = false; more() } }}
+        onWheel={event => { historyScrollIntent.current = event.deltaY > 0; if (event.deltaY < 0 && viewport.current.scrollTop <= 0) { wheel.current -= event.deltaY; if (wheel.current >= 140) { wheel.current = 0; pull() } } else wheel.current = 0 }}
+        onTouchStart={event => { historyScrollIntent.current = true; touch.current = viewport.current.scrollTop <= 0 ? event.touches[0].clientY : null }}
         onTouchEnd={event => { if (touch.current != null && event.changedTouches[0].clientY - touch.current >= 80) pull(); touch.current = null }} onTouchCancel={() => { touch.current = null }}>
         {error ? <ErrorState error={error} /> : null}
         {view === 'list' ? <>
           <div className="qp-table-wrap"><table className="qp-table mih-table"><thead><tr><th>笔记</th><th>作者</th><th>标签</th><th>操作</th></tr></thead><tbody>
-            {rows.slice((Math.min(listPage, Math.max(1, Math.ceil(rows.length / Number(pageSize)))) - 1) * Number(pageSize), Math.min(listPage, Math.max(1, Math.ceil(rows.length / Number(pageSize)))) * Number(pageSize)).map(item => <tr key={item.externalId || item.id}>
+            {rows.slice((currentPage - 1) * Number(pageSize), currentPage * Number(pageSize)).map(item => <tr key={item.externalId || item.id}>
               <td><button className="mih-xhs-list-title" onClick={() => setSelected(item)}><span><BusinessImage url={item.media?.[0]?.url} enabled={images} alt={item.title || '笔记封面'} /></span><strong>{item.title || '无标题笔记'}</strong></button></td>
               <td>{item.author?.name || '作者未知'}</td><td>{item.tags?.join('、') || '—'}</td><td><button className="qp-button qp-button--outline qp-button--sm" onClick={() => setSelected(item)}>查看详情</button></td>
             </tr>)}
           </tbody></table></div>
-          <div className="mih-xhs-list-pages"><button className="qp-button qp-button--outline" disabled={listPage <= 1} onClick={() => setListPage(page => page - 1)}>上一页</button><span>{Math.min(listPage, Math.max(1, Math.ceil(rows.length / Number(pageSize))))} / {Math.max(1, Math.ceil(rows.length / Number(pageSize)))} · {rows.length} 篇已加载</span><button className="qp-button qp-button--outline" disabled={listPage >= Math.ceil(rows.length / Number(pageSize))} onClick={() => setListPage(page => page + 1)}>下一页</button></div>
+          <div className="mih-xhs-list-pages"><button className="qp-button qp-button--outline" disabled={currentPage <= 1 || loading} onClick={() => void changeListPage(-1)}>上一页</button><span>{currentPage} / {totalPages}{cursor ? '+' : ''} · {rows.length} 篇已加载</span><button className="qp-button qp-button--outline" disabled={loading || (currentPage >= totalPages && !cursor)} onClick={() => void changeListPage(1)}>{loading ? '正在加载…' : '下一页'}</button></div>
         </> : <>
         <div className="mih-commerce-grid">{rows.map((item, index) => <article data-feed-index={index} className="mih-commerce-card" key={item.externalId || item.id}><button className="mih-commerce-card-open" onClick={() => setSelected(item)}>
           <div className="mih-commerce-card-image"><BusinessImage url={item.media?.[0]?.url} enabled={images} alt={item.title || '笔记封面'} /></div>
           <strong>{item.title || '无标题笔记'}</strong>{item.media?.length ? <small>{item.media.length} 张图片 · 点击查看全部</small> : null}<small>{item.author?.name || '作者未知'}</small><span>{item.tags?.map(tag => `#${tag}`).join(' ') || '点击查看正文与标签'}</span>
         </button></article>)}</div>
         </>}
-        {loading ? <p role="status">正在读取 Hub 历史…</p> : null}
         {!loading && !error && !rows.length ? <p className="mih-commerce-message">暂无笔记。可查询关键词列表，或在下方输入笔记链接。</p> : null}
-        {cursor ? <button className="qp-button qp-button--outline" disabled={loading} onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕；获取新数据请使用查询操作。</p> : null}
+        {view === 'mobile' ? <div className="mih-xhs-history-status">{loading ? <span role="status">正在读取 Hub 历史…</span> : cursor ? <button className="qp-button qp-button--outline" onClick={more}>加载更多 Hub 历史</button> : rows.length ? <p>Hub 历史已加载完毕</p> : null}</div> : null}
       </div>
-    </div>{view === 'mobile' ? <FeedRuler viewport={viewport} count={rows.length} pageSize={Number(pageSize)} onNavigate={() => { rulerNavigation.current = true; wheel.current = 0; touch.current = null; lastPull.current = Date.now() }} /> : null}</div>
-    {selected ? <NoteDetail key={selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} saved={detailState(selected.id)} onClose={() => setSelected(null)} /> : null}
+    </div>{view === 'mobile' ? <FeedRuler viewport={viewport} count={rows.length} pageSize={Number(pageSize)} onNavigate={() => { historyScrollIntent.current = false; wheel.current = 0; touch.current = null; lastPull.current = Date.now() }} /> : null}</div>
+    {selected ? <NoteDetail key={selected.externalId || selected.id} item={selected} apiKey={apiKey} images={images} onImagesChange={setImages} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} saved={detailState(selected.externalId || selected.id)} onClose={() => setSelected(null)} /> : null}
   </section>
 }

@@ -1,6 +1,40 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mergeNotes, nativeNotePage, storedNote } from '../../src/xiaohongshu-feed.js'
+import { claimNoteOpenRequest, mergeNoteDetail, mergeNotes, nativeNotePage, storedNote } from '../../src/xiaohongshu-feed.js'
+
+test('one note opening claims one permitted operation across reopen, renewal and unknown outcomes', () => {
+  const ready = { apiKey: 'temporary-credential', analyticsIssues: [], resolveIssues: [] }
+  const saved = {}
+  assert.equal(claimNoteOpenRequest(saved, { ...ready, apiKey: '' }), null)
+  assert.equal(claimNoteOpenRequest(saved, ready), 'note_detail')
+  assert.equal(claimNoteOpenRequest(saved, ready), null)
+  assert.equal(claimNoteOpenRequest(saved, { ...ready, apiKey: 'renewed-credential' }), null)
+  saved.researchError = new Error('unknown outcome')
+  assert.equal(claimNoteOpenRequest(saved, ready), null)
+  assert.equal(claimNoteOpenRequest({ research: { note_detail: { payload: { data: { item: null } } } } }, ready), null)
+  assert.equal(claimNoteOpenRequest({ result: { payload: {} } }, ready), null)
+})
+
+test('runtime-disabled analytics uses authorized body detail; denied operations never dispatch', () => {
+  const disabled = [{ kind: 'runtime' }], denied = [{ kind: 'authorization' }]
+  const saved = {}, ready = { apiKey: 'key', analyticsIssues: disabled, resolveIssues: [] }
+  assert.equal(claimNoteOpenRequest(saved, ready), 'resolve')
+  assert.equal(claimNoteOpenRequest(saved, { ...ready, analyticsIssues: [] }), null)
+  for (const analyticsIssues of [disabled, denied]) {
+    assert.equal(claimNoteOpenRequest({}, { ...ready, analyticsIssues, resolveIssues: denied }), null)
+  }
+  assert.equal(claimNoteOpenRequest({}, { ...ready, analyticsIssues: [], resolveIssues: denied }), 'note_detail')
+})
+
+test('partial analytics without metadata renders safely and distinguishes missing metrics from zero', () => {
+  const original = { text: '完整正文', tags: ['摄影'], media: [{ url: 'https://images.test/a' }], metrics: { liked: 5, views: null } }
+  const displayed = mergeNoteDetail(original, { data: { item: { text: null, tags: [], media: [], metrics: { liked: null, views: 0 } } } })
+  assert.equal(displayed.text, original.text)
+  assert.deepEqual(displayed.tags, original.tags)
+  assert.deepEqual(displayed.media, original.media)
+  assert.deepEqual(displayed.metrics, { liked: null, views: 0 })
+  assert.equal(mergeNoteDetail(original, { data: { item: null } }), original)
+})
 const note = { note_id: '675d277d000000000600e655', desc: '长'.repeat(1000), tag_list: [{ name: '摄影' }] }
 const response = (extra = {}) => ({ code: 200, data: { data: { items: [{ model_type: 'note', note }], has_more: true, search_id: 'session', ...extra } } })
 test('native feed preserves text/tags, carries search sessions and terminates at page 15', () => {

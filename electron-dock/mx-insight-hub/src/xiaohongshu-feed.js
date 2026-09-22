@@ -1,4 +1,22 @@
 // Presentation adapters never rewrite the archived acquisition.
+export function claimNoteOpenRequest(saved, { apiKey, analyticsIssues, resolveIssues }) {
+  if (!apiKey.trim() || saved.openOperation || saved.result || saved.research?.note_detail || saved.error || saved.researchError) return null
+  const operation = !analyticsIssues.length ? 'note_detail' : !resolveIssues.length ? 'resolve' : null
+  if (operation) saved.openOperation = operation
+  return operation
+}
+
+export function mergeNoteDetail(original, payload) {
+  const analytics = payload?.data?.item
+  if (!analytics) return original
+  const supplied = value => Object.fromEntries(Object.entries(value || {}).filter(([, entry]) => entry != null))
+  return { ...original, ...supplied(analytics),
+    tags: payload.meta?.tagsAvailable ? analytics.tags : original.tags,
+    media: analytics.media?.length ? analytics.media : original.media,
+    metrics: { ...original.metrics, ...analytics.metrics },
+  }
+}
+
 export function storedNote(row) {
   const fields = row.stableFields || {}
   const metrics = fields.metrics || row.metrics || {}
