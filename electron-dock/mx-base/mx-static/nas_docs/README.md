@@ -1,6 +1,6 @@
 # NAS 迁移运维入口
 
-当前进度：第一卷 `po_infra_media_data` 已成功切换 NAS，服务恢复与媒体 Range 检查通过；等待业务验收，SSD 旧副本仍保留。下一步见 [只读空间回收清单](operations/part1-reclaim-plan.md)。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行已经完成的切换。
+当前进度：第一卷 `po_infra_media_data` 已成功切换 NAS，服务恢复与媒体 Range 检查通过；等待业务验收，SSD 旧副本仍保留。只读清单已通过；业务验收正常后执行 [第一卷 SSD 回收](operations/part1-reclaim.md)。清单依据见 [只读空间回收清单](operations/part1-reclaim-plan.md)。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行已经完成的切换。
 
 本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`，在线完整内容校验入口为 `bash scripts/nas-verify.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 

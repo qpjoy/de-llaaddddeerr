@@ -1,5 +1,7 @@
 # 第一卷切换后的只读空间回收清单
 
+现场清单现已通过：分配空间 535,253,102,592 字节（498.49 GiB），/data 当时可用 66.05 GiB。业务验收正常后，下一步见 [限定清单的 SSD 回收](part1-reclaim.md)。
+
 第一卷 `po_infra_media_data` 已在现场切换成功，`mx-nas-cutover-po-2.service: Succeeded`、`phase=running_on_nas`。本页只准备空间清单，尚不删除文件、不记录业务验收通过。
 
 ## 当前结果

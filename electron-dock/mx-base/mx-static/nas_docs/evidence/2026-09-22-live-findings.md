@@ -237,3 +237,14 @@ rsync 耗时包含文件传输和其内部操作；单独 fsync 几乎无耗时�
 - `nas_may_have_writes=true`、`business_acceptance_pending=true`、`reclaim_ready=false`。SSD 未删除，也未收到最新 df；不能宣称空间已经释放。NAS RAID/快照/独立备份健康未因此得到确认。
 
 后续业务抽查和原 SSD 回收范围见 [只读清单](../operations/part1-reclaim-plan.md)。已经发出业务验收信息请求，尚未收到答案；新增脚本只生成私有元数据清单，不改验收状态或删除数据。
+
+
+## 第一卷只读 SSD 回收清单通过（用户回传）
+
+- 清单目录为成功切换报告下的 `reclaim-plan-6e889ff90c744504a739a40d6eb6d102`，`time_unix=1790037459.4331086`。
+- 普通文件 194,686，保留目录 4；逻辑字节 534,838,192,708，与切换时总量相同。清单 SHA256 为 `62f03d769bbed7366900c8a14211643c1b70f2efe3db2f297bbf994310c8cca1`。
+- `du_allocated_bytes=535253102592`（498.49 GiB），`data_available_bytes=70917476352`（66.05 GiB）。这些不是删除完成结果，也不保证未来 df 增加量。
+- 源身份仍为 device 66309 / inode 1083500031；清单工具两次核对当前部署、挂载与健康均通过，`state=inventory_complete`。
+- `business_acceptance_recorded=false`、`deletion_supported=false`、`reclaim_ready=false`。已询问业务验收结果，尚未收到回答；SSD 文件仍在。
+
+新增 [SSD 回收工具](../operations/part1-reclaim.md) 供业务验收正常后运行；本地未连接服务器执行删除。
