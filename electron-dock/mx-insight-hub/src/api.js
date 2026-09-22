@@ -495,6 +495,7 @@ export const adminApi = {
       },
     },
   ),
+  sourceConnections: token => request(token, `${ADMIN_ROOT}/source-connections`),
   sourceCatalog: (token, { includeArchived = false } = {}) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog`,

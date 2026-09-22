@@ -1,0 +1,106 @@
+# 数据源接入清单与聚合搜索设计
+
+核对日期：2026-09-22。基线：`feat/mx_insight_hub` 的 `b0e66882`。
+工作分支：`feat/hub_interface`。本文区分已实现、源码核对与待实现方案；历史文档不能作为执行指令或上线证据。
+
+## 本次交付：先对齐数据源看板
+
+已新增只读管理接口 `GET /internal/v1/admin/source-connections`：
+
+- 仅 Hub Admin Token 可读；普通 API Key、Launcher 用户及 Launcher 平台管理员会话不获得这一管理权限。
+- 从现有合同注册表生成接口关系，从 Hub `external_sources` 读取清洗输入登记状态；不请求 Night-All 的在线能力接口、不探测供应商、不调 Agent、不触发采集、没有数据写入。
+- 稳定的 `source-catalog-xxxx` 标识关联目录；重命名不丢关联，归档不删除既有接口或数据。人工覆盖状态、实施阶段和字段核验不被代码库存量覆写。
+- 分开显示接口实现、关键词适用性、输入是否登记、登记状态。`runtimeStatus=not_checked` 不伪装健康；未登记不是故障，登记不证明有数据或清洗成功。
+- 数据源目录新增实现清单、来源/产品/方式筛选、路径详情；原目录显示关联路径。外部数据平台卡片显示关联路径数量并能跳入对应来源视图。
+- 默认路径是对当前代码分支的只读说明，**不是新路由策略，也没有新增可写默认供应商设置**。
+- 本次未发布聚合搜索接口，未改变现有搜索、授权、计费、旧游标或外部调用方合同。清单是下一步的路由核对基础，不是运行时 dispatch registry。
+
+清单范围为已核对的 Hub 接口与内置/动态分类清洗合同；不是上游的完整 API 目录，也不是线上可用性或全部历史文件入库清单。源码新增合同需要更新清单；Night-All-A 新登记的兼容分类可自动呈现。
+
+## 当前系统边界
+
+MX-H2I V2 的用户、配置和运维中心属于 Internal/Launcher；客户端网络仍由 ProductNetwork 拥有。Luopan 是独立 standalone 产品与测试场景，不是 Hub runtime。Hub 自己管理租户、调用者、Key、授权、套餐、钱包、交付证据和数据检索。
+
+此次实现只涉及 `mx-insight-hub`。没有改 Launcher、MX-H2I、Luopan、Internal 登录、WireGuard、DNS、路由、代理、部署脚本或线上数据库。
+
+Night-All 仓库的 `docs` 与 `specs` 记载了早期“Night-All 拥有全部 provider 路由”的阶段；Hub 后续已迁移部分直连能力。当前职责以 Hub 实现和固定合同为准，不能据旧文档把已迁移调用再切回 Night-All。
+
+## 为什么多个搜索入口看起来混杂
+
+| 入口 | 实际搜索范围 | 是否采集 | 权限/可见性 |
+| --- | --- | --- | --- |
+| 数据中心 | PostgreSQL canonical current truth；关键词优先 ES，必要时 PG 降级 | 不采集 | Admin Token，含运维证据 |
+| 数据浏览中心 | 账号、内容、标签、日期等已存数据 | 不采集 | Admin Token；独立缓存统计，不阻塞列表 |
+| 高级搜索 | 已存数据全文/语义/RAG，证据回读 | 搜索本身不采集；可选回答是单独 Agent 行为 | 当前 Admin-only |
+| `/api/v1/data/canonical/search` | 当前 Key 获准的平台集合，一次逻辑 canonical 查询 | 不采集 | 公共安全投影、授权范围、配额、幂等与游标绑定 |
+| `/api/v1/data/search` | 单平台兼容合同；小红书已迁移形状直连，其他分支内部转发，Telegram 是已存检索 | 依分支，可能计费 | 原 Key/平台/操作权限 |
+| `/api/v1/search/raw\|crawl\|user-info` | 关键词、账号内容、账号资料三种历史合同 | 可能采集计费 | 原 alias、形状及响应继续兼容 |
+| 产品专用入口 | 会话、商品、IP、企业、上架商品、舆情、报告等各自的业务范围 | 各产品不同 | 不得由“文档属于产品”推断数据授权 |
+
+canonical 并不是每次到每一个上游数据库搜索：它已是 Hub 统一已存数据层。慢可能发生在分词、ES readiness/降级、PG 查询、宽授权范围或独立统计，不能未测量就归因于上游串行调用。
+
+## 已核对的数据流向
+
+| 来源 | 能力与流向 | 默认/边界 |
+| --- | --- | --- |
+| Hub 直连 T 平台 | 小红书笔记搜索/详情、用户资料/笔记；部分社交账号搜索 | 只接已核验形状，凭据、rollout、价格、Key scope 独立生效 |
+| Hub 直连 JustOne | 淘宝/天猫、京东、小红书店铺、闲鱼商品搜索；注册表中的详情/评论等资源；部分社交账号搜索 | 同一网站的账号、笔记、商品不是同一个 operation；全部电商平台仍只读，不展开采集 |
+| Night-All | 数据搜索兼容服务；raw/crawl/user-info 历史形状与已有回填 | 历史 `mxnc1` 游标和未迁移形状保持原路由，不把失败当作跨供应商重试授权 |
+| Night-All-A | 异步采集平台；按 source_type 的独立已存分类清洗 → canonical | 采集任务与数据库清洗是两个生命周期；不是历史 Night-All 搜索的另一个名称 |
+| Telegram monitor | chats/messages 两表 → `telegram.monitor.*` | 和 SQLite 并行，不互相替代；会话按来源及稳定聊天 ID 隔离 |
+| Telegram SQLite API | chats/messages 两资源 → `telegram.sqlite.*` | 首次对齐、增量及回看由原任务管理；读取会话不拉 Telegram |
+| 舆情结果源 | `monitor_strategy_results` → `public-opinion.province.v1` → 舆情发布与查询 | Night-All 上游可能负责先前的搜索/分析，但 Hub 查询读既有结果表 |
+| 手机电商库 | `mb_collected_items` → `mobile-commerce.collected-items.v1` | marketplace 是分类维度，授权平台仍是 `mobile_commerce` |
+| 虚拟超市 | 手机电商捕获 → 显式上架发布 → storefront 读取 | 独立 `virtual_supermarket` 权限，只读已上架版本 |
+| 启信慧眼/启信宝 | 固定 apiId 参数查询 → 私有完整交付及观察证据 | 未公开定价的接口关闭；不能把目录中数百接口都当作通用关键词搜索 |
+| ipsearch | IPv4 单/批查询 → 消费者范围交付 | 私有 IP 画像不进入共享全文检索 |
+| 专题洞察 | 分类存量证据 → 显式生成报告 → 调用者范围报告读取 | 查询报告列表不启动生成、采集或 Agent |
+
+凤凰网：原目录中有 `source-catalog-0019`。新闻分类存在、新闻源显示健康或有“news”数据集，均不能证明凤凰网站点已经接入。须检查具体记录的 publisher/collector 目录关联及已核验连接器；本次清单如实显示暂无核对的具体站点路径。
+
+## 聚合搜索目标合同（待实现）
+
+建议新增稳定 facade，不改上述已有路径。候选路径：`POST /api/v1/data/aggregate/search`。
+调用方只提交 Hub 逻辑条件，不提交 provider、endpoint、数据库、索引、DSL 或上游游标。
+
+- `query`：关键词。
+- `platforms[]`：业务平台多选；空选择含义必须定义为“当前授权且支持此操作的集合”，不能是全网所有上游。
+- “条目”必须与平台区分：可指目录条目或内容类型，UI/合同名称应在确认后固定；不要同时让一个 `items` 字段代表条目选择与返回结果。
+- `filters`：逻辑类型、标签、发布时间区间等；时区/闭开边界固定。不能静默丢掉某个来源不支持的日期/tag 条件。
+- 显式 `stored` 与 `refresh` 语义。未指定时的默认值应在合同确认后固定，不能靠选中平台意外触发实时付费。
+- `pageSize`、不透明 `cursor`；不暴露每个上游 page/cursor，续页由 Hub 保持路由与查询绑定。
+
+返回统一 item 安全投影与分页；另有每个逻辑来源的成功、无结果、不支持过滤、未授权、暂不可用、超时等状态。区分“该源本次成功但 0 条”和“源未执行”，不把部分成功包装为完整全量。
+
+### 先存量、再显式实时的实现顺序
+
+1. 扩展查询归一化层支持确定的多选与日期/tag，并复用一次 canonical ES/PG 查询；保留旧输入、旧游标与已有默认 profile。若无法兼容旧游标绑定，新增版本只影响新 facade，旧接口不变。
+2. 来源目录按当前 Key 权限返回逻辑可搜索能力，不下发供应商名称、凭据、路由优先级或采购价格。
+3. 为可实时来源建立服务端精确的 `(平台, 操作, 条目类型, 请求形状, 合同版本)` 解析与显式默认；同一平台可有多个来源，路由必须先选定而不是全部支付调用。
+4. fan-out 只面向合格、已授权、参数可表达的来源；有单源 timeout、总 deadline、并发/页数/采购预算上限。慢来源状态独立，已有结果不能一直等待最慢平台。
+5. 实时结果完成统一投影和严格去重，再保存固定有序的结果窗口与子来源续页状态；第一页与后续页不能改默认来源后跳行/重复。
+
+不引入数据产品/文档 ACL 作为第二道并行授权系统。产品是组合与导航；执行继续使用平台、operation、兼容合同、Key 快照、租户与发布可见性。文档可见性从权限投影得到，不授予访问权。
+
+### 成本、调用与幂等
+
+当前“外部数据平台”已有 Hub 请求/真实上游调用、成功、采购估算、未知结果、余额及接口统计，但各 provider 的统计覆盖范围不同。例如 Night-All 管理统计明确不含所有 data/search、回填和直连流量，不能直接相加后称为全量。
+
+聚合执行须新增父查询与已有子请求/真实调用证据的关联：记录命中路由版本、source logical ID、子 requestId、缓存/回放/采集、耗时与失败、采购原币和客户价格证据。沿用现有的付款保护、合同定价与 unknown 保留；父请求不能再重复收一次已结算子调用费用。客户按次还是按来源计价需发布明确价目，不能由代码发明。
+
+父请求幂等必须保存展开后的固定来源集合与每个子请求的精确指纹。对不确定的付费请求不换供应商、不自动重试；重放不能因为默认路由后来变更而额外采集。
+
+### 性能验证门槛
+
+- 先采集分词、ES、PG fallback、行体读取、权限/配额和统计耗时，以及 backend/profile/降级原因。
+- 同数据与权限下比较关键词、平台单选/多选、日期/tag 的 p50/p95；把精确总数移出首屏依赖，继续使用窄 ID 分页与有界行体读取。
+- 已存搜索是一条受限查询，不按 215 条人工目录逐条 fan-out。日期、平台、类型、标签进入检索过滤，不在客户端拿第一页后过滤。
+- 不为新 UI 自动全量重建 ES 或向量化；索引升级仍由现有显式管理流程执行。
+- 本次没有连接生产库或测量线上查询延迟，因此不声称已完成 canonical 性能优化。
+
+## 验证与兼容性
+
+新增测试覆盖目录重命名/归档关联、多来源分离、未知健康、动态分类、连接凭据隔离、Admin-only 和零上游调用。回归范围包含目录 Public 安全投影、identity、canonical search、Night-All compatibility。页面验证使用隔离内存服务与本机浏览器，不执行真实付费调用。
+
+源码主要依据：`server/hub-service.mjs`、`server/data/stored-search.mjs`、`server/contracts/night-all-legacy.mjs`、`server/contracts/social-accounts.mjs`、`server/contracts/justone-resources.mjs`、`server/ingest/*`、`server/external-platforms/*`。
+相关现行设计：[canonical search ADR](../adr/0009-unified-canonical-search.md)、[数据浏览中心](../data-browser/README.md)、[API 产品界面与文档权限](public-api-product-surfaces.md)。

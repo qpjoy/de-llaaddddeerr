@@ -13,6 +13,10 @@ those paths retire one operation at a time and are not the target architecture.
 - [实现范围、数据语义与上线门槛](data-browser/README.md)
 - [Node.js Agent、Text2ES、ES 兼容升级与契约转发可行性](data-browser/agent-search-feasibility.md)
 
+## 数据源与聚合搜索（2026-09-22）
+
+- [接入看板交付、现有链路核对与聚合搜索待实现方案](architecture/aggregate-search-and-source-routing.md)
+
 ## Current delivery
 
 | Area | Current state |

@@ -1,3 +1,4 @@
+import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { formatBrowserExport } from './data/browser-export.mjs'
 import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
@@ -3488,6 +3489,18 @@ export function createApp({
         return
       }
 
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-connections') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'source connections')
+        const [entries, sources] = await Promise.all([
+          store.listSourceCatalogEntries({ includeArchived: true }),
+          store.listExternalSources(),
+        ])
+        sendJson(response, 200, {
+          data: sourceCatalogVisibleProjection(sourceConnectionSnapshot(entries, sources)), requestId,
+        }, { 'cache-control': 'private, no-store' })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/source-catalog') {
         requireSourceAdmin(principal)
         const includeArchived = url.searchParams.get('includeArchived') === 'true'
