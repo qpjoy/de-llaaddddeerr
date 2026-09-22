@@ -56,7 +56,7 @@ class PlatformTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):catalog.load(base/'profiles.json')
 
     def test_catalog_lists_offline_without_node_or_docker(self):
-        r=subprocess.run(['bash',str(ROOT/'scripts/manage.sh'),'nas','project','list'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        r=subprocess.run(['bash',str(ROOT/'scripts/manage.sh'),'nas','project','list','--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         self.assertEqual(r.returncode,0,r.stderr)
         result=json.loads(r.stdout);self.assertEqual(set(result['projects']),{'infra','delta'})
 

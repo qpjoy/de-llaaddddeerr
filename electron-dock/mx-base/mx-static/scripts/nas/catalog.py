@@ -63,6 +63,9 @@ def route(argv, config):
         return ['host-'+args[1]]
     if args[0]=='recovery':
         if args[1:]==['install']:return ['auto-install']
+        if args[1:] in (['check'],['status']):return ['recovery-check-all']
+        if args[1:]==['enable','--migrated']:return ['recovery-enable-migrated']
+        if args[1:]==['disable']:return ['recovery-disable-all']
         if len(args)!=3 or args[2] not in projects:raise RuntimeError('Use nas recovery install or check|run|enable|disable|status <project>.')
         actions={'check':'boot-check','run':'recover','enable':'auto-enable','disable':'auto-disable','status':'status'}
         if args[1] not in actions:raise RuntimeError('Unknown recovery action.')

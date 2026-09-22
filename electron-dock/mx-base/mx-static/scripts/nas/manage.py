@@ -17,6 +17,7 @@ import time
 import uuid
 
 import catalog
+import recovery as recovery_control
 import host as host_control
 import action_log
 from projects import infra as infra_adapter
@@ -114,13 +115,11 @@ def locate(part, profile):
 
 def auto_config():
     try:fd=os.open(AUTO_DIR,DIR_FLAGS)
-    except FileNotFoundError:return {'schema':1,'enabled_parts':[]}
+    except FileNotFoundError:return recovery_control.normalize({'schema':1,'enabled_parts':[]},profiles())
     try:value=cutover.read_json(fd,'auto.json')
     except FileNotFoundError:value={'schema':1,'enabled_parts':[]}
     finally:os.close(fd)
-    if value.get('schema')!=1 or not isinstance(value.get('enabled_parts'),list) or set(value['enabled_parts'])-{'part1'}:
-        raise RuntimeError('Invalid automatic recovery registry.')
-    return value
+    return recovery_control.normalize(value,profiles())
 
 
 def systemd_summary():
@@ -261,12 +260,15 @@ def unit_files():
     return {name:(CONFIG.parent/name).read_text() for name in (UNIT+'.service',UNIT+'.timer')}
 
 
+def runtime_sources():
+    return sorted(list((ROOT/'scripts/nas').rglob('*.py'))+catalog.installed_files(CONFIG)+
+                  [CONFIG.parent/name for name in unit_files()])
+
+
 def install_auto():
     if not Path('/usr/bin/python3').is_file():raise RuntimeError('Persistent runtime requires /usr/bin/python3.')
-    # Install only tracked implementation/policy, no .env, secrets or private reports.
-    sources=list((ROOT/'scripts/nas').rglob('*.py'))+catalog.installed_files(CONFIG)
-    sources += [CONFIG.parent/name for name in unit_files()]
-    files={str(p.relative_to(ROOT)):p.read_bytes() for p in sorted(sources)}
+    # Install implementation/policy, no .env, secrets or private reports.
+    files={str(p.relative_to(ROOT)):p.read_bytes() for p in runtime_sources()}
     digest=hashlib.sha256()
     for name,data in sorted(files.items()):digest.update(name.encode()+b'\0'+data)
     version=digest.hexdigest()[:20]
@@ -314,21 +316,23 @@ def install_auto():
 def set_auto(part,profile,enabled):
     if part!='part1':raise RuntimeError('Automatic recovery is currently registered only for Part 1.')
     if enabled:
-        if not (Path(RUNTIME)/'current/scripts/nas/manage.py').is_file():raise RuntimeError('Run auto-install first.')
+        if not recovery_control.installed_current(sys.modules[__name__]):raise RuntimeError('Run recovery install first; installed runtime must match current code/policy.')
         # Do not enable against drifted/stopped production; recover it explicitly first.
         with operation(profile,require_running=True):pass
         installed=json.loads((Path(RUNTIME)/'current/deploy/nas/profiles.json').read_text())
         if installed['parts'][part]!=profile:raise RuntimeError('Installed policy is stale; run auto-install again.')
-    value=auto_config(); parts=set(value['enabled_parts'])
-    if enabled:parts.add(part)
-    else:parts.discard(part)
-    value['enabled_parts']=sorted(parts)
+    value=auto_config(); parts=set(value['enabled_parts']);disabled=set(value.get('disabled_parts',[]))
+    if enabled:
+        parts.add(part);disabled.discard(part)
+    else:
+        parts.discard(part);disabled.add(part)
+    value['enabled_parts']=sorted(parts);value['disabled_parts']=sorted(disabled)
     fd=secure_directory(AUTO_DIR)
     try:cutover.atomic_json(fd,'auto.json',value)
     finally:os.close(fd)
-    if enabled:
+    if enabled and not value.get('suspended',False):
         run(['systemctl','enable','--now',UNIT+'.timer'])
-    elif not parts:
+    elif not parts and value.get('mode','explicit')=='explicit':
         run(['systemctl','disable','--now',UNIT+'.timer'])
         run(['systemctl','stop',UNIT+'.service'])
     emit('nas_auto_policy',**value,note='Boot recovery only; disabling does not stop business containers.')
@@ -344,7 +348,7 @@ def parser():
         if action in ('cutover','redeploy','_execute-redeploy'):s.add_argument('--maintenance',action='store_true')
         if action=='reclaim':s.add_argument('--business-accepted',action='store_true')
         if action=='compose':s.add_argument('view',choices=('ps','config-check'))
-    for name in ('auto-install','_auto-recover','catalog-list','host-status','host-processes','host-mount-check','host-network'):sub.add_parser(name)
+    for name in ('auto-install','_auto-recover','catalog-list','host-status','host-processes','host-mount-check','host-network','recovery-check-all','recovery-enable-migrated','recovery-disable-all'):sub.add_parser(name)
     return p
 
 
@@ -358,8 +362,14 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra task part1 plan
   bash scripts/manage.sh nas infra task part1 cleanup --business-accepted
   bash scripts/manage.sh nas delta task part2 copy --unlimited
+  bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
+  bash scripts/manage.sh nas recovery enable --migrated
+  bash scripts/manage.sh nas recovery disable        # 暂停全部开机补启动
   bash scripts/manage.sh nas recovery check|enable|disable|run|status infra
+
+默认中文易读显示；任意位置加 --json 保留原始 JSON，--pretty 格式化 JSON。
+后台任务日志、审计文件继续保存原始结构化事件。
 
 上述 infra/delta 也可写为 project infra / project delta。新项目需在 Git 登记
 目录、身份与执行能力；不扫描全盘自动迁移，不将未审核项目当成 infra。
@@ -405,11 +415,11 @@ def main():
             return 0
         if not sys.platform.startswith('linux') or os.geteuid()!=0:raise RuntimeError('Run with sudo on the registered Linux Docker host.')
         if socket.gethostname().split('.')[0]!='mx-internal-server':raise RuntimeError('This registry belongs to mx-internal-server.')
-        if action not in ('locate','logs','auto-install','auto-disable','host-status','host-processes','host-mount-check','host-network','deployment-audit'):
+        if action not in ('locate','logs','auto-install','auto-disable','host-status','host-processes','host-mount-check','host-network','deployment-audit','recovery-disable-all'):
             precopy.check_host()
         registry=profiles()
         profile=registry.get(getattr(args,'part',None))
-        mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover'}
+        mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
         if action in mutations:
             audit(action,getattr(args,'part',None),'requested');audit_started=True
         if action.startswith('host-'):
@@ -434,12 +444,19 @@ def main():
                 cmd+=['config','--quiet'] if args.view=='config-check' else ['ps']
                 print(run(cmd),end='')
                 emit('nas_compose_view',view=args.view,storage_override_included=True)
+        elif action=='recovery-check-all':
+            with migration_lock():recovery_control.show(sys.modules[__name__])
+        elif action=='recovery-enable-migrated':
+            with migration_lock():recovery_control.enable_migrated(sys.modules[__name__])
+        elif action=='recovery-disable-all':
+            # Pause must remain available while a recovery helper holds the migration lock.
+            recovery_control.disable_all(sys.modules[__name__])
         elif action=='auto-install':install_auto()
         elif action in ('auto-enable','auto-disable'):
             with migration_lock():set_auto(args.part,profile,action=='auto-enable')
         elif action=='_auto-recover':
             with migration_lock():
-                for part in auto_config()['enabled_parts']:recover(registry[part])
+                recovery_control.run_all(sys.modules[__name__])
         elif action in ('_execute-recover','_execute-redeploy'):
             if action=='_execute-redeploy' and not args.maintenance:raise RuntimeError('redeploy requires --maintenance.')
             with migration_lock():

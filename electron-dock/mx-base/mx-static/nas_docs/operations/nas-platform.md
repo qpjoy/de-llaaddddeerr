@@ -1,5 +1,7 @@
 # mx-static NAS 管理结构与多项目接入
 
+最新统一模式及易读显示见 [易读输出与已迁移项目恢复](readable-recovery.md)。无需逐个维护 enable 清单；项目仍须成功切换、审核适配并登记到安装快照。
+
 用户已决定：NAS 运维及业务存储适配统一放在 mx-static，不散落到 po-infra 等业务仓库。生产安全基线见 [SAFETY](../SAFETY.md)，具体开机机制见 [统一管理](unified-management.md)。
 
 ## 目录与职责
@@ -17,7 +19,9 @@ mx-static/
     mx-static-nas-boot.timer
   scripts/manage.sh                  唯一公共入口：nas ...
   scripts/nas/
+    display.py                      中文显示 / 原始 JSON / 格式化 JSON
     manage.py                       调度、安装、恢复、兼容旧命令
+    recovery.py                     统一核对成功迁移和恢复覆盖，保留暂停项
     catalog.py                      项目登记校验与二级命令路由
     host.py                         本机 NFS 挂载/进程/服务诊断
     action_log.py                   root 私有操作审计
@@ -103,6 +107,6 @@ bash scripts/manage.sh nas recovery run infra
 
 ## 验证边界
 
-140 项 NAS 本地测试通过，新增 19 项覆盖二级路由与跨项目拒绝、显式验收/写探测边界、旧 CLI 兼容、目录穿越/符号链接和非法能力拒绝、离线登记查询、嵌套安装文件、主机挂载和进程解析、实际临时文件读写探测及失败清理、应用身份不被 root 覆盖、发布风险脱敏报告、私有操作日志。所有 Python NAS 子目录通过 3.6 语法检查。
+本结构初版验证时 140 项 NAS 本地测试通过，其中新增 19 项覆盖二级路由与跨项目拒绝、显式验收/写探测边界、旧 CLI 兼容、目录穿越/符号链接和非法能力拒绝、离线登记查询、嵌套安装文件、主机挂载和进程解析、实际临时文件读写探测及失败清理、应用身份不被 root 覆盖、发布风险脱敏报告、私有操作日志。所有 Python NAS 子目录通过 3.6 语法检查。
 
-没有连接服务器执行探测、清理、安装或重启；EL8 Python 3.6、实际 NFS 权限与断线恢复仍以现场回执为准。
+后续易读输出和统一恢复版本共 166 项测试通过，见上方新文档。没有连接服务器执行探测、清理、安装或重启；EL8 Python 3.6、实际 NFS 权限与断线恢复仍以现场回执为准。

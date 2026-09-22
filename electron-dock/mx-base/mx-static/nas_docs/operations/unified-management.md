@@ -1,5 +1,7 @@
 # NAS 统一管理、部署配置和重启恢复
 
+**更新：** 默认中文易读显示；推荐 `nas recovery check` 和 `nas recovery enable --migrated` 管理全部已成功迁移且审核登记的项目，保留单项目暂停例外，参见 [统一恢复模式](readable-recovery.md)。本页逐项目命令继续兼容，但不必逐个 enable。
+
 后续已加入 host / project / task 二级入口及 infra 权限、发布审查、私有审计；见 [NAS 管理结构](nas-platform.md) 与 [安全约定](../SAFETY.md)。本页旧命令仍兼容。
 
 本轮按用户选择：**配置和运维集中在 mx-static；po-infra 不修改。** 入口为：
@@ -115,7 +117,7 @@ sudo bash scripts/manage.sh nas auto-disable part1
 sudo bash scripts/manage.sh nas recover part1
 ```
 
-`auto-disable` 关闭 timer，并停止这个恢复 helper（不停止业务容器）。已提交给 Docker daemon 的单次 start 请求可能仍在完成，不能将关闭 helper 当成撤销已提交请求。重新启用使用 `auto-enable part1`。运行期已经 running 但 unhealthy 的服务需要调查，`recover` 不强制重启它们。
+`auto-disable` 在逐项目模式且无其他启用项时关闭 timer、停止恢复 helper；在统一模式下只记录该项目暂停，不影响其他项目（均不停止业务容器）。已提交给 Docker daemon 的单次 start 请求可能仍在完成，不能将关闭 helper 当成撤销已提交请求。重新启用使用 `auto-enable part1`。运行期已经 running 但 unhealthy 的服务需要调查，`recover` 不强制重启它们。
 
 ## 验证范围
 

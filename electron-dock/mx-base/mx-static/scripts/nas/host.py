@@ -20,8 +20,8 @@ def mounts(policy, text):
         if ' - ' not in line:continue
         left,right=line.split(' - ',1);a=left.split();b=right.split()
         if len(a)<6 or len(b)<3:continue
-        if b[0] in ('nfs','nfs4','autofs') or a[4]==policy['mountpoint']:
-            selected.append({'target':a[4],'type':b[0],'source':b[1],'options':a[5],
+        if b[0] in ('nfs','nfs4') or a[4]==policy['mountpoint']:
+            selected.append({'target':a[4],'type':b[0],'source':b[1],'options':a[5]+','+b[2],
                              'expected_host_mount':a[4]==policy['mountpoint'] and b[0] in ('nfs','nfs4') and b[1] in policy['exports']})
     return selected
 
@@ -33,7 +33,7 @@ def processes(text):
         if len(a)!=5 or not a[0].isdigit():continue
         state=a[2];name=a[3]
         if state.startswith('D'):blocked+=1
-        if state.startswith('D') or any(token in name.lower() for token in ('nfs','rpc','lockd','rpciod')):
+        if state.startswith('D') or name in ('rpcbind','rpciod','xprtiod','lockd') or name.startswith(('nfs','rpc.')):
             if len(found)<80:found.append({'pid':int(a[0]),'ppid':int(a[1]),'state':state,'comm':name,'wait_channel':a[4]})
     return {'sample':found,'all_d_state_count':blocked,'limit':80,'note':'D state does not by itself prove NFS is the cause; no command lines or credentials are collected.'}
 

@@ -10,7 +10,7 @@ cd "$here"
 # NAS operations must work without Node, mx-static .env or the static service.
 if [[ "${1:-}" == nas ]]; then
   shift
-  exec python3 -B "$here/scripts/nas/manage.py" "$@"
+  exec python3 -B "$here/scripts/nas/display.py" "$@"
 fi
 
 version="$(node -p "require('./package.json').version")"
