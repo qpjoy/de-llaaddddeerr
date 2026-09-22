@@ -1,6 +1,6 @@
 # NAS 迁移运维入口
 
-最新现场：开机恢复安装已完成，但 systemd 239 拒绝旧模板的 oneshot + Restart，timer 尚未启动。已修复模板并加入服务器单元校验；见 [systemd 239 修复步骤](operations/systemd-239-recovery-fix.md)。
+最新现场（2026-09-22）：恢复快照 `bd7b343be731926be9c8` 已安装并启用已迁移项目统一策略。infra 已核对并纳入，service 为 active/exited，timer 为 active/running 且 enabled；delta 等待迁移。真实重启、NAS 晚启动和断线演练尚未进行；业务验收及 SSD 回收仍待回执。见 [systemd 239 修复与成功回执](operations/systemd-239-recovery-fix.md)。
 
 默认已改为中文易读输出，`--json` 保留原始事件。推荐 `nas recovery check` 统一检查全部项目，安装后用 `nas recovery enable --migrated` 启用已迁移项目统一模式；详见 [易读输出与统一恢复](operations/readable-recovery.md)。
 

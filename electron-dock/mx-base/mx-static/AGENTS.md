@@ -7,6 +7,7 @@ The NAS tooling is a production data-management component. Read `nas_docs/SAFETY
 - On 2026-09-22, `po_infra_media_data/data_hub_raw_media` (task `part1`, project `infra`, Compose `mx_data`) successfully switched to the NAS. The NAS may contain newer writes than SSD. It is the authoritative source for that subtree.
 - The latest confirmed SSD cleanup inventory contains 194,686 files; no cleanup completion or business acceptance has been received in this session. Do not infer either from a successful copy/check/prepare.
 - `delta_59202_media_data` (task `part2`, project `delta`) has no reviewed cutover or cleanup record yet. Do not reuse Part 1 identities or configuration.
+- On 2026-09-22, recovery snapshot `bd7b343be731926be9c8` was installed and enabled successfully with the unified migrated policy: infra verified/included, delta waiting for migration, service active/exited and timer active/running + enabled. No real reboot, NAS late-start or outage drill has been confirmed. This receipt does not establish business acceptance or SSD cleanup.
 - User preference: NAS policy, tools and project-specific operations live in mx-static; do not modify po-infra for this work. The user uses root to operate tools and distributes changes through Git. Runtime reports and credentials stay private on the server.
 
 ## Required behavior

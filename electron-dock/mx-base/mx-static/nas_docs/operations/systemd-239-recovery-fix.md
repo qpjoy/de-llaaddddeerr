@@ -42,4 +42,17 @@ journalctl -b -u mx-static-nas-boot.timer -u mx-static-nas-boot.service -n 80 --
 
 172 项 NAS 本地测试通过。新增 6 项覆盖：候选单元校验失败保留已安装状态、私有 systemd 错误记录、Docker 错误不泄露、bad-setting 明确显示、timer 部分成功提示、保存策略后启动失败不误报成功；原安装测试现在核对校验发生在 daemon-reload 之前。Bash、Python 3.6 语法通过。
 
-本地为 macOS，没有运行 systemd 239；真正的服务器单元校验由修复后的 install 执行。尚未收到本次修复后安装、启用成功的现场回执。
+本地为 macOS，没有运行 systemd 239；服务器单元校验由修复后的 install 执行。已收到以下服务器成功回执。
+
+## 修复后现场回执（2026-09-22）
+
+用户同步代码后依次执行 install、enable --migrated、check，回传：
+
+- 安装快照：`/usr/local/lib/mx-static-nas/bd7b343be731926be9c8`；安装快照与当前代码/声明一致。修复后的 install 只有在服务器候选单元校验通过后才报告安装成功。
+- 策略：migrated；全局暂停为否，`disabled_parts` 为空。
+- infra / part1：成功记录、容器身份和挂载一致，已纳入恢复。
+- delta / part2：未迁移，等待迁移，未启动未审核项目。
+- `mx-static-nas-boot.service`：active/exited，开机设置 static。服务本身由 timer 触发，无需单独 enable。
+- `mx-static-nas-boot.timer`：active/running，开机设置 enabled。
+
+该回执确认了实际服务器的安装、启用和本轮恢复检查成功；不需要重复 install/enable。成功后的 service 保留 active/exited，本轮不会每分钟持续巡检；60 秒重试针对恢复程序失败。尚未进行真实重启、NAS 晚启动或断线演练，也尚未收到业务验收和 SSD 回收完成回执。下一步按 [第一卷 SSD 回收](part1-reclaim.md) 完成业务验收后再执行精确清单回收。
