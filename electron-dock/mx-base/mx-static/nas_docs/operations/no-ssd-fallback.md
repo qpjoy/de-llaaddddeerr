@@ -1,6 +1,6 @@
 # NAS 存储约束：重启、重装与断电恢复
 
-状态（2026-09-24）：本文区分现有能力和待实施的发布约束。服务器 02:04 回传 `b713ae7` 的 `nas infra storage check` 已生效，确认全部十个媒体服务实际在 SSD；未进行断电/重装演练，未封住外部发布入口。后续当前版本核对也已通过，现新增 `nas infra repair prepare` 准备独立修复报告；它尚无服务器执行回执，不复制/重建业务，不能凭本文宣布“已恢复 NAS”或“已防止回退”。
+状态（2026-09-24）：本文区分现有能力和待实施的发布约束。服务器 02:04 回传 `b713ae7` 的 `nas infra storage check` 已生效，确认全部十个媒体服务实际在 SSD；未进行断电/重装演练，未封住外部发布入口。后续当前版本核对和 `nas infra repair prepare` 均已通过，报告见本文末尾。现新增 `repair copy` 只补清单缺失文件，尚无复制完成回执；它不重建业务，不能凭本文宣布“已恢复 NAS”或“已防止回退”。
 
 ## 约束的对象
 
@@ -102,3 +102,35 @@ bash scripts/manage.sh nas infra repair prepare
 准备只写本机私有报告和操作审计。没有 rsync、删除、改媒体权限、停服务、创建卷、NAS 写探测、重写旧报告/标记或更新恢复登记。两侧仍在线，清单明确 `live_snapshot=true`、`stopped_writer_recheck_required=true`、`execution_allowed=false`、`reclaim_ready=false`。
 
 因此准备成功后仍需按回传报告制订增量补齐、维护切换和新基准登记步骤。不要将新报告交给旧 cutover/redeploy/reclaim，也不要手动执行其中候选 Compose 的 `up`。尚未提供 `repair apply` 命令。现有登录继续由当前运行服务提供；准备成功不能代替切换后的登录/媒体验收。
+
+## 已准备的具体报告与在线补齐
+
+用户已回传准备成功：
+
+```text
+/var/lib/mx-static/nas-repair/infra-a0131341096e4ba9b9e3e61c3e2581dd
+```
+
+这次在线快照的 SSD 独有文件增加到 **5,289 个 / 2.69 GiB**（tmp 1,036），NAS 独有仍为 **1,032 个 / 0.33 GiB**（tmp 348）；共享 quick-check 一致 193,005 个 / 497.42 GiB，仅属性不同 1,681 个 / 0.68 GiB，79 个共享差异文件双侧哈希一致。准备没有复制或改变业务挂载。
+
+同步新增 `infra_repair_copy.py` 及相关入口代码后，在同一目录执行：
+
+```bash
+bash scripts/manage.sh nas infra repair copy /var/lib/mx-static/nas-repair/infra-a0131341096e4ba9b9e3e61c3e2581dd
+```
+
+`5beead17` 及之前的版本尚无此复制入口。命令显式授权**新增 NAS 文件**，创建唯一的后台 systemd 任务，打印精确的 journalctl 查看命令；SSH 断开不会停止该任务。`ReadOnlyPaths=/data` 保护 SSD，Nice=19；按用户要求默认不限速，已移除原 8 MiB/s 写入节流，保留逐文件校验和持久日志。任务不因主机重启自动续跑；hard NFS I/O 仍可能等待，不能靠不断重试制造更多阻塞进程。
+
+后续约 900 多 GiB 的 `delta / part2` 继续使用独立入口 `bash scripts/manage.sh nas delta task part2 copy --unlimited`，该参数令 rsync 使用 `--bwlimit=0`。它是第二卷在线预复制，不复用本次 infra 差异修复清单；两项任务依次执行。
+
+复制只读取原 `union-manifest.jsonl` 的 `ssd_only` 项，验证原摘要、逐文件元数据、父目录、设备、完整清单校验和、镜像/容器指纹、DB 身份、当前配置和原 NAS 标记。清单外新增文件留待最终停写核对，不扩为整卷同步。当前实现只支持准备时已经存在且身份/权限不变的 NAS 父目录；不自动创建业务目录或推断其权限。最多 10,000 个候选、16 GiB，超出需审核，NAS 还须有候选总量加 1 GiB 的可用空间。
+
+每个缺失文件先进入卷目录下、raw-media **之外**的 `.mx-static-repair-copy-<本次ID>/` 私有目录；核对源文件未变化、内容与哈希文件名（适用时）一致、NAS 内容读回一致、新文件属性正确后才发布。发布使用不会覆盖既有名称的 `link`；如果目标在此期间出现，只允许验证同内容并保留其现有属性，内容不同则停止。已有 NAS 文件绝不被 chmod/chown，原目录权限保留，添加子文件自然会更新目录时间。完成后只移除自身私有临时名和空暂存目录。[Linux link 语义与 NFS 响应不确定性](https://man7.org/linux/man-pages/man2/link.2.html)
+
+源文件始终保留，不运行 rsync 覆盖、NAS 删除同步、媒体初始化、Docker up/start/stop、数据库迁移或账号初始化，不改变旧报告、NAS 标记、恢复基准或当前 SSD 挂载。复制过程中定期复查登记和部署身份；变化就停止后续写入，不自动回滚任何已补入文件。
+
+每次尝试在原准备报告下新建 `copy-<ID>/`，保存私有的 `started.json`、逐文件持久日志 `copy.jsonl` 和完成后的 `result.json`。失败/部分完成写 `failed.json`；突发断电可能来不及写失败记录，**没有 result.json 不能视为完成**。重试只对原候选检查，已经存在且内容相同的文件保持不变；源文件变化、目标冲突或异常硬链接时停止。
+
+尤其是断电恰好发生在发布与清理临时名之间，NAS 可能保留两个指向同一 inode 的名称。工具会拒绝直接继续该项，保留原 SSD、NAS 文件、暂存目录及日志供核对，不猜测性清理，不执行 `rm -rf`。NFS 若不支持所需的链接/持久化操作，也不会退回可能覆盖文件的 rename 操作。
+
+后台日志出现 `nas_repair_copy_complete` 才表示**该份清单**已完成补齐。此时仍需最终停写复核、新增文件补齐、NAS 消费者恢复和新基准登记；`reclaim_ready` 继续为 false，原 SSD 不能删除。不要再次运行旧 copy/cutover/redeploy 来完成剩余步骤。

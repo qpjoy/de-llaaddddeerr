@@ -88,6 +88,14 @@ def render(value):
                 table(['分组','文件数','逻辑大小','tmp 数'],rows)+
                 '\n在线快照；仍需停写复核。未复制、重启、采用新基准或清理；此报告不能直接用于旧 cutover/redeploy/reclaim。')
     if event=='nas_repair_failed':return '修复准备未通过\n私有报告：'+value['report_directory']+'\n原因：'+value['error']
+    if event=='nas_repair_copy_started':
+        return '开始在线补齐：{} 个候选文件，{}；不限速\n执行报告：{}\n保留 SSD，NAS 同名文件不覆盖；不重启业务。'.format(value['files'],size(value['logical_bytes']),value['attempt_directory'])
+    if event=='nas_repair_copy_progress':
+        return '补齐进度：{}/{}；新复制 {}，已存在且同内容 {}，已处理 {}'.format(value['processed'],value['candidates'],value['copied'],value['already_present'],size(value['logical_bytes']))
+    if event=='nas_repair_copy_complete':
+        return '本份清单在线补齐完成：新复制 {}，已存在且同内容 {}，共 {}\n执行报告：{}\n业务挂载尚未切换；仍需停写复核后续新增。SSD 未删除，不能据此清理。'.format(value['copied'],value['already_present'],size(value['logical_bytes']),value['attempt_directory'])
+    if event=='nas_repair_copy_failed':
+        return '补齐失败或部分完成；保留两侧数据和日志。\n执行报告：{}\n原因：{}'.format(value.get('attempt_directory') or value['report_directory'],value['error'])
     if event=='nas_host_mounts':
         rows=['  {} [{}]\n    来源：{}\n    选项：{}'.format(cell(r['target']),cell(r['type']),cell(r['source']),cell(r['options'])) for r in value['mounts']]
         return '宿主机 NAS 挂载核对：'+('匹配' if value['host_mount_verified'] else '未匹配，请检查')+'\n'+'\n'.join(rows)+'\n仅检查本机挂载表，不代表 NAS 磁盘/存储池健康。'
