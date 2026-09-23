@@ -92,6 +92,9 @@ def route(argv, config):
     if tail==['storage','check']:
         if p['adapter']!='infra-v1':raise RuntimeError('Storage check adapter not reviewed for this project.')
         return ['storage-check',task]
+    if tail==['repair','prepare']:
+        if p['adapter']!='infra-v1':raise RuntimeError('Repair preparation only reviewed for infra.')
+        return ['repair-prepare',task]
     action={'recovery':'recover','cleanup':'reclaim'}.get(tail[0],tail[0])
     if action=='compose' and p['adapter']=='infra-v1':return ['compose',task]+tail[1:]
     if action not in p['capabilities']:raise RuntimeError('Unsupported project action: '+action)

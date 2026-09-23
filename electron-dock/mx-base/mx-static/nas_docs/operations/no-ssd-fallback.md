@@ -1,6 +1,6 @@
 # NAS 存储约束：重启、重装与断电恢复
 
-状态（2026-09-24）：本文区分现有能力和待实施的发布约束。已增加只读 `nas infra storage check`；尚未在服务器部署本次更新，未进行断电/重装演练，未封住外部发布入口。当前 infra 实际在 SSD，须先修复本次存储漂移，不能凭本文宣布“已防止回退”。
+状态（2026-09-24）：本文区分现有能力和待实施的发布约束。服务器 02:04 回传 `b713ae7` 的 `nas infra storage check` 已生效，确认全部十个媒体服务实际在 SSD；未进行断电/重装演练，未封住外部发布入口。后续当前版本核对也已通过，现新增 `nas infra repair prepare` 准备独立修复报告；它尚无服务器执行回执，不复制/重建业务，不能凭本文宣布“已恢复 NAS”或“已防止回退”。
 
 ## 约束的对象
 
@@ -73,3 +73,32 @@ bash scripts/manage.sh nas recovery check
 `storage check` 读取 Docker 元数据与本机 `/proc/<pid>/mountinfo`，独立于旧 `.env`/镜像哈希，便于诊断重建后的漂移；不访问 NAS 文件、不重启、不创建卷、不改报告。缺容器、缺卷、错误 options、缺子挂载、错误读写属性或无法确认运行中的内核挂载均返回 1。`status` 显示同一核对结果，保留概览原有退出约定；自动化应使用独立的 `storage check`。
 
 全部匹配只说明瞬时存储来源符合登记，不证明 NAS 健康、应用 I/O、登录、数据完整或可清理。正常停止的 NAS 容器也会因无法确认运行中的挂载返回 1，因此此命令不能直接作为冷启动的前置条件；冷启动仍走原有严格恢复检查。`recovery check` 的旧配置/身份检查继续生效，本次没有放宽它。
+
+## 已通过当前版本核对；准备独立修复报告
+
+用户回传已确认：十个媒体容器的 Compose hash、Entrypoint、Cmd、User 与对应核对目标一致；九个应用容器启动脚本符合已审查哈希、无可写层业务代码修改；Postgres/Redis 保持旧切换时的容器 ID 且健康；配置文件和消费者在检查期间稳定。
+
+- 当前九个应用镜像：`sha256:45f5a0e5cae63bd1bc6215bcdbbe6531ba149ccc86dc47e11fcb55d1a9f5e0bf`。
+- 当前 gateway 镜像：`sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea`。
+
+准备工具限定这组已核对镜像；未来升级要另行审核，不能悄悄接受任意新版本。更新本轮代码后，在 mx-static 目录运行（`b713ae7` 尚无此命令）：
+
+```bash
+bash scripts/manage.sh nas --help
+bash scripts/manage.sh nas infra repair prepare
+```
+
+帮助中应先出现 `infra repair prepare`。该命令前台运行，期间保持 SSH 连接；通常每十秒输出目录扫描进度，hard NFS 不可用时仍可能等待。中断仅留下未完成的新报告，不会自动复制或恢复业务，不因中断改用 SSD。
+
+准备内容：
+
+1. 获取迁移锁，重核当前部署、启动脚本、实际镜像、健康及 DB/Redis 身份；发现额外 Docker 媒体消费者或运行中修改业务代码则拒绝。
+2. 在 `/var/lib/mx-static/nas-repair/infra-<随机ID>/` 建立新的 root 私有目录（0700，文件 0600），保存当前配置/容器快照。报告可能含凭据，**只回传终端摘要和报告路径，不回传 private 文件**。
+3. 生成固定当前镜像的 `compose.nas.candidate.json`；直接启动 Gunicorn 跳过旧 `run_web.sh` 中 migrate/bootstrap_admin 等初始化，Worker 设置 `MX_RECOVER_STALE_AGENT_RUNS=0`。调用 Compose **只渲染配置**，核对除了已列明的启动调整、固定镜像和 NAS 子卷外没有其他变化；DB/Redis、父卷、端口、凭据及认证环境保持当前值。没有创建或启动容器。
+4. 核对现存 NFS 卷、历史成功报告和 NAS 标记、源/目标目录身份，再扫描两侧目录元数据；生成 `union-manifest.jsonl`。SSD 独有文件为待补入候选，NAS 独有文件保留，共享文件和目录的现有 NAS 属性保留。类型冲突、链接、跨文件系统对象、共享同名文件大小不同均阻止准备。
+5. 对大小相同、整秒 mtime 不同的共享文件做双侧 SHA256；内容不同或读取期间变化则阻止。最多 1,000 对、双侧总计 512 MiB，不扩大为全量哈希。权限差异和 quick-check 一致文件不读取内容。新报告重新核对有限差异，不直接把之前终端的 79 对结果当作新的机器可执行凭证。
+6. 最后复核配置、容器、DB 身份、目录、历史回执及 NAS 标记未变化；写入 `repair-plan.json` 并输出“修复清单已准备”。
+
+准备只写本机私有报告和操作审计。没有 rsync、删除、改媒体权限、停服务、创建卷、NAS 写探测、重写旧报告/标记或更新恢复登记。两侧仍在线，清单明确 `live_snapshot=true`、`stopped_writer_recheck_required=true`、`execution_allowed=false`、`reclaim_ready=false`。
+
+因此准备成功后仍需按回传报告制订增量补齐、维护切换和新基准登记步骤。不要将新报告交给旧 cutover/redeploy/reclaim，也不要手动执行其中候选 Compose 的 `up`。尚未提供 `repair apply` 命令。现有登录继续由当前运行服务提供；准备成功不能代替切换后的登录/媒体验收。

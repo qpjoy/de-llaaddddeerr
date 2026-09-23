@@ -22,6 +22,7 @@ import host as host_control
 import action_log
 from projects import infra as infra_adapter
 from projects import infra_storage
+from projects import infra_repair
 import cutover
 import cutover_prepare as prep
 import precopy
@@ -364,7 +365,7 @@ def set_auto(part,profile,enabled):
 def parser():
     p=argparse.ArgumentParser(description='mx-static NAS operations (no Node/static-server dependency).')
     sub=p.add_subparsers(dest='action');sub.required=True
-    for action in ('status','locate','boot-check','copy','prepare','cutover','plan','reclaim','recover','redeploy','compose','logs','auto-enable','auto-disable','permissions-check','permissions-probe','deployment-audit','storage-check','_execute-permissions','_execute-recover','_execute-redeploy'):
+    for action in ('status','locate','boot-check','copy','prepare','cutover','plan','reclaim','recover','redeploy','compose','logs','auto-enable','auto-disable','permissions-check','permissions-probe','deployment-audit','storage-check','repair-prepare','_execute-permissions','_execute-recover','_execute-redeploy'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         if action in ('permissions-probe','_execute-permissions'):s.add_argument('--write-test',action='store_true')
         if action=='copy':s.add_argument('--unlimited',action='store_true')
@@ -383,6 +384,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra permissions probe --write-test
   bash scripts/manage.sh nas infra deployment audit
   bash scripts/manage.sh nas infra storage check     # 当前挂载核对；不符/未确认退出 1
+  bash scripts/manage.sh nas infra repair prepare    # 当前版本修复清单；只读媒体，另存私有报告
   bash scripts/manage.sh nas infra task part1 plan
   bash scripts/manage.sh nas infra task part1 cleanup --business-accepted
   bash scripts/manage.sh nas delta task part2 copy --unlimited
@@ -444,13 +446,15 @@ def main():
             precopy.check_host()
         registry=profiles()
         profile=registry.get(getattr(args,'part',None))
-        mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
+        mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
         if action in mutations:
             audit(action,getattr(args,'part',None),'requested');audit_started=True
         if action.startswith('host-'):
             host_control.inspect(action[5:],catalog.load(CONFIG)[1])
         elif action=='deployment-audit':infra_adapter.deployment_audit(sys.modules[__name__],profile)
         elif action=='storage-check':return 0 if infra_storage.check(sys.modules[__name__],profile) else 1
+        elif action=='repair-prepare':
+            with migration_lock():infra_repair.prepare(sys.modules[__name__],profile)
         elif action=='permissions-check':
             with migration_lock():infra_adapter.permissions(sys.modules[__name__],profile)
         elif action=='_execute-permissions':

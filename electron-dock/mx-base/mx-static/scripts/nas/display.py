@@ -76,6 +76,18 @@ def render(value):
         return ('当前 NAS 存储核对：'+('匹配' if value['ok'] else '不通过，禁止据此回收 SSD')+'\n'+
                 table(['服务','核对','内核媒体来源','说明'],rows)+'\n'+
                 '\n'.join(value['issues']+[value['note']]))
+    if event=='nas_repair_started':return '开始修复准备；只读媒体，不重启业务。\n私有报告：'+value['report_directory']
+    if event=='nas_repair_progress':return '核对当前部署：'+value['service']
+    if event=='nas_repair_hash_plan':
+        return '仅核验共享差异文件：{} 个，双侧计划读取 {}；不读取全量内容。'.format(value['selected_files'],size(value['planned_read_bytes']))
+    if event=='nas_repair_prepared':
+        labels={'ssd_only':'SSD 独有，待补齐','nas_only':'NAS 独有，保留','permissions_only':'仅属性不同，保留 NAS 属性',
+                'shared_quick_match':'共享文件 quick-check 一致','shared_hash_same':'共享差异文件哈希一致'}
+        rows=[[labels.get(k,k),v['files'],size(v['logical_bytes']),v['tmp_files']] for k,v in value['groups'].items()]
+        return ('修复清单已准备\n私有报告：'+value['report_directory']+'\n'+
+                table(['分组','文件数','逻辑大小','tmp 数'],rows)+
+                '\n在线快照；仍需停写复核。未复制、重启、采用新基准或清理；此报告不能直接用于旧 cutover/redeploy/reclaim。')
+    if event=='nas_repair_failed':return '修复准备未通过\n私有报告：'+value['report_directory']+'\n原因：'+value['error']
     if event=='nas_host_mounts':
         rows=['  {} [{}]\n    来源：{}\n    选项：{}'.format(cell(r['target']),cell(r['type']),cell(r['source']),cell(r['options'])) for r in value['mounts']]
         return '宿主机 NAS 挂载核对：'+('匹配' if value['host_mount_verified'] else '未匹配，请检查')+'\n'+'\n'.join(rows)+'\n仅检查本机挂载表，不代表 NAS 磁盘/存储池健康。'

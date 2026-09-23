@@ -2,6 +2,8 @@
 
 最新现场（2026-09-24）：infra 十个媒体消费者在后续重建中遗漏 NAS 覆盖，内核已确认当前实际使用 SSD；恢复因 `.env`/部署身份漂移被阻止。两侧各有独有文件，禁止清理、重复旧复制或绕过检查。详见 [当前差异、重启/重装/断电与防回退要求](operations/no-ssd-fallback.md)。新增 `nas infra storage check` 只读核对当前配置和内核挂载，不能代替发布启动拦截。
 
+当前版本核对随后已通过，下一步是新增 `nas infra repair prepare`：保存当前镜像/配置、生成保留两侧数据的差异清单，只写新的私有报告，不复制媒体或重启服务。`b713ae7` 尚无此入口；先同步本轮更新，详见上方方案中的准备说明。
+
 历史现场（2026-09-22）：恢复快照 `bd7b343be731926be9c8` 曾安装并启用已迁移项目统一策略；见 [成功回执](operations/systemd-239-recovery-fix.md)。这不是当前存储状态或真实重启演练的证明；业务验收及 SSD 回收仍待回执。
 
 默认已改为中文易读输出，`--json` 保留原始事件。推荐 `nas recovery check` 统一检查全部项目，安装后用 `nas recovery enable --migrated` 启用已迁移项目统一模式；详见 [易读输出与统一恢复](operations/readable-recovery.md)。
