@@ -98,6 +98,9 @@ def route(argv, config):
     if len(tail)==3 and tail[:2]==['repair','copy']:
         if p['adapter']!='infra-v1':raise RuntimeError('Repair copy only reviewed for infra.')
         return ['repair-copy',task,tail[2]]
+    if len(tail)>=3 and tail[0]=='repair' and tail[1] in ('switch','resume'):
+        if p['adapter']!='infra-v1':raise RuntimeError('Repair switch only reviewed for infra.')
+        return ['repair-'+tail[1],task]+tail[2:]
     action={'recovery':'recover','cleanup':'reclaim'}.get(tail[0],tail[0])
     if action=='compose' and p['adapter']=='infra-v1':return ['compose',task]+tail[1:]
     if action not in p['capabilities']:raise RuntimeError('Unsupported project action: '+action)

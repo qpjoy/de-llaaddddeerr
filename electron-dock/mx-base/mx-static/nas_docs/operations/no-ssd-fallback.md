@@ -1,6 +1,6 @@
 # NAS 存储约束：重启、重装与断电恢复
 
-状态（2026-09-24）：本文区分现有能力和待实施的发布约束。服务器 02:04 回传 `b713ae7` 的 `nas infra storage check` 已生效，确认全部十个媒体服务实际在 SSD；未进行断电/重装演练，未封住外部发布入口。后续当前版本核对和 `nas infra repair prepare` 均已通过。首次 `repair copy` 在写前失败；后续重试已确认至少补入 5,100 个文件，随后因视频源状态变化停止，仍是部分完成。具体回执和后续终点见本文末尾；不能据此宣布“已恢复 NAS”或“已防止回退”。
+状态（2026-09-24）：本文区分现有能力和待实施的发布约束。服务器 02:04 回传 `b713ae7` 的 `nas infra storage check` 已生效，确认全部十个媒体服务实际在 SSD；未进行断电/重装演练，未封住外部发布入口。后续当前版本核对和 `nas infra repair prepare` 均已通过。经过两次失败后，`0096322ad3` 任务现已确认 5,289 个候选全部在线补齐。新增[维护切换入口](part1-repair-switch.md)，尚待服务器执行；不能据复制回执宣布“已恢复 NAS”或“已防止回退”。
 
 ## 约束的对象
 
@@ -146,7 +146,7 @@ bash scripts/manage.sh nas infra repair copy /var/lib/mx-static/nas-repair/infra
 5. 在业务已经运行于 NAS 后，生成新的稳定 SSD 文件清单，逐项核对 NAS 对应文件及已审核差异（包括现有 NAS 属性不同的文件），保存清单摘要、目录身份、检查时间及业务验收记录。当前旧回收器要求两侧属性匹配，不能直接套用到保留 NAS 属性的此次 UNION 修复。
 6. 到此暂停，SSD 原数据保留。用户将来选择删除时，再核对当前 NAS/部署、SSD 无新写入、清单和对应文件仍满足条件；只回收确切清单中的旧 raw-media 文件，不删除 named volume 或 media 其他目录。先前一次“可回收”检查不是永久删除许可，SSD 保留期间磁盘空间也不会释放。
 
-当前能力仍有缺口：Part 1 尚无修复切换/新基准登记/适配本次差异的新清理前核验入口；Part 2 的 `precopy-only` 适配仅允许预复制，需独立审核其部署、镜像、启动行为和身份后补齐切换及回收流程。不能靠新增一个登记字段或手工改旧报告将这些步骤标记为通过。
+当前能力仍有缺口：Part 1 新增维护切换入口，但尚无现场成功回执；新基准登记及适配本次差异的新清理前核验仍待完成。Part 2 的 `precopy-only` 适配仅允许预复制，需独立审核其部署、镜像、启动行为和身份后补齐切换及回收流程。不能靠新增一个登记字段或手工改旧报告将这些步骤标记为通过。
 
 ### 第一次在线补齐的失败回执
 
@@ -181,4 +181,8 @@ error: File changed or is not a single-link regular file on expected filesystem.
 
 上一版只在整批开始时应用 ctime-only 内容复核，后面的文件可能在等待其他文件复制时改变。现将**同一规则**再用于每个文件开始前的一次复核：仍要求仅 ctime 不同、其他状态完全相同、SHA256 匹配原文件名，哈希期间稳定；先把前次元数据、当前元数据、哈希及路径 fsync 到本次 `copy.jsonl` 的 `source_ctime_revalidated_before_copy` 事件，再打开 NAS 目标进行复制或已有文件核验。原清单、批量复核记录不改写，也不在读取/暂存/发布过程中反复重试变化中的文件。其他元数据变化明确报出字段；临时文件和内容不符仍阻止。
 
-`source-revalidation.json` 和 `source_ctime_revalidated` 数量对应批量写前复核，等待期间的逐文件复核看 copy.jsonl。新版仍运行同一 repair copy 命令，不删除旧 attempt/暂存证据。此前 NAS 已有文件会重新验证内容；相同则计入 already_present 并保留 inode 和属性，不重新传输覆盖。复制仍不限速，业务不重启；清单外新增及最终停写复核仍留待 Part 1 后续切换。当前尚无完整补齐或恢复 NAS 运行的回执。
+`source-revalidation.json` 和 `source_ctime_revalidated` 数量对应批量写前复核，等待期间的逐文件复核看 copy.jsonl。重试不删除旧 attempt/暂存证据。此前 NAS 已有文件会重新验证内容；相同则计入 already_present 并保留 inode 和属性，不重新传输覆盖。复制仍不限速，业务不重启；清单外新增及最终停写复核仍留待 Part 1 后续切换。
+
+### 整份在线补齐成功
+
+`mx-nas-part1-repair-copy-0096322ad3.service` 成功，执行目录为原修复报告下的 `copy-220e052707a64e0aa53f2208b54448e2`。`nas_repair_copy_complete` 回执：`copied=181`、`already_present=5108`、`logical_bytes=2892300834`、`source_ctime_revalidated=83`。`live_snapshot=true`、`stopped_writer_recheck_required=true`、`reclaim_ready=false`；未重启业务、未删除源文件。下一步见[Part 1 当前版本维护切换](part1-repair-switch.md)。

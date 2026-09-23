@@ -24,6 +24,7 @@ from projects import infra as infra_adapter
 from projects import infra_storage
 from projects import infra_repair
 from projects import infra_repair_copy
+from projects import infra_repair_switch
 import cutover
 import cutover_prepare as prep
 import precopy
@@ -205,6 +206,11 @@ def task_command(action, profile, args):
     if action=='repair-copy':
         infra_repair_copy.validate_path(args.report)
         return [py,'-B',str(Path(__file__).resolve()),'_execute-repair-copy',args.part,args.report]
+    if action in ('repair-switch','repair-resume'):
+        if not args.maintenance or not args.write_test:
+            raise RuntimeError('Repair switch requires --maintenance --write-test; media HTTP access will pause, SSD is retained.')
+        if action=='repair-switch':infra_repair_switch.split_attempt(args.report)
+        return [py,'-B',str(Path(__file__).resolve()),'_execute-'+action,args.part,args.report,'--maintenance','--write-test']
     if action=='prepare':return [py,'-B',str(scripts/'cutover_prepare.py'),profile['volume'],'--prepare']
     if action=='cutover':
         if not args.maintenance:raise RuntimeError('cutover requires --maintenance in the agreed window.')
@@ -234,13 +240,13 @@ def launch(action,profile,args):
         finally:os.close(fd)
     unit='mx-nas-{}-{}-{}'.format(args.part,action,uuid.uuid4().hex[:10])
     cmd=['systemd-run','--unit='+unit,'--property=RuntimeMaxSec=infinity',
-         '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy') else '90s')]
-    if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy'):cmd+=['--property=ReadOnlyPaths=/data']
+         '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy','repair-switch','repair-resume') else '90s')]
+    if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy','repair-switch','repair-resume'):cmd+=['--property=ReadOnlyPaths=/data']
     if action=='reclaim':cmd+=['--property=ReadOnlyPaths=/mnt/nas']
     if action in ('copy','repair-copy'):cmd+=['--property=Nice=19']
     print(run(cmd+command),end='')
     emit('nas_job_started',part=args.part,action=action,unit=unit+'.service',
-         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action=='repair-copy' else 'sudo bash scripts/manage.sh nas logs '+args.part),
+         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume') else 'sudo bash scripts/manage.sh nas logs '+args.part),
          transient=True,reboot_auto_resume=False)
 
 
@@ -369,12 +375,12 @@ def set_auto(part,profile,enabled):
 def parser():
     p=argparse.ArgumentParser(description='mx-static NAS operations (no Node/static-server dependency).')
     sub=p.add_subparsers(dest='action');sub.required=True
-    for action in ('status','locate','boot-check','copy','prepare','cutover','plan','reclaim','recover','redeploy','compose','logs','auto-enable','auto-disable','permissions-check','permissions-probe','deployment-audit','storage-check','repair-prepare','repair-copy','_execute-repair-copy','_execute-permissions','_execute-recover','_execute-redeploy'):
+    for action in ('status','locate','boot-check','copy','prepare','cutover','plan','reclaim','recover','redeploy','compose','logs','auto-enable','auto-disable','permissions-check','permissions-probe','deployment-audit','storage-check','repair-prepare','repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume','_execute-permissions','_execute-recover','_execute-redeploy'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
-        if action in ('repair-copy','_execute-repair-copy'):s.add_argument('report')
-        if action in ('permissions-probe','_execute-permissions'):s.add_argument('--write-test',action='store_true')
+        if action in ('repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume'):s.add_argument('report')
+        if action in ('permissions-probe','_execute-permissions','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume'):s.add_argument('--write-test',action='store_true')
         if action=='copy':s.add_argument('--unlimited',action='store_true')
-        if action in ('cutover','redeploy','_execute-redeploy'):s.add_argument('--maintenance',action='store_true')
+        if action in ('cutover','redeploy','_execute-redeploy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume'):s.add_argument('--maintenance',action='store_true')
         if action=='reclaim':s.add_argument('--business-accepted',action='store_true')
         if action=='compose':s.add_argument('view',choices=('ps','config-check'))
     for name in ('auto-install','_auto-recover','catalog-list','host-status','host-processes','host-mount-check','host-network','recovery-check-all','recovery-enable-migrated','recovery-disable-all'):sub.add_parser(name)
@@ -391,6 +397,8 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra storage check     # 当前挂载核对；不符/未确认退出 1
   bash scripts/manage.sh nas infra repair prepare    # 当前版本修复清单；只读媒体，另存私有报告
   bash scripts/manage.sh nas infra repair copy <修复报告目录>  # 后台补齐清单中的 SSD 独有文件，不覆盖 NAS
+  bash scripts/manage.sh nas infra repair switch <成功 copy 尝试目录> --maintenance --write-test
+  bash scripts/manage.sh nas infra repair resume <新切换报告目录> --maintenance --write-test
   bash scripts/manage.sh nas infra task part1 plan
   bash scripts/manage.sh nas infra task part1 cleanup --business-accepted
   bash scripts/manage.sh nas delta task part2 copy --unlimited
@@ -452,7 +460,7 @@ def main():
             precopy.check_host()
         registry=profiles()
         profile=registry.get(getattr(args,'part',None))
-        mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','repair-copy','_execute-repair-copy','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
+        mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
         if action in mutations:
             audit(action,getattr(args,'part',None),'requested');audit_started=True
         if action.startswith('host-'):
@@ -463,6 +471,9 @@ def main():
             with migration_lock():infra_repair.prepare(sys.modules[__name__],profile)
         elif action=='_execute-repair-copy':
             with migration_lock():infra_repair_copy.execute(sys.modules[__name__],profile,args.report)
+        elif action in ('_execute-repair-switch','_execute-repair-resume'):
+            if not args.maintenance or not args.write_test:raise RuntimeError('Repair switch requires --maintenance --write-test.')
+            with migration_lock():infra_repair_switch.execute(sys.modules[__name__],profile,args.report,resume=action=='_execute-repair-resume')
         elif action=='permissions-check':
             with migration_lock():infra_adapter.permissions(sys.modules[__name__],profile)
         elif action=='_execute-permissions':

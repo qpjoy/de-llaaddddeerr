@@ -101,6 +101,14 @@ def render(value):
         return '本份清单在线补齐完成：新复制 {}，已存在且同内容 {}，共 {}\n执行报告：{}\n业务挂载尚未切换；仍需停写复核后续新增。SSD 未删除，不能据此清理。'.format(value['copied'],value['already_present'],size(value['logical_bytes']),value['attempt_directory'])
     if event=='nas_repair_copy_failed':
         return '补齐失败或部分完成；保留两侧数据和日志。\n执行报告：{}\n原因：{}'.format(value.get('attempt_directory') or value['report_directory'],value['error'])
+    if event=='nas_repair_switch_preparing':
+        return '开始当前版本维护切换核对；此时尚未停业务。\n新切换报告：'+value['report_directory']
+    if event=='nas_repair_switch_complete':
+        return ('媒体服务已恢复到 NAS；实际挂载、HTTP 读取和应用写入探测通过。\n新切换报告：'+value['report_directory']+
+                '\n仍待 MX-H2I 业务验收、恢复登记及新清理清单核验；SSD 保留，尚不可清理。')
+    if event=='nas_repair_switch_failed':
+        return '维护切换未完成；业务可能已停止或部分重建，不自动退回 SSD。\n报告：{}\n阶段：{}\n原因：{}'.format(
+            value.get('report_directory') or '见本任务 preparing 记录',value['phase'],value['error'])
     if event=='nas_host_mounts':
         rows=['  {} [{}]\n    来源：{}\n    选项：{}'.format(cell(r['target']),cell(r['type']),cell(r['source']),cell(r['options'])) for r in value['mounts']]
         return '宿主机 NAS 挂载核对：'+('匹配' if value['host_mount_verified'] else '未匹配，请检查')+'\n'+'\n'.join(rows)+'\n仅检查本机挂载表，不代表 NAS 磁盘/存储池健康。'
