@@ -38,3 +38,8 @@ bash scripts/manage.sh nas infra locate &&
 bash scripts/manage.sh nas recovery install &&
 bash scripts/manage.sh nas recovery check
 ```
+
+# Delta
+```bash
+bash scripts/manage.sh nas delta copy --unlimited
+```

@@ -7295,7 +7295,7 @@ export class PostgresStore {
     const matchKeys = [...new Set([entry.canonicalName, ...(entry.aliases || [])]
       .map((value) => String(value).normalize('NFKC').trim().toLocaleLowerCase('zh-CN'))
       .filter(Boolean))]
-    // Keep the four independently indexed match paths as UNION arms. A single
+    // Keep independently indexed match paths as UNION arms. A single
     // OR lets one unselective arm force a canonical_records sequential scan,
     // which becomes prohibitive after the crawler backfill.
     const matchedRecordIdsSql = `
@@ -7313,7 +7313,13 @@ export class PostgresStore {
            UNION
            SELECT id
              FROM core.canonical_records
-            WHERE stable_fields #>> '{sourceCatalog,collector,entryId}' = $2`
+            WHERE stable_fields #>> '{sourceCatalog,collector,entryId}' = $2
+           UNION
+           SELECT record.id
+             FROM catalog.record_catalog_bindings binding
+             JOIN core.canonical_records record ON record.id = binding.record_id
+            WHERE binding.entry_id = $2::uuid
+              AND binding.record_revision = record.current_revision`
     const [datasetResult, recordResult, sourceResult, chunkResult] = await Promise.all([
       this.pool.query(
          `WITH matched_record_ids AS (${matchedRecordIdsSql}
@@ -7389,15 +7395,7 @@ export class PostgresStore {
                    FROM core.canonical_records record
                   WHERE record.deleted_at IS NULL
                     AND record.dataset_id = source.dataset_id
-                    AND record.id IN (
-                      SELECT id
-                        FROM core.canonical_records
-                       WHERE stable_fields #>> '{sourceCatalog,publisher,entryId}' = $2
-                      UNION
-                      SELECT id
-                        FROM core.canonical_records
-                       WHERE stable_fields #>> '{sourceCatalog,collector,entryId}' = $2
-                    )
+                    AND record.id IN (SELECT id FROM matched_record_ids)
                )
              )
           ORDER BY source.updated_at DESC, source.source_key`,

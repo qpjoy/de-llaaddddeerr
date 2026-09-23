@@ -1,0 +1,29 @@
+.mih-news { display: grid; gap: 20px; }
+.mih-news-tabs, .mih-news-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.mih-news-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 24px; }
+.mih-news-filters .mih-news-actions, .mih-news-hint { grid-column: 1 / -1; }
+.mih-news-hint, .mih-news-facets p, .mih-news-facets small, .mih-news-list-heading span { color: var(--qp-text-3); font-size: 13px; margin: 0; }
+.mih-news-list-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mih-news-list-heading h2, .mih-news-facets h2 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 19px; }
+.mih-news-list { display: grid; gap: 14px; }
+.mih-news-card, .mih-news-debug, .mih-news-facets { padding: 24px; }
+.mih-news-card-meta { display: flex; flex-wrap: wrap; gap: 10px; color: var(--qp-text-3); font-size: 12px; }
+.mih-news-card-meta span:first-child { color: var(--qp-primary); font-weight: 600; }
+.mih-news-card h3 { margin: 14px 0 10px; line-height: 1.5; font-size: 19px; }
+.mih-news-card h3 button { border: 0; padding: 0; background: none; color: var(--qp-text-1); font: inherit; text-align: left; cursor: pointer; }
+.mih-news-card h3 button:hover { color: var(--qp-primary); }
+.mih-news-card p { color: var(--qp-text-2); line-height: 1.75; margin: 0 0 14px; overflow-wrap: anywhere; }
+.mih-news-card footer { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; color: var(--qp-text-3); font-size: 12px; }
+.mih-news-card footer button { margin-left: auto; }
+.mih-news-debug pre { max-height: 520px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.mih-news-facets { display: grid; gap: 12px; }
+.mih-news-facets > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.mih-news-detail { line-height: 1.8; overflow-wrap: anywhere; }
+.mih-news-body { white-space: pre-wrap; margin: 20px 0; }
+.mih-classifier-list { display: grid; gap: 16px; }
+.mih-classifier-list article { padding: 22px; }
+.mih-classifier-list h3 { margin-top: 8px; }
+.mih-classifier-list p { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--qp-text-2); }
+.mih-classifier-proposal { border-left: 3px solid var(--qp-primary); padding: 12px 16px; margin: 15px 0; background: var(--qp-bg-2); }
+@media (max-width: 900px) { .mih-news-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 18px; } }
+@media (max-width: 600px) { .mih-news-filters { grid-template-columns: minmax(0, 1fr); } .mih-news-card { padding: 18px; } .mih-news-list-heading { align-items: flex-start; flex-direction: column; } .mih-news-card footer button { margin-left: 0; } }

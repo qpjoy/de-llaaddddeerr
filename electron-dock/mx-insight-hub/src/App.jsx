@@ -86,6 +86,14 @@ function EnterprisePage(props) {
 const LazyTopicInsightsPage = lazy(() => import('./pages-topic-insights.jsx').then((module) => ({
   default: module.TopicInsightsPage,
 })))
+const LazyNewsDiscoveryPage = lazy(() => import('./pages-news-discovery.jsx').then(module => ({ default: module.NewsDiscoveryPage })))
+const LazyCatalogClassifierPage = lazy(() => import('./pages-catalog-classifier.jsx').then(module => ({ default: module.CatalogClassifierPage })))
+function NewsDiscoveryPage(props) {
+  return <Suspense fallback={<LoadingState label="正在加载新闻发现" />}><LazyNewsDiscoveryPage {...props} /></Suspense>
+}
+function CatalogClassifierPage(props) {
+  return <Suspense fallback={<LoadingState label="正在加载数据归类" />}><LazyCatalogClassifierPage {...props} /></Suspense>
+}
 
 function EcommerceTreasureBoxPage(props) {
   return (
@@ -359,6 +367,7 @@ const ROUTES = [
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/topic-insights', label: '专题洞察', description: '主题趋势、关联与证据报告', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TopicInsightsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/news', label: '新闻发现', description: '目录来源、新闻检索与阅读', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: NewsDiscoveryPage, capability: 'apikey.read' },
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/external-platforms', label: '外部数据平台', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -368,6 +377,7 @@ const ROUTES = [
   { path: '/agent/sequences', label: 'LLM Sequence', description: '可复用的有序调用链', icon: List, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentSequencePage, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/proxies', label: 'System Proxy', description: '共享出网代理与代理序列', icon: Globe, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProxyPage, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/market', label: 'Agent Market', description: '可编辑、可观测的 Agent 示例', icon: Storefront, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentMarketRoute, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/catalog-classifier', label: '数据归类', description: '来源匹配、Agent 建议与审核', icon: Books, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: CatalogClassifierPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/agent/studio', label: 'Agent Studio', description: '开发、编译与管理 Agent', icon: Graph, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentStudioRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
@@ -910,7 +920,7 @@ export function App() {
           </div>
         </header>
         <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
-          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} />
+          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={route.path === '/data-products/news'} />
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />

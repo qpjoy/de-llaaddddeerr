@@ -152,6 +152,12 @@ export function implementedRoutes(sources = []) {
     mode: 'stored', keywordSearch: true,
     defaultRule: '仅搜索已上架商品；从手机电商捕获发布，独立权限与店面版本，不触发采集。',
     evidence: 'server/data/virtual-supermarket.mjs',
+  }), route('news-discovery', {
+    platform: '分类存量授权范围', provider: null, product: '新闻发现',
+    operation: 'news.search', path: '/api/v1/data/news/search',
+    mode: 'stored', keywordSearch: true,
+    defaultRule: '按目录 UUID、结构化来源、类别和时间读取已入库新闻；目录不授予数据权限，待归类来源保留。',
+    evidence: 'server/data/news-discovery.mjs',
   }), route('topic-reports', {
     platform: '分类存量授权范围', provider: null, product: '专题洞察',
     operation: 'topic-reports.read', path: '/api/v1/data/topic-reports',

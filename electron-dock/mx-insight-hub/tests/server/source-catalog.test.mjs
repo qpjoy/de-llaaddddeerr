@@ -985,6 +985,8 @@ test('Postgres related-data queries bind the reviewed marketplace entry ID acros
     assert.match(sql, /stable_fields #>> '\{commerce,marketplace,entryId\}' = \$2/u)
     assert.match(sql, /stable_fields #>> '\{sourceCatalog,publisher,entryId\}' = \$2/u)
     assert.match(sql, /stable_fields #>> '\{sourceCatalog,collector,entryId\}' = \$2/u)
+    assert.match(sql, /FROM catalog\.record_catalog_bindings binding/u)
+    assert.match(sql, /binding\.record_revision = record\.current_revision/u)
     assert.deepEqual(values.slice(0, 2), [
       ['快手小店', 'kuaishou shop'],
       entry.id,

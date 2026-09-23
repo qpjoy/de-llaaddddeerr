@@ -209,6 +209,10 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  newsSources: (key, signal) => publicDataRequest(key, '/api/v1/data/news/sources', { signal }),
+  newsSearch: (key, body, idempotencyKey) => publicDataRequest(key, '/api/v1/data/news/search', { method: 'POST', body, idempotencyKey }),
+  newsFacets: (key, body, idempotencyKey) => publicDataRequest(key, '/api/v1/data/news/facets', { method: 'POST', body, idempotencyKey }),
+  newsArticle: (key, id, idempotencyKey) => publicDataRequest(key, `/api/v1/data/news/articles/${encodeURIComponent(id)}`, { idempotencyKey }),
   aggregateSources: apiKey => publicDataRequest(apiKey, '/api/v1/data/aggregate/sources'),
   aggregatePreview: (apiKey, body) => publicDataRequest(apiKey, '/api/v1/data/aggregate/preview', { method: 'POST', body }),
   aggregateSearch: (apiKey, body, idempotencyKey) => publicDataRequest(apiKey, '/api/v1/data/aggregate/search', { method: 'POST', body, idempotencyKey }),
@@ -624,6 +628,9 @@ export const adminApi = {
     { query },
   ),
   topicReportCategories: (token) => request(token, `${ADMIN_ROOT}/data-products/saved-records/categories`),
+  classificationRecords: (token, query) => request(token, `${ADMIN_ROOT}/agent/catalog-classifier/records`, { query }),
+  classifyRecord: (token, body) => request(token, `${ADMIN_ROOT}/agent/catalog-classifier/proposals`, { method: 'POST', body }),
+  reviewClassification: (token, id, body) => request(token, `${ADMIN_ROOT}/agent/catalog-classifier/proposals/${encodeURIComponent(id)}/review`, { method: 'POST', body }),
   createTopicReport: (token, body) => request(
     token,
     `${ADMIN_ROOT}/data-products/topic-reports`,

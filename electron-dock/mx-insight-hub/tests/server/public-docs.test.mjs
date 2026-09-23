@@ -1821,6 +1821,10 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/ip/risk',
       '/data/ip/risk/batch',
       '/data/mobile-commerce/items',
+      '/data/news/sources',
+      '/data/news/search',
+      '/data/news/facets',
+      '/data/news/articles/{id}',
       '/data/platforms',
       '/data/post',
       '/data/posts/media',
@@ -2015,6 +2019,12 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
     assert.deepEqual(document.paths[path], PUBLIC_OPENAPI_DOCUMENT.paths[path], path)
   }
   assertPublicDataProductMirror(PUBLIC_OPENAPI_DOCUMENT, document)
+  for (const path of ['/data/news/sources', '/data/news/search', '/data/news/facets', '/data/news/articles/{id}']) {
+    assert.deepEqual(document.paths[path], PUBLIC_OPENAPI_DOCUMENT.paths[path], path)
+    for (const operation of Object.values(document.paths[path])) for (const requirement of operation.security) {
+      for (const scheme of Object.keys(requirement)) assert.ok(PUBLIC_OPENAPI_DOCUMENT.components.securitySchemes[scheme])
+    }
+  }
 })
 
 test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {

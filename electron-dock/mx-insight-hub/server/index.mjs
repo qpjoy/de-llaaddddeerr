@@ -54,6 +54,8 @@ import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
 import { PostgresAcquisitionHistoryStore } from './acquisitions/history-store.mjs'
 import { TopicReportStore } from './insights/topic-reports.mjs'
+import { NewsDiscoveryStore } from './data/news-discovery.mjs'
+import { CatalogClassifier } from './agent/catalog-classifier.mjs'
 import { NotificationService } from './notifications.mjs'
 import { FeishuAlertNotifier } from './notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
@@ -86,6 +88,7 @@ export async function createRuntime(config = loadConfig()) {
     : null
   const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool) : null
   const topicReports = pool ? new TopicReportStore(pool) : null
+  const newsDiscovery = pool ? new NewsDiscoveryStore(pool) : null
   const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
   // Constructed unconditionally; it reports `enabled: false` when no Launcher
   // URL is configured, so the admin-token path is unaffected either way.
@@ -423,6 +426,7 @@ export async function createRuntime(config = loadConfig()) {
       maxConcurrency: config.externalMedia.maxConsumerConcurrency,
     },
     topicReports,
+    newsDiscovery,
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({
@@ -463,6 +467,7 @@ export async function createRuntime(config = loadConfig()) {
     agentPipelines,
     agentMarket,
     agentStudio,
+    catalogClassifier: pool && config.listenerMode !== 'public' ? new CatalogClassifier({ pool, store, agent }) : null,
     search,
     searchReindex,
     advancedSearch,

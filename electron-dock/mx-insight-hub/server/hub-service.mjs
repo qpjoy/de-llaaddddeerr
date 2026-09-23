@@ -1,6 +1,7 @@
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage } from './data/aggregate-search.mjs'
 import { nightAllFailureEvidence, nightAllRejectionError } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
+import { normalizeNewsQuery, newsCatalog, NEWS_CONTRACT, NEWS_METER } from './data/news-discovery.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
 import { issueDemoCredential, readDemoCredentialClaims } from './core/demo-credential.mjs'
@@ -560,6 +561,7 @@ export class HubService {
     externalImageLoader = null,
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     topicReports = null,
+    newsDiscovery = null,
     logger = console,
   }) {
     const mediaPolicy = externalMediaPolicy || DEFAULT_EXTERNAL_MEDIA_POLICY
@@ -587,6 +589,7 @@ export class HubService {
       ? externalSocialUserActivityEnabled : externalSocialUserActivityEnabled === true
     this.externalImageLoader = externalImageLoader
     this.topicReports = topicReports
+    this.newsDiscovery = newsDiscovery
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
       windowMs: Math.max(1_000, Math.floor(Number(mediaPolicy.windowMs) || DEFAULT_EXTERNAL_MEDIA_POLICY.windowMs)),
@@ -3563,6 +3566,68 @@ export class HubService {
   }
 
   async adminSavedRecordCategories() { return savedRecordCategoryCatalog(this.store) }
+
+  async newsScope(context) {
+    const grants = [...new Set(await this.#effectivePlatformGrants(context))].sort()
+    const known = new Set((await listCrawlerSpecs(this.store)).map(spec => spec.platform))
+    const platforms = grants.filter(platform => known.has(platform))
+    assert(platforms.length, 403, 'platform_not_granted', 'A saved-record category grant is required')
+    return platforms
+  }
+
+  async newsSources(context) {
+    const platforms = await this.newsScope(context)
+    const [entries, categories] = await Promise.all([
+      this.store.listSourceCatalogEntries(), savedRecordCategoryCatalog(this.store, platforms),
+    ])
+    return { contractVersion: NEWS_CONTRACT, scope: 'active_catalog_metadata', coverage: 'not_measured',
+      items: newsCatalog(entries), categories: categories.items.filter(item => platforms.includes(item.platform)) }
+  }
+
+  async newsRead(context, { body = {}, id = null, kind = 'search', idempotencyKey, path }) {
+    assert(this.newsDiscovery, 503, 'news_unavailable', 'News discovery requires PostgreSQL migration 110')
+    const key = requiredIdempotencyKey(idempotencyKey)
+    const platforms = await this.newsScope(context)
+    const queryOptions = { platforms, identity: [context.consumer.id, context.apiKey.id], secret: this.apiKeyPepper }
+    const scopeInput = body && typeof body === 'object' && !Array.isArray(body) ? { ...body, cursor: null } : body
+    const selected = normalizeNewsQuery(scopeInput, queryOptions).platforms
+    const policies = await Promise.all(selected.map(platform => this.#effectivePlatformPolicy(context, platform)))
+    const entitlements = typeof this.store.getApiKeyPlatformEntitlement === 'function'
+      ? await Promise.all(selected.map(platform => this.store.getApiKeyPlatformEntitlement(context.apiKey.id, platform))) : policies
+    const policy = { maxRequests: Math.min(...policies.map(p => p.maxRequests)),
+      windowSeconds: Math.max(...policies.map(p => p.windowSeconds)), maxPageSize: Math.min(...policies.map(p => p.maxPageSize)) }
+    const query = normalizeNewsQuery(body, { ...queryOptions, maxPageSize: policy.maxPageSize })
+    const requestId = randomUUID()
+    await this.store.reapStaleReservations()
+    const reservation = await this.store.reserve({ requestId, idempotencyKey: key,
+      fingerprint: requestFingerprint({ method: id ? 'GET' : 'POST', path, body: { id, kind, filters: query.filters, cursor: body.cursor || null, platforms } }),
+      tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
+      capability: NEWS_METER, authorizationPlatforms: selected,
+      acquisitionRequest: acquisitionRequestSnapshot({ method: id ? 'GET' : 'POST', path, body }),
+      unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart: new Date(Date.now() - policy.windowSeconds * 1000), maxRequests: policy.maxRequests,
+      apiKeyQuota: { maxRequests: Math.min(...entitlements.map(p => p?.maxRequests ?? this.defaultPolicy.maxRequests)),
+        windowSeconds: Math.max(...entitlements.map(p => p?.windowSeconds ?? this.defaultPolicy.windowSeconds)) }, replayWindowMs: null })
+    if (reservation.kind === 'conflict') throw new AppError(409, 'idempotency_conflict', 'Request key belongs to another query')
+    if (reservation.kind === 'in_progress' || reservation.kind === 'unknown') throw new AppError(409,
+      reservation.kind === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', 'The original request has not completed')
+    if (reservation.kind === 'replay') return { status: reservation.request.responseStatus, body: reservation.request.responseBody, requestId: reservation.request.id, replay: true }
+    const activeRequestId = reservation.request.id
+    let committing = false
+    try {
+      const data = id ? await this.newsDiscovery.article(id, platforms)
+        : kind === 'facets' ? await this.newsDiscovery.facets(query) : await this.newsDiscovery.search(query, this.apiKeyPepper)
+      const responseBody = { data }
+      committing = true
+      await this.store.commitRequest(activeRequestId, { responseStatus: 200, responseBody,
+        unitsActual: Math.max(1, data.pageInfo?.returnedCount || 1), upstreamLatencyMs: 0 })
+      return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
+    } catch (error) {
+      if (committing) await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
+      else await this.store.releaseRequest(activeRequestId, 'news_read_failed').catch(() => {})
+      throw error
+    }
+  }
 
   async savedRecordCategories(context) {
     return savedRecordCategoryCatalog(this.store, await this.#effectivePlatformGrants(context))

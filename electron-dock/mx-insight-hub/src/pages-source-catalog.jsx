@@ -1178,7 +1178,7 @@ function RelatedDataTab({ entry, state, onRetry }) {
       <div className="mih-source-related__match">
         <div>
           <strong>平台匹配口径</strong>
-          <small>使用 canonicalName 与 aliases 归一匹配数据中的 platform；不会用可变显示名作为数据主键。</small>
+          <small>汇总名称/别名、入库来源血缘及当前记录版本的已审核目录绑定；这是关联证据，不代表来源数据已收全。新闻发现按当前有效来源绑定筛选。</small>
         </div>
         <div className="mih-source-cell-tags" aria-label="平台匹配名称">
           {matchKeys.map((value) => <span key={value}>{value}</span>)}
@@ -1221,7 +1221,7 @@ function RelatedDataTab({ entry, state, onRetry }) {
               <div><strong>{source.displayName || source.sourceKey || '未命名接入'}</strong><small>{source.datasetId || '未绑定 dataset'} · {source.sourceKind || 'source'}</small></div>
               <em>{source.status || 'unknown'}</em>
             </article>
-          ))}</div> : <EmptyState icon={FlowArrow} title="尚无外部接入" description="可在“数据清洗计划”中注册 source，并将其 platform 统一为本平台的规范名称或别名。" />}
+          ))}</div> : <EmptyState icon={FlowArrow} title="尚无外部接入" description="可在“数据清洗计划”管理来源，或在“数据归类”补充记录与目录的绑定；不要为匹配目录而修改既有授权 platform。" />}
         </div>
       </div>
 

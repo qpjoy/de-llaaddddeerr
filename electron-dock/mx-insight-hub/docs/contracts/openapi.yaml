@@ -38,6 +38,705 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/news/sources:
+    get:
+      tags:
+      - News discovery
+      summary: News source catalog metadata and current-Key categories; no usage unit
+      security:
+      - bearerKey: []
+      - apiKeyHeader: []
+      responses:
+        '200':
+          description: Stored-data response; requestId identifies the metered request or metadata read.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - requestId
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    properties:
+                      contractVersion:
+                        const: mx-insight-hub.news-discovery.v1
+                      scope:
+                        const: active_catalog_metadata
+                      coverage:
+                        const: not_measured
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                              format: uuid
+                            name:
+                              type: string
+                            majorCategory:
+                              type:
+                              - string
+                              - 'null'
+                            scenarios:
+                              type: array
+                              items:
+                                type: string
+                      categories:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            sourceType:
+                              type: string
+                            platform:
+                              type: string
+                            label:
+                              type: string
+                            datasetId:
+                              type:
+                              - string
+                              - 'null'
+                            objectType:
+                              type:
+                              - string
+                              - 'null'
+                            registered:
+                              type: boolean
+                            authorized:
+                              type: boolean
+        '400':
+          description: Hub error envelope with code, message and requestId
+        '401':
+          description: Hub error envelope with code, message and requestId
+        '403':
+          description: Hub error envelope with code, message and requestId
+        '404':
+          description: Hub error envelope with code, message and requestId
+        '409':
+          description: Hub error envelope with code, message and requestId
+        '429':
+          description: Hub error envelope with code, message and requestId
+        '503':
+          description: Hub error envelope with code, message and requestId
+      operationId: newsSources
+  /data/news/search:
+    post:
+      tags:
+      - News discovery
+      summary: Search stored news, without acquisition or model calls
+      security:
+      - bearerKey: []
+      - apiKeyHeader: []
+      responses:
+        '200':
+          description: Stored-data response; requestId identifies the metered request or metadata read.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - requestId
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    properties:
+                      contractVersion:
+                        const: mx-insight-hub.news-discovery.v1
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          properties:
+                            id:
+                              type: string
+                              format: uuid
+                            revision:
+                              type: integer
+                            category:
+                              type: string
+                            source:
+                              type: object
+                              properties:
+                                catalogEntryId:
+                                  type:
+                                  - string
+                                  - 'null'
+                                  format: uuid
+                                name:
+                                  type: string
+                                code:
+                                  type:
+                                  - string
+                                  - 'null'
+                                bindingStatus:
+                                  type: string
+                                  enum:
+                                  - mapped
+                                  - unmapped
+                            title:
+                              type:
+                              - string
+                              - 'null'
+                            excerpt:
+                              type: string
+                              maxLength: 360
+                            summary:
+                              type:
+                              - string
+                              - 'null'
+                            url:
+                              type:
+                              - string
+                              - 'null'
+                              format: uri
+                            author:
+                              type: object
+                              properties:
+                                name:
+                                  type:
+                                  - string
+                                  - 'null'
+                            publishedAt:
+                              type:
+                              - string
+                              - 'null'
+                              format: date-time
+                            publishedDate:
+                              type:
+                              - string
+                              - 'null'
+                            publishedAtPrecision:
+                              type:
+                              - string
+                              - 'null'
+                            firstSeenAt:
+                              type:
+                              - string
+                              - 'null'
+                              format: date-time
+                            contentExtent:
+                              type: string
+                              enum:
+                              - full_text
+                              - summary
+                              - reference
+                              - unknown
+                            topics:
+                              type: array
+                              items:
+                                type: string
+                            keywords:
+                              type: array
+                              items:
+                                type: string
+                            section:
+                              type:
+                              - string
+                              - 'null'
+                      filters:
+                        type: object
+                        additionalProperties: false
+                        properties:
+                          query:
+                            type: string
+                            maxLength: 300
+                            default: ''
+                            description: Literal case-insensitive title/body substring; empty browses the corpus.
+                          catalogEntryIds:
+                            type: array
+                            maxItems: 50
+                            uniqueItems: true
+                            items:
+                              type: string
+                              pattern: ^[0-9a-fA-F-]{36}$
+                          sourceCodes:
+                            type: array
+                            maxItems: 50
+                            uniqueItems: true
+                            items:
+                              type: string
+                              pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$
+                          categories:
+                            type: array
+                            maxItems: 50
+                            uniqueItems: true
+                            items:
+                              type: string
+                              pattern: ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$
+                          binding:
+                            type: string
+                            enum:
+                            - all
+                            - mapped
+                            - unmapped
+                            default: all
+                          timeField:
+                            type: string
+                            enum:
+                            - firstSeenAt
+                            - publishedAt
+                            default: firstSeenAt
+                          from:
+                            type:
+                            - string
+                            - 'null'
+                            format: date-time
+                            description: Inclusive lower bound
+                          to:
+                            type:
+                            - string
+                            - 'null'
+                            format: date-time
+                            description: Exclusive upper bound
+                          pageSize:
+                            type: integer
+                            minimum: 1
+                            maximum: 100
+                            default: 20
+                          cursor:
+                            type:
+                            - string
+                            - 'null'
+                            maxLength: 4096
+                      dataBasis:
+                        const: stored_canonical
+                      pagination:
+                        const: live_keyset
+                      pageInfo:
+                        type: object
+                        properties:
+                          returnedCount:
+                            type: integer
+                          hasMore:
+                            type: boolean
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+        '400':
+          description: Hub error envelope with code, message and requestId
+        '401':
+          description: Hub error envelope with code, message and requestId
+        '403':
+          description: Hub error envelope with code, message and requestId
+        '404':
+          description: Hub error envelope with code, message and requestId
+        '409':
+          description: Hub error envelope with code, message and requestId
+        '429':
+          description: Hub error envelope with code, message and requestId
+        '503':
+          description: Hub error envelope with code, message and requestId
+      operationId: newsSearch
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: One exact request including cursor. Reuse only to retry that request; use a new key for each
+          new page.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                query:
+                  type: string
+                  maxLength: 300
+                  default: ''
+                  description: Literal case-insensitive title/body substring; empty browses the corpus.
+                catalogEntryIds:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    pattern: ^[0-9a-fA-F-]{36}$
+                sourceCodes:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$
+                categories:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    pattern: ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$
+                binding:
+                  type: string
+                  enum:
+                  - all
+                  - mapped
+                  - unmapped
+                  default: all
+                timeField:
+                  type: string
+                  enum:
+                  - firstSeenAt
+                  - publishedAt
+                  default: firstSeenAt
+                from:
+                  type:
+                  - string
+                  - 'null'
+                  format: date-time
+                  description: Inclusive lower bound
+                to:
+                  type:
+                  - string
+                  - 'null'
+                  format: date-time
+                  description: Exclusive upper bound
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 20
+                cursor:
+                  type:
+                  - string
+                  - 'null'
+                  maxLength: 4096
+  /data/news/facets:
+    post:
+      tags:
+      - News discovery
+      summary: Source/category facets of the latest 5000 matching records
+      security:
+      - bearerKey: []
+      - apiKeyHeader: []
+      responses:
+        '200':
+          description: Stored-data response; requestId identifies the metered request or metadata read.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - requestId
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    properties:
+                      contractVersion:
+                        const: mx-insight-hub.news-discovery.v1
+                      scope:
+                        const: latest_matching_records
+                      countBasis:
+                        const: records
+                      sampledRecords:
+                        type: integer
+                        maximum: 5000
+                      truncated:
+                        type: boolean
+                      asOf:
+                        type: string
+                        format: date-time
+                      sources:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            catalogEntryId:
+                              type:
+                              - string
+                              - 'null'
+                              format: uuid
+                            name:
+                              type: string
+                            code:
+                              type:
+                              - string
+                              - 'null'
+                            bindingStatus:
+                              type: string
+                              enum:
+                              - mapped
+                              - unmapped
+                            count:
+                              type: integer
+                      categories:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            count:
+                              type: integer
+        '400':
+          description: Hub error envelope with code, message and requestId
+        '401':
+          description: Hub error envelope with code, message and requestId
+        '403':
+          description: Hub error envelope with code, message and requestId
+        '404':
+          description: Hub error envelope with code, message and requestId
+        '409':
+          description: Hub error envelope with code, message and requestId
+        '429':
+          description: Hub error envelope with code, message and requestId
+        '503':
+          description: Hub error envelope with code, message and requestId
+      operationId: newsFacets
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: One exact request including cursor. Reuse only to retry that request; use a new key for each
+          new page.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                query:
+                  type: string
+                  maxLength: 300
+                  default: ''
+                  description: Literal case-insensitive title/body substring; empty browses the corpus.
+                catalogEntryIds:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    pattern: ^[0-9a-fA-F-]{36}$
+                sourceCodes:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$
+                categories:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    pattern: ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$
+                binding:
+                  type: string
+                  enum:
+                  - all
+                  - mapped
+                  - unmapped
+                  default: all
+                timeField:
+                  type: string
+                  enum:
+                  - firstSeenAt
+                  - publishedAt
+                  default: firstSeenAt
+                from:
+                  type:
+                  - string
+                  - 'null'
+                  format: date-time
+                  description: Inclusive lower bound
+                to:
+                  type:
+                  - string
+                  - 'null'
+                  format: date-time
+                  description: Exclusive upper bound
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 20
+                cursor:
+                  type:
+                  - string
+                  - 'null'
+                  maxLength: 4096
+  /data/news/articles/{id}:
+    get:
+      tags:
+      - News discovery
+      summary: Read the full stored article
+      security:
+      - bearerKey: []
+      - apiKeyHeader: []
+      responses:
+        '200':
+          description: Stored-data response; requestId identifies the metered request or metadata read.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - requestId
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    properties:
+                      contractVersion:
+                        const: mx-insight-hub.news-discovery.v1
+                      article:
+                        type: object
+                        additionalProperties: false
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                          revision:
+                            type: integer
+                          category:
+                            type: string
+                          source:
+                            type: object
+                            properties:
+                              catalogEntryId:
+                                type:
+                                - string
+                                - 'null'
+                                format: uuid
+                              name:
+                                type: string
+                              code:
+                                type:
+                                - string
+                                - 'null'
+                              bindingStatus:
+                                type: string
+                                enum:
+                                - mapped
+                                - unmapped
+                          title:
+                            type:
+                            - string
+                            - 'null'
+                          excerpt:
+                            type: string
+                            maxLength: 360
+                          summary:
+                            type:
+                            - string
+                            - 'null'
+                          url:
+                            type:
+                            - string
+                            - 'null'
+                            format: uri
+                          author:
+                            type: object
+                            properties:
+                              name:
+                                type:
+                                - string
+                                - 'null'
+                          publishedAt:
+                            type:
+                            - string
+                            - 'null'
+                            format: date-time
+                          publishedDate:
+                            type:
+                            - string
+                            - 'null'
+                          publishedAtPrecision:
+                            type:
+                            - string
+                            - 'null'
+                          firstSeenAt:
+                            type:
+                            - string
+                            - 'null'
+                            format: date-time
+                          contentExtent:
+                            type: string
+                            enum:
+                            - full_text
+                            - summary
+                            - reference
+                            - unknown
+                          topics:
+                            type: array
+                            items:
+                              type: string
+                          keywords:
+                            type: array
+                            items:
+                              type: string
+                          section:
+                            type:
+                            - string
+                            - 'null'
+                          body:
+                            type:
+                            - string
+                            - 'null'
+        '400':
+          description: Hub error envelope with code, message and requestId
+        '401':
+          description: Hub error envelope with code, message and requestId
+        '403':
+          description: Hub error envelope with code, message and requestId
+        '404':
+          description: Hub error envelope with code, message and requestId
+        '409':
+          description: Hub error envelope with code, message and requestId
+        '429':
+          description: Hub error envelope with code, message and requestId
+        '503':
+          description: Hub error envelope with code, message and requestId
+      operationId: newsArticle
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: One exact request including cursor. Reuse only to retry that request; use a new key for each
+          new page.
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
   /data/xiaohongshu/hot-notes/search:
     post:
       operationId: xiaohongshuHotNotes

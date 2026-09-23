@@ -746,6 +746,7 @@ export function createApp({
   agent = null,
   agentPipelines = null,
   agentMarket = null,
+  catalogClassifier = null,
   agentStudio = null,
   search = null,
   searchReindex = null,
@@ -1913,6 +1914,27 @@ export function createApp({
           })
           return
         }
+      }
+      if (pathname === '/internal/v1/admin/agent/catalog-classifier/records' && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        if (!catalogClassifier) throw new AppError(503, 'classification_unavailable', 'Classification requires PostgreSQL migration 110')
+        sendJson(response, 200, { data: await catalogClassifier.records(Object.fromEntries(searchParams)), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
+      if (pathname === '/internal/v1/admin/agent/catalog-classifier/proposals' && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'catalog classification')
+        if (!catalogClassifier) throw new AppError(503, 'classification_unavailable', 'Classification requires PostgreSQL migration 110')
+        sendJson(response, 200, { data: await catalogClassifier.propose(await readJson(request, 16 * 1024), principal.memberId || principal.kind || 'admin-token'), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/catalog-classifier/proposals/:id/review')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'classification review')
+        if (!catalogClassifier) throw new AppError(503, 'classification_unavailable', 'Classification requires PostgreSQL migration 110')
+        sendJson(response, 200, { data: await catalogClassifier.review(params.id, await readJson(request, 16 * 1024), principal.memberId || principal.kind || 'admin-token'), requestId }, { 'cache-control': 'no-store' })
+        return
       }
       params = routeMatch(pathname, '/internal/v1/admin/data-products/topic-reports/:id')
       if (request.method === 'GET' && params) {
@@ -5986,6 +6008,23 @@ export function createApp({
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'saved-record categories')
         sendJson(response, 200, { data: await service.savedRecordCategories(context), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/news/sources') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'news sources')
+        sendJson(response, 200, { data: await service.newsSources(context), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/news/articles/:id')
+      if ((request.method === 'GET' && params) || (request.method === 'POST' && ['/api/v1/data/news/search', '/api/v1/data/news/facets'].includes(pathname))) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'news queries')
+        const result = await service.newsRead(context, { id: params?.id || null,
+          body: params ? {} : await readJson(request, 32 * 1024), kind: pathname.endsWith('/facets') ? 'facets' : 'search',
+          idempotencyKey: request.headers['idempotency-key'], path: pathname })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId, 'cache-control': 'no-store' })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/topic-reports') {

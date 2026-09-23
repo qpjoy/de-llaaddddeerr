@@ -1,4 +1,6 @@
 import { isCrawlerSourceKey } from './source-contract.mjs'
+import { newsFields } from '../../data/news-record.mjs'
+import { PUBLISHER_CATALOG_KEYS } from '../../data/catalog-source-codes.mjs'
 
 const CRAWLER_RECORD_CONTRACT_VERSION = 'mx-insight-hub.crawler-saved-record.v1'
 const SHANGHAI_TIMEZONE = 'Asia/Shanghai'
@@ -417,9 +419,10 @@ export function enrichCrawlerRecord(record, raw, source, { classifyCatalog } = {
         [connectorId, sourceFamily],
         { preferredSourceKey: collectorPreferredSourceKey(connectorId || sourceFamily) },
       ),
-      publisher: classify([providerCode, providerName]),
+      publisher: classify([providerCode, providerName], { preferredSourceKey: PUBLISHER_CATALOG_KEYS[providerCode] || null }),
     },
     tags,
+    news: newsFields(raw),
   }
   return record
 }

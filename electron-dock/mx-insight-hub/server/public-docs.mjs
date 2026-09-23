@@ -1,4 +1,5 @@
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
+import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
 import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contracts/xiaohongshu-discovery-docs.mjs'
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
@@ -1254,6 +1255,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   paths: {
     ...xhsResearchPaths,
     ...xhsDiscoveryPaths,
+    ...newsOpenApiPaths,
     '/xiaohongshu/pgy/get_note_detail': { post: { ...xhsResearchPaths['/data/xiaohongshu/notes/detail'].post, operationId: 'xiaohongshuNoteAnalyticsAlias', description: '与 /data/xiaohongshu/notes/detail 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
     '/data/ip/risk': {
@@ -5277,6 +5279,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
   { key: 'saved-record-categories', path: '/docs/saved-record-categories', label: '数据类别目录', section: '数据目录' },
   { key: 'topic-reports', path: '/docs/topic-reports', label: '专题洞察', section: '数据产品' },
+  { key: 'news-discovery', path: '/docs/news-discovery', label: '新闻发现', section: '数据产品' },
   { key: 'taobao-tmall', path: '/docs/taobao-tmall', label: '淘宝天猫', section: '平台原生接口 · JustOne' },
   { key: 'jd-native', path: '/docs/jd-native', label: '京东', section: '平台原生接口 · JustOne' },
   { key: 'xianyu-native', path: '/docs/xianyu-native', label: '闲鱼', section: '平台原生接口 · JustOne' },
@@ -5863,6 +5866,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
 
     ${xhsNativePages()}
     ${xhsDiscoveryPages()}
+    ${newsGuide()}
     <section class="doc-page" data-doc-page="xiaohongshu-note">
     <h2 id="xiaohongshu-note">小红书笔记</h2>
     <div class="notice">这条数据产品由 Hub 对接的外部供应方采集，但<strong>公开合同不暴露供应方身份</strong>：请求里没有供应方选择字段，Hub 更换供应方不需要你改集成。要判断一次交付是上游的问题还是 Hub 侧的问题，看 <code>meta.reason.scope</code>（见下文「每次调用消耗什么」），不需要知道是哪一家。</div>
@@ -6403,6 +6407,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
     else if (path.startsWith('/data/aggregate/')) return scopes.some(scope => scope.platforms.some(platform => ['ecommerce', 'telegram', 'public_opinion', 'mobile_commerce', 'social', 'xiaohongshu', 'weibo', 'douyin', 'bilibili', 'kuaishou', 'facebook', 'instagram', 'reddit', 'twitter', 'tiktok', 'youtube', 'zhihu', 'wechat_mp', 'wechat_search'].includes(platform) || /^data_center_saved_records_/.test(platform)))
     else if (['/data/platforms', '/data/saved-records/categories'].includes(path)) return scopes.length > 0
     else if (path.startsWith('/data/topic-reports')) return scopes.some(scope => scope.platforms.some(value => /^data_center_saved_records_[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)))
+    else if (path.startsWith('/data/news/')) return scopes.some(scope => scope.platforms.some(value => /^data_center_saved_records_[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)))
     else return false
   }
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
@@ -6418,6 +6423,7 @@ const TENANT_PRODUCT_PATHS = {
   'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],
   'saved-record-categories': ['/data/platforms', '/data/saved-records/categories'],
   'virtual-supermarket': ['/data/virtual-supermarket/products'], 'topic-reports': ['/data/platforms', '/data/topic-reports', '/data/topic-reports/{id}'],
+  'news-discovery': Object.keys(newsOpenApiPaths),
   'taobao-tmall': ['/data/ecommerce/taobao/product-detail', '/data/ecommerce/taobao/product-reviews', '/data/ecommerce/taobao/product-questions', '/data/ecommerce/taobao/shop-products'],
   'jd-native': [], 'xianyu-native': [], 'xiaohongshu-ec-native': [],
 }
@@ -6425,6 +6431,7 @@ const tenantDocsRoute = (route, scopes) => {
   if (TENANT_HIDDEN_DOCS.has(route.key)) return false
   if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
   if (route.key === 'topic-reports' && !tenantDocumentPathAllowed('/data/topic-reports', scopes)) return false
+  if (route.key === 'news-discovery' && !tenantDocumentPathAllowed('/data/news/search', scopes)) return false
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   return paths.some(path => tenantDocumentPathAllowed(path, scopes))
 }
@@ -6459,6 +6466,7 @@ export function tenantOpenApiDocument(scopes) {
 }
 
 function tenantDocBody(route, scopes) {
+  if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
