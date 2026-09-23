@@ -127,6 +127,72 @@ def named_hash(path, value):
         raise RuntimeError('SSD content differs from its hash filename: ' + path)
 
 
+def source_metadata(root, path, tree):
+    """Observe a candidate without following links or accepting replaced parents."""
+    parts = path.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise RuntimeError('Unsafe relative source path.')
+    fd = os.dup(root)
+    try:
+        current = ''
+        for name in parts[:-1]:
+            actual = stamp(os.fstat(fd))
+            if any(actual[k] != tree[current][k] for k in ('dev', 'ino')):
+                raise RuntimeError('SSD root/parent directory was replaced.')
+            current = current + '/' + name if current else name
+            child = os.open(name, DIR_FLAGS, dir_fd=fd)
+            os.close(fd); fd = child
+        actual = stamp(os.fstat(fd))
+        if any(actual[k] != tree[current][k] for k in ('dev', 'ino')):
+            raise RuntimeError('SSD parent directory was replaced.')
+        return stamp(os.stat(parts[-1], dir_fd=fd, follow_symlinks=False))
+    finally:
+        os.close(fd)
+
+
+def recheck_sources(source, tree, paths):
+    """Hash only ctime-only drift with a trusted digest in the original filename.
+
+    The original manifest is immutable. Return a per-attempt snapshot for strict
+    checks during copying; all other metadata changes and temp files still fail.
+    Read scope remains bounded by the already validated SSD-only manifest.
+    """
+    reviewed, changes = dict(tree), []
+    hashed_bytes = 0
+    last_progress = time.monotonic()
+    for index, path in enumerate(paths, 1):
+        try:
+            expected = tree[path]
+            actual = source_metadata(source, path, tree)
+            fields = [k for k in STAT_FIELDS if actual[k] != expected[k]]
+            if fields:
+                if fields != ['ctime_ns']:
+                    raise RuntimeError('SSD metadata changed: ' + ', '.join(fields))
+                if not re.fullmatch(r'[0-9a-f]{64}\.[A-Za-z0-9]{1,12}', path.rsplit('/', 1)[-1]):
+                    raise RuntimeError('Ctime changed without a SHA256 filename; a fresh review is required.')
+                reviewed[path] = actual
+            fd = open_file(source, path, reviewed)
+            try:
+                if fields:
+                    sha = digest(fd, actual['size']); named_hash(path, sha)
+                    if stamp(os.fstat(fd)) != actual or source_metadata(source, path, tree) != actual:
+                        raise RuntimeError('SSD file/path changed during ctime content recheck.')
+                    changes.append({'path': path, 'prepared': expected, 'observed': actual,
+                                    'sha256': sha, 'validation': 'ctime-only-and-sha256-matches-filename'})
+                    hashed_bytes += actual['size']
+            finally:
+                os.close(fd)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError('Candidate cannot be copied: ' + path + '; ' + str(exc))
+        if time.monotonic() - last_progress >= 10:
+            emit('nas_repair_source_recheck_progress', checked=index, candidates=len(paths),
+                 ctime_revalidated=len(changes), hashed_source_bytes=hashed_bytes)
+            last_progress = time.monotonic()
+    emit('nas_repair_source_rechecked', checked=len(paths), ctime_revalidated=len(changes),
+         hashed_source_bytes=hashed_bytes, original_manifest_unchanged=True)
+    return reviewed, changes
+
+
 def check_existing(parent, name, size, sha):
     try: fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     except FileNotFoundError: return False
@@ -305,6 +371,7 @@ def execute(manager, profile, report_path):
         reclaim_plan.require_completed(op.state, op.path)
         op.open_media(sealed=True)
         deployment_guard(manager, op, plan, baseline, report_fd)
+        tree, revalidated = recheck_sources(op.source, tree, paths)
         # Prove every source and target parent before the first NAS write.
         for path in paths:
             try:
@@ -323,6 +390,10 @@ def execute(manager, profile, report_path):
         stage_name = '.mx-static-repair-copy-' + token
         prep.private_write(attempt_fd, 'started.json', {'report': report_path, 'manifest_sha256': plan['manifest_sha256'],
                            'stage_name': stage_name, 'candidates': len(paths), 'reclaim_ready': False})
+        if revalidated:
+            prep.private_write(attempt_fd, 'source-revalidation.json', {'schema': 1,
+                               'manifest_sha256': plan['manifest_sha256'], 'entries': revalidated,
+                               'original_manifest_unchanged': True, 'reclaim_ready': False})
         os.fsync(attempt_fd); os.fsync(report_fd)
         os.mkdir(stage_name, 0o700, dir_fd=op.job)
         stage = os.open(stage_name, DIR_FLAGS, dir_fd=op.job)
@@ -333,7 +404,7 @@ def execute(manager, profile, report_path):
         copied = present = total = 0
         emit('nas_repair_copy_started', report_directory=report_path, attempt_directory=attempt_path,
              files=len(paths), logical_bytes=sum(tree[p]['size'] for p in paths), production_restart=False,
-             write_bytes_per_second=0, bandwidth_unlimited=True)
+             write_bytes_per_second=0, bandwidth_unlimited=True, source_ctime_revalidated=len(revalidated))
         last_progress = last_guard = time.monotonic()
         for index, path in enumerate(paths, 1):
             try:
@@ -357,6 +428,7 @@ def execute(manager, profile, report_path):
         result = {'phase': 'manifest_copy_complete', 'report_directory': report_path,
                   'attempt_directory': attempt_path, 'copied': copied, 'already_present': present,
                   'logical_bytes': total, 'production_restart': False, 'source_deleted': False,
+                  'source_ctime_revalidated': len(revalidated),
                   'live_snapshot': True, 'stopped_writer_recheck_required': True, 'reclaim_ready': False}
         prep.private_write(attempt_fd, 'result.json', result); os.fsync(attempt_fd)
         emit('nas_repair_copy_complete', **result)

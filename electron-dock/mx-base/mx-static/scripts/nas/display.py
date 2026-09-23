@@ -88,6 +88,9 @@ def render(value):
                 table(['分组','文件数','逻辑大小','tmp 数'],rows)+
                 '\n在线快照；仍需停写复核。未复制、重启、采用新基准或清理；此报告不能直接用于旧 cutover/redeploy/reclaim。')
     if event=='nas_repair_failed':return '修复准备未通过\n私有报告：'+value['report_directory']+'\n原因：'+value['error']
+    if event in ('nas_repair_source_recheck_progress','nas_repair_source_rechecked'):
+        return 'SSD 候选核对{}：{} 个；仅 ctime 变化且文件名哈希验证通过 {} 个，额外读取 {}；原清单保留。'.format(
+            '完成' if event=='nas_repair_source_rechecked' else '进度',value['checked'],value['ctime_revalidated'],size(value['hashed_source_bytes']))
     if event=='nas_repair_copy_started':
         return '开始在线补齐：{} 个候选文件，{}；不限速\n执行报告：{}\n保留 SSD，NAS 同名文件不覆盖；不重启业务。'.format(value['files'],size(value['logical_bytes']),value['attempt_directory'])
     if event=='nas_repair_copy_progress':

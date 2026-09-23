@@ -52,6 +52,95 @@ class RepairCopyTests(unittest.TestCase):
     def copy(self):
         return copying.copy_one(self.src, self.dst, self.stg, self.paths[0], self.tree, self.dirs, self.journal)
 
+    def hashed_candidate(self):
+        path = self.file.with_name(hashlib.sha256(self.file.read_bytes()).hexdigest() + '.bin')
+        self.file.rename(path); self.file = path
+        with (self.output / 'union-manifest.jsonl').open('wb') as stream:
+            report = Report(stream)
+            self.plan = planning.compare(self.src, self.dst, report)
+            self.plan['manifest_sha256'] = report.sha256.hexdigest()
+        self.tree, self.dirs, self.paths = copying.read_manifest(self.out, self.plan)
+
+    def change_ctime(self):
+        self.file.chmod(0o600); self.file.chmod(0o644)
+        current = copying.stamp(self.file.stat())
+        self.assertEqual([k for k in copying.STAT_FIELDS if current[k] != self.tree[self.paths[0]][k]], ['ctime_ns'])
+
+    def test_ctime_only_hash_filename_recheck_preserves_original_manifest(self):
+        self.hashed_candidate(); self.change_ctime()
+        before = (self.output / 'union-manifest.jsonl').read_bytes()
+        prepared = dict(self.tree[self.paths[0]])
+        reviewed, changes = copying.recheck_sources(self.src, self.tree, self.paths)
+        self.assertEqual(self.tree[self.paths[0]], prepared)
+        self.assertEqual((self.output / 'union-manifest.jsonl').read_bytes(), before)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]['prepared'], prepared)
+        self.assertEqual(changes[0]['observed'], copying.stamp(self.file.stat()))
+        outcome, _ = copying.copy_one(self.src, self.dst, self.stg, self.paths[0], reviewed, self.dirs, self.journal)
+        self.assertEqual(outcome, 'copied')
+        self.assertEqual((self.target / self.paths[0]).read_bytes(), b'new-media')
+
+    def test_unchanged_candidate_recheck_never_hashes_contents(self):
+        with mock.patch.object(copying, 'digest', side_effect=AssertionError('no extra content read')):
+            reviewed, changes = copying.recheck_sources(self.src, self.tree, self.paths)
+        self.assertEqual(reviewed, self.tree); self.assertEqual(changes, [])
+
+    def test_ctime_only_without_hash_filename_still_refused(self):
+        self.change_ctime()
+        with mock.patch.object(copying, 'digest') as digest, self.assertRaisesRegex(RuntimeError, 'without a SHA256 filename'):
+            copying.recheck_sources(self.src, self.tree, self.paths)
+        digest.assert_not_called()
+        self.assertFalse((self.target / self.paths[0]).exists())
+
+    def test_same_size_corruption_with_restored_mtime_is_not_accepted_as_ctime_only(self):
+        self.hashed_candidate()
+        expected = self.tree[self.paths[0]]
+        self.file.write_bytes(b'bad-media')
+        os.utime(str(self.file), ns=(expected['mtime_ns'], expected['mtime_ns']))
+        self.assertEqual([k for k in copying.STAT_FIELDS if copying.stamp(self.file.stat())[k] != expected[k]], ['ctime_ns'])
+        with self.assertRaisesRegex(RuntimeError, 'differs from its hash filename'):
+            copying.recheck_sources(self.src, self.tree, self.paths)
+        self.assertFalse((self.target / self.paths[0]).exists())
+
+    def test_other_metadata_changes_are_not_relaxed_for_hash_filenames(self):
+        self.hashed_candidate(); self.file.chmod(0o600)
+        with mock.patch.object(copying, 'digest') as digest, self.assertRaisesRegex(RuntimeError, 'mode'):
+            copying.recheck_sources(self.src, self.tree, self.paths)
+        digest.assert_not_called()
+
+    def test_changes_during_or_after_ctime_recheck_still_block_copy(self):
+        self.hashed_candidate(); self.change_ctime()
+        original = copying.digest
+        def changed(fd, size):
+            result = original(fd, size)
+            self.file.chmod(0o600)
+            return result
+        with mock.patch.object(copying, 'digest', side_effect=changed), self.assertRaisesRegex(RuntimeError, 'during ctime content recheck'):
+            copying.recheck_sources(self.src, self.tree, self.paths)
+        self.file.chmod(0o644)
+        reviewed, _ = copying.recheck_sources(self.src, self.tree, self.paths)
+        self.file.chmod(0o600); self.file.chmod(0o644)
+        with self.assertRaises(RuntimeError):
+            copying.copy_one(self.src, self.dst, self.stg, self.paths[0], reviewed, self.dirs, self.journal)
+        self.assertFalse((self.target / self.paths[0]).exists())
+
+    def test_source_recheck_rejects_missing_symlink_hardlink_and_replaced_parent(self):
+        self.hashed_candidate()
+        self.file.unlink()
+        with self.assertRaises(RuntimeError): copying.recheck_sources(self.src, self.tree, self.paths)
+        self.file.symlink_to(self.keep)
+        with self.assertRaises(RuntimeError): copying.recheck_sources(self.src, self.tree, self.paths)
+        self.file.unlink(); self.file.write_bytes(b'new-media'); self.hashed_candidate()
+        os.link(str(self.file), str(self.source / 'extra-link'))
+        with self.assertRaisesRegex(RuntimeError, 'nlink'): copying.recheck_sources(self.src, self.tree, self.paths)
+        (self.source / 'extra-link').unlink()
+        (self.source / 'video').rename(self.source / 'retained')
+        (self.source / 'video').symlink_to(self.source / 'retained', target_is_directory=True)
+        with self.assertRaises(RuntimeError): copying.recheck_sources(self.src, self.tree, self.paths)
+        (self.source / 'video').unlink(); (self.source / 'video').mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'directory was replaced'):
+            copying.recheck_sources(self.src, self.tree, self.paths)
+
     def test_missing_only_copy_preserves_source_and_nas_extras(self):
         before = self.file.stat(); keep = self.keep.stat()
         outcome, sha = self.copy()
@@ -206,6 +295,13 @@ class RepairCopyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): copying.validate_path(value)
 
     def test_complete_copy_and_repeat_keep_historical_plan_and_deployment_unchanged(self):
+        self.complete_copy_and_repeat()
+
+    def test_ctime_revalidation_is_durable_before_nas_write_and_preserves_original_plan(self):
+        self.hashed_candidate(); self.change_ctime()
+        self.complete_copy_and_repeat(ctime_revalidated=True)
+
+    def complete_copy_and_repeat(self, ctime_revalidated=False):
         profile = manage.profiles()['part1']
         report_path = planning.REPORT_ROOT + '/infra-' + 'a' * 32
         history = {'schema': 1, 'volume': manage.prep.VOLUME, 'report_directory': profile['report'],
@@ -253,7 +349,19 @@ class RepairCopyTests(unittest.TestCase):
                 mock.patch.object(copying.reclaim_plan, 'health_guard'), \
                 mock.patch.object(copying.reclaim_plan, 'extra_source_consumers', return_value=[]), \
                 mock.patch.object(manage, 'run', return_value=json.dumps([volume])) as run:
-            first = copying.execute(manage, profile, report_path)
+            original_copy = copying.copy_one
+            def require_revalidation_record(*args):
+                if ctime_revalidated:
+                    records = list(self.output.glob('copy-*/source-revalidation.json'))
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(records[0].stat().st_mode & 0o777, 0o600)
+                    record = json.loads(records[0].read_text())
+                    self.assertEqual(record['manifest_sha256'], self.plan['manifest_sha256'])
+                    self.assertEqual(record['entries'][0]['prepared'], self.tree[self.paths[0]])
+                    self.assertEqual(record['entries'][0]['sha256'], hashlib.sha256(b'new-media').hexdigest())
+                return original_copy(*args)
+            with mock.patch.object(copying, 'copy_one', side_effect=require_revalidation_record):
+                first = copying.execute(manage, profile, report_path)
             second = copying.execute(manage, profile, report_path)
             # An environment change must stop before any further NAS staging.
             folders = sorted(p.name for p in self.job.iterdir())
@@ -262,6 +370,7 @@ class RepairCopyTests(unittest.TestCase):
         self.assertEqual(first['copied'], 1); self.assertEqual(first['already_present'], 0)
         self.assertEqual(second['copied'], 0); self.assertEqual(second['already_present'], 1)
         self.assertFalse(first['reclaim_ready']); self.assertFalse(first['production_restart'])
+        self.assertEqual(first['source_ctime_revalidated'], int(ctime_revalidated))
         self.assertEqual(sorted(p.name for p in self.job.iterdir()), folders)
         for name, data in before.items(): self.assertEqual((self.output / name).read_bytes(), data)
         for op in operations:

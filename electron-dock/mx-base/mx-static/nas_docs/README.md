@@ -2,7 +2,9 @@
 
 最新现场（2026-09-24）：infra 十个媒体消费者在后续重建中遗漏 NAS 覆盖，内核已确认当前实际使用 SSD；恢复因 `.env`/部署身份漂移被阻止。两侧各有独有文件，禁止清理、重复旧复制或绕过检查。详见 [当前差异、重启/重装/断电与防回退要求](operations/no-ssd-fallback.md)。新增 `nas infra storage check` 只读核对当前配置和内核挂载，不能代替发布启动拦截。
 
-当前版本核对和 `nas infra repair prepare` 随后已通过，具体报告尾号 `a0131341096e4ba9b9e3e61c3e2581dd`。下一步新增 `nas infra repair copy <报告目录>`：默认不限速，只补清单中 5,289 个 / 2.69 GiB 的 SSD 独有文件，不覆盖 NAS、不删除 SSD、不重启业务。复制尚未收到执行回执，也不代表挂载切换；`5beead17` 尚无此入口，需同步本轮更新。后续约 900 多 GiB 的第二卷使用 `nas delta task part2 copy --unlimited`，两项任务依次执行。详见上方方案末尾的复制说明。
+当前版本核对和 `nas infra repair prepare` 随后已通过，具体报告尾号 `a0131341096e4ba9b9e3e61c3e2581dd`。`nas infra repair copy <报告目录>` 默认不限速，只补清单中 5,289 个 / 2.69 GiB 的 SSD 独有文件，不覆盖 NAS、不删除 SSD、不重启业务。首次后台任务 `mx-nas-part1-repair-copy-6c31173829.service` 在写前检查时失败，`attempt_directory=null`，本次未复制 NAS 文件。后续定点核对确认头像文件仅 ctime 变化；已新增仅针对 SHA256 命名候选的内容复核，验证通过才继续，原清单保留。同步更新后可重试同一 repair copy 命令，不必重复整卷 prepare；尚无重试完成回执。
+
+用户最新顺序：**Part 1 完成 NAS 切换、业务验收、恢复基准登记和新 SSD 清理清单核验，保留 SSD 待日后删除；然后再将 Part 2 推进到同样状态。** 不在 Part 1 在线补齐后就启动 Part 2。当前仍缺 Part 1 修复切换/新基准和 Part 2 独立切换/回收执行能力；详见 [完整迁移终点与当前阻塞](operations/no-ssd-fallback.md#完整迁移终点与当前阻塞)。
 
 历史现场（2026-09-22）：恢复快照 `bd7b343be731926be9c8` 曾安装并启用已迁移项目统一策略；见 [成功回执](operations/systemd-239-recovery-fix.md)。这不是当前存储状态或真实重启演练的证明；业务验收及 SSD 回收仍待回执。
 
@@ -117,6 +119,6 @@ bash scripts/manage.sh nas infra deployment audit
 bash scripts/manage.sh nas infra permissions check
 ```
 
-第一卷已切换，早期小批复制、预复制与切换命令是历史流程，不重复执行。当前只读清单已通过；业务验收正常后才单独运行 `nas infra task part1 cleanup --business-accepted`。第二卷使用 `nas delta task part2 copy --unlimited` 预复制，不能提前清理。安装/启用恢复见 [统一管理](operations/unified-management.md)，NAS 进程与多项目分工见 [平台结构](operations/nas-platform.md)。
+第一卷历史切换和旧只读清单不能用于当前漂移后的回收；先完成上述 Part 1 修复、验收和新清单，用户暂不执行删除。Part 1 达到约定终点后，第二卷从 `nas delta task part2 copy --unlimited` 开始独立迁移；该命令仅预复制，不代表已切换或可删 SSD。安装/启用恢复见 [统一管理](operations/unified-management.md)，NAS 进程与多项目分工见 [平台结构](operations/nas-platform.md)。
 
 本地回归：`python3 -B -m unittest discover -s tests -p 'test_nas*.py'`。测试使用临时目录、模拟工具以及可用时的本地 rsync，不连接生产服务器或 NAS。
