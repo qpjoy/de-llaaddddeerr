@@ -62,9 +62,10 @@ class ManagerTests(unittest.TestCase):
 
     def test_explicit_maintenance_and_acceptance_gates(self):
         p=manager.parser()
+        profile=dict(self.profile,plan=self.profile['report']+'/reclaim-plan-'+'a'*32)
         for action,flag in (('cutover','--maintenance'),('redeploy','--maintenance'),('reclaim','--business-accepted')):
-            with self.assertRaises(RuntimeError):manager.task_command(action,self.profile,p.parse_args([action,'part1']))
-            self.assertTrue(manager.task_command(action,self.profile,p.parse_args([action,'part1',flag])))
+            with self.assertRaises(RuntimeError):manager.task_command(action,profile,p.parse_args([action,'part1']))
+            self.assertTrue(manager.task_command(action,profile,p.parse_args([action,'part1',flag])))
 
     def test_recovery_does_not_touch_healthy_running_containers_or_host_nas(self):
         rows=self.rows();op,context=self.fake_operation(rows)
@@ -149,12 +150,13 @@ class ManagerTests(unittest.TestCase):
 
     def test_reclaim_job_allows_ssd_write_and_requires_acceptance(self):
         args=manager.parser().parse_args(['reclaim','part1','--business-accepted'])
+        profile=dict(self.profile,plan=self.profile['report']+'/reclaim-plan-'+'a'*32)
         with mock.patch.object(manager,'run',return_value='') as run:
-            manager.launch('reclaim',self.profile,args)
+            manager.launch('reclaim',profile,args)
         command=run.call_args.args[0]
         self.assertNotIn('--property=ReadOnlyPaths=/data',command)
         self.assertIn('--property=ReadOnlyPaths=/mnt/nas',command)
-        self.assertEqual(command[-2:],['--business-accepted',self.profile['plan']])
+        self.assertEqual(command[-2:],['--business-accepted',profile['plan']])
 
     def test_redeploy_registers_created_ids_before_start_and_uses_exact_override(self):
         rows=self.rows();op,context=self.fake_operation(rows)

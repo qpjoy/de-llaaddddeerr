@@ -92,6 +92,9 @@ def route(argv, config):
     if tail==['storage','check']:
         if p['adapter']!='infra-v1':raise RuntimeError('Storage check adapter not reviewed for this project.')
         return ['storage-check',task]
+    if tail[:2]==['cleanup','check']:
+        if p['adapter']!='infra-v1':raise RuntimeError('UNION reclaim check only reviewed for infra.')
+        return ['reclaim-check',task]+tail[2:]
     if tail==['repair','prepare']:
         if p['adapter']!='infra-v1':raise RuntimeError('Repair preparation only reviewed for infra.')
         return ['repair-prepare',task]

@@ -1,6 +1,6 @@
 # Part 1 当前版本维护切换
 
-2026-09-24：原修复清单的 5,289 个候选已全部在线补齐。此页入口已实现并通过本地测试，尚无服务器切换回执。目标是将当前十个媒体消费者恢复到 NAS，保留两侧数据；不是删除步骤，也不表示整个 Part 1 已验收完成。
+2026-09-24：原修复清单的 5,289 个候选已全部在线补齐，随后本页维护切换已成功。单元 `mx-nas-part1-repair-switch-194cd1338d.service`，新报告 `/var/lib/mx-static/nas-cutover/po_infra_media_data-33e5abb193d04e7595251a5e6a6046ae`，最终核验目录 `repair-final-11cccd4afb1243a79a84ff98015babe9`。十个媒体服务已运行在 NAS，数据库/Redis 原 ID 保持，未删除 SSD；业务尚未全部检查。以下执行步骤保留为过程记录，**不要再次执行 switch**。下一步见[恢复登记和只读清理前核验](part1-union-reclaim.md)。
 
 ## 本次执行
 
@@ -31,7 +31,7 @@ bash scripts/manage.sh nas infra repair switch \
 
 回传 `nas_repair_switch_complete` 整条记录及新报告目录，不贴私有 Compose、环境或容器配置。随后确认现有 MX-H2I 用户登录、联网、旧媒体读取、新媒体写入及后台任务；不能以容器 healthy 代替业务验收。
 
-此命令保留 `business_acceptance_pending=true`、`recovery_registration_pending=true`、`reclaim_ready=false`。需要依据新成功报告更新 Git 登记（旧 plan 不再沿用）、核验/更新已安装的恢复快照，完成适配 NAS 现有属性的新清理前核验。当前 `recovery check` 仍指向旧报告，会继续阻止恢复；不要仅安装旧登记便宣称已覆盖新容器。
+切换时保留 `business_acceptance_pending=true`、`recovery_registration_pending=true`、`reclaim_ready=false`，这些是当时的阶段记录。后续 Git 已改选新成功报告并将旧 plan 置空，新增适配 NAS 现有属性的清理前核验；服务器仍须同步并安装当前快照。最新核验以实时恢复检查及新清单中的 recovery/验收字段为准，不手工修改原切换收据来伪造完成。
 
 受控重建强制使用外部 NFS 卷。外部旧发布入口仍可能省略该覆盖，防绕过约束尚未完成；重启、双方断电及 Docker 重装尚未实际演练。新切换成功不等于这些场景全部验收。Part 1 达到约定“可回收但保留 SSD”的终点后，才开始 Part 2。
 

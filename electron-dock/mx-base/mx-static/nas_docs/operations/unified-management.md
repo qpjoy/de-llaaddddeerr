@@ -19,7 +19,7 @@ NAS 子命令在静态服务器的 Node、`.env`、容器逻辑之前分发，�
 9 月 22 日成功切换使用的完整覆盖文件是（当前容器已遗漏它）：
 
 ```text
-/var/lib/mx-static/nas-cutover/po_infra_media_data-830225384207402a8ba23a2364d252d1/compose.nas.override.json
+/var/lib/mx-static/nas-cutover/po_infra_media_data-33e5abb193d04e7595251a5e6a6046ae/compose.nas.override.json
 ```
 
 这是切换准备时在服务器生成的持久文件，原来既不在 po-infra Git 中，也不在 mx-static checkout 中。它包含当时固定的镜像 ID、安全 Web 启动命令、Worker 恢复开关，以及 NAS 子挂载。报告内其他私有文件可能有环境凭据，不提交整个报告到 Git。

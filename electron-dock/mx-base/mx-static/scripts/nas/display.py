@@ -109,6 +109,16 @@ def render(value):
     if event=='nas_repair_switch_failed':
         return '维护切换未完成；业务可能已停止或部分重建，不自动退回 SSD。\n报告：{}\n阶段：{}\n原因：{}'.format(
             value.get('report_directory') or '见本任务 preparing 记录',value['phase'],value['error'])
+    if event=='nas_reclaim_check_started':
+        return '开始只读清理前核验；SSD 和 NAS 均不删除、不改权限。\n新清单：'+value['plan_directory']
+    if event=='nas_reclaim_check_progress':return 'NAS 对应文件元数据已核对：{} 个'.format(value['checked'])
+    if event=='nas_reclaim_check_complete':
+        return ('清理前文件核验通过：{} 个，{}\n新清单：{}\n业务验收已记录：{}；当前恢复登记/安装/启用已核对：{}\n'+
+                '满足暂存待回收条件：{}；本次未删除 SSD，也未自动选用清单。实际删除前仍须重新核对。').format(
+            value['regular_files'],size(value['logical_bytes']),value['plan_directory'],
+            yes(value['business_acceptance_recorded']),yes(value['recovery']['verified']),yes(value['reclaim_ready']))
+    if event=='nas_reclaim_check_failed':
+        return '清理前核验未通过；SSD 保留。\n清单：{}\n原因：{}'.format(value.get('plan_directory') or '尚未建立',value['error'])
     if event=='nas_host_mounts':
         rows=['  {} [{}]\n    来源：{}\n    选项：{}'.format(cell(r['target']),cell(r['type']),cell(r['source']),cell(r['options'])) for r in value['mounts']]
         return '宿主机 NAS 挂载核对：'+('匹配' if value['host_mount_verified'] else '未匹配，请检查')+'\n'+'\n'.join(rows)+'\n仅检查本机挂载表，不代表 NAS 磁盘/存储池健康。'

@@ -109,6 +109,8 @@ def remaining_files(root, tree, permitted):
 def open_directories(root, tree, local):
     dirs = {'': os.dup(root)}
     try:
+        if local and not same_directory(stamp(os.fstat(root)), tree['']):
+            raise RuntimeError('Manifest root identity/permissions changed.')
         for path in sorted(tree, key=lambda p: (p.count('/'), p)):
             if not path or not stat.S_ISDIR(tree[path]['mode']): continue
             parent, _, name = path.rpartition('/')
@@ -123,20 +125,21 @@ def open_directories(root, tree, local):
         raise
 
 
-def check_nas_file(dirs, tree, path):
+def check_nas_file(dirs, tree, path, strict=False):
     parent, _, name = path.rpartition('/')
     info = os.stat(name, dir_fd=dirs[parent], follow_symlinks=False)
     if (not stat.S_ISREG(info.st_mode) or info.st_dev != os.fstat(dirs['']).st_dev or
-            preserved_attributes(stamp(info)) != preserved_attributes(tree[path])):
+            (stamp(info) != tree[path] if strict else preserved_attributes(stamp(info)) != preserved_attributes(tree[path]))):
         raise RuntimeError('NAS file missing/changed; retain SSD for review: ' + path)
 
 
-def check_nas_files(target, tree, paths):
-    dirs = open_directories(target, tree, False)
+def check_nas_files(target, tree, paths, nas_tree=None):
+    expected = tree if nas_tree is None else nas_tree
+    dirs = open_directories(target, expected, nas_tree is not None)
     try:
         last = time.monotonic()
         for index, path in enumerate(paths, 1):
-            check_nas_file(dirs, tree, path)
+            check_nas_file(dirs, expected, path, strict=nas_tree is not None)
             if time.monotonic() - last >= 10:
                 emit('reclaim_nas_metadata_progress', checked=index, total=len(paths), content_hashing=False)
                 last = time.monotonic()
@@ -144,7 +147,7 @@ def check_nas_files(target, tree, paths):
         for fd in dirs.values(): os.close(fd)
 
 
-def delete_files(source, target, tree, paths, journal, guard):
+def delete_files(source, target, tree, paths, journal, guard, nas_tree=None):
     local = open_directories(source, tree, True)
     nas = None; removed = 0; logical = 0
     try:
@@ -153,7 +156,8 @@ def delete_files(source, target, tree, paths, journal, guard):
             if nas is not None:
                 for fd in nas.values(): os.close(fd)
                 nas = None
-            nas = open_directories(target, tree, False)
+            expected = tree if nas_tree is None else nas_tree
+            nas = open_directories(target, expected, nas_tree is not None)
             batch = paths[start:start+BATCH]
             # A durable intent permits reconciliation if SSH, process or host exits.
             data = (json.dumps({'kind': 'unlink_intent', 'paths': batch}, ensure_ascii=True) + '\n').encode()
@@ -167,7 +171,13 @@ def delete_files(source, target, tree, paths, journal, guard):
                 try:
                     if precopy.source_identity(fd) != precopy.source_identity(local[parent]):
                         raise RuntimeError('SSD parent detached: ' + path)
-                    check_nas_file(nas, tree, path)
+                    if nas_tree is not None:
+                        target_parent, _ = cutover.parent_fd(target, path, nas_tree)
+                        try:
+                            if precopy.source_identity(target_parent) != precopy.source_identity(nas[parent]):
+                                raise RuntimeError('NAS parent detached: ' + path)
+                        finally: os.close(target_parent)
+                    check_nas_file(nas, expected, path, strict=nas_tree is not None)
                     if stamp(os.stat(leaf, dir_fd=fd, follow_symlinks=False)) != tree[path]:
                         raise RuntimeError('SSD file changed immediately before unlink: ' + path)
                     os.unlink(leaf, dir_fd=fd)
@@ -207,6 +217,17 @@ def main():
         tree = read_manifest(plan_fd, plan)
         operation = cutover.Cutover(report_path, output)
         state = cutover.read_json(output, 'execution.json'); operation.state = state
+        nas_tree = None
+        if state.get('repair_of') or plan.get('nas_verification'):
+            from projects import infra_reclaim
+            nas_tree = infra_reclaim.read_verified_target(plan_fd, plan, tree, state)
+            # Even a direct legacy wrapper cannot use stale recovery registration.
+            import manage
+            registered = manage.profiles()['part1']
+            if registered['report'] != report_path or registered.get('plan') != plan_path:
+                raise RuntimeError('This UNION plan must be explicitly registered before later deletion.')
+            if not infra_reclaim.recovery_evidence(manage)['verified']:
+                raise RuntimeError('Current recovery installation/policy is not verified.')
         if state.get('ssd_reclaim', {}).get('plan_directory', plan_path) != plan_path:
             raise RuntimeError('Another reclaim plan already completed; review its receipt.')
         def guard():
@@ -236,7 +257,7 @@ def main():
         remaining = remaining_files(pinned_source, tree, permitted)
         emit('reclaim_preflight', plan_directory=plan_path, files_remaining=len(remaining),
              business_accepted=True, note='NAS metadata checks only; keep deployments and external SSD writers frozen.')
-        check_nas_files(pinned_target, tree, remaining)
+        check_nas_files(pinned_target, tree, remaining, nas_tree=nas_tree)
         operation.identity_probe()
         operation.http_probe(operation.mounted_services(True, expected_ids=state['new_ids']))
         if remaining_files(pinned_source, tree, permitted) != remaining: raise RuntimeError('SSD changed during preflight.')
@@ -244,7 +265,7 @@ def main():
         cutover.atomic_json(plan_fd, 'acceptance.json', {'schema': 1, 'business_accepted': True,
             'time_unix': time.time(), 'plan_directory': plan_path, 'manifest_sha256': plan['manifest_sha256']})
         before = os.fstatvfs(pinned_source)
-        removed, logical = delete_files(pinned_source, pinned_target, tree, remaining, journal, batch_guard)
+        removed, logical = delete_files(pinned_source, pinned_target, tree, remaining, journal, batch_guard, nas_tree=nas_tree)
         permitted = read_intents(journal, tree)
         if remaining_files(pinned_source, tree, permitted): raise RuntimeError('SSD still has manifested files.')
         batch_guard()
