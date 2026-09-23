@@ -421,6 +421,26 @@ test('memory provider-call admission atomically reserves reviewed monthly cost a
   assert.equal(store.calls.size, 1)
 })
 
+test('memory procurement reservations and limits are isolated by original currency', async () => {
+  const usd = callInput(), cny = callInput(), next = callInput()
+  const usageStore = { requests: new Map([usd, cny, next].map(input => [input.usageRequestId, reservedUsage(input)])) }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+  const cost = currency => ({ currency, costMinor: 6, costKind: 'estimated', monthlyBudgetMinor: 10, monthlySubsidyBudgetMinor: 10 })
+  const hold = (input, currency) => store.reserveProviderCostWorkflow({ ...input, costControls: [cost(currency)] })
+  const usdHold = await hold(usd, 'USD')
+  const cnyHold = await hold(cny, 'CNY')
+  for (const currency of ['USD', 'CNY']) {
+    assert.equal((await store.describeCostBudget(cost(currency))).spentMinor, 6)
+    await assert.rejects(hold(next, currency), { code: 'external_platform_cost_budget_exhausted' })
+  }
+  await store.beginProviderCall({ ...usd, costControl: cost('USD'), costReservationId: usdHold.id })
+  await store.beginProviderCall({ ...cny, costControl: cost('CNY'), costReservationId: cnyHold.id })
+  for (const currency of ['USD', 'CNY']) assert.equal((await store.describeCostBudget(cost(currency))).spentMinor, 6)
+  await assert.rejects(store.beginProviderCall({ ...usd, id: randomUUID(), callOrdinal: 1, costControl: cost('CNY') }),
+    { code: 'external_platform_cost_evidence_incomplete' }, 'one request still cannot mix procurement currencies')
+  assert.equal(store.calls.size, 2)
+})
+
 test('memory standalone paid requests bypass zero cost caps across billing currencies', async () => {
   for (const chargeCurrency of ['USD', 'CNY']) {
     const input = callInput()

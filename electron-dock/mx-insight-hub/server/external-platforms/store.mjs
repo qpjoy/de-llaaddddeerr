@@ -664,6 +664,12 @@ export class MemoryExternalPlatformStore {
     const monthlyCalls = [...this.calls.values()].filter((call) => {
       const startedAt = new Date(call.startedAt).getTime()
       return call.providerKey === this.providerKey
+        // Operation price books can use different currencies. Account for
+        // each original-currency ledger separately, without an implicit FX
+        // conversion. Still inspect malformed currencies and all current-
+        // request evidence so a workflow cannot switch currency mid-flight.
+        && (call.currency === costControl.currency || call.usageRequestId === usageRequestId
+          || !/^[A-Z]{3}$/u.test(call.currency || ''))
         && Number.isFinite(startedAt)
         && startedAt >= month.start
         && startedAt < month.end
@@ -696,6 +702,8 @@ export class MemoryExternalPlatformStore {
         ? null
         : new Date(usage.leaseExpiresAt).getTime()
       return reservation.providerKey === this.providerKey
+        && (reservation.currency === costControl.currency || reservation.usageRequestId === usageRequestId
+          || !/^[A-Z]{3}$/u.test(reservation.currency || ''))
         && (!customerBilled || reservation.usageRequestId === usageRequestId)
         && reservation.status === 'active'
         && usage?.status === 'reserved'
@@ -1669,6 +1677,8 @@ async function postgresProviderCostState(client, {
        SELECT usage_request_id, cost_minor, cost_kind, currency
          FROM external_platform.provider_calls
         WHERE provider_key = $1
+          AND (currency = $2 OR usage_request_id = $3
+            OR currency IS NULL OR currency !~ '^[A-Z]{3}$')
           AND started_at >= (
             date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
           )
@@ -1712,6 +1722,8 @@ async function postgresProviderCostState(client, {
          LEFT JOIN billing.customer_charges charge
            ON charge.usage_request_id = reservation.usage_request_id
         WHERE reservation.provider_key = $1
+          AND (reservation.currency = $2 OR reservation.usage_request_id = $3
+            OR reservation.currency IS NULL OR reservation.currency !~ '^[A-Z]{3}$')
           AND reservation.status = 'active'
           AND request.status = 'reserved'
           AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())
@@ -2349,6 +2361,7 @@ export class PostgresExternalPlatformStore {
                   FROM external_platform.provider_cost_reservations reservation
                   JOIN usage_requests request ON request.id = reservation.usage_request_id
                  WHERE reservation.provider_key = $1
+                   AND reservation.currency = $2
                    AND reservation.status = 'active'
                    AND request.status = 'reserved'
                    AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())

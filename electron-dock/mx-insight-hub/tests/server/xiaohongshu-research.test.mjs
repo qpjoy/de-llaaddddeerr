@@ -92,6 +92,28 @@ test('detail uses fixed POST JSON; aliases replay once, fresh request bypasses s
   assert.equal(state.platformStore.ingestJobs[0].payload.records[0].metrics.impressions, 200)
 })
 
+test('research detail and comments admit CNY costs alongside existing USD provider history', async () => {
+  let dispatched = 0
+  const state = await fixture(async url => {
+    dispatched += 1
+    return response(new URL(url).pathname.endsWith('/get_note_comments') ? comments() : detail())
+  })
+  state.config.billing.currency = 'CNY'
+  state.platformStore.calls.set('previous-usd-search', {
+    id: 'previous-usd-search', providerKey: 'tikhub', usageRequestId: 'previous-search',
+    startedAt: new Date().toISOString(), currency: 'USD', costMinor: 500,
+    costKind: 'estimated', outcome: 'succeeded',
+  })
+  const note = await state.call()
+  const page = await state.call('note_comments', { note_id: ID }, 'mixed-currency-comments')
+  assert.equal(note.body.data.item.title, '热门笔记')
+  assert.equal(page.body.data.items[0].text, '评论正文')
+  assert.equal(dispatched, 2)
+  assert.equal(state.platformStore.calls.get('previous-usd-search').currency, 'USD')
+  const budget = await state.platformStore.describeCostBudget({ ...state.config.billing, costMinor: 1 })
+  assert.equal(budget.spentMinor, 2, 'CNY budget excludes USD history without conversion')
+})
+
 test('new operations require explicit current platform AND Key scopes, never inherit old detail access', async () => {
   for (const options of [{ capabilities: [] }, { platforms: [] }]) {
     const state = await fixture(async () => { assert.fail('must not dispatch') }, options)
