@@ -599,8 +599,18 @@ export function parseTikHubConfig(environment = process.env, {
       costControlError = { code: 'cost_control_incomplete', message: error.message }
     }
   }
+  const detailQueue = {
+    intervalMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_DETAIL_INTERVAL_MS, 5000, 'MX_INSIGHT_TIKHUB_DETAIL_INTERVAL_MS'),
+    maxWaitMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_DETAIL_MAX_WAIT_MS, 60000, 'MX_INSIGHT_TIKHUB_DETAIL_MAX_WAIT_MS'),
+    maxPending: positiveInteger(environment.MX_INSIGHT_TIKHUB_DETAIL_MAX_PENDING, 12, 'MX_INSIGHT_TIKHUB_DETAIL_MAX_PENDING'),
+    freshTtlMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_DETAIL_FRESH_TTL_MS, 300000, 'MX_INSIGHT_TIKHUB_DETAIL_FRESH_TTL_MS'),
+    staleTtlMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_DETAIL_STALE_TTL_MS, 3600000, 'MX_INSIGHT_TIKHUB_DETAIL_STALE_TTL_MS'),
+  }
+  if (detailQueue.maxWaitMs > 60000 || detailQueue.maxPending > 100 || detailQueue.intervalMs > 60000
+    || detailQueue.staleTtlMs < detailQueue.freshTtlMs) throw new AppError(500, 'invalid_configuration', 'Invalid TikHub detail queue bounds')
   return {
     baseUrl,
+    detailQueue,
     apiKey,
     configured,
     contractVerified,

@@ -5363,13 +5363,20 @@ export function createApp({
             field, ['page', 'ai_mode'].includes(field) && Number.isInteger(value) ? String(value) : value,
           ]))
         }
-        const result = await tikHubGateway.officialXiaohongshu(context, {
-          endpointName: officialXiaohongshuEndpoint.name,
-          query,
-          method: request.method,
-          idempotencyKey: request.headers['idempotency-key'],
-          path: pathname,
-        })
+        const waiting = new AbortController()
+        const cancelWaiting = () => waiting.abort()
+        response.once('close', cancelWaiting)
+        let result
+        try {
+          result = await tikHubGateway.officialXiaohongshu(context, {
+            endpointName: officialXiaohongshuEndpoint.name,
+            query,
+            method: request.method,
+            idempotencyKey: request.headers['idempotency-key'],
+            path: pathname,
+            signal: waiting.signal,
+          })
+        } finally { response.off('close', cancelWaiting) }
         sendJson(response, result.status, result.body, {
           'cache-control': 'private, no-store',
           'idempotent-replay': String(result.replay),
@@ -6093,6 +6100,9 @@ export function createApp({
         ? error
         : new AppError(500, 'internal_error', 'Internal server error')
       if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
+      if (appError.status === 429 && Number.isFinite(appError.details?.retryAfterMs)) {
+        response.setHeader('retry-after', String(Math.max(1, Math.ceil(appError.details.retryAfterMs / 1000))))
+      }
       const detailRequestId = appError.details?.requestId
       const durableRequestId = typeof detailRequestId === 'string'
         && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(detailRequestId)

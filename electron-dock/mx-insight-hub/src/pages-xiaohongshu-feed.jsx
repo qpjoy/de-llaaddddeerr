@@ -36,7 +36,8 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   saved.researchRequests = researchRequests.current
   const requestResearch = async (endpoint, cursor = null, fresh = false) => {
     if (lock.current || !apiKey.trim() || (endpoint === 'note_detail' ? analyticsIssues : commentIssues).length) return
-    const body = { note_id: item.externalId, ...(endpoint === 'note_comments' ? { sort: commentSort, ...(cursor ? { cursor } : {}) } : {}) }
+    if (endpoint === 'note_detail') saved.detailDeliveryMode = fresh ? 'refresh' : saved.detailDeliveryMode || 'cache_first'
+    const body = { note_id: item.externalId, ...(endpoint === 'note_detail' ? { deliveryMode: saved.detailDeliveryMode } : {}), ...(endpoint === 'note_comments' ? { sort: commentSort, ...(cursor ? { cursor } : {}) } : {}) }
     const fingerprint = JSON.stringify([endpoint, body])
     if (fresh) researchRequests.current.delete(fingerprint)
     const idempotencyKey = researchRequests.current.get(fingerprint) || `xhs-research-${requestUuid()}`
@@ -100,9 +101,9 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   }
   return <Modal title={item.title || '笔记详情'} size="xlarge" closeOnBackdrop={false} closeOnEscape={false} busy={busy} onClose={onClose} footer={<button className="qp-button" disabled={busy} onClick={onClose}>关闭</button>}>
     <div className="mih-xhs-detail-actions mih-xhs-detail-toolbar">
-      <span role="status">{busy ? '正在加载…' : primaryResult ? (primary === 'note_detail' ? '详情已加载' : '正文与标签已加载') : '当前已存笔记'}</span>
+      <span role="status">{busy ? '正在获取，可能需要排队…' : primaryResult ? (primary === 'note_detail' ? '详情已加载' : '正文与标签已加载') : '当前已存笔记'}</span>
       <button className="qp-button qp-button--outline qp-button--sm" disabled={busy || !apiKey.trim() || !!primaryIssues.length} onClick={() => void refresh()}>{primaryError ? '重试详情' : primaryResult ? '刷新详情' : '加载详情'}</button>
-      <small>{primary === 'note_detail' ? '缺少话题时补查正文接口，各次调用按套餐计费 · 新查询建议间隔至少 5 秒' : '缓存优先，采集按套餐计费'}</small>
+      <small>{primary === 'note_detail' ? '优先使用缓存；刷新详情由服务器排队，最多等待 60 秒。各次交付按套餐计费' : '缓存优先，采集按套餐计费'}</small>
     </div>
     {!apiKey.trim() ? <p role="status">正在等待调用身份。</p> : primaryIssues.length && !primaryResult ? <p role="status">当前详情服务不可用，先展示已存内容。可在下方“更多操作与请求记录”中查看原因。</p> : null}
     <nav className="mih-source-section-tabs mih-xhs-detail-tabs" aria-label="笔记详情视图">
@@ -123,7 +124,7 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
         {result || error ? <DeliveryEvidence evidence={result?.evidence} error={error} /> : null}
       </section>
       <section aria-label="详情与阅读量"><h3>详情与阅读量</h3>
-        <p>新查询建议间隔至少 5 秒，按套餐计费。未提供的结构化标签保留已有结果。</p>
+        <p>缓存优先；实时刷新最多排队 60 秒，队列满时提示稍后再试。未提供的结构化标签保留已有结果。</p>
         <DemoAccessNotice operation="social.posts.analytics" />
         <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail', null, !!research.note_detail && !analyticsError)}>{research.note_detail ? '刷新阅读量' : '获取详情与阅读量'}</button>
         {research.note_detail ? <DeliveryEvidence evidence={research.note_detail.evidence} /> : null}

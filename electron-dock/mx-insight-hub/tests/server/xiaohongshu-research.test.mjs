@@ -33,7 +33,7 @@ async function fixture(fetchImpl = async () => response(detail()), { capabilitie
   const context = await service.authenticate(key.secret)
   const adapter = new TikHubAdapter({ apiKey: SECRET, fetchImpl })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'tikhub', authorizationPlatform: 'xiaohongshu' })
-  const config = { configured: true, contractVerified: true, researchContractVerified: true, searchContractVerified: true, userActivityContractVerified: true, maxConcurrency: 4, maxConsumerConcurrency: 4, maxRequestsPerMinute: 120, freshTtlMs: 60000, staleTtlMs: 86400000, billing: { currency: 'USD', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: Object.fromEntries(Object.values(endpoints).map(endpoint => [endpoint.endpointKey, 1])) } }
+  const config = { detailQueue: { intervalMs: 5, jitterMs: 0 }, configured: true, contractVerified: true, researchContractVerified: true, searchContractVerified: true, userActivityContractVerified: true, maxConcurrency: 4, maxConsumerConcurrency: 4, maxRequestsPerMinute: 120, freshTtlMs: 60000, staleTtlMs: 86400000, billing: { currency: 'USD', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: Object.fromEntries(Object.values(endpoints).map(endpoint => [endpoint.endpointKey, 1])) } }
   const gateway = new TikHubGateway({ usageStore: store, platformStore, adapter, config, apiKeyPepper: PEPPER, reservationLeaseMs: 150000, logger: { warn() {}, error() {} } })
   const call = (name = 'note_detail', query = { note_id: ID }, key = 'research-request-001', path = endpoints[name].path, ctx = context) => gateway.officialXiaohongshu(ctx, { endpointName: name, query, method: 'POST', idempotencyKey: key, path })
   return { store, service, tenant, consumer, key, context, adapter, platformStore, config, gateway, call }
@@ -69,7 +69,7 @@ test('detail projects HTTP image CDN addresses as usable HTTPS and retains expli
   assert.equal(raw.data.data.imagesList[0].url.startsWith('http:'), true, 'raw acquisition is unchanged')
 })
 
-test('detail uses fixed POST JSON; aliases replay once, fresh request bypasses snapshots, full raw evidence and views ingest persist', async () => {
+test('detail uses fixed POST JSON; aliases replay once, explicit refresh bypasses shared snapshots, full raw evidence and views ingest persist', async () => {
   let calls = 0
   const state = await fixture(async (url, options) => {
     calls++
@@ -85,8 +85,8 @@ test('detail uses fixed POST JSON; aliases replay once, fresh request bypasses s
   assert.equal(replay.replay, true)
   assert.deepEqual(replay.body, first.body)
   assert.equal(calls, 1)
-  await state.call('note_detail', { note_id: ID }, 'research-request-002')
-  assert.equal(calls, 2, 'new explicit request is live, without a new buffering strategy')
+  await state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'research-request-002')
+  assert.equal(calls, 2, 'explicit refresh is live')
   assert.match([...state.platformStore.restrictedResponseArchives.values()][0].bodyText, /tikhub/)
   assert.equal(state.platformStore.ingestJobs[0].payload.records[0].metrics.views, 0)
   assert.equal(state.platformStore.ingestJobs[0].payload.records[0].metrics.impressions, 200)

@@ -1,3 +1,4 @@
+import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -561,6 +562,7 @@ export class TikHubGateway {
     this.credentialStore = credentialStore
     this.defaultPolicy = defaultPolicy
     this.logger = logger
+    this.detailQueue = platformStore.detailQueue ||= new DispatchQueue({ pool: platformStore.pool })
     this.active = 0
     this.activeByConsumer = new Map()
   }
@@ -736,9 +738,15 @@ export class TikHubGateway {
     method = 'GET',
     idempotencyKey,
     path,
+    signal,
   }) {
     let durableRequestId = null
     let ownsReservation = false
+    let queueTicket = null
+    let queueOutcome = 'failed'
+    const queuePolicy = endpointName === 'note_detail' ? { ...DEFAULT_DETAIL_QUEUE, ...this.config.detailQueue } : null
+    const queueDeadline = Date.now() + (queuePolicy?.maxWaitMs || 0)
+    const leaseMs = queuePolicy ? Math.max(this.reservationLeaseMs, queuePolicy.maxWaitMs + 2 * (this.config.timeoutMs || 30000) + 30000) : this.reservationLeaseMs
     try {
       if (isTestKey(context.apiKey)) {
         throw new AppError(403, 'test_key_not_supported', 'Test API keys cannot dispatch external acquisition')
@@ -752,7 +760,7 @@ export class TikHubGateway {
         throw new AppError(404, 'not_found', 'Xiaohongshu App V2 endpoint was not found')
       }
       if (endpoint.discovery && !suppliedKey) throw new AppError(400, 'idempotency_key_required', 'Idempotency-Key is required for discovery requests')
-      const allowStoredFallback = !endpoint.liveOnly
+      const allowStoredFallback = queuePolicy ? (query?.deliveryMode ?? 'cache_first') === 'cache_first' : !endpoint.liveOnly
       const requiredCapabilities = endpoint.research ? [endpoint.operation] : [XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY, endpoint.operation]
       const grants = typeof this.usageStore.listEffectiveGrants === 'function'
         ? await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
@@ -823,10 +831,13 @@ export class TikHubGateway {
       const effectiveKey = suppliedKey
         ? idempotencyKey
         : `auto:${context.apiKey.id}:${requestId}`
+      const queueCredential = queuePolicy ? await this.#credential() : null
+      const queueScope = queuePolicy ? fingerprint({ provider: TIKHUB_PROVIDER_KEY, endpoint: endpoint.endpointKey, credential: queueCredential.value }) : null
       const dispatchFingerprint = fingerprint({
         provider: TIKHUB_PROVIDER_KEY,
         endpoint: endpoint.endpointKey,
         query: normalized.providerQuery,
+        ...(queuePolicy ? { scope: queueScope, contractVersion: normalized.contractVersion } : {}),
       })
       await this.usageStore.reapStaleReservations()
       await this.platformStore.reapStaleCalls?.()
@@ -845,7 +856,7 @@ export class TikHubGateway {
           ...requiredCapabilities.map(key => ({ type: 'capability', key })),
         ],
         unitsReserved: 1,
-        leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+        leaseExpiresAt: new Date(Date.now() + leaseMs),
         windowStart: new Date(Date.now() - consumerPolicy.windowSeconds * 1_000),
         maxRequests: consumerPolicy.maxRequests,
         replayWindowMs: null,
@@ -904,13 +915,14 @@ export class TikHubGateway {
 
       const activeRequestId = reservation.request.id
       const now = new Date()
-      let snapshot = endpoint.liveOnly ? null : await this.platformStore.snapshotFor({
+      let snapshot = queuePolicy ? await this.platformStore.sharedDetailSnapshotFor(dispatchFingerprint, now) : endpoint.liveOnly ? null : await this.platformStore.snapshotFor({
         consumerId: context.consumer.id,
         operation: endpoint.operation,
         fingerprint: dispatchFingerprint,
       }, now)
-      if (snapshot && new Date(snapshot.freshUntil) >= now) {
+      if (snapshot && (!queuePolicy || normalized.deliveryMode === 'cache_first') && new Date(snapshot.freshUntil) >= now) {
         await this.platformStore.commitSnapshotDelivery({
+            shared: Boolean(queuePolicy),
           delivery,
           snapshot,
           sourceMode: 'fresh_cache',
@@ -925,7 +937,7 @@ export class TikHubGateway {
         && new Date(providerState.circuitOpenUntil) > now
       const resolved = circuitOpen
         ? { ready: Boolean(this.adapter), value: null, revision: null }
-        : await this.#credential()
+        : queueCredential || await this.#credential()
       let operationControl = null
       let operationControlError = null
       if (!circuitOpen) {
@@ -943,6 +955,7 @@ export class TikHubGateway {
       if (!resolved.ready || circuitOpen || operationControlError) {
         if (allowStoredFallback && snapshot) {
           await this.platformStore.commitSnapshotDelivery({
+            shared: Boolean(queuePolicy),
             delivery,
             snapshot,
             sourceMode: 'stored_fallback',
@@ -971,7 +984,47 @@ export class TikHubGateway {
       let callSettled = false
       let dispatchEvidence = null
       let costReservation = null
+      const revalidateQueuedAccess = async () => {
+        operationControl = await this.#authorizeOperation(context, endpoint.operation, endpoint.gate, resolved)
+          const currentGrants = await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
+          const currentCapabilities = await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
+          const currentKey = await this.usageStore.findApiKeyById(context.apiKey.id)
+          if (!currentGrants.includes(XIAOHONGSHU_PLATFORM) || !currentCapabilities.includes(endpoint.operation)
+            || !currentKey || currentKey.apiKey?.status !== 'active') throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+          const latestCredential = await this.#credential()
+          if (!latestCredential.ready || latestCredential.value !== resolved.value) throw new AppError(503, 'external_platform_configuration_changed', 'Upstream configuration changed while waiting')
+          const latestState = await this.platformStore.providerState(TIKHUB_PROVIDER_KEY)
+          if (latestState?.circuitOpenUntil && new Date(latestState.circuitOpenUntil) > new Date()) throw new AppError(503, 'external_platform_circuit_open', 'Upstream temporarily unavailable')
+      }
       try {
+        if (queuePolicy) {
+          try {
+            queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
+              policy: queuePolicy, deadline: queueDeadline, leaseMs: (this.config.timeoutMs || 30000) + 30000, signal })
+          } catch (error) {
+            if (allowStoredFallback && snapshot && error.code === 'external_platform_busy') {
+              await this.platformStore.commitSnapshotDelivery({ delivery, snapshot, shared: true, sourceMode: 'stored_fallback', usageUnitsActual: 1 })
+              ownsReservation = false
+              return officialResult(snapshot.responseBody, activeRequestId, false, 'stored_fallback', snapshot.capturedAt)
+            }
+            throw error
+          }
+          if (queueTicket.follower) {
+            const shared = await this.platformStore.sharedDetailSnapshotFor(dispatchFingerprint)
+            if (!shared) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
+            await this.platformStore.commitSnapshotDelivery({ delivery, snapshot: shared, shared: true, sourceMode: 'fresh_cache', usageUnitsActual: 1 })
+            ownsReservation = false
+            return officialResult(shared.responseBody, activeRequestId, false, 'fresh_cache', shared.capturedAt)
+          }
+          const refreshedSnapshot = normalized.deliveryMode === 'cache_first'
+            ? await this.platformStore.sharedDetailSnapshotFor(dispatchFingerprint) : null
+          if (refreshedSnapshot && new Date(refreshedSnapshot.freshUntil) >= new Date()) {
+            await this.platformStore.commitSnapshotDelivery({ delivery, snapshot: refreshedSnapshot, shared: true, sourceMode: 'fresh_cache', usageUnitsActual: 1 })
+            ownsReservation = false; queueOutcome = 'succeeded'
+            return officialResult(refreshedSnapshot.responseBody, activeRequestId, false, 'fresh_cache', refreshedSnapshot.capturedAt)
+          }
+          await revalidateQueuedAccess()
+        }
         const lease = await this.platformStore.acquireDispatchLease({
           consumerId: context.consumer.id,
           operation: endpoint.operation,
@@ -979,7 +1032,7 @@ export class TikHubGateway {
           endpointKey: endpoint.endpointKey,
           contractVersion: normalized.contractVersion,
           ownerRequestId: activeRequestId,
-          expiresAt: new Date(Date.now() + this.reservationLeaseMs),
+          expiresAt: new Date(Date.now() + leaseMs),
         })
         ownsLease = lease === true || lease?.kind === 'acquired'
         if (!ownsLease) {
@@ -992,6 +1045,7 @@ export class TikHubGateway {
             const fresh = new Date(snapshot.freshUntil) >= new Date()
             const sourceMode = fresh ? 'fresh_cache' : 'stored_fallback'
             await this.platformStore.commitSnapshotDelivery({
+            shared: Boolean(queuePolicy),
               delivery,
               snapshot,
               sourceMode,
@@ -1016,6 +1070,7 @@ export class TikHubGateway {
         if (!this.#enter(context.consumer.id)) {
           if (snapshot) {
             await this.platformStore.commitSnapshotDelivery({
+            shared: Boolean(queuePolicy),
               delivery,
               snapshot,
               sourceMode: 'stored_fallback',
@@ -1066,7 +1121,7 @@ export class TikHubGateway {
             retryAfterMs: rateLimit.retryAfterMs,
           })
         }
-        call = await this.platformStore.beginProviderCall({
+        const beginCall = (ordinal) => this.platformStore.beginProviderCall({
           tenantId: context.tenant.id,
           consumerId: context.consumer.id,
           apiKeyId: context.apiKey.id,
@@ -1078,12 +1133,13 @@ export class TikHubGateway {
           marketplace: XIAOHONGSHU_PLATFORM,
           fingerprint: requestFingerprint,
           dispatchFingerprint,
-          callOrdinal: 0,
-          callRole: 'primary',
+          callOrdinal: ordinal,
+          callRole: ordinal ? 'retry' : 'primary',
           costControl,
           costReservationId: costReservation.id,
           ...(operationControl ? { operationControl } : {}),
         })
+        call = await beginCall(0)
         dispatchEvidence = {
           billed: null,
           costMinor: costControl.costMinor,
@@ -1093,11 +1149,41 @@ export class TikHubGateway {
         const startedAt = performance.now()
         let upstream = null
         try {
-          upstream = await this.adapter.getXiaohongshuAppV2(
-            endpoint.endpointKey,
-            normalized.providerQuery,
-            { credential: resolved.value },
-          )
+          for (let attempt = 0; ; attempt++) {
+            try {
+              if (queuePolicy) {
+                const permit = await this.detailQueue.transition(queueScope, { ...queueTicket, type: 'dispatch',
+                  leaseMs: (this.config.timeoutMs || 30000) + 30000, jitterMs: Math.floor(Math.random() * queuePolicy.jitterMs) })
+                if (permit.kind !== 'acquired') throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
+              }
+              upstream = await this.adapter.getXiaohongshuAppV2(endpoint.endpointKey, normalized.providerQuery, { credential: resolved.value })
+              break
+            } catch (error) {
+              if (!queuePolicy || attempt !== 0 || !canRetryDetail(error)) throw error
+              const requeue = await this.detailQueue.transition(queueScope, { type: 'requeue', policy: queuePolicy,
+                id: activeRequestId, deadline: queueDeadline, notBefore: Date.now() + 2 * queuePolicy.intervalMs })
+              if (requeue.kind !== 'queued') throw error
+              // Archive attempt 1 without settling the one customer delivery.
+              await this.platformStore.finishProviderStep({ callId: call.id, delivery, ...error.evidence,
+                costMinor: costControl.costMinor, costKind: costControl.costKind, currency: costControl.currency,
+                responseArchive: error.responseArchive, upstreamEvidence: error.upstreamEvidence,
+                archiveObjects: error.archiveObjects, restrictedResponseArchive: error.restrictedResponseArchive })
+              callSettled = true; call = null
+              await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
+              costReservation = null
+              this.#leave(context.consumer.id); entered = false
+              queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
+                policy: queuePolicy, deadline: queueDeadline, leaseMs: (this.config.timeoutMs || 30000) + 30000, signal })
+              await revalidateQueuedAccess()
+              if (!this.#enter(context.consumer.id)) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
+              entered = true
+              costReservation = await this.platformStore.reserveProviderCostWorkflow({ tenantId: context.tenant.id, consumerId: context.consumer.id,
+                apiKeyId: context.apiKey.id, usageRequestId: activeRequestId, fingerprint: requestFingerprint, costControls: [costControl] })
+              const retryRate = await this.platformStore.acquireProviderRateLimit({ limit: this.config.maxRequestsPerMinute ?? 120, tokens: 1, windowMs: 60000 })
+              if (!retryRate.allowed) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: retryRate.retryAfterMs })
+              call = await beginCall(1); callSettled = false
+            }
+          }
           const capturedAt = date(upstream.responseArchive?.capturedAt || upstream.capturedAt)
           if (!capturedAt) throw new TypeError('TikHub adapter returned no accepted capture timestamp')
           dispatchEvidence = {
@@ -1138,10 +1224,10 @@ export class TikHubGateway {
           )
           const responseBody = publicXiaohongshuEnvelope(projection.payload)
           const itemCount = endpoint.discovery ? projection.payload.meta.returnedCount || 0 : endpoint.research ? (projection.payload.data.item ? 1 : projection.payload.data.items?.length || 0) : officialRawItemCount(endpointName, upstream.payload)
-          const freshTtlMs = endpointName === 'search_notes'
+          const freshTtlMs = queuePolicy ? queuePolicy.freshTtlMs : endpointName === 'search_notes'
             ? (this.config.searchFreshTtlMs ?? this.config.freshTtlMs)
             : this.config.freshTtlMs
-          const staleTtlMs = endpointName === 'search_notes'
+          const staleTtlMs = queuePolicy ? queuePolicy.staleTtlMs : endpointName === 'search_notes'
             ? (this.config.searchStaleTtlMs ?? this.config.staleTtlMs)
             : this.config.staleTtlMs
           await this.platformStore.commitLiveDelivery({
@@ -1173,6 +1259,7 @@ export class TikHubGateway {
             } : null,
           })
           callSettled = true
+          queueOutcome = 'succeeded'
           ownsReservation = false
           return officialResult(responseBody, activeRequestId, false, 'live', capturedAt)
         } catch (error) {
@@ -1183,6 +1270,7 @@ export class TikHubGateway {
           if (normalizationError) {
             this.logger?.warn?.({ error, endpointName }, 'TikHub official response normalization failed')
           }
+          if (providerError && error.evidence.outcome === 'unknown') queueOutcome = 'unknown'
           const mapped = providerError
             ? publicFailure(error)
             : new AppError(
@@ -1215,7 +1303,7 @@ export class TikHubGateway {
               })
             }
           }
-          const fallbackBody = snapshot?.responseBody || null
+          const fallbackBody = !queuePolicy && snapshot?.responseBody || null
           await this.platformStore.finishFailure({
             callId: call.id,
             delivery,
@@ -1240,6 +1328,7 @@ export class TikHubGateway {
         }
       } catch (error) {
         if (call && !callSettled) {
+          queueOutcome = 'unknown'
           await this.platformStore.markPersistenceUnknown({
             callId: call.id,
             delivery,
@@ -1291,6 +1380,8 @@ export class TikHubGateway {
         throw withRequestId(new AppError(error.status, error.code, 'The requested Xiaohongshu service is unavailable'), durableRequestId)
       }
       throw withRequestId(error, durableRequestId)
+    } finally {
+      await this.detailQueue.finish(queueTicket, queueOutcome).catch(() => {})
     }
   }
 

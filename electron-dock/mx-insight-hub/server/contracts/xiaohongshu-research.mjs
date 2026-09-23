@@ -12,7 +12,7 @@ export const XHS_RESEARCH_ENDPOINTS = Object.freeze({
     providerPath: '/api/v1/xiaohongshu/pgy/get_note_detail', providerMethod: 'POST',
     endpointKey: 'xiaohongshu.pgy.note-detail.v1', endpointVersion: 'pgy',
     operation: 'social.posts.analytics', gate: 'researchContractVerified',
-    fields: ['note_id'], label: '小红书详情与阅读量', research: true, liveOnly: true,
+    fields: ['note_id', 'deliveryMode'], label: '小红书详情与阅读量', research: true, liveOnly: true,
   },
   note_comments: {
     name: 'note_comments', path: '/api/v1/data/xiaohongshu/notes/comments',
@@ -42,8 +42,11 @@ function timestamp(value) {
 export function normalizeXhsResearchRequest(endpoint, input, { decodeCursor } = {}) {
   if (!record(input) || Object.keys(input).some(key => !endpoint.fields.includes(key))) invalid('Unsupported request fields')
   if (typeof input.note_id !== 'string' || !/^[a-f0-9]{24}$/iu.test(input.note_id)) invalid('note_id must be a 24-character hexadecimal ID')
+  const deliveryMode = input.deliveryMode ?? 'cache_first'
+  if (endpoint.name === 'note_detail' && !['cache_first', 'refresh'].includes(deliveryMode)) invalid('deliveryMode must be cache_first or refresh')
   const noteId = input.note_id.toLowerCase()
   let providerQuery = { note_id: noteId }, publicQuery = { ...providerQuery }, page = 1, scope = null, providerCursor = null
+  if (endpoint.name === 'note_detail' && input.deliveryMode != null) publicQuery.deliveryMode = deliveryMode
   if (endpoint.name === 'note_comments') {
     const sort = input.sort ?? 'latest'
     if (!['latest', 'hot'].includes(sort)) invalid('sort must be latest or hot')
@@ -62,7 +65,7 @@ export function normalizeXhsResearchRequest(endpoint, input, { decodeCursor } = 
       publicQuery.cursor = input.cursor
     }
   }
-  return { endpoint, providerQuery, publicQuery, page, scope, providerCursor, contractVersion: XHS_RESEARCH_VERSION }
+  return { endpoint, deliveryMode, providerQuery, publicQuery, page, scope, providerCursor, contractVersion: XHS_RESEARCH_VERSION }
 }
 
 function business(payload) {

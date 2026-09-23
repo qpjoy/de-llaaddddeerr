@@ -512,6 +512,12 @@ export class MemoryExternalPlatformStore {
     return clone(found)
   }
 
+  async sharedDetailSnapshotFor(fingerprint, at = new Date()) {
+    return clone([...this.snapshots.values()].filter(row => row.providerKey === this.providerKey
+      && row.operation === 'social.posts.analytics' && row.fingerprint === fingerprint
+      && new Date(row.staleUntil) >= at).sort((a, b) => new Date(b.capturedAt) - new Date(a.capturedAt))[0] || null)
+  }
+
   async reapStaleCalls(at = new Date()) {
     let reaped = 0
     for (const call of this.calls.values()) {
@@ -1085,8 +1091,8 @@ export class MemoryExternalPlatformStore {
       throw new TypeError('callOrdinal must be a non-negative safe integer')
     }
     const callRole = input.callRole ?? (callOrdinal === 0 ? 'primary' : 'enrichment')
-    if (!['primary', 'enrichment'].includes(callRole)) {
-      throw new TypeError('callRole must be primary or enrichment')
+    if (!['primary', 'enrichment', 'retry'].includes(callRole)) {
+      throw new TypeError('callRole must be primary, enrichment or retry')
     }
     const dispatchFingerprint = input.dispatchFingerprint ?? input.fingerprint
     if (typeof dispatchFingerprint !== 'string' || !/^[0-9a-f]{64}$/u.test(dispatchFingerprint)) {
@@ -1377,6 +1383,7 @@ export class MemoryExternalPlatformStore {
     delivery,
     snapshot,
     sourceMode,
+    shared = false,
     responseBody = snapshot.responseBody,
     usageUnitsActual = Math.max(1, deliveredItemCount(responseBody)),
   }) {
@@ -1986,6 +1993,15 @@ export class PostgresExternalPlatformStore {
         at,
       ],
     )
+    return pgSnapshot(rows[0])
+  }
+
+  async sharedDetailSnapshotFor(fingerprint, at = new Date()) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM external_platform.response_snapshots
+        WHERE provider_key = $1 AND operation = 'social.posts.analytics'
+          AND request_fingerprint = $2 AND stale_until >= $3
+        ORDER BY captured_at DESC LIMIT 1`, [this.providerKey, fingerprint, at])
     return pgSnapshot(rows[0])
   }
 
@@ -2621,8 +2637,8 @@ export class PostgresExternalPlatformStore {
       throw new TypeError('callOrdinal must be a non-negative safe integer')
     }
     const callRole = input.callRole ?? (callOrdinal === 0 ? 'primary' : 'enrichment')
-    if (!['primary', 'enrichment'].includes(callRole)) {
-      throw new TypeError('callRole must be primary or enrichment')
+    if (!['primary', 'enrichment', 'retry'].includes(callRole)) {
+      throw new TypeError('callRole must be primary, enrichment or retry')
     }
     const costControl = normalizedCostControl(input.costControl)
     const operationControl = normalizedOperationControl(input.operationControl, {
@@ -3409,6 +3425,7 @@ export class PostgresExternalPlatformStore {
     delivery,
     snapshot,
     sourceMode,
+    shared = false,
     responseBody = snapshot.responseBody,
     usageUnitsActual = Math.max(1, deliveredItemCount(responseBody)),
   }) {
