@@ -86,7 +86,7 @@ function decorate(record, raw, kind, { connectorId, parserVersion }) {
       ?? raw.avatarUrl
       ?? null
   }
-  if (kind === 'content' && record.platform === 'twitter') {
+  if (kind === 'content' && ['twitter', 'facebook'].includes(record.platform)) {
     record.title = null
     // The canonical digest must describe the corrected fields. Keep the raw
     // payload and its independent digest intact for historical evidence.
@@ -125,7 +125,9 @@ function mapItems(items, fieldMap, options) {
 export function normalizeNightAllLegacyPayload(payload, platform, _operation, options = {}) {
   const lineage = {
     connectorId: options.connectorId || NIGHT_ALL_COMPAT_CONNECTOR_ID,
-    parserVersion: options.parserVersion || NIGHT_ALL_COMPAT_PARSER_VERSION,
+    parserVersion: options.parserVersion || (platform === 'facebook'
+      ? `${CHUNKER_VERSION}:night-all-legacy.v3`
+      : NIGHT_ALL_COMPAT_PARSER_VERSION),
   }
   const rawInfo = parseNightAllLegacyArray(payload?.data?.raw_info) || []
   const rawData = parseNightAllLegacyArray(payload?.data?.raw_data) || []

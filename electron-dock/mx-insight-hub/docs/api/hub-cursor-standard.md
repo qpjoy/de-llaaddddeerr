@@ -20,6 +20,12 @@
 顶层 cursor，但业务请求字段与终止字段遵循该接口自身的版本契约。
 不同接口的游标不能互换。原生供应商接口和存量数据浏览接口不因本文自动变成相同包络。
 
+特别注意页大小字段：兼容 `/night-all/search/raw` 使用 `count`，标准 `/data/search`
+使用 `pageSize`。标准接口不接收 `count` 或 `params`，直接复制兼容请求体会得到
+`400 unsupported_fields`；统一的是 cursor 调用方式，不是两个接口的所有请求字段。
+例如标准首屏为 `{"platform":"douyin","query":"受害企业 赔偿回收率","pageSize":20}`，
+续页仅追加顶层 cursor，值来自 `data.pageInfo.nextCursor`。
+
 ## 2. 首屏和下一页示例
 
 两次均调用 `POST /api/v1/night-all/search/raw`，使用已授权的 Hub API Key。

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 // Bump when the mapping below changes so revisions record which parser produced
 // them and historical rows can be recomputed selectively.
-export const PARSER_VERSION = 'mxih-normalizer.v2'
+export const PARSER_VERSION = 'mxih-normalizer.v3'
 export const SCHEMA_VERSION = 'content.v1'
 export const DATASET_ID = 'night-all.search.v1'
 export const CONNECTOR_ID = 'night-all'
@@ -147,6 +147,12 @@ const PLATFORM_HOOKS = {
     if (handle) record.stableFields.author.handle = handle
     return record
   },
+  facebook(record) {
+    // Facebook posts follow the same no-title policy as Twitter; the original
+    // generated display label stays in rawItem for evidence.
+    record.title = null
+    return record
+  },
   douyin(record, item) {
     if (!record.contentType) record.contentType = 'video'
     const duration = number(item?.duration ?? item?.media?.duration)
@@ -193,11 +199,13 @@ export function normalizeSearchPayload(payload, platform) {
     }
     record.rank = index + 1
     record.rawItem = item
-    // Re-observing an older Twitter row must also revise/reindex its corrected
+    // Re-observing an older Twitter/Facebook row must also revise/reindex its corrected
     // title, even when the upstream payload itself has not changed.
     const content = contentPayload(item)
-    record.payloadSha256 = sha256(canonicalJson(platform === 'twitter'
-      ? { parserVersion: PARSER_VERSION, content }
+    // Twitter's mapping is unchanged; keep its existing content identity.
+    const titleParserVersion = platform === 'twitter' ? 'mxih-normalizer.v2' : PARSER_VERSION
+    record.payloadSha256 = sha256(canonicalJson(['twitter', 'facebook'].includes(platform)
+      ? { parserVersion: titleParserVersion, content }
       : content))
     records.push(record)
   }

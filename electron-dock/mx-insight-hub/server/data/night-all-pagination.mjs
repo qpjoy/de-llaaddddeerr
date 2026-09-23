@@ -262,7 +262,7 @@ export function capNightAllCompatibilityTraversal(payload, {
   let responseField = null
   if ((mode === 'composite' || mode === 'compound') && upstreamParams) {
     const params = structuredClone(upstreamParams)
-    if (mode === 'compound' && record(upstreamBody?.params)) {
+    if (record(upstreamBody?.params)) {
       // Keep query filters across pages, but never revive stale continuation state.
       for (const [key, value] of Object.entries(upstreamBody.params)) {
         if (!hasContinuationParams({ [key]: value }) && !Object.hasOwn(params, key)) {

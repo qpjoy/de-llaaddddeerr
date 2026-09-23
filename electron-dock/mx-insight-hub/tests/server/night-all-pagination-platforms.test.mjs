@@ -9,6 +9,12 @@ import { createNightAllCompatibilityCursorCodec } from '../../server/external-pl
 // Synthetic Night-All normalized page fixtures, based on its curated endpoint
 // contracts. These verify the Hub boundary, not live supplier availability.
 const cases = [
+  ['facebook', 'RapidAPI search', {
+    paginationMode: 'cursor', nextCursor: 'fb-next',
+  }, { cursor: 'fb-next' }],
+  ['wechat_mp', 'JustOne search', {
+    paginationMode: 'cursor', nextCursor: 'wechat-next',
+  }, { cursor: 'wechat-next' }],
   ['douyin', 'video search v1', {
     paginationMode: 'compound', nextCursor: '8',
     nextParams: { search_id: 'dy-search', backtrace: 'dy-backtrace' },
@@ -84,3 +90,24 @@ for (const [platform, endpoint, page, expected] of cases) {
     }
   })
 }
+
+test('composite continuation retains stable filters over multiple pages', () => {
+  const options = {
+    operation: 'raw', platform: 'zhihu',
+    codec: createNightAllCompatibilityCursorCodec('pagination-matrix-test-secret-with-entropy', 'consumer'),
+  }
+  const request = { platform: 'zhihu', query: 'example', count: 20, params: { sort: 'date' } }
+  let traversal = prepareNightAllCompatibilityTraversal({ ...options, upstreamBody: request })
+  for (let page = 1; page <= 3; page++) {
+    const wrapped = capNightAllCompatibilityTraversal({ data: { page: {
+      hasMore: true, paginationMode: 'composite', nextPage: page + 1,
+      nextParams: { offset: page * 7, search_hash_id: `session-${page}` },
+    } } }, { ...options, ...traversal })
+    traversal = prepareNightAllCompatibilityTraversal({
+      ...options, upstreamBody: { ...request, cursor: wrapped.data.page.nextCursor },
+    })
+    assert.deepEqual(traversal.upstreamBody.params, {
+      sort: 'date', offset: page * 7, search_hash_id: `session-${page}`,
+    })
+  }
+})
