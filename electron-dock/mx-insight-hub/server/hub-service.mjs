@@ -1,5 +1,5 @@
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage } from './data/aggregate-search.mjs'
-import { nightAllFailureEvidence } from './data/night-all-failure-evidence.mjs'
+import { nightAllFailureEvidence, nightAllRejectionError } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
@@ -4403,12 +4403,7 @@ export class HubService {
       }
       if (error instanceof UpstreamRejectedError) {
         await this.store.releaseRequest(activeRequestId, `night_all_http_${error.status}`)
-        throw new AppError(
-          compatibilityPublicStatus(error),
-          'night_all_rejected',
-          'Night-All rejected the request',
-          { requestId: activeRequestId, upstreamStatus: error.status },
-        )
+        throw nightAllRejectionError(error, compatibilityPublicStatus(error), activeRequestId)
       }
       if (error instanceof UpstreamAmbiguousError) {
         await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown')
@@ -4680,10 +4675,7 @@ export class HubService {
     } catch (error) {
       if (error instanceof UpstreamRejectedError) {
         await this.store.releaseRequest(activeRequestId, `night_all_http_${error.status}`)
-        throw new AppError(502, 'night_all_rejected', 'Night-All rejected the request', {
-          requestId: activeRequestId,
-          upstreamStatus: error.status,
-        })
+        throw nightAllRejectionError(error, 502, activeRequestId)
       }
       if (error instanceof UpstreamAmbiguousError) {
         await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown')

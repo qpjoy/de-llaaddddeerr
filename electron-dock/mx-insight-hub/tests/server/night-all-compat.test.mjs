@@ -878,14 +878,16 @@ test('compatibility fallback never crosses an exact request fingerprint', async 
   assert.equal(fixture.store.compatibilitySnapshots.size, 1)
 })
 
-test('compatibility failure evidence is stored before rejection and never changes public error or released usage', async () => {
+test('compatibility rejection includes the upstream code while preserving failure evidence and released usage', async () => {
   const fixture = await compatibilityFixture()
   fixture.setMode('nested-failure')
   await assert.rejects(compatibilityCall(fixture, 'nested-failure'), error => {
     assert.equal(error.code, 'night_all_rejected')
     assert.equal(error.status, 502)
     assert.equal(error.details.upstreamStatus, 502)
-    assert.doesNotMatch(JSON.stringify(error.details), /SECRET|TIKHUB/)
+    assert.equal(error.details.upstreamCode, 'TIKHUB_ALL_ENDPOINTS_FAILED')
+    assert.equal(error.message, 'Night-All rejected the request (upstreamCode: TIKHUB_ALL_ENDPOINTS_FAILED)')
+    assert.doesNotMatch(JSON.stringify(error.details), /SECRET|TIKHUB_HTTP_ERROR|douyin_search_fetch_video_search_v1/)
     return true
   })
   const call = [...fixture.store.connectorCalls.values()].at(-1)

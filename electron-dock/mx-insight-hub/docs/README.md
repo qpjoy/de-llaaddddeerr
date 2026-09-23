@@ -20,6 +20,7 @@ those paths retire one operation at a time and are not the target architecture.
 ## 数据源与聚合搜索（2026-09-22）
 
 - [接入看板交付、现有链路核对与聚合搜索待实现方案](architecture/aggregate-search-and-source-routing.md)
+- [数据源目录与 Hub 实际接入对账规划（2026-09-23）](product/source-catalog-reconciliation-plan.md)：历史覆盖与实际接通分离、能力和路径关联、结构化接入线索、证据对账与分期改造；规划未实施。
 
 ## Current delivery
 

@@ -1,3 +1,5 @@
+import { AppError } from '../core/errors.mjs'
+
 // Retain structure, never arbitrary error messages/stack/URLs/params/bodyPreview.
 // Nested candidate failures are evidence, not a single inferred root cause.
 const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value) ? value : null
@@ -11,6 +13,21 @@ const messages = {
   CRAWLER_COMMAND_FAILED: 'Night-All 采集子进程失败；需关联日志确认原因。',
   invalid_upstream_content_type: 'Night-All 返回非 JSON 错误响应。',
   invalid_upstream_json: 'Night-All 返回的错误正文不是有效 JSON。',
+}
+
+export function nightAllRejectionError(error, httpStatus, requestId) {
+  // Only the envelope's own code is public; nested candidate diagnostics and
+  // arbitrary upstream messages remain restricted evidence.
+  const upstreamCode = [error.body?.error?.code, error.body?.code].find(value =>
+    identifier(value) || (typeof value === 'number' && Number.isFinite(value)),
+  )
+  const hasCode = upstreamCode !== undefined
+  return new AppError(
+    httpStatus,
+    'night_all_rejected',
+    `Night-All rejected the request${hasCode ? ` (upstreamCode: ${upstreamCode})` : ''}`,
+    { requestId, upstreamStatus: error.status, ...(hasCode ? { upstreamCode } : {}) },
+  )
 }
 
 export function projectNightAllFailureEvidence(value) {

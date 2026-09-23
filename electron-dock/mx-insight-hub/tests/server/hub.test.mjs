@@ -128,6 +128,13 @@ before(async () => {
       legacyUpstreamCalls.set(key, call)
       upstreamBodies.push(body)
       if (body.keyword === 'compat-cache' && call > 1) throw new TypeError('connection reset')
+      if ((body.keyword || body.username) === 'compat-rejected') {
+        return jsonResponse({ error: {
+          code: 'DATA_UPSTREAM_FAILED',
+          message: 'SECRET upstream message',
+          details: { code: 'PRIVATE_NESTED_CODE', credential: 'SECRET' },
+        } }, 502)
+      }
       return jsonResponse(nightAllLegacyEnvelope({ call }))
     }
     if (pathname !== '/api/v1/data/search') return jsonResponse({ error: 'not found' }, 404)
@@ -1141,5 +1148,41 @@ test('known upstream rejection releases reservation so explicit retry is possibl
   const second = await call('/api/v1/data/search', { method: 'POST', headers, body })
   assert.equal(first.payload.error.code, 'night_all_rejected')
   assert.equal(second.payload.error.code, 'night_all_rejected')
+  for (const result of [first, second]) {
+    assert.equal(result.response.status, 502)
+    assert.equal(result.payload.error.message, 'Night-All rejected the request (upstreamCode: unavailable)')
+    assert.deepEqual(result.payload.error.details, {
+      requestId: result.payload.requestId,
+      upstreamStatus: 503,
+      upstreamCode: 'unavailable',
+    })
+    assert.equal(result.response.headers.get('x-mx-insight-request-id'), result.payload.requestId)
+    assert.equal(store.requests.get(result.payload.requestId).status, 'released')
+  }
   assert.equal(upstreamCalls.get('facebook'), 2)
+})
+
+test('all legacy HTTP aliases include the Night-All code without exposing nested diagnostics', async () => {
+  const tenant = await store.createTenant({ name: 'Rejection tenant' })
+  const consumer = await store.createConsumer({ tenantId: tenant.id, name: 'Rejection consumer', businessId: 'rejection-test' })
+  await store.replaceGrants(consumer.id, ['facebook'])
+  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['facebook'] })
+  for (const prefix of ['/api/v1/search', '/api/v1/night-all/search']) {
+    for (const operation of ['raw', 'crawl', 'user-info']) {
+      const result = await call(`${prefix}/${operation}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${issued.secret}`, 'idempotency-key': `rejection-${prefix.includes('night-all')}-${operation}` },
+        body: { platform: 'facebook', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
+      })
+      assert.equal(result.response.status, 502)
+      assert.equal(result.payload.error.code, 'night_all_rejected')
+      assert.equal(result.payload.error.message, 'Night-All rejected the request (upstreamCode: DATA_UPSTREAM_FAILED)')
+      assert.deepEqual(result.payload.error.details, {
+        requestId: result.payload.requestId, upstreamStatus: 502, upstreamCode: 'DATA_UPSTREAM_FAILED',
+      })
+      assert.doesNotMatch(JSON.stringify(result.payload), /SECRET|PRIVATE_NESTED_CODE/)
+      assert.equal(store.requests.get(result.payload.requestId).status, 'released')
+    }
+  }
+  assert.equal([...store.requests.values()].filter(request => request.consumerId === consumer.id).length, 6)
 })

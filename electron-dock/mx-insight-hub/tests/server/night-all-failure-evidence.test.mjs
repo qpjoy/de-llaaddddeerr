@@ -1,9 +1,39 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { nightAllFailureEvidence, projectNightAllFailureEvidence } from '../../server/data/night-all-failure-evidence.mjs'
+import { nightAllFailureEvidence, nightAllRejectionError, projectNightAllFailureEvidence } from '../../server/data/night-all-failure-evidence.mjs'
 import { UpstreamRejectedError } from '../../server/core/errors.mjs'
 import { NightAllAdapter } from '../../server/adapters/night-all.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
+
+test('public rejection appends the envelope code and preserves Hub status and request identity', () => {
+  for (const [body, code] of [
+    [{ error: { code: 'DATA_UPSTREAM_FAILED', message: 'SECRET' }, code: 'OTHER_CODE' }, 'DATA_UPSTREAM_FAILED'],
+    [{ code: 'RATE_LIMITED' }, 'RATE_LIMITED'],
+    [{ error: { code: 429 } }, 429],
+    [{ code: 0 }, 0],
+    [{ error: { code: -1 } }, -1],
+  ]) {
+    const error = nightAllRejectionError(new UpstreamRejectedError(429, body), 429, 'hub-request')
+    assert.equal(error.status, 429)
+    assert.equal(error.code, 'night_all_rejected')
+    assert.equal(error.message, `Night-All rejected the request (upstreamCode: ${code})`)
+    assert.deepEqual(error.details, { requestId: 'hub-request', upstreamStatus: 429, upstreamCode: code })
+  }
+})
+
+test('public rejection preserves the original response without a usable envelope code', () => {
+  for (const body of [
+    null, 'Bad Gateway', {}, { error: { details: { code: 'NESTED_ONLY' } } },
+    ...['', ' ', 'x'.repeat(161), 'bad\nSECRET', 'https://private.test', { token: 'SECRET' }, ['SECRET'], false, NaN, Infinity]
+      .map(code => ({ error: { code, message: 'SECRET' } })),
+  ]) {
+    const error = nightAllRejectionError(new UpstreamRejectedError(503, body), 502, 'hub-request')
+    assert.equal(error.status, 502)
+    assert.equal(error.code, 'night_all_rejected')
+    assert.equal(error.message, 'Night-All rejected the request')
+    assert.deepEqual(error.details, { requestId: 'hub-request', upstreamStatus: 503 })
+  }
+})
 
 test('candidate error chains retain codes, endpoint and HTTP evidence without arbitrary text or credentials', () => {
   const input = new UpstreamRejectedError(502, { requestId: 'req_example', error: {

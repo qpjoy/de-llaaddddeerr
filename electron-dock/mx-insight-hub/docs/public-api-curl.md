@@ -1403,6 +1403,14 @@ Elasticsearch PIT 的 Hub search 操作，例如 `/data/search`、`/data/stored/
 | `503 external_platform_operation_blocked` | release、contract、credential 或已审核成本前置条件阻断该 operation；没有可用 exact fallback |
 | `409/429/502/503 external_platform_*` | Hub-native 小红书的去重、容量、响应合同、结果歧义、配置或 circuit 类别；保留 durable request ID 并按具体 code 处理 |
 
+Night-All 明确拒绝时，Hub 保留 `error.code: night_all_rejected`。若上游
+`error.code`（兼容顶层 `code`）为有效错误码，则新增 `error.details.upstreamCode`，
+并在 message 后拼接，例如 `Night-All rejected the request (upstreamCode: DATA_UPSTREAM_FAILED)`。
+错误码支持有限数值或 1–160 字符的 `[A-Za-z0-9][A-Za-z0-9_.:-]*` 标识符；
+没有有效 code 时保持原响应。适用于这些 legacy 路由、`/api/v1/search/*` 别名及
+`/api/v1/data/search` 的历史 Night-All 路径；HTTP 状态、请求 ID、回退与计费语义不变。
+不透传上游任意 message、嵌套候选诊断或凭据。
+
 ### `POST /api/v1/night-all/search/raw`
 
 至少提供一个 singular string `keyword`/`query`，或 plural string array

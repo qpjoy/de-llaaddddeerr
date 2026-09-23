@@ -36,7 +36,9 @@ Night-All legacy 兼容调用的明确 HTTP 拒绝，自 migration 102 起补充
 原错误缺少的字段不会推断补齐，也不会把多个候选端点失败解释为唯一根因。
 
 非 JSON 或损坏 JSON 的 HTTP 拒绝也保留响应头 requestId/traceId。
-该增强仅记录证据，不改变公共 night_all_rejected、HTTP 状态映射、回退与扣费。
+结构化错误链仅记录证据。公共错误仍为 `night_all_rejected`；2026-09-23 起，
+响应 envelope 自身的有效 code 另补充到 `error.details.upstreamCode` 和 message，
+嵌套候选诊断仍不透传。HTTP 状态映射、回退与扣费不变。
 证据独立限时写入（SQL 1 秒、锁等待 500 毫秒），写入失败不阻止原有结算；
 未迁移时原调用继续原有行为，诊断显示证据缺失。读取兼容 migration 102 之前的表结构。
 旧请求不会补回内层错误。po-infra 入库校验、采集 Run 和平台隔离仍不在 Hub 请求账本中。

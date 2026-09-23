@@ -6265,6 +6265,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
       <tr><td><code>404 user_not_found</code></td><td>Hub-native 小红书 crawl/user-info 无法解析目标用户。</td></tr>
       <tr><td><code>400/404/409/422/429 night_all_rejected</code></td><td>Night-All 明确拒绝；Hub 保留这些可安全转发的 HTTP 状态。其他明确拒绝映射为 502。</td></tr>
     </tbody></table>
+    <p>历史 Night-All 路径（含 <code>/api/v1/data/search</code>）明确拒绝时，<code>error.code</code> 保持 <code>night_all_rejected</code>。上游 <code>error.code</code>（兼容顶层 <code>code</code>）若为有限数值或 1–160 字符的 <code>[A-Za-z0-9][A-Za-z0-9_.:-]*</code> 标识符，Hub 会补充 <code>error.details.upstreamCode</code>，并在 message 后拼接，例如 <code>Night-All rejected the request (upstreamCode: DATA_UPSTREAM_FAILED)</code>。没有有效 code 时保持原响应；上游任意 message 与嵌套诊断不透传。HTTP 状态、请求 ID、回退与计费语义不变。</p>
     </section>
 
     <section class="doc-page" data-doc-page="tools">

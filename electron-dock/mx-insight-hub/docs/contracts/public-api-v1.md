@@ -1110,6 +1110,16 @@ Without that exact snapshot:
 | other definite non-2xx HTTP rejection | `502 night_all_rejected` |
 | network error, Hub timeout, or unusable HTTP 2xx contract after dispatch | `502 upstream_outcome_unknown`; request becomes `unknown` |
 
+For historical Night-All rejections on these routes (including `/api/v1/search/*`
+aliases) and `/api/v1/data/search`, `error.code` remains `night_all_rejected`.
+When the upstream envelope supplies a usable `error.code` (or top-level `code`),
+Hub adds `error.details.upstreamCode` and appends it to `error.message`, for example
+`Night-All rejected the request (upstreamCode: DATA_UPSTREAM_FAILED)`.
+Codes may be finite numbers or 1–160 character identifiers matching
+`[A-Za-z0-9][A-Za-z0-9_.:-]*`; without one, the original response is unchanged.
+Hub does not forward arbitrary upstream messages or nested candidate diagnostics.
+HTTP status mapping, request identity, fallback and billing behavior are unchanged.
+
 For an eligible Hub-native Xiaohongshu raw request, the corresponding safe
 errors use the `external_platform_*` codes documented for `/data/search`,
 including `external_platform_rate_limited`; they are not relabeled as
