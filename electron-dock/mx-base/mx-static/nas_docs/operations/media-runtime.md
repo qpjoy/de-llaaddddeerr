@@ -41,7 +41,7 @@ bash scripts/manage.sh nas infra start
 
 ## 初次启用新恢复模式
 
-先同步本版 mx-static，确认 `deploy/nas/profiles.json` 仍选用新迁移报告 `33e5abb193d04e7595251a5e6a6046ae`、`plan=null`，并有 `recovery_mode: media-v1`。服务器此前仍选择旧报告 `830225…`，不要改报告摘要掩盖登记差异。
+先同步本版 mx-static，确认 `deploy/nas/profiles.json` 选用新迁移报告 `33e5abb193d04e7595251a5e6a6046ae`，并有 `recovery_mode: media-v1`。`plan` 在验收前置空，现已依据成功验收回执显式选择清单 `reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9`；它不参与普通恢复，也不授权删除。服务器曾选择旧报告 `830225…`，不要改报告摘要掩盖登记差异。
 
 在服务器 mx-static 目录执行，任一步失败即停止：
 

@@ -452,9 +452,9 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra repair switch <成功 copy 尝试目录> --maintenance --write-test
   bash scripts/manage.sh nas infra repair resume <新切换报告目录> --maintenance --write-test
   bash scripts/manage.sh nas infra cleanup check     # 只读双侧核验，生成新清单；不删除
-  bash scripts/manage.sh nas infra task part1 plan
-  bash scripts/manage.sh nas infra task part1 cleanup --business-accepted
-  bash scripts/manage.sh nas delta task part2 copy --unlimited
+  bash scripts/manage.sh nas infra plan
+  bash scripts/manage.sh nas infra cleanup --business-accepted  # 按已登记清单删除旧 SSD 文件
+  bash scripts/manage.sh nas delta copy --unlimited
   bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
   bash scripts/manage.sh nas recovery enable --migrated
@@ -464,6 +464,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
 默认中文易读显示；任意位置加 --json 保留原始 JSON，--pretty 格式化 JSON。
 后台任务日志、审计文件继续保存原始结构化事件。
 
+infra/delta 已定位登记任务，无需再写 task part1/part2；显式任务写法仍兼容。
 上述 infra/delta 也可写为 project infra / project delta。新项目需在 Git 登记
 目录、身份与执行能力；不扫描全盘自动迁移，不将未审核项目当成 infra。
 

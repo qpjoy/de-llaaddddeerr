@@ -23,6 +23,8 @@ from projects import infra,infra_probe
 class PlatformTests(unittest.TestCase):
     def test_nested_commands_keep_task_and_acceptance_boundaries(self):
         examples=[(['infra','status'],['status','part1']),(['project','infra','recovery'],['recover','part1']),
+          (['infra','cleanup','--business-accepted'],['reclaim','part1','--business-accepted']),
+          (['delta','copy','--unlimited'],['copy','part2','--unlimited']),
           (['infra','task','part1','cleanup','--business-accepted'],['reclaim','part1','--business-accepted']),
           (['delta','task','part2','copy','--unlimited'],['copy','part2','--unlimited']),
           (['recovery','install'],['auto-install']),(['recovery','enable','infra'],['auto-enable','part1']),

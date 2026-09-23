@@ -1,4 +1,4 @@
-# Part 1 新恢复登记与清理前核验
+# Part 1 验收完成，保留 SSD 待日后回收
 
 2026-09-24，服务器已完成当前版本 NAS 修复切换：
 
@@ -6,34 +6,42 @@
 - 新报告：`/var/lib/mx-static/nas-cutover/po_infra_media_data-33e5abb193d04e7595251a5e6a6046ae`。
 - 最终停写证据：上述目录下的 `repair-final-11cccd4afb1243a79a84ff98015babe9`。
 - 十个媒体服务已核对 NFS 子挂载、HTTP 媒体读取和应用写入探测；Postgres/Redis 保持原 ID，SSD 未删除。
-- 用户回答“尚未全部检查”现有账号登录、联网、旧媒体读取、新媒体写入及后台任务；**业务验收仍待完成**。
+- 用户起初回答业务“尚未全部检查”；最新验收核验回执已记录业务验收和文件核验通过，见下文。
 
-Git 的 Part 1 `report` 已改选新报告，`plan` 置空。历史报告与旧清单仍留在服务器，不删除、不改写，也不继续选用旧清单。不能只凭更新 Git 就认为服务器安装完成。
+## 最新服务器回执与登记
 
-后续现场：服务器十个内核 NAS 挂载仍匹配；恢复快照 `f85c883612ed4eaf9e23` 已安装，安装/当前代码一致，timer active/enabled。但 `recovery-enable-migrated` 因 `Deployment files changed since preparation.` 拒绝 infra，策略未修改，串联命令在此停止，尚未提交 cleanup check。
+- 独立媒体登记已写入 `/etc/mx-static/nas/infra-media.json`，恢复快照 `a25a1eae157b9e99636f` 安装成功；infra 已核对并纳入 `migrated` 策略，timer active/enabled。delta 等待迁移。
+- 未验收的首次核验清单尾号为 `df68511205fd47c9af3be3d643455300`，不选用。
+- 后续单元 `mx-nas-part1-reclaim-check-53504b393b.service` 成功，最终清单位于新报告下的 `reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9`。
+- 200,543 个普通文件，538,031,658,699 逻辑字节（约 501.08 GiB）；200,464 个 quick-check 匹配，79 个差异文件双侧哈希一致；保留 1,681 个文件的 NAS 原属性。
+- `files_verified=true`、`business_acceptance_recorded=true`、`recovery.verified=true`、`reclaim_ready=true`；`deletion_authorized=false`、`source_deleted=false`。
+- SSD 清单和停写清单摘要相同：`049f14e174ae53e42400d775605e03310ede473ac61cdd1f77fa031d3b5c099d`。这仍是清单/有限差异哈希证明，不是所有文件的全量内容哈希。
 
-最新只读诊断已定位原因：服务器 `REGISTERED_REPORT` 仍为旧报告尾号 `830225384207402a8ba23a2364d252d1`；当前三个部署文件、base/nas 两份渲染结果、业务容器和数据库均与新报告 `33e5abb193d04e7595251a5e6a6046ae` 匹配，检查期间文件稳定。这次是登记仍旧，不能据此判断业务又改了配置。安装/当前代码一致只表示服务器自身两份声明相同，不表示已经取得本地最新登记。
+Git 的 Part 1 `report` 保持新报告，`plan` 现显式选择上述已验收清单。历史报告、未验收清单及原 SSD 文件继续保留，不改写、不删除。Part 1 已满足“验收通过，SSD 保留到日后另行回收”的约定终点；更新 Git 本身不会更新服务器安装快照或启动任何删除。
 
-本地 `deploy/nas/profiles.json` 已正确选择新报告且 `plan=null`；同步该版本到服务器后，通过 `nas infra locate` 确认实际读取的 Git 声明及所选报告。最新版本采用 [独立媒体恢复](media-runtime.md)，需先执行一次 `storage register` 再安装/检查恢复；日常恢复不再绑定历史应用配置。迁移/清理的严格校验保持原样，不修改历史报告摘要、重复切换或清除 NAS 标记。
+此前 `Deployment files changed since preparation.` 的原因是服务器仍选择旧报告 `830225384207402a8ba23a2364d252d1`；当时当前部署与新报告一致。现已采用 [独立媒体恢复](media-runtime.md) 并取得服务器登记和安装回执，不再按旧错误重复修复。迁移/清理的严格校验保持原样，不修改历史报告摘要、重复切换或清除 NAS 标记。
 
 ## 现在执行
 
-以下为完整执行顺序；先同步并确认服务器已选择新报告，再继续。前一步失败则停止，不跳过检查：
+先将本次清单登记更新同步到服务器 mx-static 目录，然后执行。前一步失败则停止，不跳过检查：
 
 ```bash
-bash scripts/manage.sh nas infra storage check &&
-bash scripts/manage.sh nas infra storage register &&
+bash scripts/manage.sh nas infra locate &&
 bash scripts/manage.sh nas recovery install &&
-bash scripts/manage.sh nas recovery enable --migrated &&
-bash scripts/manage.sh nas recovery check &&
-bash scripts/manage.sh nas infra cleanup check
+bash scripts/manage.sh nas recovery check
 ```
 
-独立登记只写本机媒体身份记录，不重启容器。安装操作更新本机恢复代码/声明快照，保留原恢复策略；enable 检查当前媒体挂载后启用持久 timer。安装不重建业务；timer 如触发，只补启动已核对的现存 NAS 媒体容器，已运行且挂载匹配的容器不重启。恢复检查应显示 infra 存储/恢复核对通过、已纳入，且安装快照与当前代码/声明一致；delta 等待迁移是预期结果。通过不代表应用 API 或登录已验收。
+`locate` 中的计划应为 `reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9`。安装只更新恢复代码/声明快照，保留启用策略；不重启或重建业务，不执行清理。检查应显示 infra 已核对、已纳入、安装快照一致且 timer active/enabled。无需因清单登记再次复制 Part 1、重新切换或重复业务验收。
 
-最后一条提交只读后台核验任务，打印唯一单元和 journalctl 命令。systemd 将 `/data` 与 `/mnt/nas` 设为只读；工具只向新私有本地报告写证据，不停止业务、不复制媒体、不修改 NAS 权限、不删除 SSD。没有带宽节流，不读取整卷内容做全量 SHA256。
+通过后可以按约定启动 Part 2 的独立不限速在线预复制：
 
-回传统一恢复检查摘要和 `nas_reclaim_check_complete` 整条记录。当前不要添加 `--business-accepted`。文件检查成功、恢复覆盖通过但业务验收未记录时，`reclaim_ready=false` 是正确结果，不代表文件核验失败。
+```bash
+bash scripts/manage.sh nas delta copy --unlimited
+```
+
+使用命令返回的唯一单元/journalctl 跟踪此次任务。`precopy_start` 应显示 `bandwidth_unlimited=true`、`bandwidth_limit_mib_per_second=0`；最终成功阶段为 `precopy_pass_complete`、`last_exit_code=0`。任务只复制 delta 的 raw-media（含 tmp），不停止业务、不切换挂载、不删除源文件。Part 2 目前仅支持预复制；正式切换、恢复登记和可回收清单仍需该实例自己的部署审查及适配，不能复用 Part 1 的报告或宣称预复制后可删 SSD。
+
+Part 1 旧 SSD 尚未删除，预复制也不会释放 `/data` 空间。沿用单卷顺序，不并发两卷；复制期间观察 `df -hT /data` 和业务状态，按需暂停新的大批采集，不为释放空间自动清理文件。
 
 ## 新清单如何证明可以保留到日后回收
 
@@ -46,7 +54,19 @@ bash scripts/manage.sh nas infra cleanup check
 
 文件清单位于新切换报告下独立的 `reclaim-plan-<ID>`。`files_verified=true` 表示此时文件核验通过；只有实际业务验收明确记录且恢复覆盖通过，才标记 `reclaim_ready=true`。工具不会把清单自动写入 Git `profiles.json`，也不会执行删除。切换收据中的 pending 字段保留其历史阶段含义；当前事实看最新核验结果。
 
-用户完成并确认业务验收后，可以再次运行 `infra cleanup check --business-accepted` 生成新的核验和验收记录；该参数在 **check** 上仅登记验收，仍不会删除。通过后再显式登记该清单、更新安装快照。到此 SSD 继续保留，按用户安排以后再删除；本轮不提供或执行删除命令。
+本次 `infra cleanup check --business-accepted` 已完成，并依据回执显式登记清单；该参数在 **check** 上仅登记验收，仍不会删除。以后若实际回收前状态变化而核验拒绝，先审查变化，再按流程生成并登记新清单，不能改写旧证据来绕过。
+
+## 用户现在请求的 SSD 删除命令
+
+用户已在上述验收后询问执行 Part 1 SSD 回收的命令。同步本次登记后，按前文 `locate` / `recovery install` / `recovery check` 确认当前选中的是 `reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9` 且恢复覆盖通过，然后执行：
+
+```bash
+bash scripts/manage.sh nas infra cleanup --business-accepted
+```
+
+此命令**真正删除**已登记清单内、逐项重新核验通过的旧 SSD 文件；范围固定为 `/data/docker/volumes/po_infra_media_data/_data/data_hub_raw_media`，不删除根目录、其他 media、NAS 文件、数据库或队列。不要加 `check`（加上仅核验）。项目名已选择任务，无需 `task part1`。执行中不要发布、重建容器或修改旧 SSD 文件。
+
+跟随提交结果所列单元日志，也可执行 `bash scripts/manage.sh nas infra logs`。最终应有 `reclaim_result`、`phase=ssd_files_reclaimed` 和单元 `Succeeded`，再用 `df -hT /data` 核对释放空间。文件逻辑大小约 501.08 GiB，实际释放量以 df 为准。若失败，保留清单及删除意图日志、回传错误；不能直接 rm、改清单或绕过检查。尚未收到本次删除完成回执。
 
 ## 日后删除仍有独立校验
 

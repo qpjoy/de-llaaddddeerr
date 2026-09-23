@@ -27,4 +27,14 @@ bash scripts/manage.sh nas delta task part2 copy --unlimited
 
 # compose.nas.override.json 保存在服务器的成功报告目录
 bash scripts/manage.sh nas infra locate
+
+
+# 第一阶段尝试 cleanup
+bash scripts/manage.sh nas infra cleanup check --business-accepted
+# 确认cleanup
+bash scripts/manage.sh nas infra cleanup --business-accepted
+# 删除前，应该执行
+bash scripts/manage.sh nas infra locate &&
+bash scripts/manage.sh nas recovery install &&
+bash scripts/manage.sh nas recovery check
 ```

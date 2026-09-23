@@ -60,16 +60,16 @@ bash scripts/manage.sh nas infra deployment audit
 
 宿主机命令读取本地挂载表、NFS/RPC 相关进程及 D 状态进程、指定 systemd 单元和网络路由。它不 stat NAS、不 kill 进程、不启动 mount、不修改 fstab。D 状态不一定由 NFS 导致；进程列表只输出 PID、comm、状态、等待点，不输出可能含密钥的完整命令行。Docker 暂不可用时也可以运行这些宿主诊断。
 
-回收任务归属与能力会检查：
+项目名已定位各自登记任务，无需重复写 `task part1` / `task part2`；显式任务写法仍兼容。回收任务归属与能力照常检查：
 
 ```bash
-bash scripts/manage.sh nas infra task part1 status
-bash scripts/manage.sh nas infra task part1 plan
-bash scripts/manage.sh nas infra task part1 cleanup --business-accepted
-bash scripts/manage.sh nas delta task part2 copy --unlimited
+bash scripts/manage.sh nas infra status
+bash scripts/manage.sh nas infra cleanup check
+bash scripts/manage.sh nas infra cleanup --business-accepted
+bash scripts/manage.sh nas delta copy --unlimited
 ```
 
-其中 cleanup 是真正删除旧 SSD 文件的操作，只有业务验收正常后执行；其底层仍是已验证的限定清单清理工具。已有计划路径已登记，不自动选择“最新目录”。Part 2 尚无切换/清理回执，`delta task part2 cleanup` 会拒绝，待第二卷正式迁移后再添加相应已审核能力，不能绕过。
+其中 `cleanup check` 只核验；不带 `check` 的 `cleanup --business-accepted` 是真正删除旧 SSD 文件的操作，只有业务验收正常后执行。其底层仍是已验证的限定清单清理工具，使用已登记计划，不自动选择“最新目录”。Part 2 尚无切换/清理回执，`delta cleanup` 会拒绝，待第二卷正式迁移后再添加相应已审核能力，不能绕过。
 
 持久恢复同样归到统一入口：
 
