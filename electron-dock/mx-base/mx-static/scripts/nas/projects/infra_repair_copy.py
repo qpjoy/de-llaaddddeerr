@@ -150,7 +150,7 @@ def source_metadata(root, path, tree):
         os.close(fd)
 
 
-def recheck_sources(source, tree, paths):
+def recheck_sources(source, tree, paths, emit_summary=True):
     """Hash only ctime-only drift with a trusted digest in the original filename.
 
     The original manifest is immutable. Return a per-attempt snapshot for strict
@@ -188,8 +188,9 @@ def recheck_sources(source, tree, paths):
             emit('nas_repair_source_recheck_progress', checked=index, candidates=len(paths),
                  ctime_revalidated=len(changes), hashed_source_bytes=hashed_bytes)
             last_progress = time.monotonic()
-    emit('nas_repair_source_rechecked', checked=len(paths), ctime_revalidated=len(changes),
-         hashed_source_bytes=hashed_bytes, original_manifest_unchanged=True)
+    if emit_summary:
+        emit('nas_repair_source_rechecked', checked=len(paths), ctime_revalidated=len(changes),
+             hashed_source_bytes=hashed_bytes, original_manifest_unchanged=True)
     return reviewed, changes
 
 
@@ -220,9 +221,34 @@ def append(fd, event, **values):
     os.fsync(fd)
 
 
+def open_copy_source(source, path, tree, journal):
+    """Revalidate eligible drift once, BEFORE copying this file, with a durable record.
+
+    A long online queue may outlive the batch preflight. Never retry a file that
+    changes during hashing, staging or publication, and never mutate the plan.
+    """
+    try:
+        return open_file(source, path, tree), tree[path]
+    except RuntimeError:
+        reviewed, changes = recheck_sources(source, tree, [path], emit_summary=False)
+        if not changes:
+            raise  # No proven ctime-only change; preserve the original refusal.
+        fd = open_file(source, path, reviewed)
+        try:
+            change = changes[0]
+            append(journal, 'source_ctime_revalidated_before_copy', path=path,
+                   previously_checked=change['prepared'], observed=change['observed'],
+                   sha256=change['sha256'], validation=change['validation'])
+            emit('nas_repair_copy_source_revalidated', path=path, content_matches_filename=True,
+                 original_manifest_unchanged=True)
+            return fd, reviewed[path]
+        except BaseException:
+            os.close(fd)
+            raise
+
+
 def copy_one(source, target, stage, path, tree, dirs, journal):
-    expected = tree[path]
-    source_fd = open_file(source, path, tree)
+    source_fd, expected = open_copy_source(source, path, tree, journal)
     parent = None
     temp_fd = None
     temp_name = 'file-' + uuid.uuid4().hex
@@ -400,6 +426,7 @@ def execute(manager, profile, report_path):
         if os.fstat(stage).st_dev != os.fstat(op.target).st_dev or os.fstat(stage).st_mode & 0o077:
             raise RuntimeError('Private staging must be on the same NAS filesystem.')
         journal = private_file(attempt_fd, 'copy.jsonl', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND)
+        os.fsync(attempt_fd)  # Persist the journal name before any file publication.
         append(journal, 'stage_directory', name=stage_name, identity=precopy.source_identity(stage))
         copied = present = total = 0
         emit('nas_repair_copy_started', report_directory=report_path, attempt_directory=attempt_path,

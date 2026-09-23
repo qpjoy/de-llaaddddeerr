@@ -2,7 +2,7 @@
 
 最新现场（2026-09-24）：infra 十个媒体消费者在后续重建中遗漏 NAS 覆盖，内核已确认当前实际使用 SSD；恢复因 `.env`/部署身份漂移被阻止。两侧各有独有文件，禁止清理、重复旧复制或绕过检查。详见 [当前差异、重启/重装/断电与防回退要求](operations/no-ssd-fallback.md)。新增 `nas infra storage check` 只读核对当前配置和内核挂载，不能代替发布启动拦截。
 
-当前版本核对和 `nas infra repair prepare` 随后已通过，具体报告尾号 `a0131341096e4ba9b9e3e61c3e2581dd`。`nas infra repair copy <报告目录>` 默认不限速，只补清单中 5,289 个 / 2.69 GiB 的 SSD 独有文件，不覆盖 NAS、不删除 SSD、不重启业务。首次后台任务 `mx-nas-part1-repair-copy-6c31173829.service` 在写前检查时失败，`attempt_directory=null`，本次未复制 NAS 文件。后续定点核对确认头像文件仅 ctime 变化；已新增仅针对 SHA256 命名候选的内容复核，验证通过才继续，原清单保留。同步更新后可重试同一 repair copy 命令，不必重复整卷 prepare；尚无重试完成回执。
+当前版本核对和 `nas infra repair prepare` 随后已通过，具体报告尾号 `a0131341096e4ba9b9e3e61c3e2581dd`。`nas infra repair copy <报告目录>` 默认不限速，只补清单中 5,289 个 / 2.69 GiB 的 SSD 独有文件，不覆盖 NAS、不删除 SSD、不重启业务。首次任务因头像 ctime 变化在写前失败；后续 `mx-nas-part1-repair-copy-4012630bf6.service` 已确认至少新复制 5,100 个文件 / 779,659,473 字节，然后因一个视频在轮到复制时未通过源状态检查退出，尚无整份清单完成回执。保留成功文件和报告。最新更新会在每个文件开始前，对仅 ctime 变化的 SHA256 命名候选再次验证内容并先记录日志，其他变化仍阻止；重试核对并保留已有 NAS 文件，不覆盖。详见方案末尾的部分完成记录。
 
 用户最新顺序：**Part 1 完成 NAS 切换、业务验收、恢复基准登记和新 SSD 清理清单核验，保留 SSD 待日后删除；然后再将 Part 2 推进到同样状态。** 不在 Part 1 在线补齐后就启动 Part 2。当前仍缺 Part 1 修复切换/新基准和 Part 2 独立切换/回收执行能力；详见 [完整迁移终点与当前阻塞](operations/no-ssd-fallback.md#完整迁移终点与当前阻塞)。
 

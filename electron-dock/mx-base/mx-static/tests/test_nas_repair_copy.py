@@ -108,7 +108,7 @@ class RepairCopyTests(unittest.TestCase):
             copying.recheck_sources(self.src, self.tree, self.paths)
         digest.assert_not_called()
 
-    def test_changes_during_or_after_ctime_recheck_still_block_copy(self):
+    def test_changes_during_recheck_or_later_permission_changes_still_block_copy(self):
         self.hashed_candidate(); self.change_ctime()
         original = copying.digest
         def changed(fd, size):
@@ -119,10 +119,78 @@ class RepairCopyTests(unittest.TestCase):
             copying.recheck_sources(self.src, self.tree, self.paths)
         self.file.chmod(0o644)
         reviewed, _ = copying.recheck_sources(self.src, self.tree, self.paths)
-        self.file.chmod(0o600); self.file.chmod(0o644)
+        self.file.chmod(0o600)
         with self.assertRaises(RuntimeError):
             copying.copy_one(self.src, self.dst, self.stg, self.paths[0], reviewed, self.dirs, self.journal)
         self.assertFalse((self.target / self.paths[0]).exists())
+
+    def test_ctime_change_while_queued_is_rehashed_and_journaled_before_nas_write(self):
+        self.hashed_candidate()
+        reviewed, _ = copying.recheck_sources(self.src, self.tree, self.paths)
+        self.change_ctime()
+        before = dict(reviewed[self.paths[0]])
+        original = copying.os.open
+        def check_before_staging(name, flags, *args, **kwargs):
+            if kwargs.get('dir_fd') == self.stg and flags & os.O_CREAT:
+                records = [json.loads(line) for line in (self.output / 'journal.jsonl').read_text().splitlines()]
+                self.assertEqual(records[-1]['event'], 'source_ctime_revalidated_before_copy')
+                self.assertEqual(records[-1]['previously_checked'], before)
+                self.assertEqual(records[-1]['observed'], copying.stamp(self.file.stat()))
+                self.assertEqual(records[-1]['sha256'], hashlib.sha256(b'new-media').hexdigest())
+            return original(name, flags, *args, **kwargs)
+        with mock.patch.object(copying.os, 'open', side_effect=check_before_staging):
+            outcome, _ = copying.copy_one(self.src, self.dst, self.stg, self.paths[0], reviewed, self.dirs, self.journal)
+        self.assertEqual(outcome, 'copied')
+        self.assertEqual(reviewed[self.paths[0]], before)
+        self.assertEqual((self.target / self.paths[0]).read_bytes(), b'new-media')
+
+    def test_copy_start_revalidation_journal_failure_prevents_nas_write(self):
+        self.hashed_candidate(); self.change_ctime()
+        with mock.patch.object(copying.os, 'fsync', side_effect=OSError('journal sync failed')), self.assertRaises(OSError):
+            self.copy()
+        self.assertFalse((self.target / self.paths[0]).exists())
+        self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_copy_start_revalidation_does_not_accept_corruption_or_temp_drift(self):
+        self.change_ctime()
+        with self.assertRaisesRegex(RuntimeError, 'without a SHA256 filename'): self.copy()
+        self.hashed_candidate()
+        expected = self.tree[self.paths[0]]
+        self.file.write_bytes(b'bad-media')
+        os.utime(str(self.file), ns=(expected['mtime_ns'], expected['mtime_ns']))
+        with self.assertRaisesRegex(RuntimeError, 'differs from its hash filename'): self.copy()
+        self.assertFalse((self.target / self.paths[0]).exists())
+        self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_ctime_only_change_during_copy_is_not_retried_or_published(self):
+        self.hashed_candidate()
+        original = copying.digest
+        def changed(fd, size):
+            value = original(fd, size)
+            self.change_ctime()
+            return value
+        with mock.patch.object(copying, 'digest', side_effect=changed), self.assertRaisesRegex(RuntimeError, 'before publication'):
+            self.copy()
+        self.assertFalse((self.target / self.paths[0]).exists())
+        self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_retry_after_partial_copy_keeps_published_file_and_fills_next_file(self):
+        self.copy()
+        target = self.target / self.paths[0]; target.chmod(0o600)
+        previous = target.stat()
+        next_file = self.source / 'video' / (hashlib.sha256(b'next-file').hexdigest() + '.mp4')
+        next_file.write_bytes(b'next-file'); next_file.chmod(0o644)
+        next_path = 'video/' + next_file.name
+        # A second candidate is already in this simulated prepared batch.
+        self.tree[next_path] = copying.stamp(next_file.stat())
+        next_file.chmod(0o600); next_file.chmod(0o644)
+        outcome, _ = self.copy()
+        self.assertEqual(outcome, 'already_present')
+        outcome, _ = copying.copy_one(self.src, self.dst, self.stg, next_path, self.tree, self.dirs, self.journal)
+        self.assertEqual(outcome, 'copied')
+        self.assertEqual((target.stat().st_ino, target.stat().st_mode, target.stat().st_mtime_ns),
+                         (previous.st_ino, previous.st_mode, previous.st_mtime_ns))
+        self.assertEqual((self.target / next_path).read_bytes(), b'next-file')
 
     def test_source_recheck_rejects_missing_symlink_hardlink_and_replaced_parent(self):
         self.hashed_candidate()

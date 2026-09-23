@@ -93,6 +93,8 @@ def render(value):
             '完成' if event=='nas_repair_source_rechecked' else '进度',value['checked'],value['ctime_revalidated'],size(value['hashed_source_bytes']))
     if event=='nas_repair_copy_started':
         return '开始在线补齐：{} 个候选文件，{}；不限速\n执行报告：{}\n保留 SSD，NAS 同名文件不覆盖；不重启业务。'.format(value['files'],size(value['logical_bytes']),value['attempt_directory'])
+    if event=='nas_repair_copy_source_revalidated':
+        return '候选等待期间仅 ctime 变化，内容哈希复核通过，已记入本次日志：'+cell(value['path'])
     if event=='nas_repair_copy_progress':
         return '补齐进度：{}/{}；新复制 {}，已存在且同内容 {}，已处理 {}'.format(value['processed'],value['candidates'],value['copied'],value['already_present'],size(value['logical_bytes']))
     if event=='nas_repair_copy_complete':
