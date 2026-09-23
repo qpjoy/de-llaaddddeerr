@@ -22,6 +22,9 @@ import host as host_control
 import action_log
 from projects import infra as infra_adapter
 from projects import infra_storage
+from projects import infra_runtime
+from projects import infra_services
+from projects import infra_deploy
 from projects import infra_repair
 from projects import infra_repair_copy
 from projects import infra_repair_switch
@@ -127,6 +130,10 @@ def locate(part, profile):
         reclaim_plan=profile['plan'],ssd='/data/docker/volumes/'+profile['volume']+'/_data/data_hub_raw_media',
         nas='/mnt/nas/mx-internal-server/data/docker/media-volumes/'+profile['volume']+'/data_hub_raw_media',
         docker_nfs_volume=profile['nfs_volume'],auto_config=AUTO_DIR+'/auto.json',
+        recovery_mode=profile.get('recovery_mode','legacy'),
+        media_registration=(AUTO_DIR+'/'+infra_runtime.RECORD if profile.get('recovery_mode')=='media-v1' else None),
+        media_contract=(str(CONFIG.parent/profile['runtime_file']) if profile.get('runtime_file') else None),
+        deployment_definition=(str(CONFIG.parent/profile['deployment_file']) if profile.get('deployment_file') else None),
         installed_runtime=RUNTIME+'/current',boot_service=UNIT+'.service',boot_timer=UNIT+'.timer')
 
 
@@ -154,7 +161,15 @@ def status(part, profile):
          auto=auto_config(),systemd=systemd_summary(),nas_walk=False)
     if profile['storage_file']:
         infra_storage.check(sys.modules[__name__],profile,rows)
-    if profile['report']:
+    if profile.get('recovery_mode')=='media-v1':
+        try:
+            current=infra_services.check(sys.modules[__name__],profile)
+            stopped=sorted(c['Config']['Labels']['com.docker.compose.service'] for c in current.values() if not c['State']['Running'])
+            emit('nas_media_project_state',ready=True,stopped=stopped,
+                 note='当前容器与独立 NAS 登记一致；不依赖旧迁移报告。存储核对不代表业务验收或可删除 SSD。')
+        except recovery_control.ERRORS as exc:
+            emit('nas_media_project_state',ready=False,stopped=[],note=str(exc))
+    elif profile['report']:
         fd=cutover.open_report(profile['report'])
         try:
             state=cutover.read_json(fd,'execution.json')
@@ -163,6 +178,12 @@ def status(part, profile):
 
 
 def boot_check(part,profile):
+    if profile.get('recovery_mode') == 'media-v1':
+        rows=infra_services.check(sys.modules[__name__],profile)
+        emit('nas_media_boot_check',part=part,consumers=len(rows),
+             stopped=[c['Id'][:12] for c in rows.values() if not c['State']['Running']],
+             note='核对当前 NAS 挂载和已有服务依赖；不读取业务 .env，不查询数据库内容。未模拟真实重启。')
+        return
     with operation(profile) as (op,rows):
         emit('nas_boot_check',part=part,registered_mounts=True,databases_healthy=True,
              stopped=[n for n,c in rows.items() if not c['State']['Running']],
@@ -171,7 +192,9 @@ def boot_check(part,profile):
              note='Metadata/configuration only; does not prove an actual reboot or NFS outage recovery.')
 
 
-def recover(profile):
+def recover(profile, automatic=False):
+    if profile.get('recovery_mode') == 'media-v1':
+        return infra_services.recover(sys.modules[__name__],profile,automatic=automatic)
     # This boot path deliberately avoids /mnt/nas and the SSD old-media tree.
     # Docker owns its native NFS mount; host fstab can be absent/late independently.
     with operation(profile) as (op,rows):
@@ -200,8 +223,15 @@ def recover(profile):
 
 def task_command(action, profile, args):
     py='/usr/bin/python3'; scripts=ROOT/'scripts/nas'
+    if action=='media-deploy-recreate':
+        if not args.maintenance or profile.get('recovery_mode')!='media-v1':
+            raise RuntimeError('Media deployment requires reviewed media-v1 registration and --maintenance.')
+        return [py,'-B',str(Path(__file__).resolve()),'_execute-media-deploy',args.part,'--maintenance']+(['--build'] if args.build else [])
     if action=='copy':
         return [py,'-B',str(scripts/'precopy.py'),profile['volume'],'--copy']+(['--unlimited'] if args.unlimited else [])
+    if action=='recover' and profile.get('recovery_mode')=='media-v1':
+        infra_runtime.contract(sys.modules[__name__],profile)
+        return [py,'-B',str(Path(__file__).resolve()),'_execute-recover',args.part]
     if not profile.get('report') or profile['volume']!=prep.VOLUME:
         raise RuntimeError('No reviewed Part 2 cutover/reclaim implementation; use copy part2 first.')
     if action=='repair-copy':
@@ -244,14 +274,16 @@ def launch(action,profile,args):
         finally:os.close(fd)
     unit='mx-nas-{}-{}-{}'.format(args.part,action,uuid.uuid4().hex[:10])
     cmd=['systemd-run','--unit='+unit,'--property=RuntimeMaxSec=infinity',
-         '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy','repair-switch','repair-resume') else '90s')]
+         '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy','repair-switch','repair-resume','media-deploy-recreate') else '90s')]
     if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy','repair-switch','repair-resume'):cmd+=['--property=ReadOnlyPaths=/data']
     if action=='reclaim-check':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
+    if action=='media-deploy-recreate':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
+    if action=='recover':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='reclaim':cmd+=['--property=ReadOnlyPaths=/mnt/nas']
     if action in ('copy','repair-copy'):cmd+=['--property=Nice=19']
     print(run(cmd+command),end='')
     emit('nas_job_started',part=args.part,action=action,unit=unit+'.service',
-         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume','reclaim-check') else 'sudo bash scripts/manage.sh nas logs '+args.part),
+         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume','reclaim-check','media-deploy-recreate') else 'sudo bash scripts/manage.sh nas logs '+args.part),
          transient=True,reboot_auto_resume=False)
 
 
@@ -357,7 +389,10 @@ def set_auto(part,profile,enabled):
     if enabled:
         if not recovery_control.installed_current(sys.modules[__name__]):raise RuntimeError('Run recovery install first; installed runtime must match current code/policy.')
         # Do not enable against drifted/stopped production; recover it explicitly first.
-        with operation(profile,require_running=True):pass
+        if profile.get('recovery_mode') == 'media-v1':
+            infra_services.check(sys.modules[__name__],profile,require_running=True)
+        else:
+            with operation(profile,require_running=True):pass
         installed=json.loads((Path(RUNTIME)/'current/deploy/nas/profiles.json').read_text())
         if installed['parts'][part]!=profile:raise RuntimeError('Installed policy is stale; run auto-install again.')
     value=auto_config(); parts=set(value['enabled_parts']);disabled=set(value.get('disabled_parts',[]))
@@ -392,17 +427,26 @@ def parser():
     for action in ('reclaim-check','_execute-reclaim-check'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         s.add_argument('--business-accepted',action='store_true')
+    sub.add_parser('storage-register').add_argument('part',choices=('part1',))
+    sub.add_parser('media-deploy-check').add_argument('part',choices=('part1',))
+    for action in ('media-deploy-recreate','_execute-media-deploy'):
+        s=sub.add_parser(action);s.add_argument('part',choices=('part1',))
+        s.add_argument('--maintenance',action='store_true');s.add_argument('--build',action='store_true')
     return p
 
 
 HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas project list
   bash scripts/manage.sh nas host status|processes|mount-check|network
-  bash scripts/manage.sh nas infra status|locate|logs|recovery
+  bash scripts/manage.sh nas infra status|start|locate|logs|recovery
+  # start：按依赖补启动现有服务（含 PostgreSQL/Redis）；不重建、不删 NAS/数据库/队列
   bash scripts/manage.sh nas infra permissions check
   bash scripts/manage.sh nas infra permissions probe --write-test
   bash scripts/manage.sh nas infra deployment audit
+  bash scripts/manage.sh nas infra deployment check  # 当前应用配置 + NAS 约束；不构建/启动
+  bash scripts/manage.sh nas infra deployment recreate --maintenance [--build]
   bash scripts/manage.sh nas infra storage check     # 当前挂载核对；不符/未确认退出 1
+  bash scripts/manage.sh nas infra storage register  # 一次登记媒体恢复；不重启，不绑定 .env/镜像/ID
   bash scripts/manage.sh nas infra repair prepare    # 当前版本修复清单；只读媒体，另存私有报告
   bash scripts/manage.sh nas infra repair copy <修复报告目录>  # 后台补齐清单中的 SSD 独有文件，不覆盖 NAS
   bash scripts/manage.sh nas infra repair switch <成功 copy 尝试目录> --maintenance --write-test
@@ -470,13 +514,19 @@ def main():
         registry=profiles()
         profile=registry.get(getattr(args,'part',None))
         mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
-        mutations.update(('reclaim-check','_execute-reclaim-check'))
+        mutations.update(('reclaim-check','_execute-reclaim-check','storage-register','media-deploy-recreate','_execute-media-deploy'))
         if action in mutations:
             audit(action,getattr(args,'part',None),'requested');audit_started=True
         if action.startswith('host-'):
             host_control.inspect(action[5:],catalog.load(CONFIG)[1])
         elif action=='deployment-audit':infra_adapter.deployment_audit(sys.modules[__name__],profile)
+        elif action=='media-deploy-check':infra_deploy.check(sys.modules[__name__],profile)
+        elif action=='_execute-media-deploy':
+            if not args.maintenance:raise RuntimeError('Media recreate requires --maintenance.')
+            with migration_lock():infra_deploy.recreate(sys.modules[__name__],profile,args.build)
         elif action=='storage-check':return 0 if infra_storage.check(sys.modules[__name__],profile) else 1
+        elif action=='storage-register':
+            with migration_lock():infra_runtime.register(sys.modules[__name__],profile)
         elif action=='repair-prepare':
             with migration_lock():infra_repair.prepare(sys.modules[__name__],profile)
         elif action=='_execute-repair-copy':

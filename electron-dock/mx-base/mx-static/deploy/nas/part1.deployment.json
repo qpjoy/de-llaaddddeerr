@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "directory": "/home/lcy/test/Delta/mx_data",
+  "env_file": "deploy/.env.ghcr",
+  "compose_files": ["docker-compose.ghcr.yml", "docker-compose.local-build.yml"],
+  "startup_scripts_sha256": {
+    "scripts/run_worker.sh": "fd211830a63045583a8c4917ba86d457a116f2d513872ae0552736a2041f4573",
+    "scripts/run_beat.sh": "eea7198b2d7d6cb7063e96fdfc7bb2f5cfbe3bbe09a788ced92a589046d76b18",
+    "scripts/run_chat_gateway.sh": "7904de2c3af14d0acd599a93b3ee6dc5f6d6c15530c903ac17910f8ce28e5dc1"
+  }
+}

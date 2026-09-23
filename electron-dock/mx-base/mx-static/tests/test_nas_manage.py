@@ -18,6 +18,8 @@ import manage as manager
 class ManagerTests(unittest.TestCase):
     def setUp(self):
         self.profiles=manager.profiles();self.profile=self.profiles['part1']
+        # Legacy migration/same-version recovery remains available to old registries.
+        self.profile.pop('recovery_mode',None)
         self.output=contextlib.redirect_stdout(io.StringIO());self.output.__enter__()
     def tearDown(self):self.output.__exit__(None,None,None)
 

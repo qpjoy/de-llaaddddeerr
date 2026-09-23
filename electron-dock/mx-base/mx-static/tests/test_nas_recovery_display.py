@@ -67,6 +67,7 @@ class DisplayTests(unittest.TestCase):
 class RecoveryTests(unittest.TestCase):
     def setUp(self):
         self.index,self.host,self.projects=copy.deepcopy(catalog.load(manage.CONFIG))
+        self.index['parts']['part1'].pop('recovery_mode',None)  # Legacy adapter regression coverage.
         self.policy=recovery.normalize({'schema':1,'enabled_parts':[]},self.index['parts'])
         self.output=contextlib.redirect_stdout(io.StringIO());self.output.__enter__()
         self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)

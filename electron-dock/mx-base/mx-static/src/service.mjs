@@ -659,7 +659,7 @@ export function createStaticService({
         await unlink(join(root, 'metadata', `${key}.json`)).catch(absent)
         memory.delete(key); metaCache.delete(key); recentReads.delete(key)
         return json(200, { key, references: dropped.remaining, contentRemoved: dropped.remaining === 0,
-          archivedCopyQueuedForRemoval: dropped.mirrored })
+          archivedCopyQueuedForRemoval: false })
       }
       const capacityRoute = /^\/static\/v1\/projects\/([a-z0-9-]+)\/capacity$/.exec(url.pathname)
       if (capacityRoute) {

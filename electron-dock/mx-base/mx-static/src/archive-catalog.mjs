@@ -111,9 +111,7 @@ export class ArchiveCatalog {
       if (!row) { this.db.exec('COMMIT'); return null }
       if (row.state === 'running') { this.db.exec('COMMIT'); return { row, busy: true } }
       this.sql('DELETE FROM objects WHERE key=?').run(key)
-      // Every key owns its own remote path, so each deletion schedules its own
-      // purge; the shared bytes go when the last remote link is removed.
-      if (row.mirrored === 1) this.sql('INSERT OR IGNORE INTO purges(key,created_at) VALUES(?,?)').run(key, Date.now())
+      // Removing a local reference never schedules deletion of its NAS copy.
       const remaining = this.references(row.sha256)
       this.db.exec('COMMIT')
       return { row, remaining, mirrored: row.mirrored === 1 }
@@ -172,25 +170,8 @@ export class ArchiveCatalog {
   }
   claim() { return this.claimMany(1)[0] || null }
   claimPurges(limit = 1) {
-    if (!this.backend().enabled || limit < 1) return []
-    const now = Date.now(), claimed = []
-    this.db.exec('BEGIN IMMEDIATE')
-    try {
-      while (claimed.length < limit) {
-        const row = this.sql(`UPDATE purges SET owner=?,lease_until=?,attempts=attempts+1
-          WHERE key=(SELECT key FROM purges WHERE (owner IS NULL AND next_at<=?) OR lease_until<=? ORDER BY created_at LIMIT 1)
-          RETURNING *`).get(randomUUID(), now + 60000, now, now)
-        if (!row) break
-        claimed.push({ ...row, action: 'purge', meta: { key: row.key } })
-      }
-      this.db.exec('COMMIT')
-      return claimed
-    } catch (error) { this.db.exec('ROLLBACK'); throw error }
-  }
-  completePurge(job) { return this.sql('DELETE FROM purges WHERE key=? AND owner=?').run(job.key, job.owner).changes === 1 }
-  failPurge(job, error) {
-    this.sql('UPDATE purges SET owner=NULL,lease_until=NULL,error=?,next_at=? WHERE key=? AND owner=?')
-      .run(String(error).slice(0, 100), Date.now() + Math.min(300000, 2000 * 2 ** Math.min(job.attempts, 7)), job.key, job.owner)
+    // Compatibility only: preserve old pending records without leasing them.
+    return []
   }
   // Leases stay short so a killed worker recovers in about a minute; a batch
   // that legitimately runs longer keeps them alive while it reports progress.

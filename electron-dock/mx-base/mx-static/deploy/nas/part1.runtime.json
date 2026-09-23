@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "project": "mx_data",
+  "parent_path": "/app/media",
+  "media_path": "/app/media/data_hub_raw_media",
+  "docker_root": "/data/docker",
+  "nfs_options": {
+    "type": "nfs",
+    "o": "addr=192.168.1.3,vers=3,proto=tcp,rw,hard,rsize=524288,wsize=524288,timeo=600,retrans=2,sec=sys",
+    "device": ":/volume1/data1/mx-internal-server/data/docker/media-volumes/po_infra_media_data/data_hub_raw_media"
+  },
+  "start_groups": [
+    ["web", "chat-gateway"],
+    ["worker", "worker-agent-data-hub", "worker-agent-interactive", "worker-agent-long", "worker-agent-short", "worker-strategy-draft"],
+    ["gateway"],
+    ["beat"]
+  ]
+}

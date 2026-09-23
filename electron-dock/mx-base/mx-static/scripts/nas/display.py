@@ -49,16 +49,18 @@ def render(value):
     if event=='nas_locations':
         fields=[('git_registry','Git 登记'),('git_storage','NAS 挂载声明'),('runtime_override','运行时 Compose 覆盖'),
                 ('report','迁移报告'),('reclaim_plan','清理清单'),('ssd','旧 SSD 目录'),('nas','NAS 目录'),
-                ('docker_nfs_volume','Docker NFS 卷'),('auto_config','恢复设置'),('installed_runtime','安装快照')]
+                ('docker_nfs_volume','Docker NFS 卷'),('auto_config','恢复设置'),('installed_runtime','安装快照'),
+                ('recovery_mode','恢复模式'),('media_registration','独立媒体恢复登记'),('media_contract','媒体存储约束'),
+                ('deployment_definition','仅重建时读取的部署定位')]
         return '任务路径 · '+value['part']+'\n'+'\n'.join('  {}：{}'.format(label,cell(value.get(key) or '未登记')) for key,label in fields)
     if event=='nas_status':
         rows=[]
         for c in value['containers']:
             mounts=c['raw_media_mounts']
-            rows.append([c['service'],c['status'],c['health'] or '未配置健康检查',
+            rows.append([c['service'],c['status'],c['health'] or '未配置健康检查',c.get('restart') or '未设置',
                          ', '.join((m.get('Name') or m['Type'])+(' [读写]' if m.get('RW') else ' [只读]') for m in mounts) or '无 raw-media 子挂载'])
         cfg=value['auto']
-        return ('业务状态 · '+value['part']+'\n'+table(['服务','状态','健康检查','媒体挂载'],rows)+
+        return ('业务状态 · '+value['part']+'\n'+table(['服务','状态','健康检查','Docker 重启策略','媒体挂载'],rows)+
                 '\n/data 可用：'+size(value['data_available_bytes'])+'\n恢复策略：'+('已迁移项目统一管理' if cfg.get('mode')=='migrated' else '逐项目登记')+
                 '；全局暂停：'+yes(cfg.get('suspended',False))+'；显式列表：'+(', '.join(cfg['enabled_parts']) or '无')+
                 '\n'+units(value['systemd']['units']))
@@ -149,6 +151,19 @@ def render(value):
     if event=='nas_auto_policy':
         return '项目恢复设置已保存\n  策略：{}\n  全局暂停：{}\n  显式启用：{}\n  项目暂停：{}'.format(value.get('mode','explicit'),yes(value.get('suspended',False)),','.join(value['enabled_parts']) or '无',','.join(value.get('disabled_parts',[])) or '无')
     if event=='nas_recovery_result':return '本轮补启动：'+(', '.join(value['started']) or '无需补启动，已登记容器正常')+'\n未重建、复制或删除数据。'
+    if event=='nas_media_registered':return '独立媒体恢复已登记\n  文件：'+value['record']+'\n'+value['note']
+    if event=='nas_media_project_state':
+        return 'NAS 项目接管核对：'+('通过' if value['ready'] else '需处理')+'\n待启动服务：'+(', '.join(value['stopped']) or ('无' if value['ready'] else '尚未确认'))+'\n'+value['note']
+    if event=='nas_project_start_order':return '项目依赖顺序：'+' → '.join(value['services'])+'\n'+value['note']
+    if event=='nas_project_waiting':return '启动 '+value['service']+' 前等待依赖就绪：'+', '.join(value['dependencies'])+'；最多 '+str(value['timeout_seconds'])+' 秒'
+    if event=='nas_project_recovery':return '本轮项目补启动：'+(', '.join(value['started']) or '无，已有服务保持运行')+'\n'+value['note']
+    if event=='nas_media_boot_check':return '项目恢复检查通过 · '+value['part']+'\n待启动：'+(', '.join(value['stopped']) or '无')+'\n'+value['note']
+    if event=='nas_media_recovery':return '本轮媒体补启动：'+(', '.join(value['started']) or '无')+'\n'+value['note']
+    if event=='nas_media_deployment_check':return '媒体维护重建预检通过\n缺少的媒体服务：'+(', '.join(value['missing_services']) or '无')+'\n'+value['note']
+    if event=='nas_media_deployment_building':return '正在构建媒体服务；完整构建输出写入本机私有日志：'+value['private_log']
+    if event in ('nas_media_deployment_prepared','nas_media_deployment_complete','nas_media_deployment_failed'):
+        title={'nas_media_deployment_prepared':'媒体维护配置已准备','nas_media_deployment_complete':'媒体服务已重建并核对 NAS 挂载；业务验收待完成','nas_media_deployment_failed':'媒体维护未完成，请保留现场'}[event]
+        return title+'\n私有报告：'+value['report_directory']+'\n'+value['note']
     if event in ('nas_recovery_project_failed','nas_recovery_project_blocked'):
         return '恢复需处理 · {} / {}\n  {}'.format(value['project'],value['task'],value['error'])
     if event=='nas_job_started':

@@ -15,3 +15,5 @@ RestartSec=60s
 TimeoutStartSec=infinity
 TimeoutStopSec=90s
 UMask=0077
+# Applies to the recovery helper, not the separate Docker daemon/app processes.
+ReadOnlyPaths=-/data -/mnt/nas

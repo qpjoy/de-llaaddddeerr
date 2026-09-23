@@ -6,9 +6,12 @@ import { join } from 'node:path'
 import { MediaJobs } from './jobs.mjs'
 import { ArchiveCatalog } from './archive-catalog.mjs'
 import { Settings } from './settings.mjs'
+import { assertLocalStorage } from './mounts.mjs'
 
 const stateDir = process.env.MX_STATIC_STATE_DIR || '/state'
 const dataDir = process.env.MX_STATIC_DATA_DIR || '/data'
+// Boot-time housekeeping is local-only, even when configuration is wrong.
+assertLocalStorage([dataDir,stateDir],{controlPaths:[stateDir]})
 const report = {}
 
 // Opening each store applies its CREATE/ALTER statements, including the

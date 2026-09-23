@@ -20,10 +20,9 @@ export class ArchiveWorker {
     if(!this.catalog.backend().enabled) {this.health='detached';this.catalog.heartbeat(this.health);return}
     this.catalog.heartbeat(this.health,this.lastError)
     if(this.child || Date.now()<this.nextRun) return
-    const work=this.catalog.claimMany(this.concurrency)
-    // Deletions ride in the same batch; they are the cheapest NFS operation
-    // here and must not wait behind a queue of transfers.
-    const jobs=[...work,...this.catalog.claimPurges(Math.max(0,this.concurrency-work.length))]
+    // NAS copies are retained permanently by this worker. Historical purge
+    // records remain in SQLite for inspection and are never dispatched.
+    const jobs=this.catalog.claimMany(this.concurrency)
     const child=this.spawnImpl(process.execPath,[fileURLToPath(new URL('./archive-io.mjs',import.meta.url)),JSON.stringify({...this.config,jobs,concurrency:this.concurrency})],{stdio:['ignore','ignore','pipe','ipc']})
     this.child=child
     // Outcomes arrive per object; whatever is still in here when the child ends
@@ -38,7 +37,7 @@ export class ArchiveWorker {
       finished=true;clearTimeout(timer);clearTimeout(absoluteTimer)
       for(const job of outstanding.values()) {
         const why=ok?'archive_result_missing':(reason||'archive_incomplete')
-        if(job.action==='purge') this.catalog.failPurge(job,why); else this.catalog.fail(job,why)
+        this.catalog.fail(job,why)
       }
       outstanding.clear()
       this.health=ok?'online':'backoff';this.lastError=ok?null:reason
@@ -53,7 +52,7 @@ export class ArchiveWorker {
       clearTimeout(timer);timer=setTimeout(expire,this.timeoutMs)
       if(Date.now()-renewedAt<this.renewEveryMs) return
       renewedAt=Date.now()
-      for(const job of outstanding.values()) if(job.action!=='purge') this.catalog.renew(job,this.leaseMs)
+      for(const job of outstanding.values()) this.catalog.renew(job,this.leaseMs)
     }
     child.on('message',message=>{
       if(finished) return
@@ -62,13 +61,12 @@ export class ArchiveWorker {
         if(job) {
           outstanding.delete(message.done.key)
           if(message.done.ok) {
-            if(job.action==='purge') this.catalog.completePurge(job); else this.catalog.complete(job)
+            this.catalog.complete(job)
             // An archived object is proof the backend is reachable. Outcomes
             // now land before the child exits, so health must not wait for it:
             // eviction and other transitions require an online backend.
             if(this.health!=='online') {this.health='online';this.lastError=null;this.catalog.heartbeat('online')}
           }
-          else if(job.action==='purge') this.catalog.failPurge(job,message.done.error||'archive_io_failed')
           else this.catalog.fail(job,message.done.error||'archive_io_failed')
         }
       }

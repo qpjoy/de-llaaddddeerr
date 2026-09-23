@@ -1,6 +1,8 @@
 # NAS 迁移运维入口
 
-最新现场（2026-09-24）：infra 曾因后续重建遗漏 NAS 覆盖而回到 SSD；现已完成双侧补齐和当前版本修复切换，新成功报告尾号 `33e5abb193d04e7595251a5e6a6046ae`，十个媒体服务已运行在 NAS，数据库/Redis 保持原 ID。用户尚未全部检查业务；恢复安装和新清理前核验待回传，SSD 保留。下一步见 [恢复登记与只读清理前核验](operations/part1-union-reclaim.md)。`nas infra storage check` 不能代替外部发布启动拦截，重启/重装/断电仍无实际演练回执。
+最新现场（2026-09-24）：infra 曾因后续重建遗漏 NAS 覆盖而回到 SSD；现已完成双侧补齐和当前版本修复切换，新成功报告尾号 `33e5abb193d04e7595251a5e6a6046ae`，十个媒体服务已运行在 NAS，数据库/Redis 保持原 ID。恢复工具已安装，但最新诊断确认服务器仍选择旧报告 `830225…`，当前部署文件/渲染/容器均匹配新报告；须同步正确登记后重新安装检查。业务尚未全部验收，也无新清理前核验回执，SSD 保留。下一步见 [恢复登记与只读清理前核验](operations/part1-union-reclaim.md)。`nas infra storage check` 不能代替外部发布启动拦截，重启/重装/断电仍无实际演练回执。
+
+最新实现：仅在 mx-static 增加独立媒体恢复登记，日常恢复不读取业务目录、`.env`、API、历史镜像/容器 ID 或数据库状态；需要构建/重建时才使用当前应用 Compose 的显式维护入口。未修改 po-infra 源码；服务器尚未采用本版。见 [媒体恢复与按需重建](operations/media-runtime.md)。迁移/清理仍保留严格证据，外部 Docker/原发布入口不被拦截。
 
 前序 `mx-nas-part1-repair-copy-0096322ad3.service` 已成功补齐 5,289 个 / 2,892,300,834 字节（2.69 GiB）：本次新增 181 个，已存在并核验 5,108 个。随后 `mx-nas-part1-repair-switch-194cd1338d.service` 完成[维护切换](operations/part1-repair-switch.md)，最终停写差异、实际 NAS 挂载、HTTP 媒体读取和应用写探测均通过。此前失败证据保留在[修复记录](operations/no-ssd-fallback.md)，不要重跑旧复制/切换。
 
@@ -14,7 +16,7 @@
 
 统一入口已加入 `bash scripts/manage.sh nas`，配置和运维全部保留在 mx-static。查看 [统一管理、部署配置与开机恢复](operations/unified-management.md)。它自动定位成功报告和 NAS override；持久恢复须在服务器显式安装/启用，之前的 systemd-run 任务仍是临时任务。
 
-第一卷历史上成功切换 NAS，但当前需先处理两侧增量并恢复正确挂载。旧 [SSD 回收流程](operations/part1-reclaim.md) 和 [只读清单](operations/part1-reclaim-plan.md) 保留作历史依据，不能按旧状态立即执行。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行旧切换。
+第一卷已完成双侧增量合并及正确挂载恢复，当前处理恢复登记与新清理前核验。旧 [SSD 回收流程](operations/part1-reclaim.md) 和 [只读清单](operations/part1-reclaim-plan.md) 保留作历史依据，不能按旧状态立即执行。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行旧切换。
 
 本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`，在线完整内容校验入口为 `bash scripts/nas-verify.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 

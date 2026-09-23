@@ -2,10 +2,10 @@
 import { readFile, link, mkdir, open, rename, unlink, stat, statfs } from 'node:fs/promises'
 import { createReadStream, createWriteStream, unlinkSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Transform } from 'node:stream'
-import { filesystemAt } from './mounts.mjs'
+import { filesystemAt, assertLocalStorage } from './mounts.mjs'
 import { isObjectKey } from './keys.mjs'
 import { fileURLToPath } from 'node:url'
 import { ArchiveCatalog } from './archive-catalog.mjs'
@@ -30,7 +30,7 @@ async function durableDirectory(path) {
 // The copy already hashes every byte on the way through, so the bytes we sent
 // are verified either way. readback additionally re-reads what landed, which
 // catches corruption on the far side -- and doubles the traffic to get it.
-async function copyVerified(source,target,meta,{readback=true}={}) {
+async function copyVerified(source,target,meta,{readback=true,retainPartial=false}={}) {
   await durableDirectory(dirname(target))
   const temp=target+'.'+randomUUID()+'.tmp'
   try {
@@ -39,9 +39,12 @@ async function copyVerified(source,target,meta,{readback=true}={}) {
     if (bytes!==meta.size || hash.digest('hex')!==meta.sha256) throw Error('source_checksum_mismatch')
     const file=await open(temp,'r+');try{await file.sync()}finally{await file.close()}
     if (readback) await verifyFile(temp,meta)
-    await rename(temp,target)
+    // NAS publication never replaces an existing file. Keep the staging link
+    // for explicit migration cleanup; normal operation must not unlink NAS.
+    if (retainPartial) await link(temp,target)
+    else await rename(temp,target)
     const dir=await open(dirname(target),'r');try{await dir.sync()}finally{await dir.close()}
-  } finally { await unlink(temp).catch(()=>{}) }
+  } finally { if (!retainPartial) await unlink(temp).catch(()=>{}) }
 }
 // 'sample' verifies a deterministic slice of objects rather than all of them,
 // so a bulk migration keeps some far-side coverage without paying for it twice
@@ -49,11 +52,12 @@ async function copyVerified(source,target,meta,{readback=true}={}) {
 const readbackFor=(verify,meta)=>verify==='always'||(verify==='sample'&&parseInt(meta.sha256.slice(0,2),16)<16)
 async function alreadyMirrored(remote,meta,verify) {
   // Under 'always' the skip decision is itself a full verification; otherwise a
-  // size check is enough to decide whether a re-copy is needed.
+  // a size check is used. Conflicts are retained for explicit migration repair.
   try {
     if (verify==='always') { await verifyFile(remote,meta); return true }
-    return (await stat(remote)).size===meta.size
-  } catch { return false }
+    if ((await stat(remote)).size!==meta.size) throw Error('archive_size_mismatch')
+    return true
+  } catch(error) { if(error.code==='ENOENT') return false; throw error }
 }
 async function archiveOne({nasRoot,localRoot,stateDir,verify},job) {
   const {meta,key}=job
@@ -70,21 +74,20 @@ async function archiveOne({nasRoot,localRoot,stateDir,verify},job) {
           if ((await stat(twin)).size===meta.size) { await durableDirectory(dirname(remote));await link(twin,remote);await (async()=>{const d=await open(dirname(remote),'r');try{await d.sync()}finally{await d.close()}})();linked=true }
         } catch(error) { if(!['ENOENT','EXDEV','EPERM','EMLINK','ENOTSUP','EEXIST'].includes(error.code)) throw error }
       }
-      if (!linked) await copyVerified(local,remote,meta,{readback:readbackFor(verify,meta)})
+      if (!linked) await copyVerified(local,remote,meta,{readback:readbackFor(verify,meta),retainPartial:true})
     }
     // Keep metadata alongside the archive; no tenant credentials are copied.
     const body=Buffer.from(JSON.stringify(meta)), path=join(nasRoot,'metadata',key+'.json')
     await durableDirectory(dirname(path))
+    try {
+      if (!(await readFile(path)).equals(body)) throw Error('archive_metadata_conflict')
+      return
+    } catch(error) { if(error.code!=='ENOENT') throw error }
     const temp=path+'.'+randomUUID()+'.tmp'
-    try { const fd=await open(temp,'wx',0o640);try{await fd.writeFile(body);await fd.sync()}finally{await fd.close()};await rename(temp,path);const dir=await open(dirname(path),'r');try{await dir.sync()}finally{await dir.close()} }
-    finally { await unlink(temp).catch(()=>{}) }
+    const fd=await open(temp,'wx',0o640);try{await fd.writeFile(body);await fd.sync()}finally{await fd.close()}
+    await link(temp,path);const dir=await open(dirname(path),'r');try{await dir.sync()}finally{await dir.close()}
   } else if(job.action==='purge') {
-    // Removes this key's own remote path only. Content shared with other keys
-    // survives, because each of those keys still links to the same inode.
-    const gone=error=>{ if(error.code!=='ENOENT') throw error }
-    await unlink(remote).catch(gone)
-    await unlink(join(nasRoot,'metadata',key+'.json')).catch(gone)
-    progress()
+    throw Error('nas_deletion_disabled')
   } else if(job.action==='restore') {
     const disk=await statfs(localRoot)
     if(disk.bavail*disk.bsize < 512*1024*1024+meta.size) throw Error('local_storage_full')
@@ -110,6 +113,11 @@ function report(key,ok,error) {
   else if (!ok) console.error(`${key}: ${error}`)
 }
 export async function runArchiveIO({nasRoot,localRoot,stateDir,volumeId,requireNfs=true,verify='always',concurrency=1,jobs=[],job=null}) {
+  const queue=(job?[job]:jobs).filter(Boolean)
+  if (queue.some(item=>item.action==='purge')) throw Error('nas_deletion_disabled')
+  assertLocalStorage([localRoot,stateDir],{controlPaths:[stateDir]})
+  const remoteRoot=resolve(nasRoot), cacheRoot=resolve(localRoot)
+  if (remoteRoot===cacheRoot || remoteRoot.startsWith(cacheRoot+'/') || cacheRoot.startsWith(remoteRoot+'/')) throw Error('archive_roots_overlap')
   // Preflight once for the whole batch: a wrong mount or identity fails every
   // job in it, and must never write a byte into an unconfirmed directory.
   if (requireNfs) {
@@ -117,7 +125,6 @@ export async function runArchiveIO({nasRoot,localRoot,stateDir,volumeId,requireN
     if (!['nfs','nfs4'].includes(type)) throw Error('nas_not_mounted')
   }
   if ((await readFile(join(nasRoot,'.mx-static-volume-id'),'utf8')).trim()!==volumeId) throw Error('nas_identity_mismatch')
-  const queue=(job?[job]:jobs).filter(Boolean)
   if (!queue.length) return
   const context={nasRoot,localRoot,stateDir,verify}
   // Identical content inside one batch crosses the wire once: the first job

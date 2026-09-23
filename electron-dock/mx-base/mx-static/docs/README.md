@@ -84,12 +84,12 @@ Compose writer/reader 共享对象目录；reader 的对象与状态挂载均为
 ```sh
 curl -X DELETE "$STATIC_URL/static/v1/projects/mx-insight-hub/objects/<key>" \
   -H "Authorization: Bearer $WRITE_TOKEN"
-# {"key":"...","references":2,"contentRemoved":false,"archivedCopyQueuedForRemoval":true}
+# {"key":"...","references":2,"contentRemoved":false,"archivedCopyQueuedForRemoval":false}
 ```
 
 `references` 是删除后仍指向同一内容的引用数，`contentRemoved` 为 true 表示这份内容已经没有任何引用。删除需要 write token，且只能删本 project 的 key；重复删除返回 404 而不是错误状态。**没有批量删除接口**。
 
-NAS 侧同样去重：同内容的第二个 key 在 NAS 上是一次 LINK，不重新传输字节——归档是整个系统的吞吐瓶颈，这一条收益最大。同一批任务里的相同内容也只传一次（先落一个，其余链接到它）。删除一个已归档的 key 会排队清除**它自己的**远端路径，孪生 key 的路径不受影响。
+NAS 侧同样去重：同内容的第二个 key 在 NAS 上是一次 LINK，不重新传输字节。同一批任务里的相同内容也只传一次。**删除本地 key 保留 NAS 文件**，不会排队清除远端；旧 purge 记录保留但不再执行。`contentRemoved` 仅说明本地引用，不表示 NAS 副本删除。归档发布保留暂存硬链接，失败残留也不自动清理；现有远端内容冲突会报错，不自动覆盖。迁移清理需另走明确的迁移维护流程。
 
 `GET /static/v1/projects/<p>/storage` 的 `content` 字段给出 `references` / `distinctObjects` / `logicalBytes` / `storedBytes` / `savedBytes`。
 

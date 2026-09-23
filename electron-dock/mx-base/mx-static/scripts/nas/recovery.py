@@ -53,6 +53,15 @@ def inventory(manager, require_running=False):
                  'nas_expected':observed or project.get('data_policy',{}).get('nas_authoritative') is True}
             state=None
             try:
+                if profile.get('recovery_mode') == 'media-v1':
+                    if not reviewed(project):raise RuntimeError('Media recovery adapter not reviewed.')
+                    rows=manager.infra_services.check(manager,profile,require_running=require_running)
+                    row.update(state='eligible',reason='独立 NAS 登记、当前挂载和已有服务依赖已核对（不绑定历史应用配置/ID）',
+                               stopped=[c['Id'][:12] for c in rows.values() if not c['State']['Running']],
+                               unhealthy=[c['Id'][:12] for c in rows.values() if c['State'].get('Health',{}).get('Status')=='unhealthy'])
+                    row['nas_expected']=True
+                    results.append(row)
+                    continue
                 if profile.get('report'):
                     fd=manager.cutover.open_report(profile['report'])
                     try:
@@ -77,16 +86,19 @@ def inventory(manager, require_running=False):
                     if stopped:row['reason']+='；已停止：'+','.join(stopped)
                     if unhealthy:row['reason']+='；不健康：'+','.join(unhealthy)
             except ERRORS as exc:row.update(state='blocked',reason=str(exc))
-            if task in policy.get('disabled_parts',[]):row['coverage']='项目已暂停'
-            elif policy.get('suspended',False):row['coverage']='全局已暂停'
-            elif requested(policy,task):row['coverage']='已纳入' if row['state']=='eligible' else '等待迁移' if row['state']=='not_migrated' else '被检查阻止'
-            elif row['state']=='eligible':row['coverage']='遗漏：未启用'
             results.append(row)
+    # Apply selection to both media-only and legacy adapters.
+    for row in results:
+        task=row['task']
+        if task in policy.get('disabled_parts',[]):row['coverage']='项目已暂停'
+        elif policy.get('suspended',False):row['coverage']='全局已暂停'
+        elif requested(policy,task):row['coverage']='已纳入' if row['state']=='eligible' else '等待迁移' if row['state']=='not_migrated' else '被检查阻止'
+        elif row['state']=='eligible':row['coverage']='遗漏：未启用'
     return policy,results
 
 
 def show(manager, require_running=False):
-    emit('nas_recovery_inventory_start',note='逐项核对本地成功记录、Docker 配置与挂载；不扫描 NAS 文件。')
+    emit('nas_recovery_inventory_start',note='逐项核对 NAS 登记、当前挂载和已有服务依赖；不绑定历史业务配置，不扫描 NAS 文件或数据库内容。')
     policy,rows=inventory(manager,require_running)
     emit('nas_recovery_inventory',policy=policy,tasks=rows,installed_current=installed_current(manager),systemd=manager.systemd_summary())
     return policy,rows
@@ -129,7 +141,9 @@ def run_all(manager):
         if row['state']=='blocked':
             emit('nas_recovery_project_blocked',project=row['project'],task=task,error=row['reason'])
             failures.append(task);continue
-        try:manager.recover(registry[task])
+        try:
+            if registry[task].get('recovery_mode')=='media-v1':manager.recover(registry[task],automatic=True)
+            else:manager.recover(registry[task])
         except ERRORS as exc:
             emit('nas_recovery_project_failed',project=row['project'],task=task,error=str(exc))
             failures.append(task)

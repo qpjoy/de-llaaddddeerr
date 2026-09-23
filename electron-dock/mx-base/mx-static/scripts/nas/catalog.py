@@ -33,6 +33,11 @@ def load(config):
         for task in p['tasks']:
             if task not in index['parts'] or task in claimed:raise RuntimeError('Missing/duplicate migration task: '+task)
             if p['compose_project']!=index['parts'][task]['project']:raise RuntimeError('Project/task deployment mismatch.')
+            profile=index['parts'][task]
+            if profile.get('recovery_mode') not in (None,'media-v1'):
+                raise RuntimeError('Unknown recovery mode; refusing legacy fallback.')
+            if profile.get('recovery_mode')=='media-v1' and (p['adapter']!='infra-v1' or not profile.get('runtime_file')):
+                raise RuntimeError('Media recovery needs the reviewed adapter and independent storage contract.')
             claimed.add(task)
         projects[name]=p
     if claimed!=set(index['parts']):raise RuntimeError('Every task needs exactly one registered project.')
@@ -46,6 +51,8 @@ def installed_files(config):
     names={'profiles.json',index['host_policy']}
     names.update(index['project_catalog'].values())
     names.update(p['storage_file'] for p in index['parts'].values() if p.get('storage_file'))
+    names.update(p['runtime_file'] for p in index['parts'].values() if p.get('runtime_file'))
+    names.update(p['deployment_file'] for p in index['parts'].values() if p.get('deployment_file'))
     for name in names:read_relative(config.parent,name)
     return [config.parent/name for name in sorted(names)]
 
@@ -89,9 +96,15 @@ def route(argv, config):
     if tail==['deployment','audit']:
         if 'deployment-audit' not in p['capabilities']:raise RuntimeError('Deployment adapter not reviewed.')
         return ['deployment-audit',task]
+    if tail[:2] in (['deployment','check'], ['deployment','recreate']):
+        if p['adapter']!='infra-v1':raise RuntimeError('Media deployment adapter only reviewed for infra.')
+        return ['media-deploy-'+tail[1],task]+tail[2:]
     if tail==['storage','check']:
         if p['adapter']!='infra-v1':raise RuntimeError('Storage check adapter not reviewed for this project.')
         return ['storage-check',task]
+    if tail==['storage','register']:
+        if p['adapter']!='infra-v1':raise RuntimeError('Media recovery registration only reviewed for infra.')
+        return ['storage-register',task]
     if tail[:2]==['cleanup','check']:
         if p['adapter']!='infra-v1':raise RuntimeError('UNION reclaim check only reviewed for infra.')
         return ['reclaim-check',task]+tail[2:]
@@ -104,7 +117,7 @@ def route(argv, config):
     if len(tail)>=3 and tail[0]=='repair' and tail[1] in ('switch','resume'):
         if p['adapter']!='infra-v1':raise RuntimeError('Repair switch only reviewed for infra.')
         return ['repair-'+tail[1],task]+tail[2:]
-    action={'recovery':'recover','cleanup':'reclaim'}.get(tail[0],tail[0])
+    action={'start':'recover','recovery':'recover','cleanup':'reclaim'}.get(tail[0],tail[0])
     if action=='compose' and p['adapter']=='infra-v1':return ['compose',task]+tail[1:]
     if action not in p['capabilities']:raise RuntimeError('Unsupported project action: '+action)
     return [action,task]+tail[1:]

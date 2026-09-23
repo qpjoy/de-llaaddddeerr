@@ -8,6 +8,7 @@ import {createStaticService} from '../src/service.mjs'
 import {ArchiveWorker} from '../src/archive-worker.mjs'
 import {ArchiveCatalog} from '../src/archive-catalog.mjs'
 import {filesystemAt} from '../src/mounts.mjs'
+import {runArchiveIO} from '../src/archive-io.mjs'
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1kAAAAASUVORK5CYII=','base64')
 const token='t'.repeat(32), headers={authorization:`Bearer ${token}`}
 async function fixture(t) {
@@ -85,6 +86,38 @@ test('mount selection is lexical/local and detects nested NFS without touching i
  assert.equal(filesystemAt('/data/objects/a',mounts),'nfs4')
  assert.equal(filesystemAt('/state/archive.sqlite',mounts),'ext4')
  assert.equal(filesystemAt('/database',mounts),'ext4')
+})
+test('historical purge jobs are not leased or dispatched and direct purge is refused',async t=>{
+ const f=await fixture(t),meta=await f.upload()
+ const worker=new ArchiveWorker({stateDir:f.state,localRoot:f.local,nasRoot:f.nas,volumeId:'nas-01',requireNfs:false,probeIntervalMs:20})
+ t.after(()=>worker.stop());f.catalog.setEnabled(true,'nas-01')
+ await until(worker,()=>f.catalog.get(meta.key).mirrored===1 && !worker.child)
+ f.catalog.db.prepare('INSERT INTO purges(key,created_at) VALUES(?,?)').run(meta.key,Date.now())
+ assert.deepEqual(f.catalog.claimPurges(10),[])
+ const original=f.catalog.db.prepare('SELECT * FROM purges WHERE key=?').get(meta.key)
+ const jobs=[];const fake=new EventEmitter();fake.stderr=new EventEmitter();fake.kill=()=>true
+ const second=new ArchiveWorker({stateDir:f.state,localRoot:f.local,nasRoot:f.nas,volumeId:'nas-01',requireNfs:false,
+   spawnImpl:(_cmd,args)=>{jobs.push(...JSON.parse(args[1]).jobs);return fake}})
+ t.after(async()=>{fake.emit('exit',0);await second.stop()})
+ second.tick();assert.deepEqual(jobs,[])
+ assert.deepEqual(f.catalog.db.prepare('SELECT * FROM purges WHERE key=?').get(meta.key),original)
+ await assert.rejects(runArchiveIO({nasRoot:f.nas,localRoot:f.local,stateDir:f.state,volumeId:'nas-01',requireNfs:false,
+   job:{key:meta.key,meta,action:'purge'}}),/nas_deletion_disabled/)
+ assert.deepEqual(await readFile(join(f.nas,'objects',meta.key)),png)
+ assert.equal(JSON.parse(await readFile(join(f.nas,'metadata',meta.key+'.json'),'utf8')).key,meta.key)
+})
+test('normal archive sync retains an existing conflicting NAS file',async t=>{
+ const f=await fixture(t),meta=await f.upload()
+ const remote=join(f.nas,'objects',meta.key)
+ await mkdir(join(remote,'..'),{recursive:true});await writeFile(remote,'existing NAS content')
+ await runArchiveIO({nasRoot:f.nas,localRoot:f.local,stateDir:f.state,volumeId:'nas-01',requireNfs:false,
+   job:{key:meta.key,meta,action:'sync'}})
+ assert.equal(await readFile(remote,'utf8'),'existing NAS content')
+})
+test('archive local eviction cannot target the NAS root through overlapping configuration',async t=>{
+ const f=await fixture(t)
+ await assert.rejects(runArchiveIO({nasRoot:f.nas,localRoot:f.nas,stateDir:f.state,volumeId:'nas-01',requireNfs:false}),/archive_roots_overlap/)
+ await assert.rejects(runArchiveIO({nasRoot:f.nas,localRoot:join(f.nas,'cache'),stateDir:f.state,volumeId:'nas-01',requireNfs:false}),/archive_roots_overlap/)
 })
 test('slow transfer progress refreshes idle deadline, but total task time remains bounded',async t=>{
  const f=await fixture(t);await f.upload()

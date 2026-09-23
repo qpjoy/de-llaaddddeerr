@@ -124,11 +124,11 @@ test('the NAS links identical content instead of transferring it again', async t
 
   const [a, b] = await Promise.all([first, second].map(m => stat(join(f.nas, 'objects', m.key))))
   assert.equal(a.ino, b.ino, 'the second key was linked on the NAS, not copied')
-  assert.equal(a.nlink, 2)
+  assert.equal(a.nlink, 3, 'two remote references plus the retained publication link')
   assert.deepEqual(await readFile(join(f.nas, 'objects', second.key)), body)
 })
 
-test('deleting a mirrored reference removes its remote path and spares its twin', async t => {
+test('deleting a local reference preserves both NAS copies and never queues a purge', async t => {
   const f = await fixture(t)
   const body = variant()
   const first = await f.upload(body), second = await f.upload(body)
@@ -137,13 +137,13 @@ test('deleting a mirrored reference removes its remote path and spares its twin'
   await until(worker, () => [first, second].every(m => f.catalog.get(m.key).mirrored === 1), 'both mirrored')
 
   const dropped = await f.remove(first.key).then(r => r.json())
-  assert.equal(dropped.archivedCopyQueuedForRemoval, true)
+  assert.equal(dropped.archivedCopyQueuedForRemoval, false)
   assert.equal(dropped.references, 1)
   await until(worker, () => f.catalog.status('test').pendingPurges === 0, 'purge drained')
 
-  await assert.rejects(stat(join(f.nas, 'objects', first.key)), /ENOENT/, 'the deleted key left the NAS')
+  assert.deepEqual(await readFile(join(f.nas, 'objects', first.key)), body, 'the deleted local key remains on NAS')
   assert.deepEqual(await readFile(join(f.nas, 'objects', second.key)), body, 'its twin is untouched')
-  assert.equal((await stat(join(f.nas, 'objects', second.key))).nlink, 1)
+  assert.equal((await stat(join(f.nas, 'objects', second.key))).nlink, 3)
 })
 
 test('reads record an access time, so eviction can find genuinely cold objects', async t => {

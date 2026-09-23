@@ -4,12 +4,26 @@ This is NOT an admission controller or permission to rebase a cutover report.
 Only Docker metadata and local procfs are read; no media directory is opened.
 """
 import json
+import os
 from pathlib import Path
 
 import cutover_prepare as prep
 from permissions import emit
 
 RAW = '/app/media/data_hub_raw_media'
+
+
+def media_consumer(container):
+    roots = ['/data/docker/volumes/' + prep.VOLUME + '/_data/data_hub_raw_media',
+             '/data/docker/volumes/' + prep.NFS_VOLUME + '/_data']
+    for mount in container.get('Mounts', []):
+        if mount.get('Name') in (prep.VOLUME, prep.NFS_VOLUME): return True
+        source = mount.get('Source', '')
+        if mount.get('Type') == 'bind' and source.startswith('/'):
+            source = os.path.normpath(source)
+            if any(source == root or source.startswith(root + '/') or root.startswith(source.rstrip('/') + '/') for root in roots):
+                return True
+    return False
 
 
 def reviewed(profile):
@@ -27,7 +41,7 @@ def kernel_mounts(text):
     return rows
 
 
-def evaluate(profile, containers, volume, mountinfo):
+def evaluate(profile, containers, volume, mountinfo, allow_stopped=False, allow_replicas=False):
     reviewed(profile)
     issues = []
     try:
@@ -40,12 +54,21 @@ def evaluate(profile, containers, volume, mountinfo):
         name = labels.get('com.docker.compose.service')
         if labels.get('com.docker.compose.project') == profile['project'] and name in selected:
             selected[name].append(c)
-        elif any(m.get('Name') in (prep.VOLUME, prep.NFS_VOLUME) for m in c.get('Mounts', [])):
+        elif media_consumer(c):
             issues.append('发现登记清单外的媒体卷消费者：' + c['Id'][:12])
     services = []
+    batches = []
     for name in sorted(selected):
-        reasons = []
         current = selected[name]
+        if allow_replicas and current:
+            batches.extend((name, [c]) for c in current)
+        else:
+            batches.append((name, current))
+    ids = [c['Id'] for group in selected.values() for c in group]
+    if len(ids) != len(set(ids)):
+        issues.append('媒体容器身份重复，无法可靠核对。')
+    for name, current in batches:
+        reasons = []
         result = {'service': name, 'running': False, 'kernel_source': None}
         if len(current) != 1:
             reasons.append('预期恰好一个容器，实际 ' + str(len(current)))
@@ -65,10 +88,16 @@ def evaluate(profile, containers, volume, mountinfo):
                 reasons.append('缺少正确的 NAS 子卷或读写属性不符')
             host = [m for m in c.get('HostConfig', {}).get('Mounts', []) if m.get('Target') == RAW]
             if (len(host) != 1 or host[0].get('Type') != 'volume' or host[0].get('Source') != prep.NFS_VOLUME
-                    or host[0].get('VolumeOptions', {}).get('NoCopy') is not True):
+                    or host[0].get('VolumeOptions', {}).get('NoCopy') is not True
+                    or host[0].get('VolumeOptions', {}).get('Subpath')
+                    or ('ReadOnly' in host[0] and host[0]['ReadOnly'] is not (name == 'gateway'))):
                 reasons.append('缺少正确的 nocopy 挂载声明')
+            if any(path == RAW or path.startswith(RAW + '/') for path in c.get('HostConfig', {}).get('Tmpfs', {})):
+                reasons.append('tmpfs 可能覆盖媒体目录')
             text = mountinfo.get(c['Id'])
-            if not result['running'] or text is None:
+            if not result['running'] and allow_stopped:
+                result['declared_only'] = True  # Docker must mount NFS before start; verify procfs afterwards.
+            elif not result['running'] or text is None:
                 reasons.append('容器未运行或内核挂载表不可读；不能确认实际 NAS 挂载')
             else:
                 rows = kernel_mounts(text)
@@ -95,7 +124,7 @@ def evaluate(profile, containers, volume, mountinfo):
             'note': '只读瞬时核对；不证明 NAS 可读写、不授权清理、不拦截其他 Docker/发布入口。'}
 
 
-def check(manager, profile, containers=None):
+def collect(manager, profile, containers=None):
     reviewed(profile)
     if containers is None:
         containers = manager.precopy.inspect_containers()
@@ -114,6 +143,11 @@ def check(manager, profile, containers=None):
                 mountinfo[c['Id']] = Path('/proc/{}/mountinfo'.format(pid)).read_text()
             except OSError:
                 pass  # A disappearing container must produce an unverified result.
-    result = evaluate(profile, containers, volume, mountinfo)
+    return containers, volume, mountinfo
+
+
+def check(manager, profile, containers=None):
+    containers, volume, mountinfo = collect(manager, profile, containers)
+    result = evaluate(profile, containers, volume, mountinfo, allow_replicas=profile.get('recovery_mode') == 'media-v1')
     emit('nas_infra_storage_check', **result)
     return result['ok']

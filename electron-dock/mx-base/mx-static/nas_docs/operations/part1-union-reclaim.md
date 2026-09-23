@@ -10,19 +10,26 @@
 
 Git 的 Part 1 `report` 已改选新报告，`plan` 置空。历史报告与旧清单仍留在服务器，不删除、不改写，也不继续选用旧清单。不能只凭更新 Git 就认为服务器安装完成。
 
+后续现场：服务器十个内核 NAS 挂载仍匹配；恢复快照 `f85c883612ed4eaf9e23` 已安装，安装/当前代码一致，timer active/enabled。但 `recovery-enable-migrated` 因 `Deployment files changed since preparation.` 拒绝 infra，策略未修改，串联命令在此停止，尚未提交 cleanup check。
+
+最新只读诊断已定位原因：服务器 `REGISTERED_REPORT` 仍为旧报告尾号 `830225384207402a8ba23a2364d252d1`；当前三个部署文件、base/nas 两份渲染结果、业务容器和数据库均与新报告 `33e5abb193d04e7595251a5e6a6046ae` 匹配，检查期间文件稳定。这次是登记仍旧，不能据此判断业务又改了配置。安装/当前代码一致只表示服务器自身两份声明相同，不表示已经取得本地最新登记。
+
+本地 `deploy/nas/profiles.json` 已正确选择新报告且 `plan=null`；同步该版本到服务器后，通过 `nas infra locate` 确认实际读取的 Git 声明及所选报告。最新版本采用 [独立媒体恢复](media-runtime.md)，需先执行一次 `storage register` 再安装/检查恢复；日常恢复不再绑定历史应用配置。迁移/清理的严格校验保持原样，不修改历史报告摘要、重复切换或清除 NAS 标记。
+
 ## 现在执行
 
-同步本次代码后，在服务器 mx-static 目录依次执行；前一步失败则停止，不跳过检查：
+以下为完整执行顺序；先同步并确认服务器已选择新报告，再继续。前一步失败则停止，不跳过检查：
 
 ```bash
 bash scripts/manage.sh nas infra storage check &&
+bash scripts/manage.sh nas infra storage register &&
 bash scripts/manage.sh nas recovery install &&
 bash scripts/manage.sh nas recovery enable --migrated &&
 bash scripts/manage.sh nas recovery check &&
 bash scripts/manage.sh nas infra cleanup check
 ```
 
-安装操作更新本机恢复代码/声明快照，保留原恢复策略；enable 检查当前容器后启用持久 timer。安装不重建业务；timer 如触发，只允许补启动已经登记的 NAS 容器，健康容器不重启。恢复检查应显示 infra 配置/挂载核对通过、已纳入，且安装快照与当前代码/声明一致；delta 等待迁移是预期结果。
+独立登记只写本机媒体身份记录，不重启容器。安装操作更新本机恢复代码/声明快照，保留原恢复策略；enable 检查当前媒体挂载后启用持久 timer。安装不重建业务；timer 如触发，只补启动已核对的现存 NAS 媒体容器，已运行且挂载匹配的容器不重启。恢复检查应显示 infra 存储/恢复核对通过、已纳入，且安装快照与当前代码/声明一致；delta 等待迁移是预期结果。通过不代表应用 API 或登录已验收。
 
 最后一条提交只读后台核验任务，打印唯一单元和 journalctl 命令。systemd 将 `/data` 与 `/mnt/nas` 设为只读；工具只向新私有本地报告写证据，不停止业务、不复制媒体、不修改 NAS 权限、不删除 SSD。没有带宽节流，不读取整卷内容做全量 SHA256。
 
