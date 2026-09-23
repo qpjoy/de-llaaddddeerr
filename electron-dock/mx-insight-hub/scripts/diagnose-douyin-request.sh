@@ -3,13 +3,18 @@
 set -euo pipefail
 kubectl -n "${HUB_NAMESPACE:-mx-insight-hub}" exec -i \
   "${HUB_TARGET:-deployment/mx-insight-hub-public}" -c "${HUB_CONTAINER:-api}" \
-  -- node --input-type=module <<'NODE'
+  -- node --input-type=module - "$@" <<'NODE'
 import pg from 'pg'
 import { createHash } from 'node:crypto'
 import { createNightAllCompatibilityCursorCodec } from './server/external-platforms/cursor.mjs'
 import { prepareNightAllCompatibilityTraversal, capNightAllCompatibilityTraversal } from './server/data/night-all-pagination.mjs'
-const id = '37bf1066-508d-47c9-9c54-2d572e03a0a5'
-const report = { diagnosticVersion: 2, requestId: id, checkedAt: new Date().toISOString(),
+const ids = process.argv.slice(2)
+if (!ids.length) ids.push('37bf1066-508d-47c9-9c54-2d572e03a0a5')
+if (ids.length > 10 || ids.some(id => !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))) {
+  throw new Error('Pass 1-10 Hub request UUIDs')
+}
+const report = { diagnosticVersion: 3, requestId: ids[0], requestIds: ids, checkedAt: new Date().toISOString(),
+  configuredNightAllTimeoutMs: /^\d+$/.test(process.env.NIGHT_ALL_TIMEOUT_MS || '') ? Number(process.env.NIGHT_ALL_TIMEOUT_MS) : null,
   runtimeHost: process.env.HOSTNAME || null }
 // Exercise this running instance's code using synthetic data; never dispatch.
 const probeCodec = createNightAllCompatibilityCursorCodec('offline-pagination-probe-only', 'offline-probe')
@@ -38,7 +43,8 @@ try {
   const rows = (await client.query(`SELECT id, consumer_id, status, platform, error_code, response_status,
     delivery_source_mode, units_actual, reserved_at, completed_at,
     response_body IS NOT NULL AS has_response_body, acquisition_request
-    FROM public.usage_requests WHERE id = $1`, [id])).rows
+    FROM public.usage_requests WHERE id = ANY($1::uuid[]) ORDER BY reserved_at`, [ids])).rows
+  report.missingRequestIds = ids.filter(id => !rows.some(row => row.id === id))
   report.requests = rows.map(({ acquisition_request: snapshot, consumer_id: consumerId, ...row }) => {
     const body = snapshot?.body || {}
     const params = body.params || {}
@@ -72,6 +78,7 @@ try {
               status: 'authenticated',
               platformMatchesRequest: state.platform === row.platform,
               operationIsRaw: state.operation === 'raw',
+              operation: ['raw', 'crawl', 'user-info', 'data-search'].includes(state.operation) ? state.operation : 'unknown',
               page: Number.isInteger(state.page) ? state.page : null,
               type: ['cursor', 'params', 'page'].includes(continuation.type) ? continuation.type : 'unknown',
               hasPrimaryCursor: primary != null && primary !== '',
@@ -83,15 +90,64 @@ try {
         }
       }
     }
-    return { ...row, requestSnapshotPresent: !!snapshot, parameters: summary, paginationTokens: tokens, cursorState,
+    const path = typeof snapshot?.path === 'string' && /^\/api\/v1\/[\w/-]{1,160}$/.test(snapshot.path) ? snapshot.path : null
+    return { ...row, requestPath: path,
+      durationMs: row.completed_at && row.reserved_at ? new Date(row.completed_at) - new Date(row.reserved_at) : null,
+      querySha256: typeof body.query === 'string' ? createHash('sha256').update(body.query.trim()).digest('hex') : null,
+      requestSnapshotPresent: !!snapshot, parameters: summary, paginationTokens: tokens, cursorState,
       requestBodyOmitted: snapshot?.bodyOmitted || null }
   })
-  report.connectorCalls = (await client.query(`SELECT id, usage_request_id, operation, platform,
+  // Each optional ledger is independent: missing permissions/schema must not look like no calls.
+  async function section(name, sql, project = row => row) {
+    await client.query('SAVEPOINT diagnostic_section')
+    try {
+      const result = (await client.query(sql, [ids])).rows
+      report[name] = result.slice(0, 150).map(project)
+      report[`${name}Truncated`] = result.length > 150
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT diagnostic_section')
+      report[`${name}Error`] = { code: error.code || 'query_failed' }
+    }
+    await client.query('RELEASE SAVEPOINT diagnostic_section')
+  }
+  let projectEvidence = () => null
+  try {
+    const module = await import('./server/data/night-all-failure-evidence.mjs')
+    projectEvidence = module.projectNightAllFailureEvidence
+    report.failureEvidenceReaderAvailable = true
+  } catch { report.failureEvidenceReaderAvailable = false }
+  await section('connectorCalls', `SELECT id, usage_request_id, operation, platform,
     outcome, http_status, failure_kind, error_code, upstream_request_id, upstream_trace_id,
     upstream_latency_ms, started_at, completed_at,
-    NULLIF(to_jsonb(c)->'failure_evidence', 'null'::jsonb) IS NOT NULL AS has_failure_evidence
-    FROM serving.connector_calls c WHERE usage_request_id = $1
-    ORDER BY started_at LIMIT 50`, [id])).rows
+    NULLIF(to_jsonb(c)->'failure_evidence', 'null'::jsonb) IS NOT NULL AS has_failure_evidence,
+    to_jsonb(c)->'failure_evidence' AS failure_evidence
+    FROM serving.connector_calls c WHERE usage_request_id = ANY($1::uuid[])
+    ORDER BY started_at LIMIT 151`, row => ({ ...row, failure_evidence: projectEvidence(row.failure_evidence) }))
+  await section('providerCalls', `SELECT id, usage_request_id, provider_key, operation, endpoint_key,
+    outcome, http_status, business_code, error_code, upstream_request_id,
+    billed, latency_ms, started_at, completed_at
+    FROM external_platform.provider_calls WHERE usage_request_id = ANY($1::uuid[])
+    ORDER BY started_at LIMIT 151`)
+  await section('customerCharges', `SELECT usage_request_id, status, enforcement_mode,
+    quoted_minor::text, charged_minor::text, currency, created_at, settled_at
+    FROM billing.customer_charges WHERE usage_request_id = ANY($1::uuid[]) LIMIT 151`)
+  await section('deliveredPageSummaries', `SELECT id, response_body #> '{data,pageInfo}' AS page_info,
+    response_body #> '{data,page}' AS page, response_body #>> '{data,status}' AS status,
+    response_body #> '{data,warnings}' AS warnings, response_body #> '{data,meta}' AS meta
+    FROM public.usage_requests WHERE id = ANY($1::uuid[]) AND response_body IS NOT NULL`, row => {
+      const page = row.page_info || row.page || {}
+      return { requestId: row.id,
+        envelope: row.page_info ? 'pageInfo' : row.page ? 'page' : 'absent',
+        status: ['ok', 'partial', 'failed'].includes(row.status) ? row.status : null,
+        returnedCount: Number.isInteger(page.returnedCount) ? page.returnedCount : null,
+        hasMore: typeof page.hasMore === 'boolean' ? page.hasMore : null,
+        hasNextCursor: typeof page.nextCursor === 'string' && !!page.nextCursor,
+        warningCodes: (Array.isArray(row.warnings) ? row.warnings : [])
+          .map(w => w?.code).filter(code => typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(code)).slice(0, 20),
+        providerCalls: Number.isInteger(row.meta?.providerCalls) ? row.meta.providerCalls : null,
+        errorCode: typeof row.meta?.error?.code === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(row.meta.error.code) ? row.meta.error.code : null,
+      }
+    })
   await client.query('ROLLBACK')
 } catch (error) {
   report.error = { name: error.name, code: error.code || 'diagnostic_failed' }

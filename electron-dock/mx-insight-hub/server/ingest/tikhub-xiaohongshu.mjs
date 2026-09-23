@@ -177,6 +177,8 @@ export function createTikHubXiaohongshuSearchRecord(item, {
     author: item.author,
     metrics: {
       liked: item.metrics?.likes ?? null,
+      views: item.metrics?.views ?? null,
+      impressions: item.metrics?.impressions ?? null,
       comments: item.metrics?.comments ?? null,
       shared: item.metrics?.shares ?? null,
       collected: item.metrics?.bookmarks ?? null,

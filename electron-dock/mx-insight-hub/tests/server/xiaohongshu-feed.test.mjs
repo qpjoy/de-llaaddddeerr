@@ -1,7 +1,24 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { claimNoteOpenRequest, mergeNoteDetail, mergeNotes, nativeNotePage, storedNote } from '../../src/xiaohongshu-feed.js'
+import { claimNoteOpenRequest, mergeNoteDetail, mergeNotes, nativeNote, nativeNotePage, storedNote } from '../../src/xiaohongshu-feed.js'
+import { xiaohongshuReach } from '../../shared/xiaohongshu-reach.mjs'
 import { xiaohongshuImageUrl } from '../../shared/xiaohongshu-media.mjs'
+
+test('explicit list reads and impressions survive zero-only analytics with list provenance', () => {
+  const original = nativeNote({ note_id: '69297248000000001e039940', interact_info: { view_count: '1200', impression_count: '2400' } })
+  const displayed = mergeNoteDetail(original, { data: { item: { metrics: { views: 0, impressions: 0, liked: 0 } } } })
+  assert.equal(displayed.metrics.views, 1200)
+  assert.equal(displayed.metrics.impressions, 2400)
+  assert.equal(displayed.metricSources.views, 'list')
+  assert.equal(displayed.metricSources.impressions, 'list')
+  assert.match(displayed.metricsNotice, /列表/)
+  assert.deepEqual(xiaohongshuReach({ readNum: '12', impNum: '34' }), { views: 12, impressions: 34 })
+  for (const value of [null, '', ' ', false, -1, 'NaN']) {
+    assert.deepEqual(xiaohongshuReach({ view_count: value, impression_count: value }), { views: null, impressions: null })
+  }
+  assert.deepEqual(xiaohongshuReach({ view_count: 0, impression_count: 0 }), { views: 0, impressions: 0 })
+  assert.deepEqual(xiaohongshuReach({ liked_count: 100, topic: { view_count: 9999 } }), { views: null, impressions: null })
+})
 
 test('one note opening claims one permitted operation across reopen, renewal and unknown outcomes', () => {
   const ready = { apiKey: 'temporary-credential', analyticsIssues: [], resolveIssues: [] }

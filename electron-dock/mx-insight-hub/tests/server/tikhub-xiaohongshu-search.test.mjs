@@ -3,6 +3,8 @@ import { test } from 'node:test'
 
 import { TikHubAdapter, TikHubUpstreamError } from '../../server/adapters/tikhub.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
+import { normalizeTikHubXiaohongshuNoteResult } from '../../server/contracts/tikhub-xiaohongshu.mjs'
+import { createTikHubXiaohongshuRecord, createTikHubXiaohongshuSearchRecord } from '../../server/ingest/tikhub-xiaohongshu.mjs'
 import {
   buildXiaohongshuSearchDispatch,
   needsXiaohongshuDetail,
@@ -51,6 +53,26 @@ function envelope(items, data = {}) {
     },
   }
 }
+
+test('search retains explicitly returned note reads and impressions without inventing missing counters', () => {
+  const request = normalizeXiaohongshuSearchRequest({ platform: 'xiaohongshu', query: '指标' })
+  const response = normalizeTikHubXiaohongshuSearchResponse(envelope([
+    note(FIRST_NOTE_ID, '正文', { view_count: '1234', impression_count: '4567' }),
+    note(SECOND_NOTE_ID, '正文'),
+  ]), request)
+  assert.equal(response.publicBody.data.items[0].metrics.views, 1234)
+  assert.equal(response.publicBody.data.items[0].metrics.impressions, 4567)
+  assert.equal(response.publicBody.data.items[1].metrics.views, null)
+  assert.equal(response.publicBody.data.items[1].metrics.impressions, undefined)
+  const record = createTikHubXiaohongshuSearchRecord(response.publicBody.data.items[0])
+  assert.equal(record.metrics.views, 1234)
+  assert.equal(record.metrics.impressions, 4567)
+  const detail = normalizeTikHubXiaohongshuNoteResult({ code: 200, data: { data: [{ note_list: [
+    note(FIRST_NOTE_ID, '完整正文', { readNum: '1234', impNum: '4567' }),
+  ] }] } })
+  assert.equal(detail.item.metrics.views, 1234)
+  assert.equal(createTikHubXiaohongshuRecord(detail.item).metrics.impressions, 4567)
+})
 
 function currentEnvelope(items, pagination = {}, inner = {}) {
   return {

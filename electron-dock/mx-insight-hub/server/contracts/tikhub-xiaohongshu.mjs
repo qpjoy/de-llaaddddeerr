@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { xiaohongshuReach } from '../../shared/xiaohongshu-reach.mjs'
 import { redactCredentialEcho } from '../core/credential-redaction.mjs'
 
 export const XIAOHONGSHU_PLATFORM = 'xiaohongshu'
@@ -322,6 +323,7 @@ export function normalizeTikHubXiaohongshuNoteResult(payload, {
         || safeHttpsUrl(user.image, { providerCredential }),
     },
     metrics: {
+      ...xiaohongshuReach(note),
       liked: number(interactions.liked_count ?? interactions.likedCount ?? note.liked_count),
       collected: number(interactions.collected_count ?? interactions.collectedCount ?? note.collected_count),
       comments: number(interactions.comment_count ?? interactions.commentCount ?? note.comment_count),

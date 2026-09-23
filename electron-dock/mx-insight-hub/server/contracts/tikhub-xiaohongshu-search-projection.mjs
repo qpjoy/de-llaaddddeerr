@@ -372,6 +372,7 @@ function legacyRow(item, bodyState) {
     like_count: metricOr(item.metrics?.likes, 0),
     quote_count: 0,
     view_count: metricOr(item.metrics?.views, null),
+    ...(item.metrics?.impressions != null ? { impression_count: item.metrics.impressions } : {}),
     bookmark_count: metricOr(item.metrics?.bookmarks, 0),
     lang: '',
     is_forward: false,

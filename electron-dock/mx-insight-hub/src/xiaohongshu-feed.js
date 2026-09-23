@@ -1,4 +1,5 @@
 import { xiaohongshuImageUrl } from '../shared/xiaohongshu-media.mjs'
+import { xiaohongshuReach } from '../shared/xiaohongshu-reach.mjs'
 
 // Presentation adapters never rewrite the archived acquisition.
 export function claimNoteOpenRequest(saved, { apiKey, analyticsIssues, resolveIssues }) {
@@ -66,7 +67,7 @@ export function nativeNote(note) {
       collected: note.interact_info?.collected_count ?? note.collected_count ?? null,
       comments: note.interact_info?.comment_count ?? note.comment_count ?? null,
       shared: note.interact_info?.share_count ?? note.share_count ?? null,
-      views: note.interact_info?.view_count ?? note.view_count ?? null,
+      ...xiaohongshuReach(note),
     }, metricsSource: 'list', bodyCompleteness: 'provider_preview',
   }
 }

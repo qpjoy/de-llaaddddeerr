@@ -400,7 +400,8 @@ function publicItem(note, capturedAt, providerCredential) {
         likes: normalized.metrics.liked,
         comments: normalized.metrics.comments,
         shares: normalized.metrics.shared,
-        views: null,
+        views: normalized.metrics.views,
+        ...(normalized.metrics.impressions != null ? { impressions: normalized.metrics.impressions } : {}),
         bookmarks: normalized.metrics.collected,
       }),
       media: Object.freeze({
