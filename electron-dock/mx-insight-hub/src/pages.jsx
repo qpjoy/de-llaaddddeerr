@@ -191,6 +191,8 @@ const CAPABILITY_CATALOG = {
     usageHint: '还必须同时授予 public_opinion 平台；默认不向新调用者开放',
   },
   'social.posts.analytics': { label: '小红书详情与阅读量', description: '按笔记 ID 获取正文、媒体和阅读/曝光等指标；建议间隔至少 5 秒', endpoint: 'POST /api/v1/data/xiaohongshu/notes/detail', usageHint: '需同时授予 xiaohongshu 平台及当前 Key；不会自动开通' },
+  'social.posts.hot_search': { label: '小红书热门笔记', description: '按关键词、类目、时间与指标获取一页热门内容', endpoint: 'POST /api/v1/data/xiaohongshu/hot-notes/search', usageHint: '需独立授权并检查 JustOne 对应操作的运行配置' },
+  'social.inspiration.list': { label: '小红书创作灵感', description: '获取一页创作者热点灵感', endpoint: 'POST /api/v1/data/xiaohongshu/creator-inspirations', usageHint: '需独立授权并检查 TikHub 对应操作的运行配置' },
   'social.comments.list': { label: '小红书笔记评论', description: '显式获取一页评论，按最新或最热排序；每页独立计费', endpoint: 'POST /api/v1/data/xiaohongshu/notes/comments', usageHint: '需同时授予 xiaohongshu 平台及当前 Key；不会自动开通' },
   'social.posts.resolve': {
     label: '社交笔记详情',
@@ -358,6 +360,8 @@ function billingMeterLabel(meterKey) {
     'social.posts.search': '小红书笔记搜索',
     'social.posts.resolve': '小红书笔记详情',
     'social.posts.analytics': '小红书详情与阅读量',
+    'social.posts.hot_search': '小红书热门笔记',
+    'social.inspiration.list': '小红书创作灵感',
     'social.comments.list': '小红书笔记评论',
     'social.users.resolve': '小红书用户资料',
     'social.users.posts': '小红书用户笔记',

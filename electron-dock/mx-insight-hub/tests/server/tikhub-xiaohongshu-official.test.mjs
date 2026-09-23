@@ -224,6 +224,7 @@ test('TikHub Admin metadata exposes every implemented Xiaohongshu App V2 user ca
     'social.posts.search',
     'social.posts.resolve',
     'social.posts.analytics',
+    'social.inspiration.list',
     'social.comments.list',
     'social.users.resolve',
     'social.users.posts',

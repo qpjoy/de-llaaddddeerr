@@ -27,6 +27,7 @@ import {
 import { XIAOHONGSHU_USER_INFO_OPERATION } from './contracts/tikhub-xiaohongshu-user-info.mjs'
 import { XIAOHONGSHU_CRAWL_OPERATION } from './contracts/tikhub-xiaohongshu-user-posts.mjs'
 import { XHS_RESEARCH_OPERATIONS } from './contracts/xiaohongshu-research.mjs'
+import { XHS_DISCOVERY_OPERATIONS } from './contracts/xiaohongshu-discovery.mjs'
 import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY } from './contracts/tikhub-xiaohongshu-official.mjs'
 import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
@@ -249,6 +250,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  ...XHS_DISCOVERY_OPERATIONS,
   ...XHS_RESEARCH_OPERATIONS,
   'enterprise.query',
   'ip.risk.query',
@@ -273,6 +275,7 @@ const NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES = Object.freeze({
   'user-info': XIAOHONGSHU_USER_INFO_OPERATION,
 })
 const XIAOHONGSHU_ACQUISITION_CAPABILITIES = new Set([
+  ...XHS_DISCOVERY_OPERATIONS,
   ...XHS_RESEARCH_OPERATIONS,
   XIAOHONGSHU_SEARCH_OPERATION,
   XIAOHONGSHU_POST_OPERATION,
@@ -1353,7 +1356,7 @@ export class HubService {
       ? await this.externalPlatformCapabilities({ consumerId: normalizedConsumerId })
       : null
     return {
-      operationReadiness: Object.fromEntries(Object.entries(xiaohongshuAcquisition?.operations || {}).map(([operation,state]) => [operation,{ready:state?.ready === true,effectiveState:state?.effectiveState || 'unknown'}])),
+      operationReadiness: Object.fromEntries(Object.entries({ ...ecommerceSearch?.operations, ...xiaohongshuAcquisition?.operations }).map(([operation,state]) => [operation,{ready:state?.ready === true,effectiveState:state?.effectiveState || 'unknown'}])),
       grants: normalizedConsumerId ? await this.store.listGrants(normalizedConsumerId) : [],
       policies: normalizedConsumerId ? await this.store.listPolicies(normalizedConsumerId) : [],
       capabilityGrants: normalizedConsumerId && typeof this.store.listCapabilityGrants === 'function'
@@ -1363,6 +1366,7 @@ export class HubService {
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
       availableCapabilities: [
+        ...XHS_DISCOVERY_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(capability === 'social.posts.hot_search' ? ecommerceSearch : xiaohongshuAcquisition, capability) })),
         { capability: 'enterprise.query', ready: providerOperationReady(ecommerceSearch, 'enterprise.query') },
         {
           capability: 'ip.risk.query',
@@ -1721,6 +1725,11 @@ export class HubService {
     }
     const capabilityGrants = await this.#effectiveCapabilityGrants(context)
     let externalPostCapability = null
+    let hotNotesCapability = null
+    if (canonicalGrants.includes('xiaohongshu') && capabilityGrants.includes('social.posts.hot_search') && this.externalPlatformCapabilities) {
+      try { hotNotesCapability = await this.externalPlatformCapabilities({ consumerId: context.consumer.id }) }
+      catch { this.logger?.warn?.('[external-platform] Hot notes capability discovery is unavailable') }
+    }
     const hasPostDetailGrant = capabilityGrants.includes(XIAOHONGSHU_POST_OPERATION)
     const hasXiaohongshuAcquisitionGrant = capabilityGrants.some((capability) => (
       XIAOHONGSHU_ACQUISITION_CAPABILITIES.has(capability)
@@ -1811,6 +1820,8 @@ export class HubService {
                 ? allIngestedReady
                 : capability === PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY
                   ? diagnosticsReady
+                  : capability === 'social.posts.hot_search'
+                    ? !isTestApiKey(context.apiKey) && providerOperationReady(hotNotesCapability, capability)
                   : XIAOHONGSHU_ACQUISITION_CAPABILITIES.has(capability)
                     ? !isTestApiKey(context.apiKey) && (
                         capability === XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY

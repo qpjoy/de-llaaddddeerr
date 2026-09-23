@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
+import { XHS_DISCOVERY_ENDPOINTS, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { AppError } from '../core/errors.mjs'
@@ -64,6 +65,7 @@ const SOCIAL_POST_PATH = '/api/v1/data/post'
 const SEARCH_SNAPSHOT_CONTRACT = 'mx-insight-hub.xiaohongshu-search-snapshot.v1'
 
 const TIKHUB_OPERATION_KEYS = Object.freeze([
+  XHS_DISCOVERY_ENDPOINTS.creator_inspiration.operation,
   ...XHS_RESEARCH_OPERATIONS,
   XIAOHONGSHU_POST_OPERATION,
   XIAOHONGSHU_SEARCH_OPERATION,
@@ -90,6 +92,7 @@ function legacyOperationReadiness(config, credentialReady, consumerId) {
     String(candidate).toLowerCase() === String(consumerId).toLowerCase()
   )))
   return {
+    [XHS_DISCOVERY_ENDPOINTS.creator_inspiration.operation]: false,
     ...Object.fromEntries(Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => [endpoint.operation,
       providerReady && config?.researchContractVerified === true && Number.isSafeInteger(config?.billing?.unitCostMinorByEndpoint?.[endpoint.endpointKey]) && config.billing.unitCostMinorByEndpoint[endpoint.endpointKey] > 0])),
     [XIAOHONGSHU_POST_OPERATION]: providerReady,
@@ -615,7 +618,7 @@ export class TikHubGateway {
         credentialRevision: credential?.revision ?? null,
       })
     }
-    if (this.config?.[legacyGate] === false || (XHS_RESEARCH_OPERATIONS.includes(operationKey) && this.config?.[legacyGate] !== true)) {
+    if (operationKey === XHS_DISCOVERY_ENDPOINTS.creator_inspiration.operation || this.config?.[legacyGate] === false || (XHS_RESEARCH_OPERATIONS.includes(operationKey) && this.config?.[legacyGate] !== true)) {
       throw new AppError(
         503,
         'external_platform_contract_unverified',
@@ -705,7 +708,7 @@ export class TikHubGateway {
         operationDetail = {}
       }
     }
-    const ready = TIKHUB_OPERATION_KEYS.filter(key => !XHS_RESEARCH_OPERATIONS.includes(key)).every((operationKey) => readiness[operationKey] === true)
+    const ready = TIKHUB_OPERATION_KEYS.filter(key => !XHS_RESEARCH_OPERATIONS.includes(key) && key !== XHS_DISCOVERY_ENDPOINTS.creator_inspiration.operation).every((operationKey) => readiness[operationKey] === true)
     return {
       platform: XIAOHONGSHU_PLATFORM,
       ready,
@@ -748,6 +751,7 @@ export class TikHubGateway {
       if (!endpoint || (endpoint.path !== path && !endpoint.aliases?.includes(path))) {
         throw new AppError(404, 'not_found', 'Xiaohongshu App V2 endpoint was not found')
       }
+      if (endpoint.discovery && !suppliedKey) throw new AppError(400, 'idempotency_key_required', 'Idempotency-Key is required for discovery requests')
       const allowStoredFallback = !endpoint.liveOnly
       const requiredCapabilities = endpoint.research ? [endpoint.operation] : [XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY, endpoint.operation]
       const grants = typeof this.usageStore.listEffectiveGrants === 'function'
@@ -787,12 +791,13 @@ export class TikHubGateway {
         ...((await this.usageStore.getPolicy(context.consumer.id, XIAOHONGSHU_PLATFORM)) || {}),
       }
       let codec = null
-      if (endpointName === 'get_user_posted_notes' || endpointName === 'note_comments') {
+      if (endpointName === 'get_user_posted_notes' || endpointName === 'note_comments' || endpoint.discovery) {
         if (typeof this.apiKeyPepper !== 'string' || !this.apiKeyPepper) {
           throw new AppError(503, 'external_platform_unavailable', 'External pagination signing is unavailable')
         }
         const secret = createHash('sha256')
           .update(this.apiKeyPepper)
+          .update(endpoint.discovery ? `\u0000xhs-discovery:${endpointName}:${context.apiKey.id}\u0000` : '')
           .update(endpointName === 'note_comments' ? `\u0000xiaohongshu-comments\u0000${context.apiKey.id}\u0000` : '\u0000xiaohongshu-app-v2-user-posts\u0000')
           .digest('hex')
         codec = createExternalPlatformCursorCodec(secret, context.consumer.id)
@@ -844,6 +849,7 @@ export class TikHubGateway {
         windowStart: new Date(Date.now() - consumerPolicy.windowSeconds * 1_000),
         maxRequests: consumerPolicy.maxRequests,
         replayWindowMs: null,
+        replayReleasedFailures: endpoint.discovery === true,
       })
       durableRequestId = reservation.request?.id || requestId
       ownsReservation = reservation.kind === 'reserved'
@@ -1115,21 +1121,23 @@ export class TikHubGateway {
             endpointName,
             upstream.payload,
           )
-          const projection = endpoint.research
+          const projection = endpoint.discovery
+            ? { payload: projectXhsDiscovery(upstream.payload, normalized, capturedAt, { encodeCursor: codec?.encode }) }
+            : endpoint.research
             ? { payload: projectXhsResearch(upstream.payload, normalized, capturedAt, { encodeCursor: codec?.encode }) }
             : endpointName === 'get_user_posted_notes' && !documentedServiceError
             ? projectTikHubXiaohongshuOfficialPostedNotes(upstream.payload, normalized, {
                 encodeCursor: codec.encode,
               })
             : { payload: upstream.payload }
-          const records = endpoint.research ? xhsResearchRecords(projection.payload, normalized) : officialCanonicalRecords(
+          const records = endpoint.discovery ? [] : endpoint.research ? xhsResearchRecords(projection.payload, normalized) : officialCanonicalRecords(
             normalized,
             upstream.payload,
             capturedAt,
             resolved.value,
           )
           const responseBody = publicXiaohongshuEnvelope(projection.payload)
-          const itemCount = endpoint.research ? (projection.payload.data.item ? 1 : projection.payload.data.items?.length || 0) : officialRawItemCount(endpointName, upstream.payload)
+          const itemCount = endpoint.discovery ? projection.payload.meta.returnedCount || 0 : endpoint.research ? (projection.payload.data.item ? 1 : projection.payload.data.items?.length || 0) : officialRawItemCount(endpointName, upstream.payload)
           const freshTtlMs = endpointName === 'search_notes'
             ? (this.config.searchFreshTtlMs ?? this.config.freshTtlMs)
             : this.config.freshTtlMs
@@ -1279,7 +1287,7 @@ export class TikHubGateway {
       if (!(error instanceof AppError)) {
         this.logger?.error?.({ requestId: durableRequestId, error }, 'TikHub official gateway request failed')
       }
-      if (XHS_RESEARCH_ENDPOINTS[endpointName] && error instanceof AppError && error.status >= 500) {
+      if ((XHS_RESEARCH_ENDPOINTS[endpointName] || XHS_DISCOVERY_ENDPOINTS[endpointName]) && error instanceof AppError && error.status >= 500) {
         throw withRequestId(new AppError(error.status, error.code, 'The requested Xiaohongshu service is unavailable'), durableRequestId)
       }
       throw withRequestId(error, durableRequestId)

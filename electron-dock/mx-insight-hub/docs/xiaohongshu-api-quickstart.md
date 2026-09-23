@@ -312,3 +312,11 @@ curl -sS "$HUB_URL/api/v1/requests/by-idempotency-key" \
 在 Hub 控制台演示时，可进入“数据产品 → 小红书笔记画卷 → 接口调试”，选择演示用 Key，依次选择“搜索笔记”“详情与阅读量”“笔记评论”。下游程序使用的就是本指南里的 Hub API；控制台请求预览可用于对照参数。不要在现场反复刷新或自动遍历整页笔记，以免产生额外的新查询。
 
 在列表或 Mobile 视图中，打开笔记先显示正文；点击详情顶部的“评论”才发送第一页评论请求。再次切换或关闭重开会保留本页会话的结果；点击“下一页评论”独立请求下一页。若只看到 `search_notes` 和 `get_note_info`，说明尚未调用评论，且本次正文使用的是正文与标签接口；它不会顺带查询阅读量或评论。评论入口会直接显示当前 Key 的授权或运行状态问题。
+# 热门笔记与创作灵感
+
+新增两个独立产品，均在「数据产品 → 小红书」，与原笔记画卷并列：
+
+- `POST /api/v1/data/xiaohongshu/hot-notes/search`：`social.posts.hot_search`，关键词 / 类目 / 时间 / 指标筛选。
+- `POST /api/v1/data/xiaohongshu/creator-inspirations`：`social.inspiration.list`，创作者热点灵感。
+
+均需 xiaohongshu 平台授权及本操作的业务、Key 权限，必传 Idempotency-Key。首页不传 cursor，续页原样使用 `data.pageInfo.nextCursor`，每页新标识。业务结果在 `data.result`，未验证字段不当作归一化笔记或全站热榜。参数、未知分页、计费和上线流程见 [产品接入说明](product/xiaohongshu-discovery.md)；在线文档 `/docs/xiaohongshu-hot-notes` 与 `/docs/xiaohongshu-inspiration`。

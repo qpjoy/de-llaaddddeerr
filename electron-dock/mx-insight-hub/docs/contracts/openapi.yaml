@@ -38,6 +38,363 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/xiaohongshu/hot-notes/search:
+    post:
+      operationId: xiaohongshuHotNotes
+      tags:
+      - Data products
+      summary: 小红书热门笔记
+      description: 独立授权的单页实时查询。业务和当前 Live Hub Key 必须同时具备 xiaohongshu 与本操作权限。固定路由，不接受
+        provider、URL、token、pageNum 或原生游标。必须提供 Idempotency-Key；相同请求重试保留请求体与标识，不再次采集；新查询/续页换标识。成功交付（含空结果）计一次请求，使用客户套餐接口价或租户默认价。传输结果不确定时保留原标识，先查请求状态，不盲目新建请求。data.result
+        保留原生业务字段（移除凭据、服务传输信息和原生翻页坐标），不是已归一化的笔记 schema；不保证指标、稳定 ID、排名或全站热榜。缺失指标不补零，原始响应归档不会自动转成共享笔记数据。
+        支持关键词、蒲公英类目路径、3/7/14/30 天与 8 种排序。pageInfo.paginationStatus=next_page_probe 表示可查询下一页但无法确认存在更多内容，hasMore=null；调用下一页可能返回空结果并计费。
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - social.posts.hot_search
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                searchWord:
+                  type: string
+                  maxLength: 500
+                  default: ''
+                orderBy:
+                  type: string
+                  enum:
+                  - premium_imp_num
+                  - premium_good_read_rate
+                  - premium_read_num
+                  - premium_engage_num
+                  - premium_engage_rate
+                  - premium_like_num
+                  - premium_fav_num
+                  - premium_cmt_num
+                  default: premium_imp_num
+                nd:
+                  type: string
+                  enum:
+                  - DAY_3
+                  - DAY_7
+                  - DAY_14
+                  - DAY_30
+                  default: DAY_7
+                noteContentCategory:
+                  type: string
+                  maxLength: 200
+                  description: 单个完整路径，例如 内容类目#美妆、内容类目#美妆#整体妆容、所属行业#母婴。类目是否支持以实际接口响应为准。
+                cursor:
+                  type: string
+                  maxLength: 8192
+                  description: 首页省略；下一页原样传 data.pageInfo.nextCursor，保留所有筛选并换新的 Idempotency-Key。绑定当前业务、Key、接口和筛选；最多
+                    15 页。
+            example:
+              searchWord: ''
+              orderBy: premium_imp_num
+              nd: DAY_7
+      responses:
+        '200':
+          description: 业务结果与统一分页状态；不是归一化笔记列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - contractVersion
+                - data
+                - meta
+                properties:
+                  contractVersion:
+                    const: mx-insight-hub.xiaohongshu-discovery.v1
+                  requestId:
+                    type: string
+                  data:
+                    type: object
+                    required:
+                    - result
+                    - pageInfo
+                    properties:
+                      result:
+                        type:
+                        - object
+                        - array
+                        - 'null'
+                        additionalProperties: true
+                      pageInfo:
+                        type: object
+                        properties:
+                          page:
+                            type: integer
+                            minimum: 1
+                            maximum: 15
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          hasMore:
+                            type:
+                            - boolean
+                            - 'null'
+                            description: null 为未知；false 明确结束。
+                          paginationStatus:
+                            enum:
+                            - continuable
+                            - next_page_probe
+                            - exhausted
+                            - unknown
+                            - limit_reached
+                  meta:
+                    type: object
+                    properties:
+                      status:
+                        enum:
+                        - ok
+                        - no_data
+                        - unknown
+                      projection:
+                        const: native_fields
+                      capturedAt:
+                        type: string
+                        format: date-time
+                      collectionPath:
+                        type:
+                        - string
+                        - 'null'
+                      returnedCount:
+                        type:
+                        - integer
+                        - 'null'
+                        description: 识别到的当前页容器长度，未知为 null；不是总数。
+        '400':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '405':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /data/xiaohongshu/creator-inspirations:
+    post:
+      operationId: xiaohongshuCreatorInspirations
+      tags:
+      - Data products
+      summary: 小红书创作灵感
+      description: 独立授权的单页实时查询。业务和当前 Live Hub Key 必须同时具备 xiaohongshu 与本操作权限。固定路由，不接受
+        provider、URL、token、pageNum 或原生游标。必须提供 Idempotency-Key；相同请求重试保留请求体与标识，不再次采集；新查询/续页换标识。成功交付（含空结果）计一次请求，使用客户套餐接口价或租户默认价。传输结果不确定时保留原标识，先查请求状态，不盲目新建请求。data.result
+        保留原生业务字段（移除凭据、服务传输信息和原生翻页坐标），不是已归一化的笔记 schema；不保证指标、稳定 ID、排名或全站热榜。缺失指标不补零，原始响应归档不会自动转成共享笔记数据。
+        获取创作者热点灵感，不接受热门笔记的筛选参数。只有实际返回可用的新游标时提供 nextCursor，不根据条目数猜测游标。
+      x-mx-required-platform: xiaohongshu
+      x-mx-required-capabilities:
+      - social.inspiration.list
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                cursor:
+                  type: string
+                  maxLength: 8192
+                  description: 首页省略；下一页原样传 data.pageInfo.nextCursor，保留所有筛选并换新的 Idempotency-Key。绑定当前业务、Key、接口和筛选；最多
+                    15 页。
+            example: {}
+      responses:
+        '200':
+          description: 业务结果与统一分页状态；不是归一化笔记列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - contractVersion
+                - data
+                - meta
+                properties:
+                  contractVersion:
+                    const: mx-insight-hub.xiaohongshu-discovery.v1
+                  requestId:
+                    type: string
+                  data:
+                    type: object
+                    required:
+                    - result
+                    - pageInfo
+                    properties:
+                      result:
+                        type:
+                        - object
+                        - array
+                        - 'null'
+                        additionalProperties: true
+                      pageInfo:
+                        type: object
+                        properties:
+                          page:
+                            type: integer
+                            minimum: 1
+                            maximum: 15
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          hasMore:
+                            type:
+                            - boolean
+                            - 'null'
+                            description: null 为未知；false 明确结束。
+                          paginationStatus:
+                            enum:
+                            - continuable
+                            - next_page_probe
+                            - exhausted
+                            - unknown
+                            - limit_reached
+                  meta:
+                    type: object
+                    properties:
+                      status:
+                        enum:
+                        - ok
+                        - no_data
+                        - unknown
+                      projection:
+                        const: native_fields
+                      capturedAt:
+                        type: string
+                        format: date-time
+                      collectionPath:
+                        type:
+                        - string
+                        - 'null'
+                      returnedCount:
+                        type:
+                        - integer
+                        - 'null'
+                        description: 识别到的当前页容器长度，未知为 null；不是总数。
+        '400':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '405':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Hub 错误：400 参数/游标，403 未授权，409 幂等冲突/结果不确定，429 限制，502 返回不可用，503
+            运行未就绪。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /data/xiaohongshu/notes/detail:
     post:
       operationId: xiaohongshuNoteAnalytics
@@ -2549,7 +2906,7 @@ paths:
                           additionalProperties: false
                           required: [capability, ready]
                           properties:
-                            capability: { type: string, enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts, social.posts.analytics, social.comments.list] }
+                            capability: { type: string, enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts, social.posts.analytics, social.comments.list, social.posts.hot_search, social.inspiration.list] }
                             ready: { type: boolean }
                   requestId: { type: string }
               example:
@@ -8186,7 +8543,7 @@ components:
             grants. Omission is empty unless scopePreset=legacy_all.
           items:
             type: string
-            enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts, social.posts.analytics, social.comments.list]
+            enum: [compat.xiaohongshu.app_v2, ecommerce.products.search, nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read, social.posts.resolve, social.posts.search, social.users.resolve, social.users.posts, social.posts.analytics, social.comments.list, social.posts.hot_search, social.inspiration.list]
     ApiKeyMetadata:
       type: object
       required:

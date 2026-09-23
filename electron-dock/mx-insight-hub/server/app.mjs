@@ -1,3 +1,4 @@
+import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
 import { formatBrowserExport } from './data/browser-export.mjs'
@@ -756,6 +757,7 @@ export function createApp({
   balanceMonitor = null,
   nightAllA = null,
   externalPlatformGateway = null,
+  xiaohongshuHotNotesGateway = null,
   ipRiskGateway = null,
   enterpriseGateway = null,
   socialAccountGateway = null,
@@ -5496,6 +5498,21 @@ export function createApp({
         const handler = pathname.endsWith('/batch') ? ipRiskGateway.batch : ipRiskGateway
         const result = await handler.query(context, { body: await readJson(request, 4096), idempotencyKey: request.headers['idempotency-key'], path: pathname })
         sendJson(response, result.status, result.body, { 'idempotent-replay': String(result.replay), ...(result.requestId ? { 'x-mx-insight-request-id': result.requestId } : { 'x-mx-insight-batch-id': result.batchId }), 'x-mx-insight-source-mode': result.replay ? 'idempotent_replay' : 'live' })
+        return
+      }
+
+      if (pathname === XHS_DISCOVERY_ENDPOINTS.hot_notes.path) {
+        const context = await requirePublic(request)
+        if (request.method !== 'POST') throw new AppError(405, 'method_not_allowed', 'Use JSON POST for this endpoint')
+        requireNoQuery(searchParams, 'Hot notes JSON request')
+        if (!xiaohongshuHotNotesGateway?.hotXiaohongshuNotes) throw new AppError(503, 'external_platform_unavailable', 'Hot notes service is unavailable')
+        const result = await xiaohongshuHotNotesGateway.hotXiaohongshuNotes(context, {
+          body: await readJson(request, 32 * 1024), idempotencyKey: request.headers['idempotency-key'], path: pathname,
+        })
+        sendJson(response, result.status, result.body, { 'cache-control': 'private, no-store', 'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId, 'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+        })
         return
       }
 

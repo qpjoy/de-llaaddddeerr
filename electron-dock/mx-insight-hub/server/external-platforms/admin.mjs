@@ -15,6 +15,7 @@ export const JUSTONE_MARKETPLACES = [
 ]
 
 export const EXTERNAL_PLATFORM_CAPABILITY_MATRIX = [
+  { capability: 'social.posts.hot_search', label: '小红书热门笔记', hubContractVersion: 'mx-insight-hub.xiaohongshu-discovery.v1', providerMapping: 'direct_versioned_adapter', scope: 'xiaohongshu', status: 'implemented', fallback: 'none', note: 'JustOne 热门内容单页查询；独立授权、定价和运行开关。返回业务字段，未验证的条目不写入笔记主数据。' },
   {
     capability: 'ecommerce.products.search',
     label: '电商商品搜索',
@@ -68,6 +69,7 @@ export const EXTERNAL_PLATFORM_CAPABILITY_MATRIX = [
 ]
 
 export const TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX = [
+  { capability: 'social.inspiration.list', label: '小红书创作灵感', upstreamEndpoint: 'get_creator_hot_inspiration_feed', upstreamVersion: 'App V2', hubContractVersion: 'mx-insight-hub.xiaohongshu-discovery.v1', providerMapping: 'direct_versioned_adapter', scope: 'xiaohongshu', status: 'implemented', fallback: 'none', note: 'TikHub 创作者热点灵感单页查询；独立授权、定价和运行开关；不与热门笔记互为故障切换。' },
   ...[ ['social.posts.analytics', '详情与阅读量', 'get_note_detail', 'PGY'], ['social.comments.list', '笔记评论', 'get_note_comments', 'App V2'] ].map(([capability, label, upstreamEndpoint, upstreamVersion]) => ({ capability, label, upstreamEndpoint, upstreamVersion, hubContractVersion: 'mx-insight-hub.xiaohongshu-research.v1', providerMapping: 'direct_versioned_adapter', scope: 'xiaohongshu', status: 'implemented', fallback: 'none', note: '新操作独立放行和定价；显式请求，不自动重试或获取下一页。' })),
   {
     capability: 'social.posts.search',
@@ -118,14 +120,14 @@ export const TIKHUB_XIAOHONGSHU_CAPABILITY_MATRIX = [
 const JUSTONE_METADATA = Object.freeze({
   key: 'justone',
   displayName: 'JustOne',
-  description: '由 Hub 直接对接的外部电商数据接口平台；凭证、endpoint 与原始响应不暴露给调用方。',
-  capabilities: ['ecommerce.products.search'],
+  description: '由 Hub 直接对接的电商、社交账号与小红书热门内容平台；按操作管理采购价和调用记录。',
+  capabilities: ['ecommerce.products.search', 'social.accounts.search', 'social.posts.hot_search'],
   capabilityMatrix: EXTERNAL_PLATFORM_CAPABILITY_MATRIX,
   marketplaces: JUSTONE_MARKETPLACES,
   adapterLabel: '版本化 JustOne Adapter',
-  adapterDescription: '仅允许已核验的商品搜索 endpoint；业务成功与 Hub 可用响应分别记账，不盲目重试。',
+  adapterDescription: '仅调用已登记的固定接口；小红书热门笔记使用 hot-search/v1，业务成功与可用响应分别记账，不盲目重试。',
   billingNote: '供应商公开资料未提供可验证的账户净账单 API；未知成本不会按 0 展示。',
-  freshnessNote: '专用抓取接口与缓存型通用搜索分别建模；当前只接入已核验的商品搜索版本。',
+  freshnessNote: '专用抓取接口与缓存型通用搜索分别建模；小红书热门内容按单页实时查询交付，不跨产品回退。',
 })
 
 const TIKHUB_METADATA = Object.freeze({
@@ -136,6 +138,7 @@ const TIKHUB_METADATA = Object.freeze({
     'social.posts.search',
     'social.posts.resolve',
     'social.posts.analytics',
+    'social.inspiration.list',
     'social.comments.list',
     'social.users.resolve',
     'social.users.posts',

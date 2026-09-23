@@ -1,4 +1,5 @@
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
+import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   ECOMMERCE_DELIVERY_MODES,
@@ -476,6 +477,21 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async hotXiaohongshuNotes(context, { body, idempotencyKey, path }) {
+    if (this.providerKey !== 'justone' || path !== XHS_DISCOVERY_ENDPOINTS.hot_notes.path) throw new AppError(404, 'not_found', 'Unknown discovery endpoint')
+    if (!this.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Discovery operation requires reviewed runtime controls')
+    // Purpose/Key separation keeps a cursor from crossing identities or products.
+    const secret = createHash('sha256').update(this.apiKeyPepper).update(`\u0000xhs-hot-notes:${context.apiKey.id}\u0000`).digest('hex')
+    const codec = createExternalPlatformCursorCodec(secret, context.consumer.id)
+    return this.#deliver(context, { body, idempotencyKey, path }, {
+      operation: XHS_DISCOVERY_ENDPOINTS.hot_notes.operation, authorizationPlatform: 'xiaohongshu',
+      capabilityMessage: 'Hot notes search is not granted for this API key', datasetId: 'social.posts.v1',
+      replayReleasedFailures: true, skipIngest: true,
+      normalize: () => normalizeXhsDiscoveryRequest('hot_notes', body, { decodeCursor: codec.decode }),
+      dispatch: ({ credential }) => this.adapter.hotXiaohongshuNotes(body, { ...credential, decodeCursor: codec.decode, encodeCursor: codec.encode }),
+    })
+  }
+
   async queryEnterprise(context, { apiId, body, idempotencyKey, path }) {
     if (this.providerKey !== 'qixin') throw new AppError(404, 'enterprise_api_not_found', 'Unknown enterprise API')
     assertEnterpriseCallable(apiId)
@@ -631,7 +647,7 @@ export class ExternalPlatformGateway {
       replayWindowMs: null,
       // A definitive enterprise rejection releases the wallet hold, but the
       // same caller intent must still replay its saved error without dispatch.
-      replayReleasedFailures: this.providerKey === 'qixin',
+      replayReleasedFailures: this.providerKey === 'qixin' || plan.replayReleasedFailures === true,
     })
     durableRequestId = reservation.request?.id || requestId
     ownsReservation = reservation.kind === 'reserved'
@@ -1087,7 +1103,7 @@ export class ExternalPlatformGateway {
           responseArchive: persistedEvidence.responseArchive,
           upstreamEvidence: persistedEvidence.upstreamEvidence,
           restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
-          ingestJob: {
+          ingestJob: plan.skipIngest ? null : {
             payload: {
               kind: 'external-platform-result',
               consumerId: context.consumer.id,

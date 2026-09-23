@@ -1,3 +1,4 @@
+import { normalizeXhsDiscoveryRequest, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash } from 'node:crypto'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
@@ -257,6 +258,13 @@ function archiveObjects({
     contractState,
     secret,
   })
+  if (request.contractVersion === 'mx-insight-hub.xiaohongshu-discovery.v1') {
+    const capturedDate = new Date(capturedAt).toISOString().slice(0, 10)
+    return [{ ...archive, marketplace: 'xiaohongshu', endpointVersion: request.endpointVersion,
+      capturedDate, sourceKey: 'source-catalog-0004', payloadSha256: archive.rawPayloadSha256, rawPayload: archive.rawItem,
+      archivePath: `justone/xiaohongshu/hot-notes/${request.endpointVersion}/${capturedDate}/responses/${archive.rawPayloadSha256}.json`,
+    }]
+  }
   return prepareJustOneArchiveObjects([archive], request, { capturedAt })
 }
 
@@ -479,6 +487,19 @@ export class JustOneAdapter {
         }
       },
     })
+  }
+
+  async hotXiaohongshuNotes(body, { capturedAt = null, credential: suppliedCredential, decodeCursor, encodeCursor } = {}) {
+    const credential = await this.#credentialFor(suppliedCredential)
+    const request = normalizeXhsDiscoveryRequest('hot_notes', body, { decodeCursor })
+    return this.#dispatch({ request, credential, capturedAt, normalize: (raw, context) => {
+      assertBoundedJson(raw.data)
+      const safe = redactJustOnePrivateFields(raw, { secret: credential })
+      const publicBody = projectXhsDiscovery(safe, request, context.capturedAt, { encodeCursor })
+      return { publicBody, items: [], records: [], archiveObjects: archiveObjects({
+        raw, request, ...context, outcome: 'success', businessCode: 0, billed: true, contractState: 'accepted', secret: credential,
+      }) }
+    } })
   }
 
   async #credentialFor(suppliedCredential) {

@@ -1,4 +1,5 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
+import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { SOCIAL_ACCOUNT_PLATFORMS, socialAccountPlatform } from '../contracts/social-accounts.mjs'
 import { JUSTONE_RESOURCE_CATALOG } from '../contracts/justone-resources.mjs'
 import { JUSTONE_MARKETPLACE_CATALOG } from '../ingest/justone.mjs'
@@ -28,6 +29,12 @@ function route(id, fields) {
 
 export function implementedRoutes(sources = []) {
   const rows = []
+  for (const endpoint of Object.values(XHS_DISCOVERY_ENDPOINTS)) rows.push(route(endpoint.key, {
+    platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: endpoint.provider,
+    product: endpoint.label, operation: endpoint.operation, path: endpoint.path, keywordSearch: endpoint.id === 'hot_notes',
+    defaultRule: '独立单页操作；固定数据来源，原生业务字段投影与完整受限归档；不自动查询、不推断笔记身份。',
+    evidence: 'server/contracts/xiaohongshu-discovery.mjs',
+  }))
   for (const [operation, platforms] of Object.entries(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS)) {
     for (const platform of platforms) rows.push(route(`legacy-${platform}-${operation}`, {
       platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: 'night-all',

@@ -1,3 +1,4 @@
+import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import {
   dataCenterVisibleProjection,
   sourceCatalogVisibleProjection,
@@ -248,6 +249,11 @@ export const publicDataApi = {
     { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
   xiaohongshuPost: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(apiKey, '/api/v1/data/post', { method: 'POST', body, idempotencyKey }),
+  xiaohongshuDiscovery: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => {
+    const product = XHS_DISCOVERY_PRODUCTS.find(item => item.id === endpoint)
+    if (!product) throw new Error('Unknown Xiaohongshu discovery endpoint')
+    return publicDataRequest(apiKey, product.path, { method: 'POST', body, idempotencyKey, signal })
+  },
   xiaohongshuNative: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => publicDataRequest(
     apiKey,
     `/api/v1/xiaohongshu/app_v2/${encodeURIComponent(endpoint)}`,

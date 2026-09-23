@@ -280,6 +280,16 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: externalPlatformCredentialStore,
   })
+  const xiaohongshuHotNotesStore = createExternalPlatformStore({
+    pool, usageStore: store, providerKey: 'justone', authorizationPlatform: 'xiaohongshu',
+    circuitFailureThreshold: config.justOne.circuitFailureThreshold, circuitOpenMs: config.justOne.circuitOpenMs,
+    uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
+  })
+  const xiaohongshuHotNotesGateway = new ExternalPlatformGateway({
+    usageStore: store, platformStore: xiaohongshuHotNotesStore, adapter: justOneAdapter, config: config.justOne,
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore, credentialStore: externalPlatformCredentialStore,
+  })
   const socialAccountGateway = new ExternalPlatformGateway({
     usageStore: store,
     platformStore: socialAccountPlatformStore,
@@ -462,6 +472,7 @@ export async function createRuntime(config = loadConfig()) {
     balanceMonitor,
     nightAllA,
     externalPlatformGateway,
+    xiaohongshuHotNotesGateway,
     ipRiskGateway,
     enterpriseGateway,
     socialAccountGateway,
@@ -484,6 +495,7 @@ export async function createRuntime(config = loadConfig()) {
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
+    xiaohongshuHotNotesGateway, xiaohongshuHotNotesStore,
     externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
   }

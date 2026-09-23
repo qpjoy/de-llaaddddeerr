@@ -1,4 +1,6 @@
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
+import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contracts/xiaohongshu-discovery-docs.mjs'
+import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml } from './contracts/ip-risk-docs.mjs'
@@ -1251,6 +1253,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
     ...xhsResearchPaths,
+    ...xhsDiscoveryPaths,
     '/xiaohongshu/pgy/get_note_detail': { post: { ...xhsResearchPaths['/data/xiaohongshu/notes/detail'].post, operationId: 'xiaohongshuNoteAnalyticsAlias', description: '与 /data/xiaohongshu/notes/detail 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
     '/data/ip/risk': {
@@ -4934,7 +4937,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   properties: {
                     capability: {
                       type: 'string',
-                      enum: ['compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read', 'social.posts.resolve', 'social.posts.search', 'social.users.resolve', 'social.users.posts', 'social.posts.analytics', 'social.comments.list'],
+                      enum: ['compat.xiaohongshu.app_v2', 'ecommerce.products.search', 'nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read', 'social.posts.resolve', 'social.posts.search', 'social.users.resolve', 'social.users.posts', 'social.posts.analytics', 'social.comments.list', ...XHS_DISCOVERY_PRODUCTS.map(product => product.operation)],
                     },
                     ready: { type: 'boolean' },
                   },
@@ -5268,6 +5271,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据', section: '数据产品' },
   { key: 'social-accounts', path: '/docs/social-accounts', label: '社交账号搜索', section: '数据产品' },
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
+  ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '数据产品' })),
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
@@ -5858,6 +5862,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
     </section>
 
     ${xhsNativePages()}
+    ${xhsDiscoveryPages()}
     <section class="doc-page" data-doc-page="xiaohongshu-note">
     <h2 id="xiaohongshu-note">小红书笔记</h2>
     <div class="notice">这条数据产品由 Hub 对接的外部供应方采集，但<strong>公开合同不暴露供应方身份</strong>：请求里没有供应方选择字段，Hub 更换供应方不需要你改集成。要判断一次交付是上游的问题还是 Hub 侧的问题，看 <code>meta.reason.scope</code>（见下文「每次调用消耗什么」），不需要知道是哪一家。</div>
@@ -6402,6 +6407,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
   'source-catalog': ['/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
@@ -6463,6 +6469,8 @@ function tenantDocBody(route, scopes) {
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
   if (route.key === 'xiaohongshu-note' && Object.keys(xhsResearchPaths).every(path => tenantDocumentPathAllowed(path, scopes))) html += xhsResearchGuide
+  const discoveryProduct = XHS_DISCOVERY_PRODUCTS.find(product => product.key === route.key)
+  if (discoveryProduct && tenantDocumentPathAllowed(discoveryProduct.path.slice('/api/v1'.length), scopes)) html += xhsDiscoveryGuide(discoveryProduct)
   for (const path of paths.filter(path => tenantDocumentPathAllowed(path, scopes))) {
     for (const [method, operation] of Object.entries(PUBLIC_OPENAPI_DOCUMENT.paths[path] || {})) {
       if (!['get', 'post'].includes(method)) continue

@@ -30,7 +30,7 @@ export function capabilityCatalog(sources = []) {
   }
   for (const product of PRODUCT_BUNDLES) {
     const feature = BILLING_FEATURES.find(row => row.key === product.featureKey)
-    if (!feature) issues.push({ id: product.key, code: 'missing_price_template' })
+    if (!feature && product.pricingMode !== 'tenant_contract') issues.push({ id: product.key, code: 'missing_price_template' })
     for (const capability of product.capabilities) {
       if (!routes.some(row => row.operation === capability)) issues.push({ id: `${product.key}:${capability}`, code: 'missing_route' })
     }

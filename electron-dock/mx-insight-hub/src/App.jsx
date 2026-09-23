@@ -75,6 +75,10 @@ const LazyEcommerceTreasureBoxPage = lazy(() => import('./pages-ecommerce-treasu
 const LazyXiaohongshuNotePage = lazy(() => import('./pages-xiaohongshu-note.jsx').then((module) => ({
   default: module.XiaohongshuNotePage,
 })))
+const LazyXiaohongshuDiscoveryPage = lazy(() => import('./pages-xiaohongshu-discovery.jsx').then(module => ({ default: module.XiaohongshuDiscoveryPage })))
+function XiaohongshuDiscoveryPage(props) {
+  return <Suspense fallback={<LoadingState label="正在加载小红书数据产品" />}><LazyXiaohongshuDiscoveryPage {...props} /></Suspense>
+}
 const LazyEnterprisePage = lazy(() => import('./pages-enterprise.jsx').then(module => ({ default: module.EnterprisePage })))
 function EnterprisePage(props) {
   return <Suspense fallback={<LoadingState label="正在加载企业数据" />}><LazyEnterprisePage {...props} /></Suspense>
@@ -349,7 +353,9 @@ const ROUTES = [
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
   { path: '/data-products/enterprise', label: '企业数据', description: '企业查询与接口调试', icon: House, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EnterprisePage, capability: 'apikey.read' },
-  { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
+  { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', navLabel: '笔记画卷', navSection: 'xiaohongshu', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
+  { path: '/data-products/xiaohongshu-hot-notes', label: '小红书热门笔记', navLabel: '热门笔记', navSection: 'xiaohongshu', description: '热门内容、筛选与指标', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
+  { path: '/data-products/xiaohongshu-inspiration', label: '小红书创作灵感', navLabel: '创作灵感', navSection: 'xiaohongshu', description: '热点灵感与创作线索', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/topic-insights', label: '专题洞察', description: '主题趋势、关联与证据报告', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TopicInsightsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -616,6 +622,9 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
 function Navigation({ activePath, onNavigate, routes = ROUTES }) {
   const groups = [...new Set(routes.map((route) => route.group))]
   const activeParent = routes.find((route) => route.path === activePath)?.navParent || null
+  const activeSection = routes.find(route => route.path === activePath)?.navSection || null
+  const [expandedSections, setExpandedSections] = useState(() => new Set(activeSection ? [activeSection] : []))
+  useEffect(() => { if (activeSection) setExpandedSections(current => new Set([...current, activeSection])) }, [activeSection])
   const [expandedParents, setExpandedParents] = useState(() => new Set(activeParent ? [activeParent] : []))
 
   useEffect(() => {
@@ -649,7 +658,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
         key={route.path}
       >
         <Icon size={child ? 16 : 18} weight={active ? 'duotone' : 'regular'} aria-hidden="true" />
-        <span><strong>{route.label}</strong><small>{route.description}</small></span>
+        <span><strong>{route.navLabel || route.label}</strong><small>{route.description}</small></span>
       </a>
     )
   }
@@ -674,6 +683,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
               const expanded = expandedParents.has(route.navParent)
               const parentActive = children.some((candidate) => candidate.path === activePath)
               const childrenId = `mih-nav-children-${route.navParent}`
+              const renderedSections = new Set()
               return (
                 <div className={`mih-nav__branch${parentActive ? ' is-active' : ''}`} key={route.navParent}>
                   <button
@@ -689,7 +699,14 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
                   </button>
                   {expanded ? (
                     <div className="mih-nav__children" id={childrenId}>
-                      {children.map((child) => routeLink(child, true))}
+                      {children.map(child => {
+                        if (!child.navSection) return routeLink(child, true)
+                        if (renderedSections.has(child.navSection)) return null
+                        renderedSections.add(child.navSection)
+                        const sectionChildren = children.filter(candidate => candidate.navSection === child.navSection)
+                        const sectionExpanded = expandedSections.has(child.navSection)
+                        return <div className="mih-nav__subgroup" key={child.navSection}><button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}><Scroll size={16} /><span><strong>小红书</strong><small>笔记、热门内容与创作灵感</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
+                      })}
                     </div>
                   ) : null}
                 </div>
@@ -835,7 +852,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/xiaohongshu-note', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     theme,
     token,

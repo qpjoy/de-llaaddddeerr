@@ -16,7 +16,7 @@ export function ProductSetup({ token, data, currentPlan, rates, billing, onRefre
   const missingCapabilities = product.capabilities.filter(scope => !capabilities.includes(scope))
   const ready = new Map((data.configuration?.availableCapabilities || []).map(row => [row.capability, row.ready]))
   const feature = BILLING_FEATURES.find(row => row.key === product.featureKey)
-  const meters = feature.entries
+  const meters = feature?.entries || product.capabilities.map(meterKey => ({ meterKey }))
   const pricedCount = meters.filter(entry => rates.some(rate => rate.meterKey === entry.meterKey)).length
   const plans = (data.plans?.catalog || []).filter(row => row.status === 'active' && row.versionStatus === 'published' && row.key !== 'legacy-unmetered')
   const chosen = plans.find(row => row.versionId === planId)
@@ -45,7 +45,7 @@ export function ProductSetup({ token, data, currentPlan, rates, billing, onRefre
         <DropdownField label="已有套餐版本" value={planId} onChange={setPlanId} disabled={busy || assigning} options={[{ value: '', label: '选择已发布版本' }, ...plans.map(row => ({ value: row.versionId, label: `${row.name} · v${row.version}` }))]} />
         {chosen ? <p>分配会替换当前调用者的整份套餐：包含 {chosen.priceBook?.entries.length || 0} 项价格。请核对其他业务价格与额度。</p> : null}
         <div className="mih-page-actions"><button className="qp-button qp-button--outline" disabled={busy || assigning || !chosen || chosen.versionId === currentPlan?.versionId} onClick={() => onAssign(chosen)}>分配所选套餐</button>
-          <button className="qp-button qp-button--outline" disabled={busy || currentPlan?.priceBook && currentPlan.priceBook.currency !== feature.currency} onClick={() => onPrice(product.featureKey)}>追加产品费率到草稿</button></div>
+          {feature ? <button className="qp-button qp-button--outline" disabled={busy || currentPlan?.priceBook && currentPlan.priceBook.currency !== feature.currency} onClick={() => onPrice(product.featureKey)}>追加产品费率到草稿</button> : <p>本产品未预设接口售价；使用客户套餐中的明确价格，其余沿用租户默认价。</p>}</div>
       </div>
       <div><h3>3 · 检查 Key 与服务</h3><p>计费状态：{({ enforced: '已启用', shadow: '仅试算', disabled: '未启用' })[billing.profile?.mode] || '未启用'}。同一调用者的 Key 共用已分配价格。</p>
         <a className="qp-button qp-button--outline" href={`#/api-keys?tenantId=${encodeURIComponent(data.tenantId)}&consumerId=${encodeURIComponent(data.consumerId)}`}>检查或签发 Key</a>

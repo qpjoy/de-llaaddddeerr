@@ -1,4 +1,5 @@
 // Public business metadata. Supplier coordinates never belong in this module.
+import { XHS_DISCOVERY_PRODUCTS } from './xiaohongshu-discovery.mjs'
 export const XIAOHONGSHU_CAPABILITIES = Object.freeze([
   { key: 'social.posts.search', label: '搜索笔记', path: '/api/v1/data/search', keywordSearch: true },
   { key: 'social.posts.resolve', label: '正文与标签', path: '/api/v1/data/post' },
@@ -17,6 +18,9 @@ export const PRODUCT_BUNDLES = Object.freeze([
     capabilities: ['ip.risk.query'], optionalCapabilities: [], featureKey: 'ip-risk', href: '/data-products/ip-risk', catalogKeys: [] },
   { key: 'qixin', version: 1, name: '企业数据', platforms: ['enterprise'],
     capabilities: ['enterprise.query'], optionalCapabilities: [], featureKey: 'qixin', href: '/data-products/enterprise', catalogKeys: ['source-catalog-0175'] },
+  ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['xiaohongshu'],
+    capabilities: [product.operation], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
+    href: `/data-products/${product.key}`, catalogKeys: ['source-catalog-0004'] })),
 ])
 
 // UI selection only. The existing server grant checks remain authoritative.

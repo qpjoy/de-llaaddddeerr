@@ -1,4 +1,6 @@
 const LABELS = {
+  'social.posts.hot_search': '热门笔记',
+  'social.inspiration.list': '创作灵感',
   'social.posts.analytics': '详情与阅读量',
   'social.comments.list': '笔记评论',
   'social.posts.search': '笔记搜索',

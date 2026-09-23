@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS } from '../contracts/xiaohongshu-research.mjs'
+import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createHash } from 'node:crypto'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
@@ -59,9 +60,9 @@ export const TIKHUB_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 export const TIKHUB_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 const OFFICIAL_APP_V2_ENDPOINTS = Object.freeze({
-  ...Object.fromEntries(Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => [endpoint.endpointKey, {
+  ...Object.fromEntries([...Object.values(XHS_RESEARCH_ENDPOINTS), XHS_DISCOVERY_ENDPOINTS.creator_inspiration].map(endpoint => [endpoint.endpointKey, {
     path: endpoint.providerPath, method: endpoint.providerMethod, version: endpoint.endpointVersion,
-    fields: endpoint.name === 'note_detail' ? ['note_id'] : ['note_id', 'cursor', 'index', 'pageArea', 'sort_strategy'],
+    fields: endpoint.discovery ? ['cursor'] : endpoint.name === 'note_detail' ? ['note_id'] : ['note_id', 'cursor', 'index', 'pageArea', 'sort_strategy'],
   }])),
   [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: Object.freeze({
     path: TIKHUB_XIAOHONGSHU_ENDPOINT_PATH,
@@ -671,7 +672,8 @@ export class TikHubAdapter {
     const normalizedQuery = {}
     for (const [key, value] of Object.entries(query)) {
       if (!allowed.has(key)) throw new TypeError(`${key} is not allowed for this endpoint`)
-      if (typeof value !== 'string' || !value || value.length > 8_192) {
+      const firstInspirationCursor = endpointKey === XHS_DISCOVERY_ENDPOINTS.creator_inspiration.endpointKey && key === 'cursor' && value === ''
+      if (typeof value !== 'string' || (!value && !firstInspirationCursor) || value.length > 8_192) {
         throw new TypeError(`${key} must be a non-empty string of at most 8192 characters`)
       }
       normalizedQuery[key] = value

@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_VERSION } from '../contracts/xiaohongshu-research.mjs'
+import { XHS_DISCOVERY_ENDPOINTS, XHS_DISCOVERY_VERSION } from '../contracts/xiaohongshu-discovery.mjs'
 import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
 import { randomUUID } from 'node:crypto'
 
@@ -97,8 +98,10 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
       // provider bills its own endpoints.
       endpointKeys: socialAccountEndpointKeys('justone'),
     }),
+    { operationKey: XHS_DISCOVERY_ENDPOINTS.hot_notes.operation, label: '小红书热门笔记', legacyGate: 'discoveryContractVerified', contractVersion: XHS_DISCOVERY_VERSION, endpointKeys: [XHS_DISCOVERY_ENDPOINTS.hot_notes.endpointKey] },
   ]),
   tikhub: Object.freeze([
+    { operationKey: XHS_DISCOVERY_ENDPOINTS.creator_inspiration.operation, label: '小红书创作灵感', legacyGate: 'discoveryContractVerified', contractVersion: XHS_DISCOVERY_VERSION, endpointKeys: [XHS_DISCOVERY_ENDPOINTS.creator_inspiration.endpointKey] },
     ...Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => Object.freeze({
       operationKey: endpoint.operation, label: endpoint.label, legacyGate: endpoint.gate,
       contractVersion: XHS_RESEARCH_VERSION, endpointKeys: Object.freeze([endpoint.endpointKey]),
