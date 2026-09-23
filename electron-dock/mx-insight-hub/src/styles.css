@@ -12930,6 +12930,7 @@ button.mih-catalog-status {
 
 .mih-xhs-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
 .mih-xhs-detail-toolbar { margin-top: 0; }
+.mih-xhs-detail-tabs { margin-bottom: 16px; }
 .mih-xhs-detail-toolbar small, .mih-xhs-comments small { color: var(--qp-text-3); }
 .mih-xhs-detail-options { margin: 20px 0; }
 .mih-xhs-detail-options summary, .mih-xhs-comments summary { cursor: pointer; padding: 8px 0; }

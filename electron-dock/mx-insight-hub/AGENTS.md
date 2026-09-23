@@ -1,5 +1,7 @@
 # Prototype Instructions
 
+- 2026-09-23 Xiaohongshu comment discoverability: keep a visible note/comments switch above long detail content. The first explicit comment click requests one authorized, ready comment page; tab return, reopening, failures and credential renewal reuse session state and never auto-retry. Show comment-specific grant/runtime blockers in that view, keep pagination explicit and failed retry identity intact, and distinguish body/tags from analytics in the loaded status. Preserve MX-H2I login/networking and all existing Key/pricing configuration.
+
 - 2026-09-23 tenant default pricing: migration 105 adds a tenant-wide final per-request price/currency, initially zero. Explicit assigned-plan entries (including zero) take precedence and retain their existing multiplier semantics. Default prices do not inherit plan multipliers; no priced plan is required for fallback. Preserve omitted fields from older billing-profile clients, use revision checks, freeze request-time evidence, and never rewrite existing plans, scopes, keys, balances or history. Only existing business usage meters are charged; aggregate live parents, login/admin/usage reads stay exempt. Preview and tenant price displays must use the same precedence. Deploy 105 before the binary; preserve MX-H2I login/networking.
 
 

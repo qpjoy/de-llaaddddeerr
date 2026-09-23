@@ -28,7 +28,9 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   const commentIssues = useDemoAccess('social.comments.list')
   const [research, setResearch] = useState(saved.research || {})
   const [researchError, setResearchError] = useState(saved.researchError || null)
+  const [researchErrorOperation, setResearchErrorOperation] = useState(saved.researchErrorOperation || null)
   const [commentSort, setCommentSort] = useState(saved.commentSort || 'latest')
+  const [detailView, setDetailView] = useState(saved.detailView || 'note')
   const researchRequests = useRef(saved.researchRequests || new Map())
   saved.researchRequests = researchRequests.current
   const requestResearch = async (endpoint, cursor = null, fresh = false) => {
@@ -46,7 +48,10 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
       const next = { ...saved.research, [endpoint]: response, commentPages: pages }
       saved.research = next
       if (alive.current) setResearch(next)
-    } catch (failure) { saved.researchError = failure; if (alive.current) setResearchError(failure) }
+    } catch (failure) {
+      saved.researchError = failure; saved.researchErrorOperation = endpoint
+      if (alive.current) { setResearchError(failure); setResearchErrorOperation(endpoint) }
+    }
     finally { lock.current = false; if (alive.current) setBusy(false) }
   }
   const alive = useRef(true)
@@ -72,23 +77,37 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
     if (operation === 'resolve') void resolve()
   }, [apiKey, saved, analyticsIssues.length, resolveIssues.length])
   const analytics = research.note_detail?.payload?.data?.item
+  const analyticsError = researchErrorOperation !== 'note_comments' ? researchError : null
+  const commentsError = researchErrorOperation === 'note_comments' ? researchError : null
   const displayed = mergeNoteDetail(result?.payload?.data?.item || item, research.note_detail?.payload)
   const primary = saved.openOperation || (!analyticsIssues.length ? 'note_detail' : 'resolve')
   const primaryIssues = primary === 'note_detail' ? analyticsIssues : resolveIssues
-  const primaryError = primary === 'note_detail' ? researchError : error
+  const primaryError = primary === 'note_detail' ? analyticsError : error
   const primaryResult = primary === 'note_detail' ? research.note_detail : result
   const refresh = () => primary === 'note_detail'
     ? requestResearch('note_detail', null, Boolean(primaryResult) && !primaryError)
     : resolve(primaryResult && !primaryError ? 'live_only' : 'cache_first')
+  const showComments = () => {
+    saved.detailView = 'comments'; setDetailView('comments')
+    // An explicit comment click loads the first page once. Tab switches,
+    // reopening and failed requests keep their existing result/identity.
+    const fingerprint = JSON.stringify(['note_comments', { note_id: item.externalId, sort: commentSort }])
+    if (!research.note_comments && !researchRequests.current.has(fingerprint)) void requestResearch('note_comments')
+  }
   return <Modal title={item.title || '笔记详情'} size="xlarge" closeOnBackdrop={false} closeOnEscape={false} busy={busy} onClose={onClose} footer={<button className="qp-button" disabled={busy} onClick={onClose}>关闭</button>}>
     <div className="mih-xhs-detail-actions mih-xhs-detail-toolbar">
-      <span role="status">{busy ? '正在加载…' : primaryResult ? '详情已加载' : '当前已存笔记'}</span>
+      <span role="status">{busy ? '正在加载…' : primaryResult ? (primary === 'note_detail' ? '详情与阅读量已加载' : '正文与标签已加载') : '当前已存笔记'}</span>
       <button className="qp-button qp-button--outline qp-button--sm" disabled={busy || !apiKey.trim() || !!primaryIssues.length} onClick={() => void refresh()}>{primaryError ? '重试详情' : primaryResult ? '刷新详情' : '加载详情'}</button>
       <small>{primary === 'note_detail' ? '按套餐计费 · 新查询建议间隔至少 5 秒' : '缓存优先，采集按套餐计费'}</small>
     </div>
     {!apiKey.trim() ? <p role="status">正在等待调用身份。</p> : primaryIssues.length && !primaryResult ? <p role="status">当前详情服务不可用，先展示已存内容。可在下方“更多操作与请求记录”中查看原因。</p> : null}
+    <nav className="mih-source-section-tabs mih-xhs-detail-tabs" aria-label="笔记详情视图">
+      <button type="button" aria-pressed={detailView === 'note'} onClick={() => { saved.detailView = 'note'; setDetailView('note') }}>正文与图片</button>
+      <button type="button" aria-pressed={detailView === 'comments'} disabled={busy} onClick={showComments}>评论{displayed.metrics?.comments != null ? ` · ${displayed.metrics.comments}` : ''}</button>
+    </nav>
+    <div hidden={detailView !== 'note'}>
     {error ? <ErrorState error={error} /> : null}
-    {researchError ? <ErrorState error={researchError} /> : null}
+    {analyticsError ? <ErrorState error={analyticsError} /> : null}
     {research.note_detail && !analytics ? <p role="status">本次未返回详情，保留已存内容。</p> : null}
     <NoteScroll key={imageRevision} result={{ payload: { data: { item: displayed } } }} apiKey={apiKey} mediaEnabled={images} directImages />
     <details className="mih-xhs-detail-options"><summary>更多操作与请求记录</summary>
@@ -102,21 +121,26 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
       <section aria-label="详情与阅读量"><h3>详情与阅读量</h3>
         <p>新查询建议间隔至少 5 秒，按套餐计费。未提供的结构化标签保留已有结果。</p>
         <DemoAccessNotice operation="social.posts.analytics" />
-        <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail', null, !!research.note_detail && !researchError)}>{research.note_detail ? '刷新阅读量' : '获取详情与阅读量'}</button>
+        <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim() || !!analyticsIssues.length} onClick={() => void requestResearch('note_detail', null, !!research.note_detail && !analyticsError)}>{research.note_detail ? '刷新阅读量' : '获取详情与阅读量'}</button>
         {research.note_detail ? <DeliveryEvidence evidence={research.note_detail.evidence} /> : null}
       </section>
     </details>
+    </div>
+    <div hidden={detailView !== 'comments'}>
     <section className="qp-panel mih-xhs-comments" aria-label="笔记评论"><h3>笔记评论</h3>
-      {commentIssues.length ? <details><summary>评论暂不可用 · 查看原因</summary><DemoAccessNotice operation="social.comments.list" /></details> : <>
+      {commentIssues.length ? <DemoAccessNotice operation="social.comments.list" /> : <>
+        {commentsError ? <ErrorState error={commentsError} /> : null}
         <div className="mih-xhs-detail-actions"><DropdownField label="评论排序" disabled={busy} value={commentSort} options={[{ value: 'latest', label: '最新' }, { value: 'hot', label: '最热' }]} onChange={value => { saved.commentSort = value; setCommentSort(value); const next = { ...research, note_comments: null, commentPages: {} }; saved.research = next; setResearch(next) }} />
-          <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim()} onClick={() => void requestResearch('note_comments')}>加载评论</button>
+          {!research.note_comments || commentsError ? <button className="qp-button qp-button--outline" disabled={busy || !apiKey.trim()} onClick={() => void requestResearch('note_comments', research.note_comments?.payload?.data?.nextCursor || null)}>{commentsError ? '重试评论' : '加载评论'}</button> : null}
           {research.note_comments?.payload?.data?.nextCursor ? <button className="qp-button qp-button--outline" disabled={busy} onClick={() => void requestResearch('note_comments', research.note_comments.payload.data.nextCursor)}>下一页评论</button> : null}
           <small>每页按套餐计费</small>
         </div>
         {Object.values(research.commentPages || {}).flat().map(comment => <Comment key={comment.id} comment={comment} />)}
+        {research.note_comments && !Object.values(research.commentPages || {}).flat().length ? <p role="status">本次未返回评论。</p> : null}
         {research.note_comments ? <><p>{research.note_comments.payload.data.hasMore === false ? '已无后续评论。' : research.note_comments.payload.data.nextCursor ? '可加载下一页。' : '暂无后续分页信息。'}</p><details><summary>评论请求记录</summary><DeliveryEvidence evidence={research.note_comments.evidence} /></details></> : null}
       </>}
     </section>
+    </div>
   </Modal>
 }
 

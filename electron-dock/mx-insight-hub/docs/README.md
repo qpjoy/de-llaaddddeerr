@@ -13,6 +13,10 @@ those paths retire one operation at a time and are not the target architecture.
 - [实现范围、数据语义与上线门槛](data-browser/README.md)
 - [Node.js Agent、Text2ES、ES 兼容升级与契约转发可行性](data-browser/agent-search-feasibility.md)
 
+## 下游接入与演示
+
+- [小红书 API 接入与演示指南](xiaohongshu-api-quickstart.md)：关键词搜索、详情与阅读量、评论分页、可选正文与标签，以及授权、计费和幂等重试。可单独交付给下游开发者。
+
 ## 数据源与聚合搜索（2026-09-22）
 
 - [接入看板交付、现有链路核对与聚合搜索待实现方案](architecture/aggregate-search-and-source-routing.md)
