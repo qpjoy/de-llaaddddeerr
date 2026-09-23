@@ -18,7 +18,7 @@ import {
   normalizeCreditAdjustment,
   normalizeCreditDebit,
   normalizePublishedPlan,
-  quotedMinor,
+  customerRequestPrice,
 } from './billing/contracts.mjs'
 import {
   XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH,
@@ -3315,22 +3315,24 @@ export class HubService {
     ])
     const items = routes.map(route => {
       const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : route.kind === 'products' ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
-      const rate = plan?.priceBook?.entries.find(row => row.meterKey === meterKey)
-      const enforced = billing.profile?.mode === 'enforced' && Boolean(plan?.priceBook)
-      const cost = rate ? quotedMinor(rate.unitPriceMinor, billing.profile?.multiplierPpm ?? plan.priceBook.defaultMultiplierPpm) : 0
+      const price = customerRequestPrice(plan?.priceBook, billing.profile, meterKey)
+      const enforced = billing.profile?.mode === 'enforced'
+      const cost = price.quotedMinor
       assert(Number.isSafeInteger(cost) && cost >= 0, 400, 'quote_too_large', 'Quote exceeds safe integer range')
       const runtime = (route.platform === 'xiaohongshu' ? social : route.kind === 'products' ? ecommerce : null)?.operations?.[meterKey]
       return { id: route.id, platform: route.platform, label: route.label, meterKey, pages: 1,
-        priceStatus: !enforced ? 'billing_disabled' : !rate ? 'unpriced_free' : cost === 0 ? 'explicit_free' : 'priced',
-        unitPriceMinor: enforced ? cost : 0, currency: plan?.priceBook?.currency || null,
+        priceStatus: !enforced ? 'billing_disabled' : price.priceSource === 'tenant_default' ? cost === 0 ? 'unpriced_free' : 'tenant_default' : cost === 0 ? 'explicit_free' : 'priced',
+        unitPriceMinor: enforced ? cost : 0, currency: price.currency,
         readiness: runtime ? runtime.ready === true ? 'ready' : 'unavailable' : 'not_checked',
       }
     })
     const total = items.reduce((sum, row) => sum + BigInt(row.unitPriceMinor), 0n)
+    const currencies = [...new Set(items.filter(row => row.unitPriceMinor > 0).map(row => row.currency))]
+    assert(currencies.length <= 1, 409, 'mixed_price_currencies', 'Selected sources use different price currencies')
     assert(total <= BigInt(Number.MAX_SAFE_INTEGER), 400, 'quote_too_large', 'Quote exceeds safe integer range')
     return { contractVersion: 'mx-insight-hub.aggregate-preview.v1', mode: query.mode, items,
       planVersionId: plan?.versionId || null, planVersion: plan?.version || null,
-      currency: plan?.priceBook?.currency || null, estimatedMinor: Number(total),
+      currency: currencies[0] || billing.profile?.defaultCurrency || plan?.priceBook?.currency || 'CNY', estimatedMinor: Number(total),
       parentChargeMinor: query.mode === 'refresh' ? 0 : null, observedAt: new Date().toISOString(),
       estimateOnly: true, dispatches: 0, carriedSources: page?.carriedSources.length || 0 }
   }

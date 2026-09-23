@@ -23,11 +23,11 @@ export function ConsumptionPanel({ token, tenantId, onUnauthorized, labelMeter =
         <td>{row.consumerName || row.consumerId}</td>
         <td>{row.enforcementMode === 'shadow' ? '试算 · ' : ''}{statuses[row.status] || row.status}{['reserved', 'unknown'].includes(row.status) ? <small>报价 {money(row.quotedMinor, row.currency)}</small> : null}</td>
         <td>{money(row.enforcementMode === 'enforced' ? row.chargedMinor : 0, row.currency)}</td>
-        <td><details><summary>查看结算步骤</summary><p style={{ overflowWrap: 'anywhere' }}>请求 {row.requestId}<br />Key {row.apiKeyId}<br />价目表 {row.priceBookKey} v{row.priceBookVersion}</p>
+        <td><details><summary>查看结算步骤</summary><p style={{ overflowWrap: 'anywhere' }}>请求 {row.requestId}<br />Key {row.apiKeyId}<br />{row.priceSource === 'tenant_default' ? `租户默认价 · 策略版本 ${row.billingProfileRevision}` : `价目表 ${row.priceBookKey} v${row.priceBookVersion}`}</p>
           {row.events.length ? <ul>{row.events.map(event => <li key={event.id}>{kinds[event.kind] || event.kind} · {formatDate(event.createdAt)}<br />可用变化 {money(event.availableDeltaMinor, row.currency)} / 冻结变化 {money(event.heldDeltaMinor, row.currency)}</li>)}</ul> : <p>无钱包变动（免费或试算）。</p>}
         </details></td>
       </tr>)}</tbody>
-    </table>{!rows.length ? <p>暂无消费记录。未配置价格的免费调用可在使用记录中查看；充值和人工调整见原始账本。</p> : null}</div>}
+    </table>{!rows.length ? <p>暂无消费记录。默认价为 0 的免费调用可在使用记录中查看；充值和人工调整见原始账本。</p> : null}</div>}
     <div className="mih-page-actions"><button className="qp-button qp-button--outline qp-button--sm" disabled={state.loading || cursors.length === 1} onClick={() => setCursors(current => current.slice(0, -1))}>上一页</button><span>第 {cursors.length} 页</span><button className="qp-button qp-button--outline qp-button--sm" disabled={state.loading || !state.data?.pageInfo?.nextCursor} onClick={() => setCursors(current => [...current, state.data.pageInfo.nextCursor])}>下一页</button></div>
   </section>
 }

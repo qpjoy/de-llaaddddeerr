@@ -4,7 +4,7 @@ import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
-import { quotedMinor, usageMeterKey } from '../billing/contracts.mjs'
+import { customerRequestPrice, usageMeterKey } from '../billing/contracts.mjs'
 import { consumptionItem, consumptionPage } from '../billing/consumption.mjs'
 import {
   CANONICAL_CONTEXT_DATASETS,
@@ -943,6 +943,8 @@ export class MemoryStore {
       tenantId,
       mode: 'disabled',
       multiplierPpm: null,
+      defaultUnitPriceMinor: 0,
+      defaultCurrency: 'CNY',
       revision: 0,
       updatedBy: null,
       updatedAt: null,
@@ -965,7 +967,7 @@ export class MemoryStore {
     }
   }
 
-  async replaceTenantBillingProfile({ tenantId, mode, multiplierPpm, expectedRevision, updatedBy }) {
+  async replaceTenantBillingProfile({ tenantId, mode, multiplierPpm, defaultUnitPriceMinor, defaultCurrency, expectedRevision, updatedBy }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     const current = this.billingProfiles.get(tenantId) || null
     const revision = current?.revision || 0
@@ -976,10 +978,18 @@ export class MemoryStore {
       })
     }
     const updatedAt = nowIso()
+    const defaultPrice = defaultUnitPriceMinor ?? current?.defaultUnitPriceMinor ?? 0
+    const currency = defaultCurrency ?? current?.defaultCurrency ?? 'CNY'
+    const account = this.creditAccounts.get(tenantId)
+    if (defaultPrice > 0 && account && account.currency !== currency) {
+      throw new AppError(409, 'wallet_currency_conflict', 'Default price currency must match the tenant wallet')
+    }
     const next = {
       tenantId,
       mode,
       multiplierPpm,
+      defaultUnitPriceMinor: defaultPrice,
+      defaultCurrency: currency,
       revision: revision + 1,
       updatedBy,
       updatedAt,
@@ -1288,14 +1298,11 @@ export class MemoryStore {
     const plan = this.plans.find((candidate) => candidate.versionId === assignment?.versionId)
     const priceBook = plan?.priceBook
     const profile = this.billingProfiles.get(record.tenantId)
-    if (!priceBook || !profile || profile.mode === 'disabled') return null
-
-    const entry = priceBook.entries.find((candidate) => candidate.meterKey === record.billingMeterKey)
-    // A price book sets charges, not access. Unlisted operations remain metered
-    // but do not reserve or deduct customer credit.
-    if (!entry) return null
-    const multiplierPpm = profile.multiplierPpm ?? priceBook.defaultMultiplierPpm
-    const quoted = quotedMinor(entry.unitPriceMinor, multiplierPpm)
+    if (!profile || profile.mode === 'disabled') return null
+    const price = customerRequestPrice(priceBook, profile, record.billingMeterKey)
+    if (!price || price.priceSource === 'tenant_default' && price.unitPriceMinor === 0) return null
+    const { multiplierPpm, quotedMinor: quoted, currency } = price
+    if (!Number.isSafeInteger(quoted)) throw new AppError(400, 'quote_too_large', 'Quote exceeds safe integer range')
     const createdAt = nowIso()
     const charge = {
       id: randomUUID(),
@@ -1305,38 +1312,39 @@ export class MemoryStore {
       apiKeyId: record.apiKeyId,
       accountId: null,
       meterKey: record.billingMeterKey,
-      billingUnit: entry.billingUnit,
-      priceBookId: priceBook.id,
-      priceBookKey: priceBook.key,
-      priceBookVersion: priceBook.version,
-      unitPriceMinor: entry.unitPriceMinor,
+      billingUnit: price.billingUnit,
+      priceBookId: price.priceBookId,
+      priceBookKey: price.priceBookKey,
+      priceBookVersion: price.priceBookVersion,
+      unitPriceMinor: price.unitPriceMinor,
       multiplierPpm,
       quotedMinor: quoted,
       chargedMinor: 0,
-      currency: priceBook.currency,
+      currency,
       enforcementMode: profile.mode,
       status: 'reserved',
       pricingSnapshot: {
         meterKey: record.billingMeterKey,
-        billingUnit: entry.billingUnit,
-        priceBookKey: priceBook.key,
-        priceBookVersion: priceBook.version,
-        unitPriceMinor: entry.unitPriceMinor,
+        billingUnit: price.billingUnit,
+        priceBookKey: price.priceBookKey,
+        priceBookVersion: price.priceBookVersion,
+        unitPriceMinor: price.unitPriceMinor,
         multiplierPpm,
         quotedMinor: quoted,
-        currency: priceBook.currency,
+        currency,
+        ...(price.priceSource === 'tenant_default' ? { priceSource: 'tenant_default', billingProfileRevision: profile.revision } : {}),
       },
       createdAt,
       settledAt: null,
     }
     if (profile.mode === 'enforced' && quoted > 0) {
       const account = this.creditAccounts.get(record.tenantId)
-      if (!account || account.status !== 'active' || account.currency !== priceBook.currency
+      if (!account || account.status !== 'active' || account.currency !== currency
         || account.availableMinor < quoted) {
         throw new AppError(402, 'insufficient_credit', 'Tenant credit is insufficient for this request', {
-          currency: priceBook.currency,
+          currency,
           requiredMinor: quoted,
-          availableMinor: account?.currency === priceBook.currency ? account.availableMinor : 0,
+          availableMinor: account?.currency === currency ? account.availableMinor : 0,
         })
       }
       account.availableMinor -= quoted

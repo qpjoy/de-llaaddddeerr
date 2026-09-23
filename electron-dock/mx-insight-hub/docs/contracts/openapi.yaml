@@ -4926,7 +4926,7 @@ paths:
       description: 'Uses the same body and continuation cursor as aggregate search. Read-only estimate: no data acquisition,
         usage reservation or wallet hold. Returns the current assigned plan version, per-source meter, one-page price
         and observed readiness, total estimatedMinor and estimateOnly=true. Unknown runtime readiness is not_checked;
-        unavailable sources are explicitly marked. An unpriced customer operation follows the existing free rule.
+        unavailable sources are explicitly marked. Explicit plan rates (including zero) take precedence; other metered operations use the tenant default request price, initially zero. Tenant default prices are final prices and do not inherit plan multipliers.
         Execution rechecks authorization, price and runtime; this estimate is neither a locked quote nor a spending
         cap. Live parentChargeMinor is zero; children keep their own contract rates. Never returns procurement prices
         or supplier identity.'

@@ -828,6 +828,8 @@ function billingProfileRecord(row, tenantId = null) {
     tenantId: row.tenant_id,
     mode: row.mode,
     multiplierPpm: row.multiplier_ppm == null ? null : Number(row.multiplier_ppm),
+    defaultUnitPriceMinor: Number(row.default_unit_price_minor ?? 0),
+    defaultCurrency: row.default_currency || 'CNY',
     revision: Number(row.revision),
     updatedBy: row.updated_by,
     updatedAt: iso(row.updated_at),
@@ -835,6 +837,8 @@ function billingProfileRecord(row, tenantId = null) {
     tenantId,
     mode: 'disabled',
     multiplierPpm: null,
+    defaultUnitPriceMinor: 0,
+    defaultCurrency: 'CNY',
     revision: 0,
     updatedBy: null,
     updatedAt: null,
@@ -891,7 +895,7 @@ function customerChargeRecord(row) {
     billingUnit: row.billing_unit,
     priceBookId: row.price_book_id,
     priceBookKey: row.price_book_key,
-    priceBookVersion: Number(row.price_book_version),
+    priceBookVersion: row.price_book_version == null ? null : Number(row.price_book_version),
     unitPriceMinor: Number(row.unit_price_minor),
     multiplierPpm: Number(row.multiplier_ppm),
     quotedMinor: Number(row.quoted_minor),
@@ -1833,7 +1837,7 @@ export class PostgresStore {
     }
   }
 
-  async replaceTenantBillingProfile({ tenantId, mode, multiplierPpm, expectedRevision, updatedBy }) {
+  async replaceTenantBillingProfile({ tenantId, mode, multiplierPpm, defaultUnitPriceMinor, defaultCurrency, expectedRevision, updatedBy }) {
     try {
       return await withPgTransaction(this.pool, async (client) => {
         const tenant = await client.query('SELECT id FROM tenants WHERE id = $1 FOR SHARE', [tenantId])
@@ -1855,21 +1859,27 @@ export class PostgresStore {
             currentRevision,
           })
         }
+        const defaultPrice = defaultUnitPriceMinor ?? Number(current.rows[0]?.default_unit_price_minor ?? 0)
+        const currency = defaultCurrency ?? current.rows[0]?.default_currency ?? 'CNY'
+        const account = await client.query('SELECT currency FROM billing.credit_accounts WHERE tenant_id = $1', [tenantId])
+        if (defaultPrice > 0 && account.rows[0] && account.rows[0].currency !== currency) {
+          throw new AppError(409, 'wallet_currency_conflict', 'Default price currency must match the tenant wallet')
+        }
         const result = current.rowCount === 0
           ? await client.query(
               `INSERT INTO billing.tenant_billing_profiles
-                 (tenant_id, mode, multiplier_ppm, revision, updated_by)
-               VALUES ($1, $2, $3, 1, $4)
+                 (tenant_id, mode, multiplier_ppm, revision, updated_by, default_unit_price_minor, default_currency)
+               VALUES ($1, $2, $3, 1, $4, $5, $6)
                RETURNING *`,
-              [tenantId, mode, multiplierPpm, updatedBy],
+              [tenantId, mode, multiplierPpm, updatedBy, defaultPrice, currency],
             )
           : await client.query(
               `UPDATE billing.tenant_billing_profiles
                   SET mode = $2, multiplier_ppm = $3, revision = revision + 1,
-                      updated_by = $4, updated_at = now()
+                      updated_by = $4, updated_at = now(), default_unit_price_minor = $6, default_currency = $7
                 WHERE tenant_id = $1 AND revision = $5
                 RETURNING *`,
-              [tenantId, mode, multiplierPpm, updatedBy, currentRevision],
+              [tenantId, mode, multiplierPpm, updatedBy, currentRevision, defaultPrice, currency],
             )
         return billingProfileRecord(result.rows[0])
       })

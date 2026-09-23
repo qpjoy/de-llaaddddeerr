@@ -1970,7 +1970,8 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
       <MetricCard icon={ChartLine} label="本月消费" value={billed.mixedCurrencies ? '请按币种查看明细' : formatMoneyMinor(billed.chargedMinor || 0, billed.currency || currency)} hint="当前业务实际扣款" />
       <MetricCard icon={Timer} label="待结算金额" value={account ? formatMoneyMinor(account.heldMinor, currency) : '—'} hint="结算完成后更新余额" />
     </section>
-    <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用后按以下价格扣费；已授权但未配置价格的接口免费，仍计入调用用量和额度。' : '自动扣费尚未开通，请联系服务方确认。'}>
+    <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用按套餐接口价格优先结算；未单独定价的已授权接口使用账户默认单价。' : '自动扣费尚未开通，请联系服务方确认。'}>
+      <p>账户默认单价：{formatMoneyMinor(billing.profile?.defaultUnitPriceMinor ?? 0, billing.profile?.defaultCurrency || 'CNY')} / 次。下表接口价格优先，0 元表示免费。</p>
       {rates.length ? <PagedItems items={rates} text={entry => `${entry.meterKey} ${billingMeterLabel(entry.meterKey)}`} label="服务价格">{visible => <Table label="我的服务价格">
         <thead><tr><th>服务</th><th>单次价格</th><th>预计可用次数</th></tr></thead>
         <tbody>{visible.map(({entry: rate}) => <tr key={rate.meterKey}>
@@ -1978,7 +1979,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
           <td>{formatMoneyMinor(rate.unitPriceMinor, rate.currency || currency)} / 次</td>
           <td>{account && rate.unitPriceMinor > 0 && (rate.currency || currency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / rate.unitPriceMinor))} 次` : '—'}</td>
         </tr>)}</tbody>
-      </Table>}</PagedItems> : <EmptyState icon={Coins} title="未配置收费接口" description="已授权的接口可免费调用，仍受调用额度和速率限制。" />}
+      </Table>}</PagedItems> : <EmptyState icon={Coins} title="使用账户默认单价" description="暂无单独的接口价格；已授权的业务调用使用上述默认单价，仍受调用额度和速率限制。" />}
       {rates.length ? <p>预计次数仅按当前余额和单项服务价格计算；其他业务消费及调用限额会影响实际可用次数。</p> : null}
     </Panel>
     <ConsumptionPanel key={data.tenantId} token={token} tenantId={data.tenantId} onUnauthorized={onUnauthorized} labelMeter={billingMeterLabel} />
@@ -2019,7 +2020,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const [billingBusy, setBillingBusy] = useState('')
   const [billingError, setBillingError] = useState(null)
   const [creditForm, setCreditForm] = useState({ amount: '', currency: 'CNY', reason: '', externalReference: '' })
-  const [profileForm, setProfileForm] = useState({ mode: 'shadow', multiplier: '1.000000' })
+  const [profileForm, setProfileForm] = useState({ mode: 'shadow', multiplier: '1.000000', defaultPrice: '0.00', defaultCurrency: 'CNY' })
   const [componentChoice, setComponentChoice] = useState('feature:ip-risk')
   const [planEntryFocus, setPlanEntryFocus] = useState(null)
   const [planForm, setPlanForm] = useState({
@@ -2235,6 +2236,8 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     setBillingError(null)
     setProfileForm({
       mode: billing.profile?.mode || 'disabled',
+      defaultPrice: ((billing.profile?.defaultUnitPriceMinor ?? 0) / 100).toFixed(2),
+      defaultCurrency: billing.account?.currency || billing.profile?.defaultCurrency || 'CNY',
       multiplier: billing.profile?.multiplierPpm == null
         ? ''
         : (Number(billing.profile.multiplierPpm) / 1_000_000).toFixed(6),
@@ -2252,11 +2255,18 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       setBillingError(new Error('租户倍率必须是 0–100 之间、最多六位小数的数值。'))
       return
     }
+    const defaultUnitPriceMinor = decimalToMinor(profileForm.defaultPrice)
+    if (defaultUnitPriceMinor == null) {
+      setBillingError(new Error('租户默认单价必须是非负金额，最多两位小数。'))
+      return
+    }
     setBillingBusy('profile')
     setBillingError(null)
     try {
       await adminApi.updateTenantBillingProfile(token, data.tenantId, {
         mode: profileForm.mode,
+        defaultUnitPriceMinor,
+        defaultCurrency: profileForm.defaultCurrency,
         multiplierPpm,
         ...(billing.profile?.revision > 0 ? { expectedRevision: billing.profile.revision } : {}),
       })
@@ -2399,8 +2409,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       </section>
 
       {session?.platformAdmin ? <Panel title="自动按次计费" subtitle="余额、合同价格和运行授权分别生效；充值本身不会启用扣费。">
-        <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定费率' : '尚未绑定费率'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
-        <p>标准套餐可分配给多个客户；只有价格或额度不同时才创建差异版本。同一套餐可配置多个业务的接口价格。已授权但未配置价格的接口免费，价格填 0 也表示免费；调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
+        <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定接口覆盖价格' : '使用租户默认单价'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
+        <p>标准套餐可分配给多个客户；只有价格或额度不同时才创建差异版本。同一套餐可配置多个业务的接口价格。套餐接口价格优先于租户默认单价，接口填 0 表示明确免费；未列出的已授权接口使用租户默认单价。调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
+        <p><strong>租户默认单价：{formatMoneyMinor(billing.profile?.defaultUnitPriceMinor ?? 0, billing.profile?.defaultCurrency || 'CNY')} / 次</strong> · 适用于本租户所有调用者及 Key 下没有套餐接口覆盖价的业务请求；初始为 0 元，无需逐项添加价格。</p>
+        <button className="qp-button qp-button--outline" type="button" disabled={!data.tenantId} onClick={openProfile}>设置租户默认单价</button>
         <div className="mih-page-actions">
           <button className="qp-button qp-button--outline" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={() => openFeaturePlan('qixin')}>追加启信宝费率 · 官网原价 / 统一调价</button>
           <button className="qp-button qp-button--primary" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={()=>openFeaturePlan('xiaohongshu')}>追加小红书费率 · ¥0.10/次</button>
@@ -2658,7 +2670,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       {profileOpen && session?.platformAdmin ? (
         <Modal
           title="租户计费策略"
-          description="倍率只影响以后创建的价格快照；供应商变化不会改变租户已经冻结或成交的价格。"
+          description="统一设置本租户的默认价格，再用套餐逐接口覆盖。只影响新请求，已经冻结或成交的价格保持不变。"
           busy={billingBusy === 'profile'}
           onClose={() => !billingBusy && setProfileOpen(false)}
           footer={(
@@ -2669,14 +2681,19 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           )}
         >
           <form id="tenant-billing-profile-form" className="mih-form" onSubmit={saveProfile}>
-            <Field label="计费模式" hint="建议先用影子计价核对费率与 QPS，再开启余额门禁。">
-              <select className="qp-input" value={profileForm.mode} onChange={(event) => setProfileForm({ ...profileForm, mode: event.target.value })} autoFocus>
-                <option value="disabled">未启用 · 不报价不扣费</option>
-                <option value="shadow">影子计价 · 记录报价不动余额</option>
-                <option value="enforced">余额门禁 · 请求前冻结、成功后扣费</option>
-              </select>
+            <DropdownField label="计费模式" value={profileForm.mode} onChange={mode => setProfileForm(current => ({ ...current, mode }))} options={[
+              { value: 'disabled', label: '未启用 · 不报价不扣费' },
+              { value: 'shadow', label: '影子计价 · 记录报价不动余额' },
+              { value: 'enforced', label: '余额门禁 · 请求前冻结、成功后扣费' },
+            ]} />
+            <Field label="租户默认单价（每次）" hint="初始为 0。填写 0.10 即让所有未单独定价的已授权业务请求每次收费 0.10；填 0 则免费。默认单价直接生效，不再乘套餐倍率。">
+              <input className="qp-input" type="text" inputMode="decimal" value={profileForm.defaultPrice} onChange={event => setProfileForm(current => ({ ...current, defaultPrice: event.target.value }))} required />
             </Field>
-            <Field label="租户费率倍率（可选）" hint="留空继承套餐默认倍率；例如 1.200000 表示合同价为基础费率的 1.2 倍。">
+            <Field label="默认单价币种" hint="已有钱包时使用钱包币种。">
+              <input className="qp-input" value={profileForm.defaultCurrency} readOnly={Boolean(account)} minLength={3} maxLength={3} onChange={event => setProfileForm(current => ({ ...current, defaultCurrency: event.target.value.toUpperCase() }))} required />
+            </Field>
+            <p>套餐中明确配置的接口价格（包括 0 元）优先；下方倍率仅调整这些套餐接口价格。授权、额度和服务运行状态继续独立生效。聚合查询按实际子请求计费，不另收父请求费用；登录、管理及用量查询不计费。</p>
+            <Field label="套餐接口倍率（可选）" hint="留空继承套餐默认倍率；例如 1.200000 表示合同价为基础费率的 1.2 倍。">
               <input className="qp-input" type="text" inputMode="decimal" value={profileForm.multiplier} onChange={(event) => setProfileForm({ ...profileForm, multiplier: event.target.value })} placeholder="继承套餐默认倍率" />
             </Field>
             {billingError ? <ErrorState error={billingError} /> : null}
@@ -2717,7 +2734,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 ...(data.plans?.catalog||[]).filter(plan=>plan.priceBook&&plan.versionStatus==='published').map(plan=>({value:`plan:${plan.versionId}`,label:`${plan.name} · v${plan.version}`})),
               ]}/>
               <button className="qp-button qp-button--outline" type="button" onClick={appendComponent}>添加到组合</button>
-              <p>组合在发布时展开为下方一份价目表；运行时不遍历套餐。额度和倍率统一使用上方设置，不累加来源套餐额度。最终只计下表所列价格，未列出的已授权接口免费；本操作不改变权限或文档开放。</p>
+              <p>组合在发布时展开为下方一份价目表；运行时不遍历套餐。额度和倍率统一使用上方设置，不累加来源套餐额度。下表为接口覆盖价（填 0 表示免费），未列出的已授权接口按租户默认单价计费；本操作不改变权限或文档开放。</p>
               <p>来源：{(planForm.components||[]).map(item=>item.type==='feature' ? BILLING_FEATURES.find(feature=>feature.key===item.key)?.name : (data.plans?.catalog||[]).find(plan=>plan.versionId===item.versionId)?.name||item.versionId).join(' + ')||'手动费率'}</p>
               <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current, entries: [...current.entries.filter(entry => entry.meterKey || entry.price), ...['raw', 'crawl', 'user-info'].filter(key => !current.entries.some(entry => entry.meterKey === key)).map(meterKey => ({ meterKey, price: '' }))] }))}>添加 Night-All 三类接口费率</button>
               <p>raw、crawl、user-info 按请求计费；价格填 0 表示免费。小红书直连使用自己的 social.* 计费键；费用配置不放宽采集工作预算。</p>

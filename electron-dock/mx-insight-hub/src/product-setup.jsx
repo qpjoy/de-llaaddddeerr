@@ -53,9 +53,10 @@ export function ProductSetup({ token, data, currentPlan, rates, billing, onRefre
       </div>
     </div>
     {error ? <ErrorState error={error} /> : null}
-    <details><summary>查看本产品生效价格 · 未配置项按当前规则免费</summary><PagedItems items={meters} text={entry => entry.meterKey} label="产品费率">{visible => <div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table"><thead><tr><th>业务</th><th>当前单次价格</th><th>状态</th></tr></thead><tbody>{visible.map(({entry}) => {
-      const rate = rates.find(row => row.meterKey === entry.meterKey)
-      return <tr key={entry.meterKey}><td>{XIAOHONGSHU_CAPABILITIES.find(row => row.key === entry.meterKey)?.label || entry.meterKey}</td><td>{rate ? `${rate.currency || currentPlan?.priceBook?.currency} ${(rate.unitPriceMinor / 100).toFixed(2)}` : '0.00'}</td><td>{!rate ? '未配置，按免费处理' : rate.unitPriceMinor === 0 ? '明确免费' : billing.profile?.mode === 'enforced' ? '已配置收费' : '已配置，尚未扣费'}</td></tr>
+    <details><summary>查看本产品生效价格 · 接口价格优先，其余使用租户默认价</summary><PagedItems items={meters} text={entry => entry.meterKey} label="产品费率">{visible => <div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table"><thead><tr><th>业务</th><th>当前单次价格</th><th>状态</th></tr></thead><tbody>{visible.map(({entry}) => {
+      const override = rates.find(row => row.meterKey === entry.meterKey)
+      const rate = override || { unitPriceMinor: billing.profile?.defaultUnitPriceMinor ?? 0, currency: billing.profile?.defaultCurrency || 'CNY' }
+      return <tr key={entry.meterKey}><td>{XIAOHONGSHU_CAPABILITIES.find(row => row.key === entry.meterKey)?.label || entry.meterKey}</td><td>{rate ? `${rate.currency || currentPlan?.priceBook?.currency} ${(rate.unitPriceMinor / 100).toFixed(2)}` : '0.00'}</td><td>{!override ? '租户默认价' : rate.unitPriceMinor === 0 ? '接口明确免费' : '套餐接口价'}{billing.profile?.mode === 'enforced' ? '' : ' · 尚未扣费'}</td></tr>
     })}</tbody></table></div>}</PagedItems></details>
   </section>
 }

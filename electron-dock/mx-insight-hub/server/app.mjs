@@ -2408,6 +2408,8 @@ export function createApp({
           profile: billing.profile ? {
             tenantId: billing.profile.tenantId,
             mode: billing.profile.mode,
+            defaultUnitPriceMinor: billing.profile.defaultUnitPriceMinor ?? 0,
+            defaultCurrency: billing.profile.defaultCurrency || 'CNY',
             revision: billing.profile.revision,
             updatedAt: billing.profile.updatedAt,
           } : null,

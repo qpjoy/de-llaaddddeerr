@@ -132,11 +132,16 @@ export function normalizePublishedPlan(input) {
 
 export function normalizeBillingProfile(input) {
   const value = plainObject(input)
-  strictFields(value, ['mode', 'multiplierPpm', 'expectedRevision'], 'billing profile')
+  strictFields(value, ['mode', 'multiplierPpm', 'expectedRevision', 'defaultUnitPriceMinor', 'defaultCurrency'], 'billing profile')
   const mode = String(value.mode || '').trim().toLowerCase()
   assert(BILLING_PROFILE_MODES.includes(mode), 400, 'invalid_request', 'mode must be disabled, shadow, or enforced')
   return {
     mode,
+    // Omission from older clients preserves the existing tenant default.
+    ...(Object.hasOwn(value, 'defaultUnitPriceMinor') ? {
+      defaultUnitPriceMinor: boundedInteger(value.defaultUnitPriceMinor, 'defaultUnitPriceMinor'),
+    } : {}),
+    ...(Object.hasOwn(value, 'defaultCurrency') ? { defaultCurrency: currencyCode(value.defaultCurrency) } : {}),
     multiplierPpm: value.multiplierPpm == null
       ? null
       : boundedInteger(value.multiplierPpm, 'multiplierPpm', { min: 0, max: 100_000_000 }),
@@ -181,4 +186,23 @@ export function quotedMinor(unitPriceMinor, multiplierPpm) {
   const price = BigInt(unitPriceMinor)
   const multiplier = BigInt(multiplierPpm)
   return Number((price * multiplier + 999_999n) / 1_000_000n)
+}
+
+// Plan entries (including an explicit zero) take precedence. The tenant
+// default is a final request price, independent of a consumer's plan multiplier.
+export function customerRequestPrice(priceBook, profile, meterKey) {
+  if (!meterKey) return null
+  const entry = priceBook?.entries.find(row => row.meterKey === meterKey)
+  const multiplierPpm = entry ? profile?.multiplierPpm ?? priceBook.defaultMultiplierPpm : 1_000_000
+  const unitPriceMinor = entry ? entry.unitPriceMinor : profile?.defaultUnitPriceMinor ?? 0
+  return {
+    priceSource: entry ? 'plan_entry' : 'tenant_default',
+    billingUnit: entry?.billingUnit || 'request',
+    priceBookId: entry ? priceBook.id : null,
+    priceBookKey: entry ? priceBook.key : null,
+    priceBookVersion: entry ? priceBook.version : null,
+    currency: entry ? priceBook.currency : profile?.defaultCurrency || 'CNY',
+    unitPriceMinor, multiplierPpm,
+    quotedMinor: quotedMinor(unitPriceMinor, multiplierPpm),
+  }
 }
