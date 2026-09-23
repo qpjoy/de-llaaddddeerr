@@ -982,19 +982,20 @@ export class TikHubGateway {
       let entered = false
       let call = null
       let callSettled = false
+      let callDispatched = false
       let dispatchEvidence = null
       let costReservation = null
       const revalidateQueuedAccess = async () => {
         operationControl = await this.#authorizeOperation(context, endpoint.operation, endpoint.gate, resolved)
-          const currentGrants = await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
-          const currentCapabilities = await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
-          const currentKey = await this.usageStore.findApiKeyById(context.apiKey.id)
-          if (!currentGrants.includes(XIAOHONGSHU_PLATFORM) || !currentCapabilities.includes(endpoint.operation)
-            || !currentKey || currentKey.apiKey?.status !== 'active') throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
-          const latestCredential = await this.#credential()
-          if (!latestCredential.ready || latestCredential.value !== resolved.value) throw new AppError(503, 'external_platform_configuration_changed', 'Upstream configuration changed while waiting')
-          const latestState = await this.platformStore.providerState(TIKHUB_PROVIDER_KEY)
-          if (latestState?.circuitOpenUntil && new Date(latestState.circuitOpenUntil) > new Date()) throw new AppError(503, 'external_platform_circuit_open', 'Upstream temporarily unavailable')
+        const currentGrants = await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
+        const currentCapabilities = await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
+        const currentKey = await this.usageStore.findApiKeyById(context.apiKey.id)
+        if (!currentGrants.includes(XIAOHONGSHU_PLATFORM) || !currentCapabilities.includes(endpoint.operation)
+          || !currentKey || currentKey.apiKey?.status !== 'active') throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+        const latestCredential = await this.#credential()
+        if (!latestCredential.ready || latestCredential.value !== resolved.value) throw new AppError(503, 'external_platform_configuration_changed', 'Upstream configuration changed while waiting')
+        const latestState = await this.platformStore.providerState(TIKHUB_PROVIDER_KEY)
+        if (latestState?.circuitOpenUntil && new Date(latestState.circuitOpenUntil) > new Date()) throw new AppError(503, 'external_platform_circuit_open', 'Upstream temporarily unavailable')
       }
       try {
         if (queuePolicy) {
@@ -1009,6 +1010,7 @@ export class TikHubGateway {
             }
             throw error
           }
+          await revalidateQueuedAccess()
           if (queueTicket.follower) {
             const shared = await this.platformStore.sharedDetailSnapshotFor(dispatchFingerprint)
             if (!shared) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
@@ -1023,7 +1025,6 @@ export class TikHubGateway {
             ownsReservation = false; queueOutcome = 'succeeded'
             return officialResult(refreshedSnapshot.responseBody, activeRequestId, false, 'fresh_cache', refreshedSnapshot.capturedAt)
           }
-          await revalidateQueuedAccess()
         }
         const lease = await this.platformStore.acquireDispatchLease({
           consumerId: context.consumer.id,
@@ -1068,7 +1069,7 @@ export class TikHubGateway {
           throw new AppError(409, code, 'An equal provider dispatch cannot be repeated safely')
         }
         if (!this.#enter(context.consumer.id)) {
-          if (snapshot) {
+          if (allowStoredFallback && snapshot) {
             await this.platformStore.commitSnapshotDelivery({
             shared: Boolean(queuePolicy),
               delivery,
@@ -1087,10 +1088,10 @@ export class TikHubGateway {
             errorCode: 'external_platform_busy',
           })
           ownsReservation = false
-          throw new AppError(429, 'external_platform_busy', 'External Xiaohongshu concurrency is exhausted')
+          throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy?.intervalMs || 5000 })
         }
         entered = true
-        const costControl = providerCostControl(
+        let costControl = providerCostControl(
           operationControl?.billing ? { billing: operationControl.billing } : this.config,
           endpoint.endpointKey,
         )
@@ -1152,10 +1153,12 @@ export class TikHubGateway {
           for (let attempt = 0; ; attempt++) {
             try {
               if (queuePolicy) {
+                if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
                 const permit = await this.detailQueue.transition(queueScope, { ...queueTicket, type: 'dispatch',
                   leaseMs: (this.config.timeoutMs || 30000) + 30000, jitterMs: Math.floor(Math.random() * queuePolicy.jitterMs) })
                 if (permit.kind !== 'acquired') throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
               }
+              callDispatched = true
               upstream = await this.adapter.getXiaohongshuAppV2(endpoint.endpointKey, normalized.providerQuery, { credential: resolved.value })
               break
             } catch (error) {
@@ -1175,13 +1178,14 @@ export class TikHubGateway {
               queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
                 policy: queuePolicy, deadline: queueDeadline, leaseMs: (this.config.timeoutMs || 30000) + 30000, signal })
               await revalidateQueuedAccess()
+              costControl = providerCostControl(operationControl?.billing ? { billing: operationControl.billing } : this.config, endpoint.endpointKey)
               if (!this.#enter(context.consumer.id)) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
               entered = true
               costReservation = await this.platformStore.reserveProviderCostWorkflow({ tenantId: context.tenant.id, consumerId: context.consumer.id,
                 apiKeyId: context.apiKey.id, usageRequestId: activeRequestId, fingerprint: requestFingerprint, costControls: [costControl] })
               const retryRate = await this.platformStore.acquireProviderRateLimit({ limit: this.config.maxRequestsPerMinute ?? 120, tokens: 1, windowMs: 60000 })
               if (!retryRate.allowed) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: retryRate.retryAfterMs })
-              call = await beginCall(1); callSettled = false
+              call = await beginCall(1); callSettled = false; callDispatched = false
             }
           }
           const capturedAt = date(upstream.responseArchive?.capturedAt || upstream.capturedAt)
@@ -1264,6 +1268,17 @@ export class TikHubGateway {
           return officialResult(responseBody, activeRequestId, false, 'live', capturedAt)
         } catch (error) {
           const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
+          if (queuePolicy && call && !callDispatched) {
+            // A cancellation/lost permit before the adapter call is known
+            // unbilled, even if the durable attempt row was already created.
+            await this.platformStore.finishProviderStep({
+              callId: call.id, delivery, outcome: 'rejected', billed: false,
+              costMinor: costControl.costMinor, costKind: costControl.costKind, currency: costControl.currency,
+              latencyMs, errorCode: error.code || 'external_platform_pre_dispatch_failed', affectsCircuit: false,
+            })
+            callSettled = true
+            throw error
+          }
           const providerError = error instanceof TikHubUpstreamError
           const normalizationError = Boolean(upstream) && !providerError
           if (!providerError && !normalizationError) throw error

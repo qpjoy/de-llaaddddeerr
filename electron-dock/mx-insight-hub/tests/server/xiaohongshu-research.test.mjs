@@ -239,5 +239,144 @@ test('reviewed operation policy activates only its endpoint and pause still reje
   await state.call('note_detail', { note_id: ID }, 'research-policy-live')
   await assert.rejects(state.call('note_comments', { note_id: ID }, 'research-policy-comments'), { code: 'external_platform_operation_disabled' })
   await control.updatePolicy('tikhub', 'social.posts.analytics', { desiredState: 'paused', expectedRevision: activated.revision, reason: 'Pause test' }, { runtime })
-  await assert.rejects(state.call('note_detail', { note_id: ID }, 'research-policy-paused'), { code: 'external_platform_operation_paused' })
+  await assert.rejects(state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'research-policy-paused'), { code: 'external_platform_operation_paused' })
+})
+
+
+test('queued detail retries a known unbilled 400 once with one customer capture and separate provider evidence', async () => {
+  let calls = 0
+  const state = await fixture(async () => ++calls === 1
+    ? new Response(JSON.stringify({ code: 400, message: 'temporary service error' }), { status: 400 }) : response(detail()))
+  const plan = await state.service.publishPlanVersion({ key: 'queue-plan', name: 'Queue', components: [{ type: 'feature', key: 'xiaohongshu', version: 2 }], limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 }, priceBook: { key: 'queue-plan', currency: 'CNY', defaultMultiplierPpm: 1000000 } }, 'test-admin')
+  const current = await state.service.getConsumerPlan(state.consumer.id)
+  await state.service.assignConsumerPlan(state.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'test-admin')
+  await state.service.setTenantBillingProfile(state.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'test-admin')
+  await state.service.addTenantCredit(state.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Test' }, { idempotencyKey: 'queue-credit-001', actor: 'test-admin' })
+  const result = await state.call()
+  assert.equal(result.status, 200)
+  assert.equal(calls, 2)
+  const providerCalls = [...state.platformStore.calls.values()]
+  assert.equal(providerCalls[0].billed, false)
+  assert.equal(providerCalls[1].callRole, 'retry')
+  assert.equal(providerCalls[1].callOrdinal, 1)
+  assert.equal(state.platformStore.restrictedResponseArchives.size, 2)
+  assert.equal(state.platformStore.ingestJobs.length, 1)
+  await state.call()
+  assert.equal(calls, 2)
+  const bill = await state.service.getTenantBilling(state.tenant.id)
+  assert.equal(bill.account.availableMinor, 90)
+  assert.equal(bill.ledger.filter(row => row.kind === 'capture').length, 1)
+})
+
+test('same public note shares canonical-backed acquisition across tenants, with independent authorization and usage', async () => {
+  let calls = 0, release, begun
+  const started = new Promise(resolve => { begun = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  const state = await fixture(async () => { calls++; begun(); await gate; return response(detail()) })
+  const tenant = await state.service.createTenant({ name: 'Other tenant' })
+  const consumer = await state.service.createConsumer({ tenantId: tenant.id, name: 'Other caller' })
+  await state.service.putPlatformConfiguration('xiaohongshu', { tenantId: tenant.id, consumerId: consumer.id, enabled: true, maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 })
+  await state.service.putCapabilityConfiguration('social.posts.analytics', { tenantId: tenant.id, consumerId: consumer.id, enabled: true, maxRequests: 1000, windowSeconds: 3600 })
+  const key = await state.service.createApiKey({ consumerId: consumer.id, name: 'Other key', platforms: ['xiaohongshu'], capabilities: ['social.posts.analytics'] })
+  const context = await state.service.authenticate(key.secret)
+  const first = state.call()
+  await started
+  const second = state.call('note_detail', { note_id: ID }, 'other-note-request', endpoints.note_detail.path, context)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  release()
+  const [a, b] = await Promise.all([first, second])
+  assert.equal(a.sourceMode, 'live')
+  assert.equal(b.sourceMode, 'fresh_cache')
+  assert.notEqual(a.requestId, b.requestId)
+  assert.equal(calls, 1)
+  assert.equal(state.platformStore.ingestJobs.length, 1)
+  assert.equal([...state.store.requests.values()].filter(row => row.status === 'committed').length, 2)
+  assert.doesNotMatch(JSON.stringify(b.body), new RegExp(state.consumer.id + '|' + SECRET))
+  await state.service.putCapabilityConfiguration('social.posts.analytics', { tenantId: tenant.id, consumerId: consumer.id, enabled: false, maxRequests: 1000, windowSeconds: 3600 })
+  await assert.rejects(state.call('note_detail', { note_id: ID }, 'other-denied-request', endpoints.note_detail.path, context), { status: 403 })
+  assert.equal(calls, 1)
+})
+
+test('retry limit remains one; busy admission makes no upstream call or committed usage', async () => {
+  let calls = 0
+  const state = await fixture(async () => { calls++; return new Response(JSON.stringify({ code: 400 }), { status: 400 }) })
+  await assert.rejects(state.call(), { code: 'external_platform_rejected' })
+  assert.equal(calls, 2)
+  const blocked = await fixture(async () => { assert.fail('queue rejection must not dispatch') })
+  blocked.gateway.detailQueue.enter = async () => { throw Object.assign(new Error('busy'), { status: 429, code: 'external_platform_busy' }) }
+  await assert.rejects(blocked.call())
+  assert.equal([...blocked.store.requests.values()].filter(row => row.status === 'committed').length, 0)
+  assert.equal(blocked.platformStore.costReservations.size, 0)
+})
+
+test('a grant revoked during queue wait prevents dispatch and releases the waiting usage reservation', async () => {
+  let count = 0, unblock, started
+  const began = new Promise(resolve => { started = resolve })
+  const gate = new Promise(resolve => { unblock = resolve })
+  const state = await fixture(async () => { count++; started(); await gate; return response(detail()) })
+  const first = state.call()
+  await began
+  const pending = state.call('note_detail', { note_id: OTHER }, 'queued-revoked-request')
+  const rejected = assert.rejects(pending, { status: 403 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await state.service.putCapabilityConfiguration('social.posts.analytics', { tenantId: state.tenant.id, consumerId: state.consumer.id, enabled: false, maxRequests: 1000, windowSeconds: 3600 })
+  unblock()
+  await first
+  await rejected
+  assert.equal(count, 1)
+  const request = [...state.store.requests.values()].find(row => row.idempotencyKey === 'queued-revoked-request')
+  assert.equal(request.status, 'released')
+})
+
+test('an unknown acquisition is suppressed across tenants and a new idempotency identity', async () => {
+  let count = 0
+  const state = await fixture(async () => { count++; throw new Error('ambiguous network failure') })
+  await assert.rejects(state.call(), { code: 'external_platform_outcome_unknown' })
+  await assert.rejects(state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'new-unknown-request'), { code: 'request_outcome_unknown' })
+  assert.equal(count, 1)
+})
+
+test('queue rejection serves explicitly stale shared cache only in cache_first mode', async () => {
+  let count = 0
+  const state = await fixture(async () => { count++; return response(detail()) })
+  await state.call()
+  for (const row of state.platformStore.snapshots.values()) row.freshUntil = new Date(Date.now() - 1000).toISOString()
+  state.gateway.detailQueue.enter = async () => { throw Object.assign(new Error('busy'), { status: 429, code: 'external_platform_busy' }) }
+  const cached = await state.call('note_detail', { note_id: ID }, 'stale-cache-request')
+  assert.equal(cached.sourceMode, 'stored_fallback')
+  await assert.rejects(state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'busy-refresh-request'))
+  assert.equal(count, 1)
+})
+
+test('explicit refresh never degrades to stored data when local concurrency is exhausted', async () => {
+  let count = 0
+  const state = await fixture(async () => { count++; return response(detail()) })
+  await state.call()
+  for (const row of state.platformStore.snapshots.values()) row.freshUntil = new Date(Date.now() - 1000).toISOString()
+  state.gateway.active = state.config.maxConcurrency
+  const cached = await state.call('note_detail', { note_id: ID }, 'concurrency-cache-request')
+  assert.equal(cached.sourceMode, 'stored_fallback')
+  await assert.rejects(state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'concurrency-refresh-request'), { code: 'external_platform_busy' })
+  assert.equal(count, 1)
+})
+
+test('cancelling after attempt reservation but before dispatch releases holds as known unbilled', async () => {
+  const state = await fixture(async () => { assert.fail('cancelled request must not dispatch') })
+  const controller = new AbortController()
+  const begin = state.platformStore.beginProviderCall.bind(state.platformStore)
+  state.platformStore.beginProviderCall = async input => {
+    const call = await begin(input)
+    controller.abort()
+    return call
+  }
+  await assert.rejects(state.gateway.officialXiaohongshu(state.context, {
+    endpointName: 'note_detail', query: { note_id: ID }, method: 'POST',
+    idempotencyKey: 'cancel-before-dispatch', path: endpoints.note_detail.path, signal: controller.signal,
+  }), { code: 'request_cancelled' })
+  assert.equal([...state.store.requests.values()][0].status, 'released')
+  const call = [...state.platformStore.calls.values()][0]
+  assert.equal(call.outcome, 'rejected')
+  assert.equal(call.billed, false)
+  assert.equal(state.platformStore.ingestJobs.length, 0)
+  assert.equal([...state.platformStore.costReservations.values()].some(row => row.status === 'reserved'), false)
 })

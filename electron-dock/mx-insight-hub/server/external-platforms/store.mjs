@@ -1387,7 +1387,10 @@ export class MemoryExternalPlatformStore {
     responseBody = snapshot.responseBody,
     usageUnitsActual = Math.max(1, deliveredItemCount(responseBody)),
   }) {
-    const current = this.snapshots.get(snapshotKey(delivery))
+    const current = shared && delivery.operation === 'social.posts.analytics'
+      ? [...this.snapshots.values()].find(row => row.id === snapshot.id && row.providerKey === this.providerKey
+        && row.operation === delivery.operation && row.fingerprint === snapshotFingerprint(delivery) && new Date(row.staleUntil) >= new Date())
+      : this.snapshots.get(snapshotKey(delivery))
     if (!current || current.id !== snapshot.id) {
       throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')
     }
@@ -3432,10 +3435,10 @@ export class PostgresExternalPlatformStore {
     return transaction(this.pool, async (client) => {
       const locked = await client.query(
         `SELECT * FROM external_platform.response_snapshots
-          WHERE id = $1 AND consumer_id = $2 AND operation = $3
-            AND request_fingerprint = $4 AND stale_until >= now()
+          WHERE id = $1 AND (consumer_id = $2 OR ($5 AND operation = 'social.posts.analytics')) AND operation = $3
+            AND request_fingerprint = $4 AND stale_until >= now() AND provider_key = $6
           FOR SHARE`,
-        [snapshot.id, delivery.consumerId, delivery.operation, snapshotFingerprint(delivery)],
+        [snapshot.id, delivery.consumerId, delivery.operation, snapshotFingerprint(delivery), shared, this.providerKey],
       )
       const current = pgSnapshot(locked.rows[0])
       if (!current) throw new AppError(409, 'external_platform_snapshot_unavailable', 'Stored response is unavailable')

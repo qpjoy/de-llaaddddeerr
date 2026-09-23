@@ -7,19 +7,26 @@ const busy = (retryAfterMs = 5000) => new AppError(429, 'external_platform_busy'
 // A short, atomic state transition, shared by memory and PostgreSQL. No network
 // call or timer holds a database connection. Only digests and request IDs persist.
 export function queueTransition(state, action, now) {
-  state.queue ||= []; state.done ||= []
+  state.queue ||= []; state.done ||= []; state.followers ||= []
+  state.followers = state.followers.filter(item => item.deadline > now)
   state.done = state.done.filter(item => item.until > now)
-  const finish = (item, outcome) => { state.done.push({ id: item.id, fingerprint: item.fingerprint, outcome, until: now + (outcome === 'unknown' ? 900000 : 120000) }); state.done = state.done.slice(-512) }
+  const finish = (item, outcome) => { state.done.push({ id: item.id, fingerprint: item.fingerprint, outcome, until: now + (outcome === 'unknown' ? 900000 : 120000) }); state.done = [...state.done.filter(row => row.outcome === 'unknown'), ...state.done.filter(row => row.outcome !== 'unknown').slice(-256)] }
   if (state.active && state.active.expiresAt <= now) { finish(state.active, 'unknown'); state.active = null }
   state.queue = state.queue.filter(item => { if (item.deadline > now) return true; finish(item, 'expired'); return false })
   const { policy } = action
   const spacing = Math.max(policy.intervalMs, Math.min(state.latencyMs || 0, 120000)) + policy.jitterMs
   const estimate = () => Math.max(now, state.nextAt || 0, state.active ? state.active.startedAt + spacing : 0) + state.queue.length * spacing
   if (action.type === 'join') {
+    if (state.done.filter(item => item.outcome === 'unknown').length >= 512) return { kind: 'busy', retryAfterMs: 60000 }
     const unsafe = state.done.find(item => item.fingerprint === action.fingerprint && item.outcome === 'unknown')
     if (unsafe) return { kind: 'unknown' }
     const equal = [state.active, ...state.queue].find(item => item?.fingerprint === action.fingerprint)
-    if (equal) return { kind: equal.id === action.id ? 'queued' : 'follower', id: equal.id }
+    if (equal) {
+      if (equal.id === action.id) return { kind: 'queued', id: equal.id }
+      if (state.followers.length >= 100) return { kind: 'busy', retryAfterMs: spacing }
+      state.followers.push({ id: action.id, deadline: action.deadline })
+      return { kind: 'follower', id: equal.id }
+    }
     const due = Math.max(estimate(), action.notBefore || 0)
     if (state.queue.length >= policy.maxPending || due >= action.deadline) return { kind: 'busy', retryAfterMs: Math.max(spacing, due - now) }
     state.queue.push({ id: action.id, fingerprint: action.fingerprint, deadline: action.deadline, notBefore: action.notBefore || now })
@@ -58,6 +65,10 @@ export function queueTransition(state, action, now) {
   if (action.type === 'observe') {
     const terminal = state.done.find(item => item.id === action.id)
     return terminal ? { kind: terminal.outcome } : { kind: 'wait', waitMs: 500 }
+  }
+  if (action.type === 'detach') {
+    state.followers = state.followers.filter(item => item.id !== action.id)
+    return { kind: 'finished' }
   }
   if (action.type === 'finish') {
     const active = state.active?.id === action.id ? state.active : null
@@ -111,18 +122,20 @@ export class DispatchQueue {
         if (this.clock() >= deadline) throw busy(policy.intervalMs)
         const result = await this.transition(scope, { ...action, id: joined.id, type: follower ? 'observe' : 'claim', leaseMs, jitterMs: Math.floor(this.random() * policy.jitterMs) })
         if (result.kind === 'acquired') return { scope, id: joined.id, policy, follower: false }
-        if (result.kind === 'succeeded') return { scope, id: joined.id, policy, follower: true }
+        if (result.kind === 'succeeded') return { scope, id: joined.id, policy, follower: true, followerId: id }
         if (result.kind === 'unknown') throw new AppError(409, 'request_outcome_unknown', 'Shared acquisition outcome is unknown')
         if (result.kind !== 'wait') throw busy(policy.intervalMs)
         await this.wait(Math.min(result.waitMs, deadline - this.clock()), undefined, { signal })
       }
     } catch (error) {
+      if (follower) await this.transition(scope, { ...action, type: 'detach' }).catch(() => {})
       if (!follower) await this.finish({ scope, id: joined.id, policy }, 'cancelled').catch(() => {})
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       throw error
     }
   }
   async finish(ticket, outcome) {
+    if (ticket?.follower) await this.transition(ticket.scope, { ...ticket, id: ticket.followerId, type: 'detach' })
     if (ticket && !ticket.follower) await this.transition(ticket.scope, { ...ticket, type: 'finish', outcome })
   }
 }

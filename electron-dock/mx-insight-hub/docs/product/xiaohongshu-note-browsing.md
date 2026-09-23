@@ -1,3 +1,5 @@
+> 2026-09-23 更新：PGY 详情的旧“只提示间隔、不排队、不重试、每次实时”说明由 [有界调度方案](../operations/xiaohongshu-dispatch-queue.md) 取代。详情默认缓存优先，可显式 refresh；评论原有分页行为不变。
+
 # 小红书笔记画卷：热点、阅读量与评论（2026-09-23）
 
 本次仅修改 MX Insight Hub。MX Launcher / MX-H2I 登录、Internal 配置、联网、DNS、WireGuard 均不修改。

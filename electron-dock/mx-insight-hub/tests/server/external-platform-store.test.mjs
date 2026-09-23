@@ -358,7 +358,7 @@ test('memory beginProviderCall requires one live owned ecommerce reservation', a
   )
   await assert.rejects(
     store.beginProviderCall({ ...input, id: randomUUID(), callOrdinal: 2, callRole: 'other' }),
-    /callRole must be primary or enrichment/u,
+    /callRole must be primary, enrichment or retry/u,
   )
   await assert.rejects(
     store.beginProviderCall({ ...input, id: randomUUID(), callOrdinal: 2, dispatchFingerprint: 'bad' }),
