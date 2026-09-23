@@ -1,3 +1,5 @@
+import { xiaohongshuImageUrl } from '../shared/xiaohongshu-media.mjs'
+
 // Presentation adapters never rewrite the archived acquisition.
 export function claimNoteOpenRequest(saved, { apiKey, analyticsIssues, resolveIssues }) {
   if (!apiKey.trim() || saved.openOperation || saved.result || saved.research?.note_detail || saved.error || saved.researchError) return null
@@ -6,14 +8,29 @@ export function claimNoteOpenRequest(saved, { apiKey, analyticsIssues, resolveIs
   return operation
 }
 
-export function mergeNoteDetail(original, payload) {
+export function mergeNoteDetail(original, payload, { tagsAvailable = payload?.meta?.tagsAvailable } = {}) {
   const analytics = payload?.data?.item
   if (!analytics) return original
   const supplied = value => Object.fromEntries(Object.entries(value || {}).filter(([, entry]) => entry != null))
+  const usableMedia = (analytics.media || []).filter(entry => entry?.type === 'image'
+    ? xiaohongshuImageUrl(entry.url) : entry?.type === 'video' && /^https:\/\//i.test(entry.url || ''))
+  const metrics = supplied(analytics.metrics)
+  const fields = ['views', 'impressions', 'liked', 'collected', 'comments', 'shared']
+  // Prefer detail, but use the acquired list when the whole detail metric set
+  // is zero/missing. A zero among other nonzero detail metrics is still valid.
+  const usePriorMetrics = fields.every(field => metrics[field] == null || Number(metrics[field]) === 0)
+    && fields.some(field => original.metrics?.[field] != null)
+  const mergedMetrics = { ...original.metrics, ...(usePriorMetrics ? {} : metrics) }
+  const metricSources = Object.fromEntries(fields.filter(field => mergedMetrics[field] != null).map(field => [field,
+    !usePriorMetrics && metrics[field] != null ? 'detail' : original.metricSources?.[field] || original.metricsSource || 'list',
+  ]))
   return { ...original, ...supplied(analytics),
-    tags: payload.meta?.tagsAvailable ? analytics.tags : original.tags,
-    media: analytics.media?.length ? analytics.media : original.media,
-    metrics: { ...original.metrics, ...analytics.metrics },
+    author: { ...original.author, ...supplied(analytics.author) },
+    // Empty supplemental arrays must not erase already acquired list tags.
+    tags: tagsAvailable && analytics.tags?.length ? analytics.tags : original.tags || [],
+    media: usableMedia.length ? usableMedia : original.media,
+    metrics: mergedMetrics, metricSources,
+    metricsNotice: usePriorMetrics ? `详情指标全为 0 或未提供，暂用${Object.values(metricSources).every(source => source === 'list') ? '列表' : '已有'}数据。` : null,
   }
 }
 
@@ -27,6 +44,7 @@ export function storedNote(row) {
     tags: fields.tags || [],
     media: fields.media?.items || (fields.media?.images || []).map(url => ({ type: 'image', url })),
     metrics: { views: metrics.views, impressions: metrics.impressions, liked: metrics.likes, collected: metrics.bookmarks, comments: metrics.comments, shared: metrics.shares },
+    metricsSource: 'list',
     publishedAt: row.eventTime, collectedAt: row.collectedAt,
     bodyCompleteness: row.extensions?.bodyCompleteness || 'unverified_complete',
   }
@@ -43,7 +61,13 @@ export function nativeNote(note) {
     author: { id: note.user?.user_id, name: note.user?.nickname },
     tags: (note.tag_list || note.tags || []).map(tag => typeof tag === 'string' ? tag : tag.name).filter(Boolean),
     media: images.map(image => ({ type: 'image', url: typeof image === 'string' ? image : image.url_default || image.urlDefault || image.url || image.url_size_large || image.url_size_medium || image.info_list?.[0]?.url || image.infoList?.[0]?.url })).filter(image => image.url),
-    metrics: { liked: note.interact_info?.liked_count ?? note.liked_count ?? null, collected: note.interact_info?.collected_count ?? note.collected_count ?? null, comments: note.interact_info?.comment_count ?? note.comment_count ?? null, views: null }, bodyCompleteness: 'provider_preview',
+    metrics: {
+      liked: note.interact_info?.liked_count ?? note.liked_count ?? null,
+      collected: note.interact_info?.collected_count ?? note.collected_count ?? null,
+      comments: note.interact_info?.comment_count ?? note.comment_count ?? null,
+      shared: note.interact_info?.share_count ?? note.share_count ?? null,
+      views: note.interact_info?.view_count ?? note.view_count ?? null,
+    }, metricsSource: 'list', bodyCompleteness: 'provider_preview',
   }
 }
 

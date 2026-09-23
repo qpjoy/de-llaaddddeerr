@@ -17,6 +17,7 @@ import { publicDataApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
 import { XiaohongshuFeed, BusinessImage } from './pages-xiaohongshu-feed.jsx'
 import { productMediaLoader } from './product-media-loader.js'
+import { xiaohongshuTopicHref } from './xiaohongshu-topics.js'
 
 const DELIVERY_OPTIONS = [
   { value: 'cache_first', label: '智能交付 · 缓存优先', hint: '优先读取有效缓存；需要时更新数据，更新失败可返回已存版本。' },
@@ -76,13 +77,13 @@ function formatDate(value) {
 
 function metricEntries(metrics = {}) {
   return [
-    ['阅读', metrics.views],
-    ['曝光', metrics.impressions],
-    ['点赞', metrics.liked],
-    ['收藏', metrics.collected],
-    ['评论', metrics.comments],
-    ['分享', metrics.shared],
-  ].filter(([, value]) => value != null)
+    ['views', '阅读', metrics.views],
+    ['impressions', '曝光', metrics.impressions],
+    ['liked', '点赞', metrics.liked],
+    ['collected', '收藏', metrics.collected],
+    ['comments', '评论', metrics.comments],
+    ['shared', '分享', metrics.shared],
+  ].filter(([, , value]) => value != null)
 }
 
 function RelayImage({ apiKey, requestId, mediaIndex = 0, className = '', alt = '', showPlaceholder = false }) {
@@ -177,14 +178,18 @@ function NoteScroll({ result, apiKey, mediaEnabled = true, directImages = false 
       <p className="mih-xhs-body">{item.text || '该笔记没有可展示的正文。'}</p>
       {item.tags?.length ? (
         <div className="mih-xhs-tags" aria-label="笔记标签">
-          {item.tags.map((tag) => <span key={tag}><Hash size={13} />{tag}</span>)}
+          {[...new Set(item.tags)].map((tag) => <a key={tag} href={xiaohongshuTopicHref(tag)} target="_blank" rel="noopener noreferrer" title="在小红书搜索话题（新窗口）"><Hash size={13} aria-hidden="true" />{tag}</a>)}
         </div>
       ) : null}
       <dl className="mih-xhs-facts">
         <div><dt><User size={15} />作者</dt><dd>{item.author?.name || item.author?.id || '未知'}</dd></div>
         <div><dt><ClockCounterClockwise size={15} />发布时间</dt><dd>{formatDate(item.publishedAt)}</dd></div>
-        {metricEntries(item.metrics).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{Number(value).toLocaleString('zh-CN')}</dd></div>)}
+        {metricEntries(item.metrics).map(([field, label, value]) => {
+          const source = item.metricSources?.[field] || item.metricsSource
+          return <div key={field}><dt>{label}</dt><dd><span>{Number.isFinite(Number(value)) ? Number(value).toLocaleString('zh-CN') : String(value)}</span>{source ? <small className="mih-xhs-metric-source">{source === 'list' ? '列表' : '详情'}</small> : null}</dd></div>
+        })}
       </dl>
+      {item.metricsNotice ? <p className="mih-xhs-metrics-notice" role="status">{item.metricsNotice}</p> : null}
       <footer>
         <span>{result.evidence?.sourceMode || item.platform}</span>
         <span>采集于 {formatDate(result.evidence?.capturedAt || item.collectedAt)}</span>

@@ -53,6 +53,22 @@ test('detail maps independent metrics, full content/media, missing tags and unkn
   assert.throws(() => normalizeXhsResearchRequest(endpoints.note_detail, { note_id: ID, url: 'https://evil.test' }))
 })
 
+test('detail projects HTTP image CDN addresses as usable HTTPS and retains explicit zero evidence', () => {
+  const request = normalizeXhsResearchRequest(endpoints.note_detail, { note_id: ID })
+  const raw = detail({ readNum: 0, impNum: 0, likeNum: 0, favNum: 0, cmtNum: 0, imagesList: [
+    { url: 'http://ci.xiaohongshu.com/spectrum/test?imageView2/2/w/1080/format/jpg', width: 1080, height: 1440 },
+    { url: '', url_size_large: 'https://images.example/second?signature=a%2Fb' },
+    { url: 'javascript:invalid', infoList: [{ url: 'https://images.example/third' }] },
+    { info_list: 'invalid' },
+  ] })
+  const projected = projectXhsResearch(raw, request, stamp)
+  assert.equal(projected.data.item.media.length, 3)
+  assert.deepEqual(projected.data.item.media[0], { type: 'image', url: 'https://ci.xiaohongshu.com/spectrum/test?imageView2/2/w/1080/format/jpg', width: 1080, height: 1440 })
+  assert.match(projected.data.item.media[1].url, /signature=a%2Fb$/)
+  assert.equal(projected.data.item.metrics.views, 0)
+  assert.equal(raw.data.data.imagesList[0].url.startsWith('http:'), true, 'raw acquisition is unchanged')
+})
+
 test('detail uses fixed POST JSON; aliases replay once, fresh request bypasses snapshots, full raw evidence and views ingest persist', async () => {
   let calls = 0
   const state = await fixture(async (url, options) => {

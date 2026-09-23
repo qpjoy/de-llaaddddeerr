@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { claimNoteOpenRequest, mergeNoteDetail, mergeNotes, nativeNotePage, storedNote } from '../../src/xiaohongshu-feed.js'
+import { xiaohongshuImageUrl } from '../../shared/xiaohongshu-media.mjs'
 
 test('one note opening claims one permitted operation across reopen, renewal and unknown outcomes', () => {
   const ready = { apiKey: 'temporary-credential', analyticsIssues: [], resolveIssues: [] }
@@ -32,11 +33,85 @@ test('partial analytics without metadata renders safely and distinguishes missin
   assert.equal(displayed.text, original.text)
   assert.deepEqual(displayed.tags, original.tags)
   assert.deepEqual(displayed.media, original.media)
-  assert.deepEqual(displayed.metrics, { liked: null, views: 0 })
+  assert.deepEqual(displayed.metrics, { liked: 5, views: null })
+  assert.deepEqual(displayed.metricSources, { liked: 'list' })
   assert.equal(mergeNoteDetail(original, { data: { item: null } }), original)
+})
+
+test('zero-only detail retains list metrics and discloses fallback', () => {
+  const original = { author: { id: 'author', name: '列表作者' }, metrics: { liked: 326, collected: 87, comments: 18, views: null } }
+  const item = { author: { id: 'author', name: null, avatarUrl: null }, metrics: { views: 0, impressions: 0, liked: 0, collected: 0, comments: 0, shared: null } }
+  const displayed = mergeNoteDetail(original, { data: { item } })
+  assert.deepEqual(displayed.metrics, original.metrics)
+  assert.equal(displayed.author.name, '列表作者')
+  assert.match(displayed.metricsNotice, /暂用列表数据/)
+  assert.deepEqual(displayed.metricSources, { liked: 'list', collected: 'list', comments: 'list' })
+  assert.equal(item.metrics.liked, 0, 'never rewrite the API evidence')
+  assert.equal(mergeNoteDetail({ metrics: {} }, { data: { item } }).metrics.liked, 0, 'zero without contradictory evidence stays zero')
+  const actualZero = mergeNoteDetail(original, { data: { item: { metrics: { views: 250, liked: 0, comments: 0 } } } })
+  assert.equal(actualZero.metrics.liked, 0, 'do not keep the maximum or treat every zero as missing')
+  assert.equal(actualZero.metrics.views, 250)
+  assert.deepEqual(actualZero.metricSources, { views: 'detail', liked: 'detail', collected: 'list', comments: 'detail' })
+  assert.equal(actualZero.metricsNotice, null)
+})
+
+test('all missing and mixed zero/missing detail metrics fall back to acquired list, including views and zero', () => {
+  const original = { metrics: { views: 1200, liked: '326', collected: 0, comments: 18, shared: 2 } }
+  for (const metrics of [undefined, {}, { views: null, liked: null }, { views: 0, liked: null, comments: 0 }, { views: '0', collected: 0 }]) {
+    const displayed = mergeNoteDetail(original, { data: { item: { metrics } } })
+    assert.deepEqual(displayed.metrics, original.metrics)
+    assert.equal(displayed.metricSources.views, 'list')
+    assert.equal(displayed.metricSources.collected, 'list')
+    assert.match(displayed.metricsNotice, /暂用列表数据/)
+  }
+  const empty = mergeNoteDetail({ metrics: { views: null } }, { data: { item: {} } })
+  assert.equal(empty.metrics.views, null, 'never fabricate views when neither source provides them')
+  assert.deepEqual(empty.metricSources, {})
+})
+
+test('nonzero detail takes precedence even when smaller, while missing fields retain their list provenance', () => {
+  const original = { metrics: { views: 1200, liked: 326, collected: 87, comments: 18, shared: 2 } }
+  const payload = { data: { item: { metrics: { views: 1000, liked: 300, collected: null, comments: 0, shared: null } } } }
+  const before = structuredClone(payload)
+  const displayed = mergeNoteDetail(original, payload)
+  assert.deepEqual(displayed.metrics, { views: 1000, liked: 300, collected: 87, comments: 0, shared: 2 })
+  assert.deepEqual(displayed.metricSources, { views: 'detail', liked: 'detail', collected: 'list', comments: 'detail', shared: 'list' })
+  assert.deepEqual(payload, before, 'presentation never edits delivered API evidence')
+})
+
+test('body detail and analytics both preserve the original list fallback and metric origins', () => {
+  const list = { metricsSource: 'list', metrics: { views: 1200, liked: 326, collected: 87 }, tags: ['列表标签'] }
+  const body = mergeNoteDetail(list, { data: { item: { metrics: { liked: 400, collected: null }, text: '完整正文', tags: ['完整标签'] } } }, { tagsAvailable: true })
+  const displayed = mergeNoteDetail(body, { data: { item: { metrics: { views: 0, liked: 0 } } } })
+  assert.equal(displayed.text, '完整正文')
+  assert.deepEqual(displayed.tags, ['完整标签'])
+  assert.deepEqual(displayed.metrics, { views: 1200, liked: 400, collected: 87 })
+  assert.deepEqual(displayed.metricSources, { views: 'list', liked: 'detail', collected: 'list' })
+})
+
+test('detail image URLs render over HTTPS without losing signatures or replacing usable list images with invalid URLs', () => {
+  const httpImage = 'http://ci.xiaohongshu.com/spectrum/test?imageView2/2/w/1080/format/jpg&sign=a%2Fb+z'
+  assert.equal(xiaohongshuImageUrl(httpImage), httpImage.replace('http:', 'https:'))
+  assert.equal(xiaohongshuImageUrl('http://sns-webpic.xhscdn.com/image?sign=a%2Fb'), 'https://sns-webpic.xhscdn.com/image?sign=a%2Fb')
+  for (const value of ['http://localhost/private', 'http://ci.xiaohongshu.com.evil.test/image', 'http://ci.xiaohongshu.com:8080/image', 'https://user:secret@ci.xiaohongshu.com/image', 'javascript:alert(1)', null]) {
+    assert.equal(xiaohongshuImageUrl(value), null)
+  }
+  const original = { media: [{ type: 'image', url: 'https://images.test/list.jpg' }] }
+  assert.deepEqual(mergeNoteDetail(original, { data: { item: { media: [{ type: 'image', url: 'http://unknown.test/image' }] } } }).media, original.media)
+  const media = [httpImage, 'https://images.test/second.jpg'].map(url => ({ type: 'image', url }))
+  assert.deepEqual(mergeNoteDetail(original, { data: { item: { media } } }).media, media)
 })
 const note = { note_id: '675d277d000000000600e655', desc: '长'.repeat(1000), tag_list: [{ name: '摄影' }] }
 const response = (extra = {}) => ({ code: 200, data: { data: { items: [{ model_type: 'note', note }], has_more: true, search_id: 'session', ...extra } } })
+test('native search exposes only supplied view counts, keeps share counts, and marks list provenance', () => {
+  const pageFor = fields => nativeNotePage(response({ items: [{ model_type: 'note', note: { ...note, ...fields } }] }), 'search_notes', { page: 1 }).items[0]
+  const list = pageFor({ interact_info: { liked_count: '326', view_count: 1200, share_count: 2 } })
+  assert.equal(list.metrics.views, 1200)
+  assert.equal(list.metrics.shared, 2)
+  assert.equal(list.metricsSource, 'list')
+  assert.equal(pageFor({ view_count: 0 }).metrics.views, 0)
+  assert.equal(pageFor({ interact_info: { liked_count: 326, comment_count: 18 } }).metrics.views, null)
+})
 test('native feed preserves text/tags, carries search sessions and terminates at page 15', () => {
   const page = nativeNotePage(response(), 'search_notes', { keyword: '摄影', page: 1 })
   assert.equal(page.items[0].text.length, 1000)

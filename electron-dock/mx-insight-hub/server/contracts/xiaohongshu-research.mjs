@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { createTikHubXiaohongshuRecord } from '../ingest/tikhub-xiaohongshu.mjs'
 import { canonicalJson, sha256 } from '../ingest/normalizers.mjs'
+import { xiaohongshuImageUrl } from '../../shared/xiaohongshu-media.mjs'
 
 export const XHS_RESEARCH_VERSION = 'mx-insight-hub.xiaohongshu-research.v1'
 export const XHS_RESEARCH_ENDPOINTS = Object.freeze({
@@ -77,7 +78,10 @@ function business(payload) {
 
 function media(images) {
   return (Array.isArray(images) ? images : []).flatMap(image => {
-    const source = url(typeof image === 'string' ? image : image?.url || image?.url_default || image?.urlDefault || image?.info_list?.[0]?.url)
+    const variants = image?.info_list || image?.infoList
+    const source = (typeof image === 'string' ? [image] : [image?.url, image?.url_default, image?.urlDefault,
+      image?.url_size_large, image?.url_size_medium, ...(Array.isArray(variants) ? variants : []).map(entry => entry?.url)])
+      .map(xiaohongshuImageUrl).find(Boolean)
     return source ? [{ type: 'image', url: source, width: count(image?.width), height: count(image?.height) }] : []
   })
 }

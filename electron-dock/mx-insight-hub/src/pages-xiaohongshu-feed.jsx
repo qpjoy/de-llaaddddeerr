@@ -7,13 +7,14 @@ import { ImageSquare } from '@phosphor-icons/react'
 import { adminApi, publicDataApi } from './api.js'
 import { DropdownField, ErrorState, Field, Modal } from './components.jsx'
 import { mergeNotes, nativeNotePage, storedNote, claimNoteOpenRequest, mergeNoteDetail } from './xiaohongshu-feed.js'
+import { xiaohongshuImageUrl } from '../shared/xiaohongshu-media.mjs'
+import { claimNoteTagsRequest } from './xiaohongshu-topics.js'
 
 export function BusinessImage({ url, enabled, alt, className }) {
   const [failed, setFailed] = useState(false)
   useEffect(() => setFailed(false), [url, enabled])
-  let safe = false
-  try { const parsed = new URL(url); safe = parsed.protocol === 'https:' && !parsed.username && !parsed.password } catch { /* no image */ }
-  return enabled && safe && !failed ? <img className={className} src={url} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <span className="mih-xhs-image-placeholder"><ImageSquare size={32} aria-label="图片未加载" /><small>{!enabled ? '图片显示已关闭' : !safe ? '暂无图片地址' : '图片加载失败，可在详情中重试'}</small></span>
+  const source = xiaohongshuImageUrl(url)
+  return enabled && source && !failed ? <img className={className} src={source} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <span className="mih-xhs-image-placeholder"><ImageSquare size={32} aria-label="图片未加载" /><small>{!enabled ? '图片显示已关闭' : !source ? '暂无图片地址' : '图片加载失败，可在详情中重试'}</small></span>
 }
 
 function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, DeliveryEvidence, saved, onClose }) {
@@ -41,6 +42,7 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
     const idempotencyKey = researchRequests.current.get(fingerprint) || `xhs-research-${requestUuid()}`
     researchRequests.current.set(fingerprint, idempotencyKey)
     lock.current = true; setBusy(true); setResearchError(null); saved.researchError = null
+    let supplementTags = false
     try {
       const response = await publicDataApi.xiaohongshuResearch(apiKey.trim(), endpoint, body, { idempotencyKey })
       // Replaying the same page replaces it instead of duplicating comments.
@@ -48,11 +50,13 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
       const next = { ...saved.research, [endpoint]: response, commentPages: pages }
       saved.research = next
       if (alive.current) setResearch(next)
+      if (endpoint === 'note_detail' && alive.current) supplementTags = claimNoteTagsRequest(saved, { payload: response.payload, apiKey, resolveIssues })
     } catch (failure) {
       saved.researchError = failure; saved.researchErrorOperation = endpoint
       if (alive.current) { setResearchError(failure); setResearchErrorOperation(endpoint) }
     }
     finally { lock.current = false; if (alive.current) setBusy(false) }
+    if (supplementTags && alive.current) await resolve('cache_first')
   }
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
@@ -79,7 +83,7 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   const analytics = research.note_detail?.payload?.data?.item
   const analyticsError = researchErrorOperation !== 'note_comments' ? researchError : null
   const commentsError = researchErrorOperation === 'note_comments' ? researchError : null
-  const displayed = mergeNoteDetail(result?.payload?.data?.item || item, research.note_detail?.payload)
+  const displayed = mergeNoteDetail(mergeNoteDetail(item, result?.payload, { tagsAvailable: true }), research.note_detail?.payload)
   const primary = saved.openOperation || (!analyticsIssues.length ? 'note_detail' : 'resolve')
   const primaryIssues = primary === 'note_detail' ? analyticsIssues : resolveIssues
   const primaryError = primary === 'note_detail' ? analyticsError : error
@@ -96,14 +100,14 @@ function NoteDetail({ item, apiKey, images, onImagesChange, NoteScroll, Delivery
   }
   return <Modal title={item.title || '笔记详情'} size="xlarge" closeOnBackdrop={false} closeOnEscape={false} busy={busy} onClose={onClose} footer={<button className="qp-button" disabled={busy} onClick={onClose}>关闭</button>}>
     <div className="mih-xhs-detail-actions mih-xhs-detail-toolbar">
-      <span role="status">{busy ? '正在加载…' : primaryResult ? (primary === 'note_detail' ? '详情与阅读量已加载' : '正文与标签已加载') : '当前已存笔记'}</span>
+      <span role="status">{busy ? '正在加载…' : primaryResult ? (primary === 'note_detail' ? '详情已加载' : '正文与标签已加载') : '当前已存笔记'}</span>
       <button className="qp-button qp-button--outline qp-button--sm" disabled={busy || !apiKey.trim() || !!primaryIssues.length} onClick={() => void refresh()}>{primaryError ? '重试详情' : primaryResult ? '刷新详情' : '加载详情'}</button>
-      <small>{primary === 'note_detail' ? '按套餐计费 · 新查询建议间隔至少 5 秒' : '缓存优先，采集按套餐计费'}</small>
+      <small>{primary === 'note_detail' ? '缺少话题时补查正文接口，各次调用按套餐计费 · 新查询建议间隔至少 5 秒' : '缓存优先，采集按套餐计费'}</small>
     </div>
     {!apiKey.trim() ? <p role="status">正在等待调用身份。</p> : primaryIssues.length && !primaryResult ? <p role="status">当前详情服务不可用，先展示已存内容。可在下方“更多操作与请求记录”中查看原因。</p> : null}
     <nav className="mih-source-section-tabs mih-xhs-detail-tabs" aria-label="笔记详情视图">
       <button type="button" aria-pressed={detailView === 'note'} onClick={() => { saved.detailView = 'note'; setDetailView('note') }}>正文与图片</button>
-      <button type="button" aria-pressed={detailView === 'comments'} disabled={busy} onClick={showComments}>评论{displayed.metrics?.comments != null ? ` · ${displayed.metrics.comments}` : ''}</button>
+      <button type="button" aria-pressed={detailView === 'comments'} disabled={busy} onClick={showComments}>评论</button>
     </nav>
     <div hidden={detailView !== 'note'}>
     {error ? <ErrorState error={error} /> : null}

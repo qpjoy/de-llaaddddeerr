@@ -2607,7 +2607,10 @@ select {
 .mih-xhs-gallery figcaption { position: absolute; right: 8px; bottom: 8px; padding: 3px 7px; border-radius: 999px; background: rgb(0 0 0 / 65%); color: #fff; font-size: .68rem; }
 .mih-xhs-body { white-space: pre-wrap; line-height: 1.9; font-family: ui-serif, STSong, Songti SC, serif; }
 .mih-xhs-tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0; }
-.mih-xhs-tags span { display: inline-flex; align-items: center; gap: 2px; padding: 6px 9px; border-radius: 999px; background: color-mix(in srgb, var(--qp-accent) 10%, transparent); color: var(--qp-accent); }
+.mih-xhs-tags a { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; padding: 6px 9px; border-radius: 999px; background: color-mix(in srgb, var(--qp-accent) 10%, transparent); color: var(--qp-accent); overflow-wrap: anywhere; text-decoration: none; }
+.mih-xhs-tags a svg { flex-shrink: 0; }
+.mih-xhs-tags a:hover { text-decoration: underline; }
+.mih-xhs-tags a:focus-visible { outline: 2px solid var(--qp-accent); outline-offset: 3px; border-radius: 3px; }
 .mih-xhs-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 24px 0; }
 .mih-xhs-facts div { padding: 10px; border-top: 1px solid var(--qp-line); }
 .mih-xhs-facts dt { display: flex; align-items: center; gap: 5px; color: var(--qp-text-muted); font-size: .75rem; }
@@ -12930,7 +12933,9 @@ button.mih-catalog-status {
 
 .mih-xhs-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
 .mih-xhs-detail-toolbar { margin-top: 0; }
-.mih-xhs-detail-tabs { margin-bottom: 16px; }
+.mih-xhs-detail-tabs { position: static; top: auto; z-index: auto; margin-bottom: 16px; }
+.mih-xhs-metrics-notice { color: var(--qp-text-muted); font-size: .85rem; }
+.mih-xhs-metric-source { display: inline-block; margin-left: 8px; color: var(--qp-text-muted); font-size: .7rem; }
 .mih-xhs-detail-toolbar small, .mih-xhs-comments small { color: var(--qp-text-3); }
 .mih-xhs-detail-options { margin: 20px 0; }
 .mih-xhs-detail-options summary, .mih-xhs-comments summary { cursor: pointer; padding: 8px 0; }
