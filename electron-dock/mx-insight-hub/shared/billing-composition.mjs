@@ -1,4 +1,5 @@
 import { QIXIN_OFFICIAL_PRICES } from './qixin-official-prices.mjs'
+import { XIAOHONGSHU_CAPABILITIES } from './product-catalog.mjs'
 const XHS_V1 = { key: 'xiaohongshu', version: 1, name: '小红书笔记', currency: 'CNY',
   entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts']
     .map(meterKey => ({ meterKey, unitPriceMinor: 10, billingUnit: 'request' })) }
@@ -15,8 +16,7 @@ export const BILLING_FEATURES = [
   },
   {
     key: 'xiaohongshu', version: 2, name: '小红书笔记画卷', currency: 'CNY',
-    entries: ['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts', 'social.posts.analytics', 'social.comments.list']
-      .map(meterKey => ({ meterKey, unitPriceMinor: 10, billingUnit: 'request' })),
+    entries: XIAOHONGSHU_CAPABILITIES.map(({ key: meterKey }) => ({ meterKey, unitPriceMinor: 10, billingUnit: 'request' })),
   },
 ]
 

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
 import { usageMeterKey } from '../billing/contracts.mjs'
+import { consumptionItem, consumptionPage } from '../billing/consumption.mjs'
 import { CANONICAL_CONTEXT_DATASETS } from '../data/canonical-context.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 import {
@@ -1773,6 +1774,29 @@ export class PostgresStore {
     })
   }
 
+  async listTenantConsumption(tenantId, { limit, before }) {
+    const { rows } = await this.pool.query(
+      `WITH page AS (
+         SELECT * FROM billing.customer_charges
+          WHERE tenant_id = $1 AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
+          ORDER BY created_at DESC, id DESC LIMIT $4
+       )
+       SELECT page.*, page.created_at::text AS cursor_time, c.name AS consumer_name, u.platform,
+              (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                 'id', e.id, 'kind', e.kind, 'createdAt', e.created_at,
+                 'amountMinor', e.amount_minor, 'availableDeltaMinor', e.available_delta_minor,
+                 'heldDeltaMinor', e.held_delta_minor) ORDER BY e.account_revision), '[]'::jsonb)
+                 FROM billing.credit_ledger_entries e WHERE e.tenant_id = $1 AND e.charge_id = page.id) AS events
+         FROM page LEFT JOIN consumers c ON c.id = page.consumer_id AND c.tenant_id = $1
+         LEFT JOIN usage_requests u ON u.id = page.usage_request_id AND u.tenant_id = $1
+         ORDER BY page.created_at DESC, page.id DESC`,
+      [tenantId, before?.createdAt ?? null, before?.id ?? null, limit + 1],
+    )
+    return consumptionPage(rows.map(row => ({ ...consumptionItem(customerChargeRecord(row), {
+      consumerName: row.consumer_name, platform: row.platform, events: row.events,
+    }), cursorTime: row.cursor_time })), tenantId, limit)
+  }
+
   async getTenantBilling(tenantId, { ledgerLimit = 50 } = {}) {
     const client = await this.pool.connect()
     try {
@@ -2423,7 +2447,7 @@ export class PostgresStore {
               input.fingerprint,
               input.platform ?? null,
               input.capability ?? null,
-              usageMeterKey(input),
+              usageMeterKey(input) ?? 'data.aggregate.refresh',
               JSON.stringify(authorizationScopes),
               input.unitsReserved,
               input.leaseExpiresAt,
@@ -2460,7 +2484,7 @@ export class PostgresStore {
           input.fingerprint,
           input.platform ?? null,
           input.capability ?? null,
-          usageMeterKey(input),
+          usageMeterKey(input) ?? 'data.aggregate.refresh',
           JSON.stringify(authorizationScopes),
           input.unitsReserved,
           input.leaseExpiresAt,

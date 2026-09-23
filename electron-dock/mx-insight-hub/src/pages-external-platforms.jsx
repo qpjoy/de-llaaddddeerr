@@ -1,3 +1,4 @@
+import { ProcurementTemplate } from './procurement-template.jsx'
 import { useSourceConnections } from './source-connections.jsx'
 import { StructuredCredentialPanel } from './structured-credential-panel.jsx'
 import { PagedItems } from './paged-items.jsx'
@@ -1674,156 +1675,6 @@ function ExternalPlatformOperationCard({
 // instead of retyping it into every operation -- which is how a deployment ends
 // up with one operation left on a zero budget, refusing calls for no visible
 // reason.
-function ExternalPlatformProviderPriceBook({ token, provider, operations, onSaved, onUnauthorized, notify }) {
-  const priced = operations.find((operation) => operation.priceBook.monthlyBudgetMinor !== null)
-  // Prefilled from what is already configured, so the common case is reviewing
-  // a number rather than hunting for it. Only an unambiguous price is offered:
-  // if endpoints are priced differently there is no single value to suggest,
-  // and guessing one would quietly reprice the others on submit.
-  const configuredPrices = [...new Set(
-    operations.flatMap((operation) => Object.values(operation.priceBook.endpointPrices || {}))
-      .filter((value) => Number.isFinite(value) && value > 0),
-  )]
-  const [draft, setDraft] = useState(() => ({
-    currency: priced?.priceBook.currency || 'CNY',
-    pricingAsOf: (priced?.priceBook.pricingAsOf || new Date().toISOString()).slice(0, 10),
-    budgetMode: 'calls',
-    unitCostMinor: configuredPrices.length === 1 ? String(configuredPrices[0]) : '',
-    monthlyBudgetStated: '',
-    monthlySubsidyBudgetStated: '',
-    reason: '',
-  }))
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
-  const [result, setResult] = useState(null)
-
-  const update = (field, value) => setDraft((current) => ({ ...current, [field]: value }))
-  const unitCost = Number(draft.unitCostMinor)
-  const budgetPreview = draft.budgetMode === 'calls' && Number.isSafeInteger(unitCost) && unitCost > 0
-    && Number(draft.monthlyBudgetStated) > 0
-    ? `= ${formatNumber(Number(draft.monthlyBudgetStated) * unitCost)} 最小货币单位`
-    : null
-
-  const submit = async (event) => {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    setResult(null)
-    try {
-      // The call notation is an input convenience and never reaches the wire:
-      // the control plane stores money, and the whole admin API states budgets
-      // in minor units. Converting here uses the unit price being submitted in
-      // this same form, so the two can never disagree.
-      const unitCostMinor = Number(draft.unitCostMinor)
-      const toMinor = (stated) => (draft.budgetMode === 'calls'
-        ? Number(stated) * unitCostMinor
-        : Number(stated))
-      const data = await adminApi.updateExternalPlatformPriceBook(token, provider, {
-        currency: draft.currency.trim().toUpperCase(),
-        pricingAsOf: draft.pricingAsOf,
-        unitCostMinor,
-        monthlyBudgetMinor: toMinor(draft.monthlyBudgetStated),
-        monthlySubsidyBudgetMinor: toMinor(draft.monthlySubsidyBudgetStated),
-        reason: draft.reason.trim(),
-      })
-      setResult(data)
-      setDraft((current) => ({ ...current, reason: '' }))
-      notify?.(`已统一录入 ${data.applied.length} 个业务操作的价目表`, 'success')
-      onSaved?.()
-    } catch (requestError) {
-      if (requestError?.status === 401) onUnauthorized?.(requestError)
-      setError(requestError)
-      notify?.(requestError?.message || '统一价目表发布失败', 'danger')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Named individually: telling someone to fill a field they already filled is
-  // how a form trains people to stop reading its warnings.
-  const missing = []
-  if (!(Number(draft.unitCostMinor) > 0)) missing.push('每次调用单价')
-  if (!(Number(draft.monthlyBudgetStated) >= 0) || draft.monthlyBudgetStated === '') missing.push('月度上游预算')
-  if (!(Number(draft.monthlySubsidyBudgetStated) >= 0) || draft.monthlySubsidyBudgetStated === '') missing.push('月度补贴预算')
-  if (!draft.reason.trim()) missing.push('变更原因')
-  const incomplete = missing.length > 0
-
-  return (
-    <Panel
-      id="external-price-book"
-      title="统一采购价目与预算"
-      subtitle="一次录入，应用到该供应方的全部业务操作。个别操作需要单独收紧或放宽时，再到下面对应的操作里改。"
-      className="mih-external-pricebook-panel"
-      action={<span className="qp-tag"><ShieldCheck size={14} aria-hidden="true" />仅 Admin Token 可写</span>}
-    >
-      <form className="mih-external-pricebook-form" onSubmit={submit}>
-        <div className="mih-external-operation-price-grid">
-          <Field label="币种">
-            <input className="qp-input mih-mono" value={draft.currency} maxLength="3" pattern="[A-Za-z]{3}"
-              onChange={(event) => update('currency', event.target.value.toUpperCase())} disabled={busy} required />
-          </Field>
-          <Field label="定价证据日期">
-            <input className="qp-input mih-mono" type="date" value={draft.pricingAsOf}
-              onChange={(event) => update('pricingAsOf', event.target.value)} disabled={busy} required />
-          </Field>
-          <Field label="每次调用单价（最小货币单位）" hint="应用到该供应方每一个上游 endpoint；个别 endpoint 不同价时再单独改。">
-            <input className="qp-input mih-mono" type="number" min="1" step="1" value={draft.unitCostMinor}
-              onChange={(event) => update('unitCostMinor', event.target.value)} disabled={busy} required />
-          </Field>
-          <DropdownField label="预算填写单位" value={draft.budgetMode} options={BUDGET_MODES}
-            onChange={(value) => update('budgetMode', value)} disabled={busy} />
-          <Field label={`月度上游预算（${draft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'}）`} hint={budgetPreview}>
-            <input className="qp-input mih-mono" type="number" min="0" step="1" value={draft.monthlyBudgetStated}
-              onChange={(event) => update('monthlyBudgetStated', event.target.value)} disabled={busy} required />
-          </Field>
-          <Field
-            label={`月度补贴预算（${draft.budgetMode === 'calls' ? '调用次数' : '最小货币单位'}）`}
-            hint="限制上游成本中没有被下游正价扣费覆盖的部分。若下游还没有按次计费的付费客户，每次调用都算全额补贴，这里填得比上游预算小会先撞补贴上限——通常与上游预算填相同数值。"
-          >
-            <input className="qp-input mih-mono" type="number" min="0" step="1" value={draft.monthlySubsidyBudgetStated}
-              onChange={(event) => update('monthlySubsidyBudgetStated', event.target.value)} disabled={busy} required />
-          </Field>
-          <Field label="变更原因" hint="必填；与修订号一起写入每个业务操作的审计事件。">
-            <input className="qp-input" value={draft.reason} placeholder="例如：按 2026-09 合同统一录入采购价目"
-              onChange={(event) => update('reason', event.target.value)} disabled={busy} required />
-          </Field>
-        </div>
-
-        {/* Overwriting is the stated model, not a surprise: set the common
-            value, then re-narrow the exceptions. */}
-        <p className="mih-external-operation-precondition" role="status">
-          <WarningCircle size={15} aria-hidden="true" />
-          这会覆盖全部业务操作当前的价目表与预算；之后可在下面对个别操作单独调整。
-          {incomplete ? ` 还需填写：${missing.join('、')}。` : null}
-        </p>
-
-        {error ? <ErrorState error={error} /> : null}
-        {result ? (
-          <div className="mih-external-pricebook-result" role="status">
-            <strong>已应用到 {result.applied.length} 个业务操作</strong>
-            {result.skipped.length ? (
-              <ul>
-                {result.skipped.map((entry) => (
-                  <li key={entry.operationKey}>
-                    <code className="mih-mono">{entry.operationKey}</code>
-                    <span>{entry.message || entry.reason}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : <small>没有被跳过的操作。</small>}
-          </div>
-        ) : null}
-
-        <footer className="mih-external-operation-actions">
-          <button className="qp-button qp-button--primary" type="submit" disabled={busy || incomplete}>
-            {busy ? '正在应用' : '应用到全部业务操作'}
-          </button>
-        </footer>
-      </form>
-    </Panel>
-  )
-}
-
 // A scannable list first, a form only on demand.
 //
 // Every operation rendered as a full form meant scrolling past six price books
@@ -2279,7 +2130,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
             <TrendPanel detail={detail} />
             <CostQuotaPanel detail={detail} />
           </section>
-          {provider !== 'qixin' ? <ExternalPlatformProviderPriceBook
+          {provider !== 'qixin' ? <ProcurementTemplate
             token={token}
             provider={provider}
             operations={detail.operations}

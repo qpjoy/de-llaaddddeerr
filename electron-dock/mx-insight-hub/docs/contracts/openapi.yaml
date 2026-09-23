@@ -4917,6 +4917,156 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /data/aggregate/preview:
+    post:
+      tags:
+      - Search
+      operationId: previewAggregateDataSearch
+      summary: Preview the authorized query batch and current customer prices without acquiring data
+      description: 'Uses the same body and continuation cursor as aggregate search. Read-only estimate: no data acquisition,
+        usage reservation or wallet hold. Returns the current assigned plan version, per-source meter, one-page price
+        and observed readiness, total estimatedMinor and estimateOnly=true. Unknown runtime readiness is not_checked;
+        unavailable sources are explicitly marked. An unpriced customer operation follows the existing free rule.
+        Execution rechecks authorization, price and runtime; this estimate is neither a locked quote nor a spending
+        cap. Live parentChargeMinor is zero; children keep their own contract rates. Never returns procurement prices
+        or supplier identity.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - query
+              properties:
+                query:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                mode:
+                  type: string
+                  enum:
+                  - refresh
+                  - stored
+                  default: refresh
+                platforms:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: string
+                  description: Empty means all authorized searchable platforms.
+                objectTypes:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                    - post
+                    - article
+                    - message
+                    - chat
+                    - comment
+                    - product
+                    - account
+                    - user
+                    - profile
+                    - saved_record
+                    - commerce_capture
+                    - opinion_item
+                filters:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    tags:
+                      type: array
+                      maxItems: 10
+                      items:
+                        type: string
+                        maxLength: 200
+                    from:
+                      type: string
+                      format: date-time
+                    to:
+                      type: string
+                      format: date-time
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 20
+                  description: Stored page size, subject to the current key policy.
+                cursor:
+                  type: string
+                  maxLength: 8192
+                  description: Opaque continuation in refresh or stored mode. Return unchanged with the same query
+                    scope and original Key. Omit to start a new search round.
+            example:
+              query: 新能源汽车
+              mode: refresh
+              platforms:
+              - weibo
+              - xiaohongshu
+              objectTypes:
+              - post
+      responses:
+        '200':
+          description: 'data: contractVersion, mode, items (id/platform/label/meterKey/pages/priceStatus/unitPriceMinor/currency/readiness),
+            planVersionId, planVersion, currency, estimatedMinor, parentChargeMinor, observedAt, estimateOnly=true,
+            dispatches=0, carriedSources.'
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '410':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /data/aggregate/search:
     post:
       tags:

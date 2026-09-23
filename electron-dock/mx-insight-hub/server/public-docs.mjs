@@ -1176,6 +1176,21 @@ const virtualSupermarketDetailResponse = {
   },
 }
 
+const aggregateSearchRequestBody = { required: true, content: { 'application/json': { schema: {
+          type: 'object', additionalProperties: false, required: ['query'], properties: {
+            query: { type: 'string', minLength: 1, maxLength: 200 },
+            mode: { type: 'string', enum: ['refresh', 'stored'], default: 'refresh' },
+            platforms: { type: 'array', maxItems: 100, items: { type: 'string' }, description: 'Empty means all authorized searchable platforms.' },
+            objectTypes: { type: 'array', items: { type: 'string', enum: AGGREGATE_TYPES } },
+            filters: { type: 'object', additionalProperties: false, properties: {
+              tags: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 200 } },
+              from: { type: 'string', format: 'date-time' }, to: { type: 'string', format: 'date-time' },
+            } },
+            pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: 'Stored page size, subject to the current key policy.' },
+            cursor: { type: 'string', maxLength: 8192, description: 'Opaque continuation in refresh or stored mode. Return unchanged with the same query scope and original Key. Omit to start a new search round.' },
+          },
+        }, example: { query: '新能源汽车', mode: 'refresh', platforms: ['weibo', 'xiaohongshu'], objectTypes: ['post'] } } } }
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -1804,25 +1819,20 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         responses: { 200: { description: 'data.sources: platform, label, stored, refresh, objectTypes, routes' }, ...publicErrors },
       },
     },
+    '/data/aggregate/preview': {
+      post: {
+        tags: ['Search'], operationId: 'previewAggregateDataSearch', summary: 'Preview the authorized query batch and current customer prices without acquiring data',
+        description: 'Uses the same body and continuation cursor as aggregate search. Read-only estimate: no data acquisition, usage reservation or wallet hold. Returns the current assigned plan version, per-source meter, one-page price and observed readiness, total estimatedMinor and estimateOnly=true. Unknown runtime readiness is not_checked; unavailable sources are explicitly marked. An unpriced customer operation follows the existing free rule. Execution rechecks authorization, price and runtime; this estimate is neither a locked quote nor a spending cap. Live parentChargeMinor is zero; children keep their own contract rates. Never returns procurement prices or supplier identity.',
+        requestBody: aggregateSearchRequestBody,
+        responses: { 200: { description: 'data: contractVersion, mode, items (id/platform/label/meterKey/pages/priceStatus/unitPriceMinor/currency/readiness), planVersionId, planVersion, currency, estimatedMinor, parentChargeMinor, observedAt, estimateOnly=true, dispatches=0, carriedSources.' }, ...publicErrors },
+      },
+    },
     '/data/aggregate/search': {
       post: {
         tags: ['Search'], operationId: 'aggregateDataSearch', summary: 'Search latest or stored data across one, several or all authorized platforms',
         description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence; the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed sources are not restarted. No exact total is promised. The opaque cursor references committed Hub evidence and binds the identity and query scope; missing evidence fails closed. Child cursors retain their existing route and page limits. sources[].carried marks a source not called in this batch; its counts describe its last acquired page. pageSize applies to stored mode only; live post operations fetch 20 items and product operations use their existing bounded page sizes. mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.',
         parameters: [idempotencyParameter],
-        requestBody: { required: true, content: { 'application/json': { schema: {
-          type: 'object', additionalProperties: false, required: ['query'], properties: {
-            query: { type: 'string', minLength: 1, maxLength: 200 },
-            mode: { type: 'string', enum: ['refresh', 'stored'], default: 'refresh' },
-            platforms: { type: 'array', maxItems: 100, items: { type: 'string' }, description: 'Empty means all authorized searchable platforms.' },
-            objectTypes: { type: 'array', items: { type: 'string', enum: AGGREGATE_TYPES } },
-            filters: { type: 'object', additionalProperties: false, properties: {
-              tags: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 200 } },
-              from: { type: 'string', format: 'date-time' }, to: { type: 'string', format: 'date-time' },
-            } },
-            pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: 'Stored page size, subject to the current key policy.' },
-            cursor: { type: 'string', maxLength: 8192, description: 'Opaque continuation in refresh or stored mode. Return unchanged with the same query scope and original Key. Omit to start a new search round.' },
-          },
-        }, example: { query: '新能源汽车', mode: 'refresh', platforms: ['weibo', 'xiaohongshu'], objectTypes: ['post'] } } } },
+        requestBody: aggregateSearchRequestBody,
         responses: { 200: { description: 'data: contractVersion, mode, query, scope, filters, items (safe unified fields), sources (status/requestId/returnedCount/hasMore), pageInfo, warnings. source statuses: ok, empty, unsupported, not_authorized, unavailable, unknown; partial does not imply complete coverage.' }, ...publicErrors },
       },
     },
@@ -6042,6 +6052,7 @@ printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.pr
     <h2>聚合数据搜索</h2>
     <p>一个 Hub 接口搜索最新与存量数据，不要求调用方适配数据产品或来源实现。</p>
     <p>先用 <code>GET /api/v1/data/aggregate/sources</code> 获取当前 Key 可搜索的平台；<code>platforms</code> 省略或为空表示全部授权平台，也可传一个或多个标识。淘宝、天猫、京东等可单独选择，继续使用原电商权限。</p>
+    <p>查询前可用相同 body 调用 <code>POST /api/v1/data/aggregate/preview</code>，查看本批来源、每源一页的当前成交价、套餐版本及已知运行状态。该预览不采集、不记用量、不冻结余额；续页预览也需原样传 cursor。估价不锁价，也不是费用上限，实际执行仍重新检查权限和价格。实时聚合父请求不另收费。</p>
     <pre><code>POST /api/v1/data/aggregate/search
 Authorization: Bearer &lt;HUB_API_KEY&gt;
 Idempotency-Key: &lt;本次查询唯一标识&gt;
@@ -6391,7 +6402,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
-  'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/search'],
+  'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
   'source-catalog': ['/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],

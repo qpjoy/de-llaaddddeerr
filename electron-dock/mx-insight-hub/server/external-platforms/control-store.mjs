@@ -225,7 +225,7 @@ function normalizeCanaryConsumerIds(value, { required = false } = {}) {
   return normalized.sort()
 }
 
-function normalizePriceBook(value, definition) {
+export function normalizePriceBook(value, definition) {
   if (value == null) return null
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     invalid('priceBook must be an object')

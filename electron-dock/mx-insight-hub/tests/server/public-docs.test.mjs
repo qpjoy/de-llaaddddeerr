@@ -1804,6 +1804,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/acquisitions/{requestId}',
       '/data/canonical/items/{id}/context',
       '/data/canonical/items/{id}/timeline',
+      '/data/aggregate/preview',
       '/data/aggregate/search',
       '/data/aggregate/sources',
       '/data/canonical/search',

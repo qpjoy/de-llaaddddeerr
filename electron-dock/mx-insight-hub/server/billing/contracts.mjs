@@ -168,6 +168,10 @@ export function normalizeCreditDebit(input) {
 }
 
 export function usageMeterKey({ meterKey, capability, platform }) {
+  if (meterKey === 'data.aggregate.refresh') {
+    assert(capability === 'data.canonical-search' && !platform, 500, 'invalid_usage_meter', 'Aggregate parent requires canonical quota scope')
+    return null
+  }
   const value = String(meterKey || capability || platform || '').trim().toLowerCase()
   assert(BILLING_METER_PATTERN.test(value), 500, 'invalid_usage_meter', 'Usage meter key is invalid')
   return value

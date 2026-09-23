@@ -3,6 +3,7 @@ import { SOCIAL_ACCOUNT_PLATFORMS, socialAccountPlatform } from '../contracts/so
 import { JUSTONE_RESOURCE_CATALOG } from '../contracts/justone-resources.mjs'
 import { JUSTONE_MARKETPLACE_CATALOG } from '../ingest/justone.mjs'
 import { PUBLIC_OPINION_DATASET_ID } from './public-opinion.mjs'
+import { XIAOHONGSHU_CAPABILITIES } from '../../shared/product-catalog.mjs'
 import { CRAWLER_SOURCES, crawlerSourceSpecForKey } from '../ingest/crawler/source-contract.mjs'
 
 // Read-only implementation inventory, not a dispatch registry or a grant.
@@ -25,7 +26,7 @@ function route(id, fields) {
   }
 }
 
-function implementedRoutes(sources) {
+export function implementedRoutes(sources = []) {
   const rows = []
   for (const [operation, platforms] of Object.entries(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS)) {
     for (const platform of platforms) rows.push(route(`legacy-${platform}-${operation}`, {
@@ -52,14 +53,12 @@ function implementedRoutes(sources) {
     defaultRule: '非已迁移直连形状委托内部数据服务；此看板不请求上游能力目录，支持范围与健康不作静态推断。',
     evidence: 'server/adapters/night-all.mjs',
   }))
-  for (const [operation, path, label] of [
-    ['social.posts.resolve', '/api/v1/data/post', '小红书笔记详情'],
-    ['social.users.resolve', '/api/v1/search/user-info', '小红书用户资料'],
-    ['social.users.posts', '/api/v1/search/crawl', '小红书用户笔记'],
-  ]) rows.push(route(`xiaohongshu-${operation}`, {
+  for (const { key: operation, path, label } of XIAOHONGSHU_CAPABILITIES.filter(row => row.key !== 'social.posts.search')) rows.push(route(`xiaohongshu-${operation}`, {
     platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: 'tikhub',
     product: '小红书笔记画卷', operation, path, label,
-    defaultRule: '已迁移且符合直连形状的请求走 T 平台；兼容入口的其他形状与历史游标保留原分支。',
+    defaultRule: ['social.posts.analytics', 'social.comments.list'].includes(operation)
+      ? '固定版本详情或单页评论合同；独立授权、定价与运行开关，不自动补查或重试。'
+      : '已迁移且符合直连形状的请求走 T 平台；兼容入口的其他形状与历史游标保留原分支。',
     evidence: 'server/hub-service.mjs',
   }))
   for (const platform of SOCIAL_ACCOUNT_PLATFORMS) {

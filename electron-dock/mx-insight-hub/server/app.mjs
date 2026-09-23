@@ -1,4 +1,5 @@
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
+import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
 import { formatBrowserExport } from './data/browser-export.mjs'
 import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
@@ -8,6 +9,7 @@ import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
 import { quotedMinor } from './billing/contracts.mjs'
+import { consumptionQuery } from './billing/consumption.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
 import {
   PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT,
@@ -2380,6 +2382,13 @@ export function createApp({
         sendJson(response, 201, { data: await service.createTenant(await readJson(request)), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing/consumption')
+      if (request.method === 'GET' && params) {
+        requireTenantCapability(principal, params.id, 'usage.read')
+        const query = consumptionQuery(Object.fromEntries(searchParams), params.id)
+        sendJson(response, 200, { data: await service.listTenantConsumption(params.id, query), requestId }, { 'cache-control': 'private, no-store' })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing')
       if (request.method === 'GET' && params) {
         requireTenantCapability(principal, params.id, 'usage.read')
@@ -2839,6 +2848,15 @@ export function createApp({
           ),
           requestId,
         })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/pricing-template')
+      if (params && ['GET', 'POST'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'procurement pricing template')
+        if (!externalPlatformAdmin?.pricingTemplate) throw new AppError(503, 'external_platform_control_store_unavailable', 'Operation control unavailable')
+        sendJson(response, 200, { data: await externalPlatformAdmin.pricingTemplate(params.provider,
+          request.method === 'GET' ? null : await readJson(request, 64 * 1024)), requestId }, { 'cache-control': 'private, no-store' })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/price-book')
@@ -3489,6 +3507,13 @@ export function createApp({
         return
       }
 
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/capability-catalog') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'capability catalog')
+        const catalog = store.pool ? await syncCapabilityCatalog(store.pool) : { ...capabilityCatalog(await store.listExternalSources()), differences: [], dryRun: true }
+        sendJson(response, 200, { data: catalog, requestId }, { 'cache-control': 'private, no-store' })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/source-connections') {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'source connections')
@@ -5881,6 +5906,12 @@ export function createApp({
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'aggregate sources')
         sendJson(response, 200, { data: await service.aggregateSources(context), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/aggregate/preview') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'aggregate preview')
+        sendJson(response, 200, { data: await service.aggregatePreview(context, await readJson(request, 64 * 1024)), requestId }, { 'cache-control': 'private, no-store' })
         return
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/aggregate/search') {

@@ -209,6 +209,7 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
   aggregateSources: apiKey => publicDataRequest(apiKey, '/api/v1/data/aggregate/sources'),
+  aggregatePreview: (apiKey, body) => publicDataRequest(apiKey, '/api/v1/data/aggregate/preview', { method: 'POST', body }),
   aggregateSearch: (apiKey, body, idempotencyKey) => publicDataRequest(apiKey, '/api/v1/data/aggregate/search', { method: 'POST', body, idempotencyKey }),
   acquisitionComparison: (apiKey, body, idempotencyKey) => publicDataRequest(
     apiKey, '/api/v1/night-all/search/raw', { method: 'POST', body, idempotencyKey },
@@ -370,6 +371,7 @@ export const adminApi = {
     { method: 'PUT', body },
   ),
   usage: (token, query) => request(token, `${ADMIN_ROOT}/usage`, { query }),
+  tenantConsumption: (token, tenantId, query = {}) => request(token, `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing/consumption`, { query }),
   tenantBilling: (token, tenantId, query = {}) => request(
     token,
     `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing`,
@@ -502,6 +504,8 @@ export const adminApi = {
       },
     },
   ),
+  capabilityCatalog: token => request(token, `${ADMIN_ROOT}/capability-catalog`),
+  pricingTemplate: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/pricing-template`, body ? { method: 'POST', body } : {}),
   sourceConnections: token => request(token, `${ADMIN_ROOT}/source-connections`),
   sourceCatalog: (token, { includeArchived = false } = {}) => visibleSourceCatalogResponse(request(
     token,

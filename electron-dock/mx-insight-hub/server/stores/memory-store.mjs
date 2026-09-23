@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
 import { quotedMinor, usageMeterKey } from '../billing/contracts.mjs'
+import { consumptionItem, consumptionPage } from '../billing/consumption.mjs'
 import {
   CANONICAL_CONTEXT_DATASETS,
   canonicalEventTimeCursor,
@@ -922,6 +923,18 @@ export class MemoryStore {
     }
     this.plans.push(record)
     return clone(record)
+  }
+
+  async listTenantConsumption(tenantId, { limit, before }) {
+    const rows = [...this.customerCharges.values()].filter(row => row.tenantId === tenantId
+      && (!before || row.createdAt < before.createdAt || row.createdAt === before.createdAt && row.id < before.id))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)).slice(0, limit + 1)
+      .map(row => consumptionItem(row, { consumerName: this.consumers.get(row.consumerId)?.name,
+        platform: this.requests.get(row.usageRequestId)?.platform,
+        events: this.creditLedgerEntries.filter(event => event.tenantId === tenantId && event.chargeId === row.id)
+          .sort((a, b) => a.accountRevision - b.accountRevision),
+      }))
+    return consumptionPage(rows, tenantId, limit)
   }
 
   async getTenantBilling(tenantId, { ledgerLimit = 50 } = {}) {

@@ -1,4 +1,5 @@
 import { SourceConnectionsPanel, useSourceConnections } from './source-connections.jsx'
+import { CapabilityCatalog } from './capability-catalog.jsx'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
@@ -1857,6 +1858,7 @@ function SourceConnectionsDashboard({ snapshot, token, onUnauthorized, initialPr
   const currentPage = Math.min(page, totalPages)
   const percent = count => items.length ? `${(count / items.length * 100).toFixed(1)}%` : '0%'
   return <div className="mih-source-connections">
+    <CapabilityCatalog token={token} onUnauthorized={onUnauthorized} />
     <SourceConnectionsPanel key={initialProvider} state={connections} initialProvider={initialProvider} />
     <h2>目录覆盖与接入线索</h2>
     <section className="mih-metric-grid" aria-label="平台与来源覆盖概况">

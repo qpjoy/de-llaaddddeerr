@@ -18,6 +18,7 @@ import {
   normalizeCreditAdjustment,
   normalizeCreditDebit,
   normalizePublishedPlan,
+  quotedMinor,
 } from './billing/contracts.mjs'
 import {
   XIAOHONGSHU_SEARCH_MAX_QUERY_LENGTH,
@@ -886,6 +887,12 @@ export class HubService {
     }
     const normalized = normalizePublishedPlan({ ...planBody, priceBook: { ...planBody.priceBook, entries: compiled.entries } })
     return this.store.publishPlanVersion({ ...normalized, components: compiled.components, publishedBy })
+  }
+
+  async listTenantConsumption(tenantIdInput, options) {
+    const tenantId = requiredUuid(tenantIdInput, 'tenantId')
+    assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
+    return this.store.listTenantConsumption(tenantId, options)
   }
 
   async getTenantBilling(tenantIdInput, options = {}) {
@@ -3293,6 +3300,41 @@ export class HubService {
     ) }
   }
 
+  async aggregatePreview(context, body) {
+    const { sources } = await this.aggregateSources(context)
+    const query = normalizeAggregateRequest(body, sources)
+    const [plan, billing] = await Promise.all([
+      this.store.getConsumerPlan(context.consumer.id), this.store.getTenantBilling(context.tenant.id, { ledgerLimit: 1 }),
+    ])
+    const page = query.mode === 'refresh' ? await aggregateLivePage(query, { context, store: this.store, secret: this.apiKeyPepper }) : null
+    const routes = page?.routes || [{ id: 'stored', label: 'Hub 历史数据', platform: null, kind: 'stored' }]
+    const readCapabilities = async fn => { try { return await fn({ consumerId: context.consumer.id }) } catch { return null } }
+    const [social, ecommerce] = await Promise.all([
+      routes.some(row => row.platform === 'xiaohongshu') && this.externalPostCapabilities ? readCapabilities(this.externalPostCapabilities) : null,
+      routes.some(row => row.kind === 'products') && this.externalPlatformCapabilities ? readCapabilities(this.externalPlatformCapabilities) : null,
+    ])
+    const items = routes.map(route => {
+      const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : route.kind === 'products' ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
+      const rate = plan?.priceBook?.entries.find(row => row.meterKey === meterKey)
+      const enforced = billing.profile?.mode === 'enforced' && Boolean(plan?.priceBook)
+      const cost = rate ? quotedMinor(rate.unitPriceMinor, billing.profile?.multiplierPpm ?? plan.priceBook.defaultMultiplierPpm) : 0
+      assert(Number.isSafeInteger(cost) && cost >= 0, 400, 'quote_too_large', 'Quote exceeds safe integer range')
+      const runtime = (route.platform === 'xiaohongshu' ? social : route.kind === 'products' ? ecommerce : null)?.operations?.[meterKey]
+      return { id: route.id, platform: route.platform, label: route.label, meterKey, pages: 1,
+        priceStatus: !enforced ? 'billing_disabled' : !rate ? 'unpriced_free' : cost === 0 ? 'explicit_free' : 'priced',
+        unitPriceMinor: enforced ? cost : 0, currency: plan?.priceBook?.currency || null,
+        readiness: runtime ? runtime.ready === true ? 'ready' : 'unavailable' : 'not_checked',
+      }
+    })
+    const total = items.reduce((sum, row) => sum + BigInt(row.unitPriceMinor), 0n)
+    assert(total <= BigInt(Number.MAX_SAFE_INTEGER), 400, 'quote_too_large', 'Quote exceeds safe integer range')
+    return { contractVersion: 'mx-insight-hub.aggregate-preview.v1', mode: query.mode, items,
+      planVersionId: plan?.versionId || null, planVersion: plan?.version || null,
+      currency: plan?.priceBook?.currency || null, estimatedMinor: Number(total),
+      parentChargeMinor: query.mode === 'refresh' ? 0 : null, observedAt: new Date().toISOString(),
+      estimateOnly: true, dispatches: 0, carriedSources: page?.carriedSources.length || 0 }
+  }
+
   async aggregateSearch(context, { body, idempotencyKey, path, products }) {
     const { sources } = await this.aggregateSources(context)
     const aggregate = normalizeAggregateRequest(body, sources)
@@ -3394,6 +3436,7 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       capability: CANONICAL_SEARCH_USAGE_SCOPE,
+      ...(aggregate?.mode === 'refresh' ? { meterKey: 'data.aggregate.refresh' } : {}),
       acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body: originalBody }),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + (aggregate?.mode === 'refresh' ? Math.max(this.reservationLeaseMs, 600_000) : this.reservationLeaseMs)),

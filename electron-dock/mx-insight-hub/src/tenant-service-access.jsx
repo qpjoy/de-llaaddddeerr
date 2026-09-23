@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { withIpRiskProductScopes, withEnterpriseProductScopes } from '../shared/product-access.mjs'
+import { withProductScopes } from '../shared/product-catalog.mjs'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field } from './components.jsx'
 
@@ -23,7 +24,7 @@ export function TenantServiceAccess({token,tenants,platforms,capabilities}) {
     try { setForm(await adminApi.saveTenantServiceAccess(token,tenantId,{...form,reason}));setReason('');setSaved(true) }
     catch(e){setError(e)}finally{setBusy(false)}
   }
-  const preset = () => setForm(f=>({...f,platforms:[...new Set([...f.platforms,'xiaohongshu'])],capabilities:[...new Set([...f.capabilities,'compat.xiaohongshu.app_v2','social.posts.resolve','social.posts.search','social.users.resolve','social.users.posts'])]}))
+  const preset = () => setForm(form => withProductScopes(form, 'xiaohongshu'))
   return <section className="qp-panel">
     <h2>租户业务开通</h2><p>仅平台管理员可开通。新租户默认无业务权限；现有调用者同步本次授权，新调用者自动继承，租户自行签发范围更小的 Key。</p>
     <DropdownField label="开通租户" value={tenantId} onChange={setTenantId} disabled={busy} options={[{value:'',label:'选择租户'},...tenants.map(t=>({value:t.id,label:t.name}))]} />

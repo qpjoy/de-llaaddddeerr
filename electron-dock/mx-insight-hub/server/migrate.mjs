@@ -3,6 +3,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import pg from 'pg'
+import { syncCapabilityCatalog } from './data/capability-catalog.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // Distinct from mx-common's lock. Two Hub migration Jobs may overlap across
@@ -64,6 +65,14 @@ export async function runMigrations({ connectionString, migrationsDir = resolve(
         throw error
       }
       console.log(`applied ${filename}`)
+    }
+    if (filenames.includes('104_capability_commercial_governance.sql')) {
+      await client.query('BEGIN')
+      try {
+        const inventory = await syncCapabilityCatalog(client, { dryRun: false })
+        await client.query('COMMIT')
+        console.log(`capability inventory: ${inventory.differences.length} metadata changes; existing commercial state preserved`)
+      } catch (error) { await client.query('ROLLBACK'); throw error }
     }
   } finally {
     if (migrationLockAcquired) {

@@ -1,4 +1,5 @@
 import { AppError } from '../core/errors.mjs'
+import { providerPricingTemplate } from './pricing-template.mjs'
 
 const RANGE_MS = {
   '24h': 24 * 60 * 60 * 1_000,
@@ -624,6 +625,15 @@ export class ExternalPlatformAdminService {
   // Each operation is still written through the ordinary policy path, so every
   // one gets its own audit event, its own revision check and its own blockers.
   // Nothing here bypasses the control plane; it just stops the typing.
+  async pricingTemplate(providerKey, input = null) {
+    this.#assertProvider(providerKey)
+    if (providerKey === 'qixin') throw new AppError(400, 'invalid_request', 'Use the reviewed enterprise price catalogue')
+    const credential = await this.#credential(providerKey)
+    const runtime = { config: this.config, credentialConfigured: credential.credentialConfigured }
+    const store = this.#requireOperationControlStore()
+    return providerPricingTemplate(store, providerKey, await store.describeProvider(providerKey, runtime), input, runtime)
+  }
+
   async updateProviderPriceBook(providerKey, input) {
     this.#assertProvider(providerKey)
     const body = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
@@ -818,6 +828,10 @@ export class MultiExternalPlatformAdminService {
 
   updateProviderPriceBook(providerKey, input) {
     return this.#service(providerKey).updateProviderPriceBook(providerKey, input)
+  }
+
+  pricingTemplate(providerKey, input = null) {
+    return this.#service(providerKey).pricingTemplate(providerKey, input)
   }
 
   revealCredential(providerKey) {

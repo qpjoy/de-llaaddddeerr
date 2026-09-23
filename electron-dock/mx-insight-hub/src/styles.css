@@ -1023,6 +1023,19 @@ select {
   background: transparent;
 }
 
+.mih-commercial-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mih-commercial-panel > * {
+  min-width: 0;
+}
+
+.mih-commercial-panel .mih-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .mih-table {
   width: 100%;
   min-width: 760px;

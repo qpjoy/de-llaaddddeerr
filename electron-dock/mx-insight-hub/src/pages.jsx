@@ -1,4 +1,7 @@
 import { PagedItems } from './paged-items.jsx'
+import { withProductScopes } from '../shared/product-catalog.mjs'
+import { ConsumptionPanel } from './consumption-panel.jsx'
+import { ProductSetup } from './product-setup.jsx'
 import { QixinPricingAdjustment } from './qixin-pricing.jsx'
 import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
 import { BILLING_FEATURES, compileBillingComponents } from '../shared/billing-composition.mjs'
@@ -1733,11 +1736,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
               <input className="qp-input" disabled={Boolean(scopeTarget)} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
             </Field>
             {!rotationSource ? <div>
-              <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={scopeLoading || !scopeOptions.platforms.includes('xiaohongshu')} onClick={() => setForm(current => ({
-                ...current,
-                platforms: [...new Set([...current.platforms, 'xiaohongshu'])],
-                capabilities: [...new Set([...current.capabilities, ...['social.posts.search', 'social.posts.resolve', 'social.users.resolve', 'social.users.posts', 'compat.xiaohongshu.app_v2'].filter(scope => scopeOptions.capabilities.includes(scope))])],
-              }))}>勾选已开通的小红书画卷权限</button>
+              <button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={scopeLoading || !scopeOptions.platforms.includes('xiaohongshu')} onClick={() => setForm(current => withProductScopes(current, 'xiaohongshu', scopeOptions))}>勾选已开通的小红书画卷权限</button>
               <small>同时选择小红书数据、已开通的笔记操作和 App V2 接口。请确认勾选范围后保存；调整权限时原 Key 继续有效。</small>
             </div> : null}
             {!rotationSource && scopeOptions.platforms.includes('ip_risk') ? <div>
@@ -1954,7 +1953,7 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
   }
 }
 
-function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state, setQuery }) {
+function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state, setQuery, token, onUnauthorized }) {
   const account = billing.account
   const currency = account?.currency || currentPlan?.customerRates?.[0]?.currency || 'CNY'
   const billed = usage.customerBilling || {}
@@ -1982,7 +1981,9 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
       </Table>}</PagedItems> : <EmptyState icon={Coins} title="未配置收费接口" description="已授权的接口可免费调用，仍受调用额度和速率限制。" />}
       {rates.length ? <p>预计次数仅按当前余额和单项服务价格计算；其他业务消费及调用限额会影响实际可用次数。</p> : null}
     </Panel>
-    <Panel title="账户明细" subtitle="充值、扣款与待结算记录。">
+    <ConsumptionPanel key={data.tenantId} token={token} tenantId={data.tenantId} onUnauthorized={onUnauthorized} labelMeter={billingMeterLabel} />
+    <details className="qp-panel mih-panel"><summary>原始账本 · 充值与冻结/结算明细</summary>
+    <Panel title="账户明细" subtitle="一次消费通常包含冻结和结算两行，不是重复扣费。">
       {billing.ledger?.length ? <Table label="账户明细">
         <thead><tr><th>时间</th><th>类型</th><th>金额</th><th>可用余额</th><th>说明</th></tr></thead>
         <tbody>{billing.ledger.map(entry => <tr key={entry.id}>
@@ -1991,6 +1992,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
         </tr>)}</tbody>
       </Table> : <EmptyState icon={Coins} title="暂无账单记录" description="充值或使用服务后，记录将显示在这里。" />}
     </Panel>
+    </details>
     <details className="qp-panel mih-panel"><summary>查看服务用量限制</summary>
       <p>当前套餐：{currentPlan?.name || '待开通'}</p>
       <p>本月剩余调用：{currentPlan?.limits?.monthlyRequests ? formatNumber(Math.max(0, currentPlan.limits.monthlyRequests - (usage.requests || 0))) : '未设置月上限'}</p>
@@ -2117,7 +2119,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     && currentPlan.revision > 0,
   )
 
-  if (!session?.platformAdmin) return <TenantBillingSummary data={data} billing={billing} rates={effectiveRates} currentPlan={currentPlan} usage={data.usage || {}} state={state} setQuery={setQuery} />
+  if (!session?.platformAdmin) return <TenantBillingSummary data={data} billing={billing} rates={effectiveRates} currentPlan={currentPlan} usage={data.usage || {}} state={state} setQuery={setQuery} token={token} onUnauthorized={onUnauthorized} />
 
   const openPlanPublisher = (sourcePlan = currentPlan) => {
     const reusablePlan = sourcePlan?.key === 'legacy-unmetered' ? null : sourcePlan
@@ -2398,7 +2400,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 
       {session?.platformAdmin ? <Panel title="自动按次计费" subtitle="余额、合同价格和运行授权分别生效；充值本身不会启用扣费。">
         <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定费率' : '尚未绑定费率'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
-        <p>为不同客户使用独立套餐标识，同一套餐可配置多个业务的接口价格。已授权但未配置价格的接口免费，价格填 0 也表示免费；调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
+        <p>标准套餐可分配给多个客户；只有价格或额度不同时才创建差异版本。同一套餐可配置多个业务的接口价格。已授权但未配置价格的接口免费，价格填 0 也表示免费；调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
         <div className="mih-page-actions">
           <button className="qp-button qp-button--outline" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={() => openFeaturePlan('qixin')}>追加启信宝费率 · 官网原价 / 统一调价</button>
           <button className="qp-button qp-button--primary" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={()=>openFeaturePlan('xiaohongshu')}>追加小红书费率 · ¥0.10/次</button>
@@ -2406,6 +2408,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         </div>
         <p>快捷配置保留其他接口价格，打开草案供确认。当前套餐绑定调用者，该调用者的 Key 共用生效费率；发布、分配后才改变未来请求价格，不追补历史费用。</p>
       </Panel> : null}
+      {session?.platformAdmin && data.consumerId ? <ProductSetup key={data.consumerId} token={token} data={data} currentPlan={currentPlan} rates={effectiveRates} billing={billing} onRefresh={state.refresh} onAssign={assignPlan} onPrice={openFeaturePlan} assigning={Boolean(assigningPlanVersionId)} /> : null}
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="当前套餐与配额基线">
         <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, account.currency) : '未开户'} hint={account ? `冻结 ${formatMoneyMinor(account.heldMinor, account.currency)}` : '由平台管理员首次入账时开户'} tone="success" />
         <MetricCard icon={ShieldCheck} label="计费状态" value={({ disabled: '未启用', shadow: '影子计价', enforced: '自动按次扣费' })[billing.profile?.mode] || '未启用'} hint={session?.platformAdmin && billing.profile?.multiplierPpm != null ? `租户倍率 ${(Number(billing.profile.multiplierPpm) / 1_000_000).toFixed(4)}×` : '租户只看到最终成交价'} tone={billing.profile?.mode === 'enforced' ? 'warning' : 'info'} />
@@ -2469,7 +2472,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         )}
       </Panel>
 
-      <Panel title="余额流水" subtitle="租户钱包跨调用者共享；每笔请求仍按调用者与 API Key 独立归因">
+      <ConsumptionPanel key={data.tenantId} token={token} tenantId={data.tenantId} onUnauthorized={onUnauthorized} labelMeter={billingMeterLabel} />
+      <details className="qp-panel mih-panel"><summary>原始账本 · 冻结、结算、充值与调整</summary>
+      <Panel title="余额流水" subtitle="一次消费通常包含冻结与结算两行；请勿将两行金额相加。租户钱包由各调用者共享。">
         {billing.ledger?.length ? (
           <Table label="租户余额流水">
             <thead><tr><th>时间</th><th>类型</th><th>金额</th><th>可用余额变化</th><th>冻结变化</th><th>事由</th></tr></thead>
@@ -2489,7 +2494,8 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         )}
       </Panel>
 
-      {session?.platformAdmin ? <Panel title="套餐目录" subtitle="套餐版本一经发布不可原地改价；调用者绑定具体版本用于对账">
+      </details>
+      {session?.platformAdmin ? <Panel title="套餐目录" subtitle="同一版本可分配给多个客户，无需重复定价；新版本不自动替换旧分配。">
         {data.plans?.catalog?.length ? (
           <Table label="套餐目录">
             <thead><tr><th>套餐</th><th>版本</th><th>月请求</th><th>滑动窗口</th><th>突发</th><th>分页</th><th>价格状态</th>{session?.platformAdmin ? <th>操作</th> : null}</tr></thead>

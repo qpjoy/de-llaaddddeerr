@@ -63,6 +63,9 @@ export default function AggregateSearchPanel({ session }) {
   const [sources, setSources] = useState(null)
   const [sourceError, setSourceError] = useState(null)
   const [revision, setRevision] = useState(0)
+  const [quote, setQuote] = useState(null)
+  const [quoteError, setQuoteError] = useState(null)
+  const [quoting, setQuoting] = useState(false)
   const [, render] = useState(0)
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
@@ -89,6 +92,17 @@ export default function AggregateSearchPanel({ session }) {
   const result = pages.at(-1)?.result?.payload?.data
   const items = [...new Map(pages.flatMap(page => page.result.payload.data.items).map(item => [item.id, item])).values()]
   const body = requestBody(draft, sources || [])
+  const quoteScope = JSON.stringify(body)
+  const currentQuote = quote?.scope === quoteScope && quote.identity === identity ? quote.data : null
+  async function preview(input = body) {
+    if (quoting || !apiKey) return
+    setQuoting(true); setQuoteError(null)
+    try {
+      const value = await publicDataApi.aggregatePreview(apiKey, input)
+      if (alive.current && session.current === cell) setQuote({ scope: quoteScope, identity, query: input.query, continuation: Boolean(input.cursor), data: value.payload.data })
+    } catch (error) { if (session.current === cell) setQuoteError(error) }
+    finally { setQuoting(false) }
+  }
   const platformLabel = platform => sources?.find(source => source.platform === platform)?.label || platform
   const continuing = result?.sources.filter(source => source.hasMore).length || 0
   const failed = result?.sources.filter(source => !['ok', 'empty'].includes(source.status)).length || 0
@@ -96,6 +110,7 @@ export default function AggregateSearchPanel({ session }) {
 
   async function search(input, { fresh = false, targetRound } = {}) {
     if (cell.round?.active?.busy || !apiKey) return
+    setQuote(null); setQuoteError(null)
     const fingerprint = JSON.stringify(input)
     let nextRound = targetRound || (!fresh && cell.rounds.get(fingerprint))
     if (!nextRound) {
@@ -143,6 +158,11 @@ export default function AggregateSearchPanel({ session }) {
           <a className="mih-aggregate-catalog" href="#/source-catalog">数据源目录 <ArrowUpRight /></a>
         </div>
         <p className="mih-aggregate-hint">{live ? `搜索 ${liveCount} 个实时平台，各取一页；加载更多继续取后续页，按当前套餐计费。` : '检索 Hub 已收录的历史数据，不触发实时采集；日期按北京时间筛选发布时间。'}</p>
+        <button type="button" className="qp-button qp-button--outline qp-button--sm" disabled={busy || quoting || !apiKey || !draft.query.trim()} onClick={() => preview()}>{quoting ? '读取价格…' : '预览查询范围与费用'}</button>
+        {quoteError ? <ErrorState error={quoteError} /> : null}
+        {currentQuote ? <div className="qp-panel" role="status"><strong>“{quote.query}” · {quote.continuation ? '下一批' : '第一批'} {currentQuote.items.length} 个查询 · 预计 {currentQuote.currency ? `${currentQuote.currency} ${(currentQuote.estimatedMinor / 100).toFixed(2)}` : '不扣费'}</strong><p>按当前套餐 v{currentQuote.planVersion || '—'} 估算；预览不采集、不冻结余额。实际价格与可用性在执行时重新检查，估算不是锁价或费用上限。{currentQuote.mode === 'refresh' ? '聚合父请求不另收费。' : ''}</p>
+          <details><summary>逐源价格与状态</summary><ul>{currentQuote.items.map(row => <li key={row.id}>{row.label} · {row.pages} 页 · {({ billing_disabled: '当前未扣费', unpriced_free: '未配置价格，按免费处理', explicit_free: '明确免费', priced: `${row.currency} ${(row.unitPriceMinor / 100).toFixed(2)}` })[row.priceStatus]} · {({ ready: '服务就绪', unavailable: '服务未就绪', not_checked: '执行时检查可用性' })[row.readiness]}</li>)}</ul></details>
+        </div> : null}
         {!live && (draft.tags || draft.from || draft.to) ? <p className="mih-aggregate-hint">已设筛选：{[draft.tags && `标签 ${draft.tags}`, draft.from && `从 ${draft.from}`, draft.to && `至 ${draft.to}`].filter(Boolean).join(' · ')}</p> : null}
       </form>
       {!apiKey ? <p role="status">请选择上方调用身份，查看已授权的数据来源。</p> : sourceError ? <ErrorState error={sourceError} onRetry={() => setRevision(value => value + 1)} /> : !sources ? <LoadingState /> : !available.length ? <p role="status">当前身份没有{live ? '支持实时搜索的平台，可切换「历史数据」查看已收录来源。' : '已授权的数据来源。'}</p> : null}
@@ -164,7 +184,7 @@ export default function AggregateSearchPanel({ session }) {
         <footer><span>{item.author?.name || '未提供作者'}</span><details><summary>展开内容</summary><div>{item.text || '未提供正文'}<small>采集时间：{formatDate(item.collectedAt)}</small></div></details></footer>
       </article>)}</div>}
       <div className="mih-aggregate-more" aria-live="polite">
-        {result.pageInfo.nextCursor ? <button className="qp-button qp-button--outline" disabled={busy} onClick={() => search({ ...round.body, cursor: result.pageInfo.nextCursor }, { targetRound: round })}><ArrowDown />{busy ? '正在加载…' : result.mode === 'refresh' ? '加载更多实时结果' : '加载更多历史数据'}</button> : <strong>本轮暂无可继续加载的结果</strong>}
+        {result.pageInfo.nextCursor ? <><button className="qp-button qp-button--outline" disabled={busy || quoting} onClick={() => preview({ ...round.body, cursor: result.pageInfo.nextCursor })}>预览下一批费用</button><button className="qp-button qp-button--outline" disabled={busy} onClick={() => search({ ...round.body, cursor: result.pageInfo.nextCursor }, { targetRound: round })}><ArrowDown />{busy ? '正在加载…' : result.mode === 'refresh' ? '加载更多实时结果' : '加载更多历史数据'}</button></> : <strong>本轮暂无可继续加载的结果</strong>}
         <p>{result.mode === 'refresh' ? '加载更多保留本轮结果并续查下一页；刷新最新开启新一轮实时搜索。' : '继续浏览已收录数据，不发起实时采集。'}{failed ? ' 部分来源未完整返回，详情见逐源状态。' : ''}</p>
       </div>
     </section> : !busy ? <section className="qp-panel mih-aggregate-empty"><MagnifyingGlass /><div><h3>输入关键词，即可开始</h3><p>默认搜索全部可用实时平台，也可按平台或条目类型缩小范围。</p></div></section> : <LoadingState />}

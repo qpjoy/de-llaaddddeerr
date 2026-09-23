@@ -163,7 +163,7 @@ test('the multi-provider facade forwards every operation the single service expo
 
   const forwarded = [
     'overview', 'detail', 'updateCredential', 'updateOperationPolicy',
-    'revealCredential', 'updateProviderPriceBook',
+    'revealCredential', 'updateProviderPriceBook', 'pricingTemplate',
   ]
   for (const method of forwarded) {
     assert.equal(typeof facade[method], 'function', `facade forwards ${method}`)
@@ -173,4 +173,5 @@ test('the multi-provider facade forwards every operation the single service expo
   // And it actually reaches the provider rather than merely existing.
   const result = await facade.updateProviderPriceBook('justone', BASE)
   assert.ok(result.applied.length > 0)
+  assert.deepEqual(await facade.pricingTemplate('justone'), { templates: [], bindings: [] })
 })
