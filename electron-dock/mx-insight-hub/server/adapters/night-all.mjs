@@ -63,7 +63,7 @@ export function redactNightAllDataSearchResponse(payload) {
 }
 
 export class NightAllAdapter {
-  constructor({ baseUrl, fetchImpl = globalThis.fetch, timeoutMs = 30_000, serviceToken, exportToken }) {
+  constructor({ baseUrl, fetchImpl = globalThis.fetch, timeoutMs = 60_000, serviceToken, exportToken }) {
     this.baseUrl = baseUrl.replace(/\/$/, '')
     this.fetchImpl = fetchImpl
     this.timeoutMs = timeoutMs

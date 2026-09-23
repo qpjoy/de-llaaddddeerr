@@ -1343,7 +1343,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \
     --from-literal=MX_INSIGHT_STORE=postgres \
     --from-literal=NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
-    --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-120000}" \
+    --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-60000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
     --from-literal=MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     --from-literal=MX_INSIGHT_PUBLIC_URL="$public_url" \

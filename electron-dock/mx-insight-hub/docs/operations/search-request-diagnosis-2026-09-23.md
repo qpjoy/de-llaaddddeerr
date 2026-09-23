@@ -7,7 +7,8 @@
 | 87a2d0c7-ebf6-41bb-b1ee-1bd073a4477b | 微信公众号上游 503 | wechat_mp 在 Night-All 能力门禁被拒：DATA_PLATFORM_NOT_READY / degraded / contract_unverified |
 
 不能把三个 ID 都归因为上一事件的游标丢失，也不能把错误类别当根因。
-当前工作仅取证，不增加调用次数限制、不重试、不改结算或登录/联网。
+初始工作仅取证；后续按用户要求将 Night-All 调用超时统一为 60 秒。
+不增加调用次数限制、不重试、不改结算或登录/联网。
 
 ## 源码发现
 
@@ -137,11 +138,35 @@ Hub 运行配置 NIGHT_ALL_TIMEOUT_MS=30000，请求约 30.013 秒进入 unknown
 请求耗时 34.601 秒并成功返回 9 条，供应商日志 id=242230 也记录 HTTP 200。
 这组证据高度支持 Hub deadline 导致下游看到 unknown，不能将其当成供应商未执行。
 
-Hub 当前源码、.env.example、Compose 和部署脚本默认已是 NIGHT_ALL_TIMEOUT_MS=120000。
-需要修改实际运行环境中的 30000 覆盖值及持久部署配置，再重启 Hub API；不是再改默认代码。
+按用户后续要求，Hub 配置、适配器自身兜底、.env.example、Compose 和部署脚本统一默认
+NIGHT_ALL_TIMEOUT_MS=60000（此前应用/部署默认 120000，适配器独立兜底 30000）。
+这是每次完整上游 HTTP 调用的总等待预算，包含响应头及完整响应体；不在收到响应头后重置。
+需要同时修改实际运行环境中的 30000 覆盖值及持久部署配置，再重启 Hub API。
 同时核对反向代理、下游等待时长和请求租约，让整条链路允许该耗时。
 本轮未操作部署。旧 unknown 请求缺已提交的响应正文，不能仅凭 result_count=9 标成功交付、
 扣费或自动重试，应保留幂等身份和检查点，按证据核对结算与交付。
+
+已有 Kubernetes 部署先将 Hub 项目 `.env.internal` 中该项更新为 `60000`，避免下次部署
+恢复旧值。仅更新现有 Hub ConfigMap 的该字段并重启两个 API 工作负载：
+
+```bash
+kubectl -n mx-insight-hub patch configmap mx-insight-hub-config --type merge \
+  -p '{"data":{"NIGHT_ALL_TIMEOUT_MS":"60000"}}'
+kubectl -n mx-insight-hub rollout restart deployment/mx-insight-hub-public deployment/mx-insight-hub-admin
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --timeout=180s
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin --timeout=180s
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-public -- printenv NIGHT_ALL_TIMEOUT_MS
+```
+
+预期打印 `60000`。该操作不改 Secret、Key、业务计费和 Launcher 工作负载；按单副本策略，
+两个 Hub API 在重启时会短暂不可用。反向代理/客户端的等待时间应留出上游 60 秒之外的本地
+处理与传输余量，不要把代理等待也卡在同一秒导致 Hub 的结构化错误无法送达。
+
+60 秒修订验证：新增 6 项模拟时钟测试，覆盖适配器独立默认和配置注入两种路径：
+34.601 秒成功、响应头等待到 60 秒中止、响应头与正文合用 60 秒预算、不自动重试。
+既有 Hub 搜索/分页/登录用例共 112 项通过、1 项按既有条件跳过；部署脚本测试通过。
+Night-All 分页服务/提取器 39 项通过，跨源码两类抖音端点各 3 页完整上下文验证通过。
+本次无需新增 Night-All 源码改动；这些离线用例不证明供应商历史 HTTP 400 已恢复。
 
 ### 公众号：契约未验证，调用前被拒
 

@@ -61,6 +61,7 @@ MX_INSIGHT_API_KEY_PEPPER=<long-random-pepper>
 # default (http://10.88.88.88:18150) is intentionally reachable by operators.
 MX_INSIGHT_PUBLIC_URL=https://hub.example.com
 NIGHT_ALL_BASE_URL=http://192.168.1.2:13141
+NIGHT_ALL_TIMEOUT_MS=60000
 NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
 
 # JustOne is optional and remains fail-closed on a first deployment. Prefer

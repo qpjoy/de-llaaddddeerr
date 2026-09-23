@@ -35,7 +35,12 @@ Server-controlled additions:
 
 - `businessId` is derived from the authenticated consumer.
 - readiness/availability policy is selected by the Hub, not the caller.
-- the upstream timeout is bounded by `NIGHT_ALL_TIMEOUT_MS`.
+- the complete upstream HTTP request (headers and response body together) is
+  bounded by `NIGHT_ALL_TIMEOUT_MS`, default **60000 ms**. This applies to the
+  historical data-search and raw/crawl/user-info adapter paths; direct-provider
+  connectors retain their own limits. Timeouts remain ambiguous outcomes and do
+  not trigger an automatic retry. Local admission, persistence and downstream
+  transport time are additional to this upstream deadline.
 - optional `NIGHT_ALL_SERVICE_TOKEN` is injected only on the internal hop.
 
 Caller-controlled fields are currently limited to platform, query, page size and an opaque cursor when the adapter supports it. On the historical path the only accepted continuation is the Hub-encrypted `mxnc1` cursor; provider names, provider endpoint IDs, raw provider cursors, debug metadata, upstream credentials, and internal accounting fields are rejected or stripped before dispatch.
