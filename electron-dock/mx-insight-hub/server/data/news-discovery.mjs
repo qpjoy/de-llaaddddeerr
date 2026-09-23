@@ -138,6 +138,29 @@ export function newsWhere(query, { cursor = true } = {}) {
 
 export class NewsDiscoveryStore {
   constructor(pool) { this.pool = pool }
+  async sourceOptions(platforms) {
+    // An option must have a visible, readable news record. Use the indexed
+    // binding paths as candidates, then recheck the effective current binding.
+    // No recent-record sample: a source with only older articles still belongs.
+    const { rows } = await this.bounded(`SELECT e.id, e.canonical_name
+      FROM catalog.source_catalog_entries e
+      WHERE e.archived_at IS NULL AND e.source_kind <> 'provider' AND EXISTS (
+        SELECT 1 FROM (
+          SELECT id FROM core.canonical_records WHERE stable_fields #>> '{sourceCatalog,publisher,entryId}' = e.id::text
+          UNION ALL
+          SELECT id FROM core.canonical_records WHERE stable_fields #>> '{commerce,marketplace,entryId}' = e.id::text
+          UNION ALL
+          SELECT record_id AS id FROM catalog.record_catalog_bindings WHERE entry_id = e.id
+        ) candidate
+        JOIN core.canonical_records c ON c.id = candidate.id
+        LEFT JOIN catalog.record_catalog_bindings b ON b.record_id = c.id
+        WHERE ${BINDING_ID} = e.id::text AND ${NEWS_PREDICATE}
+          AND c.platform = ANY($1::text[]) AND c.collected_at IS NOT NULL
+      ) ORDER BY e.canonical_name, e.id`, [platforms])
+    const items = rows.map(row => ({ key: row.id, value: sourceLabel(row.canonical_name) })).filter(item => item.value)
+    return { contractVersion: NEWS_CONTRACT, scope: 'authorized_news_catalog_sources',
+      countBasis: 'catalog_entries', total: items.length, items }
+  }
   async bounded(sql, values) {
     const client = await this.pool.connect()
     try {

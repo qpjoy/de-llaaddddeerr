@@ -38,6 +38,71 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/news/source-options:
+    get:
+      tags:
+      - News discovery
+      summary: List every catalog source with news visible to the current Key; no usage unit
+      security:
+      - bearerKey: []
+      - apiKeyHeader: []
+      responses:
+        '200':
+          description: Stored-data response; requestId identifies the metered request or metadata read.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - requestId
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    properties:
+                      contractVersion:
+                        const: mx-insight-hub.news-discovery.v1
+                      scope:
+                        const: authorized_news_catalog_sources
+                      countBasis:
+                        const: catalog_entries
+                      total:
+                        type: integer
+                        minimum: 0
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          required:
+                          - key
+                          - value
+                          properties:
+                            key:
+                              type: string
+                              format: uuid
+                            value:
+                              type: string
+        '400':
+          description: Hub error envelope with code, message and requestId
+        '401':
+          description: Hub error envelope with code, message and requestId
+        '403':
+          description: Hub error envelope with code, message and requestId
+        '404':
+          description: Hub error envelope with code, message and requestId
+        '409':
+          description: Hub error envelope with code, message and requestId
+        '429':
+          description: Hub error envelope with code, message and requestId
+        '503':
+          description: Hub error envelope with code, message and requestId
+      operationId: newsSourceOptions
+      description: Dropdown options from active catalog entries with at least one readable news record in the current Key category scope. Uses effective
+        current-revision bindings, not a recent-record sample. No acquisition, LLM or article search request. key is the stable catalog UUID; value
+        is its current display name. Names are not search identifiers.
   /data/news/sources:
     get:
       tags:

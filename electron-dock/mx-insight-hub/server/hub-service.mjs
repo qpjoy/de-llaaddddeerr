@@ -3584,6 +3584,11 @@ export class HubService {
       items: newsCatalog(entries), categories: categories.items.filter(item => platforms.includes(item.platform)) }
   }
 
+  async newsSourceOptions(context) {
+    assert(this.newsDiscovery, 503, 'news_unavailable', 'News discovery requires PostgreSQL migration 110')
+    return this.newsDiscovery.sourceOptions(await this.newsScope(context))
+  }
+
   async newsRead(context, { body = {}, id = null, kind = 'search', idempotencyKey, path }) {
     assert(this.newsDiscovery, 503, 'news_unavailable', 'News discovery requires PostgreSQL migration 110')
     const key = requiredIdempotencyKey(idempotencyKey)

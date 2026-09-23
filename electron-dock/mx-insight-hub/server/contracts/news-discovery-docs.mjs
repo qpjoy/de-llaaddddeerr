@@ -29,6 +29,10 @@ const response = properties => ({ ...errors, 200: { description: 'Stored-data re
     requestId: { type: 'string', format: 'uuid' }, data: { type: 'object', properties: { contractVersion: { const: 'mx-insight-hub.news-discovery.v1' }, ...properties } },
   } } } } } })
 export const newsOpenApiPaths = {
+  '/data/news/source-options': { get: operation('List every catalog source with news visible to the current Key; no usage unit', { operationId: 'newsSourceOptions',
+    description: 'Dropdown options from active catalog entries with at least one readable news record in the current Key category scope. Uses effective current-revision bindings, not a recent-record sample. No acquisition, LLM or article search request. key is the stable catalog UUID; value is its current display name. Names are not search identifiers.',
+    responses: response({ scope: { const: 'authorized_news_catalog_sources' }, countBasis: { const: 'catalog_entries' }, total: { type: 'integer', minimum: 0 },
+      items: { type: 'array', items: { type: 'object', required: ['key', 'value'], properties: { key: { type: 'string', format: 'uuid' }, value: { type: 'string' } } } } }) }) },
   '/data/news/sources': { get: operation('News source catalog metadata and current-Key categories; no usage unit', { operationId: 'newsSources',
     responses: response({ scope: { const: 'active_catalog_metadata' }, coverage: { const: 'not_measured' },
       items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, name: { type: 'string' }, majorCategory: text, scenarios: labels } } },
@@ -49,6 +53,9 @@ export const newsOpenApiPaths = {
 export function newsGuide() { return `<section class="doc-page" data-doc-page="news-discovery">
 <h2>新闻发现</h2><p>按数据源目录、结构化来源、类别和时间检索已入库新闻。读取 Hub 库存，不采集、不补抓正文、不调用模型。每次请求重新检查 tenant、consumer、Key 和类别授权；目录筛选不授予数据权限。</p>
 <h3>目录与来源</h3><p>GET <code>/api/v1/data/news/sources</code> 返回安全目录元数据及当前 Key 的类别，不计 usage unit。目录不是库存承诺。使用返回的 <code>items[].id</code> 填入 <code>catalogEntryIds</code>。使用 <code>sourceCodes</code>（如 sina、huanqiu）查询尚未绑定目录的来源；<code>binding=unmapped</code> 可筛选待归类记录。</p>
+<h3>新闻来源下拉与多选</h3><p>GET <code>/api/v1/data/news/source-options</code> 专供新闻下拉，返回当前 Key 授权类别中至少有一条可读新闻、且有效绑定目录的全部来源。它不使用最新 5000 条统计样本；没有新闻的目录项、已归档目录和未绑定来源不列为选项。接口不计 usage unit，无需 Idempotency-Key，也不请求模型或采集。total 是来源选项数，不是文章数。</p>
+<pre>{"data":{"scope":"authorized_news_catalog_sources","countBasis":"catalog_entries","total":1,"items":[{"key":"94d36773-8912-5b8e-a593-8d0dcdaac8a3","value":"腾讯新闻"}]}}</pre>
+<p>key 是稳定目录 UUID，value 是当前显示名称；重命名后 key 不变。前端组件若使用 value/label 约定，映射为 <code>{value:item.key,label:item.value}</code>。多选后把所有 key 传入 <code>catalogEntryIds:["来源UUID一","来源UUID二"]</code>，数组内部取 OR，最多 50 项。空数组表示不限目录，也保留未归类新闻。关键词留空可分页浏览选定来源的全部可见新闻；仍使用 search 的 nextCursor，不提供无上限全量文章响应。展开/勾选只准备条件，点击查询才发送新闻搜索。</p>
 <h3>检索与分页</h3><p>POST <code>/api/v1/data/news/search</code> 支持 query、catalogEntryIds、sourceCodes、categories、binding、from、to、timeField、pageSize、cursor。多个维度取交集，每个数组内部为 OR。query 为标题/正文的不区分大小写字面子串，留空浏览。日期为 RFC3339、左闭右开；默认按首次收录倒序，publishedAt 只使用可解析的原文时间。</p>
 <pre><code>curl -sS "$HUB_URL/api/v1/data/news/search" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\

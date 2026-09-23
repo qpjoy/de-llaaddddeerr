@@ -3,6 +3,7 @@ import { ArrowSquareOut, Books, NewspaperClipping, MagnifyingGlass } from '@phos
 import { publicDataApi, publicDocsHref } from './api.js'
 import { useDemoApiKey } from './demo-credentials.jsx'
 import { DropdownField, EmptyState, ErrorState, Field, LoadingState, Modal, PageHeading } from './components.jsx'
+import { NewsSourceSelect } from './news-source-select.jsx'
 import './news-discovery.css'
 
 const dateText = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未提供'
@@ -14,7 +15,9 @@ export function NewsDiscoveryPage({ session }) {
   const [catalogError, setCatalogError] = useState(null)
   const [tab, setTab] = useState('list')
   const [query, setQuery] = useState('')
-  const [entry, setEntry] = useState('')
+  const [entries, setEntries] = useState([])
+  const [sourceOptions, setSourceOptions] = useState(null), [sourcesLoading, setSourcesLoading] = useState(false), [sourcesError, setSourcesError] = useState(null)
+  const sourceRequest = useRef(null), sourceKey = useRef(null)
   const [sourceCode, setSourceCode] = useState('')
   const [category, setCategory] = useState('')
   const [binding, setBinding] = useState('all')
@@ -35,13 +38,25 @@ export function NewsDiscoveryPage({ session }) {
   const request = useRef(null), facetRequest = useRef(null), detailRequests = useRef(new Map())
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   useEffect(() => {
+    sourceRequest.current?.abort(); sourceRequest.current = null; setSourcesLoading(false)
     if (!key) return undefined
     const controller = new AbortController()
     publicDataApi.newsSources(key, controller.signal).then(value => { setCatalog(value.payload.data); setCatalogError(null) })
       .catch(error => { if (!controller.signal.aborted) setCatalogError(error) })
-    return () => controller.abort()
+    return () => { controller.abort(); sourceRequest.current?.abort(); sourceRequest.current = null }
   }, [key])
-  const body = { query, catalogEntryIds: entry ? [entry] : [], sourceCodes: sourceCode ? [sourceCode] : [],
+  async function loadSourceOptions(force = false) {
+    if (!key || sourceRequest.current || (!force && sourceKey.current === key && sourceOptions)) return
+    const controller = new AbortController()
+    sourceRequest.current = controller; setSourcesLoading(true); setSourcesError(null)
+    try {
+      const response = await publicDataApi.newsSourceOptions(key, controller.signal)
+      if (!controller.signal.aborted) { setSourceOptions(response.payload.data); sourceKey.current = key }
+    } catch (error) { if (!controller.signal.aborted) setSourcesError(error) }
+    finally { if (sourceRequest.current === controller) { sourceRequest.current = null; setSourcesLoading(false) } }
+  }
+  const sourceNames = Object.fromEntries([...(catalog?.items || []).map(item => [item.id, item.name]), ...(sourceOptions?.items || []).map(item => [item.key, item.value])])
+  const body = { query, catalogEntryIds: entries, sourceCodes: sourceCode ? [sourceCode] : [],
     categories: category ? [category] : [], binding, timeField, pageSize: Number(pageSize),
     from: from ? new Date(from).toISOString() : null, to: to ? new Date(to).toISOString() : null }
   async function search(append = false) {
@@ -96,7 +111,8 @@ export function NewsDiscoveryPage({ session }) {
     </div>
     <form className="qp-panel mih-news-filters" onSubmit={event => { event.preventDefault(); void search() }}>
       <Field label="关键词" hint="标题与正文的字面匹配；留空浏览新闻"><input className="qp-input" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索新闻标题或正文" maxLength={300} /></Field>
-      <DropdownField label="数据源目录" value={entry} onChange={setEntry} options={[{ value: '', label: '全部目录来源' }, ...(catalog?.items || []).map(item => ({ value: item.id, label: item.name, description: item.majorCategory }))]} hint="目录是治理清单，不表示每个来源都有新闻库存" />
+      <NewsSourceSelect items={sourceOptions?.items || []} values={entries} names={sourceNames} onChange={setEntries} onLoad={loadSourceOptions}
+        loading={sourcesLoading} error={sourcesError} disabled={!key} />
       <DropdownField label="数据类别" value={category} onChange={setCategory} options={[{ value: '', label: '全部已授权类别' }, ...(catalog?.categories || []).map(item => ({ value: item.id, label: item.label }))]} />
       <Field label="来源代码（可选）" hint="如 sina、huanqiu；可查尚未绑定目录的来源"><input className="qp-input" value={sourceCode} onChange={event => setSourceCode(event.target.value)} placeholder="全部来源" maxLength={96} /></Field>
       <DropdownField label="目录归类" value={binding} onChange={setBinding} options={[{ value: 'all', label: '全部记录' }, { value: 'mapped', label: '已绑定目录' }, { value: 'unmapped', label: '待归类' }]} />
@@ -110,8 +126,8 @@ export function NewsDiscoveryPage({ session }) {
     </form>
     {catalogError ? <ErrorState error={catalogError} /> : null}
     {error ? <ErrorState error={error} /> : null}
-    {tab === 'api' ? <section className="qp-panel mih-news-debug"><h2>POST /api/v1/data/news/search</h2><p>上方条件就是请求参数。点击“查询新闻”发送；失败后相同请求保留幂等键。</p><pre>{JSON.stringify(body, null, 2)}</pre><h3>最近一次响应</h3><pre>{result ? JSON.stringify(result.payload, null, 2) : '尚未发送请求'}</pre></section> : <>
-      {facets ? <section className="qp-panel mih-news-facets"><h2><Books size={19} /> 来源分布</h2><p>当前条件下最新 {facets.sampledRecords} 条记录{facets.truncated ? ' · 已达 5,000 条统计上限，不代表全库分布' : ''} · {dateText(facets.asOf)}</p><div>{facets.sources.map((item, index) => <button key={item.catalogEntryId || item.code || index} className="qp-button qp-button--outline qp-button--sm" onClick={() => { setEntry(item.catalogEntryId || ''); setSourceCode(item.catalogEntryId ? '' : item.code || ''); if (!item.catalogEntryId && !item.code) setBinding('unmapped') }}>{item.name} <strong>{item.count}</strong></button>)}</div><small>点击填入筛选条件，再点查询。统计不合并转载和重复采集。</small></section> : null}
+    {tab === 'api' ? <section className="qp-panel mih-news-debug"><h2>POST /api/v1/data/news/search</h2><p>上方条件就是请求参数。点击“查询新闻”发送；失败后相同请求保留幂等键。</p><pre>{JSON.stringify(body, null, 2)}</pre><h3>已选目录 ID 与名称</h3><pre>{JSON.stringify(entries.map(key => ({ key, value: sourceNames[key] || null })), null, 2)}</pre><h3>最近一次响应</h3><pre>{result ? JSON.stringify(result.payload, null, 2) : '尚未发送请求'}</pre></section> : <>
+      {facets ? <section className="qp-panel mih-news-facets"><h2><Books size={19} /> 来源分布</h2><p>当前条件下最新 {facets.sampledRecords} 条记录{facets.truncated ? ' · 已达 5,000 条统计上限，不代表全库分布' : ''} · {dateText(facets.asOf)}</p><div>{facets.sources.map((item, index) => <button key={item.catalogEntryId || item.code || index} className="qp-button qp-button--outline qp-button--sm" onClick={() => { setEntries(item.catalogEntryId ? [item.catalogEntryId] : []); setSourceCode(item.catalogEntryId ? '' : item.code || ''); if (!item.catalogEntryId && !item.code) setBinding('unmapped') }}>{item.name} <strong>{item.count}</strong></button>)}</div><small>点击填入筛选条件，再点查询。统计不合并转载和重复采集。</small></section> : null}
       <div className="mih-news-list-heading"><h2><NewspaperClipping size={22} /> 新闻列表</h2><span>{result ? `已加载 ${rows.length} 条` : '查询后展示已收录新闻'}</span></div>
       {rows.length ? <div className="mih-news-list">{rows.map(row => <article className="qp-panel mih-news-card" key={row.id}>
         <div className="mih-news-card-meta"><span>{row.source.name}</span><span>{row.category}</span><span>{row.source.bindingStatus === 'mapped' ? '目录已绑定' : '待归类'}</span><span>{EXTENT[row.contentExtent]}</span></div>

@@ -210,6 +210,7 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
   newsSources: (key, signal) => publicDataRequest(key, '/api/v1/data/news/sources', { signal }),
+  newsSourceOptions: (key, signal) => publicDataRequest(key, '/api/v1/data/news/source-options', { signal }),
   newsSearch: (key, body, idempotencyKey) => publicDataRequest(key, '/api/v1/data/news/search', { method: 'POST', body, idempotencyKey }),
   newsFacets: (key, body, idempotencyKey) => publicDataRequest(key, '/api/v1/data/news/facets', { method: 'POST', body, idempotencyKey }),
   newsArticle: (key, id, idempotencyKey) => publicDataRequest(key, `/api/v1/data/news/articles/${encodeURIComponent(id)}`, { idempotencyKey }),

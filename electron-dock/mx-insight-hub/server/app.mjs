@@ -6016,6 +6016,12 @@ export function createApp({
         sendJson(response, 200, { data: await service.newsSources(context), requestId }, { 'cache-control': 'no-store' })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/news/source-options') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'news source options')
+        sendJson(response, 200, { data: await service.newsSourceOptions(context), requestId }, { 'cache-control': 'no-store' })
+        return
+      }
       params = routeMatch(pathname, '/api/v1/data/news/articles/:id')
       if ((request.method === 'GET' && params) || (request.method === 'POST' && ['/api/v1/data/news/search', '/api/v1/data/news/facets'].includes(pathname))) {
         const context = await requirePublic(request)

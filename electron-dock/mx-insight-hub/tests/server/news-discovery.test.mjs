@@ -66,9 +66,10 @@ test('source classification uses structured evidence, disallows invented IDs and
 })
 
 test('news HTTP requests preserve grants, billing replay, explicit dispatch and Admin-only classification', async () => {
-  const store = new MemoryStore(), queries = []
+  const store = new MemoryStore(), queries = [], optionReads = []
   const adapter = { capabilities: async () => ({ data: { platforms: [] } }), dependencies: async () => ({ status: 'up' }) }
   const service = new HubService({ store, adapter, apiKeyPepper: 'test-news-http-pepper-at-least-32-bytes', newsDiscovery: {
+    async sourceOptions(platforms) { optionReads.push(platforms); return { items: [{ key: entry.id, value: entry.canonicalName }] } },
     async search(query) { queries.push(query); return { items: [], pageInfo: { returnedCount: 0, hasMore: false, nextCursor: null } } },
     async article(articleId, platforms) { assert.deepEqual(platforms, [NEWS]); throw Object.assign(new Error('not visible'), { status: 404, code: 'news_article_not_found' }) },
   } })
@@ -89,6 +90,16 @@ test('news HTTP requests preserve grants, billing replay, explicit dispatch and 
     const metadata = await call('/api/v1/data/news/sources')
     assert.equal(metadata.response.status, 200)
     assert.equal(metadata.payload.data.coverage, 'not_measured')
+    const sourceOptions = await call('/api/v1/data/news/source-options')
+    assert.equal(sourceOptions.response.status, 200)
+    assert.match(sourceOptions.response.headers.get('cache-control'), /no-store/)
+    assert.deepEqual(sourceOptions.payload.data.items, [{ key: entry.id, value: entry.canonicalName }])
+    assert.deepEqual(optionReads, [[NEWS]])
+    assert.equal((await call('/api/v1/data/news/source-options?platforms=all')).response.status, 400)
+    assert.equal((await call('/api/v1/data/news/source-options', null, { authorization: '' })).response.status, 401)
+    assert.equal((await call('/api/v1/data/news/source-options', null, { authorization: 'Bearer news-admin-only' })).response.status, 401)
+    assert.equal(optionReads.length, 1)
+    assert.equal(store.requests.size, 0, 'opening the source dropdown must not reserve metered usage')
     assert.equal(queries.length, 0)
     assert.equal((await call('/api/v1/data/news/search', {})).response.status, 200)
     const replay = await call('/api/v1/data/news/search', {})
@@ -102,7 +113,12 @@ test('news HTTP requests preserve grants, billing replay, explicit dispatch and 
     assert.equal(adminReads, 0)
     assert.equal((await call('/internal/v1/admin/agent/catalog-classifier/records', null, { authorization: 'Bearer news-admin-only' })).response.status, 200)
     assert.equal(adminReads, 1)
+    await service.putPlatformConfiguration(NEWS, { tenantId: tenant.id, consumerId: consumer.id, enabled: false, maxRequests: 100, windowSeconds: 60, maxPageSize: 50 })
+    assert.equal((await call('/api/v1/data/news/source-options')).response.status, 403)
+    assert.equal(optionReads.length, 1)
     await store.revokeApiKey(key.id)
+    assert.equal((await call('/api/v1/data/news/source-options')).response.status, 401)
+    assert.equal(optionReads.length, 1)
     assert.equal((await call('/api/v1/data/news/search', {})).response.status, 401)
     assert.equal(queries.length, 1)
   } finally { await new Promise(resolve => server.close(resolve)) }
@@ -137,6 +153,7 @@ test('PostgreSQL news search, legacy projection, review conflicts and Agent idem
     await insert(6, { content_type: 'bbc.article' }); await insert(7, { stable_fields: { crawler: { lineage: { qualityStatus: 'rejected' } } } })
     const news = new NewsDiscoveryStore(pool)
     const scoped = { ...options, platforms: [NEWS] }
+    assert.deepEqual((await news.sourceOptions([NEWS])).items, [], 'unbound records are not catalog source options')
     const first = await news.search(normalizeNewsQuery({ pageSize: 2 }, scoped), scoped.secret)
     assert.deepEqual(first.items.map(row => row.id), [id(5), id(4)])
     assert.equal(first.items[0].summary, '保留的历史摘要')
@@ -160,8 +177,10 @@ test('PostgreSQL news search, legacy projection, review conflicts and Agent idem
     assert.equal(proposal.method, 'rule')
     assert.equal(proposal.status, 'proposed')
     await ruleAgent.review(proposal.id, { decision: 'accept', expectedBindingRevision: 0 }, 'test-admin')
+    assert.deepEqual((await news.sourceOptions([NEWS])).items, [{ key: entry.id, value: entry.canonicalName }])
     assert.equal((await news.search(normalizeNewsQuery({ catalogEntryIds: [entry.id] }, scoped), scoped.secret)).items[0].source.catalogEntryId, entry.id)
     await db.query('UPDATE core.canonical_records SET current_revision = 2 WHERE id = $1', [id(1)])
+    assert.deepEqual((await news.sourceOptions([NEWS])).items, [], 'stale reviews cannot qualify a source')
     assert.equal((await news.search(normalizeNewsQuery({ catalogEntryIds: [entry.id] }, scoped), scoped.secret)).items.length, 0)
     const next = await ruleAgent.propose({ recordId: id(1), recordRevision: 2, requestKey: 'rule-next-revision' }, 'test-admin')
     const workbench = await ruleAgent.records({ query: '新闻测试', binding: 'all' })
@@ -197,5 +216,45 @@ test('PostgreSQL news search, legacy projection, review conflicts and Agent idem
     assert.equal((await classifier.propose({ ...request, requestKey: 'agent-new-explicit-request' }, 'test-admin')).id, successful.id)
     assert.equal(calls, 2)
     assert.equal((await news.article(id(5), [NEWS])).article.source.bindingStatus, 'unmapped', 'Agent proposal alone cannot change a binding')
+
+    // Options use the effective binding and the same visibility rules as search.
+    // Keep distinct UUIDs even when catalog display names happen to coincide.
+    for (let n = 91; n <= 100; n++) await db.query(`INSERT INTO catalog.source_catalog_entries
+      (id, source_key, canonical_name, major_category, scenarios, regions, source_kind, archived_at)
+      VALUES ($1, $2, $3, '新闻', ARRAY['新闻资讯'], ARRAY['中国'], $4, $5)`,
+    [id(n), `source-test-${n}`, n === 91 ? entry.canonicalName : `来源 ${n}`, n === 96 ? 'provider' : 'platform', n === 97 ? '2026-01-01' : null])
+    const bound = n => ({ ...record.stable_fields, sourceCatalog: { publisher: { entryId: id(n) } } })
+    await insert(10, { stable_fields: bound(91) })
+    await insert(11, { platform: FINANCE, stable_fields: bound(92) })
+    await insert(12, { content_type: 'forum.post', stable_fields: bound(93) })
+    await insert(13, { stable_fields: { ...bound(94), crawler: { lineage: { qualityStatus: 'rejected' } } } })
+    await insert(14, { stable_fields: bound(95) })
+    await db.query('UPDATE core.canonical_records SET deleted_at = now() WHERE id = $1', [id(14)])
+    await insert(15, { stable_fields: bound(96) })
+    await insert(16, { stable_fields: bound(97) })
+    await insert(17, { stable_fields: bound(98), title: null, body: null })
+    await insert(18, { stable_fields: bound(99), collected_at: '2012-01-01T00:00:00Z' })
+    await insert(19, { stable_fields: { commerce: { marketplace: { entryId: id(100) } } } })
+    const optionKeys = async platforms => (await news.sourceOptions(platforms)).items.map(item => item.key).sort()
+    assert.deepEqual(await optionKeys([NEWS]), [90, 91, 99, 100].map(id).sort())
+    assert.deepEqual(await optionKeys([NEWS, FINANCE]), [90, 91, 92, 99, 100].map(id).sort())
+    const multiple = await news.search(normalizeNewsQuery({ catalogEntryIds: [id(91), id(99)] }, scoped), scoped.secret)
+    assert.deepEqual(multiple.items.map(row => row.id), [id(10), id(18)], 'selected source UUIDs are OR-ed')
+    await db.query('UPDATE catalog.source_catalog_entries SET canonical_name = $2 WHERE id = $1', [id(91), '新来源名称'])
+    assert.equal((await news.sourceOptions([NEWS])).items.find(item => item.key === id(91)).value, '新来源名称')
+    catalogStore.listSourceCatalogEntries = async () => [{ ...entry, revision: 2 }]
+    const override = await ruleAgent.propose({ recordId: id(10), recordRevision: 1, requestKey: 'override-stored-source' }, 'test-admin')
+    await ruleAgent.review(override.id, { decision: 'accept', expectedBindingRevision: 0 }, 'test-admin')
+    assert.ok(!(await optionKeys([NEWS])).includes(id(91)), 'current review takes precedence over the ingested binding')
+    await db.query('UPDATE core.canonical_records SET current_revision = 2 WHERE id = $1', [id(10)])
+    assert.ok((await optionKeys([NEWS])).includes(id(91)), 'stale review falls back to the ingested binding')
+    await db.query(`INSERT INTO core.canonical_records (id, dataset_id, platform, object_type, external_id, schema_version, content_type, title, collected_at)
+      SELECT ('20000000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'test.v1', $1, 'article', n::text, 'v1', 'news.article', '近期未归类新闻', '2026-09-23'
+      FROM generate_series(1, 5001) n`, [NEWS])
+    const allOptions = await news.sourceOptions([NEWS])
+    assert.equal(allOptions.scope, 'authorized_news_catalog_sources')
+    assert.equal(allOptions.countBasis, 'catalog_entries')
+    assert.equal(allOptions.total, 4)
+    assert.ok(allOptions.items.some(item => item.key === id(99)), 'older source is present beyond the latest 5000 records')
   } finally { await db.close() }
 })
