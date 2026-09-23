@@ -66,7 +66,16 @@ def render(value):
         phase={'running_on_nas':'已切换到 NAS'}.get(value['phase'],value['phase'])
         reclaim=value.get('ssd_reclaim')
         detail=json.dumps(reclaim,ensure_ascii=False,indent=2) if reclaim else '尚无完成记录'
-        return '迁移：{}；业务验收待完成：{}\nSSD 回收：{}'.format(phase,yes(value.get('business_acceptance_pending')),detail)
+        return '历史切换记录：{}；业务验收待完成：{}\nSSD 回收：{}\n历史记录不代表当前仍在 NAS；以当前挂载核对为准。'.format(phase,yes(value.get('business_acceptance_pending')),detail)
+    if event=='nas_infra_storage_check':
+        rows=[]
+        for s in value['services']:
+            m=s.get('kernel_source') or {}
+            rows.append([s['service'],'匹配' if s['matched'] else '未匹配/未确认',
+                         (m.get('type','未知')+' '+m.get('target','')), '；'.join(s['issues']) or '已核对'])
+        return ('当前 NAS 存储核对：'+('匹配' if value['ok'] else '不通过，禁止据此回收 SSD')+'\n'+
+                table(['服务','核对','内核媒体来源','说明'],rows)+'\n'+
+                '\n'.join(value['issues']+[value['note']]))
     if event=='nas_host_mounts':
         rows=['  {} [{}]\n    来源：{}\n    选项：{}'.format(cell(r['target']),cell(r['type']),cell(r['source']),cell(r['options'])) for r in value['mounts']]
         return '宿主机 NAS 挂载核对：'+('匹配' if value['host_mount_verified'] else '未匹配，请检查')+'\n'+'\n'.join(rows)+'\n仅检查本机挂载表，不代表 NAS 磁盘/存储池健康。'

@@ -2,6 +2,8 @@
 
 本项目统一维护两类工作：服务器 SSD/NAS 存储排查与迁移工具，以及 mx-static 媒体采集、读取和归档服务。
 
+2026-09-24 最新现场：infra 曾成功迁至 NAS，但后续容器重建遗漏 NAS 覆盖，当前又在 SSD 写入。先处理两侧独有数据与部署漂移，不能依据旧成功记录清理 SSD。见 [重启、重装、断电与防回退方案](nas_docs/operations/no-ssd-fallback.md)；只读检查入口：`bash scripts/manage.sh nas infra storage check`。
+
 | 工作 | 入口 |
 | --- | --- |
 | 当前 Delta 媒体迁移、目录规划、只读检查 | [nas_docs](nas_docs/README.md) |

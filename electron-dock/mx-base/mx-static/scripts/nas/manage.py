@@ -21,6 +21,7 @@ import recovery as recovery_control
 import host as host_control
 import action_log
 from projects import infra as infra_adapter
+from projects import infra_storage
 import cutover
 import cutover_prepare as prep
 import precopy
@@ -147,6 +148,8 @@ def status(part, profile):
     capacity=os.statvfs('/data')
     emit('nas_status',part=part,containers=summary(rows,profile),data_available_bytes=capacity.f_bavail*capacity.f_frsize,
          auto=auto_config(),systemd=systemd_summary(),nas_walk=False)
+    if profile['storage_file']:
+        infra_storage.check(sys.modules[__name__],profile,rows)
     if profile['report']:
         fd=cutover.open_report(profile['report'])
         try:
@@ -361,7 +364,7 @@ def set_auto(part,profile,enabled):
 def parser():
     p=argparse.ArgumentParser(description='mx-static NAS operations (no Node/static-server dependency).')
     sub=p.add_subparsers(dest='action');sub.required=True
-    for action in ('status','locate','boot-check','copy','prepare','cutover','plan','reclaim','recover','redeploy','compose','logs','auto-enable','auto-disable','permissions-check','permissions-probe','deployment-audit','_execute-permissions','_execute-recover','_execute-redeploy'):
+    for action in ('status','locate','boot-check','copy','prepare','cutover','plan','reclaim','recover','redeploy','compose','logs','auto-enable','auto-disable','permissions-check','permissions-probe','deployment-audit','storage-check','_execute-permissions','_execute-recover','_execute-redeploy'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         if action in ('permissions-probe','_execute-permissions'):s.add_argument('--write-test',action='store_true')
         if action=='copy':s.add_argument('--unlimited',action='store_true')
@@ -379,6 +382,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra permissions check
   bash scripts/manage.sh nas infra permissions probe --write-test
   bash scripts/manage.sh nas infra deployment audit
+  bash scripts/manage.sh nas infra storage check     # 当前挂载核对；不符/未确认退出 1
   bash scripts/manage.sh nas infra task part1 plan
   bash scripts/manage.sh nas infra task part1 cleanup --business-accepted
   bash scripts/manage.sh nas delta task part2 copy --unlimited
@@ -396,7 +400,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
 
 兼容旧用法: sudo bash scripts/manage.sh nas <操作> [part1|part2] [选项]
 
-  status part1|part2        容器、迁移状态、SSD 可用空间、开机恢复配置
+  status part1|part2        容器、历史迁移记录、当前挂载、SSD 空间、开机恢复配置
   locate part1|part2        定位 Git 声明、覆盖文件、报告、源/目标、系统服务
   logs part1|part2          跟随迁移日志（part1 包含开机恢复日志）
   boot-check part1          只读检查容器登记、挂载声明和数据库健康
@@ -411,7 +415,8 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   auto-enable part1        登记希望开机运行，并启用持久 timer
   auto-disable part1       暂停开机恢复；不停止业务容器
 
-part1 已切换，重复 copy/prepare/cutover 会拒绝。part2 尚仅支持预复制。
+part1 有历史切换记录，当前挂载需另行核对；重复 copy/prepare/cutover 会拒绝。
+part2 尚仅支持预复制。storage check 不拦截外部发布，也不授权清理或重置迁移记录。
 没有服务器 reboot、数据库重启或自动删除命令。迁移任务是临时单元；
 开机恢复在安装和启用后生效，成功后不持续重启/监控容器。
 """
@@ -445,6 +450,7 @@ def main():
         if action.startswith('host-'):
             host_control.inspect(action[5:],catalog.load(CONFIG)[1])
         elif action=='deployment-audit':infra_adapter.deployment_audit(sys.modules[__name__],profile)
+        elif action=='storage-check':return 0 if infra_storage.check(sys.modules[__name__],profile) else 1
         elif action=='permissions-check':
             with migration_lock():infra_adapter.permissions(sys.modules[__name__],profile)
         elif action=='_execute-permissions':

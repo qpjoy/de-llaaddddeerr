@@ -1,6 +1,8 @@
 # NAS 迁移运维入口
 
-最新现场（2026-09-22）：恢复快照 `bd7b343be731926be9c8` 已安装并启用已迁移项目统一策略。infra 已核对并纳入，service 为 active/exited，timer 为 active/running 且 enabled；delta 等待迁移。真实重启、NAS 晚启动和断线演练尚未进行；业务验收及 SSD 回收仍待回执。见 [systemd 239 修复与成功回执](operations/systemd-239-recovery-fix.md)。
+最新现场（2026-09-24）：infra 十个媒体消费者在后续重建中遗漏 NAS 覆盖，内核已确认当前实际使用 SSD；恢复因 `.env`/部署身份漂移被阻止。两侧各有独有文件，禁止清理、重复旧复制或绕过检查。详见 [当前差异、重启/重装/断电与防回退要求](operations/no-ssd-fallback.md)。新增 `nas infra storage check` 只读核对当前配置和内核挂载，不能代替发布启动拦截。
+
+历史现场（2026-09-22）：恢复快照 `bd7b343be731926be9c8` 曾安装并启用已迁移项目统一策略；见 [成功回执](operations/systemd-239-recovery-fix.md)。这不是当前存储状态或真实重启演练的证明；业务验收及 SSD 回收仍待回执。
 
 默认已改为中文易读输出，`--json` 保留原始事件。推荐 `nas recovery check` 统一检查全部项目，安装后用 `nas recovery enable --migrated` 启用已迁移项目统一模式；详见 [易读输出与统一恢复](operations/readable-recovery.md)。
 
@@ -8,11 +10,13 @@
 
 统一入口已加入 `bash scripts/manage.sh nas`，配置和运维全部保留在 mx-static。查看 [统一管理、部署配置与开机恢复](operations/unified-management.md)。它自动定位成功报告和 NAS override；持久恢复须在服务器显式安装/启用，之前的 systemd-run 任务仍是临时任务。
 
-当前进度：第一卷 `po_infra_media_data` 已成功切换 NAS，服务恢复与媒体 Range 检查通过；等待业务验收，SSD 旧副本仍保留。只读清单已通过；业务验收正常后执行 [第一卷 SSD 回收](operations/part1-reclaim.md)。清单依据见 [只读空间回收清单](operations/part1-reclaim-plan.md)。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行已经完成的切换。
+第一卷历史上成功切换 NAS，但当前需先处理两侧增量并恢复正确挂载。旧 [SSD 回收流程](operations/part1-reclaim.md) 和 [只读清单](operations/part1-reclaim-plan.md) 保留作历史依据，不能按旧状态立即执行。[切换与恢复入口](operations/part1-cutover.md) 和下面的早期探测步骤保留作历史参考，不重复执行旧切换。
 
 本目录记录部署证据、存储目录规划、迁移步骤和注意点。工具在 `scripts/nas/`，只读入口为 `bash scripts/nas-audit.sh`，独立显式写探测为 `bash scripts/nas-probe.sh`，小批复制入口为 `bash scripts/nas-sample-copy.sh`，完整在线预复制入口为 `bash scripts/nas-precopy.sh`，在线完整内容校验入口为 `bash scripts/nas-verify.sh`；不需要启动 mx-static 容器。静态文件服务仍由 [docs/README.md](../docs/README.md) 描述。
 
 ## 当前目标与状态
+
+以下为 9 月 22 日迁移阶段记录；具体“下一步”已被上方 9 月 24 日现场覆盖。
 
 先把 mx-internal-server 上两个媒体卷的原始媒体复制到 NAS。用户最新安排：先 po_infra，再 delta；po_infra 可安排 10–30 分钟维护窗口。后台预复制不设四小时退出，优先完成单卷；真实复制错误仍报告失败。原数据保留到校验、切换和业务验收通过，之后用户已授权回收对应旧 raw_media；原 named volume 和其他目录保留。SSD 上的数据库、队列、agent 工作区和其他 Docker/Kubernetes 数据保持原职责。**第一卷已完成预复制和生产切换；业务验收待回传，尚未删除原数据或回收 SSD。**
 

@@ -4,7 +4,9 @@ The NAS tooling is a production data-management component. Read `nas_docs/SAFETY
 
 ## Established production state
 
-- On 2026-09-22, `po_infra_media_data/data_hub_raw_media` (task `part1`, project `infra`, Compose `mx_data`) successfully switched to the NAS. The NAS may contain newer writes than SSD. It is the authoritative source for that subtree.
+- On 2026-09-22, `po_infra_media_data/data_hub_raw_media` (task `part1`, project `infra`, Compose `mx_data`) successfully switched to the NAS. NAS remains the intended authority; the historical receipt is NOT proof of current placement.
+- On 2026-09-24, user diagnostics confirmed all ten infra consumers were recreated on Sep 23 without the NAS override and now use the SSD parent (kernel XFS). Nine application images and `.env.ghcr` changed; recovery correctly blocks configuration drift. Both NAS and SSD now have unique files. Do not clean SSD, repeat the old copy/cutover, reuse the old pinned-image override for the new version, or reset report hashes to bypass checks. See `nas_docs/operations/no-ssd-fallback.md` for evidence and recovery requirements.
+- Latest live comparison: SSD-only 5,219 files / 2,867,924,180 bytes; NAS-only 1,032 files / 358,919,683 bytes. All 79 shared size/mtime differences hash identically; 1,681 tmp files differ only in mode (SSD 0644, NAS 0600). No copy/merge, business acceptance, restored NAS deployment or cleanup is confirmed. These live results do not replace a final stopped-writer check.
 - The latest confirmed SSD cleanup inventory contains 194,686 files; no cleanup completion or business acceptance has been received in this session. Do not infer either from a successful copy/check/prepare.
 - `delta_59202_media_data` (task `part2`, project `delta`) has no reviewed cutover or cleanup record yet. Do not reuse Part 1 identities or configuration.
 - On 2026-09-22, recovery snapshot `bd7b343be731926be9c8` was installed and enabled successfully with the unified migrated policy: infra verified/included, delta waiting for migration, service active/exited and timer active/running + enabled. No real reboot, NAS late-start or outage drill has been confirmed. This receipt does not establish business acceptance or SSD cleanup.
@@ -20,6 +22,7 @@ The NAS tooling is a production data-management component. Read `nas_docs/SAFETY
 6. Add new projects through `deploy/nas` registrations and a reviewed adapter. A catalog entry is not authorization for a generic migration/deletion engine. Keep old CLI forms compatible while jobs may be running.
 7. Root operator access does not prove application access. Check the application's container identity and actual bounded I/O, keep gateway readers read-only, and change permission policy only through a separately scoped plan.
 8. mx-static's archive worker has its own object/manifest ownership. Never attach it to an existing business raw-media directory as if that directory were an initialized archive. Preserve one clearly defined writer/cleanup owner per namespace.
+9. NAS placement must fail closed across reboot/reinstall: missing metadata/configuration never authorizes an SSD fallback. Read-only `infra storage check` detects current placement but does not intercept external releases. Do not claim the old deployment path is protected until a mandatory release/start control is implemented and verified. Preserve MX-H2I login/network behavior; no auth reset or database initialization as a storage repair.
 
 ## Verification and operations
 

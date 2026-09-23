@@ -89,6 +89,9 @@ def route(argv, config):
     if tail==['deployment','audit']:
         if 'deployment-audit' not in p['capabilities']:raise RuntimeError('Deployment adapter not reviewed.')
         return ['deployment-audit',task]
+    if tail==['storage','check']:
+        if p['adapter']!='infra-v1':raise RuntimeError('Storage check adapter not reviewed for this project.')
+        return ['storage-check',task]
     action={'recovery':'recover','cleanup':'reclaim'}.get(tail[0],tail[0])
     if action=='compose' and p['adapter']=='infra-v1':return ['compose',task]+tail[1:]
     if action not in p['capabilities']:raise RuntimeError('Unsupported project action: '+action)

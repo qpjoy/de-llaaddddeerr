@@ -1,5 +1,7 @@
 # NAS 统一管理、部署配置和重启恢复
 
+**2026-09-24 现场更新：** infra 后续重建遗漏 NAS 覆盖，当前实际在 SSD，恢复被配置漂移阻止。本页“同版本重建/清理”不能用于绕过该阻止；旧 override 含旧镜像，不可直接用于新版本恢复。先读 [当前差异与重启/重装防回退要求](no-ssd-fallback.md)。
+
 **更新：** 默认中文易读显示；推荐 `nas recovery check` 和 `nas recovery enable --migrated` 管理全部已成功迁移且审核登记的项目，保留单项目暂停例外，参见 [统一恢复模式](readable-recovery.md)。本页逐项目命令继续兼容，但不必逐个 enable。
 
 后续已加入 host / project / task 二级入口及 infra 权限、发布审查、私有审计；见 [NAS 管理结构](nas-platform.md) 与 [安全约定](../SAFETY.md)。本页旧命令仍兼容。
@@ -14,7 +16,7 @@ NAS 子命令在静态服务器的 Node、`.env`、容器逻辑之前分发，�
 
 ## 当前覆盖文件在哪里
 
-线上实际使用的完整覆盖文件是：
+9 月 22 日成功切换使用的完整覆盖文件是（当前容器已遗漏它）：
 
 ```text
 /var/lib/mx-static/nas-cutover/po_infra_media_data-830225384207402a8ba23a2364d252d1/compose.nas.override.json
@@ -36,7 +38,7 @@ sudo bash scripts/manage.sh nas status part1
 sudo bash scripts/manage.sh nas compose part1 config-check
 ```
 
-`status` 只读取 Docker 元数据和 SSD 空间，不遍历 NAS，不能据此声称 NAS 硬盘/RAID 健康。`locate` 和日志、暂停自动恢复在 Docker 暂不可用时也可使用。
+`status` 只读取 Docker 元数据、本机内核挂载表和 SSD 空间，不遍历 NAS，不能据此声称 NAS 硬盘/RAID 健康。历史迁移记录与当前挂载分别显示。`nas infra storage check` 独立检查当前容器，不依赖旧 `.env` 哈希；不匹配或无法确认返回 1，但不拦截外部发布。`locate` 和日志、暂停自动恢复在 Docker 暂不可用时也可使用。
 
 ## 日常命令
 
