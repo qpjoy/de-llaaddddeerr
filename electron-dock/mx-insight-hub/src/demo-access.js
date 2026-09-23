@@ -10,6 +10,17 @@ const LABELS = {
   'compat.xiaohongshu.app_v2': '小红书 App V2 接口',
 }
 
+// News reads use the intersection of consumer and Key saved-record categories.
+// source_catalog grants and billing meter names are not news permissions.
+export function newsAccessIssue(access) {
+  if (!access) return null // Manually supplied keys remain server-validated.
+  const hasCategory = values => values?.some(value => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(value))
+  if (hasCategory(access.platforms)) return null
+  return hasCategory(access.consumerPlatforms)
+    ? '调用者已开通存量数据类别，但当前 Key 未包含这些权限。请在 API Keys → 调整 Key 权限中勾选所需数据类别并保存，再重新检查当前 Hub Key。'
+    : '当前调用者尚未开通新闻所需的数据类别。请平台管理员在开放能力 → 存量记录 · 按栏目中开通所需类别（如“数据中心 · 新闻资讯”），再为当前 Key 勾选相同类别。'
+}
+
 // Diagnose each operation independently: paused user posts must not block search.
 export function demoAccessIssues(access, operation, compatibility = false) {
   if (!access) return [] // Manual admin keys remain server-validated.

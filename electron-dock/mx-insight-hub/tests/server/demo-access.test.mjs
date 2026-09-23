@@ -1,12 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { demoAccessIssues } from '../../src/demo-access.js'
+import { demoAccessIssues, newsAccessIssue } from '../../src/demo-access.js'
 const access = {
  platforms:['xiaohongshu'], consumerPlatforms:['xiaohongshu'],
  capabilities:['social.posts.search','social.posts.resolve','social.users.posts','compat.xiaohongshu.app_v2'],
  consumerCapabilities:['social.posts.search','social.posts.resolve','social.users.posts','compat.xiaohongshu.app_v2'],
  operations:{'social.posts.search':{ready:true},'social.posts.resolve':{ready:true},'social.users.posts':{ready:false,effectiveState:'disabled'}},
 }
+test('news access separates consumer category grants from Key scope and unrelated catalog permission', () => {
+ const category = 'data_center_saved_records_news'
+ assert.equal(newsAccessIssue(null), null)
+ assert.match(newsAccessIssue({ platforms: ['source_catalog'], consumerPlatforms: ['source_catalog'] }), /当前调用者尚未开通/)
+ assert.match(newsAccessIssue({ platforms: [], consumerPlatforms: [category] }), /当前 Key 未包含/)
+ assert.equal(newsAccessIssue({ platforms: [category], capabilities: [] }), null)
+ assert.equal(newsAccessIssue({ platforms: ['data_center_saved_records_finance'] }), null)
+ assert.equal(newsAccessIssue({ platforms: ['data_center_saved_records_custom_2026'] }), null)
+ assert.match(newsAccessIssue({ platforms: ['news', 'data.canonical-search', 'data_center_saved_records_'] }), /当前调用者尚未开通/)
+})
 test('a disabled user-posts operation does not block search or detail',()=>{
  assert.deepEqual(demoAccessIssues(access,'social.posts.search',true),[])
  assert.deepEqual(demoAccessIssues(access,'social.posts.resolve'),[])

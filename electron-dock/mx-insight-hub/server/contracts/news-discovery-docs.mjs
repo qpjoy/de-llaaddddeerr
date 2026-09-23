@@ -52,6 +52,20 @@ export const newsOpenApiPaths = {
 }
 export function newsGuide() { return `<section class="doc-page" data-doc-page="news-discovery">
 <h2>新闻发现</h2><p>按数据源目录、结构化来源、类别和时间检索已入库新闻。读取 Hub 库存，不采集、不补抓正文、不调用模型。每次请求重新检查 tenant、consumer、Key 和类别授权；目录筛选不授予数据权限。</p>
+<h3>下游平台需要的完整接口</h3>
+<table><thead><tr><th>用途</th><th>接口</th><th>ID 的来源与用法</th></tr></thead><tbody>
+<tr><td>新闻来源下拉</td><td>GET /api/v1/data/news/source-options</td><td>data.items[].key → catalogEntryIds；value 是显示名称。可多选。</td></tr>
+<tr><td>数据类别与目录元数据</td><td>GET /api/v1/data/news/sources</td><td>data.categories[].id → categories；label 是显示名称，platform 仅表示授权数据域。</td></tr>
+<tr><td>新闻搜索与下一页</td><td>POST /api/v1/data/news/search</td><td>data.items[].id → 文章详情；data.pageInfo.nextCursor → 下一页 cursor。</td></tr>
+<tr><td>已存文章详情</td><td>GET /api/v1/data/news/articles/{id}</td><td>使用搜索返回的文章 id，不使用目录 key。</td></tr>
+<tr><td>来源与类别统计</td><td>POST /api/v1/data/news/facets</td><td>sources[].catalogEntryId 可用于筛选，统计有 5,000 条上限，不能充当全部来源下拉。</td></tr>
+</tbody></table>
+<p>先获取来源和类别，再把所选 ID 放入搜索请求。三个标识不要混用：目录 UUID、文章 UUID、类别代码（如 news）。目录归类 binding 可取 all/mapped/unmapped，时间依据 timeField 可取 firstSeenAt/publishedAt；这些是合同固定枚举，无需额外查询接口。pageSize 为 1–100，仍受当前 Key 的最大分页限制。</p>
+<pre><code>curl -sS "$HUB_URL/api/v1/data/news/source-options" -H "Authorization: Bearer $MX_INSIGHT_API_KEY"
+curl -sS "$HUB_URL/api/v1/data/news/sources" -H "Authorization: Bearer $MX_INSIGHT_API_KEY"</code></pre>
+<p>下面是选中一个目录来源后的搜索请求示例。目录 ID 须从当前 Key 的 source-options 响应选择；类别代码须从 sources 的 categories 选择，均不能硬编码为固定可用范围。</p>
+<pre>{"query":"","catalogEntryIds":["94d36773-8912-5b8e-a593-8d0dcdaac8a3"],"categories":["news"],"binding":"all","timeField":"firstSeenAt","pageSize":20}</pre>
+<p>下一页保持本次条件和 pageSize 不变，只增加或替换 cursor，并生成新的 Idempotency-Key；hasMore=false 时停止。详情使用新的请求标识；同一请求失败重试或重放保持标识。新闻发现的“接口调试”页可选择上述全部接口、复制 cURL/PowerShell/JavaScript 示例、读取真实 ID/名称与响应，并将搜索结果中的文章 ID 填入详情；切换接口和复制示例不会调用接口。</p>
 <h3>目录与来源</h3><p>GET <code>/api/v1/data/news/sources</code> 返回安全目录元数据及当前 Key 的类别，不计 usage unit。目录不是库存承诺。使用返回的 <code>items[].id</code> 填入 <code>catalogEntryIds</code>。使用 <code>sourceCodes</code>（如 sina、huanqiu）查询尚未绑定目录的来源；<code>binding=unmapped</code> 可筛选待归类记录。</p>
 <h3>新闻来源下拉与多选</h3><p>GET <code>/api/v1/data/news/source-options</code> 专供新闻下拉，返回当前 Key 授权类别中至少有一条可读新闻、且有效绑定目录的全部来源。它不使用最新 5000 条统计样本；没有新闻的目录项、已归档目录和未绑定来源不列为选项。接口不计 usage unit，无需 Idempotency-Key，也不请求模型或采集。total 是来源选项数，不是文章数。</p>
 <pre>{"data":{"scope":"authorized_news_catalog_sources","countBasis":"catalog_entries","total":1,"items":[{"key":"94d36773-8912-5b8e-a593-8d0dcdaac8a3","value":"腾讯新闻"}]}}</pre>

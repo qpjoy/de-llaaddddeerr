@@ -2,6 +2,19 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { publicDocsHtmlForPath, tenantOpenApiDocument, PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
+test('news tenants receive all five integration contracts and source/category/article ID guidance', () => {
+ const scopes = [{ platforms: ['data_center_saved_records_news'], capabilities: [] }]
+ const document = tenantOpenApiDocument(scopes)
+ const html = publicDocsHtmlForPath('/docs/news-discovery', { tenant: true, scopes })
+ for (const path of ['/data/news/source-options', '/data/news/sources', '/data/news/search', '/data/news/articles/{id}', '/data/news/facets']) {
+  assert.ok(document.paths[path], path)
+  assert.ok(html.includes(`/api/v1${path}`), path)
+ }
+ for (const value of ['data.items[].key', 'data.categories[].id', 'data.items[].id', 'data.pageInfo.nextCursor']) assert.ok(html.includes(value), value)
+ assert.equal(publicDocsHtmlForPath('/docs/news-discovery', { tenant: true, scopes: [] }), null)
+ assert.ok(!tenantOpenApiDocument([{ platforms: ['source_catalog'], capabilities: [] }]).paths['/data/news/source-options'])
+})
+
 test('tenant pages omit operator navigation and reject direct hidden pages', () => {
   const html = publicDocsHtmlForPath('/docs', { tenant: true })
   for (const path of ['/docs/tools', '/docs/evidence', '/docs/night-all', '/docs/search']) {

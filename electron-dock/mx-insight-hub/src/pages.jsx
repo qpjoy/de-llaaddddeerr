@@ -2830,7 +2830,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     enabled: grants.has(platform),
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
     explicit: policyByPlatform.has(platform),
-  })).filter((row) => matchesFilter(row.platform, platformLabel(row.platform), row.platform === 'enterprise' ? '启信宝 启信慧眼 qixin' : ''))
+  })).filter((row) => matchesFilter(row.platform, platformLabel(row.platform), row.platform === 'enterprise' ? '启信宝 启信慧眼 qixin' : '', row.platform.startsWith('data_center_saved_records_') ? '新闻发现' : ''))
   const groupedPlatformRows = [...PLATFORM_GROUPS, { key: 'other', label: '其他', hint: '' }]
     .map((group) => ({
       ...group,
@@ -3075,6 +3075,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         title="API Key 可访问的数据平台 / 数据域"
         subtitle={`${grants.size} / ${platformCatalog.length} 已启用；调用者授权是上限，Key 权限需单独勾选并保存`}
       >
+        <p>新闻发现按下方“存量记录 · 按栏目”的数据类别授权，例如“数据中心 · 新闻资讯”；财经、科技等类别也可能包含新闻。开通调用者后，还需在 API Keys 中调整原 Key 权限并勾选相同类别。搜索“新闻发现”可查看这些类别，无需另找同名业务操作。</p>
         {data.consumerId ? (
           <div className="mih-capability-filter">
             <MagnifyingGlass size={16} aria-hidden="true" />

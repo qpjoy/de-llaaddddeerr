@@ -16,6 +16,16 @@
 .mih-news-card footer { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; color: var(--qp-text-3); font-size: 12px; }
 .mih-news-card footer button { margin-left: auto; }
 .mih-news-debug pre { max-height: 520px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.mih-news-debug-wrap, .mih-news-debug { min-width: 0; }
+.mih-news-debug { scroll-margin-top: 80px; }
+.mih-news-debug h3 code { overflow-wrap: anywhere; }
+.mih-news-debug > p { line-height: 1.7; color: var(--qp-text-2); }
+.mih-news-debug > details { margin: 18px 0; }
+.mih-news-api-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.mih-news-api-table { overflow: auto; max-height: 340px; margin: 14px 0; }
+.mih-news-api-table table { min-width: 560px; }
+.mih-news-api-table td { overflow-wrap: anywhere; }
+.mih-news-api-table input { width: 16px; height: 16px; accent-color: var(--qp-primary); }
 .mih-news-facets { display: grid; gap: 12px; }
 .mih-news-facets > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .mih-news-detail { line-height: 1.8; overflow-wrap: anywhere; }

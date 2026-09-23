@@ -38,3 +38,21 @@ test('ordinary copied IP commands omit idempotency without requiring a user plac
   assert.ok(!code.includes('undefined'))
  }
 })
+
+test('GET metadata and article snippets omit request body and preserve optional idempotency', async () => {
+ for (const idempotencyKey of [undefined, 'news-article-001']) {
+  const request = { ...input, method: 'GET', body: undefined, idempotencyKey }
+  for (const format of ['curl', 'powershell', 'fetch', 'node']) {
+   const code = requestSnippet({ ...request, format })
+   assert.doesNotMatch(code, /Content-Type|--data-raw|-Body|undefined/)
+   assert.equal(code.includes('Idempotency-Key'), Boolean(idempotencyKey))
+   if (format === 'fetch' || format === 'node') {
+    const calls = []
+    const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor
+    await new AsyncFunction('fetch', 'console', format === 'fetch' ? `return ${code}` : code)(async (...args) => { calls.push(args); return new Response('{}') }, { log() {} })
+    assert.equal(calls[0][1].method, 'GET')
+    assert.equal(calls[0][1].body, undefined)
+   }
+  }
+ }
+})
