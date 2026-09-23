@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "endpointId": "douyin_search_fetch_video_search_v1",
+  "transport": "direct official TikHub; no Hub/Night-All HTTP request ID",
+  "query": "人工智能",
+  "networkCalls": 3,
+  "automaticRetries": 0,
+  "serviceDatabaseWrites": 0,
+  "billingAmountsChecked": false,
+  "calls": [
+    {
+      "phase": "first",
+      "startedAt": "2026-09-23T06:52:22.464Z",
+      "finishedAt": "2026-09-23T06:52:25.970Z",
+      "httpStatus": 200,
+      "apiCode": 200,
+      "providerRequestId": "b3d4555f-1b8d-4ee2-abfd-ec0a4e009800",
+      "request": {
+        "cursor": 0,
+        "hasSearchId": false,
+        "hasBacktrace": false
+      },
+      "providerBillingStatement": "response declares charged",
+      "response": {
+        "cursor": 8,
+        "hasMore": 1,
+        "rawSearchRows": 7,
+        "normalizedContentCount": 6,
+        "literalSearchIdPresent": false,
+        "sessionSource": "data.log_pb.impr_id",
+        "sessionSha256": "a862afa5b6f461b4927ae221c5bbc98a63ce44fc07f74060c47a811fb5e1d8c8",
+        "extraLogidMatchesImprId": true,
+        "backtracePresent": true
+      }
+    },
+    {
+      "phase": "without-search-id",
+      "startedAt": "2026-09-23T06:52:46.059Z",
+      "finishedAt": "2026-09-23T06:52:47.838Z",
+      "httpStatus": 400,
+      "apiCode": 400,
+      "providerRequestId": "be2f6bbe-9ab4-4839-8dd8-dc5d5d96b39d",
+      "request": {
+        "cursor": 8,
+        "hasSearchId": false,
+        "hasBacktrace": true
+      },
+      "providerBillingStatement": "response declares no charge",
+      "response": null
+    },
+    {
+      "phase": "with-search-id",
+      "startedAt": "2026-09-23T06:53:12.820Z",
+      "finishedAt": "2026-09-23T06:53:16.277Z",
+      "httpStatus": 200,
+      "apiCode": 200,
+      "providerRequestId": "b1bfe199-8038-46ca-8c6d-ef0abf93ecef",
+      "request": {
+        "cursor": 8,
+        "hasSearchId": true,
+        "hasBacktrace": true
+      },
+      "providerBillingStatement": "response declares charged",
+      "response": {
+        "cursor": 16,
+        "hasMore": 1,
+        "rawSearchRows": 8,
+        "normalizedContentCount": 7,
+        "literalSearchIdPresent": false,
+        "sessionSource": "data.log_pb.impr_id",
+        "sessionSha256": "95d5bb9b5bb6a268210130543504f7a8b447ea90b9bd440b07b4fbadcd6267c1",
+        "extraLogidMatchesImprId": true,
+        "backtracePresent": true
+      }
+    }
+  ],
+  "contentIdOverlap": 0
+}

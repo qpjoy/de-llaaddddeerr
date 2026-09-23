@@ -122,6 +122,10 @@ Hub 没有保存本路径的上游 requestId；以下映射来自平台、请求
 
 ### 抖音：底层 HTTP 400，仍缺供应商错误正文
 
+后续进展：已通过三次新请求复现缺 search_id 的 400，并验证响应 log_pb.impr_id
+映射后的第二页成功，修复了 Night-All Video Search V1 的提取规则。详见
+[实测与修复记录](douyin-search-id-2026-09-23.md)。下文保留历史证据边界。
+
 source_call_logs.id=242221、endpoint=douyin_search_fetch_video_search_v1 返回 HTTP 400。
 请求已有 cursor=8 和 backtrace，request_search_id 为空。因此不是简单补主 cursor 就能解决。
 [TikHub 分页说明](https://docs.tikhub.io/370212779e0) 说明 search_id、backtrace 应从上一页获取。

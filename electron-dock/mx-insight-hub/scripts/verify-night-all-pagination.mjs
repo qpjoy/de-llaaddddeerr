@@ -50,8 +50,12 @@ for (const endpointId of ['douyin_search_fetch_video_search_v1', 'douyin_search_
   const service = createTikHubRawSearchService({ ...orchestrator, ...mapper, ...execution,
     normalizeTikHubItem: item => item })
   for (let page = 1; page <= 3; page += 1) {
-    fixture = { code: 200, data: { cursor: page * 8, has_more: page < 3 ? 1 : 0,
-      log_pb: { search_id: `synthetic-search-${page}` }, backtrace: `synthetic-backtrace-${page}` } }
+    // Video V1's live response uses log_pb.impr_id, not a search_id key.
+    // Other endpoints keep their explicitly supplied search_id contract.
+    const sessionField = endpointId === 'douyin_search_fetch_video_search_v1' ? 'impr_id' : 'search_id'
+    fixture = { code: 200, params: { search_id: `previous-search-${page - 1}` },
+      data: { cursor: page * 8, has_more: page < 3 ? 1 : 0,
+        log_pb: { [sessionField]: `synthetic-search-${page}` }, backtrace: `synthetic-backtrace-${page}` } }
     const upstream = traversal.upstreamBody
     const result = await service.searchTikHub({ ...upstream,
       keyword: upstream.query, pageSize: 20, limit: 20 })
