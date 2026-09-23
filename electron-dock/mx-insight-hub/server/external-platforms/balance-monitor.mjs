@@ -2,9 +2,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { BALANCE_PROVIDERS, balanceLevel, decimalAmount, queryProviderBalance } from './balance-adapters.mjs'
 import { BALANCE_INCIDENT_CODE, PROBE_INCIDENT_CODE, feishuWebhook, webhookHint } from '../notifications-feishu.mjs'
+import { DEFAULT_BALANCE_SCHEDULE, MONITOR_TIME_ZONE, nextMonitorRun, normalizeMonitorSchedule } from '../../shared/monitor-schedule.mjs'
+import { MonitorCronTimer } from '../monitor-cron-timer.mjs'
 
 export function balancePolicy(input) {
-  const fields = ['enabled', 'warningThreshold', 'criticalThreshold', 'expectedRevision', 'feishuWebhook']
+  const fields = ['enabled', 'warningThreshold', 'criticalThreshold', 'expectedRevision', 'feishuWebhook', 'feishuReminderMinutes', 'balanceSchedule', 'feishuSchedule']
   try {
     if (!input || Array.isArray(input) || Object.keys(input).some(key => !fields.includes(key))
       || typeof input.enabled !== 'boolean'
@@ -12,18 +14,29 @@ export function balancePolicy(input) {
     const warning = decimalAmount(input.warningThreshold)
     const critical = decimalAmount(input.criticalThreshold)
     if (critical.units < 0n || warning.units <= critical.units) throw Error()
-    // Absent means "leave the stored hook alone": the console never receives the
-    // current value, so it cannot echo one back on an ordinary threshold save.
+    if ('feishuReminderMinutes' in input && (!Number.isInteger(input.feishuReminderMinutes)
+      || input.feishuReminderMinutes < 1 || input.feishuReminderMinutes > 1440)) throw Error()
+    if ('feishuReminderMinutes' in input && 'feishuSchedule' in input) throw Error()
+    const schedules = {}
+    for (const field of ['balanceSchedule', 'feishuSchedule']) {
+      if (field in input) {
+        try { schedules[field] = normalizeMonitorSchedule(input[field]) }
+        catch (error) { throw new AppError(400, 'invalid_monitor_schedule', error.message) }
+      }
+    }
+    // Absent means "leave the stored hook alone": ordinary console reads do not
+    // include its value, and a separate reveal never changes the edit field.
     // An explicit empty string clears it and stops notifying that group.
     const webhook = 'feishuWebhook' in input
       ? { set: true, value: feishuWebhook(input.feishuWebhook) }
       : { set: false, value: null }
-    return { ...input, warningThreshold: warning.text, criticalThreshold: critical.text, webhook }
+    return { ...input, ...schedules, warningThreshold: warning.text, criticalThreshold: critical.text, webhook }
   } catch (error) {
+    if (error?.code === 'invalid_monitor_schedule') throw error
     if (error?.code === 'invalid_feishu_webhook') {
       throw new AppError(400, 'invalid_feishu_webhook', '飞书机器人地址需为 https://open.feishu.cn/open-apis/bot/v2/hook/<id>，留空表示不修改')
     }
-    throw new AppError(400, 'invalid_balance_policy', '有效阈值需满足 0 ≤ 严重阈值 < 提醒阈值；固定北京时间每小时整点检查')
+    throw new AppError(400, 'invalid_balance_policy', '有效阈值需满足 0 ≤ 严重阈值 < 提醒阈值；飞书重复提醒间隔需为 1–1440 分钟的整数')
   }
 }
 
@@ -79,9 +92,11 @@ export class SupplierBalanceMonitor {
         provider: row.provider_key, displayName: BALANCE_PROVIDERS[row.provider_key].name,
         currency: row.currency, enabled: row.enabled, revision: row.revision,
         warningThreshold: row.warning_threshold, criticalThreshold: row.critical_threshold,
-        schedule: { timeZone: 'Asia/Shanghai', cadence: 'hourly' },
-        // The hook is secret-bearing, so only whether one is set and a short
-        // tail to tell two bots apart ever leave the service.
+        schedule: { timeZone: MONITOR_TIME_ZONE, ...row.balance_schedule },
+        balanceSchedule: row.balance_schedule,
+        feishuSchedule: row.feishu_schedule,
+        feishuReminderMinutes: row.feishu_reminder_minutes,
+        // Ordinary reads expose metadata only; reveal requires reauthentication.
         feishu: { configured: Boolean(row.feishu_webhook), hint: webhookHint(row.feishu_webhook) },
         balance: hasBalance ? row.last_balance : null,
         level: hasBalance ? balanceLevel(row.last_balance, row.warning_threshold, row.critical_threshold) : 'unknown',
@@ -101,15 +116,37 @@ export class SupplierBalanceMonitor {
     if (!this.pool) throw new AppError(503, 'balance_monitor_unavailable', '余额监控需要 PostgreSQL')
     const policy = balancePolicy(input)
     await this.transaction(async client => {
+      const { rows } = await client.query(`SELECT *,now() AS server_now FROM external_platform.balance_monitors
+        WHERE provider_key=$1 FOR UPDATE`, [provider])
+      const previous = rows[0]
+      if (!previous || previous.revision !== policy.expectedRevision) throw new AppError(409, 'balance_policy_conflict', '监控设置已变化，请刷新后重试')
+      const balanceSchedule = policy.balanceSchedule ?? previous.balance_schedule
+      const feishuSchedule = policy.feishuSchedule ?? (policy.feishuReminderMinutes == null ? previous.feishu_schedule
+        : { mode: 'interval', minutes: policy.feishuReminderMinutes })
+      const nextCheck = nextMonitorRun(balanceSchedule, previous.server_now,
+        JSON.stringify(balanceSchedule) === JSON.stringify(previous.balance_schedule) ? previous.next_check_at : previous.server_now)
       const result = await client.query(`UPDATE external_platform.balance_monitors
         SET enabled=$2, warning_threshold=$3, critical_threshold=$4,
           feishu_webhook=CASE WHEN $6 THEN $7 ELSE feishu_webhook END,
-          revision=revision+1, next_check_at=external_platform.next_balance_check(now()),
+          feishu_reminder_minutes=COALESCE($8,feishu_reminder_minutes),
+          balance_schedule=$9::jsonb, feishu_schedule=$10::jsonb,
+          revision=revision+1, next_check_at=$11,
           lease_token=NULL, lease_until=NULL, updated_at=now()
         WHERE provider_key=$1 AND revision=$5 RETURNING revision`, [provider, policy.enabled,
         policy.warningThreshold, policy.criticalThreshold, policy.expectedRevision,
-        policy.webhook.set, policy.webhook.value])
+        policy.webhook.set, policy.webhook.value, feishuSchedule.mode === 'interval' ? feishuSchedule.minutes : null,
+        JSON.stringify(balanceSchedule), JSON.stringify(feishuSchedule), nextCheck])
       if (!result.rowCount) throw new AppError(409, 'balance_policy_conflict', '监控设置已变化，请刷新后重试')
+      if (JSON.stringify(feishuSchedule) !== JSON.stringify(previous.feishu_schedule)) {
+        const incidents = await client.query(`SELECT id,notified_at FROM notifications.incidents
+          WHERE source=$1 AND code=ANY($2) AND status <> 'closed' AND notified_at IS NOT NULL FOR UPDATE`,
+        [provider, [BALANCE_INCIDENT_CODE, PROBE_INCIDENT_CODE]])
+        for (const incident of incidents.rows) {
+          const after = feishuSchedule.mode === 'cron' ? previous.server_now : incident.notified_at
+          await client.query('UPDATE notifications.incidents SET next_reminder_at=$2 WHERE id=$1',
+            [incident.id, nextMonitorRun(feishuSchedule, after)])
+        }
+      }
       // The audit record keeps what changed, never the hook itself.
       const { webhook, feishuWebhook: _raw, ...audited } = policy
       await client.query(`INSERT INTO external_platform.balance_monitor_settings_events(provider_key,revision,settings)
@@ -118,24 +155,43 @@ export class SupplierBalanceMonitor {
         feishuWebhook: !webhook.set ? 'unchanged' : webhook.value ? `set:${webhookHint(webhook.value)}` : 'cleared',
       })])
     })
+    void this.timer?.refresh()
+    this.onScheduleChanged?.()
     return (await this.list()).items.find(item => item.provider === provider)
+  }
+
+  async revealWebhook(provider) {
+    if (!BALANCE_PROVIDERS[provider]) throw new AppError(404, 'balance_provider_unsupported', '该平台尚未接入余额查询')
+    if (!this.pool) throw new AppError(503, 'balance_monitor_unavailable', '余额监控需要 PostgreSQL')
+    return this.transaction(async client => {
+      const { rows } = await client.query(`SELECT feishu_webhook,revision FROM external_platform.balance_monitors
+        WHERE provider_key=$1`, [provider])
+      const row = rows[0]
+      if (!row?.feishu_webhook) throw new AppError(404, 'feishu_webhook_unconfigured', '该平台尚未配置飞书机器人地址')
+      await client.query(`INSERT INTO external_platform.balance_monitor_settings_events(provider_key,revision,settings)
+        VALUES ($1,$2,$3::jsonb)`, [provider, row.revision, JSON.stringify({ action: 'feishu_webhook_revealed' })])
+      return { provider, feishuWebhook: row.feishu_webhook }
+    })
   }
 
   async checkProvider(provider) {
     const lease = randomUUID()
     // Missed slots after downtime are skipped, not replayed at arbitrary times.
     // A five-minute grace window tolerates scheduler/database delays.
-    await this.pool.query(`UPDATE external_platform.balance_monitors
-      SET next_check_at=external_platform.next_balance_check(now())
-      WHERE provider_key=$1 AND enabled AND next_check_at <= now()-interval '5 minutes'
-        AND (lease_until IS NULL OR lease_until < now())`, [provider])
-    const claimed = await this.pool.query(`UPDATE external_platform.balance_monitors
-      SET lease_token=$2, lease_until=now()+interval '2 minutes',
-        next_check_at=external_platform.next_balance_check(now())
-      WHERE provider_key=$1 AND enabled AND next_check_at <= now()
-        AND next_check_at > now()-interval '5 minutes'
-        AND (lease_until IS NULL OR lease_until < now()) RETURNING *`, [provider, lease])
-    if (!claimed.rows[0]) return
+    const claimed = await this.transaction(async client => {
+      const { rows } = await client.query(`SELECT *,now() AS server_now FROM external_platform.balance_monitors
+        WHERE provider_key=$1 AND enabled AND next_check_at <= now()
+          AND (lease_until IS NULL OR lease_until < now()) FOR UPDATE SKIP LOCKED`, [provider])
+      const row = rows[0]
+      if (!row) return false
+      const missed = new Date(row.server_now) - new Date(row.next_check_at) >= 5 * 60_000
+      const next = nextMonitorRun(row.balance_schedule ?? DEFAULT_BALANCE_SCHEDULE, row.server_now, row.next_check_at)
+      await client.query(`UPDATE external_platform.balance_monitors
+        SET next_check_at=$2,lease_token=$3,lease_until=CASE WHEN $3::uuid IS NULL THEN NULL ELSE now()+interval '2 minutes' END
+        WHERE provider_key=$1`, [provider, next, missed ? null : lease])
+      return !missed
+    })
+    if (!claimed) return
     let credential
     let result
     try {
@@ -157,6 +213,7 @@ export class SupplierBalanceMonitor {
       return
     }
     await this.saveObservation(provider, lease, credential?.scope || null, result)
+    this.onScheduleChanged?.()
   }
 
   async saveObservation(provider, lease, scope, result) {
@@ -266,9 +323,12 @@ export class SupplierBalanceMonitor {
   }
   start() {
     if (!this.pool || this.timer) return
-    void this.collect()
-    this.timer = setInterval(() => { void this.collect() }, 60_000)
-    this.timer.unref?.()
+    this.timer = new MonitorCronTimer({ run: () => this.collect(), logger: this.logger, nextAt: async () => {
+      const { rows } = await this.pool.query(`SELECT min(GREATEST(next_check_at,COALESCE(lease_until,next_check_at))) AS at
+        FROM external_platform.balance_monitors WHERE enabled AND next_check_at > now()`)
+      return rows[0]?.at
+    } })
+    this.timer.start()
   }
-  async close() { clearInterval(this.timer); this.timer = null; this.abort.abort(); await this.running }
+  async close() { this.abort.abort(); await this.timer?.close(); this.timer = null; await this.running }
 }

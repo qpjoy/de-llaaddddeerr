@@ -2769,6 +2769,23 @@ export function createApp({
         sendJson(response, 200, { data: await balanceMonitor.list(), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/supplier-balances/:provider/feishu-webhook/reveal')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'supplier balance webhook reveal')
+        response.setHeader('Cache-Control', 'no-store')
+        const body = await readJson(request, 4096)
+        if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).some(field => field !== 'adminToken')) {
+          throw new AppError(400, 'invalid_feishu_webhook_reveal', 'Request body must contain only adminToken')
+        }
+        if (!adminToken || typeof body.adminToken !== 'string' || !secureEqual(body.adminToken, adminToken)) {
+          throw new AppError(403, 'admin_token_reauthentication_required', '请重新输入 Hub Admin Token 以查看飞书机器人地址')
+        }
+        if (!balanceMonitor) throw new AppError(503, 'balance_monitor_unavailable', '余额监控不可用')
+        sendJson(response, 200, { data: await balanceMonitor.revealWebhook(params.provider), requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/supplier-balances/:provider')
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)

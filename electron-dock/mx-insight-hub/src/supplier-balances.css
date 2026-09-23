@@ -17,4 +17,12 @@
 .mih-balance-policy > button { justify-self: start; }
 .mih-balance-policy p { margin: 0; font-size: 12px; color: var(--qp-text-2); }
 .mih-balance-enabled { display: flex; gap: 8px; align-items: center; }
+.mih-balance-secret { overflow-wrap: anywhere; resize: vertical; }
+.mih-monitor-schedule { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--qp-line); border-radius: 10px; }
+.mih-monitor-schedule legend { padding: 0 6px; font-size: 13px; font-weight: 600; }
+.mih-monitor-schedule legend small { display: inline-block; font-size: 11px; font-weight: 400; color: var(--qp-text-2); }
+.mih-schedule-preview { font-size: 12px; color: var(--qp-text-2); }
+.mih-schedule-preview ol { display: flex; flex-wrap: wrap; gap: 8px 24px; padding-left: 20px; margin-bottom: 0; font-variant-numeric: tabular-nums; }
+.mih-monitor-schedule .mih-schedule-error { color: var(--qp-danger); }
+.mih-schedule-help { align-self: center; }
 @media (max-width: 640px) { .mih-balance-fields { grid-template-columns: 1fr; } .mih-balance-panel { padding: 16px; } }

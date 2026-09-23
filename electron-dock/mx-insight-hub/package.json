@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@qpjoy/mx-common": "file:../mx-common",
+    "croner": "10.0.1",
     "pg": "8.22.0",
     "undici": "7.29.0",
     "zod": "^4.4.3"

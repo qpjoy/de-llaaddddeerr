@@ -447,6 +447,7 @@ export async function createRuntime(config = loadConfig()) {
   // bot hooks are read from the database on every pass, so an operator's edit
   // takes effect without restarting anything.
   const feishuAlerts = config.listenerMode === 'public' ? null : new FeishuAlertNotifier({ pool })
+  if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const app = createApp({
     service,
     store,

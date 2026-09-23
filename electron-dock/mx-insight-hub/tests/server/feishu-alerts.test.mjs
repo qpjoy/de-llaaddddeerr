@@ -72,6 +72,14 @@ test('a notifier without PostgreSQL never starts polling', async () => {
   await notifier.close()
 })
 
+test('both kinds of alert describe the configured reminder interval', () => {
+  const at = new Date('2026-09-23T03:00:00Z')
+  for (const code of ['supplier_balance_low', PROBE_INCIDENT_CODE]) {
+    assert.match(alertText('tikhub', code, evidence('4'), at, 30), /每 30 分钟提醒一次/)
+    assert.match(alertText('justone', code, evidence('4'), at, 120), /每 120 分钟提醒一次/)
+  }
+})
+
 test('the console hint identifies a bot without exposing the hook', () => {
   assert.equal(webhookHint(HOOK), '…f1d151')
   assert.equal(webhookHint(OTHER), '…0c2fb1')
@@ -110,7 +118,7 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     return incident.rows[0].id
   }
   const age = async (id, interval) => db.exec(
-    `UPDATE notifications.incidents SET notified_at=notified_at-interval '${interval}' WHERE id=${id}`)
+    `UPDATE notifications.incidents SET notified_at=notified_at-interval '${interval}',next_reminder_at=next_reminder_at-interval '${interval}' WHERE id=${id}`)
   const kinds = async id => (await db.query(
     'SELECT kind FROM notifications.events WHERE incident_id=$1 ORDER BY id DESC', [id])).rows.map(row => row.kind)
 
@@ -118,7 +126,7 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     await db.exec('CREATE SCHEMA external_platform')
     for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql',
       '097_hourly_balance_check.sql', '098_feishu_balance_alerts.sql', '099_balance_feishu_webhook.sql',
-      '100_probe_failure_and_recovery_alerts.sql']) {
+      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql', '109_monitor_cron_schedules.sql']) {
       await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
     }
     // 099 seeds the groups that were already receiving these alerts, so a first
@@ -267,6 +275,29 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     await notifier.deliverBatch()
     assert.equal(sent.length, 1)
     assert.equal(sent[0].url, OTHER, 'a re-pointed hook takes effect on the next pass')
+
+    // Reminder changes are hot-loaded per provider, independent of probe slots.
+    await db.query("UPDATE external_platform.balance_monitors SET feishu_schedule='{\"mode\":\"interval\",\"minutes\":30}' WHERE provider_key='tikhub'")
+    await age(reopened, '31 minutes')
+    await db.query("UPDATE notifications.incidents SET next_reminder_at=notified_at+interval '30 minutes' WHERE id=$1", [reopened])
+    const independent = await raise('justone', 'warning', '4.5', 'CNY')
+    await db.query('UPDATE notifications.incidents SET notified_at=now()-interval \'31 minutes\',next_reminder_at=now()+interval \'29 minutes\',notified_severity=\'warning\' WHERE id=$1', [independent])
+    sent.length = 0
+    const staleCandidates = await notifier.candidates()
+    assert.deepEqual(staleCandidates.map(row => String(row.id)), [String(reopened)])
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, '30-minute provider delivers while 60-minute provider waits')
+    assert.match(sent[0].text, /固定间隔 30 分钟/)
+    assert.equal(await notifier.claim(reopened), false, 'a stale candidate from another replica cannot repeat a successful delivery')
+    await age(reopened, '31 minutes')
+    await db.query("UPDATE external_platform.balance_monitors SET feishu_schedule='{\"mode\":\"interval\",\"minutes\":120}' WHERE provider_key='tikhub'")
+    await db.query("UPDATE notifications.incidents SET next_reminder_at=notified_at+interval '120 minutes' WHERE id=$1", [reopened])
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, 'lengthening the interval applies to an existing incident')
+    await raise('tikhub', 'critical', '1')
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 2, 'critical escalation bypasses even a longer interval')
+    assert.match(sent[1].text, /固定间隔 120 分钟/)
 
     const dump = JSON.stringify((await db.query('SELECT * FROM notifications.events')).rows)
     assert.doesNotMatch(dump, /open\.feishu\.cn|6093808e|1790e6fa/, 'webhooks never reach the incident timeline')

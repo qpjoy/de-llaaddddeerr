@@ -105,10 +105,13 @@ in this environment. Never combine TikHub `free_credit` with cash or invent an
 exchange rate. This monitors account balances, not supplier tariff changes;
 the existing reviewed procurement price books continue to own endpoint prices.
 
-The schedule is fixed at **every hour on the hour, Asia/Shanghai** (24 balance
-reads per provider per day), independent of server timezone. PostgreSQL calculates
-the next wall-clock slot; this is not a rolling 60-minute interval. The scheduler
-scans every 60 seconds with a five-minute dispatch grace window. Older missed
+Balance checks default to **every half hour (:00 and :30), Asia/Shanghai** (48 balance
+reads per provider per day), independent of server timezone. Migration `109` adds
+per-provider balance and reminder schedules. The application uses **Croner 10.0.1**
+to parse Cron and wake at the exact next persisted PostgreSQL deadline; there is
+no system crontab. A Croner reconciliation job at seconds :00/:30 notices changes
+on other replicas and retries transient failures; ordinary execution does not wait
+for that scan. A five-minute dispatch grace window applies. Older missed
 slots after downtime are skipped. Initial deployment and saving/enabling a policy
 wait for the next slot. Each slot is consumed atomically before network I/O,
 so errors, crashes, expired leases and credential rotation cannot retry it.
@@ -116,7 +119,8 @@ A database lease admits one probe per provider across replicas; settings changes
 invalidate in-flight results. Probes are bounded to 30 seconds / 64 KiB, reject redirects and use fixed
 origins. Existing Hub database/environment credentials are resolved at probe
 time; TikHub uses its existing System Proxy binding. No secrets or webhook URLs
-are copied from `/tmp`, stored in observations, or returned by the monitoring API.
+are copied from `/tmp` or stored in observations. Ordinary monitoring reads never return webhook URLs;
+the explicit reauthenticated reveal described below is the only exception.
 
 Read-only does not mean free. As of 2026-09-17, the reviewed public documentation
 does not explicitly confirm whether these specific account queries incur charges:
@@ -124,11 +128,12 @@ does not explicitly confirm whether these specific account queries incur charges
 but no price; [JustOne's usage guide](https://docs.justoneapi.com/zh/usage) describes
 general success billing and directs users to the dashboard for endpoint prices.
 Do not apply the generic business-API rate to account queries or claim they are
-free without endpoint-specific evidence. Migration `097_hourly_balance_check.sql`
-raises scheduled balance reads from 2 back to 24 per provider per day (2026-09-18),
-which bounds a new low-balance alert to the next hourly check (up to 60 minutes
-during normal operation) at 12x the twice-daily query cost. Policy changes do not
-schedule extra reads.
+free without endpoint-specific evidence. The default introduced by migration `108_balance_schedule_and_reminders.sql`
+raises scheduled balance reads from 24 to 48 per provider per day (2026-09-23),
+so a new low balance is detected at the next half-hour slot (up to 30 minutes,
+plus scheduler/network delay during normal operation). The configurable schedules
+in migration `109` may change that frequency. Saving does not trigger an extra
+off-schedule supplier read.
 The standalone `/tmp/fee_monitor` script is superseded by this monitor plus the
 Feishu delivery below. Do not run it alongside Hub: it would add independent
 supplier requests and double-post to the same group.
@@ -152,8 +157,67 @@ Admin Token only:
 
 - `GET /internal/v1/admin/supplier-balances` — cached observations/settings only.
 - `PUT /internal/v1/admin/supplier-balances/:provider` — `enabled`,
-  `warningThreshold`, `criticalThreshold`, `expectedRevision`. The schedule is fixed;
-  the DTO reports it as `{ timeZone: 'Asia/Shanghai', cadence: 'hourly' }`.
+  `warningThreshold`, `criticalThreshold`, `expectedRevision`, optional `feishuWebhook`
+  plus optional `balanceSchedule` and `feishuSchedule`. Both accept
+  `{ mode: 'cron', expression: '*/30 * * * *' }` or
+  `{ mode: 'interval', minutes: 45 }` (integer 1–1440). Omitted fields preserve
+  their stored values. The list DTO returns both schedules, plus `schedule`
+  as the balance schedule with `timeZone: 'Asia/Shanghai'`.
+  Legacy `feishuReminderMinutes` remains accepted as a rolling interval, but cannot
+  be combined with `feishuSchedule` in the same request.
+- `POST /internal/v1/admin/supplier-balances/:provider/feishu-webhook/reveal` —
+  requires the Admin Token header plus a freshly entered `{ adminToken }` body.
+  Returns `{ provider, feishuWebhook }` with `Cache-Control: no-store`; Launcher
+  sessions, tenant sessions and Public API keys cannot reveal it. Records only
+  `action: feishu_webhook_revealed`, provider and revision in the settings audit.
+
+Deploy migrations `108` and `109` before the Hub server/frontend. They preserve thresholds,
+hooks, incident history, delivery timestamps, credentials and paused state. Future
+hourly slots are pulled forward when needed, while due slots and leases stay intact.
+No Launcher/MX-H2I deployment or identity/network configuration change is required.
+Upgrade maps existing `feishuReminderMinutes` into the same rolling interval and
+backfills `next_reminder_at` from `notified_at`; it does not silently realign existing
+reminders. Deploy all Admin replicas together: old binaries do not understand custom
+schedules and must not keep running beside the new scheduler after operator edits.
+
+### Cron and simple controls
+
+The two editors independently configure balance checks and **repeat** Feishu alerts.
+They share parsing and future-run calculations with the server:
+
+| Simple configuration | Cron / mode | Meaning (Beijing time) |
+| --- | --- | --- |
+| Every 30 minutes, aligned | `*/30 * * * *` | :00 and :30 |
+| Every two hours, aligned | `0 */2 * * *` | 00:00, 02:00, ... |
+| Every day at 09:00 | `0 9 * * *` | 09:00 every day |
+| Weekdays at 09:00 and 18:00 | `0 9,18 * * MON-FRI` | Retained as custom Cron |
+| Exactly every 45 minutes | `{ mode: 'interval', minutes: 45 }` | Uniform duration from its anchor |
+
+Changing a simple aligned interval/daily control updates Cron. Entering a recognized
+Cron updates the simple controls; complex Cron stays intact. `*/45 * * * *` means
+:00/:45, alternating 45- and 15-minute gaps, so it must not be labelled “every 45 minutes”.
+Nonrepresentable aligned intervals fall back explicitly to true interval mode.
+An existing rolling interval has its own anchor and cannot be converted to aligned
+Cron without changing meaning; the UI makes that switch explicit. Balance interval
+anchors start on schedule save, survive restart, and advance from their previous
+deadline rather than completion time. Reminder intervals start at successful delivery.
+
+Only five-field Cron is accepted (minute/hour/day/month/weekday); numeric fields,
+English month/weekday names, lists, ranges and steps are supported. Seconds, nicknames
+and extended calendar modifiers are rejected. Day-of-month and weekday use standard
+Cron OR semantics. Impossible dates are rejected before saving. The editor shows
+the next three times; interval previews are examples from the current time, while
+the balance card's next-check value is the persisted execution deadline.
+
+Croner uses in-process timers. Event-loop stalls, database/network delays, stopped
+processes and host clock skew can delay execution/delivery; this is not a hard
+real-time guarantee. Database claims consume balance slots before I/O. Reminder
+claims recheck current policy/state and use leases; only successful bot replies
+advance the persisted next reminder. Do not claim exactly-once external delivery
+across a crash after Feishu accepted a message but before the DB commit.
+
+Library reference: [Croner configuration](https://croner.56k.guru/usage/configuration/)
+and [Croner patterns](https://croner.56k.guru/usage/pattern/).
 
 ## Feishu delivery (2026-09-18)
 
@@ -163,7 +227,14 @@ reviewed standalone script's rules, with state in PostgreSQL rather than its
 `state.json`, so reminders survive restarts and are not duplicated by a replica:
 
 - A new `supplier_balance_low` incident is delivered on the next pass (≤30s).
-- While it stays open, at most one reminder per hour per incident.
+- While it stays open, repeat reminders follow that provider's `feishuSchedule`.
+  Calendar schedules use the next fixed slot; intervals are measured from the last
+  confirmed delivery. Local edits re-arm the deadline immediately; other replicas
+  pick up changes within 30 seconds, with no restart. Delivery timestamps are not
+  reset. Shortening a rolling interval may make an incident immediately due;
+  changing Cron begins at the next future slot. Calendar reminders missed by more
+  than five minutes are skipped; a failed send inside the grace window retries
+  on the next reconciliation without consuming the slot.
 - Escalation from warning to critical is delivered immediately; a de-escalation
   back to warning waits out the window.
 - Recovery closes the incident. A later drop is a new incident and alerts at once
@@ -224,9 +295,9 @@ the Admin listener delivers; Public never does, because two senders would
 double-post. Both bots are keyword-gated on `额度`, which is why the first message
 line carries it.
 
-`feishuWebhook` is optional on save. Omitting it leaves the stored hook alone --
-the console never receives the current value, so an ordinary threshold save
-cannot echo a stale one back. An explicit empty string clears it and stops
+`feishuWebhook` is optional on save. Omitting it leaves the stored hook alone.
+The console keeps the revealed address separate from the edit field, so an ordinary
+threshold or reminder save cannot echo a stale hook back. An explicit empty string clears it and stops
 notifying that group. A malformed value is rejected with `invalid_feishu_webhook`
 and never reaches the row.
 
@@ -236,10 +307,13 @@ the blocked platform records a `notify_failed` event instead of going silent. An
 unset hook leaves that platform's alerts in this center only.
 
 A hook is secret-bearing. It is stored in the Hub database like other
-UI-managed source credentials, and is never logged, never returned by an API,
+UI-managed source credentials, and is never logged or returned by ordinary reads,
 never copied into an observation and never written to the settings audit trail --
 that records `unchanged` / `set:<tail>` / `cleared`. The monitoring DTO exposes
 only `feishu.configured` plus a six-character tail, enough to tell two bots apart.
+The explicit reveal is visible only in its transient modal and is cleared when
+the modal closes; neither the revealed hook nor the reauthentication input is
+persisted in browser storage.
 Because the seeds live in a tracked migration, treat the seeded hooks as
 published to anyone with repository access; rotate the bot in Feishu and save the
 new hook in the console if that matters. Delivery is not a readiness dependency

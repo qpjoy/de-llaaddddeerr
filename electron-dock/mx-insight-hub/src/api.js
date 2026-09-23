@@ -323,6 +323,8 @@ export async function signInWithLauncher({ username, password }) {
 export const adminApi = {
   notifications: (token, query) => request(token, `${ADMIN_ROOT}/notifications`, { query }),
   supplierBalances: token => request(token, `${ADMIN_ROOT}/supplier-balances`),
+  revealSupplierBalanceWebhook: (token, provider, adminToken) => request(token,
+    `${ADMIN_ROOT}/supplier-balances/${encodeURIComponent(provider)}/feishu-webhook/reveal`, { method: 'POST', body: { adminToken } }),
   updateSupplierBalance: (token, provider, body) => request(token, `${ADMIN_ROOT}/supplier-balances/${encodeURIComponent(provider)}`, { method: 'PUT', body }),
   notification: (token, id, query) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}`, { query }),
   notificationAction: (token, id, body) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}/actions`, { method: 'POST', body }),

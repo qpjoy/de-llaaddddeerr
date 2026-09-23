@@ -19,6 +19,10 @@ test('native currency thresholds are strict and preserve decimal boundaries', ()
   for (const value of [null, true, NaN, Infinity, '', '1e99', {}, '0.0000000000001']) assert.throws(() => decimalAmount(value))
   assert.equal(notificationQuery({ category: 'supplier.cost' }).category, 'supplier.cost')
   assert.equal(balancePolicy(policy).warningThreshold, '30')
+  for (const minutes of [1, 30, 60, 1440]) assert.equal(balancePolicy({ ...policy, feishuReminderMinutes: minutes }).feishuReminderMinutes, minutes)
+  for (const minutes of [0, -1, 1441, 1.5, '30', null, true]) {
+    assert.throws(() => balancePolicy({ ...policy, feishuReminderMinutes: minutes }), { status: 400 })
+  }
   for (const body of [null, { ...policy, warningThreshold: '20' }, { ...policy, criticalThreshold: '-1' }, { ...policy, intervalMinutes: 1 }, { ...policy, url: 'https://evil.invalid' }, { ...policy, actor: 'owner' }]) {
     assert.throws(() => balancePolicy(body), { status: 400 })
   }
@@ -93,7 +97,75 @@ test('monitor without PostgreSQL is unavailable and never starts polling', async
   await monitor.close()
 })
 
+test('webhook reveal requires both Admin authentication and explicit reauthentication, with no cache', async () => {
+  let reads = 0
+  const secret = 'https://open.feishu.cn/open-apis/bot/v2/hook/test-only-secret'
+  const appOptions = {
+    service: {}, store: { ping: async () => true }, adminToken: 'test-admin',
+    balanceMonitor: { revealWebhook: async provider => { reads++; return { provider, feishuWebhook: secret } } },
+    identity: { enabled: true, resolve: async () => ({ kind: 'launcher-user', memberId: 'test', platformAdmin: true, tenantIds: null, capabilities: [], memberships: [] }) },
+    logger: { error() {}, warn() {} },
+  }
+  for (const listenerMode of ['combined', 'public']) {
+    const server = createServer(createApp({ ...appOptions, listenerMode }))
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${server.address().port}/internal/v1/admin/supplier-balances/justone/feishu-webhook/reveal`
+    const headers = { 'Content-Type': 'application/json', 'x-mx-insight-admin-token': 'test-admin' }
+    const post = (body, override = headers, target = url) => fetch(target, { method: 'POST', headers: override, body: JSON.stringify(body) })
+    try {
+      if (listenerMode === 'public') {
+        assert.equal((await post({ adminToken: 'test-admin' })).status, 404)
+        continue
+      }
+      assert.equal((await post({ adminToken: 'test-admin' }, { 'Content-Type': 'application/json' })).status, 401)
+      assert.equal((await post({ adminToken: 'test-admin' }, { 'Content-Type': 'application/json', authorization: 'Bearer launcher-admin' })).status, 403)
+      for (const body of [{}, { adminToken: 'wrong' }, { adminToken: 123 }]) assert.equal((await post(body)).status, 403)
+      for (const body of [null, [], { adminToken: 'test-admin', extra: secret }]) {
+        const response = await post(body)
+        assert.equal(response.status, 400)
+        assert.ok(!(await response.text()).includes(secret))
+      }
+      assert.equal((await post({ adminToken: 'test-admin' }, headers, `${url}?adminToken=test-admin`)).status, 400)
+      assert.equal(reads, 0, 'denied reads never reach secret storage')
+      const response = await post({ adminToken: 'test-admin' })
+      assert.equal(response.status, 200)
+      assert.match(response.headers.get('cache-control'), /no-store/)
+      assert.deepEqual((await response.json()).data, { provider: 'justone', feishuWebhook: secret })
+    } finally { await new Promise(resolve => server.close(resolve)) }
+  }
+  assert.equal(reads, 1)
+})
+
 // Reuse the notification suite's optional local PostgreSQL/WASM runtime.
+test('half-hour migration preserves operator policy, due slots, observations and in-flight leases', { skip: !process.env.MX_NOTIFICATION_PGLITE_MODULE }, async () => {
+  const { PGlite } = await import(process.env.MX_NOTIFICATION_PGLITE_MODULE)
+  const db = new PGlite()
+  try {
+    await db.exec('CREATE SCHEMA external_platform')
+    for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql', '097_hourly_balance_check.sql', '099_balance_feishu_webhook.sql']) {
+      await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
+    }
+    await db.exec(`UPDATE external_platform.balance_monitors SET enabled=false,warning_threshold=42,critical_threshold=7,
+      revision=9,feishu_webhook='https://open.feishu.cn/open-apis/bot/v2/hook/test-policy',last_balance=21,
+      next_check_at=now()+interval '2 hours' WHERE provider_key='justone';
+      UPDATE external_platform.balance_monitors SET next_check_at=now()-interval '1 minute',
+        lease_token='00000000-0000-4000-8000-000000000001',lease_until=now()+interval '2 minutes' WHERE provider_key='tikhub'`)
+    const before = (await db.query('SELECT * FROM external_platform.balance_monitors ORDER BY provider_key')).rows
+    await db.exec(await readFile(new URL('../../migrations/108_balance_schedule_and_reminders.sql', import.meta.url), 'utf8'))
+    const after = (await db.query('SELECT * FROM external_platform.balance_monitors ORDER BY provider_key')).rows
+    for (let i = 0; i < before.length; i++) {
+      const { next_check_at: oldNext, ...oldPolicy } = before[i]
+      const { next_check_at: next, feishu_reminder_minutes: reminder, ...newPolicy } = after[i]
+      assert.deepEqual(newPolicy, oldPolicy)
+      assert.equal(reminder, 60)
+      if (newPolicy.provider_key === 'justone') {
+        assert.ok(new Date(next) < new Date(oldNext))
+        assert.ok([0, 30].includes(new Date(next).getUTCMinutes()))
+      } else assert.equal(new Date(next).toISOString(), new Date(oldNext).toISOString())
+    }
+  } finally { await db.close() }
+})
+
 test('durable balance polling, alerts, recovery, leases, policy audit and credential rotation', { skip: !process.env.MX_NOTIFICATION_PGLITE_MODULE }, async () => {
   const { PGlite } = await import(process.env.MX_NOTIFICATION_PGLITE_MODULE)
   const db = new PGlite()
@@ -113,19 +185,21 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     await db.exec('CREATE SCHEMA external_platform')
     for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql',
       '097_hourly_balance_check.sql', '098_feishu_balance_alerts.sql', '099_balance_feishu_webhook.sql',
-      '100_probe_failure_and_recovery_alerts.sql']) {
+      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql', '109_monitor_cron_schedules.sql']) {
       await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
     }
     // 097 lowers the JustOne seed to 5/3; this case exercises threshold
     // behaviour itself, so pin the policy it asserts against, revision intact.
     await db.exec("UPDATE external_platform.balance_monitors SET warning_threshold=30, critical_threshold=20 WHERE provider_key='justone'")
-    // Wall-clock hours remain in Asia/Shanghai even on a differently zoned DB.
+    // Half-hour slots remain in Asia/Shanghai even on a differently zoned DB.
     await db.exec("SET TIME ZONE 'America/Los_Angeles'")
     for (const [input, expected] of [
       ['2026-09-17T01:59:59.999Z', '2026-09-17T02:00:00.000Z'],
-      ['2026-09-17T02:00:00.000Z', '2026-09-17T03:00:00.000Z'],
+      ['2026-09-17T02:00:00.000Z', '2026-09-17T02:30:00.000Z'],
+      ['2026-09-17T02:29:59.999Z', '2026-09-17T02:30:00.000Z'],
+      ['2026-09-17T02:30:00.000Z', '2026-09-17T03:00:00.000Z'],
       ['2026-09-17T13:59:59.999Z', '2026-09-17T14:00:00.000Z'],
-      ['2026-09-17T14:00:00.000Z', '2026-09-17T15:00:00.000Z'],
+      ['2026-09-17T14:00:00.000Z', '2026-09-17T14:30:00.000Z'],
       ['2026-12-31T15:59:59.999Z', '2026-12-31T16:00:00.000Z'],
       ['2028-02-28T15:59:59.999Z', '2028-02-28T16:00:00.000Z'],
     ]) {
@@ -145,11 +219,12 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     let dto = (await monitor.list()).items.find(item => item.provider === 'justone')
     assert.equal(dto.state, 'ready')
     assert.equal(Number(dto.balance), 25)
-    assert.deepEqual(dto.schedule, { timeZone: 'Asia/Shanghai', cadence: 'hourly' })
+    assert.deepEqual(dto.schedule, { timeZone: 'Asia/Shanghai', mode: 'cron', expression: '*/30 * * * *' })
+    assert.equal(dto.feishuReminderMinutes, 60)
     const nextCheck = new Date(dto.nextCheckAt)
-    assert.equal(nextCheck.getUTCMinutes(), 0)
+    assert.ok([0, 30].includes(nextCheck.getUTCMinutes()))
     assert.equal(nextCheck.getUTCSeconds(), 0)
-    assert.ok(nextCheck > new Date() && nextCheck - Date.now() <= 60 * 60 * 1000, 'the next slot is within the hour')
+    assert.ok(nextCheck > new Date() && nextCheck - Date.now() <= 30 * 60 * 1000, 'the next slot is within half an hour')
     assert.doesNotMatch(JSON.stringify(dto), /secret-1|credential_scope/)
     // The seeded bot hook is policy, but it is still a credential: the DTO says
     // only that one is set, plus a tail short enough to tell two bots apart.
@@ -244,16 +319,23 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     }
     assert.equal(await storedHook(), seededHook, 'a rejected hook never reaches the row')
     const replacement = 'https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555'
-    let saved = await monitor.update('justone', { ...policy, expectedRevision: 2, feishuWebhook: replacement })
+    let saved = await monitor.update('justone', { ...policy, expectedRevision: 2, feishuWebhook: replacement, feishuReminderMinutes: 30 })
     assert.equal(await storedHook(), replacement)
     assert.equal(saved.feishu.hint, '…555555')
+    assert.equal(saved.feishuReminderMinutes, 30)
+    assert.equal((await monitor.list()).items.find(item => item.provider === 'tikhub').feishuReminderMinutes, 60, 'provider policies are independent')
+    assert.deepEqual(await monitor.revealWebhook('justone'), { provider: 'justone', feishuWebhook: replacement })
+    await assert.rejects(monitor.revealWebhook('unknown'), { status: 404 })
     saved = await monitor.update('justone', { ...policy, expectedRevision: 3, feishuWebhook: '' })
+    assert.equal(saved.feishuReminderMinutes, 30, 'older clients preserve the configured interval when omitting it')
     assert.equal(await storedHook(), null, 'an explicit empty value clears the hook')
+    await assert.rejects(monitor.revealWebhook('justone'), { code: 'feishu_webhook_unconfigured' })
     assert.deepEqual(saved.feishu, { configured: false, hint: null })
     const audit = JSON.stringify((await db.query('SELECT settings FROM external_platform.balance_monitor_settings_events')).rows)
     assert.doesNotMatch(audit, /open\.feishu\.cn|11111111/, 'the audit trail records what changed, not the hook')
     assert.match(audit, /"feishuWebhook":"unchanged"/)
     assert.match(audit, /"feishuWebhook":"cleared"/)
+    assert.match(audit, /"action":"feishu_webhook_revealed"/)
     // Restore the seeded hook and the revision the rest of this case expects.
     await db.exec(`UPDATE external_platform.balance_monitors SET feishu_webhook='${seededHook}', revision=2 WHERE provider_key='justone'`)
     await monitor.checkProvider('justone')

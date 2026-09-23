@@ -102,7 +102,7 @@ export function NotificationsPage({ token, onUnauthorized }) {
         { value: 'all', label: '全部分类' }, ...Object.entries(categories).map(([value, label]) => ({ value, label })),
       ]} />
     </section>
-    <p>TikHub / JustOne 余额监控固定在北京时间每小时整点检查一次，可在外部数据平台调整告警阈值。JustOne 调用失败与 Token 限额每 30 秒从账本采集；页面刷新不请求供应商。已入库的事件与处理记录持续保留。</p>
+    <p>TikHub / JustOne 默认每 30 分钟检查余额，可在外部数据平台通过 Cron、间隔或每日定点分别配置余额检查和飞书重复提醒。时间均为北京时间。JustOne 调用失败与 Token 限额每 30 秒从账本采集；页面刷新不请求供应商。已入库的事件与处理记录持续保留。</p>
     <p>调用账本采集状态：{({ ready: '最近批次完成', pending: '等待首次采集', error: '采集失败，当前列表可能不完整', unavailable: '未启用持久化存储' })[remote.data?.collection?.state] || '读取中'} · 最近成功：{date(remote.data?.collection?.lastSuccessAt)} · 时间均为北京时间</p>
     {remote.error ? <ErrorState error={remote.error} onRetry={refresh} /> : null}
     {remote.loading && !remote.data ? <LoadingState label="正在读取通知" /> : null}
