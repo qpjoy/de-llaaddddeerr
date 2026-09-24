@@ -6,10 +6,10 @@
 
 | 项目/任务 | 已确认状态 | 允许的下一步 |
 | --- | --- | --- |
-| infra / part1 | 9/24 NAS 修复切换、独立恢复登记、文件核验及业务验收已通过；新报告尾号 `33e5abb193d04e7595251a5e6a6046ae`，核验清单尾号 `a1dc4bb0dfea4d5d83ce143daaf052e9`，`reclaim_ready=true` | 同步已选清单并更新恢复快照；SSD 保留，按约定推进 Part 2 预复制 |
+| infra / part1 | 9/24 早前 NAS 修复验收通过，但 11:04 新版本重建再次缺少 NAS 子挂载；十个服务当前均使用 SSD/XFS | 保全两侧数据；`repair inspect` 只读审查新部署及清理收据，再准备新的差异修复 |
 | delta / part2 | `delta_59202_media_data` 尚无正式切换/清理回执 | 在线预复制；成功后另行准备本实例的切换和清单 |
 
-第一卷最新 `nas_reclaim_check_complete` 回执记录 `files_verified=true`、`business_acceptance_recorded=true`、恢复覆盖通过及 `reclaim_ready=true`；共 200,543 个文件 / 538,031,658,699 逻辑字节。已据此在 Git 显式选择该清单，不自动选择最新目录。`deletion_authorized=false`、`source_deleted=false`，这是验收当时的未删除状态。用户随后询问执行该清单 SSD 回收的命令，当前入口为 `nas infra cleanup --business-accepted`；尚无删除完成回执。准备就绪不自动执行删除，实际回收仍需当前登记、恢复覆盖及逐文件重新核验。
+此前 `nas_reclaim_check_complete` 对 200,543 个文件 / 538,031,658,699 逻辑字节记录了验收和恢复通过。11:04 后再次回到 SSD，这份历史就绪状态不再适用，Git 已取消旧清理清单选用（`plan=null`），不删除或改写原证据。最新回传只有核验日志，没有实际删除完成记录；缺日志不排除手工/其他入口删除。当前禁止继续清理、复用旧修复报告或直接加挂载遮住新 SSD 数据。见 [本次现场与只读诊断](operations/2026-09-24-second-fallback.md)。
 
 NAS 已可能有新写入，SSD 在意外重建后也已增加文件。NAS 仍是预定正式来源，但两侧数据现在都必须保全；禁用旧预复制覆盖、自动 SSD 回滚和空目录降级。原 named volume 和 media 的其他目录继续保留。重启、Docker 重装、双方断电不改变 NAS 存储意图；缺卷/缺配置时应阻止恢复，不能创建本地替代品。
 

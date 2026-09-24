@@ -160,14 +160,14 @@ class UnionReviewTests(LocalFiles):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_accepted_registration_and_missing_plan_blocks_deletion(self):
+    def test_second_drift_clears_selection_and_missing_plan_blocks_deletion(self):
         profile = manage.profiles()['part1']
         self.assertTrue(profile['report'].endswith('-33e5abb193d04e7595251a5e6a6046ae'))
-        self.assertEqual(profile['plan'], profile['report'] + '/reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9')
+        self.assertIsNone(profile['plan'])
+        accepted = dict(profile, plan=profile['report'] + '/reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9')
         with mock.patch.object(manage, 'run') as run, self.assertRaisesRegex(RuntimeError, 'requires --business-accepted'):
-            manage.launch('reclaim', profile, manage.parser().parse_args(['reclaim', 'part1']))
+            manage.launch('reclaim', accepted, manage.parser().parse_args(['reclaim', 'part1']))
         run.assert_not_called()
-        profile = dict(profile, plan=None)
         with mock.patch.object(manage, 'run') as run, self.assertRaisesRegex(RuntimeError, 'No current reclaim plan'):
             manage.launch('reclaim', profile, manage.parser().parse_args(['reclaim', 'part1', '--business-accepted']))
         run.assert_not_called()

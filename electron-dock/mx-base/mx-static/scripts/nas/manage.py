@@ -26,6 +26,7 @@ from projects import infra_runtime
 from projects import infra_services
 from projects import infra_deploy
 from projects import infra_repair
+from projects import infra_drift
 from projects import infra_repair_copy
 from projects import infra_repair_switch
 from projects import infra_reclaim
@@ -424,6 +425,7 @@ def parser():
         if action=='reclaim':s.add_argument('--business-accepted',action='store_true')
         if action=='compose':s.add_argument('view',choices=('ps','config-check'))
     for name in ('auto-install','_auto-recover','catalog-list','host-status','host-processes','host-mount-check','host-network','recovery-check-all','recovery-enable-migrated','recovery-disable-all'):sub.add_parser(name)
+    sub.add_parser('repair-inspect').add_argument('part',choices=sorted(profiles()))
     for action in ('reclaim-check','_execute-reclaim-check'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         s.add_argument('--business-accepted',action='store_true')
@@ -447,6 +449,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra deployment recreate --maintenance [--build]
   bash scripts/manage.sh nas infra storage check     # 当前挂载核对；不符/未确认退出 1
   bash scripts/manage.sh nas infra storage register  # 一次登记媒体恢复；不重启，不绑定 .env/镜像/ID
+  bash scripts/manage.sh nas infra repair inspect    # 新部署与清理收据只读检查；不扫描媒体、不采纳新版本
   bash scripts/manage.sh nas infra repair prepare    # 当前版本修复清单；只读媒体，另存私有报告
   bash scripts/manage.sh nas infra repair copy <修复报告目录>  # 后台补齐清单中的 SSD 独有文件，不覆盖 NAS
   bash scripts/manage.sh nas infra repair switch <成功 copy 尝试目录> --maintenance --write-test
@@ -530,6 +533,8 @@ def main():
             with migration_lock():infra_runtime.register(sys.modules[__name__],profile)
         elif action=='repair-prepare':
             with migration_lock():infra_repair.prepare(sys.modules[__name__],profile)
+        elif action=='repair-inspect':
+            return 0 if infra_drift.inspect(sys.modules[__name__],profile) else 1
         elif action=='_execute-repair-copy':
             with migration_lock():infra_repair_copy.execute(sys.modules[__name__],profile,args.report)
         elif action=='_execute-reclaim-check':

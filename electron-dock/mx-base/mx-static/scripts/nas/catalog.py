@@ -111,6 +111,9 @@ def route(argv, config):
     if tail==['repair','prepare']:
         if p['adapter']!='infra-v1':raise RuntimeError('Repair preparation only reviewed for infra.')
         return ['repair-prepare',task]
+    if tail==['repair','inspect']:
+        if p['adapter']!='infra-v1':raise RuntimeError('Deployment drift inspection only reviewed for infra.')
+        return ['repair-inspect',task]
     if len(tail)==3 and tail[:2]==['repair','copy']:
         if p['adapter']!='infra-v1':raise RuntimeError('Repair copy only reviewed for infra.')
         return ['repair-copy',task,tail[2]]
