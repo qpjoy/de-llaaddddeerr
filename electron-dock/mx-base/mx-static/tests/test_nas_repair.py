@@ -219,6 +219,9 @@ class DeploymentTests(unittest.TestCase):
             return repair.deployment(manage, self.op, self.fd, str(self.path))
 
     def test_new_images_are_pinned_and_auth_database_configuration_retained(self):
+        for name, previous in self.op.old.items():
+            if name != 'gateway':
+                previous['Image'] = 'sha256:45f5a0e5cae63bd1bc6215bcdbbe6531ba149ccc86dc47e11fcb55d1a9f5e0bf'
         result = self.prepare_deployment()
         candidate = json.loads((self.path / 'compose.nas.candidate.json').read_text())
         self.assertEqual(candidate['services']['web']['image'], repair.APP_IMAGE)
@@ -236,6 +239,14 @@ class DeploymentTests(unittest.TestCase):
         self.consumers['web']['Image'] = 'sha256:unreviewed'
         with self.assertRaises(RuntimeError): self.prepare_deployment()
         self.assertFalse((self.path / 'compose.nas.candidate.json').exists())
+
+    def test_previous_repair_image_cannot_be_mixed_into_current_deployment(self):
+        self.consumers['worker']['Image'] = 'sha256:45f5a0e5cae63bd1bc6215bcdbbe6531ba149ccc86dc47e11fcb55d1a9f5e0bf'
+        with self.assertRaisesRegex(RuntimeError, 'deployment review failed'):
+            self.prepare_deployment()
+        self.assertFalse((self.path / 'compose.nas.candidate.json').exists())
+        review = json.loads((self.path / 'deployment-review.json').read_text())
+        self.assertIn({'service': 'worker', 'reason': 'unreviewed_image'}, review['issues'])
 
     def test_changed_start_command_stops_before_candidate(self):
         self.consumers['web']['Config']['Cmd'] = ['new-bootstrap']

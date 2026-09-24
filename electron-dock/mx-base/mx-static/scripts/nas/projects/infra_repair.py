@@ -24,7 +24,9 @@ from verify import Report, inventory, open_file, preserved_attributes, stamp
 REPORT_ROOT = '/var/lib/mx-static/nas-repair'
 MAX_HASH_PAIRS = 1000
 MAX_HASH_BYTES = 512 * 1024 ** 2  # Both sides combined; never widen automatically.
-APP_IMAGE = 'sha256:45f5a0e5cae63bd1bc6215bcdbbe6531ba149ccc86dc47e11fcb55d1a9f5e0bf'
+# Reviewed by the Sep 24 second-fallback inspect receipt; see its incident runbook.
+# Recheck scripts, launch fields, live Compose and database identities on every prepare.
+APP_IMAGE = 'sha256:f0b13dc7f35c2d317a48be2ff3b6ef97e62b8f007d32c0c8af422377d7b07446'
 GATEWAY_IMAGE = 'sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea'
 
 

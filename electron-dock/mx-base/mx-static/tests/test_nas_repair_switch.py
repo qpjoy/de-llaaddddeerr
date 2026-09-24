@@ -168,6 +168,32 @@ class ReceiptTests(LocalFiles):
 
 
 class PreparationTests(LocalFiles):
+    def test_previous_image_plan_cannot_copy_or_switch_after_new_deployment_review(self):
+        profile = manage.profiles()['part1']
+        report_path = planning.REPORT_ROOT + '/infra-' + 'a' * 32
+        plan = {'schema': 1, 'phase': 'prepared', 'report_directory': report_path,
+                'historical_report': profile['report'], 'volume': prep.VOLUME, 'nfs_volume': prep.NFS_VOLUME,
+                'application_image': 'sha256:45f5a0e5cae63bd1bc6215bcdbbe6531ba149ccc86dc47e11fcb55d1a9f5e0bf',
+                'gateway_image': planning.GATEWAY_IMAGE, 'execution_allowed': False, 'reclaim_ready': False,
+                'nas_marker': {'phase': 'cutover_running_on_nas'}}
+        prep.private_write(self.out, 'repair-plan.json', plan)
+        evidence = (self.output / 'repair-plan.json').read_bytes()
+        manager = mock.Mock()
+        with mock.patch.object(copying, 'open_report', side_effect=lambda p: os.dup(self.out)), \
+                mock.patch.object(cutover, 'read_json', side_effect=local_json), \
+                mock.patch.object(cutover, 'open_report') as history, \
+                mock.patch.object(cutover, 'Cutover') as operation, \
+                mock.patch.object(copying, 'read_manifest') as manifest:
+            with self.assertRaisesRegex(RuntimeError, 'Not a reviewed'):
+                copying.execute(manager, profile, report_path)
+            with self.assertRaisesRegex(RuntimeError, 'Unexpected reviewed repair plan'):
+                switch.make_operation(manager, profile, report_path + '/copy-' + 'b' * 32)
+            history.assert_not_called(); operation.assert_not_called(); manifest.assert_not_called()
+        self.assertEqual(manager.mock_calls, [])
+        self.assertEqual((self.output / 'repair-plan.json').read_bytes(), evidence)
+        self.assertEqual([p.name for p in self.output.iterdir()], ['repair-plan.json'])
+        self.assertEqual(list(self.target.iterdir()), [])
+
     def test_new_report_uses_current_images_and_keeps_old_reports_and_auth_unchanged(self):
         profile = manage.profiles()['part1']
         history = self.root / 'history'; history.mkdir()
