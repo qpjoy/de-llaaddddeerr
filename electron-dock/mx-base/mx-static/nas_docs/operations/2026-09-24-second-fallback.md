@@ -149,4 +149,23 @@ bash scripts/manage.sh nas infra cleanup check
 
 保留 **check**，不加 `--business-accepted`：只读核对旧 SSD 与本次停写证据、对应 NAS 文件和当前部署，生成新的私有清单，不删除、不停业务。回传任务最终 `nas_reclaim_check_complete`。用户明确业务尚未全部检查，故预期 `business_acceptance_recorded=false`、`reclaim_ready=false`；这是待验收状态，不是要求绕过检查。待实际业务验收完成，再按现有流程记录验收和新的就绪清单，之后另行决定删除。
 
-本地验证：313 项 NAS 测试通过，覆盖新镜像生成候选、旧镜像混入拒绝、旧修复计划在复制和切换入口拒绝且不访问 NAS，以及原有逐文件/数据库/恢复保护。模拟和本地文件测试不代表服务器已经修复。
+## 本次技术回收核验通过，待业务验收
+
+服务器此前仍显示 `33e5…` 是代码未同步，用户已确认并完成同步。随后安装快照为 `6e4a415baafa584072a6`，与本地运行工具/声明摘要一致；恢复检查 infra 已核对/已纳入、timer active/enabled。无需因本次文档记录再次安装。
+
+`mx-nas-part1-reclaim-check-99079f6660.service` 成功，产生本次 `8610f8a…` 报告下的 `reclaim-plan-7cc46138ae5e4421b2b8f131d5cd80b0`：
+
+- 201,521 个普通文件，538,881,503,921 逻辑字节，约 501.87 GiB；4 个目录（包含保留的根目录）。
+- 201,403 个 quick-check 匹配，加上 118 个差异文件哈希一致，合计覆盖全部普通文件；双侧哈希读取 346,818,790 字节。另有 1,681 个文件保留 NAS 属性，该数量是上述文件的子集。
+- SSD 清单与停写证据摘要相同：`6148b46aadf99058534a91422113056ee200a97500606da2a0635b3a57eb01cd`。
+- `files_verified=true`、`recovery.verified=true`；`business_acceptance_recorded=false`、`reclaim_ready=false`、`deletion_authorized=false`、`source_deleted=false`。
+
+技术核验已经通过；不将 quick-check 描述为全量内容哈希。用户尚未完成本次业务检查，因而这个计划不选入 Git，`plan=null` 继续保留，SSD 未删。检查现有账号登录/联网、旧媒体读取、新媒体写入及后台任务，全部正常后才执行：
+
+```bash
+bash scripts/manage.sh nas infra cleanup check --business-accepted
+```
+
+该命令仍是 **check**，重新核验并记录业务验收，不删除文件。回传新 `nas_reclaim_check_complete` 后再选择就绪清单，实际删除仍是后续单独操作。当前不需要重复复制、切换或普通未验收核验；应用发布脚本接入和测试仍待用户稍后同步，期间继续暂停旧发布入口及原始 Compose 重建。
+
+最近代码验证：332 项 NAS 测试通过，覆盖修复/发布入口及逐文件、数据库和恢复保护。此次仅记录服务器回执，不修改执行逻辑或声明，不重复运行测试；技术回执不代替业务验收。
