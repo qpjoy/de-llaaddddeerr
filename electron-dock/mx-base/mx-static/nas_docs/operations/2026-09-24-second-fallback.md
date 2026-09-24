@@ -177,3 +177,32 @@ bash scripts/manage.sh nas infra cleanup check --business-accepted
 截图建议的已安装 `manage.py reclaim-check part1` 也是检查入口，但不带验收参数仍会生成未验收结果，无需两个入口重复运行。当前实现仍检查迁移时保存的部署文件摘要、容器 ID、镜像和启动配置，因此重部署后可能出现 `Deployment files changed since preparation.`、`Created container replaced` 等拒绝。这表示旧部署基准不再适用，不直接证明媒体损坏或退回 SSD。回传准确错误后审查，不改写原报告、重切或跳过保护。
 
 尚无此次已验收核验成功记录，Git 的 `plan` 保持为空；不能选择之前未验收的 `7cc46138…` 清单直接删除。新核验成功后才登记新清单并执行用户准备进行的 infra SSD 回收；NAS、数据库/队列及 delta/dev 数据均不在删除范围内。
+
+## 重部署后的回收配置耦合已定位并修正
+
+用户运行带验收参数的检查后，任务 `mx-nas-part1-reclaim-check-5533850057.service` 在部署核对阶段报 `Deployment files changed since preparation.`；`plan_directory=null`、`source_deleted=false`。随后回传原始 JSON 确认十个新容器全部运行且 NFS 挂载匹配，web 为 `114a0ffeaaf3`、gateway 为 `3faa790a983f`。独立恢复已核对/已纳入、安装一致、timer active/enabled。因此这次是历史应用配置耦合，不能据此重新切换 NAS。
+
+新适配只用于独立登记的 infra/media-v1 回收：
+
+1. 原 `8610f8a…` 切换报告、最终停写清单和 NAS 标记继续作为数据证据，不改写其中的配置哈希、镜像或容器 ID。
+2. 当前媒体路径、卷选项、nocopy、gateway 只读、内核 NFS 和当前依赖健康重新核对；额外 SSD 消费者及同一媒体容器的 SSD 别名挂载均拒绝。
+3. 旧 SSD 仍须与原停写清单完全一致；对应 NAS 文件继续 quick-check/有限差异哈希、保留 NAS 属性和独有文件。当前 web 只读核对目标 inode，gateway 读取原媒体样本，不使用已移除的历史镜像创建探测容器。
+4. 新计划标记 `nas_verification=retained-union-media-v1`，另存私有 `runtime.json` 和摘要，绑定本次当前容器 ID/配置指纹；不保存明文 Env。核验期间部署变化拒绝；实际删除前和每批继续核对运行状态、登记、恢复覆盖及媒体身份，逐文件重验 NAS/SSD 并持久记录意图。
+5. 老 `retained-union-v1` 清单保持原保护，不能直接换字段升级或改旧报告绕过。新适配不触碰应用脚本、登录逻辑、数据库、队列或其他项目。
+
+将本次所有 mx-static 更新（包括新增的 `scripts/nas/projects/infra_reclaim_runtime.py`）同步到服务器后执行：
+
+```bash
+bash scripts/manage.sh nas recovery install &&
+bash scripts/manage.sh nas recovery check
+```
+
+检查通过后重新提交只读媒体核验：
+
+```bash
+bash scripts/manage.sh nas infra cleanup check --business-accepted
+```
+
+这是新工具核验，仍不删除；无需重复业务验收、repair/copy/switch。等待本次成功 `nas_reclaim_check_complete` 后再登记新计划。若旧 SSD 本身也发生变化，新工具仍会拒绝，必须依据准确错误分析，不能自动改写停写基准。
+
+本地 349 项 NAS 测试、32 个运行时 Python 3.6 语法检查通过；覆盖合法重部署、配置/容器变化中止、NAS 回退、未知 SSD 写入路径、缺登记/维护未完成、源/NAS 文件变化、运行状态证据被改、未验收/未登记计划拒绝，以及实际临时目录逐文件删除仅影响 SSD。服务器的新核验和实际删除尚待回执。

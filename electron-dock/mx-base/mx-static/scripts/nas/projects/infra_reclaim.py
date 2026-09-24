@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import time
+from contextlib import contextmanager
 
 import cutover
 import cutover_prepare as prep
@@ -14,7 +15,7 @@ import reclaim
 import reclaim_plan
 import recovery
 from permissions import emit
-from projects import infra_repair, infra_repair_switch, infra_storage
+from projects import infra_repair, infra_repair_switch, infra_storage, infra_reclaim_runtime
 from projects.infra_repair_copy import named_hash
 from sample_copy import DIR_FLAGS, digest
 from verify import Report, STAT_FIELDS, inventory, open_file, stamp
@@ -149,7 +150,7 @@ def recovery_evidence(manager):
 
 def read_verified_target(folder, plan, source, state):
     """Used again by the separately authorized deleter; never widen old plans."""
-    if (plan.get('nas_verification') != POLICY or plan.get('reclaim_ready') is not True
+    if (plan.get('nas_verification') not in (POLICY, infra_reclaim_runtime.POLICY) or plan.get('reclaim_ready') is not True
             or plan.get('business_acceptance_recorded') is not True
             or plan.get('recovery', {}).get('verified') is not True
             or plan.get('cutover_execution_sha256') != state_digest(state)):
@@ -163,12 +164,23 @@ def read_verified_target(folder, plan, source, state):
     return tree
 
 
+@contextmanager
+def operation(manager, profile):
+    if profile.get('recovery_mode') == 'media-v1':
+        with infra_reclaim_runtime.operation(manager, profile) as value:
+            yield value
+    else:
+        with manager.operation(profile, require_running=True) as (op, rows):
+            yield op, rows, None
+
+
 def check(manager, profile, business_accepted=False):
     infra_storage.reviewed(profile)
     folder = None; path = None
     try:
-        with manager.operation(profile, require_running=True) as (op, rows):
-            reclaim_plan.guard(op, op.state)
+        with operation(manager, profile) as (op, rows, session):
+            guard = session.guard if session else lambda: reclaim_plan.guard(op, op.state)
+            guard()
             if not op.state.get('repair_of') or op.state.get('ssd_reclaim'):
                 raise RuntimeError('Completed repaired cutover with retained SSD required.')
             op.open_media(sealed=True)
@@ -179,6 +191,8 @@ def check(manager, profile, business_accepted=False):
             frozen, frozen_sha = stopped_tree(op)
             name, folder = infra_repair_switch.new_directory(op.output, 'reclaim-plan-')
             path = op.path + '/' + name
+            if session:
+                prep.private_write(folder, 'runtime.json', session.evidence)
             emit('nas_reclaim_check_started', plan_directory=path, source_deleted=False)
             fresh = source_inventory(op.source, 'retained_ssd')
             if fresh != frozen: raise RuntimeError('Retained SSD differs from stopped-writer evidence; review before reclaim.')
@@ -191,8 +205,11 @@ def check(manager, profile, business_accepted=False):
             reclaim.check_nas_files(op.target, fresh, sorted(p for p in fresh if stat.S_ISREG(fresh[p]['mode'])), nas_tree=target)
             if source_inventory(op.source, 'retained_ssd_recheck') != fresh:
                 raise RuntimeError('SSD changed during verification.')
-            reclaim_plan.guard(op, op.state); infra_repair_switch.media_guard(op)
-            op.identity_probe(); op.http_probe(rows)
+            guard(); infra_repair_switch.media_guard(op)
+            if session:
+                session.probes()
+            else:
+                op.identity_probe(); op.http_probe(rows)
             if not infra_storage.check(manager, profile): raise RuntimeError('NAS mounts changed during verification.')
             restored = recovery_evidence(manager)
             result = dict(reclaim_plan.summarize_tree(fresh), schema=1, state='inventory_complete',
@@ -205,7 +222,10 @@ def check(manager, profile, business_accepted=False):
                 reclaim_ready=business_accepted and restored['verified'], deletion_supported=True,
                 deletion_authorized=False, source_deleted=False, time_unix=time.time(),
                 note='Snapshot only; SSD retained. Revalidate exact source/NAS manifests and deployment before later deletion.')
-            reclaim_plan.guard(op, op.state)
+            if session:
+                result.update(nas_verification=infra_reclaim_runtime.POLICY,
+                              runtime_snapshot_sha256=infra_reclaim_runtime.digest(session.evidence))
+            guard()
             prep.private_write(folder, 'plan.json', result); os.fsync(folder); os.fsync(op.output)
             emit('nas_reclaim_check_complete', **result)
             return result

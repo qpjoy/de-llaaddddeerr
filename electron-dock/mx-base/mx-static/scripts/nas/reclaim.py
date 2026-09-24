@@ -193,6 +193,23 @@ def delete_files(source, target, tree, paths, journal, guard, nas_tree=None):
             for fd in nas.values(): os.close(fd)
 
 
+def union_context(operation, plan_fd, plan, tree, manager):
+    from projects import infra_reclaim, infra_reclaim_runtime
+    nas_tree = infra_reclaim.read_verified_target(plan_fd, plan, tree, operation.state)
+    registered = manager.profiles()['part1']
+    if registered['report'] != operation.path or registered.get('plan') != plan['plan_directory']:
+        raise RuntimeError('This UNION plan must be explicitly registered before later deletion.')
+    if not infra_reclaim.recovery_evidence(manager)['verified']:
+        raise RuntimeError('Current recovery installation/policy is not verified.')
+    session = None
+    if plan.get('nas_verification') == infra_reclaim_runtime.POLICY:
+        evidence = cutover.read_json(plan_fd, 'runtime.json')
+        if infra_reclaim_runtime.digest(evidence) != plan.get('runtime_snapshot_sha256'):
+            raise RuntimeError('Reclaim runtime evidence checksum differs.')
+        session = infra_reclaim_runtime.Session(manager, registered, operation, expected=evidence)
+    return nas_tree, session
+
+
 def main():
     if (len(sys.argv) != 3 or sys.argv[1] != '--business-accepted' or
             not sys.platform.startswith('linux') or os.geteuid() != 0):
@@ -217,21 +234,18 @@ def main():
         tree = read_manifest(plan_fd, plan)
         operation = cutover.Cutover(report_path, output)
         state = cutover.read_json(output, 'execution.json'); operation.state = state
-        nas_tree = None
+        nas_tree = None; session = None
         if state.get('repair_of') or plan.get('nas_verification'):
-            from projects import infra_reclaim
-            nas_tree = infra_reclaim.read_verified_target(plan_fd, plan, tree, state)
             # Even a direct legacy wrapper cannot use stale recovery registration.
             import manage
-            registered = manage.profiles()['part1']
-            if registered['report'] != report_path or registered.get('plan') != plan_path:
-                raise RuntimeError('This UNION plan must be explicitly registered before later deletion.')
-            if not infra_reclaim.recovery_evidence(manage)['verified']:
-                raise RuntimeError('Current recovery installation/policy is not verified.')
+            nas_tree, session = union_context(operation, plan_fd, plan, tree, manage)
         if state.get('ssd_reclaim', {}).get('plan_directory', plan_path) != plan_path:
             raise RuntimeError('Another reclaim plan already completed; review its receipt.')
         def guard():
-            planning.guard(operation, state)
+            if session:
+                session.guard()
+            else:
+                planning.guard(operation, state)
             operation.open_media(sealed=True)
             if precopy.read_state(operation.job).get('phase') != 'cutover_running_on_nas':
                 raise RuntimeError('NAS marker no longer running.')
@@ -258,8 +272,11 @@ def main():
         emit('reclaim_preflight', plan_directory=plan_path, files_remaining=len(remaining),
              business_accepted=True, note='NAS metadata checks only; keep deployments and external SSD writers frozen.')
         check_nas_files(pinned_target, tree, remaining, nas_tree=nas_tree)
-        operation.identity_probe()
-        operation.http_probe(operation.mounted_services(True, expected_ids=state['new_ids']))
+        if session:
+            session.probes()
+        else:
+            operation.identity_probe()
+            operation.http_probe(operation.mounted_services(True, expected_ids=state['new_ids']))
         if remaining_files(pinned_source, tree, permitted) != remaining: raise RuntimeError('SSD changed during preflight.')
         batch_guard()
         cutover.atomic_json(plan_fd, 'acceptance.json', {'schema': 1, 'business_accepted': True,

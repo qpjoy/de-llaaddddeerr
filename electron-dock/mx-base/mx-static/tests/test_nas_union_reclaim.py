@@ -40,7 +40,9 @@ class UnionReviewTests(LocalFiles):
         finally: os.close(fd)
         self.op = mock.Mock(source=self.src, target=self.dst, job=self.jobfd, output=self.out,
             path=str(self.output), state={'repair_of': '/historical', 'final_review': str(final), 'phase': 'running_on_nas'})
-        self.profile = manage.profiles()['part1']
+        # Keep the existing legacy UNION adapter covered; the current-runtime
+        # adapter has independent end-to-end coverage in test_nas_reclaim_runtime.
+        self.profile = dict(manage.profiles()['part1'], recovery_mode=None)
         self.restored = {'verified': True, 'installed_current': True, 'selected': True, 'timer': {}}
         self.rows = {n: {'Id': n} for n in prep.SERVICES}
 
