@@ -1,5 +1,7 @@
 # 9 月 24 日 11:04 重建后再次回到 SSD
 
+> 本次已修复：`8610f8a…` 切换完成，当前 NFS 挂载及独立恢复检查通过。下面保留事故处理顺序，旧 copy/switch 命令不要重复执行；最新状态和下一步见末尾“本次切换与恢复已确认”。业务验收尚未完成，SSD 保留。
+
 ## 已确认事实
 
 17:08 起的现场回传证明，infra 十个媒体服务均缺少原生 NFS 子卷、nocopy 声明和内核 NFS 子挂载，媒体路径由 `/app/media` 的 XFS 父卷提供，设备 `/dev/nvme0n1p1`。此前 SSD 回收就绪状态不再适用。
@@ -60,6 +62,8 @@ bash scripts/manage.sh nas infra repair copy /var/lib/mx-static/nas-repair/infra
 
 ## 已确认的两个发布入口
 
+最新复制回执与切换命令见下方“本次在线补齐已完成”。下面的入口说明不代表应用脚本已经在服务器更新。
+
 两张用户截图均在 `/home/lcy/test/Delta/mx_data` 执行 `./scripts/deploy_public_ghcr.sh --local-build`：
 
 | 环境 | 关键参数 | 当前 Docker 项目 / 媒体父卷 |
@@ -86,6 +90,63 @@ bash scripts/manage.sh nas infra repair copy /var/lib/mx-static/nas-repair/infra
 
 先审查当前版本，再生成新的 SSD/NAS 差异清单；保留 NAS 独有数据和原属性，禁止同名覆盖。补齐新确认的 SSD 独有文件后，在维护窗口停写复核、使用当前版本受控切换。不能先加挂载把新 SSD 文件遮住，不能重复旧 rsync/cutover，也不能退回旧应用镜像。
 
-再次切换前需在服务器安装上述发布入口的 NAS 声明与权限保护。现有恢复 timer 和只读检查没有拦截外部原始 Compose 重建。新版本审查和新差异准备已经通过，数据补齐、部署接入安装及再次切换尚未完成，不能把本次工具交付写成生产修复成功。修改范围为 mx-static 及新授权的单个 po-infra 发布脚本，保护 MX-H2I 登录、数据库/队列及其他项目。
+服务器已确认安装工具快照 `c5edb8b3fc3d38846657`，但应用发布脚本尚未拉取。用户选择先完成 mx-static 受控修复，再接入/测试应用发布保护；期间不运行旧发布脚本或原始 Compose 重建。发布接入不作为修复切换的额外门槛，现有数据和部署核验保持不变。新版本审查、新差异准备和本次在线补齐已经通过，再次切换及应用接入生效尚待回执，不能把工具安装/复制写成生产修复成功。修改范围为 mx-static 及新授权的单个 po-infra 发布脚本，保护 MX-H2I 登录、数据库/队列及其他项目。
+
+## 本次在线补齐已完成
+
+用户回传 `manifest_copy_complete`：成功尝试为 `/var/lib/mx-static/nas-repair/infra-1dfa9196bd8c4e32823ca73276630c74/copy-357ceceb606548e4b3cb3c528e9c341c`，`copied=864`、`already_present=0`、`logical_bytes=662942020`、`source_ctime_revalidated=0`。`production_restart=false`、`source_deleted=false`、`live_snapshot=true`、`stopped_writer_recheck_required=true`、`reclaim_ready=false`。
+
+在服务器 mx-static 目录、允许业务访问暂停的维护窗口执行本次准确命令：
+
+```bash
+bash scripts/manage.sh nas infra repair switch \
+  /var/lib/mx-static/nas-repair/infra-1dfa9196bd8c4e32823ca73276630c74/copy-357ceceb606548e4b3cb3c528e9c341c \
+  --maintenance --write-test
+```
+
+会停写复核、补齐复制期间新增文件，并按已审查当前镜像重建/启动十个媒体服务；Web/gateway 暂停期间登录及访问可能不可用。不重启 PostgreSQL/Redis，不执行账号初始化、数据库迁移或清理旧 SSD。`--write-test` 仅创建和清理工具自身小探测。任务仍会重验部署、copy 收据和卷身份；失败时保留日志，不跳过检查或执行旧发布恢复。
+
+提交后按输出中的精确 journalctl 命令观察。随后用户已回传 `nas_repair_switch_complete` 和 storage check，结果见下文；本节命令记录已完成操作，不应重复执行。
+
+## 最新挂载核对已通过
+
+用户随后回传 storage check：十个 infra 媒体服务全部匹配，内核媒体来源均为 `nfs /app/media/data_hub_raw_media`。这确认当前挂载位置已恢复到 NAS；不要因完成日志尚未回传而重复上面的切换命令。此检查本身不证明应用读写、停写增量补齐完成或 SSD 回收就绪。
+
+当时请求只读收集本次 `nas_repair_switch_complete`（包含新报告目录）和当前恢复状态，用户现已回传：
+
+```bash
+journalctl -n 80 --no-pager -o cat -u 'mx-nas-part1-repair-switch-*.service'
+bash scripts/manage.sh nas recovery check
+```
+
+按最新任务的完成收据核对，不能套用早前 `33e5…` 报告。业务侧需确认现有账号登录/联网、旧媒体读取、新媒体写入及后台任务；用户随后明确回复“尚未全部检查”。应用脚本尚未同步，旧发布/原始 Compose 重建的暂停约定继续生效。
+
+## 本次切换与恢复已确认
+
+服务器任务 `mx-nas-part1-repair-switch-1826dd377a.service` 成功：
+
+- 新报告：`/var/lib/mx-static/nas-cutover/po_infra_media_data-8610f8a08acd40dc983a14d515aa2ec5`。
+- `phase=running_on_nas`、`final_sync_passed=true`、`nas_may_have_writes=true`；最终停写证据位于该目录的 `repair-final-fa297c7ef6cc4b41a4e0ae5731903aee`。
+- 十个新媒体容器 ID 已记录，当前挂载核对全部通过。成功入口已完成现有媒体 HTTP 读取和应用身份的小范围写入/读回探测；这不代替实际业务验收。
+- PostgreSQL `2ff6f5855d39…`、Redis `210770e5ecab…` 保持原容器；无 SSD 删除。
+- 同次恢复检查：infra 已核对/已纳入，全局未暂停，安装快照与当时服务器代码/声明一致，timer active/running 且 enabled。delta 仍等待迁移。
+
+Git 只将 Part 1 的 `report` 更新为本次 `8610f8a…`，`plan` 保持为空，旧报告/清单/NAS 证据保留。独立媒体恢复不绑定历史报告或容器 ID，因此恢复检查已经通过并不表示迁移/清理入口已选择最新报告。无需重新 storage register、enable 或切换；也不要手改完成收据的 pending 字段。
+
+同步本次 mx-static 声明后，在服务器 mx-static 目录执行：
+
+```bash
+bash scripts/manage.sh nas infra locate &&
+bash scripts/manage.sh nas recovery install &&
+bash scripts/manage.sh nas recovery check
+```
+
+`locate` 应显示上述 `8610f8a…` 报告，清理计划为空。install 的原因是报告选择属于安装声明快照；它保留启用设置，不启动或重建业务。恢复检查仍应通过且安装快照一致。然后可以先进行本次技术核验：
+
+```bash
+bash scripts/manage.sh nas infra cleanup check
+```
+
+保留 **check**，不加 `--business-accepted`：只读核对旧 SSD 与本次停写证据、对应 NAS 文件和当前部署，生成新的私有清单，不删除、不停业务。回传任务最终 `nas_reclaim_check_complete`。用户明确业务尚未全部检查，故预期 `business_acceptance_recorded=false`、`reclaim_ready=false`；这是待验收状态，不是要求绕过检查。待实际业务验收完成，再按现有流程记录验收和新的就绪清单，之后另行决定删除。
 
 本地验证：313 项 NAS 测试通过，覆盖新镜像生成候选、旧镜像混入拒绝、旧修复计划在复制和切换入口拒绝且不访问 NAS，以及原有逐文件/数据库/恢复保护。模拟和本地文件测试不代表服务器已经修复。

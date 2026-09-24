@@ -160,11 +160,11 @@ class UnionReviewTests(LocalFiles):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_second_drift_clears_selection_and_missing_plan_blocks_deletion(self):
+    def test_latest_repair_selected_without_plan_blocks_deletion(self):
         profile = manage.profiles()['part1']
-        self.assertTrue(profile['report'].endswith('-33e5abb193d04e7595251a5e6a6046ae'))
+        self.assertTrue(profile['report'].endswith('-8610f8a08acd40dc983a14d515aa2ec5'))
         self.assertIsNone(profile['plan'])
-        accepted = dict(profile, plan=profile['report'] + '/reclaim-plan-a1dc4bb0dfea4d5d83ce143daaf052e9')
+        accepted = dict(profile, plan=profile['report'] + '/reclaim-plan-' + 'a' * 32)
         with mock.patch.object(manage, 'run') as run, self.assertRaisesRegex(RuntimeError, 'requires --business-accepted'):
             manage.launch('reclaim', accepted, manage.parser().parse_args(['reclaim', 'part1']))
         run.assert_not_called()
