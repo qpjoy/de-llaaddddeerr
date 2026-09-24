@@ -11,7 +11,8 @@
       "storage_file": "part1.storage.json",
       "recovery_mode": "media-v1",
       "runtime_file": "part1.runtime.json",
-      "deployment_file": "part1.deployment.json"
+      "deployment_file": "part1.deployment.json",
+      "release_file": "part1.release.json"
     },
     "part2": {
       "project": "delta_59202",

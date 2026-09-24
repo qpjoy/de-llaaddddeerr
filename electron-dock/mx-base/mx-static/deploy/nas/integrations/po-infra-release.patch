@@ -1,0 +1,52 @@
+--- a/scripts/deploy_public_ghcr.sh
++++ b/scripts/deploy_public_ghcr.sh
+@@ -190,7 +190,12 @@
+   if [[ -n "${DB_PUBLIC_PORT:-}" ]]; then
+     args+=(-f "$DB_PORT_COMPOSE_FILE")
+   fi
+-  "${DOCKER_CMD[@]}" compose "${args[@]}" "$@"
++  # Required storage admission; a missing installation must stop the release.
++  local guard=(/usr/bin/python3 -E -s -B /usr/local/lib/mx-static-nas/current/scripts/nas/release.py)
++  if [[ "$EUID" -ne 0 ]]; then
++    guard=(sudo -E "${guard[@]}")
++  fi
++  "${guard[@]}" "${args[@]}" -- "$@"
+ }
+ 
+ sanitize_instance_name() {
+@@ -658,6 +663,8 @@
+ 
+ setup_docker_cmd
+ apply_instance_defaults
++# Check existing storage before changing env files, pulling code or starting tasks.
++NAS_STORAGE_MODE="$(compose mx-nas-mode)"
+ ensure_env_file
+ git_pull_if_needed
+ DEPLOY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+@@ -953,19 +960,24 @@
+ echo "Configuring Data Hub media URL ..."
+ compose run --rm -e DELTA_MEDIA_BASE_URL="$(public_base_url)" web python manage.py shell -c "import os; from data_hub.models import DataHubLLMSettings; item = DataHubLLMSettings.load(); item.media_base_url = os.environ.get('DELTA_MEDIA_BASE_URL', '').rstrip('/'); item.save(update_fields=['media_base_url', 'updated_at'])"
+ echo "Fixing media file permissions ..."
+-compose run --rm web sh -c "find /app/media -type d -exec chmod 755 {} +; find /app/media -type f -exec chmod 644 {} +" || true
++if [[ "$NAS_STORAGE_MODE" == "nas" ]]; then
++  compose run --rm web sh -c "find /app/media -path /app/media/data_hub_raw_media -prune -o -type d -exec chmod 755 {} +; find /app/media -path /app/media/data_hub_raw_media -prune -o -type f -exec chmod 644 {} +" || true
++else
++  compose run --rm web sh -c "find /app/media -type d -exec chmod 755 {} +; find /app/media -type f -exec chmod 644 {} +" || true
++fi
+ 
+ echo "Starting web services ..."
+ compose up -d web chat-gateway gateway
+ 
+ if ! wait_for_http "http://127.0.0.1:${PUBLIC_PORT}/healthz/" 180; then
+   echo "Deployment finished, but HTTP health endpoint did not become ready in time." >&2
+-  echo "Check logs with: docker compose --env-file $ENV_FILE -f $COMPOSE_FILE logs -f" >&2
++  echo "Check logs with: bash <mx-static>/scripts/manage.sh nas infra status (or nas delta status)" >&2
+   exit 1
+ fi
+ 
+ echo "Starting background workers ..."
+ compose up -d --remove-orphans beat worker worker-strategy-draft worker-agent-interactive worker-agent-short worker-agent-long worker-agent-data-hub
++compose mx-nas-check
+ disable_task_submission_maintenance
+ 
+ recover_agent_runs_after_deploy "$DEPLOY_STARTED_AT"

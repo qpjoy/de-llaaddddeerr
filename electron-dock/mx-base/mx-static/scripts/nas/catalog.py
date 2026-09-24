@@ -53,6 +53,7 @@ def installed_files(config):
     names.update(p['storage_file'] for p in index['parts'].values() if p.get('storage_file'))
     names.update(p['runtime_file'] for p in index['parts'].values() if p.get('runtime_file'))
     names.update(p['deployment_file'] for p in index['parts'].values() if p.get('deployment_file'))
+    names.update(p['release_file'] for p in index['parts'].values() if p.get('release_file'))
     for name in names:read_relative(config.parent,name)
     return [config.parent/name for name in sorted(names)]
 
