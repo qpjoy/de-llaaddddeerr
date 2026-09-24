@@ -162,17 +162,22 @@ class UnionReviewTests(LocalFiles):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_latest_repair_selected_without_plan_blocks_deletion(self):
+    def test_selected_plan_requires_acceptance_and_missing_plan_blocks_deletion(self):
         profile = manage.profiles()['part1']
         self.assertTrue(profile['report'].endswith('-8610f8a08acd40dc983a14d515aa2ec5'))
-        self.assertIsNone(profile['plan'])
-        accepted = dict(profile, plan=profile['report'] + '/reclaim-plan-' + 'a' * 32)
+        self.assertEqual(profile['plan'], profile['report'] + '/reclaim-plan-838075ed0c674530bdb2cfd45baf8787')
         with mock.patch.object(manage, 'run') as run, self.assertRaisesRegex(RuntimeError, 'requires --business-accepted'):
-            manage.launch('reclaim', accepted, manage.parser().parse_args(['reclaim', 'part1']))
+            manage.launch('reclaim', profile, manage.parser().parse_args(['reclaim', 'part1']))
         run.assert_not_called()
+        args = manage.parser().parse_args(['reclaim', 'part1', '--business-accepted'])
         with mock.patch.object(manage, 'run') as run, self.assertRaisesRegex(RuntimeError, 'No current reclaim plan'):
-            manage.launch('reclaim', profile, manage.parser().parse_args(['reclaim', 'part1', '--business-accepted']))
+            manage.launch('reclaim', dict(profile, plan=None), args)
         run.assert_not_called()
+        with mock.patch.object(manage, 'run', return_value='') as run, contextlib.redirect_stdout(io.StringIO()):
+            manage.launch('reclaim', profile, args)
+        command = run.call_args[0][0]
+        self.assertEqual(command[-2:], ['--business-accepted', profile['plan']])
+        self.assertIn('--property=ReadOnlyPaths=/mnt/nas', command)
 
     def test_check_is_a_readonly_background_job_and_never_implies_acceptance(self):
         route = catalog.route(['infra', 'cleanup', 'check'], manage.CONFIG)

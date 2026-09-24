@@ -1,6 +1,6 @@
 # 9 月 24 日 11:04 重建后再次回到 SSD
 
-> 本次已修复：`8610f8a…` 切换完成，当前 NFS 挂载及独立恢复检查通过，用户已确认业务。下面保留事故处理顺序，旧 copy/switch 命令不要重复执行；最新进展见末尾“运行状态核验误判修正”。新回收核验尚未通过，SSD 保留。
+> 本次已修复：`8610f8a…` 切换完成，新 `838075ed…` 清单、业务验收和恢复核验通过，已登记供回收旧 SSD。下面保留事故处理顺序，旧 copy/switch 命令不要重复执行；当前操作见末尾“本次已验收清单已登记，执行 SSD 回收”。尚无实际删除完成回执。
 
 ## 已确认事实
 
@@ -216,3 +216,33 @@ bash scripts/manage.sh nas infra cleanup check --business-accepted
 新 `runtime.json` 使用 schema 2，增加私有字段摘要，日志仅输出 `nas_reclaim_runtime_changed` 的 `changed_services` / `changed_fields`，不输出环境变量、标签或配置值。旧 schema 1 计划仍拒绝用于当前删除，需新检查，不能手工修改指纹。354 项 NAS 测试通过，包括每次检查都改变挂载顺序时完整核验/临时 SSD 删除通过，真实变化阻止删除，NAS 文件始终保留。
 
 同步本次 mx-static 文件后，按上节安装/恢复检查命令更新，再执行 `nas infra cleanup check --business-accepted`，使用新任务返回的 journalctl 命令。回传 `nas_reclaim_check_complete`；若失败，连同之前的 `nas_reclaim_runtime_changed` 一并回传。检查期间避免并行部署/重启；无需重复业务验收、复制或切换。当前 `plan=null`，本次失败不授权选择旧计划或删除。
+
+## 本次已验收清单已登记，执行 SSD 回收
+
+用户回传 `mx-nas-part1-reclaim-check-7e7a2d60fd.service` 成功，完整计划为：
+
+```text
+/var/lib/mx-static/nas-cutover/po_infra_media_data-8610f8a08acd40dc983a14d515aa2ec5/reclaim-plan-838075ed0c674530bdb2cfd45baf8787
+```
+
+`nas_verification=retained-union-media-v1`，`files_verified=true`、`business_acceptance_recorded=true`、`recovery.verified=true`、`reclaim_ready=true`。核对 201,521 个文件 / 538,881,503,921 逻辑字节（约 501.87 GiB）；201,403 个 quick-check、118 个哈希一致，读取 346,818,790 字节；保留 1,681 个文件的 NAS 属性，不是全量内容哈希。
+
+SSD 与原停写清单 SHA256 均为 `6148b46aadf99058534a91422113056ee200a97500606da2a0635b3a57eb01cd`；新 NAS 清单 SHA256 为 `fb433c1813a8cc74864219a8236cde80712091cf3edc446302ede29dd162bbd4`；当前运行指纹 SHA256 为 `c0f6c9fefe453d63ea43470025d3308fe86df04c95ec7a4383a654f375ac50e2`。`deletion_authorized=false`、`source_deleted=false` 表示该次是检查，没有执行删除，不表示需要重复询问用户已确认的业务验收。
+
+Git `profiles.json` 已选择上述精确计划，切换报告不变，全部历史证据保留。同步本次声明到服务器 mx-static 目录后执行：
+
+```bash
+bash scripts/manage.sh nas infra locate &&
+bash scripts/manage.sh nas recovery install &&
+bash scripts/manage.sh nas recovery check
+```
+
+`locate` 的清理清单应以 `reclaim-plan-838075ed0c674530bdb2cfd45baf8787` 结尾。清单登记是安装声明的一部分，所以要重新 install 使快照一致；此操作不重启业务、不改变已核验的媒体运行指纹。恢复检查通过后按用户已有删除请求执行：
+
+```bash
+bash scripts/manage.sh nas infra cleanup --business-accepted
+```
+
+这是实际回收命令，不带 `check`。仅删除清单内、再次核验通过的 `/data/docker/volumes/po_infra_media_data/_data/data_hub_raw_media` 旧 SSD 文件；保留源目录、media 其他目录、named volume、所有 NAS 文件、数据库/队列和 delta/dev 数据。实际释放量以 `df -hT /data` 为准。
+
+使用任务返回的服务名运行 `journalctl -f -n 60 -o cat -u <服务名>`，或 `bash scripts/manage.sh nas infra logs`。完成依据是 `reclaim_result` / `phase=ssd_files_reclaimed` 和单元成功，不是提交成功。执行期间不发布/重启 infra、不改旧 SSD；如核验拒绝或中途失败，保留清单和删除意图日志并回传，不手工 rm 或改写指纹。当前还没有实际删除完成回执，无需再次 repair、switch 或生成同样的 check。

@@ -7,7 +7,7 @@
       "volume": "po_infra_media_data",
       "nfs_volume": "mx_data_raw_media_nfs_v1",
       "report": "/var/lib/mx-static/nas-cutover/po_infra_media_data-8610f8a08acd40dc983a14d515aa2ec5",
-      "plan": null,
+      "plan": "/var/lib/mx-static/nas-cutover/po_infra_media_data-8610f8a08acd40dc983a14d515aa2ec5/reclaim-plan-838075ed0c674530bdb2cfd45baf8787",
       "storage_file": "part1.storage.json",
       "recovery_mode": "media-v1",
       "runtime_file": "part1.runtime.json",
