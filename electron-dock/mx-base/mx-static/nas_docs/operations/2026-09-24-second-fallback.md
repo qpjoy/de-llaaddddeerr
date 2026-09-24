@@ -1,6 +1,6 @@
 # 9 月 24 日 11:04 重建后再次回到 SSD
 
-> 本次已修复：`8610f8a…` 切换完成，当前 NFS 挂载及独立恢复检查通过。下面保留事故处理顺序，旧 copy/switch 命令不要重复执行；最新状态和下一步见末尾“本次切换与恢复已确认”。业务验收尚未完成，SSD 保留。
+> 本次已修复：`8610f8a…` 切换完成，当前 NFS 挂载及独立恢复检查通过，用户已确认业务。下面保留事故处理顺序，旧 copy/switch 命令不要重复执行；最新进展见末尾“运行状态核验误判修正”。新回收核验尚未通过，SSD 保留。
 
 ## 已确认事实
 
@@ -206,3 +206,13 @@ bash scripts/manage.sh nas infra cleanup check --business-accepted
 这是新工具核验，仍不删除；无需重复业务验收、repair/copy/switch。等待本次成功 `nas_reclaim_check_complete` 后再登记新计划。若旧 SSD 本身也发生变化，新工具仍会拒绝，必须依据准确错误分析，不能自动改写停写基准。
 
 本地 349 项 NAS 测试、32 个运行时 Python 3.6 语法检查通过；覆盖合法重部署、配置/容器变化中止、NAS 回退、未知 SSD 写入路径、缺登记/维护未完成、源/NAS 文件变化、运行状态证据被改、未验收/未登记计划拒绝，以及实际临时目录逐文件删除仅影响 SSD。服务器的新核验和实际删除尚待回执。
+
+## 运行状态核验误判修正
+
+服务器已安装上述适配，快照 `345ffee6300ed81f9170` 与代码一致、独立恢复检查通过。任务 `mx-nas-part1-reclaim-check-e1dce3b481.service` 在生成计划前报 `Runtime changed during reclaim; no further deletion is allowed.`，`plan_directory=null`、`source_deleted=false`、`reclaim_ready=false`。这条泛化错误没有记录具体字段，不能据此断定真实重启、再次 SSD 回退或媒体损坏。
+
+本地回归复现：仅反转 Docker inspect 的实际 `Mounts` 列表就会导致相同拒绝。新指纹按唯一 Destination 排序实际挂载集合，保留每个挂载的全部字段，重复目标拒绝；不会排序 Cmd/Entrypoint/Env 或 HostConfig 列表，也不会忽略 PID、StartedAt、镜像、卷、权限等真实变化。此次修正是否解释现场的全部差异，仍待服务器核验。
+
+新 `runtime.json` 使用 schema 2，增加私有字段摘要，日志仅输出 `nas_reclaim_runtime_changed` 的 `changed_services` / `changed_fields`，不输出环境变量、标签或配置值。旧 schema 1 计划仍拒绝用于当前删除，需新检查，不能手工修改指纹。354 项 NAS 测试通过，包括每次检查都改变挂载顺序时完整核验/临时 SSD 删除通过，真实变化阻止删除，NAS 文件始终保留。
+
+同步本次 mx-static 文件后，按上节安装/恢复检查命令更新，再执行 `nas infra cleanup check --business-accepted`，使用新任务返回的 journalctl 命令。回传 `nas_reclaim_check_complete`；若失败，连同之前的 `nas_reclaim_runtime_changed` 一并回传。检查期间避免并行部署/重启；无需重复业务验收、复制或切换。当前 `plan=null`，本次失败不授权选择旧计划或删除。

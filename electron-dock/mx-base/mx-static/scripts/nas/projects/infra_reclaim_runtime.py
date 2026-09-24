@@ -22,6 +22,48 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def fingerprint(container):
+    value = {k: container.get(k) for k in ('Id', 'Image', 'Config', 'HostConfig')}
+    mounts = container.get('Mounts', [])
+    destinations = [m.get('Destination') for m in mounts]
+    if (any(not isinstance(p, str) or not p.startswith('/') for p in destinations)
+            or len(destinations) != len(set(destinations))):
+        raise RuntimeError('Cannot fingerprint ambiguous actual mount destinations.')
+    # Docker's actual mount list is a collection, not launch argument order.
+    # Keep every entry/attribute, and leave Config/HostConfig lists untouched.
+    value['Mounts'] = sorted(mounts, key=lambda m: m['Destination'])
+    value['NetworkSettings.Ports'] = container.get('NetworkSettings', {}).get('Ports')
+    value.update({'State.' + k: container['State'].get(k) for k in ('Pid', 'StartedAt')})
+    components = {}
+    for name, item in value.items():
+        if name in ('Config', 'HostConfig') and isinstance(item, dict):
+            components.update({name + '.' + k: digest(v) for k, v in item.items()})
+        else:
+            components[name] = digest(item)
+    # Private evidence contains hashes, never environment/label values.
+    return {'id': container['Id'], 'sha256': digest(value), 'components': components}
+
+
+def require_same(expected, current, phase, message):
+    if expected == current:
+        return
+    fields = sorted(k for k in set(expected) | set(current)
+                    if k != 'services' and expected.get(k) != current.get(k))
+    before, after = expected.get('services', {}), current.get('services', {})
+    services = {}
+    for name in sorted(set(before) | set(after)):
+        a, b = before.get(name), after.get(name)
+        if a == b:
+            continue
+        if a is None or b is None:
+            services[name] = ['service_presence']
+            continue
+        ac, bc = a.get('components', {}), b.get('components', {})
+        services[name] = sorted(k for k in set(ac) | set(bc) if ac.get(k) != bc.get(k)) or ['fingerprint']
+    emit('nas_reclaim_runtime_changed', phase=phase, changed_fields=fields, changed_services=services)
+    raise RuntimeError(message)
+
+
 def snapshot(manager, profile):
     policy = infra_runtime.registered(manager, profile)
     infra_runtime.maintenance_guard(manager)
@@ -59,13 +101,9 @@ def snapshot(manager, profile):
     if reclaim_plan.extra_source_consumers(exposed, set()):
         raise RuntimeError('Other mounts can access retained SSD; reclaim is blocked.')
     _, _, contract = infra_runtime.contract(manager, profile)
-    evidence = {'schema': 1, 'project': profile['project'], 'contract_sha256': contract, 'services': {}}
+    evidence = {'schema': 2, 'project': profile['project'], 'contract_sha256': contract, 'services': {}}
     for name, c in rows.items():
-        value = {k: c.get(k) for k in ('Id', 'Image', 'Config', 'HostConfig', 'Mounts')}
-        value['ports'] = c.get('NetworkSettings', {}).get('Ports')
-        value['process'] = {k: c['State'].get(k) for k in ('Pid', 'StartedAt')}
-        # Do not persist environment values or private Docker inspection output.
-        evidence['services'][name] = {'id': c['Id'], 'sha256': digest(value)}
+        evidence['services'][name] = fingerprint(c)
     return evidence, {n: rows[n] for n in prep.SERVICES}
 
 
@@ -79,8 +117,9 @@ class Session:
             raise RuntimeError('Current reclaim requires repaired stopped-writer evidence.')
         manager.storage_guard(op, profile)
         self.evidence, self.rows = snapshot(manager, profile)
-        if expected is not None and self.evidence != expected:
-            raise RuntimeError('Runtime changed since reclaim check; generate a new verified plan.')
+        if expected is not None:
+            require_same(expected, self.evidence, 'since_plan',
+                         'Runtime changed since reclaim check; generate a new verified plan.')
         self.guard()
 
     def guard(self):
@@ -93,8 +132,8 @@ class Session:
             raise RuntimeError('NAS marker no longer running.')
         self.manager.storage_guard(self.op, self.profile)
         evidence, rows = snapshot(self.manager, self.profile)
-        if evidence != self.evidence:
-            raise RuntimeError('Runtime changed during reclaim; no further deletion is allowed.')
+        require_same(self.evidence, evidence, 'during_deletion' if self.deleting else 'during_check',
+                     'Runtime changed during reclaim; no further deletion is allowed.')
         if self.deleting:
             from projects import infra_reclaim
             if not infra_reclaim.recovery_evidence(self.manager)['verified']:

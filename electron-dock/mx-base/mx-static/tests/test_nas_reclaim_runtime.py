@@ -169,6 +169,73 @@ class RuntimeReclaimTests(LocalFiles):
         # A new independent check can pin the now-stable legitimate deployment.
         self.session().guard()
 
+    def test_mount_inspection_order_can_vary_between_every_guard_and_delete(self):
+        def alternating_inspect(*args, **kwargs):
+            for c in self.rows:
+                c['Mounts'].reverse()
+            self.rows.reverse()
+            return copy.deepcopy((self.rows, self.volume, self.mountinfo))
+        runtime.infra_storage.collect.side_effect = alternating_inspect
+        plan, fd = self.selected_plan()
+        nas, session = reclaim.union_context(self.op, fd, plan, self.tree, manage)
+        journal = reclaim.private_file(fd, 'unlink-intents.jsonl', os.O_RDWR | os.O_CREAT | os.O_APPEND)
+        self.addCleanup(os.close, journal)
+        session.probes()
+        removed, _ = reclaim.delete_files(self.src, self.dst, self.tree,
+            sorted(p for p in self.tree if p.endswith('.mp4')), journal, session.guard, nas_tree=nas)
+        self.assertEqual(removed, 2)
+        self.assertEqual(review.counterparts(self.dst, self.tree), nas)
+        self.assertEqual((self.target / 'live/nas-only').read_bytes(), b'live')
+
+    def test_runtime_diagnostics_name_changed_fields_without_private_values(self):
+        session = self.session()
+        self.row('web')['Config']['Env'].append('TOKEN=private-new-value')
+        self.row('worker')['State']['StartedAt'] = 'restarted'
+        with mock.patch.object(runtime, 'emit') as emit:
+            with self.assertRaisesRegex(RuntimeError, 'Runtime changed during'):
+                session.guard()
+        event, = emit.call_args.args
+        self.assertEqual(event, 'nas_reclaim_runtime_changed')
+        self.assertEqual(emit.call_args.kwargs['changed_services'], {
+            'web': ['Config.Env'], 'worker': ['State.StartedAt']})
+        self.assertNotIn('private-new-value', str(emit.call_args))
+        self.assertNotIn('not-for-output', str(emit.call_args))
+
+    def test_actual_mount_change_and_ordered_application_arguments_still_block(self):
+        c = self.row('web')
+        c['Config'].update(Cmd=['one', 'two'], Entrypoint=['entry', 'argument'],
+                           Env=['KEY=first', 'KEY=last'])
+        c['HostConfig']['Binds'] = ['first', 'second']
+        session = self.session()
+        for section, key in (('Config', 'Cmd'), ('Config', 'Entrypoint'), ('Config', 'Env'),
+                             ('HostConfig', 'Binds')):
+            with self.subTest(field=section + '.' + key):
+                c[section][key].reverse()
+                with self.assertRaisesRegex(RuntimeError, 'Runtime changed during'):
+                    session.guard()
+                c[section][key].reverse()
+        # An unrelated real mount change also invalidates a plan, even while
+        # the expected NFS media mount is still present.
+        self.row('postgres')['Mounts'][0]['RW'] = False
+        with self.assertRaisesRegex(RuntimeError, 'Runtime changed during'):
+            session.guard()
+
+    def test_previous_fingerprint_format_requires_a_new_check(self):
+        session = self.session()
+        previous = copy.deepcopy(session.evidence)
+        previous['schema'] = 1
+        for c in previous['services'].values():
+            c.pop('components', None)
+        with mock.patch.object(runtime, 'emit') as emit:
+            with self.assertRaisesRegex(RuntimeError, 'Runtime changed since'):
+                self.session(expected=previous)
+        self.assertEqual(emit.call_args.kwargs['changed_fields'], ['schema'])
+
+    def test_duplicate_actual_mount_destinations_are_not_normalized_away(self):
+        self.row('postgres')['Mounts'].append(dict(self.row('postgres')['Mounts'][0], RW=False))
+        with self.assertRaisesRegex(RuntimeError, 'mount destinations'):
+            self.session()
+
     def test_changed_historical_execution_is_never_adopted(self):
         session = self.session()
         value = dict(self.state, final_sync_passed=False)
