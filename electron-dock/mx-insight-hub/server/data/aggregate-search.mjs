@@ -87,7 +87,11 @@ export function aggregateResponse(data, query) {
   return { ...data, contractVersion: AGGREGATE_CONTRACT, mode: query.mode, scope: { platforms: query.platforms },
     items: data.items.map(item => item.platform === 'ecommerce' ? { ...item, platform: item.externalId?.split(':')[0] || item.platform } : item),
     filters: { objectTypes: query.objectTypes, ...query.filters },
-    sources: query.platforms.map(platform => ({ platform, mode: 'stored', status: 'ok' })),
+    // These are counts in this returned page, never corpus/coverage totals.
+    sources: query.platforms.map(platform => {
+      const returnedCount = data.items.filter(item => (item.platform === 'ecommerce' ? item.externalId?.split(':')[0] : item.platform) === platform).length
+      return { platform, mode: 'stored', status: returnedCount ? 'ok' : 'empty', returnedCount }
+    }),
   }
 }
 

@@ -11,6 +11,49 @@ import { SearchQueries } from '../../server/search/queries.mjs'
 
 const pepper = 'aggregate-search-test-pepper-with-enough-entropy'
 const id = '11111111-1111-4111-8111-111111111111'
+
+test('stored aggregate continues the actual ES time-sort tuple through the HTTP contract', async () => {
+  const secondId = '22222222-2222-4222-8222-222222222222'
+  const requests = []
+  const hit = (id, time, shard) => ({ _source: { id, platform: 'weibo', objectType: 'post', body: '自行车', eventTime: time },
+    _score: 1, sort: [time, id, shard] })
+  const first = hit(id, '2026-09-25T00:00:00.000Z', 1)
+  const second = hit(secondId, null, 2)
+  const client = { request: async (method, path, body) => {
+    if (path.includes('/_pit?')) return { id: 'aggregate-time-pit' }
+    if (path === '/_pit') return {}
+    assert.equal(path, '/_search')
+    requests.push(body)
+    assert.equal(body.sort.length, 2, 'PIT adds the third _shard_doc field')
+    return { hits: { hits: body.search_after ? [second] : [first, second] } }
+  } }
+  const searchQueries = new SearchQueries({ pool: {}, client, segmenter: { segment: async text => [text] }, indexSet: { readAlias: 'test' }, logger: null })
+  const { service, store, adapter, key, calls } = await setup({ platforms: ['weibo'], searchQueries })
+  const server = createServer(createApp({ service, store, adapter, adminToken: 'test-admin', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const input = { query: '自行车', mode: 'stored', platforms: ['weibo'], objectTypes: ['post'], pageSize: 1 }
+    const send = async (body, keyId) => {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/aggregate/search`, {
+        method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': 'application/json', 'idempotency-key': keyId }, body: JSON.stringify(body),
+      })
+      return { status: response.status, body: await response.json() }
+    }
+    const a = await send(input, 'stored-es-first')
+    assert.equal(a.status, 200)
+    const next = { ...input, cursor: a.body.data.pageInfo.nextCursor }
+    const b = await send(next, 'stored-es-second')
+    assert.equal(b.status, 200, JSON.stringify(b.body))
+    assert.deepEqual(requests[1].search_after, first.sort)
+    assert.deepEqual(b.body.data.items.map(row => row.id), [secondId])
+    assert.equal(b.body.data.pageInfo.nextCursor, null)
+    assert.deepEqual((await send(next, 'stored-es-second')).body, b.body)
+    assert.equal(requests.length, 2, 'exact retry replays the committed page')
+    assert.equal((await send({ ...next, query: 'other' }, 'stored-es-changed')).status, 400)
+    assert.equal(calls.length, 0)
+  } finally { await new Promise(resolve => server.close(resolve)) }
+})
+
 async function setup({ platforms = ['weibo', 'telegram'], capabilities = [], searchQueries = null } = {}) {
   const calls = []
   const store = new MemoryStore()
@@ -85,6 +128,7 @@ test('stored aggregate applies all facets before paging, omits expensive totals,
   } }
   const result = await service.aggregateSearch(context, input)
   assert.equal(result.body.data.mode, 'stored')
+  assert.deepEqual(result.body.data.sources, [{ platform: 'telegram', mode: 'stored', status: 'ok', returnedCount: 1 }])
   assert.deepEqual(searches[0].platforms, ['telegram'])
   assert.deepEqual(searches[0].objectTypes, ['chat', 'message'])
   assert.deepEqual(searches[0].tags, ['中国', '新闻'])

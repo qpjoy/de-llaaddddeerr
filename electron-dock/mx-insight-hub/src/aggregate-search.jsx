@@ -1,13 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { MagnifyingGlass, ArrowClockwise, ArrowDown, CaretDown, Funnel, Globe, Stack, ArrowUpRight } from '@phosphor-icons/react'
-import { publicDataApi } from './api.js'
-import { DropdownField, EmptyState, ErrorState, LoadingState, formatDate } from './components.jsx'
+import { publicDataApi, publicDocsHref } from './api.js'
+import { DropdownField, EmptyState, ErrorState, LoadingState, PageHeading, formatDate } from './components.jsx'
 import { useDemoApiKey, useDemoIdentity } from './demo-credentials.jsx'
 import './aggregate-search.css'
 
 const types = [['post', '帖子 / 笔记'], ['article', '文章'], ['message', '消息'], ['chat', '会话'], ['comment', '评论'], ['product', '商品'], ['account', '账号'], ['user', '用户资料'], ['profile', '画像'], ['saved_record', '分类记录'], ['commerce_capture', '电商采集记录'], ['opinion_item', '舆情条目']]
 const initial = { query: '', mode: 'refresh', platforms: [], objectTypes: [], tags: '', from: '', to: '', pageSize: 20 }
-const statuses = { ok: '成功', empty: '无结果', partial: '部分返回', unsupported: '无匹配实时接口', unavailable: '暂不可用', not_authorized: '未获操作授权', unknown: '结果待核实' }
+const statuses = { ok: '成功', empty: '本批无结果', partial: '部分返回', unsupported: '无匹配实时接口', unavailable: '暂不可用', not_authorized: '未获操作授权', unknown: '结果待核实' }
 const toggle = (values, key) => values.includes(key) ? values.filter(value => value !== key) : [...values, key].sort()
 const safeUrl = value => typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null
 function requestBody(draft, sources) {
@@ -54,7 +54,13 @@ function MultiFilter({ label, allLabel, options, values, onChange, disabled, ico
 
 // Identity-scoped memory survives navigation and credential renewal. Each page
 // keeps its exact body/key; only explicit refresh creates another search round.
-export default function AggregateSearchPanel({ session }) {
+export function DataSearchPage({ aggregateSession, session }) {
+  return <div className="mih-aggregate"><PageHeading title="数据搜索" description="用关键词、平台和条目类型搜索 Hub 数据；同一 API 可供下游产品调用。" />
+    <AggregateSearchPanel session={aggregateSession} showCatalog={session?.kind === 'admin-token'} />
+  </div>
+}
+
+export default function AggregateSearchPanel({ session, showCatalog = true }) {
   const [apiKey] = useDemoApiKey()
   const identity = useDemoIdentity()
   if (!session.current || session.current.identity !== identity) session.current = { identity, draft: initial, rounds: new Map(), round: null }
@@ -88,6 +94,7 @@ export default function AggregateSearchPanel({ session }) {
   const availableTypes = new Set(selected.flatMap(source => live ? source.routes.map(route => route.objectType) : source.objectTypes))
   const liveCount = selected.flatMap(source => source.routes).filter(route => !draft.objectTypes.length || draft.objectTypes.includes(route.objectType)).length
   const round = cell.round, run = round?.active, busy = run?.busy || false
+  const restartRequired = ['invalid_cursor', 'search_cursor_expired', 'aggregate_continuation_unavailable'].includes(run?.error?.code)
   const pages = round?.pages || []
   const result = pages.at(-1)?.result?.payload?.data
   const items = [...new Map(pages.flatMap(page => page.result.payload.data.items).map(item => [item.id, item])).values()]
@@ -137,16 +144,16 @@ export default function AggregateSearchPanel({ session }) {
       <div className="mih-aggregate-heading">
         <h2>聚合数据搜索</h2>
         <div className="qp-segmented" role="group" aria-label="数据范围">
-          {[['refresh', '实时搜索'], ['stored', '历史数据']].map(([value, label]) => <button className={`qp-segmented__item ${draft.mode === value ? 'is-active' : ''}`} type="button" key={value} aria-pressed={draft.mode === value} disabled={busy} onClick={() => change({ mode: value, platforms: [], objectTypes: [] })}>{label}</button>)}
+          {[['refresh', '实时搜索'], ['stored', '已收录数据']].map(([value, label]) => <button className={`qp-segmented__item ${draft.mode === value ? 'is-active' : ''}`} type="button" key={value} aria-pressed={draft.mode === value} disabled={busy} onClick={() => change({ mode: value, platforms: [], objectTypes: [] })}>{label}</button>)}
         </div>
       </div>
       <form onSubmit={event => { event.preventDefault(); search(body) }}>
         <div className="mih-aggregate-query">
-          <label className="qp-input-group"><MagnifyingGlass className="qp-input-group__prefix" /><input className="qp-input" aria-label="关键词" required maxLength={200} value={draft.query} disabled={busy} onChange={event => change({ query: event.target.value })} placeholder={live ? "输入关键词，即可搜索全部实时平台" : "输入关键词，查找已收录的历史数据"} /></label>
-          <button className="qp-button qp-button--primary" disabled={busy || !apiKey || !sources?.length || (live && !liveCount)}><MagnifyingGlass />{busy ? '正在搜索…' : live ? '搜最新' : '搜索历史'}</button>
+          <label className="qp-input-group"><MagnifyingGlass className="qp-input-group__prefix" /><input className="qp-input" aria-label="关键词" required maxLength={200} value={draft.query} disabled={busy} onChange={event => change({ query: event.target.value })} placeholder={live ? "输入关键词，即可搜索全部实时平台" : "输入关键词，查找最新入库与历史数据"} /></label>
+          <button className="qp-button qp-button--primary" disabled={busy || !apiKey || !sources?.length || (live && !liveCount)}><MagnifyingGlass />{busy ? '正在搜索…' : live ? '搜最新' : '搜索已收录'}</button>
         </div>
         <div className="mih-aggregate-toolbar">
-          <MultiFilter label="平台" allLabel={live ? '全部实时平台' : '全部历史来源'} icon={Globe} disabled={busy || !sources} options={available.map(source => ({ value: source.platform, label: source.label }))} values={draft.platforms} onChange={value => change({ platforms: value, objectTypes: [] })} />
+          <MultiFilter label="平台" allLabel={live ? '全部实时平台' : '全部已收录来源'} icon={Globe} disabled={busy || !sources} options={available.map(source => ({ value: source.platform, label: source.label }))} values={draft.platforms} onChange={value => change({ platforms: value, objectTypes: [] })} />
           <MultiFilter label="类型" allLabel="全部条目类型" icon={Stack} disabled={busy || !sources} options={types.filter(([value]) => availableTypes.has(value)).map(([value, label]) => ({ value, label }))} values={draft.objectTypes} onChange={value => change({ objectTypes: value })} />
           {!live ? <details className="mih-aggregate-history-filters"><summary><Funnel />标签与日期<CaretDown /></summary><div className="mih-aggregate-filters">
             <label className="qp-field">标签（同时包含）<input className="qp-input" disabled={busy} value={draft.tags} onChange={event => change({ tags: event.target.value })} placeholder="多个标签以逗号分隔" /></label>
@@ -155,9 +162,10 @@ export default function AggregateSearchPanel({ session }) {
             <DropdownField label="每批条数" disabled={busy} value={String(draft.pageSize)} onChange={value => change({ pageSize: Number(value) })} options={[10, 20, 50].map(value => ({ value: String(value), label: `${value} 条` }))} />
           </div></details> : null}
           {(draft.platforms.length || draft.objectTypes.length || !live && (draft.tags || draft.from || draft.to)) ? <button type="button" className="qp-button qp-button--ghost qp-button--sm" disabled={busy} onClick={() => change({ platforms: [], objectTypes: [], tags: '', from: '', to: '' })}>重置筛选</button> : null}
-          <a className="mih-aggregate-catalog" href="#/source-catalog">数据源目录 <ArrowUpRight /></a>
+          <a className="mih-aggregate-catalog" href={publicDocsHref('/docs/aggregate-search')}>接口文档 <ArrowUpRight /></a>
+          {showCatalog ? <a href="#/source-catalog">数据源目录 <ArrowUpRight /></a> : null}
         </div>
-        <p className="mih-aggregate-hint">{live ? `搜索 ${liveCount} 个实时平台，各取一页；加载更多继续取后续页，按当前套餐计费。` : '检索 Hub 已收录的历史数据，不触发实时采集；日期按北京时间筛选发布时间。'}</p>
+        <p className="mih-aggregate-hint">{live ? `搜索 ${liveCount} 个实时平台，各取一页；加载更多继续取后续页，按当前套餐计费。` : '搜索最新入库和历史数据，不触发上游采集；新鲜度取决于清洗与索引进度。日期按北京时间筛选发布时间。'}</p>
         <button type="button" className="qp-button qp-button--outline qp-button--sm" disabled={busy || quoting || !apiKey || !draft.query.trim()} onClick={() => preview()}>{quoting ? '读取价格…' : '预览查询范围与费用'}</button>
         {quoteError ? <ErrorState error={quoteError} /> : null}
         {currentQuote ? <div className="qp-panel" role="status"><strong>“{quote.query}” · {quote.continuation ? '下一批' : '第一批'} {currentQuote.items.length} 个查询 · 预计 {currentQuote.currency ? `${currentQuote.currency} ${(currentQuote.estimatedMinor / 100).toFixed(2)}` : '不扣费'}</strong><p>按当前套餐 v{currentQuote.planVersion || '—'} 估算；预览不采集、不冻结余额。实际价格与可用性在执行时重新检查，估算不是锁价或费用上限。{currentQuote.mode === 'refresh' ? '聚合父请求不另收费。' : ''}</p>
@@ -165,13 +173,18 @@ export default function AggregateSearchPanel({ session }) {
         </div> : null}
         {!live && (draft.tags || draft.from || draft.to) ? <p className="mih-aggregate-hint">已设筛选：{[draft.tags && `标签 ${draft.tags}`, draft.from && `从 ${draft.from}`, draft.to && `至 ${draft.to}`].filter(Boolean).join(' · ')}</p> : null}
       </form>
-      {!apiKey ? <p role="status">请选择上方调用身份，查看已授权的数据来源。</p> : sourceError ? <ErrorState error={sourceError} onRetry={() => setRevision(value => value + 1)} /> : !sources ? <LoadingState /> : !available.length ? <p role="status">当前身份没有{live ? '支持实时搜索的平台，可切换「历史数据」查看已收录来源。' : '已授权的数据来源。'}</p> : null}
+      {!apiKey ? <p role="status">请选择上方调用身份，查看已授权的数据来源。</p> : sourceError ? <ErrorState error={sourceError} onRetry={() => setRevision(value => value + 1)} /> : !sources ? <LoadingState /> : !available.length ? <p role="status">当前身份没有{live ? '支持实时搜索的平台，可切换「已收录数据」查看入库来源。' : '已授权的数据来源。'}</p> : null}
     </section>
-    {run?.error ? <section className="qp-panel mih-aggregate-error"><ErrorState error={run.error} /><p>原请求保留，可安全重试。<code>{run.idempotencyKey}</code></p><button className="qp-button qp-button--outline" disabled={busy} onClick={() => search(run.body, { targetRound: round })}>重试原请求</button></section> : null}
+    {sources?.length ? <details className="qp-panel mih-aggregate-api"><summary>当前身份的搜索范围 · {sources.length} 个平台或分类<CaretDown /></summary>
+      <p>已收录数据包含最新入库内容和历史存量。实时搜索按已实现、已授权的操作调用，执行时仍检查服务状态；目录登记不代表可以实时搜索。</p>
+      <div className="mih-aggregate-sources">{sources.map(source => <div key={source.platform}><strong>{source.label}</strong><span>{source.refresh ? '支持实时与已收录检索' : '仅已收录检索'}</span><span>{source.objectTypes.map(type => types.find(([value]) => value === type)?.[1] || type).join('、')}</span></div>)}</div>
+      <p>全平台表示当前身份可搜索的范围，不代表全网覆盖。没有返回内容与来源失败会分开显示；清洗尚未入库、未授权或未接入的数据不会出现在结果中。</p>
+    </details> : null}
+    {run?.error ? <section className="qp-panel mih-aggregate-error"><ErrorState error={run.error} /><p>{restartRequired ? '分页位置已失效或与查询条件不符，已加载内容仍保留。重新搜索会从第一页开始，并按当前套餐计量。' : '原请求保留，重试使用相同参数与请求标识。'}<code>{run.idempotencyKey}</code></p>{restartRequired ? <button className="qp-button qp-button--outline" disabled={busy || !apiKey} onClick={() => search(round.body, { fresh: true })}>重新搜索（从第一页）</button> : <button className="qp-button qp-button--outline" disabled={busy || !apiKey} onClick={() => search(run.body, { targetRound: round })}>重试原请求</button>}</section> : null}
     {result ? <section className="mih-aggregate-delivery" aria-label="搜索结果" aria-busy={busy}>
       <div className="mih-aggregate-heading mih-aggregate-result-heading">
-        <div><h2>已展示 {items.length} 条 <span className="qp-tag qp-tag--primary">{result.mode === 'refresh' ? '本轮实时' : '历史数据'}</span></h2><p>“{result.query}” · 已加载 {pages.length} 批 · 各平台独立分页，无统一总页数</p></div>
-        {result.mode === 'refresh' ? <button className="qp-button qp-button--outline qp-button--sm" disabled={busy} onClick={() => search(round.body, { fresh: true })}><ArrowClockwise />刷新最新</button> : null}
+        <div><h2>已展示 {items.length} 条 <span className="qp-tag qp-tag--primary">{result.mode === 'refresh' ? '本轮实时' : '已收录数据'}</span></h2><p>“{result.query}” · 已加载 {pages.length} 批 · {result.mode === 'refresh' ? '各平台独立分页，无统一总页数' : '按发布时间排序，跨平台统一分页；未统计总量'}</p></div>
+        <button className="qp-button qp-button--outline qp-button--sm" disabled={busy || !apiKey} onClick={() => search(round.body, { fresh: true })}><ArrowClockwise />{result.mode === 'refresh' ? '刷新最新' : '刷新已收录'}</button>
       </div>
       <details className="qp-panel mih-aggregate-progress"><summary><span className={`mih-aggregate-dot ${failed ? 'is-partial' : ''}`} />{result.sources.length} 个来源{failed ? ` · ${failed} 个未完整返回` : ' · 本批请求已完成'}{continuing ? ` · ${continuing} 个可继续加载` : ''}<span>查看逐源状态</span><CaretDown /></summary>
         <div className="mih-aggregate-sources">{result.sources.map((source, i) => <div key={`${source.id || source.platform}:${i}`}><strong>{source.label || platformLabel(source.platform)}</strong><span>{statuses[source.status] || source.status}{source.carried ? ' · 本批未再请求' : source.returnedCount != null ? ` · ${source.returnedCount} 条` : ''}{source.hasMore ? ' · 可继续' : source.continuationUnavailable ? ' · 未提供可用后续页' : ''}</span>{source.requestId ? <code>{source.requestId}</code> : null}</div>)}</div>
@@ -184,10 +197,10 @@ export default function AggregateSearchPanel({ session }) {
         <footer><span>{item.author?.name || '未提供作者'}</span><details><summary>展开内容</summary><div>{item.text || '未提供正文'}<small>采集时间：{formatDate(item.collectedAt)}</small></div></details></footer>
       </article>)}</div>}
       <div className="mih-aggregate-more" aria-live="polite">
-        {result.pageInfo.nextCursor ? <><button className="qp-button qp-button--outline" disabled={busy || quoting} onClick={() => preview({ ...round.body, cursor: result.pageInfo.nextCursor })}>预览下一批费用</button><button className="qp-button qp-button--outline" disabled={busy} onClick={() => search({ ...round.body, cursor: result.pageInfo.nextCursor }, { targetRound: round })}><ArrowDown />{busy ? '正在加载…' : result.mode === 'refresh' ? '加载更多实时结果' : '加载更多历史数据'}</button></> : <strong>本轮暂无可继续加载的结果</strong>}
+        {result.pageInfo.nextCursor ? <><button className="qp-button qp-button--outline" disabled={busy || quoting || restartRequired || !apiKey} onClick={() => preview({ ...round.body, cursor: result.pageInfo.nextCursor })}>预览下一批费用</button><button className="qp-button qp-button--outline" disabled={busy || restartRequired || !apiKey} onClick={() => search({ ...round.body, cursor: result.pageInfo.nextCursor }, { targetRound: round })}><ArrowDown />{busy ? '正在加载…' : result.mode === 'refresh' ? '加载更多实时结果' : '加载更多历史数据'}</button></> : <strong>本轮暂无可继续加载的结果</strong>}
         <p>{result.mode === 'refresh' ? '加载更多保留本轮结果并续查下一页；刷新最新开启新一轮实时搜索。' : '继续浏览已收录数据，不发起实时采集。'}{failed ? ' 部分来源未完整返回，详情见逐源状态。' : ''}</p>
       </div>
     </section> : !busy ? <section className="qp-panel mih-aggregate-empty"><MagnifyingGlass /><div><h3>输入关键词，即可开始</h3><p>默认搜索全部可用实时平台，也可按平台或条目类型缩小范围。</p></div></section> : <LoadingState />}
-    <details className="qp-panel mih-aggregate-api"><summary>API 调用 · 最新数据与历史数据<CaretDown /></summary><p>使用同一 Hub 接口：<code>mode: refresh</code> 搜最新，<code>mode: stored</code> 查历史。无需选择数据产品或上游服务。</p><pre>{requestExample}</pre><p>加载更多：保持搜索参数不变，增加响应中的 <code>data.pageInfo.nextCursor</code> 作为 <code>cursor</code>，每一页使用新标识。网络重试保留原参数和标识；没有 nextCursor 就停止。</p><p>刷新最新：移除 cursor，使用新标识。相同条件再次点击「搜最新」会复用本轮记录；要重新采集，请点击「刷新最新」。历史查询支持标签、日期，实时查询暂不支持这些统一筛选。</p></details>
+    <details className="qp-panel mih-aggregate-api"><summary>API 调用 · 实时与已收录数据<CaretDown /></summary><p>使用同一 Hub 接口：<code>mode: refresh</code> 搜最新，<code>mode: stored</code> 查最新入库和历史数据。无需选择数据产品或上游服务。</p><pre>{requestExample}</pre><p>加载更多：保持搜索参数不变，增加响应中的 <code>data.pageInfo.nextCursor</code> 作为 <code>cursor</code>，每一页使用新标识。网络重试保留原参数和标识；没有 nextCursor 就停止。</p><p>刷新最新：移除 cursor，使用新标识。已收录结果中的「刷新已收录」会重新读取当前入库数据。相同条件再次点击「搜最新」会复用本轮记录；要重新采集，请点击「刷新最新」。历史查询支持标签、日期，实时查询暂不支持这些统一筛选。</p></details>
   </div>
 }

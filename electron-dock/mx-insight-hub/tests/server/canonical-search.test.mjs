@@ -17,6 +17,28 @@ const ADMIN_TOKEN = 'canonical-search-admin-token'
 const PEPPER = 'canonical-search-test-pepper-with-enough-entropy'
 const FIRST_ID = '11111111-1111-4111-8111-111111111111'
 
+test('ES cursors round-trip time and relevance sorts, including missing dates, without relaxing signatures', () => {
+  const options = { platforms: ['weibo'], cursorSecret: PEPPER }
+  for (const sort of ['newest', 'oldest', 'relevance']) {
+    for (const time of ['2026-09-25T00:00:00.000Z', 1790294400000, null]) {
+      const query = normalizeCanonicalSearchQuery({ query: '自行车', sort }, options)
+      const searchAfter = [...(sort === 'relevance' ? [1.5] : []), time, FIRST_ID, 17]
+      const response = canonicalSearchResponse({ query, cursorSecret: PEPPER, durationMs: 1, result: {
+        mode: 'elasticsearch', items: [canonicalItem()], hasMore: true, nextCursor: {
+          mode: 'elasticsearch', pitId: 'test-pit', searchAfter,
+          analysisState: { v: 1, appliedProfile: DEFAULT_SEARCH_PROFILE, backendUsed: 'hanlp', degraded: false, errorCode: null, tokens: ['自行车'] },
+        },
+      } })
+      const cursor = response.data.pageInfo.nextCursor
+      assert.deepEqual(normalizeCanonicalSearchQuery({ query: '自行车', sort, cursor }, options).cursor.searchAfter, searchAfter)
+      assert.throws(() => normalizeCanonicalSearchQuery({ query: '自行车', sort: sort === 'newest' ? 'oldest' : 'newest', cursor }, options), { code: 'invalid_cursor' })
+      const tampered = JSON.parse(Buffer.from(cursor, 'base64url').toString())
+      tampered.a[tampered.a.length - 1]++
+      assert.throws(() => normalizeCanonicalSearchQuery({ query: '自行车', sort, cursor: Buffer.from(JSON.stringify(tampered)).toString('base64url') }, options), { code: 'invalid_cursor' })
+    }
+  }
+})
+
 async function withServer(app, run) {
   const server = createServer(app)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))

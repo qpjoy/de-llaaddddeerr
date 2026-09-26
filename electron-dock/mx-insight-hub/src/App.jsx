@@ -87,6 +87,10 @@ const LazyTopicInsightsPage = lazy(() => import('./pages-topic-insights.jsx').th
   default: module.TopicInsightsPage,
 })))
 const LazyNewsDiscoveryPage = lazy(() => import('./pages-news-discovery.jsx').then(module => ({ default: module.NewsDiscoveryPage })))
+const LazyDataSearchPage = lazy(() => import('./aggregate-search.jsx').then(module => ({ default: module.DataSearchPage })))
+function DataSearchPage(props) {
+  return <Suspense fallback={<LoadingState label="正在加载数据搜索" />}><LazyDataSearchPage {...props} /></Suspense>
+}
 const LazyCatalogClassifierPage = lazy(() => import('./pages-catalog-classifier.jsx').then(module => ({ default: module.CatalogClassifierPage })))
 function NewsDiscoveryPage(props) {
   return <Suspense fallback={<LoadingState label="正在加载新闻发现" />}><LazyNewsDiscoveryPage {...props} /></Suspense>
@@ -357,6 +361,7 @@ const ROUTES = [
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/search', label: '数据搜索', description: '跨平台关键词检索与 API', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
@@ -739,6 +744,9 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [toasts, setToasts] = useState([])
   const [session, setSession] = useState(null)
+  // One in-memory search round across the product and retained browser entry.
+  // A console identity change discards it; demo credential renewal does not.
+  const aggregateSession = useMemo(() => ({ current: null }), [token])
 
   useEffect(() => {
     const root = document.documentElement
@@ -864,6 +872,7 @@ export function App() {
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
   const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
+    aggregateSession,
     theme,
     token,
     session,
@@ -920,7 +929,7 @@ export function App() {
           </div>
         </header>
         <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
-          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={route.path === '/data-products/news'} />
+          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search'].includes(route.path)} />
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />

@@ -6058,7 +6058,7 @@ printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.pr
     </section>
 
     <section class="doc-page" data-doc-page="aggregate-search">
-    <h2>聚合数据搜索</h2>
+    <h2>数据搜索 · 聚合检索</h2>
     <p>一个 Hub 接口搜索最新与存量数据，不要求调用方适配数据产品或来源实现。</p>
     <p>先用 <code>GET /api/v1/data/aggregate/sources</code> 获取当前 Key 可搜索的平台；<code>platforms</code> 省略或为空表示全部授权平台，也可传一个或多个标识。淘宝、天猫、京东等可单独选择，继续使用原电商权限。</p>
     <p>查询前可用相同 body 调用 <code>POST /api/v1/data/aggregate/preview</code>，查看本批来源、每源一页的当前成交价、套餐版本及已知运行状态。该预览不采集、不记用量、不冻结余额；续页预览也需原样传 cursor。估价不锁价，也不是费用上限，实际执行仍重新检查权限和价格。实时聚合父请求不另收费。</p>
@@ -6069,6 +6069,8 @@ Idempotency-Key: &lt;本次查询唯一标识&gt;
 {"query":"新能源汽车","mode":"refresh","platforms":["weibo","xiaohongshu"],"objectTypes":["post"]}</code></pre>
     <p><code>refresh</code> 是默认模式，按匹配的实时接口各取第一页，不回退存量。社交内容每源 20 条，商品保持既有每页上限；首次返回各来源第一页；后续每批只续查仍有有效游标的来源，沿用各接口原有页数上限，不猜测总页数。仅存量来源、不支持的操作、失败和未知结果分别见 <code>data.sources</code>。</p>
     <p><code>stored</code> 搜索已入库数据，支持 <code>filters.tags[] / from / to</code>、条目类型多选和平台多选。标签同时匹配，日期包含边界且必须带时区；没有发布时间的记录不匹配日期筛选。实时模式遇到非空日期或标签条件直接拒绝，不会忽略条件后采集。</p>
+    <p>控制台入口为「数据产品 → 数据搜索」，数据浏览中心的原入口保留。已收录数据包含最新入库和历史内容，新鲜度取决于清洗及索引进度。存量按发布时间跨平台统一分页；来源条数仅为本批命中数量，不能当作来源总量。全局目录 UUID 筛选与实时/存量混合模式尚未开放。</p>
+    <p>存量 ES 游标过期返回 <code>410 search_cursor_expired</code>；参数或游标无效返回 <code>400 invalid_cursor</code>。请显式移除 cursor、使用新标识从第一页查询；临时 <code>503 search_cursor_unavailable</code> 保留原参数与标识稍后重试。重新查询按当前套餐计量，不会自动触发。</p>
     <p>实时与历史均使用同一接口翻页：保持参数与原 Key 不变，把 <code>data.pageInfo.nextCursor</code> 原样作为 <code>cursor</code>，每批用新的幂等标识。没有 nextCursor 即停止；即使一批内容去重后较少，也只依据游标判断。刷新最新需移除 cursor 并换新标识；它会开始新一轮采集。普通滚动不会发起请求。</p>
     <p>响应中的 <code>items</code> 仅为本批内容，调用方按 id 合并去重；不同平台同名内容不是重复。<code>sources[].carried=true</code> 表示本批未再调用该来源，其状态和条数来自最后一次调用。失败或结果未知的来源不会在下一批自动重试；逐源状态不等于全平台完整覆盖。</p>
     <p>存量每页 <code>pageSize</code> 默认 20；用原条件加 <code>data.pageInfo.nextCursor</code> 和新的幂等标识取下一页。为减少等待，不统计精确总量。实时内容异步入库，刚返回的内容可能暂未出现在存量索引。</p>
@@ -6477,6 +6479,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'errors') return '<h2>错误与重试</h2><p>保留错误码与 requestId，便于排查。401：检查 Key；403：检查服务与 Key 授权；429：等待额度恢复。请求结果不确定时，使用原 Idempotency-Key 查询或重试同一请求，避免重复消费。</p>'
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
+  if (route.key === 'aggregate-search') html += '<p>数据产品 → 数据搜索提供同一接口的交互工作台。refresh 搜索本轮实时内容；stored 查询最新入库与历史存量，新鲜度取决于清洗和索引进度。平台、条目类型支持多选，日期与标签目前仅限 stored。</p><p>续页保留原条件与 Key，把 data.pageInfo.nextCursor 原样传作 cursor，每页换新 Idempotency-Key；同页重试保留原标识。400 invalid_cursor 或 410 search_cursor_expired 需要显式从第一页重新查询；503 search_cursor_unavailable 可稍后重试原请求。返回数量是本批数量，没有 nextCursor 即停止，不以短页推断数据总量。</p>'
   if (route.key === 'xiaohongshu-note' && Object.keys(xhsResearchPaths).every(path => tenantDocumentPathAllowed(path, scopes))) html += xhsResearchGuide
   const discoveryProduct = XHS_DISCOVERY_PRODUCTS.find(product => product.key === route.key)
   if (discoveryProduct && tenantDocumentPathAllowed(discoveryProduct.path.slice('/api/v1'.length), scopes)) html += xhsDiscoveryGuide(discoveryProduct)

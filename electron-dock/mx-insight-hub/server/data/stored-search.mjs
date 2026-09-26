@@ -265,16 +265,20 @@ function validSearchAfter(mode, value) {
     if (typeof value[0] !== 'string' || value[0].length > 128) return false
     return new Date(value[0]).toISOString() === value[0]
   }
+  // PIT appends _shard_doc to both supported sorts: time/id (3 values)
+  // and score/time/id (4 values). Keep the existing signed cursor format so
+  // already-issued time-sort cursors work unchanged after this fix.
+  const timeIndex = value.length === 3 ? 0 : 1
   if (
-    value.length !== 4 ||
-    !Number.isFinite(value[0]) ||
-    !UUID_PATTERN.test(value[2] || '') ||
-    !Number.isFinite(value[3])
+    ![3, 4].includes(value.length) ||
+    (value.length === 4 && !Number.isFinite(value[0])) ||
+    !UUID_PATTERN.test(value[timeIndex + 1] || '') ||
+    !Number.isFinite(value[timeIndex + 2])
   ) {
     return false
   }
-  return value[1] === null || Number.isFinite(value[1]) || (
-    typeof value[1] === 'string' && value[1].length <= 128
+  return value[timeIndex] === null || Number.isFinite(value[timeIndex]) || (
+    typeof value[timeIndex] === 'string' && value[timeIndex].length <= 128
   )
 }
 

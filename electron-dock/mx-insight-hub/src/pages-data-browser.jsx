@@ -46,9 +46,10 @@ function AccountHeader({ token, row, onUnauthorized, onBack, onTag }) {
   const state = useRemoteData(load, onUnauthorized)
   return <><AccountHero row={state.loading ? row : state.data?.items?.[0] || row} onBack={onBack} onTag={onTag} onRefresh={state.refresh} />{state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}</>
 }
-export function DataBrowserPage({ token, onUnauthorized }) {
+export function DataBrowserPage({ token, onUnauthorized, aggregateSession: sharedAggregateSession }) {
   const resultsRef = useRef(null)
-  const aggregateSession = useRef(null)
+  const localAggregateSession = useRef(null)
+  const aggregateSession = sharedAggregateSession || localAggregateSession
   const [aggregate, setAggregate] = useState(() => new URLSearchParams(window.location.hash.split('?')[1]).get('view') === 'aggregate')
   useEffect(() => {
     if (!aggregate) return

@@ -50,7 +50,12 @@ export function DemoProductPage({ Page, pageProps, enabled, admin, compact = fal
     }
   }, [enabled, Page, state.custom])
   return <>
-    {enabled ? <details className={`qp-panel mih-panel${compact ? ' mih-demo-identity--compact' : ''}`} open={expanded || !state.secret} onToggle={event => setExpanded(event.currentTarget.open)}>
+    {enabled ? <details className={`qp-panel mih-panel${compact ? ' mih-demo-identity--compact' : ''}`} open={expanded || !state.secret} onToggle={event => {
+      // Loading temporarily forces the identity panel open; that is not a
+      // user's expand action. Keep compact search workbenches collapsed once
+      // their current credential is available.
+      if (!compact || state.secret) setExpanded(event.currentTarget.open)
+    }}>
       <summary>{admin && !compact ? '数据产品演示身份' : '当前调用身份'} · {state.busy ? '正在加载…' : state.secret ? (state.custom ? '自有 API Key' : state.credential?.name) : '请选择 Key'}</summary>
       <p>按当前账户的授权和套餐价格调用，消费记录可在账单中查看。</p>
       <DropdownField label={admin ? "演示 Key" : "我的 Key"} value={state.custom ? 'custom' : state.credential?.keyId || ''}
