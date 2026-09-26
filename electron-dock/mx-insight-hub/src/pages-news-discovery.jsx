@@ -18,7 +18,7 @@ export function NewsDiscoveryPage({ session }) {
   const canSelectKey = session?.kind === 'admin-token' || session?.memberships?.some(item => item.capabilities?.includes('apikey.write'))
   const [catalog, setCatalog] = useState(null)
   const [catalogError, setCatalogError] = useState(null)
-  const [tab, setTab] = useState('list')
+  const [tab, setTab] = useState('api')
   const [query, setQuery] = useState('')
   const [entries, setEntries] = useState([])
   const [sourceOptions, setSourceOptions] = useState(null), [sourcesLoading, setSourcesLoading] = useState(false), [sourcesError, setSourcesError] = useState(null)
@@ -112,7 +112,7 @@ export function NewsDiscoveryPage({ session }) {
       {session?.kind === 'admin-token' ? <a className="qp-button qp-button--outline" href="#/agent/catalog-classifier">数据归类</a> : null}
     </PageHeading>
     <div className="mih-news-tabs" role="tablist" aria-label="新闻发现视图">
-      {[['list', '新闻列表'], ['api', '接口调试']].map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} className={`qp-button ${tab === id ? 'qp-button--primary' : 'qp-button--ghost'}`} onClick={() => setTab(id)}>{label}</button>)}
+      {[['api', '接口调试'], ['list', '新闻列表']].map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} className={`qp-button ${tab === id ? 'qp-button--primary' : 'qp-button--ghost'}`} onClick={() => setTab(id)}>{label}</button>)}
     </div>
     {!key || accessIssue ? <div className="mih-inline-warning" role="status"><div>
       <p>{!key ? (canSelectKey

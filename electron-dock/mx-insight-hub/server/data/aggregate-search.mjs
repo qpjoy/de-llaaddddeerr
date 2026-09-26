@@ -158,14 +158,28 @@ function liveItem(item, route, requestId) {
   return { ...publicStoredSearchItem(row), acquisitionRequestId: requestId }
 }
 
-export async function refreshAggregate(query, { requestId, search, products, concurrency = 3, pageIndex = 1 }) {
+export const AGGREGATE_EXECUTION = Object.freeze({ concurrency: 3, dispatchBudgetMs: 120_000,
+  deadlineSemantics: 'stop_new_dispatch_then_drain', hardResponseDeadlineMs: null })
+
+export async function refreshAggregate(query, { requestId, search, products, concurrency = AGGREGATE_EXECUTION.concurrency,
+  dispatchBudgetMs = AGGREGATE_EXECUTION.dispatchBudgetMs, pageIndex = 1, onProgress, now = () => performance.now() }) {
   const outcomes = new Array(query.routes.length)
+  const deadline = now() + dispatchBudgetMs
+  const emit = (event, data) => { try { onProgress?.(event, data) } catch { /* delivery cannot affect settlement */ } }
   let index = 0
   await Promise.all(Array.from({ length: Math.min(concurrency, query.routes.length) }, async () => {
     while (index < query.routes.length) {
       const slot = index++
       const route = query.routes[slot]
+      if (now() >= deadline) {
+        outcomes[slot] = { source: { id: route.id, platform: route.platform, label: route.label, mode: 'refresh',
+          operation: route.operation, status: 'not_started', code: 'aggregate_dispatch_deadline',
+          returnedCount: 0, hasMore: false, durationMs: 0 }, items: [] }
+        emit('source.completed', outcomes[slot])
+        continue
+      }
       const started = performance.now()
+      emit('source.started', { id: route.id, platform: route.platform, label: route.label })
       const idempotencyKey = `agg-${requestId}-${pageIndex > 1 ? `p${pageIndex}-` : ''}${createHash('sha256').update(route.id).digest('hex').slice(0, 12)}`
       try {
         const result = route.kind === 'products'
@@ -188,6 +202,7 @@ export async function refreshAggregate(query, { requestId, search, products, con
           code: error.status === 403 ? 'source_not_authorized' : /unknown|ambiguous/.test(error.code || '') ? 'source_outcome_unknown' : 'source_unavailable', requestId: error.details?.requestId || null,
           durationMs: Math.round(performance.now() - started) }, items: [] }
       }
+      emit('source.completed', outcomes[slot])
     }
   }))
   return { sources: outcomes.map(row => row.source), items: [...new Map(outcomes.flatMap(row => row.items).map(item => [`${item.platform}:${item.externalId}`, item])).values()] }

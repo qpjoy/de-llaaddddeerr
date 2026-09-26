@@ -8,9 +8,108 @@ import { AppError } from '../../server/core/errors.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, refreshAggregate } from '../../server/data/aggregate-search.mjs'
 import { normalizeCanonicalSearchQuery, canonicalSearchResponse } from '../../server/data/stored-search.mjs'
 import { SearchQueries } from '../../server/search/queries.mjs'
+import { readAggregateEvents } from '../../src/aggregate-stream.js'
+import { aggregateDiagnostics } from '../../server/data/aggregate-diagnostics.mjs'
 
 const pepper = 'aggregate-search-test-pepper-with-enough-entropy'
 const id = '11111111-1111-4111-8111-111111111111'
+
+test('dispatch deadline stops unstarted sources, drains started work and reports progress', async () => {
+  const query = normalizeAggregateRequest({ query: 'test' }, aggregateSourceCatalog(['weibo', 'douyin', 'bilibili'], []))
+  let elapsed = 0, calls = 0
+  const events = []
+  const result = await refreshAggregate(query, { requestId: id, concurrency: 1, now: () => elapsed, dispatchBudgetMs: 100,
+    onProgress: (event, data) => events.push({ event, data }), search: async () => {
+      calls++; elapsed = 101
+      return { status: 200, requestId: id, body: { data: { items: [{ id: 'one', text: '完整返回' }], pageInfo: { hasMore: false } } } }
+    } })
+  assert.equal(calls, 1)
+  assert.equal(result.items.length, 1)
+  assert.equal(result.sources.filter(source => source.status === 'not_started').length, 2)
+  assert.equal(events.filter(row => row.event === 'source.started').length, 1)
+  assert.equal(events.filter(row => row.event === 'source.completed').length, 3)
+  assert.ok(result.sources.filter(source => source.status === 'not_started').every(source => source.hasMore === false && !source.requestId))
+})
+
+test('SSE delivers a completed source before slow work, commits once, and exact JSON retry replays', async () => {
+  const { service, store, adapter, key, calls } = await setup({ platforms: ['weibo', 'douyin'] })
+  let releaseSlow
+  const slow = new Promise(resolve => { releaseSlow = resolve })
+  const original = adapter.search
+  adapter.search = async input => { if (input.body.platform === 'douyin') await slow; return original(input) }
+  const server = createServer(createApp({ service, store, adapter, adminToken: 'test-admin', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const path = `http://127.0.0.1:${server.address().port}/api/v1/data/aggregate/search`
+  const options = { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': 'application/json', accept: 'text/event-stream', 'idempotency-key': 'sse-exact-round' }, body: JSON.stringify({ query: '自行车' }) }
+  try {
+    const response = await fetch(path, options)
+    assert.match(response.headers.get('content-type'), /text\/event-stream/)
+    let parent, firstDelivered = false
+    const payload = await readAggregateEvents(response, (event, data) => {
+      if (event === 'search.started') parent = data.requestId
+      if (event === 'source.completed' && data.source.platform === 'weibo') {
+        firstDelivered = true
+        assert.equal(store.requests.get(parent).status, 'reserved')
+        assert.equal(calls.length, 1)
+        assert.equal(data.items.length, 1)
+        releaseSlow()
+      }
+      if (event === 'search.completed') assert.equal(store.requests.get(parent).status, 'committed')
+    })
+    assert.equal(firstDelivered, true)
+    assert.equal(calls.length, 2)
+    const replay = await fetch(path, { ...options, headers: { ...options.headers, accept: 'application/json' } })
+    assert.equal(replay.headers.get('idempotent-replay'), 'true')
+    const { replay: _, ...envelope } = payload
+    assert.deepEqual(await replay.json(), envelope)
+    assert.equal(calls.length, 2)
+    const forbidden = await fetch(path, { ...options, headers: { ...options.headers, 'idempotency-key': 'sse-not-granted' }, body: JSON.stringify({ query: 'x', platforms: ['facebook'] }) })
+    assert.equal(forbidden.status, 403)
+    assert.match(forbidden.headers.get('content-type'), /application\/json/)
+    const diagnostics = await aggregateDiagnostics(store, { getAdminDiagnostics: async identifier => ({ runs: [{ requestId: identifier, providerCalls: [{ id: 'c', provider: 'test-provider', costMinor: '17', currency: 'USD' }], customerCharge: { chargedMinor: '25', currency: 'CNY' } }] }) }, payload.requestId)
+    assert.equal(diagnostics.sources[0].providerCalls[0].costMinor, '17')
+    assert.equal(diagnostics.sources[0].customerCharge.currency, 'CNY')
+    assert.doesNotMatch(JSON.stringify(payload), /test-provider|costMinor|customerCharge/)
+    const denied = await fetch(`http://127.0.0.1:${server.address().port}/internal/v1/admin/aggregate/requests/${payload.requestId}`, { headers: { 'x-mx-insight-admin-token': key.secret } })
+    assert.equal(denied.status, 403)
+  } finally { releaseSlow(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
+
+test('stream parser handles split UTF-8 and heartbeats, rejects incomplete delivery without retry', async () => {
+  const text = ': heartbeat\n\nevent: source.completed\ndata: {"source":{"label":"微博"},"items":[]}\n\nevent: search.completed\ndata: {"requestId":"done","data":{"items":[]}}\n\n'
+  const bytes = new TextEncoder().encode(text), events = []
+  const response = new Response(new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close() } }))
+  assert.equal((await readAggregateEvents(response, event => events.push(event))).requestId, 'done')
+  assert.deepEqual(events, ['source.completed', 'search.completed'])
+  await assert.rejects(readAggregateEvents(new Response('event: source.completed\ndata: {"items":[]}\n\n')), { code: 'aggregate_stream_interrupted' })
+})
+
+test('SSE disconnect never cancels settlement and a same-key retry cannot dispatch twice', async () => {
+  const { service, store, adapter, key, calls } = await setup({ platforms: ['weibo'] })
+  let release
+  const hold = new Promise(resolve => { release = resolve }), original = adapter.search
+  adapter.search = async input => { await hold; return original(input) }
+  const server = createServer(createApp({ service, store, adapter, adminToken: 'test-admin', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/data/aggregate/search`
+  const options = { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, accept: 'text/event-stream', 'content-type': 'application/json', 'idempotency-key': 'sse-disconnect-round' }, body: '{"query":"test"}' }
+  try {
+    const response = await fetch(url, options)
+    const reader = response.body.getReader()
+    await reader.read(); await reader.cancel()
+    const pending = await fetch(url, { ...options, headers: { ...options.headers, accept: 'application/json' } })
+    assert.equal(pending.status, 409)
+    assert.equal((await pending.json()).error.code, 'request_in_progress')
+    const parent = [...store.requests.values()].find(request => request.idempotencyKey === 'sse-disconnect-round')
+    release()
+    for (let attempts = 0; attempts < 100 && store.requests.get(parent.id).status !== 'committed'; attempts++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(store.requests.get(parent.id).status, 'committed')
+    const replay = await fetch(url, { ...options, headers: { ...options.headers, accept: 'application/json' } })
+    assert.equal(replay.status, 200)
+    assert.equal(replay.headers.get('idempotent-replay'), 'true')
+    assert.equal(calls.length, 1)
+  } finally { release(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
 
 test('stored aggregate continues the actual ES time-sort tuple through the HTTP contract', async () => {
   const secondId = '22222222-2222-4222-8222-222222222222'

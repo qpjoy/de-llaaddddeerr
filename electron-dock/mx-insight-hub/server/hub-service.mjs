@@ -1,4 +1,5 @@
-import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage } from './data/aggregate-search.mjs'
+import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
+import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
 import { nightAllFailureEvidence, nightAllRejectionError } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { normalizeNewsQuery, newsCatalog, NEWS_CONTRACT, NEWS_METER } from './data/news-discovery.mjs'
@@ -825,9 +826,26 @@ export class HubService {
     // Only product-level availability, never provider configuration/cost evidence.
     const operations = Object.fromEntries(Object.entries(overview.operations || {}).map(([key, value]) =>
       [key, { ready: value.ready, effectiveState: value.effectiveState }]))
-    return { choices, keyId: selected.id, consumerId: selected.consumerId, name: selected.name,
+    const adminExecution = !scope && selected.id === await this.store.getAdminExecutionKeyId?.()
+    return { choices, keyId: selected.id, consumerId: selected.consumerId, name: selected.name, adminExecution,
       access: { platforms, capabilities, consumerPlatforms, consumerCapabilities, operations },
       ...issueDemoCredential(selected.id, this.apiKeyPepper, Date.now(), scope?.memberId) }
+  }
+
+  async createAdminExecutionCredential() {
+    assert(this.store.ensureAdminExecutionKey, 503, 'admin_identity_unavailable', 'Admin identity requires migration 111')
+    const issued = issueApiKey(this.apiKeyPepper, 'live')
+    // Explicit creation snapshots currently implemented domains/capabilities.
+    // No wildcard, inherited grants, plan changes or reusable secret exposure.
+    const platforms = [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(),
+      'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk',
+      ...(await listCrawlerSpecs(this.store)).map(spec => spec.platform)])].sort()
+    let keyId
+    try { keyId = await this.store.ensureAdminExecutionKey({ id: issued.id, digest: issued.digest, prefix: issued.prefix,
+      lastFour: issued.lastFour, platforms, capabilities: [...PUBLIC_CAPABILITIES].filter(value => !value.includes('ingest')).sort(),
+      expiresAt: new Date(Date.now() + 180 * 86_400_000).toISOString() }) }
+    catch (error) { if (error.code === '42P01') throw new AppError(503, 'admin_identity_unavailable', 'Admin identity requires migration 111'); throw error }
+    return this.createDemoCredential({ keyId })
   }
 
   async authenticate(secret) {
@@ -3351,16 +3369,16 @@ export class HubService {
       estimateOnly: true, dispatches: 0, carriedSources: page?.carriedSources.length || 0 }
   }
 
-  async aggregateSearch(context, { body, idempotencyKey, path, products }) {
+  async aggregateSearch(context, { body, idempotencyKey, path, products, onProgress }) {
     const { sources } = await this.aggregateSources(context)
     const aggregate = normalizeAggregateRequest(body, sources)
     return this.canonicalSearch(context, {
       body: { query: aggregate.query, pageSize: aggregate.pageSize, ...(aggregate.cursor && aggregate.mode === 'stored' ? { cursor: aggregate.cursor } : {}) },
-      idempotencyKey, path, aggregate, originalBody: body, products,
+      idempotencyKey, path, aggregate, originalBody: body, products, onProgress,
     })
   }
 
-  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products }) {
+  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products, onProgress }) {
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -3525,9 +3543,12 @@ export class HubService {
         responseBody.data = aggregateResponse(responseBody.data, aggregate)
         if (aggregate.mode === 'refresh') {
           const page = await aggregateLivePage(aggregate, { context, store: this.store, secret: this.apiKeyPepper })
+          const execution = AGGREGATE_EXECUTION
+          try { onProgress?.('search.started', { requestId: activeRequestId, mode: aggregate.mode, totalSources: page.routes.length, execution }) } catch { /* transport only */ }
           acquisitionStarted = true
           const refreshed = await refreshAggregate({ ...aggregate, routes: page.routes }, {
             requestId: page.rootId || activeRequestId, pageIndex: page.pageIndex,
+            onProgress, ...execution,
             search: input => this.search(context, { ...input, liveOnly: true }),
             products: input => products ? products(context, input) : Promise.reject(new AppError(503, 'source_unavailable', 'Product search is unavailable')),
           })
@@ -3537,7 +3558,7 @@ export class HubService {
           const sources = [...refreshed.sources, ...page.carriedSources, ...(page.pageIndex === 1 ? skipped : [])]
           const hasMore = refreshed.sources.some(source => source.hasMore)
           responseBody.data = { ...responseBody.data, items,
-            sources,
+            sources, execution,
             searchMode: 'live', durationMs: Math.round(performance.now() - startedAt),
             status: sources.every(source => ['ok', 'empty'].includes(source.status)) ? 'ok' : 'partial',
             pageInfo: { pageIndex: page.pageIndex, returnedCount: items.length, hasMore,

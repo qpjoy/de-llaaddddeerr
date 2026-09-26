@@ -1,4 +1,5 @@
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
+import { readAggregateEvents } from './aggregate-stream.js'
 import {
   dataCenterVisibleProjection,
   sourceCatalogVisibleProjection,
@@ -209,6 +210,7 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  productRequest: (key, input, idempotencyKey) => publicDataRequest(key, input.path, { method: input.method, body: input.body, idempotencyKey }),
   newsSources: (key, signal) => publicDataRequest(key, '/api/v1/data/news/sources', { signal }),
   newsSourceOptions: (key, signal) => publicDataRequest(key, '/api/v1/data/news/source-options', { signal }),
   newsSearch: (key, body, idempotencyKey) => publicDataRequest(key, '/api/v1/data/news/search', { method: 'POST', body, idempotencyKey }),
@@ -217,6 +219,17 @@ export const publicDataApi = {
   aggregateSources: apiKey => publicDataRequest(apiKey, '/api/v1/data/aggregate/sources'),
   aggregatePreview: (apiKey, body) => publicDataRequest(apiKey, '/api/v1/data/aggregate/preview', { method: 'POST', body }),
   aggregateSearch: (apiKey, body, idempotencyKey) => publicDataRequest(apiKey, '/api/v1/data/aggregate/search', { method: 'POST', body, idempotencyKey }),
+  aggregateSearchStream: async (apiKey, body, idempotencyKey, onEvent) => {
+    const response = await fetch(`${publicApiBase()}/api/v1/data/aggregate/search`, { method: 'POST',
+      headers: { accept: 'text/event-stream', authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'idempotency-key': idempotencyKey }, body: JSON.stringify(body) })
+    if (!response.ok) {
+      const payload = await parsePayload(response)
+      throw new ApiError({ status: response.status, code: payload?.error?.code, message: payload?.error?.message, requestId: payload?.requestId })
+    }
+    const payload = response.headers.get('content-type')?.includes('text/event-stream')
+      ? await readAggregateEvents(response, onEvent) : await response.json()
+    return { status: response.status, payload, evidence: { requestId: payload.requestId, idempotentReplay: payload.replay === true } }
+  },
   acquisitionComparison: (apiKey, body, idempotencyKey) => publicDataRequest(
     apiKey, '/api/v1/night-all/search/raw', { method: 'POST', body, idempotencyKey },
   ),
@@ -334,6 +347,8 @@ export const adminApi = {
   notification: (token, id, query) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}`, { query }),
   notificationAction: (token, id, body) => request(token, `${ADMIN_ROOT}/notifications/${encodeURIComponent(id)}/actions`, { method: 'POST', body }),
   demoCredential: (token, keyId) => request(token, `${ADMIN_ROOT}/demo-credentials`, { method: 'POST', body: keyId ? { keyId } : {} }),
+  adminExecutionCredential: token => request(token, `${ADMIN_ROOT}/admin-execution-credential`, { method: 'POST', body: {} }),
+  aggregateDiagnostics: (token, requestId) => request(token, `${ADMIN_ROOT}/aggregate/requests/${encodeURIComponent(requestId)}`),
   ecommerceItems: (token, query) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { query }),
   saveEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: body.requestId ? 'PUT' : 'POST', body }),
   deleteEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: 'DELETE', body }),

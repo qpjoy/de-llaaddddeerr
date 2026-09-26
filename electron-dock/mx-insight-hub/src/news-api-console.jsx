@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { publicDataApi, publicApiOrigin } from './api.js'
 import { DropdownField, ErrorState, Field } from './components.jsx'
 import { copyText } from './open-capabilities.js'
@@ -109,5 +110,6 @@ export function NewsApiConsole({ apiKey, filters, sourceNames, onSourceOptions, 
     {operation === 'search' && result?.payload?.data?.items ? <div className="mih-news-api-table"><table className="qp-table mih-table"><thead><tr><th>新闻标题</th><th>文章 ID → articles/{'{id}'}</th><th>操作</th></tr></thead><tbody>
       {result.payload.data.items.map(item => <tr key={item.id}><td>{item.title || '无标题新闻'}</td><td><code>{item.id}</code></td><td><button type="button" className="qp-button qp-button--ghost qp-button--sm" onClick={() => { setArticleId(item.id); setOperation('articles'); setCopyStatus('') }}>填入详情</button></td></tr>)}</tbody></table></div> : null}
     <pre className="mih-news-api-response" tabIndex={0}>{result ? JSON.stringify(result.payload, null, 2) : '尚未发送此接口。切换接口、视图、勾选来源和复制示例不会发送请求。'}</pre>
+    <AdminExecutionEvidence requestId={result?.evidence?.requestId} />
   </section>
 }

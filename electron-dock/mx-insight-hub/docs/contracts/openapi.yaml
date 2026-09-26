@@ -6194,28 +6194,28 @@ paths:
       - Search
       operationId: aggregateDataSearch
       summary: Search latest or stored data across one, several or all authorized platforms
-      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded
-        concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or
-        omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to
+      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with
+        bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[]
+        or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to
         discover logical platform identifiers; clients never choose a provider. Only existing platform and
         operation entitlements apply. Telegram, published opinion and saved categories are stored-only;
         refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence;
-        the parent adds no customer purchase charge. Each refresh page acquires at most one page per
-        continuing source. Return data.pageInfo.nextCursor unchanged with the same
-        query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed
-        sources are not restarted. No exact total is promised. The opaque cursor references committed Hub
-        evidence and binds the identity and query scope; missing evidence fails closed. Child cursors
-        retain their existing route and page limits. sources[].carried marks a source not called in this
-        batch; its counts describe its last acquired page. pageSize applies to stored mode only; live post
-        operations fetch 20 items and product operations use their existing bounded page sizes.
-        mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact
-        totals. objectTypes and platform selections are OR within a group; tags require every exact tag.
-        Date bounds are inclusive publication times, must include a timezone, and exclude undated records.
-        Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same
-        Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to
-        start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a
-        continuation with a different parent key still reuses the same round/page children. Partial and
-        unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.'
+        the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing
+        source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize
+        and Key to continue; completed, unsupported and failed sources are not restarted. No exact total
+        is promised. The opaque cursor references committed Hub evidence and binds the identity and query
+        scope; missing evidence fails closed. Child cursors retain their existing route and page limits.
+        sources[].carried marks a source not called in this batch; its counts describe its last acquired
+        page. pageSize applies to stored mode only; live post operations fetch 20 items and product operations
+        use their existing bounded page sizes. mode=stored performs one filtered canonical search, returns
+        an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a
+        group; tags require every exact tag. Date bounds are inclusive publication times, must include a
+        timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before
+        any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new
+        key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires
+        or redispatches children; repeating a continuation with a different parent key still reuses the
+        same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after
+        live delivery is asynchronous.'
       parameters:
       - name: Idempotency-Key
         in: header
@@ -6228,6 +6228,17 @@ paths:
           minLength: 8
           maxLength: 128
           pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      - name: Accept
+        in: header
+        required: false
+        schema:
+          type: string
+          enum:
+          - application/json
+          - text/event-stream
+          default: application/json
+        description: SSE uses the same POST body, authorization and idempotency identity. No automatic reconnect;
+          retry the exact body/key. Last-Event-ID event replay is not supported.
       requestBody:
         required: true
         content:
@@ -6296,7 +6307,8 @@ paths:
                 cursor:
                   type: string
                   maxLength: 8192
-                  description: "Opaque continuation in refresh or stored mode. Return unchanged with the same query scope and original Key. Omit to start a new search round."
+                  description: Opaque continuation in refresh or stored mode. Return unchanged with the
+                    same query scope and original Key. Omit to start a new search round.
             example:
               query: 新能源汽车
               mode: refresh
@@ -6307,9 +6319,23 @@ paths:
               - post
       responses:
         '200':
-          description: 'data: contractVersion, mode, query, scope, filters, items (safe unified fields),
-            sources (status/requestId/returnedCount/hasMore), pageInfo, warnings. source statuses: ok, empty,
-            unsupported, not_authorized, unavailable, unknown; partial does not imply complete coverage.'
+          description: 'JSON returns the committed response. SSE events: search.started {requestId,totalSources,execution};
+            source.started {id,platform,label}; source.completed {source,items}; search.completed is the
+            full committed JSON envelope plus replay; search.error is a terminal failure after headers.
+            Before streaming, errors retain their normal HTTP status/JSON. Heartbeats every 10s. Only search.completed
+            supplies a usable parent cursor. Disconnect does not cancel paid work. A same-key in-progress
+            retry returns 409; completed retry delivers the stored response with replay=true. execution.concurrency=3,
+            dispatchBudgetMs=120000: stop new source dispatches, then drain calls under connector deadlines;
+            hardResponseDeadlineMs=null. not_started/aggregate_dispatch_deadline means no call was started
+            and will not be automatically retried. Items are a bounded page, never a total. Other source
+            statuses: ok, empty, partial, unsupported, not_authorized, unavailable, unknown.'
+          content:
+            application/json:
+              schema:
+                type: object
+            text/event-stream:
+              schema:
+                type: string
         '400':
           description: Request failed. The response contains a stable error code and requestId.
           content:

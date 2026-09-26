@@ -4,10 +4,11 @@ import { publicDataApi, publicDocsHref } from './api.js'
 import { DropdownField, EmptyState, ErrorState, LoadingState, PageHeading, formatDate } from './components.jsx'
 import { useDemoApiKey, useDemoIdentity } from './demo-credentials.jsx'
 import './aggregate-search.css'
+import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 
 const types = [['post', '帖子 / 笔记'], ['article', '文章'], ['message', '消息'], ['chat', '会话'], ['comment', '评论'], ['product', '商品'], ['account', '账号'], ['user', '用户资料'], ['profile', '画像'], ['saved_record', '分类记录'], ['commerce_capture', '电商采集记录'], ['opinion_item', '舆情条目']]
 const initial = { query: '', mode: 'refresh', platforms: [], objectTypes: [], tags: '', from: '', to: '', pageSize: 20 }
-const statuses = { ok: '成功', empty: '本批无结果', partial: '部分返回', unsupported: '无匹配实时接口', unavailable: '暂不可用', not_authorized: '未获操作授权', unknown: '结果待核实' }
+const statuses = { ok: '成功', empty: '本批无结果', partial: '部分返回', unsupported: '无匹配实时接口', unavailable: '暂不可用', not_authorized: '未获操作授权', unknown: '结果待核实', not_started: '本轮调度超时，未发起调用' }
 const toggle = (values, key) => values.includes(key) ? values.filter(value => value !== key) : [...values, key].sort()
 const safeUrl = value => typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null
 function requestBody(draft, sources) {
@@ -96,8 +97,12 @@ export default function AggregateSearchPanel({ session, showCatalog = true }) {
   const round = cell.round, run = round?.active, busy = run?.busy || false
   const restartRequired = ['invalid_cursor', 'search_cursor_expired', 'aggregate_continuation_unavailable'].includes(run?.error?.code)
   const pages = round?.pages || []
-  const result = pages.at(-1)?.result?.payload?.data
-  const items = [...new Map(pages.flatMap(page => page.result.payload.data.items).map(item => [item.id, item])).values()]
+  const pendingSources = Object.values(run?.progress?.sources || {})
+  const provisional = !run?.result && run?.progress ? { mode: run.body.mode, query: run.body.query,
+    sources: pendingSources.map(row => row.source), pageInfo: {}, provisional: true } : null
+  const result = provisional || pages.at(-1)?.result?.payload?.data
+  const items = [...new Map([...pages.flatMap(page => page.result.payload.data.items),
+    ...(provisional ? pendingSources.flatMap(row => row.items) : [])].map(item => [item.id, item])).values()]
   const body = requestBody(draft, sources || [])
   const quoteScope = JSON.stringify(body)
   const currentQuote = quote?.scope === quoteScope && quote.identity === identity ? quote.data : null
@@ -132,7 +137,15 @@ export default function AggregateSearchPanel({ session, showCatalog = true }) {
     cell.round = nextRound; nextRound.active = operation
     operation.busy = true; operation.error = null
     // No automatic retries or aborts: navigation must not obscure paid outcomes.
-    operation.promise = publicDataApi.aggregateSearch(apiKey, operation.body, operation.idempotencyKey)
+    operation.promise = publicDataApi.aggregateSearchStream(apiKey, operation.body, operation.idempotencyKey, (event, payload) => {
+      if (event === 'search.started') operation.progress = { ...payload, sources: {}, running: {} }
+      if (event === 'source.started' && operation.progress) operation.progress.running[payload.id] = payload.label
+      if (event === 'source.completed' && operation.progress) {
+        operation.progress.sources[payload.source.id] = payload
+        delete operation.progress.running[payload.source.id]
+      }
+      update()
+    })
       .then(value => { operation.result = value; if (!nextRound.pages.includes(operation)) nextRound.pages.push(operation) })
       .catch(error => { operation.error = error })
       .finally(() => { operation.busy = false; update() })
@@ -181,6 +194,7 @@ export default function AggregateSearchPanel({ session, showCatalog = true }) {
       <p>全平台表示当前身份可搜索的范围，不代表全网覆盖。没有返回内容与来源失败会分开显示；清洗尚未入库、未授权或未接入的数据不会出现在结果中。</p>
     </details> : null}
     {run?.error ? <section className="qp-panel mih-aggregate-error"><ErrorState error={run.error} /><p>{restartRequired ? '分页位置已失效或与查询条件不符，已加载内容仍保留。重新搜索会从第一页开始，并按当前套餐计量。' : '原请求保留，重试使用相同参数与请求标识。'}<code>{run.idempotencyKey}</code></p>{restartRequired ? <button className="qp-button qp-button--outline" disabled={busy || !apiKey} onClick={() => search(round.body, { fresh: true })}>重新搜索（从第一页）</button> : <button className="qp-button qp-button--outline" disabled={busy || !apiKey} onClick={() => search(run.body, { targetRound: round })}>重试原请求</button>}</section> : null}
+    {run?.progress && (busy || run.error) ? <section className="qp-panel mih-aggregate-api" role="status"><strong>{busy ? '各来源陆续返回' : '连接中断，保留已收到的来源'} · {pendingSources.length} / {run.progress.totalSources} 个来源完成</strong><p>{Object.values(run.progress.running).length ? `等待：${Object.values(run.progress.running).join('、')}` : '正在汇总结果'}。已展示结果仅代表已完成来源；最终完成后才生成本批分页游标。</p><p>并发 {run.progress.execution?.concurrency}；{(run.progress.execution?.dispatchBudgetMs || 120000) / 1000} 秒后停止发起新的来源调用，已发出的请求按各自超时收尾。断开页面不会撤销已发出的调用。</p></section> : null}
     {result ? <section className="mih-aggregate-delivery" aria-label="搜索结果" aria-busy={busy}>
       <div className="mih-aggregate-heading mih-aggregate-result-heading">
         <div><h2>已展示 {items.length} 条 <span className="qp-tag qp-tag--primary">{result.mode === 'refresh' ? '本轮实时' : '已收录数据'}</span></h2><p>“{result.query}” · 已加载 {pages.length} 批 · {result.mode === 'refresh' ? '各平台独立分页，无统一总页数' : '按发布时间排序，跨平台统一分页；未统计总量'}</p></div>
@@ -196,11 +210,12 @@ export default function AggregateSearchPanel({ session, showCatalog = true }) {
         {item.text ? <p>{item.text}</p> : <p className="qp-muted">此条目未提供正文</p>}
         <footer><span>{item.author?.name || '未提供作者'}</span><details><summary>展开内容</summary><div>{item.text || '未提供正文'}<small>采集时间：{formatDate(item.collectedAt)}</small></div></details></footer>
       </article>)}</div>}
-      <div className="mih-aggregate-more" aria-live="polite">
+      {!result.provisional ? <div className="mih-aggregate-more" aria-live="polite">
         {result.pageInfo.nextCursor ? <><button className="qp-button qp-button--outline" disabled={busy || quoting || restartRequired || !apiKey} onClick={() => preview({ ...round.body, cursor: result.pageInfo.nextCursor })}>预览下一批费用</button><button className="qp-button qp-button--outline" disabled={busy || restartRequired || !apiKey} onClick={() => search({ ...round.body, cursor: result.pageInfo.nextCursor }, { targetRound: round })}><ArrowDown />{busy ? '正在加载…' : result.mode === 'refresh' ? '加载更多实时结果' : '加载更多历史数据'}</button></> : <strong>本轮暂无可继续加载的结果</strong>}
         <p>{result.mode === 'refresh' ? '加载更多保留本轮结果并续查下一页；刷新最新开启新一轮实时搜索。' : '继续浏览已收录数据，不发起实时采集。'}{failed ? ' 部分来源未完整返回，详情见逐源状态。' : ''}</p>
-      </div>
+      </div> : null}
     </section> : !busy ? <section className="qp-panel mih-aggregate-empty"><MagnifyingGlass /><div><h3>输入关键词，即可开始</h3><p>默认搜索全部可用实时平台，也可按平台或条目类型缩小范围。</p></div></section> : <LoadingState />}
+    <AdminExecutionEvidence requestId={pages.at(-1)?.result?.payload?.requestId} aggregate />
     <details className="qp-panel mih-aggregate-api"><summary>API 调用 · 实时与已收录数据<CaretDown /></summary><p>使用同一 Hub 接口：<code>mode: refresh</code> 搜最新，<code>mode: stored</code> 查最新入库和历史数据。无需选择数据产品或上游服务。</p><pre>{requestExample}</pre><p>加载更多：保持搜索参数不变，增加响应中的 <code>data.pageInfo.nextCursor</code> 作为 <code>cursor</code>，每一页使用新标识。网络重试保留原参数和标识；没有 nextCursor 就停止。</p><p>刷新最新：移除 cursor，使用新标识。已收录结果中的「刷新已收录」会重新读取当前入库数据。相同条件再次点击「搜最新」会复用本轮记录；要重新采集，请点击「刷新最新」。历史查询支持标签、日期，实时查询暂不支持这些统一筛选。</p></details>
   </div>
 }

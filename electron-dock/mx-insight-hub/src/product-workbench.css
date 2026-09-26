@@ -1,0 +1,16 @@
+.mih-product-workbench { display: grid; gap: 16px; min-width: 0; }
+.mih-product-workbench [hidden] { display: none !important; }
+.mih-product-workbench .mih-api-console-nav { max-height: 740px; overflow: auto; }
+.mih-product-workbench .mih-api-console-nav code { display: block; font-size: 11px; overflow-wrap: anywhere; }
+.mih-product-workbench .mih-api-console { grid-template-columns: 260px minmax(0, 1fr); }
+.mih-product-workbench .mih-api-console-nav button { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 6px; text-align: left; align-items: start; }
+.mih-product-workbench .mih-api-console-nav button code { grid-column: 1 / -1; color: var(--qp-text-3); }
+.mih-product-workbench .mih-api-console-main { min-width: 0; }
+.mih-product-workbench .mih-api-console-main form { display: grid; gap: 14px; }
+.mih-product-workbench .mih-api-console-main header { flex-wrap: wrap; overflow-wrap: anywhere; }
+.mih-product-workbench .mih-api-response { max-height: 520px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mih-product-workbench .mih-product-json { min-height: 220px; font-family: monospace; resize: vertical; }
+.mih-admin-evidence { margin-top: 16px; overflow-wrap: anywhere; }
+.mih-admin-evidence section { padding-block: 12px; border-top: 1px solid var(--qp-line); }
+.mih-admin-evidence h3 { font-size: 15px; }
+@media(max-width: 700px) { .mih-product-workbench .mih-api-console { display: grid; grid-template-columns: 1fr; } .mih-product-workbench .mih-api-console-nav { max-height: 260px; } }

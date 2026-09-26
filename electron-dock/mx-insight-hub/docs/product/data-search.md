@@ -14,8 +14,11 @@
 - 展示当前 Key 的平台/分类、条目类型及实时/存量范围。存量逐源数量只代表本批返回记录，0 条不再显示为该源命中成功。
 - 无效/过期分页明确提示从第一页重新搜索，保留已加载内容；临时失败继续复用原参数与幂等标识。
 - HTTP 回归覆盖实际 ES 时间排序三元组、下一页、重放、改条件拒绝与零上游调用；另覆盖最新/最早/相关度排序及空发布时间。
+- 同一 POST 支持可选 SSE，逐来源返回；JSON 契约继续保留。120 秒调度截止后停止新派发，已发出请求按连接器超时收尾；不是整轮硬超时。
+- 数据产品默认先展示接口调试，再进入原产品展示/指南；通用调试器读取登录身份可见的 OpenAPI，产品与文档可双向跳转。专用调试器继续保留。
+- 显式 Admin 执行身份及管理证据：独立 Tenant / Consumer / Live Key；正常授权、额度、套餐与上游准入。采购成本、实际上游和目录映射通过 Admin Token 只读接口展示，不进入下游搜索响应。
 
-以下 **全局目录筛选、混合模式、运行证据聚合及新增直连迁移属于后续实现**，不把规划字段放进当前可调用示例，也不声称已完成所有供应商接管。
+以下 **全局目录筛选、混合模式、完整运行健康账本及新增直连迁移属于后续实现**，不把规划字段放进当前可调用示例，也不声称已完成所有供应商接管。逐请求管理证据已交付，不能据此声称整个供应商健康账本已完成。
 
 ## 2. 当前能力账本
 
@@ -188,3 +191,56 @@ P0 无数据库迁移，发布 Hub 服务与前端即可；在 ES PIT 尚有效�
 本机验收：17 个测试文件共 253 项，251 通过、2 个 PostgreSQL 环境相关测试跳过；包含搜索、旧兼容接口、身份、临时凭据、文档和计费回归。构建通过，保留既有 bundle 体积提示。隔离服务使用模拟 ES PIT/上游响应，经真实 Hub HTTP 与搜索代码验证存量 20→40→45 条、实时 4→7 条、双入口切换零采集、400 显式重开与 503 原标识重试。Playwright 检查 1440×1000 / 390×844、浅色/深色、无横向溢出、无 React 运行异常；console 仅有测试注入的 400/503 与既有 favicon.ico 404。未做真实 ES/PG 数据规模压测、生产登录联网实测或供应商在线合同核验。
 
 源码依据：`server/data/aggregate-search.mjs`、`stored-search.mjs`、`news-discovery.mjs`、`source-connections.mjs`、`server/search/queries.mjs`、`server/contracts/night-all-legacy.mjs`、`server/hub-service.mjs`。历史/现行关系见 [聚合搜索架构](../architecture/aggregate-search-and-source-routing.md)、[新闻发现](news-discovery-design.md)、[兼容 facade ADR](../adr/0010-night-all-compatibility-facade.md)。
+
+## 11. 流式交付、超时与 Admin 执行身份（2026-09-26）
+
+### 当前 221 条结果应该如何理解
+
+它是本轮已成功返回页面的合并、去重数量，不是全部平台的结果总数。19 个实时来源分别有自己的页长、上限、游标与失败状态；授权范围中的存量分类也不等于实时来源数。真实搜索范围是当前 Consumer grants 与原 Key scope snapshot 的有效交集，并继续通过每个子请求的操作、额度、服务准入检查。为空的 `platforms` 只代表这个范围的全部平台。撤销授权后续请求立即收敛，不能借旧游标绕过。
+
+### 两种传输共享一次执行
+
+`POST /api/v1/data/aggregate/search` 默认 JSON；显式 `Accept: text/event-stream` 开启 SSE。URL、请求体、Authorization、Idempotency-Key、分页与计费不变，不创建另一个购买身份。
+
+| 事件 | 字段/含义 | 客户端行为 |
+| --- | --- | --- |
+| `search.started` | requestId、totalSources、execution | 显示本批范围和调度边界 |
+| `source.started` | id、platform、label | 标记该来源正在执行 |
+| `source.completed` | source 状态、items 安全投影 | 展示先到结果，按 item.id 去重 |
+| `search.completed` | 完整已提交 JSON envelope，外加 replay | 以最终响应为准，启用 nextCursor |
+| `search.error` | 安全错误码、requestId | 保留已显示内容和原请求参数，不自动重采 |
+
+SSE 开始前鉴权、参数或幂等冲突继续返回正常 HTTP/JSON 错误。开始之后 HTTP 已是 200，因此只有 `search.completed` 表示父请求已提交。来源事件仅表示子请求已完成；不能先生成父游标。存量请求和已提交的回放可直接产生最终事件。
+
+每 10 秒注释心跳；设置 `Cache-Control: no-store, no-transform` 与 `X-Accel-Buffering: no`。慢客户端写缓冲超过 1 MiB 时断开传输以限制内存；已发出的调用继续正常结算。下游应使用支持 POST/Authorization 的 fetch 流读取，而非不能设置这些信息的原生 EventSource。未实现事件日志和 Last-Event-ID 续传；手动重试必须用原 body/Key/Idempotency-Key，进行中为 409，提交后只回放最终结果。
+
+### 调度预算与连接器超时分开
+
+源码默认值：Night-All 60 秒，TikHub 30 秒，JustOne 120 秒，可被对应部署配置覆盖。这些是连接器调用边界；多次详情补充、出口探测或供应商排队可能使一个逻辑来源持续更久。它们不是整轮总时限。
+
+本次新增聚合调度预算 120 秒、并发 3。预算到达后不再启动队列中的新来源，返回 `not_started / aggregate_dispatch_deadline`；已发出的请求按其既有超时收尾并留存账务证据，不用 Promise.race 抛弃结算。未开始的来源不收费，也不会在下一批偷偷补查。重新采集由用户显式开始新查询。
+
+`execution.hardResponseDeadlineMs=null` 明示目前没有硬响应截止。若今后要求“无论发生什么 30 秒必须结束连接”，应增加持久化搜索任务及查询状态端点：到时返回已完成部分与 jobId，后台工作受持久租约管理，迟到结果可读，断线恢复以事件日志/已提交快照为准。不能简单取消 HTTP 并当作付费调用未发生。本次没有后台任务、全局自动重试或供应商故障切换。
+
+### 独立 Admin Key
+
+先部署 `111_admin_execution_identity.sql`；迁移只创建身份绑定表，不创建 Key、不派发上游。Admin Token 会话在身份下拉明确选择“Admin · 独立执行身份”时，调用 `POST /internal/v1/admin/admin-execution-credential`，事务性创建一个独立租户、调用者与 Live Key，保存创建者和 scope snapshot。跨实例通过 PostgreSQL advisory lock 防止重复创建。
+
+- Key 的初始有效期为 180 天，使用创建时已实现的平台、分类与产品能力快照；每项 Key 额度为 1000 次/小时，页长上限 100。既有服务、套餐与供应商配额仍可能更低。
+- 新 Consumer 使用已有默认套餐分配流程；新的租户计费配置沿用现行默认值。它不会修改 LCY-delta、既有消费价格、余额、授权和历史。
+- 浏览器只收到一小时签名引用，不收到或持久化长期原始 Key。该 Key 不是管理凭证，不能凭自身读取管理证据；所有公有调用重新验证 Key / Consumer / Tenant 状态。
+- 刷新只签发临时引用，不恢复被撤销的 grant、不扩入未来平台、不替换撤销/过期 Key。停用与权限调整继续在既有 Key / 调用者管理中进行。
+- 供应商凭据、已审价合同、运行开关、预算、限速及不确定结果规则照常适用。Admin 不等于免费，也不等于上游一定可用。
+- Launcher 会话（包括平台管理员）和 Public Key 均不能创建此身份；仅 Hub Admin Token 可以。
+
+### 管理证据与信息边界
+
+`GET /internal/v1/admin/aggregate/requests/{requestId}` 按已提交父响应关联子请求；在相同 Consumer / Key 内读取实际调用证据。接口仅接受 Admin Token，不在 Public OpenAPI 或租户契约中开放。
+
+展示实际 provider call 的供应商、操作、端点、结果、计费状态、原币种采购金额、耗时及客户结算。币种不混加，缺失成本显示未知；Night-All 连接器只能证明发生历史服务转发，不能猜测其内部供应商或价格。证据服务暂不可用不会破坏原搜索响应，界面保留“未记录/暂不可读”的区别。
+
+目录关系来自稳定 `sourceKey` 的实现清单；用于解释本次来源对应哪些目录条目。它是当前映射，不是历史路由快照，也不是线上健康。搜索 DTO、普通 Key 与租户文档不增加上游身份、采购价格或内部端点。
+
+### 验收边界
+
+采用本地模拟上游和真实 Hub HTTP/账务流程验证：快慢来源流式先后、JSON/SSE 同身份重放、截止后不派发、权限拒绝、UTF-8 分块、Admin 单例与撤销、目录映射及采购/客户币种分离。桌面/手机浏览器验证了调试优先、流式结果先到、文档往返、身份切换与页签切换不新增采集。没有调用真实付费上游或部署到生产；本机没有 PostgreSQL 集成环境，生产上线须先执行迁移并核对数据库路径。

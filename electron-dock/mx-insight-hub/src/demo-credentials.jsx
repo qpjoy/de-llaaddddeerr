@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field } from './components.jsx'
 import { demoAccessIssues } from './demo-access.js'
+import { ProductWorkbench } from './product-workbench.jsx'
 const DemoContext = createContext(null)
 export function useDemoApiKey() {
   const context = useContext(DemoContext)
@@ -22,7 +23,7 @@ export function DemoCredentialProvider({ token, children }) {
     setBusy(true); setError(null); setCustom(false)
     setCredential(current => current ? { ...current, secret: null } : null)
     try {
-      const result = await adminApi.demoCredential(token, keyId)
+      const result = await (keyId === 'admin-execution' ? adminApi.adminExecutionCredential(token) : adminApi.demoCredential(token, keyId))
       if (version === generation.current) setCredential(result)
     } catch (error) { if (version === generation.current) setError(error) }
     finally { if (version === generation.current) setBusy(false) }
@@ -33,7 +34,7 @@ export function DemoCredentialProvider({ token, children }) {
     return () => clearTimeout(timer)
   }, [credential?.expiresAt, custom])
   const secret = custom ? manual : credential?.secret || ''
-  return <DemoContext.Provider value={{ credential, secret, select, custom, setCustom, setManual,
+  return <DemoContext.Provider value={{ credential, secret, select, custom, setCustom, setManual, token,
     manual, error, busy, identity: custom ? `custom:${manual}` : credential?.keyId || 'none' }}>{children}</DemoContext.Provider>
 }
 export function DemoProductPage({ Page, pageProps, enabled, admin, compact = false }) {
@@ -57,13 +58,14 @@ export function DemoProductPage({ Page, pageProps, enabled, admin, compact = fal
       if (!compact || state.secret) setExpanded(event.currentTarget.open)
     }}>
       <summary>{admin && !compact ? '数据产品演示身份' : '当前调用身份'} · {state.busy ? '正在加载…' : state.secret ? (state.custom ? '自有 API Key' : state.credential?.name) : '请选择 Key'}</summary>
-      <p>按当前账户的授权和套餐价格调用，消费记录可在账单中查看。</p>
+      <p>{state.credential?.adminExecution && !state.custom ? 'Admin 独立身份：按此 Key 的权限与限额执行，上游准入与采购预算照常检查。供应商调用可能产生费用；管理证据仅在管理会话中可见。' : '按当前账户的授权和套餐价格调用，消费记录可在账单中查看。'}</p>
       <DropdownField label={admin ? "演示 Key" : "我的 Key"} value={state.custom ? 'custom' : state.credential?.keyId || ''}
         disabled={state.busy} onChange={value => {
           if (value === 'custom') state.setCustom(true)
           else state.select(value || undefined)
         }} options={[
           { value: '', label: admin ? '默认 · LCY-delta' : '请选择我的 Key' },
+          ...(admin ? [{ value: 'admin-execution', label: 'Admin · 独立执行身份（首次选择创建 Key）' }] : []),
           ...(state.credential?.choices || []).map(key => ({value:key.id,label:`${key.name} · ${key.environment} · ${key.id.slice(0,8)}`})),
           ...(admin ? [{value:'custom',label:'手动输入其他 Key'}] : []),
         ]} />
@@ -75,8 +77,13 @@ export function DemoProductPage({ Page, pageProps, enabled, admin, compact = fal
       {state.error ? <ErrorState error={state.error} /> : null}
       {admin ? <p>临时调用凭据有效期一小时，仅保存在当前页面内存。</p> : null}
     </details> : null}
-    <Page key={state.identity} {...pageProps} />
+    <ProductWorkbench key={`${state.identity}:${pageProps.routePath}`} Page={Page} pageProps={pageProps} enabled={enabled} />
   </>
+}
+
+export function useAdminExecution() {
+  const state = useContext(DemoContext)
+  return state?.credential?.adminExecution && !state.custom ? { token: state.token, keyId: state.credential.keyId } : null
 }
 
 export function useDemoAccess(operation, compatibility = false) {

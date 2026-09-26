@@ -6,12 +6,12 @@ export const REQUEST_FORMATS = [
   { value: 'fetch', label: 'fetch · 浏览器 JavaScript' },
   { value: 'node', label: 'fetch · Node.js 18+' },
 ]
-export function requestSnippet({ format, url, body, credential, idempotencyKey, method = 'POST' }) {
+export function requestSnippet({ format, url, body, credential, idempotencyKey, method = 'POST', accept }) {
   const hasBody = method !== 'GET' && body !== undefined
-  const headers = { Authorization: `Bearer ${credential}`, ...(hasBody ? { 'Content-Type': 'application/json' } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) }
+  const headers = { Authorization: `Bearer ${credential}`, ...(hasBody ? { 'Content-Type': 'application/json' } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}), ...(accept ? { Accept: accept } : {}) }
   const json = hasBody ? JSON.stringify(body) : undefined
   if (format === 'curl') return [
-    `curl --request ${method} ${shellQuote(url)}`,
+    `curl ${accept === 'text/event-stream' ? '--no-buffer ' : ''}--request ${method} ${shellQuote(url)}`,
     ...Object.entries(headers).map(([name, value]) => `  --header ${shellQuote(`${name}: ${value}`)}`),
     ...(hasBody ? [`  --data-raw ${shellQuote(json)}`] : []),
   ].join(' \\\n')

@@ -14,6 +14,44 @@ async function fixture() {
   const key=await service.createApiKey({consumerId:consumer.id,name:'LCY-delta',platforms:[],capabilities:[]})
   return {store,service,key,tenant,consumer}
 }
+test('explicit Admin identity is isolated, created once, and renewal never expands or revives it', async () => {
+  const { service, store, key, consumer } = await fixture()
+  const original = await store.listApiKeyPlatformEntitlements(key.id)
+  const [a, b] = await Promise.all([service.createAdminExecutionCredential(), service.createAdminExecutionCredential()])
+  assert.equal(a.keyId, b.keyId)
+  assert.equal(a.adminExecution, true)
+  assert.notEqual(a.keyId, key.id)
+  assert.notEqual(a.consumerId, consumer.id)
+  assert.equal(store.apiKeys.size, 2)
+  assert.equal(store.adminExecutionAudit.createdBy, 'admin-token')
+  assert.ok(a.access.platforms.includes('weibo'))
+  assert.ok(a.access.capabilities.includes('social.posts.search'))
+  assert.deepEqual(await store.listApiKeyPlatformEntitlements(key.id), original)
+  assert.equal((await service.createDemoCredential()).keyId, key.id, 'existing default remains LCY-delta')
+  await store.setPlatformGrant(a.consumerId, 'weibo', false)
+  assert.equal((await service.createAdminExecutionCredential()).access.platforms.includes('weibo'), false)
+  await service.revokeApiKey(a.keyId)
+  await assert.rejects(service.createAdminExecutionCredential(), { code: 'demo_key_unavailable' })
+  await assert.rejects(service.authenticate(a.secret), { code: 'invalid_api_key' })
+  assert.equal(store.apiKeys.size, 2, 'revocation must not silently create a replacement')
+})
+
+test('Admin execution creation rejects public and Launcher credentials, and performs no acquisition', async () => {
+  const { service, store, key, tenant } = await fixture()
+  const member = await memberFor(store, tenant.id)
+  const identity = { enabled: true, resolve: async () => ({ kind: 'launcher-user', memberId: member.id, platformAdmin: true, tenantIds: null, capabilities: [] }) }
+  const server = createServer(createApp({ store, service, identity, adminToken: 'demo-admin-token', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    for (const [credential, expected] of [[key.secret, 403], ['launcher-session', 403], ['demo-admin-token', 200]]) {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/internal/v1/admin/admin-execution-credential`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-mx-insight-admin-token': credential }, body: '{}' })
+      assert.equal(response.status, expected)
+      if (expected === 200) assert.equal((await response.json()).data.adminExecution, true)
+    }
+    assert.equal(store.requests.size, 0)
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
 test('default demo identity preserves original key, grants and revocation',async()=>{
  const {service,key,store}=await fixture()
  const demo=await service.createDemoCredential()

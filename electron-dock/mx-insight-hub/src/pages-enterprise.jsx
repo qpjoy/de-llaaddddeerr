@@ -4,6 +4,7 @@ import { DropdownField, ErrorState } from './components.jsx'
 import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck } from './demo-credentials.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { requestUuid } from './request-id.js'
+import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { copyText } from './open-capabilities.js'
 import { REQUEST_FORMATS, requestSnippet } from './request-snippets.js'
 import { enterpriseAccessIssues, enterpriseConsoleEndpoints, enterpriseConsoleFields, enterpriseConsoleBody, enterpriseRequestIdentity } from './enterprise-console.js'
@@ -133,6 +134,7 @@ export function EnterprisePage({ token, query, onUnauthorized }) {
           <nav className="mih-source-section-tabs" aria-label="企业响应内容"><button type="button" aria-pressed={responseTab === 'body'} onClick={() => setResponseTab('body')}>JSON 响应</button><button type="button" aria-pressed={responseTab === 'request'} onClick={() => setResponseTab('request')}>本次请求</button></nav>
           <pre className="mih-api-response" tabIndex={0}>{result ? JSON.stringify(responseTab === 'body' ? result.payload : result.request, null, 2) : '发送请求后查看真实结果。浏览目录、切换视图不会发送查询。'}</pre>
           {result ? <p>Request ID：{result.evidence?.requestId || error?.requestId || '未取得'} · 交付来源：{result.evidence?.sourceMode || '未知'}{result.evidence?.idempotentReplay ? ' · 幂等回放' : ''}</p> : null}
+          <AdminExecutionEvidence requestId={result?.evidence?.requestId || error?.requestId} />
         </div>
       </section> : null}
     </div>

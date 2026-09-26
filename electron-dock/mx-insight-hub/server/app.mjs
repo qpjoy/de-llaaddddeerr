@@ -1,5 +1,7 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
+import { aggregateStream } from './data/aggregate-stream.mjs'
+import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
 import { formatBrowserExport } from './data/browser-export.mjs'
 import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
@@ -1698,7 +1700,14 @@ export function createApp({
         })
         return
       }
-      let params = routeMatch(pathname, '/internal/v1/admin/request-diagnostics/:identifier')
+      let params = routeMatch(pathname, '/internal/v1/admin/aggregate/requests/:requestId')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'aggregate diagnostics')
+        sendJson(response, 200, { data: await aggregateDiagnostics(store, acquisitionHistory, params.requestId), requestId }, { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/request-diagnostics/:identifier')
       if (request.method === 'GET' && params) {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'request diagnostics')
@@ -2944,6 +2953,14 @@ export function createApp({
           ),
           requestId,
         })
+        return
+      }
+      if (pathname === '/internal/v1/admin/admin-execution-credential' && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'admin execution identity')
+        const body = await readJson(request, 2048)
+        if (Object.keys(body).length) throw new AppError(400, 'unsupported_fields', 'This action accepts an empty object')
+        sendJson(response, 200, { data: await service.createAdminExecutionCredential(), requestId }, { 'cache-control': 'no-store' })
         return
       }
       if (pathname === '/internal/v1/admin/demo-credentials' && request.method === 'POST') {
@@ -5981,14 +5998,25 @@ export function createApp({
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/aggregate/search') {
         const context = await requirePublic(request)
-        const result = await service.aggregateSearch(context, {
-          body: await readJson(request, 64 * 1024),
-          idempotencyKey: request.headers['idempotency-key'], path: pathname,
-          products: externalPlatformGateway ? (ctx, input) => externalPlatformGateway.search(ctx, input) : null,
-        })
-        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
-          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
-        })
+        requireNoQuery(searchParams, 'aggregate search')
+        const stream = /(?:^|,)\s*text\/event-stream(?:\s*;[^,]*)?(?:,|$)/i.test(request.headers.accept || '') ? aggregateStream(response) : null
+        let aggregateRequestId = requestId
+        try {
+          const result = await service.aggregateSearch(context, {
+            body: await readJson(request, 64 * 1024),
+            idempotencyKey: request.headers['idempotency-key'], path: pathname,
+            products: externalPlatformGateway ? (ctx, input) => externalPlatformGateway.search(ctx, input) : null,
+            onProgress: (event, data) => { if (event === 'search.started') aggregateRequestId = data.requestId; stream?.write(event, data) },
+          })
+          if (stream) stream.write('search.completed', { ...result.body, requestId: result.requestId, replay: result.replay })
+          else sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+            'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          })
+        } catch (error) {
+          if (!stream?.opened) throw error
+          stream.write('search.error', { error: { code: error.status ? error.code : 'aggregate_failed',
+            message: '搜索未完成，请保留原参数和 Idempotency-Key 核对或重试。' }, requestId: error.details?.requestId || aggregateRequestId })
+        } finally { stream?.end() }
         return
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/canonical/search') {

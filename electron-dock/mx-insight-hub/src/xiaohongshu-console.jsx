@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { publicDataApi } from './api.js'
 import { DropdownField, ErrorState } from './components.jsx'
 import { DemoCredentialRecheck, useDemoAccessSnapshot } from './demo-credentials.jsx'
@@ -69,6 +70,7 @@ export function XiaohongshuConsole({ apiKey, admin = false }) {
       <nav className="mih-source-section-tabs" aria-label="响应内容"><button aria-pressed={responseTab === 'body'} onClick={() => setResponseTab('body')}>{error ? '错误摘要' : 'JSON 响应'}</button><button aria-pressed={responseTab === 'request'} onClick={() => setResponseTab('request')}>本次请求</button></nav>
       <pre className="mih-api-response" tabIndex={0}>{result ? JSON.stringify(responseTab === 'body' ? result.payload : result.request, null, 2) : '发送请求后在这里查看结果。不会自动发送或加载下一页。'}</pre>
       {result?.evidence?.requestId ? <small>Request ID：{result.evidence.requestId}</small> : null}
+      <AdminExecutionEvidence requestId={result?.evidence?.requestId} />
     </div>
   </section>
 }

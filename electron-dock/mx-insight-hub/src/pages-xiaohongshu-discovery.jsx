@@ -6,6 +6,7 @@ import { DropdownField, ErrorState, PageHeading } from './components.jsx'
 import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck } from './demo-credentials.jsx'
 import { demoAccessIssues } from './demo-access.js'
 import { requestUuid } from './request-id.js'
+import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import './xiaohongshu-discovery.css'
 
 const SORT_LABELS = { premium_imp_num: '曝光量', premium_good_read_rate: '阅读率', premium_read_num: '阅读数', premium_engage_num: '互动数', premium_engage_rate: '互动率', premium_like_num: '点赞数', premium_fav_num: '收藏数', premium_cmt_num: '评论数', DAY_3: '最近 3 天', DAY_7: '最近 7 天', DAY_14: '最近 14 天', DAY_30: '最近 30 天' }
@@ -96,5 +97,6 @@ function DiscoveryWorkbench({ product, admin }) {
       : <DiscoveryResults key={result?.evidence?.requestId || 'empty'} payload={result?.payload} inspiration={product.id === 'creator_inspiration'} />}
     {page ? <section className="qp-panel mih-panel mih-xhs-discovery-pagination"><div><strong>已获取第 {page.page} 页</strong><p>{({ exhausted: '本页已结束。', limit_reached: '达到 15 页上限，不代表内容耗尽。', unknown: '没有可用的继续信息，停止翻页。', next_page_probe: '结果未说明是否还有数据；点击下一页将查询下一页，可能返回空结果并计费。', continuable: '可按需继续获取下一页。' })[page.paginationStatus]}</p>{!currentResult ? <p>筛选已修改，请先执行当前查询。</p> : null}</div><button className="qp-button qp-button--outline" disabled={blocked || !currentResult || !page.nextCursor} onClick={() => { const next = { ...result.request.body, cursor: page.nextCursor }; setValues(next); void send(next) }}>下一页 <ArrowRight /></button></section> : null}
     {result?.evidence?.requestId ? <small>Request ID：{result.evidence.requestId}</small> : null}
+    <AdminExecutionEvidence requestId={result?.evidence?.requestId || error?.requestId} />
   </>
 }

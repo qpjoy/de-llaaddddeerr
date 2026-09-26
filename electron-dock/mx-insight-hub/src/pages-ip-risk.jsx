@@ -5,8 +5,10 @@ import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck, useDemoCre
 import { publicDataApi, publicApiOrigin } from './api.js'
 import { DropdownField, ErrorState } from './components.jsx'
 import { ipRiskAccessIssues } from './demo-access.js'
+import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 
 export function IpRiskPage() {
+  const [tab, setTab] = useState('debug')
   const [key] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
   const accessIssues = ipRiskAccessIssues(access)
@@ -44,6 +46,9 @@ export function IpRiskPage() {
   }
   return <div className="mih-page">
     <header><h1>IP 风险画像</h1><p>查询 IPv4 的代理识别、风险评分、秒拨概率、真人概率与风险标签。</p></header>
+    <nav className="mih-source-section-tabs" aria-label="IP 风险画像视图"><button type="button" aria-pressed={tab === 'debug'} onClick={() => setTab('debug')}>接口调试</button><button type="button" aria-pressed={tab === 'guide'} onClick={() => setTab('guide')}>接入指南</button><a href="#/docs?path=/docs/ip-risk">接口文档 ↗</a></nav>
+    <section className="qp-panel mih-panel" hidden={tab !== 'guide'}><h2>接入 IP 风险画像</h2><p>使用已授权 ip_risk 与 ip.risk.query 的 Hub Key，单 IP 与批量请求均由 Hub 计量。每次点击发送是一次新查询；未知结果先按请求编号核对。</p><a href="#/docs?path=/docs/ip-risk">查看参数、示例与响应说明</a></section>
+    <div style={{ display: tab === 'debug' ? undefined : 'none' }}>
     <div className="qp-panel mih-panel"><strong>接口调试</strong><p>按当前调用者生效套餐计费，实际费用见“用量与账单”。批量按成功交付的 IP 逐项计费。画像是本次查询结果，不代表绝对安全。</p></div>
     <section className="mih-api-console qp-panel" aria-label="Hub IP 风险接口调试">
       <aside className="mih-api-console-nav"><h2>IP 风险接口</h2><p>使用当前 Hub Key</p>{[false, true].map(mode => <button key={String(mode)} aria-pressed={batch === mode} disabled={busy} type="button" onClick={() => { setBatch(mode); setResult(null); setError(null); setCopyStatus('') }}><small>POST</small>{mode ? '批量查询 IPv4 风险画像' : '查询 IPv4 风险画像'}</button>)}</aside>
@@ -78,5 +83,7 @@ export function IpRiskPage() {
       {result ? <><p>{result.elapsedMs} ms · 请求 {result.evidence?.requestId || (result.payload?.requestId || result.payload?.batchId)} · {result.evidence?.idempotentReplay ? '幂等回放' : '本次查询'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre></> : <p>发送请求后在此查看真实响应。</p>}
       </div>
     </section>
+    <AdminExecutionEvidence requestId={result?.evidence?.requestId} />
+    </div>
   </div>
 }

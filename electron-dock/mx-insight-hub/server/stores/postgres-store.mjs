@@ -1,4 +1,5 @@
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
+import { ensurePostgresAdminExecution } from './admin-execution.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
 import { readTenantAccess, writeTenantAccess, applyTenantAccess } from './tenant-service-access.mjs'
 import { randomUUID } from 'node:crypto'
@@ -1124,6 +1125,12 @@ export class PostgresStore {
       [randomUUID(), name, status],
     )
     return tenant(rows[0])
+  }
+
+  async ensureAdminExecutionKey(input) { return ensurePostgresAdminExecution(this.pool, input) }
+  async getAdminExecutionKeyId() {
+    try { return (await this.pool.query('SELECT api_key_id FROM control.admin_execution_identity WHERE singleton')).rows[0]?.api_key_id || null }
+    catch (error) { if (error.code === '42P01') return null; throw error }
   }
 
   async listTenants() {

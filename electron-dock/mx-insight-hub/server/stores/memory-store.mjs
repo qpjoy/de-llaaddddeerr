@@ -521,6 +521,25 @@ export class MemoryStore {
     return clone(record)
   }
 
+  async getAdminExecutionKeyId() { return this.adminExecutionKeyId || null }
+  async ensureAdminExecutionKey(input) {
+    if (this.adminExecutionKeyId) return this.adminExecutionKeyId
+    if (this.adminExecutionCreation) return this.adminExecutionCreation
+    this.adminExecutionCreation = (async () => {
+      const tenant = await this.createTenant({ name: 'Hub Admin 执行' })
+      const consumer = await this.createConsumer({ tenantId: tenant.id, name: 'Hub Admin 执行' })
+      this.grants.set(consumer.id, clone(input.platforms))
+      this.capabilityGrants.set(consumer.id, clone(input.capabilities))
+      await this.createApiKey({ ...input, tenantId: tenant.id, consumerId: consumer.id, name: 'Admin',
+        platformEntitlements: input.platforms.map(platform => ({ platform, maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 })),
+        capabilityEntitlements: input.capabilities.map(capability => ({ capability, maxRequests: 1000, windowSeconds: 3600 })) })
+      this.adminExecutionKeyId = input.id
+      this.adminExecutionAudit = { keyId: input.id, createdBy: 'admin-token', createdAt: nowIso(), platforms: clone(input.platforms), capabilities: clone(input.capabilities) }
+      return input.id
+    })()
+    try { return await this.adminExecutionCreation } finally { this.adminExecutionCreation = null }
+  }
+
   async listTenants() {
     return clone([...this.tenants.values()])
   }

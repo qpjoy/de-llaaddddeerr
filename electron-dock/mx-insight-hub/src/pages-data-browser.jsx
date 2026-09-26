@@ -46,7 +46,7 @@ function AccountHeader({ token, row, onUnauthorized, onBack, onTag }) {
   const state = useRemoteData(load, onUnauthorized)
   return <><AccountHero row={state.loading ? row : state.data?.items?.[0] || row} onBack={onBack} onTag={onTag} onRefresh={state.refresh} />{state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}</>
 }
-export function DataBrowserPage({ token, onUnauthorized, aggregateSession: sharedAggregateSession }) {
+export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession: sharedAggregateSession }) {
   const resultsRef = useRef(null)
   const localAggregateSession = useRef(null)
   const aggregateSession = sharedAggregateSession || localAggregateSession
@@ -64,8 +64,14 @@ export function DataBrowserPage({ token, onUnauthorized, aggregateSession: share
     return () => observer.disconnect()
   }, [aggregate])
   const [advanced,setAdvanced] = useState(false)
-  const [diagnostics, setDiagnostics] = useState(false)
-  const [diagnosticSession, setDiagnosticSession] = useState(null)
+  const [diagnostics, setDiagnostics] = useState(() => new URLSearchParams(window.location.hash.split('?')[1]).get('view') === 'diagnostics')
+  const [diagnosticSession, setDiagnosticSession] = useState(() => ({ token, identifier: new URLSearchParams(window.location.hash.split('?')[1]).get('requestId') || '', data: null, error: null }))
+  useEffect(() => {
+    if (query?.get('view') === 'diagnostics') {
+      setAggregate(false); setAdvanced(false); setDiagnostics(true)
+      if (query.get('requestId')) setDiagnosticSession({ token, identifier: query.get('requestId'), data: null, error: null })
+    } else if (query?.get('view') === 'aggregate') { setAggregate(true); setAdvanced(false); setDiagnostics(false) }
+  }, [token, query?.get('view'), query?.get('requestId')])
   const [filters, setFilters] = useState({ ...emptySearch, view: 'accounts', account: '', page: 1, pageSize: 20 })
   const [draft, setDraft] = useState(emptySearch)
   const [accountRow, setAccountRow] = useState(null)
