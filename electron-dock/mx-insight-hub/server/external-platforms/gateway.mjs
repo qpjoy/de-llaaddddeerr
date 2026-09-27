@@ -1,4 +1,6 @@
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
+import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
+import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -490,6 +492,32 @@ export class ExternalPlatformGateway {
       normalize: () => normalizeXhsDiscoveryRequest('hot_notes', body, { decodeCursor: codec.decode }),
       dispatch: ({ credential }) => this.adapter.hotXiaohongshuNotes(body, { ...credential, decodeCursor: codec.decode, encodeCursor: codec.encode }),
     })
+  }
+
+  async forwardNative(context, { key, body, idempotencyKey, path }) {
+    const endpoint = nativeForwardingEndpoint(key)
+    if (!endpoint || endpoint.provider !== this.providerKey || endpoint.hubPath !== path) {
+      throw new AppError(404, 'native_endpoint_not_found', 'Unknown native data endpoint')
+    }
+    if (!this.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Native forwarding requires reviewed operation controls')
+    return this.#deliver(context, { body, idempotencyKey, path }, {
+      operation: endpoint.operation, authorizationPlatform: endpoint.authorizationPlatform,
+      capabilityMessage: 'This native data endpoint is not granted for this API key',
+      skipIngest: true, replayReleasedFailures: true, nativeForwarding: true,
+      normalize: ({ policy }) => normalizeNativeForwardingRequest(key, body, { maxPageSize: Math.min(100, policy.maxPageSize) }),
+      dispatch: ({ credential }) => this.adapter.forwardNative(key, body, credential),
+    })
+  }
+
+  async nativeReadiness({ consumerId, operationKeys, credentialConfigured }) {
+    if (!this.operationControlStore) return {}
+    const credentialReady = typeof credentialConfigured === 'boolean'
+      ? credentialConfigured : (await this.#resolvedCredential()).ready
+    const rows = await this.operationControlStore.describeProvider(this.providerKey, {
+      config: { ...this.config, reservationLeaseMs: this.reservationLeaseMs }, credentialConfigured: credentialReady,
+    })
+    return Object.fromEntries(rows.filter(row => operationKeys.includes(row.operationKey))
+      .map(row => [row.operationKey, credentialReady && operationReadyForConsumer(row, consumerId)]))
   }
 
   async queryEnterprise(context, { apiId, body, idempotencyKey, path }) {
@@ -1127,7 +1155,8 @@ export class ExternalPlatformGateway {
           capturedAt,
         })
       } catch (error) {
-        if (!(error instanceof JustOneUpstreamError)) throw error
+        if (!(error instanceof JustOneUpstreamError)
+          && !(plan.nativeForwarding && error instanceof TikHubUpstreamError)) throw error
         const evidence = error.evidence
         const persistedEvidence = persistedCallEvidence(error)
         const mappedError = publicFailure(error)

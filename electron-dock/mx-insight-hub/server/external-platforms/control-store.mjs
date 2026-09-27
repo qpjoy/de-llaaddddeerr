@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_VERSION } from '../contracts/xiaohongshu-research.mjs'
+import { nativeForwardingOperations } from '../contracts/native-forwarding.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, XHS_DISCOVERY_VERSION } from '../contracts/xiaohongshu-discovery.mjs'
 import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
 import { randomUUID } from 'node:crypto'
@@ -99,6 +100,7 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
       endpointKeys: socialAccountEndpointKeys('justone'),
     }),
     { operationKey: XHS_DISCOVERY_ENDPOINTS.hot_notes.operation, label: '小红书热门笔记', legacyGate: 'discoveryContractVerified', contractVersion: XHS_DISCOVERY_VERSION, endpointKeys: [XHS_DISCOVERY_ENDPOINTS.hot_notes.endpointKey] },
+    ...nativeForwardingOperations('justone'),
   ]),
   tikhub: Object.freeze([
     { operationKey: XHS_DISCOVERY_ENDPOINTS.creator_inspiration.operation, label: '小红书创作灵感', legacyGate: 'discoveryContractVerified', contractVersion: XHS_DISCOVERY_VERSION, endpointKeys: [XHS_DISCOVERY_ENDPOINTS.creator_inspiration.endpointKey] },
@@ -152,6 +154,7 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
         TIKHUB_XIAOHONGSHU_USER_POSTS_ENDPOINT_KEY,
       ]),
     }),
+    ...nativeForwardingOperations('tikhub'),
   ]),
 })
 
@@ -515,17 +518,18 @@ function dispatchRejected(state, details = undefined) {
 }
 
 function defaultRow(definition) {
+  const native = definition.operationKey.startsWith('native.')
   return {
-    controlSource: 'legacy_environment',
-    desiredState: 'active',
+    controlSource: native ? 'database' : 'legacy_environment',
+    desiredState: native ? 'disabled' : 'active',
     canaryConsumerIds: [],
-    revision: 0,
+    revision: native ? 1 : 0,
     releaseRevision: 1,
     releaseStatus: 'released',
     contractVersion: definition.contractVersion,
     endpointKeys: [...definition.endpointKeys],
     priceBook: { version: 0, source: 'legacy_environment', status: 'inherited' },
-    updatedBy: 'migration-060',
+    updatedBy: native ? 'migration-112' : 'migration-060',
     updatedAt: null,
   }
 }
@@ -776,6 +780,17 @@ export class PostgresExternalPlatformControlStore {
       const byOperation = new Map(rows.map((row) => [row.operation_key, rowFromPostgres(row)]))
       return definitions.map((definition) => {
         const row = byOperation.get(definition.operationKey)
+        // Code may deploy before migration 112. Missing new policies must not
+        // hide established operations, and this read-only view cannot authorize
+        // dispatch: #row remains strict about persisted policy evidence.
+        if (!row && definition.operationKey.startsWith('native.')) {
+          const view = operationView({ ...defaultRow(definition), revision: 0,
+            releaseStatus: 'not_registered', updatedBy: null }, definition, runtime)
+          return { ...view, migrationRequired: true, blockers: [
+            blocker('operation_migration_required', 'Apply migration 112 before configuring this operation'),
+            ...view.blockers,
+          ] }
+        }
         if (!row) throw unavailable()
         return operationView(row, definition, runtime)
       })

@@ -1,6 +1,7 @@
+import { PagedItems } from './paged-items.jsx'
 import { useCallback, useMemo, useState } from 'react'
 import { Database, FlowArrow, MagnifyingGlass, Stack } from '@phosphor-icons/react'
-import { adminApi } from './api.js'
+import { adminApi, publicDocsHref } from './api.js'
 import { DropdownField, EmptyState, ErrorState, LoadingState, MetricCard, Modal, Pagination, formatDate, useRemoteData } from './components.jsx'
 
 const MODES = { live: '实时接口', compatibility: '历史兼容', stored: '清洗入库' }
@@ -35,6 +36,9 @@ export function SourceConnectionsPanel({ state, initialProvider = '' }) {
   const summary = state.data?.summary
 
   return <section className="mih-source-connections" aria-label="已实现接入与查询路径">
+    {state.data?.migration ? <ProviderMigrationPanel inventory={state.data.migration} /> : null}
+    {rows.some(row => row.operationControls?.length) ? <details className="qp-panel mih-provisioning"><summary>当前接口运行配置与价格审核</summary><p>配置读取不触发上游探测；灰度仍按调用者名单放行。</p><PagedItems items={rows.filter(row => row.operationControls?.length)} text={row => `${row.product} ${row.platformLabel} ${row.operation}`} label="运行配置">{visible => visible.map(({entry: row}) => <article key={row.id}><h3>{row.platformLabel} · {row.product}</h3><p>{row.operationControls.length} 项操作；{row.operationControls.filter(op => op.reviewedPrice).length} 项价格已审核；{row.operationControls.filter(op => op.effectiveState === 'active').length} 项运行配置已启用；{row.operationControls.filter(op => op.effectiveState === 'canary').length} 项灰度</p><details><summary>逐项状态</summary>{row.operationControls.map(op => <p key={op.operation}>{op.operation} · {op.effectiveState} · 版本 {op.revision} · {op.blockers.join(' / ') || '无配置阻塞'}</p>)}</details></article>)}</PagedItems></details> : null}
+    <p>运行配置来自当前管理记录；“已实现”不代表已授权、已计费放行或实时健康。<a href="#/provisioning">批量开通与价格草稿</a></p>
     {summary ? <div className="mih-metric-grid">
       <MetricCard icon={FlowArrow} label="已实现接口 / 清洗路径" value={summary.routes} hint="代码合同清单 · 非实时健康" />
       <MetricCard icon={Stack} label="关联活动目录条目" value={summary.catalogEntries} hint="按稳定目录 ID 关联 · 不改人工覆盖状态" />
@@ -79,4 +83,32 @@ export function SourceConnectionsPanel({ state, initialProvider = '' }) {
       </div>
     </Modal> : null}
   </section>
+}
+
+function ProviderMigrationPanel({ inventory }) {
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState('')
+  const [page, setPage] = useState(1)
+  const rows = inventory.rows.filter(row => (!status || row.status === status)
+    && [row.platform, row.sourceLabel, row.operation, ...row.capabilities].join(' ').toLowerCase().includes(query.trim().toLowerCase()))
+  const pages = Math.max(1, Math.ceil(rows.length / 8))
+  const current = Math.min(page, pages)
+  return <details className="qp-panel mih-source-connection-list mih-provider-migration">
+    <summary><strong>Night-All → Hub 迁移进度</strong> · {inventory.summary.nativeContracts} 个单接口合同 · 本批旧接口切换 {inventory.summary.legacyCutovers} 个</summary>
+    <p>单接口转发已实现，默认禁用；逐接口完成价格审核、授权和启用后执行。raw / crawl / user-info 继续原有行为，原生返回不替代旧搜索投影。</p>
+    {inventory.incompleteInventory ? <p>当前清单来自源码。动态供应商目录文件缺失，生产数据库端点未读取，因此不是供应商全量目录。</p> : null}
+    <div className="mih-connection-controls">
+      <label className="qp-field"><span className="qp-field__label">搜索迁移平台或接口</span><input className="qp-input" value={query} onChange={e => { setQuery(e.target.value); setPage(1) }} placeholder="JustOne / facebook / search" /></label>
+      <DropdownField label="迁移阶段" value={status} onChange={value => { setStatus(value); setPage(1) }} options={[{ value: '', label: '全部阶段' }, { value: 'native_contract', label: '单接口合同已实现' }, { value: 'deferred', label: '待分阶段迁移' }]} />
+    </div>
+    <div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table mih-connection-table"><thead><tr><th>平台 / 来源</th><th>迁移阶段</th><th>接口与边界</th></tr></thead><tbody>
+      {rows.slice((current - 1) * 8, current * 8).map(row => <tr key={row.id}>
+        <td><strong>{row.platform}</strong><small>{row.sourceLabel}</small><small>{row.capabilities.join(' / ') || '专用操作'}</small></td>
+        <td>{row.status === 'native_contract' ? '单接口合同已实现' : '待迁移'}<small>运行状态未探测</small></td>
+        <td>{row.boundary}{row.hubPath ? <small><code>{row.hubPath}</code></small> : null}</td>
+      </tr>)}
+    </tbody></table></div>
+    <Pagination page={current} pageSize={8} total={rows.length} totalPages={pages} hasMore={current < pages} onPageChange={setPage} label="迁移清单分页" />
+    <p className="mih-connection-notes"><a href={publicDocsHref('/docs/native-data')}>原生接口文档 ↗</a> · <a href="#/external-platforms">逐接口运行策略与价格</a> · 源码版本 <code>{inventory.sourceRevision.slice(0, 12)}</code></p>
+  </details>
 }

@@ -1,3 +1,4 @@
+import { ProvisioningService } from './commercial/provisioning.mjs'
 import { QixinAdapter } from './adapters/qixin.mjs'
 import { QixinAdminService, QIXIN_METADATA } from './external-platforms/qixin-admin.mjs'
 import { StructuredExternalPlatformCredentialStore, QIXIN_CREDENTIAL_FIELDS } from './external-platforms/structured-credentials.mjs'
@@ -391,6 +392,18 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,
     segmenter,
+    externalNativeCapabilities: async options => {
+      const results = await Promise.allSettled([
+        [socialAccountGateway, externalPlatformCredentialStore, 'justone'],
+        [socialAccountTikHubGateway, tikHubCredentialStore, 'tikhub'],
+      ].map(async ([gateway, credentials, provider]) => {
+        // The Admin listener reads credential metadata only; it never needs
+        // decrypted acquisition credentials to render an operation status.
+        const metadata = config.listenerMode === 'admin' ? await credentials.describeCredential(provider) : null
+        return gateway.nativeReadiness({ ...options, ...(metadata ? { credentialConfigured: metadata.credentialConfigured } : {}) })
+      }))
+      return Object.assign({}, ...results.map(result => result.status === 'fulfilled' ? result.value : {}))
+    },
     externalPlatformCapabilities: async options => {
       const existing = await externalEcommerceCapabilities(options)
       let enterpriseReady = false
@@ -474,6 +487,7 @@ export async function createRuntime(config = loadConfig()) {
     retrievalControl,
     embedding,
     externalPlatformAdmin,
+    provisioning: new ProvisioningService({ service, control: externalPlatformControlStore, runtime: async provider => (await externalPlatformAdmin.provisioningContext(provider)).runtime }),
     notifications,
     balanceMonitor,
     nightAllA,

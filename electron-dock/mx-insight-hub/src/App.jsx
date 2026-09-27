@@ -1,3 +1,5 @@
+import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
+import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
@@ -331,11 +333,11 @@ const AGENT_CENTER_NAV_KEY = 'agent-center'
 const NAV_PARENTS = {
   [DATA_PRODUCTS_NAV_KEY]: {
     label: '数据产品',
-    description: '目录与业务数据展示',
+    description: '发现、数据服务与场景应用',
     icon: Package,
   },
   [DATA_CLEANING_NAV_KEY]: {
-    label: '数据清洗中心',
+    label: '数据接入与治理',
     description: '连接、清洗与上游平台',
     icon: Database,
   },
@@ -375,7 +377,8 @@ const ROUTES = [
   { path: '/data-products/news', label: '新闻发现', description: '目录来源、新闻检索与阅读', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: NewsDiscoveryPage, capability: 'apikey.read' },
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/external-platforms', label: '外部数据平台', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/provisioning', label: '批量开通', description: '价格草稿、授权与启用', icon: Globe, group: '策略控制', component: ProvisioningPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/external-platforms', label: '上游供应商', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },
@@ -692,7 +695,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
               if (renderedParents.has(route.navParent)) return null
               renderedParents.add(route.navParent)
               const parent = NAV_PARENTS[route.navParent]
-              const children = groupRoutes.filter((candidate) => candidate.navParent === route.navParent)
+              const children = groupRoutes.filter((candidate) => candidate.navParent === route.navParent).sort((a, b) => productNavigationOrder(a.path) - productNavigationOrder(b.path))
               if (!parent || children.length === 0) return null
               const ParentIcon = parent.icon
               const expanded = expandedParents.has(route.navParent)
@@ -714,13 +717,15 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
                   </button>
                   {expanded ? (
                     <div className="mih-nav__children" id={childrenId}>
-                      {children.map(child => {
-                        if (!child.navSection) return routeLink(child, true)
+                      {children.map((child, index) => {
+                        const category = productCategory(child.path)
+                        const heading = category && category.key !== productCategory(children[index - 1]?.path)?.key ? <div className="mih-nav__category">{category.label}</div> : null
+                        if (!child.navSection) return <div key={child.path}>{heading}{routeLink(child, true)}</div>
                         if (renderedSections.has(child.navSection)) return null
                         renderedSections.add(child.navSection)
                         const sectionChildren = children.filter(candidate => candidate.navSection === child.navSection)
                         const sectionExpanded = expandedSections.has(child.navSection)
-                        return <div className="mih-nav__subgroup" key={child.navSection}><button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}><Scroll size={16} /><span><strong>小红书</strong><small>笔记、热门内容与创作灵感</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
+                        return <div className="mih-nav__subgroup" key={child.navSection}>{heading}<button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}><Scroll size={16} /><span><strong>小红书</strong><small>笔记、热门内容与创作灵感</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
                       })}
                     </div>
                   ) : null}

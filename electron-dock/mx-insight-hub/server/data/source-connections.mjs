@@ -1,4 +1,6 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
+import { providerMigrationSnapshot } from './provider-migration.mjs'
+import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { SOCIAL_ACCOUNT_PLATFORMS, socialAccountPlatform } from '../contracts/social-accounts.mjs'
 import { JUSTONE_RESOURCE_CATALOG } from '../contracts/justone-resources.mjs'
@@ -29,6 +31,13 @@ function route(id, fields) {
 
 export function implementedRoutes(sources = []) {
   const rows = []
+  const migration = providerMigrationSnapshot()
+  for (const endpoint of NATIVE_FORWARDING_ENDPOINTS) rows.push(route(`native-${endpoint.key}`, {
+    platform: endpoint.platform, catalogKeys: migration.rows.find(row => row.id === endpoint.key)?.catalogKeys || [],
+    provider: endpoint.provider, product: '原生数据接口', operation: endpoint.operation, path: endpoint.hubPath,
+    defaultRule: '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
+    evidence: 'server/contracts/native-forwarding.mjs',
+  }))
   for (const endpoint of Object.values(XHS_DISCOVERY_ENDPOINTS)) rows.push(route(endpoint.key, {
     platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: endpoint.provider,
     product: endpoint.label, operation: endpoint.operation, path: endpoint.path, keywordSearch: endpoint.id === 'hot_notes',
@@ -168,7 +177,7 @@ export function implementedRoutes(sources = []) {
   return rows
 }
 
-export function sourceConnectionSnapshot(entries, sources, { now = new Date() } = {}) {
+export function sourceConnectionSnapshot(entries, sources, { now = new Date(), operations = [] } = {}) {
   const byKey = new Map(entries.map(entry => [entry.sourceKey, entry]))
   const sourceByKey = new Map(sources.map(source => [source.sourceKey, source]))
   const routes = implementedRoutes(sources).map(item => {
@@ -184,13 +193,18 @@ export function sourceConnectionSnapshot(entries, sources, { now = new Date() } 
         // Never spread a source row: it contains connection credentials.
         return { key, registered: Boolean(source), status: source?.status || 'not_registered' }
       }),
+      operationControls: operations.filter(operation => operation.provider === provider && (operation.operation === item.operation || provider === 'qixin' && item.operation === 'enterprise.query'))
+        .map(operation => ({ operation: operation.operation, revision: operation.current.revision, desiredState: operation.current.desiredState,
+          effectiveState: operation.current.effectiveState, reviewedPrice: operation.current.priceBook.source === 'database' && operation.current.priceBook.status === 'reviewed' && operation.current.priceBook.ready,
+          blockers: operation.current.blockers.map(blocker => blocker.code) })),
       runtimeStatus: 'not_checked',
     }
   })
   return {
     contractVersion: 'mx-insight-hub.source-connections.v1',
-    generatedAt: now.toISOString(), reviewedAt: '2026-09-22',
+    generatedAt: now.toISOString(), reviewedAt: '2026-09-26',
     scope: 'implemented_contracts_and_registered_cleaning_sources',
+    migration: providerMigrationSnapshot(),
     routes,
     summary: {
       routes: routes.length,

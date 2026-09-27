@@ -21,6 +21,9 @@ export function DocsPage({ token, query, onUnauthorized, theme = 'light' }) {
         if (href.startsWith('/docs')) {
           link.href = window.location.href.split('#')[0] + publicDocsHref(href)
           link.target = '_top'
+        } else if (href.startsWith('/#/')) {
+          link.href = window.location.href.split('#')[0] + href.slice(1)
+          link.target = '_top'
         } else if (!href.startsWith('#')) { link.target = '_blank'; link.rel = 'noreferrer' }
       }
       setContent({ html: '<!doctype html>' + doc.documentElement.outerHTML })

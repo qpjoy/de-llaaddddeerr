@@ -236,6 +236,7 @@ export const publicDataApi = {
   enterpriseQuery: (key, apiId, body, options) => publicDataRequest(key, `/api/v1/data/enterprise/${encodeURIComponent(apiId)}/query`, { ...options, method: 'POST', body }),
   ipRiskBatch: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk/batch', { ...options, method: 'POST', body }),
   ipRisk: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk', { ...options, method: 'POST', body }),
+  serviceCatalog: (key, query = {}) => publicDataRequest(key, `/api/v1/data/source-catalog/services${queryString(query)}`),
   sourceCatalog: (apiKey, query = {}) => publicDataRequest(apiKey, `/api/v1/data/source-catalog${queryString(query)}`),
   sourceCatalogMetadata: apiKey => publicDataRequest(apiKey, '/api/v1/data/source-catalog/metadata'),
   sourceCatalogDetail: (apiKey, id) => publicDataRequest(apiKey, `/api/v1/data/source-catalog/${encodeURIComponent(id)}`),
@@ -339,6 +340,12 @@ export async function signInWithLauncher({ username, password }) {
 }
 
 export const adminApi = {
+  provisioningCatalog: token => request(token, `${ADMIN_ROOT}/provisioning/catalog`),
+  provisioningDrafts: token => request(token, `${ADMIN_ROOT}/provisioning/price-drafts`),
+  provisioningSaveDraft: (token, body) => request(token, `${ADMIN_ROOT}/provisioning/price-drafts`, { method: 'POST', body }),
+  provisioningPreview: (token, body) => request(token, `${ADMIN_ROOT}/provisioning/preview`, { method: 'POST', body }),
+  provisioningApply: (token, id) => request(token, `${ADMIN_ROOT}/provisioning/batches/${encodeURIComponent(id)}/apply`, { method: 'POST', body: {} }),
+  provisioningBatch: (token, id) => request(token, `${ADMIN_ROOT}/provisioning/batches/${encodeURIComponent(id)}`),
   notifications: (token, query) => request(token, `${ADMIN_ROOT}/notifications`, { query }),
   supplierBalances: token => request(token, `${ADMIN_ROOT}/supplier-balances`),
   revealSupplierBalanceWebhook: (token, provider, adminToken) => request(token,

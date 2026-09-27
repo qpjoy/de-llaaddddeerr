@@ -1,4 +1,6 @@
+import { serviceCatalogPage } from './data/service-catalog.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
+import { NATIVE_FORWARDING_ENDPOINTS } from './contracts/native-forwarding.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
 import { nightAllFailureEvidence, nightAllRejectionError } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
@@ -252,6 +254,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.operation),
   ...XHS_DISCOVERY_OPERATIONS,
   ...XHS_RESEARCH_OPERATIONS,
   'enterprise.query',
@@ -554,6 +557,7 @@ export class HubService {
     segmenter = null,
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
+    externalNativeCapabilities = null,
     externalSocialSearch = null,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
@@ -579,6 +583,7 @@ export class HubService {
     this.segmenter = segmenter
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
+    this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalSocialSearchEnabled = typeof externalSocialSearchEnabled === 'function'
       ? externalSocialSearchEnabled : externalSocialSearchEnabled === true
@@ -1827,6 +1832,13 @@ export class HubService {
     const diagnosticsReady = typeof this.store.getAdminPublicOpinionFunnel === 'function'
       && typeof this.store.listAdminPublicOpinionBrowseRecords === 'function'
       && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function'
+    const grantedNative = NATIVE_FORWARDING_ENDPOINTS.filter(row => canonicalGrants.includes(row.authorizationPlatform)
+      && capabilityGrants.includes(row.operation)).map(row => row.operation)
+    let nativeReady = {}
+    if (grantedNative.length && this.externalNativeCapabilities && !isTestApiKey(context.apiKey)) {
+      try { nativeReady = await this.externalNativeCapabilities({ consumerId: context.consumer.id, operationKeys: grantedNative }) }
+      catch { this.logger?.warn?.('[external-platform] Native operation readiness is unavailable') }
+    }
     return {
       ...payload,
       data: {
@@ -1835,7 +1847,7 @@ export class HubService {
           .filter((capability) => PUBLIC_CAPABILITIES.has(capability))
           .map((capability) => ({
             capability,
-            ready: capability === TOKENIZE_CAPABILITY
+            ready: capability.startsWith('native.') ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
               ? typeof this.segmenter?.segmentWithMeta === 'function'
               : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
                 ? allIngestedReady
@@ -2316,6 +2328,19 @@ export class HubService {
           ...page,
         }
       },
+    })
+  }
+
+  async sourceCatalogServices(context, queryInput = {}) {
+    const allowed = ['query', 'majorCategory', 'scenario', 'region', 'coverageStatus', 'tag', 'pageSize', 'cursor']
+    if (Object.keys(queryInput).some(field => !allowed.includes(field))) throw new AppError(400, 'unsupported_fields', 'Service catalog accepts business filters only')
+    const policy = await this.#storedPlatformPolicy(context, SOURCE_CATALOG_PLATFORM, 'Service catalog')
+    const secret = `${this.apiKeyPepper}:service-catalog:${context.consumer.id}:${context.apiKey.id}`
+    const query = normalizePublicSourceCatalogQuery(queryInput, policy.maxPageSize, secret)
+    return this.#meterStoredRead(context, SOURCE_CATALOG_PLATFORM, policy, {
+      path: '/api/v1/data/source-catalog/services',
+      fingerprintBody: { ...query.filters, pageSize: query.pageSize, cursor: query.cursorToken },
+      operation: async () => serviceCatalogPage(await this.store.listSourceCatalogEntries({ includeArchived: false }), query, secret),
     })
   }
 

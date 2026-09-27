@@ -1,0 +1,1650 @@
+{
+  "version": "night-all-source-snapshot.2026-09-26",
+  "sourceRevision": "5359297fbe46674664ebb56479bb375d6e6faf74",
+  "dynamicCatalogs": [
+    {
+      "path": "data/tikhub/endpoints.json",
+      "present": false
+    },
+    {
+      "path": "data/tikhub/tiktok-endpoints.json",
+      "present": false
+    }
+  ],
+  "scope": "Source-defined endpoints only; not the production database or the complete supplier catalog. No credentials or live verification.",
+  "evidence": [
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/bilibili.js",
+      "sha256": "c8b33ef77574c911f1e6fd5a2483edbd10ac9054dc7d7b206686d3683229a6fd"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/douyin.js",
+      "sha256": "dc1edb0c117e28ad82cbbb43e9fb91825810ff0b06a938a9a4cf09e9ac025b55"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/facebook.js",
+      "sha256": "d13c94fc9d35cf32018386cc00e8cf71aac3083ddcc1d8f5d8a4a81d396829f5"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/kuaishou.js",
+      "sha256": "632538d1589b9abfafd58b8e27259970d4554e154956093b119343dcc1ef9973"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/wechat_mp.js",
+      "sha256": "830b8d231478a2d68613dad09c16d717b9a3588b8983ddc89c6b1aef7e7b8119"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/weibo.js",
+      "sha256": "b12a0bf04ace11cfe628250878e9adffac4479f54ebeec0d3f7d5926307fee10"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/xianyu.js",
+      "sha256": "7b61b2583a61de71a17f763f7c21b2a44584b6d016499ed4d221491f301b6936"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/xiaohongshu.js",
+      "sha256": "6bf12eb639dae041a40e679e144ee07649be57f8bb311e7242d3579381007bb1"
+    },
+    {
+      "path": "lib/integrations/social-providers/justone/platforms/zhihu.js",
+      "sha256": "5944fea079416f29e0fcc0a20e6248a34a8ab2b2e96631e8c9b2a2998204f8f5"
+    },
+    {
+      "path": "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+      "sha256": "be88306b59cfb53e409ff59b3c7c4e457b01f4e496e1b4cee1488e43fcceba04"
+    },
+    {
+      "path": "lib/integrations/social-providers/tikhub/static-endpoints.js",
+      "sha256": "9e2c64bf441e87d49e9a97d1f94ccc544b9de795c1691800c7bdcbaa713bbefb"
+    }
+  ],
+  "endpoints": [
+    {
+      "provider": "tikhub",
+      "id": "douyin_search_fetch_video_search_v1",
+      "platform": "douyin",
+      "method": "POST",
+      "path": "/api/v1/douyin/search/fetch_video_search_v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "required": false
+        },
+        {
+          "name": "sort_type",
+          "required": false
+        },
+        {
+          "name": "publish_time",
+          "required": false
+        },
+        {
+          "name": "filter_duration",
+          "required": false
+        },
+        {
+          "name": "content_type",
+          "required": false
+        },
+        {
+          "name": "search_id",
+          "required": false
+        },
+        {
+          "name": "backtrace",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "tiktok_web_fetch_general_search",
+      "platform": "tiktok",
+      "method": "GET",
+      "path": "/api/v1/tiktok/web/fetch_general_search",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "offset",
+          "required": false
+        },
+        {
+          "name": "search_id",
+          "required": false
+        },
+        {
+          "name": "cookie",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "weibo_web_v2_fetch_realtime_search",
+      "platform": "weibo",
+      "method": "GET",
+      "path": "/api/v1/weibo/web_v2/fetch_realtime_search",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "page",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "zhihu_web_fetch_article_search_v3",
+      "platform": "zhihu",
+      "method": "GET",
+      "path": "/api/v1/zhihu/web/fetch_article_search_v3",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "offset",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "required": false
+        },
+        {
+          "name": "show_all_topics",
+          "required": false
+        },
+        {
+          "name": "search_source",
+          "required": false
+        },
+        {
+          "name": "search_hash_id",
+          "required": false
+        },
+        {
+          "name": "sort",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "twitter_web_fetch_search_timeline",
+      "platform": "twitter",
+      "method": "GET",
+      "path": "/api/v1/twitter/web/fetch_search_timeline",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "search_type",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "reddit_app_fetch_dynamic_search",
+      "platform": "reddit",
+      "method": "GET",
+      "path": "/api/v1/reddit/app/fetch_dynamic_search",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "search_type",
+          "required": false
+        },
+        {
+          "name": "sort",
+          "required": false
+        },
+        {
+          "name": "time_range",
+          "required": false
+        },
+        {
+          "name": "safe_search",
+          "required": false
+        },
+        {
+          "name": "allow_nsfw",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        },
+        {
+          "name": "need_format",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_general_search",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/general_search",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "next_max_id",
+          "required": false
+        },
+        {
+          "name": "rank_token",
+          "required": false
+        },
+        {
+          "name": "enable_metadata",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "bilibili_web_fetch_general_search",
+      "platform": "bilibili",
+      "method": "GET",
+      "path": "/api/v1/bilibili/web/fetch_general_search",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "order",
+          "required": true
+        },
+        {
+          "name": "page",
+          "required": true
+        },
+        {
+          "name": "page_size",
+          "required": true
+        },
+        {
+          "name": "duration",
+          "required": false
+        },
+        {
+          "name": "pubtime_begin_s",
+          "required": false
+        },
+        {
+          "name": "pubtime_end_s",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "kuaishou_app_search_comprehensive",
+      "platform": "kuaishou",
+      "method": "GET",
+      "path": "/api/v1/kuaishou/app/search_comprehensive",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "pcursor",
+          "required": false
+        },
+        {
+          "name": "sort_type",
+          "required": false
+        },
+        {
+          "name": "publish_time",
+          "required": false
+        },
+        {
+          "name": "duration",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "youtube_web_v2_get_general_search_v2",
+      "platform": "youtube",
+      "method": "GET",
+      "path": "/api/v1/youtube/web_v2/get_general_search_v2",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": false
+        },
+        {
+          "name": "continuation_token",
+          "required": false
+        },
+        {
+          "name": "upload_date",
+          "required": false
+        },
+        {
+          "name": "type",
+          "required": false
+        },
+        {
+          "name": "duration",
+          "required": false
+        },
+        {
+          "name": "features",
+          "required": false
+        },
+        {
+          "name": "sort_by",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "douyin_search_fetch_general_search_v2",
+      "platform": "douyin",
+      "method": "POST",
+      "path": "/api/v1/douyin/search/fetch_general_search_v2",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "required": false
+        },
+        {
+          "name": "sort_type",
+          "required": false
+        },
+        {
+          "name": "publish_time",
+          "required": false
+        },
+        {
+          "name": "filter_duration",
+          "required": false
+        },
+        {
+          "name": "content_type",
+          "required": false
+        },
+        {
+          "name": "search_id",
+          "required": false
+        },
+        {
+          "name": "backtrace",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "douyin_app_v3_open_douyin_app_to_keyword_search",
+      "platform": "douyin",
+      "method": "GET",
+      "path": "/api/v1/douyin/app/v3/open_douyin_app_to_keyword_search",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        }
+      ],
+      "capabilities": [],
+      "forwarding": "deferred",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_search_users",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/search_users",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "rank_token",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_users"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_search_hashtags",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/search_hashtags",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "rank_token",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_hashtags"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v2_search_locations",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v2/search_locations",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "search_places"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_explore",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_explore",
+      "parameters": [
+        {
+          "name": "max_id",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "explore"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_recommended_reels",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_recommended_reels",
+      "parameters": [
+        {
+          "name": "first",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "recommended_reels"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_reels",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_reels",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        },
+        {
+          "name": "first",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_reels"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_stories",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_stories",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "user_stories"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_tagged_posts",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_tagged_posts",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        },
+        {
+          "name": "first",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_tagged_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_highlights",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_highlights",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        },
+        {
+          "name": "first",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_highlights"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_followers",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_followers",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        },
+        {
+          "name": "count",
+          "required": false
+        },
+        {
+          "name": "max_id",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_followers"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_following",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_following",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        },
+        {
+          "name": "count",
+          "required": false
+        },
+        {
+          "name": "max_id",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_following"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_location_posts",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_location_posts",
+      "parameters": [
+        {
+          "name": "location_id",
+          "required": true
+        },
+        {
+          "name": "first",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "location_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_location_info",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_location_info",
+      "parameters": [
+        {
+          "name": "location_id",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "location_info"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_location_nearby",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_location_nearby",
+      "parameters": [
+        {
+          "name": "location_id",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "nearby_locations"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "xiaohongshu_app_v2_search_users",
+      "platform": "xiaohongshu",
+      "method": "GET",
+      "path": "/api/v1/xiaohongshu/app_v2/search_users",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "page",
+          "required": false
+        },
+        {
+          "name": "search_id",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_users"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "xiaohongshu_app_v2_get_user_posted_notes",
+      "platform": "xiaohongshu",
+      "method": "GET",
+      "path": "/api/v1/xiaohongshu/app_v2/get_user_posted_notes",
+      "parameters": [
+        {
+          "name": "user_id",
+          "required": false
+        },
+        {
+          "name": "share_text",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "xiaohongshu_app_v2_get_image_note_detail",
+      "platform": "xiaohongshu",
+      "method": "GET",
+      "path": "/api/v1/xiaohongshu/app_v2/get_image_note_detail",
+      "parameters": [
+        {
+          "name": "note_id",
+          "required": false
+        },
+        {
+          "name": "share_text",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "post_detail"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_profile",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_profile",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "user_profile"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_posts",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_posts",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        },
+        {
+          "name": "first",
+          "required": false
+        },
+        {
+          "name": "after",
+          "required": false
+        },
+        {
+          "name": "before",
+          "required": false
+        },
+        {
+          "name": "last",
+          "required": false
+        },
+        {
+          "name": "count",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "instagram_v3_get_user_id_by_username",
+      "platform": "instagram",
+      "method": "GET",
+      "path": "/api/v1/instagram/v3/get_user_id_by_username",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "user_profile"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "linkedin_web_v2_get_user_profile_by_url",
+      "platform": "linkedin",
+      "method": "GET",
+      "path": "/api/v1/linkedin/web_v2/get_user_profile",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "user_profile"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "linkedin_web_v2_get_company_profile_by_url",
+      "platform": "linkedin",
+      "method": "GET",
+      "path": "/api/v1/linkedin/web_v2/get_company_profile",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true
+        }
+      ],
+      "capabilities": [],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "linkedin_web_v2_get_user_posts_by_url",
+      "platform": "linkedin",
+      "method": "GET",
+      "path": "/api/v1/linkedin/web_v2/get_user_posts",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true
+        },
+        {
+          "name": "type",
+          "required": false
+        },
+        {
+          "name": "start",
+          "required": false
+        },
+        {
+          "name": "pagination_token",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "user_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "linkedin_web_v2_get_company_posts_by_url",
+      "platform": "linkedin",
+      "method": "GET",
+      "path": "/api/v1/linkedin/web_v2/get_company_posts",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": false
+        },
+        {
+          "name": "pagination_token",
+          "required": false
+        },
+        {
+          "name": "sort_by",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "company_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "linkedin_web_v2_get_post_detail_by_url",
+      "platform": "linkedin",
+      "method": "GET",
+      "path": "/api/v1/linkedin/web_v2/get_post_detail",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true
+        }
+      ],
+      "capabilities": [
+        "post_detail"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "linkedin_web_v2_get_post_comments",
+      "platform": "linkedin",
+      "method": "GET",
+      "path": "/api/v1/linkedin/web_v2/get_post_comments",
+      "parameters": [
+        {
+          "name": "urn",
+          "required": true
+        },
+        {
+          "name": "sort_by",
+          "required": false
+        },
+        {
+          "name": "page",
+          "required": false
+        },
+        {
+          "name": "pagination_token",
+          "required": false
+        },
+        {
+          "name": "share_urn",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "post_comments"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "wechat_search_v2_fetch_search",
+      "platform": "wechat_search",
+      "method": "POST",
+      "path": "/api/v1/wechat_search/v2/fetch_search",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "business_type",
+          "required": false
+        },
+        {
+          "name": "offset",
+          "required": false
+        },
+        {
+          "name": "raw",
+          "required": false
+        },
+        {
+          "name": "sort",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "tikhub",
+      "id": "xiaohongshu_app_v2_search_notes",
+      "platform": "xiaohongshu",
+      "method": "GET",
+      "path": "/api/v1/xiaohongshu/app_v2/search_notes",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "page",
+          "required": false
+        },
+        {
+          "name": "sort_type",
+          "required": false
+        },
+        {
+          "name": "note_type",
+          "required": false
+        },
+        {
+          "name": "time_filter",
+          "required": false
+        },
+        {
+          "name": "search_id",
+          "required": false
+        },
+        {
+          "name": "search_session_id",
+          "required": false
+        },
+        {
+          "name": "source",
+          "required": false
+        },
+        {
+          "name": "ai_mode",
+          "required": false
+        }
+      ],
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/tikhub/curated-search-endpoints.js",
+        "lib/integrations/social-providers/tikhub/static-endpoints.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_douyin_search_video_v4",
+      "platform": "douyin",
+      "method": "GET",
+      "path": "/api/douyin/search-video/v4",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "sortType",
+          "required": false
+        },
+        {
+          "name": "publishTime",
+          "required": false
+        },
+        {
+          "name": "duration",
+          "required": false
+        },
+        {
+          "name": "page",
+          "required": false
+        },
+        {
+          "name": "searchId",
+          "required": false
+        }
+      ],
+      "fixedQuery": {},
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/douyin.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_social_cross_platform_search_v1_weibo",
+      "platform": "weibo",
+      "method": "GET",
+      "path": "/api/search/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": true
+        },
+        {
+          "name": "end",
+          "required": true
+        },
+        {
+          "name": "nextCursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {
+        "source": "WEIBO"
+      },
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/weibo.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_social_cross_platform_search_v1_zhihu",
+      "platform": "zhihu",
+      "method": "GET",
+      "path": "/api/search/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": true
+        },
+        {
+          "name": "end",
+          "required": true
+        },
+        {
+          "name": "nextCursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {
+        "source": "ZHIHU"
+      },
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/zhihu.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_social_cross_platform_search_v1_xiaohongshu",
+      "platform": "xiaohongshu",
+      "method": "GET",
+      "path": "/api/search/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": true
+        },
+        {
+          "name": "end",
+          "required": true
+        },
+        {
+          "name": "nextCursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {
+        "source": "XIAOHONGSHU"
+      },
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/xiaohongshu.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_social_cross_platform_search_v1_bilibili",
+      "platform": "bilibili",
+      "method": "GET",
+      "path": "/api/search/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": true
+        },
+        {
+          "name": "end",
+          "required": true
+        },
+        {
+          "name": "nextCursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {
+        "source": "BILIBILI"
+      },
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/bilibili.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_social_cross_platform_search_v1_kuaishou",
+      "platform": "kuaishou",
+      "method": "GET",
+      "path": "/api/search/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": true
+        },
+        {
+          "name": "end",
+          "required": true
+        },
+        {
+          "name": "nextCursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {
+        "source": "KUAISHOU"
+      },
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/kuaishou.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_social_cross_platform_search_v1_wechat_mp",
+      "platform": "wechat_mp",
+      "method": "GET",
+      "path": "/api/search/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "start",
+          "required": true
+        },
+        {
+          "name": "end",
+          "required": true
+        },
+        {
+          "name": "nextCursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {
+        "source": "WEIXIN"
+      },
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/wechat_mp.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_facebook_post_search_v1",
+      "platform": "facebook",
+      "method": "GET",
+      "path": "/api/facebook/search-post/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "startDate",
+          "required": true
+        },
+        {
+          "name": "endDate",
+          "required": true
+        },
+        {
+          "name": "cursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {},
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/facebook.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_facebook_get_profile_id_v1",
+      "platform": "facebook",
+      "method": "GET",
+      "path": "/api/facebook/get-profile-id/v1",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true
+        }
+      ],
+      "fixedQuery": {},
+      "capabilities": [
+        "user_profile"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/facebook.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_facebook_get_profile_posts_v1",
+      "platform": "facebook",
+      "method": "GET",
+      "path": "/api/facebook/get-profile-posts/v1",
+      "parameters": [
+        {
+          "name": "profileId",
+          "required": true
+        },
+        {
+          "name": "cursor",
+          "required": false
+        }
+      ],
+      "fixedQuery": {},
+      "capabilities": [
+        "user_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/facebook.js"
+      ]
+    },
+    {
+      "provider": "justone",
+      "id": "justone_xianyu_search_v1",
+      "platform": "xianyu",
+      "method": "GET",
+      "path": "/api/xianyu/search-item-list/v1",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true
+        },
+        {
+          "name": "page",
+          "required": false
+        }
+      ],
+      "fixedQuery": {},
+      "capabilities": [
+        "search_posts"
+      ],
+      "forwarding": "implemented_disabled",
+      "evidence": [
+        "lib/integrations/social-providers/justone/platforms/xianyu.js"
+      ]
+    }
+  ]
+}

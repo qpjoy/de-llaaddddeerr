@@ -958,6 +958,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
         loading={remote.loading}
         onRefresh={remote.refresh}
       >
+        <a className="qp-button qp-button--outline" href={`#/provisioning${typeof provider === 'string' ? `?provider=${encodeURIComponent(provider)}` : ''}`}>批量开通与逐端点价格</a>
         <RangeControl range={range} setQuery={setQuery} />
       </PageHeading>
 
@@ -2105,6 +2106,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
         <a className="qp-button qp-button--ghost" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />平台总览</a>
         {provider === 'qixin' ? <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/enterprise')}>企业接口文档 · 272 项</a> : null}
         {provider === 'tikhub' ? <><a className="qp-button qp-button--outline" href={publicDocsHref('/docs/tikhub/get_image_note_detail')}>小红书接口文档</a><a className="qp-button qp-button--outline" href="#/data-products/xiaohongshu-note">小红书笔记画卷</a></> : null}
+        <a className="qp-button qp-button--outline" href={`#/provisioning${typeof provider === 'string' ? `?provider=${encodeURIComponent(provider)}` : ''}`}>批量开通与逐端点价格</a>
         <RangeControl range={range} setQuery={setQuery} />
       </PageHeading>
 

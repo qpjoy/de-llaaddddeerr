@@ -1,5 +1,6 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
+import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
@@ -756,6 +757,7 @@ export function createApp({
   retrievalControl = null,
   embedding = null,
   externalPlatformAdmin = null,
+  provisioning = null,
   notifications = null,
   balanceMonitor = null,
   nightAllA = null,
@@ -2902,6 +2904,28 @@ export function createApp({
         })
         return
       }
+      if (pathname.startsWith('/internal/v1/admin/provisioning')) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'commercial provisioning')
+        if (!provisioning) throw new AppError(503, 'provisioning_unavailable', '批量开通服务尚未配置')
+        let result
+        if (pathname === '/internal/v1/admin/provisioning/catalog' && request.method === 'GET') result = await provisioning.catalog()
+        else if (pathname === '/internal/v1/admin/provisioning/price-drafts' && request.method === 'GET') result = await provisioning.listDrafts()
+        else if (pathname === '/internal/v1/admin/provisioning/price-drafts' && request.method === 'POST') result = await provisioning.createDraft(await readJson(request, 256 * 1024))
+        else if (pathname === '/internal/v1/admin/provisioning/preview' && request.method === 'POST') result = await provisioning.preview(await readJson(request, 256 * 1024))
+        else {
+          const batch = routeMatch(pathname, '/internal/v1/admin/provisioning/batches/:id')
+          const apply = routeMatch(pathname, '/internal/v1/admin/provisioning/batches/:id/apply')
+          if (batch && request.method === 'GET') result = await provisioning.batch(batch.id)
+          else if (apply && request.method === 'POST') {
+            const input = await readJson(request, 1024)
+            if (!input || Object.keys(input).length) throw new AppError(400, 'invalid_request', 'Apply accepts only the saved preview ID')
+            result = await provisioning.apply(apply.id)
+          } else throw new AppError(404, 'not_found', '批量开通接口不存在')
+        }
+        sendJson(response, 200, { data: result, requestId }, { 'cache-control': 'private, no-store' })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/pricing-template')
       if (params && ['GET', 'POST'].includes(request.method)) {
         requireSourceAdmin(principal)
@@ -3582,7 +3606,7 @@ export function createApp({
           store.listExternalSources(),
         ])
         sendJson(response, 200, {
-          data: sourceCatalogVisibleProjection(sourceConnectionSnapshot(entries, sources)), requestId,
+          data: sourceCatalogVisibleProjection(sourceConnectionSnapshot(entries, sources, { operations: provisioning ? (await provisioning.catalog()).operations : [] })), requestId,
         }, { 'cache-control': 'private, no-store' })
         return
       }
@@ -5652,6 +5676,23 @@ export function createApp({
         })
         return
       }
+      const nativeEndpoint = request.method === 'POST' ? nativeForwardingByPath(pathname) : null
+      if (nativeEndpoint) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'native data forwarding')
+        const gateway = nativeEndpoint.authorizationPlatform === 'ecommerce' ? externalPlatformGateway
+          : nativeEndpoint.provider === 'tikhub' ? socialAccountTikHubGateway : socialAccountGateway
+        if (!gateway) throw new AppError(503, 'external_platform_unavailable', 'Native data endpoint is unavailable')
+        const result = await gateway.forwardNative(context, {
+          key: nativeEndpoint.key, body: await readJson(request, 64 * 1024),
+          idempotencyKey: request.headers['idempotency-key'], path: pathname,
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
+        return
+      }
       // Platform-shaped resource routes. The path set comes from the registry,
       // so releasing a resource adds a route without editing this dispatcher.
       const justoneResource = request.method === 'POST'
@@ -5784,6 +5825,11 @@ export function createApp({
           data: await service.telegramEntities(context, Object.fromEntries(searchParams.entries())),
           requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/source-catalog/services') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, { data: await service.sourceCatalogServices(context, Object.fromEntries(searchParams.entries())), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/source-catalog/metadata') {

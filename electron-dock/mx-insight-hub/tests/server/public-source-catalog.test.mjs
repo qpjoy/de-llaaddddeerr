@@ -534,3 +534,28 @@ test('public source catalog GETs share the consumer platform quota', async () =>
     assert.equal(limited.payload.error.code, 'consumer_quota_exceeded')
   }, { maxRequests: 2, maxPageSize: 2 })
 })
+
+test('business catalogue is allowlisted, permission checked, separately cursor-bound and never exposes governance notes', async () => {
+  await withFixture(async ({ baseUrl, key, noGrantKey, adapterCalls }) => {
+    const headers = { authorization: `Bearer ${key.secret}` }
+    const params = new URLSearchParams({ majorCategory: '公共目录测试分类', pageSize: '1' })
+    const first = await call(baseUrl, `/api/v1/data/source-catalog/services?${params}`, { headers })
+    assert.equal(first.response.status, 200, JSON.stringify(first.payload))
+    assert.equal(first.payload.data.contractVersion, 'source-catalog.services.v1')
+    const item = first.payload.data.items[0]
+    assert.equal(item.runtimeStatus, 'not_checked')
+    assert.deepEqual(Object.keys(item).sort(), ['access','aliases','canonicalName','coverageStatus','id','majorCategory','products','queryModes','regions','runtimeStatus','scenarios','sourceKey','tags'].sort())
+    assert.doesNotMatch(JSON.stringify(first.payload), /connector-label|内部关键词|目录负责人|ownerId|connectorHints|"notes"/)
+    params.set('cursor', first.payload.data.pageInfo.nextCursor)
+    const next = await call(baseUrl, `/api/v1/data/source-catalog/services?${params}`, { headers })
+    assert.equal(next.response.status, 200)
+    assert.notEqual(next.payload.data.items[0].id, item.id)
+    const wrongContract = await call(baseUrl, `/api/v1/data/source-catalog?${params}`, { headers })
+    assert.equal(wrongContract.response.status, 400)
+    const denied = await call(baseUrl, '/api/v1/data/source-catalog/services', { headers: { authorization: `Bearer ${noGrantKey.secret}` } })
+    assert.equal(denied.response.status,403)
+    const privateFilter = await call(baseUrl, '/api/v1/data/source-catalog/services?ownerId=private', { headers })
+    assert.equal(privateFilter.response.status,400)
+    assert.equal(adapterCalls.length,0)
+  })
+})

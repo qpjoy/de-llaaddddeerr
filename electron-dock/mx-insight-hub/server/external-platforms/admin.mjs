@@ -604,6 +604,12 @@ export class ExternalPlatformAdminService {
     })
   }
 
+  async provisioningContext(providerKey) {
+    this.#assertProvider(providerKey)
+    const credential = await this.#credential(providerKey)
+    return { control: this.#requireOperationControlStore(), runtime: { config: this.config, credentialConfigured: credential.credentialConfigured } }
+  }
+
   async updateOperationPolicy(providerKey, operationKey, input) {
     this.#assertProvider(providerKey)
     const credential = await this.#credential(providerKey)
@@ -823,6 +829,10 @@ export class MultiExternalPlatformAdminService {
 
   updateCredential(providerKey, input) {
     return this.#service(providerKey).updateCredential(providerKey, input)
+  }
+
+  provisioningContext(providerKey) {
+    return this.#service(providerKey).provisioningContext(providerKey)
   }
 
   updateOperationPolicy(providerKey, operationKey, input) {

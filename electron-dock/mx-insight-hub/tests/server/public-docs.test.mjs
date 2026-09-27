@@ -1,4 +1,5 @@
 import { QIXIN_CATALOG } from '../../server/contracts/enterprise.mjs'
+import { NATIVE_FORWARDING_ENDPOINTS } from '../../server/contracts/native-forwarding.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
@@ -1802,6 +1803,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(response.status, 200)
     assert.equal(document.openapi, '3.1.0')
     assert.deepEqual(paths.sort(), [
+      ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.hubPath.slice('/api/v1'.length)),
       ...QIXIN_CATALOG.apis.map(api => `/data/enterprise/${api.api_id}/query`),
       '/acquisitions/{requestId}',
       '/data/canonical/items/{id}/context',
@@ -1842,6 +1844,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/social/accounts/search',
       '/data/source-catalog',
       '/data/source-catalog/metadata',
+      '/data/source-catalog/services',
       '/data/source-catalog/{id}',
       '/data/source-catalog/{id}/items',
       '/data/stored/search',

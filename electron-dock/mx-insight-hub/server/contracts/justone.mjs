@@ -27,6 +27,7 @@ const JUSTONE_EVIDENCE_CONTRACT_VERSIONS = new Set([
   'mx-insight-hub.ecommerce-resource.v1',
   'mx-insight-hub.social-accounts.v1',
   'mx-insight-hub.xiaohongshu-discovery.v1',
+  'mx-insight-hub.native-forwarding.v1',
 ])
 
 const MAX_QUERY_LENGTH = 200

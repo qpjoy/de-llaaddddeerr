@@ -1,4 +1,5 @@
 import { normalizeXhsDiscoveryRequest, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
+import { nativeForwardingEndpoint, normalizeNativeForwardingRequest, nativeForwardingPayload } from '../contracts/native-forwarding.mjs'
 import { createHash } from 'node:crypto'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
@@ -258,6 +259,9 @@ function archiveObjects({
     contractState,
     secret,
   })
+  // Native social payloads have no reviewed product identity. Keep call
+  // evidence without routing them through the ecommerce item projector.
+  if (request.contractVersion === 'mx-insight-hub.native-forwarding.v1') return [archive]
   if (request.contractVersion === 'mx-insight-hub.xiaohongshu-discovery.v1') {
     const capturedDate = new Date(capturedAt).toISOString().slice(0, 10)
     return [{ ...archive, marketplace: 'xiaohongshu', endpointVersion: request.endpointVersion,
@@ -487,6 +491,19 @@ export class JustOneAdapter {
         }
       },
     })
+  }
+
+  async forwardNative(key, body, { capturedAt = null, credential: suppliedCredential } = {}) {
+    if (nativeForwardingEndpoint(key)?.provider !== 'justone') throw new TypeError('Unsupported native endpoint')
+    const request = normalizeNativeForwardingRequest(key, body)
+    const credential = await this.#credentialFor(suppliedCredential)
+    return this.#dispatch({ request, credential, capturedAt, normalize: (raw, context) => {
+      assertBoundedJson(raw.data)
+      const safe = redactJustOnePrivateFields(raw, { secret: credential })
+      return { publicBody: nativeForwardingPayload(safe.data, request, context.capturedAt), items: [], records: [],
+        archiveObjects: archiveObjects({ raw, request, ...context, outcome: 'success', businessCode: 0,
+          billed: true, contractState: 'accepted', secret: credential }) }
+    } })
   }
 
   async hotXiaohongshuNotes(body, { capturedAt = null, credential: suppliedCredential, decodeCursor, encodeCursor } = {}) {

@@ -1,4 +1,5 @@
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
+import { nativeForwardingPaths, nativeForwardingGuide } from './contracts/native-forwarding-docs.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
 import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contracts/xiaohongshu-discovery-docs.mjs'
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
@@ -1253,6 +1254,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   ],
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
+    ...nativeForwardingPaths,
     ...xhsResearchPaths,
     ...xhsDiscoveryPaths,
     ...newsOpenApiPaths,
@@ -2046,6 +2048,13 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           parameter.name === 'query' ? { ...parameter, required: true } : parameter
         )),
         responses: { 200: virtualSupermarketPageResponse, ...publicErrors },
+      },
+    },
+    '/data/source-catalog/services': {
+      get: { tags: ['Source Catalog'], operationId: 'listServiceCatalog', summary: '按业务查看数据服务目录',
+        description: 'Requires source_catalog permission. Allowlisted business projection: stable catalogue ID, platform name, categories, scenarios, regions, tags, reviewed coverage, product/docs links and query modes. No supplier identity, connector hints, owners, notes, procurement or execution topology. Coverage is not runtime health or Key authorization. GET is metered per call. Cursor is bound to Key, business filters and page size; return unchanged. The original source-catalog routes remain compatible.',
+        parameters: sourceCatalogQueryParameters.filter(parameter => ['query','majorCategory','scenario','region','coverageStatus','tag','pageSize','cursor'].includes(parameter.name)),
+        responses: { 200: { description: 'source-catalog.services.v1 business page with items, pageInfo and notice.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ServiceCatalogEnvelope' } } } }, ...publicErrors },
       },
     },
     '/data/source-catalog': {
@@ -4104,6 +4113,28 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             ...(schema.enum ? { enum: [...schema.enum, null] } : {}),
           }])),
       },
+      ServiceCatalogEnvelope: {
+        type: 'object', required: ['data', 'requestId'], properties: {
+          requestId: { type: 'string' }, data: { type: 'object', required: ['contractVersion','items','pageInfo','notice'], properties: {
+            contractVersion: { type: 'string', const: 'source-catalog.services.v1' },
+            filters: { type: 'object', additionalProperties: { type: ['string','null'] } },
+            notice: { type: 'string' }, pageInfo: { $ref: '#/components/schemas/SourceCatalogPageInfo' },
+            items: { type: 'array', items: { type: 'object', additionalProperties: false,
+              properties: {
+                id: { type: 'string', format: 'uuid' }, sourceKey: { type: ['string','null'] }, canonicalName: { type: 'string' },
+                majorCategory: { type: 'string' }, coverageStatus: { type: 'string' },
+                aliases: { type: 'array', items: { type: 'string' } }, scenarios: { type: 'array', items: { type: 'string' } },
+                regions: { type: 'array', items: { type: 'string' } }, tags: { type: 'array', items: { type: 'string' } },
+                access: { type: 'string', const: 'checked_per_request' }, runtimeStatus: { type: 'string', const: 'not_checked' },
+                queryModes: { type: 'array', items: { type: 'string', enum: ['live','stored'] } },
+                products: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+                  label: { type: 'string' }, path: { type: 'string' }, docsPath: { type: 'string' }, category: { type: 'string' },
+                } } },
+              },
+            } },
+          } },
+        },
+      },
       SourceCatalogPageInfo: {
         type: 'object',
         additionalProperties: false,
@@ -5292,6 +5323,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'tikhub-search_users', path: '/docs/tikhub/search_users', label: '搜索用户', section: '平台原生接口 · TikHub / 小红书' },
   { key: 'tikhub-get_user_info', path: '/docs/tikhub/get_user_info', label: '获取用户信息', section: '平台原生接口 · TikHub / 小红书' },
   { key: 'tikhub-get_user_posted_notes', path: '/docs/tikhub/get_user_posted_notes', label: '获取用户笔记列表', section: '平台原生接口 · TikHub / 小红书' },
+  { key: 'native-data', path: '/docs/native-data', label: '原生数据接口', section: '通用能力' },
   { key: 'aggregate-search', path: '/docs/aggregate-search', label: '聚合数据搜索', section: '通用能力' },
   { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
   { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
@@ -5517,6 +5549,7 @@ curl -sS -G "$HUB_URL/api/v1/data/source-catalog" \
     <p>只有 <code>hasMore=true</code> 时才请求下一页。<code>nextCursor</code> 是 HMAC 签名的 keyset，绑定全部规范化 filters 与 <code>pageSize</code>；必须原样返回。更改任一条件后应移除 cursor，从第一页重新开始，否则返回 <code>400 invalid_cursor</code>。</p>
 
     <h3>5. 按列表返回的 UUID 读取详情</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/services</code></div><p>新接入推荐使用业务目录投影 <code>source-catalog.services.v1</code>。只返回平台名称、类别、场景、区域、标签、覆盖、产品与文档入口；不返回负责人、供应商、接入线索或内部备注。支持 <code>query / majorCategory / scenario / region / coverageStatus / tag / pageSize / cursor</code>。目录覆盖不等于运行健康或当前 Key 已开通。游标绑定当前 Key、筛选与页大小，续页原样传回。原目录接口保留兼容。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/{id}</code></div><p>返回与列表完全相同的安全 <code>SourceCatalogEntry</code> 投影。只接受列表返回的 active UUID，不接受 query 参数。</p></div>
     <pre><code>SOURCE_ID=$(printf '%s\n' "$FIRST_PAGE" | jq -r '.data.items[0].id')
 
@@ -6060,6 +6093,7 @@ printf '%s\n' "$REPORT" | jq '{id:.data.id,status:.data.status,progress:.data.pr
     <div class="notice">报告以任务运行时可见的 canonical 数据为准。后续新增同步记录不会改写旧结果；要获得新快照，请用新的 Idempotency-Key 创建新任务。</div>
     </section>
 
+    ${nativeForwardingGuide()}
     <section class="doc-page" data-doc-page="aggregate-search">
     <h2>数据搜索 · 聚合检索</h2>
     <p>一个 Hub 接口搜索最新与存量数据，不要求调用方适配数据产品或来源实现。</p>
@@ -6422,10 +6456,11 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
-  'source-catalog': ['/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
+  'source-catalog': ['/data/source-catalog/services', '/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
   'ecommerce-treasure-box': ['/data/ecommerce/products/search'],
   'social-accounts': ['/data/social/accounts/search'],

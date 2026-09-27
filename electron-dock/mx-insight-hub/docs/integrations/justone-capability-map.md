@@ -1,5 +1,7 @@
 # JustOne capability map and Hub adoption plan
 
+2026-09-26 update: [Night-All supplier migration](night-all-provider-migration.md) adds the 11 source-defined JustOne logical endpoints as fixed native contracts, disabled initially by migration 112. This is separate from the released ecommerce operations below; it does not switch legacy search responses or imply the complete vendor catalog is available.
+
 Status: five marketplace product-search mappings verified on the current single-provider JustOne runtime;
 every other listed capability is inventory only.
 

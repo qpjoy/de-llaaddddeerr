@@ -1564,6 +1564,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   return (
     <>
       <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="每把 Key 在签发时固化平台与能力范围，并独立统计用量。调用者授权减少会立即收窄现有 Key；新增授权可通过“调整 Key 权限”应用到原 Key。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
+        {session?.kind === 'admin-token' ? <a className="qp-button qp-button--outline" href="#/provisioning">批量开通接口</a> : null}
         {canIssueKey ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
             <Plus size={17} aria-hidden="true" />签发 API Key

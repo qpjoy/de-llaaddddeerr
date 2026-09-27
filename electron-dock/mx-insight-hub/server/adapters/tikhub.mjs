@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS } from '../contracts/xiaohongshu-research.mjs'
+import { nativeForwardingEndpoint, normalizeNativeForwardingRequest, nativeForwardingPayload } from '../contracts/native-forwarding.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createHash } from 'node:crypto'
@@ -813,6 +814,27 @@ export class TikHubAdapter {
         affectsCircuit: error?.code !== 'upstream_user_unavailable',
       }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
     }
+  }
+
+  async forwardNative(key, body, { capturedAt = null, credential: suppliedCredential } = {}) {
+    if (nativeForwardingEndpoint(key)?.provider !== 'tikhub') throw new TypeError('Unsupported native endpoint')
+    const request = normalizeNativeForwardingRequest(key, body)
+    const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const exchange = await requestTikHubJson(this, request.endpointPath, request.upstreamQuery,
+      resolvedCredential, capturedAt, request.endpointVersion, request.method)
+    const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+    if (!Object.hasOwn(exchange.raw, 'data')) throw upstreamError('Native data envelope has no data', {
+      outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,
+      billed: true, errorCode: 'invalid_upstream_contract',
+    }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
+    // This is a single native payload, not a guessed list of canonical posts.
+    const safe = redactTikHubEnvelope(providerCredentialSafePayload(exchange.raw, resolvedCredential))
+    return securedProviderResult({
+      publicBody: nativeForwardingPayload(safe.data, request, exchange.acceptedAt),
+      items: [], records: [], archiveObjects: persistence.archiveObjects,
+      responseArchive: persistence.responseArchive, upstreamEvidence: persistence.upstreamEvidence,
+    }, persistence)
   }
 
   // Keyword account search for the platforms this vendor serves (Weibo,

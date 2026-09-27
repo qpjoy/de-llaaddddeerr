@@ -17,7 +17,7 @@ export function PagedItems({ items, text, children, label, pageSize = 10, reveal
   const pages = Math.max(1, Math.ceil(matches.length / pageSize))
   const current = Math.min(page, pages)
   return <div className="mih-paged-items">
-    <Field label={`搜索${label}`}><input className="qp-input" type="search" value={filter}
+    <Field label={`搜索${label}`}><input aria-label={`搜索${label}`} className="qp-input" type="search" value={filter}
       placeholder="输入名称或接口 ID" onChange={event => { setFilter(event.target.value); setPage(1) }} /></Field>
     {children(matches.slice((current - 1) * pageSize, current * pageSize))}
     {!matches.length ? <p role="status">没有匹配项</p> : null}
