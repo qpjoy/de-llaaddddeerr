@@ -1487,7 +1487,7 @@ export function createApp({
         return
       }
 
-      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname, { tenant: docsPrincipal ? !docsPrincipal.platformAdmin : false, scopes: docsScopes }) : null
+      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname, { tenant: docsPrincipal ? !docsPrincipal.platformAdmin : false, scopes: docsScopes, procurementEvidence:docsPrincipal?.kind === 'admin-token' }) : null
       if (publicDocsHtml !== null) {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
         response.writeHead(200, {
@@ -1520,7 +1520,7 @@ export function createApp({
         const target = url.searchParams.get('path') || '/docs'
         const page = target.split('#')[0]
         const redirect = publicDocsRedirectForPath(page)
-        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page, { tenant: !principal.platformAdmin, scopes })
+        const html = publicDocsHtmlForPath(redirect?.split('#')[0] || page, { tenant: !principal.platformAdmin, scopes, procurementEvidence:principal.kind === 'admin-token' })
         if (!html && page !== '/docs/openapi.json') throw new AppError(404, 'not_found', 'Documentation not found')
         sendJson(response, 200, { data: { html, schema: page === '/docs/openapi.json' ? (principal.platformAdmin ? PUBLIC_OPENAPI_DOCUMENT : tenantOpenApiDocument(scopes)) : null }, requestId }, { 'cache-control': 'private, no-store' })
         return
@@ -3605,8 +3605,9 @@ export function createApp({
           store.listSourceCatalogEntries({ includeArchived: true }),
           store.listExternalSources(),
         ])
+        const snapshot = sourceConnectionSnapshot(entries, sources, { operations: provisioning ? (await provisioning.catalog()).operations : [] })
         sendJson(response, 200, {
-          data: sourceCatalogVisibleProjection(sourceConnectionSnapshot(entries, sources, { operations: provisioning ? (await provisioning.catalog()).operations : [] })), requestId,
+          data: { ...sourceCatalogVisibleProjection(snapshot), officialCatalog: snapshot.officialCatalog }, requestId,
         }, { 'cache-control': 'private, no-store' })
         return
       }
@@ -5674,6 +5675,12 @@ export function createApp({
             ? { warning: '110 - "Response is stale"' }
             : {}),
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/services/pricing') {
+        const context = await requirePublic(request)
+        if ([...searchParams.keys()].some(key => key !== 'path') || searchParams.getAll('path').length !== 1) throw new AppError(400, 'invalid_request', 'Provide one Hub endpoint path')
+        sendJson(response, 200, { data:await service.servicePricing(context, searchParams.get('path')), requestId }, { 'cache-control':'private, no-store' })
         return
       }
       const nativeEndpoint = request.method === 'POST' ? nativeForwardingByPath(pathname) : null

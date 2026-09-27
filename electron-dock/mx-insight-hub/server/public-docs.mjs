@@ -1,5 +1,7 @@
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
-import { nativeForwardingPaths, nativeForwardingGuide } from './contracts/native-forwarding-docs.mjs'
+import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
+import { productForDocs } from '../shared/product-workbenches.mjs'
+import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
 import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contracts/xiaohongshu-discovery-docs.mjs'
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
@@ -1255,6 +1257,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
     ...nativeForwardingPaths,
+    '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
+      parameters:[{in:'query',name:'path',required:true,schema:{type:'string'},description:'完整 Hub 数据接口路径；仅支持已登记的价格合同'}],
+      description:'只读当前已发布价格表和账户执行价；按目标接口的 Key 权限检查，不采集、不扣费、不锁价。不包含采购价或供应商信息。未发布标准单价不代表免费。',
+      responses:{'200':{description:'data 包含 hubPrice（当前价格表标准价）、accountPrice（合同执行价）、currency、billingUnit、observedAt 与 estimateOnly；未发布时 hubPrice.unitPriceMinor 为 null。'},'403':{description:'当前 Key 未授权目标接口'},'404':{description:'目标接口没有此价格合同'}} } },
     ...xhsResearchPaths,
     ...xhsDiscoveryPaths,
     ...newsOpenApiPaths,
@@ -5293,6 +5299,8 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
 })
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
+  { key:'social-content', path:'/docs/social-content', label:'社媒与内容数据', section:'数据服务' },
+  ...NATIVE_DOC_ROUTES,
   ...ENTERPRISE_DOC_ROUTES,
   { key: 'ip-risk', path: '/docs/ip-risk', label: 'IP 风险画像', section: '数据产品' },
   { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
@@ -6435,6 +6443,7 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
+  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6456,13 +6465,15 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search'],
+  ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
   'source-catalog': ['/data/source-catalog/services', '/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
-  'ecommerce-treasure-box': ['/data/ecommerce/products/search'],
+  'ecommerce-treasure-box': ['/data/ecommerce/products/search', ...nativeDocPaths('ecommerce-treasure-box')],
   'social-accounts': ['/data/social/accounts/search'],
   'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],
   'saved-record-categories': ['/data/platforms', '/data/saved-records/categories'],
@@ -6510,6 +6521,8 @@ export function tenantOpenApiDocument(scopes) {
 }
 
 function tenantDocBody(route, scopes) {
+  if (route.nativeKey) return nativeEndpointGuide(route.key)
+  if (route.key === 'social-content') return nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
@@ -6523,9 +6536,10 @@ function tenantDocBody(route, scopes) {
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
   if (route.key === 'aggregate-search') html += '<p>数据产品 → 数据搜索提供接口调试、产品展示与接入指南。refresh 搜索本轮实时内容；stored 查询最新入库与历史存量，新鲜度取决于清洗和索引进度。平台、条目类型支持多选，日期与标签目前仅限 stored。</p><p>同一 POST 设置 Accept: text/event-stream 可逐来源接收结果：search.started → source.started / source.completed → search.completed；最终事件才包含完整已提交结果与游标。每 10 秒心跳，断线不取消已派发调用；没有自动重连或 Last-Event-ID 续传。复用原 body 和 Idempotency-Key 重试，进行中返回 409，已提交则回放。开始流式前错误使用普通 HTTP/JSON，开始后用 search.error。并发 3，120 秒后停止新派发、等待在途调用按各自超时收尾，不是整轮硬超时；not_started 表示未调用，不自动重试。</p><p>续页保留原条件与 Key，把 data.pageInfo.nextCursor 原样传作 cursor，每页换新 Idempotency-Key；同页重试保留原标识。400 invalid_cursor 或 410 search_cursor_expired 需要显式从第一页重新查询；503 search_cursor_unavailable 可稍后重试原请求。返回数量是本批数量，没有 nextCursor 即停止，不以短页推断数据总量。</p>'
   if (route.key === 'xiaohongshu-note' && Object.keys(xhsResearchPaths).every(path => tenantDocumentPathAllowed(path, scopes))) html += xhsResearchGuide
+  if (route.key === 'ecommerce-treasure-box') html += nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   const discoveryProduct = XHS_DISCOVERY_PRODUCTS.find(product => product.key === route.key)
   if (discoveryProduct && tenantDocumentPathAllowed(discoveryProduct.path.slice('/api/v1'.length), scopes)) html += xhsDiscoveryGuide(discoveryProduct)
-  for (const path of paths.filter(path => tenantDocumentPathAllowed(path, scopes))) {
+  for (const path of paths.filter(path => !path.startsWith('/data/native/') && tenantDocumentPathAllowed(path, scopes))) {
     for (const [method, operation] of Object.entries(PUBLIC_OPENAPI_DOCUMENT.paths[path] || {})) {
       if (!['get', 'post'].includes(method)) continue
       html += `<h3><code>${method.toUpperCase()} /api/v1${escape(path)}</code></h3>`
@@ -6543,12 +6557,14 @@ function tenantDocBody(route, scopes) {
 
 function docsNavigation(activeKey, tenant = false, scopes) {
   let section = null
-  return PUBLIC_DOCS_ROUTES.filter(route => !route.hiddenNavigation && (!tenant || tenantDocsRoute(route, scopes))).map((route) => {
+  const group = route => productCategory(productForDocs(route.path)?.path)?.label || (route.section.includes('平台原生') ? '更多平台接口' : route.section)
+  const order = route => ['start','rules'].includes(route.key) ? -10 : productForDocs(route.path) ? productNavigationOrder(productForDocs(route.path).path) : 1000 + PUBLIC_DOCS_ROUTES.indexOf(route)
+  return PUBLIC_DOCS_ROUTES.filter(route => !route.hiddenNavigation && (!tenant || tenantDocsRoute(route, scopes))).sort((a,b)=>order(a)-order(b)).map((route) => {
     const active = route.key === activeKey
-    const heading = route.section !== section
-      ? `<span class="nav-section">${route.section}</span>`
+    const heading = group(route) !== section
+      ? `<span class="nav-section">${group(route)}</span>`
       : ''
-    section = route.section
+    section = group(route)
     // Deliberately no vendor name here. These docs are the tenant-facing
     // contract, which stays provider-neutral so Hub can change vendors without
     // breaking an integration. The admin console names vendors instead, on the
@@ -6557,7 +6573,7 @@ function docsNavigation(activeKey, tenant = false, scopes) {
   }).join('')
 }
 
-export function publicDocsHtmlForPath(pathname, { tenant = false, scopes } = {}) {
+export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procurementEvidence = false } = {}) {
   const normalized = normalizedDocsPath(pathname)
   const route = PUBLIC_DOCS_ROUTES.find((candidate) => candidate.path === normalized)
   if (!route || (tenant && !tenantDocsRoute(route, scopes))) return null
@@ -6568,7 +6584,10 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes } = {})
     .replace(/\n\s*<section class="doc-page" data-doc-page="([^"]+)">[\s\S]*?<\/section>/g, (section, key) => (
       key === route.key ? section : ''
     ))
-  if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant })}</main>`)
+  if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant, procurementEvidence })}</main>`)
+  if (route.nativeKey) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeEndpointGuide(route.key)}</main>`)
+  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeServiceGuide(route.key)}</main>`)
+  if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {
     html = html.replace(/<a href="(\/docs[^"#]*)(?:#[^"]*)?"[^>]*>([\s\S]*?)<\/a>/g, (link, path, text) => {
       const target = PUBLIC_DOCS_ROUTES.find(item => item.path === path)

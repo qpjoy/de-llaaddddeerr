@@ -19,7 +19,7 @@ test('data-cleaning navigation keeps every privileged route under one parent', a
   const externalRoute = appSource.match(/\{ path: '\/external-platforms',[^\n]+\}/u)?.[0] || ''
 
   assert.match(appSource, /const DATA_CLEANING_NAV_KEY = 'data-cleaning'/u)
-  assert.match(appSource, /label: '数据清洗中心'/u)
+  assert.match(appSource, /label: '数据接入与治理'/u)
   for (const route of [databaseRoute, plansRoute, externalRoute]) {
     assert.match(route, /navParent: DATA_CLEANING_NAV_KEY/u)
     assert.match(route, /capability: 'membership\.write'/u)
@@ -27,7 +27,7 @@ test('data-cleaning navigation keeps every privileged route under one parent', a
     assert.match(route, /adminTokenOnly: true/u)
   }
   assert.match(plansRoute, /label: '清洗任务计划'/u)
-  assert.match(externalRoute, /label: '外部数据平台'/u)
+  assert.match(externalRoute, /label: '上游供应商'/u)
 })
 
 test('database connection UI uses the shared dropdown and the safe flat DTO', async () => {

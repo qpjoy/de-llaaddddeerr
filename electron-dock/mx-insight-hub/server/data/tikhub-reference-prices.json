@@ -1,0 +1,3905 @@
+{
+  "version": "tikhub-account-reference.2026-09-27",
+  "observedAt": "2026-09-27T00:00:00.000Z",
+  "sourceUrl": "https://user.tikhub.io/dashboard/pricing",
+  "currency": "USD",
+  "priceBasis": "displayed_new_account_reference_before_volume_discounts",
+  "complete": false,
+  "collection": {
+    "displayedTotal": 1463,
+    "capturedPaths": 1360,
+    "matchedDocumentPaths": 972,
+    "stoppedReason": "account_pricing_page_rate_limit"
+  },
+  "notice": "仅包含已读取且与接口文档路径匹配的账户参考价；缺失项待核价，不推测折扣或实际扣费。",
+  "rows": [
+    {
+      "path": "/api/v1/bilibili/app/fetch_bangumi_tab",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_cinema_tab",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_home_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_one_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_popular_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_reply_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_search_all",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_search_by_type",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_user_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/app/fetch_video_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/account_session_info",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/cooperate_experience_industry",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/dmp_pkg_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/effect_goods_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/industry_tags",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/label_char_style",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/live_area_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/live_commerce_info",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/live_good_category",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/live_guild_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/live_parent_tag",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/live_upper_portrait",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/mcn_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/partition_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_avid_category_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_avid_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_goods_industry_up_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_goods_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_goods_up_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_up_list",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_up_tid_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/popular_up_x_huo",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/region_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/search_live_upper",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/search_upper",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/search_upper_suggest",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/square_static_info",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/tag_character",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/tag_commercial",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/tag_occupation",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_archive_highlights",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_base_info",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_busy_time",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_by_nickname",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_detail",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_draft_performance",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_draft_trend",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_fans_trend",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_label_tree",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_overlap_uppers",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_representative",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_seek_info",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/upper_similar",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/x_huo_date_options",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/huahuo/x_huo_industry_drop",
+      "unitPrice": "0.0060"
+    },
+    {
+      "path": "/api/v1/bilibili/web/bv_to_aid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_all_live_areas",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_collect_folders",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_com_popular",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_comment_reply",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_dynamic_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_dynamic_detail_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_general_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_get_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_hot_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_live_room_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_live_streamers",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_live_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_one_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_one_video_v2",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_one_video_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_collection_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_dynamic",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_post_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_post_videos_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_relation_stat",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_user_up_stat",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_danmaku",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_parts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_play_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_playurl",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_video_subtitle",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/bilibili/web/fetch_vip_video_playurl",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_brand_hot_search_list_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_hot_search_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_multi_video",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_multi_video_high_quality_play_url",
+      "unitPrice": "0.2500"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_multi_video_statistics",
+      "unitPrice": "0.0250"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_multi_video_v2",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_music_hot_search_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_music_video_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_one_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_one_video_by_share_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_one_video_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_one_video_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_series_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_series_video_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_share_info_by_share_code",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_user_fans_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_user_like_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_user_post_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_user_series_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_video_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_video_high_quality_play_url",
+      "unitPrice": "0.0050"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_video_mix_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/fetch_video_statistics",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/generate_douyin_short_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/open_douyin_app_to_keyword_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/open_douyin_app_to_send_private_message",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/open_douyin_app_to_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/open_douyin_app_to_video_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/app/v3/register_device",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_city_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_content_tag",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_fans_interest_account_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_fans_interest_search_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_fans_interest_topic_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_fans_portrait_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_item_analysis_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_search_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_account_trends_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_calendar_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_calendar_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_category_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_challenge_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_city_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_comment_word_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_item_trends_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_rise_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_high_fan_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_high_like_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_high_play_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_high_search_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_high_topic_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_hot_word_detail_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_hot_word_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_low_fan_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_search_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_topic_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_total_video_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/billboard/fetch_hot_user_portrait_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_activity_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_activity_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_content_category",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_content_course",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_hot_challenge_billboard",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_hot_course",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_hot_music_billboard",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_hot_props_billboard",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_hot_spot_billboard",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_hot_topic_billboard",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_material_center_billboard",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_material_center_config",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_creator_material_center_related",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_industry_category_config",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_mission_task_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_user_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator/fetch_video_danmaku_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_author_diagnosis",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_analysis_involved_vertical",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_analysis_item_performance",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_analysis_overview",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_audience_others",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_audience_portrait",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_danmaku_analysis",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_list_download",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_overview_data",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_play_source",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_search_keyword",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_item_watch_trend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/creator_v2/fetch_live_room_history_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/calculate_cost",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_analyse_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_analyse_graph",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_analyse_overview",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_promotable_item_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_promoted_accounts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_sec_token",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_talent_categories",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_talents_by_category",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_user_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_video_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/fetch_video_ranking",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/search_live_room",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/search_user",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/search_user_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/douplus/search_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_all_area",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_all_valid_date",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_cycles",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_hot_videos_time_scope",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_initiative_rank_weekly",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_lines",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_radar_chart",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_suggest",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_brand_valid_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_author_portrait",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_consume_trend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_consumer_portrait",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_creative_duration",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_creative_keyword_items",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_creative_keywords",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_creative_topic",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_interact_trend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_publish_trend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_content_valid_date",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_current_hot_topic",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_daren_compare_users_stable",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_daren_great_item_mile_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_daren_great_user_fans_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_daren_great_user_top_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_daren_similar_users",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_daren_sug_great_user_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_encrypt_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_get_user_sub_word",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_hot_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_hot_trend_word",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_hot_words",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_insight_get_rec",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_insight_recommend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_analysis",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_base",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_filter_options",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_index",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_index_interpret",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_query",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_sug",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_item_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_keyword_valid_date",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_multi_keyword_hot_trend",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_multi_keyword_interpretation",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_portrait",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_relation_word",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_report_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_report_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_topic_query",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_topic_suggest",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/index/fetch_valid_date_for_relation",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_challenge_search_v1",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_challenge_search_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_challenge_suggest",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_discuss_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_experience_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_general_search_v1",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_general_search_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_general_search_v3",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_image_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_image_search_v3",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_live_search_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_multi_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_music_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_school_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_search_suggest",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_user_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_user_search_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_video_search_v1",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_video_search_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_video_search_v3",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_video_search_v4",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/search/fetch_video_search_v5",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/web/encrypt_uid_to_sec_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_batch_user_profile_v1",
+      "unitPrice": "0.0300"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_batch_user_profile_v2",
+      "unitPrice": "0.1500"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_cartoon_aweme",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_challenge_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_douyin_web_guest_cookie",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_food_aweme",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_game_aweme",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_home_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_hot_search_result",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_knowledge_aweme",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_live_im_fetch",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_multi_video",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_multi_video_high_quality_play_url",
+      "unitPrice": "0.2500"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_music_aweme",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_one_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_one_video_by_share_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_one_video_danmaku",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_one_video_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_query_user",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_related_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_series_aweme",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_collection_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_collects",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_collects_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_fans_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_following_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_like_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_live_info_by_uid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_live_videos_by_room_id_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_live_videos_by_sec_uid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_post_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_profile_by_short_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_user_profile_by_uid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_video_channel_result",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_video_comment_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/fetch_video_high_quality_play_url",
+      "unitPrice": "0.0050"
+    },
+    {
+      "path": "/api/v1/douyin/web/generate_ttwid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/generate_wss_xb_signature",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/get_all_sec_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/get_aweme_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/handler_shorten_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/handler_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/handler_user_profile_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/handler_user_profile_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/web/handler_user_profile_v4",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/web/webcast_id_2_room_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/author_content_hot_comment_keywords_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/author_hot_comment_tokens_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/get_sign_image",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/get_xingtu_kolid_by_sec_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/get_xingtu_kolid_by_uid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/get_xingtu_kolid_by_unique_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_audience_portrait_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_base_info_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_conversion_ability_analysis_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_convert_video_display_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_cp_info_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_daily_fans_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_data_overview_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_fans_portrait_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_link_struct_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_rec_videos_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_service_price_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_touch_distribution_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_video_performance_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/kol_xingtu_index_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/search_kol_v1",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu/search_kol_v2",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_audience_distribution",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_base_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_business_card_info",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_commerce_spread_info",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_content_hot_keywords",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_convert_ability",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_convert_videos_or_products",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_cp_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_daily_fans",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_daily_link",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_daily_link_score",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_fans_distribution",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_homepage_videos",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_hot_comment_tokens",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_link_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_local_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_market_fields",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_rec_videos_v2",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_show_items",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_spread_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_spread_videos",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_touch_distribution",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_author_video_distribution",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_content_trend_guide",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_demander_mcn_list",
+      "unitPrice": "0.0050"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_excellent_case_category_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_ip_activity_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_ip_activity_industry_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_ip_activity_list",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_item_play_count",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_item_report_comments",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_item_report_detail",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_item_report_th_analysis",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_item_report_trend",
+      "unitPrice": "0.0030"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_playlet_actor_rank_catalog",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_playlet_actor_rank_list",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_ranking_list_catalog",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_ranking_list_data",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_recommend_for_star_authors",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_resource_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_search_field_options",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_user_profile_qrcode",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_xingtu_kolid_by_sec_user_id",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_xingtu_kolid_by_uid",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/get_xingtu_kolid_by_unique_id",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/multi_get_author_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/multi_get_item_stats",
+      "unitPrice": "0.0400"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/search_anchor",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/search_creator",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/douyin/xingtu_v2/search_toutiao_creator",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/hybrid/video_data",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_cities",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_comment_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_explore_sections",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_hashtag_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_location_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_location_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_locations",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_music_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_post_by_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_post_by_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_post_by_url_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_post_comments_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_related_profiles",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_section_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_about_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_info_by_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_info_by_id_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_info_by_username",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_info_by_username_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_info_by_username_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_posts_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_reels",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_reposts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/fetch_user_tagged_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/media_id_to_shortcode",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/shortcode_to_media_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v1/user_id_to_username",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_comment_replies",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_hashtag_posts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_highlight_stories",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_location_posts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_music_posts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_post_comments",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_post_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_post_likes",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_similar_users",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_followers",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_following",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_highlights",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_posts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_reels",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_stories",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/fetch_user_tagged_posts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/general_search",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/media_id_to_shortcode",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/search_by_coordinates",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/search_hashtags",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/search_locations",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/search_music",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/search_reels",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/search_users",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/shortcode_to_media_id",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v2/user_id_to_username",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v3/bulk_translate_comments",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/extract_shortcode",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v3/general_search",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_comment_replies",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_explore",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_hashtag_posts",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_highlight_stories",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_location_info",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_location_nearby",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_location_posts",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_music_posts",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_post_comments",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_post_info",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_post_info_by_code",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_post_likes",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_post_oembed",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_recommended_reels",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_similar_users",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_about",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_brief",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_followers",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_following",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_former_usernames",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_highlights",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_id_by_username",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_posts",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_profile",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_reels",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_stories",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/get_user_tagged_posts",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/media_id_to_shortcode",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v3/search_by_coordinates",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/search_hashtags",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/search_users",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/shortcode_to_media_id",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/instagram/v3/translate_comment",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/instagram/v3/user_id_to_username",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/ios_shortcut/shortcut",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_brand_top_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_hot_board_categories",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_hot_board_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_hot_search_person",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_live_top_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_music_ranking",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_one_user_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_one_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_one_video_by_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_selection_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_shopping_top_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_tag_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_user_hot_post",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_user_live_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_user_post_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_video_comment",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_video_sub_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/fetch_videos_batch",
+      "unitPrice": "0.0400"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/generate_kuaishou_share_link",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_comprehensive",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_image",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_live",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_music",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_tag",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_user_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/app/search_video_v2",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_get_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_kuaishou_hot_list_v1",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_kuaishou_hot_list_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_one_video",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_one_video_by_url",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_one_video_comment",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_one_video_sub_comment",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_one_video_v2",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_user_collect",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_user_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/fetch_user_live_replay",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/kuaishou/web/generate_share_short_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_discover_banners",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_discover_tab",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_discover_tab_information_tabs",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_hot_search_keywords",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_post_comment_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_post_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_topic_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_topic_post_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_user_follower_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_user_following_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/fetch_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/get_item_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/get_item_ids",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/get_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/lemon8/app/get_user_ids",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_company_posts",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_company_profile",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_job_detail",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_post_comments",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_post_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_user_posts",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/get_user_profile",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/linkedin/web_v2/search_jobs",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_hashtag_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_hashtag_post_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_home_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_home_short_drama_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_hot_search_board_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_hot_search_board_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_hot_search_words",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_increase_post_view_count",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_post_comment_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_post_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_post_statistics",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_short_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_user_follower_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_user_following_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/pipixia/app/fetch_user_post_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/check_subreddit_muted",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_comment_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_community_highlights",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_dynamic_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_games_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_home_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_news_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_popular_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_post_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_post_details",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_post_details_batch",
+      "unitPrice": "0.0050"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_post_details_batch_large",
+      "unitPrice": "0.0250"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_search_typeahead",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_subreddit_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_subreddit_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_subreddit_post_channels",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_subreddit_settings",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_subreddit_style",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_trending_searches",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_user_active_subreddits",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_user_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_user_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/reddit/app/fetch_user_trophies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/telegram/web/batch_channel_info",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/telegram/web/fetch_channel_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/telegram/web/fetch_channel_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/telegram/web/fetch_channel_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/telegram/web/fetch_post_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/telegram/web/fetch_post_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/telegram/web/fetch_similar_channels",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_post_detail",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_post_detail_v2",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_user_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_user_info_by_id",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_user_posts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_user_replies",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/fetch_user_reposts",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/search_recent",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/threads/web/search_top",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tikhub/user/calculate_price",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/tikhub/user/get_all_endpoints_info",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/tikhub/user/get_endpoint_info",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/tikhub/user/get_tiered_discount_info",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/tikhub/user/get_user_daily_usage",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/tikhub/user/get_user_info",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_ad_interactive_analysis",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_ad_keyframe_analysis",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_ad_percentile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_ads_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_configure_safety",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_creators_card",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_location_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_query_suggestions",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_recommended_ads",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_top_ads_filters",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_top_ads_spotlight",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_top_contents_item_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_top_contents_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_trends_hashtag_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/get_trends_hashtag_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/ads/search_ads",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/analytics/detect_fake_views",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/tiktok/analytics/fetch_comment_keywords",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/analytics/fetch_creator_info_and_milestones",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/analytics/fetch_video_metrics",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/TTencrypt_algorithm",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/check_live_room_online",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/check_live_room_online_batch",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/encrypt_decrypt_login_request",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_content_translate",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_creator_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_creator_search_insights",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_creator_search_insights_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_creator_search_insights_trend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_creator_search_insights_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_hashtag_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_hashtag_search_result",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_hashtag_video_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_home_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_live_room_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_live_room_product_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_live_room_product_list_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_location_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_multi_video",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_multi_video_v2",
+      "unitPrice": "0.0250"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_music_chart_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_music_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_music_search_result",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_one_video_by_share_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_one_video_by_share_url_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_one_video_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_one_video_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_share_qr_code",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_share_short_link",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_similar_user_recommendations",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_country_by_username",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_follower_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_following_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_music_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_post_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_post_videos_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_post_videos_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_repost_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_user_search_result",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_video_comment_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_video_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_video_search_result",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/fetch_webcast_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/get_user_id_and_sec_user_id_by_username",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/handler_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/open_tiktok_app_to_keyword_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/open_tiktok_app_to_send_private_message",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/open_tiktok_app_to_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/open_tiktok_app_to_video_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/search_follower_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/app/v3/search_following_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_account_health_status",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_account_insights_overview",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_account_violation_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_creator_account_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_live_analytics_summary",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_product_analytics_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_product_related_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_showcase_product_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_video_analytics_summary",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_video_associated_product_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_video_audience_stats",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_video_detailed_stats",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_video_list_analytics",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/creator/get_video_to_product_stats",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_hot_selling_products_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_product_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_product_detail_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_product_detail_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_product_id_by_share_link",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_product_reviews_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_products_by_category_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_products_category_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_search_products_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_search_products_list_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_search_word_suggestion_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_seller_products_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_seller_products_list_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/shop/web/fetch_shop_id_by_share_link",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/decrypt_strData",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/device_register",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tiktok/web/encrypt_strData",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_batch_check_live_alive",
+      "unitPrice": "0.0500"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_check_live_alive",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_explore_post",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_gift_name_by_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_gift_names_by_ids",
+      "unitPrice": "0.0250"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_home_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_live_gift_list",
+      "unitPrice": "0.0250"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_live_im_fetch",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_live_recommend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_live_recommend_tabs",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_post_ai_article",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_post_comment",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_post_detail_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_search_keyword_suggest",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_search_live",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_search_photo",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_search_user",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_tag_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_tag_post",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_tiktok_live_data",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_tiktok_web_guest_cookie",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_trending_searchwords",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_fans",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_follow",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_like",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_live_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_post",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/fetch_user_repost",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_fingerprint",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_hashed_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_real_msToken",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_webid",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_wss_xb_signature",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_x_mssdk_info",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_xbogus",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_xgnarly",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/tiktok/web/generate_xgnarly_and_xbogus",
+      "unitPrice": "0.0050"
+    },
+    {
+      "path": "/api/v1/tiktok/web/get_all_aweme_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/get_aweme_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/get_live_room_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/get_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/tiktok/web/tiktok_live_room",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/toutiao/app/get_article_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/toutiao/app/get_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/toutiao/app/get_user_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/toutiao/app/get_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/toutiao/app/get_video_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/toutiao/web/get_article_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/toutiao/web/get_video_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_latest_post_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_post_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_retweet_user_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_search_timeline",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_trending",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_tweet_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_user_followers",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_user_followings",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_user_media",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_user_post_tweet",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_user_profile",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/twitter/web/fetch_user_tweet_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_channel_id_to_username",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_channel_info",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_collection_videos",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_live_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_live_history",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_search_channel_videos",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_user_collections",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_user_profile",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_user_videos",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_video_comments",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_video_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_channels/v2/fetch_video_share_url",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_account_articles",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_account_profile",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_account_services",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_article_ad",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_article_comments",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_article_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_article_stats",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_comment_replies",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_mp/v2/fetch_related_articles",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_search/v2/fetch_search",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/wechat_search/v2/fetch_search_videos",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_ai_smart_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_home_recommend_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_hot_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_hot_search_categories",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_search_all",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_status_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_status_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_status_likes",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_status_reposts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_album",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_articles",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_audios",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_followers",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_following",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_info_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_profile_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_super_topics",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_timeline",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_user_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_video_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/app/fetch_video_featured_feed",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/check_allow_comment_with_pic",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_advanced_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_ai_related_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_ai_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_all_groups",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_city_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_entertainment_ranking",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_hot_ranking_timeline",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_hot_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_hot_search_index",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_hot_search_summary",
+      "unitPrice": "0.0015"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_life_ranking",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_pic_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_post_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_post_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_post_sub_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_realtime_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_similar_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_social_ranking",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_topic_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_basic_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_fans",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_following",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_original_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_recommend_timeline",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_video_collection_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_video_collection_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_user_video_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/fetch_video_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/weibo/web_v2/search_user_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_creator_hot_inspiration_feed",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_creator_inspiration_feed",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_image_note_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_note_comments",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_note_sub_comments",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_product_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_product_recommendations",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_product_review_overview",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_product_reviews",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_topic_feed",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_topic_info",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_user_faved_notes",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_user_info",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_user_posted_notes",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/get_video_note_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/search_groups",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/search_images",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/search_notes",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/search_products",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/app_v2/search_users",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_core_data",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_data_summary",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_detail",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_fans_history",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_fans_profile",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_fans_summary",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_filter_options",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_list",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_notes",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_notes_rate",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_notes_v2",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_blogger_similar",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_content_square",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_keyword_daily",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_keyword_related",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_keyword_stat",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_live_blogger_list",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/pgy/get_note_detail",
+      "unitPrice": "0.0200"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/web_v3/fetch_homefeed",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/web_v3/fetch_homefeed_categories",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/web_v3/fetch_note_detail",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/web_v3/fetch_search_suggest",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xiaohongshu/web_v3/fetch_user_info",
+      "unitPrice": "0.0100"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/fetch_one_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/fetch_one_video_play_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/fetch_one_video_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/fetch_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/fetch_user_post_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/fetch_video_comment_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/xigua/app/v2/search_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/get_channel_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/get_channel_id_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/get_channel_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/get_channel_short_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/get_channel_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/get_relate_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/search_channel",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web/search_video",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_channel_community_posts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_channel_description",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_channel_id",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_channel_shorts",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_channel_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_channel_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_general_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_general_search_v2",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_post_comment_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_post_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_post_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_related_videos",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_search_suggestions",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_shorts_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_shorts_search_v2",
+      "unitPrice": "0.0020"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_signed_stream_url",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_captions",
+      "unitPrice": "0.0080"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_captions_result",
+      "unitPrice": "0.0000"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_comment_replies",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_info_v2",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_streams",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/get_video_streams_v2",
+      "unitPrice": "0.0040"
+    },
+    {
+      "path": "/api/v1/youtube/web_v2/search_channels",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_ai_search_stream",
+      "unitPrice": "0.0050"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_answer_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_article_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_column_article_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_column_articles",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_column_comment_config",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_column_recommend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_column_relationship",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_column_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_comment_v5",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_ebook_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_hot_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_hot_recommend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_pin_comments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_pin_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_preset_search",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_question_answers",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_question_detail",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_recommend_followees",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_salt_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_scholar_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_search_recommend",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_search_suggest",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_sub_comment_v5",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_topic_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_answers",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_articles",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_collections",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_follow_collections",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_follow_columns",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_follow_questions",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_follow_topics",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_followees",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_followers",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_included_articles",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_info",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_pins",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_search_v3",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_user_segments",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_video_list",
+      "unitPrice": "0.0010"
+    },
+    {
+      "path": "/api/v1/zhihu/web/fetch_video_search_v3",
+      "unitPrice": "0.0010"
+    }
+  ]
+}

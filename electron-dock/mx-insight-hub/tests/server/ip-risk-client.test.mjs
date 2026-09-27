@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises'
 async function client() {
   const source = (await readFile(new URL('../../src/api.js', import.meta.url), 'utf8'))
     .replaceAll('import.meta.env', '({})')
-    .replace("'../shared/source-catalog-visibility.mjs'", JSON.stringify(new URL('../../shared/source-catalog-visibility.mjs', import.meta.url).href))
+    .replace(/from '([^']+)'/g, (_match,path)=>`from ${JSON.stringify(new URL(path,new URL('../../src/api.js',import.meta.url)).href)}`)
   return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
 }
 

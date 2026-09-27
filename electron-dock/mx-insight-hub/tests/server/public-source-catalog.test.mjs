@@ -371,7 +371,7 @@ test('public source catalog metadata reconstructs fields, statuses, facets and s
     assert.ok(result.payload.data.enums.coverageStatuses.includes('covered'))
     assert.ok(result.payload.data.enums.deliveryStatuses.includes('doing'))
     assert.ok(result.payload.data.facets.majorCategories.includes('公共目录测试分类'))
-    assert.equal(result.payload.data.summary.total, 217)
+    assert.equal(result.payload.data.summary.total, 225)
     assert.equal(Object.hasOwn(result.payload.data.summary, 'archived'), false)
     assert.equal(Object.hasOwn(result.payload.data, 'items'), false)
     assert.deepEqual(Object.keys(result.payload.data.summary).sort(), [

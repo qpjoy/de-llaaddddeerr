@@ -1,4 +1,5 @@
 import snapshot from '../data/night-all-provider-inventory.json' with { type: 'json' }
+import official from '../data/provider-official-contracts.json' with { type: 'json' }
 import { AppError } from '../core/errors.mjs'
 
 export const NATIVE_FORWARDING_VERSION = 'mx-insight-hub.native-forwarding.v1'
@@ -7,18 +8,28 @@ const FAMILY = { tikhub: 't', justone: 'j' }
 
 // Only this reviewed, code-owned list can dispatch. The catalog/database may
 // describe more candidates but can never turn a user-supplied URL into a route.
-export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze(snapshot.endpoints
+const legacyEndpoints = snapshot.endpoints
   .filter(row => row.forwarding === 'implemented_disabled')
   .map(row => {
     const key = `${FAMILY[row.provider]}.${row.id.replace(/^(tikhub|justone)_/, '')}`
+    const documented = official.endpoints.find(item => item.provider === row.provider && item.method === row.method && item.path === row.path)
     return Object.freeze({ ...row, key,
+      platformLabel: documented?.platformLabel || row.platform, summary: documented?.summary || row.id,
       operation: `native.${key}`, endpointKey: `native.${key}`,
       hubPath: `/api/v1/data/native/${key}`,
       authorizationPlatform: row.platform === 'xianyu' ? 'ecommerce' : 'social',
       parameters: Object.freeze(row.parameters.filter(p => !PRIVATE_PARAMS.has(p.name)).map(p => Object.freeze({ ...p }))),
       fixedQuery: Object.freeze({ ...row.fixedQuery }),
     })
-  }))
+  })
+const legacyPaths = new Set(legacyEndpoints.map(row => `${row.provider}:${row.method}:${row.path}`))
+export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
+  ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
+    .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,
+      hubPath: `/api/v1/data/native/${row.key}`, schemaVersion: official.version,
+      parameters: Object.freeze(row.parameters.map(p => Object.freeze({...p}))), fixedQuery: Object.freeze({}),
+    })),
+])
 const byKey = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [row.key, row]))
 const byPath = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [row.hubPath, row]))
 export const nativeForwardingEndpoint = key => byKey.get(key) || null
@@ -26,7 +37,7 @@ export const nativeForwardingByPath = path => byPath.get(path) || null
 
 export function nativeForwardingOperations(provider) {
   return NATIVE_FORWARDING_ENDPOINTS.filter(row => row.provider === provider).map(row => ({
-    operationKey: row.operation, label: `${row.platform} · 原生 ${row.key}`,
+    operationKey: row.operation, label: `${row.platformLabel || row.platform} · ${row.summary || row.key}`,
     legacyGate: 'nativeForwardingVerified', contractVersion: NATIVE_FORWARDING_VERSION,
     endpointKeys: [row.endpointKey],
   }))
@@ -49,10 +60,20 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
   }
   const query = { ...endpoint.fixedQuery }
   for (const p of endpoint.parameters) {
-    const value = body.params[p.name]
+    const value = body.params[p.name] === undefined ? (endpoint.schemaVersion && !p.required ? p.default : undefined) : body.params[p.name]
     if (value === undefined) {
       if (p.required) throw new AppError(400, 'missing_parameter', `${p.name} is required`)
       continue
+    }
+    // Existing v1 contracts retain their scalar coercion. New official contracts
+    // validate their declared types/enums before a billable dispatch.
+    if (endpoint.schemaVersion) {
+      const validType = p.type === 'integer' ? Number.isSafeInteger(value) : p.type === 'number' ? typeof value === 'number' && Number.isFinite(value) : typeof value === p.type
+      if (!validType || p.enum && !p.enum.includes(value)
+        || p.minimum != null && value < p.minimum || p.maximum != null && value > p.maximum
+        || typeof value === 'string' && (p.minLength != null && value.length < p.minLength || p.maxLength != null && value.length > p.maxLength || p.pattern && !new RegExp(p.pattern).test(value))) {
+        throw new AppError(400, 'invalid_parameter', `${p.name} does not match the declared parameter contract`)
+      }
     }
     if (!['string', 'number', 'boolean'].includes(typeof value)
       || (typeof value === 'number' && !Number.isFinite(value))
@@ -67,7 +88,7 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
   }
   return Object.freeze({
     key, maxPageSize, contractVersion: NATIVE_FORWARDING_VERSION, endpointContractVersion: NATIVE_FORWARDING_VERSION,
-    operation: endpoint.operation, endpointKey: endpoint.endpointKey, endpointVersion: snapshot.version,
+    operation: endpoint.operation, endpointKey: endpoint.endpointKey, endpointVersion: endpoint.schemaVersion || snapshot.version,
     endpointPath: endpoint.path, method: endpoint.method, marketplace: endpoint.platform,
     deliveryMode: 'live_only', upstreamQuery: Object.freeze(query),
     fingerprintBody: { contractVersion: NATIVE_FORWARDING_VERSION, key, params: query, deliveryMode: 'live_only' },

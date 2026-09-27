@@ -56,13 +56,13 @@ test('an open gate with no pricebook reports every endpoint of the released oper
   assert.deepEqual(search.missingEndpointKeys, ALL_JUSTONE_ENDPOINTS)
 })
 
-test('the preflight covers every released operation the control plane knows about', () => {
+test('the environment preflight covers only operations behind its explicitly open gate', () => {
   const reported = envOnlyPricing({ MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED: '1' })
     .map((finding) => finding.operationKey)
 
   assert.deepEqual(
     [...reported].sort(),
-    EXTERNAL_PLATFORM_OPERATION_CATALOG.justone.map((entry) => entry.operationKey).sort(),
+    EXTERNAL_PLATFORM_OPERATION_CATALOG.justone.filter(entry=>entry.legacyGate==='contractVerified').map((entry) => entry.operationKey).sort(),
   )
 })
 

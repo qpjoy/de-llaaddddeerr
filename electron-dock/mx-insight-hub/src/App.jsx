@@ -1,6 +1,7 @@
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
+import { SocialContentOverview } from './product-workbench.jsx'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
 import { DocsPage } from './pages-docs.jsx'
@@ -368,6 +369,7 @@ const ROUTES = [
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
   { path: '/data-products/enterprise', label: '企业数据', description: '企业查询与接口调试', icon: House, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EnterprisePage, capability: 'apikey.read' },
+  { path: '/data-products/social-content', label: '社媒与内容数据', description: '内容、账号、评论与趋势接口', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SocialContentOverview, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', navLabel: '笔记画卷', navSection: 'xiaohongshu', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-hot-notes', label: '小红书热门笔记', navLabel: '热门笔记', navSection: 'xiaohongshu', description: '热门内容、筛选与指标', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-inspiration', label: '小红书创作灵感', navLabel: '创作灵感', navSection: 'xiaohongshu', description: '热点灵感与创作线索', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
@@ -875,7 +877,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     theme,

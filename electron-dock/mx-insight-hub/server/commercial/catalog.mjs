@@ -3,6 +3,7 @@ import { EXTERNAL_PLATFORM_OPERATION_CATALOG } from '../external-platforms/contr
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { implementedRoutes } from '../data/source-connections.mjs'
 import { QIXIN_OFFICIAL_PRICES } from '../../shared/qixin-official-prices.mjs'
+import tikPrices from '../data/tikhub-reference-prices.json' with { type: 'json' }
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [row.operation, row]))
@@ -27,6 +28,14 @@ export const PROVISIONING_CATALOG_VERSION = digest(PROVISIONING_OPERATIONS)
 export const provisioningOperation = id => PROVISIONING_OPERATIONS.find(row => row.id === id)
 
 export function officialPriceDraft(provider) {
+  if (provider === 'tikhub') {
+    const prices = new Map(tikPrices.rows.map(row => [row.path,row.unitPrice]))
+    return { provider, available:true, sourceKind:'official', sourceUrl:tikPrices.sourceUrl, observedAt:tikPrices.observedAt,
+      name:'TikHub 新账户逐接口参考价（部分核验）',
+      rates:NATIVE_FORWARDING_ENDPOINTS.filter(row=>row.provider===provider && prices.has(row.path)).map(row=>({
+        endpointKey:row.endpointKey,currency:tikPrices.currency,unitPrice:prices.get(row.path),billingUnit:'request',
+      })) }
+  }
   if (provider !== 'qixin') return { provider, available: false, reason: '尚无已核对的逐端点官方价格快照；可导入带来源的价格草稿，不能推测为统一价格。' }
   return { provider, available: true, sourceKind: 'official', sourceUrl: QIXIN_OFFICIAL_PRICES.source.split('?')[0],
     observedAt: QIXIN_OFFICIAL_PRICES.observedAt, name: '企业接口官方价格快照',

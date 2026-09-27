@@ -6,7 +6,7 @@ import { productForDocs } from '../shared/product-workbenches.mjs'
 export function DocsPage({ token, query, onUnauthorized, theme = 'light' }) {
   const path = query.get('path') || '/docs'
   const product = productForDocs(path)
-  const productHref = product ? `#${product.path}${product.docs === 'enterprise' && /^\/docs\/enterprise\/\d+\.\d+$/.test(path) ? `?apiId=${encodeURIComponent(path.split('/').at(-1))}` : ''}` : null
+  const productHref = product ? `#${product.path}${path.includes('/native/') ? `?endpoint=${encodeURIComponent(path.split('/').at(-1))}` : product.docs === 'enterprise' && /^\/docs\/enterprise\/\d+\.\d+$/.test(path) ? `?apiId=${encodeURIComponent(path.split('/').at(-1))}` : ''}` : null
   const [content, setContent] = useState(null)
   const [error, setError] = useState(null)
   useEffect(() => {

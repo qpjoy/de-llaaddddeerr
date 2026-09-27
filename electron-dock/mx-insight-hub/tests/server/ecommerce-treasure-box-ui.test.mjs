@@ -24,6 +24,7 @@ function behaviorModule() {
       resolveDir: fileURLToPath(new URL('../../src/', import.meta.url)),
     },
     bundle: true,
+    loader: { '.css':'empty' },
     define: { 'import.meta.env': '{}' },
     format: 'esm',
     jsx: 'automatic',
@@ -230,7 +231,7 @@ test('live key preflight is zero-cost, rejects every Test key and leaves one-cli
   assert.match(pageSource, /本页调用 Public API：[\s\S]*?publicApiOrigin\(\)[\s\S]*?MX_INSIGHT_PUBLIC_URL/u)
   assert.match(pageSource, /上一次外部采集请求仍待核查[\s\S]*?点击主按钮即可[\s\S]*?先自动只读核对/u)
   assert.doesNotMatch(pageSource, /ambiguousLookupReady|再次核对状态|需要人工核查 consumer 归属/u)
-  assert.match(demoSource, /<Page key=\{state.identity\}/u)
+  assert.match(demoSource, /<ProductWorkbench key=\{`\$\{state.identity\}:\$\{pageProps.routePath\}`\}/u)
   assert.match(pageSource, /useState\(loadLiveRequest\)/u)
   assert.doesNotMatch(pageSource, /const keyUsable|ambiguousLookupReady/u)
   assert.doesNotMatch(pageSource, /type="submit"[^>]+!keyUsable/u)
@@ -360,7 +361,7 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /label="平台"[\s\S]*?disabled=\{semanticsLocked\}/u)
   assert.match(pageSource, /label="数据服务排序（仅采集）"[\s\S]*?disabled=\{semanticsLocked/u)
   assert.match(pageSource, /maxLength="200" disabled=\{semanticsLocked\}/u)
-  assert.match(demoSource, /<Page key=\{state.identity\}/u)
+  assert.match(demoSource, /<ProductWorkbench key=\{`\$\{state.identity\}:\$\{pageProps.routePath\}`\}/u)
   assert.match(pageSource, /const semanticsLocked = phase === 'searching'/u)
   assert.doesNotMatch(pageSource, /const semanticsLocked = [^\n]*ambiguousOriginalSelected/u)
   assert.match(changeMode, /if \(phase === 'searching'\) return/u)

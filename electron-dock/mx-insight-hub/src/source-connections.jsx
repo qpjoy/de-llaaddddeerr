@@ -36,6 +36,7 @@ export function SourceConnectionsPanel({ state, initialProvider = '' }) {
   const summary = state.data?.summary
 
   return <section className="mih-source-connections" aria-label="已实现接入与查询路径">
+    {state.data?.officialCatalog ? <OfficialProviderPanel catalog={state.data.officialCatalog} /> : null}
     {state.data?.migration ? <ProviderMigrationPanel inventory={state.data.migration} /> : null}
     {rows.some(row => row.operationControls?.length) ? <details className="qp-panel mih-provisioning"><summary>当前接口运行配置与价格审核</summary><p>配置读取不触发上游探测；灰度仍按调用者名单放行。</p><PagedItems items={rows.filter(row => row.operationControls?.length)} text={row => `${row.product} ${row.platformLabel} ${row.operation}`} label="运行配置">{visible => visible.map(({entry: row}) => <article key={row.id}><h3>{row.platformLabel} · {row.product}</h3><p>{row.operationControls.length} 项操作；{row.operationControls.filter(op => op.reviewedPrice).length} 项价格已审核；{row.operationControls.filter(op => op.effectiveState === 'active').length} 项运行配置已启用；{row.operationControls.filter(op => op.effectiveState === 'canary').length} 项灰度</p><details><summary>逐项状态</summary>{row.operationControls.map(op => <p key={op.operation}>{op.operation} · {op.effectiveState} · 版本 {op.revision} · {op.blockers.join(' / ') || '无配置阻塞'}</p>)}</details></article>)}</PagedItems></details> : null}
     <p>运行配置来自当前管理记录；“已实现”不代表已授权、已计费放行或实时健康。<a href="#/provisioning">批量开通与价格草稿</a></p>
@@ -82,6 +83,18 @@ export function SourceConnectionsPanel({ state, initialProvider = '' }) {
         <h3>权限与证据</h3><p>调用仍使用原 API Key 的平台、操作和合同授权；目录可见不等于数据可读。文档与产品分组不新增授权。</p><p>实现依据：<code>{detail.evidence}</code></p><p>运行健康、可读记录数与上游账单未在此推测。</p>
       </div>
     </Modal> : null}
+  </section>
+}
+
+function OfficialProviderPanel({catalog}) {
+  const [provider,setProvider]=useState('tikhub'),[status,setStatus]=useState('')
+  const rows=catalog.rows.filter(row=>row.provider===provider && (!status || row.implementation===status))
+  return <section className="qp-panel mih-source-connection-list"><h2>官方接口目录与 Hub 接入覆盖</h2><p>核对日期 {catalog.observedAt}。文档登记、固定合同、价格审核和运行启用独立记录；本页不探测或调用上游。</p>
+    <div className="mih-metric-grid">{catalog.summary.map(row=><article key={row.provider}><h3>{row.provider === 'tikhub' ? 'TikHub' : 'JustOne'}</h3><p>{row.documented} 项官方定义 · {row.platforms} 个平台 / 模块</p><p>{row.implemented} 项 Hub 固定合同 · {row.active} 项启用 · {row.canary} 项灰度</p></article>)}</div>
+    <div className="mih-connection-controls"><DropdownField label="上游供应商" value={provider} onChange={setProvider} options={[{value:'tikhub',label:'TikHub'},{value:'justone',label:'JustOne'}]} /><DropdownField label="封装进度" value={status} onChange={setStatus} options={[{value:'',label:'全部定义'},{value:'fixed_contract',label:'已有固定合同'},{value:'documented_only',label:'待适配 / 不属于数据查询'}]} /></div>
+    <PagedItems key={`${provider}:${status}`} items={rows} label="官方接口" text={row=>`${row.platform} ${row.label} ${row.summary} ${row.sourcePath}`}>
+      {visible=><div className="qp-table-wrap"><table className="qp-table"><thead><tr><th>平台与接口</th><th>Hub 接入与运行</th><th>目录关联</th><th>Admin 依据</th></tr></thead><tbody>{visible.map(({entry:row})=><tr key={`${row.method}:${row.sourcePath}`}><td><strong>{row.label}</strong><p>{row.summary}</p><code>{row.method} {row.sourcePath}</code></td><td>{row.hubPath ? <><code>{row.hubPath}</code><p>{row.effectiveState} · {row.priceReviewed?'采购价已审核':'采购价待审核'}</p><a href={`#/provisioning?provider=${provider}`}>配置价格与授权</a></> : <p>尚未封装：{row.reason}</p>}</td><td>{row.catalogKeys.length ? row.catalogKeys.join(' / ') : '非平台操作或目录映射待核对'}</td><td><a href={row.sourceUrl} target="_blank" rel="noreferrer">官方参数定义 ↗</a>{row.procurementReference ? <p>账户参考 {row.procurementReference.currency} {row.procurementReference.unitPrice} / 次<br/><a href={row.procurementReference.sourceUrl} target="_blank" rel="noreferrer">价格依据 · {row.procurementReference.observedAt.slice(0,10)}</a></p> : <p>逐接口采购价待核对</p>}</td></tr>)}</tbody></table></div>}
+    </PagedItems><p>此处的合同不会自动进入聚合关键词搜索。聚合还需要统一条目、过滤、去重和游标适配。</p>
   </section>
 }
 

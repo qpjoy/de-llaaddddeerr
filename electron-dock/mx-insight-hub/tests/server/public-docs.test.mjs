@@ -1805,6 +1805,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.deepEqual(paths.sort(), [
       ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.hubPath.slice('/api/v1'.length)),
       ...QIXIN_CATALOG.apis.map(api => `/data/enterprise/${api.api_id}/query`),
+      '/data/services/pricing',
       '/acquisitions/{requestId}',
       '/data/canonical/items/{id}/context',
       '/data/canonical/items/{id}/timeline',

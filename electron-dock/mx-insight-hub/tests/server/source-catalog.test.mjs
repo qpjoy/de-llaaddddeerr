@@ -84,7 +84,7 @@ test('MemoryStore seeds the governed catalog from the four source files without 
   const store = new MemoryStore()
   const entries = await store.listSourceCatalogEntries()
 
-  assert.equal(entries.length, 215)
+  assert.equal(entries.length, 223)
   assert.equal(entries.filter((entry) => entry.coverageStatus === 'covered').length, 29)
   assert.equal(entries.filter((entry) => entry.coverageStatus === 'not_covered').length, 186)
   assert.equal(entries.filter((entry) => entry.deliveryStatus === 'complete').length, 2)
@@ -109,14 +109,14 @@ test('source catalog HTTP contract supports governed CRUD, optimistic revisions,
   await withServer(async (baseUrl) => {
     const initial = await call(baseUrl, '/internal/v1/admin/source-catalog')
     assert.equal(initial.response.status, 200)
-    assert.equal(initial.payload.data.items.length, 215)
+    assert.equal(initial.payload.data.items.length, 223)
     assert.deepEqual({
       total: initial.payload.data.summary.total,
       covered: initial.payload.data.summary.covered,
       uncovered: initial.payload.data.summary.uncovered,
       complete: initial.payload.data.summary.complete,
     }, {
-      total: 215,
+      total: 223,
       covered: 29,
       uncovered: 186,
       complete: 2,
@@ -245,14 +245,14 @@ test('source catalog HTTP contract supports governed CRUD, optimistic revisions,
 
     const activeOnly = await call(baseUrl, '/internal/v1/admin/source-catalog')
     assert.equal(activeOnly.payload.data.items.some((entry) => entry.id === entryId), false)
-    assert.equal(activeOnly.payload.data.summary.total, 215)
+    assert.equal(activeOnly.payload.data.summary.total, 223)
 
     const includingArchived = await call(
       baseUrl,
       '/internal/v1/admin/source-catalog?includeArchived=true',
     )
     assert.equal(includingArchived.response.status, 200)
-    assert.equal(includingArchived.payload.data.items.length, 216)
+    assert.equal(includingArchived.payload.data.items.length, 224)
     assert.equal(includingArchived.payload.data.summary.archived, 1)
     assert.equal(includingArchived.payload.data.items.some((entry) => entry.id === entryId), true)
 

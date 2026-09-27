@@ -1,12 +1,14 @@
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
+import nativeServiceCapabilities from './native-service-access.json' with { type: 'json' }
 export const PRODUCT_ACCESS = {
+  '/data-products/social-content': { platform: 'social', any: ['social.accounts.search', ...nativeServiceCapabilities.social], docs:'social-content' },
   '/data-products/xiaohongshu-hot-notes': { platform: 'xiaohongshu', any: ['social.posts.hot_search'], docs: 'xiaohongshu-hot-notes' },
   '/data-products/xiaohongshu-inspiration': { platform: 'xiaohongshu', any: ['social.inspiration.list'], docs: 'xiaohongshu-inspiration' },
   '/data-products/enterprise': { platform: 'enterprise', any: ['enterprise.query'], docs: 'enterprise' },
   '/data-products/ip-risk': { platform: 'ip_risk', any: ['ip.risk.query'], docs: 'ip-risk' },
   '/source-catalog': { platform: 'source_catalog', docs: 'source-catalog' },
   '/data-products/telegram': { platform: 'telegram', docs: 'telegram' },
-  '/data-products/ecommerce-treasure-box': { platform: 'ecommerce', any: ['ecommerce.products.search'], docs: 'ecommerce-treasure-box' },
+  '/data-products/ecommerce-treasure-box': { platform: 'ecommerce', any: ['ecommerce.products.search', ...nativeServiceCapabilities.ecommerce], docs: 'ecommerce-treasure-box' },
   '/data-products/xiaohongshu-note': { platform: 'xiaohongshu', any: ['social.posts.resolve', 'social.posts.search', 'social.users.posts', 'social.posts.analytics', 'social.comments.list'], docs: 'xiaohongshu-note' },
   '/data-products/virtual-supermarket': { platform: 'virtual_supermarket', docs: 'virtual-supermarket' },
   '/data-products/public-opinion': { platform: 'public_opinion', docs: 'public-opinion' },

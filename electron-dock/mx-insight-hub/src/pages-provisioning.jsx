@@ -4,7 +4,7 @@ import { ErrorState, Field, LoadingState, PageHeading } from './components.jsx'
 import { PagedItems } from './paged-items.jsx'
 
 const providers = { qixin: '启信 · 企业数据', justone: 'JustOne', tikhub: 'TikHub' }
-const blockers = { key_scope_limit_exceeded: '追加后超过 Key 的 128 项范围限制', procurement_price_missing: '缺少完整端点价格', operation_currency_mismatch: '同一操作含多种币种', procurement_price_invalid: '采购价不符合当前计量规则', rounding_acknowledgment_required: '请确认预算取整规则', explicit_operation_review_required: '已暂停或处于验证阶段，须单独审核', credential_missing: '未配置有效凭据', release_not_active: '接口版本未发布', migration_required: '需先执行数据库迁移', qixin_price_negotiation_required: '面议接口尚未开放' }
+const blockers = { key_scope_limit_exceeded: '追加后超过 Key 的 128 平台 / 2048 能力限制', procurement_price_missing: '缺少完整端点价格', operation_currency_mismatch: '同一操作含多种币种', procurement_price_invalid: '采购价不符合当前计量规则', rounding_acknowledgment_required: '请确认预算取整规则', explicit_operation_review_required: '已暂停或处于验证阶段，须单独审核', credential_missing: '未配置有效凭据', release_not_active: '接口版本未发布', migration_required: '需先执行数据库迁移', qixin_price_negotiation_required: '面议接口尚未开放' }
 export function ProvisioningPage({ token, query, setQuery, onUnauthorized, notify }) {
   const [data,setData]=useState(null), [drafts,setDrafts]=useState([]), [error,setError]=useState(null), [busy,setBusy]=useState(false)
   const [provider,setProvider]=useState(providers[query.get('provider')] ? query.get('provider') : 'justone')
@@ -80,7 +80,7 @@ export function ProvisioningPage({ token, query, setQuery, onUnauthorized, notif
       <p>逐端点保存币种、单价和来源。已审核价格默认保留；新增价格沿用所选草稿。仅导入草稿不会开通接口。</p>
       <Field label="价格草稿"><select aria-label="价格草稿" className="qp-input" disabled={busy} value={draftId} onChange={e=>edit(setDraftId,e.target.value)}><option value="">保留现有采购价格</option>{drafts.filter(row=>row.spec.provider===provider).map(row=><option value={row.id} key={row.id}>{row.spec.name} · {row.spec.observedAt.slice(0,10)} · {row.spec.rates.length} 项</option>)}</select></Field>
       {draft?<p><a href={draft.spec.sourceUrl} target="_blank" rel="noreferrer">价格来源</a> · {draft.spec.sourceKind} · {draft.spec.rates.length} 项精确价格；保存后不可修改，可建立新草稿。</p>:null}
-      {!official?.available?<p>{official?.reason}</p>:null}
+      {!official?.available?<p>{official?.reason}</p>:provider==='tikhub'?<p>新账户参考快照仅覆盖已核对接口；缺失项待核价。阶梯折扣、赠额和实际扣费单独核算，不据此认定服务免费。</p>:null}
       <details><summary>导入逐端点价格</summary><p>单价使用原币金额的十进制字符串，例如 USD “0.0038”。当前仅支持按请求计价；阶梯、套餐和按结果收费须先人工换算为明确适用的账户合同价格。</p>
         <button className="qp-button qp-button--outline" disabled={busy} onClick={newDraft}>{official?.available?'载入已核对官方快照':'生成所选端点导入模板'}</button>
         <Field label="价格草稿 JSON"><textarea aria-label="价格草稿 JSON" className="qp-input mih-provisioning-json" spellCheck="false" disabled={busy} value={draftText} onChange={e=>setDraftText(e.target.value)}/></Field>

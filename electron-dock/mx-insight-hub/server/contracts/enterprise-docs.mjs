@@ -112,14 +112,14 @@ except urllib.error.HTTPError as error:
 <p><a href="/docs/openapi.json">下载 OpenAPI 3.1 JSON</a>，其中 servers.url 为相对路径 /api/v1，生成客户端时设置 Hub 域名。以 JSON 中 x-mx-callable 判断目录是否开放；运行授权、余额与暂停状态仍由每次请求校验。目录完整不代表所有接口均已付费实测或都已授权。</p>`
 }
 
-export function enterpriseDocumentationHtml(key = 'enterprise', { tenant = false } = {}) {
+export function enterpriseDocumentationHtml(key = 'enterprise', { tenant = false, procurementEvidence = false } = {}) {
   if (key === 'enterprise') return `<h2>企业数据接口</h2><p>${QIXIN_CATALOG.category_count} 类、${QIXIN_CATALOG.api_count} 个接口。原合同快照：${QIXIN_CATALOG.synced_at.slice(0, 10)}；价格及新增接口更新：2026-09-17。所有调用使用已授权的 Hub Live API Key；接口是否可用以当前开通状态为准。</p>
 <p>需要同时授权 <code>enterprise</code> 与 <code>enterprise.query</code>。请求必须发往 Hub，平台签名由服务端处理。请求结果完整留存，可通过原 requestId 查看交付证据。仅浏览文档不发起数据查询。</p>
 ${integrationGuide()}
 <label for="enterprise-filter">搜索接口名称、ID 或分类</label><input id="enterprise-filter" type="search" placeholder="例如 工商、风险、1.31" style="width:100%;padding:12px;background:var(--surface);color:inherit;border:1px solid currentColor;border-radius:8px">
 <p id="enterprise-count" role="status">${QIXIN_CATALOG.api_count} 个接口</p>
-${QIXIN_CATALOG.categories.map(category => `<details open data-enterprise-category><summary>${escape(category.category_name)}</summary><table><thead><tr><th>接口</th><th>说明</th>${tenant ? '' : '<th>官网参考价格</th>'}</tr></thead><tbody>${QIXIN_CATALOG.apis.filter(api => api.category_id === category.category_id).map(api => `<tr data-enterprise-api data-search="${escape(`${api.api_id} ${api.api_name} ${api.category_name}`)}"><td><a href="/docs/enterprise/${api.api_id}">${escape(api.api_id + ' ' + api.api_name)}</a></td><td>${escape(api.brief)}</td>${tenant ? '' : `<td>${escape(api.display_price)}</td>`}</tr>`).join('')}</tbody></table></details>`).join('')}
-${tenant ? '' : '<p>官网标价是参考快照，不能替代合同价，也不会自动发布为 Hub 客户价格。双密钥和运行开关在外部数据平台管理。</p>'}
+${QIXIN_CATALOG.categories.map(category => `<details open data-enterprise-category><summary>${escape(category.category_name)}</summary><table><thead><tr><th>接口</th><th>说明</th>${tenant || !procurementEvidence ? '' : '<th>Admin 采购参考</th>'}</tr></thead><tbody>${QIXIN_CATALOG.apis.filter(api => api.category_id === category.category_id).map(api => `<tr data-enterprise-api data-search="${escape(`${api.api_id} ${api.api_name} ${api.category_name}`)}"><td><a href="/docs/enterprise/${api.api_id}">${escape(api.api_id + ' ' + api.api_name)}</a></td><td>${escape(api.brief)}</td>${tenant || !procurementEvidence ? '' : `<td>${escape(api.display_price)}</td>`}</tr>`).join('')}</tbody></table></details>`).join('')}
+${tenant || !procurementEvidence ? '' : '<p>官网标价是参考快照，不能替代合同价，也不会自动发布为 Hub 客户价格。双密钥和运行开关在外部数据平台管理。</p>'}
 <script>document.getElementById('enterprise-filter').addEventListener('input', function() { const value=this.value.trim().toLowerCase(); let count=0; document.querySelectorAll('[data-enterprise-api]').forEach(row=>{row.hidden=!row.dataset.search.toLowerCase().includes(value);if(!row.hidden)count++});document.querySelectorAll('[data-enterprise-category]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('[data-enterprise-api]')).some(row=>!row.hidden);if(value)group.open=true});document.getElementById('enterprise-count').textContent=count+' 个接口' });</script>`
   const api = enterpriseApi(key.slice('enterprise-'.length))
   const example = JSON.stringify(exampleFor(api), null, 2)
@@ -134,7 +134,7 @@ ${api.api_id === '66.35' ? '<p>keyword 与 import_keyword 至少提供一个。<
 <h3>Hub 请求示例</h3><p>先设置 HUB_URL、HUB_API_KEY 和本次新请求的 IDEMPOTENCY_KEY（8–128 字符，例如 UUID）；重试保留原值，换页或新查询更换。</p><pre>curl -X POST "$HUB_URL/api/v1${escape(pathFor(api.api_id))}" \\\n  -H "Authorization: Bearer $HUB_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \\\n  --data '${escape(example)}'</pre>
 <h3>响应</h3><p>成功交付返回 HTTP 200。外层包含 contractVersion、apiId、requestId、meta 和 data。data 是完整业务响应（包括 status/message/sign/data）；以下字段均位于外层 data 中。这里的业务 status 200 为完成、201/206 为无数据、202/203 为处理中，对应 meta.resultState 的 completed/no_data/pending，不能与 HTTP 状态混淆。其他错误用 Hub 错误响应返回并留存原始证据。</p>${fieldsTable(api.response)}
 <details><summary>业务响应示例（位于 Hub data 内）</summary><pre>${escape(typeof api.response_example === 'string' ? api.response_example : JSON.stringify(api.response_example, null, 2))}</pre></details>
-<h3>留存与复现</h3><p>成功交付前保存完整响应、调用记录和当前调用者的快照，并排队形成 Canonical 响应观察。<code>GET /api/v1/acquisitions/{requestId}</code> 读取原交付结果，不重新查询。响应观察不是企业去重主表。费用以当前套餐和使用记录为准。</p>
+<h3>Hub 官方定价</h3><p>以当前 Hub 已发布价格表为准。账户执行价包含当前合同倍率或折扣；未发布单价不代表免费。</p><p><a href="/#/data-products/enterprise?apiId=${escape(api.api_id)}">查看本接口的 Hub 官方定价与账户执行价 →</a></p><p>也可使用当前 Key 读取 <code>GET /api/v1/data/services/pricing?path=${encodeURIComponent(`/api/v1${pathFor(api.api_id)}`)}</code>，不采集、不计费。</p><h3>留存与复现</h3><p>成功交付前保存完整响应、调用记录和当前调用者的快照，并排队形成 Canonical 响应观察。<code>GET /api/v1/acquisitions/{requestId}</code> 读取原交付结果，不重新查询。响应观察不是企业去重主表。费用以当前套餐和使用记录为准。</p>
 <p><a href="/docs/enterprise#integration">下游接入完整指南：Node.js / Python、分页、状态与重试</a></p>
-${tenant ? '' : `<p>官网参考价：${escape(api.display_price)}；标价核对于 2026-09-17（北京时间）。<a href="${escape(api.source_url)}" rel="noreferrer">启信官方文档</a>。运行使用已复核采购价；不推断供应商实际扣费。</p>`}`
+${tenant || !procurementEvidence ? '' : `<details><summary>Admin 采购参考（仅管理身份可见）</summary><p>官网参考价：${escape(api.display_price)}；标价核对于 2026-09-17（北京时间）。<a href="${escape(api.source_url)}" rel="noreferrer">启信官方文档</a>。运行使用已复核采购价；不推断供应商实际扣费。</p></details>`}`
 }

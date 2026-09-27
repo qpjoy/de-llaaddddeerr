@@ -8,6 +8,7 @@ import { customerRequestPrice } from '../billing/contracts.mjs'
 import { digest, PROVISIONING_OPERATIONS, PROVISIONING_CATALOG_VERSION, provisioningOperation, officialPriceDraft } from './catalog.mjs'
 import { normalizePriceDraft } from './price-drafts.mjs'
 import { transactionPool } from './transaction.mjs'
+import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES, MAX_PROVISIONING_OPERATIONS } from '../../shared/access-limits.mjs'
 
 const fail = (status, code, message) => { throw new AppError(status, code, message) }
 const clone = value => structuredClone(value)
@@ -51,7 +52,7 @@ export class ProvisioningService {
   }
   normalize(input) {
     if (!input || Object.keys(input).some(key => !['keyId','operationIds','draftId','overrideProcurement','salePrices','currency','monthlyBudgetMinor','monthlySubsidyBudgetMinor','reason','acknowledgeRounding'].includes(key))) fail(400, 'invalid_provisioning', '批量配置字段无效')
-    if (!uuid(input.keyId) || !Array.isArray(input.operationIds) || !input.operationIds.length || input.operationIds.length > 400 || input.operationIds.some(id => !provisioningOperation(id))) fail(400, 'invalid_provisioning', '请选择有效 Key 和已实现接口')
+    if (!uuid(input.keyId) || !Array.isArray(input.operationIds) || !input.operationIds.length || input.operationIds.length > MAX_PROVISIONING_OPERATIONS || input.operationIds.some(id => !provisioningOperation(id))) fail(400, 'invalid_provisioning', '请选择有效 Key 和已实现接口')
     const ids = uniq(input.operationIds)
     const overrides = input.overrideProcurement || []
     if (!Array.isArray(overrides) || overrides.some(id => !ids.includes(id))) fail(400, 'invalid_provisioning', '采购覆盖范围必须在所选接口内')
@@ -111,7 +112,7 @@ export class ProvisioningService {
     const changesPrice = rows.some(row => row.saleChanged)
     if (Object.keys(spec.salePrices).length && plan.priceBook && spec.currency !== plan.priceBook.currency) fail(409, 'plan_currency_mismatch', '新价格必须沿用当前套餐币种；批量开通不进行换汇')
     if (changesPrice && billing.account?.currency && spec.currency !== billing.account.currency) fail(409, 'wallet_currency_mismatch', '新套餐币种必须与租户钱包一致')
-    const scopeOverflow = uniq([...key.platforms, ...rows.map(row => row.platform)]).length > 128 || uniq([...key.capabilities, ...rows.map(row => row.capability)]).length > 128
+    const scopeOverflow = uniq([...key.platforms, ...rows.map(row => row.platform)]).length > MAX_PLATFORM_SCOPES || uniq([...key.capabilities, ...rows.map(row => row.capability)]).length > MAX_CAPABILITY_SCOPES
     if (scopeOverflow) for (const row of rows) row.blockers.push('key_scope_limit_exceeded')
     // Shared meters (e.g. social.accounts.search across providers) must agree.
     const meters = new Map()

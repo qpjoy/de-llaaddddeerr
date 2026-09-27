@@ -110,6 +110,8 @@ test('generic capability grants stay separate from platform grants and policies'
     assert.equal(configuration.payload.data.policies[0].platform, 'xiaohongshu')
     assert.equal(configuration.payload.data.capabilityPolicies[0].capability, 'nlp.tokenize')
     assert.deepEqual(configuration.payload.data.availableCapabilities, [
+      { capability: 'social.posts.hot_search', ready: false },
+      { capability: 'social.inspiration.list', ready: false },
       { capability: 'enterprise.query', ready: false },
       { capability: 'ip.risk.query', ready: false },
       { capability: 'nlp.tokenize', ready: true },

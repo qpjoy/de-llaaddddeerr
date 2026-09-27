@@ -1,6 +1,6 @@
 # Night-All 上游接口向 Hub 迁移
 
-2026-09-27 后续商业与产品规划：[数据服务、批量开通与渠道定价](../architecture/product-services-bulk-access-channel-pricing.md)。用于后续开通与发布设计，不表示这些新增流程已经实现。
+2026-09-27 后续进展：[数据服务、批量开通与渠道定价](../architecture/product-services-bulk-access-channel-pricing.md) §9 已实施；本轮又增加官方目录与 987 个固定合同，见 [官方接口服务与定价](official-provider-services-2026-09-27.md)。下面的 50 项数量是 Night-All 源码第一阶段快照，不是当前 Hub 接口总量；三个旧入口仍未整体切换。
 
 核对日期：2026-09-26。参考源码：`/Users/qpjoy/workspace/mingxi/Night-All`，版本 `5359297fbe46674664ebb56479bb375d6e6faf74`。
 

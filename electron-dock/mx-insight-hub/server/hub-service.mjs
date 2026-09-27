@@ -1,4 +1,6 @@
+import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
+import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from './contracts/native-forwarding.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
@@ -402,7 +404,8 @@ function apiKeyLifetimeDays(value) {
 function requestedScopes(value, field, canonicalize) {
   if (value == null) return null
   assert(Array.isArray(value), 400, 'invalid_request', `${field} must be an array`)
-  assert(value.length <= 128, 400, 'invalid_request', `${field} must contain at most 128 entries`)
+  const maximum = field === 'capabilities' ? MAX_CAPABILITY_SCOPES : MAX_PLATFORM_SCOPES
+  assert(value.length <= maximum, 400, 'invalid_request', `${field} must contain at most ${maximum} entries`)
   return [...new Set(value.map((entry) => canonicalize(entry)))].sort()
 }
 
@@ -654,7 +657,7 @@ export class HubService {
     const tenantId = requiredUuid(id, 'tenantId')
     assert(await this.store.getTenant(tenantId),404,'tenant_not_found','Tenant not found')
     assert(Array.isArray(body?.platforms) && Array.isArray(body?.capabilities),400,'invalid_request','Explicit platforms and capabilities are required')
-    assert(body.platforms.length <= 100 && body.capabilities.length <= 100,400,'invalid_request','Too many scopes')
+    assert(body.platforms.length <= MAX_PLATFORM_SCOPES && body.capabilities.length <= MAX_CAPABILITY_SCOPES,400,'invalid_request','Too many scopes')
     const platforms = [...new Set(body.platforms.map(canonicalPlatform))]
     assert(platforms.every(p => !RESERVED_PLATFORM_NAMES.has(p)),400,'invalid_platform','Wildcard grants are not allowed')
     const capabilities = [...new Set(body.capabilities.map(canonicalCapability))]
@@ -3355,6 +3358,15 @@ export class HubService {
     return { contractVersion: 'mx-insight-hub.aggregate-sources.v1', sources: aggregateSourceCatalog(
       await this.#effectivePlatformGrants(context), await this.#effectiveCapabilityGrants(context), await listCrawlerSpecs(this.store),
     ) }
+  }
+
+  async servicePricing(context, path) {
+    const definition = servicePriceDefinition(path)
+    assert(definition, 404, 'service_price_not_found', 'No pricing contract for this Hub endpoint')
+    const [platforms, capabilities] = await Promise.all([this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context)])
+    assert(platforms.includes(definition.platform) && definition.capabilities.every(value => capabilities.includes(value)), 403, 'service_not_authorized', 'The selected Key is not authorized for this service')
+    const [plan, billing] = await Promise.all([this.store.getConsumerPlan(context.consumer.id), this.store.getTenantBilling(context.tenant.id, { ledgerLimit:1 })])
+    return customerServiceQuote(path, definition, plan, billing.profile)
   }
 
   async aggregatePreview(context, body) {

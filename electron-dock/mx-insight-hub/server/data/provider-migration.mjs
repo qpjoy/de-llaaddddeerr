@@ -9,7 +9,7 @@ const DIRECTORY = { douyin: '0001', kuaishou: '0002', xiaohongshu: '0004', weibo
 // Planning evidence is deliberately separate from implementedRoutes and from
 // operator-authored coverage. Reading this list never contacts a supplier.
 export function providerMigrationSnapshot() {
-  const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [`${row.provider}:${row.id}`, row]))
+  const native = new Map(NATIVE_FORWARDING_ENDPOINTS.filter(row => !row.schemaVersion).map(row => [`${row.provider}:${row.id}`, row]))
   const rows = snapshot.endpoints.map(row => {
     const endpoint = native.get(`${row.provider}:${row.id}`)
     return { id: endpoint?.key || `deferred:${row.platform}:app-launch`, platform: row.platform,

@@ -23,10 +23,15 @@ function runtime() {
   }
 }
 
-test('the checked-in price book covers every released endpoint key', async () => {
+test('the checked-in price book covers its declared legacy operations; new operations stay unpriced', async () => {
   const file = await priceBookFile()
   for (const definition of EXTERNAL_PLATFORM_OPERATION_CATALOG.justone) {
     const narrowed = priceBookForOperation(file, definition.endpointKeys)
+    if (!definition.endpointKeys.some(key=>Object.hasOwn(file.unitCostMinorByEndpoint,key))) {
+      assert.equal(narrowed.ok,false)
+      assert.deepEqual(narrowed.missing,definition.endpointKeys)
+      continue
+    }
     assert.ok(
       narrowed.ok,
       `seeds/pricebooks/justone.json is missing a price for ${narrowed.missing?.join(', ')}`,

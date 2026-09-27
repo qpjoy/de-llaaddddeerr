@@ -3,7 +3,8 @@ export const PRODUCT_WORKBENCHES = [
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },
   { path: '/data-products/search', label: '数据搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
   { path: '/data-products/telegram', label: 'Telegram 会话', docs: 'telegram', prefixes: ['/data/telegram/', '/data/canonical/items/'] },
-  { path: '/data-products/ecommerce-treasure-box', label: '电商数据', docs: 'ecommerce-treasure-box', prefixes: ['/data/ecommerce/'] },
+  { path: '/data-products/ecommerce-treasure-box', label: '电商数据', docs: 'ecommerce-treasure-box', prefixes: ['/data/ecommerce/', '/data/native/'], nativePlatform: 'ecommerce' },
+  { path: '/data-products/social-content', label: '社媒与内容数据', docs: 'social-content', prefixes: ['/data/native/', '/data/social/accounts/'], nativePlatform: 'social' },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', docs: 'virtual-supermarket', prefixes: ['/data/virtual-supermarket/'] },
   { path: '/data-products/public-opinion', label: '全国舆情', docs: 'public-opinion', prefixes: ['/data/public-opinion/'] },
   { path: '/data-products/topic-insights', label: '专题洞察', docs: 'topic-reports', prefixes: ['/data/topic-reports', '/data/platforms'] },
@@ -22,7 +23,7 @@ export function productEndpoints(document, product) {
   const labels = { '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录' }
   return Object.entries(document?.paths || {}).flatMap(([path, item]) => {
     if (!product.prefixes?.some(prefix => path.startsWith(prefix)) || /\/media$/.test(path)) return []
-    return ['get', 'post'].filter(method => item[method]).map(method => ({ path: `/api/v1${path}`, method: method.toUpperCase(),
+    return ['get', 'post'].filter(method => item[method] && (!path.startsWith('/data/native/') || !product.nativePlatform || item[method]['x-mx-required-platform'] === product.nativePlatform)).map(method => ({ path: `/api/v1${path}`, method: method.toUpperCase(),
       id: `${method}:${path}`, ...item[method], summary: labels[path] || item[method].summary, parameters: [...(item.parameters || []), ...(item[method].parameters || [])] }))
   })
 }

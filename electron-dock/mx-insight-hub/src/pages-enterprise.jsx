@@ -3,6 +3,7 @@ import { adminApi, publicDataApi, publicApiOrigin } from './api.js'
 import { DropdownField, ErrorState } from './components.jsx'
 import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck } from './demo-credentials.jsx'
 import { PagedItems } from './paged-items.jsx'
+import { ServicePrice } from './service-price.jsx'
 import { requestUuid } from './request-id.js'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { copyText } from './open-capabilities.js'
@@ -111,6 +112,7 @@ export function EnterprisePage({ token, query, onUnauthorized }) {
           <header><span className="mih-api-method">POST</span><code>{endpoint?.path || '暂无已开放接口'}</code>{endpoint ? <a href={`#/docs?path=/docs/enterprise/${endpoint.id}`}>本接口文档</a> : null}</header>
           {endpoint ? <>
             <h2>{endpoint.label}</h2>
+            <ServicePrice path={endpoint.path} />
             {!endpoint.callable ? <p className="mih-inline-warning">此接口未开放调用，不能发送请求。</p> : null}
             <p>按当前套餐计费。相同参数重复发送使用原幂等标识；修改查询、页码或交付方式表示新请求。不会自动翻页、轮询或重试。</p>
             <form onSubmit={send}>

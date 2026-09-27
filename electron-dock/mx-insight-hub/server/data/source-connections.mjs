@@ -1,6 +1,7 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { providerMigrationSnapshot } from './provider-migration.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
+import { officialProviderCatalog, providerCatalogKeys } from './provider-catalog.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { SOCIAL_ACCOUNT_PLATFORMS, socialAccountPlatform } from '../contracts/social-accounts.mjs'
 import { JUSTONE_RESOURCE_CATALOG } from '../contracts/justone-resources.mjs'
@@ -31,10 +32,9 @@ function route(id, fields) {
 
 export function implementedRoutes(sources = []) {
   const rows = []
-  const migration = providerMigrationSnapshot()
   for (const endpoint of NATIVE_FORWARDING_ENDPOINTS) rows.push(route(`native-${endpoint.key}`, {
-    platform: endpoint.platform, catalogKeys: migration.rows.find(row => row.id === endpoint.key)?.catalogKeys || [],
-    provider: endpoint.provider, product: '原生数据接口', operation: endpoint.operation, path: endpoint.hubPath,
+    platform: endpoint.platform, catalogKeys: providerCatalogKeys(endpoint.platform),
+    provider: endpoint.provider, product: endpoint.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据', operation: endpoint.operation, path: endpoint.hubPath,
     defaultRule: '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
     evidence: 'server/contracts/native-forwarding.mjs',
   }))
@@ -205,6 +205,7 @@ export function sourceConnectionSnapshot(entries, sources, { now = new Date(), o
     generatedAt: now.toISOString(), reviewedAt: '2026-09-26',
     scope: 'implemented_contracts_and_registered_cleaning_sources',
     migration: providerMigrationSnapshot(),
+    officialCatalog: officialProviderCatalog(operations),
     routes,
     summary: {
       routes: routes.length,

@@ -10,7 +10,9 @@ import {
   CANONICAL_CONTEXT_DATASETS,
   canonicalEventTimeCursor,
 } from '../data/canonical-context.mjs'
-import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
+import { SOURCE_CATALOG_SEED as BASE_SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
+import { PROVIDER_CATALOG_ADDITIONS } from '../data/provider-catalog-additions.mjs'
+const SOURCE_CATALOG_SEED = [...BASE_SOURCE_CATALOG_SEED, ...PROVIDER_CATALOG_ADDITIONS]
 import { sourceCatalogTermNormalizedName } from '../data/source-catalog.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 import {
