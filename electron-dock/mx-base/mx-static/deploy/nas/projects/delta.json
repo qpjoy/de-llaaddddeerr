@@ -14,7 +14,9 @@
     "migration-prepare",
     "migration-switch",
     "recover",
-    "delta-reclaim-check"
+    "delta-reclaim-check",
+    "delta-reclaim-prepare",
+    "delta-reclaim"
   ],
   "ownership": {
     "operator": "root",

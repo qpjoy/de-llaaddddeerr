@@ -146,11 +146,26 @@ def render(value):
         return '开始 delta 只读回收核验；不停止业务、不删除。\n核验报告：'+value['check_directory']
     if event=='nas_delta_reclaim_check_complete':
         return ('delta 文件核验通过：{} 个，{}\n核验报告：{}\n业务验收已记录：{}；恢复已核对：{}\n'+
-                'SSD 保留；此报告不是删除清单，delta 删除入口尚未启用。').format(
+                'SSD 保留；此报告不是删除清单，实际验收后使用 delta cleanup prepare 准备独立回收清单。').format(
             value['regular_files'],size(value['logical_bytes']),value['check_directory'],
             yes(value['business_acceptance_recorded']),yes(value['recovery']['verified']))
     if event=='nas_delta_reclaim_check_failed':
         return 'delta 核验未通过；SSD 保留。\n核验报告：{}\n原因：{}'.format(value.get('check_directory') or '尚未建立',value['error'])
+    if event=='nas_delta_reclaim_prepare_complete':
+        return 'delta 已验收回收清单已准备：{} 个文件，{}\n清单：{}\nSSD 未删除；稍后删除需显式指定此清单并实时复核。'.format(
+            value['regular_files'],size(value['logical_bytes']),value['plan_directory'])
+    if event=='nas_delta_reclaim_prepare_failed':
+        return 'delta 回收准备未通过；未删除 SSD。\n原因：'+value['error']
+    if event=='nas_delta_reclaim_started':
+        return '开始显式回收 delta SSD 清单内文件：剩余 {} 个\n清单：{}\n保留 Docker 卷、目录、其他 media 数据及 NAS 文件。'.format(
+            value['files_remaining'],value['plan_directory'])
+    if event in ('nas_delta_reclaim_complete','nas_delta_reclaim_already_complete'):
+        return 'delta SSD 清单内文件已回收：共 {} 个，逻辑大小 {}\n清单：{}\n卷、目录和其他 media 保留，NAS 未删除；实际可用空间以 df 为准。'.format(
+            value['manifest_files_total'],size(value['manifest_logical_bytes']),value['plan_directory'])
+    if event=='nas_delta_reclaim_state':
+        return 'delta SSD 回收：{}\n清单：{}'.format('已完成' if value['phase']=='ssd_files_reclaimed' else '已开始，需查看任务日志',value['plan_directory'])
+    if event=='nas_delta_reclaim_failed':
+        return 'delta 回收未完成，可能部分文件已删除；保留同一清单及意图日志。\n清单：{}\n原因：{}'.format(value['plan_directory'],value['error'])
     if event=='nas_reclaim_check_progress':return 'NAS 对应文件元数据已核对：{} 个'.format(value['checked'])
     if event=='nas_reclaim_check_complete':
         return ('清理前文件核验通过：{} 个，{}\n新清单：{}\n业务验收已记录：{}；当前恢复登记/安装/启用已核对：{}\n'+

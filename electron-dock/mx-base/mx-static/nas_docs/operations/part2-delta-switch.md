@@ -4,7 +4,7 @@
 
 服务器已返回 `nas_delta_switch_complete`，unit `mx-nas-part2-delta-migration-switch-823e84ae77.service` 为 `Succeeded`。成功执行报告为 `/var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699`，最终停写复核位于其 `repair-final-f08352c6561c45c5aa34012d3c0c1205`。`phase=running_on_nas`、`final_sync_passed=true`、十个新媒体容器 ID 已记录；`source_deleted=false`、`reclaim_ready=false`、`business_acceptance_pending=true`。
 
-完成事件在内核 NFS/媒体 HTTP/应用默认身份 I/O 检查通过、独立 `/etc/mx-static/nas/delta-media.json` 完成登记之后输出。数据库、Redis 和 websearch 在执行器身份守卫下保留原状态。随后服务器只读回执确认十个媒体服务全部匹配 NFS，locate 指向本次报告，delta / infra 均已纳入恢复且 timer active/enabled。业务验收仍待确认；不据此认定真实重启/断电/应用重部署演练完成。下一步见 [SSD 只读核验](part2-delta-reclaim-check.md)，delta 删除适配尚未启用。
+完成事件在内核 NFS/媒体 HTTP/应用默认身份 I/O 检查通过、独立 `/etc/mx-static/nas/delta-media.json` 完成登记之后输出。数据库、Redis 和 websearch 在执行器身份守卫下保留原状态。随后服务器只读回执确认十个媒体服务全部匹配 NFS，locate 指向本次报告，delta / infra 均已纳入恢复且 timer active/enabled。后续 SSD 只读核验也已成功：319,813 个文件 / 937.29 GiB 全部 quick-check 匹配，SSD 与停写清单一致。用户再次明确业务“尚未全部检查”；不据此认定真实重启/断电/应用重部署演练完成。见 [最新核验回执与待办](part2-delta-reclaim-check.md)，后续条件式回收见 [delta SSD 回收](part2-delta-cleanup.md)，尚无服务器删除回执。
 
 **不要重复 copy、prepare、switch 或 resume，不要重置旧 marker，不把 SSD 再补写到已经运行的 NAS。** 当前代码已自动登记本次报告，`nas delta locate` 已指向 `delta-20849647…`；无需为登记而改 Git 的旧报告路径或重建业务。本轮新增 cleanup check 运行时代码，需按只读核验文档同步并更新持久工具；下方旧快照仅属切换历史。
 
@@ -64,7 +64,7 @@ bash scripts/manage.sh nas recovery check
 
 十个媒体服务都应匹配 `nfs /app/media/data_hub_raw_media`；delta 和 infra 都应“已核对 / 已纳入”，安装快照当前、timer active/enabled。原有 `migrated` 策略会自动纳入已完成的 delta；若策略未启用或项目曾被暂停，需按检查结果明确启用，不擅自清除暂停设置。
 
-以上只读核对已经通过，不需重复切换。业务仍需实际验收账号登录/联网、旧媒体读取、新媒体写入和后台任务。`business_acceptance_pending=true` 与 `reclaim_ready=false` 是预期值；SSD 原文件保留。新版提供 `nas delta cleanup check` 做文件核验；**delta 的 SSD 删除适配尚未启用**，不要套用 infra 清理命令或删除整个 Docker 卷。见 [核验命令与结果说明](part2-delta-reclaim-check.md)。
+以上只读核对已经通过，不需重复切换。业务仍需实际验收账号登录/联网、旧媒体读取、新媒体写入和后台任务。`business_acceptance_pending=true` 与 `reclaim_ready=false` 是预期值；SSD 原文件保留。新版提供 `nas delta cleanup check` 做文件核验；新增的 [delta 专用回收](part2-delta-cleanup.md) 需实际验收及显式准备/执行，不要套用 infra 清理命令或删除整个 Docker 卷。见 [核验命令与结果说明](part2-delta-reclaim-check.md)。
 
 ## 重部署、重启与中断
 

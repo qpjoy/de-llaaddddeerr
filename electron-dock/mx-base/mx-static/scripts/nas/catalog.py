@@ -20,7 +20,7 @@ def load(config):
         raise RuntimeError('Unreviewed host policy.')
     projects={};claimed=set()
     allowed={'infra-v1':{'status','locate','logs','copy','plan','reclaim','recover','redeploy','permissions','deployment-audit'},
-             'delta-v1':{'status','locate','logs','copy','migration-prepare','migration-switch','recover','delta-reclaim-check'},
+             'delta-v1':{'status','locate','logs','copy','migration-prepare','migration-switch','recover','delta-reclaim-check','delta-reclaim-prepare','delta-reclaim'},
              'precopy-only':{'status','locate','logs','copy','migration-prepare'},'manual-review':{'status','locate','logs'}}
     for name,filename in index['project_catalog'].items():
         p=read_relative(base,filename)
@@ -131,6 +131,13 @@ def route(argv, config):
             return ['delta-reclaim-check',task]+tail[2:]
         if p['adapter']!='infra-v1':raise RuntimeError('UNION reclaim check only reviewed for infra.')
         return ['reclaim-check',task]+tail[2:]
+    if p['adapter']=='delta-v1' and tail[0]=='cleanup':
+        preparing=tail[1:2]==['prepare']
+        action='delta-reclaim-prepare' if preparing else 'delta-reclaim'
+        args=tail[2:] if preparing else tail[1:]
+        if action not in p['capabilities'] or not args or args[0].startswith('-'):
+            raise RuntimeError('Delta cleanup requires an exact check/plan directory and --business-accepted.')
+        return [action,task]+args
     if tail==['repair','prepare']:
         if p['adapter']!='infra-v1':raise RuntimeError('Repair preparation only reviewed for infra.')
         return ['repair-prepare',task]

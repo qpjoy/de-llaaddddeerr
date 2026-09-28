@@ -1,5 +1,9 @@
 # NAS 迁移运维入口
 
+**当前收尾状态（覆盖下方历史准备/复制指令）：** infra 约 500 GiB 已迁移且旧 SSD 已回收；delta 已切到 NAS，十个媒体挂载与统一恢复已通过，319,813 文件 / 937.29 GiB 的只读 SSD/NAS 核验成功。用户业务验收仍未完成。实际验收后使用新增的 [delta 专用准备清单与 SSD 回收流程](operations/part2-delta-cleanup.md)，当前本地运行时 `6163bffe0a3a6618cba0`，485 项测试通过，尚未在服务器执行删除。不重复旧复制/切换、不删除整个 Docker 卷。
+
+以下是历史问题与修正记录，不是要求再次执行的最新步骤。
+
 **最新 tmpfs 修正：** delta 部署报告 `delta-216a994933844e5aacdfa055c261ed1d` 中，十个媒体服务及候选合并检查通过；唯一待审项已定位为 websearch 的 `/tmp:size=64m,noexec,nosuid`，与 Docker `HostConfig.Tmpfs` 一致。现保留这类不涉及媒体的临时目录，不误作 NAS 挂载拦截。424 项 NAS 回归通过，新快照 `d7760d1d283194c65fa9`；同步后重新执行只读准备，无需重复复制。见 [当前命令](operations/part2-delta-migration.md#最新回执与当前下一步)。
 
 **最新准备检查修正：** 服务器已安装 `a242d3d71db429e361dd`；delta 因固定服务集合未包含 `websearch` 而在只读准备阶段被拦截。用户回传确认它无挂载。现按辅助服务保留，不纳入媒体切换或可用性门槛，仍验证无媒体挂载/额外主机访问；无需重复复制或删除容器。同步修正后重跑原 `migration prepare`，见下方链接的最新操作步骤。

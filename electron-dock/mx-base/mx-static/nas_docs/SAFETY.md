@@ -7,7 +7,7 @@
 | 项目/任务 | 已确认状态 | 允许的下一步 |
 | --- | --- | --- |
 | infra / part1 | 用户于 9 月 28 日确认约 500 GiB 迁移及旧 SSD 删除完成，业务正常；已确认 `claude_sessions` 是首次新增的普通本地应用卷，与现有媒体/数据库挂载无重叠 | 更新 mx-static 发布检查以允许显式应用发布创建普通新卷；原五个基础卷继续 external 且必须存在。不重复迁移/清理，见 [发布拦截修复](operations/2026-09-28-release-external.md) |
-| delta / part2 | 正式 switch 已成功：报告 `delta-2084964733fa4abfb8d0409ac076c699`；随后十个媒体 NFS 挂载、报告定位和统一开机恢复均已核对，SSD 保留，业务验收待完成 | 新版 `nas delta cleanup check` 只读核验停写/SSD/NAS 文件及当前运行状态；本地实现待服务器运行。不重复 copy/switch/resume、不以 SSD 覆盖 NAS。delta 删除适配尚未启用，不套用 infra 清理。见 [第二卷只读核验](operations/part2-delta-reclaim-check.md) |
+| delta / part2 | 正式 switch、十个媒体 NFS 挂载和统一恢复已核对；服务器只读核验 `reclaim-check-93f71158…` 成功：319,813 文件 / 937.29 GiB，全部 quick-check，SSD 与停写清单一致，恢复有效；SSD 保留，用户明确“尚未全部检查”业务 | 完成实际业务验收；本次文件核验无需为 false 标志重复运行。不重复 copy/switch/resume、不以 SSD 覆盖 NAS。新增 delta 专用 cleanup prepare/cleanup 已通过本地测试，待同步和实际验收后显式执行；不套用 infra 清理。见 [第二卷回收步骤](operations/part2-delta-cleanup.md) |
 
 此前 `33e5…` 报告下对 200,543 个文件的历史就绪清单因 11:04 再次回到 SSD 而失效，原证据保留。第二次修复后的 `8610f8a…` 报告取得已验收 `838075ed…` 清单，Git 保留这份登记，不能恢复旧清单。用户随后确认旧 SSD 删除完成；本对话未收到工具逐项删除回执/df，不据此编造实际释放字节或执行方式。完整过程见 [本次现场与只读诊断](operations/2026-09-24-second-fallback.md)。
 
@@ -17,7 +17,7 @@
 
 最新回执已通过部署审核，正式执行器使用独立 `/var/lib/mx-static/nas-delta-cutover/delta-…` 报告，保留原复制/准备报告和 NAS marker。新安装声明要求 delta 使用 NAS：缺完成登记时拦截发布/开机补启动，不主动停止当前服务；实际切换必须显式维护命令。先持久记录 `/etc/mx-static/nas/delta-media.json` 维护所有权，再只停止/重建十个媒体角色。数据库、队列和 websearch 保持原运行身份；媒体 HTTP、应用默认身份 I/O、停写并集复核通过后才完成独立登记。不对 infra 常量做全局替换，不复用 infra 历史执行状态。
 
-中断后不自动回滚 SSD、不自动续跑迁移。已可能产生 NAS 业务写入后禁止重新补写 SSD 内容；部分创建且缺完整新 ID 时须只读核对，不能猜测并删除/重建混合容器。普通恢复仅按依赖启动已有容器，缺数据库/NFS 卷或登记时拒绝创建替代品。delta 仅新增只读 cleanup check，报告使用独立 `delta-retained-review-v1`，不自动选作删除清单，不改历史记录；删除入口未启用，`reclaim_ready=false` 不能解释为可删除。
+中断后不自动回滚 SSD、不自动续跑迁移。已可能产生 NAS 业务写入后禁止重新补写 SSD 内容；部分创建且缺完整新 ID 时须只读核对，不能猜测并删除/重建混合容器。普通恢复仅按依赖启动已有容器，缺数据库/NFS 卷或登记时拒绝创建替代品。delta cleanup check 保持独立 `delta-retained-review-v1` 只读报告，不自动选作删除清单，不改历史记录。实际验收后使用 cleanup prepare 生成独立 `delta-retained-reclaim-v1` 计划，再显式指定该计划和 --business-accepted 执行 SSD 删除。执行绑定当前运行和文件身份，先持久写意图日志；部分删除只能沿用同一计划，重启/部署变化不自动重置基准。保留卷、目录、NAS、其他媒体、数据库和队列；普通恢复/发布不调用此能力。
 
 ## 操作分级
 

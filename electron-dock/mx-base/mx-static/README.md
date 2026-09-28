@@ -2,7 +2,7 @@
 
 本项目统一维护两类工作：服务器 SSD/NAS 存储排查与迁移工具，以及 mx-static 媒体采集、读取和归档服务。
 
-2026-09-24 最新现场：infra 曾成功迁至 NAS，但后续容器重建遗漏 NAS 覆盖，当前又在 SSD 写入。先处理两侧独有数据与部署漂移，不能依据旧成功记录清理 SSD。见 [重启、重装、断电与防回退方案](nas_docs/operations/no-ssd-fallback.md)；只读检查入口：`bash scripts/manage.sh nas infra storage check`。
+2026-09-28 收尾进度：infra 约 500 GiB 已迁移并回收旧 SSD；delta 已切到 NAS，319,813 文件 / 937.29 GiB 的只读核验通过，业务验收仍待完成。实际验收后按 [delta 专用 SSD 回收步骤](nas_docs/operations/part2-delta-cleanup.md) 显式准备清单、实时复核并删除旧 SSD 清单文件，保留卷、NAS 及其他数据。下方早期复制/探测步骤为历史记录，不需重复迁移。
 
 | 工作 | 入口 |
 | --- | --- |

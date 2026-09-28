@@ -110,6 +110,9 @@ def check(manager, profile, business_accepted=False):
         record = runtime.read_record(manager)
         report = record['source_report']
         output = media.open_absolute(report, private=True)
+        from projects.delta_cleanup import owner
+        if owner(output) is not None:
+            raise RuntimeError('Delta SSD reclaim has started/completed; keep its exact plan and journal, do not rebase the check.')
         state, state_sha = media.read_private(output, 'execution.json')
         baseline, baseline_sha = media.read_private(output, 'baseline.private.json')
         if (state.get('schema') != 1 or state.get('project') != media.PROJECT or state.get('volume') != media.VOLUME
