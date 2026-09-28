@@ -81,6 +81,31 @@ def require_same_deployment(manager, profile, values):
     return rows
 
 
+def stop_policy(rows):
+    """Review configured signals, never override them on docker stop.
+
+    nginx's official entrypoint uses SIGQUIT for graceful shutdown. Application
+    workers retain Docker's default SIGTERM for warm shutdown. This exception
+    does not allow QUIT (cold shutdown) on workers or arbitrary gateway commands.
+    """
+    for name in sorted(prep.SERVICES):
+        c = rows[name]
+        policy = c.get('HostConfig', {}).get('RestartPolicy', {}).get('Name')
+        if policy != 'unless-stopped':
+            raise RuntimeError('Media restart policy needs review: ' + json.dumps(
+                {'service': name, 'restart_policy': policy}))
+        configured = c['Config'].get('StopSignal')
+        effective = 'SIGTERM' if configured in (None, '', 'SIGTERM', '15') else configured
+        if effective == '3': effective = 'SIGQUIT'
+        nginx_quit = (name == 'gateway' and effective == 'SIGQUIT'
+                      and c['Config'].get('Entrypoint') == ['/docker-entrypoint.sh']
+                      and c['Config'].get('Cmd') == ['nginx', '-g', 'daemon off;'])
+        details = {'service': name, 'configured_stop_signal': configured, 'effective_stop_signal': effective}
+        if effective != 'SIGTERM' and not nginx_quit:
+            raise RuntimeError('Media graceful stop signal needs review: ' + json.dumps(details))
+        emit('nas_delta_stop_policy', **details)
+
+
 def ensure_volume(manager, profile):
     names = manager.run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).splitlines()
     if media.NFS_VOLUME not in names:
@@ -297,6 +322,7 @@ def execute(manager, profile, path, resume=False):
     runtime.contract(manager, profile)
     validate_path(path, resume)
     op = None; output = None; execution_path = path if resume else None
+    new_attempt = False; registration_started = False
     try:
         if not manager.recovery_control.installed_current(manager):
             raise RuntimeError('Install the current runtime before delta switch; release guard must match.')
@@ -318,8 +344,10 @@ def execute(manager, profile, path, resume=False):
         else:
             if runtime.read_record(manager, optional=True) is not None:
                 raise RuntimeError('Delta authority exists; use migration resume with its exact execution report.')
+            new_attempt = True
             values = load_preparation(path)
             require_same_deployment(manager, profile, values)
+            stop_policy(values['old'])  # Before creating/probing NFS or stopping services.
             with media.media() as view:
                 if media.identity(view) != values['copy']['media_identity']: raise RuntimeError('Media identity changed.')
             # Verify dependency graph before any stop. Auxiliary stays outside it.
@@ -353,26 +381,28 @@ def execute(manager, profile, path, resume=False):
             if merged != values['merged']: raise RuntimeError('NAS candidate render changed.')
             # Do not create missing app data volumes during storage maintenance.
             infra_deploy.data_volumes(manager, profile, merged)
-            for c in values['old'].values():
-                if c['Config']['Labels']['com.docker.compose.service'] in prep.SERVICES:
-                    if c.get('HostConfig', {}).get('RestartPolicy', {}).get('Name') != 'unless-stopped':
-                        raise RuntimeError('Media restart policy needs review.')
-                    if c['Config'].get('StopSignal', 'SIGTERM') not in ('', 'SIGTERM', '15'):
-                        raise RuntimeError('Media graceful stop signal needs review.')
             _, folder = files.new_directory(output, 'online-review-')
             try: files.union_plan(op.source, op.target, folder, LIMITS)
             finally: os.close(folder)
             require_same_deployment(manager, profile, values)
             op.writer_guard(); op.media_guard()
             op.checkpoint('prepared')
+            registration_started = True  # A failed write/fsync may still leave authority on disk.
             runtime.begin(manager, profile, execution_path)
         op.continue_switch()
         return op.state
     except Exception as exc:
+        preflight_only = new_attempt and not registration_started
         emit('nas_delta_switch_failed', report_directory=execution_path,
              phase=op.state.get('phase', 'preflight') if op else 'preflight', error=str(exc),
-             source_deleted=False, reclaim_ready=False,
-             note='Keep SSD and NAS. No automatic rollback. Resume only the exact durable execution report.')
+             source_deleted=False, reclaim_ready=False, preflight_only=preflight_only,
+             next_action='retry_switch_after_fix' if preflight_only else 'inspect_execution',
+             note=('Keep SSD and NAS. No automatic rollback. ' +
+                   ('No maintenance registration or service stop attempted. After fixing the error, '
+                    'retry migration switch with the original preparation if unchanged; '
+                    'do not resume this preflight report.' if preflight_only else
+                    'Inspect durable registration/checkpoint before migration resume; '
+                    'partial container creation requires inspection.')))
         raise
     finally:
         if op is not None: op.close()

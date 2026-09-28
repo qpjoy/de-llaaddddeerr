@@ -29,6 +29,9 @@ class DeltaSwitchTests(unittest.TestCase):
         self.stack = self.media.stack
         for c in f.rows:
             c['HostConfig']['RestartPolicy'] = {'Name': 'unless-stopped', 'MaximumRetryCount': 0}
+            # Official nginx images use QUIT; Python images leave the Docker
+            # default TERM unset. Exercise actual inspect-style metadata.
+            if self.name(c) == 'gateway': c['Config']['StopSignal'] = 'SIGQUIT'
         websearch = f.add_websearch()
         websearch['HostConfig']['Tmpfs'] = {'/tmp': 'size=64m,noexec,nosuid'}
         f.model['services']['websearch']['tmpfs'] = ['/tmp:size=64m,noexec,nosuid']
@@ -164,6 +167,80 @@ class DeltaSwitchTests(unittest.TestCase):
         infra_services.recover(self.manager, self.profile)
         self.assertEqual(len(self.commands), before)  # Running services untouched.
         with self.assertRaisesRegex(RuntimeError, 'authority exists'): self.execute()
+
+    def test_default_and_numeric_signals_are_reviewed_without_mutating_metadata(self):
+        rows = {self.name(c): copy.deepcopy(c) for c in self.orig}
+        for value in (None, '', 'SIGTERM', '15'):
+            with self.subTest(worker_signal=value):
+                rows['worker']['Config']['StopSignal'] = value
+                before = copy.deepcopy(rows)
+                switch.stop_policy(rows)
+                self.assertEqual(rows, before)
+        rows['gateway']['Config']['StopSignal'] = '3'
+        switch.stop_policy(rows)
+        self.assertEqual(rows['gateway']['Config']['StopSignal'], '3')
+
+    def test_worker_quit_and_unknown_signals_still_refuse_with_service_diagnostic(self):
+        for service, signal in (('worker', 'SIGQUIT'), ('worker-agent-short', '3'),
+                                ('web', 'SIGQUIT'), ('gateway', 'SIGKILL'), ('beat', 'SIGUSR1')):
+            with self.subTest(service=service, signal=signal):
+                rows = {self.name(c): copy.deepcopy(c) for c in self.orig}
+                rows[service]['Config']['StopSignal'] = signal
+                with self.assertRaises(RuntimeError) as error: switch.stop_policy(rows)
+                self.assertIn(service, str(error.exception)); self.assertIn(signal, str(error.exception))
+                self.assertNotIn('private-value', str(error.exception))
+        rows = {self.name(c): copy.deepcopy(c) for c in self.orig}
+        rows['gateway']['Config']['StopSignal'] = 'SIGQUIT'
+        rows['gateway']['Config']['Cmd'] = ['another-server']
+        with self.assertRaisesRegex(RuntimeError, 'gateway'): switch.stop_policy(rows)
+
+    def test_unreviewed_worker_stop_is_refused_before_nfs_creation_or_service_stop(self):
+        next(c for c in self.fixture.rows if self.name(c) == 'worker')['Config']['StopSignal'] = 'SIGQUIT'
+        before = copy.deepcopy(self.fixture.rows)
+        self.prepared = self.fixture.prepare()['report_directory']
+        with mock.patch.object(switch, 'emit') as events:
+            with self.assertRaisesRegex(RuntimeError, 'worker.*SIGQUIT'): self.execute()
+        failed = next(call.kwargs for call in events.call_args_list if call.args[0] == 'nas_delta_switch_failed')
+        self.assertTrue(failed['preflight_only'])
+        self.assertEqual(failed['next_action'], 'retry_switch_after_fix')
+        self.assertIsNone(failed['report_directory'])
+        self.assertFalse((self.auto / runtime.RECORD).exists())
+        self.assertNotIn(media.NFS_VOLUME, self.volumes)
+        self.assertEqual(self.fixture.rows, before)
+        self.assertTrue(all(c['State']['Running'] for c in self.fixture.rows))
+        self.assertFalse(any(c[:2] in (['docker', 'stop'], ['docker', 'run']) for c in self.commands))
+        self.create.assert_not_called()
+
+    def test_preflight_report_is_not_resumable_and_same_preparation_can_retry_switch(self):
+        with mock.patch.object(switch.files, 'union_plan', side_effect=RuntimeError('injected online preflight')), \
+                mock.patch.object(switch, 'emit') as events:
+            with self.assertRaisesRegex(RuntimeError, 'injected online preflight'): self.execute()
+        report = Path(self.current_report())
+        saved = {p: p.read_bytes() for p in report.iterdir() if p.is_file()}
+        self.assertFalse((report / 'execution.json').exists())
+        self.assertFalse((self.auto / runtime.RECORD).exists())
+        self.assertEqual(self.fixture.rows, self.orig)
+        failed = next(call.kwargs for call in events.call_args_list if call.args[0] == 'nas_delta_switch_failed')
+        self.assertEqual(failed['phase'], 'preflight'); self.assertTrue(failed['preflight_only'])
+        self.assertEqual(failed['next_action'], 'retry_switch_after_fix')
+        with self.assertRaisesRegex(RuntimeError, 'registration missing'): self.execute(str(report), resume=True)
+        self.assertEqual(self.execute()['phase'], 'running_on_nas')
+        for p, data in saved.items(): self.assertEqual(p.read_bytes(), data)
+        for p, data in self.prepared_bytes.items(): self.assertEqual(p.read_bytes(), data)
+        self.assertEqual(sum(c[:3] == ['docker', 'volume', 'create'] for c in self.commands), 1)
+
+    def test_partial_registration_write_is_not_labelled_safe_to_repeat_switch(self):
+        def begin_then_fail(*args):
+            original(*args)
+            raise RuntimeError('injected registration fsync uncertainty')
+        original = runtime.begin
+        with mock.patch.object(runtime, 'begin', side_effect=begin_then_fail), mock.patch.object(switch, 'emit') as events:
+            with self.assertRaisesRegex(RuntimeError, 'injected registration'): self.execute()
+        failed = next(call.kwargs for call in events.call_args_list if call.args[0] == 'nas_delta_switch_failed')
+        self.assertFalse(failed['preflight_only']); self.assertEqual(failed['next_action'], 'inspect_execution')
+        self.assertEqual(runtime.read_record(self.manager)['phase'], 'maintenance')
+        self.assertEqual(self.fixture.rows, self.orig)
+        self.assertEqual(self.execute(self.current_report(), resume=True)['phase'], 'running_on_nas')
 
     def test_failure_after_stop_blocks_release_and_boot_but_exact_resume_finishes(self):
         with mock.patch.object(switch.files, 'final_union', side_effect=RuntimeError('injected final sync failure')):
