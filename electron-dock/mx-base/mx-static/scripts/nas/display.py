@@ -87,6 +87,14 @@ def render(value):
         return ('当前 NAS 存储核对：'+('匹配' if value['ok'] else '不通过，禁止据此回收 SSD')+'\n'+
                 table(['服务','核对','内核媒体来源','说明'],rows)+'\n'+
                 '\n'.join(value['issues']+[value['note']]))
+    if event=='nas_delta_copy_prepare_started':return '开始 delta 续传准备；只读媒体，保留旧记录。\n私有报告：'+value['report_directory']
+    if event=='nas_delta_copy_prepared':
+        labels={'ssd_only':'SSD 独有，待补齐','nas_only':'NAS 独有，保留','permissions_only':'仅属性不同，保留 NAS 属性',
+                'shared_quick_match':'共享文件 quick-check 一致','shared_hash_same':'共享差异文件哈希一致'}
+        rows=[[labels.get(k,k),str(v['files']),size(v['logical_bytes']),str(v['tmp_files'])] for k,v in value['groups'].items()]
+        return ('delta 续传清单已准备\n私有报告：'+value['report_directory']+'\n'+
+                table(['分组','文件数','逻辑大小','tmp 数'],rows)+
+                '\n未复制、切换、删除或改写旧 marker；需要 copy resume 显式执行。')
     if event=='nas_repair_started':return '开始修复准备；只读媒体，不重启业务。\n私有报告：'+value['report_directory']
     if event=='nas_repair_progress':return '核对当前部署：'+value['service']
     if event=='nas_repair_hash_plan':

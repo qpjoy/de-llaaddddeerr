@@ -86,6 +86,10 @@ def route(argv, config):
     if tail==['copy','status']:
         if 'copy' not in p['capabilities']:raise RuntimeError('Pre-copy adapter not reviewed for this project.')
         return ['precopy-status',task]
+    if tail[:2] in (['copy','prepare'], ['copy','resume']):
+        if (p['id'],p['adapter'],task)!=('delta','precopy-only','part2') or 'copy' not in p['capabilities']:
+            raise RuntimeError('Pre-copy continuation is only reviewed for delta / part2.')
+        return ['delta-copy-'+tail[1],task]+tail[2:]
     if tail[0]=='task':
         if len(tail)<3 or tail[1] not in p['tasks']:raise RuntimeError('Migration task does not belong to this project.')
         task=tail[1];action={'cleanup':'reclaim','recovery':'recover'}.get(tail[2],tail[2])

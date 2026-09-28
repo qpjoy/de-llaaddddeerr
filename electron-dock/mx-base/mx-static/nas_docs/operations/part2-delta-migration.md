@@ -8,23 +8,37 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 服务器日志确认 `mx-nas-part2-copy-d076b1bf96.service` 成功，job_id 为 `cdc8d85a2475440b86b21c624f365512`。2026-09-24 05:20:33–08:42:43（北京时间）复制了 312,505 个普通文件，逻辑大小 1,000,864,960,734 字节（932.13 GiB）；rsync 退出 0、没有删除文件、当次不限速，phase 为 `precopy_pass_complete`，cutover_ready/reclaim_ready 均为 false。
 
-历史源身份为 device `66309` / inode `7135180`，目标 inode `384893057`，消费者指纹 `918f25a42057ff3334d4458596925cc79dc4a8561a59ec2735db15ac96db05a8`。当前旧工具只报告 `Migration marker/deployment changed or copy is sealed`；不能仅凭此断言是容器 ID 变化，更不能改旧指纹续传。
+历史源身份为 device `66309` / inode `7135180`，目标 inode `384893057`，消费者指纹 `918f25a42057ff3334d4458596925cc79dc4a8561a59ec2735db15ac96db05a8`。最新服务器安装 `ef5b6675f3b12c142d28` 后确认：**只有 consumer_fingerprint 不一致**，当前值为 `1cb035cc33634e4675ddb4f1fd1a24c12c406398c3f0745c481b8eced6b6f9b4`；源目录、目标路径/inode、schema、job_id 和未封存阶段都匹配。旧 marker 只保存摘要，不能反推具体是 ID、镜像或哪个挂载发生变化；不能改旧指纹续传。
 
 当前 delta web 的部署标签已确认：工作目录 `/home/lcy/test/Delta/mx_data`，依次使用 `docker-compose.ghcr.yml`、`docker-compose.local-build.yml`、`docker-compose.db-port.yml`，环境文件为 `deploy/.env.delta-59202.ghcr`。这是定位证据，不代表全部服务的当前模型/启动脚本已审核。宿主机挂载表可见 infra 的 NFS 卷；delta 仍未登记 NAS 切换/恢复/清理。
 
-本次新增 `nas delta copy status` 只读入口，并把旧复合校验逐项输出为 `precopy_resume_check`：包括旧/当前源目录身份、目标路径/inode、消费者指纹、阶段及任务标识。沿用原主机/锁/目录检查，检查不扫描媒体树、不改 marker、不采用新指纹，不提供绕过参数；失败仍退出 1。旧 `nas-precopy.sh --status` 同样得到详细事件。
+`nas delta copy status` 的逐项诊断已完成，不必重复。旧 `nas delta copy --unlimited` 仍保留严格指纹检查，**不要继续重试该入口或删除旧 marker**。
+
+本次增加独立的 `delta copy prepare / resume`，用于已成功预复制后正常部署发生变化的场景：只重用项目无关的文件核验/添加函数，不调用 infra 的迁移执行器，不改变 infra 常量、登记、恢复或清理状态。
 
 同步本次 mx-static 代码后，在服务器 mx-static 目录以 root 执行：
 
 ```bash
 bash scripts/manage.sh nas recovery install &&
-bash scripts/manage.sh nas recovery check
-bash scripts/manage.sh nas delta copy status --json
+bash scripts/manage.sh nas recovery check &&
+bash scripts/manage.sh nas delta copy prepare
 ```
 
-本次运行时快照预期为 `ef5b6675f3b12c142d28`（后续代码/声明改变会改变摘要）。回传 `precopy_resume_check` 及紧随其后的失败/状态事件。若只有 consumer_fingerprint 不匹配，下一步仍须核对当前部署并形成单独的续传依据；本次没有放宽旧记录的身份保护。若源/目标 inode 或阶段也变了，则先处理对应差异。当前不要重复提交 `copy` 或开始切换。
+prepare 只读取媒体和 Docker/内核挂载，扫描目录元数据，将结果写入新的 root 私有目录 `/var/lib/mx-static/nas-precopy-continuation/delta-<32位ID>`。成功摘要为 `nas_delta_copy_prepared`。必须证明当前十个媒体容器健康运行、raw-media 由预期 SSD 父挂载提供，没有已挂载目标或额外 Docker 路径/卷别名访问该媒体。当前消费者、PID、启动时间和内核来源记录到这份新计划；准备或执行期间再部署/重启则拒绝，要求新建计划，旧证据不改写。
 
-本地 374 项 NAS 回归、33 个运行时 Python 3.6 语法及 11 个 Bash 语法检查通过；测试验证每种身份/封存差异均拒绝、记录字节保持不变、输出只含指定元数据，以及统一入口只运行 `--status` 并保留失败退出码。未连接服务器、未复制或重启业务。
+比较策略是保留并集：只把 SSD 独有文件列为候选；NAS 独有和已有属性保留；同名大小冲突拒绝，同大小但 mtime 不同最多核验 1,000 对、双侧合计 512 MiB 的内容哈希。它不是全量哈希校验。已有 NAS 父目录缺失、链接、跨设备、文件变化或真实内容冲突均失败，保留报告，不自动覆盖或扩大冲突读取范围。
+
+成功后，把实际准备报告路径代入（不是旧 job_id、infra 报告或 copy 尝试路径）：
+
+```bash
+bash scripts/manage.sh nas delta copy resume /var/lib/mx-static/nas-precopy-continuation/delta-实际32位ID --unlimited
+```
+
+resume 以后台任务执行，只添加该清单内 NAS 缺失文件。带宽始终不限速，`--unlimited` 可显式保留；一次计划的范围上限为 400,000 个候选、2 TiB、512 MiB 清单，和限速无关，不放宽 infra 原有的小批修复上限。按候选字节检查 NAS 余量加 1 GiB 预留。每个新增文件在本次独占暂存目录写入、哈希读回，再以不替换已有名称的链接发布；只清理本次自己的暂存文件/空目录，不删 SSD 或任何原 NAS 文件。中断后保留完成文件与私有日志；同份计划重试时已存在文件须内容完全一致才跳过，否则停止。新报告不会替换旧 `.mx-static-precopy.json`，因此旧 status 仍可报告原指纹差异，续传结果以新 attempt/result.json 为准。
+
+使用提交输出中的精确 `journalctl` 命令跟随日志，确认 `nas_delta_copy_complete`、phase=`manifest_copy_complete` 和 unit Succeeded。这只完成在线差量清单，仍为 `stopped_writer_recheck_required=true`、`reclaim_ready=false`；当前业务继续写 SSD，不代表已经切换。失败不做回滚、不删已复制文件、不自动继续。不要并行运行其他迁移或部署；同一迁移锁防止本工具任务竞争，不能拦截任意 root/原始 Docker 命令。
+
+本地 399 项 NAS 回归通过（含新增 25 项 delta 续传测试），34 个运行时 Python 文件通过 Python 3.6 语法检查，11 个 Bash 脚本语法检查通过；本次运行时快照预期为 `18ededb3d26883ec29c6`。测试验证真实临时文件的追加、冲突拒绝、部分完成重试、marker 字节不变及源保留；Docker/内核/NFS 边界使用隔离模拟，未连接服务器，也没有执行真实复制或重启。正式切换、发布约束、独立恢复和回收能力仍按下文第三至六步实现。
 
 ## 两个实例的对应关系
 
@@ -59,7 +73,7 @@ NAS 目标：/mnt/nas/mx-internal-server/data/docker/media-volumes/delta_59202_m
 
 ## 第一步：读取现场，暂不改变运行服务
 
-以下为已回传的初始检查命令，保留供复查，不必重复执行整组。当前下一步使用上方新逐项诊断入口。不输出 .env 内容，不读取数据库表，不停止容器。
+以下为已回传的初始检查命令，保留供复查，不必重复执行整组。当前下一步使用上方 `copy prepare`。不输出 .env 内容，不读取数据库表，不停止容器。
 
 ```bash
 date -Is
@@ -78,6 +92,8 @@ docker ps -aq --filter label=com.docker.compose.project=delta_59202 --filter lab
 预期旧记录包含 `phase: precopy_pass_complete`、`last_exit_code: 0`。这只说明当时在线复制成功，仍会有 `cutover_ready: false`、`reclaim_ready: false`。若出现 `Migration marker/deployment changed or copy is sealed`，可能是期间重新部署改变了容器 ID/镜像/挂载；此时先分析现场，不能删 marker、改指纹或把 NAS 目录清空。若 NAS 已被消费者挂载，也不能用旧 SSD 预复制覆盖正在使用的 NAS。
 
 ## 第二步：条件满足后不限速补齐在线增量
+
+**当前服务器已确认消费者指纹变化，应使用上文 `copy prepare / resume`。** 以下原 rsync 入口仅保留给原消费者指纹仍匹配的预复制，不适用于本次回执。
 
 仅在第一步证明旧目标仍是未切换的预复制目录、SSD 仍是本实例的写入来源、源/目标及消费者身份通过检查时执行：
 

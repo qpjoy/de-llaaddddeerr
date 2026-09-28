@@ -30,6 +30,7 @@ from projects import infra_drift
 from projects import infra_repair_copy
 from projects import infra_repair_switch
 from projects import infra_reclaim
+from projects import delta_copy
 import cutover
 import cutover_prepare as prep
 import precopy
@@ -230,6 +231,9 @@ def task_command(action, profile, args):
         return [py,'-B',str(Path(__file__).resolve()),'_execute-media-deploy',args.part,'--maintenance']+(['--build'] if args.build else [])
     if action=='copy':
         return [py,'-B',str(scripts/'precopy.py'),profile['volume'],'--copy']+(['--unlimited'] if args.unlimited else [])
+    if action=='delta-copy-resume':
+        delta_copy.reviewed(profile);delta_copy.validate_path(args.report)
+        return [py,'-B',str(Path(__file__).resolve()),'_execute-delta-copy',args.part,args.report]
     if action=='recover' and profile.get('recovery_mode')=='media-v1':
         infra_runtime.contract(sys.modules[__name__],profile)
         return [py,'-B',str(Path(__file__).resolve()),'_execute-recover',args.part]
@@ -276,15 +280,15 @@ def launch(action,profile,args):
     unit='mx-nas-{}-{}-{}'.format(args.part,action,uuid.uuid4().hex[:10])
     cmd=['systemd-run','--unit='+unit,'--property=RuntimeMaxSec=infinity',
          '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy','repair-switch','repair-resume','media-deploy-recreate') else '90s')]
-    if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy','repair-switch','repair-resume'):cmd+=['--property=ReadOnlyPaths=/data']
+    if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy','repair-switch','repair-resume','delta-copy-resume'):cmd+=['--property=ReadOnlyPaths=/data']
     if action=='reclaim-check':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='media-deploy-recreate':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='recover':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='reclaim':cmd+=['--property=ReadOnlyPaths=/mnt/nas']
-    if action in ('copy','repair-copy'):cmd+=['--property=Nice=19']
+    if action in ('copy','repair-copy','delta-copy-resume'):cmd+=['--property=Nice=19']
     print(run(cmd+command),end='')
     emit('nas_job_started',part=args.part,action=action,unit=unit+'.service',
-         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume','reclaim-check','media-deploy-recreate') else 'sudo bash scripts/manage.sh nas logs '+args.part),
+         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume','reclaim-check','media-deploy-recreate','delta-copy-resume') else 'sudo bash scripts/manage.sh nas logs '+args.part),
          transient=True,reboot_auto_resume=False)
 
 
@@ -427,6 +431,10 @@ def parser():
     for name in ('auto-install','_auto-recover','catalog-list','host-status','host-processes','host-mount-check','host-network','recovery-check-all','recovery-enable-migrated','recovery-disable-all'):sub.add_parser(name)
     sub.add_parser('repair-inspect').add_argument('part',choices=sorted(profiles()))
     sub.add_parser('precopy-status').add_argument('part',choices=sorted(profiles()))
+    sub.add_parser('delta-copy-prepare').add_argument('part',choices=('part2',))
+    for action in ('delta-copy-resume','_execute-delta-copy'):
+        s=sub.add_parser(action);s.add_argument('part',choices=('part2',));s.add_argument('report')
+        s.add_argument('--unlimited',action='store_true',help='Continuation always has no bandwidth limit.')
     for action in ('reclaim-check','_execute-reclaim-check'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         s.add_argument('--business-accepted',action='store_true')
@@ -460,6 +468,8 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra cleanup --business-accepted  # 按已登记清单删除旧 SSD 文件
   bash scripts/manage.sh nas delta copy --unlimited
   bash scripts/manage.sh nas delta copy status      # 只读核对旧预复制记录，逐项显示不能续传的原因
+  bash scripts/manage.sh nas delta copy prepare     # 重部署后另存差量清单；只读媒体，保留旧 marker
+  bash scripts/manage.sh nas delta copy resume <准备报告目录> --unlimited  # 后台只补 NAS 缺失文件
   bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
   bash scripts/manage.sh nas recovery enable --migrated
@@ -521,6 +531,7 @@ def main():
         profile=registry.get(getattr(args,'part',None))
         mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
         mutations.update(('reclaim-check','_execute-reclaim-check','storage-register','media-deploy-recreate','_execute-media-deploy'))
+        mutations.update(('delta-copy-prepare','delta-copy-resume','_execute-delta-copy'))
         if action in mutations:
             audit(action,getattr(args,'part',None),'requested');audit_started=True
         if action.startswith('host-'):
@@ -541,6 +552,10 @@ def main():
             # The helper retains its own lock/host/path checks and streams even
             # failed diagnostic events. It never uses --copy or rewrites state.
             return subprocess.call(['/usr/bin/python3','-B',str(ROOT/'scripts/nas/precopy.py'),profile['volume'],'--status'])
+        elif action=='delta-copy-prepare':
+            with migration_lock():delta_copy.prepare(sys.modules[__name__],profile)
+        elif action=='_execute-delta-copy':
+            with migration_lock():delta_copy.execute(sys.modules[__name__],profile,args.report)
         elif action=='_execute-repair-copy':
             with migration_lock():infra_repair_copy.execute(sys.modules[__name__],profile,args.report)
         elif action=='_execute-reclaim-check':

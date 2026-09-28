@@ -1,6 +1,6 @@
 # NAS 迁移运维入口
 
-**2026-09-28 当前进度（优先于下文历史现场）：** 用户确认 infra 约 500 GiB 媒体已迁移且旧 SSD 已清理，工具快照 `aa1049b7eaba9364b176` 安装成功、infra 恢复已核对/纳入，timer active/enabled。15:53 现场确认 `/data` 可用约 520 GiB；delta / part2 历史预复制成功（312,505 个文件、932.13 GiB），但仍使用 SSD，没有正式切换/清理回执。当前旧复制因身份/阶段复合校验拒绝，已增加 `nas delta copy status` 逐项只读诊断，尚未放开续传。delta 正式切换/回收仍未实现，不能套用 infra 命令。见 [第二卷 delta 的完整顺序与当前可执行命令](operations/part2-delta-migration.md)。新增会话卷的发布兼容见 [9 月 28 日发布检查修复](operations/2026-09-28-release-external.md)；工具安装不代表已实际发布测试。
+**2026-09-28 当前进度（优先于下文历史现场）：** 用户确认 infra 约 500 GiB 媒体已迁移且旧 SSD 已清理；最新服务器快照 `ef5b6675f3b12c142d28` 安装成功，infra 恢复已核对/纳入，timer active/enabled。15:53 现场确认 `/data` 可用约 520 GiB；delta / part2 历史预复制成功（312,505 个文件、932.13 GiB），但仍使用 SSD。新诊断已确认只有消费者指纹变化，源/目标和阶段匹配。现增加独立 `nas delta copy prepare / resume`：审核当前 SSD 挂载、另存差量清单、不限速添加 NAS 缺失文件，保留旧 marker 和两侧已有数据；待服务器执行。delta 正式切换/恢复/回收仍未实现，不能套用 infra 命令。见 [第二卷 delta 的完整顺序与当前可执行命令](operations/part2-delta-migration.md)。新增会话卷的发布兼容见 [9 月 28 日发布检查修复](operations/2026-09-28-release-external.md)。
 
 以下 9 月 24 日及更早记录保留为历史，不是重复第一卷迁移/清理的指令。
 

@@ -56,13 +56,15 @@ def metadata(value, directory=False):
     return value
 
 
-def read_manifest(fd, plan):
+def read_manifest(fd, plan, max_files=None, max_bytes=None, max_manifest_bytes=32 * 1024 ** 2):
+    if max_files is None: max_files = MAX_FILES
+    if max_bytes is None: max_bytes = MAX_BYTES
     source, target_dirs, seen = {}, {}, set()
     files = []
     sha = hashlib.sha256()
     leaf = private_file(fd, 'union-manifest.jsonl', os.O_RDONLY)
     with os.fdopen(leaf, 'rb') as stream:
-        if os.fstat(stream.fileno()).st_size > 32 * 1024 ** 2:
+        if os.fstat(stream.fileno()).st_size > max_manifest_bytes:
             raise RuntimeError('Unexpected repair manifest size.')
         for line in stream:
             sha.update(line); entry = json.loads(line)
@@ -94,7 +96,7 @@ def read_manifest(fd, plan):
               'tmp_files': sum(p.endswith('.tmp') for p in files)}
     if totals != plan['groups'].get('ssd_only', {'files': 0, 'logical_bytes': 0, 'tmp_files': 0}):
         raise RuntimeError('SSD-only totals differ from prepared plan.')
-    if len(files) > MAX_FILES or totals['logical_bytes'] > MAX_BYTES:
+    if len(files) > max_files or totals['logical_bytes'] > max_bytes:
         raise RuntimeError('Online addition budget exceeded; do not widen automatically.')
     # This repair has existing avatar/video/etc parents. Do not invent new
     # directory ownership or permission policy for unreviewed paths.
