@@ -88,6 +88,17 @@ def render(value):
                 table(['服务','核对','内核媒体来源','说明'],rows)+'\n'+
                 '\n'.join(value['issues']+[value['note']]))
     if event=='nas_delta_copy_prepare_started':return '开始 delta 续传准备；只读媒体，保留旧记录。\n私有报告：'+value['report_directory']
+    if event=='nas_delta_migration_prepare_started':return '开始 delta 切换准备；只读部署核对，不停写、不切换。\n私有报告：'+value['report_directory']
+    if event=='nas_delta_migration_service':
+        return '核对 delta {}：镜像匹配={}，启动脚本匹配={}'.format(value['service'],yes(value['image_matches_live']),
+            '不适用' if value['startup_scripts_match_reviewed'] is None else yes(value['startup_scripts_match_reviewed']))
+    if event=='nas_delta_migration_prepared':
+        return ('delta 部署审核：'+('通过' if value['deployment_review_passed'] else '需处理')+
+                '\n私有报告：'+value['report_directory']+'\n'+
+                json.dumps({'review_items':value['review_items'],'databases':value['databases'],
+                            'release_hook':value['release_hook']},ensure_ascii=False,indent=2)+
+                '\nNAS 候选合并已核对；未执行发布、停写或切换，不能据此删除 SSD。\n'+
+                '正式执行还需 delta 发布/恢复适配、停写最终同步及应用身份读写验证。')
     if event=='nas_delta_copy_prepared':
         labels={'ssd_only':'SSD 独有，待补齐','nas_only':'NAS 独有，保留','permissions_only':'仅属性不同，保留 NAS 属性',
                 'shared_quick_match':'共享文件 quick-check 一致','shared_hash_same':'共享差异文件哈希一致'}

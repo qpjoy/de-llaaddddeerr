@@ -7,7 +7,7 @@
 | 项目/任务 | 已确认状态 | 允许的下一步 |
 | --- | --- | --- |
 | infra / part1 | 用户于 9 月 28 日确认约 500 GiB 迁移及旧 SSD 删除完成，业务正常；已确认 `claude_sessions` 是首次新增的普通本地应用卷，与现有媒体/数据库挂载无重叠 | 更新 mx-static 发布检查以允许显式应用发布创建普通新卷；原五个基础卷继续 external 且必须存在。不重复迁移/清理，见 [发布拦截修复](operations/2026-09-28-release-external.md) |
-| delta / part2 | 历史预复制成功：312,505 个文件、932.13 GiB；最新回执仅 consumer_fingerprint 变化，目录身份/阶段匹配；仍写 SSD | 新 `copy prepare / resume` 独立审核当前 SSD 消费者、另存并集清单，只添加 NAS 缺失文件，保持原 marker；不限速，不切换、不删源。正式切换、恢复与回收尚待实现。见 [第二卷迁移步骤](operations/part2-delta-migration.md) |
+| delta / part2 | 历史预复制 312,505 个 / 932.13 GiB；最新续传成功，6,531 新增 + 250 已有并核验，共补齐 6,781 个 / 4.77 GiB；仍写 SSD | 新 `migration prepare <成功 copy 尝试目录>` 只读核对本次复制证据、当前部署和 NAS 候选。保持旧 marker、源及 NAS 文件，不停写、不切换、不删除；正式发布/恢复/切换/回收适配尚待完成。见 [第二卷迁移步骤](operations/part2-delta-migration.md) |
 
 此前 `33e5…` 报告下对 200,543 个文件的历史就绪清单因 11:04 再次回到 SSD 而失效，原证据保留。第二次修复后的 `8610f8a…` 报告取得已验收 `838075ed…` 清单，Git 保留这份登记，不能恢复旧清单。用户随后确认旧 SSD 删除完成；本对话未收到工具逐项删除回执/df，不据此编造实际释放字节或执行方式。完整过程见 [本次现场与只读诊断](operations/2026-09-24-second-fallback.md)。
 

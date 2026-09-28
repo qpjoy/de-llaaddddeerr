@@ -20,7 +20,8 @@
       "nfs_volume": "delta_59202_raw_media_nfs_v1",
       "report": null,
       "plan": null,
-      "storage_file": null
+      "storage_file": null,
+      "deployment_file": "part2.deployment.json"
     }
   },
   "host_policy": "hosts/mx-internal-server.json",

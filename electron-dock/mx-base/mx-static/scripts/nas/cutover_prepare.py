@@ -86,7 +86,8 @@ def validate_config(config, consumers):
     return differences
 
 
-def candidate(consumers):
+def candidate(consumers, nfs_volume=None):
+    if nfs_volume is None: nfs_volume = NFS_VOLUME
     services = {}
     for name, container in consumers.items():
         services[name] = {'image': container['Image'], 'volumes': [{
@@ -99,15 +100,16 @@ def candidate(consumers):
     services['web']['command'] = ['gunicorn', 'mx_data.wsgi:application', '--bind',
         (env.get('MX_HOST') or '0.0.0.0') + ':' + (env.get('MX_PORT') or '8000'),
         '--workers', env.get('MX_WEB_WORKERS') or '2', '--timeout', env.get('MX_WEB_TIMEOUT') or '600']
-    return {'services': services, 'volumes': {'mx_static_raw_media_nfs': {'external': True, 'name': NFS_VOLUME}}}
+    return {'services': services, 'volumes': {'mx_static_raw_media_nfs': {'external': True, 'name': nfs_volume}}}
 
 
-def validate_merged(original, merged, overlay):
+def validate_merged(original, merged, overlay, nfs_volume=None):
+    if nfs_volume is None: nfs_volume = NFS_VOLUME
     # Normalize only the intended changes back to the original model. Any other
     # change (including DB/Redis/env/ports/parent volumes) is a refusal.
     restored = copy.deepcopy(merged)
     new_volume = restored['volumes'].pop('mx_static_raw_media_nfs')
-    if new_volume.get('name') != NFS_VOLUME or new_volume.get('external') is not True:
+    if new_volume.get('name') != nfs_volume or new_volume.get('external') is not True:
         raise RuntimeError('Merged external NFS volume differs.')
     for name in SERVICES:
         service = restored['services'][name]

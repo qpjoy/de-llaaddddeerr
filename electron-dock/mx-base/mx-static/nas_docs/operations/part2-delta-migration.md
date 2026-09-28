@@ -6,6 +6,36 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 ## 最新回执与当前下一步
 
+续传任务 `mx-nas-part2-delta-copy-resume-bb431bb374.service` 已成功，事件 `nas_delta_copy_complete`，phase=`manifest_copy_complete`。成功尝试目录：
+
+```text
+/var/lib/mx-static/nas-precopy-continuation/delta-8cb4f04483264339ba4cdc63df13a788/copy-ec419a215a6148d7aceabd642c30d28a
+```
+
+本次复制 6,531 个，已有且通过核验 250 个，清单共 6,781 个 / 5,117,294,423 字节（4.77 GiB），不限速。原 marker 未改、生产未重启、源未删除。**这只完成在线补复制；delta 仍写 SSD，停写后的最终复核尚未进行，不可删除 SSD。** 不必重复 copy prepare/resume。
+
+此前 gateway 的四次探测超过 5 秒超时；16:31 已恢复 healthy，RestartCount=0、无 OOM。续传完成证明重试通过了运行核对，不能据此断言先前超时由复制或 NAS 引起。
+
+本版新增只读部署审核入口，先收集正式切换所需的服务器证据。同步 mx-static 代码后，在服务器 mx-static 目录以 root 执行：
+
+```bash
+bash scripts/manage.sh nas recovery install &&
+bash scripts/manage.sh nas recovery check &&
+bash scripts/manage.sh nas delta migration prepare \
+  /var/lib/mx-static/nas-precopy-continuation/delta-8cb4f04483264339ba4cdc63df13a788/copy-ec419a215a6148d7aceabd642c30d28a \
+  --json
+```
+
+回传终端中的 `nas_delta_migration_service`、`nas_delta_migration_prepared`（或失败事件）即可，不贴私有配置或 `.env`。新报告保存在 `/var/lib/mx-static/nas-migration-prepare/delta-<32位ID>`，权限为目录 0700、文件 0600。它验证成功复制收据/清单及源、目标、原 marker 身份，核对当前 12 个服务、Compose 标签/模型、镜像和启动脚本，并生成只含 delta 的 NAS 挂载候选。完整 Env/Compose 留在私有报告；公开差异只含字段名或脚本摘要。只读取目录身份和部署信息，不遍历媒体树、不读取全量媒体内容、不创建 NFS 卷、不写 NAS、不重启任何业务。
+
+`deployment_review_passed=true` 仅表示这次部署证据符合已审阅参考，`candidate_merge_verified=true` 仅表示候选合并没有改变媒体挂载及必要启动参数以外的配置。仍有 `execution_allowed=false`、`reclaim_ready=false`；**不能手工拿候选文件运行 Compose up**。已有 web 启动脚本会执行数据库迁移与管理员初始化，迁移需核对实际镜像后采用受控启动，保留数据库和现有账号。若 `review_items` 非空，保留报告按字段分析，不改摘要或绕过检查。
+
+`part2.deployment.json` 只登记现有三个 Compose 文件和独立 delta env 的位置，以及本地已阅读的四个启动脚本摘要，不启用 NAS 权威或恢复。正式 delta 发布/恢复/切换/回收适配仍需完成；目前普通 `--instance delta-59202` 发布仍为 local，不能用重新部署代替迁移。后续顺序是：审核现场、完成发布及恢复保护、维护窗口停写和最终同步、只重建媒体消费者挂 NAS、业务验证、清理前核验、再显式删除 SSD。
+
+本地 411 项 NAS 回归、35 个运行时 Python 文件的 Python 3.6 语法检查、11 个 Bash 脚本语法检查通过；准备入口运行时快照为 `a242d3d71db429e361dd`。新增测试使用真实临时复制收据和私有报告，验证旧证据不变、配置/脚本/身份变化拒绝或列为待审核、数据库/账号配置不变、公开输出不含测试密钥。Docker/Compose/内核/NFS 边界为隔离模拟；未连接服务器，未执行真实部署、停写或删除。
+
+## 历史续传准备与失败重试（已完成，无需照此重跑）
+
 **最新状态覆盖下方首次准备指令：** 服务器已安装 `18ededb3d26883ec29c6`，infra 恢复正常。准备报告 `/var/lib/mx-static/nas-precopy-continuation/delta-8cb4f04483264339ba4cdc63df13a788` 成功：312,505 个共享文件 / 932.13 GiB quick-check 一致，6,781 个 SSD 独有文件 / 4.77 GiB 待添加（不含 tmp），共享哈希候选为 0。复制前全部 6,781 个源文件复核通过。
 
 续传任务 `mx-nas-part2-delta-copy-resume-c8552f3f5c.service`、尝试 `copy-ef8f3e5aea0d4857aeaaa1a86f5699b0` 已开始不限速添加，最后一条进度为 copied=200、logical_bytes=6,097,882，随后状态复核报 `Media HTTP service not healthy: gateway` 并停止。日志只能确认至少 200 个完成文件，实际数量看私有 copy.jsonl；本次没有完成收据。已完成的 NAS 添加保留，源和旧 marker 保留，不做回滚或删除。
@@ -89,13 +119,13 @@ NAS 目标：/mnt/nas/mx-internal-server/data/docker/media-volumes/delta_59202_m
 
 ## 当前实现边界
 
-`deploy/nas/projects/delta.json` 仍为 `adapter: precopy-only`，支持 `status / locate / logs / copy`。`profiles.json` 中 part2 的 `report / plan / storage_file` 均为空；切换准备/执行器和 media-v1 恢复适配目前绑定 infra。应用发布检查把尚未登记 NAS 的 delta 保持在 local 模式。
+`deploy/nas/projects/delta.json` 仍为 `adapter: precopy-only`，支持 `status / locate / logs / copy`，另有只读 `migration prepare`。`profiles.json` 中 part2 的 `report / plan / storage_file` 均为空；正式切换执行器和 media-v1 恢复适配目前绑定 infra。应用发布检查把尚未登记 NAS 的 delta 保持在 local 模式。
 
 因此现在可检查和补齐预复制，**不能把 infra 命令中的名称换成 delta 就完成切换**。`nas delta storage check`、`repair switch`、`cleanup` 等还没有可执行适配；此文不把拟实现命令伪装成可直接运行的命令。也不能用原应用部署命令代替迁移：当前 delta 的正常部署仍会使用本地媒体声明。
 
 ## 第一步：读取现场，暂不改变运行服务
 
-以下为已回传的初始检查命令，保留供复查，不必重复执行整组。当前下一步使用上方 `copy prepare`。不输出 .env 内容，不读取数据库表，不停止容器。
+以下为已回传的初始检查命令，保留供复查，不必重复执行整组。当前下一步使用上方 `migration prepare`。不输出 .env 内容，不读取数据库表，不停止容器。
 
 ```bash
 date -Is
@@ -133,7 +163,7 @@ bash scripts/manage.sh nas delta logs
 
 日志跟随可以用 Ctrl-C 退出，不会停止后台复制。结束时确认 `precopy_result` 的 `last_exit_code: 0` 和 `phase: precopy_pass_complete`，不能只看“后台任务已提交”。若出现保护检查或 rsync 错误，保留两侧和原日志，先诊断；不要手工跳过校验。
 
-## 第三步：接入 delta 的正式切换能力（当前待实现）
+## 第三步：部署审核及正式切换适配（只读准备已实现，执行待实现）
 
 依据第一步现场补齐独立 delta 适配，继续使用统一 manage.sh 和已有应用发布 hook，不另造一套人工部署命令。必须覆盖：
 

@@ -31,6 +31,7 @@ from projects import infra_repair_copy
 from projects import infra_repair_switch
 from projects import infra_reclaim
 from projects import delta_copy
+from projects import delta_migration
 import cutover
 import cutover_prepare as prep
 import precopy
@@ -432,6 +433,7 @@ def parser():
     sub.add_parser('repair-inspect').add_argument('part',choices=sorted(profiles()))
     sub.add_parser('precopy-status').add_argument('part',choices=sorted(profiles()))
     sub.add_parser('delta-copy-prepare').add_argument('part',choices=('part2',))
+    s=sub.add_parser('delta-migration-prepare');s.add_argument('part',choices=('part2',));s.add_argument('attempt')
     for action in ('delta-copy-resume','_execute-delta-copy'):
         s=sub.add_parser(action);s.add_argument('part',choices=('part2',));s.add_argument('report')
         s.add_argument('--unlimited',action='store_true',help='Continuation always has no bandwidth limit.')
@@ -470,6 +472,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas delta copy status      # 只读核对旧预复制记录，逐项显示不能续传的原因
   bash scripts/manage.sh nas delta copy prepare     # 重部署后另存差量清单；只读媒体，保留旧 marker
   bash scripts/manage.sh nas delta copy resume <准备报告目录> --unlimited  # 后台只补 NAS 缺失文件
+  bash scripts/manage.sh nas delta migration prepare <成功 copy 尝试目录>  # 只读审核当前部署及 NAS 候选，不停写/切换
   bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
   bash scripts/manage.sh nas recovery enable --migrated
@@ -501,7 +504,8 @@ infra/delta 已定位登记任务，无需再写 task part1/part2；显式任务
   auto-disable part1       暂停开机恢复；不停止业务容器
 
 part1 有历史切换记录，当前挂载需另行核对；重复 copy/prepare/cutover 会拒绝。
-part2 尚仅支持预复制。storage check 不拦截外部发布，也不授权清理或重置迁移记录。
+part2 支持预复制与只读切换准备，尚无正式切换/回收入口。
+storage check 不拦截外部发布，也不授权清理或重置迁移记录。
 没有服务器 reboot、数据库重启或自动删除命令。迁移任务是临时单元；
 开机恢复在安装和启用后生效，成功后不持续重启/监控容器。
 """
@@ -532,6 +536,7 @@ def main():
         mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
         mutations.update(('reclaim-check','_execute-reclaim-check','storage-register','media-deploy-recreate','_execute-media-deploy'))
         mutations.update(('delta-copy-prepare','delta-copy-resume','_execute-delta-copy'))
+        mutations.add('delta-migration-prepare')
         if action in mutations:
             audit(action,getattr(args,'part',None),'requested');audit_started=True
         if action.startswith('host-'):
@@ -554,6 +559,8 @@ def main():
             return subprocess.call(['/usr/bin/python3','-B',str(ROOT/'scripts/nas/precopy.py'),profile['volume'],'--status'])
         elif action=='delta-copy-prepare':
             with migration_lock():delta_copy.prepare(sys.modules[__name__],profile)
+        elif action=='delta-migration-prepare':
+            with migration_lock():delta_migration.prepare(sys.modules[__name__],profile,args.attempt)
         elif action=='_execute-delta-copy':
             with migration_lock():delta_copy.execute(sys.modules[__name__],profile,args.report)
         elif action=='_execute-repair-copy':

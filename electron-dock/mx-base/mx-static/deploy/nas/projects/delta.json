@@ -10,7 +10,8 @@
     "status",
     "locate",
     "logs",
-    "copy"
+    "copy",
+    "migration-prepare"
   ],
   "ownership": {
     "operator": "root",

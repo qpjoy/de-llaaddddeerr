@@ -20,7 +20,7 @@ def load(config):
         raise RuntimeError('Unreviewed host policy.')
     projects={};claimed=set()
     allowed={'infra-v1':{'status','locate','logs','copy','plan','reclaim','recover','redeploy','permissions','deployment-audit'},
-             'precopy-only':{'status','locate','logs','copy'},'manual-review':{'status','locate','logs'}}
+             'precopy-only':{'status','locate','logs','copy','migration-prepare'},'manual-review':{'status','locate','logs'}}
     for name,filename in index['project_catalog'].items():
         p=read_relative(base,filename)
         if (not re.fullmatch('[a-z][a-z0-9-]*',name) or p.get('schema')!=1 or p.get('id')!=name or
@@ -90,6 +90,10 @@ def route(argv, config):
         if (p['id'],p['adapter'],task)!=('delta','precopy-only','part2') or 'copy' not in p['capabilities']:
             raise RuntimeError('Pre-copy continuation is only reviewed for delta / part2.')
         return ['delta-copy-'+tail[1],task]+tail[2:]
+    if tail[:2]==['migration','prepare']:
+        if (p['id'],p['adapter'],task)!=('delta','precopy-only','part2') or 'migration-prepare' not in p['capabilities']:
+            raise RuntimeError('Migration preparation is only reviewed for delta / part2.')
+        return ['delta-migration-prepare',task]+tail[2:]
     if tail[0]=='task':
         if len(tail)<3 or tail[1] not in p['tasks']:raise RuntimeError('Migration task does not belong to this project.')
         task=tail[1];action={'cleanup':'reclaim','recovery':'recover'}.get(tail[2],tail[2])
