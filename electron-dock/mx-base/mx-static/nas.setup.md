@@ -42,4 +42,16 @@ bash scripts/manage.sh nas recovery check
 # Delta
 ```bash
 bash scripts/manage.sh nas delta copy --unlimited
+
+# delta clean up
+bash scripts/manage.sh nas delta cleanup \
+  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-6f8ee4902178476eb91ba29514392017 \
+  --business-accepted
+
+# delta storage check
+df -hT /data
+bash scripts/manage.sh nas delta status
+bash scripts/manage.sh nas delta storage check
+bash scripts/manage.sh nas recovery check
 ```
+

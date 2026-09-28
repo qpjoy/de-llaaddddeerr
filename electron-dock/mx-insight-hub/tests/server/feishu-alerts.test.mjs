@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { FeishuAlertNotifier, PROBE_INCIDENT_CODE, alertText, feishuWebhook, recoveryText, webhookHint } from '../../server/notifications-feishu.mjs'
+import { SupplierBalanceMonitor } from '../../server/external-platforms/balance-monitor.mjs'
 
 const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/6093808e-6a97-4160-8f3c-af97b1f1d151'
 const OTHER = 'https://open.feishu.cn/open-apis/bot/v2/hook/1790e6fa-fe18-4501-b55e-2de84d0c2fb1'
@@ -105,6 +106,10 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     'UPDATE external_platform.balance_monitors SET feishu_webhook=$2 WHERE provider_key=$1', [provider, value])
 
   const raise = async (source, severity, amount, currency = 'USD') => {
+    await db.query(`UPDATE external_platform.balance_monitors
+      SET last_success_at=now(),last_attempt_at=now(),last_error_code=NULL,
+          credential_scope='credential:1',last_balance=$2,next_check_at=now()+interval '30 minutes'
+      WHERE provider_key=$1`, [source, amount])
     const level = severity === 'critical' ? 'critical' : 'warning'
     const incident = await db.query(`INSERT INTO notifications.incidents
       (category,severity,source,source_scope,code,title,first_occurred_at,last_occurred_at)
@@ -118,7 +123,7 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     return incident.rows[0].id
   }
   const age = async (id, interval) => db.exec(
-    `UPDATE notifications.incidents SET notified_at=notified_at-interval '${interval}',next_reminder_at=next_reminder_at-interval '${interval}' WHERE id=${id}`)
+    `UPDATE notifications.incidents SET last_occurred_at=last_occurred_at-interval '${interval}',notified_at=notified_at-interval '${interval}',next_reminder_at=next_reminder_at-interval '${interval}' WHERE id=${id}`)
   const kinds = async id => (await db.query(
     'SELECT kind FROM notifications.events WHERE incident_id=$1 ORDER BY id DESC', [id])).rows.map(row => row.kind)
 
@@ -281,7 +286,7 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     await age(reopened, '31 minutes')
     await db.query("UPDATE notifications.incidents SET next_reminder_at=notified_at+interval '30 minutes' WHERE id=$1", [reopened])
     const independent = await raise('justone', 'warning', '4.5', 'CNY')
-    await db.query('UPDATE notifications.incidents SET notified_at=now()-interval \'31 minutes\',next_reminder_at=now()+interval \'29 minutes\',notified_severity=\'warning\' WHERE id=$1', [independent])
+    await db.query('UPDATE notifications.incidents SET last_occurred_at=now()-interval \'32 minutes\',notified_at=now()-interval \'31 minutes\',next_reminder_at=now()+interval \'29 minutes\',notified_severity=\'warning\' WHERE id=$1', [independent])
     sent.length = 0
     const staleCandidates = await notifier.candidates()
     assert.deepEqual(staleCandidates.map(row => String(row.id)), [String(reopened)])
@@ -298,6 +303,56 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     await notifier.deliverBatch()
     assert.equal(sent.length, 2, 'critical escalation bypasses even a longer interval')
     assert.match(sent[1].text, /固定间隔 120 分钟/)
+
+    // Reproduce 19:00/19:30: reminder wins the timer race, the check fails,
+    // then the next successful check discovers the top-up. No old low alert
+    // may escape at either slot, even through a stale cross-replica candidate.
+    await db.exec("UPDATE notifications.incidents SET status='closed',recovery_notified_at=now()")
+    const race = await raise('tikhub', 'warning', '4.3473')
+    sent.length = 0
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1)
+    await age(race, '121 minutes')
+    await db.exec("UPDATE external_platform.balance_monitors SET next_check_at=now()-interval '1 second' WHERE provider_key='tikhub'")
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, 'due check blocks the old reminder before a collector claims it')
+    const lease = '11111111-1111-4111-8111-111111111111'
+    await db.query(`UPDATE external_platform.balance_monitors
+      SET next_check_at=now()+interval '30 minutes',lease_token=$1,lease_until=now()+interval '2 minutes'
+      WHERE provider_key='tikhub'`, [lease])
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, 'in-flight check blocks the reminder after next_check_at advances')
+    const monitor = new SupplierBalanceMonitor({ pool })
+    await monitor.saveObservation('tikhub', lease, 'credential:1', { errorCode: 'balance_http_error' })
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, 'failed check cannot present the last successful balance as current')
+
+    // A fresh low result is immediate even if the configured repeat is 120 min.
+    await raise('tikhub', 'warning', '4.2')
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 2)
+    await raise('tikhub', 'warning', '4.1')
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 3, 'each newly confirmed low balance bypasses the repeat cooldown')
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 3, 'the same observation is not immediately delivered twice')
+
+    await age(race, '121 minutes')
+    const staleLow = (await notifier.candidates()).find(row => String(row.id) === String(race))
+    assert.ok(staleLow)
+    await db.query(`UPDATE external_platform.balance_monitors
+      SET lease_token=$1,lease_until=now()+interval '2 minutes' WHERE provider_key='tikhub'`, [lease])
+    await monitor.saveObservation('tikhub', lease, 'credential:1', { balance: '53.4563' })
+    assert.equal(await notifier.claim(staleLow.id), false, 'recovery invalidates a previously selected low alert')
+    reply = () => new Response(JSON.stringify({ code: 19021 }))
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 4)
+    assert.match(sent.at(-1).text, /额度恢复.*\n当前余额：53.4563/)
+    reply = accepted
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 5, 'rejected recovery is retried without another balance query')
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 5, 'successful recovery is only announced once')
 
     const dump = JSON.stringify((await db.query('SELECT * FROM notifications.events')).rows)
     assert.doesNotMatch(dump, /open\.feishu\.cn|6093808e|1790e6fa/, 'webhooks never reach the incident timeline')

@@ -221,12 +221,26 @@ and [Croner patterns](https://croner.56k.guru/usage/pattern/).
 
 ## Feishu delivery (2026-09-18)
 
+The 2026-09-28 fix requires updating the Hub Admin runtime only, with no new
+database migration or Launcher/MX-H2I changes. It does not repair historical
+messages or actively probe the supplier during deployment. Historical
+`balance_http_error` observations still lack the upstream HTTP status.
+
 Migration `098_feishu_balance_alerts.sql` adds delivery state and `notified` /
 `notify_failed` timeline events. `server/notifications-feishu.mjs` ports the
 reviewed standalone script's rules, with state in PostgreSQL rather than its
 `state.json`, so reminders survive restarts and are not duplicated by a replica:
 
-- A new `supplier_balance_low` incident is delivered on the next pass (≤30s).
+- Each newly confirmed low balance is eligible immediately, even within the
+  repeat cooldown. Saving an observation wakes the notifier; the 30-second
+  reconciliation remains the fallback. Default balance checks stay at Beijing
+  :00/:30; this change does not overwrite operator schedules or thresholds.
+- Before claiming an alert, lock the provider monitor before the incident,
+  matching collection/policy lock order. Defer alerts while a check is due or
+  its lease is active, including across replicas. A failed latest balance check,
+  missing successful observation or changed credential scope suppresses old
+  numeric low-balance messages; failure is not zero and does not close the incident.
+  Consecutive query-failure notifications retain their existing separate policy.
 - While it stays open, repeat reminders follow that provider's `feishuSchedule`.
   Calendar schedules use the next fixed slot; intervals are measured from the last
   confirmed delivery. Local edits re-arm the deadline immediately; other replicas
@@ -235,10 +249,16 @@ reviewed standalone script's rules, with state in PostgreSQL rather than its
   changing Cron begins at the next future slot. Calendar reminders missed by more
   than five minutes are skipped; a failed send inside the grace window retries
   on the next reconciliation without consuming the slot.
-- Escalation from warning to critical is delivered immediately; a de-escalation
-  back to warning waits out the window.
+- A fresh low observation, including escalation or a still-low de-escalation,
+  is delivered immediately. Re-reading the same observation does not bypass
+  the configured repeat window.
 - Recovery closes the incident. A later drop is a new incident and alerts at once
   rather than inheriting a cooldown.
+- The first successful check at or above the warning threshold queues one
+  recovery for an incident previously announced to the group, without waiting
+  for the repeat deadline. A rejected recovery send remains retryable without
+  querying the supplier again. Manual closure does not announce recovery.
+
 - Only a bot reply of `code: 0` starts the cooldown. An HTTP error, a rejection,
   an oversized or non-JSON body and a timeout are all retried on the next pass.
   A persistently broken hook records one `notify_failed` per hour, not one per

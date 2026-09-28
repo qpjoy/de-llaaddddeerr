@@ -141,8 +141,8 @@ export class FeishuAlertNotifier {
   }
 
   // Candidates: an open balance incident that has never been delivered, whose
-  // reminder window has elapsed, or that escalated to critical since the last
-  // delivery. A de-escalation back to warning deliberately waits out the window.
+  // reminder window has elapsed, or that has a newly observed low balance.
+  // Probe incidents retain their independent repeat/escalation policy.
   async candidates() {
     const { rows } = await this.pool.query(`
       SELECT i.id, i.source, i.code, i.severity, i.last_occurred_at, i.notified_severity,
@@ -158,6 +158,7 @@ export class FeishuAlertNotifier {
         AND (i.notify_lease_until IS NULL OR i.notify_lease_until < now())
         AND (i.notified_at IS NULL
           OR i.next_reminder_at IS NULL OR i.next_reminder_at <= now()
+          OR (i.code = 'supplier_balance_low' AND i.last_occurred_at > i.notified_at)
           OR (i.notified_severity = 'warning' AND i.severity = 'critical'))
       ORDER BY i.id LIMIT $2`, [ALERT_CODES, BATCH_SIZE])
     return rows
@@ -196,7 +197,19 @@ export class FeishuAlertNotifier {
 
   async claim(id, recovery = false) {
     return this.transaction(async client => {
-      const { rows } = await client.query(`SELECT i.*,m.feishu_schedule,m.feishu_webhook,now() AS server_now,e.evidence
+      // Match the collector/policy lock order: monitor, then incident. A due
+      // check must finish before old evidence can become a new notification,
+      // including when another replica has already advanced next_check_at.
+      const monitor = (await client.query(`SELECT m.*,now() AS server_now
+        FROM external_platform.balance_monitors m
+        WHERE provider_key=(SELECT source FROM notifications.incidents WHERE id=$1)
+        FOR UPDATE OF m SKIP LOCKED`, [id])).rows[0]
+      if (!monitor) return false
+      if (!recovery && (!monitor.enabled
+        || new Date(monitor.next_check_at) <= new Date(monitor.server_now)
+        || (monitor.lease_until && new Date(monitor.lease_until) > new Date(monitor.server_now)))) return false
+      const { rows } = await client.query(`SELECT i.*,m.feishu_schedule,m.feishu_webhook,now() AS server_now,e.evidence,
+        (i.notified_at IS NULL OR i.last_occurred_at > i.notified_at) AS fresh_observation
         FROM notifications.incidents i JOIN external_platform.balance_monitors m ON m.provider_key=i.source
         LEFT JOIN LATERAL (SELECT evidence FROM notifications.events WHERE incident_id=i.id
           AND kind=ANY($2) ORDER BY id DESC LIMIT 1) e ON true
@@ -208,8 +221,12 @@ export class FeishuAlertNotifier {
         if (row.status !== 'closed' || !row.recovered_at || !row.notified_at || row.recovery_notified_at) return false
       } else {
         if (row.status === 'closed') return false
+        if (row.code === BALANCE_INCIDENT_CODE
+          && (monitor.last_error_code || !monitor.last_success_at
+            || monitor.credential_scope !== row.source_scope)) return false
         const escalated = row.notified_severity === 'warning' && row.severity === 'critical'
-        if (row.notified_at && !escalated) {
+        const freshBalance = row.code === BALANCE_INCIDENT_CODE && row.fresh_observation
+        if (row.notified_at && !escalated && !freshBalance) {
           const due = row.next_reminder_at ?? nextMonitorRun(row.feishu_schedule, row.notified_at)
           if (!row.next_reminder_at) await client.query('UPDATE notifications.incidents SET next_reminder_at=$2 WHERE id=$1', [id, due])
           // Fixed-time reminders missed during downtime are skipped, not sent

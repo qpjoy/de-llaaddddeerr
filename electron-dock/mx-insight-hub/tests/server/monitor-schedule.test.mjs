@@ -121,6 +121,9 @@ test('durable schedules hot-update, skip missed cron slots, preserve retries and
       (category,severity,source,source_scope,code,title,first_occurred_at,last_occurred_at)
       VALUES ('supplier.cost','warning','tikhub','test','supplier_balance_low','test',now(),now()) RETURNING id`)).rows[0].id
     const evidence = { balance: '4', currency: 'USD', level: 'warning', warningThreshold: '5', criticalThreshold: '3' }
+    await db.query(`UPDATE external_platform.balance_monitors
+      SET last_success_at=now(),last_attempt_at=now(),last_balance=4,credential_scope='test'
+      WHERE provider_key='tikhub'`)
     await db.query(`INSERT INTO notifications.events(incident_id,kind,actor,evidence,occurred_at)
       VALUES($1,'balance_observed','monitor:balance',$2::jsonb,now())`, [incident, JSON.stringify(evidence)])
     await notifier.deliverBatch()
