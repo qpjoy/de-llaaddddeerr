@@ -7,7 +7,7 @@
 | 项目/任务 | 已确认状态 | 允许的下一步 |
 | --- | --- | --- |
 | infra / part1 | 用户于 9 月 28 日确认约 500 GiB 迁移及旧 SSD 删除完成，业务正常；已确认 `claude_sessions` 是首次新增的普通本地应用卷，与现有媒体/数据库挂载无重叠 | 更新 mx-static 发布检查以允许显式应用发布创建普通新卷；原五个基础卷继续 external 且必须存在。不重复迁移/清理，见 [发布拦截修复](operations/2026-09-28-release-external.md) |
-| delta / part2 | 历史预复制 312,505 个 / 932.13 GiB；最新续传补齐 6,781 个 / 4.77 GiB。准备 `delta-c2c06489…` 通过；最新 switch 在 writer guard 预检失败，尚未登记维护/停业务/切写入 | 同步实际挂载列表顺序比较修复及差异诊断，重试原准备报告的 `migration switch --maintenance --write-test`；失败预检报告 `delta-d4023c29…` 不能 resume。仅忽略顺序，属性/配置/身份变化继续拒绝；保留旧 marker、两侧数据，SSD 清理未启用。见 [第二卷正式切换](operations/part2-delta-switch.md) |
+| delta / part2 | 正式 switch 已成功：报告 `delta-2084964733fa4abfb8d0409ac076c699`，unit `823e84ae77` Succeeded；运行于 NAS，停写补齐通过、独立恢复登记完成，SSD 保留，业务验收待完成 | 当前挂载/恢复只读核对，实际业务验收；不重复 copy/switch/resume、不以 SSD 覆盖 NAS。delta 回收适配尚未启用，不套用 infra 清理。见 [第二卷正式切换](operations/part2-delta-switch.md) |
 
 此前 `33e5…` 报告下对 200,543 个文件的历史就绪清单因 11:04 再次回到 SSD 而失效，原证据保留。第二次修复后的 `8610f8a…` 报告取得已验收 `838075ed…` 清单，Git 保留这份登记，不能恢复旧清单。用户随后确认旧 SSD 删除完成；本对话未收到工具逐项删除回执/df，不据此编造实际释放字节或执行方式。完整过程见 [本次现场与只读诊断](operations/2026-09-24-second-fallback.md)。
 

@@ -1,5 +1,15 @@
 # Delta 正式切换与恢复（2026-09-28）
 
+## 当前状态：已切到 NAS，SSD 保留
+
+服务器已返回 `nas_delta_switch_complete`，unit `mx-nas-part2-delta-migration-switch-823e84ae77.service` 为 `Succeeded`。成功执行报告为 `/var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699`，最终停写复核位于其 `repair-final-f08352c6561c45c5aa34012d3c0c1205`。`phase=running_on_nas`、`final_sync_passed=true`、十个新媒体容器 ID 已记录；`source_deleted=false`、`reclaim_ready=false`、`business_acceptance_pending=true`。
+
+完成事件在内核 NFS/媒体 HTTP/应用默认身份 I/O 检查通过、独立 `/etc/mx-static/nas/delta-media.json` 完成登记之后输出。数据库、Redis 和 websearch 在执行器身份守卫下保留原状态。此回执证明程序切换成功，不能替代用户登录/联网、新旧媒体及后台任务的业务验收，也不证明真实重启/断电/应用重部署演练完成。当前应做下文“成功判据与后续”的只读核对和实际业务验收；delta SSD 回收适配尚未启用。
+
+**不要重复 copy、prepare、switch 或 resume，不要重置旧 marker，不把 SSD 再补写到已经运行的 NAS。** 当前代码已自动登记本次报告，`nas delta locate` 应指向 `delta-20849647…`；无需为登记而改 Git 的旧报告路径或重建业务。本次只更新文档，运行时快照仍为 `a328613b893c026c9df3`，不需要为文档更新重新安装恢复工具。
+
+## 切换前记录（已由上面的成功回执取代）
+
 最新服务器报告 `/var/lib/mx-static/nas-migration-prepare/delta-c2c06489a22e45c7add56c185f335940` 已通过：`review_items=[]`、`deployment_review_passed=true`、候选合并通过，10 个媒体服务的镜像/启动脚本通过，PostgreSQL/Redis 健康，websearch 的私有 `/tmp` tmpfs 保留。它是准备成功，不是 NAS 切换成功。
 
 最新重试 `mx-nas-part2-delta-migration-switch-8366ae4205.service` 在 `preflight_only=true` 失败：`Original SSD writer changed: worker-agent-interactive`，报告 `/var/lib/mx-static/nas-delta-cutover/delta-d4023c293f4041c89ec4d402dfadd3c0`。没有尝试维护登记或停止服务，SSD/NAS 业务文件均保留。前面的部署快照比较已把 Docker 实际 `Mounts` 排序，随后的 writer guard 却比较原始列表，造成不一致。本地加入已观察到的会话卷，仅交换两项排列即复现同样错误。服务器旧日志未记差异字段，现场是否仅顺序变化仍待新日志确认。
@@ -12,7 +22,7 @@
 
 源卷为 `delta_59202_media_data`，只切换其 `data_hub_raw_media`。目标 Docker NFS 卷为 `delta_59202_raw_media_nfs_v1`。infra 的已完成迁移、数据库及队列不参与本次操作。
 
-## 服务器执行
+## 历史执行步骤（本次已完成，不再重复）
 
 在服务器 mx-static 目录，以 root 操作。先同步本次 mx-static 代码，然后安装持久工具；本次预期快照为 `a328613b893c026c9df3`：
 
