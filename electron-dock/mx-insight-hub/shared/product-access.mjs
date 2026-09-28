@@ -1,6 +1,17 @@
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
 import nativeServiceCapabilities from './native-service-access.json' with { type: 'json' }
+import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../server/contracts/night-all-legacy.mjs'
+
+// Match aggregateSourceCatalog's stored-search domain. Live operations still
+// enforce their own capability grants; a product entry never grants API access.
+const searchablePlatforms = new Set([
+  ...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw,
+  'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce',
+])
+const savedRecordCategory = platform => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(platform)
 export const PRODUCT_ACCESS = {
+  '/data-products/search': { domain: 'search', docs: 'aggregate-search' },
+  '/data-products/news': { domain: 'news', docs: 'news-discovery' },
   '/data-products/social-content': { platform: 'social', any: ['social.accounts.search', ...nativeServiceCapabilities.social], docs:'social-content' },
   '/data-products/xiaohongshu-hot-notes': { platform: 'xiaohongshu', any: ['social.posts.hot_search'], docs: 'xiaohongshu-hot-notes' },
   '/data-products/xiaohongshu-inspiration': { platform: 'xiaohongshu', any: ['social.inspiration.list'], docs: 'xiaohongshu-inspiration' },
@@ -17,6 +28,8 @@ export const PRODUCT_ACCESS = {
 export function productAllowed(path, scopes = []) {
   if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('twitter') && ['social.content.search', 'social.content.crawl', 'social.profile.get'].some(capability => scope.capabilities?.includes(capability)))) return true
   const rule = PRODUCT_ACCESS[path]
+  if (rule?.domain) return scopes.some(scope => scope.platforms?.some(platform =>
+    savedRecordCategory(platform) || (rule.domain === 'search' && searchablePlatforms.has(platform))))
   return !!rule && scopes.some(scope => scope.platforms?.includes(rule.platform) && (!rule.any || rule.any.some(value => scope.capabilities?.includes(value))))
 }
 

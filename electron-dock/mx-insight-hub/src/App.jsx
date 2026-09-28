@@ -877,7 +877,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     theme,
