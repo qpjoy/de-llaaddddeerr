@@ -3,7 +3,7 @@ import { adminApi } from './api.js'
 import { ErrorState, Field, LoadingState, PageHeading } from './components.jsx'
 import { PagedItems } from './paged-items.jsx'
 
-const providers = { qixin: '启信 · 企业数据', justone: 'JustOne', tikhub: 'TikHub' }
+const providers = { qixin: '启信 · 企业数据', justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI · Twitter' }
 const blockers = { key_scope_limit_exceeded: '追加后超过 Key 的 128 平台 / 2048 能力限制', procurement_price_missing: '缺少完整端点价格', operation_currency_mismatch: '同一操作含多种币种', procurement_price_invalid: '采购价不符合当前计量规则', rounding_acknowledgment_required: '请确认预算取整规则', explicit_operation_review_required: '已暂停或处于验证阶段，须单独审核', credential_missing: '未配置有效凭据', release_not_active: '接口版本未发布', migration_required: '需先执行数据库迁移', qixin_price_negotiation_required: '面议接口尚未开放' }
 export function ProvisioningPage({ token, query, setQuery, onUnauthorized, notify }) {
   const [data,setData]=useState(null), [drafts,setDrafts]=useState([]), [error,setError]=useState(null), [busy,setBusy]=useState(false)

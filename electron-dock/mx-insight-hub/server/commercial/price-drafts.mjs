@@ -17,7 +17,7 @@ export function procurementAmount(value, currency) {
 export function normalizePriceDraft(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)
     || Object.keys(input).some(key => !['provider', 'name', 'sourceKind', 'sourceUrl', 'observedAt', 'rates'].includes(key))) fail('价格草稿字段无效')
-  if (!['qixin', 'justone', 'tikhub'].includes(input.provider)) fail('供应商不支持逐接口采购策略')
+  if (!['qixin', 'justone', 'tikhub', 'rapidapi'].includes(input.provider)) fail('供应商不支持逐接口采购策略')
   if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 128) fail('请填写草稿名称')
   if (!['official', 'contract', 'manual'].includes(input.sourceKind)) fail('请选择官方参考、账户合同或人工估价')
   let source

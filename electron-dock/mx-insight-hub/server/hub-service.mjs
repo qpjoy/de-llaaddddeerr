@@ -1,4 +1,5 @@
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
+import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
 import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
@@ -256,6 +257,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation),
   ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.operation),
   ...XHS_DISCOVERY_OPERATIONS,
   ...XHS_RESEARCH_OPERATIONS,
@@ -1395,6 +1397,7 @@ export class HubService {
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
       availableCapabilities: [
+        ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => ({ capability: row.operation, ready: providerOperationReady(ecommerceSearch, row.operation) })),
         ...XHS_DISCOVERY_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(capability === 'social.posts.hot_search' ? ecommerceSearch : xiaohongshuAcquisition, capability) })),
         { capability: 'enterprise.query', ready: providerOperationReady(ecommerceSearch, 'enterprise.query') },
         {
@@ -1837,6 +1840,7 @@ export class HubService {
       && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function'
     const grantedNative = NATIVE_FORWARDING_ENDPOINTS.filter(row => canonicalGrants.includes(row.authorizationPlatform)
       && capabilityGrants.includes(row.operation)).map(row => row.operation)
+    grantedNative.push(...Object.values(HUB_SOCIAL_ENDPOINTS).filter(row => canonicalGrants.includes(row.platform) && capabilityGrants.includes(row.operation)).map(row => row.operation))
     let nativeReady = {}
     if (grantedNative.length && this.externalNativeCapabilities && !isTestApiKey(context.apiKey)) {
       try { nativeReady = await this.externalNativeCapabilities({ consumerId: context.consumer.id, operationKeys: grantedNative }) }
@@ -1850,7 +1854,7 @@ export class HubService {
           .filter((capability) => PUBLIC_CAPABILITIES.has(capability))
           .map((capability) => ({
             capability,
-            ready: capability.startsWith('native.') ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
+            ready: capability.startsWith('native.') || Object.values(HUB_SOCIAL_ENDPOINTS).some(row => row.operation === capability) ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
               ? typeof this.segmenter?.segmentWithMeta === 'function'
               : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
                 ? allIngestedReady
@@ -3354,9 +3358,10 @@ export class HubService {
     }
   }
 
-  async aggregateSources(context) {
+  async aggregateSources(context, execution) {
     return { contractVersion: 'mx-insight-hub.aggregate-sources.v1', sources: aggregateSourceCatalog(
       await this.#effectivePlatformGrants(context), await this.#effectiveCapabilityGrants(context), await listCrawlerSpecs(this.store),
+      execution,
     ) }
   }
 
@@ -3370,7 +3375,7 @@ export class HubService {
   }
 
   async aggregatePreview(context, body) {
-    const { sources } = await this.aggregateSources(context)
+    const { sources } = await this.aggregateSources(context, body?.execution)
     const query = normalizeAggregateRequest(body, sources)
     const [plan, billing] = await Promise.all([
       this.store.getConsumerPlan(context.consumer.id), this.store.getTenantBilling(context.tenant.id, { ledgerLimit: 1 }),
@@ -3380,15 +3385,15 @@ export class HubService {
     const readCapabilities = async fn => { try { return await fn({ consumerId: context.consumer.id }) } catch { return null } }
     const [social, ecommerce] = await Promise.all([
       routes.some(row => row.platform === 'xiaohongshu') && this.externalPostCapabilities ? readCapabilities(this.externalPostCapabilities) : null,
-      routes.some(row => row.kind === 'products') && this.externalPlatformCapabilities ? readCapabilities(this.externalPlatformCapabilities) : null,
+      routes.some(row => ['products', 'hub_social'].includes(row.kind)) && this.externalPlatformCapabilities ? readCapabilities(this.externalPlatformCapabilities) : null,
     ])
     const items = routes.map(route => {
-      const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : route.kind === 'products' ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
+      const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : ['products', 'hub_social'].includes(route.kind) ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
       const price = customerRequestPrice(plan?.priceBook, billing.profile, meterKey)
       const enforced = billing.profile?.mode === 'enforced'
       const cost = price.quotedMinor
       assert(Number.isSafeInteger(cost) && cost >= 0, 400, 'quote_too_large', 'Quote exceeds safe integer range')
-      const runtime = (route.platform === 'xiaohongshu' ? social : route.kind === 'products' ? ecommerce : null)?.operations?.[meterKey]
+      const runtime = (route.platform === 'xiaohongshu' ? social : ['products', 'hub_social'].includes(route.kind) ? ecommerce : null)?.operations?.[meterKey]
       return { id: route.id, platform: route.platform, label: route.label, meterKey, pages: 1,
         priceStatus: !enforced ? 'billing_disabled' : price.priceSource === 'tenant_default' ? cost === 0 ? 'unpriced_free' : 'tenant_default' : cost === 0 ? 'explicit_free' : 'priced',
         unitPriceMinor: enforced ? cost : 0, currency: price.currency,
@@ -3406,16 +3411,16 @@ export class HubService {
       estimateOnly: true, dispatches: 0, carriedSources: page?.carriedSources.length || 0 }
   }
 
-  async aggregateSearch(context, { body, idempotencyKey, path, products, onProgress }) {
-    const { sources } = await this.aggregateSources(context)
+  async aggregateSearch(context, { body, idempotencyKey, path, products, hubSocial, onProgress }) {
+    const { sources } = await this.aggregateSources(context, body?.execution)
     const aggregate = normalizeAggregateRequest(body, sources)
     return this.canonicalSearch(context, {
       body: { query: aggregate.query, pageSize: aggregate.pageSize, ...(aggregate.cursor && aggregate.mode === 'stored' ? { cursor: aggregate.cursor } : {}) },
-      idempotencyKey, path, aggregate, originalBody: body, products, onProgress,
+      idempotencyKey, path, aggregate, originalBody: body, products, hubSocial, onProgress,
     })
   }
 
-  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products, onProgress }) {
+  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products, hubSocial, onProgress }) {
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -3587,6 +3592,7 @@ export class HubService {
             requestId: page.rootId || activeRequestId, pageIndex: page.pageIndex,
             onProgress, ...execution,
             search: input => this.search(context, { ...input, liveOnly: true }),
+            hubSocial: input => hubSocial ? hubSocial(context, input) : Promise.reject(new AppError(503, 'social_data_unavailable', 'Hub social data is unavailable')),
             products: input => products ? products(context, input) : Promise.reject(new AppError(503, 'source_unavailable', 'Product search is unavailable')),
           })
           const items = refreshed.items

@@ -4,7 +4,7 @@ export const PRODUCT_WORKBENCHES = [
   { path: '/data-products/search', label: '数据搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
   { path: '/data-products/telegram', label: 'Telegram 会话', docs: 'telegram', prefixes: ['/data/telegram/', '/data/canonical/items/'] },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', docs: 'ecommerce-treasure-box', prefixes: ['/data/ecommerce/', '/data/native/'], nativePlatform: 'ecommerce' },
-  { path: '/data-products/social-content', label: '社媒与内容数据', docs: 'social-content', prefixes: ['/data/native/', '/data/social/accounts/'], nativePlatform: 'social' },
+  { path: '/data-products/social-content', label: '社媒与内容数据', docs: 'social-content', prefixes: ['/data/native/', '/data/social/'], nativePlatform: 'social' },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', docs: 'virtual-supermarket', prefixes: ['/data/virtual-supermarket/'] },
   { path: '/data-products/public-opinion', label: '全国舆情', docs: 'public-opinion', prefixes: ['/data/public-opinion/'] },
   { path: '/data-products/topic-insights', label: '专题洞察', docs: 'topic-reports', prefixes: ['/data/topic-reports', '/data/platforms'] },

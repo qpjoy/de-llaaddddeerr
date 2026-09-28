@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { EXTERNAL_PLATFORM_OPERATION_CATALOG } from '../external-platforms/control-store.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { implementedRoutes } from '../data/source-connections.mjs'
@@ -13,7 +14,7 @@ export const PROVISIONING_OPERATIONS = Object.entries(EXTERNAL_PLATFORM_OPERATIO
   const endpoint = native.get(operation)
   const matches = routes.filter(row => row.provider === provider && row.operation === operation)
   const enterprise = provider === 'qixin'
-  const platform = endpoint?.authorizationPlatform || (enterprise ? 'enterprise' : operation.startsWith('ecommerce.') ? 'ecommerce' : operation === 'social.accounts.search' ? 'social' : 'xiaohongshu')
+  const platform = endpoint?.authorizationPlatform || Object.values(HUB_SOCIAL_ENDPOINTS).find(row => row.operation === operation)?.platform || (enterprise ? 'enterprise' : operation.startsWith('ecommerce.') ? 'ecommerce' : operation === 'social.accounts.search' ? 'social' : 'xiaohongshu')
   return { id: `${provider}:${operation}`, provider, operation, label: definition.label,
     platform, capability: enterprise ? 'enterprise.query' : operation, meterKey: operation,
     contractVersion: definition.contractVersion, endpointKeys: [...definition.endpointKeys],

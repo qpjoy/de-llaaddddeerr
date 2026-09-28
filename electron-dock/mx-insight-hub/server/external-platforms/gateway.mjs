@@ -1,6 +1,8 @@
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
+import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
+import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hub-social.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -193,6 +195,14 @@ function replayedFailure(request) {
 
 function publicFailure(error) {
   const evidence = error.evidence || {}
+  if (error instanceof RapidApiUpstreamError) {
+    if (evidence.errorCode === 'social_egress_unavailable') return new AppError(503, 'social_egress_unavailable', 'Social data egress is unavailable; no business request was dispatched', { outcome: 'rejected', retryable: false })
+    const unknown = evidence.outcome === 'unknown'
+    const code = unknown ? 'social_upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'social_upstream_response_unusable' : 'social_upstream_rejected'
+    return new AppError(evidence.httpStatus === 429 ? 429 : 502, code,
+      `External social data request failed (upstreamStatus: ${evidence.httpStatus ?? 'unknown'}${evidence.businessCode != null ? `, upstreamCode: ${evidence.businessCode}` : ''})`,
+      { upstreamStatus: evidence.httpStatus, ...(evidence.businessCode != null ? {upstreamCode:evidence.businessCode} : {}), outcome: evidence.outcome, retryable: false })
+  }
   if (evidence.businessCode === 302 || evidence.businessCode === 303 || evidence.httpStatus === 429) {
     return new AppError(429, 'external_platform_capacity_exceeded', 'External data capacity is temporarily exhausted')
   }
@@ -506,6 +516,22 @@ export class ExternalPlatformGateway {
       skipIngest: true, replayReleasedFailures: true, nativeForwarding: true,
       normalize: ({ policy }) => normalizeNativeForwardingRequest(key, body, { maxPageSize: Math.min(100, policy.maxPageSize) }),
       dispatch: ({ credential }) => this.adapter.forwardNative(key, body, credential),
+    })
+  }
+
+  async socialData(context, { operation, body, idempotencyKey, path }) {
+    const endpoint = HUB_SOCIAL_ENDPOINTS[operation]
+    if (!endpoint || endpoint.path !== path || this.providerKey !== endpoint.provider) throw new AppError(404, 'not_found', 'Unknown Hub social endpoint')
+    if (!this.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Social data requires reviewed operation controls')
+    const secret = createHash('sha256').update(this.apiKeyPepper).update(`\u0000hub-social:${context.apiKey.id}\u0000`).digest('hex')
+    const codec = createExternalPlatformCursorCodec(secret, context.consumer.id)
+    let normalized
+    return this.#deliver(context, { body, idempotencyKey, path }, {
+      operation: endpoint.operation, authorizationPlatform: endpoint.platform,
+      capabilityMessage: 'This Hub social operation is not granted for this API key',
+      replayReleasedFailures: true, skipIngest: true, billingUnknown: true,
+      normalize: ({ policy }) => (normalized = normalizeHubSocialRequest(operation, body, { maxPageSize: policy.maxPageSize, decodeCursor: codec.decode })),
+      dispatch: ({ credential }) => this.adapter.execute(normalized, { ...credential, encodeCursor: codec.encode }),
     })
   }
 
@@ -1156,6 +1182,7 @@ export class ExternalPlatformGateway {
         })
       } catch (error) {
         if (!(error instanceof JustOneUpstreamError)
+          && !(error instanceof RapidApiUpstreamError)
           && !(plan.nativeForwarding && error instanceof TikHubUpstreamError)) throw error
         const evidence = error.evidence
         const persistedEvidence = persistedCallEvidence(error)

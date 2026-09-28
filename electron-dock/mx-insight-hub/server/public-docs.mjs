@@ -1,5 +1,6 @@
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
+import { hubSocialPaths, hubSocialGuide } from './contracts/hub-social-docs.mjs'
 import { productForDocs } from '../shared/product-workbenches.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
@@ -1186,6 +1187,7 @@ const aggregateSearchRequestBody = { required: true, content: { 'application/jso
           type: 'object', additionalProperties: false, required: ['query'], properties: {
             query: { type: 'string', minLength: 1, maxLength: 200 },
             mode: { type: 'string', enum: ['refresh', 'stored'], default: 'refresh' },
+            execution: { type: 'string', enum: ['hub_only'], description: 'Opt-in Hub-owned live execution; requires mode=refresh. Currently Twitter only, with social.content.search grant. No legacy fallback. Omit to preserve existing routes; include unchanged on continuation. New live social deliveries are not yet indexed for stored search.' },
             platforms: { type: 'array', maxItems: 100, items: { type: 'string' }, description: 'Empty means all authorized searchable platforms.' },
             objectTypes: { type: 'array', items: { type: 'string', enum: AGGREGATE_TYPES } },
             filters: { type: 'object', additionalProperties: false, properties: {
@@ -1257,6 +1259,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
   paths: {
     ...nativeForwardingPaths,
+    ...hubSocialPaths,
     '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
       parameters:[{in:'query',name:'path',required:true,schema:{type:'string'},description:'完整 Hub 数据接口路径；仅支持已登记的价格合同'}],
       description:'只读当前已发布价格表和账户执行价；按目标接口的 Key 权限检查，不采集、不扣费、不锁价。不包含采购价或供应商信息。未发布标准单价不代表免费。',
@@ -1828,6 +1831,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/data/aggregate/sources': {
       get: {
         tags: ['Search'], operationId: 'aggregateSearchSources', summary: 'List searchable Hub platforms for the current API key',
+        parameters: [{ name: 'execution', in: 'query', required: false, schema: { type: 'string', enum: ['hub_only'] }, description: 'Discover only Hub-owned live routes. Omit for existing behavior.' }],
         description: 'Read-only discovery. Includes stored and authorized live operations, never grants new access or contacts a data service. Ecommerce marketplaces are separate logical platforms backed by the existing ecommerce scope.',
         responses: { 200: { description: 'data.sources: platform, label, stored, refresh, objectTypes, routes' }, ...publicErrors },
       },
@@ -6443,7 +6447,7 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
-  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk'].includes(value)))
+  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6465,7 +6469,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
-  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search'],
+  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
@@ -6522,7 +6526,7 @@ export function tenantOpenApiDocument(scopes) {
 
 function tenantDocBody(route, scopes) {
   if (route.nativeKey) return nativeEndpointGuide(route.key)
-  if (route.key === 'social-content') return nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
+  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
@@ -6586,7 +6590,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
     ))
   if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant, procurementEvidence })}</main>`)
   if (route.nativeKey) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeEndpointGuide(route.key)}</main>`)
-  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeServiceGuide(route.key)}</main>`)
+  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {
     html = html.replace(/<a href="(\/docs[^"#]*)(?:#[^"]*)?"[^>]*>([\s\S]*?)<\/a>/g, (link, path, text) => {

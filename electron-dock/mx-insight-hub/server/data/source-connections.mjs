@@ -1,4 +1,5 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
+import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { providerMigrationSnapshot } from './provider-migration.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { officialProviderCatalog, providerCatalogKeys } from './provider-catalog.mjs'
@@ -20,7 +21,7 @@ const SOCIAL_CATALOG = {
 }
 const catalogKey = platform => SOCIAL_CATALOG[platform] ? `source-catalog-${SOCIAL_CATALOG[platform]}` : null
 const CANONICAL_PATH = '/api/v1/data/canonical/search'
-const PROVIDER_LABELS = { tikhub: 'T 平台', justone: 'JustOne', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A', qixin: '启信慧眼（启信宝）', ipsearch: 'ipsearch' }
+const PROVIDER_LABELS = { rapidapi: 'RapidAPI', tikhub: 'T 平台', justone: 'JustOne', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A', qixin: '启信慧眼（启信宝）', ipsearch: 'ipsearch' }
 
 function route(id, fields) {
   return {
@@ -32,6 +33,12 @@ function route(id, fields) {
 
 export function implementedRoutes(sources = []) {
   const rows = []
+  for (const endpoint of Object.values(HUB_SOCIAL_ENDPOINTS)) rows.push(route(`hub-social-${endpoint.key}`, {
+    platform: endpoint.platform, catalogKeys: [catalogKey(endpoint.platform)], provider: endpoint.provider,
+    product: '社媒与内容数据', operation: endpoint.operation, path: endpoint.path, keywordSearch: endpoint.key === 'search',
+    defaultRule: 'Hub 自主接口；首批 Twitter 单页/基础资料，无 Night-All 回退。独立授权和采购策略，默认禁用；尚未完全覆盖旧合同。',
+    evidence: 'server/contracts/hub-social.mjs',
+  }))
   for (const endpoint of NATIVE_FORWARDING_ENDPOINTS) rows.push(route(`native-${endpoint.key}`, {
     platform: endpoint.platform, catalogKeys: providerCatalogKeys(endpoint.platform),
     provider: endpoint.provider, product: endpoint.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据', operation: endpoint.operation, path: endpoint.hubPath,

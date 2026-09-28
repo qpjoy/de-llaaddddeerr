@@ -24,7 +24,8 @@ function failureSummary(attempts) {
     .join('；')
 }
 
-export function ExternalProxyPanel({ token, proxy, onSaved, onUnauthorized, Panel, notify }) {
+export function ExternalProxyPanel({ token, provider = 'tikhub', proxy, onSaved, onUnauthorized, Panel, notify }) {
+  const providerLabel = provider === 'rapidapi' ? 'RapidAPI' : 'TikHub'
   const [mode, setMode] = useState(proxy.mode)
   const [sequenceKey, setSequenceKey] = useState(proxy.sequenceKey || '')
   const [reason, setReason] = useState('')
@@ -42,17 +43,17 @@ export function ExternalProxyPanel({ token, proxy, onSaved, onUnauthorized, Pane
   const save = async event => {
     event.preventDefault(); setBusy(true); setError(null)
     try {
-      await adminApi.updateExternalPlatformProxy(token, 'tikhub', {
+      await adminApi.updateExternalPlatformProxy(token, provider, {
         mode, sequenceKey: mode === 'proxy-sequence' ? sequenceKey : null,
         expectedRevision: proxy.revision, reason: reason.trim(),
         probePolicy: Object.fromEntries(PROBE_FIELDS.map(field => [field.key, numberOrNull(probe[field.key])])),
       })
-      notify?.('TikHub 代理已保存，下一次请求生效', 'success')
+      notify?.(`${providerLabel} 代理已保存，下一次请求生效`, 'success')
       onSaved()
     } catch (error) { setError(error); if (error.status === 401) onUnauthorized?.(error) }
     finally { setBusy(false) }
   }
-  return <Panel title="TikHub 出网代理" subtitle="复用 System Proxy；保存后下一次请求生效，仅影响 TikHub。">
+  return <Panel title={`${providerLabel} 出网代理`} subtitle={`复用 System Proxy；保存后下一次请求生效，仅影响 ${providerLabel}。`}>
     <p>当前：{proxy.mode === 'inherit' ? '继承 System Proxy 全局设置' : proxy.mode === 'system-egress' ? '直接出网' : `Proxy Sequence · ${proxy.sequenceKey}`} · 修订 {proxy.revision}</p>
     <form onSubmit={save}>
       <DropdownField label="出网方式" value={mode} onChange={setMode} disabled={busy} options={[
@@ -65,8 +66,8 @@ export function ExternalProxyPanel({ token, proxy, onSaved, onUnauthorized, Pane
         ...proxy.sequences.map(s => ({ value: s.sequenceKey, label: `${s.displayName}${s.enabled ? '' : '（已停用）'}` })),
       ]} /> : null}
       <fieldset className="mih-proxy-probe">
-        <legend>探测策略覆盖（仅 TikHub）</legend>
-        <p>探测策略属于出网链路，默认在 System Proxy 的 Sequence 上维护；这里只为 TikHub 覆盖。留空即继承。
+        <legend>探测策略覆盖（仅 {providerLabel}）</legend>
+        <p>探测策略属于出网链路，默认在 System Proxy 的 Sequence 上维护；这里只为 {providerLabel} 覆盖。留空即继承。
           {effective ? ` 本次生效：超时 ${effective.timeoutMs}ms · 探测 ${effective.attempts} 次 · 复用 ${effective.cacheTtlMs}ms。` : ''}</p>
         {PROBE_FIELDS.map(field => <Field key={field.key} label={field.label} hint={field.hint}>
           <input className="qp-input" type="number" inputMode="numeric" min={field.min} max={field.max}

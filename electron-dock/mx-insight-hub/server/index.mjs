@@ -3,7 +3,7 @@ import { QixinAdapter } from './adapters/qixin.mjs'
 import { QixinAdminService, QIXIN_METADATA } from './external-platforms/qixin-admin.mjs'
 import { StructuredExternalPlatformCredentialStore, QIXIN_CREDENTIAL_FIELDS } from './external-platforms/structured-credentials.mjs'
 import { QIXIN_CONFIG } from './contracts/enterprise.mjs'
-import { ExternalPlatformProxyStore, createTikHubProxyFetch } from './external-platforms/proxy.mjs'
+import { ExternalPlatformProxyStore, createTikHubProxyFetch, createRapidApiProxyFetch } from './external-platforms/proxy.mjs'
 import { ExternalPlatformEgressRelayStore } from './external-platforms/egress-relay.mjs'
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
@@ -18,6 +18,9 @@ import { IpRiskGateway } from './external-platforms/ip-risk-gateway.mjs'
 import { IpSearchAdminService } from './external-platforms/ipsearch-admin.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
+import { RapidApiAdapter } from './adapters/rapidapi.mjs'
+import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
+import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
 import { loadConfig } from './config.mjs'
 import { AppError } from './core/errors.mjs'
@@ -200,6 +203,19 @@ export async function createRuntime(config = loadConfig()) {
   // flags are bootstrap defaults only; migration-060 rows start
   // in legacy mode so an existing env=1 deployment does not switch off.
   const externalPlatformControlStore = createExternalPlatformControlStore({ pool })
+  const rapidConfig = config.rapidApi || rapidApiConfig()
+  const rapidApiProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress, { providerKey: 'rapidapi' }) : null
+  const rapidApiCredentialStore = createExternalPlatformCredentialStore({ pool, providerKey: 'rapidapi', environmentConfigured: rapidConfig.configured })
+  const rapidApiStore = createExternalPlatformStore({ pool, usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'twitter',
+    circuitFailureThreshold: rapidConfig.circuitFailureThreshold, circuitOpenMs: rapidConfig.circuitOpenMs,
+    uncertainCooldownMs: rapidConfig.unknownFingerprintCooldownMs })
+  const rapidApiAdapter = pool && config.listenerMode !== 'admin' && !rapidConfig.configurationError
+    ? new RapidApiAdapter({ apiKey: rapidConfig.apiKey, fetchImpl: createRapidApiProxyFetch(rapidApiProxyStore), credentialResolver: async () => (await rapidApiCredentialStore.readCredentialSnapshot('rapidapi')).source === 'database'
+      ? await rapidApiCredentialStore.readCredential('rapidapi') : rapidConfig.apiKey, timeoutMs: rapidConfig.timeoutMs }) : null
+  const hubSocialGateway = new ExternalPlatformGateway({ usageStore: store, platformStore: rapidApiStore,
+    adapter: rapidApiAdapter, config: rapidConfig, providerKey: 'rapidapi', credentialStore: rapidApiCredentialStore,
+    operationControlStore: externalPlatformControlStore, apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
   // JustOne is optional and is never a Hub readiness dependency. The admin
   // listener still receives truthful configuration/analytics, while only a
   // listener that serves public APIs constructs the credentialed adapter.
@@ -265,6 +281,8 @@ export async function createRuntime(config = loadConfig()) {
     providerKey: 'qixin', credentialStore: qixinCredentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
+    new ExternalPlatformAdminService({ store: rapidApiStore, config: rapidConfig, credentialStore: rapidApiCredentialStore,
+      proxyStore: rapidApiProxyStore, operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'rapidapi', metadata: RAPIDAPI_METADATA }),
     new QixinAdminService({ store: qixinPlatformStore, config: QIXIN_CONFIG, credentialStore: qixinCredentialStore,
       operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'qixin', metadata: QIXIN_METADATA,
       egressRelayStore: qixinEgressRelayStore }),
@@ -396,6 +414,7 @@ export async function createRuntime(config = loadConfig()) {
       const results = await Promise.allSettled([
         [socialAccountGateway, externalPlatformCredentialStore, 'justone'],
         [socialAccountTikHubGateway, tikHubCredentialStore, 'tikhub'],
+        [hubSocialGateway, rapidApiCredentialStore, 'rapidapi'],
       ].map(async ([gateway, credentials, provider]) => {
         // The Admin listener reads credential metadata only; it never needs
         // decrypted acquisition credentials to render an operation status.
@@ -406,13 +425,22 @@ export async function createRuntime(config = loadConfig()) {
     },
     externalPlatformCapabilities: async options => {
       const existing = await externalEcommerceCapabilities(options)
+      let socialOperations = {}
+      try {
+        const credential = config.listenerMode === 'admin' ? await rapidApiCredentialStore.describeCredential('rapidapi') : null
+        const readiness = await hubSocialGateway.nativeReadiness({ ...options,
+          operationKeys: Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation),
+          ...(credential ? { credentialConfigured: credential.credentialConfigured } : {}),
+        })
+        socialOperations = Object.fromEntries(Object.entries(readiness).map(([key, ready]) => [key, { ready }]))
+      } catch { /* Optional social connector cannot block existing capabilities. */ }
       let enterpriseReady = false
       try {
         const credential = await qixinCredentialStore.describeCredential('qixin')
         const operations = await externalPlatformControlStore.describeProvider('qixin', { config: QIXIN_CONFIG, credentialConfigured: credential.credentialConfigured })
         enterpriseReady = !!pool && operations.some(op => op.effectiveState === 'active' || (op.effectiveState === 'canary' && op.canaryConsumerIds.includes(options?.consumerId)))
       } catch { /* Optional enterprise connector cannot block other capabilities. */ }
-      return { ...existing, operations: { ...existing.operations, ...(await ipRiskGateway.capabilities()).operations,
+      return { ...existing, operations: { ...existing.operations, ...socialOperations, ...(await ipRiskGateway.capabilities()).operations,
         'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
@@ -469,6 +497,7 @@ export async function createRuntime(config = loadConfig()) {
     service,
     store,
     adapter,
+    hubSocialGateway,
     identity,
     queue,
     importer,
@@ -517,6 +546,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
     xiaohongshuHotNotesGateway, xiaohongshuHotNotesStore,
     externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
+    hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
   }
 }

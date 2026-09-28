@@ -23,7 +23,15 @@ export const DEFAULT_PROXY_PROBE_POLICY = Object.freeze({
 // rate limiting.
 const ROUTE_FAILURE_STATUSES = new Set([407, 502, 503, 504])
 
-const PROBE_URL = 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes'
+const PROVIDER_ROUTES = Object.freeze({
+  tikhub: { origin: 'https://api.tikhub.io', probeUrl: 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes' },
+  rapidapi: { origin: 'https://twitter-aio.p.rapidapi.com', probeUrl: 'https://twitter-aio.p.rapidapi.com/' },
+})
+function providerRoute(providerKey) {
+  const route = Object.hasOwn(PROVIDER_ROUTES, providerKey) ? PROVIDER_ROUTES[providerKey] : null
+  if (!route) throw new AppError(400, 'unsupported_proxy_provider', 'Unsupported proxy provider')
+  return route
+}
 
 function boundedInteger(value, { min, max }) {
   return Number.isSafeInteger(value) && value >= min && value <= max ? value : null
@@ -67,7 +75,10 @@ function probeColumnsMissing(error) {
 }
 
 export class ExternalPlatformProxyStore {
-  constructor(pool, deploymentEgress = {}) { this.pool = pool; this.deploymentEgress = deploymentEgress }
+  constructor(pool, deploymentEgress = {}, { providerKey = 'tikhub' } = {}) {
+    this.pool = pool; this.deploymentEgress = deploymentEgress
+    this.providerKey = providerKey; this.providerRoute = providerRoute(providerKey)
+  }
   async snapshot() {
     const client = await this.pool.connect()
     let probeColumns = true
@@ -75,7 +86,7 @@ export class ExternalPlatformProxyStore {
       for (;;) {
         try {
           await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-          const binding = await client.query("SELECT * FROM control.external_platform_proxy_bindings WHERE provider_key = 'tikhub'")
+          const binding = await client.query("SELECT * FROM control.external_platform_proxy_bindings WHERE provider_key = $1", [this.providerKey])
           const settings = await client.query('SELECT * FROM control.agent_proxy_settings WHERE singleton = true')
           const sequences = await client.query(`SELECT sequence_key,display_name,enabled,proxy_keys,direct_fallback${probeColumns ? ',probe_timeout_ms,probe_attempts,probe_cache_ttl_ms' : ''} FROM control.agent_proxy_sequences ORDER BY sequence_key`)
           const endpoints = await client.query('SELECT proxy_key,proxy_url,enabled FROM control.agent_proxy_endpoints')
@@ -116,7 +127,7 @@ export class ExternalPlatformProxyStore {
     const { binding, control } = await this.snapshot()
     const override = binding.egress_mode === 'inherit' ? undefined : binding.egress_mode === 'system-egress' ? null : binding.sequence_key
     return {
-      ...resolveProviderProxyRoute({ baseUrl: 'https://api.tikhub.io' }, control, override),
+      ...resolveProviderProxyRoute({ baseUrl: this.providerRoute.origin }, control, override),
       probePolicy: this.#probePolicy(binding, control),
     }
   }
@@ -149,10 +160,10 @@ export class ExternalPlatformProxyStore {
     const { rows } = await this.pool.query(
       `SELECT route_fingerprint, attempts, created_at
          FROM control.external_platform_proxy_probe_failures
-        WHERE provider_key = 'tikhub'
+        WHERE provider_key = $2
         ORDER BY id DESC
         LIMIT $1`,
-      [Math.min(Math.max(Number(limit) || 10, 1), 50)],
+      [Math.min(Math.max(Number(limit) || 10, 1), 50), this.providerKey],
     )
     return rows.map((row) => ({
       routeFingerprint: row.route_fingerprint,
@@ -163,7 +174,7 @@ export class ExternalPlatformProxyStore {
 
   // Best-effort diagnostics for one failed dispatch. Never part of the paid
   // request's transaction and never able to fail it.
-  async recordProbeFailure({ providerKey = 'tikhub', routeFingerprint = null, attempts = [] } = {}) {
+  async recordProbeFailure({ providerKey = this.providerKey, routeFingerprint = null, attempts = [] } = {}) {
     await this.pool.query(
       `INSERT INTO control.external_platform_proxy_probe_failures(provider_key, route_fingerprint, attempts)
        VALUES ($1, $2, $3::jsonb)`,
@@ -203,14 +214,14 @@ export class ExternalPlatformProxyStore {
         ? await client.query(`UPDATE control.external_platform_proxy_bindings
         SET egress_mode=$1,sequence_key=$2,revision=revision+1,reason=$3,updated_at=now(),
             probe_timeout_ms=$5,probe_attempts=$6,probe_cache_ttl_ms=$7
-        WHERE provider_key='tikhub' AND revision=$4 RETURNING revision`,
-          [mode,sequenceKey,reason.trim(),expectedRevision,probe.timeoutMs,probe.attempts,probe.cacheTtlMs])
+        WHERE provider_key=$8 AND revision=$4 RETURNING revision`,
+          [mode,sequenceKey,reason.trim(),expectedRevision,probe.timeoutMs,probe.attempts,probe.cacheTtlMs,this.providerKey])
         : await client.query(`UPDATE control.external_platform_proxy_bindings
         SET egress_mode=$1,sequence_key=$2,revision=revision+1,reason=$3,updated_at=now()
-        WHERE provider_key='tikhub' AND revision=$4 RETURNING revision`, [mode,sequenceKey,reason.trim(),expectedRevision])
+        WHERE provider_key=$5 AND revision=$4 RETURNING revision`, [mode,sequenceKey,reason.trim(),expectedRevision,this.providerKey])
       if (!result.rowCount) throw new AppError(409, 'proxy_revision_conflict', 'Proxy settings changed; refresh before saving')
       await client.query(`INSERT INTO control.external_platform_proxy_events(provider_key,revision,egress_mode,sequence_key,actor,reason)
-        VALUES ('tikhub',$1,$2,$3,'admin-token',$4)`, [result.rows[0].revision,mode,sequenceKey,reason.trim()])
+        VALUES ($5,$1,$2,$3,'admin-token',$4)`, [result.rows[0].revision,mode,sequenceKey,reason.trim(),this.providerKey])
       await client.query('COMMIT')
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
     finally { client.release() }
@@ -244,15 +255,24 @@ function normalizeProbePolicyInput(input) {
 
 // Probe only an unauthenticated fixed API URL. Never fail over a paid request,
 // including on timeout, HTTP 5xx, response parse failure or unknown billing.
-export function createTikHubProxyFetch(store, {
+export function createTikHubProxyFetch(store, options = {}) {
+  return createProviderProxyFetch(store, { ...options, providerKey: 'tikhub' })
+}
+export function createRapidApiProxyFetch(store, options = {}) {
+  return createProviderProxyFetch(store, { ...options, providerKey: 'rapidapi' })
+}
+
+function createProviderProxyFetch(store, {
+  providerKey,
   fetchImpl = proxyFetch,
   makeAgent = url => new ProxyAgent(url),
   now = () => Date.now(),
 } = {}) {
+  const { origin, probeUrl } = providerRoute(providerKey)
   const selection = new Map()
   return async (url, options = {}) => {
     const target = new URL(url)
-    if (target.origin !== 'https://api.tikhub.io') throw new Error('Unexpected TikHub origin')
+    if (target.origin !== origin || target.username || target.password) throw new Error('Unexpected provider origin')
     const route = await store.route()
     const policy = resolveProbePolicy(route.probePolicy)
     const candidates = [...route.proxyUrls, ...(route.directFallback ? [null] : [])]
@@ -271,11 +291,11 @@ export function createTikHubProxyFetch(store, {
           // the only throws that escape here are the caller's own deadline and
           // the paid request itself. Neither may fail over to another proxy.
           const verdict = await probeCandidate({
-            fetchImpl, dispatcher, candidate, policy, signal: options.signal, now,
+            fetchImpl, dispatcher, candidate, policy, signal: options.signal, now, probeUrl,
           })
           attempts.push(...verdict.attempts)
           if (verdict.callerAborted) {
-            await recordFailure(store, route, attempts)
+            await recordFailure(store, route, attempts, providerKey)
             throw new AppError(
               503,
               'proxy_routes_unreachable',
@@ -294,7 +314,7 @@ export function createTikHubProxyFetch(store, {
         if (dispatcher) void dispatcher.close().catch(() => {})
       }
     }
-    await recordFailure(store, route, attempts)
+    await recordFailure(store, route, attempts, providerKey)
     throw new AppError(
       503,
       'proxy_routes_unreachable',
@@ -304,14 +324,14 @@ export function createTikHubProxyFetch(store, {
   }
 }
 
-async function probeCandidate({ fetchImpl, dispatcher, candidate, policy, signal, now }) {
+async function probeCandidate({ fetchImpl, dispatcher, candidate, policy, signal, now, probeUrl }) {
   const endpoint = proxyEndpointLabel(candidate)
   const attempts = []
   for (let attempt = 1; attempt <= policy.attempts; attempt += 1) {
     const startedAt = now()
     try {
       const deadline = AbortSignal.timeout(policy.timeoutMs)
-      const probe = await fetchImpl(PROBE_URL, {
+      const probe = await fetchImpl(probeUrl, {
         dispatcher,
         method: 'GET',
         redirect: 'error',
@@ -341,11 +361,11 @@ function summarize(attempts) {
 }
 
 // Diagnostics must never turn a recorded proxy failure into a different one.
-async function recordFailure(store, route, attempts) {
+async function recordFailure(store, route, attempts, providerKey) {
   if (typeof store.recordProbeFailure !== 'function' || !attempts.length) return
   try {
     await store.recordProbeFailure({
-      providerKey: 'tikhub',
+      providerKey,
       routeFingerprint: route.fingerprint ?? null,
       attempts,
     })

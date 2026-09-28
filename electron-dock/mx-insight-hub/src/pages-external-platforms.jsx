@@ -72,7 +72,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['qixin', 'justone', 'tikhub', 'night-all', 'night-all-a', 'ipsearch'])
+const SUPPORTED_PROVIDERS = new Set(['qixin', 'justone', 'tikhub', 'rapidapi', 'night-all', 'night-all-a', 'ipsearch'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -105,7 +105,7 @@ function FixLink({ target, children }) {
 }
 
 function providerDisplayName(provider) {
-  return ({ qixin: '启信慧眼', justone: 'JustOne', tikhub: 'TikHub', 'night-all': 'Night-All' })[provider] || provider || '外部平台'
+  return ({ qixin: '启信慧眼', justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All' })[provider] || provider || '外部平台'
 }
 
 const PROCESSING_STAGES = [
@@ -2140,7 +2140,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
             onUnauthorized={onUnauthorized}
             notify={notify}
           /> : null}
-          {provider === 'tikhub' && detail.proxy ? <ExternalProxyPanel notify={notify} Panel={Panel} key={detail.proxy.revision} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
+          {['tikhub', 'rapidapi'].includes(provider) && detail.proxy ? <ExternalProxyPanel provider={provider} notify={notify} Panel={Panel} key={`${provider}-${detail.proxy.revision}`} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           {detail.egressRelay ? <EgressRelayPanel notify={notify} Panel={Panel} key={`egress-${detail.egressRelay.revision}`} token={token} provider={provider} relay={detail.egressRelay} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           <ExternalPlatformOperationControlPanel
             token={token}

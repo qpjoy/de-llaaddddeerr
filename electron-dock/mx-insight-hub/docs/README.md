@@ -19,6 +19,8 @@ those paths retire one operation at a time and are not the target architecture.
 
 ## 数据源与聚合搜索（2026-09-22）
 
+- [Hub 独立社媒接口（第一批）](integrations/hub-social-data.md)：三个新入口、Twitter HTTP 直连、聚合 hub_only、独立授权与启用；默认禁用，尚未完整替代 Night-All。
+- [三个社交接口由 Hub 接管的评估（2026-09-28）](architecture/night-all-search-replacement-assessment-2026-09-28.md)：原始链路、性能边界、三接口能力差距、SearXNG 与自建工具和目录组织；后续实现状态见上条。
 - [数据搜索产品、全局目录与上游迁移规划](product/data-search.md)
 - [接入看板、现有链路与聚合搜索交付记录](architecture/aggregate-search-and-source-routing.md)
 - [数据源目录与 Hub 实际接入对账规划（2026-09-23）](product/source-catalog-reconciliation-plan.md)：历史覆盖与实际接通分离、能力和路径关联、结构化接入线索、证据对账与分期改造；规划未实施。

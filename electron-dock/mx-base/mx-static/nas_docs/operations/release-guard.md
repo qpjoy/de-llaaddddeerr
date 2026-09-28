@@ -4,6 +4,8 @@
 
 ## 当前现场与启用顺序
 
+**9 月 28 日更新优先于下面的历史顺序：** 用户已确认约 500 GiB 迁移和旧 SSD 删除完成，业务正常运行。发布被旧版“所有卷都必须 external”规则阻止；现已确认唯一新增项为普通本地 `claude_sessions`，目标 `/root/.claude/projects`，无现存挂载冲突。新规则由 mx-static 管理，允许显式应用发布创建符合条件的新卷，原 NAS/数据库保护不变；同步 mx-static 并重新安装工具后，只读预检通过即可沿用原应用发布脚本及命令。无需再改应用脚本或手工创建卷，见 [本次 external 拦截修复](2026-09-28-release-external.md)。以下旧现场为历史过程，不是重复迁移、验收或删除的指令。
+
 最新跟进：用户已确认业务，并回传重部署后的原始核对结果，十个新容器仍全部使用 NFS，独立恢复通过。旧回收检查因历史部署摘要变化拒绝；目前已增加绑定当前部署的新回收清单适配，见 [事故记录末尾](2026-09-24-second-fallback.md)。尚未收到新适配的服务器成功核验，不应沿用发布前的清单删除。下面安装步骤保留为入口维护说明，不代表仍需重复发布验证。
 
 infra 本次 NAS 切换已经成功，报告为 `po_infra_media_data-8610f8a08acd40dc983a14d515aa2ec5`，最终停写同步通过；十个服务均确认内核 NFS 挂载，PostgreSQL/Redis 保持原容器。独立恢复已核对并纳入，timer active/enabled。用户确认业务尚未全部检查；SSD 保留，尚无本次验收及回收就绪清单。完整回执见 [本次修复记录](2026-09-24-second-fallback.md)。
@@ -48,7 +50,8 @@ bash -n /home/lcy/test/Delta/mx_data/scripts/deploy_public_ghcr.sh
 
 - `mx_data`：渲染当前应用配置并最后加入 `part1.release.json`，所有媒体服务含原生 NFS 子卷和 nocopy，gateway 只读。现有应用启动命令、环境变量、镜像、API、数据库配置不由存储接入重写。改变媒体角色/路径或项目/卷身份须重新核对。
 - `delta_59202`：仍处预复制阶段，保持本地存储，绝不使用 infra 卷；以后有切换记录或 NAS 声明时，未支持的发布适配会拒绝执行，不能静默继续 SSD。
-- 注册、NAS 声明、NFS 卷定义或必需数据卷缺失时失败；所有 infra 数据卷作为 external 引用。已有数据库/Redis 的卷映射与当前模型不同时拒绝发布。不会创建空数据卷修复 `down -v`、Docker 重装或缺失元数据。[Docker external 卷说明](https://docs.docker.com/reference/compose-file/volumes/#external)
+- 注册、NAS 声明、NFS 卷定义或必需基础卷缺失时失败；`media_data`、`mx_static_raw_media_nfs`、`postgres_data`、`redis_data`、`static_data` 必须作为 external 引用。额外显式 external 卷也必须存在。已有数据库/Redis 的卷映射与当前模型不同时拒绝发布，不会创建空基础卷修复 `down -v`、Docker 重装或缺失元数据。[Docker external 卷说明](https://docs.docker.com/reference/compose-file/volumes/#external)
+- 其他非 external 卷可以由显式应用发布创建：名称限当前项目命名空间，driver 只能默认/local，无 driver_opts，不得冒用其他声明的卷名或覆盖媒体、static、其他配置/现存挂载。若已存在，核对本地 driver、数据目录、Compose 项目/卷键标签，其他项目使用时拒绝。规则不按 `claude_sessions` 名称写死。只读预检和恢复不会创建它；它仍遵循应用卷生命周期，不自动纳入 NAS 迁移/备份。
 - 每次 Compose 调用前检查现有媒体消费者的挂载声明与运行容器的内核 NFS 来源。仍有 SSD 媒体消费者时拒绝发布，避免直接加挂载遮住未合并数据。不存在的媒体容器可由显式应用 `up` 创建；末尾检查要求十个角色齐全。
 - 临时 `compose run` 同样携带 NAS 声明，禁止通过其 `--volume`、`--entrypoint` 等额外选项绕过审核模型。原应用命令及业务参数按数组原样传递；不打印私有渲染配置。
 - 应用脚本在修改 `.env`、git pull、构建、任务维护之前先检查；NAS 模式下，其媒体权限处理会跳过整个 raw-media 子树；发布后再次检查挂载。delta 原权限行为不变。
@@ -65,4 +68,6 @@ bash -n /home/lcy/test/Delta/mx_data/scripts/deploy_public_ghcr.sh
 
 ## 验证
 
-本地 332 项 NAS 测试、31 个 Python 3.6 语法检查、10 个 mx-static Bash 脚本及实际应用脚本的 Bash 语法检查通过。回归覆盖 NAS/数据库卷缺失、SSD 消费者、错误卷选项、NAS 不可达、数据库卷映射漂移、修复占锁、声明/环境变化、挂载遮盖、缺登记/维护未完成、新镜像和业务 env 保留、delta 隔离、命令参数绕过、后置挂载失败及不存在容器的显式重建。真实 Compose CLI 离线验证覆盖文件合并，保留环境/命令/数据库设置；补丁在应用脚本临时副本通过 git apply，获得用户明确授权后已应用到本地 po-infra 的这一个脚本，并验证两个实例的参数传递。其他本地已有修改保留；没有对生产服务器执行发布或重启。
+9 月 28 日新增应用卷支持完成后，本地 368 项 NAS 测试、33 个运行时 Python 3.6 语法检查、11 个 mx-static scripts 下 Bash 语法检查通过，新增卷边界见 [验证记录](2026-09-28-release-external.md)。
+
+最初发布接入完成时，332 项 NAS 测试、31 个 Python 3.6 语法检查、10 个 mx-static Bash 脚本及实际应用脚本的 Bash 语法检查通过。回归覆盖 NAS/数据库卷缺失、SSD 消费者、错误卷选项、NAS 不可达、数据库卷映射漂移、修复占锁、声明/环境变化、挂载遮盖、缺登记/维护未完成、新镜像和业务 env 保留、delta 隔离、命令参数绕过、后置挂载失败及不存在容器的显式重建。真实 Compose CLI 离线验证覆盖文件合并，保留环境/命令/数据库设置；补丁在应用脚本临时副本通过 git apply，获得用户明确授权后已应用到本地 po-infra 的这一个脚本，并验证两个实例的参数传递。其他本地已有修改保留；没有对生产服务器执行发布或重启。

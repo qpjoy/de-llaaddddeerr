@@ -24,6 +24,7 @@
     "ops:api-key-quota-indexes": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f scripts/api-key-quota-indexes.sql",
     "migrate:external-platform-credentials": "node scripts/migrate-tikhub-credential.mjs --all",
     "migrate:tikhub-credential": "node scripts/migrate-tikhub-credential.mjs",
+    "migrate:rapidapi-credential": "node scripts/migrate-tikhub-credential.mjs --provider rapidapi",
     "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs && bash tests/manage-script.test.sh",
     "test:server": "node --test tests/server/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json",

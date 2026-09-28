@@ -246,3 +246,49 @@ test('credential migration dry-run reads metadata but performs no write', async 
     globalThis.fetch = originalFetch
   }
 })
+
+test('RapidAPI migration reads current config, environment and legacy twitterDaily in Night-All order', async () => {
+  const fixture = await configFixture()
+  const rapid = 'synthetic-rapid-api-key'
+  await writeFile(fixture.path, JSON.stringify({ crawlerProviders: { rapidapi: { apiKey: rapid } } }), { mode: 0o600 })
+  assert.deepEqual(await readNightAllExternalPlatformCredentials(fixture.path, { providers: ['rapidapi'], environment: { RAPIDAPI_KEY: 'different-env' } }), { rapidapi: rapid })
+  await writeFile(fixture.path, '{}', { mode: 0o600 })
+  assert.deepEqual(await readNightAllExternalPlatformCredentials(fixture.path, { providers: ['rapidapi'], environment: { RAPIDAPI_KEY: rapid } }), { rapidapi: rapid })
+  const legacy = join(fixture.directory, 'legacy.json')
+  await writeFile(legacy, JSON.stringify({ twitterDaily: { apiKey: rapid } }), { mode: 0o600 })
+  assert.deepEqual(await readNightAllExternalPlatformCredentials(fixture.path, { providers: ['rapidapi'], environment: { NIGHT_ALL_NEWS_CONFIG_PATH: legacy } }), { rapidapi: rapid })
+  await chmod(legacy, 0o644)
+  await assert.rejects(readNightAllExternalPlatformCredentials(fixture.path, { providers: ['rapidapi'], environment: { NIGHT_ALL_NEWS_CONFIG_PATH: legacy } }), /permissions/)
+  await assert.rejects(readNightAllExternalPlatformCredentials(fixture.path, { providers: ['rapidapi'], environment: { RAPIDAPI_KEY: 'bad\nvalue' } }), /missing or invalid/)
+})
+
+test('RapidAPI is an explicit migration target and does not overwrite an existing Hub credential implicitly', async () => {
+  const { migrationProviders } = await import('../../scripts/migrate-tikhub-credential.mjs')
+  assert.deepEqual(migrationProviders(['--all']), ['tikhub','justone'])
+  assert.deepEqual(migrationProviders(['--provider','rapidapi']), ['rapidapi'])
+  assert.throws(() => migrationProviders(['--provider','unknown']))
+  const fixture = await configFixture()
+  await writeFile(fixture.path, JSON.stringify({ crawlerProviders: { rapidapi: { apiKey: 'synthetic-rapid-migration-secret' } } }), { mode: 0o600 })
+  const original = globalThis.fetch, calls = []
+  let configured = false
+  globalThis.fetch = async (url, init) => {
+    calls.push(init.method)
+    assert.equal(init.redirect, 'error', 'Admin Token and provider key must not follow a redirect outside loopback')
+    assert.match(String(url), /external-platforms\/rapidapi/)
+    if (init.method === 'GET') return Response.json({ data: { credential: { source: configured ? 'database' : 'environment', credentialConfigured: configured, revision: 2 } } })
+    assert.deepEqual(JSON.parse(init.body), { expectedRevision: 2, apiKey: 'synthetic-rapid-migration-secret' })
+    return Response.json({ data: { source: 'database', credentialConfigured: true, revision: 3 } })
+  }
+  const env = { NIGHT_ALL_CONFIG_PATH: fixture.path, MX_INSIGHT_ADMIN_TOKEN: ADMIN_TOKEN }
+  try {
+    const dry = await migrateExternalPlatformCredentials({ ...env, MX_INSIGHT_EXTERNAL_CREDENTIAL_MIGRATION_DRY_RUN: '1' }, { providers: ['rapidapi'] })
+    assert.deepEqual(calls, ['GET'])
+    assert.doesNotMatch(formatMigrationResults(dry), /synthetic-rapid-migration-secret/)
+    const result = await migrateExternalPlatformCredentials(env, { providers: ['rapidapi'] })
+    assert.equal(result.providers[0].source, 'database')
+    assert.deepEqual(calls, ['GET','GET','PUT'])
+    configured = true
+    await assert.rejects(migrateExternalPlatformCredentials(env, { providers: ['rapidapi'] }), /already has a RapidAPI/)
+    assert.equal(calls.filter(method=>method==='PUT').length,1)
+  } finally { globalThis.fetch = original }
+})

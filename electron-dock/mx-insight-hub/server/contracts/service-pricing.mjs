@@ -1,8 +1,11 @@
 import { nativeForwardingByPath } from './native-forwarding.mjs'
+import { hubSocialByPath } from './hub-social.mjs'
 import { QIXIN_CATALOG } from './enterprise.mjs'
 import { customerRequestPrice } from '../billing/contracts.mjs'
 const enterprises = new Set(QIXIN_CATALOG.apis.map(api => api.api_id))
 export function servicePriceDefinition(path) {
+  const social = hubSocialByPath(path)
+  if (social) return { platform:social.platform, capabilities:[social.operation], meterKey:social.operation }
   const native = nativeForwardingByPath(path)
   if (native) return { platform:native.authorizationPlatform, capabilities:[native.operation], meterKey:native.operation }
   const enterprise = /^\/api\/v1\/data\/enterprise\/([0-9]+\.[0-9]+)\/query$/.exec(path)

@@ -1598,7 +1598,7 @@ export class AgentControlStore {
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       if (error.code === '23503' && error.constraint === 'external_platform_proxy_bindings_sequence_key_fkey') {
-        throw new AppError(409, 'agent_proxy_sequence_in_use', 'Change the TikHub System Proxy binding before deleting this sequence')
+        throw new AppError(409, 'agent_proxy_sequence_in_use', 'Change the upstream supplier System Proxy binding before deleting this sequence')
       }
       throw error
     } finally {

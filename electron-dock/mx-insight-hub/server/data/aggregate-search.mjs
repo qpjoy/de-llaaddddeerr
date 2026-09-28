@@ -4,6 +4,7 @@ import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-leg
 import { JUSTONE_ENDPOINTS } from '../contracts/justone.mjs'
 import { publicStoredSearchItem } from './stored-search.mjs'
 import { createAggregateCursorCodec } from '../external-platforms/cursor.mjs'
+import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 
 export const AGGREGATE_CONTRACT = 'mx-insight-hub.aggregate-search.v1'
 export const AGGREGATE_TYPES = ['post', 'article', 'message', 'chat', 'comment', 'product', 'account', 'user', 'profile', 'saved_record', 'commerce_capture', 'opinion_item']
@@ -29,10 +30,17 @@ function time(value, name) {
 
 // Executable routes are pinned here, independently of the editable source catalog.
 // Provider selection remains inside each existing, governed operation.
-export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = []) {
+export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = [], execution) {
+  if (execution !== undefined && execution !== 'hub_only') fail('execution must be hub_only when specified')
   const crawlers = new Map(crawlerSpecs.map(spec => [spec.platform, spec]))
   const supported = new Set([...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, 'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce', ...crawlers.keys()])
   return [...new Set(grants)].filter(platform => supported.has(platform)).sort().flatMap(platform => {
+    if (execution === 'hub_only') {
+      const endpoint = HUB_SOCIAL_ENDPOINTS.search
+      const available = platform === endpoint.platform && capabilities.includes(endpoint.operation)
+      return [{ platform, label: labels[platform] || platform, stored: true, refresh: available, objectTypes: ['post'],
+        routes: available ? [{ id: `hub-posts:${platform}`, platform, kind: 'hub_social', operation: endpoint.operation, objectType: 'post', label: labels[platform] }] : [] }]
+    }
     if (platform === 'ecommerce') return Object.keys(JUSTONE_ENDPOINTS).map(marketplace => ({
       platform: marketplace, label: labels[marketplace] || marketplace, stored: true,
       refresh: capabilities.includes('ecommerce.products.search'), objectTypes: ['product'],
@@ -54,11 +62,12 @@ export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = []) 
 
 export function normalizeAggregateRequest(body, sources) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) fail('JSON object body is required')
-  const allowed = new Set(['query', 'platforms', 'objectTypes', 'filters', 'pageSize', 'cursor', 'mode'])
+  const allowed = new Set(['query', 'platforms', 'objectTypes', 'filters', 'pageSize', 'cursor', 'mode', 'execution'])
   if (Object.keys(body).some(k => !allowed.has(k))) fail('Unsupported aggregate search field')
   if (typeof body.query !== 'string' || !body.query.trim() || body.query.length > 200) fail('query must contain 1–200 characters')
   const mode = body.mode ?? 'refresh'
   if (!['stored', 'refresh'].includes(mode)) fail('mode must be stored or refresh')
+  if (body.execution !== undefined && (body.execution !== 'hub_only' || mode !== 'refresh')) fail('execution=hub_only requires mode=refresh')
   const requested = strings(body.platforms, 'platforms')
   const available = sources.map(source => source.platform)
   if (requested.some(platform => !available.includes(platform))) throw new AppError(403, 'platform_not_granted', 'A requested platform is not granted or searchable')
@@ -78,8 +87,9 @@ export function normalizeAggregateRequest(body, sources) {
   if (mode === 'refresh' && (filters.tags.length || filters.from || filters.to)) throw new AppError(400, 'refresh_filters_unsupported', 'Live sources do not support Hub tags/date filters; use stored mode or remove these filters')
   const selected = sources.filter(source => platforms.includes(source.platform))
   const routes = mode === 'refresh' ? selected.flatMap(source => source.routes).filter(route => !objectTypes.length || objectTypes.includes(route.objectType)) : []
+  if (body.execution === 'hub_only' && routes.some(route => route.kind !== 'hub_social')) fail('Hub-only search requires Hub-owned source routes')
   if (mode === 'refresh' && !routes.length) throw new AppError(400, 'refresh_unavailable', 'No selected source supports this authorized live operation')
-  return { query: body.query.trim(), platforms, authorizationPlatforms: [...new Set(platforms.map(platform => Object.hasOwn(JUSTONE_ENDPOINTS, platform) ? 'ecommerce' : platform))].sort(),
+  return { ...(body.execution ? {execution:body.execution} : {}), query: body.query.trim(), platforms, authorizationPlatforms: [...new Set(platforms.map(platform => Object.hasOwn(JUSTONE_ENDPOINTS, platform) ? 'ecommerce' : platform))].sort(),
     marketplaces: platforms.filter(platform => Object.hasOwn(JUSTONE_ENDPOINTS, platform)), objectTypes, filters, pageSize, cursor: body.cursor ?? null, mode, routes }
 }
 
@@ -150,7 +160,7 @@ function liveItem(item, route, requestId) {
     externalId: route.marketplace ? `${route.marketplace}:${externalId}` : externalId,
     platform: route.platform, objectType: route.objectType,
     datasetId: route.kind === 'products' ? 'ecommerce.products.v1' : null,
-    title: scalar(item.title), body: scalar(item.text), url: scalar(item.url),
+    title: scalar(item.title), body: scalar(route.kind === 'hub_social' ? item.content : item.text), url: scalar(item.url),
     contentType: scalar(item.contentType), authorExternalId: scalar(item.author?.id || item.shop?.id),
     authorName: scalar(item.author?.name || item.shop?.name), metrics: item.metrics,
     eventTime: item.publishedAt || item.eventTime, collectedAt: item.collectedAt,
@@ -161,7 +171,7 @@ function liveItem(item, route, requestId) {
 export const AGGREGATE_EXECUTION = Object.freeze({ concurrency: 3, dispatchBudgetMs: 120_000,
   deadlineSemantics: 'stop_new_dispatch_then_drain', hardResponseDeadlineMs: null })
 
-export async function refreshAggregate(query, { requestId, search, products, concurrency = AGGREGATE_EXECUTION.concurrency,
+export async function refreshAggregate(query, { requestId, search, products, hubSocial, concurrency = AGGREGATE_EXECUTION.concurrency,
   dispatchBudgetMs = AGGREGATE_EXECUTION.dispatchBudgetMs, pageIndex = 1, onProgress, now = () => performance.now() }) {
   const outcomes = new Array(query.routes.length)
   const deadline = now() + dispatchBudgetMs
@@ -182,7 +192,9 @@ export async function refreshAggregate(query, { requestId, search, products, con
       emit('source.started', { id: route.id, platform: route.platform, label: route.label })
       const idempotencyKey = `agg-${requestId}-${pageIndex > 1 ? `p${pageIndex}-` : ''}${createHash('sha256').update(route.id).digest('hex').slice(0, 12)}`
       try {
-        const result = route.kind === 'products'
+        const result = route.kind === 'hub_social'
+          ? await hubSocial({ operation: 'search', body: { platform: route.platform, query: query.query, count: 20, ...(route.cursor ? { cursor: route.cursor } : {}) }, idempotencyKey, path: HUB_SOCIAL_ENDPOINTS.search.path })
+          : route.kind === 'products'
           ? await products({ body: { marketplace: route.marketplace, query: query.query, deliveryMode: 'live_only', ...(route.cursor ? { cursor: route.cursor } : {}) }, idempotencyKey, path: '/api/v1/data/ecommerce/products/search' })
           : await search({ body: { platform: route.platform, query: query.query, pageSize: 20, ...(route.cursor ? { cursor: route.cursor, type: 'stable' } : {}) }, idempotencyKey, path: '/api/v1/data/search' })
         if (result.status >= 400) throw new AppError(result.status, 'source_request_failed', 'Source request failed', { requestId: result.requestId })

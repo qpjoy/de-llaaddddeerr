@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createTikHubProxyFetch, DEFAULT_PROXY_PROBE_POLICY, ExternalPlatformProxyStore, resolveProbePolicy } from '../../server/external-platforms/proxy.mjs'
+import { createTikHubProxyFetch, createRapidApiProxyFetch, DEFAULT_PROXY_PROBE_POLICY, ExternalPlatformProxyStore, resolveProbePolicy } from '../../server/external-platforms/proxy.mjs'
 import { readFile } from 'node:fs/promises'
 const url = 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes?keyword=test'
 const options = { headers: { authorization: 'Bearer secret-sentinel' } }
@@ -183,8 +183,8 @@ test('binding update uses optimistic revision and writes audit in the same trans
   const store=new ExternalPlatformProxyStore({connect:async()=>client})
   store.describe=async()=>({revision:4})
   assert.deepEqual(await store.update({mode:'proxy-sequence',sequenceKey:'shared',expectedRevision:3,reason:' reviewed '}),{revision:4})
-  assert.deepEqual(calls.find(c=>c.sql.startsWith('UPDATE')).args,['proxy-sequence','shared','reviewed',3])
-  assert.deepEqual(calls.find(c=>c.sql.startsWith('INSERT')).args,[4,'proxy-sequence','shared','reviewed'])
+  assert.deepEqual(calls.find(c=>c.sql.startsWith('UPDATE')).args,['proxy-sequence','shared','reviewed',3,'tikhub'])
+  assert.deepEqual(calls.find(c=>c.sql.startsWith('INSERT')).args,[4,'proxy-sequence','shared','reviewed','tikhub'])
   assert.equal(calls.at(-1).sql,'COMMIT')
   client.query=async(sql)=> {calls.push({sql});return {rowCount:0,rows:[]}}
   await assert.rejects(()=>store.update({mode:'system-egress',expectedRevision:3,reason:'stale'}),e=>e.code==='proxy_revision_conflict')
@@ -270,4 +270,51 @@ test('a caller deadline records its probe verdicts and never tries another proxy
   assert.equal(recorded.length, 1)
   assert.deepEqual(recorded[0].attempts.map(entry => entry.endpoint), ['http://proxy-a:7788'])
   assert.match(error.message, /AbortError/)
+})
+
+test('RapidAPI probes only its fixed origin without credentials and never retries paid dispatch', async () => {
+  const paidUrl = 'https://twitter-aio.p.rapidapi.com/search/test'
+  for (const failPaid of [false, true]) {
+    const calls = [], closed = []
+    const run = createRapidApiProxyFetch({ route: async () => ({ proxyUrls: ['http://first:7788','http://second:7788'], directFallback: false }) }, {
+      makeAgent: name => ({ name, close: async () => closed.push(name) }),
+      fetchImpl: async (target, init) => {
+        calls.push({ target, init })
+        if (String(target) === paidUrl) {
+          assert.equal(init.headers['x-rapidapi-key'], 'synthetic-key')
+          if (failPaid) throw new Error('connection lost after sending')
+          return Response.json({ data: {} })
+        }
+        assert.equal(target, 'https://twitter-aio.p.rapidapi.com/')
+        assert.equal(init.headers, undefined)
+        return new Response('', { status: init.dispatcher.name.includes('first') ? 502 : 401 })
+      },
+    })
+    if (failPaid) await assert.rejects(run(paidUrl, { headers: { 'x-rapidapi-key': 'synthetic-key' } }), /connection lost/)
+    else assert.equal((await run(paidUrl, { headers: { 'x-rapidapi-key': 'synthetic-key' } })).status, 200)
+    assert.equal(calls.filter(call => String(call.target) === paidUrl).length, 1)
+    assert.equal(calls.length, 4)
+    assert.equal(closed.length, 2)
+    await assert.rejects(run('https://api.tikhub.io/search/test'), /Unexpected provider origin/)
+  }
+})
+
+test('RapidAPI binding reads, revisions, probe diagnostics and audit are isolated from TikHub', async () => {
+  const calls = []
+  const client = { release() {}, async query(sql, args) {
+    calls.push({sql,args})
+    if (sql.startsWith('UPDATE')) return { rowCount: 1, rows: [{ revision: 2 }] }
+    if (sql.includes('SELECT * FROM control.external_platform_proxy_bindings')) return { rows: [{ egress_mode: 'system-egress', revision: 1 }] }
+    return { rows: [] }
+  } }
+  const store = new ExternalPlatformProxyStore({ connect: async () => client, query: (...args) => client.query(...args) }, {}, { providerKey: 'rapidapi' })
+  assert.deepEqual((await store.route()).proxyUrls, [])
+  await store.describe()
+  await store.update({ mode: 'system-egress', expectedRevision: 1, reason: 'synthetic change', probePolicy: { timeoutMs: 1000, attempts: 1, cacheTtlMs: 0 } })
+  await store.recordProbeFailure({ attempts: [{ endpoint: 'http://proxy:7788', error: 'Error' }] })
+  for (const call of calls.filter(call => call.sql.includes('external_platform_proxy_'))) {
+    assert.ok(call.args.includes('rapidapi'), call.sql)
+    assert.equal(call.args.includes('tikhub'), false)
+  }
+  assert.equal(calls.find(call=>call.sql.startsWith('UPDATE')).args.at(-1), 'rapidapi')
 })

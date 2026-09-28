@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
 
 const DEFAULT_NIGHT_ALL_CONFIG = '/Users/qpjoy/workspace/mingxi/Night-All/config.json'
 const DEFAULT_ADMIN_BASE = 'http://127.0.0.1:18151'
@@ -34,8 +35,12 @@ export function normalizeAdminBase(value) {
   return parsed.origin
 }
 
-async function readPrivateJson(configPath) {
-  const pathInfo = await lstat(configPath).catch(() => null)
+async function readPrivateJson(configPath, { optional = false } = {}) {
+  const pathInfo = await lstat(configPath).catch(error => {
+    if (optional && error.code === 'ENOENT') return null
+    throw migrationError('Night-All config could not be inspected')
+  })
+  if (optional && !pathInfo) return {}
   if (!pathInfo?.isFile() || pathInfo.isSymbolicLink()) {
     throw migrationError('Night-All config must be an existing regular file, not a symlink')
   }
@@ -83,7 +88,7 @@ async function readPrivateJson(configPath) {
 
 function readProviderApiKey(parsed, { configKey }) {
   const apiKey = parsed?.crawlerProviders?.[configKey]?.apiKey
-  if (typeof apiKey !== 'string' || !apiKey.trim() || Buffer.byteLength(apiKey.trim()) > MAX_API_KEY_BYTES) {
+  if (typeof apiKey !== 'string' || !apiKey.trim() || /[\r\n]/.test(apiKey.trim()) || Buffer.byteLength(apiKey.trim()) > MAX_API_KEY_BYTES) {
     throw migrationError(`Night-All crawlerProviders.${configKey}.apiKey is missing or invalid`)
   }
   return apiKey.trim()
@@ -91,13 +96,26 @@ function readProviderApiKey(parsed, { configKey }) {
 
 export async function readNightAllExternalPlatformCredentials(configPath, {
   providers = PROVIDERS.map(({ provider }) => provider),
+  environment = {},
 } = {}) {
   const requested = providers.map((provider) => {
-    const definition = PROVIDERS.find((candidate) => candidate.provider === provider)
+    const definition = provider === 'rapidapi' ? { provider, configKey: 'rapidapi' } : PROVIDERS.find((candidate) => candidate.provider === provider)
     if (!definition) throw migrationError(`Unsupported external-platform credential ${provider}`)
     return definition
   })
-  const parsed = await readPrivateJson(configPath)
+  const parsed = await readPrivateJson(configPath, { optional: providers.length === 1 && providers[0] === 'rapidapi' })
+  if (providers.includes('rapidapi') && !String(parsed?.crawlerProviders?.rapidapi?.apiKey || '').trim()) {
+    // Match Night-All's precedence: config.json, runtime environment, legacy
+    // twitterDaily. Read data only; never import/execute the Night-All project.
+    let apiKey = [environment.RAPIDAPI_KEY, environment.RAPID_API_KEY, environment.TWITTER_RAPIDAPI_KEY]
+      .find(value => typeof value === 'string' && value.trim())
+    if (!apiKey) {
+      const legacy = await readPrivateJson(environment.NIGHT_ALL_NEWS_CONFIG_PATH || join(dirname(configPath), 'data', 'news-config.json'), { optional: true })
+      apiKey = legacy?.twitterDaily?.apiKey
+    }
+    parsed.crawlerProviders ??= {}
+    parsed.crawlerProviders.rapidapi = { apiKey }
+  }
   return Object.fromEntries(requested.map((definition) => [
     definition.provider,
     readProviderApiKey(parsed, definition),
@@ -119,6 +137,8 @@ export function credentialFingerprintTail(apiKey) {
 async function adminRequest(base, adminToken, method, path, body) {
   const response = await fetch(`${base}${path}`, {
     method,
+    redirect: 'error',
+    cache: 'no-store',
     headers: {
       'x-mx-insight-admin-token': adminToken,
       ...(body ? { 'content-type': 'application/json' } : {}),
@@ -153,6 +173,7 @@ export async function migrateExternalPlatformCredentials(environment = process.e
   const base = normalizeAdminBase(environment.MX_INSIGHT_ADMIN_BASE_URL)
   const credentials = await readNightAllExternalPlatformCredentials(configPath, {
     providers,
+    environment,
   })
 
   // Resolve every target revision before the first write so invalid source or
@@ -167,6 +188,10 @@ export async function migrateExternalPlatformCredentials(environment = process.e
     const expectedRevision = detail?.credential?.revision
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       throw migrationError(`Hub Admin did not return a valid ${provider} credential revision`)
+    }
+    if (provider === 'rapidapi' && detail.credential.source === 'database' && detail.credential.credentialConfigured
+      && environment.MX_INSIGHT_RAPIDAPI_MIGRATION_REPLACE !== '1') {
+      throw migrationError('Hub already has a RapidAPI database credential; use MX_INSIGHT_RAPIDAPI_MIGRATION_REPLACE=1 only for an intentional replacement')
     }
     return {
       provider,
@@ -224,11 +249,17 @@ export function formatMigrationResults(result) {
 }
 
 async function main() {
-  const providers = process.argv.includes('--all')
-    ? PROVIDERS.map(({ provider }) => provider)
-    : ['tikhub']
+  const providers = migrationProviders(process.argv.slice(2))
   const result = await migrateExternalPlatformCredentials(process.env, { providers })
   process.stdout.write(`${formatMigrationResults(result)}\n`)
+}
+
+export function migrationProviders(args = []) {
+  if (!args.length) return ['tikhub']
+  // Preserve the existing --all migration scope; RapidAPI is always explicit.
+  if (args.length === 1 && args[0] === '--all') return PROVIDERS.map(({ provider }) => provider)
+  if (args.length === 2 && args[0] === '--provider' && ['tikhub', 'justone', 'rapidapi'].includes(args[1])) return [args[1]]
+  throw migrationError('Use --all or --provider tikhub|justone|rapidapi')
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

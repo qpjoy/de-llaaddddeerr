@@ -158,6 +158,9 @@ function usePlatformCatalog(token, session, onUnauthorized) {
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
+  'social.content.search': { label: 'Hub 内容搜索', endpoint: 'POST /api/v1/data/social/search', description: '独立搜索合同；首批覆盖 Twitter 单页', usageHint: '需 twitter 平台与本能力授权；运行开关默认禁用' },
+  'social.content.crawl': { label: 'Hub 账号内容', endpoint: 'POST /api/v1/data/social/crawl', description: 'Twitter 账号时间线单页；不自动获取全量历史', usageHint: '需 twitter 平台与本能力授权；新游标不可与旧接口混用' },
+  'social.profile.get': { label: 'Hub 账号资料', endpoint: 'POST /api/v1/data/social/user-info', description: 'Twitter 基础资料；不补充 about', usageHint: '需 twitter 平台与本能力授权；保持旧资料接口不变' },
   'enterprise.query': { label: '企业数据查询', endpoint: 'POST /api/v1/data/enterprise/{apiId}/query', description: '查询已开通的企业数据接口并留存结果', usageHint: '还需开通 enterprise 数据域' },
   'ip.risk.query': { label: 'IP 风险查询能力', endpoint: 'POST /api/v1/data/ip/risk', description: '查询 IPv4 风险画像；当前仅记录次数，不扣费', usageHint: '还需开通 ip_risk 数据域' },
   'public_opinion.diagnostics.read': { label: '舆情诊断读取' },
@@ -3192,7 +3195,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
                     <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} />
-                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : row.capability === 'enterprise.query' ? '#/external-platforms?provider=qixin' : `#/external-platforms?provider=tikhub&operation=${encodeURIComponent(row.capability)}`}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
+                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : row.capability === 'enterprise.query' ? '#/external-platforms?provider=qixin' : `#/external-platforms?provider=${['social.content.search', 'social.content.crawl', 'social.profile.get'].includes(row.capability) ? 'rapidapi' : 'tikhub'}&operation=${encodeURIComponent(row.capability)}`}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
                     </td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>

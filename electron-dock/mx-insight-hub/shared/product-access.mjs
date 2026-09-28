@@ -15,6 +15,7 @@ export const PRODUCT_ACCESS = {
   '/data-products/topic-insights': { platform: 'topic_reports', docs: 'topic-reports' },
 }
 export function productAllowed(path, scopes = []) {
+  if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('twitter') && ['social.content.search', 'social.content.crawl', 'social.profile.get'].some(capability => scope.capabilities?.includes(capability)))) return true
   const rule = PRODUCT_ACCESS[path]
   return !!rule && scopes.some(scope => scope.platforms?.includes(rule.platform) && (!rule.any || rule.any.some(value => scope.capabilities?.includes(value))))
 }

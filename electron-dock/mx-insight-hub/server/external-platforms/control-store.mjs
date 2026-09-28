@@ -3,6 +3,7 @@ import { nativeForwardingOperations } from '../contracts/native-forwarding.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, XHS_DISCOVERY_VERSION } from '../contracts/xiaohongshu-discovery.mjs'
 import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
 import { randomUUID } from 'node:crypto'
+import { HUB_SOCIAL_OPERATIONS } from '../contracts/hub-social.mjs'
 
 import { AppError } from '../core/errors.mjs'
 import {
@@ -79,6 +80,7 @@ function justoneResourceOperationEntries() {
 }
 
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
+  rapidapi: Object.freeze(HUB_SOCIAL_OPERATIONS),
   qixin: Object.freeze(QIXIN_OPERATIONS),
   justone: Object.freeze([
     Object.freeze({
@@ -518,7 +520,7 @@ function dispatchRejected(state, details = undefined) {
 }
 
 function defaultRow(definition) {
-  const native = definition.operationKey.startsWith('native.')
+  const native = definition.operationKey.startsWith('native.') || definition.legacyGate === 'hubSocialVerified'
   return {
     controlSource: native ? 'database' : 'legacy_environment',
     desiredState: native ? 'disabled' : 'active',
@@ -529,7 +531,7 @@ function defaultRow(definition) {
     contractVersion: definition.contractVersion,
     endpointKeys: [...definition.endpointKeys],
     priceBook: { version: 0, source: 'legacy_environment', status: 'inherited' },
-    updatedBy: native ? 'migration-112' : 'migration-060',
+    updatedBy: definition.legacyGate === 'hubSocialVerified' ? 'migration-116' : native ? 'migration-112' : 'migration-060',
     updatedAt: null,
   }
 }
@@ -783,11 +785,11 @@ export class PostgresExternalPlatformControlStore {
         // Code may deploy before migration 112. Missing new policies must not
         // hide established operations, and this read-only view cannot authorize
         // dispatch: #row remains strict about persisted policy evidence.
-        if (!row && definition.operationKey.startsWith('native.')) {
+        if (!row && (definition.operationKey.startsWith('native.') || definition.legacyGate === 'hubSocialVerified')) {
           const view = operationView({ ...defaultRow(definition), revision: 0,
             releaseStatus: 'not_registered', updatedBy: null }, definition, runtime)
           return { ...view, migrationRequired: true, blockers: [
-            blocker('operation_migration_required', 'Apply migration 112 before configuring this operation'),
+            blocker('operation_migration_required', `Apply migration ${definition.legacyGate === 'hubSocialVerified' ? '116' : '112'} before configuring this operation`),
             ...view.blockers,
           ] }
         }

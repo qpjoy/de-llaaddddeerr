@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import catalog
 import manage
-from projects import infra_deploy, infra_runtime, infra_storage
+from projects import infra_deploy, infra_runtime, infra_storage, infra_release_volumes
 
 DOCKER = ['docker', '--host', 'unix:///var/run/docker.sock']
 OPTIONS = {'-f', '--env-file', '-p', '--project-directory'}
@@ -145,11 +145,13 @@ def execute(options, command, reader=read_command, runner=None):
         base += ['-f', path]
         model = json.loads(reader(base + ['config', '--format', 'json']))
         infra_deploy.model_guard(manager, profile, model)
-        if not all(v.get('external') is True for v in model.get('volumes', {}).values()):
-            raise RuntimeError('All existing data volumes must be external for NAS releases.')
-        infra_deploy.data_volumes(manager, profile, model)
+        application = infra_release_volumes.application_volumes(model)
+        required = dict(model, volumes={key: value for key, value in model['volumes'].items()
+                                       if key not in application})
+        infra_deploy.data_volumes(manager, profile, required)
         rows = current(manager, profile, require_all=command[0] == 'mx-nas-check')
         database_mounts(model, rows)
+        infra_release_volumes.check(manager, model, application, rows)
         with socket.create_connection(('192.168.1.3', 2049), timeout=5):
             pass
     if inputs(options) != before or (declaration is not None and declaration != catalog.read_relative(

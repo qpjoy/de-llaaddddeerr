@@ -1,6 +1,7 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
+import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
@@ -762,6 +763,7 @@ export function createApp({
   balanceMonitor = null,
   nightAllA = null,
   externalPlatformGateway = null,
+  hubSocialGateway = null,
   xiaohongshuHotNotesGateway = null,
   ipRiskGateway = null,
   enterpriseGateway = null,
@@ -5683,6 +5685,21 @@ export function createApp({
         sendJson(response, 200, { data:await service.servicePricing(context, searchParams.get('path')), requestId }, { 'cache-control':'private, no-store' })
         return
       }
+      const socialEndpoint = request.method === 'POST' ? hubSocialByPath(pathname) : null
+      if (socialEndpoint) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Hub social data')
+        if (!hubSocialGateway) throw new AppError(503, 'social_data_unavailable', 'Hub social data is unavailable')
+        const result = await hubSocialGateway.socialData(context, {
+          operation: socialEndpoint.key, body: await readJson(request, 64 * 1024), path: pathname,
+          idempotencyKey: request.headers['idempotency-key'],
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
+        return
+      }
       const nativeEndpoint = request.method === 'POST' ? nativeForwardingByPath(pathname) : null
       if (nativeEndpoint) {
         const context = await requirePublic(request)
@@ -6039,8 +6056,8 @@ export function createApp({
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/aggregate/sources') {
         const context = await requirePublic(request)
-        requireNoQuery(searchParams, 'aggregate sources')
-        sendJson(response, 200, { data: await service.aggregateSources(context), requestId }, { 'cache-control': 'no-store' })
+        if ([...searchParams.keys()].some(key => key !== 'execution') || searchParams.getAll('execution').length > 1) throw new AppError(400, 'invalid_request', 'Only one execution parameter is supported')
+        sendJson(response, 200, { data: await service.aggregateSources(context, searchParams.get('execution') ?? undefined), requestId }, { 'cache-control': 'no-store' })
         return
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/aggregate/preview') {
@@ -6059,6 +6076,7 @@ export function createApp({
             body: await readJson(request, 64 * 1024),
             idempotencyKey: request.headers['idempotency-key'], path: pathname,
             products: externalPlatformGateway ? (ctx, input) => externalPlatformGateway.search(ctx, input) : null,
+            hubSocial: hubSocialGateway ? (ctx, input) => hubSocialGateway.socialData(ctx, input) : null,
             onProgress: (event, data) => { if (event === 'search.started') aggregateRequestId = data.requestId; stream?.write(event, data) },
           })
           if (stream) stream.write('search.completed', { ...result.body, requestId: result.requestId, replay: result.replay })

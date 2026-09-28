@@ -1,6 +1,7 @@
 import { loadCommonConfig } from '@qpjoy/mx-common'
 import { nightAllAConfig } from './external-platforms/night-all-a.mjs'
 import { AppError } from './core/errors.mjs'
+import { rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import {
   disabledJustOneConfig,
   disabledTikHubConfig,
@@ -359,6 +360,7 @@ export function loadConfig(environment = process.env) {
     },
     justOne,
     tikHub,
+    rapidApi: rapidApiConfig(environment),
     externalMedia,
     backfill: {
       // Platforms the Hub will backfill. Restricted by default to the three
