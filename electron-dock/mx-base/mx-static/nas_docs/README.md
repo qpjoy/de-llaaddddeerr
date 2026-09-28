@@ -1,5 +1,7 @@
 # NAS 迁移运维入口
 
+**最新 tmpfs 修正：** delta 部署报告 `delta-216a994933844e5aacdfa055c261ed1d` 中，十个媒体服务及候选合并检查通过；唯一待审项已定位为 websearch 的 `/tmp:size=64m,noexec,nosuid`，与 Docker `HostConfig.Tmpfs` 一致。现保留这类不涉及媒体的临时目录，不误作 NAS 挂载拦截。424 项 NAS 回归通过，新快照 `d7760d1d283194c65fa9`；同步后重新执行只读准备，无需重复复制。见 [当前命令](operations/part2-delta-migration.md#最新回执与当前下一步)。
+
 **最新准备检查修正：** 服务器已安装 `a242d3d71db429e361dd`；delta 因固定服务集合未包含 `websearch` 而在只读准备阶段被拦截。用户回传确认它无挂载。现按辅助服务保留，不纳入媒体切换或可用性门槛，仍验证无媒体挂载/额外主机访问；无需重复复制或删除容器。同步修正后重跑原 `migration prepare`，见下方链接的最新操作步骤。
 
 **最新复制完成回执（覆盖下文待执行状态）：** delta 续传 unit `mx-nas-part2-delta-copy-resume-bb431bb374.service` 成功；本次新增 6,531 个、已有并核验 250 个，补齐清单共 6,781 个文件 / 4.77 GiB。仍为在线快照，业务继续写 SSD；未切换、未删除、不可回收。下一步同步代码后运行新 `nas delta migration prepare <成功 copy 尝试目录>`，只读收集当前部署和 NAS 候选配置，不重复复制。正式切换/发布/恢复/回收适配尚待完成；精确命令和报告路径见 [第二卷当前下一步](operations/part2-delta-migration.md#最新回执与当前下一步)。

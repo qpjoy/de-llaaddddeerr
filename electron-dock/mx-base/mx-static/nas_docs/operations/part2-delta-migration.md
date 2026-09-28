@@ -6,6 +6,10 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 ## 最新回执与当前下一步
 
+**最新现场：** 安装 `d75dc69e91f799f36fb4` 后已生成 `/var/lib/mx-static/nas-migration-prepare/delta-216a994933844e5aacdfa055c261ed1d`。十个媒体镜像/启动检查及 NAS 候选合并通过，PostgreSQL/Redis 健康，release hook 的四项静态检查匹配。唯一待审项为 websearch 的 `auxiliary_mount_or_access_needs_review`。后续读取该报告确认：Compose 只有 `tmpfs: ["/tmp:size=64m,noexec,nosuid"]`，与 Docker `HostConfig.Tmpfs` 完全一致，持久 Mounts、config_refs、secret_refs 均为空。这是容器私有临时目录，不涉及本次媒体/NAS，应保留而非拦截。
+
+本次修正检查 tmpfs 的声明类型、规范绝对路径、重复目标、与媒体路径重叠以及 Compose/HostConfig 路径和选项一致性；匹配且不涉及媒体的临时目录原样保留。持久挂载/主机访问保护不放宽，公开摘要增加 tmpfs，并用具体字段名及原因区分后续差异。旧 `216a9949…` 报告保持不变；下方命令生成新的只读结果，尚不执行正式切换。
+
 服务器已安装 `a242d3d71db429e361dd`，infra 恢复正常；delta 的首次 `migration prepare` 在创建部署报告前被固定服务集合检查拦截。回传确认额外服务为 `websearch`（`3556627c4fc2`），running、oneoff=False、Mounts 为空。它没有挂载待迁移的媒体卷/NAS；容器内部仍可能有缓存，不能因此宣称它完全没有存储。现将它作为独立辅助服务记录并原样保留：不加入媒体 override，不启动/停止/重建，不因它存在或不可用阻止媒体准备；仍检查当前/候选无挂载或额外主机访问权限。未知服务、重复角色、一次性任务仍明确指出对象和原因，不能盲目放行或删掉容器。
 
 之前诊断命令的 `{{.Name}}` 在某个非卷挂载上缺字段而失败，导致 gateway 信息未完整输出；这是输出模板问题，不是 Docker/NAS 运行失败。诊断挂载应使用 `{{json .Mounts}}` 或按 Type 取字段。无需重复原诊断，下面的准备命令会完整读取 Docker JSON，并继续要求全部十个媒体服务和现有 PostgreSQL/Redis 通过原有检查。`claude_sessions`、static 和 gateway 的其他绑定挂载保持不变。
@@ -20,7 +24,7 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 此前 gateway 的四次探测超过 5 秒超时；16:31 已恢复 healthy，RestartCount=0、无 OOM。续传完成证明重试通过了运行核对，不能据此断言先前超时由复制或 NAS 引起。
 
-同步本次辅助服务修正后，在服务器 mx-static 目录以 root 执行下方命令，重新收集部署审核结果。预期安装快照 `d75dc69e91f799f36fb4`；无需重复补复制：
+同步本次 tmpfs 修正后，在服务器 mx-static 目录以 root 执行下方命令，重新收集部署审核结果。预期安装快照 `d7760d1d283194c65fa9`；无需重复补复制：
 
 ```bash
 bash scripts/manage.sh nas recovery install &&
@@ -36,7 +40,7 @@ bash scripts/manage.sh nas delta migration prepare \
 
 `part2.deployment.json` 只登记现有三个 Compose 文件和独立 delta env 的位置，以及本地已阅读的四个启动脚本摘要，不启用 NAS 权威或恢复。正式 delta 发布/恢复/切换/回收适配仍需完成；目前普通 `--instance delta-59202` 发布仍为 local，不能用重新部署代替迁移。后续顺序是：审核现场、完成发布及恢复保护、维护窗口停写和最终同步、只重建媒体消费者挂 NAS、业务验证、清理前核验、再显式删除 SSD。
 
-本地 419 项 NAS 回归、35 个运行时 Python 文件的 Python 3.6 语法检查、11 个 Bash 脚本语法检查通过。本次新增 8 项辅助服务回归：无挂载 websearch 原样保留、不可用不阻塞、挂载/额外主机访问需审核、运行期间变化拒绝、重复/未知/一次性角色错误可定位、必需媒体/数据库缺失拒绝、会话卷和无 Name 的 gateway bind 保留。测试使用真实临时复制收据和私有报告；Docker/Compose/内核/NFS 边界为隔离模拟，未连接服务器，未执行真实部署、停写或删除。
+本地 424 项 NAS 回归、35 个运行时 Python 文件的 Python 3.6 语法检查、11 个 Bash 脚本语法检查通过。新增 5 项 tmpfs 回归覆盖本次真实字段、配置原样保留、媒体重叠、当前/声明差异、异常路径/类型及持久挂载/权限保护；此前辅助服务与会话卷回归继续通过。测试使用真实临时复制收据和私有报告；Docker/Compose/内核/NFS 边界为隔离模拟，未连接服务器，未执行真实部署、停写或删除。
 
 ## 历史续传准备与失败重试（已完成，无需照此重跑）
 

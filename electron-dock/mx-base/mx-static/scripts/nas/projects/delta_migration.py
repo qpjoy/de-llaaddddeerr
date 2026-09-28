@@ -29,8 +29,8 @@ ENV_FILE = 'deploy/.env.delta-59202.ghcr'
 RELEASE_SCRIPT = 'scripts/deploy_public_ghcr.sh'
 SCRIPT_NAMES = {'scripts/run_web.sh', 'scripts/run_worker.sh', 'scripts/run_beat.sh', 'scripts/run_chat_gateway.sh'}
 DEPENDENCIES = {'postgres': '/var/lib/postgresql/data', 'redis': '/data'}
-# Observed on delta: a separate, mountless application service. It is recorded
-# and preserved, never included in the media override or migration lifecycle.
+# Observed on delta: a separate application service with no persistent mounts.
+# Its private tmpfs is preserved; it never joins the media override/lifecycle.
 AUXILIARIES = {'websearch'}
 
 
@@ -157,6 +157,35 @@ def runtime_snapshot(rows):
             for name, c in rows.items()}
 
 
+def auxiliary_tmpfs_review(service, container):
+    """Compare Compose short tmpfs declarations with Docker's separate Tmpfs map.
+
+    A container-private temporary filesystem away from raw media needs no NAS
+    migration. Keep options and the original model untouched; do not infer it
+    from Mounts, which need not include HostConfig.Tmpfs entries.
+    """
+    declared = service.get('tmpfs') or []
+    actual = (container.get('HostConfig') or {}).get('Tmpfs') or {}
+    if isinstance(declared, str): declared = [declared]
+    if not isinstance(declared, list) or not isinstance(actual, dict):
+        return 'auxiliary_tmpfs_invalid_declaration'
+    wanted = {}
+    for entry in declared:
+        if not isinstance(entry, str): return 'auxiliary_tmpfs_invalid_declaration'
+        target, _, options = entry.partition(':')
+        if target in wanted: return 'auxiliary_tmpfs_invalid_declaration'
+        wanted[target] = options
+    for target, options in list(wanted.items()) + list(actual.items()):
+        if (not isinstance(target, str) or not isinstance(options, str)
+                or not target.startswith('/') or target.startswith('//')
+                or '\0' in target or target != os.path.normpath(target)):
+            return 'auxiliary_tmpfs_invalid_declaration'
+        if copying.overlaps(target, copying.RAW):
+            return 'auxiliary_tmpfs_overlaps_media'
+    if wanted != actual: return 'auxiliary_tmpfs_differs_from_live'
+    return None
+
+
 def model_review(model, rows, hashes):
     issues = []
     if model.get('name') != copying.PROJECT or set(model.get('services', {})) != set(rows):
@@ -202,10 +231,14 @@ def model_review(model, rows, hashes):
                     or mounts[0].get('volume', {}).get('subpath')
                     or volumes.get(key, {}).get('name') != copying.PROJECT + '_' + key):
                 issues.append({'service': name, 'reason': 'database_or_queue_volume_differs'})
-        elif (mounts or service.get('tmpfs') or service.get('configs') or service.get('secrets')
-                or service.get('privileged') or service.get('devices') or service.get('pid')
-                or service.get('cap_add')):
-            issues.append({'service': name, 'reason': 'auxiliary_mount_or_access_needs_review'})
+        else:
+            fields = [key for key in ('volumes', 'configs', 'secrets', 'privileged', 'devices', 'pid', 'cap_add')
+                      if service.get(key)]
+            if fields:
+                issues.append({'service': name, 'reason': 'auxiliary_mount_or_access_needs_review', 'fields': fields})
+            tmpfs_issue = auxiliary_tmpfs_review(service, c)
+            if tmpfs_issue:
+                issues.append({'service': name, 'reason': tmpfs_issue, 'fields': ['tmpfs', 'HostConfig.Tmpfs']})
     return issues
 
 
@@ -314,7 +347,8 @@ def prepare(manager, profile, attempt_path):
                   'databases': {n: {'id': rows[n]['Id'], 'health': rows[n]['State']['Health']['Status'],
                                     'volume': copying.PROJECT + '_' + n + '_data'} for n in DEPENDENCIES},
                   'auxiliary_services': [{'service': n, 'id': rows[n]['Id'][:12],
-                                          'mounts': [], 'preserved': True}
+                                          'mounts': [], 'tmpfs': (rows[n].get('HostConfig') or {}).get('Tmpfs') or {},
+                                          'preserved': True}
                                          for n in sorted(AUXILIARIES & set(rows))],
                   'review_items': issues, 'deployment_review_passed': not issues,
                   'candidate_merge_verified': True, 'release_hook': hook,

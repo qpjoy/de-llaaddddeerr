@@ -126,7 +126,7 @@ class DeltaMigrationTests(unittest.TestCase):
         result = self.prepare()
         self.assertTrue(result['deployment_review_passed'])
         self.assertEqual(result['auxiliary_services'], [{'service': 'websearch', 'id': row['Id'][:12],
-                                                        'mounts': [], 'preserved': True}])
+                                                        'mounts': [], 'tmpfs': {}, 'preserved': True}])
         folder = Path(result['report_directory'])
         candidate = json.loads((folder / 'compose.nas.candidate.json').read_text())
         merged = json.loads((folder / 'compose.nas.candidate.private.json').read_text())
@@ -181,7 +181,67 @@ class DeltaMigrationTests(unittest.TestCase):
         self.model['services']['websearch']['volumes'] = [{'type': 'volume', 'source': 'media_data', 'target': '/app/media'}]
         result = self.prepare()
         self.assertFalse(result['deployment_review_passed'])
-        self.assertIn({'service': 'websearch', 'reason': 'auxiliary_mount_or_access_needs_review'}, result['review_items'])
+        self.assertIn({'service': 'websearch', 'reason': 'auxiliary_mount_or_access_needs_review',
+                       'fields': ['volumes']}, result['review_items'])
+
+    def test_websearch_private_tmpfs_from_server_receipt_is_preserved(self):
+        row = self.add_websearch()
+        tmpfs = {'/tmp': 'size=64m,noexec,nosuid'}
+        row['HostConfig']['Tmpfs'] = dict(tmpfs)
+        self.model['services']['websearch']['tmpfs'] = ['/tmp:size=64m,noexec,nosuid']
+        original = copy.deepcopy(self.model['services']['websearch'])
+        result = self.prepare()
+        self.assertTrue(result['deployment_review_passed'])
+        self.assertEqual(result['review_items'], [])
+        self.assertEqual(result['auxiliary_services'][0]['tmpfs'], tmpfs)
+        merged = json.loads((Path(result['report_directory']) / 'compose.nas.candidate.private.json').read_text())
+        self.assertEqual(merged['services']['websearch'], original)
+        self.assertEqual(row['HostConfig']['Tmpfs'], tmpfs)
+        self.assertFalse(result['execution_allowed'])
+        self.assertTrue(all(row['Id'] not in cmd for cmd in self.commands))
+
+    def test_auxiliary_tmpfs_media_overlap_remains_a_review_item(self):
+        row = self.add_websearch()
+        for target in ('/', '/app', '/app/media', copying.RAW, copying.RAW + '/video'):
+            with self.subTest(target=target):
+                self.model['services']['websearch']['tmpfs'] = [target + ':size=64m']
+                row['HostConfig']['Tmpfs'] = {target: 'size=64m'}
+                result = self.prepare()
+                self.assertFalse(result['deployment_review_passed'])
+                self.assertIn('auxiliary_tmpfs_overlaps_media', {r['reason'] for r in result['review_items']})
+
+    def test_auxiliary_tmpfs_requires_both_declarations_to_match(self):
+        row = self.add_websearch()
+        for declared, actual in ((['/tmp:size=64m'], {}), ([], {'/tmp': 'size=64m'}),
+                                 (['/tmp:size=64m,noexec,nosuid'], {'/tmp': 'size=128m,noexec,nosuid'}),
+                                 (['/tmp:size=64m'], {'/cache': 'size=64m'})):
+            with self.subTest(declared=declared, actual=actual):
+                row['HostConfig']['Tmpfs'] = actual
+                self.model['services']['websearch']['tmpfs'] = declared
+                result = self.prepare()
+                self.assertFalse(result['deployment_review_passed'])
+                self.assertIn('auxiliary_tmpfs_differs_from_live', {r['reason'] for r in result['review_items']})
+
+    def test_auxiliary_tmpfs_rejects_ambiguous_or_malformed_paths(self):
+        for declared, actual in ((['/tmp', '/tmp'], {}), (['tmp:size=64m'], {}),
+                                 (['/cache/../tmp:size=64m'], {}), (['//tmp:size=64m'], {}),
+                                 ([{'target': '/tmp'}], {}), ({'/tmp': ''}, {}),
+                                 ([], {'/tmp': None}), ([], ['/tmp'])):
+            with self.subTest(declared=declared, actual=actual):
+                self.assertEqual(migration.auxiliary_tmpfs_review({'tmpfs': declared}, {'HostConfig': {'Tmpfs': actual}}),
+                                 'auxiliary_tmpfs_invalid_declaration')
+
+    def test_tmpfs_does_not_override_persistent_mount_or_host_access_guards(self):
+        row = self.add_websearch()
+        row['HostConfig']['Tmpfs'] = {'/tmp': 'size=64m,noexec,nosuid'}
+        self.model['services']['websearch']['tmpfs'] = ['/tmp:size=64m,noexec,nosuid']
+        self.model['services']['websearch']['privileged'] = True
+        result = self.prepare()
+        self.assertFalse(result['deployment_review_passed'])
+        self.assertIn({'service': 'websearch', 'reason': 'auxiliary_mount_or_access_needs_review',
+                       'fields': ['privileged']}, result['review_items'])
+        row['HostConfig']['Privileged'] = True
+        with self.assertRaisesRegex(RuntimeError, 'mount/access review: websearch'): self.prepare()
 
     def test_auxiliary_availability_does_not_gate_media_preparation(self):
         row = self.add_websearch()
