@@ -2,6 +2,10 @@
 
 最新服务器报告 `/var/lib/mx-static/nas-migration-prepare/delta-c2c06489a22e45c7add56c185f335940` 已通过：`review_items=[]`、`deployment_review_passed=true`、候选合并通过，10 个媒体服务的镜像/启动脚本通过，PostgreSQL/Redis 健康，websearch 的私有 `/tmp` tmpfs 保留。它是准备成功，不是 NAS 切换成功。
 
+最新重试 `mx-nas-part2-delta-migration-switch-8366ae4205.service` 在 `preflight_only=true` 失败：`Original SSD writer changed: worker-agent-interactive`，报告 `/var/lib/mx-static/nas-delta-cutover/delta-d4023c293f4041c89ec4d402dfadd3c0`。没有尝试维护登记或停止服务，SSD/NAS 业务文件均保留。前面的部署快照比较已把 Docker 实际 `Mounts` 排序，随后的 writer guard 却比较原始列表，造成不一致。本地加入已观察到的会话卷，仅交换两项排列即复现同样错误。服务器旧日志未记差异字段，现场是否仅顺序变化仍待新日志确认。
+
+修复统一 delta 准备、停写及创建后的实际挂载比较：仅规范化顶层 `Mounts` 顺序，保留所有条目/属性，拒绝重复或无效目标，不更改原准备报告。Config/HostConfig 中的列表顺序仍严格比较。预检仅顺序变化会输出 `nas_delta_mount_order_normalized`；writer guard 遇到真实变化会输出 `nas_delta_writer_changed` 的服务/字段名，不打印 Env 值。同步后仍用原准备报告执行下方 `migration switch`；`delta-d4023…` 同样不能 resume，不需重新复制或改应用部署。
+
 服务器首次正式尝试 `mx-nas-part2-delta-migration-switch-1598f6dc88.service` 在 `phase=preflight` 失败：`Media graceful stop signal needs review.`。十个服务的镜像/启动检查、隔离 Docker NFS 挂载及 4 KiB root 读写已通过；失败点位于维护登记和停止业务之前，尚未切换写入、未补复制或删除业务文件。保留本次 `/var/lib/mx-static/nas-delta-cutover/delta-79b3192952c2460ead53458b9a4ee1a6` 报告，但它没有执行检查点，不能作为 `migration resume` 的目标。
 
 旧检查要求所有媒体服务使用 TERM，误拒绝 nginx 官方镜像的 `STOPSIGNAL SIGQUIT`。[nginx 文档](https://nginx.org/en/docs/control.html)说明 QUIT 用于优雅退出；[官方镜像定义](https://github.com/nginx/docker-nginx/blob/master/stable/alpine-slim/Dockerfile)声明了该信号。本地已用该元数据复现相同失败；旧服务器日志没有服务名/实际信号，因此尚不能断言现场一定是 gateway。修复只允许已审核 nginx 命令/入口的 gateway 使用 QUIT/3，其他媒体服务仍限定 TERM/15 或未配置时的 Docker 默认 TERM；不改容器信号，不强制 kill。停止策略核对提前到创建/探测 NAS 前，并输出逐服务实际信号。修复同步后使用下面的原准备报告重试 `migration switch`，当前配置/身份仍须通过检查；无需改应用脚本或重做 900 GiB 复制。
@@ -10,7 +14,7 @@
 
 ## 服务器执行
 
-在服务器 mx-static 目录，以 root 操作。先同步本次 mx-static 代码，然后安装持久工具；本次预期快照为 `622df815666c372a5829`：
+在服务器 mx-static 目录，以 root 操作。先同步本次 mx-static 代码，然后安装持久工具；本次预期快照为 `a328613b893c026c9df3`：
 
 ```bash
 bash scripts/manage.sh nas recovery install
@@ -72,4 +76,4 @@ bash scripts/manage.sh nas delta migration resume <失败日志中的执行报�
 
 停写/最终补复制阶段可以在身份仍匹配时继续。已登记全部新容器后可继续 NAS 启动/探测，不再用 SSD 补写正在运行的 NAS。若创建动作中断而新容器 ID 尚未完整登记，工具拒绝自动推断，应先检查具体容器身份；不会删除混合容器、回滚 SSD 或继续数据复制。业务配置、数据库/辅助容器发生变化时也需先检查，不强行续跑。
 
-本地 443 项 NAS 测试、37 个运行时 Python 文件的 Python 3.6 语法检查、11 个 Shell 文件的 Bash 语法检查通过。新增回归覆盖 nginx QUIT 完整流程、worker/未知信号拒绝、默认信号、预检重试保留原报告及登记写入不确定性。测试使用真实临时文件和模拟 Docker/systemd/NFS 边界；它不代替服务器 NFS I/O、真实 Compose 创建或断电重启演练。
+本地 449 项 NAS 测试、37 个 Python 文件的 Python 3.6 语法检查、11 个 Bash 语法检查通过。回归同时覆盖 nginx QUIT、媒体/会话卷排列变化下的完整切换、原准备报告不变、真实挂载属性/配置/容器身份变化及重复目标仍拒绝、错误日志不泄漏配置值。测试使用真实临时文件和模拟 Docker/systemd/NFS 边界；它不代替服务器 NFS I/O、真实 Compose 创建或断电重启演练。

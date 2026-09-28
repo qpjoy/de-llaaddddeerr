@@ -168,6 +168,84 @@ class DeltaSwitchTests(unittest.TestCase):
         self.assertEqual(len(self.commands), before)  # Running services untouched.
         with self.assertRaisesRegex(RuntimeError, 'authority exists'): self.execute()
 
+    def test_mount_list_order_change_between_inspects_allows_complete_switch(self):
+        name = 'worker-agent-interactive'
+        row = next(c for c in self.fixture.rows if self.name(c) == name)
+        volume = media.PROJECT + '_claude_sessions'
+        row['Mounts'].append({'Type': 'volume', 'Name': volume,
+                             'Source': '/data/docker/volumes/' + volume + '/_data',
+                             'Destination': '/root/.claude/projects', 'RW': True})
+        self.fixture.model['volumes']['claude_sessions'] = {'name': volume}
+        self.fixture.model['services'][name]['volumes'].append(
+            {'type': 'volume', 'source': 'claude_sessions', 'target': '/root/.claude/projects'})
+        self.volumes[volume] = {'Name': volume, 'Driver': 'local', 'Options': None}
+        self.media.baseline['consumer_fingerprint'] = precopy.check_consumers(media.VOLUME, self.fixture.rows)
+        self.prepared = self.fixture.prepare()['report_directory']
+        before = {p: p.read_bytes() for p in Path(self.prepared).iterdir()}
+        row['Mounts'].reverse()
+        with mock.patch.object(switch, 'emit') as events:
+            result = self.execute()
+        self.assertEqual(result['phase'], 'running_on_nas')
+        for p, data in before.items(): self.assertEqual(p.read_bytes(), data)
+        order_events = [call.kwargs for call in events.call_args_list
+                        if call.args[0] == 'nas_delta_mount_order_normalized']
+        self.assertTrue(any(e['service'] == name and e['attributes_unchanged'] for e in order_events))
+        self.assertTrue(self.late.exists()); self.assertEqual(self.media.keep.read_bytes(), b'nas-only')
+
+    def writer_operation(self):
+        op = object.__new__(switch.Switch)
+        op.old = {self.name(c): copy.deepcopy(c) for c in self.orig}
+        op.state = {}
+        rows = copy.deepcopy(op.old)
+        op.rows = mock.Mock(return_value=rows)
+        return op, rows
+
+    def test_writer_guard_keeps_every_mount_attribute_significant(self):
+        for key, value in (('Name', 'other-volume'), ('Source', '/other-ssd'),
+                           ('Destination', '/different-target'), ('RW', False), ('Type', 'bind'),
+                           ('Mode', 'ro'), ('Propagation', 'rshared'), ('Driver', 'other-driver')):
+            with self.subTest(field=key):
+                op, rows = self.writer_operation()
+                rows['worker-agent-interactive']['Mounts'][0][key] = value
+                with mock.patch.object(switch, 'emit') as events:
+                    with self.assertRaisesRegex(RuntimeError, 'worker-agent-interactive; fields: Mounts'):
+                        op.writer_guard()
+                events.assert_called_once_with('nas_delta_writer_changed',
+                    service='worker-agent-interactive', changed_fields=['Mounts'], phase='preflight')
+        self.assertFalse(self.commands)
+
+    def test_writer_guard_preserves_config_order_and_reports_only_field_names(self):
+        for section, field in (('Config', 'Env'), ('Config', 'Cmd'), ('HostConfig', 'Mounts')):
+            with self.subTest(section=section, field=field):
+                op, rows = self.writer_operation()
+                values = ['first-secret-value', 'second-secret-value']
+                op.old['worker'][section][field] = values
+                rows['worker'][section][field] = list(reversed(values))
+                with mock.patch.object(switch, 'emit') as events:
+                    with self.assertRaises(RuntimeError) as error: op.writer_guard()
+                self.assertIn(section + '.' + field, str(error.exception))
+                self.assertNotIn('secret-value', str(error.exception) + repr(events.call_args_list))
+                self.assertEqual(events.call_args.kwargs['changed_fields'], [section + '.' + field])
+        op, rows = self.writer_operation()
+        rows['worker']['Config']['AddedNullField'] = None
+        with self.assertRaisesRegex(RuntimeError, 'Config.AddedNullField'): op.writer_guard()
+
+    def test_writer_guard_rejects_duplicate_targets_even_when_both_sides_match(self):
+        op, rows = self.writer_operation()
+        for view in (op.old, rows):
+            view['worker']['Mounts'].append(copy.deepcopy(view['worker']['Mounts'][0]))
+        with self.assertRaisesRegex(RuntimeError, 'ambiguous actual mount destinations'): op.writer_guard()
+
+    def test_writer_guard_still_rejects_new_container_image_and_live_restart(self):
+        for field in ('Id', 'Image'):
+            op, rows = self.writer_operation()
+            rows['worker'][field] += '-changed'
+            with self.assertRaisesRegex(RuntimeError, 'worker; fields: ' + field): op.writer_guard()
+        for field, value in (('Pid', 123456), ('StartedAt', 'restarted')):
+            op, rows = self.writer_operation()
+            rows['worker']['State'][field] = value
+            with self.assertRaisesRegex(RuntimeError, 'Original SSD writer restarted: worker'): op.writer_guard()
+
     def test_default_and_numeric_signals_are_reviewed_without_mutating_metadata(self):
         rows = {self.name(c): copy.deepcopy(c) for c in self.orig}
         for value in (None, '', 'SIGTERM', '15'):

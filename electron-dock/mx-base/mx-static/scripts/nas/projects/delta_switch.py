@@ -205,10 +205,24 @@ class Switch:
 
     def writer_guard(self, stopped=False):
         rows = self.rows()
-        for n in prep.SERVICES:
+        for n in sorted(prep.SERVICES):
             c, old = rows[n], self.old[n]
-            if any(c.get(k) != old.get(k) for k in ('Id', 'Image', 'Config', 'HostConfig', 'Mounts')):
-                raise RuntimeError('Original SSD writer changed: ' + n)
+            changed = []
+            for key in ('Id', 'Image', 'Config', 'HostConfig'):
+                before, after = old.get(key), c.get(key)
+                if before == after: continue
+                if key in ('Config', 'HostConfig') and isinstance(before, dict) and isinstance(after, dict):
+                    changed.extend(key + '.' + field for field in sorted(set(before) | set(after))
+                                   if field not in before or field not in after or before[field] != after[field])
+                else: changed.append(key)
+            if review.ordered_mounts(c.get('Mounts', [])) != review.ordered_mounts(old.get('Mounts', [])):
+                changed.append('Mounts')
+            if changed:
+                emit('nas_delta_writer_changed', service=n, changed_fields=changed,
+                     phase=self.state.get('phase', 'preflight'))
+                raise RuntimeError('Original SSD writer changed: ' + n + '; fields: ' + ', '.join(changed))
+            if c.get('Mounts') != old.get('Mounts') and not self.state.get('phase'):
+                emit('nas_delta_mount_order_normalized', service=n, attributes_unchanged=True)
             state = c['State']
             if state.get('Running') and any(state.get(k) != old['State'].get(k) for k in ('Pid', 'StartedAt')):
                 raise RuntimeError('Original SSD writer restarted: ' + n)
@@ -237,7 +251,7 @@ class Switch:
         for n in prep.SERVICES:
             c, old = rows[n], self.old[n]
             mounts = [m for m in c.get('Mounts', []) if m.get('Destination') != media.RAW]
-            ordered = lambda ms: sorted(ms, key=lambda m: json.dumps(m, sort_keys=True))
+            ordered = review.ordered_mounts
             expected_env = dict(x.split('=', 1) for x in old['Config'].get('Env', []) if '=' in x)
             if n.startswith('worker'): expected_env['MX_RECOVER_STALE_AGENT_RUNS'] = '0'
             actual_env = dict(x.split('=', 1) for x in c['Config'].get('Env', []) if '=' in x)

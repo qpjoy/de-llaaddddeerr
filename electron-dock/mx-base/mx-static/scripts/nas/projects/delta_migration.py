@@ -151,11 +151,26 @@ def select(rows):
     return selected
 
 
+def ordered_mounts(mounts):
+    """Actual Docker mounts are a collection; preserve every entry/attribute.
+
+    Only inspect's top-level Mounts may be reordered, never Config/HostConfig
+    lists. Reject ambiguous destinations rather than collapsing duplicates.
+    """
+    if not isinstance(mounts, list) or any(not isinstance(m, dict) for m in mounts):
+        raise RuntimeError('Cannot compare invalid actual Docker mounts.')
+    destinations = [m.get('Destination') for m in mounts]
+    if (any(not isinstance(p, str) or not p.startswith('/') for p in destinations)
+            or len(destinations) != len(set(destinations))):
+        raise RuntimeError('Cannot compare ambiguous actual mount destinations.')
+    return sorted(mounts, key=lambda m: m['Destination'])
+
+
 def runtime_snapshot(rows):
     """Private immutable evidence, excluding volatile health-probe counters."""
     return {name: {'id': c['Id'], 'image': c['Image'], 'config': c['Config'],
                   'host_config': c.get('HostConfig'),
-                  'mounts': sorted(c.get('Mounts', []), key=lambda m: json.dumps(m, sort_keys=True)),
+                  'mounts': ordered_mounts(c.get('Mounts', [])),
                   'state': {k: c['State'].get(k) for k in ('Running', 'Pid', 'StartedAt', 'Paused', 'Restarting', 'OOMKilled')}}
             for name, c in rows.items()}
 

@@ -382,6 +382,21 @@ class DeltaMigrationTests(unittest.TestCase):
         changed['gateway']['State']['Pid'] += 1
         self.assertNotEqual(migration.runtime_snapshot(rows), migration.runtime_snapshot(changed))
 
+    def test_snapshot_mount_collection_keeps_attributes_and_rejects_duplicate_targets(self):
+        rows = migration.select(self.rows)
+        rows['worker']['Mounts'].append({'Type': 'bind', 'Source': '/config',
+                                         'Destination': '/etc/app', 'RW': False})
+        changed = copy.deepcopy(rows)
+        changed['worker']['Mounts'].reverse()
+        before = copy.deepcopy(changed)
+        self.assertEqual(migration.runtime_snapshot(rows), migration.runtime_snapshot(changed))
+        self.assertEqual(changed, before)
+        changed['worker']['Mounts'][0]['RW'] = True
+        self.assertNotEqual(migration.runtime_snapshot(rows), migration.runtime_snapshot(changed))
+        changed['worker']['Mounts'].append(copy.deepcopy(changed['worker']['Mounts'][0]))
+        with self.assertRaisesRegex(RuntimeError, 'ambiguous actual mount destinations'):
+            migration.runtime_snapshot(changed)
+
     def test_probe_is_python36_compatible_and_contains_no_application_import(self):
         code = migration.script_probe(migration.SCRIPT_NAMES)
         ast.parse(code, feature_version=(3, 6))
