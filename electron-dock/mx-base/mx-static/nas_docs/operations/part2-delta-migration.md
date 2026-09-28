@@ -6,6 +6,28 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 ## 最新回执与当前下一步
 
+**最新状态覆盖下方首次准备指令：** 服务器已安装 `18ededb3d26883ec29c6`，infra 恢复正常。准备报告 `/var/lib/mx-static/nas-precopy-continuation/delta-8cb4f04483264339ba4cdc63df13a788` 成功：312,505 个共享文件 / 932.13 GiB quick-check 一致，6,781 个 SSD 独有文件 / 4.77 GiB 待添加（不含 tmp），共享哈希候选为 0。复制前全部 6,781 个源文件复核通过。
+
+续传任务 `mx-nas-part2-delta-copy-resume-c8552f3f5c.service`、尝试 `copy-ef8f3e5aea0d4857aeaaa1a86f5699b0` 已开始不限速添加，最后一条进度为 copied=200、logical_bytes=6,097,882，随后状态复核报 `Media HTTP service not healthy: gateway` 并停止。日志只能确认至少 200 个完成文件，实际数量看私有 copy.jsonl；本次没有完成收据。已完成的 NAS 添加保留，源和旧 marker 保留，不做回滚或删除。
+
+错误来自 `delta_copy.current → reclaim_plan.health_guard` 的 HTTP 健康门槛；具体健康状态可能是 unhealthy、starting 或未提供状态，不能仅凭报错断言超时、NAS 故障或复制引起业务异常。先在服务器以 root 读取 delta gateway 的状态/近期探测结果，不重启、不打印 Env：
+
+```bash
+date -Is
+docker ps -aq --filter label=com.docker.compose.project=delta_59202 --filter label=com.docker.compose.service=gateway |
+  xargs -r docker inspect --format 'name={{.Name}} id={{.Id}} restart_count={{.RestartCount}} state={{json .State}}'
+```
+
+如果恢复 healthy，沿用原报告显式重试（无需重复 install/prepare）；执行器仍重新检查当前容器/PID、挂载、源文件及 marker，已存在文件通过内容核对后跳过。若发生身份变化则按错误另建计划，不能改报告指纹：
+
+```bash
+bash scripts/manage.sh nas delta copy resume \
+  /var/lib/mx-static/nas-precopy-continuation/delta-8cb4f04483264339ba4cdc63df13a788 \
+  --unlimited
+```
+
+持续不健康时先查近期 Health.Log 的探测退出码/响应原因；本次没有删除或放宽健康检查，也不建议在未知原因下反复提交复制。下文保留实现说明及首次准备过程。
+
 服务器日志确认 `mx-nas-part2-copy-d076b1bf96.service` 成功，job_id 为 `cdc8d85a2475440b86b21c624f365512`。2026-09-24 05:20:33–08:42:43（北京时间）复制了 312,505 个普通文件，逻辑大小 1,000,864,960,734 字节（932.13 GiB）；rsync 退出 0、没有删除文件、当次不限速，phase 为 `precopy_pass_complete`，cutover_ready/reclaim_ready 均为 false。
 
 历史源身份为 device `66309` / inode `7135180`，目标 inode `384893057`，消费者指纹 `918f25a42057ff3334d4458596925cc79dc4a8561a59ec2735db15ac96db05a8`。最新服务器安装 `ef5b6675f3b12c142d28` 后确认：**只有 consumer_fingerprint 不一致**，当前值为 `1cb035cc33634e4675ddb4f1fd1a24c12c406398c3f0745c481b8eced6b6f9b4`；源目录、目标路径/inode、schema、job_id 和未封存阶段都匹配。旧 marker 只保存摘要，不能反推具体是 ID、镜像或哪个挂载发生变化；不能改旧指纹续传。
