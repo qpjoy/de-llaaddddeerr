@@ -6,6 +6,10 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 ## 最新回执与当前下一步
 
+服务器已安装 `a242d3d71db429e361dd`，infra 恢复正常；delta 的首次 `migration prepare` 在创建部署报告前被固定服务集合检查拦截。回传确认额外服务为 `websearch`（`3556627c4fc2`），running、oneoff=False、Mounts 为空。它没有挂载待迁移的媒体卷/NAS；容器内部仍可能有缓存，不能因此宣称它完全没有存储。现将它作为独立辅助服务记录并原样保留：不加入媒体 override，不启动/停止/重建，不因它存在或不可用阻止媒体准备；仍检查当前/候选无挂载或额外主机访问权限。未知服务、重复角色、一次性任务仍明确指出对象和原因，不能盲目放行或删掉容器。
+
+之前诊断命令的 `{{.Name}}` 在某个非卷挂载上缺字段而失败，导致 gateway 信息未完整输出；这是输出模板问题，不是 Docker/NAS 运行失败。诊断挂载应使用 `{{json .Mounts}}` 或按 Type 取字段。无需重复原诊断，下面的准备命令会完整读取 Docker JSON，并继续要求全部十个媒体服务和现有 PostgreSQL/Redis 通过原有检查。`claude_sessions`、static 和 gateway 的其他绑定挂载保持不变。
+
 续传任务 `mx-nas-part2-delta-copy-resume-bb431bb374.service` 已成功，事件 `nas_delta_copy_complete`，phase=`manifest_copy_complete`。成功尝试目录：
 
 ```text
@@ -16,7 +20,7 @@ infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 ti
 
 此前 gateway 的四次探测超过 5 秒超时；16:31 已恢复 healthy，RestartCount=0、无 OOM。续传完成证明重试通过了运行核对，不能据此断言先前超时由复制或 NAS 引起。
 
-本版新增只读部署审核入口，先收集正式切换所需的服务器证据。同步 mx-static 代码后，在服务器 mx-static 目录以 root 执行：
+同步本次辅助服务修正后，在服务器 mx-static 目录以 root 执行下方命令，重新收集部署审核结果。预期安装快照 `d75dc69e91f799f36fb4`；无需重复补复制：
 
 ```bash
 bash scripts/manage.sh nas recovery install &&
@@ -26,13 +30,13 @@ bash scripts/manage.sh nas delta migration prepare \
   --json
 ```
 
-回传终端中的 `nas_delta_migration_service`、`nas_delta_migration_prepared`（或失败事件）即可，不贴私有配置或 `.env`。新报告保存在 `/var/lib/mx-static/nas-migration-prepare/delta-<32位ID>`，权限为目录 0700、文件 0600。它验证成功复制收据/清单及源、目标、原 marker 身份，核对当前 12 个服务、Compose 标签/模型、镜像和启动脚本，并生成只含 delta 的 NAS 挂载候选。完整 Env/Compose 留在私有报告；公开差异只含字段名或脚本摘要。只读取目录身份和部署信息，不遍历媒体树、不读取全量媒体内容、不创建 NFS 卷、不写 NAS、不重启任何业务。
+回传终端中的 `nas_delta_migration_service`、`nas_delta_migration_prepared`（或失败事件）即可，不贴私有配置或 `.env`。新报告保存在 `/var/lib/mx-static/nas-migration-prepare/delta-<32位ID>`，权限为目录 0700、文件 0600。它验证成功复制收据/清单及源、目标、原 marker 身份，核对十个媒体服务、现有 PostgreSQL/Redis 和已登记辅助服务的 Compose 标签/模型；媒体镜像/启动脚本另行检查，并生成只含 delta 媒体角色的 NAS 挂载候选。`auxiliary_services` 摘要列明保留的辅助服务。完整 Env/Compose 留在私有报告；公开差异只含字段名或脚本摘要。只读取目录身份和部署信息，不遍历媒体树、不读取全量媒体内容、不创建 NFS 卷、不写 NAS、不重启任何业务。
 
 `deployment_review_passed=true` 仅表示这次部署证据符合已审阅参考，`candidate_merge_verified=true` 仅表示候选合并没有改变媒体挂载及必要启动参数以外的配置。仍有 `execution_allowed=false`、`reclaim_ready=false`；**不能手工拿候选文件运行 Compose up**。已有 web 启动脚本会执行数据库迁移与管理员初始化，迁移需核对实际镜像后采用受控启动，保留数据库和现有账号。若 `review_items` 非空，保留报告按字段分析，不改摘要或绕过检查。
 
 `part2.deployment.json` 只登记现有三个 Compose 文件和独立 delta env 的位置，以及本地已阅读的四个启动脚本摘要，不启用 NAS 权威或恢复。正式 delta 发布/恢复/切换/回收适配仍需完成；目前普通 `--instance delta-59202` 发布仍为 local，不能用重新部署代替迁移。后续顺序是：审核现场、完成发布及恢复保护、维护窗口停写和最终同步、只重建媒体消费者挂 NAS、业务验证、清理前核验、再显式删除 SSD。
 
-本地 411 项 NAS 回归、35 个运行时 Python 文件的 Python 3.6 语法检查、11 个 Bash 脚本语法检查通过；准备入口运行时快照为 `a242d3d71db429e361dd`。新增测试使用真实临时复制收据和私有报告，验证旧证据不变、配置/脚本/身份变化拒绝或列为待审核、数据库/账号配置不变、公开输出不含测试密钥。Docker/Compose/内核/NFS 边界为隔离模拟；未连接服务器，未执行真实部署、停写或删除。
+本地 419 项 NAS 回归、35 个运行时 Python 文件的 Python 3.6 语法检查、11 个 Bash 脚本语法检查通过。本次新增 8 项辅助服务回归：无挂载 websearch 原样保留、不可用不阻塞、挂载/额外主机访问需审核、运行期间变化拒绝、重复/未知/一次性角色错误可定位、必需媒体/数据库缺失拒绝、会话卷和无 Name 的 gateway bind 保留。测试使用真实临时复制收据和私有报告；Docker/Compose/内核/NFS 边界为隔离模拟，未连接服务器，未执行真实部署、停写或删除。
 
 ## 历史续传准备与失败重试（已完成，无需照此重跑）
 

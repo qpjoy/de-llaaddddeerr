@@ -110,6 +110,120 @@ class DeltaMigrationTests(unittest.TestCase):
     def prepare(self):
         return migration.prepare(self.manager, self.profile, self.attempt)
 
+    def add_websearch(self):
+        row = copy.deepcopy(self.rows[0])
+        row.update(Id='e' * 64, Name='/delta_59202-websearch-1', Image='sha256:websearch', Mounts=[])
+        row['Config']['Labels'].update({'com.docker.compose.service': 'websearch',
+                                       'com.docker.compose.config-hash': 'hash-websearch'})
+        row['Config']['Cmd'] = ['websearch']
+        self.rows.append(row)
+        self.model['services']['websearch'] = {'image': 'image:websearch', 'command': ['websearch'],
+                                             'environment': {'SECRET': 'private-value'}}
+        return row
+
+    def test_mountless_websearch_is_recorded_but_never_added_to_media_override(self):
+        row = self.add_websearch()
+        result = self.prepare()
+        self.assertTrue(result['deployment_review_passed'])
+        self.assertEqual(result['auxiliary_services'], [{'service': 'websearch', 'id': row['Id'][:12],
+                                                        'mounts': [], 'preserved': True}])
+        folder = Path(result['report_directory'])
+        candidate = json.loads((folder / 'compose.nas.candidate.json').read_text())
+        merged = json.loads((folder / 'compose.nas.candidate.private.json').read_text())
+        self.assertNotIn('websearch', candidate['services'])
+        self.assertEqual(merged['services']['websearch'], self.model['services']['websearch'])
+        self.assertTrue(all(row['Id'] not in cmd for cmd in self.commands))
+        self.assertFalse(result['execution_allowed'])
+
+    def test_auxiliary_actual_mount_or_host_access_is_not_silently_accepted(self):
+        row = self.add_websearch()
+        for mount in ({'Type': 'volume', 'Name': copying.VOLUME, 'Destination': '/app/media'},
+                      {'Type': 'bind', 'Source': '/data', 'Destination': '/host'},
+                      {'Type': 'bind', 'Source': '/var/run/docker.sock', 'Destination': '/var/run/docker.sock'}):
+            with self.subTest(mount=mount):
+                row['Mounts'] = [mount]
+                with self.assertRaisesRegex(RuntimeError, 'mount/access review: websearch'):
+                    migration.select(self.rows)
+        row['Mounts'] = []
+        for host in ({'Privileged': True}, {'VolumesFrom': ['other']}, {'PidMode': 'host'},
+                     {'CapAdd': ['SYS_ADMIN']}, {'Binds': ['/data:/host']}):
+            with self.subTest(host=host):
+                row['HostConfig'] = host
+                with self.assertRaisesRegex(RuntimeError, 'mount/access review: websearch'):
+                    migration.select(self.rows)
+
+    def test_application_session_volume_and_gateway_bind_are_preserved(self):
+        self.add_websearch()
+        self.model['volumes']['claude_sessions'] = {'name': 'delta_59202_claude_sessions'}
+        for row in self.rows:
+            name = row['Config']['Labels']['com.docker.compose.service']
+            if name == 'web' or name.startswith('worker'):
+                row['Mounts'].append({'Type': 'volume', 'Name': 'delta_59202_claude_sessions',
+                                     'Source': '/data/docker/volumes/delta_59202_claude_sessions/_data',
+                                     'Destination': '/root/.claude/projects', 'RW': True})
+                self.model['services'][name]['volumes'].append({'type': 'volume', 'source': 'claude_sessions',
+                                                               'target': '/root/.claude/projects'})
+            if name == 'gateway':
+                # Bind mounts need not contain Docker's volume-only Name key.
+                row['Mounts'].append({'Type': 'bind', 'Source': migration.APP_ROOT + '/nginx.conf',
+                                     'Destination': '/etc/nginx/conf.d/default.conf', 'RW': False})
+                self.model['services'][name]['volumes'].append({'type': 'bind', 'source': migration.APP_ROOT + '/nginx.conf',
+                                                               'target': '/etc/nginx/conf.d/default.conf', 'read_only': True})
+        self.fixture.baseline['consumer_fingerprint'] = precopy.check_consumers(copying.VOLUME, self.rows)
+        result = self.prepare()
+        self.assertTrue(result['deployment_review_passed'])
+        merged = json.loads((Path(result['report_directory']) / 'compose.nas.candidate.private.json').read_text())
+        for name in ('gateway', 'web', 'worker'):
+            self.assertEqual([m for m in merged['services'][name]['volumes'] if m['target'] != copying.RAW],
+                             self.model['services'][name]['volumes'])
+    def test_auxiliary_model_mount_added_after_deployment_is_a_review_item(self):
+        self.add_websearch()
+        self.model['services']['websearch']['volumes'] = [{'type': 'volume', 'source': 'media_data', 'target': '/app/media'}]
+        result = self.prepare()
+        self.assertFalse(result['deployment_review_passed'])
+        self.assertIn({'service': 'websearch', 'reason': 'auxiliary_mount_or_access_needs_review'}, result['review_items'])
+
+    def test_auxiliary_availability_does_not_gate_media_preparation(self):
+        row = self.add_websearch()
+        row['State'].update(Running=False, Pid=0)
+        row['State']['Health']['Status'] = 'unhealthy'
+        result = self.prepare()
+        self.assertTrue(result['deployment_review_passed'])
+        self.assertTrue(all(row['Id'] not in cmd for cmd in self.commands))
+
+    def test_auxiliary_change_during_preparation_cannot_publish_success(self):
+        row = self.add_websearch()
+        original = self.fake_run
+        def drift(args):
+            result = original(args)
+            if args[:len(migration.command())] == migration.command() and '/compose.nas.candidate.json' in ' '.join(args):
+                row['State']['Pid'] += 1
+            return result
+        self.manager.run.side_effect = drift
+        with self.assertRaisesRegex(RuntimeError, 'changed while preparing'): self.prepare()
+        self.assertFalse(list(self.reports.glob('*/review.json')))
+
+    def test_unreviewed_duplicate_or_oneoff_service_error_identifies_object_without_env(self):
+        row = self.add_websearch()
+        for service, oneoff, extra, reason in [('unknown', 'False', [], 'unreviewed_service'),
+                                              ('websearch', 'True', [], 'one_off'),
+                                              ('websearch', 'False', [row], 'duplicate_service')]:
+            with self.subTest(reason=reason):
+                row['Config']['Labels'].update({'com.docker.compose.service': service,
+                                               'com.docker.compose.oneoff': oneoff})
+                with self.assertRaises(RuntimeError) as error: migration.select(self.rows + extra)
+                self.assertIn(reason, str(error.exception))
+                self.assertIn(row['Id'][:12], str(error.exception))
+                self.assertNotIn('private-value', str(error.exception))
+
+    def test_auxiliary_present_does_not_allow_missing_gateway_or_database(self):
+        self.add_websearch()
+        for service in ('gateway', 'postgres', 'redis'):
+            with self.subTest(service=service):
+                rows = [c for c in self.rows if c['Config']['Labels']['com.docker.compose.service'] != service]
+                with self.assertRaisesRegex(RuntimeError, 'Missing required delta services: ' + service):
+                    migration.select(rows)
+
     def test_read_only_preparation_preserves_receipts_and_database_config(self):
         result = self.prepare()
         self.assertTrue(result['deployment_review_passed'])

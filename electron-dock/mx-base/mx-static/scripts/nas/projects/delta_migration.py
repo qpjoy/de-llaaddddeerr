@@ -29,6 +29,9 @@ ENV_FILE = 'deploy/.env.delta-59202.ghcr'
 RELEASE_SCRIPT = 'scripts/deploy_public_ghcr.sh'
 SCRIPT_NAMES = {'scripts/run_web.sh', 'scripts/run_worker.sh', 'scripts/run_beat.sh', 'scripts/run_chat_gateway.sh'}
 DEPENDENCIES = {'postgres': '/var/lib/postgresql/data', 'redis': '/data'}
+# Observed on delta: a separate, mountless application service. It is recorded
+# and preserved, never included in the media override or migration lifecycle.
+AUXILIARIES = {'websearch'}
 
 
 def definition(manager, profile):
@@ -110,17 +113,29 @@ def completed_copy(path):
 
 def select(rows):
     selected = {}
+    required = precopy.SERVICES | set(DEPENDENCIES)
     for c in rows:
         labels = c.get('Config', {}).get('Labels') or {}
         if labels.get('com.docker.compose.project') != copying.PROJECT: continue
         name = labels.get('com.docker.compose.service')
-        if (name not in precopy.SERVICES | set(DEPENDENCIES) or name in selected
-                or str(labels.get('com.docker.compose.oneoff', 'false')).lower() != 'false'):
-            raise RuntimeError('Unexpected, duplicate or one-off delta service; review before cutover preparation.')
+        reasons = []
+        if name not in required | AUXILIARIES: reasons.append('unreviewed_service')
+        if name in selected: reasons.append('duplicate_service')
+        if str(labels.get('com.docker.compose.oneoff', 'false')).lower() != 'false': reasons.append('one_off')
+        if reasons:
+            raise RuntimeError('Delta service requires review: ' + json.dumps({
+                'id': c.get('Id', '')[:12], 'name': c.get('Name'), 'service': name, 'reasons': reasons}))
         selected[name] = c
-    if set(selected) != precopy.SERVICES | set(DEPENDENCIES):
-        raise RuntimeError('Expected exactly ten media services and the existing delta PostgreSQL/Redis.')
-    reclaim_plan.health_guard(selected)
+    if not required <= set(selected):
+        raise RuntimeError('Missing required delta services: ' + ', '.join(sorted(required - set(selected))))
+    for name in AUXILIARIES & set(selected):
+        c = selected[name]; host = c.get('HostConfig') or {}
+        if (c.get('Mounts') or host.get('Binds') or host.get('Mounts') or host.get('VolumesFrom')
+                or host.get('Privileged') or host.get('Devices') or host.get('DeviceRequests')
+                or host.get('PidMode') or host.get('CapAdd')):
+            raise RuntimeError('Auxiliary delta service requires mount/access review: ' + name)
+    # An unrelated auxiliary's availability is not a media-migration gate.
+    reclaim_plan.health_guard({name: selected[name] for name in required})
     for name, target in DEPENDENCIES.items():
         c = selected[name]
         mounts = c.get('Mounts', [])
@@ -180,13 +195,17 @@ def model_review(model, rows, hashes):
                     or any(copying.overlaps(m.get('target', '/'), copying.RAW) for m in mounts if m not in parents)
                     or any(copying.overlaps(p.split(':')[0], copying.RAW) for p in tmpfs)):
                 issues.append({'service': name, 'reason': 'media_mount_differs_or_hidden'})
-        else:
+        elif name in DEPENDENCIES:
             key = name + '_data'
             if (len(mounts) != 1 or mounts[0].get('type') != 'volume' or mounts[0].get('source') != key
                     or mounts[0].get('target') != DEPENDENCIES[name] or mounts[0].get('read_only', False)
                     or mounts[0].get('volume', {}).get('subpath')
                     or volumes.get(key, {}).get('name') != copying.PROJECT + '_' + key):
                 issues.append({'service': name, 'reason': 'database_or_queue_volume_differs'})
+        elif (mounts or service.get('tmpfs') or service.get('configs') or service.get('secrets')
+                or service.get('privileged') or service.get('devices') or service.get('pid')
+                or service.get('cap_add')):
+            issues.append({'service': name, 'reason': 'auxiliary_mount_or_access_needs_review'})
     return issues
 
 
@@ -294,6 +313,9 @@ def prepare(manager, profile, attempt_path):
                   'deployment_files_sha256': before, 'services': services,
                   'databases': {n: {'id': rows[n]['Id'], 'health': rows[n]['State']['Health']['Status'],
                                     'volume': copying.PROJECT + '_' + n + '_data'} for n in DEPENDENCIES},
+                  'auxiliary_services': [{'service': n, 'id': rows[n]['Id'][:12],
+                                          'mounts': [], 'preserved': True}
+                                         for n in sorted(AUXILIARIES & set(rows))],
                   'review_items': issues, 'deployment_review_passed': not issues,
                   'candidate_merge_verified': True, 'release_hook': hook,
                   'production_changed': False, 'source_deleted': False, 'nas_walk': False,

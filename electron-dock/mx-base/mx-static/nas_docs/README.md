@@ -1,5 +1,7 @@
 # NAS 迁移运维入口
 
+**最新准备检查修正：** 服务器已安装 `a242d3d71db429e361dd`；delta 因固定服务集合未包含 `websearch` 而在只读准备阶段被拦截。用户回传确认它无挂载。现按辅助服务保留，不纳入媒体切换或可用性门槛，仍验证无媒体挂载/额外主机访问；无需重复复制或删除容器。同步修正后重跑原 `migration prepare`，见下方链接的最新操作步骤。
+
 **最新复制完成回执（覆盖下文待执行状态）：** delta 续传 unit `mx-nas-part2-delta-copy-resume-bb431bb374.service` 成功；本次新增 6,531 个、已有并核验 250 个，补齐清单共 6,781 个文件 / 4.77 GiB。仍为在线快照，业务继续写 SSD；未切换、未删除、不可回收。下一步同步代码后运行新 `nas delta migration prepare <成功 copy 尝试目录>`，只读收集当前部署和 NAS 候选配置，不重复复制。正式切换/发布/恢复/回收适配尚待完成；精确命令和报告路径见 [第二卷当前下一步](operations/part2-delta-migration.md#最新回执与当前下一步)。
 
 **2026-09-28 当前进度（优先于下文历史现场）：** 用户确认 infra 约 500 GiB 媒体已迁移且旧 SSD 已清理；最新服务器快照 `ef5b6675f3b12c142d28` 安装成功，infra 恢复已核对/纳入，timer active/enabled。15:53 现场确认 `/data` 可用约 520 GiB；delta / part2 历史预复制成功（312,505 个文件、932.13 GiB），但仍使用 SSD。新诊断已确认只有消费者指纹变化，源/目标和阶段匹配。现增加独立 `nas delta copy prepare / resume`：审核当前 SSD 挂载、另存差量清单、不限速添加 NAS 缺失文件，保留旧 marker 和两侧已有数据；待服务器执行。delta 正式切换/恢复/回收仍未实现，不能套用 infra 命令。见 [第二卷 delta 的完整顺序与当前可执行命令](operations/part2-delta-migration.md)。新增会话卷的发布兼容见 [9 月 28 日发布检查修复](operations/2026-09-28-release-external.md)。

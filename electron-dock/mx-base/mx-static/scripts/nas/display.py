@@ -96,6 +96,7 @@ def render(value):
         return ('delta 部署审核：'+('通过' if value['deployment_review_passed'] else '需处理')+
                 '\n私有报告：'+value['report_directory']+'\n'+
                 json.dumps({'review_items':value['review_items'],'databases':value['databases'],
+                            'auxiliary_services':value.get('auxiliary_services',[]),
                             'release_hook':value['release_hook']},ensure_ascii=False,indent=2)+
                 '\nNAS 候选合并已核对；未执行发布、停写或切换，不能据此删除 SSD。\n'+
                 '正式执行还需 delta 发布/恢复适配、停写最终同步及应用身份读写验证。')
