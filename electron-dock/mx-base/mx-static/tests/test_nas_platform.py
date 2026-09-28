@@ -25,6 +25,7 @@ class PlatformTests(unittest.TestCase):
         examples=[(['infra','status'],['status','part1']),(['project','infra','recovery'],['recover','part1']),
           (['infra','cleanup','--business-accepted'],['reclaim','part1','--business-accepted']),
           (['delta','copy','--unlimited'],['copy','part2','--unlimited']),
+          (['delta','copy','status'],['precopy-status','part2']),
           (['infra','task','part1','cleanup','--business-accepted'],['reclaim','part1','--business-accepted']),
           (['delta','task','part2','copy','--unlimited'],['copy','part2','--unlimited']),
           (['recovery','install'],['auto-install']),(['recovery','enable','infra'],['auto-enable','part1']),

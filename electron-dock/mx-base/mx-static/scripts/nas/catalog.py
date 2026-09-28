@@ -83,6 +83,9 @@ def route(argv, config):
     if args[0]!='project':return args  # Preserve old part1/part2 commands.
     if len(args)<3 or args[1] not in projects:raise RuntimeError('Use nas project list or nas project <registered-project> <action>.')
     p=projects[args[1]];tail=args[2:];task=p['tasks'][0]
+    if tail==['copy','status']:
+        if 'copy' not in p['capabilities']:raise RuntimeError('Pre-copy adapter not reviewed for this project.')
+        return ['precopy-status',task]
     if tail[0]=='task':
         if len(tail)<3 or tail[1] not in p['tasks']:raise RuntimeError('Migration task does not belong to this project.')
         task=tail[1];action={'cleanup':'reclaim','recovery':'recover'}.get(tail[2],tail[2])

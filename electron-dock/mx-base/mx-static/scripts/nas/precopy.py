@@ -185,20 +185,43 @@ def open_job(parent_fd, volume, source_fd, fingerprint, create, records=None):
             write_state(job_fd, state)
         else:
             state = read_state(job_fd)  # No marker: refuse, even if the directory looks empty.
-            if (state.get('schema') != 1 or state.get('volume') != volume
-                    or state.get('source_identity') != source_identity(source_fd)
-                    or not matches_fingerprint(state.get('consumer_fingerprint'), fingerprint, records)
-                    or state.get('target') != MEDIA_ROOT + '/' + volume + '/data_hub_raw_media'
-                    or state.get('phase') not in ('prepared', 'precopy_running', 'precopy_pass_complete', 'precopy_failed')
-                    or state.get('cutover_ready') is not False or state.get('reclaim_ready') is not False):
-                raise RuntimeError('Migration marker/deployment changed or copy is sealed; review before resuming.')
-            if not isinstance(state.get('job_id'), str) or len(state['job_id']) != 32:
-                raise RuntimeError('Invalid job identity.')
-            int(state['job_id'], 16)
             target_fd, _ = child_directory(job_fd, 'data_hub_raw_media')
             opened.append(target_fd)
-            if os.fstat(target_fd).st_ino != state.get('target_inode'):
-                raise RuntimeError('Destination directory replaced; refusing to reuse it.')
+            current = {'volume': volume, 'source_identity': source_identity(source_fd),
+                       'consumer_fingerprint': fingerprint, 'target_inode': os.fstat(target_fd).st_ino,
+                       'target': MEDIA_ROOT + '/' + volume + '/data_hub_raw_media'}
+            fingerprint_error = None
+            try:
+                consumers_match = matches_fingerprint(state.get('consumer_fingerprint'), fingerprint, records)
+            except RuntimeError as exc:
+                consumers_match = False
+                fingerprint_error = str(exc)
+            checks = {key: state.get(key) == current[key]
+                      for key in ('volume', 'source_identity', 'target', 'target_inode')}
+            checks.update(schema=state.get('schema') == 1, consumer_fingerprint=consumers_match,
+                          phase=state.get('phase') in ('prepared', 'precopy_running', 'precopy_pass_complete', 'precopy_failed'),
+                          cutover_ready=state.get('cutover_ready') is False,
+                          reclaim_ready=state.get('reclaim_ready') is False)
+            checks['job_id'] = isinstance(state.get('job_id'), str) and len(state['job_id']) == 32
+            if checks['job_id']:
+                try:
+                    int(state['job_id'], 16)
+                except ValueError:
+                    checks['job_id'] = False
+            failed = sorted(key for key, matched in checks.items() if not matched)
+            # Whitelist metadata only. Never adopt today's fingerprint or write
+            # the old marker merely because a read-only diagnostic was requested.
+            recorded = {key: state.get(key) for key in list(current) +
+                        ['schema', 'job_id', 'phase', 'cutover_ready', 'reclaim_ready', 'last_exit_code',
+                         'started_at_unix', 'finished_at_unix']}
+            emit('precopy_resume_check', volume=volume, checks=checks, failed_checks=failed,
+                 recorded=recorded, current=current, fingerprint_error=fingerprint_error,
+                 marker_changed=False, nas_walk=False, reclaim_ready=False,
+                 note='Resume identity checks only; no copy, rebase or deletion. Not a file verification or cutover.')
+            if failed:
+                suffix = ' Destination directory replaced.' if 'target_inode' in failed else ''
+                raise RuntimeError('Migration marker/deployment changed or copy is sealed; review before resuming. '
+                                   'Failed checks: ' + ', '.join(failed) + '.' + suffix)
         # Keep only the descriptors needed for copying/state writes.
         for fd in opened[:-2]:
             os.close(fd)

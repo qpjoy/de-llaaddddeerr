@@ -99,6 +99,74 @@ class PrecopyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'replaced'):
             self.job()
 
+    def test_resume_diagnostic_isolates_changed_fingerprint_without_rebasing_marker(self):
+        self.job(volume='delta_59202_media_data', fingerprint='before-redeploy')
+        marker = self.parent / 'data/docker/media-volumes/delta_59202_media_data' / precopy.MARKER
+        before = marker.read_bytes()
+        with patch.object(precopy, 'emit') as emit, patch.object(precopy, 'write_state') as write:
+            with self.assertRaisesRegex(RuntimeError, 'consumer_fingerprint'):
+                self.job(volume='delta_59202_media_data', fingerprint='after-redeploy', create=False)
+        event = emit.call_args.kwargs
+        self.assertEqual(event['failed_checks'], ['consumer_fingerprint'])
+        self.assertTrue(event['checks']['source_identity'])
+        self.assertTrue(event['checks']['target_inode'])
+        self.assertEqual(event['recorded']['consumer_fingerprint'], 'before-redeploy')
+        self.assertEqual(event['current']['consumer_fingerprint'], 'after-redeploy')
+        write.assert_not_called()
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_resume_diagnostic_keeps_every_other_identity_and_seal_guard(self):
+        job, _, original = self.job()
+        marker = self.parent / 'data/docker/media-volumes/po_infra_media_data' / precopy.MARKER
+        mutations = {'schema': 99, 'volume': 'delta_59202_media_data',
+                     'source_identity': {'device': 1, 'inode': 2}, 'target': '/unrelated',
+                     'target_inode': original['target_inode'] + 1, 'phase': 'running_on_nas',
+                     'cutover_ready': True, 'reclaim_ready': True, 'job_id': 'not-a-job'}
+        for key, value in mutations.items():
+            with self.subTest(key=key):
+                precopy.write_state(job, dict(original, **{key: value}))
+                before = marker.read_bytes()
+                with patch.object(precopy, 'emit') as emit, patch.object(precopy, 'write_state') as write:
+                    with self.assertRaisesRegex(RuntimeError, key): self.job(create=False)
+                self.assertEqual(emit.call_args.kwargs['failed_checks'], [key])
+                write.assert_not_called()
+                self.assertEqual(marker.read_bytes(), before)
+
+    def test_resume_diagnostic_whitelists_metadata_and_matching_status_never_writes(self):
+        job, _, original = self.job()
+        precopy.write_state(job, dict(original, env='private-secret', unexpected='do-not-print'))
+        marker = self.parent / 'data/docker/media-volumes/po_infra_media_data' / precopy.MARKER
+        before = marker.read_bytes()
+        with patch.object(precopy, 'emit') as emit, patch.object(precopy, 'write_state') as write:
+            self.job(create=False)
+        event = emit.call_args.kwargs
+        self.assertEqual(event['failed_checks'], [])
+        self.assertNotIn('private-secret', json.dumps(event))
+        self.assertNotIn('do-not-print', json.dumps(event))
+        self.assertFalse(event['marker_changed'])
+        self.assertFalse(event['nas_walk'])
+        self.assertFalse(event['reclaim_ready'])
+        write.assert_not_called()
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_legacy_matching_limit_is_a_diagnostic_failure_not_a_bypass(self):
+        self.job()
+        with patch.object(precopy, 'matches_fingerprint', side_effect=RuntimeError('Legacy mount-order matching exceeds its limit.')), \
+                patch.object(precopy, 'emit') as emit:
+            with self.assertRaisesRegex(RuntimeError, 'consumer_fingerprint'): self.job(create=False)
+        self.assertIn('exceeds its limit', emit.call_args.kwargs['fingerprint_error'])
+        self.assertEqual(emit.call_args.kwargs['failed_checks'], ['consumer_fingerprint'])
+
+    def test_resume_human_view_distinguishes_deployment_drift_from_directory_change(self):
+        import display
+        self.job()
+        with patch.object(precopy, 'emit') as emit:
+            with self.assertRaises(RuntimeError): self.job(fingerprint='new', create=False)
+        rendered = display.render(dict(emit.call_args.kwargs, event='precopy_resume_check'))
+        self.assertIn('消费者指纹', rendered)
+        self.assertIn('不匹配', rendered)
+        self.assertIn('未修改旧记录', rendered)
+
     def test_command_copies_all_files_and_never_deletes_or_updates_in_place(self):
         _, target, state = self.job()
         command = precopy.copy_command(self.source_fd, target, state)

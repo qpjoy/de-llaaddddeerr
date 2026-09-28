@@ -426,6 +426,7 @@ def parser():
         if action=='compose':s.add_argument('view',choices=('ps','config-check'))
     for name in ('auto-install','_auto-recover','catalog-list','host-status','host-processes','host-mount-check','host-network','recovery-check-all','recovery-enable-migrated','recovery-disable-all'):sub.add_parser(name)
     sub.add_parser('repair-inspect').add_argument('part',choices=sorted(profiles()))
+    sub.add_parser('precopy-status').add_argument('part',choices=sorted(profiles()))
     for action in ('reclaim-check','_execute-reclaim-check'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         s.add_argument('--business-accepted',action='store_true')
@@ -458,6 +459,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas infra plan
   bash scripts/manage.sh nas infra cleanup --business-accepted  # 按已登记清单删除旧 SSD 文件
   bash scripts/manage.sh nas delta copy --unlimited
+  bash scripts/manage.sh nas delta copy status      # 只读核对旧预复制记录，逐项显示不能续传的原因
   bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
   bash scripts/manage.sh nas recovery enable --migrated
@@ -535,6 +537,10 @@ def main():
             with migration_lock():infra_repair.prepare(sys.modules[__name__],profile)
         elif action=='repair-inspect':
             return 0 if infra_drift.inspect(sys.modules[__name__],profile) else 1
+        elif action=='precopy-status':
+            # The helper retains its own lock/host/path checks and streams even
+            # failed diagnostic events. It never uses --copy or rewrites state.
+            return subprocess.call(['/usr/bin/python3','-B',str(ROOT/'scripts/nas/precopy.py'),profile['volume'],'--status'])
         elif action=='_execute-repair-copy':
             with migration_lock():infra_repair_copy.execute(sys.modules[__name__],profile,args.report)
         elif action=='_execute-reclaim-check':

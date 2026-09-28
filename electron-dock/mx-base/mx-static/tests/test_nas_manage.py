@@ -62,6 +62,21 @@ class ManagerTests(unittest.TestCase):
         for action in ('cutover','reclaim','recover','redeploy'):
             with self.assertRaises(RuntimeError):manager.task_command(action,self.profiles['part2'],args)
 
+    def test_project_precopy_status_only_delegates_readonly_helper_and_preserves_exit(self):
+        for code in (0, 1):
+            with mock.patch.object(manager.sys, 'argv', ['manage.py', 'delta', 'copy', 'status']), \
+                    mock.patch.object(manager.sys, 'platform', 'linux'), \
+                    mock.patch.object(manager.os, 'geteuid', return_value=0), \
+                    mock.patch.object(manager.socket, 'gethostname', return_value='mx-internal-server'), \
+                    mock.patch.object(manager.precopy, 'check_host'), \
+                    mock.patch.object(manager.subprocess, 'call', return_value=code) as call, \
+                    mock.patch.object(manager, 'audit') as audit, mock.patch.object(manager, 'launch') as launch:
+                self.assertEqual(manager.main(), code)
+                call.assert_called_once_with(['/usr/bin/python3', '-B', str(ROOT / 'scripts/nas/precopy.py'),
+                                              'delta_59202_media_data', '--status'])
+                audit.assert_not_called()
+                launch.assert_not_called()
+
     def test_explicit_maintenance_and_acceptance_gates(self):
         p=manager.parser()
         profile=dict(self.profile,plan=self.profile['report']+'/reclaim-plan-'+'a'*32)

@@ -69,6 +69,15 @@ def render(value):
         reclaim=value.get('ssd_reclaim')
         detail=json.dumps(reclaim,ensure_ascii=False,indent=2) if reclaim else '尚无完成记录'
         return '历史切换记录：{}；业务验收待完成：{}\nSSD 回收：{}\n历史记录不代表当前仍在 NAS；以当前挂载核对为准。'.format(phase,yes(value.get('business_acceptance_pending')),detail)
+    if event=='precopy_resume_check':
+        labels={'schema':'记录版本','job_id':'任务标识格式','volume':'媒体卷','source_identity':'SSD 目录设备/inode',
+                'target':'NAS 目标路径','target_inode':'NAS 目标 inode','consumer_fingerprint':'消费者指纹（容器/镜像/挂载）',
+                'phase':'预复制阶段','cutover_ready':'尚未封存切换','reclaim_ready':'尚未进入回收'}
+        rows=[[labels.get(k,k),'匹配' if matched else '不匹配'] for k,matched in value['checks'].items()]
+        return ('预复制续传身份核对 · '+value['volume']+'\n'+table(['项目','结果'],rows)+
+                '\n旧记录阶段：'+cell(value['recorded'].get('phase'))+
+                '\n仅核对身份；未扫描文件、未复制、未修改旧记录，不能据此切换或删除。'+
+                ('\n'+cell(value['fingerprint_error']) if value.get('fingerprint_error') else ''))
     if event=='nas_infra_storage_check':
         rows=[]
         for s in value['services']:
