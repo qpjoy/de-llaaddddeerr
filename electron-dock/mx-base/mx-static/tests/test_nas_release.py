@@ -297,14 +297,16 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'files changed'): self.execute()
         self.runner.assert_not_called()
 
-    def test_delta_remains_local_and_cannot_implicitly_adopt_infra_nas(self):
+    def test_delta_declaration_requires_registration_and_never_uses_infra_nas(self):
         self.model['name'] = 'delta_59202'
         self.model['volumes']['media_data']['name'] = 'delta_59202_media_data'
-        self.assertEqual(self.execute(), 0)
-        self.assertNotIn(str(manage.CONFIG.parent / 'part1.release.json'), self.runner.call_args.args[0])
+        with mock.patch.object(release.delta_runtime, 'read_record', side_effect=RuntimeError('Delta registration missing')):
+            with self.assertRaisesRegex(RuntimeError, 'Delta registration missing'): self.execute()
+        self.runner.assert_not_called()
         self.network.assert_not_called()
         index, _, _ = catalog.load(manage.CONFIG)
-        index['parts']['part2']['report'] = '/new-cutover'
+        self.assertEqual(release.select(index, self.model)[1], 'nas')
+        index['parts']['part2']['release_file'] = None
         with self.assertRaisesRegex(RuntimeError, 'no SSD fallback'): release.select(index, self.model)
 
     def test_unknown_project_and_changed_parent_are_refused(self):

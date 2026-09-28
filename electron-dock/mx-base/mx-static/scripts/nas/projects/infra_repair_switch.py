@@ -66,7 +66,7 @@ def new_directory(parent, prefix):
     return name, fd
 
 
-def union_plan(source, target, folder):
+def union_plan(source, target, folder, limits=None):
     leaf = os.open('union-manifest.jsonl', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                    0o600, dir_fd=folder)
     with os.fdopen(leaf, 'wb') as stream:
@@ -75,7 +75,7 @@ def union_plan(source, target, folder):
         plan['manifest_sha256'] = report.sha256.hexdigest()
         stream.flush(); os.fsync(stream.fileno())
     prep.private_write(folder, 'union-plan.json', plan); os.fsync(folder)
-    tree, dirs, paths = copying.read_manifest(folder, plan)
+    tree, dirs, paths = copying.read_manifest(folder, plan, **(limits or {}))
     return plan, tree, dirs, paths
 
 
@@ -201,9 +201,11 @@ def make_operation(manager, profile, attempt_path):
             if fd is not None: os.close(fd)
 
 
-def final_union(op):
-    """Called only after every reviewed SSD writer has stopped gracefully."""
-    writer_guard(op, stopped=True); op.config_guard(); media_guard(op)
+def final_union(op, writer_check=None, media_check=None, limits=None):
+    """Project-independent additive file phase, with explicit runtime guards."""
+    writer_check = writer_check or writer_guard
+    media_check = media_check or media_guard
+    writer_check(op, stopped=True); op.config_guard(); media_check(op)
     name, folder = new_directory(op.output, 'repair-final-')
     stage = journal = None
     try:
@@ -216,7 +218,7 @@ def final_union(op):
             for path in sorted(before): report.record('entry', path=path, metadata=before[path])
             stream.flush(); os.fsync(stream.fileno())
             source_manifest_sha256 = report.sha256.hexdigest()
-        _, tree, dirs, paths = union_plan(op.source, op.target, folder)
+        _, tree, dirs, paths = union_plan(op.source, op.target, folder, limits)
         fs = os.fstatvfs(op.target)
         if fs.f_bavail * fs.f_frsize < sum(tree[p]['size'] for p in paths) + 1024 ** 3:
             raise RuntimeError('NAS needs remaining candidate bytes plus 1 GiB reserve.')
@@ -234,12 +236,12 @@ def final_union(op):
             copying.copy_one(op.source, op.target, stage, path, tree, dirs, journal)
             if index % 100 == 0:
                 emit('nas_repair_final_copy_progress', processed=index, candidates=len(paths))
-                writer_guard(op, stopped=True); op.config_guard()
+                writer_check(op, stopped=True); op.config_guard()
         # Retain every NAS-only file and its attributes. No rsync mirror,
         # quarantine, chmod/chown of existing files, or deletion is permitted.
         _, verification = new_directory(folder, 'verify-')
         try:
-            result, _, _, missing = union_plan(op.source, op.target, verification)
+            result, _, _, missing = union_plan(op.source, op.target, verification, limits)
             if missing: raise RuntimeError('SSD-only files remain after the stopped-writer addition.')
         finally:
             os.close(verification)
@@ -257,7 +259,7 @@ def final_union(op):
         try: sha = hashlib.sha256(os.read(fd, 1024)).hexdigest()
         finally: os.close(fd)
         op.state['sample'] = {'relative': sample, 'size': before[sample]['size'], 'prefix_sha256': sha}
-        writer_guard(op, stopped=True); op.config_guard(); media_guard(op); op.identity_probe()
+        writer_check(op, stopped=True); op.config_guard(); media_check(op); op.identity_probe()
         actual = os.stat(stage_name, dir_fd=op.job, follow_symlinks=False)
         if {'device': actual.st_dev, 'inode': actual.st_ino} != precopy.source_identity(stage):
             raise RuntimeError('Private NAS staging replaced; retained for review.')

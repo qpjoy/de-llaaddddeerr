@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "delta",
   "compose_project": "delta_59202",
-  "adapter": "precopy-only",
+  "adapter": "delta-v1",
   "tasks": [
     "part2"
   ],
@@ -11,7 +11,9 @@
     "locate",
     "logs",
     "copy",
-    "migration-prepare"
+    "migration-prepare",
+    "migration-switch",
+    "recover"
   ],
   "ownership": {
     "operator": "root",
@@ -20,7 +22,7 @@
     "gateway_access": "read-only"
   },
   "data_policy": {
-    "nas_authoritative": false,
+    "nas_authoritative": true,
     "automatic_cleanup": false,
     "reuse_static_archive": false
   }

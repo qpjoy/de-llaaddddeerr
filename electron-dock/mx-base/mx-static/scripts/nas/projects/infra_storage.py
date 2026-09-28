@@ -13,11 +13,12 @@ from permissions import emit
 RAW = '/app/media/data_hub_raw_media'
 
 
-def media_consumer(container):
-    roots = ['/data/docker/volumes/' + prep.VOLUME + '/_data/data_hub_raw_media',
-             '/data/docker/volumes/' + prep.NFS_VOLUME + '/_data']
+def media_consumer(container, profile=None):
+    volume, nfs, _ = storage_spec(profile)
+    roots = ['/data/docker/volumes/' + volume + '/_data/data_hub_raw_media',
+             '/data/docker/volumes/' + nfs + '/_data']
     for mount in container.get('Mounts', []):
-        if mount.get('Name') in (prep.VOLUME, prep.NFS_VOLUME): return True
+        if mount.get('Name') in (volume, nfs): return True
         source = mount.get('Source', '')
         if mount.get('Type') == 'bind' and source.startswith('/'):
             source = os.path.normpath(source)
@@ -26,9 +27,26 @@ def media_consumer(container):
     return False
 
 
+def storage_spec(profile=None):
+    if profile is None or (profile.get('project'), profile.get('volume'), profile.get('nfs_volume')) == ('mx_data', prep.VOLUME, prep.NFS_VOLUME):
+        return prep.VOLUME, prep.NFS_VOLUME, prep.OPTIONS
+    if (profile.get('project'), profile.get('volume'), profile.get('nfs_volume'), profile.get('recovery_mode')) == (
+            'delta_59202', 'delta_59202_media_data', 'delta_59202_raw_media_nfs_v1', 'delta-media-v1'):
+        return profile['volume'], profile['nfs_volume'], dict(prep.OPTIONS,
+            device=':/volume1/data1/mx-internal-server/data/docker/media-volumes/delta_59202_media_data/data_hub_raw_media')
+    raise RuntimeError('Storage identity has no reviewed adapter.')
+
+
 def reviewed(profile):
-    if (profile['project'], profile['volume'], profile['nfs_volume']) != ('mx_data', prep.VOLUME, prep.NFS_VOLUME):
-        raise RuntimeError('Storage check is only reviewed for infra/mx_data.')
+    # Legacy infra execution callers use this narrower gate.
+    if (profile.get('project'), profile.get('volume'), profile.get('nfs_volume')) != ('mx_data', prep.VOLUME, prep.NFS_VOLUME):
+        raise RuntimeError('This execution adapter is only reviewed for infra/mx_data.')
+
+
+def validate_volume(profile, meta):
+    _, name, options = storage_spec(profile)
+    if meta.get('Name') != name or meta.get('Driver') != 'local' or meta.get('Options') != options:
+        raise RuntimeError('Existing NFS volume differs; never create a local substitute.')
 
 
 def kernel_mounts(text):
@@ -42,10 +60,10 @@ def kernel_mounts(text):
 
 
 def evaluate(profile, containers, volume, mountinfo, allow_stopped=False, allow_replicas=False):
-    reviewed(profile)
+    parent_volume, nfs_volume, options = storage_spec(profile)
     issues = []
     try:
-        prep.validate_volume(volume or {})
+        validate_volume(profile, volume or {})
     except RuntimeError:
         issues.append('NFS 卷不存在或 driver/options 不符；禁止自动创建本地替代卷。')
     selected = {name: [] for name in prep.SERVICES}
@@ -54,7 +72,7 @@ def evaluate(profile, containers, volume, mountinfo, allow_stopped=False, allow_
         name = labels.get('com.docker.compose.service')
         if labels.get('com.docker.compose.project') == profile['project'] and name in selected:
             selected[name].append(c)
-        elif media_consumer(c):
+        elif media_consumer(c, profile):
             issues.append('发现登记清单外的媒体卷消费者：' + c['Id'][:12])
     services = []
     batches = []
@@ -79,15 +97,15 @@ def evaluate(profile, containers, volume, mountinfo, allow_stopped=False, allow_
             mounts = c.get('Mounts', [])
             parent = [m for m in mounts if m.get('Destination') == '/app/media']
             child = [m for m in mounts if m.get('Destination') == RAW]
-            if (len(parent) != 1 or parent[0].get('Type') != 'volume' or parent[0].get('Name') != prep.VOLUME
-                    or parent[0].get('Source') != '/data/docker/volumes/' + prep.VOLUME + '/_data'):
+            if (len(parent) != 1 or parent[0].get('Type') != 'volume' or parent[0].get('Name') != parent_volume
+                    or parent[0].get('Source') != '/data/docker/volumes/' + parent_volume + '/_data'):
                 reasons.append('SSD 父卷不符')
-            if (len(child) != 1 or child[0].get('Type') != 'volume' or child[0].get('Name') != prep.NFS_VOLUME
-                    or child[0].get('Source') != '/data/docker/volumes/' + prep.NFS_VOLUME + '/_data'
+            if (len(child) != 1 or child[0].get('Type') != 'volume' or child[0].get('Name') != nfs_volume
+                    or child[0].get('Source') != '/data/docker/volumes/' + nfs_volume + '/_data'
                     or child[0].get('RW') is not (name != 'gateway')):
                 reasons.append('缺少正确的 NAS 子卷或读写属性不符')
             host = [m for m in c.get('HostConfig', {}).get('Mounts', []) if m.get('Target') == RAW]
-            if (len(host) != 1 or host[0].get('Type') != 'volume' or host[0].get('Source') != prep.NFS_VOLUME
+            if (len(host) != 1 or host[0].get('Type') != 'volume' or host[0].get('Source') != nfs_volume
                     or host[0].get('VolumeOptions', {}).get('NoCopy') is not True
                     or host[0].get('VolumeOptions', {}).get('Subpath')
                     or ('ReadOnly' in host[0] and host[0]['ReadOnly'] is not (name == 'gateway'))):
@@ -106,7 +124,7 @@ def evaluate(profile, containers, volume, mountinfo, allow_stopped=False, allow_
                 if nearest:
                     result['kernel_source'] = {k: nearest[k] for k in ('target', 'root', 'type', 'source')}
                 exact = [m for m in rows if m['target'] == RAW]
-                sources = {prep.OPTIONS['device'], '192.168.1.3' + prep.OPTIONS['device'], 'nas-storage' + prep.OPTIONS['device']}
+                sources = {options['device'], '192.168.1.3' + options['device'], 'nas-storage' + options['device']}
                 if (len(exact) != 1 or exact[0]['type'] != 'nfs' or exact[0]['root'] != '/'
                         or exact[0]['source'] not in sources
                         or not {'hard', 'vers=3', 'addr=192.168.1.3'}.issubset(exact[0]['super_options'])
@@ -125,13 +143,13 @@ def evaluate(profile, containers, volume, mountinfo, allow_stopped=False, allow_
 
 
 def collect(manager, profile, containers=None):
-    reviewed(profile)
+    _, nfs_volume, _ = storage_spec(profile)
     if containers is None:
         containers = manager.precopy.inspect_containers()
     names = manager.run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).splitlines()
     volume = None
-    if prep.NFS_VOLUME in names:
-        volume = json.loads(manager.run(['docker', 'volume', 'inspect', prep.NFS_VOLUME]))[0]
+    if nfs_volume in names:
+        volume = json.loads(manager.run(['docker', 'volume', 'inspect', nfs_volume]))[0]
     mountinfo = {}
     for c in containers:
         labels = c.get('Config', {}).get('Labels') or {}
@@ -148,6 +166,6 @@ def collect(manager, profile, containers=None):
 
 def check(manager, profile, containers=None):
     containers, volume, mountinfo = collect(manager, profile, containers)
-    result = evaluate(profile, containers, volume, mountinfo, allow_replicas=profile.get('recovery_mode') == 'media-v1')
+    result = evaluate(profile, containers, volume, mountinfo, allow_replicas=profile.get('recovery_mode') in ('media-v1', 'delta-media-v1'))
     emit('nas_infra_storage_check', **result)
     return result['ok']

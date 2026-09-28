@@ -124,7 +124,7 @@ class MediaRuntimeTests(unittest.TestCase):
         policy, rows = recovery.inventory(manage)
         infra = next(row for row in rows if row['task'] == 'part1')
         self.assertEqual(infra['state'], 'eligible'); self.assertEqual(infra['coverage'], '已纳入')
-        self.assertEqual(next(row for row in rows if row['task'] == 'part2')['state'], 'not_migrated')
+        self.assertEqual(next(row for row in rows if row['task'] == 'part2')['state'], 'blocked')
         self.policy['disabled_parts'] = ['part1']
         self.assertEqual(next(r for r in recovery.inventory(manage)[1] if r['task'] == 'part1')['coverage'], '项目已暂停')
 
@@ -151,7 +151,7 @@ class MediaRuntimeTests(unittest.TestCase):
     def test_project_start_routes_to_current_nas_recovery_not_compose_up(self):
         for args in (['infra', 'start'], ['project', 'infra', 'start'], ['infra', 'recovery']):
             self.assertEqual(catalog.route(args, manage.CONFIG), ['recover', 'part1'])
-        with self.assertRaises(RuntimeError): catalog.route(['delta', 'start'], manage.CONFIG)
+        self.assertEqual(catalog.route(['delta', 'start'], manage.CONFIG), ['recover', 'part2'])
 
     def test_interrupted_maintenance_blocks_automatic_and_manual_recovery(self):
         self.register()

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import catalog
 import manage
-from projects import infra_deploy, infra_runtime, infra_storage, infra_release_volumes
+from projects import infra_deploy, infra_runtime, infra_storage, infra_release_volumes, delta_runtime
 
 DOCKER = ['docker', '--host', 'unix:///var/run/docker.sock']
 OPTIONS = {'-f', '--env-file', '-p', '--project-directory'}
@@ -86,9 +86,10 @@ def select(index, model):
         if not profile.get('release_file'):
             raise RuntimeError('Required NAS release declaration is missing.')
         return profile, 'nas'
-    if (profile['project'] == 'delta_59202' and profile.get('report') is None
-            and profile.get('storage_file') is None and profile.get('recovery_mode') is None):
-        return profile, 'local'
+    if profile['project'] == 'delta_59202' and profile.get('recovery_mode') == 'delta-media-v1':
+        if not profile.get('release_file'):
+            raise RuntimeError('Delta NAS release declaration missing; no SSD fallback.')
+        return profile, 'nas'
     raise RuntimeError('This project needs a reviewed NAS release adapter; no SSD fallback.')
 
 
@@ -138,13 +139,17 @@ def execute(options, command, reader=read_command, runner=None):
     manager = SimpleNamespace(CONFIG=manage.CONFIG, prep=manage.prep, run=reader, AUTO_DIR=manage.AUTO_DIR)
     declaration = None
     if mode == 'nas':
-        infra_runtime.registered(manager, profile)
-        infra_runtime.maintenance_guard(manager)
+        runtime = delta_runtime if profile.get('recovery_mode') == 'delta-media-v1' else infra_runtime
+        runtime.registered(manager, profile)
+        runtime.maintenance_guard(manager)
         declaration = catalog.read_relative(manage.CONFIG.parent, profile['release_file'])
         path = str(manage.CONFIG.parent / profile['release_file'])
         base += ['-f', path]
         model = json.loads(reader(base + ['config', '--format', 'json']))
-        infra_deploy.model_guard(manager, profile, model)
+        if profile.get('recovery_mode') == 'delta-media-v1':
+            delta_runtime.model_guard(manager, profile, model)
+        else:
+            infra_deploy.model_guard(manager, profile, model)
         application = infra_release_volumes.application_volumes(model)
         required = dict(model, volumes={key: value for key, value in model['volumes'].items()
                                        if key not in application})

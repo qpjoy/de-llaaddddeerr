@@ -20,24 +20,29 @@ def load(config):
         raise RuntimeError('Unreviewed host policy.')
     projects={};claimed=set()
     allowed={'infra-v1':{'status','locate','logs','copy','plan','reclaim','recover','redeploy','permissions','deployment-audit'},
+             'delta-v1':{'status','locate','logs','copy','migration-prepare','migration-switch','recover'},
              'precopy-only':{'status','locate','logs','copy','migration-prepare'},'manual-review':{'status','locate','logs'}}
     for name,filename in index['project_catalog'].items():
         p=read_relative(base,filename)
         if (not re.fullmatch('[a-z][a-z0-9-]*',name) or p.get('schema')!=1 or p.get('id')!=name or
-                p.get('adapter') not in ('infra-v1','precopy-only','manual-review') or not p.get('tasks')):
+                p.get('adapter') not in ('infra-v1','delta-v1','precopy-only','manual-review') or not p.get('tasks')):
             raise RuntimeError('Invalid project registration: '+name)
         if not isinstance(p.get('capabilities'),list) or set(p['capabilities'])-allowed[p['adapter']]:
             raise RuntimeError('Unreviewed adapter capability: '+name)
         if p['adapter']=='infra-v1' and (p['compose_project']!='mx_data' or p['tasks']!=['part1']):
             raise RuntimeError('The infra-v1 execution adapter is bound to the reviewed mx_data instance.')
+        if p['adapter']=='delta-v1' and (p['compose_project']!='delta_59202' or p['tasks']!=['part2']):
+            raise RuntimeError('Delta adapter is bound to delta_59202 / part2.')
         for task in p['tasks']:
             if task not in index['parts'] or task in claimed:raise RuntimeError('Missing/duplicate migration task: '+task)
             if p['compose_project']!=index['parts'][task]['project']:raise RuntimeError('Project/task deployment mismatch.')
             profile=index['parts'][task]
-            if profile.get('recovery_mode') not in (None,'media-v1'):
+            if profile.get('recovery_mode') not in (None,'media-v1','delta-media-v1'):
                 raise RuntimeError('Unknown recovery mode; refusing legacy fallback.')
             if profile.get('recovery_mode')=='media-v1' and (p['adapter']!='infra-v1' or not profile.get('runtime_file')):
                 raise RuntimeError('Media recovery needs the reviewed adapter and independent storage contract.')
+            if profile.get('recovery_mode')=='delta-media-v1' and (p['adapter']!='delta-v1' or any(not profile.get(k+'_file') for k in ('storage','runtime','release'))):
+                raise RuntimeError('Delta NAS requires all storage/runtime/release declarations.')
             claimed.add(task)
         projects[name]=p
     if claimed!=set(index['parts']):raise RuntimeError('Every task needs exactly one registered project.')
@@ -78,7 +83,7 @@ def route(argv, config):
         actions={'check':'boot-check','run':'recover','enable':'auto-enable','disable':'auto-disable','status':'status'}
         if args[1] not in actions:raise RuntimeError('Unknown recovery action.')
         p=projects[args[2]]
-        if p['adapter']!='infra-v1':raise RuntimeError('Recovery adapter has not been reviewed for this project.')
+        if p['adapter'] not in ('infra-v1','delta-v1'):raise RuntimeError('Recovery adapter has not been reviewed for this project.')
         return [actions[args[1]],p['tasks'][0]]
     if args[0]!='project':return args  # Preserve old part1/part2 commands.
     if len(args)<3 or args[1] not in projects:raise RuntimeError('Use nas project list or nas project <registered-project> <action>.')
@@ -87,13 +92,17 @@ def route(argv, config):
         if 'copy' not in p['capabilities']:raise RuntimeError('Pre-copy adapter not reviewed for this project.')
         return ['precopy-status',task]
     if tail[:2] in (['copy','prepare'], ['copy','resume']):
-        if (p['id'],p['adapter'],task)!=('delta','precopy-only','part2') or 'copy' not in p['capabilities']:
+        if (p['id'],task)!=('delta','part2') or p['adapter'] not in ('precopy-only','delta-v1') or 'copy' not in p['capabilities']:
             raise RuntimeError('Pre-copy continuation is only reviewed for delta / part2.')
         return ['delta-copy-'+tail[1],task]+tail[2:]
     if tail[:2]==['migration','prepare']:
-        if (p['id'],p['adapter'],task)!=('delta','precopy-only','part2') or 'migration-prepare' not in p['capabilities']:
+        if (p['id'],task)!=('delta','part2') or p['adapter'] not in ('precopy-only','delta-v1') or 'migration-prepare' not in p['capabilities']:
             raise RuntimeError('Migration preparation is only reviewed for delta / part2.')
         return ['delta-migration-prepare',task]+tail[2:]
+    if len(tail)>=3 and tail[0]=='migration' and tail[1] in ('switch','resume'):
+        if p['adapter']!='delta-v1' or 'migration-switch' not in p['capabilities']:
+            raise RuntimeError('Delta switch adapter is not registered.')
+        return ['delta-migration-'+tail[1],task]+tail[2:]
     if tail[0]=='task':
         if len(tail)<3 or tail[1] not in p['tasks']:raise RuntimeError('Migration task does not belong to this project.')
         task=tail[1];action={'cleanup':'reclaim','recovery':'recover'}.get(tail[2],tail[2])
@@ -112,7 +121,7 @@ def route(argv, config):
         if p['adapter']!='infra-v1':raise RuntimeError('Media deployment adapter only reviewed for infra.')
         return ['media-deploy-'+tail[1],task]+tail[2:]
     if tail==['storage','check']:
-        if p['adapter']!='infra-v1':raise RuntimeError('Storage check adapter not reviewed for this project.')
+        if p['adapter'] not in ('infra-v1','delta-v1'):raise RuntimeError('Storage check adapter not reviewed for this project.')
         return ['storage-check',task]
     if tail==['storage','register']:
         if p['adapter']!='infra-v1':raise RuntimeError('Media recovery registration only reviewed for infra.')

@@ -4,7 +4,11 @@
 
 infra 已安装 `aa1049b7eaba9364b176`，恢复检查通过，统一策略与 timer 已启用。该安装回执只证明工具/恢复登记就绪，不代表新增会话卷已发布或 delta 已迁移。本轮不重复 infra 的复制、切换、删除或业务验收。
 
-## 最新回执与当前下一步
+## 当前下一步（最新）
+
+服务器 `d7760d1d283194c65fa9` 的新报告 `delta-c2c06489a22e45c7add56c185f335940` 已全部通过（`review_items=[]`）。无需继续重复准备/复制。本次已实现显式 delta 正式切换、发布保护、独立恢复；请按 [正式切换与恢复](part2-delta-switch.md) 同步新代码、安装工具并进入维护窗口。它会保留两侧数据，不启用 SSD 删除；现场还没有正式切换成功回执。
+
+## 历史准备回执与当时命令（已由上节取代）
 
 **最新现场：** 安装 `d75dc69e91f799f36fb4` 后已生成 `/var/lib/mx-static/nas-migration-prepare/delta-216a994933844e5aacdfa055c261ed1d`。十个媒体镜像/启动检查及 NAS 候选合并通过，PostgreSQL/Redis 健康，release hook 的四项静态检查匹配。唯一待审项为 websearch 的 `auxiliary_mount_or_access_needs_review`。后续读取该报告确认：Compose 只有 `tmpfs: ["/tmp:size=64m,noexec,nosuid"]`，与 Docker `HostConfig.Tmpfs` 完全一致，持久 Mounts、config_refs、secret_refs 均为空。这是容器私有临时目录，不涉及本次媒体/NAS，应保留而非拦截。
 

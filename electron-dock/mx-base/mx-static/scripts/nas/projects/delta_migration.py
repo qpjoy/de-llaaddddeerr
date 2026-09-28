@@ -1,8 +1,8 @@
 """Read-only delta cutover preparation, based on an explicit successful copy.
 
 Capture today's application model/launches privately and render a NAS candidate.
-No cutover executor is exposed until delta release/recovery are implemented and
-the server deployment evidence is reviewed. Never reuse infra execution state.
+The separate delta_switch executor consumes a passed immutable report through
+an explicit maintenance command. Never reuse infra execution state.
 """
 import hashlib
 import json
@@ -88,6 +88,9 @@ def completed_copy(path):
         info = os.fstat(attempt)
         if info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise RuntimeError('Copy attempt must be private.')
+        try: os.stat('failed.json', dir_fd=attempt, follow_symlinks=False)
+        except FileNotFoundError: pass
+        else: raise RuntimeError('Copy attempt also has a failure receipt; review before switching.')
         plan, sha = copying.read_private(report, 'plan.json')
         result, result_sha = copying.read_private(attempt, 'result.json')
         started, _ = copying.read_private(attempt, 'started.json')
@@ -332,7 +335,7 @@ def prepare(manager, profile, attempt_path):
                 'storage_mode_check_present': 'compose mx-nas-mode' in release,
                 'post_release_check_present': 'compose mx-nas-check' in release,
                 'nas_permission_prune_present': 'find /app/media -path /app/media/data_hub_raw_media -prune' in release,
-                'static_observations_only': True, 'delta_nas_release_adapter_available': False}
+                'static_observations_only': True, 'delta_nas_release_adapter_available': profile.get('recovery_mode') == 'delta-media-v1'}
         after = select(precopy.inspect_containers())
         if (inputs(deployment) != before or definition(manager, profile) != deployment
                 or runtime_snapshot(after) != runtime_snapshot(rows) or copying.current(manager) != current
@@ -354,7 +357,7 @@ def prepare(manager, profile, attempt_path):
                   'candidate_merge_verified': True, 'release_hook': hook,
                   'production_changed': False, 'source_deleted': False, 'nas_walk': False,
                   'execution_allowed': False, 'reclaim_ready': False, 'time_unix': time.time(),
-                  'pending': ['delta_release_and_recovery_adapter', 'stopped_writer_final_sync',
+                  'pending': ['explicit_maintenance_switch', 'stopped_writer_final_sync',
                               'application_identity_io_probe', 'business_acceptance']}
         prep.private_write(output, 'review.json', result); os.fsync(output)
         emit('nas_delta_migration_prepared', **{k: v for k, v in result.items() if k not in ('deployment_files_sha256', 'services')})

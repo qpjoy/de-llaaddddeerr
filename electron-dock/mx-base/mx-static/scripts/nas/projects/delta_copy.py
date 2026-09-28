@@ -44,9 +44,12 @@ MAX_MANIFEST_BYTES = 512 * 1024 ** 2
 
 def reviewed(profile):
     if ((profile.get('project'), profile.get('volume'), profile.get('nfs_volume')) !=
-            (PROJECT, VOLUME, NFS_VOLUME) or any(profile.get(k) for k in
-            ('report', 'plan', 'storage_file', 'recovery_mode', 'runtime_file', 'release_file'))):
+            (PROJECT, VOLUME, NFS_VOLUME) or profile.get('report') or profile.get('plan')):
         raise RuntimeError('Continuation requires the unmigrated delta / part2 registration.')
+    planned = {'storage_file': 'part2.storage.json', 'recovery_mode': 'delta-media-v1',
+               'runtime_file': 'part2.runtime.json', 'release_file': 'part2.release.json'}
+    if any(profile.get(k) for k in planned) and any(profile.get(k) != v for k, v in planned.items()):
+        raise RuntimeError('Unreviewed delta planned storage contract.')
 
 
 def overlaps(a, b):

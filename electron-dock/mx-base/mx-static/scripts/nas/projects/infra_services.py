@@ -17,6 +17,14 @@ WAIT_SECONDS = 180
 LOCAL_VOLUMES = '/data/docker/volumes'
 
 
+def adapter(profile):
+    if profile.get('recovery_mode') == 'delta-media-v1':
+        from projects import delta_runtime
+        return delta_runtime
+    storage.reviewed(profile)
+    return media
+
+
 def dependencies(name, container):
     labels = container['Config']['Labels']
     if LABEL not in labels:
@@ -39,7 +47,7 @@ def dependencies(name, container):
 
 def snapshot(manager, profile, expected_ids=None):
     inspection = storage.collect(manager, profile)
-    rows = media.inspect(manager, profile, inspection=inspection)
+    rows = adapter(profile).inspect(manager, profile, inspection=inspection)
     for c in inspection[0]:
         labels = c.get('Config', {}).get('Labels') or {}
         if labels.get('com.docker.compose.project') == profile['project'] and labels.get('com.docker.compose.service') in DEPENDENCIES:
@@ -75,8 +83,9 @@ def order(graph, policy):
 
 
 def check(manager, profile, require_running=False, maintenance_report=None):
-    policy = media.registered(manager, profile)
-    media.maintenance_guard(manager, maintenance_report)
+    selected_media = adapter(profile)
+    policy = selected_media.registered(manager, profile)
+    selected_media.maintenance_guard(manager, maintenance_report)
     rows, groups, graph = snapshot(manager, profile)
     order(graph, policy)
     if require_running and any(not c['State']['Running'] for c in rows.values()):
@@ -127,16 +136,18 @@ def local_data_guard(manager, name, container):
     finally: os.close(fd)
 
 
-def recover(manager, profile, automatic=False, maintenance_report=None):
-    policy = media.registered(manager, profile)
-    media.maintenance_guard(manager, maintenance_report)
+def recover(manager, profile, automatic=False, maintenance_report=None, guard=None):
+    selected_media = adapter(profile)
+    policy = selected_media.registered(manager, profile)
+    selected_media.maintenance_guard(manager, maintenance_report)
     initial_selection = dict(manager.auto_config())
     rows, groups, graph = snapshot(manager, profile)
     ids = set(rows); sequence = order(graph, policy); started = []
     def refresh():
-        media.registered(manager, profile); media.maintenance_guard(manager, maintenance_report)
+        if guard is not None: guard()
+        selected_media.registered(manager, profile); selected_media.maintenance_guard(manager, maintenance_report)
         selection = manager.auto_config()
-        if not manager.recovery_control.requested(selection, 'part1') and (automatic or selection != initial_selection):
+        if not manager.recovery_control.requested(selection, 'part2' if profile.get('recovery_mode') == 'delta-media-v1' else 'part1') and (automatic or selection != initial_selection):
             raise RuntimeError('项目恢复已暂停，不继续启动。')
         current, by_name, current_graph = snapshot(manager, profile, expected_ids=ids)
         if current_graph != graph: raise RuntimeError('恢复过程中依赖关系变化，停止操作。')

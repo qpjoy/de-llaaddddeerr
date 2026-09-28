@@ -27,7 +27,7 @@ def normalize(value, tasks):
 
 def reviewed(project):
     # A future adapter must be explicitly implemented here, not inferred from JSON.
-    return project['adapter']=='infra-v1' and 'recover' in project['capabilities']
+    return project['adapter'] in ('infra-v1','delta-v1') and 'recover' in project['capabilities']
 
 
 def installed_current(manager):
@@ -53,7 +53,7 @@ def inventory(manager, require_running=False):
                  'nas_expected':observed or project.get('data_policy',{}).get('nas_authoritative') is True}
             state=None
             try:
-                if profile.get('recovery_mode') == 'media-v1':
+                if profile.get('recovery_mode') in ('media-v1','delta-media-v1'):
                     if not reviewed(project):raise RuntimeError('Media recovery adapter not reviewed.')
                     rows=manager.infra_services.check(manager,profile,require_running=require_running)
                     row.update(state='eligible',reason='独立 NAS 登记、当前挂载和已有服务依赖已核对（不绑定历史应用配置/ID）',
@@ -142,7 +142,7 @@ def run_all(manager):
             emit('nas_recovery_project_blocked',project=row['project'],task=task,error=row['reason'])
             failures.append(task);continue
         try:
-            if registry[task].get('recovery_mode')=='media-v1':manager.recover(registry[task],automatic=True)
+            if registry[task].get('recovery_mode') in ('media-v1','delta-media-v1'):manager.recover(registry[task],automatic=True)
             else:manager.recover(registry[task])
         except ERRORS as exc:
             emit('nas_recovery_project_failed',project=row['project'],task=task,error=str(exc))

@@ -36,7 +36,7 @@ class PlatformTests(unittest.TestCase):
 
     def test_cross_project_and_unreviewed_actions_refused(self):
         for args in (['infra','task','part2','cleanup'],['delta','task','part2','cleanup','--business-accepted'],
-                     ['delta','recovery'],['recovery','enable','delta'],['host','reboot'],['host','umount'],
+                     ['delta','repair','switch','/wrong'],['host','reboot'],['host','umount'],
                      ['infra','permissions','probe'],['infra','permissions','probe','--write-test','--force']):
             with self.assertRaises(RuntimeError):catalog.route(args,manage.CONFIG)
 

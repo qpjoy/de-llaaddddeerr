@@ -113,10 +113,8 @@ class StorageTests(unittest.TestCase):
 
     def test_route_scope_and_failed_check_exit(self):
         self.assertEqual(catalog.route(['infra', 'storage', 'check'], manage.CONFIG), ['storage-check', 'part1'])
-        with self.assertRaises(RuntimeError):
-            catalog.route(['delta', 'storage', 'check'], manage.CONFIG)
-        with self.assertRaises(RuntimeError):
-            storage.evaluate(manage.profiles()['part2'], [], None, {})
+        self.assertEqual(catalog.route(['delta', 'storage', 'check'], manage.CONFIG), ['storage-check', 'part2'])
+        self.assertFalse(storage.evaluate(manage.profiles()['part2'], [], None, {})['ok'])
         with mock.patch.object(sys, 'argv', ['manage.py', 'infra', 'storage', 'check']), \
                 mock.patch.object(sys, 'platform', 'linux'), mock.patch.object(manage.os, 'geteuid', return_value=0), \
                 mock.patch.object(manage.socket, 'gethostname', return_value='mx-internal-server'), \

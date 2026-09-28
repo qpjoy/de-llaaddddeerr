@@ -59,7 +59,7 @@ class ManagerTests(unittest.TestCase):
         args=p.parse_args(['copy','part2','--unlimited'])
         command=manager.task_command('copy',self.profiles['part2'],args)
         self.assertEqual(command[-3:],['delta_59202_media_data','--copy','--unlimited'])
-        for action in ('cutover','reclaim','recover','redeploy'):
+        for action in ('cutover','reclaim','redeploy'):
             with self.assertRaises(RuntimeError):manager.task_command(action,self.profiles['part2'],args)
 
     def test_project_precopy_status_only_delegates_readonly_helper_and_preserves_exit(self):
@@ -208,10 +208,11 @@ class ManagerTests(unittest.TestCase):
         with mock.patch.object(manager,'operation',context),self.assertRaises(RuntimeError):manager.redeploy(self.profile)
         op.command.assert_not_called();op.start.assert_not_called();op.checkpoint.assert_not_called()
 
-    def test_auto_part2_policy_is_refused_without_modifying_systemd(self):
-        with mock.patch.object(manager,'run') as run:
-            for enabled in (True,False):
-                with self.assertRaises(RuntimeError):manager.set_auto('part2',self.profiles['part2'],enabled)
+    def test_auto_part2_enable_requires_valid_runtime_without_modifying_systemd(self):
+        with mock.patch.object(manager,'run') as run, mock.patch.object(manager.recovery_control,'installed_current',return_value=True), \
+                mock.patch.object(manager.infra_services,'check',side_effect=RuntimeError('Delta registration missing')):
+            with self.assertRaisesRegex(RuntimeError, 'Delta registration missing'):
+                manager.set_auto('part2',self.profiles['part2'],True)
             run.assert_not_called()
 
     def test_auto_installer_snapshots_only_code_policy_and_does_not_enable(self):

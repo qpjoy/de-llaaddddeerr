@@ -303,7 +303,7 @@ class DeltaMigrationTests(unittest.TestCase):
         self.assertEqual((self.fixture.job / precopy.MARKER).read_bytes(), self.fixture.before)
         self.assertTrue(self.fixture.candidate.exists())
         self.assertNotIn('private-value', self.output.getvalue())
-        self.assertFalse(result['release_hook']['delta_nas_release_adapter_available'])
+        self.assertTrue(result['release_hook']['delta_nas_release_adapter_available'])
 
     def test_changed_startup_scripts_and_environment_are_review_items(self):
         self.changed_script = True
@@ -367,7 +367,7 @@ class DeltaMigrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): catalog.route(['infra', 'migration', 'prepare', self.attempt], manage.CONFIG)
         self.assertIn('part2.deployment.json', [p.name for p in catalog.installed_files(manage.CONFIG)])
         _, mode = release.select({'parts': manage.profiles()}, self.model)
-        self.assertEqual(mode, 'local')
+        self.assertEqual(mode, 'nas')
 
     def test_changed_media_identity_does_not_adopt_old_copy(self):
         with mock.patch.object(copying, 'identity', return_value={'different': True}):

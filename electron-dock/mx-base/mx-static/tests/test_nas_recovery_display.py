@@ -25,7 +25,7 @@ class DisplayTests(unittest.TestCase):
 
     def test_default_is_human_and_json_remains_parseable(self):
         human=self.command('project','list');self.assertEqual(human.returncode,0,human.stderr)
-        self.assertIn('NAS 项目登记',human.stdout);self.assertIn('待迁移',human.stdout);self.assertNotIn('"event"',human.stdout)
+        self.assertIn('NAS 项目登记',human.stdout);self.assertIn('delta_59202',human.stdout);self.assertNotIn('"event"',human.stdout)
         raw=self.command('--json','project','list');self.assertEqual(raw.returncode,0,raw.stderr)
         self.assertEqual(json.loads(raw.stdout)['event'],'nas_projects')
         pretty=self.command('project','list','--pretty');self.assertEqual(pretty.returncode,0,pretty.stderr)
@@ -72,6 +72,10 @@ class RecoveryTests(unittest.TestCase):
         self.output=contextlib.redirect_stdout(io.StringIO());self.output.__enter__()
         self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)
         self.saved={}
+        # These cases exercise historical completion discovery before delta NAS registration.
+        self.index['parts']['part2']['recovery_mode']=None
+        self.projects['delta']['adapter']='precopy-only'
+        self.projects['delta']['data_policy']['nas_authoritative']=False
         for task,p in self.index['parts'].items():
             path=Path(self.directory.name)/task;path.mkdir()
             if p.get('report'):p['report']=str(path)

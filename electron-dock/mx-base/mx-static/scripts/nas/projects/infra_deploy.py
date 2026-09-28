@@ -48,8 +48,8 @@ def command(manager, profile, deployment):
     return result + ['-f', str(manager.CONFIG.parent / profile['storage_file'])]
 
 
-def model_guard(manager, profile, model):
-    policy, declared, digest = runtime.contract(manager, profile)
+def model_guard(manager, profile, model, contract=None):
+    policy, declared, digest = (contract or runtime.contract)(manager, profile)
     if model.get('name') != profile['project']: raise RuntimeError('Rendered project differs.')
     volumes = model.get('volumes', {})
     nfs = volumes.get('mx_static_raw_media_nfs', {})
@@ -92,7 +92,7 @@ def data_volumes(manager, profile, model):
         raise RuntimeError('数据卷缺失，禁止创建空卷替代（可能执行过 down -v）：' + ', '.join(sorted(missing)))
     nfs = json.loads(manager.run(['docker', 'volume', 'inspect', profile['nfs_volume']]))
     if len(nfs) != 1: raise RuntimeError('Expected one NAS volume.')
-    manager.prep.validate_volume(nfs[0])
+    storage.validate_volume(profile, nfs[0])
 
 
 def current(manager, profile):

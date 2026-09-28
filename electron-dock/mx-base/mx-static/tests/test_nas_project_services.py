@@ -153,8 +153,8 @@ class ProjectServicesTests(unittest.TestCase):
         self.patch(manage.precopy, 'inspect_containers', return_value=self.rows)
         row = next(r for r in recovery.inventory(manage)[1] if r['task'] == 'part1')
         self.assertEqual(set(row['stopped']), {'postgres-id', 'redis-id'})
-        recovery.run_all(manage)
-        self.assertEqual(self.starts(), ['postgres-id', 'redis-id'])
+        with self.assertRaisesRegex(RuntimeError, 'part2'): recovery.run_all(manage)
+        self.assertEqual(self.starts(), ['postgres-id', 'redis-id'])  # Blocked delta does not prevent infra recovery.
 
 
 class DependencyDataTests(unittest.TestCase):
