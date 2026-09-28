@@ -188,7 +188,7 @@ class RegistryTests(unittest.TestCase):
         command = run.call_args[0][0]
         self.assertIn('--property=ReadOnlyPaths=/data /mnt/nas', command)
         self.assertIn('_execute-reclaim-check', command); self.assertNotIn('--business-accepted', command)
-        with self.assertRaises(RuntimeError): catalog.route(['delta', 'cleanup', 'check'], manage.CONFIG)
+        self.assertEqual(catalog.route(['delta', 'cleanup', 'check'], manage.CONFIG), ['delta-reclaim-check', 'part2'])
 
     def test_recovery_evidence_requires_current_install_selected_policy_and_persistent_timer(self):
         manager = mock.Mock(UNIT='mx-static-nas-boot')

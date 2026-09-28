@@ -142,6 +142,15 @@ def render(value):
             value.get('report_directory') or '见本任务 preparing 记录',value['phase'],value['error'])
     if event=='nas_reclaim_check_started':
         return '开始只读清理前核验；SSD 和 NAS 均不删除、不改权限。\n新清单：'+value['plan_directory']
+    if event=='nas_delta_reclaim_check_started':
+        return '开始 delta 只读回收核验；不停止业务、不删除。\n核验报告：'+value['check_directory']
+    if event=='nas_delta_reclaim_check_complete':
+        return ('delta 文件核验通过：{} 个，{}\n核验报告：{}\n业务验收已记录：{}；恢复已核对：{}\n'+
+                'SSD 保留；此报告不是删除清单，delta 删除入口尚未启用。').format(
+            value['regular_files'],size(value['logical_bytes']),value['check_directory'],
+            yes(value['business_acceptance_recorded']),yes(value['recovery']['verified']))
+    if event=='nas_delta_reclaim_check_failed':
+        return 'delta 核验未通过；SSD 保留。\n核验报告：{}\n原因：{}'.format(value.get('check_directory') or '尚未建立',value['error'])
     if event=='nas_reclaim_check_progress':return 'NAS 对应文件元数据已核对：{} 个'.format(value['checked'])
     if event=='nas_reclaim_check_complete':
         return ('清理前文件核验通过：{} 个，{}\n新清单：{}\n业务验收已记录：{}；当前恢复登记/安装/启用已核对：{}\n'+

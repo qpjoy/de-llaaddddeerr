@@ -22,6 +22,7 @@ import host as host_control
 import action_log
 from projects import infra as infra_adapter
 from projects import infra_storage
+from projects import delta_reclaim
 from projects import infra_runtime
 from projects import infra_services
 from projects import infra_deploy
@@ -229,6 +230,9 @@ def recover(profile, automatic=False):
 
 def task_command(action, profile, args):
     py='/usr/bin/python3'; scripts=ROOT/'scripts/nas'
+    if action=='delta-reclaim-check':
+        delta_runtime.contract(sys.modules[__name__],profile)
+        return [py,'-B',str(Path(__file__).resolve()),'_execute-delta-reclaim-check',args.part]+(['--business-accepted'] if args.business_accepted else [])
     if action=='media-deploy-recreate':
         if not args.maintenance or profile.get('recovery_mode')!='media-v1':
             raise RuntimeError('Media deployment requires reviewed media-v1 registration and --maintenance.')
@@ -248,7 +252,7 @@ def task_command(action, profile, args):
         infra_services.adapter(profile).contract(sys.modules[__name__],profile)
         return [py,'-B',str(Path(__file__).resolve()),'_execute-recover',args.part]
     if not profile.get('report') or profile['volume']!=prep.VOLUME:
-        raise RuntimeError('Legacy infra cutover/reclaim is not available for delta; use nas delta migration switch. Delta cleanup is not enabled.')
+        raise RuntimeError('Legacy infra cutover/reclaim is not available for delta. After successful switch use nas delta cleanup check; delta deletion is not enabled.')
     if action=='repair-copy':
         infra_repair_copy.validate_path(args.report)
         return [py,'-B',str(Path(__file__).resolve()),'_execute-repair-copy',args.part,args.report]
@@ -291,14 +295,14 @@ def launch(action,profile,args):
     cmd=['systemd-run','--unit='+unit,'--property=RuntimeMaxSec=infinity',
          '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy','repair-switch','repair-resume','media-deploy-recreate','delta-migration-switch','delta-migration-resume') else '90s')]
     if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy','repair-switch','repair-resume','delta-copy-resume','delta-migration-switch','delta-migration-resume'):cmd+=['--property=ReadOnlyPaths=/data']
-    if action=='reclaim-check':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
+    if action in ('reclaim-check','delta-reclaim-check'):cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='media-deploy-recreate':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='recover':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='reclaim':cmd+=['--property=ReadOnlyPaths=/mnt/nas']
     if action in ('copy','repair-copy','delta-copy-resume'):cmd+=['--property=Nice=19']
     print(run(cmd+command),end='')
     emit('nas_job_started',part=args.part,action=action,unit=unit+'.service',
-         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume','reclaim-check','media-deploy-recreate','delta-copy-resume','delta-migration-switch','delta-migration-resume') else 'sudo bash scripts/manage.sh nas logs '+args.part),
+         logs=('journalctl -f -n 60 -o cat -u '+unit+'.service' if action in ('repair-copy','repair-switch','repair-resume','reclaim-check','delta-reclaim-check','media-deploy-recreate','delta-copy-resume','delta-migration-switch','delta-migration-resume') else 'sudo bash scripts/manage.sh nas logs '+args.part),
          transient=True,reboot_auto_resume=False)
 
 
@@ -452,6 +456,9 @@ def parser():
     for action in ('reclaim-check','_execute-reclaim-check'):
         s=sub.add_parser(action);s.add_argument('part',choices=tuple(profiles()))
         s.add_argument('--business-accepted',action='store_true')
+    for action in ('delta-reclaim-check','_execute-delta-reclaim-check'):
+        s=sub.add_parser(action);s.add_argument('part',choices=('part2',))
+        s.add_argument('--business-accepted',action='store_true')
     sub.add_parser('storage-register').add_argument('part',choices=('part1',))
     sub.add_parser('media-deploy-check').add_argument('part',choices=('part1',))
     for action in ('media-deploy-recreate','_execute-media-deploy'):
@@ -488,6 +495,7 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas delta migration switch <部署准备报告> --maintenance --write-test
   bash scripts/manage.sh nas delta migration resume <切换执行报告> --maintenance --write-test
   bash scripts/manage.sh nas delta storage check
+  bash scripts/manage.sh nas delta cleanup check    # 只读核验停写清单、SSD/NAS 与当前运行状态；删除入口未启用
   bash scripts/manage.sh nas delta start  # 只补启动已登记容器，缺卷/缺登记不回退 SSD
   bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
@@ -520,7 +528,7 @@ infra/delta 已定位登记任务，无需再写 task part1/part2；显式任务
   auto-disable part1       暂停开机恢复；不停止业务容器
 
 part1 有历史切换记录，当前挂载需另行核对；重复 copy/prepare/cutover 会拒绝。
-part2 支持显式 migration switch/resume 和独立 NAS 恢复；SSD 清理入口尚未启用。
+part2 支持显式 migration switch/resume、独立 NAS 恢复和 cleanup check 只读核验；SSD 删除入口尚未启用。
 storage check 不拦截外部发布，也不授权清理或重置迁移记录。
 没有服务器 reboot、数据库重启或自动删除命令。迁移任务是临时单元；
 开机恢复在安装和启用后生效，成功后不持续重启/监控容器。
@@ -551,6 +559,7 @@ def main():
         profile=registry.get(getattr(args,'part',None))
         mutations={'copy','prepare','cutover','reclaim','recover','redeploy','auto-install','auto-enable','auto-disable','permissions-probe','repair-prepare','repair-copy','_execute-repair-copy','repair-switch','repair-resume','_execute-repair-switch','_execute-repair-resume','_execute-permissions','_execute-recover','_execute-redeploy','_auto-recover','recovery-enable-migrated','recovery-disable-all'}
         mutations.update(('reclaim-check','_execute-reclaim-check','storage-register','media-deploy-recreate','_execute-media-deploy'))
+        mutations.update(('delta-reclaim-check','_execute-delta-reclaim-check'))
         mutations.update(('delta-copy-prepare','delta-copy-resume','_execute-delta-copy'))
         mutations.update(('delta-migration-prepare','delta-migration-switch','delta-migration-resume','_execute-delta-migration-switch','_execute-delta-migration-resume'))
         if action in mutations:
@@ -586,6 +595,8 @@ def main():
             with migration_lock():infra_repair_copy.execute(sys.modules[__name__],profile,args.report)
         elif action=='_execute-reclaim-check':
             with migration_lock():infra_reclaim.check(sys.modules[__name__],profile,args.business_accepted)
+        elif action=='_execute-delta-reclaim-check':
+            with migration_lock():delta_reclaim.check(sys.modules[__name__],profile,args.business_accepted)
         elif action in ('_execute-repair-switch','_execute-repair-resume'):
             if not args.maintenance or not args.write_test:raise RuntimeError('Repair switch requires --maintenance --write-test.')
             with migration_lock():infra_repair_switch.execute(sys.modules[__name__],profile,args.report,resume=action=='_execute-repair-resume')

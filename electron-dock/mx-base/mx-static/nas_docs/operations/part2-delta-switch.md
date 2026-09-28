@@ -4,9 +4,9 @@
 
 服务器已返回 `nas_delta_switch_complete`，unit `mx-nas-part2-delta-migration-switch-823e84ae77.service` 为 `Succeeded`。成功执行报告为 `/var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699`，最终停写复核位于其 `repair-final-f08352c6561c45c5aa34012d3c0c1205`。`phase=running_on_nas`、`final_sync_passed=true`、十个新媒体容器 ID 已记录；`source_deleted=false`、`reclaim_ready=false`、`business_acceptance_pending=true`。
 
-完成事件在内核 NFS/媒体 HTTP/应用默认身份 I/O 检查通过、独立 `/etc/mx-static/nas/delta-media.json` 完成登记之后输出。数据库、Redis 和 websearch 在执行器身份守卫下保留原状态。此回执证明程序切换成功，不能替代用户登录/联网、新旧媒体及后台任务的业务验收，也不证明真实重启/断电/应用重部署演练完成。当前应做下文“成功判据与后续”的只读核对和实际业务验收；delta SSD 回收适配尚未启用。
+完成事件在内核 NFS/媒体 HTTP/应用默认身份 I/O 检查通过、独立 `/etc/mx-static/nas/delta-media.json` 完成登记之后输出。数据库、Redis 和 websearch 在执行器身份守卫下保留原状态。随后服务器只读回执确认十个媒体服务全部匹配 NFS，locate 指向本次报告，delta / infra 均已纳入恢复且 timer active/enabled。业务验收仍待确认；不据此认定真实重启/断电/应用重部署演练完成。下一步见 [SSD 只读核验](part2-delta-reclaim-check.md)，delta 删除适配尚未启用。
 
-**不要重复 copy、prepare、switch 或 resume，不要重置旧 marker，不把 SSD 再补写到已经运行的 NAS。** 当前代码已自动登记本次报告，`nas delta locate` 应指向 `delta-20849647…`；无需为登记而改 Git 的旧报告路径或重建业务。本次只更新文档，运行时快照仍为 `a328613b893c026c9df3`，不需要为文档更新重新安装恢复工具。
+**不要重复 copy、prepare、switch 或 resume，不要重置旧 marker，不把 SSD 再补写到已经运行的 NAS。** 当前代码已自动登记本次报告，`nas delta locate` 已指向 `delta-20849647…`；无需为登记而改 Git 的旧报告路径或重建业务。本轮新增 cleanup check 运行时代码，需按只读核验文档同步并更新持久工具；下方旧快照仅属切换历史。
 
 ## 切换前记录（已由上面的成功回执取代）
 
@@ -64,7 +64,7 @@ bash scripts/manage.sh nas recovery check
 
 十个媒体服务都应匹配 `nfs /app/media/data_hub_raw_media`；delta 和 infra 都应“已核对 / 已纳入”，安装快照当前、timer active/enabled。原有 `migrated` 策略会自动纳入已完成的 delta；若策略未启用或项目曾被暂停，需按检查结果明确启用，不擅自清除暂停设置。
 
-业务仍需实际验收账号登录/联网、旧媒体读取、新媒体写入和后台任务。`business_acceptance_pending=true` 与 `reclaim_ready=false` 是预期值；SSD 原文件保留，**delta 的 SSD 清理适配尚未启用**，不要套用 infra 清理命令或删除整个 Docker 卷。保存切换完成回执，后续回收须基于本次停写证据与 NAS/当前运行状态重新核验。
+以上只读核对已经通过，不需重复切换。业务仍需实际验收账号登录/联网、旧媒体读取、新媒体写入和后台任务。`business_acceptance_pending=true` 与 `reclaim_ready=false` 是预期值；SSD 原文件保留。新版提供 `nas delta cleanup check` 做文件核验；**delta 的 SSD 删除适配尚未启用**，不要套用 infra 清理命令或删除整个 Docker 卷。见 [核验命令与结果说明](part2-delta-reclaim-check.md)。
 
 ## 重部署、重启与中断
 

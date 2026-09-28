@@ -13,7 +13,8 @@
     "copy",
     "migration-prepare",
     "migration-switch",
-    "recover"
+    "recover",
+    "delta-reclaim-check"
   ],
   "ownership": {
     "operator": "root",

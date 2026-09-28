@@ -20,7 +20,7 @@ def load(config):
         raise RuntimeError('Unreviewed host policy.')
     projects={};claimed=set()
     allowed={'infra-v1':{'status','locate','logs','copy','plan','reclaim','recover','redeploy','permissions','deployment-audit'},
-             'delta-v1':{'status','locate','logs','copy','migration-prepare','migration-switch','recover'},
+             'delta-v1':{'status','locate','logs','copy','migration-prepare','migration-switch','recover','delta-reclaim-check'},
              'precopy-only':{'status','locate','logs','copy','migration-prepare'},'manual-review':{'status','locate','logs'}}
     for name,filename in index['project_catalog'].items():
         p=read_relative(base,filename)
@@ -127,6 +127,8 @@ def route(argv, config):
         if p['adapter']!='infra-v1':raise RuntimeError('Media recovery registration only reviewed for infra.')
         return ['storage-register',task]
     if tail[:2]==['cleanup','check']:
+        if p['adapter']=='delta-v1' and 'delta-reclaim-check' in p['capabilities']:
+            return ['delta-reclaim-check',task]+tail[2:]
         if p['adapter']!='infra-v1':raise RuntimeError('UNION reclaim check only reviewed for infra.')
         return ['reclaim-check',task]+tail[2:]
     if tail==['repair','prepare']:
