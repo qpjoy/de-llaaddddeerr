@@ -237,10 +237,18 @@ def recover(profile, automatic=False):
 def task_command(action, profile, args):
     py='/usr/bin/python3'; scripts=ROOT/'scripts/nas'
     if action in ('delta-reclaim-prepare','delta-reclaim'):
-        if not args.business_accepted:raise RuntimeError('Actual business acceptance and --business-accepted required.')
+        inspecting=action=='delta-reclaim' and args.inspect_ctime
+        if not args.business_accepted and not inspecting:raise RuntimeError('Actual business acceptance and --business-accepted required.')
         delta_runtime.contract(sys.modules[__name__],profile)
         delta_cleanup.split_path(args.report,'check' if action.endswith('prepare') else 'plan')
-        return [py,'-B',str(Path(__file__).resolve()),'_execute-'+action,args.part,args.report,'--business-accepted']
+        command=[py,'-B',str(Path(__file__).resolve()),'_execute-'+action,args.part,args.report]
+        if args.business_accepted:command+=['--business-accepted']
+        if action=='delta-reclaim':
+            delta_cleanup.proof_files.limits(args.ctime_proof_read_mib,args.ctime_proof_pairs)
+            if inspecting:command+=['--inspect-ctime']
+            for flag,value in (('--ctime-proof-read-mib',args.ctime_proof_read_mib),('--ctime-proof-pairs',args.ctime_proof_pairs)):
+                if value is not None:command += [flag,str(value)]
+        return command
     if action=='delta-reclaim-check':
         delta_runtime.contract(sys.modules[__name__],profile)
         return [py,'-B',str(Path(__file__).resolve()),'_execute-delta-reclaim-check',args.part]+(['--business-accepted'] if args.business_accepted else [])
@@ -307,7 +315,9 @@ def launch(action,profile,args):
          '--property=TimeoutStopSec='+('infinity' if action in ('cutover','redeploy','repair-switch','repair-resume','media-deploy-recreate','delta-migration-switch','delta-migration-resume') else '90s')]
     if action in ('copy','prepare','cutover','plan','permissions-probe','repair-copy','repair-switch','repair-resume','delta-copy-resume','delta-migration-switch','delta-migration-resume'):cmd+=['--property=ReadOnlyPaths=/data']
     if action in ('reclaim-check','delta-reclaim-check','delta-reclaim-prepare'):cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
-    if action=='delta-reclaim':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas','--property=ReadWritePaths='+delta_copy.SOURCE]
+    if action=='delta-reclaim':
+        cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
+        if not args.inspect_ctime:cmd+=['--property=ReadWritePaths='+delta_copy.SOURCE]
     if action=='media-deploy-recreate':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='recover':cmd+=['--property=ReadOnlyPaths=/data /mnt/nas']
     if action=='reclaim':cmd+=['--property=ReadOnlyPaths=/mnt/nas']
@@ -474,6 +484,10 @@ def parser():
     for action in ('delta-reclaim-prepare','_execute-delta-reclaim-prepare','delta-reclaim','_execute-delta-reclaim'):
         s=sub.add_parser(action);s.add_argument('part',choices=('part2',));s.add_argument('report')
         s.add_argument('--business-accepted',action='store_true')
+        if action in ('delta-reclaim','_execute-delta-reclaim'):
+            s.add_argument('--inspect-ctime',action='store_true',help='Read-only same-plan metadata/cost inspection; no hash, new plan or unlink.')
+            s.add_argument('--ctime-proof-read-mib',type=int,help='Explicit total two-sided hash read budget; per-file cap is one quarter.')
+            s.add_argument('--ctime-proof-pairs',type=int,help='Explicit count of two-sided hash passes (preflight and deletion each count).')
     sub.add_parser('storage-register').add_argument('part',choices=('part1',))
     sub.add_parser('media-deploy-check').add_argument('part',choices=('part1',))
     for action in ('media-deploy-recreate','_execute-media-deploy'):
@@ -512,7 +526,9 @@ HELP = """推荐二级入口（root 可省略 sudo）：
   bash scripts/manage.sh nas delta storage check
   bash scripts/manage.sh nas delta cleanup check    # 只读核验停写清单、SSD/NAS 与当前运行状态
   bash scripts/manage.sh nas delta cleanup prepare <成功核验目录> --business-accepted  # 生成已验收清单，不删除
+  bash scripts/manage.sh nas delta cleanup <回收清单目录> --inspect-ctime  # 同一清单只读统计 ctime 差异/读取量，支持部分删除
   bash scripts/manage.sh nas delta cleanup <回收清单目录> --business-accepted  # 实时复核后删除清单内 SSD 文件；中断沿用同一清单
+    # 异常哈希范围可显式指定 --ctime-proof-read-mib N --ctime-proof-pairs N；先 inspect 查看估计值，不跳过内容核验
   bash scripts/manage.sh nas delta start  # 只补启动已登记容器，缺卷/缺登记不回退 SSD
   bash scripts/manage.sh nas recovery check          # 统一检查所有登记项目
   bash scripts/manage.sh nas recovery install
@@ -618,7 +634,8 @@ def main():
         elif action=='_execute-delta-reclaim-prepare':
             with migration_lock():delta_cleanup.prepare(sys.modules[__name__],profile,args.report,args.business_accepted)
         elif action=='_execute-delta-reclaim':
-            with migration_lock():delta_cleanup.execute(sys.modules[__name__],profile,args.report,args.business_accepted)
+            with migration_lock():delta_cleanup.execute(sys.modules[__name__],profile,args.report,args.business_accepted,
+                inspect_ctime=args.inspect_ctime,ctime_proof_read_mib=args.ctime_proof_read_mib,ctime_proof_pairs=args.ctime_proof_pairs)
         elif action in ('_execute-repair-switch','_execute-repair-resume'):
             if not args.maintenance or not args.write_test:raise RuntimeError('Repair switch requires --maintenance --write-test.')
             with migration_lock():infra_repair_switch.execute(sys.modules[__name__],profile,args.report,resume=action=='_execute-repair-resume')

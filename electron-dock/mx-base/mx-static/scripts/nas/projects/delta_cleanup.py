@@ -20,6 +20,7 @@ import reclaim_plan
 from permissions import emit
 from projects import delta_copy as media
 from projects import delta_reclaim as review
+from projects import delta_reclaim_files as proof_files
 from projects.delta_reclaim_files import CtimeRevalidator
 from projects import delta_runtime as runtime
 from projects import infra_reclaim as files
@@ -184,8 +185,10 @@ def prepare(manager, profile, check_path, business_accepted=False):
         if folder is not None: os.close(folder)
 
 
-def execute(manager, profile, plan_path, business_accepted=False):
-    if not business_accepted: raise RuntimeError('Explicit --business-accepted required for SSD deletion.')
+def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=False,
+            ctime_proof_read_mib=None, ctime_proof_pairs=None):
+    if not inspect_ctime and not business_accepted: raise RuntimeError('Explicit --business-accepted required for SSD deletion.')
+    budget = proof_files.limits(ctime_proof_read_mib, ctime_proof_pairs)
     report, _ = split_path(plan_path, 'plan')
     folder = journal = None; started = False
     try:
@@ -220,9 +223,10 @@ def execute(manager, profile, plan_path, business_accepted=False):
                     raise RuntimeError('Unowned delta reclaim journal/receipt; review before deleting.')
             else:
                 started = True
-                journal = reclaim.private_file(folder, 'unlink-intents.jsonl', os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                journal = reclaim.private_file(folder, 'unlink-intents.jsonl',
+                    os.O_RDONLY if inspect_ctime else os.O_RDWR | os.O_CREAT | os.O_APPEND)
                 if os.fstat(journal).st_nlink != 1: raise RuntimeError('Unsafe reclaim journal hardlink.')
-                os.fsync(folder)
+                if not inspect_ctime: os.fsync(folder)
 
             def guard():
                 op.guard()
@@ -241,7 +245,17 @@ def execute(manager, profile, plan_path, business_accepted=False):
             guard()
             permitted = reclaim.read_intents(journal, op.tree) if journal is not None else set()
             remaining = reclaim.remaining_files(op.source, op.tree, permitted)
-            revalidate = CtimeRevalidator(op, folder, plan, plan_sha, guard)
+            if inspect_ctime:
+                before_journal = stamp(os.fstat(journal)) if journal is not None else None
+                result = proof_files.inspect_remaining(op, remaining, plan, guard)
+                if (reclaim.remaining_files(op.source, op.tree, permitted) != remaining or
+                        (journal is not None and stamp(os.fstat(journal)) != before_journal)):
+                    raise RuntimeError('SSD/intent journal changed during ctime inspection.')
+                guard()
+                emit('nas_delta_reclaim_ctime_inspect_complete', **result)
+                if result['issues']: raise RuntimeError('Non-ctime NAS differences require review; SSD retained.')
+                return result
+            revalidate = CtimeRevalidator(op, folder, plan, plan_sha, guard, budget=budget)
             reclaim.check_nas_files(op.target, op.tree, remaining, nas_tree=op.nas_tree, revalidate=revalidate)
             op.probes()
             if reclaim.remaining_files(op.source, op.tree, permitted) != remaining:
@@ -257,6 +271,7 @@ def execute(manager, profile, plan_path, business_accepted=False):
             emit('nas_delta_reclaim_started', plan_directory=plan_path, files_remaining=len(remaining),
                  business_accepted=True, nas_deleted=False, source_root_retained=True)
             before = os.fstatvfs(op.source)
+            revalidate.phase = 'deleting'
             removed, logical = reclaim.delete_files(op.source, op.target, op.tree, remaining, journal, guard,
                                                     nas_tree=op.nas_tree, revalidate=revalidate)
             if reclaim.remaining_files(op.source, op.tree, reclaim.read_intents(journal, op.tree)):
@@ -275,6 +290,7 @@ def execute(manager, profile, plan_path, business_accepted=False):
             return result
     except Exception as exc:
         emit('nas_delta_reclaim_failed', plan_directory=plan_path, error=str(exc), may_be_partially_reclaimed=started,
+             inspect_only=inspect_ctime,
              note='Keep exact plan and intent journal. No rollback. Retry only this same plan after reviewing the failure.')
         raise
     finally:

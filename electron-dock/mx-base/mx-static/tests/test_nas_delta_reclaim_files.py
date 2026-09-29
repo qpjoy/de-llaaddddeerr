@@ -39,7 +39,7 @@ class CtimeProofTests(unittest.TestCase):
         self.stack.callback(os.close, self.journal)
         self.guard = mock.Mock()
         self.plan = dict(plan_directory=str(self.folder), check_sha256='a'*64, manifest_sha256='b'*64,
-                         target_manifest_sha256='c'*64, runtime_snapshot_sha256='d'*64)
+                         target_manifest_sha256='c'*64, runtime_snapshot_sha256='d'*64, regular_files=1)
         self.validate = proofs.CtimeRevalidator(self.op, self.folderfd, self.plan, 'e'*64, self.guard)
 
     def open_dir(self, p):
@@ -127,6 +127,68 @@ class CtimeProofTests(unittest.TestCase):
             self.check(self.validate)
             with self.assertRaisesRegex(RuntimeError, 'budget exceeded'): self.check(self.validate)
 
+    def test_large_video_default_refusal_inspection_and_exact_explicit_read_budget(self):
+        self.ssd.unlink(); self.nas.unlink()
+        self.content = b'm' * (17 * 1024 ** 2)
+        self.sha = hashlib.sha256(self.content).hexdigest()
+        self.path = 'avatar/' + self.sha + '.mp4'
+        self.ssd, self.nas = self.source / self.path, self.target / self.path
+        self.ssd.write_bytes(self.content); shutil.copy2(str(self.ssd), str(self.nas))
+        self.op.tree, self.op.nas_tree = self.tree(self.source), self.tree(self.target)
+        self.drift()
+        with mock.patch.object(proofs, 'emit') as emit:
+            with self.assertRaisesRegex(RuntimeError, 'max_file_bytes'): self.check(self.validate)
+        info = emit.call_args.kwargs
+        self.assertEqual(info['exceeded'], ['max_file_bytes'])
+        self.assertEqual(info['file_bytes'], len(self.content))
+        with mock.patch.object(proofs, 'digest', side_effect=AssertionError('inspection must not hash')):
+            inspected = proofs.inspect_remaining(self.op, [self.path], self.plan, self.guard)
+        self.assertEqual(inspected['planned_read_bytes'], 68 * 1024 ** 2)
+        self.assertEqual(inspected['recommended_read_mib'], 68)
+        self.assertIn('--ctime-proof-read-mib 68', inspected['resume_command'])
+        self.assertFalse(inspected['content_verified'])
+        self.assertEqual(list(self.folder.glob('ctime-proof-*')), [])
+        self.validate = proofs.CtimeRevalidator(self.op, self.folderfd, self.plan, 'e'*64, self.guard,
+                                               budget=proofs.limits(68, 2))
+        self.check(self.validate)
+        self.assertEqual(self.delete(), (1, len(self.content)))
+        self.assertEqual(self.validate.read_bytes, 68 * 1024 ** 2)
+        self.assertEqual(self.nas.read_bytes(), self.content)
+
+    def test_pair_and_read_budget_diagnostics_are_distinct_and_never_skip_hashes(self):
+        self.drift(); self.check(self.validate)
+        for budget, exceeded in ((dict(max_file_bytes=999, max_pairs=1, max_read_bytes=999), ['max_pairs']),
+                                 (dict(max_file_bytes=999, max_pairs=9, max_read_bytes=2*len(self.content)), ['max_read_bytes'])):
+            with self.subTest(exceeded=exceeded), mock.patch.object(proofs, 'emit') as emit, mock.patch.object(proofs, 'digest') as digest:
+                self.validate.budget = budget
+                with self.assertRaisesRegex(RuntimeError, 'budget exceeded'): self.check(self.validate)
+                digest.assert_not_called()
+                self.assertEqual(emit.call_args.kwargs['exceeded'], exceeded)
+                self.assertEqual(emit.call_args.kwargs['pairs_used'], 1)
+
+    def test_explicit_budget_validation_refuses_unbounded_or_invalid_values(self):
+        for value in (0, -1, 1.5, True, '100', 8388609):
+            with self.subTest(value=value), self.assertRaises(RuntimeError): proofs.limits(read_mib=value)
+        for value in (0, -1, True, '100', 800001):
+            with self.subTest(value=value), self.assertRaises(RuntimeError): proofs.limits(pairs=value)
+
+    def test_larger_budget_does_not_admit_wrong_content_or_nonctime_change(self):
+        self.validate.budget = proofs.limits(1024, 2000)
+        old = self.nas.stat(); self.nas.write_bytes(b'x' * len(self.content))
+        os.utime(str(self.nas), ns=(old.st_atime_ns, old.st_mtime_ns))
+        with self.assertRaisesRegex(RuntimeError, 'content/filename'): self.check(self.validate)
+        self.nas.chmod(0o600)
+        with self.assertRaisesRegex(RuntimeError, 'not eligible'): self.check(self.validate)
+        self.assertTrue(self.ssd.exists())
+
+    def test_inspection_reports_other_changes_and_never_recommends_deletion_for_them(self):
+        self.nas.chmod(0o600)
+        result = proofs.inspect_remaining(self.op, [self.path], self.plan, self.guard)
+        self.assertEqual(result['issues'], 1)
+        self.assertIn('mode', result['errors'][0]['changed_fields'])
+        self.assertIsNone(result['resume_command'])
+        self.assertTrue(self.ssd.exists())
+
     def test_file_changed_during_hash_is_refused(self):
         self.drift(); digest = proofs.digest
         def change(fd, size):
@@ -210,6 +272,61 @@ class PartialDeltaCtimeResumeTests(unittest.TestCase):
         for p, data in f.immutable.items(): self.assertEqual(p.read_bytes(), data)
         for p, value in nas_before.items(): self.assertEqual((stamp(p.stat()), p.read_bytes()), value)
         self.assertEqual((f.other / 'keep').read_bytes(), b'other media')
+
+    def test_readonly_inspection_reconciles_same_partial_plan_and_changes_no_evidence(self):
+        from projects import delta_cleanup as cleanup
+        f = self.f; plan = f.prepare(); unlink = os.unlink; count = []
+        def stop(name, **kw):
+            if len(count) == 2: raise OSError('interrupted')
+            count.append(name); return unlink(name, **kw)
+        with mock.patch.object(reclaim.os, 'unlink', side_effect=stop):
+            with self.assertRaisesRegex(OSError, 'interrupted'): f.execute(plan)
+        nas = f.m.target / self.path; os.chmod(str(nas), nas.stat().st_mode)
+        before = {p: (stamp(p.stat()), p.read_bytes()) for root in (f.f.report, f.m.source, f.m.target)
+                  for p in root.rglob('*') if p.is_file()}
+        with mock.patch.object(proofs, 'digest', side_effect=AssertionError('inspection must not hash')), \
+                mock.patch.object(reclaim.os, 'unlink', side_effect=AssertionError('inspection must not delete')):
+            result = cleanup.execute(f.manager, f.profile, plan['plan_directory'], inspect_ctime=True)
+        self.assertEqual(result['remaining_files'], 1); self.assertEqual(result['missing_with_intent'], 2)
+        self.assertEqual(result['ctime_only_candidates'], 1)
+        after = {p: (stamp(p.stat()), p.read_bytes()) for root in (f.f.report, f.m.source, f.m.target)
+                 for p in root.rglob('*') if p.is_file()}
+        self.assertEqual(before, after)
+        with self.assertRaisesRegex(RuntimeError, 'business-accepted'):
+            cleanup.execute(f.manager, f.profile, plan['plan_directory'], ctime_proof_read_mib=64)
+
+    def test_inspection_refuses_truncated_journal_runtime_drift_and_missing_journal(self):
+        from projects import delta_cleanup as cleanup
+        f = self.f; plan = f.prepare()
+        with mock.patch.object(reclaim.os, 'unlink', side_effect=OSError('interrupted')):
+            with self.assertRaisesRegex(OSError, 'interrupted'): f.execute(plan)
+        journal = Path(plan['plan_directory']) / 'unlink-intents.jsonl'; original = journal.read_bytes()
+        journal.write_bytes(original + b'{')
+        with self.assertRaisesRegex(RuntimeError, 'Incomplete reclaim journal'):
+            cleanup.execute(f.manager, f.profile, plan['plan_directory'], inspect_ctime=True)
+        journal.write_bytes(original); journal.unlink()
+        with self.assertRaises(FileNotFoundError):
+            cleanup.execute(f.manager, f.profile, plan['plan_directory'], inspect_ctime=True)
+        self.assertFalse(journal.exists())
+        f.f.service('worker')['State']['Pid'] += 1
+        with self.assertRaisesRegex(RuntimeError, 'runtime changed'):
+            cleanup.execute(f.manager, f.profile, plan['plan_directory'], inspect_ctime=True)
+
+    def test_cli_passes_explicit_budgets_and_inspection_has_no_ssd_write_exception(self):
+        import catalog
+        import manage
+        f = self.f; plan = f.prepare()
+        for options in (['--inspect-ctime'], ['--business-accepted', '--ctime-proof-read-mib', '512', '--ctime-proof-pairs', '128']):
+            with self.subTest(options=options):
+                args = manage.parser().parse_args(catalog.route(['delta','cleanup',plan['plan_directory']]+options, manage.CONFIG))
+                with mock.patch.object(manage, 'run', return_value='') as run:
+                    manage.launch('delta-reclaim', manage.profiles()['part2'], args)
+                command = run.call_args.args[0]
+                for option in options: self.assertIn(option, command)
+                self.assertIn('--property=ReadOnlyPaths=/data /mnt/nas', command)
+                self.assertEqual(any(x.startswith('--property=ReadWritePaths=') for x in command), not args.inspect_ctime)
+                args.ctime_proof_pairs = -1
+                with self.assertRaises(RuntimeError): manage.task_command('delta-reclaim', f.profile, args)
 
 
 if __name__ == '__main__': unittest.main()
