@@ -2,7 +2,19 @@
 
 这是显式迁移收尾操作，普通开机恢复、应用发布和容错不会调用它。
 
-最新现场：服务器已安装 `6163bffe0a3a6618cba0`，delta/infra 恢复均通过。用户携带 `--business-accepted` 执行本页准备命令，任务 `mx-nas-part2-delta-reclaim-prepare-a7f5d5c6a0.service` 在 NAS 对应文件严格元数据检查处失败：`avatar/e34a680ea26c1aeeb0163f836240d84892c4a889cd3fd92bd6b322eb575e3b45.png`。`plan_directory=null`、`source_deleted=false`，本次尚未生成删除清单，也未开始删除。先对照原报告检查该文件两侧的元数据和有界内容哈希；报错本身不能区分属性变化与内容变化，不能直接认定文件丢失/损坏或忽略 ctime。保留旧报告，不重复安装/复制/切换，不以 SSD 覆盖正在使用的 NAS。下文为完整流程，当前停在第 2 步诊断。
+最新现场（2026-09-29）：业务验收已登记，新检查 `reclaim-check-738fdb0f9ef94b2c981e2dc94cc8970b` 与就绪清单 `reclaim-plan-6f8ee4902178476eb91ba29514392017` 均成功。显式删除任务 `mx-nas-part2-delta-reclaim-854b886ada.service` 在源 SSD 身份检查处失败，尚未进入删除归属/日志创建和文件删除。此前头像核验失败已确认仅 NAS ctime 变化，两侧 504 字节稳定内容哈希相等且匹配文件名；新报告保存了新的 NAS 元数据，原报告未改写。
+
+本次原因是任务的 `ReadOnlyPaths=/data /mnt/nas` 加精确 `ReadWritePaths` 形成子目录绑定挂载，`findmnt SOURCE` 显示为 `/dev/nvme0n1p1[/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media]`，旧校验只接受裸设备名。这种方括号格式是 [util-linux 2.32.1 官方 findmnt 文档](https://github.com/util-linux/util-linux/blob/v2.32.1/misc-utils/findmnt.8) 说明的文件系统子目录信息。修复只额外接受该卷的精确 raw-media 子目录，同时检查块设备类型、目录类型和实际设备号；不去除任意方括号，不移除只读保护，不放宽文件/容器/日志校验。
+
+当前只需同步代码后执行第 1 步安装/恢复检查，再沿用已成功准备的清单重试：
+
+```bash
+bash scripts/manage.sh nas delta cleanup \
+  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-6f8ee4902178476eb91ba29514392017 \
+  --business-accepted
+```
+
+执行器仍重新核对当前状态。若后来重部署、重启或对应文件变化，不绕过报错或自动采用新基准。此次格式问题本身无需重跑复制、切换、检查或清单准备。以下保留完整流程供参考，当前应继续第 3 步。
 
 ## 删除范围
 
@@ -25,7 +37,7 @@ bash scripts/manage.sh nas recovery install &&
 bash scripts/manage.sh nas recovery check
 ```
 
-本次预期运行时快照：`6163bffe0a3a6618cba0`。delta 和 infra 应仍已核对、已纳入，timer active/enabled。安装不停止业务，保留已有策略。原只读核验记录不用改写；新增能力不会把其中的 `deletion_supported=false` 原地改成 true。
+本次预期运行时快照：`519f63842c724ba186e1`。delta 和 infra 应仍已核对、已纳入，timer active/enabled。安装不停止业务，保留已有策略。原只读核验记录不用改写；新增能力不会把其中的 `deletion_supported=false` 原地改成 true。
 
 ## 2. 实际业务验收通过后，准备独立回收清单
 
@@ -33,7 +45,7 @@ bash scripts/manage.sh nas recovery check
 
 ```bash
 bash scripts/manage.sh nas delta cleanup prepare \
-  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-check-93f7115885534b64a254a5e7e0ae01a6 \
+  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-check-738fdb0f9ef94b2c981e2dc94cc8970b \
   --business-accepted
 ```
 
@@ -45,7 +57,7 @@ bash scripts/manage.sh nas delta cleanup prepare \
 /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-<本次实际编号>
 ```
 
-原来的 `reclaim-check-93f…` 是检查报告，不能直接作为删除参数。prepare 会新建 `delta-retained-reclaim-v1` 清单，引用并校验原检查证据，记录实际验收；不修改切换报告或 NAS marker，也不编辑 Git 中的 plan。
+`reclaim-check-738f…` 是检查报告，不能直接作为删除参数。prepare 会新建 `delta-retained-reclaim-v1` 清单，引用并校验原检查证据，记录实际验收；不修改切换报告或 NAS marker，也不编辑 Git 中的 plan。当前已经有成功的 `6f8ee490…` 计划，不必重复准备。
 
 ## 3. 准备成功后，显式删除清单内 SSD 文件
 
@@ -92,4 +104,4 @@ SSH 断开不停止后台任务；主机重启不会自动续跑删除。先查�
 
 已删除部分不会回滚；NAS 始终是正式来源。普通业务运行、恢复和数据库/队列不因清理失败被本工具停止或重建。
 
-本地 485 项 NAS 测试、39 个 Python 文件的 Python 3.6 语法检查、11 个 Bash 语法检查通过。16 个新增回归覆盖真实临时文件删除、两次显式验收参数、精确范围、元数据/运行变化、日志先落盘、部分删除续跑、拒绝更换计划及完成回执写入中断。Docker/NFS/systemd 边界采用模拟，未在服务器执行真实删除或断电演练。
+本地 489 项 NAS 测试、39 个 Python 文件的 Python 3.6 语法检查、10 个 NAS/manage Bash 语法检查通过。原 16 个回收回归覆盖真实临时文件删除、两次显式验收参数、精确范围、元数据/运行变化、日志先落盘、部分删除续跑、拒绝更换计划及完成回执写入中断；本次 4 个新增用例覆盖现场绑定来源格式、其他目录/项目绑定拒绝、显示设备与实际设备不一致、文件类型/NFS/错误磁盘/符号链接拒绝。Docker/NFS/systemd 边界采用模拟，尚未取得服务器删除完成回执，也未做断电演练。

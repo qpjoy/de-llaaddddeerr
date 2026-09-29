@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 import runpy
+import stat
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +70,56 @@ class LayoutTests(unittest.TestCase):
 
 
 class MediaTests(unittest.TestCase):
+    def checked_source(self, source, volume='delta_59202_media_data', fs='xfs',
+                       device=66309, block=True, directory=True, symlink=False):
+        expected = '/data/docker/volumes/' + volume + '/_data'
+        root = expected + '/data_hub_raw_media'
+        metadata = [{'Driver': 'local', 'Options': None, 'Mountpoint': expected}]
+        def inspect(path):
+            if path == '/dev/nvme0n1p1':
+                return SimpleNamespace(st_mode=stat.S_IFBLK if block else stat.S_IFREG, st_rdev=66309)
+            self.assertEqual(path, root)
+            return SimpleNamespace(st_mode=stat.S_IFDIR if directory else stat.S_IFREG, st_dev=device)
+        with patch.object(media.subprocess, 'check_output', side_effect=[
+                json.dumps(metadata).encode(), source + ' ' + fs + '\n']), \
+                patch.object(media.os.path, 'realpath', return_value='/wrong' if symlink else root), \
+                patch.object(media.os, 'stat', side_effect=inspect):
+            return media.checked_root(volume)
+
+    def test_plain_ssd_and_exact_systemd_writable_child_are_accepted(self):
+        for volume in ('delta_59202_media_data', 'po_infra_media_data'):
+            root = '/data/docker/volumes/' + volume + '/_data/data_hub_raw_media'
+            for source in ('/dev/nvme0n1p1', '/dev/nvme0n1p1[' + root[len('/data'):] + ']'):
+                with self.subTest(volume=volume, source=source):
+                    self.assertEqual(self.checked_source(source, volume), root)
+
+    def test_bind_from_another_directory_or_project_is_not_normalized_away(self):
+        for relative in ('/docker/volumes/po_infra_media_data/_data/data_hub_raw_media',
+                         '/docker/volumes/delta_59202_media_data/_data',
+                         '/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media/other',
+                         '/docker/volumes/delta_59202_media_data/_data/../_data/data_hub_raw_media',
+                         '/data/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media'):
+            with self.subTest(relative=relative):
+                with self.assertRaisesRegex(SystemExit, 'not the expected local SSD'):
+                    self.checked_source('/dev/nvme0n1p1[' + relative + ']')
+
+    def test_source_display_cannot_override_actual_device_or_type(self):
+        for source in ('/dev/nvme0n1p1', '/dev/nvme0n1p1[/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media]'):
+            for change in ({'device': 2097296}, {'block': False}, {'directory': False}):
+                with self.subTest(source=source, change=change):
+                    with self.assertRaisesRegex(SystemExit, 'device identity'):
+                        self.checked_source(source, **change)
+
+    def test_bind_exception_keeps_network_wrong_disk_and_symlink_rejections(self):
+        for source, fs in (('/dev/nvme0n1p1', 'nfs'), ('/dev/nvme1n1p1', 'xfs'),
+                           ('/dev/nvme0n1p1[/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media]extra', 'xfs'),
+                           ('/dev/nvme0n1p1 xfs\n/dev/nvme0n1p1', 'xfs')):
+            with self.subTest(source=source, fs=fs):
+                with self.assertRaisesRegex(SystemExit, 'not the expected local SSD'):
+                    self.checked_source(source, fs=fs)
+        with self.assertRaisesRegex(SystemExit, 'symlink'):
+            self.checked_source('/dev/nvme0n1p1', symlink=True)
+
     def test_counts_and_no_link_traversal_or_modification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

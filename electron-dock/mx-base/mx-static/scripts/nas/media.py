@@ -16,10 +16,19 @@ def checked_root(volume):
     root = expected + '/data_hub_raw_media'
     mount = subprocess.check_output(['findmnt', '-rn', '-T', root, '-o', 'SOURCE,FSTYPE'],
                                     universal_newlines=True).split()
-    if len(mount) != 2 or mount[0] != '/dev/nvme0n1p1' or mount[1] not in ('xfs', 'ext4', 'btrfs'):
+    # systemd's exact ReadWritePaths child inside ReadOnlyPaths=/data is a
+    # bind mount. findmnt SOURCE then includes the path within the SSD fs.
+    # Keep that path meaningful: never strip an arbitrary bracket suffix.
+    exact_child = '/dev/nvme0n1p1[' + root[len('/data'):] + ']'
+    if (len(mount) != 2 or mount[0] not in ('/dev/nvme0n1p1', exact_child)
+            or mount[1] not in ('xfs', 'ext4', 'btrfs')):
         raise SystemExit('Source is not the expected local SSD: ' + repr(mount))
     if os.path.realpath(root) != root:
         raise SystemExit('Source path resolves through a symlink; stop: ' + root)
+    device, directory = os.stat('/dev/nvme0n1p1'), os.stat(root)
+    if (not stat.S_ISBLK(device.st_mode) or not stat.S_ISDIR(directory.st_mode)
+            or directory.st_dev != device.st_rdev):
+        raise SystemExit('Source device identity is not the expected local SSD; stop: ' + root)
     return root
 
 
