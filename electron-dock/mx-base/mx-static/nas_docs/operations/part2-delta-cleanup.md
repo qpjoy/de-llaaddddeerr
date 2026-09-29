@@ -2,26 +2,33 @@
 
 这是显式迁移收尾操作，普通开机恢复、应用发布和容错不会调用它。
 
-**最新现场：已经部分删除，随后容器重新部署；先审核当前部署，继续保留原清单和意图日志。** 只读任务 `mx-nas-part2-delta-reclaim-957702929d.service` 在初始运行比较处拒绝，十个媒体容器 ID/PID/启动时间变化，多数实际镜像和部分 HostConfig.Mounts 也变化。这不能单独证明媒体回到 SSD。`inspect_only=true` 表示本次没有删除；旧 `may_be_partially_reclaimed=false` 不能否定之前已经部分删除。本次改为在尚未核对归属时输出 null 及 `prior_ownership_checked=false`，避免误读。
+**最新现场：当前部署审核已通过，下一步是在当前业务确认正常后，显式选择这份审核续删。** 服务器任务 `mx-nas-part2-delta-reclaim-ab99146252.service` 已 Succeeded。本次只是只读审核，没有继续删除；原回收计划、归属和意图日志保留。
 
-当前唯一回收计划仍是 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e`，保留它引用的 `reclaim-check-d28a86a2c0f341b18789fb7cd3e47bef`、原报告 `ssd-reclaim.json` 和原计划 `unlink-intents.jsonl`。历史快照曾有 41,875 个有意图的缺失 SSD 文件 / 277,938 个剩余文件，后续续删与超限后当前数量尚不确定。不得新建 cleanup check/prepare 接管，或改写旧运行指纹来绕过失败。
+原计划仍为 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e`，引用原 `reclaim-check-d28a86a2c0f341b18789fb7cd3e47bef`。新增审核目录为该计划下的 `runtime-review-265849b08eb549259eabbf147e48f949`；审核摘要 `eccbe6c2727b169670329433235c6f0038468ad8d73ae638943d7cff7bfb6945`，当前运行摘要 `e3b2d770695033f46a8a8774e079af63487200019c91626e1ef75a2571c87181`。
 
-先同步完整 mx-static 代码（含新 `scripts/nas/projects/delta_reclaim_review.py`），在服务器 mx-static 目录以 root 执行：
+本次核对得到：
 
-```bash
-bash scripts/manage.sh nas recovery install &&
-bash scripts/manage.sh nas recovery check
-```
+- SSD 尚存 55,036 个清单文件；264,777 个缺失路径全部有持久删除意图记录，合计原 319,813 个文件。不能用文件数推算已释放字节。
+- NAS 对应项仅 1 个 ctime-only 候选：`video/f6b999d6eadf0016d8d0e9906bcc50cb581ffd76644219ff2796212692b4e4db.mp4`，2,706,046 字节；其他差异 `issues=0`。
+- 候选在预检/删除前分别核对两侧完整哈希，预计共读取 10,824,184 字节、2 对。返回的 64 MiB / 64 对预算覆盖本快照；这不是传输限速，也不说明候选内容哈希已经通过。
+- `content_verified=false`、`business_acceptance_pending=true`、`deletion_authorized=false` 为预期值：部署审核不是内容证明、业务验收或删除命令。
 
-本次预期快照 **`c5613bfa5cd301643400`**。两项目恢复检查通过后，只读审核同一计划：
+若**本次重新部署后**的账号登录/联网、旧媒体读取、新媒体写入和后台任务已经实测正常，在服务器 mx-static 目录执行返回的顶层 `resume_command`：
 
 ```bash
 bash scripts/manage.sh nas delta cleanup \
   /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e \
-  --review-runtime
+  --runtime-review /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e/runtime-review-265849b08eb549259eabbf147e48f949 \
+  --business-accepted \
+  --ctime-proof-read-mib 64 \
+  --ctime-proof-pairs 64
 ```
 
-按返回的 `journalctl` 命令查看实际完成结果。此操作不停止/重建容器，不删除、补写 NAS 或 SSD，不改变原清单/运行指纹/归属/意图。后台对 `/data` 和 `/mnt/nas` 只读，没有 SSD 可写例外。只新增原计划内私有 `runtime-review-UUID`，包括 `review.json` 和绑定其摘要的完成标记。审核失败的未完成记录不能用于续删。
+这是**实际续删 SSD 清单文件**的命令。它保留卷/目录、其他 media、NAS、数据库和队列。按新任务返回的 journalctl 命令查看进度，不复用只读审核的 unit。最终需取得 `nas_delta_reclaim_complete` 与 Succeeded，再核对 `/data` 空间与 delta 存储状态；目前尚未收到该完成回执。`statistics.resume_command=null` 是有意避免输出不带新审核的旧命令，使用顶层完整命令即可。
+
+无需因本次成功回执再次安装、重复审核或新建 cleanup check/prepare。本地运行时仍为 `c5613bfa5cd301643400`；本次只更新操作记录。续删前会重新核对原日志、当前运行和文件，并为 ctime 候选做实际双侧哈希；若出现新部署或新文件变化，仍会停止，不能无视错误继续。
+
+此前 `957702929d` 只读检查因十个媒体容器的 ID/PID/启动时间、实际镜像及部分 HostConfig.Mounts 改变而拒绝。本次独立审核已核对当前部署，原运行记录未改写。旧 `may_be_partially_reclaimed=false` 不代表历史未删除；新的错误输出在尚未核对归属时为 null 及 `prior_ownership_checked=false`。
 
 审核重新检查当前 NAS 卷和内核子挂载、额外 SSD 访问路径、必需服务健康、恢复启用及当前代码；核对原始迁移/停写/清单证据，按原意图日志核对 SSD 缺失与剩余文件，扫描剩余 NAS 对应项的元数据，执行当前容器 NAS 身份和 1024 字节 HTTP 读取探测。业务新写到 NAS 的额外文件保留。NAS 内容变化不会因部署审核而被直接接受：此处只统计可进行 ctime-only 哈希的候选，真正续删仍必须做完整双侧内容证明。
 
@@ -31,7 +38,7 @@ bash scripts/manage.sh nas delta cleanup \
 
 预算沿用之前的异常核验策略：默认单文件 16 MiB、累计读取 64 MiB、64 对；显式 `--ctime-proof-read-mib N` 设累计读取上限、单文件上限为四分之一，`--ctime-proof-pairs N` 限制成对哈希次数。预检和删除前各读双侧，估计是候选字节的 4 倍 / 候选数的 2 倍；这是核验范围，不是限速。只准 SHA256 命名、非 tmp、单链接普通文件且仅 NAS ctime 变化的候选；两侧稳定完整 SHA256 必须相同且等于文件名。其他属性/路径/内容变化拒绝。原清单和旧证明不被修改，不复用旧哈希跳过核验。之后新增 ctime 差异仍可能超出预算，保留日志分析。
 
-`--inspect-ctime` 仍可用于运行未变时的同计划只读统计；当前现场必须先做 `--review-runtime`，之后统计可显式带 `--runtime-review <已完成审核目录>`。两种只读动作均不授权删除，也不会建立替代回收计划。
+`--inspect-ctime` 仍可用于运行未变时的同计划只读统计；当前现场已经完成 `--review-runtime`；若只需重新统计，可显式带 `--runtime-review <上述已完成审核目录>`。两种只读动作均不授权删除，也不会建立替代回收计划。
 
 **清理期间避免并行部署/重启，不重置任何原始记录，不从 SSD 回写 NAS。** 普通业务可继续。只有最终 `nas_delta_reclaim_complete` 和任务 `Succeeded` 才表示该清单完成，再按第 4 节查看空间/服务状态。当前没有服务器删除完成回执。下文保留历史与通用流程，不能覆盖本段的部分删除处理。
 
