@@ -2,19 +2,21 @@
 
 这是显式迁移收尾操作，普通开机恢复、应用发布和容错不会调用它。
 
-最新现场（2026-09-29）：业务验收已登记，新检查 `reclaim-check-738fdb0f9ef94b2c981e2dc94cc8970b` 与就绪清单 `reclaim-plan-6f8ee4902178476eb91ba29514392017` 均成功。显式删除任务 `mx-nas-part2-delta-reclaim-854b886ada.service` 在源 SSD 身份检查处失败，尚未进入删除归属/日志创建和文件删除。此前头像核验失败已确认仅 NAS ctime 变化，两侧 504 字节稳定内容哈希相等且匹配文件名；新报告保存了新的 NAS 元数据，原报告未改写。
+最新现场（2026-09-29）：删除重试 `mx-nas-part2-delta-reclaim-e6f5367f18.service` 已通过源目录打开，随后在初始运行指纹核对处拒绝。十个媒体容器的 ID/PID/启动时间均变化，多数实际镜像改变，web 命令和三个 worker 的 HostConfig.Mounts 也变化；这是不同于下文绑定挂载格式问题的真实部署变化。原 `6f8ee490…` 清单不能继续用于当前部署。本次尚未进入删除归属/日志创建和文件删除；不据此推断任何其他任务的历史删除情况。
+
+当前执行以下只读命令，重新核验当前部署、原停写 SSD 和 NAS 对应项：
+
+```bash
+bash scripts/manage.sh nas delta cleanup check
+```
+
+若当前部署业务也已实际验收，可加 `--business-accepted`；否则先完成只读检查。检查器会先拒绝已有 `ssd-reclaim.json` 回收归属，SSD 有未经记录的缺失/变化也会拒绝，不能用新清单接管部分删除。成功后使用新输出的 `check_directory` 执行第 2 步 prepare，并使用新的 plan_directory 执行第 3 步，旧证据原样保留。不修改旧运行指纹，不重复迁移/覆盖 NAS，也无需为了此运行变化再改代码或安装工具。日志中的通用提示“只重试同一清单”不能用于反复重试已失效的预检清单；已开始删除的场景仍必须保留原清单/日志、先分析。
+
+此前：业务验收已登记，检查 `reclaim-check-738fdb0f9ef94b2c981e2dc94cc8970b` 与就绪清单 `reclaim-plan-6f8ee4902178476eb91ba29514392017` 均成功。显式删除任务 `mx-nas-part2-delta-reclaim-854b886ada.service` 在源 SSD 身份检查处失败，尚未进入删除归属/日志创建和文件删除。此前头像核验失败已确认仅 NAS ctime 变化，两侧 504 字节稳定内容哈希相等且匹配文件名；新报告保存了新的 NAS 元数据，原报告未改写。
 
 本次原因是任务的 `ReadOnlyPaths=/data /mnt/nas` 加精确 `ReadWritePaths` 形成子目录绑定挂载，`findmnt SOURCE` 显示为 `/dev/nvme0n1p1[/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media]`，旧校验只接受裸设备名。这种方括号格式是 [util-linux 2.32.1 官方 findmnt 文档](https://github.com/util-linux/util-linux/blob/v2.32.1/misc-utils/findmnt.8) 说明的文件系统子目录信息。修复只额外接受该卷的精确 raw-media 子目录，同时检查块设备类型、目录类型和实际设备号；不去除任意方括号，不移除只读保护，不放宽文件/容器/日志校验。
 
-当前只需同步代码后执行第 1 步安装/恢复检查，再沿用已成功准备的清单重试：
-
-```bash
-bash scripts/manage.sh nas delta cleanup \
-  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-6f8ee4902178476eb91ba29514392017 \
-  --business-accepted
-```
-
-执行器仍重新核对当前状态。若后来重部署、重启或对应文件变化，不绕过报错或自动采用新基准。此次格式问题本身无需重跑复制、切换、检查或清单准备。以下保留完整流程供参考，当前应继续第 3 步。
+格式修复后曾建议重试原清单，但当前运行变化回执已使该建议失效。按本页顶部说明重新做只读检查；以下保留完整流程供参考，路径必须使用新检查/准备的实际输出。
 
 ## 删除范围
 
@@ -45,7 +47,7 @@ bash scripts/manage.sh nas recovery check
 
 ```bash
 bash scripts/manage.sh nas delta cleanup prepare \
-  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-check-738fdb0f9ef94b2c981e2dc94cc8970b \
+  "本次新检查输出的完整check_directory" \
   --business-accepted
 ```
 
@@ -57,7 +59,7 @@ bash scripts/manage.sh nas delta cleanup prepare \
 /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-<本次实际编号>
 ```
 
-`reclaim-check-738f…` 是检查报告，不能直接作为删除参数。prepare 会新建 `delta-retained-reclaim-v1` 清单，引用并校验原检查证据，记录实际验收；不修改切换报告或 NAS marker，也不编辑 Git 中的 plan。当前已经有成功的 `6f8ee490…` 计划，不必重复准备。
+`reclaim-check-738f…` 是历史检查报告，不能直接作为删除参数，当前部署变化后也不能再据它生成新计划。prepare 会新建 `delta-retained-reclaim-v1` 清单，引用并校验检查证据，记录实际验收；不修改切换报告或 NAS marker，也不编辑 Git 中的 plan。上方占位路径必须替换为本次新检查输出。
 
 ## 3. 准备成功后，显式删除清单内 SSD 文件
 
