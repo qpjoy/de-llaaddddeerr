@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
+import { WECHAT_LEGACY_SEARCH_PLATFORMS, WECHAT_SEARCH_OPERATION, normalizeWechatSearchAlias } from '../contracts/wechat-search-alias.mjs'
+import { wechatAggregatePage } from './wechat-search.mjs'
 import { JUSTONE_ENDPOINTS } from '../contracts/justone.mjs'
 import { publicStoredSearchItem } from './stored-search.mjs'
 import { createAggregateCursorCodec } from '../external-platforms/cursor.mjs'
@@ -33,8 +35,16 @@ function time(value, name) {
 export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = [], execution) {
   if (execution !== undefined && execution !== 'hub_only') fail('execution must be hub_only when specified')
   const crawlers = new Map(crawlerSpecs.map(spec => [spec.platform, spec]))
-  const supported = new Set([...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, 'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce', ...crawlers.keys()])
-  return [...new Set(grants)].filter(platform => supported.has(platform)).sort().flatMap(platform => {
+  const supported = new Set([...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, ...WECHAT_LEGACY_SEARCH_PLATFORMS, 'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce', ...crawlers.keys()])
+  const wechatGranted = grants.includes('social') && capabilities.includes(WECHAT_SEARCH_OPERATION)
+  const discovered = [...new Set([...grants, ...(wechatGranted ? WECHAT_LEGACY_SEARCH_PLATFORMS : [])])]
+  return discovered.filter(platform => supported.has(platform)).sort().flatMap(platform => {
+    if (WECHAT_LEGACY_SEARCH_PLATFORMS.includes(platform)) {
+      const objectType = platform === 'wechat_mp' ? 'article' : 'post'
+      return { platform, label: labels[platform], stored: grants.includes(platform), refresh: wechatGranted,
+        objectTypes: [objectType], routes: wechatGranted ? [{ id: `wechat-native:${platform}`, platform, kind: 'wechat',
+          operation: WECHAT_SEARCH_OPERATION, objectType, label: labels[platform] }] : [] }
+    }
     if (execution === 'hub_only') {
       const endpoint = HUB_SOCIAL_ENDPOINTS.search
       const available = platform === endpoint.platform && capabilities.includes(endpoint.operation)
@@ -69,7 +79,7 @@ export function normalizeAggregateRequest(body, sources) {
   if (!['stored', 'refresh'].includes(mode)) fail('mode must be stored or refresh')
   if (body.execution !== undefined && (body.execution !== 'hub_only' || mode !== 'refresh')) fail('execution=hub_only requires mode=refresh')
   const requested = strings(body.platforms, 'platforms')
-  const available = sources.map(source => source.platform)
+  const available = sources.filter(source => mode !== 'stored' || source.stored).map(source => source.platform)
   if (requested.some(platform => !available.includes(platform))) throw new AppError(403, 'platform_not_granted', 'A requested platform is not granted or searchable')
   const platforms = requested.length ? requested : available
   if (!platforms.length) throw new AppError(403, 'platform_not_granted', 'No searchable platform is granted to this API key')
@@ -87,9 +97,13 @@ export function normalizeAggregateRequest(body, sources) {
   if (mode === 'refresh' && (filters.tags.length || filters.from || filters.to)) throw new AppError(400, 'refresh_filters_unsupported', 'Live sources do not support Hub tags/date filters; use stored mode or remove these filters')
   const selected = sources.filter(source => platforms.includes(source.platform))
   const routes = mode === 'refresh' ? selected.flatMap(source => source.routes).filter(route => !objectTypes.length || objectTypes.includes(route.objectType)) : []
-  if (body.execution === 'hub_only' && routes.some(route => route.kind !== 'hub_social')) fail('Hub-only search requires Hub-owned source routes')
+  if (body.execution === 'hub_only' && routes.some(route => !['hub_social', 'wechat'].includes(route.kind))) fail('Hub-only search requires Hub-owned source routes')
   if (mode === 'refresh' && !routes.length) throw new AppError(400, 'refresh_unavailable', 'No selected source supports this authorized live operation')
-  return { ...(body.execution ? {execution:body.execution} : {}), query: body.query.trim(), platforms, authorizationPlatforms: [...new Set(platforms.map(platform => Object.hasOwn(JUSTONE_ENDPOINTS, platform) ? 'ecommerce' : platform))].sort(),
+  // Validate WeChat's 100-character keyword limit before any paid child starts.
+  for (const route of routes.filter(route => route.kind === 'wechat')) normalizeWechatSearchAlias({ platform: route.platform, query: body.query })
+  return { ...(body.execution ? {execution:body.execution} : {}), query: body.query.trim(), platforms, authorizationPlatforms: [...new Set(platforms.map(platform =>
+    mode === 'refresh' && routes.some(route => route.kind === 'wechat' && route.platform === platform) ? 'social'
+      : Object.hasOwn(JUSTONE_ENDPOINTS, platform) ? 'ecommerce' : platform))].sort(),
     marketplaces: platforms.filter(platform => Object.hasOwn(JUSTONE_ENDPOINTS, platform)), objectTypes, filters, pageSize, cursor: body.cursor ?? null, mode, routes }
 }
 
@@ -132,7 +146,7 @@ export async function aggregateLivePage(query, { context, store, secret }) {
     if (!source?.hasMore || !['ok', 'empty', 'partial'].includes(source.status)) return []
     return [(async () => {
       const child = await store.getUsageRequestForRetry(source.requestId, context.consumer.id)
-      const next = liveContinuation(child?.responseBody?.data)
+      const next = liveContinuation(route.kind === 'wechat' ? wechatAggregatePage(child?.responseBody, route) : child?.responseBody?.data)
       if (child?.apiKeyId !== context.apiKey.id || child?.tenantId !== context.tenant.id || child?.status !== 'committed' || !next) {
         throw new AppError(409, 'aggregate_continuation_unavailable', 'Committed source continuation is unavailable; no source was dispatched')
       }
@@ -196,9 +210,11 @@ export async function refreshAggregate(query, { requestId, search, products, hub
           ? await hubSocial({ operation: 'search', body: { platform: route.platform, query: query.query, count: 20, ...(route.cursor ? { cursor: route.cursor } : {}) }, idempotencyKey, path: HUB_SOCIAL_ENDPOINTS.search.path })
           : route.kind === 'products'
           ? await products({ body: { marketplace: route.marketplace, query: query.query, deliveryMode: 'live_only', ...(route.cursor ? { cursor: route.cursor } : {}) }, idempotencyKey, path: '/api/v1/data/ecommerce/products/search' })
+          : route.kind === 'wechat'
+          ? await search({ body: { platform: route.platform, query: query.query, params: { raw: false, ...(route.cursor ? { cursor: route.cursor } : {}) } }, idempotencyKey, path: '/api/v1/data/search' })
           : await search({ body: { platform: route.platform, query: query.query, pageSize: 20, ...(route.cursor ? { cursor: route.cursor, type: 'stable' } : {}) }, idempotencyKey, path: '/api/v1/data/search' })
         if (result.status >= 400) throw new AppError(result.status, 'source_request_failed', 'Source request failed', { requestId: result.requestId })
-        const data = result.body?.data
+        const data = route.kind === 'wechat' ? wechatAggregatePage(result.body, route) : result.body?.data
         if (!Array.isArray(data?.items)) throw new AppError(502, 'invalid_source_response', 'Source did not return a search result', { requestId: result.requestId })
         const items = data.items.map(item => liveItem(item, route, result.requestId)).filter(Boolean)
         outcomes[slot] = {

@@ -1,20 +1,21 @@
+import { wechatServiceProduct, wechatProduct } from '../../shared/wechat.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from './native-forwarding.mjs'
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-export const nativeDocPath = row => `/docs/${row.authorizationPlatform === 'ecommerce' ? 'ecommerce-treasure-box' : 'social-content'}/native/${row.key}`
+export const nativeDocPath = row => `/docs/${wechatServiceProduct(row.key)?.key || (row.authorizationPlatform === 'ecommerce' ? 'ecommerce-treasure-box' : 'social-content')}/native/${row.key}`
 export const NATIVE_DOC_ROUTES = NATIVE_FORWARDING_ENDPOINTS.map(row=>({ key:`native-${row.key}`, path:nativeDocPath(row), label:row.summary || row.key, section:'数据服务', hiddenNavigation:true, nativeKey:row.key }))
 export function nativeDocPaths(key) {
-  return NATIVE_FORWARDING_ENDPOINTS.filter(row=>key === 'social-content' ? row.authorizationPlatform === 'social' : key === 'ecommerce-treasure-box' ? row.authorizationPlatform === 'ecommerce' : key === `native-${row.key}`).map(row=>row.hubPath.slice('/api/v1'.length))
+  return NATIVE_FORWARDING_ENDPOINTS.filter(row=>key === 'social-content' ? row.authorizationPlatform === 'social' : key === 'ecommerce-treasure-box' ? row.authorizationPlatform === 'ecommerce' : wechatProduct(key) ? wechatServiceProduct(row.key)?.key === key : key === `native-${row.key}`).map(row=>row.hubPath.slice('/api/v1'.length))
 }
 
 export const nativeForwardingPaths = Object.fromEntries(NATIVE_FORWARDING_ENDPOINTS.map(row => [
   row.hubPath.slice('/api/v1'.length), { post: {
     tags: [row.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据'], operationId: `native_${row.key.replaceAll('.', '_')}`,
     summary: `${row.platformLabel || row.platform} · ${row.summary || row.key}`, 'x-mx-required-platform': row.authorizationPlatform,
-    'x-mx-data-platform': row.platform, 'x-mx-category': row.platformLabel || row.platform,
+    'x-mx-endpoint-key': row.key, 'x-mx-data-platform': row.platform, 'x-mx-category': row.platformLabel || row.platform,
     'x-mx-meter-key': row.operation,
     'x-mx-doc-path': nativeDocPath(row),
     'x-mx-required-capabilities': [row.operation],
-    description: '固定单接口原生数据查询，一次请求最多一次采集。需要独立操作授权与启用；data 完整保留业务字段，不归一化为搜索列表。仅 live_only，无自动分页、重试、补详情或存量回退。按接口参数显式翻页，每页使用新 Idempotency-Key；同页重试保持原请求和标识。不会替换现有 search/raw、crawl、user-info 合同。',
+    description: '固定单接口原生数据查询，一次请求最多一次采集。需要独立操作授权与启用；data 完整保留业务字段，不归一化为搜索列表。仅 live_only，无自动分页、重试、补详情或存量回退。按接口参数显式翻页，每页使用新 Idempotency-Key；同页重试保持原请求和标识。' + (row.key === 'wechat.search.search' ? 'search/raw 与 data/search 的微信分支转入本合同；聚合微信搜索显式采用精简 items 投影及独立子请求计量。旧 Night-All 微信搜索停用，旧 mxnc1 游标不可复用。' : '不改变其他历史搜索合同。'),
     parameters: [{ name: 'Idempotency-Key', in: 'header', required: true, schema: { type: 'string', minLength: 8, maxLength: 128 } }],
     requestBody: { required: true, content: { 'application/json': { schema: {
       type: 'object', additionalProperties: false, required: ['params'], properties: {
@@ -34,18 +35,19 @@ export const nativeForwardingPaths = Object.fromEntries(NATIVE_FORWARDING_ENDPOI
 export function nativeEndpointGuide(key) {
   const row = NATIVE_FORWARDING_ENDPOINTS.find(item=>`native-${item.key}` === key)
   if (!row) return ''
-  const product = row.authorizationPlatform === 'ecommerce' ? 'ecommerce-treasure-box' : 'social-content'
+  const product = wechatServiceProduct(row.key)?.key || (row.authorizationPlatform === 'ecommerce' ? 'ecommerce-treasure-box' : 'social-content')
   return `<h2>${escape(row.platformLabel || row.platform)} · ${escape(row.summary || row.key)}</h2><p><a href="/#/data-products/${product}?endpoint=${encodeURIComponent(row.key)}">打开本接口调试与 Hub 定价 →</a></p>
   <h3>POST <code>${row.hubPath}</code></h3><p>使用 Hub Live Key 与 Idempotency-Key。每次只查询此接口的一页；参数放入 JSON 的 params 对象，deliveryMode 固定 live_only。没有自动翻页、重试或关联查询。</p>
   <h3>Hub 官方定价</h3><p>官方定价来自当前 Hub 已发布价格表，账户执行价包含合同倍率或折扣。<code>GET /api/v1/data/services/pricing?path=${encodeURIComponent(row.hubPath)}</code> 用当前 Key 读取两项价格，不采集、不扣费，不锁定执行价格。未发布单价不代表免费。</p>
-  <div style="overflow:auto"><table><thead><tr><th>params 字段</th><th>类型</th><th>必填</th><th>默认 / 可选值</th><th>说明</th></tr></thead><tbody>${row.parameters.map(p=>`<tr><td><code>${escape(p.name)}</code></td><td>${escape(p.type || 'scalar')}</td><td>${p.required?'是':'否'}</td><td>${escape(p.enum?.join(' / ') || (p.default ?? '—'))}</td><td>${escape(p.description || '按字段声明填写')}</td></tr>`).join('')}</tbody></table></div>
-  <h3>响应与分页</h3><p>外层为 data + requestId；data 包含 contractVersion、endpoint、业务 data 和 meta.capturedAt。业务数据结构随接口版本不同，不保证统一 items、总数或分页字段。按接口返回的分页参数显式请求后续页，每页新建 Idempotency-Key；相同页重试保留原标识和参数。</p><p>400 修正参数；403 检查 Key 平台与操作授权；402 检查余额；429 等待限额恢复；409/502/503 保留 requestId 核对原请求，勿自动新建请求重试。接口授权、运行启用及余额在发送时独立检查。</p>`
+  <div style="overflow:auto"><table><thead><tr><th>params 字段</th><th>类型</th><th>必填</th><th>默认 / 可选值</th><th>说明</th></tr></thead><tbody>${row.parameters.map(p=>`<tr><td><code>${escape(p.name)}</code></td><td>${escape(p.type || p.anyOf?.map(variant=>variant.type).join(' / ') || 'scalar')}</td><td>${p.required?'是':'否'}</td><td>${escape(p.enum?.join(' / ') || (p.default ?? '—'))}</td><td>${escape(p.description || '按字段声明填写')}</td></tr>`).join('')}</tbody></table></div>
+  ${row.key.startsWith('wechat.') ? '<h3>微信数据说明</h3><p>大整数标识以字符串返回，传参时不要转成 Number。raw 仅选择业务数据详略，不返回连接凭据或服务传输信息。文章正文、互动、评论是独立调用，不会自动补查。搜索续页原样传 cursor 并保留筛选条件，不能只增加 offset；公众号文章列表原样传 next_offset。空结果仍可能正常计量；总数可能为 null。建议客户端至少等待 30 秒。固定文章演示仅用于格式验证，有 1 小时缓存，不能指定文章。</p>' : ''}
+  <h3>响应与分页</h3><p>响应包含 contractVersion、endpoint、业务 data、meta.capturedAt 与 requestId。业务数据结构随接口版本不同，不保证统一 items、总数或分页字段。按接口返回的分页参数显式请求后续页，每页新建 Idempotency-Key；相同页重试保留原标识和参数。</p><p>400 修正参数；403 检查 Key 平台与操作授权；402 检查余额；429 等待限额恢复；409/502/503 保留 requestId 核对原请求，勿自动新建请求重试。接口授权、运行启用及余额在发送时独立检查。</p>`
 }
 
 export function nativeServiceGuide(key, allowed = () => true) {
-  const rows=NATIVE_FORWARDING_ENDPOINTS.filter(row=>(key==='social-content' ? row.authorizationPlatform==='social' : row.authorizationPlatform==='ecommerce') && allowed(row.hubPath.slice('/api/v1'.length)))
+  const rows=NATIVE_FORWARDING_ENDPOINTS.filter(row=>(wechatProduct(key) ? wechatServiceProduct(row.key)?.key === key : key==='social-content' ? row.authorizationPlatform==='social' : row.authorizationPlatform==='ecommerce') && allowed(row.hubPath.slice('/api/v1'.length)))
   const platforms=[...new Set(rows.map(row=>row.platformLabel || row.platform))].sort()
-  return `<h2>${key==='social-content'?'社媒与内容数据':'电商数据接口'}</h2><p>通过 Hub 查询内容、账号、评论、趋势或商品数据。当前文档范围包含 ${rows.length} 个固定接口，调用仍由所选 Key 权限、运行开关与账户余额决定。</p><p><a href="/#/data-products/${key}">打开接口调试、平台筛选与 Hub 官方定价 →</a></p><h3>平台与接口</h3><table><thead><tr><th>平台</th><th>接口数</th><th>接口文档示例</th></tr></thead><tbody>${platforms.map(platform=>{const matches=rows.filter(row=>(row.platformLabel || row.platform)===platform);return `<tr><td>${escape(platform)}</td><td>${matches.length}</td><td><a href="${nativeDocPath(matches[0])}">${escape(matches[0].summary || matches[0].key)}</a></td></tr>`}).join('')}</tbody></table><p>完整授权接口与字段定义见 <a href="/docs/openapi.json">OpenAPI JSON</a>。选择具体接口后，可在调试页面直接跳转对应文档。所有采集均需点击发送，浏览、筛选和读取价格不会采集数据。</p>`
+  return `<h2>${wechatProduct(key)?.label || (key==='social-content'?'社媒与内容数据':'电商数据接口')}</h2><p>通过 Hub 查询内容、账号、评论、趋势或商品数据。当前文档范围包含 ${rows.length} 个固定接口，调用仍由所选 Key 权限、运行开关与账户余额决定。</p><p><a href="/#/data-products/${key}">打开接口调试、平台筛选与 Hub 官方定价 →</a></p><h3>平台与接口</h3><table><thead><tr><th>平台</th><th>接口数</th><th>接口文档示例</th></tr></thead><tbody>${platforms.map(platform=>{const matches=rows.filter(row=>(row.platformLabel || row.platform)===platform);return `<tr><td>${escape(platform)}</td><td>${matches.length}</td><td><a href="${nativeDocPath(matches[0])}">${escape(matches[0].summary || matches[0].key)}</a></td></tr>`}).join('')}</tbody></table>${wechatProduct(key) ? `<h3>全部微信服务</h3><table><thead><tr><th>服务</th><th>Hub 接口</th></tr></thead><tbody>${rows.map(row=>`<tr><td><a href="${nativeDocPath(row)}">${escape(row.summary)}</a></td><td><code>POST ${row.hubPath}</code></td></tr>`).join('')}</tbody></table><p>公众号文章详情优先使用 H5；阅读互动、评论和账号资料分别查询。搜索支持显式 cursor 续页，空结果也可能计量。已收录搜索不自动包含本次查询，返回标识应始终作为字符串保存。</p>` : ''}<p>完整授权接口与字段定义见 <a href="/docs/openapi.json">OpenAPI JSON</a>。选择具体接口后，可在调试页面直接跳转对应文档。所有采集均需点击发送，浏览、筛选和读取价格不会采集数据。</p>`
 }
 
 export function nativeForwardingGuide() {

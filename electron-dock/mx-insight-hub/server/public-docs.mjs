@@ -1,3 +1,4 @@
+import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
 import { hubSocialPaths, hubSocialGuide } from './contracts/hub-social-docs.mjs'
@@ -868,10 +869,43 @@ function officialXiaohongshuOperation(endpointName) {
   }
 }
 
+function wechatSearchAliasOperation() {
+  const native = nativeForwardingPaths['/data/wechat/search/search'].post
+  const schema = native.requestBody.content['application/json'].schema
+  return { ...native, operationId: 'searchWechatThroughHistoricalRawPath',
+    summary: '微信搜索旧路径转入 Hub 新接口',
+    description: '此固定路径描述微信分支：platform=wechat_search（别名 wechat/weixin）或 wechat_mp。与 /data/wechat/search/search 共用 social + native.wechat.search.search 授权、运行开关、客户定价、余额和幂等；返回新 contractVersion/endpoint/data/meta/requestId，不返回旧 raw_data 字符串。wechat_mp 默认 business_type=article。keyword/query/params.keyword 必须一致；count/pageSize/limit 仅接受旧默认值 20，响应仍为原生一页，不保证 20 条、不截断、不补齐。page>1 需要新 cursor；mxnc1 游标、仅 offset 翻页、批量和补详情请求拒绝。旧 Key 不自动增权；旧幂等标识若已用于旧合同则返回 409，不再次采集。非微信平台继续使用 /search/{operation} 的原合同。/data/search 的微信分支同样进入新合同；只有 /night-all/search/raw 的微信入口返回 410，不转发或回退。',
+    requestBody: { required: true, content: { 'application/json': { schema: {
+      ...schema, required: ['platform'],
+      anyOf: [{ required: ['keyword'] }, { required: ['query'] }, { required: ['params'], properties: { params: { required: ['keyword'] } } }],
+      properties: { ...schema.properties,
+        params: { ...schema.properties.params, required: [] },
+        platform: { type: 'string', enum: ['wechat_search', 'wechat_mp', 'wechat', 'weixin'] },
+        keyword: { type: 'string', minLength: 1, maxLength: 100 }, query: { type: 'string', minLength: 1, maxLength: 100 },
+        cursor: schema.properties.params.properties.cursor, page: { type: 'integer', minimum: 1 },
+        count: { const: 20 }, pageSize: { const: 20 }, limit: { const: 20 },
+        includeDetails: { const: false }, includeComments: { const: false }, disableAutoDetails: { const: true },
+      },
+    }, example: { platform: 'wechat_mp', keyword: '城市观察', params: { raw: false } } } } },
+  }
+}
+
+function wechatDataSearchOperation() {
+  const operation = wechatSearchAliasOperation()
+  const content = operation.requestBody.content['application/json']
+  return { ...operation, operationId: 'searchWechatThroughDataSearch',
+    summary: '微信实时搜索统一入口',
+    description: operation.description + ' 此处请求路径为 /data/search；兼容 type=fresh/stable，两者均使用新合同的永久幂等重放。',
+    requestBody: { required: true, content: { 'application/json': { ...content, schema: { ...content.schema,
+      properties: { ...content.schema.properties, type: { type: 'string', enum: ['fresh', 'stable'], description: 'Both use native durable idempotency; explicit new acquisition requires a new key.' } },
+    } } } },
+  }
+}
+
 function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
   const aliasDescription = historicalAlias
-    ? 'This historical /search spelling is an exact alias of /night-all/search: both enter the same Hub service and paid-operation fingerprint, so changing the route cannot authorize or purchase a second upstream dispatch. '
-    : ''
+    ? 'Except for WeChat raw search, this historical /search spelling is an exact alias of /night-all/search: both enter the same Hub service and paid-operation fingerprint, so changing the route cannot authorize or purchase a second upstream dispatch. WeChat raw now uses the new /data/wechat/search/search contract and its exact permissions, pricing and response; see /search/raw. '
+    : 'WeChat raw search (wechat_mp, wechat_search and aliases wechat/weixin) is retired on this route: HTTP 410 wechat_search_route_retired; use /data/wechat/search/search or /search/raw. No historical dispatch, fallback or replay is served here. '
   return {
     tags: ['Compatibility'],
     operationId: historicalAlias
@@ -889,7 +923,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
     },
     description: `${aliasDescription}The Hub authenticates and authorizes the platform, then selects the implementation without exposing provider credentials. For Xiaohongshu, the immutable API-key scope must also include the matching business operation: raw requires social.posts.search, crawl requires social.users.posts and user-info requires social.users.resolve. This operation grant is checked before either Hub-native or historical dispatch. Crawl work (distinct identity aliases times effective count times activity type count) is admitted against the server-owned consumer/platform maxCrawlWork policy (1–5000; default 100), independently of price. The per-page cap remains 100 and the identity cap remains 50. Total-budget rejection returns work_budget_exceeded with error.details containing identityCount, pageSize, activityTypeCount, requestedWork, allowedWork, stage=admission, upstreamDispatched=false and retryable=false; unchanged retries cannot resolve it. After independent rollout gates, a compatible Xiaohongshu raw first-page request uses the Hub-native direct connector when it has exactly one scalar keyword or query, effective page size 20, and no fan-out/detail/comment workload controls. Explicit includeDetails=false/includeComments=false remain harmless compatibility defaults. Xiaohongshu crawl and user-info also use Hub-native acquisition for one username, userId, uid or official profile URL; crawl additionally requires posts-only activity, effective page size 20, concurrency 1 and either no cursor or its Hub-issued opaque cursor. These migrated shapes retain the historical legacy envelope and one customer usage unit while all provider calls are cost-admitted atomically. Unsupported multi-identifier/channel/non-post/non-20/custom-params shapes continue on the historical compatibility path until migrated. Previously issued direct cursors stay on their owning connector. Historical Night-All cursor/compound/composite/page/offset continuations are replaced at the public boundary by a consumer/operation/platform/query-scoped encrypted mxnc1 cursor carrying the next page number. Every continuation is available as data.page.nextCursor and is returned unchanged as the request cursor; composite/offset responses retain their nextParams.cursor alias and mode for legacy clients. If both cursor aliases are sent they must match. Page 15 is terminal. Pre-migration raw provider cursors or continuation params return 400 invalid_cursor and must restart without a cursor and with a new Idempotency-Key. The direct projection keeps raw_info and raw_data as JSON strings and puts the durable Hub request UUID in both the body requestId and x-mx-insight-request-id header. Night-All-owned live/fallback bodies keep their original business fields and correlation IDs unchanged; only pagination-control fields are governed. Historical ingestion retains the complete pre-projection parsed JSON and legacy raw strings; Hub-native provider calls additionally retain exact response bytes in restricted storage. The legacy x-mx-insight-source-mode header remains live or stale; Hub-native cache/replay states map back to that vocabulary. Historical dispatch is governed by the Hub-pinned, grant-filtered data.legacySearch matrix returned by GET /data/capabilities; its selected platform must appear in both supportedPlatforms and readyPlatforms. A data.platforms entry alone, including telegram, does not grant a historical operation. The matrix is owned by the deployed Hub release and is not fetched from Night-All at request time. readyPlatforms does not prove current Night-All handler, endpoint, provider, credential, or upstream health. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return the exact governed snapshot. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy.`,
     ...(historicalAlias
-      ? { 'x-mx-canonical-operation': '/night-all/search/{operation}' }
+      ? { 'x-mx-canonical-operation': '/night-all/search/{operation}', 'x-mx-wechat-raw-operation': '/data/wechat/search/search' }
       : {}),
     'x-mx-error-codes': {
       400: ['invalid_request', 'invalid_query', 'invalid_cursor', 'invalid_page_size', 'cursor_scope_mismatch', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key', 'invalid_user_profile_url', 'cursor_page_mismatch', 'platform_operation_unsupported', 'night_all_rejected'],
@@ -898,6 +932,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
       404: ['not_found', 'user_not_found', 'night_all_rejected'],
       409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'external_platform_response_unusable', 'night_all_rejected'],
       422: ['night_all_rejected'],
+      410: ['wechat_search_route_retired'],
       429: [...QUOTA_429_CODES, 'external_platform_busy', 'external_platform_rate_limited', 'external_platform_capacity_exceeded', 'external_platform_cost_budget_exhausted', 'external_platform_subsidy_budget_exhausted', 'night_all_rejected'],
       502: ['night_all_rejected', 'upstream_outcome_unknown', 'external_platform_response_unusable', 'external_platform_outcome_unknown', 'external_platform_rejected'],
       503: ['platform_operation_unavailable', 'compatibility_capabilities_unavailable', 'compatibility_store_unavailable', 'external_platform_unavailable', 'external_platform_not_configured', 'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_capacity_unavailable', 'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete', 'external_platform_operation_disabled', 'external_platform_operation_shadow', 'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_operation_blocked'],
@@ -922,7 +957,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
         },
       },
     },
-    responses: { 200: nightAllCompatibilityResponse, ...nightAllCompatibilityErrors },
+    responses: { 200: nightAllCompatibilityResponse, ...nightAllCompatibilityErrors, 410: errorResponse },
   }
 }
 
@@ -1764,7 +1799,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         operationId: 'searchData',
         summary: 'Search one explicitly selected platform',
         'x-mx-required-capabilities-by-platform': { xiaohongshu: 'social.posts.search' },
-        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the API-key scope must also include social.posts.search; this is checked before direct or historical dispatch, and the default and only Hub-native page size is exactly 20. Compatible first-page requests use the governed direct external-data connector only after an independent rollout gate; previously issued opaque mxec2 direct cursors remain on that connector. The response keeps the night-all.data-search.v1 envelope. A non-20 pageSize stays on the historical compatibility path; that path now returns an encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and terminates after page 15. Return that cursor unchanged with a new Idempotency-Key for each page. A pre-migration raw historical cursor returns 400 invalid_cursor and must restart from a cursor-less first page. Hub automatically attempts bounded detail enrichment only for note bodies at the provider preview boundary; it keeps a detail body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion and every data_center_saved_records_* platform are Hub-stored and deliberately rejected by this live-compatible route; use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external provider; cursors cannot move between paths, queries or page sizes. Replay the same body with the same Idempotency-Key.',
+        description: 'WeChat platforms wechat_mp/wechat_search (aliases wechat/weixin) use /data/wechat/search/search directly and return its native contractVersion/endpoint/data/meta/requestId envelope. Requires social + native.wechat.search.search; platform-only grants do not authorize live search. Optional params follow the native schema. type=fresh/stable both use permanent native idempotent replay; a new acquisition requires a new Idempotency-Key. Old mxnc1 cursors are rejected. No Night-All dispatch or fallback. Other platforms: one request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the API-key scope must also include social.posts.search; this is checked before direct or historical dispatch, and the default and only Hub-native page size is exactly 20. Compatible first-page requests use the governed direct external-data connector only after an independent rollout gate; previously issued opaque mxec2 direct cursors remain on that connector. The response keeps the night-all.data-search.v1 envelope. A non-20 pageSize stays on the historical compatibility path; that path now returns an encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and terminates after page 15. Return that cursor unchanged with a new Idempotency-Key for each page. A pre-migration raw historical cursor returns 400 invalid_cursor and must restart from a cursor-less first page. Hub automatically attempts bounded detail enrichment only for note bodies at the provider preview boundary; it keeps a detail body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion and every data_center_saved_records_* platform are Hub-stored and deliberately rejected by this live-compatible route; use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external provider; cursors cannot move between paths, queries or page sizes. Replay the same body with the same Idempotency-Key.',
         'x-mx-error-codes': {
           400: ['invalid_request', 'invalid_platform', 'invalid_query', 'invalid_cursor', 'invalid_page_size', 'cursor_scope_mismatch', 'page_size_exceeded', 'unsupported_fields', 'unsupported_match_mode', 'invalid_result_type', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported'],
           401: ['api_key_required', 'invalid_api_key'],
@@ -1780,7 +1815,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           required: true,
           content: {
             'application/json': {
-              schema: { $ref: '#/components/schemas/SearchRequest' },
+              schema: { anyOf: [{ allOf: [{ $ref: '#/components/schemas/SearchRequest' }, { properties: { platform: { not: { enum: ['wechat_mp', 'wechat_search', 'wechat', 'weixin'] } } } }] }, wechatDataSearchOperation().requestBody.content['application/json'].schema] },
               examples: {
                 telegram: {
                   summary: 'Telegram stored search',
@@ -1794,7 +1829,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
         },
-        responses: { 200: searchResponse, ...publicErrors },
+        responses: { 200: { ...searchResponse, content: { 'application/json': { schema: { anyOf: [searchResponse.content['application/json'].schema, { type: 'object', required: ['contractVersion', 'endpoint', 'data', 'meta', 'requestId'], properties: { contractVersion: { type: 'string' }, endpoint: { const: 'wechat.search.search' }, data: { type: 'object', additionalProperties: true }, meta: { type: 'object' }, requestId: { type: 'string' } } }] } } } }, ...publicErrors, 402: errorResponse },
       },
     },
     '/night-all/search/{operation}': {
@@ -1803,6 +1838,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/search/{operation}': {
       post: nightAllCompatibilityOperation({ historicalAlias: true }),
     },
+    '/search/raw': { post: wechatSearchAliasOperation() },
     '/data/stored/search': {
       post: {
         tags: ['Search'],
@@ -1832,7 +1868,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       get: {
         tags: ['Search'], operationId: 'aggregateSearchSources', summary: 'List searchable Hub platforms for the current API key',
         parameters: [{ name: 'execution', in: 'query', required: false, schema: { type: 'string', enum: ['hub_only'] }, description: 'Discover only Hub-owned live routes. Omit for existing behavior.' }],
-        description: 'Read-only discovery. Includes stored and authorized live operations, never grants new access or contacts a data service. Ecommerce marketplaces are separate logical platforms backed by the existing ecommerce scope.',
+        description: 'Read-only discovery. Includes stored and authorized live operations, never grants new access or contacts a data service. Ecommerce marketplaces are separate logical platforms backed by the existing ecommerce scope. WeChat live routes require social + native.wechat.search.search and are included in hub_only; stored WeChat requires its separate platform grant. A live-only grant never grants stored access.',
         responses: { 200: { description: 'data.sources: platform, label, stored, refresh, objectTypes, routes' }, ...publicErrors },
       },
     },
@@ -1847,7 +1883,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/data/aggregate/search': {
       post: {
         tags: ['Search'], operationId: 'aggregateDataSearch', summary: 'Search latest or stored data across one, several or all authorized platforms',
-        description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence; the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed sources are not restarted. No exact total is promised. The opaque cursor references committed Hub evidence and binds the identity and query scope; missing evidence fails closed. Child cursors retain their existing route and page limits. sources[].carried marks a source not called in this batch; its counts describe its last acquired page. pageSize applies to stored mode only; live post operations fetch 20 items and product operations use their existing bounded page sizes. mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.',
+        description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence; the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed sources are not restarted. No exact total is promised. The opaque cursor references committed Hub evidence and binds the identity and query scope; missing evidence fails closed. Child cursors retain their existing route and page limits. sources[].carried marks a source not called in this batch; its counts describe its last acquired page. pageSize applies to stored mode only; historical live post operations fetch 20 items and product operations use their existing bounded page sizes. WeChat uses one native page without truncation or fill: wechat_mp selects articles, wechat_search selects all categories, raw=false; only declared items are projected, never categories. Both require social + native.wechat.search.search and a keyword of at most 100 characters. The same native operation price applies to each child; preview includes its runtime readiness. Native continue_flag and cursor are held inside committed child evidence; callers use the aggregate cursor. Old WeChat aggregate cursors must restart explicitly. WeChat results are archived but not automatically ingested into canonical search. mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.',
         parameters: [idempotencyParameter, { name: 'Accept', in: 'header', required: false,
           schema: { type: 'string', enum: ['application/json', 'text/event-stream'], default: 'application/json' },
           description: 'SSE uses the same POST body, authorization and idempotency identity. No automatic reconnect; retry the exact body/key. Last-Event-ID event replay is not supported.' }],
@@ -5303,6 +5339,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
 })
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
+  ...WECHAT_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '微信数据服务' })),
   { key:'social-content', path:'/docs/social-content', label:'社媒与内容数据', section:'数据服务' },
   ...NATIVE_DOC_ROUTES,
   ...ENTERPRISE_DOC_ROUTES,
@@ -6280,7 +6317,8 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
     <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。小红书平台项包含 <code>search_posts</code> 且 <code>search.ready=true</code> 表示独立的首屏 rollout gate 已开启；此时单 scalar query、有效页大小 20 的 page 1 raw 请求由 Hub-native connector 处理，已签发的 <code>mxec2</code> direct traversal cursor 继续走同一路径。独立 user-activity gate 开启后，单个 <code>username|userId|uid|profileUrl</code> 的 user-info，以及 posts-only、页大小 20、concurrency 1 的 crawl 也由 Hub-native connector 处理；crawl 只接受并返回 Hub 不透明 cursor，最多 15 页。<code>data.legacySearch</code> 仍保留小红书，因为 multi-identifier、channel、非 posts、非 20 页和自定义 params 等尚未迁移形态继续走历史路径。矩阵不会在请求时从 Night-All 的 capability 接口实时发现。</p>
     <p><code>data.legacySearch.contractVersion</code> 固定为 <code>night-all.legacy-search-capabilities.v1</code>。这是 Hub-pinned 的 operation dispatch 策略：目标平台必须同时出现在对应 operation 的 <code>supportedPlatforms</code> 与 <code>readyPlatforms</code>；它不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。</p>
-    <p><code>/api/v1/search/raw|crawl|user-info</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
+    <p>除微信 raw 搜索外，<code>/api/v1/search/raw|crawl|user-info</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
+    <div class="notice">微信已迁移：<code>/api/v1/search/raw</code> 的 <code>wechat_search/wechat/weixin/wechat_mp</code> 请求转入 <code>/api/v1/data/wechat/search/search</code>，返回新响应，并要求 <code>social + native.wechat.search.search</code> 权限和当前客户价格/余额。公众号默认文章检索；单关键词，旧页大小提示只接受默认 20，旧 <code>mxnc1</code> 游标不可复用。<code>/api/v1/data/search</code> 同样转入新合同；聚合微信实时子请求使用新接口、独立计费并映射明确的 items 与游标。只有 <code>/api/v1/night-all/search/raw</code> 的微信分支返回 410；不会转发或回退。历史请求可按 requestId 查阅，不会被重写。详见<a href="/docs/wechat-search/native/wechat.search.search">微信搜索新合同</a>。</div>
     <p>当 <code>platform=xiaohongshu</code> 时，Key 与 consumer 必须同时拥有平台 grant 和 operation grant：<code>raw → social.posts.search</code>、<code>crawl → social.users.posts</code>、<code>user-info → social.users.resolve</code>。该映射对 Hub-native direct 子集、历史兼容分支以及两组路径别名完全相同。</p>
     <table><thead><tr><th>operation</th><th>示例</th><th>运行时判断字段</th></tr></thead><tbody>
       <tr><td><code>raw</code> direct 子集</td><td><code>xiaohongshu + 单 query + 20</code></td><td><code>data.platforms[xiaohongshu].search</code></td></tr>
@@ -6447,6 +6485,7 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
+  if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
   if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
@@ -6469,6 +6508,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
   'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
@@ -6499,9 +6539,10 @@ const platformDisplayName = text => text.replace(/JustOne/gi, 'J Platform').repl
 
 export function tenantOpenApiDocument(scopes) {
   const document = structuredClone(PUBLIC_OPENAPI_DOCUMENT)
-  const hidden = new Set(['/data/capabilities', '/data/search', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
+  document.paths['/data/search'] = { post: wechatDataSearchOperation() }
+  const hidden = new Set(['/data/capabilities', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
   document.paths = Object.fromEntries(Object.entries(document.paths).filter(([path]) =>
-    !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/night-all/') && !path.startsWith('/search/')))
+    !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/night-all/') && (!path.startsWith('/search/') || path === '/search/raw')))
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6526,6 +6567,7 @@ export function tenantOpenApiDocument(scopes) {
 
 function tenantDocBody(route, scopes) {
   if (route.nativeKey) return nativeEndpointGuide(route.key)
+  if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
   if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
@@ -6589,6 +6631,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
       key === route.key ? section : ''
     ))
   if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant, procurementEvidence })}</main>`)
+  if (WECHAT_PRODUCTS.some(product => product.key === route.key)) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeServiceGuide(route.key)}</main>`)
   if (route.nativeKey) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeEndpointGuide(route.key)}</main>`)
   if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)

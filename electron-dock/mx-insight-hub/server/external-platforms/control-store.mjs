@@ -671,10 +671,11 @@ export class MemoryExternalPlatformControlStore {
 }
 
 function rowFromPostgres(row) {
+  const definition = catalogFor(row.provider_key).find(entry => entry.operationKey === row.operation_key)
   const endpointPrices = Object.fromEntries(Object.entries(row.endpoint_prices || {}).map(
     ([endpointKey, value]) => [
       endpointKey,
-      databaseSafeInteger(value, `unit price for ${endpointKey}`, { minimum: row.provider_key === 'qixin' && QIXIN_OPERATIONS.some(op => op.allowZeroCost && op.endpointKeys.includes(endpointKey)) ? 0 : 1 }),
+      databaseSafeInteger(value, `unit price for ${endpointKey}`, { minimum: definition?.allowZeroCost && definition.endpointKeys.includes(endpointKey) ? 0 : 1 }),
     ],
   ))
   return {

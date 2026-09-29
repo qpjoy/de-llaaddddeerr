@@ -2,6 +2,7 @@ import official from './provider-official-contracts.json' with { type: 'json' }
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { PROVIDER_CATALOG_ADDITIONS } from './provider-catalog-additions.mjs'
 import tikPrices from './tikhub-reference-prices.json' with { type: 'json' }
+import wechat from './wechat-contracts.json' with { type: 'json' }
 
 // Explicit platform identities, not substring matches against editable labels.
 const DIRECTORY = {
@@ -19,7 +20,9 @@ export function officialProviderCatalog(operations = []) {
   const referencePrices = new Map(tikPrices.rows.map(row=>[row.path,row.unitPrice]))
   const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [`${row.provider}:${row.method}:${row.path}`,row]))
   const policies = new Map(operations.map(row => [`${row.provider}:${row.operation}`,row.current]))
-  const rows = official.endpoints.map(row => {
+  const wechatByPath = new Map(wechat.endpoints.map(row => [row.path, row]))
+  const rows = official.endpoints.map(original => {
+    const row = original.provider === 'tikhub' && wechatByPath.has(original.path) ? { ...original, ...wechatByPath.get(original.path) } : original
     const endpoint = native.get(`${row.provider}:${row.method}:${row.path}`)
     const policy = endpoint && policies.get(`${row.provider}:${endpoint.operation}`)
     return { provider:row.provider, platform:row.platform, label:row.platformLabel || row.platform,
@@ -28,7 +31,7 @@ export function officialProviderCatalog(operations = []) {
       operation:endpoint?.operation || null, implementation:endpoint ? 'fixed_contract' : 'documented_only',
       reason:endpoint ? null : row.reason, effectiveState:policy?.effectiveState || 'not_checked',
       priceReviewed:policy?.priceBook?.source === 'database' && policy?.priceBook?.status === 'reviewed' && policy?.priceBook?.ready === true,
-      procurementReference:row.provider === 'tikhub' && referencePrices.has(row.path) ? {currency:tikPrices.currency,unitPrice:referencePrices.get(row.path),sourceUrl:tikPrices.sourceUrl,observedAt:tikPrices.observedAt} : null,
+      procurementReference:row.procurementReference || (row.provider === 'tikhub' && referencePrices.has(row.path) ? {currency:tikPrices.currency,unitPrice:referencePrices.get(row.path),sourceUrl:tikPrices.sourceUrl,observedAt:tikPrices.observedAt} : null),
       runtimeStatus:'not_checked' }
   })
   return { version:official.version, observedAt:official.observedAt, rows,

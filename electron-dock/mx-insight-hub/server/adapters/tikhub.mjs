@@ -168,8 +168,10 @@ function decodeUtf8(bytes) {
   }
 }
 
-function parseJsonText(text) {
-  return JSON.parse(text.codePointAt(0) === 0xFEFF ? text.slice(1) : text)
+function parseJsonText(text, preserveLargeIntegers = false) {
+  return JSON.parse(text.codePointAt(0) === 0xFEFF ? text.slice(1) : text, preserveLargeIntegers
+    ? (_key, value, context) => typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value) && /^-?\d+$/.test(context.source) ? context.source : value
+    : undefined)
 }
 
 async function boundedBody(response, maximum, controller) {
@@ -219,6 +221,7 @@ async function boundedBody(response, maximum, controller) {
 
 function archiveEvidence({
   raw,
+  marketplace = XIAOHONGSHU_PLATFORM,
   providerCredential = null,
   capturedAt,
   httpStatus,
@@ -276,10 +279,10 @@ function archiveEvidence({
     },
     archiveObjects: payloadHash == null ? [] : [{
       kind: 'response',
-      marketplace: XIAOHONGSHU_PLATFORM,
+      marketplace,
       endpointVersion,
       capturedDate: new Date(capturedAt).toISOString().slice(0, 10),
-      archivePath: `external/tikhub/xiaohongshu/${new Date(capturedAt).toISOString().slice(0, 10)}/responses/${payloadHash}.json`,
+      archivePath: `external/tikhub/${marketplace}/${new Date(capturedAt).toISOString().slice(0, 10)}/responses/${payloadHash}.json`,
       envelopePointer: '$',
       sourceKey: payloadHash,
       payloadSha256: payloadHash,
@@ -401,6 +404,7 @@ async function requestTikHubJson(
   capturedAt,
   endpointVersion,
   method = 'GET',
+  marketplace = XIAOHONGSHU_PLATFORM,
 ) {
   const billedOnHttp200 = path === XHS_RESEARCH_ENDPOINTS.note_detail.providerPath
   const url = new URL(path, adapter.baseUrl)
@@ -452,7 +456,7 @@ async function requestTikHubJson(
         bodyText = body.text
         bodyBytes = body.bytes
         try {
-          raw = parseJsonText(body.text)
+          raw = parseJsonText(body.text, path.startsWith('/api/v1/wechat_') || path === '/api/v1/demo/wechat/article_extract')
           jsonParsed = true
         } catch {
           archiveState = 'provider_rejected_invalid_json'
@@ -471,7 +475,7 @@ async function requestTikHubJson(
         'TikHub rejected the request',
         { ...httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null), ...(billedOnHttp200 && httpStatus === 400 ? { billed: false } : {}) },
         {
-          ...archiveEvidence({
+          ...archiveEvidence({ marketplace,
             raw,
             providerCredential: resolvedCredential,
             capturedAt: attemptedAt,
@@ -503,7 +507,7 @@ async function requestTikHubJson(
             : controller.signal.aborted ? 'upstream_deadline_exceeded' : 'upstream_body_read_failed',
         affectsCircuit: true,
       }, error instanceof BodyEncodingError ? {
-        ...archiveEvidence({
+        ...archiveEvidence({ marketplace,
           raw: null,
           providerCredential: resolvedCredential,
           capturedAt: attemptedAt,
@@ -527,12 +531,12 @@ async function requestTikHubJson(
       } : {})
     }
     let raw
-    try { raw = parseJsonText(body.text) } catch {
+    try { raw = parseJsonText(body.text, path.startsWith('/api/v1/wechat_') || path === '/api/v1/demo/wechat/article_extract') } catch {
       throw upstreamError('TikHub returned invalid JSON', {
         outcome: 'succeeded_unusable', httpStatus, billed: billedOnHttp200 && httpStatus === 200 ? true : null,
         errorCode: 'invalid_upstream_json', affectsCircuit: true,
       }, {
-        ...archiveEvidence({
+        ...archiveEvidence({ marketplace,
           raw: null,
           providerCredential: resolvedCredential,
           capturedAt: attemptedAt,
@@ -551,7 +555,7 @@ async function requestTikHubJson(
       })
     }
     const persisted = (state, at = attemptedAt) => ({
-      ...archiveEvidence({
+      ...archiveEvidence({ marketplace,
         raw,
         providerCredential: resolvedCredential,
         capturedAt: at,
@@ -822,7 +826,8 @@ export class TikHubAdapter {
     const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)
     if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
     const exchange = await requestTikHubJson(this, request.endpointPath, request.upstreamQuery,
-      resolvedCredential, capturedAt, request.endpointVersion, request.method)
+      resolvedCredential, capturedAt, request.endpointVersion, request.method,
+      key.startsWith('wechat.') ? request.marketplace : undefined)
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     if (!Object.hasOwn(exchange.raw, 'data')) throw upstreamError('Native data envelope has no data', {
       outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,

@@ -53,6 +53,7 @@ const NIGHT_ALL_COMPATIBILITY_EXAMPLES = {
   userInfo: { value: { platform: 'twitter', username: 'openai' } },
 }
 const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
+  410: ['wechat_search_route_retired'],
   400: [
     'invalid_request', 'invalid_query', 'invalid_cursor', 'invalid_page_size',
     'cursor_scope_mismatch', 'invalid_platform', 'page_size_exceeded',
@@ -661,7 +662,7 @@ function assertXiaohongshuSearchContract(document) {
 
   const request = resolveSchema(
     document,
-    operation.requestBody.content['application/json'].schema,
+    operation.requestBody.content['application/json'].schema.anyOf[0].allOf[0],
   )
   assert.equal(request.additionalProperties, false)
   assert.deepEqual(request.required, ['platform', 'query'])
@@ -990,9 +991,10 @@ function assertNightAllPublicContract(document) {
   assert.deepEqual(historicalAlias.responses, compatibility.responses)
   assert.deepEqual(
     Object.keys(compatibility.responses).map(Number).sort((left, right) => left - right),
-    [200, 400, 401, 403, 404, 409, 422, 429, 502, 503],
+    [200, 400, 401, 403, 404, 409, 410, 422, 429, 502, 503],
   )
-  assert.equal(compatibility.responses[410], undefined)
+  assert.ok(compatibility.responses[410])
+  assert.match(compatibility.description, /wechat_search.*retired/i)
   assert.match(historicalAlias.description, /same Hub service and paid-operation fingerprint/i)
   assert.ok(compatibility.responses[422])
   assert.ok(compatibility.responses[503])
@@ -1865,6 +1867,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/night-all/search/{operation}',
       '/requests/by-idempotency-key',
       '/requests/{requestId}',
+      '/search/raw',
       '/search/{operation}',
       '/tools/tokenize',
       '/usage',
@@ -2010,6 +2013,11 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
     PUBLIC_OPENAPI_DOCUMENT['x-mx-external-platform-admission'],
   )
   assertNightAllPublicContract(document)
+  assert.deepEqual(document.paths['/search/raw'], PUBLIC_OPENAPI_DOCUMENT.paths['/search/raw'])
+  for (const path of ['/data/search', '/data/aggregate/sources', '/data/aggregate/search']) {
+    assert.deepEqual(document.paths[path], PUBLIC_OPENAPI_DOCUMENT.paths[path], path)
+  }
+  assert.equal(document.paths['/search/{operation}'].post['x-mx-wechat-raw-operation'], '/data/wechat/search/search')
   assertPublicOpinionContract(document)
   assertPublicOpinionSearchContract(document)
   assertCanonicalContextContract(document)

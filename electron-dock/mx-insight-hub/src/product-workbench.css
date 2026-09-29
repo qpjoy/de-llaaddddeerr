@@ -21,3 +21,12 @@
 
 .mih-native-fields { border: 1px solid var(--qp-line); border-radius: 12px; padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
 .mih-native-fields small { color: var(--qp-text-muted); overflow-wrap: anywhere; white-space: pre-line; }
+
+.mih-wechat-result { padding: 1rem; margin-block: 1rem; border: 1px solid var(--qp-border); border-radius: .75rem; min-width: 0; overflow-wrap: anywhere; }
+.mih-wechat-result article + article { border-top: 1px solid var(--qp-border); padding-top: 1rem; }
+.mih-wechat-article { white-space: pre-wrap; line-height: 1.9; margin-top: 1rem; max-height: 32rem; overflow: auto; }
+.mih-compatibility-summary { max-width: 34rem; }
+.mih-compatibility-summary details > div { padding-block: .6rem; }
+.mih-compatibility-summary code { overflow-wrap: anywhere; font-size: .8rem; }
+.mih-capability-row .qp-button { flex-shrink: 0; white-space: nowrap; }
+.mih-capability-row .mih-status { white-space: nowrap; }

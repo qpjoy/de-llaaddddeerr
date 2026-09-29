@@ -1,0 +1,210 @@
+[
+  {
+    "key": "wechat.channels.channel-info",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/channel-info",
+    "summary": "获取视频号账号信息",
+    "operation": "native.wechat.channels.channel-info"
+  },
+  {
+    "key": "wechat.channels.channel-id-to-username",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/channel-id-to-username",
+    "summary": "视频号ID转finder username",
+    "operation": "native.wechat.channels.channel-id-to-username"
+  },
+  {
+    "key": "wechat.channels.user-videos",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/user-videos",
+    "summary": "获取视频号用户作品列表",
+    "operation": "native.wechat.channels.user-videos"
+  },
+  {
+    "key": "wechat.channels.video-detail",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/video-detail",
+    "summary": "获取视频号作品详情",
+    "operation": "native.wechat.channels.video-detail"
+  },
+  {
+    "key": "wechat.channels.video-comments",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/video-comments",
+    "summary": "获取视频号作品评论",
+    "operation": "native.wechat.channels.video-comments"
+  },
+  {
+    "key": "wechat.channels.video-share-url",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/video-share-url",
+    "summary": "生成视频号作品分享链接",
+    "operation": "native.wechat.channels.video-share-url"
+  },
+  {
+    "key": "wechat.channels.user-profile",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/user-profile",
+    "summary": "获取视频号账号主页资料+统计",
+    "operation": "native.wechat.channels.user-profile"
+  },
+  {
+    "key": "wechat.channels.user-collections",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/user-collections",
+    "summary": "获取视频号合集列表",
+    "operation": "native.wechat.channels.user-collections"
+  },
+  {
+    "key": "wechat.channels.collection-videos",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/collection-videos",
+    "summary": "获取视频号合集内视频",
+    "operation": "native.wechat.channels.collection-videos"
+  },
+  {
+    "key": "wechat.channels.live-history",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/live-history",
+    "summary": "获取视频号直播回放列表",
+    "operation": "native.wechat.channels.live-history"
+  },
+  {
+    "key": "wechat.channels.live-detail",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/live-detail",
+    "summary": "获取视频号直播间详情",
+    "operation": "native.wechat.channels.live-detail"
+  },
+  {
+    "key": "wechat.channels.search-channel-videos",
+    "platform": "wechat_channels",
+    "platformLabel": "微信视频号",
+    "hubPath": "/api/v1/data/wechat/channels/search-channel-videos",
+    "summary": "视频号号内搜索",
+    "operation": "native.wechat.channels.search-channel-videos"
+  },
+  {
+    "key": "wechat.mp.article-detail",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/article-detail",
+    "summary": "获取公众号文章详情",
+    "operation": "native.wechat.mp.article-detail"
+  },
+  {
+    "key": "wechat.mp.article-detail-h5",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/article-detail-h5",
+    "summary": "获取公众号文章详情（H5 版本，推荐）",
+    "operation": "native.wechat.mp.article-detail-h5"
+  },
+  {
+    "key": "wechat.mp.article-stats-h5",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/article-stats-h5",
+    "summary": "获取公众号文章互动数据（H5 版本）",
+    "operation": "native.wechat.mp.article-stats-h5"
+  },
+  {
+    "key": "wechat.mp.article-stats",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/article-stats",
+    "summary": "获取公众号文章互动数据",
+    "operation": "native.wechat.mp.article-stats"
+  },
+  {
+    "key": "wechat.mp.article-comments",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/article-comments",
+    "summary": "获取公众号文章评论",
+    "operation": "native.wechat.mp.article-comments"
+  },
+  {
+    "key": "wechat.mp.comment-replies",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/comment-replies",
+    "summary": "获取公众号评论的二级回复",
+    "operation": "native.wechat.mp.comment-replies"
+  },
+  {
+    "key": "wechat.mp.related-articles",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/related-articles",
+    "summary": "获取公众号关联文章",
+    "operation": "native.wechat.mp.related-articles"
+  },
+  {
+    "key": "wechat.mp.article-ad",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/article-ad",
+    "summary": "获取公众号文章广告",
+    "operation": "native.wechat.mp.article-ad"
+  },
+  {
+    "key": "wechat.mp.account-profile",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/account-profile",
+    "summary": "获取公众号资料页",
+    "operation": "native.wechat.mp.account-profile"
+  },
+  {
+    "key": "wechat.mp.account-articles",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/account-articles",
+    "summary": "获取公众号文章列表",
+    "operation": "native.wechat.mp.account-articles"
+  },
+  {
+    "key": "wechat.mp.account-services",
+    "platform": "wechat_mp",
+    "platformLabel": "微信公众号",
+    "hubPath": "/api/v1/data/wechat/mp/account-services",
+    "summary": "获取公众号服务/自定义菜单",
+    "operation": "native.wechat.mp.account-services"
+  },
+  {
+    "key": "wechat.search.search",
+    "platform": "wechat_search",
+    "platformLabel": "微信搜一搜",
+    "hubPath": "/api/v1/data/wechat/search/search",
+    "summary": "微信综合搜索（搜一搜）",
+    "operation": "native.wechat.search.search"
+  },
+  {
+    "key": "wechat.search.search-videos",
+    "platform": "wechat_search",
+    "platformLabel": "微信搜一搜",
+    "hubPath": "/api/v1/data/wechat/search/search-videos",
+    "summary": "搜视频号视频（时长/排序/时间筛选）",
+    "operation": "native.wechat.search.search-videos"
+  },
+  {
+    "key": "wechat.demo.article-sample",
+    "platform": "wechat_mp",
+    "platformLabel": "微信演示",
+    "hubPath": "/api/v1/data/wechat/demo/article-sample",
+    "summary": "固定文章演示（1 小时缓存）",
+    "operation": "native.wechat.demo.article-sample"
+  }
+]

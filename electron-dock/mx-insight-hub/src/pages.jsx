@@ -2847,6 +2847,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   )
   const capabilityRows = (data.configuration?.availableCapabilities || []).map((entry) => ({
     capability: entry.capability,
+    endpoints: entry.endpoints || [],
     ready: entry.ready === true,
     enabled: capabilityGrants.has(entry.capability),
     policy: capabilityPolicyByName.get(entry.capability) || DEFAULT_POLICY,
@@ -3187,15 +3188,19 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         >
           {data.consumerId ? (
             section.rows.length ? (
-              <Table label={section.tableLabel}>
+              <PagedItems items={section.rows} label={section.title} text={row => `${row.metadata.label} ${row.capability} ${row.metadata.endpoint}`} pageSize={10}>{visibleRows => <Table label={section.tableLabel}>
               <thead><tr><th>能力</th><th>授权</th><th>运行状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>操作</th></tr></thead>
               <tbody>
-                {section.rows.map((row) => (
-                  <tr key={row.capability}>
+                {visibleRows.map(({entry: row}) => (
+                  <tr key={row.capability} className="mih-capability-row">
                     <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
                     <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} />
-                      {!row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && (row.capability === 'compat.xiaohongshu.app_v2' || operation === row.capability)).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '上游前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : row.capability === 'enterprise.query' ? '#/external-platforms?provider=qixin' : `#/external-platforms?provider=${['social.content.search', 'social.content.crawl', 'social.profile.get'].includes(row.capability) ? 'rapidapi' : 'tikhub'}&operation=${encodeURIComponent(row.capability)}`}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
+                      {row.metadata.group === 'compatibility' ? <div className="mih-compatibility-summary">
+                        <small>{row.endpoints.filter(endpoint => endpoint.ready).length} / {row.endpoints.length} 个接口就绪，各接口独立校验业务授权。</small>
+                        <details><summary>查看接口与状态</summary>{row.endpoints.length ? row.endpoints.map(endpoint => <div key={endpoint.path}><strong>{CAPABILITY_CATALOG[endpoint.operation]?.label || endpoint.operation}</strong><small>{endpoint.ready ? '可调用' : endpoint.effectiveState === 'disabled' ? '运行开关关闭' : endpoint.effectiveState === 'blocked' ? '运行前置条件未满足' : '运行时未就绪'}</small><code>{endpoint.path}</code></div>) : <small>当前服务未返回明细，请查看接口文档。</small>}</details>
+                        <a href="#/data-products/xiaohongshu-note">打开小红书接口调试 →</a><br /><a href="#/docs?path=/docs/xiaohongshu-note">查看接口文档 →</a>
+                      </div> : !row.ready ? <div>{Object.entries(data.configuration?.operationReadiness || {}).filter(([operation,state]) => !state.ready && operation === row.capability).map(([operation,state]) => <small key={operation}>{CAPABILITY_CATALOG[operation]?.label || operation}：{state.effectiveState === 'disabled' ? '运行开关关闭' : state.effectiveState === 'blocked' ? '运行前置条件未满足' : state.effectiveState}</small>)}<small>业务授权与运行配置独立；签发 Key 不会解除运行阻断。</small>{session?.platformAdmin ? <a href={row.capability === 'ip.risk.query' ? '#/external-platforms?provider=ipsearch' : row.capability === 'enterprise.query' ? '#/external-platforms?provider=qixin' : `#/external-platforms?provider=${['social.content.search', 'social.content.crawl', 'social.profile.get'].includes(row.capability) ? 'rapidapi' : 'tikhub'}&operation=${encodeURIComponent(row.capability)}`}>检查服务运行配置 →</a> : <small>请联系管理员恢复该项服务。</small>}</div> : null}
                     </td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
@@ -3227,7 +3232,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                   </tr>
                 ))}
               </tbody>
-              </Table>
+              </Table>}</PagedItems>
             ) : (
               <EmptyState icon={Globe} title={`当前版本没有可配置的${section.title}`} description="升级 Hub 后刷新能力目录。" />
             )

@@ -8,7 +8,7 @@ export const NIGHT_ALL_LEGACY_SEARCH_CAPABILITIES_VERSION = 'night-all.legacy-se
 export const NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS = Object.freeze({
   raw: Object.freeze([
     'bilibili', 'douyin', 'facebook', 'instagram', 'kuaishou', 'reddit',
-    'tiktok', 'twitter', 'wechat_mp', 'wechat_search', 'weibo',
+    'tiktok', 'twitter', 'weibo',
     'xiaohongshu', 'youtube', 'zhihu',
   ]),
   crawl: Object.freeze([

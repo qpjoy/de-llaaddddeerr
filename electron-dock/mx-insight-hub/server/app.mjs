@@ -1,6 +1,7 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
+import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
@@ -5811,9 +5812,24 @@ export function createApp({
         || routeMatch(pathname, '/api/v1/search/:operation')
       if (request.method === 'POST' && params) {
         const context = await requirePublic(request)
+        const body = await readJson(request)
+        if (params.operation === 'raw' && wechatSearchPlatform(body?.platform)) {
+          if (pathname !== '/api/v1/search/raw') assertWechatSearchNotRetired(params.operation, body)
+          requireNoQuery(searchParams, 'WeChat search')
+          const mapped = normalizeWechatSearchAlias(body)
+          if (!socialAccountTikHubGateway) throw new AppError(503, 'external_platform_unavailable', 'WeChat data service is unavailable')
+          const result = await socialAccountTikHubGateway.forwardNative(context, {
+            ...mapped, idempotencyKey: request.headers['idempotency-key'],
+          })
+          sendJson(response, result.status, result.body, {
+            'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+            'x-mx-insight-source-mode': result.sourceMode,
+          })
+          return
+        }
         const result = await service.nightAllCompatibilitySearch(context, {
           operation: params.operation,
-          body: await readJson(request),
+          body,
           idempotencyKey: request.headers['idempotency-key'],
           // Both public spellings name the same logical paid operation. A
           // canonical fingerprint path prevents a caller from purchasing the
@@ -6175,8 +6191,10 @@ export function createApp({
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/search') {
         const context = await requirePublic(request)
+        const body = await readJson(request)
+        if (wechatSearchPlatform(body?.platform)) requireNoQuery(searchParams, 'WeChat search')
         const result = await service.search(context, {
-          body: await readJson(request),
+          body,
           idempotencyKey: request.headers['idempotency-key'],
           path: pathname,
         })

@@ -1,3 +1,5 @@
+import { WechatOverview } from './wechat-product.jsx'
+import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
@@ -369,6 +371,7 @@ const ROUTES = [
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
   { path: '/data-products/enterprise', label: '企业数据', description: '企业查询与接口调试', icon: House, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EnterprisePage, capability: 'apikey.read' },
+  ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, navSection: 'wechat', description: product.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatOverview, capability: 'apikey.read' })),
   { path: '/data-products/social-content', label: '社媒与内容数据', description: '内容、账号、评论与趋势接口', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SocialContentOverview, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', navLabel: '笔记画卷', navSection: 'xiaohongshu', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-hot-notes', label: '小红书热门笔记', navLabel: '热门笔记', navSection: 'xiaohongshu', description: '热门内容、筛选与指标', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
@@ -727,7 +730,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
                         renderedSections.add(child.navSection)
                         const sectionChildren = children.filter(candidate => candidate.navSection === child.navSection)
                         const sectionExpanded = expandedSections.has(child.navSection)
-                        return <div className="mih-nav__subgroup" key={child.navSection}>{heading}<button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}><Scroll size={16} /><span><strong>小红书</strong><small>笔记、热门内容与创作灵感</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
+                        return <div className="mih-nav__subgroup" key={child.navSection}>{heading}<button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}><Scroll size={16} /><span><strong>{child.navSection === 'wechat' ? '微信' : '小红书'}</strong><small>{child.navSection === 'wechat' ? '公众号、视频号与搜一搜' : '笔记、热门内容与创作灵感'}</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
                       })}
                     </div>
                   ) : null}
@@ -877,7 +880,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && !['/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     theme,

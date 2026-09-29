@@ -5,7 +5,7 @@ import { MemoryStore } from '../stores/memory-store.mjs'
 import { PostgresStore } from '../stores/postgres-store.mjs'
 import { MemoryExternalPlatformControlStore, PostgresExternalPlatformControlStore, normalizePriceBook } from '../external-platforms/control-store.mjs'
 import { customerRequestPrice } from '../billing/contracts.mjs'
-import { digest, PROVISIONING_OPERATIONS, PROVISIONING_CATALOG_VERSION, provisioningOperation, officialPriceDraft } from './catalog.mjs'
+import { digest, PROVISIONING_OPERATIONS, PROVISIONING_CATALOG_VERSION, provisioningOperation, officialPriceDraft, wechatOfficialPriceDraft } from './catalog.mjs'
 import { normalizePriceDraft } from './price-drafts.mjs'
 import { transactionPool } from './transaction.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES, MAX_PROVISIONING_OPERATIONS } from '../../shared/access-limits.mjs'
@@ -31,7 +31,7 @@ export class ProvisioningService {
     }))
     return { version: PROVISIONING_CATALOG_VERSION, operations: PROVISIONING_OPERATIONS.map(row => ({ ...row,
       current: views.find(([provider]) => provider === row.provider)?.[1].find(op => op.operationKey === row.operation) })),
-      officialDrafts: providers.map(officialPriceDraft) }
+      officialDrafts: providers.map(officialPriceDraft), wechatOfficialDraft: wechatOfficialPriceDraft() }
   }
   async listDrafts() {
     if (!this.store.pool) return clone([...this.drafts.values()].reverse())

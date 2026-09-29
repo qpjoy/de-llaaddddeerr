@@ -1,3 +1,6 @@
+import { ProductApiConsole } from './product-workbench.jsx'
+import { productForPath } from '../shared/product-workbenches.mjs'
+import { productAllowed } from '../shared/product-access.mjs'
 import { useEffect, useId, useRef, useState } from 'react'
 import { MagnifyingGlass, ArrowClockwise, ArrowDown, CaretDown, Funnel, Globe, Stack, ArrowUpRight } from '@phosphor-icons/react'
 import { publicDataApi, publicDocsHref } from './api.js'
@@ -55,9 +58,13 @@ function MultiFilter({ label, allLabel, options, values, onChange, disabled, ico
 
 // Identity-scoped memory survives navigation and credential renewal. Each page
 // keeps its exact body/key; only explicit refresh creates another search round.
-export function DataSearchPage({ aggregateSession, session }) {
+export function DataSearchPage({ aggregateSession, session, token }) {
+  const [mode, setMode] = useState('aggregate'), [wechatVisited, setWechatVisited] = useState(false)
+  const canWechat = session?.platformAdmin || productAllowed('/data-products/wechat-search', session?.productScopes || [])
   return <div className="mih-aggregate"><PageHeading title="数据搜索" description="用关键词、平台和条目类型搜索 Hub 数据；同一 API 可供下游产品调用。" />
-    <AggregateSearchPanel session={aggregateSession} showCatalog={session?.kind === 'admin-token'} />
+    {canWechat ? <nav className="mih-source-section-tabs" aria-label="数据搜索方式"><button type="button" aria-pressed={mode === 'aggregate'} onClick={() => setMode('aggregate')}>跨平台 / 已收录</button><button type="button" aria-pressed={mode === 'wechat'} onClick={() => { setMode('wechat'); setWechatVisited(true) }}>微信专项搜索</button></nav> : null}
+    <div hidden={canWechat && mode !== 'aggregate'}><AggregateSearchPanel session={aggregateSession} showCatalog={session?.kind === 'admin-token'} /></div>
+    {canWechat && wechatVisited ? <div hidden={mode !== 'wechat'}><p>独立查询公众号、文章和视频；每页手动发送，不参与跨平台扇出。已返回数据不等于已入库。</p><ProductApiConsole product={productForPath('/data-products/wechat-search')} token={token} /></div> : null}
   </div>
 }
 
@@ -90,7 +97,7 @@ export default function AggregateSearchPanel({ session, showCatalog = true }) {
     const next = { ...current, ...patch }; cell.draft = next; return next
   })
   const live = draft.mode === 'refresh'
-  const available = (sources || []).filter(source => !live || source.refresh)
+  const available = (sources || []).filter(source => live ? source.refresh : source.stored)
   const selected = available.filter(source => !draft.platforms.length || draft.platforms.includes(source.platform))
   const availableTypes = new Set(selected.flatMap(source => live ? source.routes.map(route => route.objectType) : source.objectTypes))
   const liveCount = selected.flatMap(source => source.routes).filter(route => !draft.objectTypes.length || draft.objectTypes.includes(route.objectType)).length
@@ -190,7 +197,7 @@ export default function AggregateSearchPanel({ session, showCatalog = true }) {
     </section>
     {sources?.length ? <details className="qp-panel mih-aggregate-api"><summary>当前身份的搜索范围 · {sources.length} 个平台或分类<CaretDown /></summary>
       <p>已收录数据包含最新入库内容和历史存量。实时搜索按已实现、已授权的操作调用，执行时仍检查服务状态；目录登记不代表可以实时搜索。</p>
-      <div className="mih-aggregate-sources">{sources.map(source => <div key={source.platform}><strong>{source.label}</strong><span>{source.refresh ? '支持实时与已收录检索' : '仅已收录检索'}</span><span>{source.objectTypes.map(type => types.find(([value]) => value === type)?.[1] || type).join('、')}</span></div>)}</div>
+      <div className="mih-aggregate-sources">{sources.map(source => <div key={source.platform}><strong>{source.label}</strong><span>{source.refresh ? source.stored ? '支持实时与已收录检索' : '仅实时检索' : '仅已收录检索'}</span><span>{source.objectTypes.map(type => types.find(([value]) => value === type)?.[1] || type).join('、')}</span></div>)}</div>
       <p>全平台表示当前身份可搜索的范围，不代表全网覆盖。没有返回内容与来源失败会分开显示；清洗尚未入库、未授权或未接入的数据不会出现在结果中。</p>
     </details> : null}
     {run?.error ? <section className="qp-panel mih-aggregate-error"><ErrorState error={run.error} /><p>{restartRequired ? '分页位置已失效或与查询条件不符，已加载内容仍保留。重新搜索会从第一页开始，并按当前套餐计量。' : '原请求保留，重试使用相同参数与请求标识。'}<code>{run.idempotencyKey}</code></p>{restartRequired ? <button className="qp-button qp-button--outline" disabled={busy || !apiKey} onClick={() => search(round.body, { fresh: true })}>重新搜索（从第一页）</button> : <button className="qp-button qp-button--outline" disabled={busy || !apiKey} onClick={() => search(run.body, { targetRound: round })}>重试原请求</button>}</section> : null}

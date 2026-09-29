@@ -25,7 +25,7 @@ test('official snapshot has reproducible sources; every added dispatch is a fixe
   assert.deepEqual(official.collection.justoneErrors,[])
   assert.ok(official.sources.every(row=>/^[a-f0-9]{64}$/.test(row.sha256)))
   assert.equal(official.endpoints.length,1343)
-  assert.equal(endpoints.filter(row=>row.schemaVersion).length,987)
+  assert.equal(endpoints.filter(row=>row.schemaVersion && !row.key.startsWith('wechat.')).length,987)
   assert.equal(endpoints.filter(row=>!row.schemaVersion).length,50)
   assert.equal(new Set(endpoints.map(row=>row.hubPath)).size,endpoints.length)
   for (const platform of ['taobao','jd','xianyu','douyin-ec','xiaohongshu-ec','1688','aliexpress','shopee','tiktok-shop','amazon']) {
@@ -34,7 +34,7 @@ test('official snapshot has reproducible sources; every added dispatch is a fixe
     assert.ok(rows.every(row=>row.authorizationPlatform==='ecommerce'),platform)
   }
   const sql=readFileSync(new URL('../../migrations/114_official_provider_contracts.sql',import.meta.url),'utf8')
-  for(const row of endpoints.filter(row=>row.schemaVersion)) {
+  for(const row of endpoints.filter(row=>row.schemaVersion && !row.key.startsWith('wechat.'))) {
     assert.equal(row.method,'GET');assert.ok(row.path.startsWith('/api/'))
     assert.ok(!row.parameters.some(p=>/^(token|cookie|authorization|api_key|password)$/i.test(p.name)))
     assert.ok(sql.includes(row.operation));assert.ok(PROVISIONING_OPERATIONS.some(op=>op.operation===row.operation))

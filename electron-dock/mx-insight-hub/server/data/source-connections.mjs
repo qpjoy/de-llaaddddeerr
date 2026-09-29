@@ -2,6 +2,7 @@ import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-leg
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { providerMigrationSnapshot } from './provider-migration.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
+import { WECHAT_LEGACY_SEARCH_PLATFORMS, WECHAT_SEARCH_PATH, WECHAT_SEARCH_KEY } from '../contracts/wechat-search-alias.mjs'
 import { officialProviderCatalog, providerCatalogKeys } from './provider-catalog.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { SOCIAL_ACCOUNT_PLATFORMS, socialAccountPlatform } from '../contracts/social-accounts.mjs'
@@ -41,8 +42,9 @@ export function implementedRoutes(sources = []) {
   }))
   for (const endpoint of NATIVE_FORWARDING_ENDPOINTS) rows.push(route(`native-${endpoint.key}`, {
     platform: endpoint.platform, catalogKeys: providerCatalogKeys(endpoint.platform),
-    provider: endpoint.provider, product: endpoint.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据', operation: endpoint.operation, path: endpoint.hubPath,
-    defaultRule: '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
+    provider: endpoint.provider, product: endpoint.key.startsWith('wechat.') ? (endpoint.platform === 'wechat_mp' ? '微信公众号' : endpoint.platformLabel) : endpoint.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据', operation: endpoint.operation, path: endpoint.hubPath,
+    keywordSearch: ['wechat.search.search', 'wechat.search.search-videos', 'wechat.channels.search-channel-videos'].includes(endpoint.key),
+    defaultRule: endpoint.key.startsWith('wechat.') ? 'Hub 微信直连合同；逐接口审核价格、授权与启用；旧微信搜索不再转发，旧游标不可复用，无自动补查或重试。' : '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
     evidence: 'server/contracts/native-forwarding.mjs',
   }))
   for (const endpoint of Object.values(XHS_DISCOVERY_ENDPOINTS)) rows.push(route(endpoint.key, {
@@ -51,6 +53,21 @@ export function implementedRoutes(sources = []) {
     defaultRule: '独立单页操作；固定数据来源，原生业务字段投影与完整受限归档；不自动查询、不推断笔记身份。',
     evidence: 'server/contracts/xiaohongshu-discovery.mjs',
   }))
+  for (const platform of WECHAT_LEGACY_SEARCH_PLATFORMS) rows.push(route(`wechat-search-alias-${platform}`, {
+    platform, catalogKeys: [catalogKey(platform)], provider: 'tikhub', product: platform === 'wechat_mp' ? '微信公众号' : '微信搜一搜',
+    operation: `native.${WECHAT_SEARCH_KEY}`, path: '/api/v1/search/raw', keywordSearch: true,
+    defaultRule: `转入 ${WECHAT_SEARCH_PATH} 并返回新合同；公众号默认文章分类。与直接调用共用授权、价格和幂等；旧 Night-All 微信搜索已停用。`,
+    evidence: 'server/contracts/wechat-search-alias.mjs',
+  }))
+  for (const platform of WECHAT_LEGACY_SEARCH_PLATFORMS) {
+    for (const [kind, path] of [['search', '/api/v1/data/search'], ['aggregate', '/api/v1/data/aggregate/search']]) rows.push(route(`wechat-${kind}-${platform}`, {
+      platform, catalogKeys: [catalogKey(platform)], provider: 'tikhub', product: '数据搜索',
+      operation: `native.${WECHAT_SEARCH_KEY}`, path, keywordSearch: true,
+      defaultRule: kind === 'aggregate' ? '微信实时子请求调用 Hub 新搜索，精简 items 映射为聚合结果；独立新权限、定价及单页游标，不回退 Night-All，不自动入库。'
+        : `转入 ${WECHAT_SEARCH_PATH}，返回原生新合同；与短路径共用权限、价格和幂等，不回退 Night-All。`,
+      evidence: 'server/data/aggregate-search.mjs',
+    }))
+  }
   for (const [operation, platforms] of Object.entries(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS)) {
     for (const platform of platforms) rows.push(route(`legacy-${platform}-${operation}`, {
       platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: 'night-all',
@@ -73,7 +90,7 @@ export function implementedRoutes(sources = []) {
     platform: '按 /api/v1/data/capabilities 返回的平台', provider: 'night-all',
     product: '跨平台内容', operation: 'data.search', path: '/api/v1/data/search',
     keywordSearch: true, mode: 'compatibility',
-    defaultRule: '非已迁移直连形状委托内部数据服务；此看板不请求上游能力目录，支持范围与健康不作静态推断。',
+    defaultRule: '非已迁移直连形状委托内部数据服务，微信实时搜索除外（已停用）；此看板不请求上游能力目录，支持范围与健康不作静态推断。',
     evidence: 'server/adapters/night-all.mjs',
   }))
   for (const { key: operation, path, label } of XIAOHONGSHU_CAPABILITIES.filter(row => row.key !== 'social.posts.search')) rows.push(route(`xiaohongshu-${operation}`, {

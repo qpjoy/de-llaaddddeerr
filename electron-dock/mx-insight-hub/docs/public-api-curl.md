@@ -42,6 +42,8 @@ new_idempotency_key() {
 `deliveryMode` 不变；复用 key 后改变 `deliveryMode` 会返回 `409 idempotency_conflict`。五个
 App V2-compatible GET 各自使用“endpoint + 规范化 query”的独立兼容合同与幂等域，不属于这三个
 入口，也不能跨 endpoint 复用 key。
+第 6 节的微信 `/search/raw` 与 `/data/wechat/search/search` 也是同一合同的路径别名，
+映射后的参数相同时必须复用同一幂等标识；不能仅因切换入口而发起第二次采集。
 同一个 key 对应其他不同请求也会返回 `409 idempotency_conflict`。POST 重试还必须继续使用创建该
 usage 记录的同一把 Hub API Key；同一 consumer 的另一把 Key 只能执行只读状态查询，不能接管旧记录，
 需要发起新业务请求时应使用新的 `Idempotency-Key`。
@@ -1246,11 +1248,37 @@ POST /api/v1/night-all/search/crawl
 POST /api/v1/night-all/search/user-info
 ```
 
-旧客户端也可继续调用对应的 `/api/v1/search/raw|crawl|user-info`。每个旧路径与
+除下述微信 raw 分支外，旧客户端可继续调用对应的 `/api/v1/search/raw|crawl|user-info`。每个旧路径与
 `/api/v1/night-all/search/*` 对应路径进入同一个服务和 paid fingerprint；仅切换路径不会
 获得第二次外部派发，也不应生成新的 `Idempotency-Key`。
 
-每条路由都要求一个明确授权的 `platform`。`businessId` 由已认证 consumer 派生，
+2026-09-30 起，`/api/v1/search/raw` 的 `wechat_search`（含 `wechat/weixin` 别名）和
+`wechat_mp` 请求使用 `/api/v1/data/wechat/search/search` 的新合同，返回
+`contractVersion/endpoint/data/meta/requestId`，不再返回 `raw_data` 字符串。
+必须有 `social` 和 `native.wechat.search.search` 的 consumer 与 Key 权限，正常检查运行
+开关、客户报价及余额；已有微信平台授权不会自动扩展。`wechat_mp` 搜索文章。
+`/api/v1/data/search` 的微信请求也返回新合同，共用上述权限、价格和幂等；
+`type=fresh/stable` 均使用新合同的永久重放。聚合微信实时子请求同样调用新网关，
+对外保留统一 items/pageInfo 与聚合游标；费用预览按新微信操作计价，父请求不另收费。
+仅 `/api/v1/night-all/search/raw` 的微信请求返回 `410 wechat_search_route_retired`，不转发或回退。
+已收录微信搜索仍按原平台授权保留，新实时授权不会扩大存量权限。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/search/raw" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"platform":"wechat_mp","keyword":"城市观察","params":{"raw":false}}'
+```
+
+该请求与新路径的 `{"params":{"keyword":"城市观察","business_type":"article","raw":false}}`
+共用幂等指纹及费用。旧合同用过的 Key 返回 409；需要新采集时才新建标识。
+旧 `mxnc1` 游标返回 400，必须从新首页开始；新分页传回响应 cursor。
+旧页大小字段仅接受默认提示 20，返回原生一页，不截断、不补齐；批量、补详情及其他
+无法映射的控制返回 400。完整迁移规则见[微信数据服务](integrations/wechat-services.md)。
+
+以下为其余兼容分支：每条路由都要求一个明确授权的 `platform`。`businessId` 由已认证 consumer 派生，
 调用方应省略；如果发送 `businessId`/`business_id`，值必须与 consumer 完全一致。
 legacy 客户端可发送 `includeRaw:false`，Hub 会在 dispatch 前移除；
 `includeRaw:true` 会被拒绝。

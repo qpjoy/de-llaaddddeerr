@@ -1,5 +1,8 @@
+import { WECHAT_PRODUCTS } from './wechat.mjs'
 // Product navigation and API docs share one mapping. It never grants access.
 export const PRODUCT_WORKBENCHES = [
+  ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, docs: product.key,
+    prefixes: [`/data/wechat/${product.group}/`, ...(product.group === 'mp' ? ['/data/wechat/demo/'] : [])] })),
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },
   { path: '/data-products/search', label: '数据搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
   { path: '/data-products/telegram', label: 'Telegram 会话', docs: 'telegram', prefixes: ['/data/telegram/', '/data/canonical/items/'] },
@@ -25,7 +28,7 @@ export function productEndpoints(document, product) {
     if (!product.prefixes?.some(prefix => path.startsWith(prefix)) || /\/media$/.test(path)) return []
     return ['get', 'post'].filter(method => item[method] && (!path.startsWith('/data/native/') || !product.nativePlatform || item[method]['x-mx-required-platform'] === product.nativePlatform)).map(method => ({ path: `/api/v1${path}`, method: method.toUpperCase(),
       id: `${method}:${path}`, ...item[method], summary: labels[path] || item[method].summary, parameters: [...(item.parameters || []), ...(item[method].parameters || [])] }))
-  })
+  }).sort((a, b) => Number(b.path === '/api/v1/data/wechat/mp/article-detail-h5') - Number(a.path === '/api/v1/data/wechat/mp/article-detail-h5'))
 }
 
 export function resolveProductSchema(document, schema) {

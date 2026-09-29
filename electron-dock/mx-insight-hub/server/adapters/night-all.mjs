@@ -1,5 +1,6 @@
 import { UpstreamAmbiguousError, UpstreamRejectedError } from '../core/errors.mjs'
 import { isNightAllDataSearchV1Envelope } from '../contracts/night-all-data-search.mjs'
+import { assertWechatSearchNotRetired } from '../contracts/wechat-search-alias.mjs'
 import {
   buildNightAllLegacySearchCapabilities,
   isNightAllLegacyEnvelope,
@@ -225,6 +226,7 @@ export class NightAllAdapter {
   }
 
   search({ body, businessId }) {
+    assertWechatSearchNotRetired('raw', body)
     return this.#request(
       'POST',
       '/api/v1/data/search',
@@ -239,6 +241,7 @@ export class NightAllAdapter {
   }
 
   legacySearch({ operation, body, businessId }) {
+    assertWechatSearchNotRetired(operation, body)
     if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation)) {
       throw new TypeError(`Unsupported Night-All legacy operation: ${operation}`)
     }

@@ -1,3 +1,4 @@
+import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
 import nativeServiceCapabilities from './native-service-access.json' with { type: 'json' }
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../server/contracts/night-all-legacy.mjs'
@@ -6,10 +7,12 @@ import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../server/contracts/night-
 // enforce their own capability grants; a product entry never grants API access.
 const searchablePlatforms = new Set([
   ...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw,
+  'wechat_mp', 'wechat_search',
   'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce',
 ])
 const savedRecordCategory = platform => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(platform)
 export const PRODUCT_ACCESS = {
+  ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [`/data-products/${product.key}`, { platform: 'social', any: wechatServices(product).map(row => row.operation), docs: product.key } ])),
   '/data-products/search': { domain: 'search', docs: 'aggregate-search' },
   '/data-products/news': { domain: 'news', docs: 'news-discovery' },
   '/data-products/social-content': { platform: 'social', any: ['social.accounts.search', ...nativeServiceCapabilities.social], docs:'social-content' },

@@ -5659,92 +5659,398 @@ paths:
         "504": { $ref: "#/components/responses/Error" }
   /data/search:
     post:
+      tags:
+      - Search
       operationId: searchData
+      summary: Search one explicitly selected platform
       x-mx-required-capabilities-by-platform:
         xiaohongshu: social.posts.search
-      description: >-
-        Stable provider-neutral Night-All-v1 search facade. For platform telegram, Hub serves
-        canonical local data with the same fixed item source and response meta
-        labels documented by /data/telegram/search; PostgreSQL degradation is
-        represented only by warnings. For platform xiaohongshu, the immutable
-        API-key scope must additionally contain social.posts.search before any
-        direct or historical dispatch; the default and only Hub-native page size
-        is exactly 20. Compatible first-page requests
-        use a governed direct external-data connector only after an independent
-        rollout gate; previously issued opaque mxec2 direct cursors remain on that
-        connector. The response retains the same envelope; a non-20 pageSize remains on the
-        historical compatibility path. For Xiaohongshu, that path exposes only a
-        Hub-encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and stops
-        after page 15. A pre-migration raw historical cursor returns 400
-        invalid_cursor and must restart from a cursor-less first page. Callers
-        return Hub cursors unchanged with a new Idempotency-Key per page and never
-        move them between paths, queries or page sizes. Hub performs a
-        bounded detail check for note bodies at the 60-character provider preview
-        boundary and retains detail text only when it is strictly longer;
-        unresolved enrichment is explicit in response warnings. The caller never
-        selects a provider. public_opinion and every data_center_saved_records_* platform are
-        Hub-local stored corpora and are rejected here; they must use the
-        province feed, /data/stored/search or /data/canonical/search. Telegram pagination follows the signed,
-        query-bound cursor, PIT/keyset and sticky-mode rules documented by
-        /data/telegram/search.
+      description: 'WeChat platforms wechat_mp/wechat_search (aliases wechat/weixin) use /data/wechat/search/search
+        directly and return its native contractVersion/endpoint/data/meta/requestId envelope. Requires social + native.wechat.search.search;
+        platform-only grants do not authorize live search. Optional params follow the native schema. type=fresh/stable
+        both use permanent native idempotent replay; a new acquisition requires a new Idempotency-Key. Old mxnc1 cursors
+        are rejected. No Night-All dispatch or fallback. Other platforms: one request targets one granted platform.
+        For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the API-key scope
+        must also include social.posts.search; this is checked before direct or historical dispatch, and the default
+        and only Hub-native page size is exactly 20. Compatible first-page requests use the governed direct external-data
+        connector only after an independent rollout gate; previously issued opaque mxec2 direct cursors remain on
+        that connector. The response keeps the night-all.data-search.v1 envelope. A non-20 pageSize stays on the historical
+        compatibility path; that path now returns an encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and
+        terminates after page 15. Return that cursor unchanged with a new Idempotency-Key for each page. A pre-migration
+        raw historical cursor returns 400 invalid_cursor and must restart from a cursor-less first page. Hub automatically
+        attempts bounded detail enrichment only for note bodies at the provider preview boundary; it keeps a detail
+        body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion
+        and every data_center_saved_records_* platform are Hub-stored and deliberately rejected by this live-compatible
+        route; use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external
+        provider; cursors cannot move between paths, queries or page sizes. Replay the same body with the same Idempotency-Key.'
       x-mx-error-codes:
-        "400": [invalid_request, invalid_platform, invalid_query, invalid_cursor, invalid_page_size, cursor_scope_mismatch, page_size_exceeded, unsupported_fields, unsupported_match_mode, invalid_result_type, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported]
-        "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
-        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
-        "410": [search_cursor_expired]
-        "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted]
-        "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
-        "503": [stored_search_unavailable, search_cursor_unavailable, external_platform_unavailable, external_platform_not_configured, external_platform_contract_unverified, external_platform_circuit_open, external_platform_capacity_unavailable, external_platform_cost_control_unavailable, external_platform_cost_evidence_incomplete, external_platform_operation_disabled, external_platform_operation_shadow, external_platform_operation_paused, external_platform_operation_canary, external_platform_operation_blocked]
+        '400':
+        - invalid_request
+        - invalid_platform
+        - invalid_query
+        - invalid_cursor
+        - invalid_page_size
+        - cursor_scope_mismatch
+        - page_size_exceeded
+        - unsupported_fields
+        - unsupported_match_mode
+        - invalid_result_type
+        - idempotency_key_required
+        - invalid_idempotency_key
+        - platform_operation_unsupported
+        '401':
+        - api_key_required
+        - invalid_api_key
+        '403':
+        - platform_not_granted
+        - capability_not_granted
+        - test_key_not_supported
+        '409':
+        - request_in_progress
+        - idempotency_conflict
+        - request_outcome_unknown
+        - external_platform_response_unusable
+        '410':
+        - search_cursor_expired
+        '429':
+        - consumer_quota_exceeded
+        - api_key_quota_exceeded
+        - plan_window_quota_exceeded
+        - plan_month_quota_exceeded
+        - plan_burst_exceeded
+        - external_platform_busy
+        - external_platform_rate_limited
+        - external_platform_capacity_exceeded
+        - external_platform_cost_budget_exhausted
+        - external_platform_subsidy_budget_exhausted
+        '502':
+        - night_all_rejected
+        - upstream_outcome_unknown
+        - external_platform_response_unusable
+        - external_platform_outcome_unknown
+        - external_platform_rejected
+        '503':
+        - stored_search_unavailable
+        - search_cursor_unavailable
+        - external_platform_unavailable
+        - external_platform_not_configured
+        - external_platform_contract_unverified
+        - external_platform_circuit_open
+        - external_platform_capacity_unavailable
+        - external_platform_cost_control_unavailable
+        - external_platform_cost_evidence_incomplete
+        - external_platform_operation_disabled
+        - external_platform_operation_shadow
+        - external_platform_operation_paused
+        - external_platform_operation_canary
+        - external_platform_operation_blocked
       parameters:
-        - name: Idempotency-Key
-          in: header
-          required: true
-          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API key that created
+          its usage record. Reuse it only with that same API key when retrying the exact same path and normalized
+          body; another API key, a new path, body or page requires a new Idempotency-Key.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SearchRequest"
+              anyOf:
+              - allOf:
+                - $ref: '#/components/schemas/SearchRequest'
+                - properties:
+                    platform:
+                      not:
+                        enum:
+                        - wechat_mp
+                        - wechat_search
+                        - wechat
+                        - weixin
+              - type: object
+                additionalProperties: false
+                required:
+                - platform
+                properties:
+                  deliveryMode:
+                    type: string
+                    enum:
+                    - live_only
+                    default: live_only
+                  params:
+                    type: object
+                    additionalProperties: false
+                    required: []
+                    properties:
+                      keyword:
+                        type: string
+                        maxLength: 100
+                        minLength: 1
+                        description: 搜索关键词（1-100 字）
+                      business_type:
+                        type: string
+                        enum:
+                        - all
+                        - account
+                        - article
+                        - video
+                        - sticker
+                        - underline
+                        - encyclopedia
+                        - live_stream
+                        - comment
+                        - listen
+                        - news
+                        - photos
+                        - book
+                        - moments
+                        - image
+                        - mini_game
+                        - weixin_index
+                        - ai_search
+                        default: all
+                        description: 垂类字符串键（共 18 个）。**实测有结果**：综合 all / 公众号·服务号·视频号 account / 文章 article / 视频 video
+                          / 表情 sticker。其余键（underline / encyclopedia / live_stream / comment / listen / news / photos
+                          / book / moments / image / mini_game / weixin_index / ai_search）由微信服务端按账号与地区下发，当前实测恒返回空结果（count=0
+                          + no_more 文案，仍按一次正常调用计费）。当前账号真正可用的 tab 以综合搜索响应里的 categories 为准；传列表外的值直接报错（422）
+                      sort:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: default
+                        description: 排序（结果页「排序」下拉，综合与各垂类通用）：不限(相关性) default/0 / 最新(发布时间降序) latest/1 / 最热(点赞降序) hot/2，字符串键或整数均可
+                        enum:
+                        - 0
+                        - 1
+                        - 2
+                        - default
+                        - latest
+                        - hot
+                      publish_time:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: all
+                        description: 发布时间（结果页「时间」下拉，通用）：不限 all/0 / 最近一天 day/1 / 最近七天 week/2 / 最近半年 half_year/3，字符串键或整数均可
+                        enum:
+                        - 0
+                        - 1
+                        - 2
+                        - 3
+                        - all
+                        - day
+                        - week
+                        - half_year
+                      offset:
+                        type: integer
+                        minimum: 0
+                        default: 0
+                        description: 首页传 0；翻页请用 cursor（只传 offset 无效，每页都回到第一页）
+                      cursor:
+                        anyOf:
+                        - type: string
+                        - type: 'null'
+                        description: 翻页游标：首页留空；翻页时把上一页响应返回的 cursor 原样传回
+                      raw:
+                        type: boolean
+                        default: true
+                        description: True=原始搜索响应；False=精简解析结构
+                  platform:
+                    type: string
+                    enum:
+                    - wechat_search
+                    - wechat_mp
+                    - wechat
+                    - weixin
+                  keyword:
+                    type: string
+                    minLength: 1
+                    maxLength: 100
+                  query:
+                    type: string
+                    minLength: 1
+                    maxLength: 100
+                  cursor:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    description: 翻页游标：首页留空；翻页时把上一页响应返回的 cursor 原样传回
+                  page:
+                    type: integer
+                    minimum: 1
+                  count:
+                    const: 20
+                  pageSize:
+                    const: 20
+                  limit:
+                    const: 20
+                  includeDetails:
+                    const: false
+                  includeComments:
+                    const: false
+                  disableAutoDetails:
+                    const: true
+                  type:
+                    type: string
+                    enum:
+                    - fresh
+                    - stable
+                    description: Both use native durable idempotency; explicit new acquisition requires a new key.
+                anyOf:
+                - required:
+                  - keyword
+                - required:
+                  - query
+                - required:
+                  - params
+                  properties:
+                    params:
+                      required:
+                      - keyword
+            examples:
+              telegram:
+                summary: Telegram stored search
+                value:
+                  platform: telegram
+                  query: AI Agent
+                  pageSize: 20
+              platform:
+                summary: Another granted platform
+                value:
+                  platform: xiaohongshu
+                  query: AI Agent
+                  pageSize: 20
       responses:
-        "200":
-          description: Stable search response.
+        '200':
+          description: Stable provider-neutral data-search response. Xiaohongshu requests served by the Hub-native
+            connector also expose delivery-source and capture-age headers.
           headers:
             x-mx-insight-request-id:
-              schema: { type: string, format: uuid }
+              description: Durable request identifier for status lookup.
+              schema:
+                type: string
+                format: uuid
             idempotent-replay:
-              schema: { type: string, enum: ["true", "false"] }
+              description: Whether the stored result of the same idempotent request was returned.
+              schema:
+                type: string
+                enum:
+                - 'true'
+                - 'false'
             x-mx-insight-source-mode:
-              description: Present when Hub has delivery-path evidence.
-              schema: { type: string, enum: [live, stale, fresh_cache, stored_fallback, idempotent_replay] }
+              description: Present when Hub has delivery-path evidence. stale is the historical compatibility snapshot
+                mode; the other cache/fallback values are Hub-native connector modes.
+              schema:
+                type: string
+                enum:
+                - live
+                - stale
+                - fresh_cache
+                - stored_fallback
+                - idempotent_replay
             x-mx-insight-captured-at:
-              schema: { type: string, format: date-time }
+              description: Present when Hub knows when the delivered external-data snapshot was captured.
+              schema:
+                type: string
+                format: date-time
             Age:
-              schema: { type: integer, minimum: 0 }
+              description: Whole seconds between capture and delivery when capture evidence is available.
+              schema:
+                type: integer
+                minimum: 0
             Warning:
               description: HTTP Warning 110 is present for stale or stored_fallback delivery.
-              schema: { type: string }
+              schema:
+                type: string
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NightAllDataSearchEnvelope"
-        "400":
-          $ref: "#/components/responses/Error"
-        "401":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
-        "409":
-          $ref: "#/components/responses/Error"
-        "410":
-          $ref: "#/components/responses/Error"
-        "429":
-          $ref: "#/components/responses/Error"
-        "502":
-          $ref: "#/components/responses/Error"
-        "503":
-          $ref: "#/components/responses/Error"
+                anyOf:
+                - $ref: '#/components/schemas/SearchEnvelope'
+                - type: object
+                  required:
+                  - contractVersion
+                  - endpoint
+                  - data
+                  - meta
+                  - requestId
+                  properties:
+                    contractVersion:
+                      type: string
+                    endpoint:
+                      const: wechat.search.search
+                    data:
+                      type: object
+                      additionalProperties: true
+                    meta:
+                      type: object
+                    requestId:
+                      type: string
+        '400':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '402':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '410':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Request failed. The response contains a stable error code and requestId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /night-all/search/{operation}:
     post: &nightAllCompatibilityPost
       operationId: searchNightAllCompatibility
@@ -5755,6 +6061,10 @@ paths:
           crawl: social.users.posts
           user-info: social.users.resolve
       description: >-
+        WeChat raw search (wechat_mp, wechat_search and aliases wechat/weixin)
+        is retired on this route: HTTP 410 wechat_search_route_retired; use
+        /data/wechat/search/search or /search/raw. No historical dispatch,
+        fallback or replay is served here.
         The Hub authenticates the consumer, enforces the platform grant and
         policy, then selects the implementation without exposing provider
         details. For Xiaohongshu, the immutable API-key scope must also include
@@ -5821,6 +6131,7 @@ paths:
         "403": [platform_not_granted, capability_not_granted, test_key_not_supported]
         "404": [not_found, user_not_found, night_all_rejected]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, night_all_rejected]
+        "410": [wechat_search_route_retired]
         "422": [night_all_rejected]
         "429": [consumer_quota_exceeded, api_key_quota_exceeded, plan_window_quota_exceeded, plan_month_quota_exceeded, plan_burst_exceeded, external_platform_busy, external_platform_rate_limited, external_platform_capacity_exceeded, external_platform_cost_budget_exhausted, external_platform_subsidy_budget_exhausted, night_all_rejected]
         "502": [night_all_rejected, upstream_outcome_unknown, external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
@@ -5885,6 +6196,7 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
@@ -5895,12 +6207,205 @@ paths:
       operationId: searchHistoricalCompatibilityAlias
       summary: Call a legacy search operation through its historical route alias.
       description: >-
-        This historical /search spelling is an exact alias of
+        Except for WeChat raw search, this historical /search spelling is an exact alias of
         /night-all/search: both enter the same Hub service and paid-operation
         fingerprint, so changing the route cannot authorize or purchase a
-        second upstream dispatch. Request, response and error semantics are
-        otherwise identical.
+        second upstream dispatch. WeChat raw now uses the new
+        /data/wechat/search/search contract and its exact permissions, pricing
+        and response; see /search/raw. Other request, response and error semantics
+        are identical to the historical contract.
       x-mx-canonical-operation: /night-all/search/{operation}
+      x-mx-wechat-raw-operation: /data/wechat/search/search
+  /search/raw:
+    post:
+      tags:
+      - 社媒与内容数据
+      operationId: searchWechatThroughHistoricalRawPath
+      summary: 微信搜索旧路径转入 Hub 新接口
+      x-mx-required-platform: social
+      x-mx-endpoint-key: wechat.search.search
+      x-mx-data-platform: wechat_search
+      x-mx-category: 微信搜一搜
+      x-mx-meter-key: native.wechat.search.search
+      x-mx-doc-path: /docs/wechat-search/native/wechat.search.search
+      x-mx-required-capabilities:
+      - native.wechat.search.search
+      description: 此固定路径描述微信分支：platform=wechat_search（别名 wechat/weixin）或 wechat_mp。与 /data/wechat/search/search 共用
+        social + native.wechat.search.search 授权、运行开关、客户定价、余额和幂等；返回新 contractVersion/endpoint/data/meta/requestId，不返回旧
+        raw_data 字符串。wechat_mp 默认 business_type=article。keyword/query/params.keyword 必须一致；count/pageSize/limit 仅接受旧默认值
+        20，响应仍为原生一页，不保证 20 条、不截断、不补齐。page>1 需要新 cursor；mxnc1 游标、仅 offset 翻页、批量和补详情请求拒绝。旧 Key 不自动增权；旧幂等标识若已用于旧合同则返回
+        409，不再次采集。非微信平台继续使用 /search/{operation} 的原合同。/data/search 的微信分支同样进入新合同；只有 /night-all/search/raw 的微信入口返回 410，不转发或回退。
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - platform
+              properties:
+                deliveryMode:
+                  type: string
+                  enum:
+                  - live_only
+                  default: live_only
+                params:
+                  type: object
+                  additionalProperties: false
+                  required: []
+                  properties:
+                    keyword:
+                      type: string
+                      maxLength: 100
+                      minLength: 1
+                      description: 搜索关键词（1-100 字）
+                    business_type:
+                      type: string
+                      enum:
+                      - all
+                      - account
+                      - article
+                      - video
+                      - sticker
+                      - underline
+                      - encyclopedia
+                      - live_stream
+                      - comment
+                      - listen
+                      - news
+                      - photos
+                      - book
+                      - moments
+                      - image
+                      - mini_game
+                      - weixin_index
+                      - ai_search
+                      default: all
+                      description: 垂类字符串键（共 18 个）。**实测有结果**：综合 all / 公众号·服务号·视频号 account / 文章 article / 视频 video /
+                        表情 sticker。其余键（underline / encyclopedia / live_stream / comment / listen / news / photos /
+                        book / moments / image / mini_game / weixin_index / ai_search）由微信服务端按账号与地区下发，当前实测恒返回空结果（count=0
+                        + no_more 文案，仍按一次正常调用计费）。当前账号真正可用的 tab 以综合搜索响应里的 categories 为准；传列表外的值直接报错（422）
+                    sort:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      default: default
+                      description: 排序（结果页「排序」下拉，综合与各垂类通用）：不限(相关性) default/0 / 最新(发布时间降序) latest/1 / 最热(点赞降序) hot/2，字符串键或整数均可
+                      enum:
+                      - 0
+                      - 1
+                      - 2
+                      - default
+                      - latest
+                      - hot
+                    publish_time:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      default: all
+                      description: 发布时间（结果页「时间」下拉，通用）：不限 all/0 / 最近一天 day/1 / 最近七天 week/2 / 最近半年 half_year/3，字符串键或整数均可
+                      enum:
+                      - 0
+                      - 1
+                      - 2
+                      - 3
+                      - all
+                      - day
+                      - week
+                      - half_year
+                    offset:
+                      type: integer
+                      minimum: 0
+                      default: 0
+                      description: 首页传 0；翻页请用 cursor（只传 offset 无效，每页都回到第一页）
+                    cursor:
+                      anyOf:
+                      - type: string
+                      - type: 'null'
+                      description: 翻页游标：首页留空；翻页时把上一页响应返回的 cursor 原样传回
+                    raw:
+                      type: boolean
+                      default: true
+                      description: True=原始搜索响应；False=精简解析结构
+                platform:
+                  type: string
+                  enum:
+                  - wechat_search
+                  - wechat_mp
+                  - wechat
+                  - weixin
+                keyword:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                query:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                cursor:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  description: 翻页游标：首页留空；翻页时把上一页响应返回的 cursor 原样传回
+                page:
+                  type: integer
+                  minimum: 1
+                count:
+                  const: 20
+                pageSize:
+                  const: 20
+                limit:
+                  const: 20
+                includeDetails:
+                  const: false
+                includeComments:
+                  const: false
+                disableAutoDetails:
+                  const: true
+              anyOf:
+              - required:
+                - keyword
+              - required:
+                - query
+              - required:
+                - params
+                properties:
+                  params:
+                    required:
+                    - keyword
+            example:
+              platform: wechat_mp
+              keyword: 城市观察
+              params:
+                raw: false
+      responses:
+        '200':
+          description: 原生 data、contractVersion、endpoint、requestId 与采集时间；没有推测的总数或 canonical 条目。
+        '400':
+          description: 请求失败；未知结果禁止自动重发。
+        '401':
+          description: 请求失败；未知结果禁止自动重发。
+        '402':
+          description: 请求失败；未知结果禁止自动重发。
+        '403':
+          description: 请求失败；未知结果禁止自动重发。
+        '409':
+          description: 请求失败；未知结果禁止自动重发。
+        '429':
+          description: 请求失败；未知结果禁止自动重发。
+        '502':
+          description: 请求失败；未知结果禁止自动重发。
+        '503':
+          description: 请求失败；未知结果禁止自动重发。
   /data/stored/search:
     post:
       operationId: searchStoredData
@@ -5978,15 +6483,19 @@ paths:
       - Search
       operationId: aggregateSearchSources
       summary: List searchable Hub platforms for the current API key
-      description: Read-only discovery. Includes stored and authorized live operations, never grants new
-        access or contacts a data service. Ecommerce marketplaces are separate logical platforms backed
-        by the existing ecommerce scope.
       parameters:
       - name: execution
         in: query
         required: false
-        schema: {type: string, enum: [hub_only]}
-        description: Discover Hub-owned live routes only; omit for existing behavior.
+        schema:
+          type: string
+          enum:
+          - hub_only
+        description: Discover only Hub-owned live routes. Omit for existing behavior.
+      description: Read-only discovery. Includes stored and authorized live operations, never grants new access or
+        contacts a data service. Ecommerce marketplaces are separate logical platforms backed by the existing ecommerce
+        scope. WeChat live routes require social + native.wechat.search.search and are included in hub_only; stored
+        WeChat requires its separate platform grant. A live-only grant never grants stored access.
       responses:
         '200':
           description: 'data.sources: platform, label, stored, refresh, objectTypes, routes'
@@ -6204,35 +6713,38 @@ paths:
       - Search
       operationId: aggregateDataSearch
       summary: Search latest or stored data across one, several or all authorized platforms
-      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with
-        bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[]
-        or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to
-        discover logical platform identifiers; clients never choose a provider. Only existing platform and
-        operation entitlements apply. Telegram, published opinion and saved categories are stored-only;
-        refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence;
-        the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing
-        source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize
-        and Key to continue; completed, unsupported and failed sources are not restarted. No exact total
-        is promised. The opaque cursor references committed Hub evidence and binds the identity and query
-        scope; missing evidence fails closed. Child cursors retain their existing route and page limits.
-        sources[].carried marks a source not called in this batch; its counts describe its last acquired
-        page. pageSize applies to stored mode only; live post operations fetch 20 items and product operations
-        use their existing bounded page sizes. mode=stored performs one filtered canonical search, returns
-        an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a
-        group; tags require every exact tag. Date bounds are inclusive publication times, must include a
-        timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before
-        any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new
-        key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires
-        or redispatches children; repeating a continuation with a different parent key still reuses the
-        same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after
-        live delivery is asynchronous.'
+      description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency,
+        without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently
+        authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients
+        never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion
+        and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price,
+        quota and delivery evidence; the parent adds no customer purchase charge. Each refresh page acquires at most
+        one page per continuing source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize
+        and Key to continue; completed, unsupported and failed sources are not restarted. No exact total is promised.
+        The opaque cursor references committed Hub evidence and binds the identity and query scope; missing evidence
+        fails closed. Child cursors retain their existing route and page limits. sources[].carried marks a source
+        not called in this batch; its counts describe its last acquired page. pageSize applies to stored mode only;
+        historical live post operations fetch 20 items and product operations use their existing bounded page sizes.
+        WeChat uses one native page without truncation or fill: wechat_mp selects articles, wechat_search selects
+        all categories, raw=false; only declared items are projected, never categories. Both require social + native.wechat.search.search
+        and a keyword of at most 100 characters. The same native operation price applies to each child; preview includes
+        its runtime readiness. Native continue_flag and cursor are held inside committed child evidence; callers use
+        the aggregate cursor. Old WeChat aggregate cursors must restart explicitly. WeChat results are archived but
+        not automatically ingested into canonical search. mode=stored performs one filtered canonical search, returns
+        an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags
+        require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude
+        undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the
+        same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start
+        a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation
+        with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit
+        source statuses. Ingestion after live delivery is asynchronous.'
       parameters:
       - name: Idempotency-Key
         in: header
         required: true
-        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API
-          key that created its usage record. Reuse it only with that same API key when retrying the exact
-          same path and normalized body; another API key, a new path, body or page requires a new Idempotency-Key.
+        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API key that created
+          its usage record. Reuse it only with that same API key when retrying the exact same path and normalized
+          body; another API key, a new path, body or page requires a new Idempotency-Key.
         schema:
           type: string
           minLength: 8
@@ -6259,10 +6771,6 @@ paths:
               required:
               - query
               properties:
-                execution:
-                  type: string
-                  enum: [hub_only]
-                  description: Opt-in Hub-owned Twitter live search; requires mode=refresh and social.content.search. No legacy fallback. Omit to retain existing behavior. Keep unchanged on continuation.
                 query:
                   type: string
                   minLength: 1
@@ -6273,6 +6781,13 @@ paths:
                   - refresh
                   - stored
                   default: refresh
+                execution:
+                  type: string
+                  enum:
+                  - hub_only
+                  description: Opt-in Hub-owned live execution; requires mode=refresh. Currently Twitter only, with
+                    social.content.search grant. No legacy fallback. Omit to preserve existing routes; include unchanged
+                    on continuation. New live social deliveries are not yet indexed for stored search.
                 platforms:
                   type: array
                   maxItems: 100
@@ -6321,8 +6836,8 @@ paths:
                 cursor:
                   type: string
                   maxLength: 8192
-                  description: Opaque continuation in refresh or stored mode. Return unchanged with the
-                    same query scope and original Key. Omit to start a new search round.
+                  description: Opaque continuation in refresh or stored mode. Return unchanged with the same query
+                    scope and original Key. Omit to start a new search round.
             example:
               query: 新能源汽车
               mode: refresh
@@ -6334,15 +6849,14 @@ paths:
       responses:
         '200':
           description: 'JSON returns the committed response. SSE events: search.started {requestId,totalSources,execution};
-            source.started {id,platform,label}; source.completed {source,items}; search.completed is the
-            full committed JSON envelope plus replay; search.error is a terminal failure after headers.
-            Before streaming, errors retain their normal HTTP status/JSON. Heartbeats every 10s. Only search.completed
-            supplies a usable parent cursor. Disconnect does not cancel paid work. A same-key in-progress
-            retry returns 409; completed retry delivers the stored response with replay=true. execution.concurrency=3,
-            dispatchBudgetMs=120000: stop new source dispatches, then drain calls under connector deadlines;
-            hardResponseDeadlineMs=null. not_started/aggregate_dispatch_deadline means no call was started
-            and will not be automatically retried. Items are a bounded page, never a total. Other source
-            statuses: ok, empty, partial, unsupported, not_authorized, unavailable, unknown.'
+            source.started {id,platform,label}; source.completed {source,items}; search.completed is the full committed
+            JSON envelope plus replay; search.error is a terminal failure after headers. Before streaming, errors
+            retain their normal HTTP status/JSON. Heartbeats every 10s. Only search.completed supplies a usable parent
+            cursor. Disconnect does not cancel paid work. A same-key in-progress retry returns 409; completed retry
+            delivers the stored response with replay=true. execution.concurrency=3, dispatchBudgetMs=120000: stop
+            new source dispatches, then drain calls under connector deadlines; hardResponseDeadlineMs=null. not_started/aggregate_dispatch_deadline
+            means no call was started and will not be automatically retried. Items are a bounded page, never a total.
+            Other source statuses: ok, empty, partial, unsupported, not_authorized, unavailable, unknown.'
           content:
             application/json:
               schema:

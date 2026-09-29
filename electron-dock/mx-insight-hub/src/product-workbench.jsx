@@ -1,3 +1,4 @@
+import { WechatResult } from './wechat-product.jsx'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { productForPath, productEndpoints, productConsoleRequest, resolveProductSchema } from '../shared/product-workbenches.mjs'
 import { adminApi, publicDataApi, publicDocsHref, publicApiOrigin } from './api.js'
@@ -38,7 +39,7 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
   const [key] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
   const [document, setDocument] = useState(null), [loadError, setLoadError] = useState(null)
-  const [selected, setSelected] = useState(initialEndpoint ? `post:/data/native/${initialEndpoint}` : ''), [drafts, setDrafts] = useState({}), [category, setCategory] = useState('')
+  const [selected, setSelected] = useState(''), [drafts, setDrafts] = useState({}), [category, setCategory] = useState('')
   const [result, setResult] = useState(null), [error, setError] = useState(null), [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(null), [, render] = useState(0)
   const [copyStatus, setCopyStatus] = useState('')
@@ -50,8 +51,10 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
   const endpoints = useMemo(() => productEndpoints(document, product).filter(row => !access || !row['x-mx-required-platform'] || access.platforms?.includes(row['x-mx-required-platform']) && (row['x-mx-required-capabilities'] || []).every(cap => access.capabilities?.includes(cap))), [document, product, access])
   const categories = [...new Set(endpoints.map(row=>row['x-mx-category'] || '通用'))].sort()
   const visibleEndpoints = endpoints.filter(row=>!category || (row['x-mx-category'] || '通用') === category)
+  const initialSelection = endpoints.find(row => row['x-mx-endpoint-key'] === initialEndpoint || row.id === `post:/data/native/${initialEndpoint}`)?.id
+  useEffect(() => { if (initialSelection) setSelected(initialSelection) }, [initialSelection])
   const endpoint = visibleEndpoints.find(row => row.id === selected) || visibleEndpoints[0]
-  const revealItem = useMemo(() => { const index=endpoints.filter(row=>!category || (row['x-mx-category'] || '通用')===category).findIndex(row=>row.id===`post:/data/native/${initialEndpoint}`); return initialEndpoint && index>=0 ? {index} : null },[endpoints,category,initialEndpoint])
+  const revealItem = useMemo(() => { const index=endpoints.filter(row=>!category || (row['x-mx-category'] || '通用')===category).findIndex(row=>row['x-mx-endpoint-key'] === initialEndpoint || row.id===`post:/data/native/${initialEndpoint}`); return initialEndpoint && index>=0 ? {index} : null },[endpoints,category,initialEndpoint])
   const draft = drafts[endpoint?.id] || {}, values = draft.values || {}
   const json = draft.json ?? initialBody(document, endpoint)
   const schema = resolveProductSchema(document, endpoint?.requestBody?.content?.['application/json']?.schema)
@@ -89,11 +92,11 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
     <div className="mih-api-console-main">{endpoint ? <>
       <header><strong className="mih-api-method">{endpoint.method}</strong> <code>{endpoint.path}</code><a href={publicDocsHref(endpoint['x-mx-doc-path'] || `/docs/${product.docs}`)}>本接口文档 ↗</a></header>
       <h2>{endpoint.summary}</h2><details><summary>契约说明</summary><p>{endpoint.description}</p></details>
-      {endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path === '/api/v1/data/ecommerce/products/search' ? <ServicePrice path={endpoint.path} /> : null}
+      {(endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path.startsWith('/api/v1/data/wechat/')) || endpoint.path === '/api/v1/data/ecommerce/products/search' ? <ServicePrice path={endpoint.path} /> : null}
       <p>发送使用当前 Key，服务端复核授权、限额与价格。页面打开和标签切换不会自动调用。</p>
       <form onSubmit={event => { event.preventDefault(); void send() }}>
         {(endpoint.parameters || []).filter(row => ['path', 'query'].includes(row.in)).map(row => <label className="qp-field" key={`${row.in}:${row.name}`}>{row.name}{row.required ? ' *' : ''} · {row.in}<input className="qp-input" disabled={busy} value={values[`${row.in}:${row.name}`] || ''} placeholder={row.description || '留空不传'} onChange={event => change({ values: { ...values, [`${row.in}:${row.name}`]: event.target.value } })} /></label>)}
-        {schema.properties?.params && endpoint.path.startsWith('/api/v1/data/native/') ? <NativeParameterFields schema={schema.properties.params} json={json} disabled={busy} onChange={value=>change({json:value})} /> : null}
+        {schema.properties?.params && (endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path.startsWith('/api/v1/data/wechat/')) ? <NativeParameterFields schema={schema.properties.params} json={json} disabled={busy} onChange={value=>change({json:value})} /> : null}
         {endpoint.requestBody ? <><details><summary>请求体字段</summary><div className="qp-table-wrap"><table className="qp-table"><thead><tr><th>参数</th><th>类型</th><th>说明</th></tr></thead><tbody>{Object.entries(schema.properties || {}).map(([name, field]) => <tr key={name}><td>{name}{schema.required?.includes(name) ? ' *' : ''}</td><td>{field.type || '见契约'}</td><td>{field.description || field.enum?.join(' / ') || '—'}</td></tr>)}</tbody></table></div></details><label className="qp-field">JSON 请求体<textarea aria-label="JSON 请求体" className="qp-input mih-product-json" rows={10} disabled={busy} value={json} onChange={event => change({ json: event.target.value })} /></label></> : null}
         {validation ? <p role="status">{validation}</p> : null}
         <div className="mih-page-actions"><button className="qp-button qp-button--primary" disabled={busy || !key || !input}>{busy ? '正在调用…' : usesIdempotency && attempt ? '重放 / 重试原请求' : '发送请求'}</button>{usesIdempotency && attempt ? <button className="qp-button qp-button--outline" type="button" disabled={busy} onClick={() => { attempts.current.delete(fingerprint); render(value => value + 1) }}>新建请求（再次发送会计量）</button> : null}</div>
@@ -105,6 +108,7 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
       }}>复制示例</button><p role="status">{copyStatus}</p></details>
       {progress ? <p role="status">已完成 {progress.completed} / {progress.total} 个来源 · 收到 {progress.items} 条（最终以去重响应为准）</p> : null}
       {error ? <ErrorState error={error} /> : null}
+      {endpoint.path.startsWith('/api/v1/data/wechat/') && result?.identity === key ? <WechatResult payload={result.payload} /> : null}
       <h3>JSON 响应</h3>{result?.identity === key ? <><p>{result.evidence?.requestId} · {result.evidence?.idempotentReplay ? '幂等回放' : '本次返回'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} aggregate={result.input.path === '/api/v1/data/aggregate/search'} /></> : <p>发送后展示实际响应。</p>}
     </> : <p>当前身份暂无可见接口。</p>}</div>
   </section>
@@ -121,10 +125,11 @@ function NativeParameterFields({schema,json,disabled,onChange}) {
   const update=(name,field,value)=>{
     const params={...body.params}
     if(value==='') delete params[name]
+    else if (field.enum) params[name] = field.enum.find(item => String(item) === value)
     else params[name]=field.type==='boolean' ? value==='true' : ['integer','number'].includes(field.type) ? Number(value) : value
     onChange(JSON.stringify({...body,params},null,2))
   }
-  return <fieldset className="mih-native-fields" disabled={disabled}><legend>接口参数</legend>{Object.entries(schema.properties || {}).map(([name,field])=> field.enum || field.type==='boolean'
+  return <fieldset className="mih-native-fields" disabled={disabled}><legend>接口参数</legend>{Object.entries(schema.properties || {}).map(([name,original])=> { const variants = original.anyOf?.filter(item => item.type !== 'null'); const field = variants?.length === 1 ? { ...original, ...variants[0] } : original; return field.enum || field.type==='boolean'
     ? <DropdownField key={name} label={`params.${name}${schema.required?.includes(name)?' *':''}`} disabled={disabled} value={String(body.params[name]??'')} onChange={value=>update(name,field,value)} options={[{value:'',label:'留空不传'},...(field.enum || [true,false]).map(value=>({value:String(value),label:String(value)}))]} hint={field.description || '按本接口参数填写'} />
-    : <label className="qp-field" key={name}>{name}{schema.required?.includes(name)?' *':''}<input aria-label={`params.${name}`} className="qp-input" type={['integer','number'].includes(field.type)?'number':'text'} step={field.type==='integer'?'1':'any'} min={field.minimum} max={field.maximum} value={body.params[name]??''} onChange={e=>update(name,field,e.target.value)} placeholder={field.default!==undefined?`默认 ${field.default}`:'留空不传'} /><small>{field.description || '按本接口参数填写'}</small></label>)}</fieldset>
+    : <label className="qp-field" key={name}>{name}{schema.required?.includes(name)?' *':''}<input aria-label={`params.${name}`} className="qp-input" type={['integer','number'].includes(field.type)?'number':'text'} step={field.type==='integer'?'1':'any'} min={field.minimum} max={field.maximum} value={body.params[name]??''} onChange={e=>update(name,field,e.target.value)} placeholder={field.default!==undefined?`默认 ${field.default}`:'留空不传'} /><small>{field.description || '按本接口参数填写'}</small></label> })}</fieldset>
 }

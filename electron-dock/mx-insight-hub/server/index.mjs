@@ -445,6 +445,7 @@ export async function createRuntime(config = loadConfig()) {
     },
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
+    externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
     externalSocialSearchEnabled: (context) => useTikHubOperation(context, 'social.posts.search'),

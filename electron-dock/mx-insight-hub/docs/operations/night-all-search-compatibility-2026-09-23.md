@@ -1,5 +1,7 @@
 # Night-All 搜索契约与 Facebook 标题修复
 
+2026-09-30 微信例外：Hub 的 `/api/v1/search/raw`、`/api/v1/data/search` 与聚合微信实时子请求转入新 Hub 合同；仅 `/api/v1/night-all/search/raw` 的微信分支停用，旧 mxnc1 与旧微信聚合游标不可复用。以下保留此前的兼容实现记录；当前微信行为见[微信接入与旧入口切换](../integrations/wechat-services.md)。其他平台和已收录查询不变。
+
 ## 已复现的问题与改动
 
 本次依据两个仓库源码与合成数据验证，不将截图的 HTTP 状态视为已确认的生产根因。

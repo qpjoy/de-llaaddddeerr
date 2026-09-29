@@ -1,0 +1,1573 @@
+{
+  "version": "hub-wechat.2026-09-29",
+  "observedAt": "2026-09-29",
+  "sourceUrl": "https://api.tikhub.io/openapi.json",
+  "sourceSha256": "1be3071e54cccc806ccf1121ba4fb3d0732a4e43416b86e5da6cc0da13742983",
+  "endpoints": [
+    {
+      "key": "wechat.channels.channel-info",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_channel_info",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/channel-info",
+      "summary": "获取视频号账号信息",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 10,
+          "pattern": "^v2_[0-9a-fA-F]+@finder$",
+          "description": "视频号 finder username（v2_…@finder 格式）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.channel-id-to-username",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_channel_id_to_username",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/channel-id-to-username",
+      "summary": "视频号ID转finder username",
+      "parameters": [
+        {
+          "name": "channel_id",
+          "required": true,
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^sph[A-Za-z0-9_-]+$",
+          "description": "视频号 ID（sph 开头的短号）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": false,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.user-videos",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_user_videos",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/user-videos",
+      "summary": "获取视频号用户作品列表",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 10,
+          "pattern": "^v2_[0-9a-fA-F]+@finder$",
+          "description": "视频号 finder username（v2_…@finder 格式）"
+        },
+        {
+          "name": "last_buffer",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/=_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "翻页游标（base64），首页留空"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构（推荐做媒体下载）"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.video-detail",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_video_detail",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/video-detail",
+      "summary": "获取视频号作品详情",
+      "parameters": [
+        {
+          "name": "object_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "作品 objectId（纯数字，最优先）"
+        },
+        {
+          "name": "export_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048,
+              "pattern": "^(export/.+)?$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "搜索结果中的 exportId（export/ 开头，会过期，需尽快使用）/exportId from search results (starts with export/, expires soon)"
+        },
+        {
+          "name": "object_nonce_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "配套 objectNonceId（纯数字，可选，提升命中率）"
+        },
+        {
+          "name": "share_url",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^(https?://weixin\\.qq\\.com/sph/[A-Za-z0-9]+/?)?$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "视频号分享短链（），仅在 object_id 与 export_id 都为空时使用"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构（推荐做媒体下载）"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.video-comments",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_video_comments",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/video-comments",
+      "summary": "获取视频号作品评论",
+      "parameters": [
+        {
+          "name": "object_id",
+          "required": true,
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9]+$",
+          "description": "作品 objectId（纯数字）"
+        },
+        {
+          "name": "last_buffer",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/=_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "翻页游标（base64），首页留空"
+        },
+        {
+          "name": "comment_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "展开某条评论的二级回复时传其 commentId（纯数字），首页留空"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.video-share-url",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_video_share_url",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/video-share-url",
+      "summary": "生成视频号作品分享链接",
+      "parameters": [
+        {
+          "name": "object_id",
+          "required": true,
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9]+$",
+          "description": "作品 objectId（纯数字）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.user-profile",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_user_profile",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/user-profile",
+      "summary": "获取视频号账号主页资料+统计",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 10,
+          "pattern": "^v2_[0-9a-fA-F]+@finder$",
+          "description": "视频号 finder username（v2_…@finder 格式）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.user-collections",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_user_collections",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/user-collections",
+      "summary": "获取视频号合集列表",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 10,
+          "pattern": "^v2_[0-9a-fA-F]+@finder$",
+          "description": "视频号 finder username（v2_…@finder 格式）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.collection-videos",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_collection_videos",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/collection-videos",
+      "summary": "获取视频号合集内视频",
+      "parameters": [
+        {
+          "name": "topic_id",
+          "required": true,
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9]+$",
+          "description": "合集 ID（纯数字，来自 fetch_user_collections 的 topic_id）"
+        },
+        {
+          "name": "topic",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "合集名（可选，提高命中）"
+        },
+        {
+          "name": "username",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^(v2_[0-9a-fA-F]+@finder)?$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "创作者 finder username（可选，提高命中）"
+        },
+        {
+          "name": "last_buffer",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/=_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "翻页游标（base64），首页留空"
+        },
+        {
+          "name": "topic_type",
+          "required": false,
+          "type": "integer",
+          "maximum": 1000,
+          "minimum": 0,
+          "default": 16,
+          "description": "合集类型，默认 16（与 fetch_user_collections 返回的 topic_type 对齐）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构（推荐做媒体下载）"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.live-history",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_live_history",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/live-history",
+      "summary": "获取视频号直播回放列表",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 10,
+          "pattern": "^v2_[0-9a-fA-F]+@finder$",
+          "description": "视频号 finder username（v2_…@finder 格式）"
+        },
+        {
+          "name": "last_buffer",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/=_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "翻页游标（base64），首页留空"
+        },
+        {
+          "name": "flag",
+          "required": false,
+          "type": "integer",
+          "maximum": 1000,
+          "minimum": 0,
+          "default": 12,
+          "description": "拉取标志，默认 12"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构（推荐做媒体下载）"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.live-detail",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_live_detail",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/live-detail",
+      "summary": "获取视频号直播间详情",
+      "parameters": [
+        {
+          "name": "live_id",
+          "required": true,
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9]+$",
+          "description": "直播 ID（纯数字）"
+        },
+        {
+          "name": "scene",
+          "required": false,
+          "type": "integer",
+          "maximum": 1000,
+          "minimum": 0,
+          "default": 5,
+          "description": "进入场景，默认 5"
+        },
+        {
+          "name": "finder_username",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^(v2_[0-9a-fA-F]+@finder)?$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "主播 finder username（可选，提高命中）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.channels.search-channel-videos",
+      "platform": "wechat_channels",
+      "platformLabel": "微信视频号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_channels/v2/fetch_search_channel_videos",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/channels/search-channel-videos",
+      "summary": "视频号号内搜索",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 10,
+          "pattern": "^v2_[0-9a-fA-F]+@finder$",
+          "description": "创作者 finder username（v2_…@finder 格式）"
+        },
+        {
+          "name": "keyword",
+          "required": true,
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "description": "在该号内搜索的关键词（1-100 字）"
+        },
+        {
+          "name": "cursor",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "翻页游标：首页留空；翻页时原样回传上一页响应的 next_cursor（不透明字符串，勿解析或拼接）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.article-detail",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_article_detail",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/article-detail",
+      "summary": "获取公众号文章详情",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（ 或带 __biz 的长链）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.article-detail-h5",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_article_detail_h5",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/article-detail-h5",
+      "summary": "获取公众号文章详情（H5 版本，推荐）",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（ 或带 __biz 的长链）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.article-stats-h5",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_article_stats_h5",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/article-stats-h5",
+      "summary": "获取公众号文章互动数据（H5 版本）",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（ 或带 __biz 的长链）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        },
+        {
+          "name": "comment_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "文章的评论 id（可选，**性能捷径**）：不传时上游要先抓并解析整篇文章 HTML 才能拿到它，约占本接口耗时的一半；已有该值时传进来可显著加快。取自 /fetch_article_detail 或 /fetch_article_detail_h5 响应的 `$.data.content.comment_id`"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.article-stats",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_article_stats",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/article-stats",
+      "summary": "获取公众号文章互动数据",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（ 或带 __biz 的长链）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.article-comments",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_article_comments",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/article-comments",
+      "summary": "获取公众号文章评论",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（）"
+        },
+        {
+          "name": "buffer",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "翻页游标，首页留空；翻页传上一页响应的 buffer"
+        },
+        {
+          "name": "comment_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "文章的评论 id（可选，**性能捷径**）：不传时上游要先抓并解析整篇文章 HTML 才能拿到它，约占本接口耗时的一半；已有该值时传进来可显著加快。取自 /fetch_article_detail 或 /fetch_article_detail_h5 响应的 `$.data.content.comment_id`"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.comment-replies",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_comment_replies",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/comment-replies",
+      "summary": "获取公众号评论的二级回复",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（）"
+        },
+        {
+          "name": "content_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "目标一级评论的 content_id（纯数字），不传则自动取第一条有回复的评论/content_id (numeric) of the target first-level comment; defaults to the first comment that has replies"
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "回复翻页偏移，首页 0；has_more=true 时传上次返回的 next_offset"
+        },
+        {
+          "name": "comment_id",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[0-9]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "文章的评论 id（可选，**性能捷径**）：不传时上游要先抓并解析整篇文章 HTML 才能拿到它，约占本接口耗时的一半；已有该值时传进来可显著加快。取自 /fetch_article_detail 或 /fetch_article_detail_h5 响应的 `$.data.content.comment_id`"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.related-articles",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_related_articles",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/related-articles",
+      "summary": "获取公众号关联文章",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（ 或带 __biz 的长链）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.article-ad",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_article_ad",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/article-ad",
+      "summary": "获取公众号文章广告",
+      "parameters": [
+        {
+          "name": "url",
+          "required": true,
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https?://mp\\.weixin\\.qq\\.com/s([/?].+)?$",
+          "description": "公众号文章链接（ 或带 __biz 的长链）"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.account-profile",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_account_profile",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/account-profile",
+      "summary": "获取公众号资料页",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[0-9A-Za-z][-_0-9A-Za-z]{1,63}(@[0-9A-Za-z]{1,16})?$",
+          "description": "公众号 username。三种形态都支持：`gh_…`、`gh_…@app`（关联小程序的账号）、以及自定义微信号（如 `nikejdi`）。取自文章详情接口响应的 `$.data.content.user_name`"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.account-articles",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_account_articles",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/account-articles",
+      "summary": "获取公众号文章列表",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[0-9A-Za-z][-_0-9A-Za-z]{1,63}(@[0-9A-Za-z]{1,16})?$",
+          "description": "公众号 username。三种形态都支持：`gh_…`、`gh_…@app`（关联小程序的账号）、以及自定义微信号（如 `nikejdi`）。取自文章详情接口响应的 `$.data.content.user_name`"
+        },
+        {
+          "name": "page_size",
+          "required": false,
+          "type": "integer",
+          "maximum": 100,
+          "minimum": 1,
+          "default": 20,
+          "description": "每页数量（默认 20）。⚠️ 微信当前**忽略**该参数：返回条数由公众号自身决定，实测取 1 与取 40 结果完全相同；翻页请用 offset / next_offset"
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^[A-Za-z0-9+/=_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "description": "翻页游标（base64），首页留空；翻页传上一页响应的 next_offset"
+        },
+        {
+          "name": "item_show_type",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "内容栏目：留空/0=文章（默认）、5=视频、7=音频、8=贴图"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.mp.account-services",
+      "platform": "wechat_mp",
+      "platformLabel": "微信公众号",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_mp/v2/fetch_account_services",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/mp/account-services",
+      "summary": "获取公众号服务/自定义菜单",
+      "parameters": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[0-9A-Za-z][-_0-9A-Za-z]{1,63}(@[0-9A-Za-z]{1,16})?$",
+          "description": "公众号 username。三种形态都支持：`gh_…`、`gh_…@app`（关联小程序的账号）、以及自定义微信号（如 `nikejdi`）。取自文章详情接口响应的 `$.data.content.user_name`"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.search.search",
+      "platform": "wechat_search",
+      "platformLabel": "微信搜一搜",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_search/v2/fetch_search",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/search/search",
+      "summary": "微信综合搜索（搜一搜）",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true,
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "description": "搜索关键词（1-100 字）"
+        },
+        {
+          "name": "business_type",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "all",
+            "account",
+            "article",
+            "video",
+            "sticker",
+            "underline",
+            "encyclopedia",
+            "live_stream",
+            "comment",
+            "listen",
+            "news",
+            "photos",
+            "book",
+            "moments",
+            "image",
+            "mini_game",
+            "weixin_index",
+            "ai_search"
+          ],
+          "default": "all",
+          "description": "垂类字符串键（共 18 个）。**实测有结果**：综合 all / 公众号·服务号·视频号 account / 文章 article / 视频 video / 表情 sticker。其余键（underline / encyclopedia / live_stream / comment / listen / news / photos / book / moments / image / mini_game / weixin_index / ai_search）由微信服务端按账号与地区下发，当前实测恒返回空结果（count=0 + no_more 文案，仍按一次正常调用计费）。当前账号真正可用的 tab 以综合搜索响应里的 categories 为准；传列表外的值直接报错（422）"
+        },
+        {
+          "name": "sort",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "default",
+          "description": "排序（结果页「排序」下拉，综合与各垂类通用）：不限(相关性) default/0 / 最新(发布时间降序) latest/1 / 最热(点赞降序) hot/2，字符串键或整数均可",
+          "enum": [
+            0,
+            1,
+            2,
+            "default",
+            "latest",
+            "hot"
+          ]
+        },
+        {
+          "name": "publish_time",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "all",
+          "description": "发布时间（结果页「时间」下拉，通用）：不限 all/0 / 最近一天 day/1 / 最近七天 week/2 / 最近半年 half_year/3，字符串键或整数均可",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            "all",
+            "day",
+            "week",
+            "half_year"
+          ]
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "首页传 0；翻页请用 cursor（只传 offset 无效，每页都回到第一页）"
+        },
+        {
+          "name": "cursor",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "翻页游标：首页留空；翻页时把上一页响应返回的 cursor 原样传回"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始搜索响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.search.search-videos",
+      "platform": "wechat_search",
+      "platformLabel": "微信搜一搜",
+      "provider": "tikhub",
+      "path": "/api/v1/wechat_search/v2/fetch_search_videos",
+      "method": "POST",
+      "hubPath": "/api/v1/data/wechat/search/search-videos",
+      "summary": "搜视频号视频（时长/排序/时间筛选）",
+      "parameters": [
+        {
+          "name": "keyword",
+          "required": true,
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "description": "搜索关键词（1-100 字）"
+        },
+        {
+          "name": "duration",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "all",
+          "description": "时长档（video 垂类专属）：不限 all/0 / 短(<5min) short/1 / 中(5-10min) medium/2 / 长(20min+) long/3，字符串键或整数均可",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            "all",
+            "short",
+            "medium",
+            "long"
+          ]
+        },
+        {
+          "name": "sort",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "default",
+          "description": "排序：不限(相关性) default/0 / 最新(发布时间降序) latest/1 / 最热(点赞降序) hot/2，字符串键或整数均可",
+          "enum": [
+            0,
+            1,
+            2,
+            "default",
+            "latest",
+            "hot"
+          ]
+        },
+        {
+          "name": "publish_time",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "all",
+          "description": "发布时间：不限 all/0 / 最近一天 day/1 / 最近七天 week/2 / 最近半年 half_year/3，字符串键或整数均可",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            "all",
+            "day",
+            "week",
+            "half_year"
+          ]
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "首页传 0；翻页请用 cursor（只传 offset 无效）"
+        },
+        {
+          "name": "cursor",
+          "required": false,
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "翻页游标，用法同综合搜索：首页留空；翻页时把上一页响应返回的 cursor 原样传回"
+        },
+        {
+          "name": "raw",
+          "required": false,
+          "type": "boolean",
+          "default": true,
+          "description": "True=原始搜索响应；False=精简解析结构"
+        }
+      ],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": false,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.010000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_base_price_per_request"
+      }
+    },
+    {
+      "key": "wechat.demo.article-sample",
+      "platform": "wechat_mp",
+      "platformLabel": "微信演示",
+      "provider": "tikhub",
+      "path": "/api/v1/demo/wechat/article_extract",
+      "method": "GET",
+      "hubPath": "/api/v1/data/wechat/demo/article-sample",
+      "summary": "固定文章演示（1 小时缓存）",
+      "parameters": [],
+      "fixedQuery": {},
+      "authorizationPlatform": "social",
+      "status": "fixed_read_contract",
+      "sourceUrl": "https://api.tikhub.io/openapi.json",
+      "schemaVersion": "hub-wechat.2026-09-29",
+      "allowZeroCost": true,
+      "procurementReference": {
+        "currency": "USD",
+        "unitPrice": "0.000000",
+        "observedAt": "2026-09-29",
+        "sourceUrl": "https://api.tikhub.io/openapi.json",
+        "basis": "documented_free_fixed_demo"
+      }
+    }
+  ]
+}

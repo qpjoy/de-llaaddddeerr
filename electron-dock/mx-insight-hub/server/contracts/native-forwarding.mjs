@@ -1,5 +1,6 @@
 import snapshot from '../data/night-all-provider-inventory.json' with { type: 'json' }
 import official from '../data/provider-official-contracts.json' with { type: 'json' }
+import wechat from '../data/wechat-contracts.json' with { type: 'json' }
 import { AppError } from '../core/errors.mjs'
 
 export const NATIVE_FORWARDING_VERSION = 'mx-insight-hub.native-forwarding.v1'
@@ -24,6 +25,7 @@ const legacyEndpoints = snapshot.endpoints
   })
 const legacyPaths = new Set(legacyEndpoints.map(row => `${row.provider}:${row.method}:${row.path}`))
 export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
+  ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
     .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,
       hubPath: `/api/v1/data/native/${row.key}`, schemaVersion: official.version,
@@ -40,6 +42,7 @@ export function nativeForwardingOperations(provider) {
     operationKey: row.operation, label: `${row.platformLabel || row.platform} · ${row.summary || row.key}`,
     legacyGate: 'nativeForwardingVerified', contractVersion: NATIVE_FORWARDING_VERSION,
     endpointKeys: [row.endpointKey],
+    ...(row.allowZeroCost ? { allowZeroCost: true } : {}),
   }))
 }
 
@@ -55,6 +58,14 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
     throw new AppError(400, 'invalid_delivery_mode', 'Native forwarding supports live_only')
   }
   const allowed = new Set(endpoint.parameters.map(p => p.name))
+  if (key.startsWith('wechat.search.')) {
+    if (typeof body.params.cursor === 'string' && body.params.cursor.trim().startsWith('mxnc1.')) {
+      throw new AppError(400, 'wechat_legacy_cursor_retired', 'This legacy cursor cannot be used by the new WeChat API; explicitly restart from the first page with a new Idempotency-Key')
+    }
+    if (body.params.offset > 0 && !body.params.cursor) {
+      throw new AppError(400, 'invalid_cursor', 'WeChat continuation requires the response cursor; offset alone cannot advance a page')
+    }
+  }
   if (Object.keys(body.params).some(name => !allowed.has(name))) {
     throw new AppError(400, 'unsupported_request_field', 'params contains an undeclared field')
   }
@@ -68,13 +79,11 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
     // Existing v1 contracts retain their scalar coercion. New official contracts
     // validate their declared types/enums before a billable dispatch.
     if (endpoint.schemaVersion) {
-      const validType = p.type === 'integer' ? Number.isSafeInteger(value) : p.type === 'number' ? typeof value === 'number' && Number.isFinite(value) : typeof value === p.type
-      if (!validType || p.enum && !p.enum.includes(value)
-        || p.minimum != null && value < p.minimum || p.maximum != null && value > p.maximum
-        || typeof value === 'string' && (p.minLength != null && value.length < p.minLength || p.maxLength != null && value.length > p.maxLength || p.pattern && !new RegExp(p.pattern).test(value))) {
+      if (!matchesScalarSchema(value, p)) {
         throw new AppError(400, 'invalid_parameter', `${p.name} does not match the declared parameter contract`)
       }
     }
+    if (value === null && p.anyOf?.some(schema => schema.type === 'null')) { query[p.name] = null; continue }
     if (!['string', 'number', 'boolean'].includes(typeof value)
       || (typeof value === 'number' && !Number.isFinite(value))
       || (typeof value === 'string' && (value.length > 8192 || value.includes('\u0000') || (p.required && !value.trim())))) {
@@ -86,6 +95,9 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
     }
     query[p.name] = value
   }
+  if (key === 'wechat.channels.video-detail' && !['object_id', 'export_id', 'share_url'].some(name => query[name])) {
+    throw new AppError(400, 'missing_parameter', 'Provide object_id, export_id or share_url')
+  }
   return Object.freeze({
     key, maxPageSize, contractVersion: NATIVE_FORWARDING_VERSION, endpointContractVersion: NATIVE_FORWARDING_VERSION,
     operation: endpoint.operation, endpointKey: endpoint.endpointKey, endpointVersion: endpoint.schemaVersion || snapshot.version,
@@ -93,6 +105,16 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
     deliveryMode: 'live_only', upstreamQuery: Object.freeze(query),
     fingerprintBody: { contractVersion: NATIVE_FORWARDING_VERSION, key, params: query, deliveryMode: 'live_only' },
   })
+}
+
+function matchesScalarSchema(value, schema) {
+  if (schema.enum && !schema.enum.includes(value)) return false
+  if (schema.anyOf) return schema.anyOf.some(variant => matchesScalarSchema(value, variant))
+  const validType = schema.type === 'null' ? value === null : schema.type === 'integer' ? Number.isSafeInteger(value)
+    : schema.type === 'number' ? typeof value === 'number' && Number.isFinite(value) : typeof value === schema.type
+  return validType && (!schema.enum || schema.enum.includes(value))
+    && !(schema.minimum != null && value < schema.minimum || schema.maximum != null && value > schema.maximum)
+    && !(typeof value === 'string' && (schema.minLength != null && value.length < schema.minLength || schema.maxLength != null && value.length > schema.maxLength || schema.pattern && !new RegExp(schema.pattern).test(value)))
 }
 
 export function nativeForwardingPayload(data, request, capturedAt) {

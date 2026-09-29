@@ -33,7 +33,7 @@ export function officialPriceDraft(provider) {
     const prices = new Map(tikPrices.rows.map(row => [row.path,row.unitPrice]))
     return { provider, available:true, sourceKind:'official', sourceUrl:tikPrices.sourceUrl, observedAt:tikPrices.observedAt,
       name:'TikHub 新账户逐接口参考价（部分核验）',
-      rates:NATIVE_FORWARDING_ENDPOINTS.filter(row=>row.provider===provider && prices.has(row.path)).map(row=>({
+      rates:NATIVE_FORWARDING_ENDPOINTS.filter(row=>row.provider===provider && !row.key.startsWith('wechat.') && prices.has(row.path)).map(row=>({
         endpointKey:row.endpointKey,currency:tikPrices.currency,unitPrice:prices.get(row.path),billingUnit:'request',
       })) }
   }
@@ -45,4 +45,14 @@ export function officialPriceDraft(provider) {
       return price?.unitPriceMinor == null ? [] : row.endpointKeys.map(endpointKey => ({ endpointKey,
         currency: 'CNY', unitPrice: (price.unitPriceMinor / 100).toFixed(2), billingUnit: 'request' }))
     }) }
+}
+
+// Separate draft: a dated WeChat documentation price must not inherit the older
+// account snapshot's URL/time or silently overwrite an operator's reviewed rate.
+export function wechatOfficialPriceDraft() {
+  const rows = NATIVE_FORWARDING_ENDPOINTS.filter(row => row.key.startsWith('wechat.'))
+  return { provider: 'tikhub', name: '微信官方文档逐接口参考价（2026-09-29）', sourceKind: 'official',
+    sourceUrl: rows[0].procurementReference.sourceUrl, observedAt: rows[0].procurementReference.observedAt,
+    rates: rows.map(row => ({ endpointKey: row.endpointKey, currency: row.procurementReference.currency,
+      unitPrice: row.procurementReference.unitPrice, billingUnit: 'request' })) }
 }

@@ -83,6 +83,7 @@ export function ProvisioningPage({ token, query, setQuery, onUnauthorized, notif
       {!official?.available?<p>{official?.reason}</p>:provider==='tikhub'?<p>新账户参考快照仅覆盖已核对接口；缺失项待核价。阶梯折扣、赠额和实际扣费单独核算，不据此认定服务免费。</p>:null}
       <details><summary>导入逐端点价格</summary><p>单价使用原币金额的十进制字符串，例如 USD “0.0038”。当前仅支持按请求计价；阶梯、套餐和按结果收费须先人工换算为明确适用的账户合同价格。</p>
         <button className="qp-button qp-button--outline" disabled={busy} onClick={newDraft}>{official?.available?'载入已核对官方快照':'生成所选端点导入模板'}</button>
+        {provider === 'tikhub' && data.catalog.wechatOfficialDraft ? <button className="qp-button qp-button--outline" disabled={busy} onClick={() => setDraftText(JSON.stringify(data.catalog.wechatOfficialDraft, null, 2))}>载入微信官方文档价格（26 项）</button> : null}
         <Field label="价格草稿 JSON"><textarea aria-label="价格草稿 JSON" className="qp-input mih-provisioning-json" spellCheck="false" disabled={busy} value={draftText} onChange={e=>setDraftText(e.target.value)}/></Field>
         <button className="qp-button qp-button--primary" disabled={busy||!draftText} onClick={()=>run(async()=>{const saved=await adminApi.provisioningSaveDraft(token,JSON.parse(draftText));setDrafts(current=>[saved,...current]);edit(setDraftId,saved.id);notify?.('价格草稿已保存，尚未开通接口','success')})}>保存不可变价格草稿</button>
       </details>

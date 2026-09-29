@@ -1,3 +1,4 @@
+import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 // Public business metadata. Supplier coordinates never belong in this module.
 import { XHS_DISCOVERY_PRODUCTS } from './xiaohongshu-discovery.mjs'
 export const XIAOHONGSHU_CAPABILITIES = Object.freeze([
@@ -18,6 +19,9 @@ export const PRODUCT_BUNDLES = Object.freeze([
     capabilities: ['ip.risk.query'], optionalCapabilities: [], featureKey: 'ip-risk', href: '/data-products/ip-risk', catalogKeys: [] },
   { key: 'qixin', version: 1, name: '企业数据', platforms: ['enterprise'],
     capabilities: ['enterprise.query'], optionalCapabilities: [], featureKey: 'qixin', href: '/data-products/enterprise', catalogKeys: ['source-catalog-0175'] },
+  ...WECHAT_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['social'],
+    capabilities: wechatServices(product).map(row => row.operation), optionalCapabilities: [], featureKey: null,
+    pricingMode: 'tenant_contract', href: `/data-products/${product.key}`, catalogKeys: product.catalogKeys })),
   ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['xiaohongshu'],
     capabilities: [product.operation], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
     href: `/data-products/${product.key}`, catalogKeys: ['source-catalog-0004'] })),

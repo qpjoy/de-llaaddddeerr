@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-09-10.
+Last reviewed: 2026-09-29.
 
 This directory is the source of truth for MX Insight Hub as an independent
 control plane and data center. TikHub/JustOne operations already migrated to
@@ -14,6 +14,8 @@ those paths retire one operation at a time and are not the target architecture.
 - [Node.js Agent、Text2ES、ES 兼容升级与契约转发可行性](data-browser/agent-search-feasibility.md)
 
 ## 下游接入与演示
+
+- [微信数据服务、公众号产品与目录关联](integrations/wechat-services.md)：25 个正式接口与 1 个固定演示，Hub 业务路径、官方采购参考价、迁移 118 与数据搜索边界。
 
 - [小红书 API 接入与演示指南](xiaohongshu-api-quickstart.md)：关键词搜索、详情与阅读量、评论分页、可选正文与标签，以及授权、计费和幂等重试。可单独交付给下游开发者。
 

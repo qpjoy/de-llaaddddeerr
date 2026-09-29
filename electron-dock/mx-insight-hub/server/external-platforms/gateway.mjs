@@ -134,7 +134,12 @@ function deliveryBody(base, {
   // `reason` is derived from the same sourceMode/fallbackReason pair that is
   // written to durable delivery evidence, so the public explanation and the
   // audit row cannot drift apart. `fallbackReason` stays for compatibility.
-  const reason = describeDeliveryReason({ sourceMode, fallbackReason, detail: reasonDetail })
+  const deliveryReason = describeDeliveryReason({ sourceMode, fallbackReason, detail: reasonDetail })
+  // WeChat is a Hub-owned public surface. Keep the delivery facts and durable
+  // replay body while leaving connector topology in restricted call evidence.
+  const reason = sourceMode === 'live' && base?.endpoint?.startsWith('wechat.')
+    ? { ...deliveryReason, scope: 'data_service', summary: 'Served from a fresh Hub data request.' }
+    : deliveryReason
   return {
     ...structuredClone(base),
     requestId,
@@ -514,6 +519,8 @@ export class ExternalPlatformGateway {
       operation: endpoint.operation, authorizationPlatform: endpoint.authorizationPlatform,
       capabilityMessage: 'This native data endpoint is not granted for this API key',
       skipIngest: true, replayReleasedFailures: true, nativeForwarding: true,
+      billingFree: endpoint.key === 'wechat.demo.article-sample',
+      allowZeroCost: endpoint.allowZeroCost === true,
       normalize: ({ policy }) => normalizeNativeForwardingRequest(key, body, { maxPageSize: Math.min(100, policy.maxPageSize) }),
       dispatch: ({ credential }) => this.adapter.forwardNative(key, body, credential),
     })
@@ -1118,7 +1125,7 @@ export class ExternalPlatformGateway {
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
         const unitCost = costControl.costMinor
         lastDispatchEvidence = {
-          billed: plan.billingUnknown ? null : true,
+          billed: plan.billingFree ? false : plan.billingUnknown ? null : true,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
           currency: unitCost == null ? null : costControl.currency,
@@ -1149,7 +1156,7 @@ export class ExternalPlatformGateway {
           // Official usage semantics count only code=0 as a successful billed
           // request. Monetary cost remains unknown unless a reviewed price book
           // is configured.
-          billed: plan.billingUnknown ? null : true,
+          billed: plan.billingFree ? false : plan.billingUnknown ? null : true,
           costMinor: unitCost,
           costKind: unitCost == null ? 'unknown' : 'estimated',
           currency: unitCost == null ? null : costControl.currency,
@@ -1188,7 +1195,7 @@ export class ExternalPlatformGateway {
         const persistedEvidence = persistedCallEvidence(error)
         const mappedError = publicFailure(error)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
-        const billed = evidence.billed ?? null
+        const billed = plan.billingFree ? false : evidence.billed ?? null
         const unitCost = costControl.costMinor
         lastDispatchEvidence = {
           billed,

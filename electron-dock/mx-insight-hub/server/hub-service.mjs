@@ -4,6 +4,7 @@ import { serviceCatalogPage } from './data/service-catalog.mjs'
 import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from './contracts/native-forwarding.mjs'
+import { assertWechatSearchNotRetired, wechatSearchPlatform, normalizeWechatDataSearch, WECHAT_SEARCH_OPERATION, WECHAT_LEGACY_SEARCH_PLATFORMS } from './contracts/wechat-search-alias.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
 import { nightAllFailureEvidence, nightAllRejectionError } from './data/night-all-failure-evidence.mjs'
 import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
@@ -35,7 +36,7 @@ import { XIAOHONGSHU_USER_INFO_OPERATION } from './contracts/tikhub-xiaohongshu-
 import { XIAOHONGSHU_CRAWL_OPERATION } from './contracts/tikhub-xiaohongshu-user-posts.mjs'
 import { XHS_RESEARCH_OPERATIONS } from './contracts/xiaohongshu-research.mjs'
 import { XHS_DISCOVERY_OPERATIONS } from './contracts/xiaohongshu-discovery.mjs'
-import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY } from './contracts/tikhub-xiaohongshu-official.mjs'
+import { XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY, TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS } from './contracts/tikhub-xiaohongshu-official.mjs'
 import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
 import { SOCIAL_ACCOUNT_SEARCH_OPERATION } from './contracts/social-accounts.mjs'
@@ -564,6 +565,7 @@ export class HubService {
     externalPostCapabilities = null,
     externalNativeCapabilities = null,
     externalSocialSearch = null,
+    externalWechatSearch = null,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
     externalSocialUserActivity = null,
@@ -590,6 +592,7 @@ export class HubService {
     this.externalPostCapabilities = externalPostCapabilities
     this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
+    this.externalWechatSearch = externalWechatSearch
     this.externalSocialSearchEnabled = typeof externalSocialSearchEnabled === 'function'
       ? externalSocialSearchEnabled : externalSocialSearchEnabled === true
     this.externalSocialSearchCanaryConsumerIds = new Set(
@@ -847,7 +850,7 @@ export class HubService {
     const issued = issueApiKey(this.apiKeyPepper, 'live')
     // Explicit creation snapshots currently implemented domains/capabilities.
     // No wildcard, inherited grants, plan changes or reusable secret exposure.
-    const platforms = [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(),
+    const platforms = [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), ...WECHAT_LEGACY_SEARCH_PLATFORMS,
       'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk',
       ...(await listCrawlerSpecs(this.store)).map(spec => spec.platform)])].sort()
     let keyId
@@ -1439,7 +1442,12 @@ export class HubService {
           capability: XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY,
           // The compatibility grant covers several App V2 endpoints, so its
           // generic readiness stays conservative unless every operation is ready.
-          ready: Boolean(xiaohongshuAcquisition?.ready),
+          ready: Object.values(TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS).every(endpoint => providerOperationReady(xiaohongshuAcquisition, endpoint.operation)),
+          endpoints: Object.values(TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS).map(endpoint => ({
+            path: endpoint.path, operation: endpoint.operation,
+            ready: providerOperationReady(xiaohongshuAcquisition, endpoint.operation),
+            effectiveState: xiaohongshuAcquisition?.operations?.[endpoint.operation]?.effectiveState || 'unknown',
+          })),
         },
         {
           capability: JUSTONE_OPERATION,
@@ -1539,6 +1547,10 @@ export class HubService {
           .map((platform) => ({ platform, ready: false })),
         legacySearch: legacyPlatforms.size > 0 ? legacySearch : null,
       },
+    }
+    for (const platform of canonicalGrants.filter(value => wechatSearchPlatform(value))) {
+      payload.data.platforms.push({ platform, ready: Boolean(this.searchQueries?.searchContent),
+        source: 'hub', servingMode: 'stored', capabilities: ['stored_search'] })
     }
     if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
@@ -3383,17 +3395,20 @@ export class HubService {
     const page = query.mode === 'refresh' ? await aggregateLivePage(query, { context, store: this.store, secret: this.apiKeyPepper }) : null
     const routes = page?.routes || [{ id: 'stored', label: 'Hub 历史数据', platform: null, kind: 'stored' }]
     const readCapabilities = async fn => { try { return await fn({ consumerId: context.consumer.id }) } catch { return null } }
-    const [social, ecommerce] = await Promise.all([
+    const [social, ecommerce, wechat] = await Promise.all([
       routes.some(row => row.platform === 'xiaohongshu') && this.externalPostCapabilities ? readCapabilities(this.externalPostCapabilities) : null,
       routes.some(row => ['products', 'hub_social'].includes(row.kind)) && this.externalPlatformCapabilities ? readCapabilities(this.externalPlatformCapabilities) : null,
+      routes.some(row => row.kind === 'wechat') && this.externalNativeCapabilities
+        ? readCapabilities(options => this.externalNativeCapabilities({ ...options, operationKeys: [WECHAT_SEARCH_OPERATION] })) : null,
     ])
     const items = routes.map(route => {
-      const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : ['products', 'hub_social'].includes(route.kind) ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
+      const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : ['products', 'hub_social', 'wechat'].includes(route.kind) ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
       const price = customerRequestPrice(plan?.priceBook, billing.profile, meterKey)
       const enforced = billing.profile?.mode === 'enforced'
       const cost = price.quotedMinor
       assert(Number.isSafeInteger(cost) && cost >= 0, 400, 'quote_too_large', 'Quote exceeds safe integer range')
-      const runtime = (route.platform === 'xiaohongshu' ? social : ['products', 'hub_social'].includes(route.kind) ? ecommerce : null)?.operations?.[meterKey]
+      const runtime = route.kind === 'wechat' && typeof wechat?.[meterKey] === 'boolean' ? { ready: wechat[meterKey] }
+        : (route.platform === 'xiaohongshu' ? social : ['products', 'hub_social'].includes(route.kind) ? ecommerce : null)?.operations?.[meterKey]
       return { id: route.id, platform: route.platform, label: route.label, meterKey, pages: 1,
         priceStatus: !enforced ? 'billing_disabled' : price.priceSource === 'tenant_default' ? cost === 0 ? 'unpriced_free' : 'tenant_default' : cost === 0 ? 'explicit_free' : 'priced',
         unitPriceMinor: enforced ? cost : 0, currency: price.currency,
@@ -4153,6 +4168,7 @@ export class HubService {
   }
 
   async nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path }) {
+    assertWechatSearchNotRetired(operation, body)
     assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
@@ -4568,6 +4584,11 @@ export class HubService {
   }
 
   async search(context, { body, idempotencyKey, path, liveOnly = false }) {
+    if (wechatSearchPlatform(body?.platform)) {
+      const mapped = normalizeWechatDataSearch(body)
+      assert(this.externalWechatSearch, 503, 'external_platform_unavailable', 'WeChat data service is unavailable')
+      return this.externalWechatSearch(context, { ...mapped, idempotencyKey })
+    }
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),

@@ -1,5 +1,10 @@
 # MX Insight Hub
 
+新增：[微信数据服务与公众号产品](docs/integrations/wechat-services.md)（2026-09-29，本地实现；迁移 118、新操作默认禁用）。
+
+2026-09-30：`/api/v1/search/raw` 与 `/api/v1/data/search` 微信请求转入 Hub 新合同；聚合微信实时子请求也使用新网关。仅显式 Night-All 微信搜索返回 410。新授权、价格与幂等生效，旧游标不可复用；其他平台和 MX-H2I 登录联网不变。
+
+
 Internal 部署与重启先看 [mx-insight.deploy.md](mx-insight.deploy.md)：共享数据归属、原盘位置、凭据、单命令恢复及验收边界。
 
 MX Insight Hub is an independently deployed data control plane and data center.
