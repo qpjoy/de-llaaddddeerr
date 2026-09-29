@@ -125,21 +125,26 @@ def open_directories(root, tree, local):
         raise
 
 
-def check_nas_file(dirs, tree, path, strict=False):
+def check_nas_file(dirs, tree, path, strict=False, revalidate=None):
     parent, _, name = path.rpartition('/')
     info = os.stat(name, dir_fd=dirs[parent], follow_symlinks=False)
     if (not stat.S_ISREG(info.st_mode) or info.st_dev != os.fstat(dirs['']).st_dev or
             (stamp(info) != tree[path] if strict else preserved_attributes(stamp(info)) != preserved_attributes(tree[path]))):
+        if strict and revalidate is not None:
+            # Only an explicit project verifier can prove a narrow exception.
+            # Legacy/infra callers retain strict metadata behavior.
+            revalidate(path)
+            return
         raise RuntimeError('NAS file missing/changed; retain SSD for review: ' + path)
 
 
-def check_nas_files(target, tree, paths, nas_tree=None):
+def check_nas_files(target, tree, paths, nas_tree=None, revalidate=None):
     expected = tree if nas_tree is None else nas_tree
     dirs = open_directories(target, expected, nas_tree is not None)
     try:
         last = time.monotonic()
         for index, path in enumerate(paths, 1):
-            check_nas_file(dirs, expected, path, strict=nas_tree is not None)
+            check_nas_file(dirs, expected, path, strict=nas_tree is not None, revalidate=revalidate)
             if time.monotonic() - last >= 10:
                 emit('reclaim_nas_metadata_progress', checked=index, total=len(paths), content_hashing=False)
                 last = time.monotonic()
@@ -147,7 +152,7 @@ def check_nas_files(target, tree, paths, nas_tree=None):
         for fd in dirs.values(): os.close(fd)
 
 
-def delete_files(source, target, tree, paths, journal, guard, nas_tree=None):
+def delete_files(source, target, tree, paths, journal, guard, nas_tree=None, revalidate=None):
     local = open_directories(source, tree, True)
     nas = None; removed = 0; logical = 0
     try:
@@ -177,7 +182,7 @@ def delete_files(source, target, tree, paths, journal, guard, nas_tree=None):
                             if precopy.source_identity(target_parent) != precopy.source_identity(nas[parent]):
                                 raise RuntimeError('NAS parent detached: ' + path)
                         finally: os.close(target_parent)
-                    check_nas_file(nas, expected, path, strict=nas_tree is not None)
+                    check_nas_file(nas, expected, path, strict=nas_tree is not None, revalidate=revalidate)
                     if stamp(os.stat(leaf, dir_fd=fd, follow_symlinks=False)) != tree[path]:
                         raise RuntimeError('SSD file changed immediately before unlink: ' + path)
                     os.unlink(leaf, dir_fd=fd)

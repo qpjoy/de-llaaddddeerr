@@ -2,9 +2,32 @@
 
 这是显式迁移收尾操作，普通开机恢复、应用发布和容错不会调用它。
 
-**最新现场：已经部分删除，以下历史重新检查/准备步骤目前不能执行。** 新检查 `reclaim-check-d28a86a2c0f341b18789fb7cd3e47bef` 和已验收清单 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e` 成功后，删除任务 `mx-nas-part2-delta-reclaim-b7fa889b43.service` 已报告删除 41,000 个 SSD 文件、641,666,643 逻辑字节。随后在下一批检查 `avatar/e34a680ea26c1aeeb0163f836240d84892c4a889cd3fd92bd6b322eb575e3b45.png` 的 NAS 元数据时失败，实际已删数量可能更多，须以剩余文件和持久意图日志核对。NAS/SSD 本次具体变化字段及内容仍待诊断，不套用此前 ctime-only 结论。
+**最新现场：部分删除后的只读诊断已确认，只能使用同一清单续删。** 原 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e` 对应的 SSD 已缺失 41,875 个文件，均有持久删除意图；剩余 277,938 个。日志有 42,000 个唯一文件路径，包含报错头像，检查期间日志稳定。
 
-必须保留成功切换报告下的 `ssd-reclaim.json` 和 **1fc15c5e 清单**中的 `plan.json`、`unlink-intents.jsonl`；对照它引用的 **d28a86a2 检查**做只读核验。不要运行 cleanup check/prepare 生成新清单、重置日志、手工删剩余文件或将 SSD 内容重新写入 NAS。诊断后只能在原计划及日志约束下考虑续删；业务正常运行可继续，避免重新部署或重启容器。下面历史步骤仅供追溯，不能覆盖这一最新状态。
+报错 `avatar/e34a680ea26c1aeeb0163f836240d84892c4a889cd3fd92bd6b322eb575e3b45.png` 的 SSD 元数据未变；NAS 只有 ctime_ns 从 1790683256761350800 变为 1790688683942680403。两侧都是 504 字节普通单链接文件，稳定读取的完整 SHA256 一致且匹配文件名。尚未确定哪个进程改动了 ctime，不能由此推断其他文件均无变化。
+
+本次修复只在显式 delta 删除器启用：NAS 与原清单仅 ctime 不同、文件名是 SHA256 的非 tmp 普通文件时，重新读取 SSD/NAS 完整内容，要求哈希均等于文件名，SSD 全部属性仍符合冻结清单。单文件最多 16 MiB，每次执行最多 64 对、累计双侧读取 64 MiB；这是异常核验的读取范围，不是限速。不满足条件或超出范围则保留 SSD 报错，不自动扩展到全量哈希。
+
+每次核验另存并 fsync 原计划目录内的私有 `ctime-proof-UUID.json`，记录计划/检查/运行指纹、原新属性和双侧哈希，落盘后再次核对运行状态及文件描述符和路径。预检和逐文件删除前各自重新计算，不用旧复核文件作为许可。计划、清单、删除意图历史、NAS 文件和迁移报告保持原内容；缺失项仍必须在原意图日志中。默认 infra/旧回收路径继续严格匹配元数据。
+
+同步本次 mx-static（包含新增 `scripts/nas/projects/delta_reclaim_files.py`）后，在服务器 mx-static 目录以 root 执行：
+
+```bash
+bash scripts/manage.sh nas recovery install &&
+bash scripts/manage.sh nas recovery check
+```
+
+预期快照 **`7d9bcc2847ec012da71e`**，两项目恢复仍已核对、已纳入。确认后显式续删：
+
+```bash
+bash scripts/manage.sh nas delta cleanup \
+  /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e \
+  --business-accepted
+```
+
+根据新任务返回的精确 unit 查看日志。可见 `nas_delta_reclaim_ctime_revalidated`；最终仍须 `nas_delta_reclaim_complete` 和 `Succeeded`，然后按第 4 节核对状态/空间。当前没有服务端续删成功回执。
+
+**不要运行新的 cleanup check/prepare，不改日志、不重新部署或重启容器、不从 SSD 回写 NAS。** 保留原报告下的 `ssd-reclaim.json`、1fc15c5e 目录的 `plan.json` / `unlink-intents.jsonl` 及它引用的 d28a86a2 检查。普通业务可继续；运行、挂载、源文件或其他 NAS 属性变化仍会拦截。下文保留历史事件与通用流程，不能覆盖上述部分删除状态。
 
 此前（2026-09-29）：删除重试 `mx-nas-part2-delta-reclaim-e6f5367f18.service` 已通过源目录打开，随后在初始运行指纹核对处拒绝。十个媒体容器的 ID/PID/启动时间均变化，多数实际镜像改变，web 命令和三个 worker 的 HostConfig.Mounts 也变化；这是不同于下文绑定挂载格式问题的真实部署变化。原 `6f8ee490…` 清单不能继续用于当前部署。当次尚未进入删除归属/日志创建和文件删除。
 
@@ -43,7 +66,7 @@ bash scripts/manage.sh nas recovery install &&
 bash scripts/manage.sh nas recovery check
 ```
 
-本次预期运行时快照：`519f63842c724ba186e1`。delta 和 infra 应仍已核对、已纳入，timer active/enabled。安装不停止业务，保留已有策略。原只读核验记录不用改写；新增能力不会把其中的 `deletion_supported=false` 原地改成 true。
+本次预期运行时快照：`7d9bcc2847ec012da71e`。delta 和 infra 应仍已核对、已纳入，timer active/enabled。安装不停止业务，保留已有策略。原只读核验记录不用改写；新增能力不会把其中的 `deletion_supported=false` 原地改成 true。
 
 ## 2. 实际业务验收通过后，准备独立回收清单
 
@@ -110,4 +133,4 @@ SSH 断开不停止后台任务；主机重启不会自动续跑删除。先查�
 
 已删除部分不会回滚；NAS 始终是正式来源。普通业务运行、恢复和数据库/队列不因清理失败被本工具停止或重建。
 
-本地 489 项 NAS 测试、39 个 Python 文件的 Python 3.6 语法检查、10 个 NAS/manage Bash 语法检查通过。原 16 个回收回归覆盖真实临时文件删除、两次显式验收参数、精确范围、元数据/运行变化、日志先落盘、部分删除续跑、拒绝更换计划及完成回执写入中断；本次 4 个新增用例覆盖现场绑定来源格式、其他目录/项目绑定拒绝、显示设备与实际设备不一致、文件类型/NFS/错误磁盘/符号链接拒绝。Docker/NFS/systemd 边界采用模拟，尚未取得服务器删除完成回执，也未做断电演练。
+本地 500 项 NAS 测试、40 个 Python 文件的 Python 3.6 语法检查、10 个 NAS/manage Bash 语法检查通过。本次新增 11 个用例覆盖部分删除后同计划续删、双侧内容/文件名核验、预检到删除之间 ctime 变化、内容改写但大小/mtime 相同、源文件变化、临时文件拒绝、读取上限、读取/审计写入期间变化、父目录替换/链接、审计失败和运行状态拒绝。原有清单归属、日志落盘/丢失/截断、运行变化和删除范围测试继续通过。Docker/NFS/systemd 边界采用模拟，尚未取得服务器删除完成回执，也未做断电演练。

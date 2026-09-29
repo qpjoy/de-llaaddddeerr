@@ -20,6 +20,7 @@ import reclaim_plan
 from permissions import emit
 from projects import delta_copy as media
 from projects import delta_reclaim as review
+from projects.delta_reclaim_files import CtimeRevalidator
 from projects import delta_runtime as runtime
 from projects import infra_reclaim as files
 from projects import infra_reclaim_runtime as evidence
@@ -240,7 +241,8 @@ def execute(manager, profile, plan_path, business_accepted=False):
             guard()
             permitted = reclaim.read_intents(journal, op.tree) if journal is not None else set()
             remaining = reclaim.remaining_files(op.source, op.tree, permitted)
-            reclaim.check_nas_files(op.target, op.tree, remaining, nas_tree=op.nas_tree)
+            revalidate = CtimeRevalidator(op, folder, plan, plan_sha, guard)
+            reclaim.check_nas_files(op.target, op.tree, remaining, nas_tree=op.nas_tree, revalidate=revalidate)
             op.probes()
             if reclaim.remaining_files(op.source, op.tree, permitted) != remaining:
                 raise RuntimeError('Delta SSD changed during deletion preflight.')
@@ -255,7 +257,8 @@ def execute(manager, profile, plan_path, business_accepted=False):
             emit('nas_delta_reclaim_started', plan_directory=plan_path, files_remaining=len(remaining),
                  business_accepted=True, nas_deleted=False, source_root_retained=True)
             before = os.fstatvfs(op.source)
-            removed, logical = reclaim.delete_files(op.source, op.target, op.tree, remaining, journal, guard, nas_tree=op.nas_tree)
+            removed, logical = reclaim.delete_files(op.source, op.target, op.tree, remaining, journal, guard,
+                                                    nas_tree=op.nas_tree, revalidate=revalidate)
             if reclaim.remaining_files(op.source, op.tree, reclaim.read_intents(journal, op.tree)):
                 raise RuntimeError('Delta SSD still contains manifested files.')
             guard()
