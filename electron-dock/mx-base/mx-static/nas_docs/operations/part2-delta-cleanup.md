@@ -2,41 +2,38 @@
 
 这是显式迁移收尾操作，普通开机恢复、应用发布和容错不会调用它。
 
-**最新现场：仍使用同一清单，先只读统计本次异常哈希范围。** 最新续删任务 `mx-nas-part2-delta-reclaim-f25eeb2a40.service` 在 `video/f6b999d6eadf0016d8d0e9906bcc50cb581ffd76644219ff2796212692b4e4db.mp4` 报 `NAS ctime proof read budget exceeded`。旧日志没有区分单文件 16 MiB、累计双侧读取 64 MiB、64 次成对核验中的哪一项，也没有区分预检/删除阶段，不能据此宣称该视频哈希已经通过，或本次没有继续删除文件。
+**最新现场：已经部分删除，随后容器重新部署；先审核当前部署，继续保留原清单和意图日志。** 只读任务 `mx-nas-part2-delta-reclaim-957702929d.service` 在初始运行比较处拒绝，十个媒体容器 ID/PID/启动时间变化，多数实际镜像和部分 HostConfig.Mounts 也变化。这不能单独证明媒体回到 SSD。`inspect_only=true` 表示本次没有删除；旧 `may_be_partially_reclaimed=false` 不能否定之前已经部分删除。本次改为在尚未核对归属时输出 null 及 `prior_ownership_checked=false`，避免误读。
 
-此前对原 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e` 的只读核对得到 41,875 个有持久意图的缺失 SSD 文件、277,938 个剩余文件；这是上次快照，不是本次最新数量。504 字节头像 `e34a680e…png` 当时仅 NAS ctime 改变，两侧稳定完整 SHA256 相等且匹配文件名。保留原报告下 `ssd-reclaim.json`、原计划/意图日志和其引用的 d28a86a2 检查。
+当前唯一回收计划仍是 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e`，保留它引用的 `reclaim-check-d28a86a2c0f341b18789fb7cd3e47bef`、原报告 `ssd-reclaim.json` 和原计划 `unlink-intents.jsonl`。历史快照曾有 41,875 个有意图的缺失 SSD 文件 / 277,938 个剩余文件，后续续删与超限后当前数量尚不确定。不得新建 cleanup check/prepare 接管，或改写旧运行指纹来绕过失败。
 
-本次增加 `--inspect-ctime`：读取同一计划，检查当前恢复/运行身份、SSD 剩余文件与原意图日志，只遍历剩余 NAS 对应文件元数据；统计可进行 ctime-only 内容核验的数量、总字节、最大文件。它不哈希、不删除、不生成新清单、不追加意图或证明文件。已有意图文件以只读方式打开，丢失不创建；后台任务对 `/data`、`/mnt/nas` 均只读，不给 SSD 可写例外。
-
-先同步 mx-static，在服务器 mx-static 目录以 root 执行：
+先同步完整 mx-static 代码（含新 `scripts/nas/projects/delta_reclaim_review.py`），在服务器 mx-static 目录以 root 执行：
 
 ```bash
 bash scripts/manage.sh nas recovery install &&
 bash scripts/manage.sh nas recovery check
 ```
 
-本次预期快照 **`ccdc6496e84250c89611`**。两项目恢复核对通过后执行同一清单的只读统计：
+本次预期快照 **`c5613bfa5cd301643400`**。两项目恢复检查通过后，只读审核同一计划：
 
 ```bash
 bash scripts/manage.sh nas delta cleanup \
   /var/lib/mx-static/nas-delta-cutover/delta-2084964733fa4abfb8d0409ac076c699/reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e \
-  --inspect-ctime
+  --review-runtime
 ```
 
-使用返回的精确 `journalctl` 命令查看后台结果。成功事件 `nas_delta_reclaim_ctime_inspect_complete` 包含：
+按返回的 `journalctl` 命令查看实际完成结果。此操作不停止/重建容器，不删除、补写 NAS 或 SSD，不改变原清单/运行指纹/归属/意图。后台对 `/data` 和 `/mnt/nas` 只读，没有 SSD 可写例外。只新增原计划内私有 `runtime-review-UUID`，包括 `review.json` 和绑定其摘要的完成标记。审核失败的未完成记录不能用于续删。
 
-- `remaining_files` / `missing_with_intent`：重新核对的当前数量。
-- `ctime_only_candidates` / `largest_candidate_bytes`：仅 NAS ctime 变化且文件名/类型等符合要求的候选，尚未做内容哈希。
-- `planned_read_bytes` / `planned_hash_pairs`：预检和删除前各核验双侧一次，共候选逻辑字节的 4 倍、候选数的 2 倍。
-- `issues=0` 时才给 `resume_command`：同一清单、`--business-accepted` 和按快照计算的有限 `--ctime-proof-read-mib N --ctime-proof-pairs N`。确认统计范围后显式执行该命令；有其他差异则不给续删命令并返回失败。
+审核重新检查当前 NAS 卷和内核子挂载、额外 SSD 访问路径、必需服务健康、恢复启用及当前代码；核对原始迁移/停写/清单证据，按原意图日志核对 SSD 缺失与剩余文件，扫描剩余 NAS 对应项的元数据，执行当前容器 NAS 身份和 1024 字节 HTTP 读取探测。业务新写到 NAS 的额外文件保留。NAS 内容变化不会因部署审核而被直接接受：此处只统计可进行 ctime-only 哈希的候选，真正续删仍必须做完整双侧内容证明。
 
-统计通过不等于内容通过，也不执行删除。显式扩大读取预算只改变允许做多少核验：NAS 除 ctime 外的所有字段、SSD 全部原属性仍须匹配，两侧完整 SHA256 必须等于彼此及文件名，读取与复核落盘期间也必须稳定。只支持 SHA256 命名的非 tmp 单链接普通文件；其他类型、属性和内容变化仍拒绝。每次证明写入原计划下新的 `ctime-proof-UUID.json`，记录实际预算和阶段；不会采用旧证明跳过重新核验。
+成功事件 **`nas_delta_reclaim_runtime_review_complete`** 包含 `review_directory`、仅服务/字段名的 `changes`、`statistics` 和 `resume_command`。统计包含当前剩余/意图覆盖缺失数、ctime-only 候选数量/最大文件、预计读取字节/哈希对数。原计划/归属/目录身份和日志已有前缀与新审核绑定，日志后续只能追加。记录中的 `business_acceptance_pending=true` 和 `deletion_authorized=false` 是预期值；旧版本业务验收不代表新部署已实测正常。
 
-默认预算仍为单文件 16 MiB、累计读取 64 MiB、64 对。显式 `--ctime-proof-read-mib N` 将总读取上限设为 N MiB，单文件上限为其四分之一以容纳两轮双侧读取；`--ctime-proof-pairs N` 指成对哈希次数，每文件预检/删除各占一次。有限最大值为 8 TiB / 800,000 对，对应既有项目 2 TiB / 400,000 文件上限，不提供无限读取绕过。预算是异常核验范围，不是传输限速。统计后若又出现新的 ctime 差异，仍可能超限，保留日志再分析；不会自动扩张。
+确认**当前部署**账号登录/联网、旧媒体读取、新媒体写入、后台任务正常后，使用此次输出的完整 `resume_command`。它仍指定原 `1fc15c5e…` 计划，增加 `--runtime-review <本次审核目录>`、`--business-accepted` 及有限哈希读取预算。不要猜审核目录，工具不会自动选择最新记录。续删会重新核对原日志前缀、全部剩余文件、当前运行与恢复；审核后再次部署/重启、原记录变化或内容不符仍停止。若同一审核下因暂时故障再次中断，可保留日志用同一显式命令重试；新的合法意图追加不使原前缀失效。选择的审核摘要同时写入新的 ctime 证明和完成收据。
 
-新超限事件 `nas_delta_reclaim_ctime_budget_exceeded` 明确给出 `phase`、`exceeded`、`file_bytes`、`pairs_used`、`read_bytes_used` 和 `limits`，避免再猜哪个上限。最终仍须 `nas_delta_reclaim_complete` 与 `Succeeded`，再按第 4 节核对空间/状态；当前无服务端删除完成回执。
+预算沿用之前的异常核验策略：默认单文件 16 MiB、累计读取 64 MiB、64 对；显式 `--ctime-proof-read-mib N` 设累计读取上限、单文件上限为四分之一，`--ctime-proof-pairs N` 限制成对哈希次数。预检和删除前各读双侧，估计是候选字节的 4 倍 / 候选数的 2 倍；这是核验范围，不是限速。只准 SHA256 命名、非 tmp、单链接普通文件且仅 NAS ctime 变化的候选；两侧稳定完整 SHA256 必须相同且等于文件名。其他属性/路径/内容变化拒绝。原清单和旧证明不被修改，不复用旧哈希跳过核验。之后新增 ctime 差异仍可能超出预算，保留日志分析。
 
-**不要运行新的 cleanup check/prepare，不改日志、不重新部署或重启容器、不从 SSD 回写 NAS。** 普通业务可继续。下文保留历史事件与通用流程，不能覆盖上述部分删除状态。
+`--inspect-ctime` 仍可用于运行未变时的同计划只读统计；当前现场必须先做 `--review-runtime`，之后统计可显式带 `--runtime-review <已完成审核目录>`。两种只读动作均不授权删除，也不会建立替代回收计划。
+
+**清理期间避免并行部署/重启，不重置任何原始记录，不从 SSD 回写 NAS。** 普通业务可继续。只有最终 `nas_delta_reclaim_complete` 和任务 `Succeeded` 才表示该清单完成，再按第 4 节查看空间/服务状态。当前没有服务器删除完成回执。下文保留历史与通用流程，不能覆盖本段的部分删除处理。
 
 此前（2026-09-29）：删除重试 `mx-nas-part2-delta-reclaim-e6f5367f18.service` 已通过源目录打开，随后在初始运行指纹核对处拒绝。十个媒体容器的 ID/PID/启动时间均变化，多数实际镜像改变，web 命令和三个 worker 的 HostConfig.Mounts 也变化；这是不同于下文绑定挂载格式问题的真实部署变化。原 `6f8ee490…` 清单不能继续用于当前部署。当次尚未进入删除归属/日志创建和文件删除。
 
@@ -137,9 +134,9 @@ bash scripts/manage.sh nas recovery check
 SSH 断开不停止后台任务；主机重启不会自动续跑删除。先查看精确任务日志，再决定后续：
 
 - **尚未开始删除，运行状态已变化**：旧证据会拒绝。重新做 `nas delta cleanup check`，再从新检查报告准备新清单，原证据保留。
-- **已开始删除**：只能保留并沿用同一 `reclaim-plan` 和 `unlink-intents.jsonl`；相同运行状态下修复暂时故障后重跑同一条 cleanup 命令，工具会根据已持久写入的意图核对缺失文件，只删除尚存的清单文件。另一份计划不能接管。
+- **已开始删除**：只能保留并沿用同一 `reclaim-plan` 和 `unlink-intents.jsonl`；相同运行状态下修复暂时故障后重跑同一条 cleanup 命令，工具会根据已持久写入的意图核对缺失文件，只删除尚存的清单文件。发生部署变化时按本页顶部执行独立当前运行审核，显式选择后才能续删；另一份回收计划不能接管。
 - **重启、重部署、报告/清单/挂载变化，或日志丢失/截断**：拒绝自动采用新状态续删；保留全部证据，先分析错误。不要重置日志、重新复制 SSD 到 NAS、绕过校验或手工把状态改成成功。
 
 已删除部分不会回滚；NAS 始终是正式来源。普通业务运行、恢复和数据库/队列不因清理失败被本工具停止或重建。
 
-本地 508 项 NAS 测试、40 个 Python 文件的 Python 3.6 语法检查、10 个 NAS/manage Bash 语法检查通过。本次新增 8 个用例覆盖真实 17 MiB 文件默认拒绝与显式预算下两轮完整哈希、三种超限诊断、无效/无穷预算拒绝、扩大预算仍拒绝内容/其他属性变化、只读统计差异、部分删除后的原日志核对且零内容/证据写入、日志丢失/截断与运行变化拒绝、参数传递和只读 systemd 范围。原有哈希稳定性、清单归属、日志持久化和精确删除范围测试继续通过。Docker/NFS/systemd 边界采用模拟，尚未取得服务器删除完成回执，也未做断电演练。
+本地 526 项 NAS 测试、41 个 Python 文件的 Python 3.6 语法检查、10 个 NAS/manage Bash 语法检查通过。本轮 18 个新增用例覆盖部分删除后的独立审核与显式选择、零原证据/媒体变更、审核前后部署变化、NAS 回落和 SSD 别名拒绝、依赖/恢复/探测失败、未登记缺失、新文件、NAS 非 ctime 差异、日志丢失/截断/前缀改变、合法追加后的同审核续跑、完成标记与存储约束核对，以及选用新运行审核后仍执行两轮双侧 ctime 内容核验、错误内容拒绝。Docker/NFS/systemd 边界采用模拟，未连接服务器、未做真实删除或断电演练。

@@ -44,9 +44,7 @@ def fingerprint(container):
     return {'id': container['Id'], 'sha256': digest(value), 'components': components}
 
 
-def require_same(expected, current, phase, message):
-    if expected == current:
-        return
+def differences(expected, current):
     fields = sorted(k for k in set(expected) | set(current)
                     if k != 'services' and expected.get(k) != current.get(k))
     before, after = expected.get('services', {}), current.get('services', {})
@@ -60,7 +58,13 @@ def require_same(expected, current, phase, message):
             continue
         ac, bc = a.get('components', {}), b.get('components', {})
         services[name] = sorted(k for k in set(ac) | set(bc) if ac.get(k) != bc.get(k)) or ['fingerprint']
-    emit('nas_reclaim_runtime_changed', phase=phase, changed_fields=fields, changed_services=services)
+    return {'changed_fields': fields, 'changed_services': services}
+
+
+def require_same(expected, current, phase, message):
+    if expected == current:
+        return
+    emit('nas_reclaim_runtime_changed', phase=phase, **differences(expected, current))
     raise RuntimeError(message)
 
 

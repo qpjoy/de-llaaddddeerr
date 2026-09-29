@@ -7,6 +7,7 @@ each bounded batch before unlink. No Docker lifecycle, NAS writes or rmdir.
 from contextlib import ExitStack, contextmanager
 import json
 import os
+import shlex
 import re
 import stat
 import time
@@ -21,6 +22,7 @@ from permissions import emit
 from projects import delta_copy as media
 from projects import delta_reclaim as review
 from projects import delta_reclaim_files as proof_files
+from projects import delta_reclaim_review as runtime_reviews
 from projects.delta_reclaim_files import CtimeRevalidator
 from projects import delta_runtime as runtime
 from projects import infra_reclaim as files
@@ -57,7 +59,7 @@ def status(manager, profile):
 
 
 @contextmanager
-def context(manager, profile, check_path):
+def context(manager, profile, check_path, reviewing_runtime=False, selection=None):
     report, _ = split_path(check_path, 'check')
     runtime.registered(manager, profile); runtime.maintenance_guard(manager)
     record = runtime.read_record(manager)
@@ -116,8 +118,17 @@ def context(manager, profile, check_path):
             raise RuntimeError('Reclaim evidence must reside on local storage.')
         capacity = os.fstatvfs(output)
         if capacity.f_bavail * capacity.f_frsize < 1024 ** 3: raise RuntimeError('Need 1 GiB local journal space.')
+        active_runtime = saved_runtime
+        if reviewing_runtime:
+            if selection is not None: raise RuntimeError('Review and selection must be separate operations.')
+            active_runtime, _ = review.snapshot(manager, profile)
+        elif selection is not None:
+            active_runtime = selection['value']['runtime']
+        if evidence.differences(saved_runtime, active_runtime)['changed_fields']:
+            raise RuntimeError('Runtime review cannot change the registered storage contract/schema/project.')
 
         def guard():
+            if selection is not None: selection['guard']()
             if manager.profiles()['part2'] != profile or runtime.read_record(manager) != record:
                 raise RuntimeError('Delta registration changed; stop reclaim.')
             for path, fd in pinned_dirs:
@@ -132,7 +143,7 @@ def context(manager, profile, check_path):
             with media.media() as current:
                 if media.identity(current) != identity: raise RuntimeError('Delta source/NAS path changed; stop reclaim.')
             actual, rows = review.snapshot(manager, profile)
-            evidence.require_same(saved_runtime, actual, 'delta_reclaim',
+            evidence.require_same(active_runtime, actual, 'delta_reclaim_runtime_review' if reviewing_runtime else 'delta_reclaim',
                                   'Delta runtime changed since check; retain SSD and review before continuing.')
             if not review.recovery_evidence(manager)['verified']:
                 raise RuntimeError('Delta recovery is not current/enabled; stop reclaim.')
@@ -152,7 +163,8 @@ def context(manager, profile, check_path):
         guard()
         yield SimpleNamespace(output=output, report=report, check=check, check_sha=check_sha,
             source=view['source'], target=view['target'], tree=tree, nas_tree=nas_tree,
-            totals=totals, guard=guard, probes=probes)
+            totals=totals, guard=guard, probes=probes, original_runtime=saved_runtime, active_runtime=active_runtime,
+            runtime_selection=selection)
 
 
 def prepare(manager, profile, check_path, business_accepted=False):
@@ -186,11 +198,14 @@ def prepare(manager, profile, check_path, business_accepted=False):
 
 
 def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=False,
-            ctime_proof_read_mib=None, ctime_proof_pairs=None):
-    if not inspect_ctime and not business_accepted: raise RuntimeError('Explicit --business-accepted required for SSD deletion.')
+            ctime_proof_read_mib=None, ctime_proof_pairs=None, review_runtime=False, runtime_review=None):
+    if review_runtime and (inspect_ctime or runtime_review): raise RuntimeError('Runtime review and selection/inspection must be separate operations.')
+    readonly = inspect_ctime or review_runtime
+    if not readonly and not business_accepted: raise RuntimeError('Explicit --business-accepted required for SSD deletion.')
     budget = proof_files.limits(ctime_proof_read_mib, ctime_proof_pairs)
     report, _ = split_path(plan_path, 'plan')
-    folder = journal = None; started = False
+    folder = journal = None; started = False; owner_checked = False
+    selections = ExitStack()
     try:
         folder = media.open_absolute(plan_path, private=True)
         plan, plan_sha = media.read_private(folder, 'plan.json')
@@ -200,7 +215,8 @@ def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=
                 or plan.get('reclaim_ready') is not True or plan.get('deletion_supported') is not True
                 or plan.get('deletion_authorized') is not False or plan.get('source_deleted') is not False):
             raise RuntimeError('An accepted delta reclaim plan is required; checks are not deletion plans.')
-        with context(manager, profile, plan['check_directory']) as op:
+        selection = selections.enter_context(runtime_reviews.load(runtime_review, plan, plan_sha)) if runtime_review else None
+        with context(manager, profile, plan['check_directory'], reviewing_runtime=review_runtime, selection=selection) as op:
             if (op.report != report or op.check_sha != plan['check_sha256']
                     or any(plan.get(k) != v for k, v in op.totals.items())
                     or any(plan.get(k) != op.check[k] for k in ('manifest_sha256', 'target_manifest_sha256', 'runtime_snapshot_sha256'))):
@@ -208,6 +224,8 @@ def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=
             identity = {'schema': 1, 'project': media.PROJECT, 'volume': media.VOLUME,
                         'plan_directory': plan_path, 'plan_sha256': plan_sha, 'manifest_sha256': plan['manifest_sha256']}
             saved = owner(op.output)
+            owner_checked = True
+            started = saved is not None and saved['phase'] == 'deleting'
             if saved is not None and any(saved.get(k) != v for k, v in identity.items()):
                 raise RuntimeError('Another delta reclaim plan owns the deletion journal; do not replace it.')
             if saved is not None and saved['phase'] == 'ssd_files_reclaimed':
@@ -217,6 +235,8 @@ def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=
                 return result
             # Never adopt an orphan journal as permission for pre-existing holes.
             if saved is None:
+                if review_runtime or selection is not None:
+                    raise RuntimeError('Runtime review requires the existing partial cleanup owner; use a fresh check before deletion starts.')
                 for name in ('unlink-intents.jsonl', 'reclaim-result.json'):
                     try: os.stat(name, dir_fd=folder, follow_symlinks=False)
                     except FileNotFoundError: continue
@@ -224,9 +244,10 @@ def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=
             else:
                 started = True
                 journal = reclaim.private_file(folder, 'unlink-intents.jsonl',
-                    os.O_RDONLY if inspect_ctime else os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                    os.O_RDONLY if readonly else os.O_RDWR | os.O_APPEND)
                 if os.fstat(journal).st_nlink != 1: raise RuntimeError('Unsafe reclaim journal hardlink.')
-                if not inspect_ctime: os.fsync(folder)
+                if not readonly: os.fsync(folder)
+            if selection is not None: runtime_reviews.validate_owner(selection, op, saved, journal)
 
             def guard():
                 op.guard()
@@ -245,13 +266,29 @@ def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=
             guard()
             permitted = reclaim.read_intents(journal, op.tree) if journal is not None else set()
             remaining = reclaim.remaining_files(op.source, op.tree, permitted)
-            if inspect_ctime:
+            if readonly:
                 before_journal = stamp(os.fstat(journal)) if journal is not None else None
                 result = proof_files.inspect_remaining(op, remaining, plan, guard)
                 if (reclaim.remaining_files(op.source, op.tree, permitted) != remaining or
                         (journal is not None and stamp(os.fstat(journal)) != before_journal)):
                     raise RuntimeError('SSD/intent journal changed during ctime inspection.')
                 guard()
+                if review_runtime:
+                    # Do not publish a command without explicit runtime selection.
+                    result['resume_command'] = None
+                    if result['issues']:
+                        emit('nas_delta_reclaim_ctime_inspect_complete', **result)
+                        raise RuntimeError('Non-ctime NAS differences require review; SSD retained.')
+                    op.probes()
+                    guard()
+                    if (reclaim.remaining_files(op.source, op.tree, permitted) != remaining or
+                            stamp(os.fstat(journal)) != before_journal):
+                        raise RuntimeError('SSD/intent journal changed during runtime review probes.')
+                    result = runtime_reviews.save(folder, op, plan, plan_sha, saved, journal, result, guard)
+                    emit(result.pop('event'), **result)
+                    return result
+                if selection is not None and result['resume_command']:
+                    result['resume_command'] += ' --runtime-review ' + shlex.quote(selection['path'])
                 emit('nas_delta_reclaim_ctime_inspect_complete', **result)
                 if result['issues']: raise RuntimeError('Non-ctime NAS differences require review; SSD retained.')
                 return result
@@ -284,15 +321,20 @@ def execute(manager, profile, plan_path, business_accepted=False, inspect_ctime=
                 removed_this_run=removed, logical_bytes_this_run=logical,
                 data_available_before_bytes=before.f_bavail * before.f_frsize,
                 data_available_after_bytes=after.f_bavail * after.f_frsize, completed_unix=time.time())
+            if selection is not None:
+                result.update(runtime_review_directory=selection['path'], runtime_review_sha256=selection['sha256'],
+                              active_runtime_sha256=evidence.digest(op.active_runtime))
             cutover.atomic_json(folder, 'reclaim-result.json', result)
             cutover.atomic_json(op.output, OWNER, result)
             emit('nas_delta_reclaim_complete', **result)
             return result
     except Exception as exc:
-        emit('nas_delta_reclaim_failed', plan_directory=plan_path, error=str(exc), may_be_partially_reclaimed=started,
-             inspect_only=inspect_ctime,
+        emit('nas_delta_reclaim_failed', plan_directory=plan_path, error=str(exc),
+             may_be_partially_reclaimed=started if owner_checked else None, prior_ownership_checked=owner_checked,
+             inspect_only=readonly,
              note='Keep exact plan and intent journal. No rollback. Retry only this same plan after reviewing the failure.')
         raise
     finally:
+        selections.close()
         if journal is not None: os.close(journal)
         if folder is not None: os.close(folder)

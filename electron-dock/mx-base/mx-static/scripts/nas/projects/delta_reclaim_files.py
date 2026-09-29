@@ -148,6 +148,10 @@ class CtimeRevalidator:
                 source_metadata=op.tree[path], recorded_nas_metadata=expected, current_nas_metadata=current,
                 source_sha256=source_sha, nas_sha256=target_sha, hashed_bytes=2 * size, time_unix=time.time(),
                 phase=self.phase, limits=budget)
+            selection = getattr(op, 'runtime_selection', None)
+            if selection is not None:
+                proof.update(runtime_review_directory=selection['path'], runtime_review_sha256=selection['sha256'],
+                             active_runtime_sha256=selection['value']['runtime_sha256'])
             prep.private_write(self.folder, name, proof); os.fsync(self.folder)
             self.guard()
             stable()  # Including changes during proof write/fsync or the final runtime check.

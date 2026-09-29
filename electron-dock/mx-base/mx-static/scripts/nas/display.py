@@ -163,6 +163,14 @@ def render(value):
             value['remaining_files'],value['missing_with_intent'],value['ctime_only_candidates'],
             size(value['largest_candidate_bytes']),size(value['planned_read_bytes']),value['planned_hash_pairs'],
             value['issues'],('显式续删命令（执行时仍重新核验）：\n'+value['resume_command']) if value['resume_command'] else '保留 SSD，先查看差异明细。')
+    if event=='nas_delta_reclaim_runtime_review_complete':
+        s=value['statistics']
+        return ('delta 同清单当前部署审核通过；本次未删除，也未替换原清单/意图日志。\n'
+                '审核目录：{}\n变化服务：{}\n剩余 {} 个，有意图记录的缺失 {} 个\n'
+                'ctime-only 候选 {} 个，双侧核验预计读取 {}\n'
+                '实际确认当前部署业务正常后，才可使用以下显式续删命令（仍重新核验）：\n{}').format(
+            value['review_directory'],', '.join(sorted(value['changes']['changed_services'])) or '无',
+            s['remaining_files'],s['missing_with_intent'],s['ctime_only_candidates'],size(s['planned_read_bytes']),value['resume_command'])
     if event=='nas_delta_reclaim_started':
         return '开始显式回收 delta SSD 清单内文件：剩余 {} 个\n清单：{}\n保留 Docker 卷、目录、其他 media 数据及 NAS 文件。'.format(
             value['files_remaining'],value['plan_directory'])
@@ -173,7 +181,7 @@ def render(value):
         return 'delta SSD 回收：{}\n清单：{}'.format('已完成' if value['phase']=='ssd_files_reclaimed' else '已开始，需查看任务日志',value['plan_directory'])
     if event=='nas_delta_reclaim_failed':
         if value.get('inspect_only'):
-            return 'delta 同清单只读统计失败；本次未删除，原归属/日志保留。\n原因：'+value['error']
+            return 'delta 同清单只读核对失败；本次未删除，历史部分回收状态仍以原归属/日志为准。\n原因：'+value['error']
         return 'delta 回收未完成，可能部分文件已删除；保留同一清单及意图日志。\n清单：{}\n原因：{}'.format(value['plan_directory'],value['error'])
     if event=='nas_reclaim_check_progress':return 'NAS 对应文件元数据已核对：{} 个'.format(value['checked'])
     if event=='nas_reclaim_check_complete':
