@@ -433,6 +433,8 @@ macOS 与 Windows 的 ASAR 打包入口：
 ```bash
 cd electron-dock/mx-launcher/demos/mx-h2i
 pnpm make:asar
+# Windows 快捷入口同样支持省略版本（package.json 版本，win32 / x64）：
+pnpm make:asar:win
 # 或显式指定目标版本、平台与架构：
 pnpm make:asar --version 2.1.20 --platform darwin --arch universal
 # 以下平台快捷脚本仍可使用：

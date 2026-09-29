@@ -102,6 +102,10 @@ For a code-only ASAR update, run from this demo directory:
 
 ```sh
 pnpm make:asar
+# Windows shortcut: package.json version, win32 / x64:
+pnpm make:asar:win
+# Existing positional version/architecture override remains supported:
+pnpm make:asar:win 2.1.20 arm64
 # Optional explicit target (also supports --arch arm64 or x64):
 pnpm make:asar --platform darwin --arch universal --version 2.1.20
 ```
@@ -112,6 +116,8 @@ The version defaults to this demo's `package.json`; explicit flags override
 these defaults. The command runs the checks and writes the `.asar` and its
 `.asar.json` manifest to `out/release-asar/`. It does not publish a release.
 Native dependencies are inherited from the compatible full installer.
+The Windows shortcut delegates to the same preparation, check, and build
+pipeline; its version argument is optional.
 
 Windows packaging uses electron-builder's PowerShell-backed pnpm dependency
 collector. `make:win` automatically prepends the inbox Windows PowerShell 5.1
