@@ -2,9 +2,13 @@
 
 这是显式迁移收尾操作，普通开机恢复、应用发布和容错不会调用它。
 
-最新现场（2026-09-29）：删除重试 `mx-nas-part2-delta-reclaim-e6f5367f18.service` 已通过源目录打开，随后在初始运行指纹核对处拒绝。十个媒体容器的 ID/PID/启动时间均变化，多数实际镜像改变，web 命令和三个 worker 的 HostConfig.Mounts 也变化；这是不同于下文绑定挂载格式问题的真实部署变化。原 `6f8ee490…` 清单不能继续用于当前部署。本次尚未进入删除归属/日志创建和文件删除；不据此推断任何其他任务的历史删除情况。
+**最新现场：已经部分删除，以下历史重新检查/准备步骤目前不能执行。** 新检查 `reclaim-check-d28a86a2c0f341b18789fb7cd3e47bef` 和已验收清单 `reclaim-plan-1fc15c5eb242408b85c4d1549a9f380e` 成功后，删除任务 `mx-nas-part2-delta-reclaim-b7fa889b43.service` 已报告删除 41,000 个 SSD 文件、641,666,643 逻辑字节。随后在下一批检查 `avatar/e34a680ea26c1aeeb0163f836240d84892c4a889cd3fd92bd6b322eb575e3b45.png` 的 NAS 元数据时失败，实际已删数量可能更多，须以剩余文件和持久意图日志核对。NAS/SSD 本次具体变化字段及内容仍待诊断，不套用此前 ctime-only 结论。
 
-当前执行以下只读命令，重新核验当前部署、原停写 SSD 和 NAS 对应项：
+必须保留成功切换报告下的 `ssd-reclaim.json` 和 **1fc15c5e 清单**中的 `plan.json`、`unlink-intents.jsonl`；对照它引用的 **d28a86a2 检查**做只读核验。不要运行 cleanup check/prepare 生成新清单、重置日志、手工删剩余文件或将 SSD 内容重新写入 NAS。诊断后只能在原计划及日志约束下考虑续删；业务正常运行可继续，避免重新部署或重启容器。下面历史步骤仅供追溯，不能覆盖这一最新状态。
+
+此前（2026-09-29）：删除重试 `mx-nas-part2-delta-reclaim-e6f5367f18.service` 已通过源目录打开，随后在初始运行指纹核对处拒绝。十个媒体容器的 ID/PID/启动时间均变化，多数实际镜像改变，web 命令和三个 worker 的 HostConfig.Mounts 也变化；这是不同于下文绑定挂载格式问题的真实部署变化。原 `6f8ee490…` 清单不能继续用于当前部署。当次尚未进入删除归属/日志创建和文件删除。
+
+当时在未开始删除的条件下，使用以下只读命令重新核验当前部署、原停写 SSD 和 NAS 对应项（现已完成）：
 
 ```bash
 bash scripts/manage.sh nas delta cleanup check
@@ -16,7 +20,7 @@ bash scripts/manage.sh nas delta cleanup check
 
 本次原因是任务的 `ReadOnlyPaths=/data /mnt/nas` 加精确 `ReadWritePaths` 形成子目录绑定挂载，`findmnt SOURCE` 显示为 `/dev/nvme0n1p1[/docker/volumes/delta_59202_media_data/_data/data_hub_raw_media]`，旧校验只接受裸设备名。这种方括号格式是 [util-linux 2.32.1 官方 findmnt 文档](https://github.com/util-linux/util-linux/blob/v2.32.1/misc-utils/findmnt.8) 说明的文件系统子目录信息。修复只额外接受该卷的精确 raw-media 子目录，同时检查块设备类型、目录类型和实际设备号；不去除任意方括号，不移除只读保护，不放宽文件/容器/日志校验。
 
-格式修复后曾建议重试原清单，但当前运行变化回执已使该建议失效。按本页顶部说明重新做只读检查；以下保留完整流程供参考，路径必须使用新检查/准备的实际输出。
+格式修复后曾建议重试旧清单，后来运行变化使该建议失效。新检查和准备已经完成，当前已经部分删除，按本页顶部说明保留原计划诊断；以下仅保留完整流程供参考。
 
 ## 删除范围
 
