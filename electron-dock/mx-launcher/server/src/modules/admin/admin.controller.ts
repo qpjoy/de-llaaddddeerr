@@ -35,6 +35,7 @@ import {
   MX_H2I_PRODUCT_ID,
   isSystemSubscriptionAccessAccount,
   SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH,
+  normalizeOverseaBandwidth,
   SYSTEM_SUBSCRIPTION_MIXED_PORT,
   tlsFingerprintFromSiteSlotOutput
 } from '../../store/domain.js';
@@ -507,6 +508,7 @@ export class AdminController {
       knownHostsFile: stringValue(body.knownHostsFile),
       sshConfigFile: stringValue(body.sshConfigFile),
       hostKeyAlias: stringValue(body.hostKeyAlias) ?? siteId,
+      bandwidth: body.bandwidth as SiteSlotPlanInput['bandwidth'],
       serverPorts: requestServerPorts,
       exportPort: requestExportPort,
       workerInternalBaseUrl,
@@ -555,6 +557,7 @@ export class AdminController {
       internalBaseUrl: workerInternalBaseUrl,
       workerInternalBaseUrl,
       overseaCallbackBaseUrl,
+      bandwidth: profile.bandwidth,
       accessAccounts: planAccessAccounts,
       createdBy: requestedBy,
       requestId: `${requestId}-plan`
@@ -731,7 +734,8 @@ export class AdminController {
     }
 
     let plan = await this.findReusableOverseaPlan(siteId, profile.profileId, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl);
-    if (!plan || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
+    if (!plan || JSON.stringify(normalizeOverseaBandwidth(plan.runtime.oversea?.bandwidth)) !== JSON.stringify(normalizeOverseaBandwidth(profile.bandwidth))
+      || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
       plan = await this.store.createSiteSlotPlan({
         siteId,
         kind: 'oversea',
@@ -747,6 +751,7 @@ export class AdminController {
         internalBaseUrl: workerInternalBaseUrl,
         workerInternalBaseUrl,
         overseaCallbackBaseUrl,
+        bandwidth: profile.bandwidth,
         accessAccounts: planAccessAccounts,
         createdBy: requestedBy,
         requestId
@@ -2846,6 +2851,7 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     hasOutboundInternet: booleanValue(body.hasOutboundInternet),
     overseaSiteId: stringValue(body.overseaSiteId),
     overseaHost: stringValue(body.overseaHost),
+    bandwidth: body.bandwidth as SiteSlotPlanInput['bandwidth'],
     serverPorts: stringValue(body.serverPorts),
     exportPort: numberValueOrNull(body.exportPort),
     internalBaseUrl: stringValue(body.internalBaseUrl),

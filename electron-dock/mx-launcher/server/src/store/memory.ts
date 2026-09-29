@@ -1,3 +1,4 @@
+import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
@@ -408,6 +409,7 @@ export class MemoryStore implements PlatformStore {
   private readonly userOverseaAccountSyncReports = new Map<string, UserOverseaAccountSyncReport>();
   private readonly serviceAccounts = new Map<string, UserCenterServiceAccount>();
   private readonly serviceAccountCredentials = new Map<string, UserCenterServiceAccountCredential>();
+  private systemSubscriptionPublication: SystemSubscriptionPublication = { link: null };
   private readonly tokens = new Map<string, UserCenterTokenRecord>();
   private readonly feishuAuthorizationTransactions = new Map<string, FeishuAuthorizationTransaction>();
   private readonly authenticationRateLimits = new Map<
@@ -1811,6 +1813,15 @@ export class MemoryStore implements PlatformStore {
       outcome: 'imported',
       credential: summarizeUserCenterServiceAccountCredential(credential)
     };
+  }
+
+  getSystemSubscriptionPublication(): SystemSubscriptionPublication {
+    return structuredClone(this.systemSubscriptionPublication);
+  }
+
+  updateSystemSubscriptionPublication(patch: Partial<SystemSubscriptionPublication>): SystemSubscriptionPublication {
+    this.systemSubscriptionPublication = structuredClone({ ...this.systemSubscriptionPublication, ...patch });
+    return this.getSystemSubscriptionPublication();
   }
 
   issueUserCenterToken(input: IssueTokenInput): UserCenterIssuedToken {

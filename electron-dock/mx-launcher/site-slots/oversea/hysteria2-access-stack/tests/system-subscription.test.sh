@@ -360,6 +360,40 @@ JSON
 	count="$(find data/subscriptions -maxdepth 1 -type f -name 'peer_*-subscriptions.mihomo.yaml' | wc -l | tr -d ' ')"
 	[[ "$count" == "1" ]] || fail "expected exactly one managed system YAML, found ${count}"
 
+	# Changing only the node policy must not rotate any account or rewrite legacy hints.
+	cp "$USERS_FILE" users-before-bandwidth.csv
+	cp "$managed" system-before-bandwidth.yaml
+	set_env_value HY2_SERVER_BANDWIDTH_MODE unlimited
+	load_env
+	apply_internal_managed_defaults
+	load_env
+	render_server_config
+	if grep -q '^bandwidth:' "$SERVER_CONFIG_PATH"; then fail "unlimited node still has fixed server bandwidth"; fi
+	cmp "$USERS_FILE" users-before-bandwidth.csv || fail "bandwidth change rotated credentials"
+	cmp "$managed" system-before-bandwidth.yaml || fail "bandwidth change rewrote legacy system hints"
+	set_env_value HY2_SERVER_BANDWIDTH_MODE limited
+	set_env_value HY2_SERVER_BANDWIDTH_UP "13 Mbps"
+	set_env_value HY2_SERVER_BANDWIDTH_DOWN "47 Mbps"
+	load_env
+	apply_internal_managed_defaults
+	load_env
+	render_server_config
+	assert_contains "$SERVER_CONFIG_PATH" "  down: 13 Mbps"
+	assert_contains "$SERVER_CONFIG_PATH" "  up: 47 Mbps"
+	set_env_value HY2_SERVER_BANDWIDTH_MODE typo
+	load_env
+	if apply_internal_managed_defaults >/dev/null 2>&1; then fail "invalid bandwidth mode accepted"; fi
+	[[ "$(read_env_value_from_file "$(env_storage_file)" HY2_SERVER_BANDWIDTH_UP)" == "13 Mbps" ]] || fail "invalid policy changed the persisted cap"
+	# A pre-policy deployment still converges to the historical 30/30 defaults.
+	set_env_value HY2_SERVER_BANDWIDTH_MODE ""
+	load_env
+	apply_internal_managed_defaults
+	load_env
+	render_server_config
+	assert_contains "$SERVER_CONFIG_PATH" "  down: 30 Mbps"
+	assert_contains "$SERVER_CONFIG_PATH" "  up: 30 Mbps"
+	cmp "$USERS_FILE" users-before-bandwidth.csv || fail "legacy policy rotated credentials"
+
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_ACCOUNT ""
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH ""
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256 ""

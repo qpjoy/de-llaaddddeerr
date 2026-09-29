@@ -133,6 +133,8 @@ for (const [method, path] of [
   ['POST', '/internal/v1/user-center/bootstrap'],
   ['POST', '/internal/v1/user-center/oversea-entitlements/rollout'],
   ['POST', '/internal/v1/user-center/system-subscriptions/ensure'],
+  ['POST', '/internal/v1/user-center/system-subscriptions/subscription-link'],
+  ['DELETE', '/internal/v1/user-center/system-subscriptions/subscription-link'],
   ['POST', '/internal/v1/user-center/system-subscriptions/sites/mx-oversea-hk01/reveal'],
   ['GET', '/internal/v1/site-slots/mx-oversea-hk01/access-accounts'],
   ['GET', '/internal/v1/site-slots/plans/slotplan_oversea'],

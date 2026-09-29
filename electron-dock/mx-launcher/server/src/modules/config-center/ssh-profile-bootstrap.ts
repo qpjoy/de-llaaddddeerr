@@ -156,6 +156,7 @@ export async function prepareSiteSlotSshProfileBootstrap(
       knownHostsFile,
       sshConfigFile,
       hostKeyAlias,
+      bandwidth: input.bandwidth,
       serverPorts: input.serverPorts,
       exportPort: input.exportPort,
       internalBaseUrl: input.internalBaseUrl,

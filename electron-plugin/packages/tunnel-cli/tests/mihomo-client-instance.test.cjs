@@ -56,6 +56,105 @@ test('packaged mihomo client is synchronized with its repository source', () => 
   assert.equal(readFileSync(packagedScript, 'utf8'), readFileSync(sourceScript, 'utf8'));
 });
 
+const regionalSubscription = `mixed-port: 7788
+external-controller: 127.0.0.1:9090
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+proxies:
+  - {name: jp01, type: socks5, server: 127.0.0.1, port: 20001}
+  - {name: xjp01, type: socks5, server: 127.0.0.1, port: 20002}
+proxy-groups:
+  - {name: Oversea-Auto, type: fallback, url: 'https://www.gstatic.com/generate_204', interval: 30, proxies: [jp01, xjp01]}
+  - {name: Oversea, type: select, proxies: [Oversea-Auto, jp01, xjp01, DIRECT]}
+rules:
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - MATCH,Oversea
+`;
+
+function regionalUpdate(root, options = [], extra = '') {
+  return runLibrary(['update-subscription', '--instance', 'xjp01', '--file', join(root, 'source.yaml'), ...options], String.raw`
+MIHOMO_HOME="$MIHOMO_TEST_STATE_ROOT/client"
+MIHOMO_ENV_FILE="$MIHOMO_HOME/client.env"
+MIHOMO_CONFIG_FILE="$MIHOMO_HOME/config.yaml"
+MIHOMO_SUBSCRIPTION_FILE="$MIHOMO_HOME/subscription.yaml"
+MIHOMO_TUN_OVERLAY_FILE="$MIHOMO_HOME/tun-overlay.yaml"
+MIHOMO_BIN="$MIHOMO_TEST_STATE_ROOT/validate-core"
+mkdir -p "$MIHOMO_HOME"
+if [[ ! -f "$MIHOMO_ENV_FILE" ]]; then set_env_value MIHOMO_MIXED_PORT 7789; fi
+require_root() { :; }
+service_is_active() { return 0; }
+systemctl() { printf '%s\n' "$*" >> "$MIHOMO_TEST_STATE_ROOT/lifecycle"; }
+` + extra + '\nmain "$@"', { env: { MIHOMO_TEST_STATE_ROOT: root } });
+}
+
+function regionalFixture(name) {
+  const root = join(testRoot, name);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, 'source.yaml'), regionalSubscription);
+  writeFileSync(join(root, 'validate-core'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  return root;
+}
+
+function yamlFile(path) {
+  const result = spawnSync('python3', ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))', path], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test('named regional binding persists across refresh and isolates every proxy group and listener', () => {
+  const root = regionalFixture('regional-pin');
+  let result = regionalUpdate(root, ['--node', 'xjp01']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(root, 'client/subscription.yaml'), 'utf8'), regionalSubscription);
+  let config = yamlFile(join(root, 'client/config.yaml'));
+  assert.equal(config['mixed-port'], 7789);
+  assert.deepEqual(config.proxies.map(p => p.name), ['xjp01']);
+  assert.ok(config['proxy-groups'].every(g => g.type === 'select' && g.proxies.length === 1 && g.proxies[0] === 'xjp01'));
+  assert.equal(config.dns.listen, '');
+  assert.equal(config['external-controller'], '');
+  assert.equal(config.rules[0], 'IP-CIDR,10.0.0.0/8,DIRECT,no-resolve');
+  assert.match(readFileSync(join(root, 'client/client.env'), 'utf8'), /MIHOMO_PINNED_NODE='xjp01'/);
+  result = regionalUpdate(root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(yamlFile(join(root, 'client/config.yaml')).proxies.map(p => p.name), ['xjp01']);
+  assert.doesNotMatch(readFileSync(join(root, 'lifecycle'), 'utf8'), /restart mihomo-client\.service/);
+  result = regionalUpdate(root, ['--node', 'auto']);
+  assert.equal(result.status, 0, result.stderr);
+  config = yamlFile(join(root, 'client/config.yaml'));
+  assert.equal(config['proxy-groups'][0].type, 'fallback');
+  assert.equal(config.proxies.length, 2);
+  assert.equal(config.profile['store-selected'], false, 'returning to auto must not reuse a cached pinned selection');
+});
+
+test('missing pinned nodes and invalid configs preserve the last good files and do not restart', () => {
+  const root = regionalFixture('regional-atomic-update');
+  assert.equal(regionalUpdate(root, ['--node', 'xjp01']).status, 0);
+  const files = ['client/config.yaml', 'client/subscription.yaml', 'client/client.env', 'lifecycle'];
+  const previous = files.map(file => readFileSync(join(root, file), 'utf8'));
+  writeFileSync(join(root, 'source.yaml'), regionalSubscription.replaceAll('xjp01', 'replacement'));
+  let result = regionalUpdate(root);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /pinned node must match exactly one inline proxy/);
+  assert.deepEqual(files.map(file => readFileSync(join(root, file), 'utf8')), previous);
+  writeFileSync(join(root, 'source.yaml'), regionalSubscription);
+  writeFileSync(join(root, 'validate-core'), '#!/bin/sh\nexit 1\n');
+  result = regionalUpdate(root, ['--node', 'jp01']);
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(files.map(file => readFileSync(join(root, file), 'utf8')), previous);
+});
+
+test('install forwards exact --node names to the installer', () => {
+  const result = runLibrary(['install', '--instance', 'xjp01', '--mixed-port', '7789', '--node', 'mx-oversea-xjp01-hysteria2', '--url', 'https://example.test/public.yaml'], String.raw`
+require_root() { :; }
+require_cmd() { :; }
+install_command() { shift 9; printf '%s\n' "$1"; }
+main "$@"
+`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'mx-oversea-xjp01-hysteria2');
+});
+
 test('default instance preserves historical 7788 paths and arguments', () => {
   const result = runLibrary(['status'], String.raw`
 printf '%s\n' \

@@ -3423,11 +3423,14 @@ function h2oSubscriptionNeedsBearer(item) {
 
 function normalizeH2oClashLinkUi(value) {
   const row = value && typeof value === 'object' ? value : {};
-  const url = row.url ? String(row.url) : null;
+  const subject = String(state?.auth?.subject || state?.connection?.subject || '');
+  const userId = state?.auth?.user?.userId || (subject.startsWith('user:') ? subject.slice(5) : subject);
+  const status = row.userId && row.userId === userId ? row.status || 'unverified' : 'unverified';
+  const url = row.url && status === 'verified' ? String(row.url) : null;
   const issuedAt = row.issuedAt ? String(row.issuedAt) : null;
   const expiresAt = row.expiresAt ? String(row.expiresAt) : null;
   if (!url && !issuedAt && !expiresAt) return null;
-  return { url, issuedAt, expiresAt };
+  return { url, issuedAt, expiresAt, status, userId: row.userId || null };
 }
 
 /**
@@ -3438,7 +3441,7 @@ function renderH2oClashLink(runtime, connected, currentUserReady, busyAction) {
   const link = runtime.clashLink || null;
   const busy = busyAction === 'issueH2oClashLink';
   const disabled = !connected || !currentUserReady || busy;
-  const issuedElsewhere = Boolean(link && !link.url);
+  const issuedElsewhere = link?.status === 'remote-only';
   return `
     <div class="h2o-clash-link">
       <small>上面那条要登录态，复制到 Clash 会 404。Clash 请用下面这条（token 在地址里，直接 GET）。</small>
@@ -3446,6 +3449,8 @@ function renderH2oClashLink(runtime, connected, currentUserReady, busyAction) {
       ${issuedElsewhere
         ? '<small>这个账号已经有一条链接，但明文只在生成时显示过一次，本机没有副本。重新生成会让旧链接立即失效。</small>'
         : ''}
+      ${link?.status === 'unverified' ? '<small>尚未核验分享链接，请点“刷新系统默认”。核验期间不提供旧链接复制。</small>' : ''}
+      ${link?.status === 'missing' ? '<small>原分享链接已失效。可在此重新生成；无需重新分配节点。</small>' : ''}
       <div class="toolbar-actions">
         <button class="secondary-button" type="button" data-action="issueH2oClashLink" ${disabled ? 'disabled' : ''}>
           ${busy ? '生成中' : link?.url || issuedElsewhere ? '重新生成' : '生成 Clash 链接'}

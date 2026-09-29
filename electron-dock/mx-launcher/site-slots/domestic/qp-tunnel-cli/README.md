@@ -544,6 +544,43 @@ sudo qp-tunnel-cli uninstall --instance subscriptions
 `--no-auth` forces an unauthenticated fetch and also avoids prompting for saved
 credentials, so do not combine it with a URL that needs `user:pass@` auth.
 
+### Fixed regional egress from one HTTPS subscription
+
+With a build containing `--node`, multiple instances can consume the same Admin/H2O
+public token URL without Basic Auth. Each instance persists an exact proxy name:
+
+```bash
+sudo apt-get install -y python3-yaml
+sudo qp-tunnel-cli install --instance xjp01 --mixed-port 7789 \
+  --node mx-oversea-xjp01-hysteria2 --url '<HTTPS-public-token-URL>' --no-auth
+sudo qp-tunnel-cli update-subscription --instance xjp01
+sudo qp-tunnel-cli status --instance xjp01
+```
+
+Applications use `http://127.0.0.1:7789` (HTTP proxy) or `socks5h://127.0.0.1:7789`.
+Keep an existing Internal-managed `mx-internal-egr` on 7788 intact. On a fresh host
+where 7788 is free, a second install can use the same URL with
+`--instance jp01 --mixed-port 7788 --node mx-oversea-jp01-hysteria2`.
+This is Mihomo `install`, separate from WireGuard `h2i enroll`.
+
+The raw subscription remains complete. The runtime keeps only the chosen inline
+proxy and points every proxy group at it, preserving explicit DIRECT/REJECT routing
+rules. Failure of that node does not change region. If refresh removes the chosen
+node or core validation fails, the previous configuration remains in place and the
+service is not restarted. Provider-only nodes and dialer-proxy chains are unsupported.
+Named pinned instances also clear extra proxy listeners, DNS listeners and controllers
+inherited from the subscription so they do not compete for another instance's ports.
+Use per-application proxy settings; `egress-on`/`tun-on` are unnecessary for this setup.
+
+Omitting `--node` on refresh preserves the binding. To explicitly return to the
+subscription policy, run `update-subscription --instance xjp01 --node auto`.
+Pinning a node does not reserve its public IP; the server must retain that address.
+
+Admin Rotate and H2O regeneration replace the **same user's** public link. Use one
+of them once and update consumers with the returned URL. Changing node grants only
+requires refreshing the subscription, not rotating its URL or reassigning the system
+default. H2O cannot retrieve the plaintext of a link previously issued by Admin.
+
 Mihomo core download fallback knobs:
 
 ```bash

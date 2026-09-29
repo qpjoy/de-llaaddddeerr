@@ -1856,7 +1856,7 @@ function registerIpc() {
       const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
       runtime.apps.h2o.runtime = h2oPluginRuntime({
         ...current,
-        clashLink: { url: issued.url, expiresAt: issued.expiresAt, issuedAt: nowIso() }
+        clashLink: { ...issued, status: 'verified' }
       });
       runtime.feedback = {
         tone: 'success',
@@ -8941,7 +8941,7 @@ function normalizeH2oClashLink(value) {
   const issuedAt = nullableString(row.issuedAt);
   const expiresAt = nullableString(row.expiresAt);
   if (!url && !issuedAt && !expiresAt) return null;
-  return { url, issuedAt, expiresAt };
+  return { url, issuedAt, expiresAt, userId: nullableString(row.userId), status: nullableString(row.status) };
 }
 
 function normalizeH2oSubscriptions(value, activeSubscription) {
@@ -11469,29 +11469,44 @@ function firstH2oOverseaSyncReason(accounts) {
 async function ensureH2oClashSubscriptionLink(input = {}) {
   try {
     const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
-    if (decideClashLinkAction({ local: current.clashLink }) === 'reuse') return current.clashLink;
     const baseUrl = normalizeBaseUrl(input?.baseUrl)
       || normalizeBaseUrl(runtime.connection?.internalBaseUrl);
     const userId = await h2oCurrentUserId({ baseUrl, bootstrapResolveMode: input.bootstrapResolveMode });
     if (!userId) return null;
+    // Retain the private cache for a later retry, but never offer an unverified
+    // URL for copying while metadata is unavailable or the account has changed.
+    if (current.clashLink) {
+      runtime.apps.h2o.runtime.clashLink = { ...current.clashLink, status: 'unverified' };
+    }
     const remote = await h2oRequestInternalJson(
       baseUrl,
       `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`,
       { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
-    ).then((result) => result.payload?.link || null).catch(() => null);
-    const action = decideClashLinkAction({ local: current.clashLink, remote });
-    if (action === 'remote-only') {
+    ).then((result) => result.payload?.link);
+    if (await h2oCurrentUserId({ baseUrl, bootstrapResolveMode: input.bootstrapResolveMode }) !== userId) return null;
+    const action = decideClashLinkAction({ local: current.clashLink, remote, userId });
+    if (action === 'defer') return null;
+    if (action === 'reuse') {
+      const link = { ...current.clashLink, userId, status: 'verified' };
+      runtime.apps.h2o.runtime.clashLink = link;
+      return link;
+    }
+    if (action === 'remote-only' || action === 'missing') {
       // 有链接但本机没有明文：宁可让用户显式重新生成，也不要替他把旧链接作废。
       runtime.apps.h2o.runtime = h2oPluginRuntime({
         ...h2oPluginRuntime(runtime.apps.h2o.runtime),
-        clashLink: { url: null, issuedAt: nullableString(remote.issuedAt), expiresAt: nullableString(remote.expiresAt) }
+        clashLink: {
+          url: null, userId, status: action,
+          issuedAt: nullableString(remote?.issuedAt) || current.clashLink?.issuedAt,
+          expiresAt: nullableString(remote?.expiresAt) || current.clashLink?.expiresAt
+        }
       });
       return null;
     }
     const issued = await issueH2oClashSubscriptionLink(input);
     runtime.apps.h2o.runtime = h2oPluginRuntime({
       ...h2oPluginRuntime(runtime.apps.h2o.runtime),
-      clashLink: { url: issued.url, expiresAt: issued.expiresAt, issuedAt: nowIso() }
+      clashLink: { ...issued, status: 'verified' }
     });
     pushAppLog('h2o', 'info', 'H2O clash subscription link provisioned during hydrate.');
     return issued;
@@ -11524,10 +11539,14 @@ async function issueH2oClashSubscriptionLink(input = {}) {
   );
   const path = nullableString(payload?.link?.path);
   if (!path) throw new Error('Internal 没有返回可用的订阅链接。');
+  if (h2oKnownUserId() && h2oKnownUserId() !== userId) throw new Error('当前用户已变化，请为当前用户重新操作。');
   // public link 必须走公网域名：裸 IP 的 https 在 Domestic ingress 上 SNI 握手必失败。
   const url = h2oManagedSubscriptionUrl(path, { baseUrl });
   if (!url) throw new Error('无法拼出可用的订阅链接地址。');
-  return { url, expiresAt: nullableString(payload?.link?.expiresAt) };
+  return {
+    url, userId, issuedAt: nullableString(payload?.link?.issuedAt),
+    expiresAt: nullableString(payload?.link?.expiresAt)
+  };
 }
 
 function h2oManagedSubscriptionUrl(pathName, options = {}) {

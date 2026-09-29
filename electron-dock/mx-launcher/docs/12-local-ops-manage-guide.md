@@ -885,3 +885,34 @@ bash scripts/manage.sh ops k8s-shadow down
 
 Docker Desktop 本地 K8s 通常能使用本机镜像。远程 Internal 集群不能直接使用本机镜像，
 必须先 push 到 registry，再把 manifest 里的 image 改成远程 registry 地址。
+
+## Oversea 节点带宽与系统聚合订阅（2026-09-29）
+
+新建 Oversea 或编辑 SSH Access 时，可选择「限速 / 不限速」，限速模式分别填写**用户上传 / 下载 Mbps**。这是该节点 Hysteria2 服务端对每个客户端的上限，不是全机总带宽。缺少新字段的旧 SSH profile 和新建表单均默认 30/30 Mbps；JP01 不需要编辑或重新同步，原服务端限速、系统订阅的 50 Mbps 提示和普通用户参数保持原样。
+
+操作顺序：保存 SSH Profile → 只对目标新节点执行 Install / Sync Remote → 检查通过的 worker 部署证据。保存不会立即修改服务器；策略变化会生成新部署计划，不能复用旧限速计划。Subscriptions 目录分别显示已部署策略和「新策略等待 Sync Remote」。不限速只取消固定上限，真实速率由线路、CPU、并发和拥塞控制决定，不保证一定更快，也不是稳定性保证。普通用户订阅仍保留原有带宽参数；无需修改 MX-H2I 登录或重新分配默认站点。
+
+User Center → 置顶 `subscriptions` →「聚合订阅 · 手动选择节点」：
+
+1. 生成并复制 HTTPS 聚合链接。它使用路径 token，不需要 IP:port + Basic Auth。首次生成要求已配置 active Domestic HTTPS 公网域名。
+2. 链接动态包含所有**已同步就绪**、未归档且账号有效的系统节点。新增节点同步后刷新同一 URL 即可，无需轮换。Pending 节点暂不加入。
+3. 无 `Oversea-Auto`；首次导入处于「请先选择节点」并拒绝需要代理的请求。在 Clash 的 `Oversea` 组手选 JP/XJP；选择会保存，选中节点故障不会自动跨地区或直连。原 LAN/CN 直连规则保留。
+4. 默认 `bandwidth=unlimited`：对已部署不限速的节点省略 Hysteria2 `up/down` 固定速率，使用拥塞控制。可改为 `bandwidth=30`、`50`、`100`，单位 Mbps；API 支持 0.001–100000。**这些参数只作用于不限速节点**；JP01 等限速节点保留原来的 50 Mbps 客户端提示，并受服务端原上限约束。修改 URL 参数不用轮换 token。
+5. 单站旧 Basic 链接仍保持 7788/50 Mbps 原行为。新聚合 YAML 使用 mixed-port 7890；CLI 安装时可覆盖监听端口。此界面只发放配置，不在 Internal 安装本地代理。
+
+系统聚合链接有效期十年，只保存摘要，明文仅在签发时返回。轮换／撤销仅影响该系统聚合链接，不改每站 Hysteria2 密钥，不影响普通用户、H2O 分享链接或登录。已有链接不必为了新增节点而轮换。聚合链接与普通用户链接共用已有公网订阅路径，因此不用开放新的服务端端口。
+
+同一聚合 URL 配合支持 `--node` 的 tunnel-cli，在服务器上固定 XJP 出口：
+
+```bash
+# Bash；输入刚复制的聚合 URL，避免直接写入命令历史。
+read -rsp 'System subscription URL: ' SYSTEM_SUB_URL; printf '\n'
+sudo qp-tunnel-cli install --instance xjp01 --mixed-port 7789 \
+  --node mx-oversea-xjp01-hysteria2 --url "$SYSTEM_SUB_URL" --no-auth
+unset SYSTEM_SUB_URL
+sudo qp-tunnel-cli update-subscription --instance xjp01
+```
+
+应用指向 `http://127.0.0.1:7789` 或 `socks5h://127.0.0.1:7789`。若原 7788 由 `mx-internal-egr` 持有，保留它。固定节点用完整 YAML `name`；没有 `--xjp` 参数。`--node auto` 仅清除 CLI 绑定并恢复订阅自己的策略：系统聚合订阅仍然是手动选择，不会凭空创建 Oversea-Auto。
+
+实现位于 Internal server、Admin UI、Oversea access-stack；上线需要更新这三处相关制品。源码测试不会自动部署、修改 JP01、更新任何已有链接或重启线上用户网络。

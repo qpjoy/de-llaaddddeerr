@@ -679,6 +679,20 @@ allowlist 覆盖回去。
 
 ### 多 oversea 节点切换
 
+Internal 签发的多节点聚合订阅默认选择 `Oversea-Auto`（`fallback`），按平台默认站点
+优先的顺序选用通过检测的节点。2026-09-29 起，自动组每 30 秒检测一次，即使没有用户
+流量也继续检测（`lazy: false`）；单次超时 5 秒，HTTPS 检测要求返回 204，连续连接失败
+阈值设为 2 以提早触发重新检测。一个节点认证失败不会把其他节点一并判为不可用。
+切换在健康状态更新后影响新连接，不保证首个失败请求或已有连接无损重试。所有节点都
+失败时不自动转 DIRECT；单节点订阅仍沿用原有结构。
+
+`synced` 只表示服务端同步证据，实际可用性由客户端从当前网络完成认证和连通性检测。
+节点旁的 `Error` 表示该节点测试失败，`-` 表示未展示延迟；都不能单独证明自动组失败。
+更新 Internal API 的订阅生成代码后，用户刷新原聚合订阅即可获取新策略，无需轮换分享
+链接、重新登录或对 Oversea 执行 Sync Remote。现有已运行的配置须由客户端重新应用。
+可用 `MIHOMO_BINARY=/path/to/mihomo pnpm --dir server smoke:oversea-failover` 运行本地
+Hysteria2 认证失败／恢复测试；测试使用独立端口和临时目录，不接管 TUN 或系统代理。
+
 一个用户的 oversea entitlement 可以覆盖多个站点（`oversea-main` / `oversea-mx` /
 `oversea-sg-1`…），订阅 YAML 里就是多条 `proxies`。切换遵循 Clash 的做法：
 
@@ -692,6 +706,23 @@ allowlist 覆盖回去。
 
 相关 API：`proxyNodes(yaml)` 列节点、`proxyPolicyGroupName(yaml)` 取组名、
 `MihomoManager.selectProxyNode(name)` 切换、`applyManagedConfig({ selectedNode })` 下发。
+
+### 分享链接与固定地区代理
+
+Admin 与 H2O 对同一用户使用同一个 public subscription-link 资源。只有 JP 授权时也能
+生成单节点 YAML；节点数量不决定 public link 是否有效。Rotate / 重新生成会吊销该用户
+旧链接，服务端只返回元数据，不能取回此前签发的明文。授权更新后刷新原订阅即可；
+不要为了修复 404 点击「分配系统默认」，该动作会把节点授权重设为平台默认站点。
+
+H2O 缓存分享链接时记录 userId 和服务端签发/到期时间。刷新时先核验当前用户和服务端
+元数据；旧账号缓存、Admin 已轮换的缓存不再提供复制。元数据请求失败只推迟核验，不得
+视为「没有链接」而自动签发。历史链接已失效时要求用户显式重新生成，避免恢复已吊销访问。
+
+需要固定地区的服务器应用可使用 tunnel-cli 的独立实例与 `--node <完整节点名>`：同一
+聚合 token URL 给不同实例提供数据，端口由 `--mixed-port` 隔离。实例运行配置仅保留
+指定代理，已有 DIRECT/REJECT 分流规则保留；节点失败时不跨地区切换。刷新缺少指定节点
+或核心校验失败时保留旧配置。`--node auto` 才显式恢复订阅原策略。现有 Internal 管理的
+7788 进程不因新增 7789 实例而被替换。操作例见 tunnel-cli/README.setup.md。
 
 ### 从商业 Clash 订阅里可以借鉴的结构
 

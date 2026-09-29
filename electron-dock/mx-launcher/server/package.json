@@ -14,6 +14,7 @@
     "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",
     "smoke:config-secret-registry": "pnpm run build && node dist/scripts/config-secret-registry-smoke.js",
     "smoke:user-oversea-auth": "pnpm run build && node dist/scripts/user-oversea-auth-smoke.js",
+    "smoke:oversea-failover": "node --import tsx scripts/oversea-failover-smoke.ts",
     "smoke:user-lifecycle": "pnpm run build && node dist/scripts/user-lifecycle-smoke.js",
     "smoke:feishu-network": "pnpm run build && node dist/scripts/feishu-network-smoke.js",
     "test:sdk-auth": "node --test --import tsx src/modules/app-center/app-center-credential.test.ts src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts src/modules/release/release-sdk-publisher.test.ts",
@@ -37,7 +38,7 @@
     "release:publish": "node scripts/release-center-publish.mjs",
     "test:oversea-site-archive": "node --test --import tsx src/modules/launcher-network/oversea-site-archive.test.ts",
     "test:oversea-subscription-link": "node --test --import tsx src/modules/user-center/oversea-subscription-link.test.ts",
-    "test:system-subscriptions": "node --test --import tsx src/modules/user-center/system-subscriptions.test.ts src/modules/admin/admin-site-slot-credential-visibility.test.ts src/modules/config-center/site-slot-ssh-profile-auth.test.ts src/modules/site-slots/remote-ssh-profile-binding.test.ts",
+    "test:system-subscriptions": "node --test --import tsx src/modules/user-center/system-subscriptions.test.ts src/modules/user-center/system-subscriptions-aggregate.test.ts src/modules/admin/admin-site-slot-credential-visibility.test.ts src/modules/config-center/site-slot-ssh-profile-auth.test.ts src/modules/site-slots/remote-ssh-profile-binding.test.ts",
     "test:user-oversea-entitlement": "node --test --import tsx src/modules/user-center/user-oversea-entitlement-assignment.test.ts",
     "test:api-docs": "node --test --import tsx src/modules/api-docs/api-docs.contract.test.ts"
   },

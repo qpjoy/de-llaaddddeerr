@@ -1,4 +1,5 @@
 import type {
+  SystemSubscriptionPublication,
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
   AppCenterAccessContextInput,
@@ -314,6 +315,8 @@ export interface PlatformStore {
   consumeFeishuAuthorizationTransaction(
     transactionId: string
   ): MaybePromise<FeishuAuthorizationTransaction | null>;
+  getSystemSubscriptionPublication(): MaybePromise<SystemSubscriptionPublication>;
+  updateSystemSubscriptionPublication(patch: Partial<SystemSubscriptionPublication>): MaybePromise<SystemSubscriptionPublication>;
   issueUserCenterToken(input: IssueTokenInput): MaybePromise<UserCenterIssuedToken>;
   introspectToken(input: TokenIntrospectionInput): MaybePromise<TokenIntrospectionResult>;
   resolvePrincipalContext(input: PrincipalContextInput): MaybePromise<PrincipalContext>;

@@ -6,6 +6,8 @@ import {
   hashToken,
   SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID,
   SYSTEM_SUBSCRIPTION_MIXED_PORT,
+  renderSystemSubscriptionAggregate,
+  normalizeOverseaBandwidth,
   systemSubscriptionAccessAccountName
 } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -21,12 +23,13 @@ import type {
 } from '../../types.js';
 
 export async function buildSystemSubscriptionCatalog(store: PlatformStore): Promise<SystemSubscriptionCatalog> {
-  const [sites, profiles, plans, jobs, reports] = await Promise.all([
+  const [sites, profiles, plans, jobs, reports, publication] = await Promise.all([
     store.listLauncherNetworkMihomoSites(),
     store.listSiteSlotSshProfiles(),
     store.listSiteSlotPlans(),
     store.listSiteSlotWorkerJobs(),
-    store.listSiteSlotWorkerReports()
+    store.listSiteSlotWorkerReports(),
+    store.getSystemSubscriptionPublication()
   ]);
   // Archived sites retain plans/reports for audit and may be restored, but
   // they are not live subscription channels.
@@ -43,9 +46,18 @@ export async function buildSystemSubscriptionCatalog(store: PlatformStore): Prom
     )));
     const latestPlan = plans.find((plan) => plan.siteId === site.siteId && plan.kind === 'oversea') ?? null;
     const appliedReport = latestSystemSubscriptionDeploymentReport(reports, jobs, latestPlan, account);
-    return buildSystemSubscriptionItem(site, account, profile, latestPlan, appliedReport);
+    const item = buildSystemSubscriptionItem(site, account, profile, latestPlan, appliedReport);
+    const configured = normalizeOverseaBandwidth(profile?.bandwidth);
+    const deployed = item.status === 'ready' ? normalizeOverseaBandwidth(latestPlan?.runtime.oversea?.bandwidth) : null;
+    item.bandwidth = { configured, deployed, pending: JSON.stringify(configured) !== JSON.stringify(deployed) };
+    return item;
   }));
   return {
+    aggregate: {
+      link: publication.link && Date.parse(publication.link.expiresAt) > Date.now()
+        ? { issuedAt: publication.link.issuedAt, expiresAt: publication.link.expiresAt } : null,
+      selection: 'manual', mixedPort: 7890
+    },
     account: {
       accountId: SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID,
       kind: 'system-subscription-catalog',
@@ -224,6 +236,7 @@ function buildSystemSubscriptionItem(
     ? `http://${SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID}:***@${httpUrlHost(host)}:${exportPort}${path}`
     : null;
   return {
+    bandwidth: { configured: normalizeOverseaBandwidth(), deployed: null, pending: true },
     subscriptionId: `oversea-direct:${site.siteId}`,
     label: `${site.siteId} Direct IP`,
     siteId: site.siteId,
@@ -279,4 +292,29 @@ function recordOrNull(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+export async function renderSystemAggregate(store: PlatformStore, bandwidth: string | null): Promise<string> {
+  const catalog = await buildSystemSubscriptionCatalog(store);
+  const entries = [];
+  for (const item of catalog.subscriptions.filter(item => item.status === 'ready').sort((a, b) => a.siteId.localeCompare(b.siteId))) {
+    const site = await store.getLauncherNetworkMihomoSite(item.siteId);
+    const account = await store.getSiteSlotAccessAccount(item.siteId, item.runtimeUsername);
+    if (site?.status === 'active' && account?.status === 'active') {
+      entries.push({ site, account, unlimited: item.bandwidth.deployed?.mode === 'unlimited' });
+    }
+  }
+  return renderSystemSubscriptionAggregate(entries, bandwidth);
+}
+
+export async function systemAggregateDomainUrl(store: PlatformStore, path: string): Promise<string | null> {
+  const configs = await store.listSiteSlotDomesticRuntimeConfigs();
+  for (const config of configs) {
+    if (config.status !== 'active') continue;
+    try {
+      const base = new URL(config.edge.publicBaseUrl);
+      if (base.protocol === 'https:' && isIP(base.hostname) === 0) return new URL(path, base).toString();
+    } catch { /* Try the next configured edge. */ }
+  }
+  return null;
 }

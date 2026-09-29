@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 import type {
+  OverseaBandwidthPolicy,
   AnonymousEnrollment,
   AppCenterAccessDecision,
   AppCenterAccessInput,
@@ -216,8 +217,8 @@ export const SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH = '50 Mbps';
 const HYSTERIA2_CLIENT_ALPN = 'h3';
 const HYSTERIA2_CLIENT_DNS = ['223.5.5.5', '119.29.29.29', '1.1.1.1', '8.8.8.8'];
 /** 健康探测必须是「墙外可达且国内不可达」的地址，否则节点挂了探测仍然算通过。 */
-const OVERSEA_HEALTH_CHECK_URL = 'http://www.gstatic.com/generate_204';
-const OVERSEA_HEALTH_CHECK_INTERVAL_SECONDS = 300;
+const OVERSEA_HEALTH_CHECK_URL = 'https://www.gstatic.com/generate_204';
+const OVERSEA_HEALTH_CHECK_INTERVAL_SECONDS = 30;
 const OVERSEA_AUTO_GROUP = 'Oversea-Auto';
 const OVERSEA_SELECT_GROUP = 'Oversea';
 export const SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID = 'subscriptions';
@@ -5463,6 +5464,7 @@ export function buildSiteSlotPlan(
   const runtimeInput = kind === 'oversea'
     ? {
         ...input,
+        bandwidth: input.bandwidth ?? activeProfile?.bandwidth,
         serverPorts: input.serverPorts ?? activeProfile?.serverPorts,
         exportPort: input.exportPort ?? activeProfile?.exportPort,
         workerInternalBaseUrl: input.workerInternalBaseUrl ?? activeProfile?.workerInternalBaseUrl ?? input.internalBaseUrl,
@@ -5588,6 +5590,7 @@ export function buildSiteSlotSshProfile(
     knownHostsFile,
     sshConfigFile,
     hostKeyAlias,
+    bandwidth: kind === 'oversea' ? normalizeOverseaBandwidth(input.bandwidth ?? previous?.bandwidth) : null,
     serverPorts,
     exportPort,
     workerInternalBaseUrl,
@@ -7013,6 +7016,7 @@ function buildSiteSlotOverseaRuntimeConfig(input: SiteSlotPlanInput, host: strin
     warnings.push(`invalid health/evidence exportPort "${input.exportPort}", using ${exportPort}`);
   }
   return {
+    bandwidth: normalizeOverseaBandwidth(input.bandwidth),
     serverPorts: serverPorts.normalized,
     firstServerPort: serverPorts.firstPort,
     exportPort,
@@ -7535,8 +7539,9 @@ function siteSlotDeploymentPhases(
     `HY2_TLS_SERVER_NAME=${target}`,
     'HY2_TLS_SELF_SIGNED_DAYS=3650',
     'HY2_TLS_SKIP_CERT_VERIFY=true',
-    `HY2_SERVER_BANDWIDTH_DOWN="${HYSTERIA2_CLIENT_DOWNLOAD}"`,
-    `HY2_SERVER_BANDWIDTH_UP="${HYSTERIA2_CLIENT_UPLOAD}"`,
+    `HY2_SERVER_BANDWIDTH_MODE=${normalizeOverseaBandwidth(input.bandwidth).mode}`,
+    `HY2_SERVER_BANDWIDTH_DOWN="${normalizeOverseaBandwidth(input.bandwidth).mode === 'unlimited' ? '' : `${normalizeOverseaBandwidth(input.bandwidth).downMbps} Mbps`}"`,
+    `HY2_SERVER_BANDWIDTH_UP="${normalizeOverseaBandwidth(input.bandwidth).mode === 'unlimited' ? '' : `${normalizeOverseaBandwidth(input.bandwidth).upMbps} Mbps`}"`,
     `HY2_DEFAULT_DOWN="${HYSTERIA2_CLIENT_DOWNLOAD}"`,
     `HY2_DEFAULT_UP="${HYSTERIA2_CLIENT_UPLOAD}"`,
     'HY2_MASQUERADE_URL=https://news.ycombinator.com/',
@@ -8402,19 +8407,7 @@ export function renderSystemHysteria2MihomoSubscription(
     'geo-update-interval: 24',
     '',
     'proxies:',
-    `  - name: ${yamlQuote(proxyName)}`,
-    '    type: hysteria2',
-    `    server: ${yamlQuote(site.publicHost)}`,
-    `    port: ${firstHysteriaPort(site.serverPorts)}`,
-    `    password: ${yamlQuote(account.authToken)}`,
-    `    down: ${yamlQuote(SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH)}`,
-    `    up: ${yamlQuote(SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH)}`,
-    '    skip-cert-verify: true',
-    `    fingerprint: ${yamlQuote(site.tlsFingerprint)}`,
-    '    alpn:',
-    `      - ${HYSTERIA2_CLIENT_ALPN}`,
-    '    dns:',
-    ...HYSTERIA2_CLIENT_DNS.map((server) => `      - ${yamlQuote(server)}`),
+    ...systemSubscriptionProxyLines(site, account, proxyName, SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH),
     '',
     'proxy-groups:',
     '  - name: PROXY',
@@ -8439,6 +8432,53 @@ export function renderSystemHysteria2MihomoSubscription(
     reachability: site.reachability,
     generatedAt: now
   };
+}
+
+function systemSubscriptionProxyLines(
+  site: LauncherNetworkMihomoSite, account: SiteSlotAccessAccount,
+  proxyName: string, bandwidth: string | null
+): string[] {
+  if (!isSystemSubscriptionAccessAccount(account) || !site.publicHost || !site.tlsFingerprint) {
+    throw new Error('Ready canonical system subscription account required');
+  }
+  return [
+    `  - name: ${yamlQuote(proxyName)}`,
+    '    type: hysteria2',
+    `    server: ${yamlQuote(site.publicHost)}`,
+    `    port: ${firstHysteriaPort(site.serverPorts)}`,
+    `    password: ${yamlQuote(account.authToken)}`,
+    ...(bandwidth ? [`    down: ${yamlQuote(bandwidth)}`, `    up: ${yamlQuote(bandwidth)}`] : []),
+    '    skip-cert-verify: true',
+    `    fingerprint: ${yamlQuote(site.tlsFingerprint)}`,
+    '    alpn:',
+    `      - ${HYSTERIA2_CLIENT_ALPN}`,
+    '    dns:',
+    ...HYSTERIA2_CLIENT_DNS.map((server) => `      - ${yamlQuote(server)}`),
+  ];
+}
+
+/** Manual aggregate: existing listeners retain their historical bandwidth hints. */
+export function renderSystemSubscriptionAggregate(
+  entries: Array<{ site: LauncherNetworkMihomoSite; account: SiteSlotAccessAccount; unlimited: boolean }>,
+  bandwidth: string | null = null
+): string {
+  const names = entries.map(({ site }) => `${site.siteId}-hysteria2`);
+  return [
+    '# System subscriptions: select a node explicitly; no automatic region failover.',
+    'mixed-port: 7890', 'allow-lan: false', 'mode: rule', 'log-level: info',
+    'geodata-mode: true', 'profile:', '  store-selected: true',
+    entries.length ? 'proxies:' : 'proxies: []',
+    ...entries.flatMap(({ site, account, unlimited }, index) => systemSubscriptionProxyLines(
+      site, account, names[index],
+      unlimited ? bandwidth : SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH
+    )),
+    'proxy-groups:',
+    '  - name: "请先选择节点"', '    type: select', '    proxies: [REJECT]',
+    '  - name: Oversea', '    type: select', '    proxies:',
+    '      - "请先选择节点"', ...names.map(name => `      - ${yamlQuote(name)}`),
+    'rules:', ...HYSTERIA2_LOCAL_DIRECT_RULES.map(rule => `  - ${rule}`),
+    '  - GEOSITE,CN,DIRECT', '  - GEOIP,CN,DIRECT', '  - MATCH,Oversea', ''
+  ].join('\n');
 }
 
 export function userOverseaAccountName(user: UserCenterUser, siteId: string): string {
@@ -8588,6 +8628,10 @@ function overseaProxyGroupLines(proxyNames: string[]): string[] {
         '    type: fallback',
         `    url: ${yamlQuote(OVERSEA_HEALTH_CHECK_URL)}`,
         `    interval: ${OVERSEA_HEALTH_CHECK_INTERVAL_SECONDS}`,
+        '    timeout: 5000',
+        '    lazy: false',
+        '    expected-status: 204',
+        '    max-failed-times: 2',
         '    proxies:',
         ...proxyNames.map((proxyName) => `      - ${yamlQuote(proxyName)}`)
       ]
@@ -8741,4 +8785,16 @@ export function normalizeTestStatus(value: string): TestStep['status'] {
 export function required<T>(value: T | null, message: string): T {
   if (value) return value;
   throw new Error(message);
+}
+
+/** Legacy profiles remain limited at 30 Mbps unless explicitly edited. */
+export function normalizeOverseaBandwidth(value?: OverseaBandwidthPolicy | null): OverseaBandwidthPolicy {
+  const mode = value?.mode ?? 'limited';
+  const upMbps = value?.upMbps ?? 30;
+  const downMbps = value?.downMbps ?? 30;
+  if (!['limited', 'unlimited'].includes(mode)
+    || ![upMbps, downMbps].every(rate => typeof rate === 'number' && Number.isFinite(rate) && rate >= 0.001 && rate <= 100000)) {
+    throw new Error('Bandwidth requires limited/unlimited mode and positive Mbps values up to 100000');
+  }
+  return { mode, upMbps, downMbps };
 }

@@ -1,3 +1,4 @@
+import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
@@ -392,6 +393,7 @@ type RecordKind =
   | 'user-oversea-account-sync-report'
   | 'iam-service-account'
   | 'iam-service-account-credential'
+  | 'system-subscription-publication'
   | 'iam-token'
   | 'feishu-authorization-transaction'
   | 'authentication-rate-limit'
@@ -2123,6 +2125,26 @@ export class PostgresStore implements PlatformStore {
       };
     });
     return result;
+  }
+
+  async getSystemSubscriptionPublication(): Promise<SystemSubscriptionPublication> {
+    return await this.getRecord<SystemSubscriptionPublication>('system-subscription-publication', 'subscriptions')
+      ?? { link: null };
+  }
+
+  async updateSystemSubscriptionPublication(patch: Partial<SystemSubscriptionPublication>): Promise<SystemSubscriptionPublication> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+        [`mx-launcher:${this.config.environment}`, 'system-subscription-publication']);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const row = await records.findOne({ where: {
+        kind: 'system-subscription-publication', id: 'subscriptions', environment: this.config.environment
+      } });
+      const current = row?.data as unknown as SystemSubscriptionPublication | undefined;
+      const updated = { link: null, ...current, ...patch };
+      await this.saveRecordTo(records, 'system-subscription-publication', 'subscriptions', updated, this.config.siteId);
+      return updated;
+    });
   }
 
   async issueUserCenterToken(input: IssueTokenInput): Promise<UserCenterIssuedToken> {

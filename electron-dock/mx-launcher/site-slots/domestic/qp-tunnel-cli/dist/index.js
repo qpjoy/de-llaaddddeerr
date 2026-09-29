@@ -115,6 +115,8 @@ Common commands:
   qp-tunnel-cli install --instance subscriptions --mixed-port 7890 --url http://user:pass@IP:3434/peer_subscriptions.mihomo.yaml
   qp-tunnel-cli status --instance subscriptions
   qp-tunnel-cli update-subscription --instance subscriptions
+  qp-tunnel-cli install --instance xjp01 --mixed-port 7789 --node mx-oversea-xjp01-hysteria2 --url https://HOST/internal/v1/oversea-subscriptions/TOKEN.yaml --no-auth
+  qp-tunnel-cli update-subscription --instance xjp01
   qp-tunnel-cli install --url http://internal:18090/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-internal.yaml
   qp-tunnel-cli install --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
   qp-tunnel-cli status
@@ -151,6 +153,10 @@ The default Mihomo instance remains on mixed-port 7788 with its historical paths
 Named instances use isolated state, binary, launcher and systemd unit paths. The
 reserved subscriptions instance is explicit-use-only: applications connect to
 its local port directly, and host-wide proxy/SSH/daemon/TUN wiring is refused.
+Use --node <exact proxy name> to persist one region per instance; this requires
+python3-yaml. A failed pinned node does not fail over to another region. A refresh
+missing that node keeps the last good config. --node auto restores the subscription
+policy. These are Mihomo install/update options, separate from h2i enroll.
 
 Unknown commands are executed with QPJoy proxy variables injected. Host commands
 receive HTTP_PROXY=http://127.0.0.1:<mixed-port>; Docker/Compose build contexts

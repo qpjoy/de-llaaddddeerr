@@ -6,16 +6,25 @@
  * 唯一真正危险的动作是「签发」：它会立即吊销上一条，已经配进 Clash 的订阅当场失效。
  * 所以这段逻辑单独拆出来测——判断错了不是显示问题，是把用户的订阅弄断了。
  *
- * - reuse       本机有还没过期的明文链接，直接用。
+ * - reuse       当前用户、本机副本与服务端有效期一致，才复用。
  * - remote-only 服务端有活跃链接，但本机没有明文（明文只在签发响应里出现一次）。
  *               **不签发**，交给用户显式「重新生成」。
- * - issue       两边都没有，可以安全签发。
+ * - issue       已确认服务端没有链接，且本机没有历史链接，可以首次签发。
+ * - missing     历史链接已失效，交给用户显式重新生成。
+ * - defer       尚未取得服务端状态，不得把查询失败当成没有链接。
  */
 function decideClashLinkAction(input = {}) {
   const now = Number.isFinite(input.now) ? input.now : Date.now();
-  if (isUsableLink(input.local, now)) return 'reuse';
-  if (isActiveRemoteLink(input.remote, now)) return 'remote-only';
-  return 'issue';
+  if (input.remote === undefined) return 'defer';
+  if (isActiveRemoteLink(input.remote, now)) {
+    const sameOwner = Boolean(input.userId && input.local?.userId === input.userId);
+    const sameExpiry = Boolean(input.local?.expiresAt
+      && input.local.expiresAt === input.remote.expiresAt);
+    return sameOwner && sameExpiry && isUsableLink(input.local, now) ? 'reuse' : 'remote-only';
+  }
+  if (input.remote !== null) return 'defer';
+  const hasHistory = input.local && (input.local.url || input.local.issuedAt || input.local.expiresAt);
+  return hasHistory ? 'missing' : 'issue';
 }
 
 /** 本机副本可用 = 有明文 URL 且没过期。没写过期时间的当作长期有效。 */

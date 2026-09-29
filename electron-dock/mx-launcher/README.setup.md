@@ -341,3 +341,17 @@ kubectl -n mx-internal-shadow exec deploy/mx-launcher-internal -- sh -c 'tar -xz
 # 3. 查验包是否更新
  kubectl -n mx-internal-shadow exec deploy/mx-launcher-internal -- sh -c 'tar -xzOf /app/runtime-artifacts/site-slots/domestic/mx-domestic-services.tar.gz ./Caddyfile | grep -cE "publicOverseaSubscription|publicOverseaAggregate"'
 ```
+
+# 新建oversea，enable门槛
+```bash
+kubectl -n mx-internal-shadow set env deployment/mx-launcher-internal \
+  --containers=internal-api \
+  SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=1 \
+  SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=1 \
+  SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=1 \
+  SITE_SLOT_WORKER_REMOTE_SSH=1 \
+  SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1
+
+kubectl -n mx-internal-shadow rollout status \
+  deployment/mx-launcher-internal --timeout=180s
+```

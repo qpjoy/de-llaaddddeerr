@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const { decideClashLinkAction, resolveEffectiveProxyNode } = require('../src/clash-link-policy.cjs');
@@ -9,62 +11,84 @@ const now = Date.parse('2026-08-09T12:00:00.000Z');
 const future = '2026-10-09T12:00:00.000Z';
 const past = '2026-07-09T12:00:00.000Z';
 
-assert.equal(
-  decideClashLinkAction({ local: null, remote: null, now }),
-  'issue',
-  'nothing anywhere means it is safe to issue the first link'
-);
-
-assert.equal(
-  decideClashLinkAction({ local: { url: 'https://h2i.example/x.yaml', expiresAt: future }, remote: null, now }),
-  'reuse',
-  'a live local copy is used as-is'
-);
-
-assert.equal(
-  decideClashLinkAction({ local: { url: 'https://h2i.example/x.yaml' }, remote: null, now }),
-  'reuse',
-  'no expiry recorded is treated as long-lived, not as a reason to rotate'
-);
-
-// This is the case that matters: issuing revokes the previous link, so a user who
-// already pasted it into Clash would silently stop updating. Another machine
-// holding the plaintext is not a reason to take it away from them.
-assert.equal(
-  decideClashLinkAction({ local: null, remote: { issuedAt: past, expiresAt: future }, now }),
-  'remote-only',
-  'an active server-side link is never silently rotated'
-);
-assert.equal(
-  decideClashLinkAction({ local: { url: null, issuedAt: past, expiresAt: future }, remote: { issuedAt: past, expiresAt: future }, now }),
-  'remote-only',
-  'a metadata-only local record still must not trigger a rotation'
-);
-
-assert.equal(
-  decideClashLinkAction({ local: { url: 'https://h2i.example/x.yaml', expiresAt: past }, remote: null, now }),
-  'issue',
-  'an expired local copy is replaced'
-);
-assert.equal(
-  decideClashLinkAction({ local: null, remote: { issuedAt: past, expiresAt: past }, now }),
-  'issue',
-  'an expired server-side link no longer blocks issuing a fresh one'
-);
-
-assert.equal(
-  decideClashLinkAction({ local: { url: 'https://h2i.example/x.yaml', expiresAt: past }, remote: { issuedAt: past, expiresAt: future }, now }),
-  'remote-only',
-  'an expired local copy does not authorise rotating a still-active server link'
-);
-
-for (const junk of [undefined, null, {}, { url: '' }, 'nope', 42]) {
-  assert.equal(
-    decideClashLinkAction({ local: junk, remote: junk, now }),
-    'issue',
-    `malformed input ${JSON.stringify(junk)} falls back to issuing rather than throwing`
-  );
+const userId = 'usr_feishu_test';
+const local = { userId, url: 'https://h2i.example/x.yaml', issuedAt: past, expiresAt: future };
+const remote = { issuedAt: past, expiresAt: future };
+const cases = [
+  [{ local: null, remote: null }, 'issue', 'confirmed absence allows first issuance'],
+  [{ local, remote }, 'reuse', 'same owner and server expiry allow reuse'],
+  [{ local }, 'defer', 'unknown server state never permits local-only reuse or issuance'],
+  [{ local, remote: {} }, 'defer', 'malformed metadata never authorises rotation'],
+  [{ local, remote: null }, 'missing', 'revocation requires an explicit user action'],
+  [{ local: { ...local, expiresAt: past }, remote: null }, 'missing', 'expired history is not silently replaced'],
+  [{ local: { ...local, userId: 'usr_other' }, remote }, 'remote-only', 'switching users cannot copy another user link'],
+  [{ local: { ...local, userId: null }, remote }, 'remote-only', 'legacy unbound cache must not be trusted'],
+  [{ local: { ...local, expiresAt: '2027-01-01T00:00:00Z' }, remote }, 'remote-only', 'Admin rotation invalidates an unexpired local cache'],
+  [{ local: null, remote }, 'remote-only', 'existing server link is never silently rotated'],
+  [{ local: { ...local, url: null }, remote }, 'remote-only', 'metadata is not a recoverable URL'],
+  [{ local: { ...local, expiresAt: past }, remote }, 'remote-only', 'expired cache cannot revoke an active server link'],
+];
+for (const [input, expected, reason] of cases) {
+  assert.equal(decideClashLinkAction({ ...input, userId, now }), expected, reason);
 }
+
+// Exercise the production hydrate orchestration without booting Electron or
+// accessing real user accounts. A metadata failure must never reach issuance.
+const runtimeSource = readFileSync(new URL('../src/main-runtime.cjs', import.meta.url), 'utf8');
+const rendererSource = readFileSync(new URL('../src/renderer.js', import.meta.url), 'utf8');
+function functionSource(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, name);
+  return source.slice(start, source.indexOf('\n}', start) + 2);
+}
+async function hydrate({ cache = local, metadata = remote, fail = false, switchUser = false } = {}) {
+  let issues = 0;
+  let lookups = 0;
+  const context = vm.createContext({
+    runtime: { connection: { internalBaseUrl: 'https://internal.example' }, apps: { h2o: { runtime: { clashLink: cache } } } },
+    h2oPluginRuntime: value => ({ ...value }),
+    normalizeBaseUrl: value => value || null,
+    nullableString: value => value || null,
+    h2oCurrentUserId: async () => switchUser && lookups++ > 0 ? 'usr_other' : userId,
+    h2oRequestInternalJson: async () => {
+      if (fail) throw new Error('offline');
+      return { payload: { link: metadata } };
+    },
+    appCenterCatalogHeaders: () => ({}),
+    decideClashLinkAction: input => decideClashLinkAction({ ...input, now }),
+    issueH2oClashSubscriptionLink: async () => { issues++; return local; },
+    pushAppLog: () => {}, errorMessage: error => error.message,
+    state: { auth: { user: { userId } } }
+  });
+  vm.runInContext(`async ${functionSource(runtimeSource, 'ensureH2oClashSubscriptionLink')}`, context);
+  vm.runInContext(functionSource(rendererSource, 'normalizeH2oClashLinkUi'), context);
+  await context.ensureH2oClashSubscriptionLink();
+  const cached = context.runtime.apps.h2o.runtime.clashLink;
+  return { issues, cached, display: context.normalizeH2oClashLinkUi(cached) };
+}
+let result = await hydrate();
+assert.equal(result.issues, 0);
+assert.equal(result.display.url, local.url);
+result = await hydrate({ fail: true });
+assert.equal(result.issues, 0, 'network failure must not rotate a public URL');
+assert.equal(result.cached.url, local.url, 'private cache survives a transient failure');
+assert.equal(result.display.url, null, 'unverified cache cannot be copied');
+result = await hydrate({ metadata: { ...remote, expiresAt: '2036-10-09T12:00:00.000Z' } });
+assert.equal(result.issues, 0);
+assert.equal(result.cached.status, 'remote-only');
+assert.equal(result.display.url, null, 'Admin rotation hides the obsolete cached URL');
+result = await hydrate({ cache: { ...local, userId: 'usr_other' } });
+assert.equal(result.issues, 0);
+assert.equal(result.display.url, null, 'cached URLs never cross accounts');
+result = await hydrate({ metadata: null });
+assert.equal(result.issues, 0);
+assert.equal(result.cached.status, 'missing', 'revoked links require explicit regeneration');
+result = await hydrate({ cache: null, metadata: null });
+assert.equal(result.issues, 1, 'first issuance remains available after confirmed absence');
+assert.equal(result.display.url, local.url);
+result = await hydrate({ switchUser: true, metadata: null });
+assert.equal(result.issues, 0, 'changing accounts during lookup cancels automatic issuance');
+assert.equal(result.display.url, null);
 
 // --- resolveEffectiveProxyNode ---
 

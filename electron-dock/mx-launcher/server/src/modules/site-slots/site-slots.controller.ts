@@ -725,6 +725,7 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     hasOutboundInternet: booleanValue(body.hasOutboundInternet),
     overseaSiteId: nullableString(body.overseaSiteId),
     overseaHost: nullableString(body.overseaHost),
+    bandwidth: body.bandwidth as SiteSlotPlanInput['bandwidth'],
     serverPorts: nullableString(body.serverPorts),
     exportPort: numberValue(body.exportPort),
     internalBaseUrl: nullableString(body.internalBaseUrl),

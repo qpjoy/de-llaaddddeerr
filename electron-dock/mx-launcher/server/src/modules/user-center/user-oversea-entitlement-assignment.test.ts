@@ -191,7 +191,7 @@ test('the default site is listed first so the select group defaults to it', () =
   );
 });
 
-test('a multi-node subscription fails over in order without user action', () => {
+test('a multi-node subscription keeps probing for recovery without user traffic', () => {
   const { store, user } = seed();
   store.upsertUserOverseaEntitlement({
     userId: user.userId,
@@ -200,10 +200,14 @@ test('a multi-node subscription fails over in order without user action', () => 
   });
 
   const yaml = store.renderUserOverseaMihomoSubscription(user.userId)?.yaml ?? '';
-  // fallback = 按顺序探测，当前不通就顺延；没有 url/interval 就不会真的探测。
+  // Recovery must not wait for another user request or the old five-minute interval.
   assert.match(yaml, /type: fallback/);
-  assert.match(yaml, /url: "http:\/\/www\.gstatic\.com\/generate_204"/);
-  assert.match(yaml, /interval: 300/);
+  assert.match(yaml, /url: "https:\/\/www\.gstatic\.com\/generate_204"/);
+  assert.match(yaml, /interval: 30\s*\n/);
+  assert.match(yaml, /timeout: 5000\s*\n/);
+  assert.match(yaml, /lazy: false\s*\n/);
+  assert.match(yaml, /expected-status: 204\s*\n/);
+  assert.match(yaml, /max-failed-times: 2\s*\n/);
   // MATCH 仍然指向 select 组，所以手动切换的入口没有被 Auto 顶掉。
   assert.match(yaml, /- MATCH,Oversea$/m);
 });

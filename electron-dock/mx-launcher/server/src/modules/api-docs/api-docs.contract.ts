@@ -1114,6 +1114,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         auth: 'ops-token',
         response: {
           catalog: {
+            aggregate: { link: null, selection: 'manual', mixedPort: 7890 },
             account: { accountId: 'subscriptions', kind: 'system-subscription-catalog', loginAllowed: false, immutable: true, pinnedRank: 0 },
             summary: { total: 1, ready: 1, pending: 0, blocked: 0 },
             subscriptions: [{
@@ -1123,7 +1124,8 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
               delivery: { kind: 'oversea-direct-ip-http-basic', host: '203.0.113.21', port: 3434, urlMasked: 'http://subscriptions:***@203.0.113.21:3434/peer_mx-oversea-hk01-subscriptions.mihomo.yaml' },
               client: { mixedPort: 7788, explicitUseOnly: true },
               trafficPolicy: { mode: 'unlimited', maxBytes: null, resetPeriod: null, expiresAt: null },
-              bandwidthHint: { down: '50 Mbps', up: '50 Mbps' }
+              bandwidthHint: { down: '50 Mbps', up: '50 Mbps' },
+              bandwidth: { configured: { mode: 'limited', upMbps: 30, downMbps: 30 }, deployed: { mode: 'limited', upMbps: 30, downMbps: 30 }, pending: false }
             }]
           }
         }
@@ -1146,6 +1148,21 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             nextAction: 'Run Oversea Install/Sync for each pending site before revealing its system subscription URLs.'
           }
         }
+      })
+    },
+    '/internal/v1/user-center/system-subscriptions/subscription-link': {
+      post: operation({
+        tag: 'Oversea Subscriptions', summary: '签发或轮换系统聚合订阅链接',
+        description: '仅 ops-token。返回十年 HTTPS token 链接，明文仅返回一次；轮换使旧聚合链接失效。'
+          + '动态包含已同步就绪的系统账号节点；手动 select，首次 REJECT，无 Oversea-Auto。'
+          + '与普通用户链接及单站 Basic 凭据独立，不改变任何登录权限。需要 active Domestic HTTPS 域名。',
+        operationId: 'issueSystemSubscriptionLink', auth: 'ops-token',
+        response: { link: { url: 'https://h2i.example.com/internal/v1/oversea-subscriptions/<system-token>.yaml', path: '/internal/v1/oversea-subscriptions/<system-token>.yaml', issuedAt: '2026-09-29T00:00:00.000Z', expiresAt: '2036-09-26T00:00:00.000Z' } }
+      }),
+      delete: operation({
+        tag: 'Oversea Subscriptions', summary: '撤销系统聚合订阅链接',
+        description: '仅使系统聚合链接失效，不改变普通用户链接、登录令牌、站点账号或已有单站链接。',
+        operationId: 'revokeSystemSubscriptionLink', auth: 'ops-token', response: { revoked: true }
       })
     },
     '/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal': {
@@ -1507,10 +1524,12 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         tag: 'Oversea Subscriptions',
         summary: '公开的聚合订阅（Clash 直接粘这条）',
         description: '**URL 本身就是凭据**：路径里的 token 可吊销、只能读自己那份订阅，且不含 userId。'
-          + '返回和 H2O 相同的多节点 YAML——`Oversea` 是 select 组，默认走列表第一个节点（平台默认站点），其余可手动切换。'
+          + '普通用户 token 返回和 H2O 相同的多节点 YAML，默认 Oversea-Auto 自动容错，仍可手动选择节点。'
+          + '系统聚合 token 返回独立手动配置；bandwidth=unlimited（默认）不写固定速率，或 0.001–100000 Mbps，仅作用于已部署不限速的新节点，JP01 等限速节点保留 50 Mbps 原提示和服务端限速。'
           + '这是唯一在公网 edge 放行的用户订阅形态；Bearer 保护的 user-center 订阅永远不会开到公网。'
           + '无效、过期或已吊销的 token 一律返回 404，不区分——避免探测出 token 是否存在过。',
         operationId: 'getPublicOverseaSubscription',
+        parameters: [queryParameter('bandwidth', 'unlimited', false)],
         auth: 'public',
         pathParams: ['token'],
         responseContentType: 'text/yaml',

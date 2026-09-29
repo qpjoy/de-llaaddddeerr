@@ -595,6 +595,9 @@ const sshProfileRotateKey = document.getElementById('ssh-profile-rotate-key');
 const sshProfilePort = document.getElementById('ssh-profile-port');
 const sshProfileHy2Ports = document.getElementById('ssh-profile-hy2-ports');
 const sshProfileHealthPort = document.getElementById('ssh-profile-health-port');
+const sshProfileBandwidthMode = document.getElementById('ssh-profile-bandwidth-mode');
+const sshProfileBandwidthUp = document.getElementById('ssh-profile-bandwidth-up');
+const sshProfileBandwidthDown = document.getElementById('ssh-profile-bandwidth-down');
 const sshProfileWorkerInternalUrl = document.getElementById('ssh-profile-worker-internal-url');
 const sshProfileOverseaCallbackUrl = document.getElementById('ssh-profile-oversea-callback-url');
 const sshProfileStrict = document.getElementById('ssh-profile-strict');
@@ -905,6 +908,9 @@ for (const control of [
   sshProfilePort,
   sshProfileHy2Ports,
   sshProfileHealthPort,
+  sshProfileBandwidthMode,
+  sshProfileBandwidthUp,
+  sshProfileBandwidthDown,
   sshProfileWorkerInternalUrl,
   sshProfileOverseaCallbackUrl,
   sshProfileStrict,
@@ -2369,6 +2375,11 @@ function sshProfilePlanPayload() {
 
 function overseaRuntimeFormPayload() {
   return {
+    bandwidth: {
+      mode: sshProfileBandwidthMode?.value === 'unlimited' ? 'unlimited' : 'limited',
+      upMbps: positiveNumberOrNull(sshProfileBandwidthUp?.value) || 30,
+      downMbps: positiveNumberOrNull(sshProfileBandwidthDown?.value) || 30
+    },
     serverPorts: blankToNull(sshProfileHy2Ports?.value) || '51288',
     exportPort: positiveNumberOrNull(sshProfileHealthPort?.value) || 3434,
     workerInternalBaseUrl: workerInternalBaseUrl(),
@@ -2382,6 +2393,7 @@ function overseaRuntimePayloadForSite(siteId) {
   }
   const runtime = overseaRuntimeForSiteId(siteId);
   return {
+    bandwidth: runtime.bandwidth,
     serverPorts: runtime.serverPorts,
     exportPort: runtime.exportPort,
     workerInternalBaseUrl: normalizeWorkerBaseValue(runtime.workerInternalBaseUrl) || defaultWorkerInternalBaseUrl(),
@@ -3874,6 +3886,9 @@ function fillSshProfileForm(profile) {
   sshProfilePort.value = String(profile.sshPort || 22);
   sshProfileHy2Ports.value = profile.kind === 'oversea' ? (profile.serverPorts || runtime.serverPorts) : '';
   sshProfileHealthPort.value = profile.kind === 'oversea' ? String(positiveNumberOrNull(profile.exportPort) || runtime.exportPort) : '';
+  if (sshProfileBandwidthMode) sshProfileBandwidthMode.value = profile.bandwidth?.mode || 'limited';
+  if (sshProfileBandwidthUp) sshProfileBandwidthUp.value = String(profile.bandwidth?.upMbps || 30);
+  if (sshProfileBandwidthDown) sshProfileBandwidthDown.value = String(profile.bandwidth?.downMbps || 30);
   sshProfileWorkerInternalUrl.value = profile.kind === 'oversea' ? workerBaseUrl : '';
   sshProfileOverseaCallbackUrl.value = profile.kind === 'oversea' ? (profile.overseaCallbackBaseUrl || runtime.overseaCallbackBaseUrl || '') : '';
   sshProfileStrict.value = profile.strictHostKeyChecking || 'yes';
@@ -3947,6 +3962,11 @@ function renderSshProfileFeedback() {
 }
 
 function renderSshProfileSaveState() {
+  const oversea = sshProfileKind.value === 'oversea';
+  if (sshProfileBandwidthMode) sshProfileBandwidthMode.disabled = !oversea;
+  for (const field of [sshProfileBandwidthUp, sshProfileBandwidthDown]) {
+    if (field) field.disabled = !oversea || sshProfileBandwidthMode?.value === 'unlimited';
+  }
   sshProfileSave.disabled = state.sshProfileBusy;
   sshProfileSave.textContent = state.sshProfileBusy ? 'Saving' : 'Save Profile';
   sshProfileRefreshHostKey.disabled = state.sshProfileBusy || state.sshHostKeyBusy || !blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value);
@@ -4380,6 +4400,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/users\/[^/]+\/access$/.test(path);
   }
   if (verb === 'POST') {
+    if (path === '/internal/v1/user-center/system-subscriptions/subscription-link') return true;
     return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/(?:migrate|rollout)|system-subscriptions\/ensure)$/.test(path)
       || /^\/internal\/v1\/user-center\/system-subscriptions\/sites\/[^/]+\/reveal$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime|oversea\/subscription-link)$/.test(path)
@@ -4402,7 +4423,8 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   }
   return verb === 'DELETE'
     && (
-      /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path)
+      path === '/internal/v1/user-center/system-subscriptions/subscription-link'
+      || /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/oversea\/subscription-link$/.test(path)
       || /^\/internal\/v1\/app-center\/apps\/[^/]+$/.test(path)
     );
@@ -6960,6 +6982,7 @@ function overseaRuntimeForSiteId(siteId) {
     .find((item) => item.siteId === siteId);
   const overseaCallbackBaseUrl = site?.runtime?.overseaCallbackBaseUrl || site?.sshProfile?.overseaCallbackBaseUrl || '';
   return {
+    bandwidth: site?.sshProfile?.bandwidth || site?.runtime?.bandwidth || { mode: 'limited', upMbps: 30, downMbps: 30 },
     serverPorts: site?.runtime?.serverPorts || site?.sshProfile?.serverPorts || site?.mihomoSite?.serverPorts || '51288',
     exportPort: positiveNumberOrNull(site?.runtime?.exportPort) || positiveNumberOrNull(site?.sshProfile?.exportPort) || 3434,
     workerInternalBaseUrl: workerInternalBaseUrlForSite(site),
@@ -7026,6 +7049,9 @@ function fillNewSshProfileForm(kind, siteId) {
   sshProfilePort.value = '22';
   sshProfileHy2Ports.value = kind === 'oversea' ? '51288' : '';
   sshProfileHealthPort.value = kind === 'oversea' ? '3434' : '';
+  if (sshProfileBandwidthMode) sshProfileBandwidthMode.value = 'limited';
+  if (sshProfileBandwidthUp) sshProfileBandwidthUp.value = '30';
+  if (sshProfileBandwidthDown) sshProfileBandwidthDown.value = '30';
   sshProfileWorkerInternalUrl.value = kind === 'oversea' ? defaultWorkerInternalBaseUrl() : '';
   sshProfileOverseaCallbackUrl.value = '';
   sshProfileStrict.value = 'yes';
@@ -9420,10 +9446,51 @@ function systemSubscriptionFeedbackKind(status) {
   return 'info';
 }
 
+async function changeSystemAggregateLink(revoke = false) {
+  const active = state.userCenter.systemSubscriptions?.aggregate?.link;
+  if ((revoke || active) && !window.confirm(revoke
+    ? '撤销系统聚合链接？使用此链接的客户端将无法刷新。单节点旧链接不受影响。'
+    : '轮换系统聚合链接会使旧聚合链接失效。继续？')) return;
+  const generation = state.userCenter.systemSubscriptionSecretGeneration;
+  state.userCenter.systemSubscriptionBusy = true;
+  renderUserEditorDrawer();
+  try {
+    const result = await fetchJson('/internal/v1/user-center/system-subscriptions/subscription-link', { method: revoke ? 'DELETE' : 'POST' });
+    if (generation !== state.userCenter.systemSubscriptionSecretGeneration) return;
+    state.userCenter.systemSubscriptionSecrets.__aggregate = revoke ? null : result.link;
+    if (state.userCenter.systemSubscriptions) {
+      state.userCenter.systemSubscriptions.aggregate = { selection: 'manual', mixedPort: 7890, link: revoke ? null : {
+        issuedAt: result.link.issuedAt, expiresAt: result.link.expiresAt
+      } };
+    }
+    state.userCenter.systemSubscriptionFeedback = { kind: 'success', message: revoke ? '系统聚合链接已撤销。' : '聚合链接已生成，请复制保存。新增节点同步就绪后刷新同一链接即可。' };
+  } catch (error) {
+    if (generation === state.userCenter.systemSubscriptionSecretGeneration) {
+      state.userCenter.systemSubscriptionFeedback = { kind: 'error', message: error.message };
+    }
+  } finally {
+    if (generation === state.userCenter.systemSubscriptionSecretGeneration) {
+      state.userCenter.systemSubscriptionBusy = false;
+      renderUserEditorDrawer();
+    }
+  }
+}
+
+function systemAggregateCopyUrl() {
+  const cached = state.userCenter.systemSubscriptionSecrets?.__aggregate;
+  const active = state.userCenter.systemSubscriptions?.aggregate?.link;
+  if (!cached?.url || !active || !(Date.parse(active.expiresAt) > Date.now()) || cached.issuedAt !== active.issuedAt || cached.expiresAt !== active.expiresAt) return null;
+  const url = new URL(cached.url);
+  url.searchParams.set('bandwidth', state.userCenter.systemSubscriptionBandwidth || 'unlimited');
+  return url.toString();
+}
+
 function renderSystemSubscriptionsDrawer() {
   const catalog = state.userCenter.systemSubscriptions;
   const items = asArray(catalog?.subscriptions);
   const summary = catalog?.summary || {};
+  const aggregateUrl = systemAggregateCopyUrl();
+  const aggregateActive = catalog?.aggregate?.link;
   const feedback = state.userCenter.systemSubscriptionFeedback;
   const busy = state.userCenter.systemSubscriptionBusy;
   userEditorBackdrop.hidden = false;
@@ -9434,7 +9501,7 @@ function renderSystemSubscriptionsDrawer() {
         <div>
           <span class="site-kind">User Center · System</span>
           <h2 id="user-editor-title">Subscriptions</h2>
-          <p>置顶的只读系统订阅目录。不可登录、不可设密码，不参与 MX-H2I 用户 OAuth 或现有 7788 ensure-subscription。</p>
+          <p>置顶的系统订阅目录。不可登录、不可设密码，不参与 MX-H2I 用户 OAuth 或现有 7788 ensure-subscription。</p>
         </div>
         <button class="icon-button app-drawer-close" type="button" data-system-subscriptions-close aria-label="Close system subscriptions">×</button>
       </header>
@@ -9446,10 +9513,31 @@ function renderSystemSubscriptionsDrawer() {
             <article><span>Traffic quota</span><strong>Unlimited</strong><small>no byte cap / reset / expiry</small></article>
             <article><span>Channels</span><strong>${escapeHtml(`${summary.ready || 0}/${summary.total || items.length} ready`)}</strong><small>Internal pushes, Oversea serves</small></article>
           </div>
-          <div class="system-subscription-warning">Each ready site uses one long-lived system Basic account for both the direct-IP URL and the HTTPS domain URL. Treat both URLs as secrets. MX only reveals and copies them; the consuming application owns its local listener. This YAML declares 7788; use the consuming application's provider/override option if its existing 7890 listener must remain unchanged.</div>
+          <div class="system-subscription-warning">Each ready site uses one long-lived system Basic account for both the direct-IP URL and the HTTPS domain URL. Treat both URLs as secrets. MX only reveals and copies them; the consuming application owns its local listener. The single-site YAML below declares 7788; use the consuming application's provider/override option if its existing 7890 listener must remain unchanged.</div>
         </section>
         <section class="app-drawer-section">
-          <div class="app-section-title"><span>02</span><strong>System subscription channels</strong></div>
+          <div class="app-section-title"><span>02</span><strong>聚合订阅 · 手动选择节点</strong></div>
+          <article class="system-subscription-card system-aggregate-card" data-state="ready">
+            <p>一条 HTTPS 链接包含所有已同步就绪的系统节点。无 Oversea-Auto；首次导入停在“请先选择节点”，已选节点故障不跨地区切换。</p>
+            <p>默认遵循各节点已部署策略：限速节点保留原速率，不限速节点不设固定带宽。新节点同步完成后刷新此链接即可，无需重新签发。</p>
+            <label class="form-field"><span>不限速节点的客户端带宽选项</span>
+              <select data-system-aggregate-bandwidth>
+                ${[['unlimited', '不设固定速率'], ['30', '30 Mbps'], ['50', '50 Mbps'], ['100', '100 Mbps']].map(([value, label]) => `<option value="${value}" ${(state.userCenter.systemSubscriptionBandwidth || 'unlimited') === value ? 'selected' : ''}>${label}</option>`).join('')}
+              </select>
+            </label>
+            <div class="foundation-subscription-url"><span>HTTPS 聚合链接 · token 认证 · mixed-port 7890</span>
+              <code>${escapeHtml(aggregateUrl || (aggregateActive ? '链接已签发；明文仅在生成时返回。已有链接可继续使用。' : '尚未生成聚合链接'))}</code>
+            </div>
+            <div class="foundation-operation-actions">
+              <button class="secondary-button" type="button" data-system-aggregate-issue ${busy ? 'disabled' : ''}>${aggregateActive ? '轮换聚合链接' : '生成聚合链接'}</button>
+              <button class="secondary-button" type="button" data-system-aggregate-copy ${aggregateUrl ? '' : 'disabled'}>复制 HTTPS 聚合链接</button>
+              <button class="secondary-button" type="button" data-system-aggregate-revoke ${busy || !aggregateActive ? 'disabled' : ''}>撤销聚合链接</button>
+            </div>
+            <small>服务器 CLI 可使用同一链接配合 --instance / --mixed-port / --node 固定出口。修改节点服务器限速请编辑该站点 SSH 配置，再执行 Sync Remote。</small>
+          </article>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>03</span><strong>System subscription channels</strong></div>
           <div class="system-subscription-list">
             ${items.map((item) => {
               const delivery = item.delivery || {};
@@ -9481,6 +9569,7 @@ function renderSystemSubscriptionsDrawer() {
                     <code>${escapeHtml(domainValue)}</code>
                   </div>
                   <p>${escapeHtml(item.statusReason || '')}</p>
+                  <p>聚合出口策略：${escapeHtml(!item.bandwidth?.deployed ? '尚无已部署策略' : item.bandwidth.deployed.mode === 'unlimited' ? '服务器不限速' : `服务器上传 ${item.bandwidth?.deployed?.upMbps || 30} / 下载 ${item.bandwidth?.deployed?.downMbps || 30} Mbps`)}${item.bandwidth?.pending ? ' · 新策略等待 Sync Remote' : ''}</p>
                   <div class="foundation-operation-actions">
                     <button class="secondary-button" type="button" data-system-subscription-reveal="${escapeHtml(item.siteId)}" ${busy || !canReveal ? 'disabled' : ''}>${secret ? 'Reveal Again' : 'Reveal'}</button>
                     ${secret ? `
@@ -9494,7 +9583,7 @@ function renderSystemSubscriptionsDrawer() {
           </div>
         </section>
         <section class="app-drawer-section">
-          <div class="app-section-title"><span>03</span><strong>Activation</strong></div>
+          <div class="app-section-title"><span>04</span><strong>Activation</strong></div>
           <p class="system-subscription-note">Ensure creates only the Internal credential. A channel stays pending until the normal Oversea Install/Sync deploys the stack and returns passing worker evidence. This keeps live user networking untouched.</p>
           ${feedback ? `<div class="feedback ${escapeHtml(feedback.kind || 'info')}">${escapeHtml(feedback.message || '')}</div>` : ''}
         </section>
@@ -9506,6 +9595,13 @@ function renderSystemSubscriptionsDrawer() {
       </footer>
     </div>
   `;
+  userEditorDrawer.querySelector('[data-system-aggregate-issue]')?.addEventListener('click', () => void changeSystemAggregateLink());
+  userEditorDrawer.querySelector('[data-system-aggregate-revoke]')?.addEventListener('click', () => void changeSystemAggregateLink(true));
+  userEditorDrawer.querySelector('[data-system-aggregate-copy]')?.addEventListener('click', () => void copySystemSubscriptionValue(systemAggregateCopyUrl(), 'HTTPS 聚合链接'));
+  userEditorDrawer.querySelector('[data-system-aggregate-bandwidth]')?.addEventListener('change', event => {
+    state.userCenter.systemSubscriptionBandwidth = event.target.value;
+    renderUserEditorDrawer();
+  });
   for (const close of userEditorDrawer.querySelectorAll('[data-system-subscriptions-close]')) {
     close.addEventListener('click', () => closeUserEditorDrawer());
   }

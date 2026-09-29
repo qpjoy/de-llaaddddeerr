@@ -292,12 +292,34 @@ default_hy2_peer_dns() {
 	echo "223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8"
 }
 
+# Explicit per-site policy; old deployments with no mode keep the historical caps.
+configured_server_bandwidth() {
+	local direction="$1" value
+	case "${HY2_SERVER_BANDWIDTH_MODE:-legacy}" in
+		unlimited) return 0 ;;
+		limited)
+			if [[ "$direction" == "up" ]]; then value="${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}";
+			else value="${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}"; fi
+			[[ "$value" =~ ^[0-9]+([.][0-9]+)?[[:space:]]Mbps$ ]] || die "Invalid server bandwidth: $value"
+			awk -v rate="${value% Mbps}" 'BEGIN { exit !(rate >= 0.001 && rate <= 100000) }' || die "Invalid server bandwidth: $value"
+			printf '%s\n' "$value"
+		;;
+		legacy)
+			if [[ "$direction" == "up" ]]; then default_hy2_upload_rate; else default_hy2_download_rate; fi
+		;;
+		*) die "Unknown HY2_SERVER_BANDWIDTH_MODE" ;;
+	esac
+}
+
 apply_internal_managed_defaults() {
+	local server_down server_up
+	server_down="$(configured_server_bandwidth down)" || return 1
+	server_up="$(configured_server_bandwidth up)" || return 1
 	set_env_value HY2_SERVER_PORTS "$(default_hy2_server_ports_value)"
 	set_env_value HY2_HOP_INTERVAL_SECONDS "0"
 	set_env_value HY2_PEER_DNS "$(default_hy2_peer_dns)"
-	set_env_value HY2_SERVER_BANDWIDTH_DOWN "$(default_hy2_download_rate)"
-	set_env_value HY2_SERVER_BANDWIDTH_UP "$(default_hy2_upload_rate)"
+	set_env_value HY2_SERVER_BANDWIDTH_DOWN "$server_down"
+	set_env_value HY2_SERVER_BANDWIDTH_UP "$server_up"
 	set_env_value HY2_DEFAULT_DOWN "$(default_hy2_download_rate)"
 	set_env_value HY2_DEFAULT_UP "$(default_hy2_upload_rate)"
 	set_env_value HY2_INTERNAL_SUBSCRIPTION_STORE "config-center"
@@ -1883,12 +1905,12 @@ internal_defaults_drift_report() {
 		echo "drift: HY2_PEER_DNS=${HY2_PEER_DNS:-unset} expected $(default_hy2_peer_dns)"
 		drift=1
 	fi
-	if [[ "${HY2_SERVER_BANDWIDTH_DOWN:-}" != "$(default_hy2_download_rate)" ]]; then
-		echo "drift: HY2_SERVER_BANDWIDTH_DOWN=${HY2_SERVER_BANDWIDTH_DOWN:-unset} expected $(default_hy2_download_rate)"
+	if [[ "${HY2_SERVER_BANDWIDTH_DOWN:-}" != "$(configured_server_bandwidth down)" ]]; then
+		echo "drift: HY2_SERVER_BANDWIDTH_DOWN=${HY2_SERVER_BANDWIDTH_DOWN:-unset} expected $(configured_server_bandwidth down)"
 		drift=1
 	fi
-	if [[ "${HY2_SERVER_BANDWIDTH_UP:-}" != "$(default_hy2_upload_rate)" ]]; then
-		echo "drift: HY2_SERVER_BANDWIDTH_UP=${HY2_SERVER_BANDWIDTH_UP:-unset} expected $(default_hy2_upload_rate)"
+	if [[ "${HY2_SERVER_BANDWIDTH_UP:-}" != "$(configured_server_bandwidth up)" ]]; then
+		echo "drift: HY2_SERVER_BANDWIDTH_UP=${HY2_SERVER_BANDWIDTH_UP:-unset} expected $(configured_server_bandwidth up)"
 		drift=1
 	fi
 	if [[ "${HY2_DEFAULT_DOWN:-}" != "$(default_hy2_download_rate)" ]]; then

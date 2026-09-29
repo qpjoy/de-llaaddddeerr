@@ -184,7 +184,11 @@ test('low-frequency traffic history is ops-only, peer-attributed, bounded, and r
 test('the system subscription contract exposes both operator URLs without provisioning a local 7890 instance', () => {
   const catalog = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions']?.get?.responses['200']);
   assert.match(catalog, /"mixedPort":7788/);
-  assert.doesNotMatch(catalog, /"instance":"subscriptions"|7890/);
+  assert.match(catalog, /"selection":"manual","mixedPort":7890/);
+  assert.doesNotMatch(catalog, /"instance":"subscriptions"|installCommand/);
+  const issue = paths['/internal/v1/user-center/system-subscriptions/subscription-link']?.post;
+  assert.match(issue?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(issue?.description ?? '', /首次 REJECT/);
 
   const reveal = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal']?.post?.responses['200']);
   assert.match(reveal, /"url":/);

@@ -205,9 +205,13 @@ Install options:
   --binary-path PATH   Use an existing Mihomo binary instead of downloading
   --mixed-port PORT    Persist this instance's local mixed port. Required for a
                        named instance's first install.
+  --node NAME          Pin egress to one exact inline proxy name; requires python3-yaml.
+                       Persisted across refresh/restart. Missing nodes reject the update.
+                       Use --node auto to restore the subscription's default policy.
   --no-start           Install/update files but do not start the service
 
 Update options:
+  --node NAME          Set/change the persisted node binding (or auto). Omission keeps it.
   --url URL            Override saved subscription URL
   --file FILE          Replace subscription from a local YAML file
   --user USER          Override saved subscription username
@@ -1042,8 +1046,61 @@ apply_mixed_port_override() {
 	mv "$tmp" "$MIHOMO_CONFIG_FILE"
 }
 
-render_runtime_config() {
+apply_node_binding() {
+	[[ -n "${MIHOMO_PINNED_NODE:-}" ]] || return 0
+	require_cmd python3
+	python3 - "$MIHOMO_CONFIG_FILE" "$MIHOMO_PINNED_NODE" "$MIHOMO_INSTANCE" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit('--node requires python3-yaml (Ubuntu/Debian: sudo apt-get install python3-yaml).')
+path, name, instance = sys.argv[1:]
+try:
+    with open(path) as stream:
+        config = yaml.safe_load(stream)
+    if not isinstance(config, dict):
+        raise ValueError('subscription must be a YAML mapping')
+    if name != 'auto':
+        matches = [p for p in config.get('proxies', []) if isinstance(p, dict) and p.get('name') == name]
+        if len(matches) != 1:
+            raise ValueError('pinned node must match exactly one inline proxy: ' + name)
+        if matches[0].get('dialer-proxy') not in (None, '', 'DIRECT'):
+            raise ValueError('pinned nodes with a dialer-proxy chain are not supported')
+        config['proxies'] = matches
+        config.pop('proxy-providers', None)
+        # Keep rule targets and DIRECT/REJECT rules, but every proxy group now
+        # contains only the chosen real node. No fallback can change its region.
+        config['proxy-groups'] = [
+            {'name': group['name'], 'type': 'select', 'proxies': [name]}
+            for group in config.get('proxy-groups', [])
+        ]
+    config.setdefault('profile', {})['store-selected'] = False
+    if instance != 'default':
+        # A copied subscription must not bind another instance's DNS/controller
+        # or extra proxy listeners. The CLI owns only its chosen mixed port.
+        for key in ('port', 'socks-port', 'redir-port', 'tproxy-port', 'listeners',
+                    'external-controller-tls', 'external-controller-unix', 'external-controller-pipe'):
+            config.pop(key, None)
+        config['external-controller'] = ''
+        if isinstance(config.get('dns'), dict):
+            config['dns']['listen'] = ''
+    with open(path, 'w') as stream:
+        yaml.safe_dump(config, stream, allow_unicode=True, sort_keys=False)
+except (ValueError, TypeError, KeyError, yaml.YAMLError) as error:
+    sys.exit('Cannot apply --node: ' + str(error))
+PY
+}
+
+render_runtime_config() (
+	local destination="$MIHOMO_CONFIG_FILE"
+	local candidate
+	if [[ -n "${1:-}" ]]; then MIHOMO_SUBSCRIPTION_FILE="$1"; fi
 	ensure_subscription_source
+	candidate="$(mktemp "$MIHOMO_HOME/.config.XXXXXX")"
+	trap 'rm -f -- "$candidate"' EXIT
+	chmod 600 "$candidate"
+	MIHOMO_CONFIG_FILE="$candidate"
 	cat "$MIHOMO_SUBSCRIPTION_FILE" > "$MIHOMO_CONFIG_FILE"
 	apply_mixed_port_override
 	append_geox_overlay_if_needed
@@ -1051,8 +1108,14 @@ render_runtime_config() {
 		printf "\n" >> "$MIHOMO_CONFIG_FILE"
 		cat "$MIHOMO_TUN_OVERLAY_FILE" >> "$MIHOMO_CONFIG_FILE"
 	fi
+	apply_node_binding
+	if [[ -n "${MIHOMO_PINNED_NODE:-}" ]]; then
+		"$MIHOMO_BIN" -t -d "$MIHOMO_HOME" -f "$MIHOMO_CONFIG_FILE" >/dev/null \
+			|| die "Pinned config validation failed; the existing runtime config is unchanged."
+	fi
 	chmod 600 "$MIHOMO_CONFIG_FILE"
-}
+	mv "$MIHOMO_CONFIG_FILE" "$destination"
+)
 
 fetch_subscription() (
 	local url="$1"
@@ -1100,10 +1163,10 @@ fetch_subscription() (
 		_fetch_subscription_curl_config=""
 	fi
 	[[ -s "$_fetch_subscription_tmp_file" ]] || die "Downloaded subscription is empty."
+	render_runtime_config "$_fetch_subscription_tmp_file"
 	mv "$_fetch_subscription_tmp_file" "$MIHOMO_SUBSCRIPTION_FILE"
 	_fetch_subscription_tmp_file=""
 	chmod 600 "$MIHOMO_SUBSCRIPTION_FILE"
-	render_runtime_config
 )
 
 install_subscription_file() {
@@ -1115,9 +1178,9 @@ install_subscription_file() {
 
 	ensure_dirs
 	log "Installing local subscription file: $file_path"
+	render_runtime_config "$file_path"
 	cp "$file_path" "$MIHOMO_SUBSCRIPTION_FILE"
 	chmod 600 "$MIHOMO_SUBSCRIPTION_FILE"
-	render_runtime_config
 }
 
 # The port the system-wide proxy wiring should point at. Defaults to this
@@ -1242,6 +1305,7 @@ status_command() {
 	echo "Subscription file: $MIHOMO_SUBSCRIPTION_FILE"
 	echo "Subscription URL: ${MIHOMO_SUBSCRIPTION_URL:-unset}"
 	echo "Mixed port: ${port:-unknown}"
+	echo "Node binding: ${MIHOMO_PINNED_NODE:-auto (subscription policy)}"
 	report_mixed_port_binding "$port"
 	echo "Shell proxy profile: $([[ -f "$MIHOMO_PROFILE_PROXY_FILE" ]] && echo enabled || echo disabled)"
 	echo "TUN mode: $([[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]] && echo enabled || echo disabled)"
@@ -1263,6 +1327,7 @@ update_subscription_command() {
 	local password="${3:-}"
 	local file_path="${4:-}"
 	local no_auth="${5:-false}"
+	local node="${6:-}"
 	local -a normalized=()
 
 	if [[ "$MIHOMO_INSTANCE" != "default" ]] \
@@ -1273,9 +1338,11 @@ update_subscription_command() {
 	fi
 
 	load_env
+	if [[ -n "$node" ]]; then MIHOMO_PINNED_NODE="$node"; fi
 
 	if [[ -n "$file_path" ]]; then
 		install_subscription_file "$file_path"
+		set_env_value MIHOMO_PINNED_NODE "${MIHOMO_PINNED_NODE:-}"
 		set_env_value MIHOMO_SUBSCRIPTION_SOURCE "local-file"
 		set_env_value MIHOMO_SUBSCRIPTION_LOCAL_FILE "$file_path"
 		set_env_value MIHOMO_SUBSCRIPTION_URL ""
@@ -1312,6 +1379,7 @@ update_subscription_command() {
 	[[ -n "$url" ]] || die "No subscription URL configured. Use install or pass --url."
 
 	fetch_subscription "$url" "$username" "$password"
+	set_env_value MIHOMO_PINNED_NODE "${MIHOMO_PINNED_NODE:-}"
 	set_env_value MIHOMO_SUBSCRIPTION_SOURCE "url"
 	set_env_value MIHOMO_SUBSCRIPTION_LOCAL_FILE ""
 	set_env_value MIHOMO_SUBSCRIPTION_URL "$url"
@@ -1725,6 +1793,7 @@ install_command() {
 	local file_path="${7:-}"
 	local no_auth="${8:-false}"
 	local mixed_port="${9:-}"
+	local node="${10:-}"
 	local -a normalized=()
 
 	if [[ -n "$mixed_port" ]]; then
@@ -1783,7 +1852,7 @@ install_command() {
 	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
 
 	log "Installing initial subscription and rendering runtime config"
-	update_subscription_command "$url" "$username" "$password" "$file_path"
+	update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth" "$node"
 
 	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
 	if [[ "$autostart" == "true" ]]; then
@@ -2142,6 +2211,7 @@ main() {
 			local file_path=""
 			local no_auth="false"
 			local mixed_port=""
+			local node=""
 			local url_arg_provided="false"
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
@@ -2158,13 +2228,14 @@ main() {
 						shift 2
 					;;
 					--no-start) autostart="false"; shift ;;
+					--node) [[ $# -ge 2 && -n "$2" ]] || die "Missing value for --node."; node="$2"; shift 2 ;;
 					*) die "Unknown install option: $1" ;;
 				esac
 			done
 			if [[ "$url_arg_provided" == "true" && "$no_auth" != "true" && -z "$username" && -z "$password" ]] && ! url_has_userinfo "$url"; then
 				no_auth="true"
 			fi
-			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path" "$no_auth" "$mixed_port"
+			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path" "$no_auth" "$mixed_port" "$node"
 		;;
 		update-subscription)
 			local url=""
@@ -2172,6 +2243,7 @@ main() {
 			local password=""
 			local file_path=""
 			local no_auth="false"
+			local node=""
 			local url_arg_provided="false"
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
@@ -2180,13 +2252,14 @@ main() {
 					--user) username="$2"; shift 2 ;;
 					--password) password="$2"; shift 2 ;;
 					--no-auth) no_auth="true"; shift ;;
+					--node) [[ $# -ge 2 && -n "$2" ]] || die "Missing value for --node."; node="$2"; shift 2 ;;
 					*) die "Unknown update-subscription option: $1" ;;
 				esac
 			done
 			if [[ "$url_arg_provided" == "true" && "$no_auth" != "true" && -z "$username" && -z "$password" ]] && ! url_has_userinfo "$url"; then
 				no_auth="true"
 			fi
-			update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth"
+			update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth" "$node"
 		;;
 		start)
 			start_command

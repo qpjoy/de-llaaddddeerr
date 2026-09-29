@@ -1,9 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { promisify } from 'node:util';
 
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import {
@@ -13,6 +14,9 @@ import {
 } from '../../lib/internal-ops-auth.js';
 import {
   USER_OVERSEA_SUBSCRIPTION_SCOPE,
+  hashToken,
+  isUserOverseaSubscriptionLinkToken,
+  userOverseaSubscriptionLinkPath,
   systemSubscriptionAccessAccountName
 } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -37,6 +41,8 @@ import type {
 } from '../../types.js';
 import {
   buildSystemSubscriptionCatalog,
+  renderSystemAggregate,
+  systemAggregateDomainUrl,
   systemSubscriptionDirectUrl,
   systemSubscriptionDomainUrl
 } from './system-subscriptions.js';
@@ -153,6 +159,29 @@ export class UserCenterController {
       },
       catalog: await buildSystemSubscriptionCatalog(this.store)
     };
+  }
+
+  @Post('internal/v1/user-center/system-subscriptions/subscription-link')
+  @Header('Cache-Control', 'no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  async issueSystemSubscriptionLink(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
+    const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
+    const path = userOverseaSubscriptionLinkPath(token);
+    const url = await systemAggregateDomainUrl(this.store, path);
+    if (!url) throw new BadRequestException('Configure an active HTTPS Domestic domain before issuing a system link');
+    const now = Date.now();
+    const link = { tokenHash: hashToken(token), issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 10 * 365 * 86400000).toISOString() };
+    await this.store.updateSystemSubscriptionPublication({ link });
+    return { link: { path, url, issuedAt: link.issuedAt, expiresAt: link.expiresAt } };
+  }
+
+  @Delete('internal/v1/user-center/system-subscriptions/subscription-link')
+  @Header('Cache-Control', 'no-store')
+  async revokeSystemSubscriptionLink(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
+    await this.store.updateSystemSubscriptionPublication({ link: null });
+    return { revoked: true };
   }
 
   @Post('internal/v1/user-center/system-subscriptions/sites/:siteId/reveal')
@@ -506,11 +535,20 @@ export class UserCenterController {
   @Header('content-type', 'text/yaml; charset=utf-8')
   @Header('cache-control', 'no-store')
   @Header('referrer-policy', 'no-referrer')
-  async publicOverseaSubscription(@Param('token') token: string) {
+  async publicOverseaSubscription(@Param('token') token: string, @Query('bandwidth') bandwidth?: string) {
     const userId = await this.store.resolveUserOverseaSubscriptionLink(String(token ?? ''));
     // A bad, revoked or expired link is indistinguishable from a wrong one on
     // purpose: probing must not reveal whether a token ever existed.
-    if (!userId) throw new NotFoundException('Oversea subscription not found');
+    if (!userId) {
+      const { link } = await this.store.getSystemSubscriptionPublication();
+      if (!link || !isUserOverseaSubscriptionLinkToken(token) || link.tokenHash !== hashToken(token)
+        || !(Date.parse(link.expiresAt) > Date.now())) throw new NotFoundException('Oversea subscription not found');
+      const hint = bandwidth == null || bandwidth === 'unlimited' ? null : Number(bandwidth);
+      if (hint !== null && (!Number.isFinite(hint) || hint < 0.001 || hint > 100000)) {
+        throw new BadRequestException('bandwidth must be unlimited or a positive Mbps value up to 100000');
+      }
+      return renderSystemAggregate(this.store, hint === null ? null : `${hint} Mbps`);
+    }
     const subscription = await this.store.renderUserOverseaMihomoSubscription(userId);
     if (!subscription) throw new NotFoundException('Oversea subscription not found');
     return subscription.yaml;

@@ -75,7 +75,14 @@ export interface SiteSlotPlanAccessAccountInput {
   downRate?: string | null;
 }
 
+export interface OverseaBandwidthPolicy {
+  mode: 'limited' | 'unlimited';
+  upMbps: number;
+  downMbps: number;
+}
+
 export interface SiteSlotPlanInput {
+  bandwidth?: OverseaBandwidthPolicy | null;
   siteId?: string | null;
   kind?: SiteSlotKind | null;
   sshProfileId?: string | null;
@@ -190,6 +197,7 @@ export interface SiteSlotPlan {
 }
 
 export interface SiteSlotOverseaRuntimeConfig {
+  bandwidth?: OverseaBandwidthPolicy | null;
   serverPorts: string;
   firstServerPort: number;
   exportPort: number;
@@ -1279,6 +1287,7 @@ export interface ConfigPolicySnapshotInput {
 }
 
 export interface SiteSlotSshProfileInput {
+  bandwidth?: OverseaBandwidthPolicy | null;
   profileId?: string | null;
   siteId?: string | null;
   kind?: SiteSlotKind | null;
@@ -1303,6 +1312,7 @@ export interface SiteSlotSshProfileInput {
 }
 
 export interface SiteSlotSshProfileBootstrapInput {
+  bandwidth?: OverseaBandwidthPolicy | null;
   profileId?: string | null;
   siteId?: string | null;
   kind?: SiteSlotKind | null;
@@ -1374,6 +1384,7 @@ export interface SiteSlotSshProfileBootstrapResult {
 }
 
 export interface SiteSlotSshProfile {
+  bandwidth?: OverseaBandwidthPolicy | null;
   profileId: string;
   siteId: string;
   kind: SiteSlotKind;
@@ -3057,7 +3068,16 @@ export interface MihomoSubscriptionRender {
  * deliberately separate from UserCenterUser so it can never acquire a local
  * password, OAuth token, Feishu identity, or user-scoped Oversea entitlement.
  */
+export interface SystemSubscriptionPublication {
+  link: { tokenHash: string; issuedAt: string; expiresAt: string } | null;
+}
+
 export interface SystemSubscriptionCatalog {
+  aggregate: {
+    link: { issuedAt: string; expiresAt: string } | null;
+    selection: 'manual';
+    mixedPort: 7890;
+  };
   account: {
     accountId: 'subscriptions';
     kind: 'system-subscription-catalog';
@@ -3080,6 +3100,7 @@ export interface SystemSubscriptionCatalog {
 export type SystemSubscriptionStatus = 'ready' | 'pending-sync' | 'blocked' | 'disabled';
 
 export interface SystemSubscriptionItem {
+  bandwidth: { configured: OverseaBandwidthPolicy; deployed: OverseaBandwidthPolicy | null; pending: boolean };
   subscriptionId: string;
   label: string;
   siteId: string;

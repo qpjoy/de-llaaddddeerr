@@ -380,6 +380,24 @@
                       <span>Health TCP</span>
                       <input id="ssh-profile-health-port" inputmode="numeric" min="1" placeholder="3435" type="number" />
                     </label>
+                    <div class="ssh-bandwidth-fields">
+                    <label class="form-field">
+                      <span>节点带宽策略</span>
+                      <select id="ssh-profile-bandwidth-mode">
+                        <option value="limited">限速（默认）</option>
+                        <option value="unlimited">不限速</option>
+                      </select>
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>用户上传 Mbps</span>
+                      <input id="ssh-profile-bandwidth-up" type="number" min="0.001" max="100000" step="any" value="30" />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>用户下载 Mbps</span>
+                      <input id="ssh-profile-bandwidth-down" type="number" min="0.001" max="100000" step="any" value="30" />
+                    </label>
+                    <p class="field-help">每个客户端的服务端上限，仅适用于 Oversea。保存后执行该节点的 Sync Remote 生效；普通用户订阅保留原带宽设置。</p>
+                    </div>
                     <label class="form-field wide-field">
                       <span>Worker URL</span>
                       <input id="ssh-profile-worker-internal-url" autocomplete="off" placeholder="http://127.0.0.1:18090" />

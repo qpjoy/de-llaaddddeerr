@@ -1089,7 +1089,8 @@ select {
   align-items: end;
 }
 
-.dns-evaluate-form .form-field {
+.dns-evaluate-form
+.form-field {
   min-width: 0;
 }
 
@@ -5725,6 +5726,14 @@ select {
   background: rgba(18, 20, 28, 0.5);
 }
 
+.system-aggregate-card {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.system-aggregate-card > * {
+  grid-column: 1 / -1;
+}
+
 .system-subscription-card[data-state="ready"] {
   border-color: color-mix(in srgb, var(--green) 42%, var(--line));
 }
@@ -6013,6 +6022,33 @@ select {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 10px;
+}
+
+.ssh-profile-form {
+  align-items: start;
+}
+
+.ssh-bandwidth-fields {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ssh-bandwidth-fields > .form-field {
+  flex: 1 1 140px;
+}
+
+.ssh-bandwidth-fields input:disabled {
+  opacity: 0.45;
+}
+
+.ssh-bandwidth-fields > .field-help {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .form-field {
