@@ -500,12 +500,14 @@ H2O 运行时订阅策略：
 - **`ensure-subscription` 不带 `siteIds` = 「不改分配」，不是「回到平台默认」。** Internal 只在
   用户**还没有任何 entitlement 记录**时才落到 `defaultUserOverseaSiteId()`；已有记录时原样
   保留 admin 在 User Center 勾的站点（勾成空 = 停用，也要保留，不能被刷新悄悄重新授权）。
-  客户端侧同样：`ensure-subscription` 的第一档候选是「已授权站点全集」而不是逐个站点，
-  否则多站点授权会在服务端被裁成单站点，用户的节点列表随之变短。
-- H2O 的 **分配系统默认** 是上述规则的显式例外：按钮发送
-  `assignmentMode: 'platform-default'`，只在这一次操作中把当前用户替换为平台当前可服务的默认站点。
-  若默认站点不可用则直接失败，不回退已归档/停机的旧站点；登录、自动水合和普通刷新均不发送该
-  mode，因此仍保留 Admin 已有分配。
+  H2O 确认已有 entitlement 后始终省略 `siteIds`，由服务端保留最新分配，避免刷新期间覆盖
+  Admin 新追加的节点。补同步失败不会降级为单节点重试；读取授权失败也不能当成新用户重新分配。
+- H2O 用户侧已移除 **分配系统默认**，只保留 **刷新系统订阅**，获取当前授权下的聚合与
+  单节点订阅。系统下发订阅不可编辑或删除，用户仍可选择使用哪个订阅/节点、管理自己的外部订阅。
+  旧 `provision-h2o-oversea` IPC 兼容为普通刷新，忽略重设分配参数。只有全新用户仍走自动初始化
+  默认节点；登录流程和 standalone launcher 的默认出网能力保持不变。增删授权统一在 Admin
+  User Center → Oversea access → **Update Access** 操作，必要时 **Sync Runtime**。
+  服务端的显式 `assignmentMode: 'platform-default'` API 保留兼容其他调用方，H2O 不再发送。
 - 如果 entitlement 已存在但账号缺失或 `runtimeSync` 不是 `synced`，H2O 水合 managed profile
   时也应优先调用 `ensure-subscription`，让一次请求同时补 entitlement、site access account、
   remote runtime sync 和 YAML 可渲染性；`/oversea/sync-runtime` 只作为已有 active account
@@ -712,7 +714,9 @@ Hysteria2 认证失败／恢复测试；测试使用独立端口和临时目录�
 Admin 与 H2O 对同一用户使用同一个 public subscription-link 资源。只有 JP 授权时也能
 生成单节点 YAML；节点数量不决定 public link 是否有效。Rotate / 重新生成会吊销该用户
 旧链接，服务端只返回元数据，不能取回此前签发的明文。授权更新后刷新原订阅即可；
-不要为了修复 404 点击「分配系统默认」，该动作会把节点授权重设为平台默认站点。
+旧版 H2O 的「分配系统默认」曾将授权重设为单个默认站点，新版已移除此入口。受影响用户需要
+管理员重新勾选原节点并 Update Access，必要时 Sync Runtime，随后客户端刷新系统订阅。
+恢复节点授权不需要 Rotate 链接，也不需要重新登录。
 
 H2O 缓存分享链接时记录 userId 和服务端签发/到期时间。刷新时先核验当前用户和服务端
 元数据；旧账号缓存、Admin 已轮换的缓存不再提供复制。元数据请求失败只推迟核验，不得

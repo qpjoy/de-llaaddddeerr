@@ -6,6 +6,7 @@ const {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } = require('node:fs');
@@ -127,6 +128,33 @@ test('named regional binding persists across refresh and isolates every proxy gr
   assert.equal(config.profile['store-selected'], false, 'returning to auto must not reuse a cached pinned selection');
 });
 
+test('regional pinning supports legacy PyYAML without sort_keys and preserves rule priority', () => {
+  const root = regionalFixture('regional-legacy-pyyaml');
+  const shim = join(root, 'legacy-yaml');
+  mkdirSync(shim);
+  // Match the older dump_all API: unsupported keywords fail exactly as on the server.
+  writeFileSync(join(shim, 'sitecustomize.py'), `import os, yaml
+original_dump_all = yaml.dump_all
+def legacy_dump_all(documents, stream=None, Dumper=yaml.Dumper, default_flow_style=None, allow_unicode=None):
+    with open(os.path.join(os.environ['MIHOMO_TEST_STATE_ROOT'], 'legacy-dump-used'), 'a') as marker:
+        marker.write('used\\n')
+    return original_dump_all(documents, stream, Dumper=Dumper, default_flow_style=default_flow_style, allow_unicode=allow_unicode)
+yaml.dump_all = legacy_dump_all
+`);
+  const result = regionalUpdate(root, ['--node', 'xjp01'], String.raw`
+export PYTHONPATH="$MIHOMO_TEST_STATE_ROOT/legacy-yaml"
+`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(existsSync(join(root, 'legacy-dump-used')), 'test must use the legacy API');
+  const config = yamlFile(join(root, 'client/config.yaml'));
+  assert.equal(config['mixed-port'], 7789);
+  assert.deepEqual(config.proxies.map(proxy => proxy.name), ['xjp01']);
+  assert.ok(config['proxy-groups'].every(group => group.proxies.length === 1 && group.proxies[0] === 'xjp01'));
+  assert.deepEqual(config.rules, ['IP-CIDR,10.0.0.0/8,DIRECT,no-resolve', 'MATCH,Oversea']);
+  assert.match(readFileSync(join(root, 'lifecycle'), 'utf8'), /restart mihomo-client@xjp01\.service/);
+  assert.doesNotMatch(readFileSync(join(root, 'lifecycle'), 'utf8'), /restart mihomo-client\.service/);
+});
+
 test('missing pinned nodes and invalid configs preserve the last good files and do not restart', () => {
   const root = regionalFixture('regional-atomic-update');
   assert.equal(regionalUpdate(root, ['--node', 'xjp01']).status, 0);
@@ -137,11 +165,13 @@ test('missing pinned nodes and invalid configs preserve the last good files and 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /pinned node must match exactly one inline proxy/);
   assert.deepEqual(files.map(file => readFileSync(join(root, file), 'utf8')), previous);
+  assert.deepEqual(readdirSync(join(root, 'client')).filter(name => name.startsWith('.config.')), [], 'failed render cleans temporary credentials');
   writeFileSync(join(root, 'source.yaml'), regionalSubscription);
   writeFileSync(join(root, 'validate-core'), '#!/bin/sh\nexit 1\n');
   result = regionalUpdate(root, ['--node', 'jp01']);
   assert.notEqual(result.status, 0);
   assert.deepEqual(files.map(file => readFileSync(join(root, file), 'utf8')), previous);
+  assert.deepEqual(readdirSync(join(root, 'client')).filter(name => name.startsWith('.config.')), [], 'failed render cleans temporary credentials');
 });
 
 test('install forwards exact --node names to the installer', () => {

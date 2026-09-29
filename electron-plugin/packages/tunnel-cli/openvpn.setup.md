@@ -15,6 +15,13 @@ sudo qp-tunnel-cli open enroll --file internal-01.ovpn
 sudo qp-tunnel-cli open doctor
 ```
 
+```bash
+# 加入open mesh
+ qp-tunnel-cli open create xjp01 \
+  --instance mx \
+  --out /root/xjp01.ovpn
+```
+
 `route-nopull` 让客户端只增加 VPN 网段的直连路由，不替换默认路由，也不接管 DNS。
 内网机器应始终用 CLI 的 `preflight`、`enroll` 和 `doctor`，不要绕过保护直接启动
 profile。

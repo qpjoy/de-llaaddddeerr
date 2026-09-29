@@ -43,6 +43,12 @@ Internal Admin → User Center → `subscriptions` →「生成聚合链接 / �
 
 节点服务端策略在新建或编辑 Oversea SSH 信息时设置，保存后对目标节点执行 Sync Remote 才生效。聚合链接发放、轮换与普通用户/H2O 分享链接相互独立。对这份手动配置执行 `--node auto` 只是清除 CLI 绑定，仍须按订阅策略手选节点。
 
+## 旧版 PyYAML 的 `sort_keys` 报错
+
+若 `--node` 报 `Cannot apply --node: dump_all() got an unexpected keyword argument 'sort_keys'`，这是旧系统 PyYAML 与 CLI 的兼容问题，和节点授权、限速及前一条 geox-url 日志无关。2.1.14 已移除该参数，不要求升级系统 Python / PyYAML。安装修复版后重试原来的 XJP 安装命令；已有实例也可执行 `sudo qp-tunnel-cli update-subscription --instance xjp01 --node mx-oversea-xjp01-hysteria2`。
+
+配置生成仍先写临时文件并通过 Mihomo 校验，再替换当前配置。失败时不替换旧运行配置、不重启该实例；2.1.14 同时修复失败后临时文件清理。不要用重新分配用户默认站点或轮换订阅链接处理此错误。
+
 ## 历史操作记录
 
 ```bash
@@ -162,4 +168,25 @@ qp-tunnel-cli update-subscription --instance subscriptions
 /etc/systemd/system/docker.service.d/
 # k8s 代理位置
 /etc/systemd/system/kubelet.service.d/proxy.conf
+```
+
+# V2 订阅
+### 新增7789端口代理
+```bash
+# 添加订阅
+qp-tunnel-cli install \
+  --instance xjp01 --mixed-port 7789 \
+  --node mx-oversea-xjp01-hysteria2 \
+  --url '<系统聚合订阅URL>' --no-auth
+
+QP_TUNNEL_MIXED_PORT=7789 qp-tunnel-cli curl -I https://www.google.com
+
+# 更新订阅
+qp-tunnel-cli update-subscription \
+  --instance xjp01 \
+  --node mx-oversea-xjp01-hysteria2
+
+# 启动
+qp-tunnel-cli start --instance xjp01
+qp-tunnel-cli status --instance xjp01
 ```

@@ -1086,7 +1086,9 @@ try:
         if isinstance(config.get('dns'), dict):
             config['dns']['listen'] = ''
     with open(path, 'w') as stream:
-        yaml.safe_dump(config, stream, allow_unicode=True, sort_keys=False)
+        # Older distro PyYAML has no sort_keys argument. Mapping order is not
+        # significant here; proxy and routing priority are preserved as lists.
+        yaml.safe_dump(config, stream, allow_unicode=True, default_flow_style=False)
 except (ValueError, TypeError, KeyError, yaml.YAMLError) as error:
     sys.exit('Cannot apply --node: ' + str(error))
 PY
@@ -1094,13 +1096,12 @@ PY
 
 render_runtime_config() (
 	local destination="$MIHOMO_CONFIG_FILE"
-	local candidate
 	if [[ -n "${1:-}" ]]; then MIHOMO_SUBSCRIPTION_FILE="$1"; fi
 	ensure_subscription_source
-	candidate="$(mktemp "$MIHOMO_HOME/.config.XXXXXX")"
-	trap 'rm -f -- "$candidate"' EXIT
-	chmod 600 "$candidate"
-	MIHOMO_CONFIG_FILE="$candidate"
+	_mihomo_render_candidate="$(mktemp "$MIHOMO_HOME/.config.XXXXXX")"
+	trap 'rm -f -- "$_mihomo_render_candidate"' EXIT
+	chmod 600 "$_mihomo_render_candidate"
+	MIHOMO_CONFIG_FILE="$_mihomo_render_candidate"
 	cat "$MIHOMO_SUBSCRIPTION_FILE" > "$MIHOMO_CONFIG_FILE"
 	apply_mixed_port_override
 	append_geox_overlay_if_needed

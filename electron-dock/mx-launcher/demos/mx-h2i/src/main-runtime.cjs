@@ -1920,14 +1920,16 @@ function registerIpc() {
     runtime.feedback = {
       tone: ready ? 'success' : 'warning',
       message: ready
-        ? 'H2O 已获得当前用户的默认 oversea 订阅。'
+        ? 'H2O 已刷新当前用户的系统 oversea 订阅，节点授权保持不变。'
         : 'H2O 当前用户 oversea 订阅仍未就绪，请检查 Internal / k8s admin 的 Oversea 状态。'
     };
     touchRuntime('h2o subscription refreshed');
     await saveAndBroadcast();
     return visibleRuntime();
   });
-  ipcMain.handle('mx-h2i:provision-h2o-oversea', async (_event, input = {}) => {
+  // Compatibility for older renderers: this entry now refreshes subscriptions;
+  // only User Center admin controls which sites a user is assigned.
+  ipcMain.handle('mx-h2i:provision-h2o-oversea', async () => {
     if (!runtime.apps.h2o.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1941,46 +1943,37 @@ function registerIpc() {
       applyH2oManagedSubscriptionState(current, {
         status: 'login-required',
         syncStatus: 'login-required',
-        errorMessage: '新建系统 oversea 订阅需要先登录员工用户。'
+        errorMessage: '系统 oversea 订阅需要先登录员工用户。'
       });
       runtime.feedback = {
         tone: 'warning',
-        message: '请先登录员工用户后再分配 H2O oversea 订阅。'
+        message: '请先登录员工用户后再刷新 H2O oversea 订阅。'
       };
       await saveAndBroadcast();
       return visibleRuntime();
     }
     try {
-      await markH2oSystemSubscriptionInitializing(h2oPluginRuntime(runtime.apps.h2o.runtime), 'h2o oversea provision initializing');
-      // This IPC is only reached from the explicit "分配系统默认" action. Background
-      // hydrate/refresh paths deliberately omit assignmentMode so they keep an
-      // admin-managed assignment instead of silently moving the user.
-      const provisionResult = await provisionH2oOverseaForCurrentUser({
-        ...(input && typeof input === 'object' ? input : {}),
-        assignmentMode: 'platform-default'
-      });
+      await hydrateH2oSystemSubscriptionsForUser({ showInitializing: true });
       const ready = h2oHasUsableSubscription(runtime.apps.h2o.runtime?.activeSubscription);
-      const syncStatus = nullableString(provisionResult?.syncStatus);
-      const syncMessage = syncStatus && syncStatus !== 'skipped' ? `返回 ${syncStatus}` : '仍未完成';
       runtime.feedback = {
         tone: ready ? 'success' : 'warning',
         message: ready
-          ? '已为当前用户分配并同步 H2O oversea 订阅。'
-          : `已为当前用户创建 oversea entitlement，但远端 runtime 同步${syncMessage}。`
+          ? 'H2O 已刷新当前用户的系统 oversea 订阅，节点授权保持不变。'
+          : 'H2O 当前用户 oversea 订阅仍未就绪，请检查 Internal / k8s admin 的 Oversea 状态。'
       };
-      touchRuntime('h2o oversea provisioned');
+      touchRuntime('h2o subscription refreshed');
     } catch (err) {
       const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
       applyH2oManagedSubscriptionState(current, {
         status: 'error',
-        syncStatus: 'provision-failed',
-        errorMessage: `分配 H2O oversea 订阅失败：${errorMessage(err)}`
+        syncStatus: 'refresh-failed',
+        errorMessage: `刷新 H2O oversea 订阅失败：${errorMessage(err)}`
       });
       runtime.feedback = {
         tone: 'error',
-        message: `分配 H2O oversea 订阅失败：${errorMessage(err)}`
+        message: `刷新 H2O oversea 订阅失败：${errorMessage(err)}`
       };
-      touchRuntime('h2o oversea provision failed');
+      touchRuntime('h2o subscription refresh failed');
     }
     await saveAndBroadcast();
     return visibleRuntime();
@@ -10409,7 +10402,7 @@ function h2oTestFallbackHint(proxyMode) {
     return '本次请求没有走 H2O：H2O 未运行，已回退系统代理。请先在 H2O 管理页点击「启动」再测试';
   }
   if (proxyMode === 'direct-no-subscription') {
-    return '本次请求没有走 H2O：订阅未就绪，已回退系统代理。请先刷新/分配系统默认订阅';
+    return '本次请求没有走 H2O：订阅未就绪，已回退系统代理。请先刷新系统订阅';
   }
   if (proxyMode === 'direct-not-whitelisted') {
     return '本次请求没有走 H2O：App 规则模式下该域名不在白名单，走的是直连';
@@ -10641,25 +10634,19 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
     bootstrapResolveMode: input.bootstrapResolveMode
   });
   if (!userId) throw new Error('Internal OAuth token 没有返回 userId，无法分配 oversea 订阅。');
-  const assignmentMode = input?.assignmentMode === 'platform-default' ? 'platform-default' : null;
-  // Read the current grant first so re-provisioning keeps whatever the admin set
-  // in User Center instead of resetting the user to a client-side default.
-  // The explicit platform-default action is intentionally different: it does
-  // not reuse the old entitlement as a fallback and lets Internal resolve the
-  // current serviceable default authoritatively.
-  const existingEntitlement = assignmentMode
-    ? null
-    : await h2oRequestInternalJson(
-        baseUrl,
-        `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`,
-        { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
-      ).then((result) => result.payload?.entitlement || null).catch(() => null);
-  const siteAttempts = assignmentMode
+  // For an existing grant, omit siteIds so Internal preserves its latest admin
+  // assignment, including disabled access. Never retry a failed sync with a
+  // single-site subset. A failed lookup must not look like a brand-new user.
+  const existingEntitlement = await h2oRequestInternalJson(
+    baseUrl,
+    `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`,
+    { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
+  ).then((result) => result.payload?.entitlement || null);
+  const siteAttempts = existingEntitlement
     ? [[]]
     : await h2oOverseaProvisionSiteAttempts(input, {
         baseUrl,
-        bootstrapResolveMode: input.bootstrapResolveMode,
-        entitlementSiteIds: arrayValue(existingEntitlement?.siteIds, [])
+        bootstrapResolveMode: input.bootstrapResolveMode
       });
   const requestedBy = 'mx-h2i-h2o';
   const requestId = makeRequestId('h2o-oversea');
@@ -10678,7 +10665,6 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
           bootstrapResolveMode: input.bootstrapResolveMode,
           headers: appCenterCatalogHeaders(),
           body: {
-            ...(assignmentMode ? { assignmentMode } : {}),
             ...(siteIds.length ? { siteIds } : {}),
             syncRuntime: true,
             confirmRemoteExecution: true,
@@ -10730,22 +10716,12 @@ async function h2oOverseaProvisionSiteAttempts(input = {}, options = {}) {
   ].map((item) => String(item || '').trim()).filter(Boolean));
   if (explicit.length) return [explicit];
 
-  // What the admin already granted this user outranks any client-side guess:
-  // re-provisioning used to hard-code oversea-main first, so it silently reverted
-  // an explicit Oversea access change back to a site the admin had moved off.
-  const entitledSiteIds = uniqueStrings(arrayValue(options.entitlementSiteIds, [])
-    .map((item) => String(item || '').trim())
-    .filter(Boolean));
-
+  // Bootstrap candidates are only used after confirming no entitlement exists.
+  // Existing (including disabled) grants never reach these single-site fallbacks.
   const discoveredSiteIds = await discoverH2oOverseaSiteIds(options);
-  // 第一档是「admin 授权的全集」而不是逐个站点：订阅本来就是多节点聚合，
-  // 只发第一个站点会把多站点授权在服务端裁成单站点，用户的节点列表随之变短。
-  // 之后才逐档降级；空数组 = 不带 siteIds，由 Internal 保留已有分配或取平台默认。
   const candidates = [
-    entitledSiteIds,
-    ...entitledSiteIds.map((siteId) => [siteId]),
-    ...discoveredSiteIds.map((siteId) => [siteId]),
     [],
+    ...discoveredSiteIds.map((siteId) => [siteId]),
     ['oversea-main']
   ];
   const seen = new Set();

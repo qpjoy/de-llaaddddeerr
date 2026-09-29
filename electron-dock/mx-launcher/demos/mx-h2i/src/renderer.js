@@ -2855,7 +2855,6 @@ function renderH2oSubscriptionManager(runtime, connected) {
   const currentUserReady = isUserIdentity();
   const managedSubscription = runtime.subscriptions.find((item) => item.id === 'h2o-default') || runtime.activeSubscription;
   const refreshManagedDisabled = !connected || (managedSubscription.requiresUser && !currentUserReady) || busyAction === 'refreshH2oSubscription';
-  const provisionDisabled = !connected || !currentUserReady || busyAction === 'provisionH2oOversea';
   const draft = h2oSubscriptionDraft || defaultH2oSubscriptionDraft();
   const editing = Boolean(h2oSubscriptionEditId);
   return `
@@ -2866,8 +2865,7 @@ function renderH2oSubscriptionManager(runtime, connected) {
           <span>${escapeHtml(h2oManagedProfileSummary(runtime, currentUserReady))}</span>
         </div>
         <div class="toolbar-actions">
-          <button class="primary-button" type="button" data-action="provisionH2oOversea" ${provisionDisabled ? 'disabled' : ''}>分配系统默认</button>
-          <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(managedSubscription.id)}" ${refreshManagedDisabled ? 'disabled' : ''}>刷新系统默认</button>
+          <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(managedSubscription.id)}" ${refreshManagedDisabled ? 'disabled' : ''}>刷新系统订阅</button>
         </div>
       </section>
       <form class="h2o-subscription-form" data-form-action="add-h2o-subscription">
@@ -2905,8 +2903,8 @@ function renderH2oSubscriptionManager(runtime, connected) {
             ${item.errorMessage ? `<small class="h2o-subscription-reason">${escapeHtml(item.errorMessage)}</small>` : ''}
             <div class="toolbar-actions">
               <button class="secondary-button" type="button" data-action="pinH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>置顶</button>
-              <button class="secondary-button" type="button" data-action="editH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${!isCustom || busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>编辑</button>
-              <button class="secondary-button" type="button" data-action="deleteH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${!canDelete || busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>删除</button>
+              ${isCustom ? `<button class="secondary-button" type="button" data-action="editH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>编辑</button>` : ''}
+              ${canDelete ? `<button class="secondary-button" type="button" data-action="deleteH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>删除</button>` : ''}
               <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${!connected || (item.requiresUser && !currentUserReady) || busyAction === 'refreshH2oSubscription' ? 'disabled' : ''}>刷新</button>
               <button class="primary-button" type="button" data-action="setH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${item.id === runtime.activeSubscription.id || !connected || !usable ? 'disabled' : ''}>使用</button>
             </div>
@@ -3231,11 +3229,11 @@ function h2oManagedProfileSummary(runtime, currentUserReady) {
   if (!currentUserReady) return '系统 oversea 默认订阅需要登录用户；Visitor 不会自动获得 admin 指派节点。';
   const active = runtime?.activeSubscription || {};
   if (active.source === 'custom' || active.source === 'external') {
-    return '当前使用自定义订阅；系统 oversea-main 可在这里分配/刷新，成功后不会覆盖自定义 active。';
+    return '当前使用自定义订阅；刷新系统订阅会获取管理员分配的节点，并保留当前使用的自定义订阅。';
   }
   if (active.syncStatus === 'initializing') return '正在为当前用户初始化系统 oversea 订阅；完成后会自动作为 H2O 默认连接。';
-  if (h2oSubscriptionUsable(active)) return '已使用当前用户从 Internal / k8s admin 获取系统 oversea 配置。';
-  return '已登录；可从 Internal 分配或刷新 oversea-main，失败时会保留已有可用外部订阅。';
+  if (h2oSubscriptionUsable(active)) return '节点授权由管理员管理；刷新可获取最新的聚合与单节点订阅，保留已有节点授权。';
+  return '已登录；刷新可获取系统订阅。需要调整节点授权请联系管理员，首次使用会自动获取默认节点。';
 }
 
 function h2oSubscriptionStatusText(runtime, connected) {
@@ -3281,6 +3279,7 @@ function h2oSubscriptionUsable(item) {
 
 function h2oSubscriptionCanDelete(item) {
   if (!item) return false;
+  if (item.requiresUser || item.source === 'internal') return false;
   return !['h2o-default', 'h2o-oversea-backup'].includes(String(item.id || ''));
 }
 
@@ -3449,7 +3448,7 @@ function renderH2oClashLink(runtime, connected, currentUserReady, busyAction) {
       ${issuedElsewhere
         ? '<small>这个账号已经有一条链接，但明文只在生成时显示过一次，本机没有副本。重新生成会让旧链接立即失效。</small>'
         : ''}
-      ${link?.status === 'unverified' ? '<small>尚未核验分享链接，请点“刷新系统默认”。核验期间不提供旧链接复制。</small>' : ''}
+      ${link?.status === 'unverified' ? '<small>尚未核验分享链接，请点“刷新系统订阅”。核验期间不提供旧链接复制。</small>' : ''}
       ${link?.status === 'missing' ? '<small>原分享链接已失效。可在此重新生成；无需重新分配节点。</small>' : ''}
       <div class="toolbar-actions">
         <button class="secondary-button" type="button" data-action="issueH2oClashLink" ${disabled ? 'disabled' : ''}>

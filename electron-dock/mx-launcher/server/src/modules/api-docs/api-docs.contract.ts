@@ -1397,13 +1397,12 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Internal User Operations',
         summary: '确保用户订阅与运行态就绪',
-        description: '真实 Bearer 鉴权接口。普通刷新省略 siteIds 会保留已有分配；只有用户明确点击“分配系统默认”时才传 assignmentMode=platform-default，将分配替换为当前可服务的平台默认站点。普通用户只能操作 token subject 对应的 userId，且需要 oversea.subscription.ensure；跨用户管理需要同时具备 site-slot.manage 与 site-slot.execute。',
+        description: '真实 Bearer 鉴权接口。普通刷新省略 siteIds 会保留已有分配；全新用户自动获取平台默认站点。H2O 只提供刷新系统订阅，节点授权由 Admin 管理。assignmentMode=platform-default 保留为显式重设分配的兼容参数，H2O 不再发送。普通用户只能操作 token subject 对应的 userId，且需要 oversea.subscription.ensure；跨用户管理需要同时具备 site-slot.manage 与 site-slot.execute。',
         operationId: 'ensureUserOverseaSubscription',
         scopes: ['oversea.subscription.ensure'],
         auth: 'internal-bearer',
         pathParams: ['userId'],
         request: {
-          assignmentMode: 'platform-default',
           syncRuntime: true,
           includeYaml: false,
           requestedBy: 'mx-h2i',
