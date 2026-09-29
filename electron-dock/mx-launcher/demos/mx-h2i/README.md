@@ -98,6 +98,21 @@ The package and make scripts run the same local Launcher preparation step
 before invoking electron-builder, so clean Windows workspaces do not start with
 an empty `@qpjoy/electron-launcher/dist`.
 
+For a code-only ASAR update, run from this demo directory:
+
+```sh
+pnpm make:asar
+# Optional explicit target (also supports --arch arm64 or x64):
+pnpm make:asar --platform darwin --arch universal --version 2.1.20
+```
+
+The default target is the current OS (`darwin` or `win32`), with `universal`
+for macOS and `x64` for Windows, matching the platform-specific shortcuts.
+The version defaults to this demo's `package.json`; explicit flags override
+these defaults. The command runs the checks and writes the `.asar` and its
+`.asar.json` manifest to `out/release-asar/`. It does not publish a release.
+Native dependencies are inherited from the compatible full installer.
+
 Windows packaging uses electron-builder's PowerShell-backed pnpm dependency
 collector. `make:win` automatically prepends the inbox Windows PowerShell 5.1
 directory to `PATH` and fails early with a focused message if

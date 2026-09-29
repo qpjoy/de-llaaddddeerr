@@ -432,9 +432,16 @@ macOS 与 Windows 的 ASAR 打包入口：
 
 ```bash
 cd electron-dock/mx-launcher/demos/mx-h2i
+pnpm make:asar
+# 或显式指定目标版本、平台与架构：
+pnpm make:asar --version 2.1.20 --platform darwin --arch universal
+# 以下平台快捷脚本仍可使用：
 ./scripts/build-asar-macos.sh 2.1.3 universal
 scripts\build-asar-windows.cmd 2.1.3 x64
 ```
+
+`pnpm make:asar` 默认读取本项目 `package.json` 的版本和当前操作系统，macOS 使用
+`universal`、Windows 使用 `x64`；显式参数可覆盖默认值。只构建本地文件，不自动发布。
 
 输出位于 `out/release-asar/`，同时生成 `.asar.json`，记录 sha256、平台、架构和最低基座。
 使用 Admin 发布时只上传 `.asar`；`.asar.json` 留在本地用于核对或自动化脚本，服务端会

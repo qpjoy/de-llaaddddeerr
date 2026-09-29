@@ -10,10 +10,12 @@ import { createPackage } from '@electron/asar';
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const args = parseArgs(process.argv.slice(2));
-const platform = normalizePlatform(requiredArg('platform', args.platform));
-const arch = normalizeArch(requiredArg('arch', args.arch));
+const platform = normalizePlatform(requiredArg('platform', args.platform ?? process.platform));
+// This archive contains application code only; native dependencies come from
+// the installed base. Match the macOS/Windows convenience scripts' defaults.
+const arch = normalizeArch(requiredArg('arch', args.arch ?? (platform === 'darwin' ? 'universal' : 'x64')));
 const packageJson = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8'));
-const version = normalizeVersion(requiredArg('version', args.version));
+const version = normalizeVersion(requiredArg('version', args.version ?? packageJson.version));
 const outputDir = path.resolve(projectDir, args.outputDir || 'out/release-asar');
 const stagingDir = path.join(outputDir, `.staging-${process.pid}-${platform}-${arch}`);
 const fileName = `MX-H2I-${version}-${platform}-${arch}-app.asar`;
