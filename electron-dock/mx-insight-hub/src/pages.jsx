@@ -2,7 +2,7 @@ import { WebSearchAccess } from './web-search-access.jsx'
 import { matchesAccessSearch, normalizeAccessSearch } from './access-search.js'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { PagedItems } from './paged-items.jsx'
-import { withProductScopes } from '../shared/product-catalog.mjs'
+import { withProductScopes, XIAOHONGSHU_ANALYTICS_METERS } from '../shared/product-catalog.mjs'
 import { ConsumptionPanel } from './consumption-panel.jsx'
 import { ProductSetup } from './product-setup.jsx'
 import { QixinPricingAdjustment } from './qixin-pricing.jsx'
@@ -377,6 +377,8 @@ function multiplierToPpm(value) {
 const enterpriseMeterNames = new Map(QIXIN_OFFICIAL_PRICES.entries.map(entry => [`enterprise.api.${entry.apiId}`, `${entry.apiId} · ${entry.name}`]))
 function billingMeterLabel(meterKey) {
   if (enterpriseMeterNames.has(meterKey)) return enterpriseMeterNames.get(meterKey)
+  const analytics = XIAOHONGSHU_ANALYTICS_METERS.find(entry => entry.key === meterKey)
+  if (analytics) return analytics.label
   return ({
     'social.posts.search': '小红书笔记搜索',
     'social.posts.resolve': '小红书笔记详情',
@@ -2772,6 +2774,11 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
               <p>来源：{(planForm.components||[]).map(item=>item.type==='feature' ? BILLING_FEATURES.find(feature=>feature.key===item.key)?.name : (data.plans?.catalog||[]).find(plan=>plan.versionId===item.versionId)?.name||item.versionId).join(' + ')||'手动费率'}</p>
               <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current, entries: [...current.entries.filter(entry => entry.meterKey || entry.price), ...['raw', 'crawl', 'user-info'].filter(key => !current.entries.some(entry => entry.meterKey === key)).map(meterKey => ({ meterKey, price: '' }))] }))}>添加 Night-All 三类接口费率</button>
               <p>raw、crawl、user-info 按请求计费；价格填 0 表示免费。小红书直连使用自己的 social.* 计费键；费用配置不放宽采集工作预算。</p>
+              <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setPlanForm(current => ({ ...current,
+                entries: [...current.entries.filter(entry => entry.meterKey || entry.price),
+                  ...XIAOHONGSHU_ANALYTICS_METERS.filter(meter => !current.entries.some(entry => entry.meterKey === meter.key)).map(meter => ({ meterKey: meter.key, price: '' }))],
+              }))}>添加小红书详情 / 博主指标两项费率</button>
+              <p>note_id 详情按次、user_id 博主指标按页独立定价；每次仅查指定页，Hub 不自动翻页。两项共用现有详情与阅读量授权，计量键不需要另行授权。新增费率留空待填，已有价格保留；未配置覆盖价时沿用租户默认单价。</p>
               <QixinPricingAdjustment busy={Boolean(billingBusy)} currency={planForm.currency}
                 component={planForm.components?.find(item => item.type === 'feature' && item.key === 'qixin')}
                 onApply={(component, rates) => setPlanForm(current => ({ ...current,

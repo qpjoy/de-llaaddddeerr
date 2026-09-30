@@ -1,13 +1,12 @@
 import { AppError } from '../core/errors.mjs'
 
-// Internal supplementary acquisition; it uses the existing analytics grant and
-// customer request, but requires its own explicitly reviewed procurement price.
+// Explicit user-ID page acquisition shares the analytics grant, with its own
+// independently reviewed procurement price.
 export const XHS_BLOGGER_NOTES_V2 = Object.freeze({
   endpointKey: 'xiaohongshu.pgy.blogger-notes.v2',
   providerPath: '/api/v1/xiaohongshu/pgy/get_blogger_notes_v2',
   endpointVersion: 'pgy_v2',
-  contractVersion: 'mx-insight-hub.xiaohongshu-note-metrics.v2',
-  pageSize: 8, budgetMs: 90000,
+  pageSize: 8,
 })
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -15,11 +14,6 @@ const count = value => (typeof value === 'number' || (typeof value === 'string' 
   && Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null
 const id = value => typeof value === 'string' && /^[a-f0-9]{24}$/iu.test(value) ? value.toLowerCase() : null
 const invalid = () => { throw new AppError(502, 'invalid_upstream_contract', 'Note metrics response does not match the released contract') }
-
-export function needsNoteMetrics(item) {
-  return Boolean(item) && ([item.metrics?.views, item.metrics?.impressions].some(value => value == null)
-    || ![item.metrics?.views, item.metrics?.impressions].some(value => value > 0))
-}
 
 export function projectBloggerNotesV2(payload) {
   if (payload?.code !== 200) invalid()
@@ -41,26 +35,4 @@ export function projectBloggerNotesV2(payload) {
     }
   })
   return { items, total: count(data.total) }
-}
-
-export function mergeBloggerNoteMetrics(projection, match, { page, capturedAt }) {
-  const item = projection.data.item
-  if (match.externalId !== item.externalId || (match.authorId && match.authorId !== item.author.id?.toLowerCase())) invalid()
-  const whollyEmpty = Object.values(item.metrics).every(value => value == null || value === 0)
-  const emptyReach = ![item.metrics.views, item.metrics.impressions].some(value => value > 0)
-  const sources = Object.fromEntries(Object.entries(item.metrics).map(([key, value]) => [key, value == null ? null : 'detail']))
-  // An entirely empty detail metric set is an upstream placeholder in this
-  // case. V2 does not supply individual likes/comments/shares; do not derive
-  // those from engageNum or retain its placeholder zeroes as verified counts.
-  if (whollyEmpty && Object.values(match.metrics).some(value => value > 0)) {
-    for (const key of Object.keys(item.metrics)) { item.metrics[key] = null; sources[key] = null }
-  }
-  for (const [key, value] of Object.entries(match.metrics)) {
-    if (value != null && (key === 'engaged' || (emptyReach && ['views', 'impressions'].includes(key)) || item.metrics[key] == null || whollyEmpty)) {
-      item.metrics[key] = value
-      sources[key] = 'blogger_notes_v2'
-    }
-  }
-  projection.meta.metricSources = sources
-  projection.meta.metricsSupplement = { ...projection.meta.metricsSupplement, status: 'matched', matchedPage: page, collectedAt: capturedAt }
 }

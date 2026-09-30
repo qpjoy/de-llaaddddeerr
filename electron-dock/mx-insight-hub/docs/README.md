@@ -12,6 +12,8 @@ those paths retire one operation at a time and are not the target architecture.
 
 - [实现范围、数据语义与上线门槛](data-browser/README.md)
 - [Node.js Agent、Text2ES、ES 兼容升级与契约转发可行性](data-browser/agent-search-feasibility.md)
+- [LLM Wiki 可行性、搜索整合、角色价值与容量评估](data-browser/llm-wiki-extension.md)：2026-09-30 规划；派生知识服务、高级搜索范围、聚合材料接入及 Admin 试点，尚未实现。
+- [知识馆与持续更新书架：详细实现规划](data-browser/knowledge-library-implementation-plan.md)：最新产品方向；搜索保存、分类/事件层级、历史/增量/定期获取、租户启停、费用与存储、可逛书架及分阶段验收，尚未实现。
 
 ## 下游接入与演示
 

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { PRODUCT_BUNDLES, XIAOHONGSHU_CAPABILITIES } from '../shared/product-catalog.mjs'
+import { PRODUCT_BUNDLES, XIAOHONGSHU_CAPABILITIES, XIAOHONGSHU_ANALYTICS_METERS } from '../shared/product-catalog.mjs'
 import { BILLING_FEATURES } from '../shared/billing-composition.mjs'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState } from './components.jsx'
@@ -16,7 +16,8 @@ export function ProductSetup({ token, data, currentPlan, rates, billing, onRefre
   const missingCapabilities = product.capabilities.filter(scope => !capabilities.includes(scope))
   const ready = new Map((data.configuration?.availableCapabilities || []).map(row => [row.capability, row.ready]))
   const feature = BILLING_FEATURES.find(row => row.key === product.featureKey)
-  const meters = feature?.entries || product.capabilities.map(meterKey => ({ meterKey }))
+  const meters = [...(feature?.entries || product.capabilities.map(meterKey => ({ meterKey }))),
+    ...(productKey === 'xiaohongshu' ? [{ meterKey: XIAOHONGSHU_ANALYTICS_METERS[1].key }] : [])]
   const pricedCount = meters.filter(entry => rates.some(rate => rate.meterKey === entry.meterKey)).length
   const plans = (data.plans?.catalog || []).filter(row => row.status === 'active' && row.versionStatus === 'published' && row.key !== 'legacy-unmetered')
   const chosen = plans.find(row => row.versionId === planId)
@@ -43,6 +44,7 @@ export function ProductSetup({ token, data, currentPlan, rates, billing, onRefre
       </div>
       <div><h3>2 · 复用客户套餐</h3><p>当前 {currentPlan?.name || '未分配'}{currentPlan ? ` v${currentPlan.version}` : ''} · 本产品已配置 {pricedCount}/{meters.length} 项价格</p>
         <DropdownField label="已有套餐版本" value={planId} onChange={setPlanId} disabled={busy || assigning} options={[{ value: '', label: '选择已发布版本' }, ...plans.map(row => ({ value: row.versionId, label: `${row.name} · v${row.version}` }))]} />
+        {productKey === 'xiaohongshu' ? <p>详情和博主笔记指标分开计价。博主指标每页计一次，请在套餐草案中添加对应费率；旧产品价格模板保持原价。</p> : null}
         {chosen ? <p>分配会替换当前调用者的整份套餐：包含 {chosen.priceBook?.entries.length || 0} 项价格。请核对其他业务价格与额度。</p> : null}
         <div className="mih-page-actions"><button className="qp-button qp-button--outline" disabled={busy || assigning || !chosen || chosen.versionId === currentPlan?.versionId} onClick={() => onAssign(chosen)}>分配所选套餐</button>
           {feature ? <button className="qp-button qp-button--outline" disabled={busy || currentPlan?.priceBook && currentPlan.priceBook.currency !== feature.currency} onClick={() => onPrice(product.featureKey)}>追加产品费率到草稿</button> : <p>本产品未预设接口售价；使用客户套餐中的明确价格，其余沿用租户默认价。</p>}</div>
@@ -56,7 +58,7 @@ export function ProductSetup({ token, data, currentPlan, rates, billing, onRefre
     <details><summary>查看本产品生效价格 · 接口价格优先，其余使用租户默认价</summary><PagedItems items={meters} text={entry => entry.meterKey} label="产品费率">{visible => <div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table"><thead><tr><th>业务</th><th>当前单次价格</th><th>状态</th></tr></thead><tbody>{visible.map(({entry}) => {
       const override = rates.find(row => row.meterKey === entry.meterKey)
       const rate = override || { unitPriceMinor: billing.profile?.defaultUnitPriceMinor ?? 0, currency: billing.profile?.defaultCurrency || 'CNY' }
-      return <tr key={entry.meterKey}><td>{XIAOHONGSHU_CAPABILITIES.find(row => row.key === entry.meterKey)?.label || entry.meterKey}</td><td>{rate ? `${rate.currency || currentPlan?.priceBook?.currency} ${(rate.unitPriceMinor / 100).toFixed(2)}` : '0.00'}</td><td>{!override ? '租户默认价' : rate.unitPriceMinor === 0 ? '接口明确免费' : '套餐接口价'}{billing.profile?.mode === 'enforced' ? '' : ' · 尚未扣费'}</td></tr>
+      return <tr key={entry.meterKey}><td>{XIAOHONGSHU_ANALYTICS_METERS.find(row => row.key === entry.meterKey)?.label || XIAOHONGSHU_CAPABILITIES.find(row => row.key === entry.meterKey)?.label || entry.meterKey}</td><td>{rate ? `${rate.currency || currentPlan?.priceBook?.currency} ${(rate.unitPriceMinor / 100).toFixed(2)}` : '0.00'}</td><td>{!override ? '租户默认价' : rate.unitPriceMinor === 0 ? '接口明确免费' : '套餐接口价'}{billing.profile?.mode === 'enforced' ? '' : ' · 尚未扣费'}</td></tr>
     })}</tbody></table></div>}</PagedItems></details>
   </section>
 }

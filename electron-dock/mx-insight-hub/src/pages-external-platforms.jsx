@@ -1614,7 +1614,7 @@ function ExternalPlatformOperationCard({
             key={endpointKey}
             className="mih-external-operation-endpoint-price"
             label={`${endpointKey} 单次价格`}
-            hint={operation.release.optionalEndpointKeys?.includes(endpointKey) ? '可选的指标补数接口；每页单独计采购成本。留空不启用补数，原详情服务不受影响。' : operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
+            hint={operation.release.optionalEndpointKeys?.includes(endpointKey) ? '按用户 ID 查询笔记指标的独立接口；每页单独计采购成本。留空时该分页接口不可用，原 note_id 详情仍可用且不会自动补数。' : operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
           >
             <input
               className="qp-input mih-mono"

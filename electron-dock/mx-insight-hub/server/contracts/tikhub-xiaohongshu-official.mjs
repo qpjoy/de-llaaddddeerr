@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { XHS_DISCOVERY_ENDPOINTS, normalizeXhsDiscoveryRequest } from './xiaohongshu-discovery.mjs'
 import { XHS_RESEARCH_ENDPOINTS, normalizeXhsResearchRequest } from './xiaohongshu-research.mjs'
+import { XHS_BLOGGER_NOTES_ENDPOINT, normalizeBloggerNotesRequest } from './xiaohongshu-blogger-notes.mjs'
 
 import {
   TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
@@ -51,6 +52,7 @@ const SEARCH_NOTE_TIME_FILTERS = new Set(['不限', '一天内', '一周内', '�
 export const TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS = Object.freeze({
   creator_inspiration: XHS_DISCOVERY_ENDPOINTS.creator_inspiration,
   ...XHS_RESEARCH_ENDPOINTS,
+  user_notes_analytics: XHS_BLOGGER_NOTES_ENDPOINT,
   detail: Object.freeze({
     name: 'detail',
     endpointKey: TIKHUB_XIAOHONGSHU_ENDPOINT_KEY,
@@ -214,6 +216,7 @@ function postedNotesRequest(query, decodeCursor) {
 
 export function normalizeTikHubXiaohongshuOfficialRequest(endpointName, query, { decodeCursor } = {}) {
   const endpoint = TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS[endpointName]
+  if (endpointName === 'user_notes_analytics') return normalizeBloggerNotesRequest(query)
   if (endpoint?.discovery) return normalizeXhsDiscoveryRequest(endpointName, query, { decodeCursor })
   if (endpoint?.research) return normalizeXhsResearchRequest(endpoint, query, { decodeCursor })
   if (!endpoint) invalid('unsupported_endpoint', 'Xiaohongshu App V2 endpoint is not supported')

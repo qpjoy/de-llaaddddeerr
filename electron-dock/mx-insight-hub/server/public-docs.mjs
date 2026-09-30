@@ -1306,6 +1306,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...xhsDiscoveryPaths,
     ...newsOpenApiPaths,
     '/xiaohongshu/pgy/get_note_detail': { post: { ...xhsResearchPaths['/data/xiaohongshu/notes/detail'].post, operationId: 'xiaohongshuNoteAnalyticsAlias', description: '与 /data/xiaohongshu/notes/detail 相同的 JSON POST 合同、授权和幂等身份。' } },
+    '/xiaohongshu/pgy/get_blogger_notes_v2': { post: { ...xhsResearchPaths['/data/xiaohongshu/users/notes/analytics'].post, operationId: 'xiaohongshuUserNoteAnalyticsAlias', description: '与 /data/xiaohongshu/users/notes/analytics 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
     '/data/ip/risk': {
       post: {
@@ -6491,7 +6492,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
-  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','web_search'].includes(value)))
+  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','web_search','xiaohongshu'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6522,7 +6523,7 @@ const TENANT_PRODUCT_PATHS = {
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
   'source-catalog': ['/data/source-catalog/services', '/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
-  'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
+  'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/users/notes/analytics', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
   'ecommerce-treasure-box': ['/data/ecommerce/products/search', ...nativeDocPaths('ecommerce-treasure-box')],
   'social-accounts': ['/data/social/accounts/search'],
   'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],

@@ -280,9 +280,9 @@ export const publicDataApi = {
     { method: 'POST', body, idempotencyKey, signal },
   ),
   xiaohongshuResearch: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => {
-    const paths = { note_detail: 'detail', note_comments: 'comments' }
+    const paths = { note_detail: 'notes/detail', note_comments: 'notes/comments', user_notes_analytics: 'users/notes/analytics' }
     if (!Object.hasOwn(paths, endpoint)) throw new Error('Unknown Xiaohongshu endpoint')
-    return publicDataRequest(apiKey, `/api/v1/data/xiaohongshu/notes/${paths[endpoint]}`, { method: 'POST', body, idempotencyKey, signal })
+    return publicDataRequest(apiKey, `/api/v1/data/xiaohongshu/${paths[endpoint]}`, { method: 'POST', body, idempotencyKey, signal })
   },
   xiaohongshuNote: (apiKey, body, { idempotencyKey, retryOfRequestId, signal } = {}) => publicDataRequest(
     apiKey,

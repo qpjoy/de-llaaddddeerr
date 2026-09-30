@@ -2,7 +2,11 @@
 
 日期：2026-09-16。最新状态见文末“账号总览、内容画像与独立精确计数”；其余修复记录保留为历史。本文区分已经实现、待验证和规划，参考项目文档中的目标不代表 Hub 当前能力。
 
-历史评估：[高级搜索与 RAG 评估](advanced-search-rag-assessment.md)。当前实现与手动操作见 [RAG 操作及容量边界](rag-search-operations.md)，后续 [LLM Wiki 扩展预案](llm-wiki-extension.md)。线上全库重建由用户在数据中心点击，本次不自动启动。
+历史评估：[高级搜索与 RAG 评估](advanced-search-rag-assessment.md)。当前实现与手动操作见 [RAG 操作及容量边界](rag-search-operations.md)，后续 [LLM Wiki 可行性与数据浏览中心规划](llm-wiki-extension.md)。线上全库重建由用户在数据中心点击，本次不自动启动。
+
+2026-09-30 Wiki 评估：建议新增「知识库」页签，以独立派生知识服务对接高级搜索；保留 RAG／全文／全部，另设原始内容／知识库／联合检索范围。聚合搜索负责材料获取，显式选入并完成规范化后才编译知识。容量按知识页、版本、引用、索引和备份计算，先做 Admin 小专题试点；当前仅完成规划，未新增 UI、API、表或后台任务。
+
+后续用户需求与 [知识馆/持续书架实现规划](knowledge-library-implementation-plan.md)：分类用于导航，书架保存专题/实体/事件/调查意图，原始资料跨架引用、Wiki 形成知识卷。知识库的“搜索并保存”可建架并按已授权策略持续补历史、匹配新增入库或定期获取；独立显示 token、接口费、存储、频率及停止控制。规划先交付可交互 2.5D 书架和等价分页目录，再扩展租户计划与空间体验；尚未实现或启用任务。
 
 技术交流可使用 [Hub 架构图册](../architecture/atlas/index.html)：Archify 服务图、核心表关系、双索引流水线、RAG 时序及可搜索的 DDL 字典；[配套说明](../architecture/atlas/README.md)区分 ES 重建与模型向量化。
 

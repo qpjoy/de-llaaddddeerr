@@ -665,16 +665,19 @@ export class TikHubAdapter {
     return credential(dynamic) || this.#fallbackCredential
   }
 
-  async getXiaohongshuBloggerNotesV2(userId, page, { credential: suppliedCredential } = {}) {
+  async getXiaohongshuBloggerNotesV2(userId, page, { credential: suppliedCredential,
+    pageSize = XHS_BLOGGER_NOTES_V2.pageSize, noteType = 0, orderType = 1 } = {}) {
     if (typeof userId !== 'string' || !/^[a-f0-9]{24}$/iu.test(userId)
-      || !Number.isSafeInteger(page) || page < 1) {
+      || !Number.isSafeInteger(page) || page < 1
+      || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 8
+      || ![0, 1, 2].includes(noteType) || ![1, 2, 3].includes(orderType)) {
       throw new TypeError('Invalid blogger notes user or page')
     }
     const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)
     if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
     const exchange = await requestTikHubJson(this, XHS_BLOGGER_NOTES_V2.providerPath, {
-      user_id: userId.toLowerCase(), page_number: page, page_size: XHS_BLOGGER_NOTES_V2.pageSize,
-      note_type: 0, order_type: 1,
+      user_id: userId.toLowerCase(), page_number: page, page_size: pageSize,
+      note_type: noteType, order_type: orderType,
     }, resolvedCredential, null, XHS_BLOGGER_NOTES_V2.endpointVersion, 'POST')
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     return securedProviderResult({

@@ -1,6 +1,12 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 // Public business metadata. Supplier coordinates never belong in this module.
 import { XHS_DISCOVERY_PRODUCTS } from './xiaohongshu-discovery.mjs'
+// Separate customer meters, one existing authorization capability. Do not add
+// the page meter to the capability catalog or mutate published v1/v2 plans.
+export const XIAOHONGSHU_ANALYTICS_METERS = Object.freeze([
+  { key: 'social.posts.analytics', label: '小红书笔记详情（按 note_id）', path: '/api/v1/data/xiaohongshu/notes/detail' },
+  { key: 'social.users.notes.analytics', label: '小红书博主笔记指标（按页）', path: '/api/v1/data/xiaohongshu/users/notes/analytics' },
+])
 export const XIAOHONGSHU_CAPABILITIES = Object.freeze([
   { key: 'social.posts.search', label: '搜索笔记', path: '/api/v1/data/search', keywordSearch: true },
   { key: 'social.posts.resolve', label: '正文与标签', path: '/api/v1/data/post' },

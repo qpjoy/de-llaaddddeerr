@@ -1,7 +1,6 @@
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
-import { XHS_BLOGGER_NOTES_V2 } from '../contracts/xiaohongshu-note-metrics.mjs'
-import { supplementNoteMetrics } from './xiaohongshu-note-metrics.mjs'
+import { projectBloggerNotesPage } from '../contracts/xiaohongshu-blogger-notes.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
@@ -261,6 +260,8 @@ function publicXiaohongshuEnvelope(body) {
 
 function officialRawItemCount(endpointName, payload) {
   if (officialDocumentedServiceError(endpointName, payload)) return 0
+  if (endpointName === 'user_notes_analytics') return Array.isArray(payload?.data?.data?.noteList)
+    ? payload.data.data.noteList.length : 0
   if (endpointName === 'search_notes') return Array.isArray(payload?.data?.data?.items)
     ? payload.data.data.items.length : 0
   if (endpointName === 'search_users') return Array.isArray(payload?.data?.data?.users)
@@ -748,8 +749,8 @@ export class TikHubGateway {
     let queueOutcome = 'failed'
     const queuePolicy = endpointName === 'note_detail' ? { ...DEFAULT_DETAIL_QUEUE, ...this.config.detailQueue } : null
     const queueDeadline = Date.now() + (queuePolicy?.maxWaitMs || 0)
-    const detailDispatchLeaseMs = (this.config.timeoutMs || 30000) + XHS_BLOGGER_NOTES_V2.budgetMs + 30000
-    const leaseMs = queuePolicy ? Math.max(this.reservationLeaseMs, queuePolicy.maxWaitMs + 2 * (this.config.timeoutMs || 30000) + XHS_BLOGGER_NOTES_V2.budgetMs + 30000) : this.reservationLeaseMs
+    const detailDispatchLeaseMs = (this.config.timeoutMs || 30000) + 30000
+    const leaseMs = queuePolicy ? Math.max(this.reservationLeaseMs, queuePolicy.maxWaitMs + 2 * (this.config.timeoutMs || 30000) + 30000) : this.reservationLeaseMs
     try {
       if (isTestKey(context.apiKey)) {
         throw new AppError(403, 'test_key_not_supported', 'Test API keys cannot dispatch external acquisition')
@@ -840,7 +841,7 @@ export class TikHubGateway {
         provider: TIKHUB_PROVIDER_KEY,
         endpoint: endpoint.endpointKey,
         query: normalized.providerQuery,
-        ...(queuePolicy ? { scope: queueScope, contractVersion: normalized.contractVersion, metricsContractVersion: XHS_BLOGGER_NOTES_V2.contractVersion } : {}),
+        ...(queuePolicy ? { scope: queueScope, contractVersion: normalized.contractVersion, metricsContractVersion: 'mx-insight-hub.note-detail-only.v1' } : {}),
       })
       await this.usageStore.reapStaleReservations()
       await this.platformStore.reapStaleCalls?.()
@@ -852,7 +853,7 @@ export class TikHubGateway {
         consumerId: context.consumer.id,
         apiKeyId: context.apiKey.id,
         platform: XIAOHONGSHU_PLATFORM,
-        meterKey: endpoint.operation,
+        meterKey: endpoint.meterKey || endpoint.operation,
         acquisitionRequest: acquisitionRequestSnapshot({ method, path, body: query }),
         requiredAuthorizationScopes: [
           { type: 'platform', key: XIAOHONGSHU_PLATFORM },
@@ -1094,6 +1095,11 @@ export class TikHubGateway {
           throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy?.intervalMs || 5000 })
         }
         entered = true
+        if (endpointName === 'user_notes_analytics') {
+          const price = (operationControl?.billing || this.config.billing)?.unitCostMinorByEndpoint?.[endpoint.endpointKey]
+          if (!Number.isSafeInteger(price) || price <= 0) throw new AppError(503,
+            'external_platform_cost_control_unavailable', 'User note analytics price is not configured')
+        }
         let costControl = providerCostControl(
           operationControl?.billing ? { billing: operationControl.billing } : this.config,
           endpoint.endpointKey,
@@ -1162,7 +1168,12 @@ export class TikHubGateway {
                 if (permit.kind !== 'acquired') throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
               }
               callDispatched = true
-              upstream = await this.adapter.getXiaohongshuAppV2(endpoint.endpointKey, normalized.providerQuery, { credential: resolved.value })
+              upstream = endpointName === 'user_notes_analytics'
+                ? await this.adapter.getXiaohongshuBloggerNotesV2(normalized.providerQuery.user_id, normalized.page, {
+                  credential: resolved.value, pageSize: normalized.providerQuery.page_size,
+                  noteType: normalized.providerQuery.note_type, orderType: normalized.providerQuery.order_type,
+                })
+                : await this.adapter.getXiaohongshuAppV2(endpoint.endpointKey, normalized.providerQuery, { credential: resolved.value })
               break
             } catch (error) {
               if (!queuePolicy || attempt !== 0 || !canRetryDetail(error)) throw error
@@ -1216,6 +1227,8 @@ export class TikHubGateway {
           )
           const projection = endpoint.discovery
             ? { payload: projectXhsDiscovery(upstream.payload, normalized, capturedAt, { encodeCursor: codec?.encode }) }
+            : endpointName === 'user_notes_analytics'
+            ? { payload: projectBloggerNotesPage(upstream.payload, normalized, capturedAt) }
             : endpoint.research
             ? { payload: projectXhsResearch(upstream.payload, normalized, capturedAt, { encodeCursor: codec?.encode }) }
             : endpointName === 'get_user_posted_notes' && !documentedServiceError
@@ -1223,30 +1236,8 @@ export class TikHubGateway {
                 encodeCursor: codec.encode,
               })
             : { payload: upstream.payload }
-          let metricEvidence = null
-          if (endpointName === 'note_detail') {
-            // The primary call has durable evidence and consumes its own cost.
-            // Supplementary pages reserve/settle costs under this same usage.
-            await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
-            costReservation = null
-            metricEvidence = await supplementNoteMetrics({ projection: projection.payload, context, delivery,
-              adapter: this.adapter, platformStore: this.platformStore, credential: resolved.value,
-              queue: this.detailQueue, queuePolicy, timeoutMs: this.config.timeoutMs || 30000,
-              maxRequestsPerMinute: this.config.maxRequestsPerMinute ?? 120, signal,
-              authorize: async () => {
-                await revalidateQueuedAccess()
-                const billing = operationControl?.billing || this.config.billing
-                if (!Number.isSafeInteger(billing?.unitCostMinorByEndpoint?.[XHS_BLOGGER_NOTES_V2.endpointKey])
-                  || billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] <= 0) {
-                  throw new AppError(503, 'external_platform_cost_control_unavailable', 'Supplementary price is not configured')
-                }
-                const supplementalCost = providerCostControl({ billing }, XHS_BLOGGER_NOTES_V2.endpointKey)
-                if (supplementalCost.currency !== costControl.currency) throw new AppError(503, 'external_platform_cost_evidence_incomplete', 'Procurement currency changed')
-                return { costControl: supplementalCost, operationControl }
-              },
-            })
-          }
-          const records = endpoint.discovery ? [] : endpoint.research ? xhsResearchRecords(projection.payload, normalized, metricEvidence) : officialCanonicalRecords(
+          // List summaries retain raw evidence, but must not replace full note content.
+          const records = endpoint.discovery || endpointName === 'user_notes_analytics' ? [] : endpoint.research ? xhsResearchRecords(projection.payload, normalized) : officialCanonicalRecords(
             normalized,
             upstream.payload,
             capturedAt,
@@ -1418,7 +1409,7 @@ export class TikHubGateway {
       if (!(error instanceof AppError)) {
         this.logger?.error?.({ requestId: durableRequestId, error }, 'TikHub official gateway request failed')
       }
-      if ((XHS_RESEARCH_ENDPOINTS[endpointName] || XHS_DISCOVERY_ENDPOINTS[endpointName]) && error instanceof AppError && error.status >= 500) {
+      if ((TIKHUB_XIAOHONGSHU_OFFICIAL_ENDPOINTS[endpointName]?.research || XHS_DISCOVERY_ENDPOINTS[endpointName]) && error instanceof AppError && error.status >= 500) {
         throw withRequestId(new AppError(error.status, error.code, 'The requested Xiaohongshu service is unavailable'), durableRequestId)
       }
       throw withRequestId(error, durableRequestId)

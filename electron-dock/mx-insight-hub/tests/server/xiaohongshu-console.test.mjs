@@ -4,8 +4,19 @@ import { XHS_CONSOLE_ENDPOINTS as endpoints, consoleBody, consoleCurl, consoleRe
 import { demoAccessIssues } from '../../src/demo-access.js'
 import { spawnSync } from 'node:child_process'
 import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
+test('user ID analytics is separate from note ID detail and permits numeric pages above 15', () => {
+  const user = endpoints.find(item => item.id === 'user_notes_analytics')
+  const note = endpoints.find(item => item.id === 'note_detail')
+  assert.equal(user.capability, note.capability)
+  assert.notEqual(user.path, note.path)
+  const body = consoleBody(user, { user_id: '624560f5000000000100ffab', page_number: '20', page_size: '8', note_type: 0, order_type: '2' })
+  assert.deepEqual(body, { user_id: '624560f5000000000100ffab', page_number: 20, page_size: 8, note_type: 0, order_type: 2 })
+  assert.notEqual(consoleRequestIdentity(user, body), consoleRequestIdentity(user, { ...body, page_number: 21 }))
+  for (const invalid of [{ page_number: 0 }, { page_size: 9 }, { note_type: -1 }, { order_type: 4 }]) assert.throws(() => consoleBody(user, { ...body, ...invalid }))
+  assert.match(consoleCurl(user, body), /users\/notes\/analytics/)
+})
 test('console exposes only fixed Hub POST contracts with known parameters', () => {
-  assert.equal(endpoints.length, 8)
+  assert.equal(endpoints.length, 9)
   for (const endpoint of endpoints) {
     const operation = PUBLIC_OPENAPI_DOCUMENT.paths[endpoint.path.replace('/api/v1', '')]?.post
     assert.ok(operation, endpoint.path)
@@ -36,7 +47,7 @@ test('admin can inspect new APIs with an old Key without bypassing tenant grants
     consumerCapabilities: ['social.posts.resolve', 'social.posts.analytics', 'social.comments.list'],
     operations: Object.fromEntries(['social.posts.analytics', 'social.comments.list'].map(key => [key, { ready: false, effectiveState: 'disabled' }])),
   }
-  assert.equal(visibleConsoleEndpoints(access, true).length, 8)
+  assert.equal(visibleConsoleEndpoints(access, true).length, 9)
   assert.deepEqual(visibleConsoleEndpoints(access).map(endpoint => endpoint.id), ['post'])
   for (const capability of ['social.posts.analytics', 'social.comments.list']) {
     const issues = demoAccessIssues(access, capability)
@@ -48,8 +59,8 @@ test('admin can inspect new APIs with an old Key without bypassing tenant grants
   assert.ok(visibleConsoleEndpoints(granted).some(endpoint => endpoint.id === 'note_detail'))
   assert.ok(demoAccessIssues(granted, 'social.posts.analytics').every(issue => issue.kind === 'runtime'))
   assert.deepEqual(visibleConsoleEndpoints(undefined), [])
-  assert.equal(visibleConsoleEndpoints(undefined, true).length, 8)
-  assert.equal(visibleConsoleEndpoints(null).length, 8) // Manual keys are checked by the API.
+  assert.equal(visibleConsoleEndpoints(undefined, true).length, 9)
+  assert.equal(visibleConsoleEndpoints(null).length, 9) // Manual keys are checked by the API.
 })
 
 test('external cURL uses the Hub contract and preserves shell-sensitive input as literal JSON', () => {
