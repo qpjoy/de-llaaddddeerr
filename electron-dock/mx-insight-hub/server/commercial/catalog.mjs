@@ -14,9 +14,9 @@ export const PROVISIONING_OPERATIONS = Object.entries(EXTERNAL_PLATFORM_OPERATIO
   const endpoint = native.get(operation)
   const matches = routes.filter(row => row.provider === provider && row.operation === operation)
   const enterprise = provider === 'qixin'
-  const platform = endpoint?.authorizationPlatform || Object.values(HUB_SOCIAL_ENDPOINTS).find(row => row.operation === operation)?.platform || (enterprise ? 'enterprise' : operation.startsWith('ecommerce.') ? 'ecommerce' : operation === 'social.accounts.search' ? 'social' : 'xiaohongshu')
+  const platform = (operation==='web.search'?'web_search':null) || endpoint?.authorizationPlatform || Object.values(HUB_SOCIAL_ENDPOINTS).find(row => row.operation === operation)?.platform || (enterprise ? 'enterprise' : operation.startsWith('ecommerce.') ? 'ecommerce' : operation === 'social.accounts.search' ? 'social' : 'xiaohongshu')
   return { id: `${provider}:${operation}`, provider, operation, label: definition.label,
-    platform, capability: enterprise ? 'enterprise.query' : operation, meterKey: operation,
+    platform, capability: enterprise ? 'enterprise.query' : operation, ...(operation==='web.search'?{additionalCapabilities:[`web.search.provider.${provider}`]}:{}), meterKey: operation,
     contractVersion: definition.contractVersion, endpointKeys: [...definition.endpointKeys],
     blocked: definition.dispatchBlock || null, allowZeroCost: definition.allowZeroCost === true,
     products: [...new Set(matches.map(row => row.product))],

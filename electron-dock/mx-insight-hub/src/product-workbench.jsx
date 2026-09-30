@@ -1,3 +1,5 @@
+import { WebSearchResult } from './web-search-result.jsx'
+import { searchProviderKeys } from '../shared/web-search.mjs'
 import { WechatResult } from './wechat-product.jsx'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { productForPath, productEndpoints, productConsoleRequest, resolveProductSchema } from '../shared/product-workbenches.mjs'
@@ -57,7 +59,8 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
   const revealItem = useMemo(() => { const index=endpoints.filter(row=>!category || (row['x-mx-category'] || '通用')===category).findIndex(row=>row['x-mx-endpoint-key'] === initialEndpoint || row.id===`post:/data/native/${initialEndpoint}`); return initialEndpoint && index>=0 ? {index} : null },[endpoints,category,initialEndpoint])
   const draft = drafts[endpoint?.id] || {}, values = draft.values || {}
   const json = draft.json ?? initialBody(document, endpoint)
-  const schema = resolveProductSchema(document, endpoint?.requestBody?.content?.['application/json']?.schema)
+  const schema = structuredClone(resolveProductSchema(document, endpoint?.requestBody?.content?.['application/json']?.schema))
+  if (product.docs === 'web-search' && access && schema.properties?.provider) schema.properties.provider.enum = searchProviderKeys(access.capabilities)
   let input = null, validation = ''
   try { input = productConsoleRequest(endpoint, values, json) } catch (failure) { validation = failure.message }
   const fingerprint = JSON.stringify([key,input]), attempt = attempts.current.get(fingerprint)
@@ -92,7 +95,7 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
     <div className="mih-api-console-main">{endpoint ? <>
       <header><strong className="mih-api-method">{endpoint.method}</strong> <code>{endpoint.path}</code><a href={publicDocsHref(endpoint['x-mx-doc-path'] || `/docs/${product.docs}`)}>本接口文档 ↗</a></header>
       <h2>{endpoint.summary}</h2><details><summary>契约说明</summary><p>{endpoint.description}</p></details>
-      {(endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path.startsWith('/api/v1/data/wechat/')) || endpoint.path === '/api/v1/data/ecommerce/products/search' ? <ServicePrice path={endpoint.path} /> : null}
+      {(endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path.startsWith('/api/v1/data/wechat/')) || endpoint.path === '/api/v1/data/ecommerce/products/search' || (endpoint.path.startsWith('/api/v1/data/web-search/') && endpoint.method === 'POST') ? <ServicePrice path={endpoint.path} /> : null}
       <p>发送使用当前 Key，服务端复核授权、限额与价格。页面打开和标签切换不会自动调用。</p>
       <form onSubmit={event => { event.preventDefault(); void send() }}>
         {(endpoint.parameters || []).filter(row => ['path', 'query'].includes(row.in)).map(row => <label className="qp-field" key={`${row.in}:${row.name}`}>{row.name}{row.required ? ' *' : ''} · {row.in}<input className="qp-input" disabled={busy} value={values[`${row.in}:${row.name}`] || ''} placeholder={row.description || '留空不传'} onChange={event => change({ values: { ...values, [`${row.in}:${row.name}`]: event.target.value } })} /></label>)}
@@ -108,6 +111,7 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
       }}>复制示例</button><p role="status">{copyStatus}</p></details>
       {progress ? <p role="status">已完成 {progress.completed} / {progress.total} 个来源 · 收到 {progress.items} 条（最终以去重响应为准）</p> : null}
       {error ? <ErrorState error={error} /> : null}
+      {product.docs === 'web-search' && result?.identity === key ? <WebSearchResult payload={result.payload}/> : null}
       {endpoint.path.startsWith('/api/v1/data/wechat/') && result?.identity === key ? <WechatResult payload={result.payload} /> : null}
       <h3>JSON 响应</h3>{result?.identity === key ? <><p>{result.evidence?.requestId} · {result.evidence?.idempotentReplay ? '幂等回放' : '本次返回'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} aggregate={result.input.path === '/api/v1/data/aggregate/search'} /></> : <p>发送后展示实际响应。</p>}
     </> : <p>当前身份暂无可见接口。</p>}</div>

@@ -7,6 +7,7 @@ import { SocialContentOverview } from './product-workbench.jsx'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
 import { DocsPage } from './pages-docs.jsx'
+import { WebSearchPage } from './pages-web-search.jsx'
 import { IpRiskPage } from './pages-ip-risk.jsx'
 import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -369,6 +370,7 @@ const ROUTES = [
   { path: '/data-products/search', label: '数据搜索', description: '跨平台关键词检索与 API', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/web-search', label: 'Web Search', description: '全网检索与多渠道搜索', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WebSearchPage, capability: 'apikey.read' },
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
   { path: '/data-products/enterprise', label: '企业数据', description: '企业查询与接口调试', icon: House, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EnterprisePage, capability: 'apikey.read' },
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, navSection: 'wechat', description: product.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatOverview, capability: 'apikey.read' })),
@@ -880,7 +882,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     theme,

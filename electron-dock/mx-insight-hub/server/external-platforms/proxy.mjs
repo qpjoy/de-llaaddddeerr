@@ -1,3 +1,5 @@
+import { SEARCH_UPSTREAMS } from '../web-search/providers.mjs'
+import { WEB_SEARCH_PROVIDERS } from '../../shared/web-search.mjs'
 import { fetch as proxyFetch, ProxyAgent } from 'undici'
 import { AppError } from '../core/errors.mjs'
 import { resolveProviderProxyRoute } from '../agent/control-store.mjs'
@@ -24,6 +26,7 @@ export const DEFAULT_PROXY_PROBE_POLICY = Object.freeze({
 const ROUTE_FAILURE_STATUSES = new Set([407, 502, 503, 504])
 
 const PROVIDER_ROUTES = Object.freeze({
+  ...Object.fromEntries(SEARCH_UPSTREAMS.map(p=>[p.key,{origin:new URL(p.url).origin,probeUrl:new URL('/',p.url).href}])),
   tikhub: { origin: 'https://api.tikhub.io', probeUrl: 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes' },
   rapidapi: { origin: 'https://twitter-aio.p.rapidapi.com', probeUrl: 'https://twitter-aio.p.rapidapi.com/' },
 })
@@ -370,4 +373,9 @@ async function recordFailure(store, route, attempts, providerKey) {
       attempts,
     })
   } catch { /* the dispatch failure is the reportable outcome */ }
+}
+
+export function createWebSearchProxyFetch(store, providerKey, options={}) {
+  if (!WEB_SEARCH_PROVIDERS.some(p=>p.key===providerKey)) throw new AppError(400,'unsupported_proxy_provider','Unsupported search supplier')
+  return createProviderProxyFetch(store,{...options,providerKey})
 }

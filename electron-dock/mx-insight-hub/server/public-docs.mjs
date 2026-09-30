@@ -1,3 +1,5 @@
+import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
+import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
@@ -1295,6 +1297,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   paths: {
     ...nativeForwardingPaths,
     ...hubSocialPaths,
+    ...webSearchPaths,
     '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
       parameters:[{in:'query',name:'path',required:true,schema:{type:'string'},description:'完整 Hub 数据接口路径；仅支持已登记的价格合同'}],
       description:'只读当前已发布价格表和账户执行价；按目标接口的 Key 权限检查，不采集、不扣费、不锁价。不包含采购价或供应商信息。未发布标准单价不代表免费。',
@@ -5339,6 +5342,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
 })
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
+  {key:'web-search',path:'/docs/web-search',label:'Web Search',section:'数据产品'},
   ...WECHAT_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '微信数据服务' })),
   { key:'social-content', path:'/docs/social-content', label:'社媒与内容数据', section:'数据服务' },
   ...NATIVE_DOC_ROUTES,
@@ -6485,8 +6489,9 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
+  if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
-  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter'].includes(value)))
+  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','web_search'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6508,6 +6513,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  'web-search':Object.keys(webSearchPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
   'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
@@ -6543,6 +6549,8 @@ export function tenantOpenApiDocument(scopes) {
   const hidden = new Set(['/data/capabilities', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
   document.paths = Object.fromEntries(Object.entries(document.paths).filter(([path]) =>
     !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/night-all/') && (!path.startsWith('/search/') || path === '/search/raw')))
+  const searchSchema=document.paths['/data/web-search/search']?.post?.requestBody?.content?.['application/json']?.schema
+  if(searchSchema && scopes) searchSchema.properties.provider.enum=WEB_SEARCH_PROVIDERS.filter(p=>scopes.some(s=>s.platforms.includes('web_search')&&s.capabilities.includes('web.search')&&s.capabilities.includes(p.capability))).map(p=>p.key)
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6566,6 +6574,7 @@ export function tenantOpenApiDocument(scopes) {
 }
 
 function tenantDocBody(route, scopes) {
+  if (route.key === 'web-search') return webSearchGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
   if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
@@ -6633,6 +6642,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant, procurementEvidence })}</main>`)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeServiceGuide(route.key)}</main>`)
   if (route.nativeKey) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeEndpointGuide(route.key)}</main>`)
+  if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
   if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {

@@ -30,3 +30,9 @@
 .mih-compatibility-summary code { overflow-wrap: anywhere; font-size: .8rem; }
 .mih-capability-row .qp-button { flex-shrink: 0; white-space: nowrap; }
 .mih-capability-row .mih-status { white-space: nowrap; }
+.mih-web-search-order { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+.mih-web-search-order > span { flex:1; min-width:8rem; }
+.mih-web-search-results article { margin-block:.75rem; }
+.mih-web-search-results h4 { margin:.5rem 0; }
+.mih-web-search-results p { white-space:pre-wrap; overflow-wrap:anywhere; }
+.mih-web-search-url { overflow-wrap:anywhere; }

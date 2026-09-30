@@ -12,6 +12,7 @@ const searchablePlatforms = new Set([
 ])
 const savedRecordCategory = platform => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(platform)
 export const PRODUCT_ACCESS = {
+  '/data-products/web-search': {platform:'web_search',any:['web.search'],docs:'web-search'},
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [`/data-products/${product.key}`, { platform: 'social', any: wechatServices(product).map(row => row.operation), docs: product.key } ])),
   '/data-products/search': { domain: 'search', docs: 'aggregate-search' },
   '/data-products/news': { domain: 'news', docs: 'news-discovery' },
@@ -29,6 +30,8 @@ export const PRODUCT_ACCESS = {
   '/data-products/topic-insights': { platform: 'topic_reports', docs: 'topic-reports' },
 }
 export function productAllowed(path, scopes = []) {
+  if (path === '/data-products/web-search') return scopes.some(s=>s.platforms?.includes('web_search') && s.capabilities?.includes('web.search') && s.capabilities.some(c=>c.startsWith('web.search.provider.')))
+
   if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('twitter') && ['social.content.search', 'social.content.crawl', 'social.profile.get'].some(capability => scope.capabilities?.includes(capability)))) return true
   const rule = PRODUCT_ACCESS[path]
   if (rule?.domain) return scopes.some(scope => scope.platforms?.some(platform =>

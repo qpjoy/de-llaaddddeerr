@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-09-29.
+Last reviewed: 2026-09-30.
 
 This directory is the source of truth for MX Insight Hub as an independent
 control plane and data center. TikHub/JustOne operations already migrated to
@@ -14,6 +14,9 @@ those paths retire one operation at a time and are not the target architecture.
 - [Node.js Agent、Text2ES、ES 兼容升级与契约转发可行性](data-browser/agent-search-feasibility.md)
 
 ## 下游接入与演示
+
+- [Web Search 当前实现与开通指南](integrations/web-search.md)：Hub 直连八家 HTTP 搜索、默认关闭、租户和 Key 范围与排序、逐供应商凭据/代理、迁移 119 与验收边界。
+- [Web Search、百度接入与多供应商路由规划](integrations/web-search-plan-2026-09-30.md)：独立数据服务、百度目录关联、Admin Key 管理、搜索 Sequence、逐供应商代理、Domestic/Internal 链路、下游合同与分期验收；原始规划，当前落地范围见下项。
 
 - [微信数据服务、公众号产品与目录关联](integrations/wechat-services.md)：25 个正式接口与 1 个固定演示，Hub 业务路径、官方采购参考价、迁移 118 与数据搜索边界。
 

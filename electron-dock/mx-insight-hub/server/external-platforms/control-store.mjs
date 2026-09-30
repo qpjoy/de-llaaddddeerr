@@ -1,3 +1,4 @@
+import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_VERSION } from '../../shared/web-search.mjs'
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_VERSION } from '../contracts/xiaohongshu-research.mjs'
 import { XHS_BLOGGER_NOTES_V2 } from '../contracts/xiaohongshu-note-metrics.mjs'
 import { nativeForwardingOperations } from '../contracts/native-forwarding.mjs'
@@ -81,6 +82,7 @@ function justoneResourceOperationEntries() {
 }
 
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
+  ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.key,[{operationKey:'web.search',label:'Web Search',legacyGate:'contractVerified',contractVersion:WEB_SEARCH_VERSION,endpointKeys:[p.endpointKey]}]])),
   rapidapi: Object.freeze(HUB_SOCIAL_OPERATIONS),
   qixin: Object.freeze(QIXIN_OPERATIONS),
   justone: Object.freeze([
@@ -524,7 +526,7 @@ function dispatchRejected(state, details = undefined) {
 }
 
 function defaultRow(definition) {
-  const native = definition.operationKey.startsWith('native.') || definition.legacyGate === 'hubSocialVerified'
+  const native = definition.operationKey === 'web.search' || definition.operationKey.startsWith('native.') || definition.legacyGate === 'hubSocialVerified'
   return {
     controlSource: native ? 'database' : 'legacy_environment',
     desiredState: native ? 'disabled' : 'active',
@@ -791,7 +793,7 @@ export class PostgresExternalPlatformControlStore {
         // Code may deploy before migration 112. Missing new policies must not
         // hide established operations, and this read-only view cannot authorize
         // dispatch: #row remains strict about persisted policy evidence.
-        if (!row && (definition.operationKey.startsWith('native.') || definition.legacyGate === 'hubSocialVerified')) {
+        if (!row && (definition.operationKey === 'web.search' || definition.operationKey.startsWith('native.') || definition.legacyGate === 'hubSocialVerified')) {
           const view = operationView({ ...defaultRow(definition), revision: 0,
             releaseStatus: 'not_registered', updatedBy: null }, definition, runtime)
           return { ...view, migrationRequired: true, blockers: [

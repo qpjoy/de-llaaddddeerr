@@ -1,3 +1,5 @@
+import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
+import { validateSearchOrder } from './web-search/contract.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
@@ -258,6 +260,7 @@ function replayWindowFor(resultType) {
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
+  'web.search', ...WEB_SEARCH_PROVIDERS.map(row => row.capability),
   ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation),
   ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.operation),
   ...XHS_DISCOVERY_OPERATIONS,
@@ -667,7 +670,9 @@ export class HubService {
     assert(platforms.every(p => !RESERVED_PLATFORM_NAMES.has(p)),400,'invalid_platform','Wildcard grants are not allowed')
     const capabilities = [...new Set(body.capabilities.map(canonicalCapability))]
     assert(Number.isInteger(body.revision) && body.revision >= 0,400,'invalid_request','Revision is required')
-    const input = {platforms,capabilities,revision:body.revision,reason:requiredString(body.reason,'reason'),
+    const prior = await this.store.getTenantServiceAccess(tenantId)
+    const webSearchOrder = validateSearchOrder(body.webSearchOrder ?? (prior.webSearchOrder || []).filter(key=>capabilities.includes(`web.search.provider.${key}`)),capabilities)
+    const input = {platforms,capabilities,webSearchOrder,revision:body.revision,reason:requiredString(body.reason,'reason'),
       maxRequests:positiveInteger(body.maxRequests,'maxRequests',1000),windowSeconds:positiveInteger(body.windowSeconds,'windowSeconds',3600),
       maxPageSize:positiveInteger(body.maxPageSize,'maxPageSize',100),maxCrawlWork:positiveInteger(body.maxCrawlWork,'maxCrawlWork',100)}
     assert(input.maxCrawlWork <= MAX_CRAWL_WORK,400,'invalid_request','Crawl work exceeds limit')
@@ -693,7 +698,7 @@ export class HubService {
   async createApiKey(body, scopeUpdate = null) {
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const unsupported = Object.keys(body).filter(
-      (field) => !['consumerId', 'name', 'environment', 'expiresInDays', 'scopePreset', 'platforms', 'capabilities'].includes(field),
+      (field) => !['consumerId', 'name', 'environment', 'expiresInDays', 'scopePreset', 'platforms', 'capabilities', 'webSearchOrder'].includes(field),
     )
     assert(unsupported.length === 0, 400, 'unsupported_fields', `Unsupported API key fields: ${unsupported.join(', ')}`)
     const consumerId = requiredUuid(body.consumerId, 'consumerId')
@@ -718,6 +723,7 @@ export class HubService {
     )
     const platforms = requestedPlatforms ?? (scopePreset === 'legacy_all' ? [...consumerPlatforms] : [])
     const capabilities = requestedCapabilities ?? (scopePreset === 'legacy_all' ? [...consumerCapabilities] : [])
+    const webSearchOrder = validateSearchOrder(body.webSearchOrder ?? [], capabilities)
     const consumerPlatformSet = new Set(consumerPlatforms)
     const consumerCapabilitySet = new Set(consumerCapabilities)
     const plan = typeof this.store.getConsumerPlan === 'function'
@@ -760,12 +766,13 @@ export class HubService {
       }
     }))
     if (scopeUpdate) return this.store.updateApiKeyScopes(scopeUpdate.id, {
-      platformEntitlements, capabilityEntitlements, expected: scopeUpdate.expected, actor: scopeUpdate.actor,
+      platformEntitlements, capabilityEntitlements, webSearchOrder, expected: scopeUpdate.expected, actor: scopeUpdate.actor,
     })
     const issued = issueApiKey(this.apiKeyPepper, environment)
     const record = await this.store.createApiKey({
       ...issued,
       sealedSecret: sealApiKey(issued.plaintext, issued.id, this.apiKeyPepper),
+      webSearchOrder,
       environment,
       expiresAt,
       tenantId: consumer.tenantId,
@@ -779,11 +786,11 @@ export class HubService {
 
   async updateApiKeyScopes(id, body, actor) {
     assert(body && Array.isArray(body.platforms) && Array.isArray(body.capabilities) && body.expected && Array.isArray(body.expected.platforms) && Array.isArray(body.expected.capabilities), 400, 'invalid_request', 'Explicit scopes and previous scope snapshot are required')
-    assert(Object.keys(body).every(key => ['platforms', 'capabilities', 'expected'].includes(key)), 400, 'unsupported_fields', 'Only scopes can be updated')
+    assert(Object.keys(body).every(key => ['platforms', 'capabilities', 'webSearchOrder', 'expected'].includes(key)), 400, 'unsupported_fields', 'Only scopes can be updated')
     const key = (await this.store.listApiKeys()).find(item => item.id === requiredUuid(id, 'id'))
     assert(key, 404, 'api_key_not_found', 'API key not found')
     assert(key.status === 'active' && new Date(key.expiresAt) > new Date(), 409, 'api_key_unavailable', 'Key is expired or revoked')
-    return this.createApiKey({ consumerId: key.consumerId, name: key.name, platforms: body.platforms, capabilities: body.capabilities }, { id, expected: body.expected, actor })
+    return this.createApiKey({ consumerId: key.consumerId, name: key.name, platforms: body.platforms, capabilities: body.capabilities, webSearchOrder: body.webSearchOrder ?? (key.webSearchOrder || []).filter(provider=>body.capabilities.includes(`web.search.provider.${provider}`)) }, { id, expected: body.expected, actor })
   }
 
   async revealApiKey(id, memberId) {
@@ -851,7 +858,7 @@ export class HubService {
     // Explicit creation snapshots currently implemented domains/capabilities.
     // No wildcard, inherited grants, plan changes or reusable secret exposure.
     const platforms = [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), ...WECHAT_LEGACY_SEARCH_PLATFORMS,
-      'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk',
+      'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk', 'web_search',
       ...(await listCrawlerSpecs(this.store)).map(spec => spec.platform)])].sort()
     let keyId
     try { keyId = await this.store.ensureAdminExecutionKey({ id: issued.id, digest: issued.digest, prefix: issued.prefix,

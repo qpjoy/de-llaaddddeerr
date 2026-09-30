@@ -25,6 +25,8 @@ export const PRODUCT_BUNDLES = Object.freeze([
   ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['xiaohongshu'],
     capabilities: [product.operation], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
     href: `/data-products/${product.key}`, catalogKeys: ['source-catalog-0004'] })),
+  {key:'web-search',version:1,name:'Web Search',platforms:['web_search'],capabilities:['web.search'],optionalCapabilities:[],featureKey:null,pricingMode:'tenant_contract',href:'/data-products/web-search',catalogKeys:['source-catalog-0135']},
+
 ])
 
 // UI selection only. The existing server grant checks remain authoritative.

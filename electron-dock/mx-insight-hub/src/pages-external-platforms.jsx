@@ -1,5 +1,6 @@
 import { ProcurementTemplate } from './procurement-template.jsx'
 import { useSourceConnections } from './source-connections.jsx'
+import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { StructuredCredentialPanel } from './structured-credential-panel.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
@@ -72,7 +73,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set(['qixin', 'justone', 'tikhub', 'rapidapi', 'night-all', 'night-all-a', 'ipsearch'])
+const SUPPORTED_PROVIDERS = new Set([...WEB_SEARCH_PROVIDERS.map(p=>p.key),'qixin', 'justone', 'tikhub', 'rapidapi', 'night-all', 'night-all-a', 'ipsearch'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -2132,7 +2133,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
               blocker above can jump straight to the one that fixes it. */}
           <DetailMetricRail detail={detail} />
           {provider !== 'qixin' ? <SupplierBalancePanel token={token} provider={provider} onUnauthorized={onUnauthorized} /> : null}
-          {provider === 'qixin' ? <StructuredCredentialPanel key={provider} token={token} provider={provider} credential={detail.credential} onSaved={remote.refresh} onUnauthorized={onUnauthorized} notify={notify} /> : null}
+          {(provider === 'qixin' || WEB_SEARCH_PROVIDERS.some(p=>p.key===provider)) ? <StructuredCredentialPanel key={provider} token={token} provider={provider} credential={detail.credential} onSaved={remote.refresh} onUnauthorized={onUnauthorized} notify={notify} /> : null}
           <ProviderAlerts item={detail} />
           <section className="mih-external-two-column">
             <TrendPanel detail={detail} />
@@ -2146,7 +2147,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
             onUnauthorized={onUnauthorized}
             notify={notify}
           /> : null}
-          {['tikhub', 'rapidapi'].includes(provider) && detail.proxy ? <ExternalProxyPanel provider={provider} notify={notify} Panel={Panel} key={`${provider}-${detail.proxy.revision}`} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
+          {detail.proxy ? <ExternalProxyPanel provider={provider} notify={notify} Panel={Panel} key={`${provider}-${detail.proxy.revision}`} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           {detail.egressRelay ? <EgressRelayPanel notify={notify} Panel={Panel} key={`egress-${detail.egressRelay.revision}`} token={token} provider={provider} relay={detail.egressRelay} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           <ExternalPlatformOperationControlPanel
             token={token}
@@ -2157,7 +2158,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
             onUnauthorized={onUnauthorized}
             notify={notify}
           />
-          {provider !== 'qixin' ? <ExternalPlatformCredentialPanel
+          {provider !== 'qixin' && !WEB_SEARCH_PROVIDERS.some(p=>p.key===provider) ? <ExternalPlatformCredentialPanel
             token={token}
             provider={provider}
             credential={detail.credential}

@@ -1,3 +1,5 @@
+import { WebSearchAccess } from './web-search-access.jsx'
+import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { PagedItems } from './paged-items.jsx'
 import { withProductScopes } from '../shared/product-catalog.mjs'
 import { ConsumptionPanel } from './consumption-panel.jsx'
@@ -158,6 +160,8 @@ function usePlatformCatalog(token, session, onUnauthorized) {
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
+  'web.search': {label:'Web Search 搜索',endpoint:'POST /api/v1/data/web-search/search',description:'全网搜索；另需勾选渠道'},
+  ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.capability,{label:`Web Search · ${p.label}`,description:'允许此渠道；不会自动扩大已有 Key'}])),
   'social.content.search': { label: 'Hub 内容搜索', endpoint: 'POST /api/v1/data/social/search', description: '独立搜索合同；首批覆盖 Twitter 单页', usageHint: '需 twitter 平台与本能力授权；运行开关默认禁用' },
   'social.content.crawl': { label: 'Hub 账号内容', endpoint: 'POST /api/v1/data/social/crawl', description: 'Twitter 账号时间线单页；不自动获取全量历史', usageHint: '需 twitter 平台与本能力授权；新游标不可与旧接口混用' },
   'social.profile.get': { label: 'Hub 账号资料', endpoint: 'POST /api/v1/data/social/user-info', description: 'Twitter 基础资料；不补充 about', usageHint: '需 twitter 平台与本能力授权；保持旧资料接口不变' },
@@ -1432,7 +1436,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         capabilities: scopes.capabilities.filter((value) => requestedScopes.capabilities?.includes(value)),
       } : { platforms: [], capabilities: [] }
       setForm((current) => current.consumerId === targetConsumerId
-        ? { ...current, platforms: selectedScopes.platforms, capabilities: selectedScopes.capabilities }
+        ? { ...current, platforms: selectedScopes.platforms, capabilities: selectedScopes.capabilities, webSearchOrder: requestedScopes?.webSearchOrder || [] }
         : current)
     } catch (error) {
       if (scopeRequestRef.current !== generation) return
@@ -1473,7 +1477,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     setOpen(true)
     await applyScopes(key.consumerId, key.scopeMode === 'legacy_dynamic' ? 'legacy_all' : {
       platforms: key.platforms || [],
-      capabilities: key.capabilities || [],
+      capabilities: key.capabilities || [], webSearchOrder: key.webSearchOrder || [],
     })
   }
 
@@ -1492,6 +1496,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
   const toggleScope = (field, value) => setForm((current) => ({
     ...current,
+    webSearchOrder: field==='capabilities' && current[field].includes(value) ? (current.webSearchOrder || []).filter(key=>`web.search.provider.${key}`!==value) : current.webSearchOrder,
     [field]: current[field].includes(value)
       ? current[field].filter((entry) => entry !== value)
       : [...current[field], value].sort(),
@@ -1504,8 +1509,8 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     try {
       if (scopeTarget) {
         await adminApi.updateApiKeyScopes(token, scopeTarget.id, {
-          platforms: form.platforms, capabilities: form.capabilities,
-          expected: { scopeMode: scopeTarget.scopeMode, platforms: scopeTarget.platforms || [], capabilities: scopeTarget.capabilities || [] },
+          platforms: form.platforms, capabilities: form.capabilities, webSearchOrder: form.webSearchOrder || [],
+          expected: { webSearchOrder: scopeTarget.webSearchOrder || [], scopeMode: scopeTarget.scopeMode, platforms: scopeTarget.platforms || [], capabilities: scopeTarget.capabilities || [] },
         })
         setOpen(false); setScopeTarget(null); state.refresh()
         notify('权限已更新，原 Key 继续有效；产品页刷新调用身份后可见新权限', 'success')
@@ -1735,6 +1740,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           )}
         >
           <form id="create-api-key" className="mih-form" onSubmit={create}>
+            <WebSearchAccess form={form} onChange={setForm} allowed={rotationSource ? scopeOptions.capabilities.filter(cap=>rotationSource.capabilities?.includes(cap)) : scopeOptions.capabilities} disabled={saving || scopeLoading}/>
             <DropdownField label="调用者" value={form.consumerId}
               onChange={changeFormConsumer}
               options={writableConsumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
@@ -2999,6 +3005,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
   return (
     <>
+      {session?.platformAdmin ? <TenantServiceAccess token={token} tenants={data.tenants || []} platforms={[...new Set([...platformCatalog,'web_search'])]} capabilities={CAPABILITY_CATALOG}/> : null}
       <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="调用者授权是上限，API Key 在签发时选择其中的平台与能力。停用会立即收窄现有 Key；新增能力需在 Key 列表中显式调整权限。" loading={state.loading} onRefresh={state.refresh}>
         {canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
         <a className="qp-button qp-button--outline" href={publicDocsHref()}>查看公共 API 文档</a>
@@ -3060,7 +3067,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           <span><Cloud size={19} weight="duotone" aria-hidden="true" /></span>
           <div>
             <strong>对外授权 Hub 数据域，对内选择上游适配器</strong>
-            <p>数据产品只是“数据域 + 业务操作”的权限组合；provider-compatible 接口再叠加兼容合同授权。调用方只持有同一把 Hub API Key，不会看到或指定供应方。</p>
+            <p>数据产品只是“数据域 + 业务操作”的权限组合；provider-compatible 接口再叠加兼容合同授权。调用方使用 Hub API Key。Web Search 还可从已授权渠道中选择，其他产品继续由 Hub 内部路由。</p>
           </div>
         </div>
         <div className="mih-provider-routing-boundary__flow" aria-label="电商请求分流">

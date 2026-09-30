@@ -1,3 +1,4 @@
+import { WEB_SEARCH_PROVIDERS } from '../../shared/web-search.mjs'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
@@ -211,7 +212,7 @@ test('admin runtime keeps provider adapters secretless and reports TikHub readin
     assert.equal((await runtime.tikHubGateway.capabilities()).ready, false)
     assert.deepEqual(
       (await runtime.externalPlatformAdmin.overview('24h')).providers.map(({ key }) => key),
-      ['rapidapi', 'qixin', 'ipsearch', 'justone', 'tikhub', 'night-all', 'night-all-a'],
+      [...WEB_SEARCH_PROVIDERS.map(p=>p.key),'rapidapi', 'qixin', 'ipsearch', 'justone', 'tikhub', 'night-all', 'night-all-a'],
     )
 
     let secretRead = false

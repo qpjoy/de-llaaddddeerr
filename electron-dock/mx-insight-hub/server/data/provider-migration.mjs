@@ -1,3 +1,4 @@
+import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_PATH } from '../../shared/web-search.mjs'
 import snapshot from './night-all-provider-inventory.json' with { type: 'json' }
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { JUSTONE_MARKETPLACE_CATALOG } from '../ingest/justone.mjs'
@@ -27,12 +28,12 @@ export function providerMigrationSnapshot() {
     ['rapid-twitter', 'twitter', 'RapidAPI', ['search_posts', 'post_detail', 'post_comments', 'user_info', 'user_posts', 'earliest_user_posts'], 'Python 解析、账号时间线及分页；需独立凭据、计费合同与回放测试。'],
     ['rapid-facebook', 'facebook', 'RapidAPI', ['search_posts'], 'Python 搜索与媒体归一化；需保留正文、无标题规则及游标。'],
     ['tgstat', 'telegram', 'TGStat', ['posts_search', 'channel_posts'], '独立 Telegram HTTP 服务；与 Hub 已存 Telegram 会话分开建模。'],
-    ...['Exa', 'Tavily', 'Serper', 'You.com', 'SearchAPI.io', 'Firecrawl', 'SerpApi'].map(label => [label.toLowerCase(), 'web', label, ['web_search'], 'HTTP 客户端已在参考源码中；尚未迁入 Hub 的凭据、价格与返回合同。']),
     ['web-search-skill', 'web', 'web-search-skill / SearXNG', ['web_search', 'web_fetch'], 'Python 技能、自建运行环境与搜索策略；单列迁移，不作为纯 HTTP 转发。'],
     ['defuddle', 'web', 'Defuddle / direct fetch', ['web_fetch'], '网页抓取、字符集与正文提取；需 Hub 出站目标校验及独立内容合同。'],
   ]) rows.push({ id, platform, sourceLabel, capabilities, status: 'deferred', hubPath: null, operation: null,
     catalogKeys: DIRECTORY[platform] ? [`source-catalog-${DIRECTORY[platform]}`] : [],
     legacyStatus: 'existing_routes_unchanged', runtimeStatus: 'not_checked', boundary })
+  for (const p of WEB_SEARCH_PROVIDERS) rows.push({id:`web-search:${p.key}`,platform:'web_search',sourceLabel:p.label,capabilities:['web_search'],status:'native_contract',hubPath:WEB_SEARCH_PATH,operation:'web.search',catalogKeys:p.key==='baidu'?['source-catalog-0135']:[],legacyStatus:'existing_routes_unchanged',runtimeStatus:'not_checked',boundary:'Hub 直连搜索合同；默认禁用，凭据、价格与授权需显式配置。不会调用 Night-All 或自动提取全文。'})
   return { version: snapshot.version, sourceRevision: snapshot.sourceRevision,
     incompleteInventory: snapshot.dynamicCatalogs.some(row => !row.present),
     missingCatalogs: snapshot.dynamicCatalogs.filter(row => !row.present).map(row => row.path.replace('tikhub', 'T-platform')),

@@ -1,3 +1,4 @@
+import { createWebSearchRuntime } from './web-search/runtime.mjs'
 import { ProvisioningService } from './commercial/provisioning.mjs'
 import { QixinAdapter } from './adapters/qixin.mjs'
 import { QixinAdminService, QIXIN_METADATA } from './external-platforms/qixin-admin.mjs'
@@ -280,7 +281,9 @@ export async function createRuntime(config = loadConfig()) {
       : new QixinAdapter({ resolveEgressBase: () => qixinEgressRelayStore.relayBase() }), config: QIXIN_CONFIG,
     providerKey: 'qixin', credentialStore: qixinCredentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
+  const webSearch = createWebSearchRuntime({pool,store,controls:externalPlatformControlStore,config})
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
+    ...webSearch.admins,
     new ExternalPlatformAdminService({ store: rapidApiStore, config: rapidConfig, credentialStore: rapidApiCredentialStore,
       proxyStore: rapidApiProxyStore, operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'rapidapi', metadata: RAPIDAPI_METADATA }),
     new QixinAdminService({ store: qixinPlatformStore, config: QIXIN_CONFIG, credentialStore: qixinCredentialStore,
@@ -440,7 +443,8 @@ export async function createRuntime(config = loadConfig()) {
         const operations = await externalPlatformControlStore.describeProvider('qixin', { config: QIXIN_CONFIG, credentialConfigured: credential.credentialConfigured })
         enterpriseReady = !!pool && operations.some(op => op.effectiveState === 'active' || (op.effectiveState === 'canary' && op.canaryConsumerIds.includes(options?.consumerId)))
       } catch { /* Optional enterprise connector cannot block other capabilities. */ }
-      return { ...existing, operations: { ...existing.operations, ...socialOperations, ...(await ipRiskGateway.capabilities()).operations,
+      const searchOperations = await webSearch.service.operationReadiness(options?.consumerId).catch(() => ({}))
+      return { ...existing, operations: { ...existing.operations, ...socialOperations, ...searchOperations, ...(await ipRiskGateway.capabilities()).operations,
         'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
@@ -499,6 +503,7 @@ export async function createRuntime(config = loadConfig()) {
     store,
     adapter,
     hubSocialGateway,
+    webSearchService: webSearch.service,
     identity,
     queue,
     importer,

@@ -765,6 +765,7 @@ export function createApp({
   nightAllA = null,
   externalPlatformGateway = null,
   hubSocialGateway = null,
+  webSearchService = null,
   xiaohongshuHotNotesGateway = null,
   ipRiskGateway = null,
   enterpriseGateway = null,
@@ -5684,6 +5685,15 @@ export function createApp({
         const context = await requirePublic(request)
         if ([...searchParams.keys()].some(key => key !== 'path') || searchParams.getAll('path').length !== 1) throw new AppError(400, 'invalid_request', 'Provide one Hub endpoint path')
         sendJson(response, 200, { data:await service.servicePricing(context, searchParams.get('path')), requestId }, { 'cache-control':'private, no-store' })
+        return
+      }
+      if ((request.method === 'GET' && pathname === '/api/v1/data/web-search/capabilities') || (request.method === 'POST' && ['/api/v1/data/web-search/search','/api/v1/data/web-search/compatible/baidu'].includes(pathname))) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Web Search')
+        if (!webSearchService) throw new AppError(503, 'web_search_unavailable', 'Web Search is unavailable')
+        if (request.method === 'GET') { sendJson(response,200,{data:await webSearchService.capabilities(context)},{'cache-control':'private, no-store'}); return }
+        const result = await webSearchService.search(context,{body:await readJson(request,64*1024),idempotencyKey:request.headers['idempotency-key'],baiduCompatible:pathname.endsWith('/compatible/baidu')})
+        sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
         return
       }
       const socialEndpoint = request.method === 'POST' ? hubSocialByPath(pathname) : null

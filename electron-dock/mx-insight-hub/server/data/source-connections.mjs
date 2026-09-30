@@ -1,3 +1,4 @@
+import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_PATH } from '../../shared/web-search.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { providerMigrationSnapshot } from './provider-migration.mjs'
@@ -33,7 +34,7 @@ function route(id, fields) {
 }
 
 export function implementedRoutes(sources = []) {
-  const rows = []
+  const rows = WEB_SEARCH_PROVIDERS.map(p=>route(`web-search-${p.key}`,{provider:p.key,providerLabel:p.label,product:'Web Search',operation:'web.search',platform:'web_search',path:WEB_SEARCH_PATH,catalogKeys:p.key==='baidu'?['source-catalog-0135']:[],keywordSearch:true,defaultRule:'按租户与 Key 的渠道范围和顺序选择；发送后不切换，不转发 Night-All。',evidence:'server/web-search/contract.mjs'}))
   for (const endpoint of Object.values(HUB_SOCIAL_ENDPOINTS)) rows.push(route(`hub-social-${endpoint.key}`, {
     platform: endpoint.platform, catalogKeys: [catalogKey(endpoint.platform)], provider: endpoint.provider,
     product: '社媒与内容数据', operation: endpoint.operation, path: endpoint.path, keywordSearch: endpoint.key === 'search',

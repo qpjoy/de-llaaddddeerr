@@ -671,7 +671,7 @@ export class MemoryStore {
   async createApiKey({
     id, tenantId, consumerId, name, digest, prefix, lastFour, sealedSecret = null,
     environment = 'live', status = 'active', expiresAt,
-    platformEntitlements = null, capabilityEntitlements = null,
+    platformEntitlements = null, capabilityEntitlements = null, webSearchOrder = [],
   }) {
     const owner = this.consumers.get(consumerId)
     if (!owner) {
@@ -701,6 +701,7 @@ export class MemoryStore {
       lastFour,
       environment,
       scopeMode: explicitScopes ? 'snapshot' : 'legacy_dynamic',
+      webSearchOrder: clone(webSearchOrder),
       status,
       createdAt: nowIso(),
       expiresAt,
@@ -803,11 +804,12 @@ export class MemoryStore {
     return null
   }
 
-  async updateApiKeyScopes(id, { platformEntitlements, capabilityEntitlements, expected, actor }) {
+  async updateApiKeyScopes(id, { platformEntitlements, capabilityEntitlements, webSearchOrder, expected, actor }) {
     const record = this.apiKeys.get(id)
     if (!record || record.status !== 'active' || new Date(record.expiresAt) <= new Date()) throw new AppError(409, 'api_key_unavailable', 'Key is expired or revoked')
+    if (webSearchOrder !== undefined && JSON.stringify(expected.webSearchOrder || []) !== JSON.stringify(record.webSearchOrder || [])) throw new AppError(409, 'api_key_scopes_changed', 'Search order changed; reload before saving')
     const current = this.#publicApiKey(record)
-    const before = { scopeMode: current.scopeMode, platforms: current.platforms, capabilities: current.capabilities }
+    const before = { webSearchOrder: current.webSearchOrder || [], scopeMode: current.scopeMode, platforms: current.platforms, capabilities: current.capabilities }
     if (expected.scopeMode !== before.scopeMode || ['platforms', 'capabilities'].some(field => JSON.stringify([...expected[field]].sort()) !== JSON.stringify([...before[field]].sort()))) throw new AppError(409, 'api_key_scopes_changed', 'Key permissions changed; reload before saving')
     for (const [rows, field, grants] of [[platformEntitlements, 'platform', this.grants], [capabilityEntitlements, 'capability', this.capabilityGrants]]) {
       if (rows.some(row => !(grants.get(record.consumerId) || []).includes(row[field]))) throw new AppError(409, 'api_key_scope_not_granted', 'Consumer grants changed')
@@ -816,10 +818,12 @@ export class MemoryStore {
       const old = map.get(id) || []
       map.set(id, clone(rows.map(row => old.find(item => item[field] === row[field]) || row)))
     }
+    const nextOrder = webSearchOrder ?? (record.webSearchOrder || []).filter(key=>capabilityEntitlements.some(row=>row.capability===`web.search.provider.${key}`))
+    record.webSearchOrder = clone(nextOrder)
     record.scopeMode = 'snapshot'
     const updated = this.#publicApiKey(record)
     this.apiKeyScopeEvents ||= []
-    this.apiKeyScopeEvents.push({ id, actor, before, after: { scopeMode: updated.scopeMode, platforms: updated.platforms, capabilities: updated.capabilities } })
+    this.apiKeyScopeEvents.push({ id, actor, before, after: { webSearchOrder: updated.webSearchOrder, scopeMode: updated.scopeMode, platforms: updated.platforms, capabilities: updated.capabilities } })
     return updated
   }
 

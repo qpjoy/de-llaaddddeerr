@@ -1,6 +1,7 @@
 import { WECHAT_PRODUCTS } from './wechat.mjs'
 // Product navigation and API docs share one mapping. It never grants access.
 export const PRODUCT_WORKBENCHES = [
+  {path:'/data-products/web-search',label:'Web Search',docs:'web-search',prefixes:['/data/web-search/'],native:true},
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, docs: product.key,
     prefixes: [`/data/wechat/${product.group}/`, ...(product.group === 'mp' ? ['/data/wechat/demo/'] : [])] })),
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },

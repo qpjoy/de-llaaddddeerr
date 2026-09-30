@@ -112,7 +112,7 @@ export class ProvisioningService {
     const changesPrice = rows.some(row => row.saleChanged)
     if (Object.keys(spec.salePrices).length && plan.priceBook && spec.currency !== plan.priceBook.currency) fail(409, 'plan_currency_mismatch', '新价格必须沿用当前套餐币种；批量开通不进行换汇')
     if (changesPrice && billing.account?.currency && spec.currency !== billing.account.currency) fail(409, 'wallet_currency_mismatch', '新套餐币种必须与租户钱包一致')
-    const scopeOverflow = uniq([...key.platforms, ...rows.map(row => row.platform)]).length > MAX_PLATFORM_SCOPES || uniq([...key.capabilities, ...rows.map(row => row.capability)]).length > MAX_CAPABILITY_SCOPES
+    const scopeOverflow = uniq([...key.platforms, ...rows.map(row => row.platform)]).length > MAX_PLATFORM_SCOPES || uniq([...key.capabilities, ...rows.flatMap(row => [row.capability,...(row.additionalCapabilities || [])])]).length > MAX_CAPABILITY_SCOPES
     if (scopeOverflow) for (const row of rows) row.blockers.push('key_scope_limit_exceeded')
     // Shared meters (e.g. social.accounts.search across providers) must agree.
     const meters = new Map()
@@ -121,7 +121,7 @@ export class ProvisioningService {
       meters.set(row.meterKey, row.salePriceMinor)
     }
     return { catalogVersion: PROVISIONING_CATALOG_VERSION,
-      key: { id: key.id, name: key.name, scopeMode: key.scopeMode, platforms: key.platforms, capabilities: key.capabilities, expiresAt: key.expiresAt },
+      key: { id: key.id, name: key.name, webSearchOrder: key.webSearchOrder || [], scopeMode: key.scopeMode, platforms: key.platforms, capabilities: key.capabilities, expiresAt: key.expiresAt },
       consumer, tenant: { id: tenant.id, name: tenant.name }, plan, profile: billing.profile, grants, capabilities, draftHash: draft?.hash || null,
       affectedKeys: allKeys.map(item => ({ id: item.id, name: item.name, status: item.status })), changesPrice, rows,
       canApply: rows.every(row => !row.blockers.length),
@@ -162,10 +162,10 @@ export class ProvisioningService {
       await service.assignConsumerPlan(view.consumer.id, { planVersionId: published.versionId, expectedRevision: view.plan.revision }, 'admin-token')
     }
     for (const platform of uniq(view.rows.map(row => row.platform))) if (!view.grants.includes(platform)) await service.putPlatformConfiguration(platform, { tenantId: view.tenant.id, consumerId: view.consumer.id, enabled: true })
-    for (const capability of uniq(view.rows.map(row => row.capability))) if (!view.capabilities.includes(capability)) await service.putCapabilityConfiguration(capability, { tenantId: view.tenant.id, consumerId: view.consumer.id, enabled: true })
-    const platforms = uniq([...view.key.platforms, ...view.rows.map(row => row.platform)]), capabilities = uniq([...view.key.capabilities, ...view.rows.map(row => row.capability)])
+    for (const capability of uniq(view.rows.flatMap(row => [row.capability,...(row.additionalCapabilities || [])]))) if (!view.capabilities.includes(capability)) await service.putCapabilityConfiguration(capability, { tenantId: view.tenant.id, consumerId: view.consumer.id, enabled: true })
+    const platforms = uniq([...view.key.platforms, ...view.rows.map(row => row.platform)]), capabilities = uniq([...view.key.capabilities, ...view.rows.flatMap(row => [row.capability,...(row.additionalCapabilities || [])])])
     if (digest(platforms) !== digest([...view.key.platforms].sort()) || digest(capabilities) !== digest([...view.key.capabilities].sort())) await service.updateApiKeyScopes(view.key.id, { platforms, capabilities,
-      expected: { scopeMode: view.key.scopeMode, platforms: view.key.platforms, capabilities: view.key.capabilities } }, 'admin-token')
+      expected: { webSearchOrder: view.key.webSearchOrder || [], scopeMode: view.key.scopeMode, platforms: view.key.platforms, capabilities: view.key.capabilities } }, 'admin-token')
     return { batchId: batch.id, status: 'completed', keyId: view.key.id, consumerId: view.consumer.id, applied, planChanged: view.changesPrice, completedAt: new Date().toISOString() }
   }
   async apply(id) {

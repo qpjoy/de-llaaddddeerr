@@ -761,6 +761,7 @@ function apiKey(row) {
     lastFour: row.last_four,
     environment: row.environment,
     scopeMode: row.scope_mode || 'legacy_dynamic',
+    webSearchOrder: row.web_search_order || [],
     status: row.status,
     effectiveStatus: expired ? 'expired' : row.status,
     createdAt: iso(row.created_at),
@@ -1244,7 +1245,7 @@ export class PostgresStore {
   async createApiKey({
     id, tenantId, consumerId, name, digest, prefix, lastFour, sealedSecret = null,
     environment = 'live', status = 'active', expiresAt,
-    platformEntitlements = null, capabilityEntitlements = null,
+    platformEntitlements = null, capabilityEntitlements = null, webSearchOrder = [],
   }) {
     const client = await this.pool.connect()
     try {
@@ -1270,14 +1271,14 @@ export class PostgresStore {
       const { rows } = await client.query(
         `INSERT INTO api_keys
            (id, tenant_id, consumer_id, name, key_digest, key_prefix, last_four,
-            environment, scope_mode, status, expires_at)
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+            environment, scope_mode, status, expires_at, web_search_order)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
            FROM consumers owner
           WHERE owner.id = $3 AND owner.tenant_id = $2
          RETURNING *`,
         [
           id, tenantId, consumerId, name, digest, prefix, lastFour, environment,
-          explicitScopes ? 'snapshot' : 'legacy_dynamic', status, expiresAt,
+          explicitScopes ? 'snapshot' : 'legacy_dynamic', status, expiresAt, webSearchOrder,
         ],
       )
       if (!rows[0]) {
@@ -1447,14 +1448,15 @@ export class PostgresStore {
     return rows[0]?.tenant_status === 'suspended' ? 'tenant_suspended' : null
   }
 
-  async updateApiKeyScopes(id, { platformEntitlements, capabilityEntitlements, expected, actor }) {
+  async updateApiKeyScopes(id, { platformEntitlements, capabilityEntitlements, webSearchOrder, expected, actor }) {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
       const { rows: keys } = await client.query('SELECT * FROM api_keys WHERE id=$1 FOR UPDATE', [id])
       const key = keys[0]
       if (!key || key.status !== 'active' || new Date(key.expires_at) <= new Date()) throw new AppError(409, 'api_key_unavailable', 'Key is expired or revoked')
-      const before = { scopeMode: key.scope_mode, platforms: [], capabilities: [] }
+      const before = { scopeMode: key.scope_mode, platforms: [], capabilities: [], webSearchOrder: key.web_search_order || [] }
+      if (webSearchOrder !== undefined && JSON.stringify(expected.webSearchOrder || []) !== JSON.stringify(before.webSearchOrder)) throw new AppError(409, 'api_key_scopes_changed', 'Search order changed; reload before saving')
       const after = { scopeMode: 'snapshot', platforms: [], capabilities: [] }
       const groups = [
         ['platforms', 'platform', 'api_key_platform_entitlements', 'platform_grants', platformEntitlements],
@@ -1479,7 +1481,8 @@ export class PostgresStore {
           await client.query(`INSERT INTO ${table} (api_key_id, ${column}, max_requests, window_seconds${column === 'platform' ? ', max_page_size' : ''}) VALUES (${values.map((_, i) => '$' + (i + 1)).join(',')})`, values)
         }
       }
-      await client.query("UPDATE api_keys SET scope_mode='snapshot' WHERE id=$1", [id])
+      after.webSearchOrder = webSearchOrder ?? before.webSearchOrder.filter(key=>after.capabilities.includes(`web.search.provider.${key}`))
+      await client.query("UPDATE api_keys SET scope_mode='snapshot', web_search_order=$2 WHERE id=$1", [id, after.webSearchOrder])
       await client.query('INSERT INTO api_key_scope_events(api_key_id,actor,previous_scopes,next_scopes) VALUES($1,$2,$3,$4)', [id, actor, JSON.stringify(before), JSON.stringify(after)])
       await client.query('COMMIT')
       return { id, ...after }

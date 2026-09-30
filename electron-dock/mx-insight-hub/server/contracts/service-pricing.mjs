@@ -10,6 +10,7 @@ export function servicePriceDefinition(path) {
   if (native) return { platform:native.authorizationPlatform, capabilities:[native.operation], meterKey:native.operation }
   const enterprise = /^\/api\/v1\/data\/enterprise\/([0-9]+\.[0-9]+)\/query$/.exec(path)
   if (enterprise && enterprises.has(enterprise[1])) return { platform:'enterprise', capabilities:['enterprise.query'], meterKey:`enterprise.api.${enterprise[1]}` }
+  if (path === '/api/v1/data/web-search/search' || path === '/api/v1/data/web-search/compatible/baidu') return {platform:'web_search',capabilities:['web.search'],meterKey:'web.search'}
   if (path === '/api/v1/data/ip/risk' || path === '/api/v1/data/ip/risk/batch') return { platform:'ip_risk', capabilities:['ip.risk.query'], meterKey:'ip.risk.query', unit:'ip' }
   if (path === '/api/v1/data/ecommerce/products/search') return { platform:'ecommerce', capabilities:['ecommerce.products.search'], meterKey:'ecommerce.products.search' }
   return null

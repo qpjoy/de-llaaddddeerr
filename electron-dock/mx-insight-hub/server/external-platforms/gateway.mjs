@@ -1,3 +1,5 @@
+import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
+import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
@@ -200,6 +202,12 @@ function replayedFailure(request) {
 
 function publicFailure(error) {
   const evidence = error.evidence || {}
+  if (error instanceof WebSearchUpstreamError) {
+    const code = evidence.outcome === 'unknown' ? 'web_search_upstream_outcome_unknown'
+      : evidence.outcome === 'succeeded_unusable' ? 'web_search_upstream_response_unusable' : evidence.errorCode
+    return new AppError(evidence.errorCode === 'web_search_egress_unavailable' ? 503 : evidence.httpStatus === 429 ? 429 : 502,
+      code, 'Search request failed; reuse the same request identifier to verify its outcome', { outcome: evidence.outcome, retryable: false })
+  }
   if (error instanceof RapidApiUpstreamError) {
     if (evidence.errorCode === 'social_egress_unavailable') return new AppError(503, 'social_egress_unavailable', 'Social data egress is unavailable; no business request was dispatched', { outcome: 'rejected', retryable: false })
     const unknown = evidence.outcome === 'unknown'
@@ -542,6 +550,18 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async webSearch(context, { request, provider, body, idempotencyKey, path }) {
+    if (!this.operationControlStore) throw new AppError(503, 'web_search_unavailable', 'Search controls are unavailable')
+    let normalized
+    return this.#deliver(context, { body, idempotencyKey, path }, {
+      operation: 'web.search', authorizationPlatform: 'web_search',
+      capabilityMessage: 'Web Search is not granted for this Key',
+      requiredCapabilities: [provider.capability], replayReleasedFailures: true, skipIngest: true, billingUnknown: true,
+      normalize: ({policy}) => (normalized = gatewayWebSearchRequest(request, provider, policy.maxPageSize)),
+      dispatch: ({credential}) => this.adapter.execute(normalized, credential),
+    })
+  }
+
   async nativeReadiness({ consumerId, operationKeys, credentialConfigured }) {
     if (!this.operationControlStore) return {}
     const credentialReady = typeof credentialConfigured === 'boolean'
@@ -603,6 +623,7 @@ export class ExternalPlatformGateway {
     if (!capabilityGrants.includes(plan.capability || plan.operation)) {
       throw new AppError(403, 'capability_not_granted', plan.capabilityMessage)
     }
+    if ((plan.requiredCapabilities || []).some(scope => !capabilityGrants.includes(scope))) throw new AppError(403, 'web_search_provider_not_granted', 'Search supplier is not granted')
     const consumerPolicy = {
       ...this.defaultPolicy,
       ...((await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform)) || {}),
@@ -697,6 +718,7 @@ export class ExternalPlatformGateway {
       requiredAuthorizationScopes: [
         { type: 'platform', key: authorizationPlatform },
         { type: 'capability', key: plan.capability || plan.operation },
+        ...(plan.requiredCapabilities || []).map(key => ({type:'capability',key})),
       ],
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
@@ -1189,7 +1211,7 @@ export class ExternalPlatformGateway {
         })
       } catch (error) {
         if (!(error instanceof JustOneUpstreamError)
-          && !(error instanceof RapidApiUpstreamError)
+          && !(error instanceof RapidApiUpstreamError || error instanceof WebSearchUpstreamError)
           && !(plan.nativeForwarding && error instanceof TikHubUpstreamError)) throw error
         const evidence = error.evidence
         const persistedEvidence = persistedCallEvidence(error)
