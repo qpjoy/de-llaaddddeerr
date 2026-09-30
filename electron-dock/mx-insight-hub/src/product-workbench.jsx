@@ -4,7 +4,7 @@ import { WechatResult } from './wechat-product.jsx'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { productForPath, productEndpoints, productConsoleRequest, resolveProductSchema } from '../shared/product-workbenches.mjs'
 import { adminApi, publicDataApi, publicDocsHref, publicApiOrigin } from './api.js'
-import { useDemoApiKey, useDemoAccessSnapshot } from './demo-credentials.jsx'
+import { useDemoApiKey, useDemoAccessSnapshot, useDemoIdentity } from './demo-credentials.jsx'
 import { ErrorState, DropdownField } from './components.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { ServicePrice } from './service-price.jsx'
@@ -37,8 +37,9 @@ function initialBody(document, endpoint) {
   return JSON.stringify(content?.example || Object.values(content?.examples || {})[0]?.value || schema.example || example(schema), null, 2)
 }
 
-export function ProductApiConsole({ product, token, initialEndpoint }) {
+export function ProductApiConsole({ product, token, initialEndpoint, onResult }) {
   const [key] = useDemoApiKey()
+  const identity = useDemoIdentity()
   const access = useDemoAccessSnapshot()
   const [document, setDocument] = useState(null), [loadError, setLoadError] = useState(null)
   const [selected, setSelected] = useState(''), [drafts, setDrafts] = useState({}), [category, setCategory] = useState('')
@@ -63,7 +64,7 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
   if (product.docs === 'web-search' && access && schema.properties?.provider) schema.properties.provider.enum = searchProviderKeys(access.capabilities)
   let input = null, validation = ''
   try { input = productConsoleRequest(endpoint, values, json) } catch (failure) { validation = failure.message }
-  const fingerprint = JSON.stringify([key,input]), attempt = attempts.current.get(fingerprint)
+  const fingerprint = JSON.stringify([identity,input]), attempt = attempts.current.get(fingerprint)
   const usesIdempotency = endpoint?.method === 'POST' && endpoint.parameters?.some(row => row.in === 'header' && row.name?.toLowerCase() === 'idempotency-key')
   const snippet = id => input ? requestSnippet({ format: 'curl', url: publicApiOrigin() + input.path, method: input.method, body: input.body,
     credential: '<HUB_API_KEY>', idempotencyKey: usesIdempotency ? id || '<IDEMPOTENCY_KEY>' : undefined,
@@ -81,7 +82,9 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
           if (event === 'source.completed') setProgress(value => value ? { ...value, completed: value.completed + 1, items: value.items + data.items.length } : value)
         })
         : await publicDataApi.productRequest(key, input, usesIdempotency ? operation.key : undefined)
-      setResult({ ...response, input, identity:key })
+      const delivery = { ...response, input, identity }
+      setResult(delivery)
+      onResult?.(delivery)
     } catch (failure) { setError(failure) }
     finally { lock.current = false; setBusy(false) }
   }
@@ -111,9 +114,9 @@ export function ProductApiConsole({ product, token, initialEndpoint }) {
       }}>复制示例</button><p role="status">{copyStatus}</p></details>
       {progress ? <p role="status">已完成 {progress.completed} / {progress.total} 个来源 · 收到 {progress.items} 条（最终以去重响应为准）</p> : null}
       {error ? <ErrorState error={error} /> : null}
-      {product.docs === 'web-search' && result?.identity === key ? <WebSearchResult payload={result.payload}/> : null}
-      {endpoint.path.startsWith('/api/v1/data/wechat/') && result?.identity === key ? <WechatResult payload={result.payload} /> : null}
-      <h3>JSON 响应</h3>{result?.identity === key ? <><p>{result.evidence?.requestId} · {result.evidence?.idempotentReplay ? '幂等回放' : '本次返回'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} aggregate={result.input.path === '/api/v1/data/aggregate/search'} /></> : <p>发送后展示实际响应。</p>}
+      {product.docs === 'web-search' && result?.identity === identity ? <WebSearchResult key={result.evidence?.requestId} payload={result.payload}/> : null}
+      {endpoint.path.startsWith('/api/v1/data/wechat/') && result?.identity === identity ? <WechatResult payload={result.payload} /> : null}
+      <h3>JSON 响应</h3>{result?.identity === identity ? <><p>{result.evidence?.requestId} · {result.evidence?.idempotentReplay ? '幂等回放' : '本次返回'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} aggregate={result.input.path === '/api/v1/data/aggregate/search'} /></> : <p>发送后展示实际响应。</p>}
     </> : <p>当前身份暂无可见接口。</p>}</div>
   </section>
 }
