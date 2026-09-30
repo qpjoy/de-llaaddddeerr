@@ -2639,7 +2639,7 @@ select {
 }
 .mih-key-scopes label {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 2px 8px;
   align-items: center;
   padding: 9px;
@@ -2652,7 +2652,10 @@ select {
   background: color-mix(in srgb, var(--qp-accent) 7%, transparent);
 }
 .mih-key-scopes input { grid-row: 1 / 3; accent-color: var(--qp-accent); }
-.mih-key-scopes small { color: var(--qp-text-muted); overflow: hidden; text-overflow: ellipsis; }
+.mih-key-scopes small { color: var(--qp-text-muted); overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .mih-key-scopes { grid-template-columns: minmax(0, 1fr); }
+}
 
 @media (max-width: 1180px) {
   .mih-xhs-workbench { grid-template-columns: minmax(240px, 300px) 1fr; }

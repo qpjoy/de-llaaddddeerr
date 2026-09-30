@@ -3,7 +3,7 @@ import { Field, Pagination } from './components.jsx'
 
 // Keep original indices: editing a searched/page-two row must update that row,
 // while publication still validates and submits the complete draft.
-export function PagedItems({ items, text, children, label, pageSize = 10, revealItem = null, searchable = true }) {
+export function PagedItems({ items, text, children, label, pageSize = 10, revealItem = null, searchable = true, normalizeSearch = value => value.toLowerCase() }) {
   const [filter, setFilter] = useState('')
   const [page, setPage] = useState(1)
   useEffect(() => {
@@ -11,9 +11,9 @@ export function PagedItems({ items, text, children, label, pageSize = 10, reveal
     setFilter('')
     setPage(Math.floor(revealItem.index / pageSize) + 1)
   }, [revealItem, pageSize])
-  const term = filter.trim().toLowerCase()
+  const term = normalizeSearch(filter.trim())
   const matches = items.map((entry, index) => ({ entry, index }))
-    .filter(({ entry }) => !term || text(entry).toLowerCase().includes(term))
+    .filter(({ entry }) => !term || normalizeSearch(text(entry)).includes(term))
   const pages = Math.max(1, Math.ceil(matches.length / pageSize))
   const current = Math.min(page, pages)
   return <div className="mih-paged-items">

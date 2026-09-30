@@ -1016,6 +1016,7 @@ export function percent(part, total) {
 
 export function platformLabel(platform) {
   const labels = {
+    web_search: 'Web Search 全网搜索',
     ip_risk: 'IP 风险画像',
     enterprise: '企业数据',
     xiaohongshu: '小红书',

@@ -1,4 +1,5 @@
 import { WebSearchAccess } from './web-search-access.jsx'
+import { matchesAccessSearch, normalizeAccessSearch } from './access-search.js'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { PagedItems } from './paged-items.jsx'
 import { withProductScopes } from '../shared/product-catalog.mjs'
@@ -76,6 +77,12 @@ import {
 // prefix so a new platform lands somewhere deliberate rather than at the end.
 const PLATFORM_GROUPS = [
   {
+    key: 'web_search',
+    label: 'Web Search 全网搜索',
+    hint: '需同时授权搜索能力与供应商渠道',
+    members: ['web_search'],
+  },
+  {
     key: 'social',
     label: '社交与内容平台',
     hint: '按数据域与业务能力授权',
@@ -114,6 +121,7 @@ function platformGroupOf(platform) {
 }
 
 const PLATFORM_CATALOG = [
+  'web_search',
   'enterprise',
   'ip_risk',
   'xiaohongshu',
@@ -228,6 +236,12 @@ const CAPABILITY_CATALOG = {
 }
 
 const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = {
+  web_search: {
+    kind: 'Hub 数据服务',
+    operation: 'web.search',
+    route: 'POST /api/v1/data/web-search/search',
+    policyNote: 'Key 需同时包含 Web Search 数据域、搜索能力和至少一个已授权供应商。',
+  },
   ecommerce: {
     kind: 'Hub 数据域',
     operation: 'ecommerce.products.search',
@@ -1346,6 +1360,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const [formError, setFormError] = useState(null)
   const [form, setForm] = useState({ consumerId: '', name: '', environment: 'live', expiresInDays: 180, platforms: [], capabilities: [] })
   const [scopeOptions, setScopeOptions] = useState({ platforms: [], capabilities: [] })
+  const [scopeFilter, setScopeFilter] = useState('')
   const [scopeLoading, setScopeLoading] = useState(false)
   const scopeRequestRef = useRef(0)
   const [issuedSecret, setIssuedSecret] = useState(null)
@@ -1415,6 +1430,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   ))
 
   const applyScopes = async (targetConsumerId, requestedScopes = null) => {
+    setScopeFilter('')
     const generation = ++scopeRequestRef.current
     setScopeOptions({ platforms: [], capabilities: [] })
     setScopeLoading(true)
@@ -1690,7 +1706,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                         href={`#/platforms?${new URLSearchParams({ tenantId: key.tenantId, consumerId: key.consumerId })}`}
                         aria-label={`配置 ${key.name} 所属调用身份的开放能力`}
                       >
-                        <SlidersHorizontal size={15} aria-hidden="true" />配置开放能力
+                        <SlidersHorizontal size={15} aria-hidden="true" />配置调用者授权
                       </a>
                     ) : null}
                     {tenantAllows(session, key.tenantId, 'apikey.write') ? (
@@ -1741,6 +1757,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         >
           <form id="create-api-key" className="mih-form" onSubmit={create}>
             <WebSearchAccess form={form} onChange={setForm} allowed={rotationSource ? scopeOptions.capabilities.filter(cap=>rotationSource.capabilities?.includes(cap)) : scopeOptions.capabilities} disabled={saving || scopeLoading}/>
+            {scopeTarget ? <p role="status">仅修改「{scopeTarget.name}」这把 Key；同一调用者的其他 Key 保持原权限。</p> : null}
             <DropdownField label="调用者" value={form.consumerId}
               onChange={changeFormConsumer}
               options={writableConsumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
@@ -1767,9 +1784,12 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
               <div className="mih-page-actions">{session?.platformAdmin ? <a className="qp-button qp-button--ghost qp-button--sm" href={`#/platforms?consumerId=${encodeURIComponent(form.consumerId)}`}>配置调用者启信宝授权</a> : null}
               <a className="qp-button qp-button--ghost qp-button--sm" href={`#/plans?consumerId=${encodeURIComponent(form.consumerId)}`}>查看 / 配置套餐费率</a></div>
             </div> : null}
+            <Field label="搜索 Key 权限" hint="支持名称与标识，例如 websearch、web_search、百度。筛选只改变显示，未显示的勾选仍会保留。">
+              <input className="qp-input" type="search" value={scopeFilter} onChange={event=>setScopeFilter(event.target.value)} />
+            </Field>
             <Field label="数据域 / 来源范围" hint="决定可访问哪类数据；只展示调用者当前授权，可在此选择授权后应用到原 Key。">
               <div className="mih-key-scopes">
-                {scopeOptions.platforms.map((platform) => (
+                {scopeOptions.platforms.filter(platform=>matchesAccessSearch(scopeFilter,platform,platformLabel(platform))).map((platform) => (
                   <label key={platform}><input type="checkbox" checked={form.platforms.includes(platform)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.platforms?.includes(platform))} onChange={() => toggleScope('platforms', platform)} /><span>{platformLabel(platform)}</span><small>{platform}</small></label>
                 ))}
                 {!scopeLoading && scopeOptions.platforms.length === 0 ? <small>暂无平台授权。请联系平台管理员在“调用者 → 租户业务开通”中开通。</small> : null}
@@ -1777,7 +1797,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             </Field>
             <Field label="业务操作" hint="决定 Key 可以执行什么；业务操作不随数据域授权自动开启。">
               <div className="mih-key-scopes">
-                {operationScopeOptions.map((capability) => (
+                {operationScopeOptions.filter(capability=>matchesAccessSearch(scopeFilter,capability,CAPABILITY_CATALOG[capability]?.label)).map((capability) => (
                   <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
                 ))}
                 {!scopeLoading && operationScopeOptions.length === 0 ? <small>暂无业务操作授权。</small> : null}
@@ -1785,7 +1805,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
             </Field>
             <Field label="兼容接口合同" hint="开放平台原生接口；仍需同时勾选对应数据域和业务操作。">
               <div className="mih-key-scopes">
-                {compatibilityScopeOptions.map((capability) => (
+                {compatibilityScopeOptions.filter(capability=>matchesAccessSearch(scopeFilter,capability,CAPABILITY_CATALOG[capability]?.label)).map((capability) => (
                   <label key={capability}><input type="checkbox" checked={form.capabilities.includes(capability)} disabled={Boolean(rotationSource && rotationSource.scopeMode !== 'legacy_dynamic' && !rotationSource.capabilities?.includes(capability))} onChange={() => toggleScope('capabilities', capability)} /><span>{CAPABILITY_CATALOG[capability]?.label || capability}</span><small>{capability}</small></label>
                 ))}
                 {!scopeLoading && compatibilityScopeOptions.length === 0 ? <small>暂无兼容接口合同授权。</small> : null}
@@ -2835,10 +2855,9 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   const policyByPlatform = new Map((data.configuration?.policies || []).map((policy) => [policy.platform, policy]))
   const filterTerm = capabilityFilter.trim().toLowerCase()
   // Match the id and the human label, so either "xhs 小红书" spelling finds it.
-  const matchesFilter = (...fields) => filterTerm === '' || fields.some(
-    (field) => String(field || '').toLowerCase().includes(filterTerm),
-  )
-  const rows = [...new Set([...platformCatalog, ...grants])].map((platform) => ({
+  const matchesFilter = (...fields) => matchesAccessSearch(filterTerm, ...fields)
+  const domainCatalog = [...new Set([...platformCatalog, ...grants])]
+  const rows = domainCatalog.map((platform) => ({
     platform,
     enabled: grants.has(platform),
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
@@ -3096,9 +3115,10 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       </section> : null}
 
       {consumerSection==='domains' ? <Panel
-        title="API Key 可访问的数据平台 / 数据域"
-        subtitle={`${grants.size} / ${platformCatalog.length} 已启用；调用者授权是上限，Key 权限需单独勾选并保存`}
+        title="调用者已开放的数据域"
+        subtitle={`${grants.size} / ${domainCatalog.length} 已启用；这里设置调用者的授权上限。单独修改某把 Key，请进入“调整 Key 权限”。`}
       >
+        {canReadApiKeys && data.consumerId ? <div className="mih-page-actions"><a className="qp-button qp-button--outline" href={`#/api-keys?${new URLSearchParams({consumerId:data.consumerId})}`}>前往 API Keys 调整单 Key 权限</a></div> : null}
         <details className="mih-access-help"><summary>新闻发现如何授权</summary><p>新闻发现按下方“存量记录 · 按栏目”的数据类别授权，例如“数据中心 · 新闻资讯”；财经、科技等类别也可能包含新闻。开通调用者后，还需在 API Keys 中调整原 Key 权限并勾选相同类别。搜索“新闻发现”可查看这些类别，无需另找同名业务操作。</p></details>
         {data.consumerId ? (
           <div className="mih-capability-filter">
@@ -3121,8 +3141,8 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         {data.consumerId && groupedPlatformRows.length === 0 ? (
           <p className="mih-capability-empty">没有匹配「{capabilityFilter}」的开放项。</p>
         ) : null}
-        {data.consumerId ? <div className="mih-access-domain-groups">{groupedPlatformRows.map(group=><button type="button" key={group.key} aria-pressed={(groupedPlatformRows.some(g=>g.key===domainGroup)?domainGroup:groupedPlatformRows[0]?.key)===group.key} onClick={()=>setDomainGroup(group.key)}>{group.label} · {group.rows.length}</button>)}</div> : null}
-        {data.consumerId ? groupedPlatformRows.filter(group=>group.key===(groupedPlatformRows.some(g=>g.key===domainGroup)?domainGroup:groupedPlatformRows[0]?.key)).map((group) => (
+        {data.consumerId && !filterTerm ? <div className="mih-access-domain-groups">{groupedPlatformRows.map(group=><button type="button" key={group.key} aria-pressed={(groupedPlatformRows.some(g=>g.key===domainGroup)?domainGroup:groupedPlatformRows[0]?.key)===group.key} onClick={()=>setDomainGroup(group.key)}>{group.label} · {group.rows.length}</button>)}</div> : null}
+        {data.consumerId ? groupedPlatformRows.filter(group=>filterTerm || group.key===(groupedPlatformRows.some(g=>g.key===domainGroup)?domainGroup:groupedPlatformRows[0]?.key)).map((group) => (
           <section className="mih-capability-group" key={group.key}>
             <header>
               <strong>{group.label}</strong>
@@ -3206,7 +3226,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         >
           {data.consumerId ? (
             section.rows.length ? (
-              <PagedItems items={section.rows} label={section.title} text={row => `${row.metadata.label} ${row.capability} ${row.metadata.endpoint}`} pageSize={10}>{visibleRows => <Table label={section.tableLabel}>
+              <PagedItems items={section.rows} label={section.title} text={row => `${row.metadata.label} ${row.capability} ${row.metadata.endpoint}`} pageSize={10} normalizeSearch={normalizeAccessSearch}>{visibleRows => <Table label={section.tableLabel}>
               <thead><tr><th>能力</th><th>授权</th><th>运行状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>操作</th></tr></thead>
               <tbody>
                 {visibleRows.map(({entry: row}) => (

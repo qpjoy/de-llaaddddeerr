@@ -5,6 +5,7 @@ import { withProductScopes } from '../shared/product-catalog.mjs'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, Modal, Pagination, platformLabel } from './components.jsx'
 import { PagedItems } from './paged-items.jsx'
+import { matchesAccessSearch } from './access-search.js'
 
 const groups = [['all','全部能力'],['web','Web Search'],['platforms','数据域'],['operations','业务操作'],['compatibility','兼容接口']]
 const count = scopes => scopes.platforms.length + scopes.capabilities.length
@@ -49,7 +50,7 @@ export function TenantServiceAccess({token,tenants,platforms,capabilities,initia
     ...[...new Set([...platforms,...form.platforms])].map(scope=>({scope,field:'platforms',label:scope==='web_search'?'Web Search':platformLabel(scope),group:'platforms'})),
     ...[...new Set([...Object.keys(capabilities),...form.capabilities])].map(scope=>({scope,field:'capabilities',label:capabilities[scope]?.label||scope,group:capabilities[scope]?.group==='compatibility'?'compatibility':'operations'})),
   ] : []
-  const matches = entries.filter(row=>(group==='all'||row.group===group) && `${row.label} ${row.scope}`.toLowerCase().includes(filter.trim().toLowerCase()) && (selection==='all'||form[row.field].includes(row.scope)===(selection==='selected')))
+  const matches = entries.filter(row=>(group==='all'||row.group===group) && matchesAccessSearch(filter,row.label,row.scope) && (selection==='all'||form[row.field].includes(row.scope)===(selection==='selected')))
   const pages = Math.max(1,Math.ceil(matches.length/8)), current = Math.min(page,pages)
   const added = form && baseline ? diff(form,baseline) : {platforms:[],capabilities:[]}
   const removed = form && baseline ? diff(baseline,form) : {platforms:[],capabilities:[]}
@@ -87,6 +88,7 @@ export function TenantServiceAccess({token,tenants,platforms,capabilities,initia
         <aside className="mih-access-summary" aria-label="本次变更">
           <h3>本次变更</h3><dl><div><dt>新增</dt><dd>{count(added)}</dd></div><div data-danger={count(removed)>0}><dt>移除</dt><dd>{count(removed)}</dd></div><div><dt>当前已选</dt><dd>{count(form)}</dd></div></dl>
           <p>保存时补齐所有旧 Key 缺少的已选权限。</p><p>只移除本次明确取消的租户权限，保留 Key 额外权限。</p>
+          <p>此前已开通的能力无需重新勾选；填写原因后预览并同步，即可补齐历史 Key。新增、移除均为 0 时也可执行。</p>
           {count(removed)>0 ? <p className="mih-access-warning">将移除：{names(removed).join('、')}。请在预览中确认受影响的 Key。</p> : null}
           <details><summary>调用者默认额度</summary><p>每个调用者独立生效；已有 Key 的限额保持不变。</p>{[['maxRequests','窗口请求上限'],['windowSeconds','窗口秒数'],['maxPageSize','最大分页'],['maxCrawlWork','最大采集工作量']].map(([field,label])=><Field key={field} label={label}><input className="qp-input" type="number" min="1" disabled={busy} value={form[field]} onChange={e=>change(f=>({...f,[field]:Number(e.target.value)}))}/></Field>)}</details>
         </aside>

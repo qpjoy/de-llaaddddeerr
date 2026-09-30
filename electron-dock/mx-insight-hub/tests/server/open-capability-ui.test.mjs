@@ -8,6 +8,18 @@ import { fileURLToPath } from 'node:url'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from '../../src/open-capabilities.js'
 import { selectVisibleTenantId } from '../../src/tenant-scope.js'
 import { CRAWLER_SOURCES } from '../../server/ingest/crawler/source-contract.mjs'
+import { matchesAccessSearch } from '../../src/access-search.js'
+
+test('access search matches Web Search names and scope spellings without confusing stored webpages', () => {
+  for (const query of ['websearch', 'Web Search', 'web_search', 'web.search', ' web-search ']) {
+    assert(matchesAccessSearch(query, 'web_search', 'Web Search 全网搜索'))
+    assert(matchesAccessSearch(query, 'web.search.provider.baidu', 'Web Search · 百度 AI 搜索'))
+    assert(!matchesAccessSearch(query, 'data_center_saved_records_web', '数据中心 · 网页'))
+  }
+  assert(matchesAccessSearch('百度', 'web.search.provider.baidu', 'Web Search · 百度 AI 搜索'))
+  assert(matchesAccessSearch('', 'ip_risk'))
+  assert(!matchesAccessSearch('absent', 'web.search'))
+})
 
 test('tenant deep links accept only visible tenant IDs and preserve intentional aggregate views', () => {
   const tenants = [{ id: 'tenant-a' }, { id: 'tenant-b' }]
@@ -95,8 +107,8 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(apiKeysPage, /Field label="数据域 \/ 来源范围"/u)
   assert.match(apiKeysPage, /Field label="业务操作"/u)
   assert.match(apiKeysPage, /Field label="兼容接口合同"/u)
-  assert.match(apiKeysPage, /compatibilityScopeOptions\.map/u)
-  assert.match(apiKeysPage, /operationScopeOptions\.map/u)
+  assert.match(apiKeysPage, /compatibilityScopeOptions\.filter\(capability=>matchesAccessSearch/u)
+  assert.match(apiKeysPage, /operationScopeOptions\.filter\(capability=>matchesAccessSearch/u)
   assert.match(apiKeysPage, /scopeMode !== 'legacy_dynamic'[\s\S]*?!rotationSource\.platforms\?\.includes/u)
   assert.match(apiKeysPage, /已切换并验证，撤销旧 Key/u)
   const platformsPage = pages.match(/export function PlatformsPage[\s\S]*?\nexport function UsagePage/u)?.[0] || ''
