@@ -1,4 +1,5 @@
 import { createContext, useContext, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Chart from 'chart.js/auto'
 import {
   ArrowClockwise,
@@ -286,6 +287,7 @@ export function DropdownField({
   placeholder = '请选择',
   hint = '',
   leadingIcon: LeadingIcon = null,
+  portalMenu = false,
 }) {
   const labelId = useId()
   const triggerId = useId()
@@ -295,9 +297,11 @@ export function DropdownField({
   const anchorRef = useRef(null)
   const triggerRef = useRef(null)
   const searchRef = useRef(null)
+  const menuRef = useRef(null)
   const optionRefs = useRef([])
   const [open, setOpen] = useState(false)
   const [openUpward, setOpenUpward] = useState(false)
+  const [menuPosition, setMenuPosition] = useState(null)
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN')
   const selected = options.find((option) => !option.group && option.value === value) || null
@@ -340,6 +344,7 @@ export function DropdownField({
 
   const closeMenu = ({ restoreFocus = false } = {}) => {
     setOpen(false)
+    setMenuPosition(null)
     setQuery('')
     if (restoreFocus) triggerRef.current?.focus()
   }
@@ -415,21 +420,21 @@ export function DropdownField({
       event.preventDefault()
       closeMenu({ restoreFocus: true })
     } else if (event.key === 'Tab') {
-      closeMenu()
+      closeMenu({ restoreFocus: portalMenu })
     }
   }
 
   useEffect(() => {
     if (!open) return undefined
     const closeOnOutsidePointer = (event) => {
-      if (!rootRef.current?.contains(event.target)) closeMenu()
+      if (!rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) closeMenu()
     }
     document.addEventListener('pointerdown', closeOnOutsidePointer)
     return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
   }, [open])
 
   useLayoutEffect(() => {
-    if (!open || !anchorRef.current) return
+    if (!open || !anchorRef.current || portalMenu) return
     const triggerRect = anchorRef.current.getBoundingClientRect()
     const boundaryRect = rootRef.current?.closest('.mih-modal__body')?.getBoundingClientRect()
       ?? rootRef.current?.closest('.mih-modal')?.getBoundingClientRect()
@@ -439,7 +444,49 @@ export function DropdownField({
     const spaceBelow = boundaryBottom - triggerRect.bottom - 8
     const spaceAbove = triggerRect.top - boundaryTop - 8
     setOpenUpward(spaceBelow < menuHeight && spaceAbove > spaceBelow)
-  }, [open, visibleOptions.length])
+  }, [open, visibleOptions.length, portalMenu])
+
+  useLayoutEffect(() => {
+    if (!open || !portalMenu) return
+    // Escape scrolling tables without changing their horizontal overflow behavior.
+    const updatePosition = () => {
+      const anchor = anchorRef.current
+      const menu = menuRef.current
+      if (!anchor || !menu) return
+      const rect = anchor.getBoundingClientRect()
+      const viewportWidth = document.documentElement.clientWidth
+      const viewportHeight = window.innerHeight
+      if (rect.bottom <= 0 || rect.top >= viewportHeight || rect.right <= 0 || rect.left >= viewportWidth) {
+        setOpen(false)
+        setMenuPosition(null)
+        return
+      }
+      const optionsElement = menu.querySelector('[role="listbox"]')
+      const desiredHeight = menu.offsetHeight - optionsElement.offsetHeight
+        + Math.min(optionsElement.scrollHeight, 236, viewportHeight * .38)
+      const below = viewportHeight - rect.bottom - 14
+      const above = rect.top - 14
+      const upward = below < desiredHeight && above > below
+      const maxHeight = Math.max(0, upward ? above : below)
+      const width = Math.min(Math.max(rect.width, 220), 360, viewportWidth - 16)
+      setMenuPosition({
+        left: Math.max(8, Math.min(rect.left, viewportWidth - width - 8)),
+        top: upward ? rect.top - 6 - Math.min(desiredHeight, maxHeight) : rect.bottom + 6,
+        width,
+        maxHeight,
+      })
+    }
+    const onScroll = (event) => {
+      if (!menuRef.current?.contains(event.target)) updatePosition()
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      document.removeEventListener('scroll', onScroll, true)
+    }
+  }, [open, portalMenu, visibleOptions.length])
 
   useEffect(() => {
     if (!open) return
@@ -452,12 +499,14 @@ export function DropdownField({
     if (open) optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
   }, [highlightedIndex, open])
 
+  const renderMenu = (menu) => portalMenu ? createPortal(menu, document.body) : menu
+
   return (
     <div
       ref={rootRef}
       className={`qp-field mih-search-select ${className}`.trim()}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) closeMenu()
+        if (!event.currentTarget.contains(event.relatedTarget) && !menuRef.current?.contains(event.relatedTarget)) closeMenu()
       }}
     >
       <span className={`qp-field__label mih-search-select__label${LeadingIcon ? ' mih-sr-only' : ''}`} id={labelId}>{label}</span>
@@ -484,8 +533,12 @@ export function DropdownField({
           <span className={`qp-dropdown__value mih-search-select__value${selected ? '' : ' is-placeholder'}`}>{selected?.label ?? (value ? `未知筛选：${value}` : placeholder)}</span>
           <CaretDown className="qp-dropdown__chevron mih-search-select__chevron" size={14} aria-hidden="true" />
         </button>
-        {open ? (
-          <div className={`qp-dropdown__menu qp-dropdown__menu--searchable mih-search-select__menu${openUpward ? ' is-upward' : ''}`}>
+        {open ? renderMenu(
+          <div
+            ref={menuRef}
+            className={`qp-dropdown__menu qp-dropdown__menu--searchable mih-search-select__menu${portalMenu ? ' mih-search-select__menu--portal' : openUpward ? ' is-upward' : ''}`}
+            style={portalMenu ? menuPosition || { visibility: 'hidden' } : undefined}
+          >
             <label className="qp-dropdown__search mih-search-select__search" htmlFor={searchId}>
               <MagnifyingGlass size={14} aria-hidden="true" />
               <input
