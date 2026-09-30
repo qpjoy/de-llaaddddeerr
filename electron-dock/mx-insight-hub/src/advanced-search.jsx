@@ -27,7 +27,9 @@ const initial = {
   from: '',
   to: '',
   topK: 30,
+  minSimilarity: '',
 }
+const modeLabels = { fulltext: '全文排名', hybrid: '全文与语义融合排名', semantic: '仅语义排名' }
 // ES markers become React text nodes. Source HTML is never interpreted.
 export function SearchHighlight({ text = '' }) {
   return String(text)
@@ -81,7 +83,11 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
     setResult(null)
     setSelected([])
     try {
-      const body = { ...draft }
+      const body = {
+        ...draft,
+        minSimilarity: draft.mode === 'fulltext' || draft.minSimilarity === '' ? null : Number(draft.minSimilarity),
+        ...(draft.mode === 'semantic' ? { operator: 'and', fuzzy: false } : {}),
+      }
       if (!body.from) delete body.from
       if (!body.to) delete body.to
       const data = await adminApi.advancedSearch(token, body)
@@ -120,6 +126,9 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
             scope: result.query,
             computedAt: result.computedAt,
             coverage: '本次排名候选，不是全库导出',
+            mode: result.mode,
+            degraded: result.degraded,
+            retrieval: result.retrieval,
             items: result.items,
           },
           null,
@@ -183,12 +192,14 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
               options={options([
                 ['fulltext', '全文检索'],
                 ['hybrid', '语义 + 全文（RAG）'],
+                ['semantic', '仅语义（向量对照）'],
               ])}
               onChange={(v) => change('mode', v)}
             />
             <DropdownField
               label="词项关系"
               value={draft.operator}
+              disabled={draft.mode === 'semantic'}
               options={options([
                 ['and', 'AND · 同时包含'],
                 ['or', 'OR · 任一包含'],
@@ -210,12 +221,33 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
               <input
                 type="checkbox"
                 checked={draft.fuzzy}
-                disabled={draft.operator === 'phrase'}
+                disabled={draft.operator === 'phrase' || draft.mode === 'semantic'}
                 onChange={(e) => change('fuzzy', e.target.checked)}
               />{' '}
               模糊纠错
             </label>
           </div>
+          {draft.mode !== 'fulltext' ? (
+            <div className="mih-advanced-semantic-settings">
+              <label className="qp-field">
+                向量相似度下限（可选）
+                <input
+                  className="qp-input"
+                  type="number"
+                  min="-1"
+                  max="1"
+                  step="0.01"
+                  value={draft.minSimilarity}
+                  placeholder="留空：不设下限"
+                  onChange={(e) => change('minSimilarity', e.target.value)}
+                />
+              </label>
+              <p className="mih-browser-note">
+                范围 −1 到 1，越高越严格；这是当前模型的余弦相似度，不是相关概率。请用真实样例对比后调整。
+                {draft.mode === 'hybrid' ? ' 下限只约束语义候选，全文仍可独立命中。' : ' 只检索已向量化内容，不混入全文候选。'}
+              </p>
+            </div>
+          ) : null}
           <details className="mih-browser-advanced-wrap">
             <summary>限定范围：平台、类型、账号、标签与日期</summary>
             <div className="mih-browser-advanced">
@@ -255,12 +287,14 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
             </div>
           </details>
           <p className="mih-browser-note">
-            {draft.mode === 'hybrid'
-              ? '语义召回按含义匹配；AND / OR 约束其中的全文分支。平台、类型、日期等范围同时约束两路结果。'
-              : '全文检索支持词项 AND / OR、连续短语及模糊纠错。'}{' '}
-            日期按北京时间的发布时间。高亮表示字面命中，语义命中可能没有高亮。
+            {draft.mode === 'semantic'
+              ? '仅语义模式便于与全文对照；不使用词项关系或模糊纠错，失败时会明确报错。'
+              : draft.mode === 'hybrid'
+                ? '语义召回按含义匹配；AND / OR 约束全文分支的完整词项。平台、类型、日期等范围同时约束两路结果。'
+                : 'AND / OR 按 HanLP 完整词项匹配；连续短语要求原文词序相邻。'}{' '}
+            日期按北京时间的发布时间。高亮标出字面词项或短语，语义命中可能没有高亮。
           </p>
-          {draft.mode === 'hybrid' && !capabilities.loading && !capabilities.data?.semantic ? (
+          {draft.mode !== 'fulltext' && !capabilities.loading && !capabilities.data?.semantic ? (
             <p className="mih-advanced-notice">
               语义检索尚未就绪：请在 Agent 中心配置 Embedding 业务默认，并在数据中心启用后台向量化。
             </p>
@@ -273,9 +307,9 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
         <section className="qp-panel mih-browser-panel" aria-live="polite">
           <div className="mih-advanced-intro">
             <div>
-              <h2>找到 {result.returned} 条相关证据</h2>
+              <h2>返回 {result.returned} 条候选证据</h2>
               <p>
-                {result.mode === 'hybrid' ? '全文与语义融合排名' : '全文排名'} ·{' '}
+                {modeLabels[result.mode]} ·{' '}
                 {formatDate(result.computedAt)} · 仅展示前 {result.query.topK} 条候选
               </p>
             </div>
@@ -293,13 +327,31 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
               {result.degraded}
             </p>
           ) : null}
+          {result.retrieval?.semanticStatus === 'no_matches' ? (
+            <p className="mih-advanced-notice" role="status">
+              本次没有可用的语义候选。请检查向量覆盖、筛选范围或相似度下限。
+              {result.mode === 'hybrid' ? ' 当前列表仅含全文命中。' : ''}
+            </p>
+          ) : null}
+          {result.retrieval ? (
+            <details className="mih-advanced-diagnostics">
+              <summary>本次检索依据</summary>
+              {result.query.mode !== 'semantic' ? (
+                <p>全文{result.query.operator === 'phrase' ? '短语' : '词项'}：
+                  {result.query.operator === 'phrase' ? result.query.query : result.retrieval.terms.join(' · ')}
+                </p>
+              ) : null}
+              <p>融合前已核验候选：全文 {result.retrieval.lexicalRecords} 条 · 语义 {result.retrieval.semanticRecords} 条 · 两路共同命中 {result.retrieval.overlapRecords} 条。这些数量不是全库覆盖率。</p>
+              {result.retrieval.embeddingSpace ? <p>向量模型 / 维度：{result.retrieval.embeddingSpace} · 相似度下限：{result.retrieval.minSimilarity ?? '未设置'}</p> : null}
+            </details>
+          ) : null}
           <p className="mih-browser-note">
-            {result.mode === 'hybrid'
+            {result.mode !== 'fulltext'
               ? '语义相关性没有精确总页数。'
               : result.lexicalTotal?.value != null
                 ? `全文索引匹配 ${result.lexicalTotal.value.toLocaleString('zh-CN')}${result.lexicalTotal.relation === 'gte' ? '+' : ''} 条（索引可能有延迟）。`
                 : ''}
-            此处是有限候选，完整总量、分页及批量筛选请使用账号 /
+            候选数量是上限，不保证每条都相关。完整总量、分页及批量筛选请使用账号 /
             内容大盘。已排除过期或删除的来源。向量覆盖范围取决于后台进度。
           </p>
           <div className="mih-browser-tabs" aria-label="结果视图">
@@ -364,6 +416,7 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
                     {item.retrievers.includes('lexical') ? '全文命中' : ''}
                     {item.retrievers.length > 1 ? ' + ' : ''}
                     {item.retrievers.includes('vector') ? '语义相关' : ''} · 来源修订 {item.revision}
+                    {item.semanticSimilarity != null ? ` · 向量相似度 ${item.semanticSimilarity.toFixed(3)}` : ''}
                   </div>
                 </article>
               ))}

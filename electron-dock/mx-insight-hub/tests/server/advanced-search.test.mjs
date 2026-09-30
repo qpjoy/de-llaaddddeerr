@@ -8,10 +8,12 @@ import {
   matchesScope,
   searchFilters,
   withRetrievalSlot,
+  lexicalQuery,
+  lexicalHighlight,
 } from '../../server/retrieval/search.mjs'
 import { createApp } from '../../server/app.mjs'
 const ids = Array.from({ length: 5 }, (_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`)
-function fixture({ rows = null, vectorError = false, lexicalError = false, degradedHanlp = false } = {}) {
+function fixture({ rows = null, vectorError = false, lexicalError = false, degradedHanlp = false, queryTokens = ['售后', '困难'], vectorHits = null } = {}) {
   const calls = [],
     snapshots = new Map()
   const records =
@@ -51,7 +53,7 @@ function fixture({ rows = null, vectorError = false, lexicalError = false, degra
     segmenter: {
       async segmentWithMeta() {
         return {
-          tokens: ['售后', '困难'],
+          tokens: queryTokens,
           backendUsed: degradedHanlp ? 'jieba' : 'hanlp',
           degraded: degradedHanlp,
         }
@@ -76,10 +78,10 @@ function fixture({ rows = null, vectorError = false, lexicalError = false, degra
         if (vectorError) throw Error('offline')
         return {
           hits: {
-            hits: [
-              { _id: 'chunk1', _source: { recordId: ids[0], sourceRevision: 2, content: '售后原文' } },
-              { _id: 'chunk2', _source: { recordId: ids[0], sourceRevision: 2, content: '重复来源' } },
-              { _id: 'chunk3', _source: { recordId: ids[2], sourceRevision: 1, content: '过时原文' } },
+            hits: vectorHits || [
+              { _id: 'chunk1', _score: 0.91, _source: { recordId: ids[0], sourceRevision: 2, content: '售后原文' } },
+              { _id: 'chunk2', _score: 0.89, _source: { recordId: ids[0], sourceRevision: 2, content: '重复来源' } },
+              { _id: 'chunk3', _score: 0.8, _source: { recordId: ids[2], sourceRevision: 1, content: '过时原文' } },
             ],
           },
         }
@@ -126,6 +128,12 @@ test('intent rejects raw DSL, excessive candidates, invalid calendar dates and u
     { query: 'x', from: '2026-02-30' },
     { query: 'x', account: '1' },
     { query: 'x', operator: 'phrase', fuzzy: true },
+    { query: 'x', mode: 'semantic', minSimilarity: 1.01 },
+    { query: 'x', mode: 'hybrid', minSimilarity: '-0.1' },
+    { query: 'x', mode: 'hybrid', minSimilarity: -1.01 },
+    { query: 'x', mode: 'fulltext', minSimilarity: 0.7 },
+    { query: 'x', mode: 'semantic', fuzzy: true },
+    { query: 'x', mode: 'semantic', operator: 'or' },
   ])
     assert.throws(
       () => parseIntent(v),
@@ -306,4 +314,127 @@ test('account profile evidence groups under its platform identity when author is
   const f=fixture();f.records[0].object_type='profile';f.records[0].external_id='profile-a';f.records[0].author_external_id=null
   const result=await f.service.run({query:'售后',operator:'phrase'})
   assert.equal(result.accounts.find(a=>a.id==='profile-a').platform,'douyin')
+})
+
+test('Chinese AND/OR cannot be bypassed by unordered standard-analyzer character matches', async () => {
+  for (const operator of ['and', 'or']) {
+    for (const fuzzy of [false, true]) {
+      const f = fixture({ queryTokens: ['售后', '拖延', '、', '退款', '困难'] })
+      const result = await f.service.run({ query: '售后拖延、退款困难', operator, fuzzy })
+      const query = f.calls.find((c) => c.index === 'content').body.query
+      const branches = query.bool.should
+      assert.deepEqual(result.retrieval.terms, ['售后', '拖延', '退款', '困难'])
+      const words = branches.find((b) => b.multi_match?.fields.includes('bodyHanlp')).multi_match
+      assert.equal(words.operator, operator)
+      assert.equal(words.query, '售后 拖延 退款 困难')
+      // This is the admission path that previously matched long economic news
+      // containing the same scattered characters without any complete terms.
+      const raw = branches.filter((b) => b.multi_match?.fields.includes('body'))
+      assert.equal(raw.length, 1)
+      assert.equal(raw[0].multi_match.type, 'phrase')
+      assert.equal(raw[0].multi_match.fuzziness, undefined)
+      if (fuzzy) {
+        for (const clause of branches.at(-1).bool[operator === 'and' ? 'must' : 'should'])
+          assert.deepEqual(clause.multi_match.fields, ['titleHanlp^3', 'bodyHanlp'])
+      }
+    }
+  }
+})
+
+test('highlight query uses adjacent complete words and never incompatible HanLP offsets', () => {
+  const q = parseIntent({ query: '售后拖延、退款困难' })
+  const highlight = lexicalHighlight(q, ['售后', '拖延', '退款', '困难'])
+  assert.deepEqual(highlight.fields.body.highlight_query.bool.should, [
+    { match_phrase: { body: '售后' } }, { match_phrase: { body: '拖延' } },
+    { match_phrase: { body: '退款' } }, { match_phrase: { body: '困难' } },
+  ])
+  assert.equal(highlight.fields.body.matched_fields, undefined)
+  const phrase = parseIntent({ query: '售后拖延', operator: 'phrase' })
+  assert.deepEqual(lexicalHighlight(phrase, []).fields.body.highlight_query.bool.should, [{ match_phrase: { body: '售后拖延' } }])
+  assert.equal(lexicalQuery(phrase, []).bool.should[0].multi_match.type, 'phrase')
+})
+
+test('whole-word search retains legitimate single-character queries and mixed-language terms', async () => {
+  const f = fixture({ queryTokens: ['车', 'API', '退款', '车', '，'] })
+  const result = await f.service.run({ query: '车 API退款' })
+  assert.deepEqual(result.retrieval.terms, ['车', 'API', '退款'])
+  const words = f.calls.find((c) => c.index === 'content').body.query.bool.should[0].multi_match
+  assert.equal(words.query, '车 API 退款')
+})
+
+test('excess terms are rejected instead of silently dropping AND constraints', async () => {
+  const f = fixture({ queryTokens: Array.from({ length: 65 }, (_, i) => `词${i}`) })
+  await assert.rejects(f.service.run({ query: '很多词项' }), (e) => e.code === 'too_many_search_terms')
+  assert.equal(f.calls.some((c) => c.index), false)
+})
+
+test('semantic-only contrast runs no lexical search or HanLP and revalidates current evidence', async () => {
+  const f = fixture({ lexicalError: true, degradedHanlp: true })
+  const result = await f.service.run({ query: '退货一直没人处理', mode: 'semantic' })
+  assert.equal(result.mode, 'semantic')
+  assert.deepEqual(result.items.map((i) => i.id), [ids[0]])
+  assert.deepEqual(result.items[0].retrievers, ['vector'])
+  assert.equal(f.calls.some((c) => c.index === 'content'), false)
+  assert.equal(result.lexicalTotal, null)
+  assert.equal(result.retrieval.semanticRecords, 1)
+  assert.equal(result.retrieval.lexicalRecords, 0)
+  assert.equal(result.retrieval.embeddingSpace, 'test-embedding:2')
+  assert.ok(Math.abs(result.items[0].semanticSimilarity - 0.82) < 1e-10)
+})
+
+test('semantic-only errors never silently return fulltext, and release capacity', async () => {
+  const f = fixture({ vectorError: true })
+  await assert.rejects(f.service.run({ query: '退款', mode: 'semantic' }), (e) => e.code === 'semantic_search_failed')
+  assert.equal(f.calls.some((c) => c.index === 'content'), false)
+  assert.equal(f.service.active, 0)
+  assert.ok(f.calls.some((c) => c.sql?.includes('SET token=NULL')))
+})
+
+test('cosine cutoff applies before fusion and snapshot storage; weak vectors cannot become evidence', async () => {
+  const f = fixture({ vectorHits: [
+    { _id: 'strong', _score: 0.9, _source: { recordId: ids[0], sourceRevision: 2, content: '有效证据' } },
+    { _id: 'weak', _score: 0.7, _source: { recordId: ids[1], sourceRevision: 2, content: '弱相关' } },
+    { _id: 'missing-score', _source: { recordId: ids[2], sourceRevision: 2, content: '未知分数' } },
+  ] })
+  const result = await f.service.run({ query: '退款', mode: 'semantic', minSimilarity: 0.6 })
+  assert.equal(f.calls.find((c) => c.index === 'chunks').body.knn.similarity, 0.6)
+  assert.deepEqual(result.items.map((i) => i.id), [ids[0]])
+  assert.deepEqual(f.snapshots.get(result.snapshotId).evidence.map((i) => i.id), [ids[0]])
+  await assert.rejects(f.service.answer({ snapshotId: result.snapshotId, ids: [ids[1]] }), (e) => e.code === 'invalid_evidence')
+})
+
+test('cutoff is optional and does not turn similarity into probability or suppress lexical matches', async () => {
+  const f = fixture()
+  const ordinary = await f.service.run({ query: '退款', mode: 'hybrid' })
+  assert.equal(f.calls.find((c) => c.index === 'chunks').body.knn.similarity, undefined)
+  assert.equal(ordinary.retrieval.overlapRecords, 1)
+  const strict = await f.service.run({ query: '退款', mode: 'hybrid', minSimilarity: 0.99 })
+  assert.equal(strict.retrieval.semanticStatus, 'no_matches')
+  assert.equal(strict.degraded, null)
+  assert.equal(strict.items.length, 3)
+  assert.ok(strict.items.every((i) => i.retrievers.length === 1 && i.retrievers[0] === 'lexical'))
+})
+
+test('no semantic matches is distinct from model failure and does not fill the requested count', async () => {
+  const f = fixture({ vectorHits: [] })
+  const result = await f.service.run({ query: '没有资料的问题', mode: 'semantic', topK: 30 })
+  assert.equal(result.returned, 0)
+  assert.equal(result.retrieval.semanticStatus, 'no_matches')
+  assert.equal(result.degraded, null)
+  const failed = fixture({ vectorError: true })
+  const fallback = await failed.service.run({ query: '退款', mode: 'hybrid' })
+  assert.equal(fallback.retrieval.semanticStatus, 'unavailable')
+  assert.equal(fallback.mode, 'fulltext')
+})
+
+test('cosine thresholds include boundary rounding and retain negative similarity honestly', async () => {
+  const f = fixture({ vectorHits: [
+    { _id: 'boundary', _score: 0.85, _source: { recordId: ids[0], sourceRevision: 2, content: '边界值' } },
+    { _id: 'negative', _score: 0.45, _source: { recordId: ids[1], sourceRevision: 2, content: '负相似度' } },
+  ] })
+  const boundary = await f.service.run({ query: '退款', mode: 'semantic', minSimilarity: 0.7 })
+  assert.deepEqual(boundary.items.map((item) => item.id), [ids[0]])
+  const broad = await f.service.run({ query: '退款', mode: 'semantic', minSimilarity: -0.2 })
+  assert.equal(broad.items.length, 2)
+  assert.ok(broad.items[1].semanticSimilarity < 0)
 })

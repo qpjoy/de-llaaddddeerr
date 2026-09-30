@@ -17,7 +17,7 @@ const date = z
 export const SearchIntent = z
   .object({
     query: z.string().trim().min(1).max(500),
-    mode: z.enum(['fulltext', 'hybrid']).default('fulltext'),
+    mode: z.enum(['fulltext', 'hybrid', 'semantic']).default('fulltext'),
     operator: z.enum(['and', 'or', 'phrase']).default('and'),
     fuzzy: z.boolean().default(false),
     platform: identifier,
@@ -29,11 +29,14 @@ export const SearchIntent = z
     from: date.optional(),
     to: date.optional(),
     topK: z.number().int().min(1).max(100).default(30),
+    minSimilarity: z.number().min(-1).max(1).nullable().default(null),
   })
   .strict()
   .refine((v) => !v.account || v.platform, '账号范围必须指定平台')
   .refine((v) => !v.from || !v.to || v.from <= v.to, '日期范围无效')
   .refine((v) => !(v.fuzzy && v.operator === 'phrase'), '短语匹配不使用模糊纠错')
+  .refine((v) => v.mode !== 'fulltext' || v.minSimilarity === null, '相似度下限仅用于语义检索')
+  .refine((v) => v.mode !== 'semantic' || (!v.fuzzy && v.operator === 'and'), '仅语义模式不使用词项关系或模糊纠错')
 
 export function parseIntent(body) {
   const parsed = SearchIntent.safeParse(body)
@@ -41,6 +44,51 @@ export function parseIntent(body) {
     throw new AppError(400, 'invalid_search_intent', '搜索条件无效；只接受已定义字段、日期及最多 100 条候选')
   return parsed.data
 }
+
+// Raw Chinese uses standard analysis (single characters). Only an ordered
+// phrase may independently admit a raw-text hit; AND/OR operate on HanLP words.
+export function lexicalQuery(q, tokens) {
+  const phrase = { multi_match: { query: q.query, fields: ['title^3', 'body'], type: 'phrase' } }
+  if (q.operator === 'phrase') return { bool: { filter: searchFilters(q), should: [phrase], minimum_should_match: 1 } }
+  const should = [
+    { multi_match: { query: tokens.join(' '), fields: ['titleHanlp^3', 'bodyHanlp'], type: 'cross_fields', operator: q.operator } },
+    phrase,
+  ]
+  if (q.fuzzy) {
+    if (tokens.length > 16)
+      throw new AppError(400, 'fuzzy_query_too_long', '模糊纠错最多接受 16 个词项，请缩短查询')
+    should.push({ bool: {
+      [q.operator === 'and' ? 'must' : 'should']: tokens.map((token) => ({ multi_match: {
+        query: token, fields: ['titleHanlp^3', 'bodyHanlp'], fuzziness: 'AUTO', prefix_length: 1, max_expansions: 20,
+      } })),
+      ...(q.operator === 'or' ? { minimum_should_match: 1 } : {}),
+    } })
+  }
+  return { bool: { filter: searchFilters(q), should, minimum_should_match: 1 } }
+}
+
+export function lexicalHighlight(q, tokens) {
+  // Separate HanLP fields have different offsets. Highlight complete query
+  // terms as phrases in the original text, never isolated standard tokens.
+  const phrases = q.operator === 'phrase' ? [q.query] : tokens
+  return {
+    pre_tags: ['\uE000'], post_tags: ['\uE001'], order: 'score',
+    fields: Object.fromEntries(['title', 'body'].map((field) => [field, {
+      ...(field === 'title' ? { number_of_fragments: 0 } : { fragment_size: 200, number_of_fragments: 2 }),
+      highlight_query: { bool: {
+        should: phrases.map((phrase) => ({ match_phrase: { [field]: phrase } })), minimum_should_match: 1,
+      } },
+    }])),
+  }
+}
+
+function cosineSimilarity(hit) {
+  // The Hub chunk mapping is cosine; an unboosted kNN score is (1+cosine)/2.
+  // This is model-specific similarity, never a relevance probability.
+  return typeof hit?._score === 'number' && Number.isFinite(hit._score)
+    ? Math.max(-1, Math.min(1, 2 * hit._score - 1)) : null
+}
+
 export function searchFilters(q, { chunks = false } = {}) {
   const filters = []
   for (const key of ['platform', 'datasetId', 'objectType', 'contentType'])
@@ -146,6 +194,8 @@ export class AdvancedSearch {
       fulltext: Boolean(this.search?.client),
       semantic: Boolean(this.search?.chunkIndexSet && this.agent?.embeddings?.available),
       maxResults: 100,
+      modes: ['fulltext', 'hybrid', 'semantic'],
+      similarityMetric: 'cosine',
       generation: 'explicit',
       evidenceContract: 'hub.canonical-evidence.v1',
       tokenizer: 'hanlp',
@@ -157,7 +207,8 @@ export class AdvancedSearch {
     if (cached && cached.expires > this.now()) return cached.tokens
     if (!this.strict)
       throw new AppError(503, 'hanlp_unavailable', 'HanLP 未配置；请使用明确的短语匹配或原大盘')
-    const tokens = (await this.strict.segment(query)).slice(0, 64)
+    const tokens = [...new Set((await this.strict.segment(query)).filter((token) => /[\p{L}\p{N}]/u.test(token)))]
+    if (tokens.length > 64) throw new AppError(400, 'too_many_search_terms', '查询最多接受 64 个词项，请缩短查询')
     if (!tokens.length) throw new AppError(400, 'empty_search_terms', '查询未产生有效词项')
     if (this.tokenCache.size >= 256) this.tokenCache.delete(this.tokenCache.keys().next().value)
     this.tokenCache.set(query, { tokens, expires: this.now() + 60000 })
@@ -171,63 +222,17 @@ export class AdvancedSearch {
     this.active++
     try {
       return await withRetrievalSlot(this.pool, 'search', async () => {
-        const tokens = q.operator === 'phrase' ? [] : await this.tokens(q.query)
-        const filters = searchFilters(q)
-        const should =
-          q.operator === 'phrase'
-            ? [{ multi_match: { query: q.query, fields: ['title^3', 'body'], type: 'phrase' } }]
-            : [
-                {
-                  multi_match: {
-                    query: tokens.join(' '),
-                    fields: ['titleHanlp^3', 'bodyHanlp'],
-                    type: 'cross_fields',
-                    operator: q.operator,
-                  },
-                },
-                {
-                  multi_match: {
-                    query: q.query,
-                    fields: ['title^3', 'body'],
-                    operator: q.operator,
-                    ...(q.fuzzy ? { fuzziness: 'AUTO', prefix_length: 1, max_expansions: 20 } : {}),
-                  },
-                },
-              ]
-        if (q.fuzzy) {
-          if (tokens.length > 16)
-            throw new AppError(400, 'fuzzy_query_too_long', '模糊纠错最多接受 16 个词项，请缩短查询')
-          should.push({
-            bool: {
-              [q.operator === 'and' ? 'must' : 'should']: tokens.map((token) => ({
-                multi_match: {
-                  query: token,
-                  fields: ['titleHanlp^3', 'bodyHanlp'],
-                  fuzziness: 'AUTO',
-                  prefix_length: 1,
-                  max_expansions: 20,
-                },
-              })),
-              ...(q.operator === 'or' ? { minimum_should_match: 1 } : {}),
-            },
-          })
-        }
-        const lexicalPromise = this.search.client.search(this.search.indexSet.readAlias, {
+        const useLexical = q.mode !== 'semantic'
+        const tokens = !useLexical || q.operator === 'phrase' ? [] : await this.tokens(q.query)
+        const lexicalPromise = useLexical ? this.search.client.search(this.search.indexSet.readAlias, {
           size: 100,
           timeout: '4s',
           track_total_hits: 10000,
-          query: { bool: { filter: filters, should, minimum_should_match: 1 } },
+          query: lexicalQuery(q, tokens),
           _source: ['id', 'projectionRevision'],
-          highlight: {
-            pre_tags: ['\uE000'],
-            post_tags: ['\uE001'],
-            fields: {
-              title: { number_of_fragments: 0 },
-              body: { fragment_size: 200, number_of_fragments: 2 },
-            },
-          },
-        })
-        const semanticPromise = q.mode === 'hybrid' ? this.vector(q) : Promise.resolve(null)
+          highlight: lexicalHighlight(q, tokens),
+        }) : Promise.resolve(null)
+        const semanticPromise = q.mode !== 'fulltext' ? this.vector(q) : Promise.resolve(null)
         const [lexicalResult, semanticResult] = await Promise.allSettled([lexicalPromise, semanticPromise])
         if (lexicalResult.status === 'rejected')
           throw new AppError(
@@ -236,10 +241,12 @@ export class AdvancedSearch {
             'ES 全文检索失败，未返回不完整的关键词结果；可使用原大盘',
           )
         const lexical = lexicalResult.value
-        if (lexical.timed_out || lexical._shards?.failed)
+        if (lexical?.timed_out || lexical?._shards?.failed)
           throw new AppError(503, 'fulltext_search_timeout', '全文检索未完整执行，请缩小范围')
         const semantic = semanticResult.status === 'fulfilled' ? semanticResult.value : null
-        const lexicalHits = lexical.hits?.hits || []
+        if (q.mode === 'semantic' && !semantic)
+          throw new AppError(503, 'semantic_search_failed', '语义检索不可用；请检查 Embedding 与向量索引，或手动选择全文检索')
+        const lexicalHits = lexical?.hits?.hits || []
         const vectorHits = semantic?.hits?.hits || []
         const ids = [
           ...new Set(
@@ -270,6 +277,8 @@ export class AdvancedSearch {
             const row = current.get(h._source?.recordId)
             if (!row || Number(row.current_revision) !== Number(h._source.sourceRevision) || seen.has(row.id))
               return false
+            const similarity = cosineSimilarity(h)
+            if (q.minSimilarity !== null && (similarity === null || similarity + 1e-6 < q.minSimilarity)) return false
             seen.add(row.id)
             return true
           })
@@ -300,6 +309,7 @@ export class AdvancedSearch {
             snippet: vector?._source?.content?.slice(0, 1600) || r.body?.slice(0, 1600) || r.title || '',
             retrievers: hit.retrievers,
             score: hit.score,
+            semanticSimilarity: vector ? cosineSimilarity(vector) : null,
             evidenceKind: 'canonical',
             evidenceVersion: 'hub.canonical-evidence.v1',
           })
@@ -328,11 +338,20 @@ export class AdvancedSearch {
         return {
           snapshotId: id,
           query: q,
-          mode: semantic ? 'hybrid' : 'fulltext',
+          mode: semantic ? q.mode : 'fulltext',
           degraded,
           items,
           accounts: [...accounts.values()],
-          lexicalTotal: lexical.hits?.total ?? null,
+          lexicalTotal: lexical?.hits?.total ?? null,
+          retrieval: {
+            terms: tokens,
+            lexicalRecords: validLexical.length,
+            semanticRecords: validVector.length,
+            overlapRecords: validVector.filter((h) => lexicalById.has(h._id)).length,
+            semanticStatus: q.mode === 'fulltext' ? 'not_requested' : !semantic ? 'unavailable' : validVector.length ? 'matched' : 'no_matches',
+            embeddingSpace: semantic?.embeddingSpace ?? null,
+            minSimilarity: q.minSimilarity,
+          },
           returned: items.length,
           candidateLimit: 100,
           expiresInSeconds: 600,
@@ -378,6 +397,7 @@ export class AdvancedSearch {
         query_vector: embedded.vectors[0],
         k: 100,
         num_candidates: 200,
+        ...(q.minSimilarity !== null ? { similarity: q.minSimilarity } : {}),
         filter: [
           ...searchFilters(q, { chunks: true }),
           { term: { embeddingSpace: `${embedded.model}:${embedded.vectors[0].length}` } },
@@ -387,7 +407,7 @@ export class AdvancedSearch {
     })
     if (result.timed_out || result._shards?.failed)
       throw new AppError(503, 'semantic_timeout', '语义检索超时')
-    return result
+    return { ...result, embeddingSpace: `${embedded.model}:${embedded.vectors[0].length}` }
   }
   async answer(body) {
     const parsed = z
