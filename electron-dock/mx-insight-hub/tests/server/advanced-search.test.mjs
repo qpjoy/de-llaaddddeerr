@@ -94,7 +94,8 @@ function fixture({ rows = null, vectorError = false, lexicalError = false, degra
   const agent = {
     available: true,
     embeddings: { available: true },
-    async embed() {
+    async embed(texts, options) {
+      assert.equal(options.priority, 'interactive')
       return { vectors: [[0.1, 0.2]], model: 'test-embedding' }
     },
     async complete() {

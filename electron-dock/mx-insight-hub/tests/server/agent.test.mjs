@@ -924,6 +924,24 @@ test('a provider that returns the wrong dimension count is rejected at the bound
   await assert.rejects(() => router.embed(['hello']), /returned 2 dimensions, expected 4/)
 })
 
+test('embedding priority reaches default and explicit Sequence transports without changing input', async () => {
+  const seen = []
+  const embeddings = new EmbeddingRouter({
+    providers: [{ id: 'local', baseUrl: 'https://local.invalid/v1', model: 'm1', dimensions: 2, timeoutMs: 1000 }],
+    logger: quiet,
+    fetchImpl: async (_, init) => {
+      seen.push(init)
+      return jsonResponse({ data: [{ index: 0, embedding: [1, 2] }] })
+    },
+  })
+  const agent = new HubAgent({ chat: new ProviderRouter({ providers: [], logger: quiet }), embeddings, logger: quiet })
+  await agent.embed(['原始查询'], { priority: 'interactive' })
+  await agent.embed(['原始查询'], { providerIds: ['local'], priority: 'background' })
+  await agent.embed(['原始查询'])
+  assert.deepEqual(seen.map(x => x.headers['x-mx-embedding-priority']), ['interactive', 'background', undefined])
+  for (const init of seen) assert.deepEqual(JSON.parse(init.body), { model: 'm1', input: ['原始查询'] })
+})
+
 test('an invalid embedding 2xx payload fails over before circuit success is recorded', async () => {
   const seen = []
   const shared = {

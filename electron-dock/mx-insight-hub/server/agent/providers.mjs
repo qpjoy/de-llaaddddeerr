@@ -345,11 +345,12 @@ export class ProviderRouter {
    * provider-specific) is substituted per attempt rather than baked in by the
    * caller.
    */
-  async call(path, buildBody, { signal, validatePayload, transportOverride } = {}) {
+  async call(path, buildBody, { signal, validatePayload, transportOverride, priority } = {}) {
     return this.#callProviders(this.providers, path, buildBody, {
       signal,
       validatePayload,
       transportOverride,
+      priority,
     })
   }
 
@@ -358,7 +359,7 @@ export class ProviderRouter {
     providerIds,
     path,
     buildBody,
-    { signal, validatePayload, ignoreCircuit = false, transportOverride } = {},
+    { signal, validatePayload, ignoreCircuit = false, transportOverride, priority } = {},
   ) {
     if (!Array.isArray(providerIds) || providerIds.length === 0) {
       throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence has no providers')
@@ -373,6 +374,7 @@ export class ProviderRouter {
       validatePayload,
       ignoreCircuit,
       transportOverride,
+      priority,
     })
   }
 
@@ -397,7 +399,7 @@ export class ProviderRouter {
     providers,
     path,
     buildBody,
-    { signal, validatePayload, ignoreCircuit = false, transportOverride } = {},
+    { signal, validatePayload, ignoreCircuit = false, transportOverride, priority } = {},
   ) {
     if (providers.length === 0) {
       throw new AppError(503, 'agent_not_configured', 'No model provider is configured')
@@ -460,6 +462,10 @@ export class ProviderRouter {
                 : { authorization: `Bearer ${apiKey}` }
               : {}),
             ...(anthropic ? { 'anthropic-version': '2023-06-01' } : {}),
+            // Optional scheduling hint understood by mx-embedding. Keep the
+            // OpenAI request body and query/document vector semantics unchanged.
+            ...(path === '/embeddings' && ['interactive', 'background'].includes(priority)
+              ? { 'x-mx-embedding-priority': priority } : {}),
           },
           body: JSON.stringify(anthropic ? anthropicRequestBody(requestBody) : requestBody),
           signal: controller.signal,

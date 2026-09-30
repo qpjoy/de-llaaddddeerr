@@ -388,7 +388,7 @@ export class AdvancedSearch {
       if (this.vectorCache.size >= 256) this.vectorCache.delete(this.vectorCache.keys().next().value)
       cached = {
         expires: this.now() + 60000,
-        promise: this.agent.embed([q.query], { signal: AbortSignal.timeout(8000) }),
+        promise: this.agent.embed([q.query], { signal: AbortSignal.timeout(8000), priority: 'interactive' }),
       }
       this.vectorCache.set(q.query, cached)
     }

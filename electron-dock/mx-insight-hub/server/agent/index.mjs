@@ -350,6 +350,7 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
   /** Embed a batch of texts. Throws when unavailable: there is no fallback for a vector. */
   async embed(texts, {
     signal,
+    priority,
     providerIds = null,
     sequenceKey = null,
     ignoreCircuit = false,
@@ -361,10 +362,11 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
     const result = providerIds
       ? await this.embeddings.embedSequence(providerIds, texts, {
           signal,
+          priority,
           ignoreCircuit,
           transportOverride,
         })
-      : await this.embeddings.embed(texts, { signal, ignoreCircuit, transportOverride })
+      : await this.embeddings.embed(texts, { signal, priority, ignoreCircuit, transportOverride })
     return { ...result, sequenceKey }
   }
 

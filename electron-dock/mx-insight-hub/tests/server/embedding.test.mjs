@@ -300,7 +300,10 @@ test('a vector is stored in PostgreSQL so re-indexing never re-pays the model', 
     pool,
     agent: {
       embeddings: { available: true },
-      embed: async () => ({ provider: 'deepseek', model: 'embed-v1', vectors: [[0.1, 0.2]], attempts: [] }),
+      embed: async (_texts, options) => {
+        assert.equal(options.priority, 'background')
+        return { provider: 'deepseek', model: 'embed-v1', vectors: [[0.1, 0.2]], attempts: [] }
+      },
     },
     logger: quiet,
   })

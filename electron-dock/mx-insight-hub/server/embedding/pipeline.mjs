@@ -261,7 +261,7 @@ export class EmbeddingPipeline {
     if (rows.length === 0) return { embedded: 0 }
 
     if (beforeEmbed) await beforeEmbed(rows.map((row) => row.content), recordId ? rows[0].source_revision : null)
-    const result = await this.agent.embed(rows.map((row) => row.content), signal ? { signal } : {})
+    const result = await this.agent.embed(rows.map((row) => row.content), { ...(signal ? { signal } : {}), priority: 'background' })
     const model = `${result.provider}:${result.model}`
 
     let embedded = 0
