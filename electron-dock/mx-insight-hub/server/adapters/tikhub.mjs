@@ -667,7 +667,7 @@ export class TikHubAdapter {
 
   async getXiaohongshuBloggerNotesV2(userId, page, { credential: suppliedCredential } = {}) {
     if (typeof userId !== 'string' || !/^[a-f0-9]{24}$/iu.test(userId)
-      || !Number.isInteger(page) || page < 1 || page > XHS_BLOGGER_NOTES_V2.maxPages) {
+      || !Number.isSafeInteger(page) || page < 1) {
       throw new TypeError('Invalid blogger notes user or page')
     }
     const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)

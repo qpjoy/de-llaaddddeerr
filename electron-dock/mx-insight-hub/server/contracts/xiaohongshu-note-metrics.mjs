@@ -6,8 +6,8 @@ export const XHS_BLOGGER_NOTES_V2 = Object.freeze({
   endpointKey: 'xiaohongshu.pgy.blogger-notes.v2',
   providerPath: '/api/v1/xiaohongshu/pgy/get_blogger_notes_v2',
   endpointVersion: 'pgy_v2',
-  contractVersion: 'mx-insight-hub.xiaohongshu-note-metrics.v1',
-  pageSize: 8, maxPages: 15, budgetMs: 90000,
+  contractVersion: 'mx-insight-hub.xiaohongshu-note-metrics.v2',
+  pageSize: 8, budgetMs: 90000,
 })
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value)

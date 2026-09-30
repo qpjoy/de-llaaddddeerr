@@ -14,7 +14,7 @@ export async function supplementNoteMetrics({ projection, context, delivery, ada
   const deadline = Date.now() + contract.budgetMs
   const seen = new Set()
   const scope = fingerprint(['blogger-notes-v2', credential])
-  for (let page = 1; page <= contract.maxPages; page++) {
+  for (let page = 1; ; page++) {
     if (signal?.aborted) { meta.status = 'cancelled'; return }
     if (Date.now() + timeoutMs > deadline) { meta.status = 'time_limit'; return }
     let costReservation, ticket, call, ownsLease = false
@@ -112,5 +112,4 @@ export async function supplementNoteMetrics({ projection, context, delivery, ada
       await queue.finish(ticket, outcome)
     }
   }
-  meta.status = 'page_limit'
 }

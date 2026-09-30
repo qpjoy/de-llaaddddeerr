@@ -101,19 +101,53 @@ test('zero detail metrics are supplemented from a later v2 page with exact mappi
   assert.equal(bill.account.availableMinor, 90)
 })
 
-test('v2 pagination stops on total, empty, repeated page or the 15-page bound; short pages still continue', async () => {
-  for (const [mode, expectedPages, status] of [['total', 1, 'not_found'], ['empty', 2, 'not_found'], ['repeated', 2, 'repeated_page'], ['limit', 15, 'page_limit']]) {
+test('v2 pagination stops on total, empty or repeated pages even beyond page 15; short pages still continue', async () => {
+  for (const [mode, expectedPages, status] of [['total', 1, 'not_found'], ['empty', 2, 'not_found'], ['repeated', 2, 'repeated_page'], ['long_total', 20, 'not_found'], ['long_empty', 20, 'not_found']]) {
     let pages = 0
     const state = await fixture(async url => {
       if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
       pages++
-      return response(bloggerPage(mode === 'empty' && pages === 2 ? [] : [bloggerNote(mode === 'limit' ? pages.toString(16).padStart(24, '0') : OTHER)], mode === 'total' ? 1 : 50))
+      const empty = (mode === 'empty' && pages === 2) || (mode === 'long_empty' && pages === 20)
+      const noteId = mode.startsWith('long_') ? pages.toString(16).padStart(24, '0') : OTHER
+      return response(bloggerPage(empty ? [] : [bloggerNote(noteId)], mode === 'total' ? 1 : mode === 'long_total' ? 20 : 50))
     })
     state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
     const result = await state.call()
     assert.equal(pages, expectedPages, mode)
     assert.equal(result.body.meta.metricsSupplement.status, status, mode)
     assert.equal(result.body.data.item.metrics.views, 0, 'unmatched data is never merged')
+  }
+})
+
+test('v2 finds metrics on page 20, archives every page and replays without further dispatch', async () => {
+  const queries = []
+  const state = await fixture(async (url, options) => {
+    if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+    const query = JSON.parse(options.body)
+    queries.push(query)
+    assert.ok(queries.length <= 20, 'stop immediately after finding the target')
+    return response(bloggerPage([bloggerNote(query.page_number === 20 ? ID : query.page_number.toString(16).padStart(24, '0'))]))
+  })
+  state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+  const result = await state.call()
+  assert.deepEqual(queries, Array.from({ length: 20 }, (_, index) => ({ user_id: AUTHOR, page_number: index + 1, page_size: 8, note_type: 0, order_type: 1 })))
+  assert.equal(result.body.meta.metricsSupplement.status, 'matched')
+  assert.equal(result.body.meta.metricsSupplement.pagesFetched, 20)
+  assert.equal(result.body.meta.metricsSupplement.matchedPage, 20)
+  assert.equal(result.body.data.item.metrics.views, 619)
+  assert.equal(result.body.data.item.metrics.impressions, 6499)
+  const calls = [...state.platformStore.calls.values()]
+  assert.equal(calls.length, 21)
+  assert.equal(new Set(calls.map(call => call.usageRequestId)).size, 1)
+  assert.equal(state.platformStore.restrictedResponseArchives.size, 21)
+  assert.deepEqual((await state.call()).body, result.body)
+  assert.equal(queries.length, 20)
+})
+
+test('v2 page validation still rejects invalid numbers before dispatch', async () => {
+  const adapter = new TikHubAdapter({ apiKey: SECRET, fetchImpl: async () => assert.fail('invalid pages must not dispatch') })
+  for (const page of [0, -1, 1.5, '20', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(adapter.getXiaohongshuBloggerNotesV2(AUTHOR, page), TypeError)
   }
 })
 
@@ -426,6 +460,11 @@ test('HTTP routes and published tenant docs enforce the same independent scopes'
     assert.ok(tenantOpenApiDocument([{ platforms: ['xiaohongshu'], capabilities: [endpoint.operation] }]).paths[publicPath])
   }
   const scopedHtml = publicDocsHtmlForPath('/docs/xiaohongshu-note', { tenant: true, scopes: [{ platforms: ['xiaohongshu'], capabilities: ['social.posts.analytics'] }] })
+  const analytics = PUBLIC_OPENAPI_DOCUMENT.paths['/data/xiaohongshu/notes/detail'].post
+  const supplement = analytics.responses[200].content['application/json'].schema.properties.meta.properties.metricsSupplement.properties
+  assert.equal(supplement.pagesFetched.maximum, undefined)
+  assert.equal(supplement.matchedPage.maximum, undefined)
+  assert.match(analytics.description, /无固定页数上限/)
   assert.match(scopedHtml, /notes\/detail/)
   assert.doesNotMatch(scopedHtml, /notes\/comments|TikHub|tikhub/)
 })
