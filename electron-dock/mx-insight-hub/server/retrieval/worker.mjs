@@ -4,8 +4,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { AppError } from '../core/errors.mjs'
 import { estimateTokens } from '../embedding/chunker.mjs'
 import { RetrievalJobs } from './control.mjs'
+import { RetrievalResourceGuard } from './resource-guard.mjs'
 
-export async function processRetrievalJob({ jobs, pipeline, job, signal, logger = console }) {
+export async function processRetrievalJob({ jobs, pipeline, job, signal, admission = null, logger = console }) {
   const abort = new AbortController()
   const onAbort = () => abort.abort(signal.reason)
   if (signal?.aborted) onAbort()
@@ -25,6 +26,7 @@ export async function processRetrievalJob({ jobs, pipeline, job, signal, logger 
     if (lost) throw lost
     abort.signal.throwIfAborted()
     await jobs.heartbeat(job)
+    if (!job.retire) await admission?.check()
   }
   try {
     await check()
@@ -65,9 +67,12 @@ export async function processRetrievalJob({ jobs, pipeline, job, signal, logger 
       throw new AppError(503, 'chunk_projection_failed', 'Chunks remain pending or quarantined')
     await check()
     await jobs.complete(job)
+    admission?.succeeded()
   } catch (error) {
     logger.warn?.(`[retrieval] job ${job.record_id}: ${error.code || 'failed'}`)
-    await jobs.fail(job, error)
+    const rateLimited = admission?.failed(error)
+    await jobs.fail(job, rateLimited
+      ? new AppError(429, 'retrieval_dependency_backoff', '依赖服务限流，稍后自动继续') : error)
   } finally {
     clearInterval(timer)
     await heartbeat
@@ -75,7 +80,7 @@ export async function processRetrievalJob({ jobs, pipeline, job, signal, logger 
   }
 }
 
-export async function runRetrievalWorker({ pool, pipeline, signal, logger = console }) {
+export async function runRetrievalWorker({ pool, pipeline, signal, logger = console, admission = new RetrievalResourceGuard() }) {
   const metrics = new IndexingMetrics()
   const observedPool = observePool(pool, metrics)
   const jobs = new RetrievalJobs(observedPool)
@@ -91,8 +96,8 @@ export async function runRetrievalWorker({ pool, pipeline, signal, logger = cons
   const timer = setInterval(() => {
     if (reporting) return
     reporting = true
-    beat = pool.query('UPDATE retrieval.workers SET heartbeat_at=now(),telemetry=$2::jsonb WHERE id=$1',
-      [workerId, JSON.stringify(metrics.snapshot())]).catch(() => {}).finally(() => { reporting = false })
+    beat = admission.sample().then((resources) => pool.query('UPDATE retrieval.workers SET heartbeat_at=now(),telemetry=$2::jsonb WHERE id=$1',
+      [workerId, JSON.stringify({ ...metrics.snapshot(), admission: resources })])).catch(() => {}).finally(() => { reporting = false })
   }, 10000)
   timer.unref?.()
   try {
@@ -106,7 +111,8 @@ export async function runRetrievalWorker({ pool, pipeline, signal, logger = cons
           await sleep(2000, undefined, { signal })
           continue
         }
-        const retireOnly = !settings?.enabled || settings.paused || !pipeline.agent?.embeddings?.available
+        const pressure = await admission.sample()
+        const retireOnly = !settings?.enabled || settings.paused || !pipeline.agent?.embeddings?.available || pressure.blocked
         if (Date.now() - housekeepingAt > 5000) {
           if (!retireOnly) await jobs.seedBatch(250)
           await jobs.settleRun()
@@ -117,7 +123,7 @@ export async function runRetrievalWorker({ pool, pipeline, signal, logger = cons
           await sleep(1000, undefined, { signal })
           continue
         }
-        await processRetrievalJob({ jobs, pipeline, job, signal, logger })
+        await processRetrievalJob({ jobs, pipeline, job, signal, logger, admission })
       } catch (error) {
         if (signal.aborted) break
         logger.warn?.(`[retrieval] worker retry: ${error.code || 'dependency_unavailable'}`)

@@ -15,7 +15,7 @@ import './advanced-search.css'
 const options = (pairs) => pairs.map(([value, label]) => ({ value, label }))
 const initial = {
   query: '',
-  mode: 'fulltext',
+  mode: 'semantic',
   operator: 'and',
   fuzzy: false,
   platform: '',
@@ -29,7 +29,7 @@ const initial = {
   topK: 30,
   minSimilarity: '',
 }
-const modeLabels = { fulltext: '全文排名', hybrid: '全文与语义融合排名', semantic: '仅语义排名' }
+const modeLabels = { semantic: 'RAG 语义排名', fulltext: '全文排名', hybrid: '全部 · RAG 与全文融合排名' }
 // ES markers become React text nodes. Source HTML is never interpreted.
 export function SearchHighlight({ text = '' }) {
   return String(text)
@@ -162,7 +162,7 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
         <div className="mih-advanced-intro">
           <div>
             <h2>高级搜索</h2>
-            <p>按词项精确检索，或按含义发现相关内容。选择证据后，可生成带引用的回答。</p>
+            <p>按含义发现相关内容，也可切换到全文检索。选择证据后，可生成带引用的回答。</p>
           </div>
           <span className="mih-advanced-badge">已入库数据 · 不触发采集</span>
         </div>
@@ -190,9 +190,9 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
               label="搜索模式"
               value={draft.mode}
               options={options([
-                ['fulltext', '全文检索'],
-                ['hybrid', '语义 + 全文（RAG）'],
-                ['semantic', '仅语义（向量对照）'],
+                ['semantic', 'RAG'],
+                ['fulltext', '全文'],
+                ['hybrid', '全部'],
               ])}
               onChange={(v) => change('mode', v)}
             />
@@ -288,10 +288,10 @@ export default function AdvancedSearchPanel({ token, onUnauthorized, onAccount, 
           </details>
           <p className="mih-browser-note">
             {draft.mode === 'semantic'
-              ? '仅语义模式便于与全文对照；不使用词项关系或模糊纠错，失败时会明确报错。'
+              ? 'RAG 按含义检索已向量化内容，不使用词项关系或模糊纠错；服务不可用时可手动选择全文。'
               : draft.mode === 'hybrid'
-                ? '语义召回按含义匹配；AND / OR 约束全文分支的完整词项。平台、类型、日期等范围同时约束两路结果。'
-                : 'AND / OR 按 HanLP 完整词项匹配；连续短语要求原文词序相邻。'}{' '}
+                ? '全部合并 RAG 与全文候选并排序，两路任一命中即可进入结果。AND / OR 只约束全文词项，筛选范围同时约束两路。'
+                : '全文使用 Elasticsearch；AND / OR 按完整词项匹配，连续短语要求原文词序相邻。'}{' '}
             日期按北京时间的发布时间。高亮标出字面词项或短语，语义命中可能没有高亮。
           </p>
           {draft.mode !== 'fulltext' && !capabilities.loading && !capabilities.data?.semantic ? (

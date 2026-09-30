@@ -12,6 +12,7 @@ import {
   lexicalHighlight,
 } from '../../server/retrieval/search.mjs'
 import { createApp } from '../../server/app.mjs'
+import { isPostgresSafeJsonValue, isPostgresSafeText } from '../../server/core/postgres-json.mjs'
 const ids = Array.from({ length: 5 }, (_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`)
 function fixture({ rows = null, vectorError = false, lexicalError = false, degradedHanlp = false, queryTokens = ['售后', '困难'], vectorHits = null } = {}) {
   const calls = [],
@@ -38,6 +39,8 @@ function fixture({ rows = null, vectorError = false, lexicalError = false, degra
       calls.push({ sql, args })
       if (sql.startsWith('UPDATE retrieval.request_slots')) return { rows: [{ slot: 1 }] }
       if (sql.startsWith('INSERT INTO retrieval.search_snapshots')) {
+        assert.ok(isPostgresSafeJsonValue(args[1]), 'query must be valid PostgreSQL jsonb')
+        assert.ok(isPostgresSafeJsonValue(JSON.parse(args[2])), 'evidence must be valid PostgreSQL jsonb')
         snapshots.set(args[0], { query: args[1], evidence: JSON.parse(args[2]) })
         return { rows: [] }
       }
@@ -134,11 +137,56 @@ test('intent rejects raw DSL, excessive candidates, invalid calendar dates and u
     { query: 'x', mode: 'fulltext', minSimilarity: 0.7 },
     { query: 'x', mode: 'semantic', fuzzy: true },
     { query: 'x', mode: 'semantic', operator: 'or' },
+    { query: 'bad\u0000query' },
+    { query: 'bad\uD83D' },
+    { query: 'x', tag: 'bad\uDC00' },
+    { query: 'x', datasetId: 'bad\u0000scope' },
   ])
     assert.throws(
       () => parseIntent(v),
       (e) => e.code === 'invalid_search_intent',
     )
+})
+test('emoji at preview/snippet/answer boundaries remains valid evidence in every search mode', async () => {
+  const body = '文'.repeat(299) + '😀' + '文'.repeat(698) + '😀' + '文'.repeat(598) + '𠮷末尾'
+  // Both truncation lengths previously produced lone surrogates and a jsonb
+  // insertion error. Real canonical text is valid; truncation introduced it.
+  assert.equal(isPostgresSafeText(body), true)
+  assert.equal(isPostgresSafeText(body.slice(0, 300)), false)
+  assert.equal(isPostgresSafeText(body.slice(0, 1600)), false)
+  for (const mode of ['semantic', 'fulltext', 'hybrid']) {
+    const f = fixture({ vectorHits: [{
+      _id: 'emoji-chunk', _score: 0.91,
+      _source: { recordId: ids[0], sourceRevision: 2, content: body },
+    }] })
+    f.records[0].body = body
+    const result = await f.service.run({ query: '甜美的女孩子 😀', mode })
+    const item = result.items.find((row) => row.id === ids[0])
+    assert.equal(item.bodyPreview, body.slice(0, 299))
+    assert.equal(item.snippet, body.slice(0, 1599))
+    assert.ok(isPostgresSafeText(item.bodyPreview))
+    assert.ok(isPostgresSafeText(item.snippet))
+    assert.deepEqual(f.snapshots.get(result.snapshotId).evidence, JSON.parse(JSON.stringify(result.items)))
+    assert.equal(f.records[0].body, body, 'canonical content stays intact')
+    const complete = f.agent.complete
+    f.agent.complete = async (messages) => {
+      const evidence = JSON.parse(messages[1].content).evidence[0]
+      assert.equal(evidence.text, body.slice(0, 999))
+      assert.ok(isPostgresSafeText(evidence.text))
+      return complete()
+    }
+    await f.service.answer({ snapshotId: result.snapshotId, ids: [ids[0]] })
+    assert.equal(f.service.active, 0)
+  }
+})
+test('emoji fully inside a preview is preserved and omitted API mode remains fulltext', async () => {
+  const f = fixture()
+  f.records[0].body = '文'.repeat(298) + '😀后文'
+  const result = await f.service.run({ query: '售后 😀' })
+  assert.equal(result.items[0].bodyPreview, '文'.repeat(298) + '😀')
+  assert.equal(result.mode, 'fulltext')
+  assert.equal(f.calls.some((c) => c.index === 'chunks'), false)
+  assert.deepEqual((await f.service.capabilities()).modes, ['semantic', 'fulltext', 'hybrid'])
 })
 test('hard filters apply to canonical current truth and both recall branches', () => {
   const q = parseIntent({

@@ -36,14 +36,20 @@ export class RetrievalControl {
     } : null
     const telemetry = mergeWorkerMetrics(workers.rows)
     const config = settings.rows[0], today = Number(usage.rows[0]?.reserved_tokens || 0)
+    const continuous = Number(config?.daily_token_budget) === 0
+    const guardedWorkers = workers.rows.filter((w) => w.telemetry?.admission?.version === 1
+      && Date.now() - w.telemetry.admission.checkedAt < 45000)
+    const pressureWorkers = guardedWorkers.filter((w) => w.telemetry.admission.blocked)
+    const availableWorkers = (continuous ? guardedWorkers.length : workers.rows.length) - pressureWorkers.length
     const activeRun = run && ['scanning', 'draining'].includes(run.status)
     const fixed = activeRun && run.snapshot_locked
     const count = (status) => Number(counts.rows.find((row) => row.status === status)?.count || 0)
     const blocked = !config?.enabled ? 'disabled' : config.paused ? 'paused'
       : !this.agent?.embeddings?.available || !this.search?.chunkIndexSet ? 'unready'
       : !workers.rows.length ? 'no_workers' : !telemetry.reportingWorkers ? 'stale'
+      : !availableWorkers ? 'resource_pressure'
       : fixed && Number(run.token_budget) > 0 && (Number(run.reserved_tokens) >= Number(run.token_budget) || run.progress?.budgetBlocked) ? 'initialization_budget'
-      : !fixed && today >= Number(config.daily_token_budget) ? 'daily_budget' : null
+      : !fixed && !continuous && today >= Number(config.daily_token_budget) ? 'daily_budget' : null
     const eta = activeRun && !fixed ? { seconds: null, rate: null, reason: 'legacy' }
       : this.rate.estimate({ key: `${fixed ? run.id : 'queue'}:${config?.updated_at}`,
         processed: fixed ? Number(run.progress?.completed || 0) + Number(run.progress?.superseded || 0) : count('done'),
@@ -52,8 +58,12 @@ export class RetrievalControl {
         blocked: blocked || (!fixed && !count('pending') && !count('running') && count('dead') ? 'failed' : null) })
     return {
       observation: { ...telemetry, eta, scope: fixed ? 'initialization' : 'queue',
-        effectiveConcurrency: Math.min(Number(config?.max_concurrency || 0), workers.rows.length),
+        effectiveConcurrency: Math.min(Number(config?.max_concurrency || 0), availableWorkers),
         concurrencyLimit: Number(config?.max_concurrency || 0),
+        pressureWorkers: pressureWorkers.length,
+        resources: guardedWorkers.map((w) => ({ worker: w.id.slice(0, 8), ...w.telemetry.admission })),
+        incrementalPending: counts.rows.reduce((n, row) => n + Number(row.incremental_pending || 0), 0),
+        historicalPending: counts.rows.reduce((n, row) => n + Number(row.historical_pending || 0), 0),
         retrying: counts.rows.reduce((n, row) => n + Number(row.retrying || 0), 0),
         budgetWaiting: counts.rows.reduce((n, row) => n + Number(row.budget_waiting || 0), 0),
         deferred: counts.rows.reduce((n, row) => n + Number(row.deferred || 0), 0),
@@ -64,6 +74,13 @@ export class RetrievalControl {
       jobs: counts.rows,
       run,
       reservedTokensToday: Number(usage.rows[0]?.reserved_tokens || 0),
+      budget: {
+        mode: continuous ? 'continuous' : 'daily',
+        remaining: continuous ? null : Math.max(0, Number(config?.daily_token_budget || 0) - today),
+        exhausted: !continuous && today >= Number(config?.daily_token_budget),
+        resetsAt: new Date(new Date().setUTCHours(24, 0, 0, 0)).toISOString(),
+        continuousReady: workers.rows.length > 0 && guardedWorkers.length === workers.rows.length,
+      },
       ready: Boolean(this.agent?.embeddings?.available && this.search?.chunkIndexSet),
       reason: !this.search?.chunkIndexSet
         ? '未配置向量维度/索引'
@@ -80,10 +97,12 @@ export class RetrievalControl {
     if (this.countsCache && this.countsCache.expires > Date.now()) return this.countsCache.value
     const value = await this.pool.query(
       `SELECT status,count(*)::int AS count,min(updated_at) AS oldest,
+        count(*) FILTER (WHERE status IN ('pending','running') AND priority<100 AND NOT retire) AS incremental_pending,
+        count(*) FILTER (WHERE status IN ('pending','running') AND priority>=100 AND NOT retire) AS historical_pending,
         count(*) FILTER (WHERE status='pending' AND run_at>now()) AS deferred,
         count(*) FILTER (WHERE status='pending' AND last_error_code IN ('embedding_budget_exceeded','initialization_budget_exceeded')) AS budget_waiting,
         count(*) FILTER (WHERE status='pending' AND last_error_code IS NOT NULL
-          AND last_error_code NOT IN ('embedding_budget_exceeded','initialization_budget_exceeded','retrieval_paused','embedding_not_ready')) AS retrying
+          AND last_error_code NOT IN ('embedding_budget_exceeded','initialization_budget_exceeded','retrieval_paused','embedding_not_ready','retrieval_resource_pressure')) AS retrying
        FROM retrieval.jobs GROUP BY status`,
     )
     this.countsCache = { value, expires: Date.now() + 30000 }
@@ -110,7 +129,7 @@ export class RetrievalControl {
         enabled: z.boolean(),
         paused: z.boolean(),
         maxConcurrency: z.number().int().min(1).max(16),
-        dailyTokenBudget: z.number().int().min(1000).max(1000000000),
+        dailyTokenBudget: z.number().int().min(0).max(1000000000).refine((n) => n === 0 || n >= 1000),
       })
       .strict()
       .safeParse(input)
@@ -118,13 +137,20 @@ export class RetrievalControl {
     const v = parsed.data
     if (v.enabled && (!this.agent?.embeddings?.available || !this.search?.chunkIndexSet))
       throw new AppError(409, 'embedding_not_ready', '先配置并验证 Embedding Sequence 及向量维度')
+    if (v.enabled && !v.paused && v.dailyTokenBudget === 0) {
+      const workers = await this.pool.query("SELECT telemetry FROM retrieval.workers WHERE heartbeat_at>now()-interval '90 seconds'")
+      if (!workers.rows.length || workers.rows.some((w) => w.telemetry?.admission?.version !== 1
+        || !(Date.now() - w.telemetry.admission.checkedAt < 45000)))
+        throw new AppError(409, 'retrieval_guard_unready', '请等待全部在线 Worker 升级并上报负荷指标，再启用持续处理')
+    }
     // Explicit enable is allowed to prepare an empty schema, never replay the corpus.
     if (v.enabled) await this.search?.prepareEmbeddingIndex?.()
     await this.pool.query(
       `UPDATE retrieval.settings SET enabled=$1,paused=$2,max_concurrency=$3,daily_token_budget=$4,updated_at=now() WHERE id`,
       [v.enabled, v.paused, v.maxConcurrency, v.dailyTokenBudget],
     )
-    await this.pool.query("UPDATE retrieval.jobs SET run_at=now() WHERE status='pending' AND last_error_code='embedding_budget_exceeded'")
+    await this.pool.query("UPDATE retrieval.jobs SET run_at=now(),last_error_code=NULL WHERE status='pending' AND last_error_code='embedding_budget_exceeded'")
+    this.countsCache = null
     return this.status()
   }
   async preflight() {
@@ -369,12 +395,15 @@ export class RetrievalJobs {
       'embedding_not_ready',
       'reindex_segmenter_degraded',
       'retrieval_paused',
+      'retrieval_resource_pressure',
+      'retrieval_dependency_backoff',
     ].includes(error.code)
     await this.pool.query(
       `UPDATE retrieval.jobs SET status=CASE WHEN attempts>=8 AND NOT $4 AND version=$6 THEN 'dead' ELSE 'pending' END,
       attempts=CASE WHEN version<>$6 THEN 0 WHEN $4 THEN greatest(0,attempts-1) ELSE attempts END,
       run_at=CASE WHEN version<>$6 THEN now()
         WHEN $3='embedding_budget_exceeded' THEN ((now() AT TIME ZONE 'UTC')::date+1)::timestamp AT TIME ZONE 'UTC'
+        WHEN $3 IN ('retrieval_resource_pressure','retrieval_dependency_backoff') THEN now()+interval '30 seconds'
         ELSE now()+make_interval(secs=>$5) END,
       lease_token=NULL,lease_until=NULL,last_error_code=$3,updated_at=now()
       WHERE record_id=$1 AND lease_token=$2 AND status='running' AND lease_until>now()`,
@@ -412,9 +441,10 @@ export class RetrievalJobs {
     }
     const { rows } = await this.pool.query(
       `INSERT INTO retrieval.daily_usage AS u(day,reserved_tokens)
-      SELECT (now() AT TIME ZONE 'UTC')::date,$1 FROM retrieval.settings WHERE id AND enabled AND NOT paused AND daily_token_budget>=$1
+      SELECT (now() AT TIME ZONE 'UTC')::date,$1 FROM retrieval.settings WHERE id AND enabled AND NOT paused AND (daily_token_budget=0 OR daily_token_budget>=$1)
       ON CONFLICT(day) DO UPDATE SET reserved_tokens=u.reserved_tokens+EXCLUDED.reserved_tokens
-      WHERE u.reserved_tokens+EXCLUDED.reserved_tokens<=(SELECT daily_token_budget FROM retrieval.settings WHERE id AND enabled AND NOT paused)
+      WHERE EXISTS(SELECT 1 FROM retrieval.settings WHERE id AND enabled AND NOT paused
+        AND (daily_token_budget=0 OR u.reserved_tokens+EXCLUDED.reserved_tokens<=daily_token_budget))
       RETURNING reserved_tokens`,
       [n],
     )

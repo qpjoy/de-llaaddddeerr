@@ -9,6 +9,7 @@ const reasons = {
   unready: 'Embedding 或向量索引尚未就绪', no_workers: '没有在线 Worker',
   initialization_budget: '本次初始化额度不足，调整额度后继续',
   daily_budget: '每日预算已用完，次日 UTC 00:00（北京时间 08:00）恢复',
+  resource_pressure: '资源压力保护或采样等待中，符合恢复条件后自动继续',
   legacy: '旧任务未锁定范围，无法估算初始化剩余时间',
 }
 const advice = {
@@ -49,6 +50,13 @@ export function IndexingObservation({ data, kind }) {
       ? `按最近 ${number(eta.windowSeconds)} 秒的实际速度估算，随吞吐变化更新。${kind === 'search' ? '仅含当前阶段，不含后续追平、校验和其他投影。' : '新数据优先、重试和限流可能延长完成时间。'}`
       : reasons[eta?.reason] || '等待进度样本'}</p>
     {kind !== 'search' && data ? <p className="mih-index-observation__note">等待预算 {number(data.budgetWaiting)} · 延后调度 {number(data.deferred)} · 待重试 {number(data.retrying)} · 失败待处理 {number(data.dead)}（分类可能重叠）</p> : null}
+    {kind !== 'search' && data?.incrementalPending != null ? <p className="mih-index-observation__note">优先队列（含增量）{number(data.incrementalPending)} · 普通历史回填 {number(data.historicalPending)}（含执行中，不含删除同步）；新数据优先。</p> : null}
+    {kind !== 'search' && data?.resources?.length ? <div className="mih-index-observation__note">
+      {data.resources.map((r) => <p key={r.worker}>Worker {r.worker} · 主机 CPU {Number.isFinite(r.cpuPercent) ? `${number(r.cpuPercent)}%` : '采样中'} · 主机内存 {Number.isFinite(r.memoryPercent) ? `${number(r.memoryPercent)}%` : '未知'}
+        {Number.isFinite(r.containerCpuPercent) ? ` · 容器 CPU 配额使用 ${number(r.containerCpuPercent)}%` : ''}
+        {Number.isFinite(r.containerMemoryPercent) ? ` · 容器内存 ${number(r.containerMemoryPercent)}%` : ''}
+        {' · '}{!r.blocked ? '可承接任务' : ({ cpu_pressure: 'CPU 压力等待', memory_pressure: '内存压力等待', dependency_backoff: '依赖退避', sampling: '采样中', recovering: '等待稳定恢复', resource_unavailable: '资源指标不可用' })[r.reason] || '等待恢复'}</p>)}
+    </div> : null}
     {data?.lastError ? <p className="mih-index-observation__advice">最近失败环节：{stages[data.lastError.stage] || data.lastError.stage} · {data.lastError.kind === 'rate_limit' ? '检测到 HTTP 429 限流' : data.lastError.kind === 'unavailable' ? '服务暂不可用' : '调用失败，请结合任务日志排查'}</p> : null}
     {active.length ? <p className="mih-index-observation__note">正在等待：{active.join('；')}</p> : null}
     {entries.length ? <>

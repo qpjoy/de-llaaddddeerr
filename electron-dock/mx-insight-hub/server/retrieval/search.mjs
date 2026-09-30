@@ -1,12 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { AppError } from '../core/errors.mjs'
+import { isPostgresSafeText } from '../core/postgres-json.mjs'
 import { requireSegmenterBackend } from '../search/reindex-integrity.mjs'
 import { reciprocalRankFusion } from '../search/queries.mjs'
 import { dataCenterVisibleProjection } from '../../shared/source-catalog-visibility.mjs'
 
 const iso = (value) => (value instanceof Date ? value.toISOString() : value)
-const identifier = z.string().trim().max(200).default('')
+const identifier = z.string().trim().max(200).refine(isPostgresSafeText).default('')
+// Keep the existing UTF-16 size bounds without splitting an emoji/astral
+// character. A lone surrogate makes the evidence snapshot invalid jsonb.
+function textPrefix(text, limit) {
+  if (!text) return ''
+  let end = Math.min(text.length, limit)
+  const last = text.charCodeAt(end - 1)
+  if (end < text.length && last >= 0xD800 && last <= 0xDBFF) end--
+  return text.slice(0, end)
+}
 const date = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -16,7 +26,7 @@ const date = z
   )
 export const SearchIntent = z
   .object({
-    query: z.string().trim().min(1).max(500),
+    query: z.string().trim().min(1).max(500).refine(isPostgresSafeText),
     mode: z.enum(['fulltext', 'hybrid', 'semantic']).default('fulltext'),
     operator: z.enum(['and', 'or', 'phrase']).default('and'),
     fuzzy: z.boolean().default(false),
@@ -194,7 +204,7 @@ export class AdvancedSearch {
       fulltext: Boolean(this.search?.client),
       semantic: Boolean(this.search?.chunkIndexSet && this.agent?.embeddings?.available),
       maxResults: 100,
-      modes: ['fulltext', 'hybrid', 'semantic'],
+      modes: ['semantic', 'fulltext', 'hybrid'],
       similarityMetric: 'cosine',
       generation: 'explicit',
       evidenceContract: 'hub.canonical-evidence.v1',
@@ -292,7 +302,7 @@ export class AdvancedSearch {
           return dataCenterVisibleProjection({
             id: r.id,
             title: r.title,
-            bodyPreview: r.body?.slice(0, 300) || '',
+            bodyPreview: textPrefix(r.body, 300),
             platform: r.platform,
             datasetId: r.dataset_id,
             objectType: r.object_type,
@@ -306,7 +316,7 @@ export class AdvancedSearch {
             revision: Number(r.current_revision),
             projectionRevision: Number(r.projection_revision),
             highlight: lexicalById.get(r.id)?.highlight || {},
-            snippet: vector?._source?.content?.slice(0, 1600) || r.body?.slice(0, 1600) || r.title || '',
+            snippet: textPrefix(vector?._source?.content, 1600) || textPrefix(r.body, 1600) || r.title || '',
             retrievers: hit.retrievers,
             score: hit.score,
             semanticSimilarity: vector ? cosineSimilarity(vector) : null,
@@ -472,7 +482,7 @@ export class AdvancedSearch {
               evidence: items.map((i) => ({
                 id: i.id,
                 title: i.title,
-                text: i.snippet.slice(0, 1000),
+                text: textPrefix(i.snippet, 1000),
                 date: i.eventTime,
               })),
             }),

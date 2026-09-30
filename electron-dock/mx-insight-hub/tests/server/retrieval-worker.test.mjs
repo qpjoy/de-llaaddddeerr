@@ -68,3 +68,39 @@ test('embedding reserves budget before request and uses a bounded abort signal',
   assert.ok(f.calls.indexOf('budget') < f.calls.indexOf('model'))
   assert.ok(f.calls.includes('complete'))
 })
+
+test('resource pressure stops costly work before token reservation but still permits tombstone cleanup', async () => {
+  const f = fixture()
+  f.admission = { check: async () => { throw Object.assign(Error('pressure'), { code: 'retrieval_resource_pressure' }) }, failed: () => false }
+  await processRetrievalJob(f)
+  assert.deepEqual(f.calls, ['heartbeat', 'retrieval_resource_pressure'])
+  f.calls.length = 0
+  f.job.retire = true
+  await processRetrievalJob(f)
+  assert.ok(f.calls.includes('delete'))
+  assert.ok(f.calls.includes('complete'))
+  assert.equal(f.calls.includes('budget'), false)
+})
+
+test('pressure is checked between embedding batches so a large record can yield without another model call', async () => {
+  const f = fixture()
+  let pressure = false, calls = 0
+  f.admission = { check: async () => { if (pressure) throw Object.assign(Error('pressure'), { code: 'retrieval_resource_pressure' }) }, failed: () => false }
+  f.pipeline.embedPending = async ({ beforeEmbed }) => {
+    await beforeEmbed(['正文'])
+    calls++; pressure = true
+    return { embedded: 1 }
+  }
+  await processRetrievalJob(f)
+  assert.equal(calls, 1)
+  assert.ok(f.calls.includes('retrieval_resource_pressure'))
+  assert.equal(f.calls.includes('complete'), false)
+})
+
+test('dependency 429 preserves the job for automatic retry rather than exhausting permanent-failure attempts', async () => {
+  const f = fixture()
+  f.admission = { check: async () => {}, failed: (e) => e.status === 429 }
+  f.pipeline.embedPending = async () => { throw Object.assign(Error('busy'), { status: 429 }) }
+  await processRetrievalJob(f)
+  assert.ok(f.calls.includes('retrieval_dependency_backoff'))
+})

@@ -18,7 +18,7 @@ async function fixture(t) {
       title text,body text DEFAULT '初始化任务使用固定的文本版本，新版本与新记录使用每日增量预算。',deleted_at timestamptz);
     CREATE TABLE core.record_chunks(id uuid,record_id uuid,projection_failed_at timestamptz,projection_attempts int);
     CREATE TABLE outbox.projection_events(aggregate_type text,aggregate_id uuid,projection_revision bigint,event_type text);`)
-  for (const file of ['026_search_reindex_operations.sql', '086_retrieval_jobs.sql', '087_retrieval_initialization_budget.sql', '089_indexing_observation.sql'])
+  for (const file of ['026_search_reindex_operations.sql', '086_retrieval_jobs.sql', '087_retrieval_initialization_budget.sql', '089_indexing_observation.sql', '120_retrieval_continuous_budget.sql'])
     await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
   const control = new RetrievalControl({ pool, agent: { embeddings: { available: true, dimensions: 2 } }, search: {
     chunkIndexSet: { writeAlias: 'chunks', mappings: { properties: { embedding: { dims: 2 } } } },
@@ -40,6 +40,85 @@ async function fixture(t) {
   return { db, query, control, jobs, event, add, run }
 }
 const options = { skip: !process.env.MX_RETRIEVAL_TEST_PGLITE }
+
+async function reportGuard(f, blocked = false) {
+  await f.query('UPDATE retrieval.workers SET telemetry=$1::jsonb', [JSON.stringify({
+    sampledAt: Date.now(), stages: {}, active: [],
+    admission: { version: 1, checkedAt: Date.now(), blocked, reason: blocked ? 'cpu_pressure' : null },
+  })])
+}
+
+test('continuous processing is explicit, requires upgraded workers, meters beyond daily quota and resumes budget-waiting jobs', options, async (t) => {
+  const f = await fixture(t)
+  await f.add()
+  const job = await f.jobs.claim()
+  await f.jobs.reserveTokens(1000, job, 1)
+  await assert.rejects(f.jobs.reserveTokens(1, job, 1), { code: 'embedding_budget_exceeded' })
+  await f.jobs.fail(job, { code: 'embedding_budget_exceeded' })
+  f.control.countsCache = null
+  const daily = await f.control.status()
+  assert.equal(daily.budget.mode, 'daily')
+  assert.equal(daily.budget.exhausted, true)
+  assert.equal(daily.observation.budgetWaiting, 1)
+  assert.equal(daily.observation.incrementalPending, 1)
+  assert.equal(daily.observation.historicalPending, 0)
+  const settings = { enabled: true, paused: false, maxConcurrency: 2, dailyTokenBudget: 0 }
+  await assert.rejects(f.control.configure(settings), { code: 'retrieval_guard_unready' })
+  assert.equal(Number((await f.query('SELECT daily_token_budget FROM retrieval.settings')).rows[0].daily_token_budget), 1000)
+  await reportGuard(f)
+  const status = await f.control.configure(settings)
+  assert.equal(status.budget.mode, 'continuous')
+  assert.equal(status.budget.exhausted, false)
+  assert.equal(status.budget.remaining, null)
+  assert.equal(status.observation.budgetWaiting, 0)
+  const resumed = await f.jobs.claim()
+  assert.equal(resumed.record_id, job.record_id)
+  await Promise.all([f.jobs.reserveTokens(2000, resumed, 1), f.jobs.reserveTokens(3000, resumed, 1)])
+  assert.equal(Number((await f.query('SELECT reserved_tokens FROM retrieval.daily_usage')).rows[0].reserved_tokens), 6000)
+  assert.equal((await f.query('SELECT * FROM retrieval.runs')).rows.length, 0, 'setting continuous never initializes the corpus')
+  await f.control.configure({ ...settings, paused: true })
+  await assert.rejects(f.jobs.reserveTokens(1, resumed, 1), { code: 'embedding_budget_exceeded' })
+  await f.control.configure({ ...settings, dailyTokenBudget: 1000 })
+  await assert.rejects(f.jobs.reserveTokens(1, resumed, 1), { code: 'embedding_budget_exceeded' })
+  for (const dailyTokenBudget of [-1, 1, 999, 1000000001])
+    await assert.rejects(f.control.configure({ ...settings, dailyTokenBudget }), { code: 'invalid_retrieval_settings' })
+})
+
+test('continuous mode retains initialization quotas and excludes resource-blocked workers from available capacity', options, async (t) => {
+  const f = await fixture(t)
+  await f.add()
+  await reportGuard(f)
+  await f.control.configure({ enabled: true, paused: false, maxConcurrency: 2, dailyTokenBudget: 0 })
+  await f.control.start({ tokenBudget: 100 })
+  await f.jobs.seedBatch()
+  const job = await f.jobs.claim()
+  await f.jobs.reserveTokens(100, job, 1)
+  await assert.rejects(f.jobs.reserveTokens(1, job, 1), { code: 'initialization_budget_exceeded' })
+  await reportGuard(f, true)
+  const status = await f.control.status()
+  assert.equal(status.observation.effectiveConcurrency, 0)
+  assert.equal(status.observation.eta.reason, 'resource_pressure')
+  assert.equal(status.observation.pressureWorkers, 1)
+  await f.jobs.fail(job, { code: 'retrieval_resource_pressure' })
+  const waiting = (await f.query('SELECT * FROM retrieval.jobs')).rows[0]
+  assert.equal(waiting.status, 'pending')
+  assert.equal(waiting.attempts, 0)
+  assert.ok(new Date(waiting.run_at).getTime() > Date.now())
+  await reportGuard(f)
+  assert.equal((await f.control.status()).observation.effectiveConcurrency, 1)
+})
+
+test('old or stale worker telemetry cannot enable continuous processing during rollout', options, async (t) => {
+  const f = await fixture(t)
+  await reportGuard(f)
+  const oldId = randomUUID()
+  await f.query('INSERT INTO retrieval.workers(id) VALUES($1)', [oldId])
+  const settings = { enabled: true, paused: false, maxConcurrency: 2, dailyTokenBudget: 0 }
+  await assert.rejects(f.control.configure(settings), { code: 'retrieval_guard_unready' })
+  await reportGuard(f)
+  await f.query("UPDATE retrieval.workers SET telemetry=jsonb_set(telemetry,'{admission,checkedAt}',to_jsonb($1::bigint)) WHERE id=$2", [Date.now() - 60000, oldId])
+  await assert.rejects(f.control.configure(settings), { code: 'retrieval_guard_unready' })
+})
 
 test('ETA detects a remaining budget too small for the next batch, even before the budget is numerically exhausted', options, async (t) => {
   const f = await fixture(t)
