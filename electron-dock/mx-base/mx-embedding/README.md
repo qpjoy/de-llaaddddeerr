@@ -10,12 +10,16 @@
 | 模型版本 | `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` |
 | 精度 / 输出 | BF16 / 512 维，截取模型前 512 维后重新 L2 归一化 |
 | 输入限制 | 每条 2048 token、每请求最多 16 条、合计最多 8192 token |
-| 推理 | 单进程、单次 GPU 推理；每个 micro-batch 最多 4 条 |
+| 推理 | 单进程、单次 GPU 推理；跨请求合批，每个 micro-batch 最多 4 条；禁用生成用 KV cache |
+| 调度 | 最多 32 个在途请求，8 个名额保留给查询；最多连续 4 个查询批次后处理一个后台批次 |
+| 时限 | 查询入队后最多 6 秒、后台 45 秒；合批窗口 2 ms |
 | 资源 | 4 CPU / 8 GiB 主存；PyTorch allocator 最多使用所选卡显存的 25% |
 | 缓存 | `/srv/mx-embedding/models` → `/models`，停止后保留 |
 | 监听 | `127.0.0.1:18210`，Bearer API Key |
 
-25% 是 PyTorch allocator 上限，不是 GPU 硬隔离、不是预分配，也不包含所有驱动/context 开销。默认先分卡运行。输入超长返回 413，**不静默截断**；超并发返回 429 + Retry-After。提高输入长度、批量或资源后需重新验收。当前无跨请求合批，因此两个 Hub Worker 不一定能喂满 GPU。
+25% 是 PyTorch allocator 上限，不是 GPU 硬隔离、不是预分配，也不包含所有驱动/context 开销。默认先分卡运行。输入超长返回 413，**不静默截断**；队列满或超过时限返回 429 + Retry-After。查询预留是入队名额，不是 GPU 显存/算力隔离，正在执行的 CUDA micro-batch 不能抢占。提高输入长度、批量或资源后需重新验收。
+
+2026-09-30 调度优化取代请求级非阻塞锁：原先后台请求占锁期间其他请求直接返回 429，并可能触发 Hub Provider 熔断/Worker 退避。现在在 micro-batch 边界调度优先级，合并并发短请求，按请求内 token 长度排序后还原输出顺序。GPU forward 仍串行，micro-batch 受条数和补齐后 token 数上限约束，整条请求验证完成才计算，失败不返回部分向量。模型版本、512 维裁剪后归一化、左填充、SDPA、文本/查询指令规则与显存上限均不变，无需重建向量；不同 batch 的浮点细节可能有微小差别，真实 GPU 仍须做质量与延迟回归。
 
 容器使用已核对存在的 `pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`（Linux amd64），通过 Transformers 原生 Qwen3 与 SDPA 推理，不依赖额外 FlashAttention 编译包。启动时真实执行一次 CUDA forward，成功后才对外就绪；没有 CPU fallback。服务器需提供支持该 GPU/CUDA 组合的驱动与 NVIDIA Container Toolkit。本机测试不能替代 5090 验收。
 
@@ -72,6 +76,28 @@ bash scripts/manage.sh deploy mx-embedding --direct
 返回 `object:list`、按输入顺序排列的 `data[{index,embedding}]`、模型名称和 tokenizer 实际 `usage`。`dimensions` 可省略；如提供，必须与服务固定维度相同。`encoding_format` 仅支持 `float`。
 
 可选 `input_type:"query"` 会按照 Qwen 官方建议添加查询指令；省略时为 `document`，正文不加指令。**当前 Hub 不发送 input_type，查询与正文均走无指令基线；本次不通过文本长度、batch 大小等猜测请求类型。** 若要启用查询指令，需后续在 Hub 明确区分 query/document，再测检索质量。不能把本次称为已完成指令优化的端到端验收。
+
+Hub RAG 查询发送 `X-MX-Embedding-Priority: interactive`，后台向量化发送 `background`。这是独立的 HTTP 调度提示，不改变请求 JSON 或 `input_type`；其他 OpenAI-compatible Provider 可以忽略。未提供 header 的旧客户端按后台处理；旧 mx-embedding 可忽略新 header。先部署 mx-embedding，再更新 Hub Admin/Worker，可逐步升级，无数据库迁移或默认模型变更。仅更新模型服务不会让旧 Hub 查询获得优先级。公开调用者不能覆盖 Hub 调度提示。
+
+## 吞吐与查询延迟验收
+
+在 `electron-dock/mx-base` 目录，先在相同负载下运行基线，部署后用相同命令对比：
+
+```bash
+bash scripts/manage.sh gpu                  # 只读核对 GPU UUID、进程和容器归属
+bash scripts/manage.sh bench mx-embedding --requests 20
+# 对照：纯查询 / 纯后台
+bash scripts/manage.sh bench mx-embedding --background-workers 0 --requests 20
+bash scripts/manage.sh bench mx-embedding --query-workers 0 --requests 20
+```
+
+`bench` 显式调用真实模型，默认 80 个请求（40 查询 + 40 个 16 文本后台请求），使用合成文本，不触发采集或修改 Hub 数据，没有自动重试。API Key 在容器内部读取，不进入命令行/输出。输出成功 QPS、文本/秒、实际 token/秒、成功 P50/P95、全部请求 P95 和 HTTP 状态分布；不能只看成功请求延迟而忽略 429。这是容器内模型服务压测，不含跨主机网络、Hub/HanLP/数据库/ES 耗时。
+
+认证后的 `/api/info` 增加队列占用、拒绝/过期计数、forward 批次数、补齐 token 数、首轮排队等待总秒数与 forward 墙钟秒数。计数在进程重启后归零，实际 token 仅计完整成功请求；服务计数差包含压测期间其他流量，以客户端结果为准。Uvicorn 仍只有一个模型进程，HTTP 并发上限提高到 160 以容纳队列与健康检查，推理在途数量仍受 32 请求的队列限制。超时/取消任务不进入后续批次，已运行的一次 forward 会自然结束。
+
+用户 2026-09-30 提供的快照显示四卡均有约 28 GiB 的 vLLM TP 进程，GPU 3 总占用接近 32 GiB。单次 0% GPU-util 不代表显存充足，也不能仅凭 Python 进程名确认 Embedding PID。先用 `gpu` 报告确认 UUID/容器；本改动不调整 vLLM、用卡、模型进程数或显存份额。保持 micro-batch=4 做混合负载验证；队列不会增加算力，也无法解决单次 forward 本身超过查询时限的问题。
+
+端到端增量速度还应观察 Hub Worker 的 HanLP/数据库/ES 阶段。服务只能合并已经提交的请求。实测确认模型、显存与 ES 都有余量后，才逐步将 Hub 集群任务并发从 1 调到 2，不自动提高既有设置。每天能否处理完应比较新增文本/token 数与稳定成功吞吐、可用运行时长，不能只看请求 QPS 或预算。
 
 1024 维可通过 `MX_EMBEDDING_DIMENSIONS=1024` 显式选择，部署后在空的测试索引比较召回效果。不要在已有 512 维索引上直接切换；模型、revision、维度或预处理策略变化需评估重算与索引迁移。
 

@@ -34,7 +34,8 @@ class EngineTests(unittest.TestCase):
         self.engine.torch = torch
         self.engine.settings = server.Settings(dimensions=32, micro_batch=2)
         self.engine.tokenizer = Tokenizer()
-        def model(input_ids):
+        def model(input_ids, use_cache):
+            self.assertFalse(use_cache)
             # Different last tokens identify the record even after left padding.
             hidden = torch.zeros((*input_ids.shape, 1024))
             hidden[:, :, 0] = input_ids.float()

@@ -29,7 +29,7 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
 应用：mx-static / mx-ocr / mx-embedding (Docker)、jenkins (Kubernetes mx-base namespace)
 通用操作：status / deploy / start / stop / restart / logs / doctor
 mx-static：init / jobs / storage / attach / detach（项目任务计数；失败任务通过 API 查询/重试）
-mx-ocr：stats / disk / test / bench / compare；mx-embedding：stats / test
+mx-ocr：stats / disk / test / bench / compare；mx-embedding：stats / test / bench
 jenkins：password / agent-cmd
 stop/down 保留持久数据、模型缓存、凭据；OCR 内存任务不保留。没有一键删除数据或全停命令。
 

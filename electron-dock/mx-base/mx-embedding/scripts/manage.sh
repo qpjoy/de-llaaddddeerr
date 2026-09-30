@@ -33,6 +33,7 @@ status() {
 action="${1:-help}"
 [ "$#" = 0 ] || shift
 while [ "$#" -gt 0 ]; do
+  [ "$action" != bench ] || break
   [ "$action" = deploy ] || { echo '下载参数仅用于 deploy' >&2; exit 1; }
   case "$1" in
     --proxy|--pip-index)
@@ -110,6 +111,7 @@ case "$action" in
   logs) docker logs --tail 200 --follow mx-embedding-api;;
   stats) docker stats --no-stream mx-embedding-api; nvidia-smi;;
   test) docker exec -i mx-embedding-api python - < "$APP_DIR/scripts/smoke.py";;
-  help|-h|--help) echo 'deploy 可用 --proxy URL / --direct / --pip-index URL，确认后自动保存下载设置'; echo 'mx-embedding: deploy | start | stop | restart | status | doctor | logs | stats | test';;
+  bench) docker exec -i mx-embedding-api python - "$@" < "$APP_DIR/scripts/benchmark.py";;
+  help|-h|--help) echo 'deploy 可用 --proxy URL / --direct / --pip-index URL，确认后自动保存下载设置'; echo 'mx-embedding: deploy | start | stop | restart | status | doctor | logs | stats | test | bench';;
   *) echo "不支持的操作：$action" >&2; exit 1;;
 esac

@@ -2,18 +2,15 @@
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import hmac
-import logging
-import math
 import os
 from pathlib import Path
-import threading
-import time
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
 from starlette.concurrency import run_in_threadpool
+from scheduler import BatchScheduler
 
 MODEL = 'Qwen/Qwen3-Embedding-0.6B'
 REVISION = '97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3'  # Resolved to a full upstream commit in the deployment defaults.
@@ -29,6 +26,11 @@ class Settings:
     max_batch: int = 16
     token_budget: int = 8192
     micro_batch: int = 4
+    max_pending: int = 32
+    query_reserved: int = 8
+    query_timeout: float = 6.0
+    background_timeout: float = 45.0
+    batch_wait_ms: float = 2.0
     dtype: str = 'bfloat16'
     gpu_fraction: float = 0.25
     threads: int = 4
@@ -46,12 +48,20 @@ class Settings:
                 max_batch=int(os.environ.get('MAX_BATCH', '16')),
                 token_budget=int(os.environ.get('TOKEN_BUDGET', '8192')),
                 micro_batch=int(os.environ.get('MICRO_BATCH', '4')),
+                max_pending=int(os.environ.get('MAX_PENDING', '32')),
+                query_reserved=int(os.environ.get('QUERY_RESERVED', '8')),
+                query_timeout=float(os.environ.get('QUERY_TIMEOUT', '6')),
+                background_timeout=float(os.environ.get('BACKGROUND_TIMEOUT', '45')),
+                batch_wait_ms=float(os.environ.get('BATCH_WAIT_MS', '2')),
                 dtype=os.environ.get('DTYPE', 'bfloat16'),
                 gpu_fraction=float(os.environ.get('GPU_MEMORY_FRACTION', '0.25')),
                 threads=int(os.environ.get('CPU_THREADS', '4')), api_key=key)
         if not (32 <= s.dimensions <= 1024 and 16 <= s.max_length <= 32768
                 and 1 <= s.max_batch <= 64 and 1 <= s.micro_batch <= s.max_batch
                 and 16 <= s.token_budget <= 65536 and 1 <= s.threads <= 32
+                and 2 <= s.max_pending <= 128 and 1 <= s.query_reserved < s.max_pending
+                and 0 < s.query_timeout <= 30 and 0 < s.background_timeout <= 120
+                and 0 <= s.batch_wait_ms <= 10
                 and 0 < s.gpu_fraction <= 0.8 and s.dtype in ('bfloat16', 'float16')):
             raise ValueError('Invalid model/resource configuration')
         return s
@@ -86,8 +96,8 @@ class QwenEngine:
         # A real CUDA forward proves kernels work on the selected GPU before readiness.
         self.encode(['服务就绪检查'], 'document')
 
-    def encode(self, texts, input_type):
-        torch, s = self.torch, self.settings
+    def prepare(self, texts, input_type):
+        s = self.settings
         if input_type == 'query':
             texts = [f'Instruct: {QUERY_INSTRUCTION}\nQuery:{t}' for t in texts]
         encoded = self.tokenizer(texts, padding=False, truncation=False)
@@ -96,20 +106,29 @@ class QwenEngine:
             raise HTTPException(413, f'Input exceeds {s.max_length} tokens; split text, no silent truncation')
         if sum(lengths) > s.token_budget:
             raise HTTPException(413, f'Batch exceeds {s.token_budget} tokens; use a smaller batch')
-        vectors = []
+        return [{k: v[i] for k, v in encoded.items()} for i in range(len(texts))], sum(lengths)
+
+    def forward(self, rows):
+        torch, s = self.torch, self.settings
         with torch.inference_mode():
-            for start in range(0, len(texts), s.micro_batch):
-                batch = self.tokenizer.pad(
-                    {k: v[start:start+s.micro_batch] for k, v in encoded.items()},
-                    padding=True, return_tensors='pt').to('cuda:0')
-                hidden = self.model(**batch).last_hidden_state
-                # Left padding: the last token is the last non-padding token.
-                pooled = hidden[:, -1, :s.dimensions].float()
-                normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
-                if not torch.isfinite(normalized).all() or (normalized.norm(dim=1) < 0.99).any():
-                    raise RuntimeError('Invalid embedding output')
-                vectors.extend(normalized.cpu().tolist())
-        return vectors, sum(lengths)
+            batch = self.tokenizer.pad(
+                {k: [row[k] for row in rows] for k in rows[0]},
+                padding=True, return_tensors='pt').to('cuda:0')
+            # Embedding is a single forward, never autoregressive generation.
+            hidden = self.model(**batch, use_cache=False).last_hidden_state
+            pooled = hidden[:, -1, :s.dimensions].float()
+            normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
+            if not torch.isfinite(normalized).all() or (normalized.norm(dim=1) < 0.99).any():
+                raise RuntimeError('Invalid embedding output')
+            return normalized.cpu().tolist()
+
+    def encode(self, texts, input_type):
+        # Startup CUDA smoke only; requests run through the shared scheduler.
+        rows, tokens = self.prepare(texts, input_type)
+        vectors = []
+        for start in range(0, len(rows), self.settings.micro_batch):
+            vectors.extend(self.forward(rows[start:start+self.settings.micro_batch]))
+        return vectors, tokens
 
 
 class BodyLimit:
@@ -137,16 +156,19 @@ class BodyLimit:
 
 
 def create_app(settings=None, engine_factory=QwenEngine):
-    lock = threading.Lock()
-    state = {'ready': False, 'requests': 0, 'failed': 0, 'tokens': 0, 'seconds': 0.0}
+    state = {'ready': False}
 
     @asynccontextmanager
     async def lifespan(app):
         app.state.settings = settings or Settings.from_env()
         app.state.engine = await run_in_threadpool(engine_factory, app.state.settings)
+        app.state.scheduler = BatchScheduler(app.state.engine, app.state.settings)
         state['ready'] = True
-        yield
-        state['ready'] = False
+        try:
+            yield
+        finally:
+            state['ready'] = False
+            await app.state.scheduler.close()
 
     app = FastAPI(title='MX Embedding', lifespan=lifespan)
     app.add_middleware(BodyLimit)
@@ -172,36 +194,14 @@ def create_app(settings=None, engine_factory=QwenEngine):
         s = app.state.settings
         return {'model': MODEL, 'revision': s.revision, 'dimensions': s.dimensions,
                 'maxLength': s.max_length, 'maxBatch': s.max_batch, 'tokenBudget': s.token_budget,
-                'dtype': s.dtype, 'device': 'cuda:0', 'defaultInputType': 'document', **state}
-
-    def infer(texts, input_type):
-        if not lock.acquire(blocking=False):
-            raise HTTPException(429, 'Embedding busy; retry with backoff', headers={'Retry-After': '1'})
-        started = time.monotonic()
-        try:
-            vectors, tokens = app.state.engine.encode(texts, input_type)
-            s = app.state.settings
-            if len(vectors) != len(texts) or any(len(v) != s.dimensions or not all(math.isfinite(x) for x in v) for v in vectors):
-                raise RuntimeError('Invalid embedding shape')
-            state['requests'] += 1
-            state['tokens'] += tokens
-            return {'object': 'list', 'model': MODEL,
-                    'data': [{'object': 'embedding', 'index': i, 'embedding': v} for i, v in enumerate(vectors)],
-                    'usage': {'prompt_tokens': tokens, 'total_tokens': tokens}}
-        except HTTPException:
-            state['failed'] += 1
-            raise
-        except Exception as exc:
-            state['failed'] += 1
-            # Never log submitted text, headers or provider credentials.
-            logging.error('Embedding inference failed: %s', type(exc).__name__)
-            raise HTTPException(503, 'Embedding inference unavailable') from None
-        finally:
-            state['seconds'] += time.monotonic() - started
-            lock.release()
+                'microBatch': s.micro_batch, 'maxPending': s.max_pending,
+                'queryReserved': s.query_reserved, 'queryTimeout': s.query_timeout,
+                'backgroundTimeout': s.background_timeout, 'batchWaitMs': s.batch_wait_ms,
+                'dtype': s.dtype, 'device': 'cuda:0', 'defaultInputType': 'document',
+                **state, **app.state.scheduler.snapshot()}
 
     @app.post('/v1/embeddings')
-    async def embeddings(body: EmbeddingRequest):
+    async def embeddings(body: EmbeddingRequest, request: Request):
         s = app.state.settings
         if body.model != MODEL:
             raise HTTPException(400, 'Unknown model')
@@ -210,7 +210,14 @@ def create_app(settings=None, engine_factory=QwenEngine):
         texts = [body.input] if isinstance(body.input, str) else body.input
         if not texts or len(texts) > s.max_batch or any(not t.strip() for t in texts):
             raise HTTPException(400, f'Expected 1–{s.max_batch} nonempty texts')
-        return await run_in_threadpool(infer, texts, body.input_type)
+        priority = request.headers.get('x-mx-embedding-priority', 'background')
+        if priority not in ('interactive', 'background'):
+            raise HTTPException(400, 'Unknown embedding priority')
+        # Scheduling metadata does not imply input_type=query or modify vector space.
+        vectors, tokens = await app.state.scheduler.submit(texts, body.input_type, priority)
+        return {'object': 'list', 'model': MODEL,
+                'data': [{'object': 'embedding', 'index': i, 'embedding': v} for i, v in enumerate(vectors)],
+                'usage': {'prompt_tokens': tokens, 'total_tokens': tokens}}
 
     return app
 

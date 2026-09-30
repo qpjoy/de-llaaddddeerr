@@ -8,6 +8,7 @@ import unittest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+sys.path.insert(0, str(Path(__file__).parents[1] / 'app'))
 spec = importlib.util.spec_from_file_location('embedding_server', Path(__file__).parents[1] / 'app/server.py')
 server = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = server
@@ -21,13 +22,16 @@ class FakeEngine:
         self.settings = settings
         self.calls = []
 
-    def encode(self, texts, input_type):
+    def prepare(self, texts, input_type):
         self.calls.append((texts, input_type))
         if texts == ['too-long']:
             raise HTTPException(413, 'Too many tokens')
         if texts == ['fail']:
             raise RuntimeError('sensitive submitted text must not escape')
-        return [[float(i == j) for j in range(self.settings.dimensions)] for i in range(len(texts))], len(texts) * 3
+        return [{'input_ids': [1, 2, 3]} for _ in texts], len(texts) * 3
+
+    def forward(self, rows):
+        return [[float(j == 0) for j in range(self.settings.dimensions)] for _ in rows]
 
 
 class ApiTests(unittest.TestCase):
@@ -73,29 +77,39 @@ class ApiTests(unittest.TestCase):
         r = self.client.post('/v1/embeddings', content=b'x' * 1_048_577, headers=HEADERS)
         self.assertEqual(r.status_code, 413)
 
-    def test_busy_is_bounded_and_order_is_preserved(self):
+    def test_parallel_requests_queue_instead_of_immediate_429(self):
         entered, release = threading.Event(), threading.Event()
-        original = self.app.state.engine.encode
-        def slow(texts, kind):
+        original = self.app.state.engine.forward
+        def slow(rows):
             entered.set()
             if not release.wait(5):
                 raise RuntimeError('test timed out')
-            return original(texts, kind)
-        self.app.state.engine.encode = slow
+            return original(rows)
+        self.app.state.engine.forward = slow
         with concurrent.futures.ThreadPoolExecutor() as executor:
             first = executor.submit(self.post)
             self.assertTrue(entered.wait(3))
             try:
-                second = self.post()
-                self.assertEqual(second.status_code, 429)
-                self.assertEqual(second.headers['retry-after'], '1')
+                second = executor.submit(self.post)
+                self.assertEqual(self.client.get('/healthz').status_code, 200)
             finally:
                 release.set()
             self.assertEqual(first.result().status_code, 200)
+            self.assertEqual(second.result().status_code, 200)
 
     def test_bad_engine_output_is_never_published(self):
-        self.app.state.engine.encode = lambda *_: ([[float('nan')] * 512], 1)
+        self.app.state.engine.forward = lambda *_: [[float('nan')] * 512]
         self.assertEqual(self.post(input='x').status_code, 503)
+
+    def test_priority_header_does_not_change_query_text_or_instruction(self):
+        response = self.client.post('/v1/embeddings', json={'model': server.MODEL, 'input': '退款'},
+                                    headers={**HEADERS, 'X-MX-Embedding-Priority': 'interactive'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.app.state.engine.calls[-1], (['退款'], 'document'))
+        info = self.client.get('/api/info', headers=HEADERS).json()
+        self.assertEqual(info['requests'], 1)
+        self.assertEqual(info['pending'], 0)
+        self.assertEqual(info['queryReserved'], 8)
 
 
 if __name__ == '__main__':
