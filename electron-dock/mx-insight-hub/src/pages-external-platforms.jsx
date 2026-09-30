@@ -528,6 +528,7 @@ function normalizeOperations(root, fallback = {}) {
         status: optionalText(release.status, row.releaseStatus),
         contractVersion: optionalText(release.contractVersion, row.contractVersion),
         endpointKeys: firstArray(release.endpointKeys, row.endpointKeys).map(String),
+        optionalEndpointKeys: firstArray(release.optionalEndpointKeys).map(String),
       },
       priceBook: {
         version: optionalNumber(priceBook.version),
@@ -1256,6 +1257,10 @@ const BUDGET_MODES = [
   { value: 'calls', label: '按调用次数' },
 ]
 
+function operationPriceEndpointKeys(operation) {
+  return [...new Set([...operation.release.endpointKeys, ...(operation.release.optionalEndpointKeys || [])])]
+}
+
 function initialOperationPriceDraft(operation) {
   return {
     currency: operation.priceBook.currency || 'CNY',
@@ -1266,7 +1271,7 @@ function initialOperationPriceDraft(operation) {
     budgetMode: 'minor',
     monthlyBudgetMinor: operation.priceBook.monthlyBudgetMinor ?? '',
     monthlySubsidyBudgetMinor: operation.priceBook.monthlySubsidyBudgetMinor ?? '',
-    endpointPrices: Object.fromEntries(operation.release.endpointKeys.map((endpointKey) => [
+    endpointPrices: Object.fromEntries(operationPriceEndpointKeys(operation).map((endpointKey) => [
       endpointKey,
       operation.priceBook.endpointPrices[endpointKey] ?? '',
     ])),
@@ -1309,13 +1314,14 @@ function budgetMinorFromDraft(draft, label, unitCostMinorByEndpoint) {
   return parseCallCount(stated, label.text) * Math.max(...prices)
 }
 
-function operationPriceBookPayload(draft, endpointKeys, allowZeroCost = false) {
+function operationPriceBookPayload(draft, endpointKeys, allowZeroCost = false, optionalEndpointKeys = []) {
   const currency = draft.currency.trim().toUpperCase()
   const pricingAsOf = draft.pricingAsOf.trim()
   if (!/^[A-Z]{3}$/u.test(currency)) throw new Error('币种必须是 3 位 ISO 代码，例如 CNY')
   if (!pricingAsOf || Number.isNaN(Date.parse(pricingAsOf))) {
     throw new Error('请填写有效的定价证据日期')
   }
+  endpointKeys = [...endpointKeys.filter(key => !optionalEndpointKeys.includes(key)), ...optionalEndpointKeys.filter(key => String(draft.endpointPrices[key] ?? '').trim() !== '')]
   const unitCostMinorByEndpoint = Object.fromEntries(endpointKeys.map((endpointKey) => [
     endpointKey,
     parseMinorUnit(draft.endpointPrices[endpointKey], `${endpointKey} 单次价格`, { positive: !allowZeroCost }),
@@ -1355,7 +1361,7 @@ function ExternalPlatformOperationCard({
   // Whichever unit is being typed, show the other one. The conversion uses the
   // prices in this form so editing a price and a budget together stays honest.
   const budgetHint = (value) => {
-    const prices = operation.release.endpointKeys
+    const prices = operationPriceEndpointKeys(operation)
       .map((endpointKey) => Number(priceDraft.endpointPrices[endpointKey]))
       .filter((price) => Number.isFinite(price) && price > 0)
     const entered = Number(value)
@@ -1423,7 +1429,7 @@ function ExternalPlatformOperationCard({
         reason: submittedReason,
         canaryConsumerIds: desiredState === 'canary' ? submittedCanaryIds : null,
         ...(publishPriceBook ? {
-          priceBook: operationPriceBookPayload(priceDraft, operation.release.endpointKeys, operation.allowZeroCost),
+          priceBook: operationPriceBookPayload(priceDraft, operation.release.endpointKeys, operation.allowZeroCost, operation.release.optionalEndpointKeys),
         } : {}),
       }
       await adminApi.updateExternalPlatformOperationPolicy(
@@ -1602,12 +1608,12 @@ function ExternalPlatformOperationCard({
             required={publishPriceBook}
           />
         </Field>
-        {operation.release.endpointKeys.map((endpointKey) => (
+        {operationPriceEndpointKeys(operation).map((endpointKey) => (
           <Field
             key={endpointKey}
             className="mih-external-operation-endpoint-price"
             label={`${endpointKey} 单次价格`}
-            hint={operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
+            hint={operation.release.optionalEndpointKeys?.includes(endpointKey) ? '可选的指标补数接口；每页单独计采购成本。留空不启用补数，原详情服务不受影响。' : operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
           >
             <input
               className="qp-input mih-mono"
@@ -1617,7 +1623,7 @@ function ExternalPlatformOperationCard({
               value={priceDraft.endpointPrices[endpointKey] ?? ''}
               onChange={(event) => updateEndpointPrice(endpointKey, event.target.value)}
               disabled={busy || !publishPriceBook}
-              required={publishPriceBook}
+              required={publishPriceBook && !operation.release.optionalEndpointKeys?.includes(endpointKey)}
             />
           </Field>
         ))}

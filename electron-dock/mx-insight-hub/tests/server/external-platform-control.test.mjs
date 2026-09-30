@@ -222,7 +222,12 @@ test('environment credentials retain explicit revision-zero admission evidence',
   assert.equal(admitted.credentialRevision, 0)
 })
 
-test('Postgres policy update atomically publishes price, release, policy and audit event', async () => {
+for (const scenario of [
+  { name: 'Postgres policy update atomically publishes price, release, policy and audit event',
+    provider: 'justone', operation: JUSTONE_OPERATION, endpoints: ENDPOINTS, optional: [] },
+  { name: 'Postgres analytics price publication persists optional v2 cost alongside required detail cost',
+    provider: 'tikhub', operation: 'social.posts.analytics', endpoints: ['xiaohongshu.pgy.note-detail.v1'], optional: ['xiaohongshu.pgy.blogger-notes.v2'] },
+]) test(scenario.name, async () => {
   const statements = []
   let releasedWith = Symbol('not released')
   let policy = {
@@ -235,14 +240,14 @@ test('Postgres policy update atomically publishes price, release, policy and aud
   let publishedPrice = null
   let eventValues = null
   const selectedRow = () => ({
-    provider_key: 'justone',
-    operation_key: JUSTONE_OPERATION,
+    provider_key: scenario.provider,
+    operation_key: scenario.operation,
     ...policy,
     updated_by: policy.control_source === 'database' ? 'source-admin' : 'migration-060',
     updated_at: '2026-09-10T09:00:00.000Z',
     release_status: 'released',
     contract_version: 'mx-insight-hub.ecommerce-products.v1',
-    endpoint_keys: ENDPOINTS,
+    endpoint_keys: scenario.endpoints,
     price_book_version: publishedPrice ? 1 : 0,
     price_book_source: publishedPrice ? 'database' : 'legacy_environment',
     price_book_status: publishedPrice ? 'reviewed' : 'inherited',
@@ -274,7 +279,10 @@ test('Postgres policy update atomically publishes price, release, policy and aud
       return { rows: [] }
     }
     if (/MAX\(release_revision\)/u.test(sql)) return { rows: [{ release_revision: 2 }] }
-    if (/INSERT INTO control\.external_platform_operation_releases/u.test(sql)) return { rows: [] }
+    if (/INSERT INTO control\.external_platform_operation_releases/u.test(sql)) {
+      assert.deepEqual(values[4], [...scenario.endpoints, ...scenario.optional], 'the immutable release includes each reviewed endpoint')
+      return { rows: [] }
+    }
     if (/UPDATE control\.external_platform_operation_policies/u.test(sql)) {
       policy = {
         control_source: 'database',
@@ -295,11 +303,11 @@ test('Postgres policy update atomically publishes price, release, policy and aud
   const store = new PostgresExternalPlatformControlStore({
     pool: { connect: async () => client, query },
   })
-  const active = await store.updatePolicy('justone', JUSTONE_OPERATION, {
+  const active = await store.updatePolicy(scenario.provider, scenario.operation, {
     expectedRevision: 0,
     desiredState: 'active',
     reason: 'Publish reviewed price from Admin',
-    priceBook: priceBook(13),
+    priceBook: { ...priceBook(13), unitCostMinorByEndpoint: Object.fromEntries([...scenario.endpoints, ...scenario.optional].map(key => [key, 13])) },
   }, {
     actor: 'source-admin',
     runtime: runtime({ priced: false }),
@@ -310,7 +318,7 @@ test('Postgres policy update atomically publishes price, release, policy and aud
   assert.equal(active.revision, 1)
   assert.equal(active.release.revision, 2)
   assert.equal(active.priceBook.version, 1)
-  assert.equal(active.priceBook.endpointPrices[ENDPOINTS[0]], 13)
+  for (const key of [...scenario.endpoints, ...scenario.optional]) assert.equal(active.priceBook.endpointPrices[key], 13)
   assert.equal(eventValues.at(-1), 'Publish reviewed price from Admin')
   assert.ok(statements.some(({ sql }) => sql === 'BEGIN'))
   assert.ok(statements.some(({ sql }) => sql === 'COMMIT'))

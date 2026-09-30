@@ -7,16 +7,16 @@ const comment = { type: 'object', properties: {
   publishedAt: nullableText, author, media, replyCount: metric,
   replies: { type: 'array', description: '本次返回的部分内嵌回复；不保证等于 replyCount。', items: { type: 'object' } },
 } }
-const commonDescription = '仅接受 JSON POST；使用已授权的 Live Hub Key，业务与 Key 都必须有 xiaohongshu 平台和本操作权限。每个新请求实时获取一次，不自动缓冲、排队、重试或翻页。相同 Idempotency-Key 与相同参数重放不再次采集/计费，参数变化必须换标识。成功返回（含 no_data）计一次用量，按当前已发布并分配的套餐计费；新能力不会自动授权或改价。交付标识、时间与来源模式见 x-mx-insight-request-id / x-mx-insight-captured-at / x-mx-insight-source-mode 响应头。'
+const commonDescription = '仅接受 JSON POST；使用已授权的 Live Hub Key，业务与 Key 都必须有 xiaohongshu 平台和本操作权限。相同 Idempotency-Key 与相同参数重放不再次采集/计费，参数变化必须换标识。成功返回（含 no_data）计一次用量，按当前已发布并分配的套餐计费；新能力不会自动授权或改价。交付标识、时间与来源模式见 x-mx-insight-request-id / x-mx-insight-captured-at / x-mx-insight-source-mode 响应头。'
 export const xhsResearchPaths = Object.fromEntries([
   ['detail', 'social.posts.analytics', '获取笔记详情与阅读量', { note_id: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' }, deliveryMode: { type: 'string', enum: ['cache_first', 'refresh'], default: 'cache_first' } }, {
     item: { type: ['object', 'null'], properties: {
       platform: { const: 'xiaohongshu' }, externalId: { type: 'string' }, url: { type: 'string' },
       title: nullableText, text: nullableText, type: nullableText, publishedAt: nullableText, collectedAt: { type: 'string', format: 'date-time' },
       tags: { type: 'array', items: { type: 'string' } }, author, media,
-      metrics: { type: 'object', properties: Object.fromEntries(['views', 'impressions', 'liked', 'collected', 'comments', 'shared'].map(key => [key, metric])) },
+      metrics: { type: 'object', properties: { ...Object.fromEntries(['views', 'impressions', 'liked', 'collected', 'comments', 'shared'].map(key => [key, metric])), engaged: { ...metric, description: '补数提供的总互动量，不能当作点赞数，也不能据此推导评论数。' } } },
     } },
-  }, '默认缓存优先，deliveryMode=refresh 明确获取最新数据；同一上游凭据的详情采集平滑排队，默认间隔至少 5 秒，预计等待达到 60 秒返回 429 external_platform_busy 和 Retry-After。可确认未计费的拒绝最多重试一次，未知结果不重试。阅读量 metrics.views 与曝光量 metrics.impressions 分开；未提供用 null，不猜测或用点赞数替代。meta.tagsAvailable=false 时不要当作无标签，可继续使用完整正文与标签接口。查无结果返回 meta.status=no_data、data.item=null，仍计一次成功调用；不要因此自动重试。'],
+  }, '默认缓存优先，deliveryMode=refresh 明确获取最新数据；详情采集平滑排队，默认间隔至少 5 秒，预计等待达到 60 秒返回 429 external_platform_busy 和 Retry-After。可确认未计费的详情拒绝最多重试一次，未知结果不重试。阅读/曝光任一缺失或同时为零且服务已配置时，按作者分页查找同一笔记的指标；每页最多 8 条、最多 15 页、补数时间预算 90 秒，找到目标即停止。补数页不重试，整个详情请求仍计一次客户用量。meta.metricsSupplement 标识匹配、未配置、缺少作者、未找到或受限状态；补数失败保留正文与原始指标，不代表已确认指标为零。metrics.engaged 为总互动量；不能推算点赞/评论。确认详情整组零是占位值后，补数未提供的点赞/评论/分享为 null。meta.metricSources 标明逐项来源。meta.tagsAvailable=false 时不要当作无标签，可继续使用完整正文与标签接口。查无结果返回 meta.status=no_data、data.item=null，仍计一次成功调用；不要因此自动重试。'],
   ['comments', 'social.comments.list', '获取笔记评论', {
     note_id: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
     sort: { type: 'string', enum: ['latest', 'hot'], default: 'latest' },
@@ -34,7 +34,14 @@ export const xhsResearchPaths = Object.fromEntries([
         code: { const: 200 }, data: { type: 'object', properties: response },
         meta: { type: 'object', properties: {
           status: { enum: ['ok', 'no_data'] }, collectedAt: { type: 'string', format: 'date-time' },
-          ...(path === 'detail' ? { tagsAvailable: { type: 'boolean' }, recommendedIntervalSeconds: { const: 5 } }
+          ...(path === 'detail' ? { tagsAvailable: { type: 'boolean' }, recommendedIntervalSeconds: { const: 5 },
+            metricSources: { type: 'object', additionalProperties: { enum: ['detail', 'blogger_notes_v2', null] } },
+            metricsSupplement: { type: 'object', properties: {
+              status: { enum: ['matched', 'missing_author', 'not_configured', 'not_found', 'repeated_page', 'page_limit', 'time_limit', 'cancelled', 'temporarily_unavailable'] },
+              pagesFetched: { type: 'integer', minimum: 0, maximum: 15 }, total: metric,
+              matchedPage: { type: 'integer', minimum: 1, maximum: 15 }, collectedAt: { type: 'string', format: 'date-time' },
+            } },
+          }
             : { page: { type: 'integer', minimum: 1, maximum: 15 }, paginationStatus: { enum: ['continuable', 'exhausted', 'unknown', 'limit_reached'] } }),
         } },
       },
@@ -45,6 +52,7 @@ export const xhsResearchPaths = Object.fromEntries([
 export const xhsResearchGuide = `<h3>关键词 → 热门笔记 → 阅读量与评论</h3>
 <p>搜索笔记可用 sort_type=popularity_descending（点赞热度）、comment_descending（评论最多）和 time_filter；结果是关键词相关笔记，不代表全站热榜。取列表的笔记 ID，再按需要分别请求下列接口。</p>
 <p><code>POST /api/v1/data/xiaohongshu/notes/detail</code>：JSON <code>{"note_id":"6a20edfa0000000021020951"}</code>；需 <code>social.posts.analytics</code>。返回 <code>data.item.text</code>、媒体、<code>metrics.views</code> 阅读量和 <code>metrics.impressions</code> 曝光量。缺失指标为 null。标签未提供时仍可调用原完整正文与标签入口。</p>
+<p>阅读/曝光任一缺失或同时为零时，已配置的服务按作者分页查找同一笔记补数，每页最多 8 条、最多 15 页、时间预算 90 秒；不会为了补满数量继续采集。<code>meta.metricsSupplement</code> 说明是否找到及停止原因，<code>meta.metricSources</code> 标明指标来源。未配置、未找到或补数失败时，保留原详情数据；原始零不等于已经核实的零。<code>metrics.engaged</code> 是总互动量，不能代替点赞/评论。整个详情请求仍只计一次客户用量，原幂等标识重放不再翻页。</p>
 <p>详情默认 <code>deliveryMode=cache_first</code>，有效缓存直接返回；<code>refresh</code> 强制实时。服务器按上游凭据排队，默认间隔至少 <strong>5 秒</strong>、等待上限 60 秒，队列满返回 429 和 Retry-After；确认未计费的拒绝最多重试一次，超时或未知结果不重试。缓存交付仍按调用者套餐计费，合并采集不会共享其他用户的权限或计费身份。无结果 <code>meta.status=no_data</code> 也计一次成功请求；不要自动重试。每次成功请求按已分配套餐计费。</p>
 <p><code>POST /api/v1/data/xiaohongshu/notes/comments</code>：JSON <code>{"note_id":"6a20edfa0000000021020951","sort":"hot"}</code>；需 <code>social.comments.list</code>。返回 <code>data.items</code> 和 <code>data.nextCursor</code>。下一页传 <code>cursor</code>，保留相同 note_id/sort 并换用新 Idempotency-Key；只在 nextCursor 非空时继续，最多 15 页。回复仅展示已取得部分。</p>
 <pre>curl -X POST "$HUB_URL/api/v1/data/xiaohongshu/notes/detail" \\

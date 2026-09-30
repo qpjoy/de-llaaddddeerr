@@ -101,10 +101,12 @@ export function projectXhsResearch(payload, request, capturedAt, { encodeCursor 
       url: url(data.noteLink) || `https://www.xiaohongshu.com/explore/${data.noteId.toLowerCase()}`,
       title: text(data.title), text: text(data.content), type: text(data.type),
       publishedAt: timestamp(data.createTime), collectedAt: base.meta.collectedAt,
-      author: { id: text(data.userId), name: text(data.name), avatarUrl: url(data.headPhoto) },
+      author: { id: text(data.userId) || text(data.userInfo?.userId),
+        name: text(data.name) || text(data.userInfo?.nickName),
+        avatarUrl: url(data.headPhoto) || url(data.userInfo?.avatar) },
       tags: (Array.isArray(data.tags) ? data.tags : Array.isArray(data.tagList) ? data.tagList : []).map(tag => text(tag) || text(tag?.name)).filter(Boolean),
       media: media(data.imagesList),
-      metrics: { views: count(data.readNum), impressions: count(data.impNum), liked: count(data.likeNum), collected: count(data.favNum), comments: count(data.cmtNum), shared: null },
+      metrics: { views: count(data.readNum), impressions: count(data.impNum), liked: count(data.likeNum), collected: count(data.favNum), comments: count(data.cmtNum), shared: count(data.shareNum) },
     }
     const video = url(data.videoInfo?.url || data.videoInfo?.videoUrl || data.videoInfo?.masterUrl)
     if (video) item.media.push({ type: 'video', url: video })
@@ -138,9 +140,13 @@ export function projectXhsResearch(payload, request, capturedAt, { encodeCursor 
   return { ...base, meta: { ...base.meta, page: request.page, paginationStatus: request.page === 15 && more !== false ? 'limit_reached' : nextCursor ? 'continuable' : more === false ? 'exhausted' : 'unknown' }, data: { noteId: request.providerQuery.note_id, items, nextCursor, hasMore: nextCursor ? true : more === false ? false : null } }
 }
 
-export function xhsResearchRecords(projection, request) {
+export function xhsResearchRecords(projection, request, metricEvidence = null) {
   const options = { operation: request.endpoint.operation, connectorContractVersion: XHS_RESEARCH_VERSION, parserVersion: XHS_RESEARCH_VERSION, sourcePointer: '$.data.data' }
-  if (request.endpoint.name === 'note_detail') return projection.data.item ? [createTikHubXiaohongshuRecord(projection.data.item, options)] : []
+  if (request.endpoint.name === 'note_detail') return projection.data.item ? [createTikHubXiaohongshuRecord({
+    ...projection.data.item,
+    ...(projection.meta.metricsSupplement ? { metricsSupplement: projection.meta.metricsSupplement, metricSources: projection.meta.metricSources } : {}),
+    ...(metricEvidence ? { metricEvidence } : {}),
+  }, options)] : []
   const records = []
   const append = (comment, parentId = null) => {
     const item = { platform: 'xiaohongshu', externalId: comment.id, text: comment.text, author: comment.author, media: comment.media, metrics: { liked: comment.liked, comments: comment.replyCount }, publishedAt: comment.publishedAt, collectedAt: projection.meta.collectedAt }

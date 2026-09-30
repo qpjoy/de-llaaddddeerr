@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_VERSION } from '../contracts/xiaohongshu-research.mjs'
+import { XHS_BLOGGER_NOTES_V2 } from '../contracts/xiaohongshu-note-metrics.mjs'
 import { nativeForwardingOperations } from '../contracts/native-forwarding.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, XHS_DISCOVERY_VERSION } from '../contracts/xiaohongshu-discovery.mjs'
 import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
@@ -109,6 +110,7 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
     ...Object.values(XHS_RESEARCH_ENDPOINTS).map(endpoint => Object.freeze({
       operationKey: endpoint.operation, label: endpoint.label, legacyGate: endpoint.gate,
       contractVersion: XHS_RESEARCH_VERSION, endpointKeys: Object.freeze([endpoint.endpointKey]),
+      ...(endpoint.name === 'note_detail' ? { optionalEndpointKeys: Object.freeze([XHS_BLOGGER_NOTES_V2.endpointKey]) } : {}),
     })),
     Object.freeze({
       operationKey: SOCIAL_ACCOUNT_SEARCH_OPERATION,
@@ -258,12 +260,13 @@ export function normalizePriceBook(value, definition) {
     invalid('priceBook.unitCostMinorByEndpoint must be an object')
   }
   const unsupportedEndpoints = Object.keys(unitCosts).filter((endpointKey) => (
-    !definition.endpointKeys.includes(endpointKey)
+    !definition.endpointKeys.includes(endpointKey) && !definition.optionalEndpointKeys?.includes(endpointKey)
   ))
   if (unsupportedEndpoints.length > 0) {
     invalid(`priceBook contains unsupported endpoint ${unsupportedEndpoints[0]}`)
   }
-  const endpointPrices = Object.fromEntries(definition.endpointKeys.map((endpointKey) => {
+  const endpointKeys = [...definition.endpointKeys, ...(definition.optionalEndpointKeys || []).filter(key => Object.hasOwn(unitCosts, key))]
+  const endpointPrices = Object.fromEntries(endpointKeys.map((endpointKey) => {
     const valueForEndpoint = unitCosts[endpointKey]
     if (!Number.isSafeInteger(valueForEndpoint) || valueForEndpoint < (definition.allowZeroCost ? 0 : 1)) {
       invalid(`priceBook requires a positive safe-integer unit cost for ${endpointKey}`)
@@ -338,9 +341,9 @@ function priceEvidence(row, definition, config) {
   const billing = databasePriceBook ? null : config?.billing
   const endpointPrices = databasePriceBook
     ? row.priceBook.endpointPrices || {}
-    : Object.fromEntries(definition.endpointKeys.map((endpointKey) => [
+    : Object.fromEntries([...definition.endpointKeys, ...(definition.optionalEndpointKeys || [])].map((endpointKey) => [
         endpointKey,
-        unitCostFor(billing, endpointKey, definition.allowZeroCost),
+        unitCostFor(definition.optionalEndpointKeys?.includes(endpointKey) ? { ...billing, unitCostMinor: null } : billing, endpointKey, definition.allowZeroCost),
       ]))
   const missingEndpointKeys = definition.endpointKeys.filter((endpointKey) => (
     !Number.isSafeInteger(endpointPrices[endpointKey]) || endpointPrices[endpointKey] < (definition.allowZeroCost ? 0 : 1)
@@ -461,6 +464,7 @@ function operationView(row, definition, { config = {}, credentialConfigured = fa
       status: row.releaseStatus,
       contractVersion: row.contractVersion,
       endpointKeys: row.endpointKeys,
+      ...(definition.optionalEndpointKeys ? { optionalEndpointKeys: definition.optionalEndpointKeys } : {}),
     },
     priceBook: pricing,
     blockers,
@@ -632,6 +636,7 @@ export class MemoryExternalPlatformControlStore {
       canaryConsumerIds: normalized.canaryConsumerIds ?? [...row.canaryConsumerIds],
       releaseRevision,
       ...(promotedPricing ? {
+        endpointKeys: [...definition.endpointKeys, ...(definition.optionalEndpointKeys || []).filter(key => Number.isSafeInteger(promotedPricing.endpointPrices[key]))],
         priceBook: {
           version: nextPriceBookVersion,
           source: 'database',
@@ -857,7 +862,7 @@ export class PostgresExternalPlatformControlStore {
               promotedPricing.monthlySubsidyBudgetMinor, actor,
             ],
           )
-          for (const endpointKey of definition.endpointKeys) {
+          for (const endpointKey of [...definition.endpointKeys, ...(definition.optionalEndpointKeys || [])].filter(key => Number.isSafeInteger(promotedPricing.endpointPrices[key]))) {
             await client.query(
               `INSERT INTO control.external_platform_provider_price_book_entries
                  (provider_key, price_book_version, endpoint_key, unit_cost_minor)
@@ -883,7 +888,7 @@ export class PostgresExternalPlatformControlStore {
              VALUES ($1, $2, $3, $4, $5::text[], $6, 'released', $7)`,
             [
               providerKey, operationKey, releaseRevision, currentFull.contractVersion,
-              currentFull.endpointKeys, priceBookVersion, actor,
+              [...definition.endpointKeys, ...(definition.optionalEndpointKeys || []).filter(key => Number.isSafeInteger(promotedPricing.endpointPrices[key]))], priceBookVersion, actor,
             ],
           )
         }

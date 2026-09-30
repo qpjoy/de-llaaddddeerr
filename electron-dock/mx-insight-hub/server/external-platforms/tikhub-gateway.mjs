@@ -1,5 +1,7 @@
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
+import { XHS_BLOGGER_NOTES_V2 } from '../contracts/xiaohongshu-note-metrics.mjs'
+import { supplementNoteMetrics } from './xiaohongshu-note-metrics.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
@@ -746,7 +748,8 @@ export class TikHubGateway {
     let queueOutcome = 'failed'
     const queuePolicy = endpointName === 'note_detail' ? { ...DEFAULT_DETAIL_QUEUE, ...this.config.detailQueue } : null
     const queueDeadline = Date.now() + (queuePolicy?.maxWaitMs || 0)
-    const leaseMs = queuePolicy ? Math.max(this.reservationLeaseMs, queuePolicy.maxWaitMs + 2 * (this.config.timeoutMs || 30000) + 30000) : this.reservationLeaseMs
+    const detailDispatchLeaseMs = (this.config.timeoutMs || 30000) + XHS_BLOGGER_NOTES_V2.budgetMs + 30000
+    const leaseMs = queuePolicy ? Math.max(this.reservationLeaseMs, queuePolicy.maxWaitMs + 2 * (this.config.timeoutMs || 30000) + XHS_BLOGGER_NOTES_V2.budgetMs + 30000) : this.reservationLeaseMs
     try {
       if (isTestKey(context.apiKey)) {
         throw new AppError(403, 'test_key_not_supported', 'Test API keys cannot dispatch external acquisition')
@@ -837,7 +840,7 @@ export class TikHubGateway {
         provider: TIKHUB_PROVIDER_KEY,
         endpoint: endpoint.endpointKey,
         query: normalized.providerQuery,
-        ...(queuePolicy ? { scope: queueScope, contractVersion: normalized.contractVersion } : {}),
+        ...(queuePolicy ? { scope: queueScope, contractVersion: normalized.contractVersion, metricsContractVersion: XHS_BLOGGER_NOTES_V2.contractVersion } : {}),
       })
       await this.usageStore.reapStaleReservations()
       await this.platformStore.reapStaleCalls?.()
@@ -1001,7 +1004,7 @@ export class TikHubGateway {
         if (queuePolicy) {
           try {
             queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
-              policy: queuePolicy, deadline: queueDeadline, leaseMs: (this.config.timeoutMs || 30000) + 30000, signal })
+              policy: queuePolicy, deadline: queueDeadline, leaseMs: detailDispatchLeaseMs, signal })
           } catch (error) {
             if (allowStoredFallback && snapshot && error.code === 'external_platform_busy') {
               await this.platformStore.commitSnapshotDelivery({ delivery, snapshot, shared: true, sourceMode: 'stored_fallback', usageUnitsActual: 1 })
@@ -1155,7 +1158,7 @@ export class TikHubGateway {
               if (queuePolicy) {
                 if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
                 const permit = await this.detailQueue.transition(queueScope, { ...queueTicket, type: 'dispatch',
-                  leaseMs: (this.config.timeoutMs || 30000) + 30000, jitterMs: Math.floor(Math.random() * queuePolicy.jitterMs) })
+                  leaseMs: detailDispatchLeaseMs, jitterMs: Math.floor(Math.random() * queuePolicy.jitterMs) })
                 if (permit.kind !== 'acquired') throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
               }
               callDispatched = true
@@ -1176,7 +1179,7 @@ export class TikHubGateway {
               costReservation = null
               this.#leave(context.consumer.id); entered = false
               queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
-                policy: queuePolicy, deadline: queueDeadline, leaseMs: (this.config.timeoutMs || 30000) + 30000, signal })
+                policy: queuePolicy, deadline: queueDeadline, leaseMs: detailDispatchLeaseMs, signal })
               await revalidateQueuedAccess()
               costControl = providerCostControl(operationControl?.billing ? { billing: operationControl.billing } : this.config, endpoint.endpointKey)
               if (!this.#enter(context.consumer.id)) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
@@ -1220,7 +1223,30 @@ export class TikHubGateway {
                 encodeCursor: codec.encode,
               })
             : { payload: upstream.payload }
-          const records = endpoint.discovery ? [] : endpoint.research ? xhsResearchRecords(projection.payload, normalized) : officialCanonicalRecords(
+          let metricEvidence = null
+          if (endpointName === 'note_detail') {
+            // The primary call has durable evidence and consumes its own cost.
+            // Supplementary pages reserve/settle costs under this same usage.
+            await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
+            costReservation = null
+            metricEvidence = await supplementNoteMetrics({ projection: projection.payload, context, delivery,
+              adapter: this.adapter, platformStore: this.platformStore, credential: resolved.value,
+              queue: this.detailQueue, queuePolicy, timeoutMs: this.config.timeoutMs || 30000,
+              maxRequestsPerMinute: this.config.maxRequestsPerMinute ?? 120, signal,
+              authorize: async () => {
+                await revalidateQueuedAccess()
+                const billing = operationControl?.billing || this.config.billing
+                if (!Number.isSafeInteger(billing?.unitCostMinorByEndpoint?.[XHS_BLOGGER_NOTES_V2.endpointKey])
+                  || billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] <= 0) {
+                  throw new AppError(503, 'external_platform_cost_control_unavailable', 'Supplementary price is not configured')
+                }
+                const supplementalCost = providerCostControl({ billing }, XHS_BLOGGER_NOTES_V2.endpointKey)
+                if (supplementalCost.currency !== costControl.currency) throw new AppError(503, 'external_platform_cost_evidence_incomplete', 'Procurement currency changed')
+                return { costControl: supplementalCost, operationControl }
+              },
+            })
+          }
+          const records = endpoint.discovery ? [] : endpoint.research ? xhsResearchRecords(projection.payload, normalized, metricEvidence) : officialCanonicalRecords(
             normalized,
             upstream.payload,
             capturedAt,
@@ -1245,6 +1271,7 @@ export class TikHubGateway {
             itemCount,
             usageUnitsActual: 1,
             ...dispatchEvidence,
+            usageLatencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
             ingestJob: records.length > 0 ? {
               payload: {
                 kind: 'external-platform-result',

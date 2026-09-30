@@ -1,4 +1,5 @@
 import { XHS_RESEARCH_ENDPOINTS } from '../contracts/xiaohongshu-research.mjs'
+import { XHS_BLOGGER_NOTES_V2 } from '../contracts/xiaohongshu-note-metrics.mjs'
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest, nativeForwardingPayload } from '../contracts/native-forwarding.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { AppError } from '../core/errors.mjs'
@@ -406,7 +407,7 @@ async function requestTikHubJson(
   method = 'GET',
   marketplace = XIAOHONGSHU_PLATFORM,
 ) {
-  const billedOnHttp200 = path === XHS_RESEARCH_ENDPOINTS.note_detail.providerPath
+  const billedOnHttp200 = [XHS_RESEARCH_ENDPOINTS.note_detail.providerPath, XHS_BLOGGER_NOTES_V2.providerPath].includes(path)
   const url = new URL(path, adapter.baseUrl)
   if (method === 'GET') for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value)
   const controller = new AbortController()
@@ -662,6 +663,26 @@ export class TikHubAdapter {
   async resolveCredential() {
     const dynamic = this.#credentialResolver ? await this.#credentialResolver() : null
     return credential(dynamic) || this.#fallbackCredential
+  }
+
+  async getXiaohongshuBloggerNotesV2(userId, page, { credential: suppliedCredential } = {}) {
+    if (typeof userId !== 'string' || !/^[a-f0-9]{24}$/iu.test(userId)
+      || !Number.isInteger(page) || page < 1 || page > XHS_BLOGGER_NOTES_V2.maxPages) {
+      throw new TypeError('Invalid blogger notes user or page')
+    }
+    const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)
+    if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
+    const exchange = await requestTikHubJson(this, XHS_BLOGGER_NOTES_V2.providerPath, {
+      user_id: userId.toLowerCase(), page_number: page, page_size: XHS_BLOGGER_NOTES_V2.pageSize,
+      note_type: 0, order_type: 1,
+    }, resolvedCredential, null, XHS_BLOGGER_NOTES_V2.endpointVersion, 'POST')
+    const persistence = exchange.persisted('accepted', exchange.acceptedAt)
+    return securedProviderResult({
+      payload: providerCredentialSafePayload(exchange.raw, resolvedCredential),
+      archiveObjects: persistence.archiveObjects, responseArchive: persistence.responseArchive,
+      upstreamEvidence: persistence.upstreamEvidence, endpointKey: XHS_BLOGGER_NOTES_V2.endpointKey,
+      capturedAt: exchange.acceptedAt,
+    }, persistence)
   }
 
   async getXiaohongshuAppV2(endpointKey, query, {

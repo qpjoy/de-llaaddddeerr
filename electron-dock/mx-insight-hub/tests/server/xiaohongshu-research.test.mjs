@@ -12,6 +12,7 @@ import { XHS_RESEARCH_ENDPOINTS as endpoints, XHS_RESEARCH_OPERATIONS, normalize
 import { createExternalPlatformCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { compileBillingComponents } from '../../shared/billing-composition.mjs'
 import { PUBLIC_OPENAPI_DOCUMENT, tenantOpenApiDocument, publicDocsHtmlForPath } from '../../server/public-docs.mjs'
+import { XHS_BLOGGER_NOTES_V2, projectBloggerNotesV2 } from '../../server/contracts/xiaohongshu-note-metrics.mjs'
 
 const ID = '6a20edfa0000000021020951'
 const OTHER = '6a20edfa0000000021020952'
@@ -21,6 +22,11 @@ const stamp = new Date('2026-09-23T01:00:00Z')
 const response = payload => new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
 const detail = (data = {}) => ({ code: 200, router: 'https://api.tikhub.io/private', cache_url: 'https://api.tikhub.io/cache', support: 'TikHub support', docs: 'https://docs.tikhub.io', request_id: 'provider-id', data: { code: 0, success: true, data: { noteId: ID, title: '热门笔记', content: '完整正文'.repeat(100), readNum: 0, impNum: 200, likeNum: 10, favNum: 2, cmtNum: 3, imagesList: [{ url: 'https://images.example/note.jpg?signature=preserved' }], ...data } } })
 const comments = () => ({ code: 200, data: { code: 0, data: { comments: [{ id: 'comment-1', content: '评论正文', like_count: 2, user_info: { user_id: 'user-1', nickname: '读者' }, sub_comment_count: 1, sub_comments: [{ id: 'reply-1', content: '回复', like_count: 0 }] }], cursor: 'private-next', index: 10, pageArea: 'FOLDED', has_more: true } } })
+const AUTHOR = '624560f5000000000100ffab'
+const zeroDetail = () => detail({ readNum: 0, impNum: 0, likeNum: 0, favNum: 0, cmtNum: 0,
+  userInfo: { userId: AUTHOR, nickName: '奇绩创坛', avatar: 'https://images.example/avatar.jpg' } })
+const bloggerPage = (items, total = 50) => ({ code: 200, data: { code: 0, success: true, data: { noteList: items, total } } })
+const bloggerNote = (noteId = ID, fields = {}) => ({ noteInfo: { noteId, readNum: 619, impNum: 6499, engageNum: 107, favNum: 27, ...fields }, userInfo: { userId: AUTHOR } })
 
 async function fixture(fetchImpl = async () => response(detail()), { capabilities = XHS_RESEARCH_OPERATIONS, platforms = ['xiaohongshu'] } = {}) {
   const store = new MemoryStore()
@@ -51,6 +57,204 @@ test('detail maps independent metrics, full content/media, missing tags and unkn
   assert.doesNotMatch(JSON.stringify(projected), /tikhub|router|cache_url|provider-id/i)
   assert.throws(() => projectXhsResearch(detail({ noteId: OTHER }), request, stamp))
   assert.throws(() => normalizeXhsResearchRequest(endpoints.note_detail, { note_id: ID, url: 'https://evil.test' }))
+})
+
+test('zero detail metrics are supplemented from a later v2 page with exact mapping, one charge and immutable replay', async () => {
+  const queries = []
+  const state = await fixture(async (url, options) => {
+    if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+    assert.equal(new URL(url).pathname, XHS_BLOGGER_NOTES_V2.providerPath)
+    assert.equal(options.method, 'POST')
+    queries.push(JSON.parse(options.body))
+    return response(bloggerPage(queries.length === 1 ? [bloggerNote(OTHER)] : [bloggerNote()]))
+  })
+  state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 2
+  await state.service.setTenantBillingProfile(state.tenant.id, { mode: 'enforced', multiplierPpm: 1000000,
+    defaultUnitPriceMinor: 10, defaultCurrency: 'CNY' }, 'test-admin')
+  await state.service.addTenantCredit(state.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Test' }, { idempotencyKey: 'metrics-credit-001', actor: 'test-admin' })
+  const first = await state.call()
+  assert.deepEqual(queries, [1, 2].map(page_number => ({ user_id: AUTHOR, page_number, page_size: 8, note_type: 0, order_type: 1 })))
+  assert.deepEqual(first.body.data.item.metrics, { views: 619, impressions: 6499, liked: null, collected: 27, comments: null, shared: null, engaged: 107 })
+  assert.equal(first.body.data.item.text, zeroDetail().data.data.content)
+  assert.equal(first.body.data.item.author.name, '奇绩创坛')
+  assert.equal(first.body.meta.metricsSupplement.status, 'matched')
+  assert.equal(first.body.meta.metricsSupplement.pagesFetched, 2)
+  assert.equal(first.body.meta.metricsSupplement.total, 50)
+  assert.equal(first.body.meta.metricsSupplement.matchedPage, 2)
+  assert.equal(first.body.meta.metricSources.views, 'blogger_notes_v2')
+  const calls = [...state.platformStore.calls.values()]
+  assert.deepEqual(calls.map(call => call.callRole), ['primary', 'enrichment', 'enrichment'])
+  assert.deepEqual(calls.map(call => call.costMinor), [1, 2, 2])
+  assert.equal(new Set(calls.map(call => call.usageRequestId)).size, 1)
+  assert.equal(state.platformStore.restrictedResponseArchives.size, 3)
+  const record = state.platformStore.ingestJobs[0].payload.records[0]
+  assert.equal(record.metrics.views, 619)
+  assert.equal(record.rawItem.metrics.engaged, 107)
+  assert.equal(record.rawItem.metricsSupplement.matchedPage, 2)
+  assert.equal(record.rawItem.metricEvidence.providerCallId, calls[2].id)
+  assert.equal(record.rawItem.metricEvidence.sourcePointer, '$.data.data.noteList[0].noteInfo')
+  const replay = await state.call('note_detail', { note_id: ID }, 'research-request-001', endpoints.note_detail.aliases[0])
+  assert.deepEqual(replay.body, first.body)
+  assert.equal(queries.length, 2)
+  const bill = await state.service.getTenantBilling(state.tenant.id)
+  assert.equal(bill.ledger.filter(row => row.kind === 'capture').length, 1)
+  assert.equal(bill.account.availableMinor, 90)
+})
+
+test('v2 pagination stops on total, empty, repeated page or the 15-page bound; short pages still continue', async () => {
+  for (const [mode, expectedPages, status] of [['total', 1, 'not_found'], ['empty', 2, 'not_found'], ['repeated', 2, 'repeated_page'], ['limit', 15, 'page_limit']]) {
+    let pages = 0
+    const state = await fixture(async url => {
+      if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+      pages++
+      return response(bloggerPage(mode === 'empty' && pages === 2 ? [] : [bloggerNote(mode === 'limit' ? pages.toString(16).padStart(24, '0') : OTHER)], mode === 'total' ? 1 : 50))
+    })
+    state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+    const result = await state.call()
+    assert.equal(pages, expectedPages, mode)
+    assert.equal(result.body.meta.metricsSupplement.status, status, mode)
+    assert.equal(result.body.data.item.metrics.views, 0, 'unmatched data is never merged')
+  }
+})
+
+test('v2 zeroes and missing counters remain distinct, and total engagement never becomes likes', () => {
+  const parsed = projectBloggerNotesV2(bloggerPage([bloggerNote(ID, { readNum: '0', impNum: null, favNum: -1, engageNum: '107' })], '1'))
+  assert.deepEqual(parsed.items[0].metrics, { views: 0, impressions: null, collected: null, engaged: 107 })
+  assert.equal(parsed.total, 1)
+  assert.throws(() => projectBloggerNotesV2({ code: 200, data: { noteList: [] } }))
+  assert.throws(() => projectBloggerNotesV2({ code: 200, data: { success: false, data: null } }))
+  assert.throws(() => projectBloggerNotesV2(bloggerPage([{ noteInfo: { noteId: 'bad' } }])))
+  assert.deepEqual(projectBloggerNotesV2({ code: 200, data: null }), { items: [], total: null })
+})
+
+test('supplementing one missing reach metric preserves positive detail metrics and individual real zeroes', async () => {
+  const state = await fixture(async url => response(new URL(url).pathname.endsWith('/get_note_detail')
+    ? detail({ readNum: null, impNum: 200, likeNum: 10, favNum: 0, cmtNum: 0, userId: AUTHOR })
+    : bloggerPage([bloggerNote()], 1)))
+  state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+  const result = await state.call()
+  assert.deepEqual(result.body.data.item.metrics, { views: 619, impressions: 200, liked: 10, collected: 0, comments: 0, shared: null, engaged: 107 })
+  assert.equal(result.body.meta.metricSources.impressions, 'detail')
+  assert.equal(result.body.meta.metricSources.views, 'blogger_notes_v2')
+})
+
+test('missing optional procurement price preserves old analytics and does not inherit a global or detail price', async () => {
+  let dispatched = 0
+  const state = await fixture(async () => { dispatched++; return response(zeroDetail()) })
+  state.config.billing.unitCostMinor = 1
+  const result = await state.call()
+  assert.equal(result.body.meta.metricsSupplement.status, 'not_configured')
+  assert.equal(dispatched, 1)
+  assert.equal(result.body.data.item.text, zeroDetail().data.data.content)
+})
+
+test('metrics supplementation uses reviewed database price while original analytics needs only its old price', async () => {
+  let pages = 0
+  const state = await fixture(async url => {
+    if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+    pages++; return response(bloggerPage([bloggerNote()], 1))
+  })
+  const control = state.gateway.operationControlStore = new MemoryExternalPlatformControlStore()
+  const runtime = { config: state.config, credentialConfigured: true }
+  const priceBook = { currency: 'USD', pricingAsOf: stamp.toISOString(), monthlyBudgetMinor: 10000,
+    monthlySubsidyBudgetMinor: 10000, unitCostMinorByEndpoint: { [endpoints.note_detail.endpointKey]: 1 } }
+  const active = await control.updatePolicy('tikhub', 'social.posts.analytics', {
+    desiredState: 'active', expectedRevision: 0, reason: 'Keep detail price', priceBook }, { runtime })
+  assert.equal((await state.call()).body.meta.metricsSupplement.status, 'not_configured')
+  assert.equal(pages, 0)
+  assert.deepEqual(active.release.optionalEndpointKeys, [XHS_BLOGGER_NOTES_V2.endpointKey])
+  const supplemented = await control.updatePolicy('tikhub', 'social.posts.analytics', { desiredState: 'active', expectedRevision: active.revision,
+    reason: 'Review supplementary page price', priceBook: { ...priceBook, unitCostMinorByEndpoint: {
+      ...priceBook.unitCostMinorByEndpoint, [XHS_BLOGGER_NOTES_V2.endpointKey]: 2,
+    } } }, { runtime })
+  const result = await state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'metrics-priced-refresh')
+  assert.equal(result.body.data.item.metrics.views, 619)
+  assert.equal(pages, 1)
+  assert.deepEqual(supplemented.release.endpointKeys, [endpoints.note_detail.endpointKey, XHS_BLOGGER_NOTES_V2.endpointKey])
+  const removed = await control.updatePolicy('tikhub', 'social.posts.analytics', { desiredState: 'active', expectedRevision: supplemented.revision,
+    reason: 'Disable optional metrics only', priceBook }, { runtime })
+  assert.deepEqual(removed.release.endpointKeys, [endpoints.note_detail.endpointKey])
+  assert.equal(removed.effectiveState, 'active')
+})
+
+test('v2 errors keep body and durable billing evidence, never retry a page or replay acquisition', async () => {
+  for (const mode of ['400', 'malformed', 'business', 'unknown', 'wrong_author']) {
+    let pages = 0
+    const state = await fixture(async url => {
+      if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+      pages++
+      if (mode === '400') return new Response('{}', { status: 400 })
+      if (mode === 'malformed') return new Response('{bad', { status: 200 })
+      if (mode === 'business') return response({ code: 200, data: { code: -1, success: false, data: null } })
+      if (mode === 'unknown') throw new Error('Network outcome unknown')
+      const note = bloggerNote(); note.userInfo.userId = OTHER
+      return response(bloggerPage([note], 1))
+    })
+    state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+    const result = await state.call()
+    assert.equal(result.body.meta.metricsSupplement.status, 'temporarily_unavailable', mode)
+    assert.equal(result.body.data.item.text, zeroDetail().data.data.content)
+    assert.equal(pages, 1)
+    const call = [...state.platformStore.calls.values()][1]
+    assert.equal(call.billed, mode === '400' ? false : mode === 'unknown' ? null : true, mode)
+    await state.call()
+    assert.equal(pages, 1, mode)
+    assert.equal([...state.platformStore.costReservations.values()].every(row => row.status === 'released'), true)
+  }
+})
+
+test('supplemental page dispatch rechecks revoked grants and budget before each new page', async () => {
+  for (const mode of ['grant', 'budget']) {
+    let pages = 0
+    const state = await fixture(async url => {
+      if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+      pages++
+      if (mode === 'grant') await state.service.putCapabilityConfiguration('social.posts.analytics', {
+        tenantId: state.tenant.id, consumerId: state.consumer.id, enabled: false, maxRequests: 1000, windowSeconds: 3600,
+      })
+      return response(bloggerPage([bloggerNote(OTHER)], 50))
+    })
+    state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+    if (mode === 'budget') state.config.billing.monthlyBudgetMinor = 2
+    const result = await state.call()
+    assert.equal(pages, 1)
+    assert.equal(result.body.meta.metricsSupplement.status, 'temporarily_unavailable')
+  }
+})
+
+test('a missing author, positive reach, or no detail result never triggers v2 acquisition', async () => {
+  for (const raw of [detail(), detail({ readNum: 0, impNum: 0 }), { code: 200, data: null }]) {
+    let calls = 0
+    const state = await fixture(async url => {
+      calls++
+      assert.equal(new URL(url).pathname, endpoints.note_detail.providerPath)
+      return response(raw)
+    })
+    state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+    await state.call()
+    assert.equal(calls, 1)
+  }
+})
+
+test('v2 page settlement failure stops acquisition and retains unknown evidence instead of successful delivery', async () => {
+  let pages = 0
+  const state = await fixture(async url => {
+    if (new URL(url).pathname.endsWith('/get_note_detail')) return response(zeroDetail())
+    pages++; return response(bloggerPage([bloggerNote()], 1))
+  })
+  state.config.billing.unitCostMinorByEndpoint[XHS_BLOGGER_NOTES_V2.endpointKey] = 1
+  const finish = state.platformStore.finishProviderStep.bind(state.platformStore)
+  state.platformStore.finishProviderStep = async settlement => {
+    if (settlement.outcome === 'succeeded') throw new Error('Simulated persistence failure')
+    return finish(settlement)
+  }
+  await assert.rejects(state.call(), { code: 'external_platform_response_unusable' })
+  assert.equal(pages, 1)
+  assert.equal([...state.platformStore.calls.values()][1].outcome, 'unknown')
+  assert.equal(state.platformStore.restrictedResponseArchives.size, 2)
+  assert.equal(state.platformStore.ingestJobs.length, 0)
+  await assert.rejects(state.call())
+  assert.equal(pages, 1)
 })
 
 test('detail projects HTTP image CDN addresses as usable HTTPS and retains explicit zero evidence', () => {
