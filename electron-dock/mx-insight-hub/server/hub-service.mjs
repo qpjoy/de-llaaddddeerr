@@ -661,7 +661,7 @@ export class HubService {
     return tenant
   }
 
-  async putTenantServiceAccess(id, body, actor) {
+  async tenantServiceAccessInput(id, body) {
     const tenantId = requiredUuid(id, 'tenantId')
     assert(await this.store.getTenant(tenantId),404,'tenant_not_found','Tenant not found')
     assert(Array.isArray(body?.platforms) && Array.isArray(body?.capabilities),400,'invalid_request','Explicit platforms and capabilities are required')
@@ -676,7 +676,17 @@ export class HubService {
       maxRequests:positiveInteger(body.maxRequests,'maxRequests',1000),windowSeconds:positiveInteger(body.windowSeconds,'windowSeconds',3600),
       maxPageSize:positiveInteger(body.maxPageSize,'maxPageSize',100),maxCrawlWork:positiveInteger(body.maxCrawlWork,'maxCrawlWork',100)}
     assert(input.maxCrawlWork <= MAX_CRAWL_WORK,400,'invalid_request','Crawl work exceeds limit')
-    return this.store.putTenantServiceAccess(tenantId,input,actor)
+    return { tenantId, input }
+  }
+
+  async previewTenantServiceAccess(id, body) {
+    const { tenantId, input } = await this.tenantServiceAccessInput(id, body)
+    return this.store.previewTenantServiceAccess(tenantId, input)
+  }
+
+  async putTenantServiceAccess(id, body, actor) {
+    const { tenantId, input } = await this.tenantServiceAccessInput(id, body)
+    return this.store.putTenantServiceAccess(tenantId, input, actor, { previewToken: body.previewToken, confirmRemovals: body.confirmRemovals })
   }
 
   async createConsumer(body) {

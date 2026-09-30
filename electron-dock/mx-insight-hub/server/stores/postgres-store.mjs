@@ -1,7 +1,7 @@
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
-import { readTenantAccess, writeTenantAccess, applyTenantAccess } from './tenant-service-access.mjs'
+import { readTenantAccess, writeTenantAccess, applyTenantAccess, previewTenantAccess } from './tenant-service-access.mjs'
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
@@ -1164,7 +1164,8 @@ export class PostgresStore {
   }
 
   async getTenantServiceAccess(tenantId) { return readTenantAccess(this.pool, tenantId) }
-  async putTenantServiceAccess(tenantId, input, actor) { return writeTenantAccess(this.pool, tenantId, input, actor) }
+  async previewTenantServiceAccess(tenantId, input) { return previewTenantAccess(this.pool, tenantId, input) }
+  async putTenantServiceAccess(tenantId, input, actor, review) { return writeTenantAccess(this.pool, tenantId, input, actor, review) }
 
   async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     const id = randomUUID()
@@ -1250,6 +1251,7 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${tenantId}`])
       const assignment = await client.query(
         `SELECT 1
            FROM consumer_plan_assignments assignment
@@ -1285,6 +1287,10 @@ export class PostgresStore {
         throw new AppError(409, 'api_key_owner_mismatch', 'API key tenant and consumer do not match')
       }
       if (explicitScopes) {
+        for (const [requested, column, table] of [[platformEntitlements || [], 'platform', 'platform_grants'], [capabilityEntitlements || [], 'capability', 'capability_grants']]) {
+          const { rows: allowed } = await client.query(`SELECT ${column} FROM ${table} WHERE consumer_id=$1`, [consumerId])
+          if (requested.some(row => !allowed.some(grant => grant[column] === row[column]))) throw new AppError(409, 'api_key_scope_not_granted', 'Consumer grants changed; reload before issuing')
+        }
         for (const entitlement of platformEntitlements || []) {
           await client.query(
             `INSERT INTO api_key_platform_entitlements
@@ -1452,6 +1458,9 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      const { rows: owners } = await client.query('SELECT tenant_id FROM api_keys WHERE id=$1', [id])
+      if (!owners[0]) throw new AppError(404, 'api_key_not_found', 'API key not found')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${owners[0].tenant_id}`])
       const { rows: keys } = await client.query('SELECT * FROM api_keys WHERE id=$1 FOR UPDATE', [id])
       const key = keys[0]
       if (!key || key.status !== 'active' || new Date(key.expires_at) <= new Date()) throw new AppError(409, 'api_key_unavailable', 'Key is expired or revoked')
@@ -2208,6 +2217,8 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      const { rows: owners } = await client.query('SELECT tenant_id FROM consumers WHERE id=$1', [consumerId])
+      if (owners[0]) await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${owners[0].tenant_id}`])
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         authorizationScopeLockKey(consumerId, { type: 'platform', key: platformName }),
       ])
@@ -2259,6 +2270,7 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${tenantId}`])
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         authorizationScopeLockKey(consumerId, { type: 'capability', key: capability }),
       ])

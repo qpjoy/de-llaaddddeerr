@@ -439,6 +439,7 @@ export const adminApi = {
   // are not allowed to use.
   session: (token) => request(token, `${ADMIN_ROOT}/session`),
   tenantServiceAccess: (token, id) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access`),
+  previewTenantServiceAccess: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access/preview`, { method: 'POST', body }),
   saveTenantServiceAccess: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access`, { method: 'PUT', body }),
   members: (token) => request(token, `${ADMIN_ROOT}/members`),
   grantMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships`, { method: 'POST', body }),

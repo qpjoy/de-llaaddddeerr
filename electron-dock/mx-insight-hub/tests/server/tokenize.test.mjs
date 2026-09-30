@@ -340,7 +340,7 @@ test('Postgres capability configuration rolls back its grant when policy persist
     }),
     /simulated policy transaction failure/,
   )
-  assert.deepEqual(statements, ['BEGIN', 'LOCK', 'GRANT', 'POLICY', 'ROLLBACK'])
+  assert.deepEqual(statements, ['BEGIN', 'LOCK', 'LOCK', 'GRANT', 'POLICY', 'ROLLBACK'])
   assert.equal(stagedAuthorized, false)
   assert.equal(authorized, false)
   assert.equal(released, true)

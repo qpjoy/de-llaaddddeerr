@@ -161,7 +161,7 @@ function usePlatformCatalog(token, session, onUnauthorized) {
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 100 }
 const CAPABILITY_CATALOG = {
   'web.search': {label:'Web Search 搜索',endpoint:'POST /api/v1/data/web-search/search',description:'全网搜索；另需勾选渠道'},
-  ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.capability,{label:`Web Search · ${p.label}`,description:'允许此渠道；不会自动扩大已有 Key'}])),
+  ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.capability,{label:`Web Search · ${p.label}`,description:'租户授权保存后同步到已有 Key'}])),
   'social.content.search': { label: 'Hub 内容搜索', endpoint: 'POST /api/v1/data/social/search', description: '独立搜索合同；首批覆盖 Twitter 单页', usageHint: '需 twitter 平台与本能力授权；运行开关默认禁用' },
   'social.content.crawl': { label: 'Hub 账号内容', endpoint: 'POST /api/v1/data/social/crawl', description: 'Twitter 账号时间线单页；不自动获取全量历史', usageHint: '需 twitter 平台与本能力授权；新游标不可与旧接口混用' },
   'social.profile.get': { label: 'Hub 账号资料', endpoint: 'POST /api/v1/data/social/user-info', description: 'Twitter 基础资料；不补充 about', usageHint: '需 twitter 平台与本能力授权；保持旧资料接口不变' },
@@ -1144,7 +1144,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
-      {session?.platformAdmin ? <><TenantMemberships token={token} tenants={tenants} /><TenantServiceAccess token={token} tenants={tenants} platforms={platformCatalog} capabilities={CAPABILITY_CATALOG} /></> : null}
+      {session?.platformAdmin ? <><TenantMemberships token={token} tenants={tenants} /><a className="qp-button qp-button--outline" href="#/platforms">前往开放能力管理租户授权</a></> : null}
       <Panel
         title="租户"
         subtitle={`${tenants.length} 个租户`}
@@ -1571,7 +1571,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
   return (
     <>
-      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="每把 Key 在签发时固化平台与能力范围，并独立统计用量。调用者授权减少会立即收窄现有 Key；新增授权可通过“调整 Key 权限”应用到原 Key。默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="每把 Key 独立统计用量。租户授权保存后会同步已有 Key，也可在此单独调整当前权限；默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
         {session?.kind === 'admin-token' ? <a className="qp-button qp-button--outline" href="#/provisioning">批量开通接口</a> : null}
         {canIssueKey ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
@@ -1813,7 +1813,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           title={issuedSecret.replaces ? '替代 API Key 已签发' : 'API Key 已签发'}
           description={issuedSecret.replaces
             ? `完整密钥已加密保存，可验证账号密码后再次查看；有效至 ${formatDate(issuedSecret.expiresAt)}。旧 Key 保持有效，请先安全保存、更新客户端并验证，再撤销旧 Key。`
-            : `完整密钥已加密保存，可验证账号密码后再次查看；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用签发时勾选、且调用者当前仍允许的范围。`}
+            : `完整密钥已加密保存，可验证账号密码后再次查看；有效至 ${formatDate(issuedSecret.expiresAt)}。该 Key 只能调用当前已授权、且调用者仍允许的范围；租户授权保存会同步更新已有 Key。`}
           onClose={() => setIssuedSecret(null)}
           footer={(
             <>
@@ -2781,6 +2781,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 }
 
 export function PlatformsPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+  const [workspace, setWorkspace] = useState(() => query.get('consumerId') || !session?.platformAdmin ? 'consumer' : 'tenant')
+  const [consumerSection, setConsumerSection] = useState('domains')
+  const [domainGroup, setDomainGroup] = useState('social')
   const platformCatalog = usePlatformCatalog(token, session, onUnauthorized)
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
@@ -3005,12 +3008,18 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
   return (
     <>
-      {session?.platformAdmin ? <TenantServiceAccess token={token} tenants={data.tenants || []} platforms={[...new Set([...platformCatalog,'web_search'])]} capabilities={CAPABILITY_CATALOG}/> : null}
-      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="调用者授权是上限，API Key 在签发时选择其中的平台与能力。停用会立即收窄现有 Key；新增能力需在 Key 列表中显式调整权限。" loading={state.loading} onRefresh={state.refresh}>
-        {canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
+      <PageHeading title="开放能力" description="按租户管理授权，变更同步已有 Key。调用者配置与 Key 限额独立管理。" loading={state.loading} onRefresh={workspace==='tenant'?undefined:state.refresh}>
+        {workspace!=='tenant' && canReadApiKeys && data.consumerId ? <a className="qp-button qp-button--ghost" href={`#/api-keys?${new URLSearchParams({ consumerId: data.consumerId })}`}><Key size={17} aria-hidden="true" />查看该身份 API Key</a> : null}
         <a className="qp-button qp-button--outline" href={publicDocsHref()}>查看公共 API 文档</a>
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+      <div className="mih-access-tabs" aria-label="开放能力工作区">
+        {session?.platformAdmin ? <button type="button" aria-pressed={workspace==='tenant'} onClick={()=>setWorkspace('tenant')}>租户授权</button> : null}
+        <button type="button" aria-pressed={workspace==='consumer'} onClick={()=>setWorkspace('consumer')}>调用者配置</button>
+        {session?.kind==='admin-token' ? <button type="button" aria-pressed={workspace==='keys'} onClick={()=>setWorkspace('keys')}>Key 限额</button> : null}
+      </div>
+      {session?.platformAdmin ? <div hidden={workspace!=='tenant'}><TenantServiceAccess token={token} tenants={data.tenants || []} platforms={[...new Set([...platformCatalog,'web_search'])]} capabilities={CAPABILITY_CATALOG} initialTenantId={requestedTenantId} onSaved={state.refresh}/></div> : null}
+      <div hidden={workspace==='tenant'} className="mih-access-consumer">
       <section className="qp-panel mih-filterbar">
         <FilterSelect
           label="租户"
@@ -3047,12 +3056,15 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
             <span>当前授权对象</span>
             <strong>{selectedTenant?.name || data.tenantId} / {selectedConsumer.name}</strong>
             <code className="mih-mono">Consumer ID: {selectedConsumer.id}</code>
-            <small>现有 Key 只会被这里的变更收窄，不会因新增授权而静默扩权；扩大范围请在 Key 列表中调整权限</small>
+            {workspace==='consumer' ? <small>这里调整单个调用者。现有 Key 只会被这里的变更收窄，不会因新增授权而静默扩权；统一更新租户所有旧 Key，请使用“租户授权”。</small> : null}
           </div>
         ) : null}
       </section>
 
-      {session?.platformAdmin ? <Panel title="启信宝 · 企业数据权限" subtitle="企业数据域与查询能力同时授权，现有 Key 还需显式勾选保存；套餐只决定价格。">
+      {workspace==='keys' ? (data.consumerId && !contextUnavailable ? <KeyAccessLimitsPanel key={data.consumerId} token={token} consumerId={data.consumerId} capabilities={CAPABILITY_CATALOG}/> : <p>选择调用者后配置其 Key 限额。</p>) : null}
+      {workspace==='consumer' ? <>
+      <div className="mih-access-tabs mih-access-tabs--secondary" aria-label="调用者配置分类">{[['domains','数据域'],['operations','业务操作'],['compatibility','兼容接口'],['guide','产品开通与说明']].map(([key,label])=><button type="button" key={key} aria-pressed={consumerSection===key} onClick={()=>{setConsumerSection(key);setCapabilityFilter('')}}>{label}</button>)}</div>
+      {consumerSection==='guide' && session?.platformAdmin ? <Panel title="启信宝 · 企业数据权限" subtitle="企业数据域与查询能力同时授权，现有 Key 还需显式勾选保存；套餐只决定价格。">
         <p>数据域 enterprise：{grants.has('enterprise') ? '已授权' : '未授权'} · 查询能力 enterprise.query：{capabilityGrants.has('enterprise.query') ? '已授权' : '未授权'}</p>
         <div className="mih-page-actions">
           <button type="button" className="qp-button qp-button--primary" onClick={grantEnterprise}
@@ -3062,7 +3074,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         </div>
       </Panel> : null}
 
-      {session?.platformAdmin ? <section className="qp-panel mih-provider-routing-boundary" aria-label="电商能力与上游路由边界">
+      {consumerSection==='guide' && session?.platformAdmin ? <section className="qp-panel mih-provider-routing-boundary" aria-label="电商能力与上游路由边界">
         <div className="mih-provider-routing-boundary__intro">
           <span><Cloud size={19} weight="duotone" aria-hidden="true" /></span>
           <div>
@@ -3083,11 +3095,11 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         </footer>
       </section> : null}
 
-      <Panel
+      {consumerSection==='domains' ? <Panel
         title="API Key 可访问的数据平台 / 数据域"
         subtitle={`${grants.size} / ${platformCatalog.length} 已启用；调用者授权是上限，Key 权限需单独勾选并保存`}
       >
-        <p>新闻发现按下方“存量记录 · 按栏目”的数据类别授权，例如“数据中心 · 新闻资讯”；财经、科技等类别也可能包含新闻。开通调用者后，还需在 API Keys 中调整原 Key 权限并勾选相同类别。搜索“新闻发现”可查看这些类别，无需另找同名业务操作。</p>
+        <details className="mih-access-help"><summary>新闻发现如何授权</summary><p>新闻发现按下方“存量记录 · 按栏目”的数据类别授权，例如“数据中心 · 新闻资讯”；财经、科技等类别也可能包含新闻。开通调用者后，还需在 API Keys 中调整原 Key 权限并勾选相同类别。搜索“新闻发现”可查看这些类别，无需另找同名业务操作。</p></details>
         {data.consumerId ? (
           <div className="mih-capability-filter">
             <MagnifyingGlass size={16} aria-hidden="true" />
@@ -3109,17 +3121,18 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         {data.consumerId && groupedPlatformRows.length === 0 ? (
           <p className="mih-capability-empty">没有匹配「{capabilityFilter}」的开放项。</p>
         ) : null}
-        {data.consumerId ? groupedPlatformRows.map((group) => (
+        {data.consumerId ? <div className="mih-access-domain-groups">{groupedPlatformRows.map(group=><button type="button" key={group.key} aria-pressed={(groupedPlatformRows.some(g=>g.key===domainGroup)?domainGroup:groupedPlatformRows[0]?.key)===group.key} onClick={()=>setDomainGroup(group.key)}>{group.label} · {group.rows.length}</button>)}</div> : null}
+        {data.consumerId ? groupedPlatformRows.filter(group=>group.key===(groupedPlatformRows.some(g=>g.key===domainGroup)?domainGroup:groupedPlatformRows[0]?.key)).map((group) => (
           <section className="mih-capability-group" key={group.key}>
             <header>
               <strong>{group.label}</strong>
               <span>{group.rows.filter((row) => row.enabled).length} / {group.rows.length} 已启用</span>
               {group.hint ? <small>{group.hint}</small> : null}
             </header>
-          <Table label={`${group.label}授权与策略`}>
+          <PagedItems items={group.rows} label={group.label} text={row=>`${row.platform} ${platformLabel(row.platform)}`} pageSize={8} searchable={false}>{visible => <Table label={`${group.label}授权与策略`}>
             <thead><tr><th>开放项</th><th>能力类型</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>crawl 总预算</th><th>操作</th></tr></thead>
             <tbody>
-              {group.rows.map((row) => (
+              {visible.map(({entry:row}) => (
                 <tr key={row.platform}>
                   <td>
                     <strong>{row.platform === 'enterprise' && session?.platformAdmin ? '企业数据 · 启信宝' : platformLabel(row.platform)}</strong>
@@ -3162,14 +3175,12 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                 </tr>
               ))}
             </tbody>
-          </Table>
+          </Table>}</PagedItems>
           </section>
         )) : (
           <EmptyState icon={Globe} title={data.tenants.length ? '请选择调用者' : '请先创建调用者'} description="平台授权与配额策略必须绑定到具体调用者。" action={!data.tenants.length ? <a className="qp-button qp-button--outline" href="#/consumers"><Users size={16} aria-hidden="true" />前往调用者</a> : null} />
         )}
-      </Panel>
-
-      {session?.kind === 'admin-token' && data.consumerId && !contextUnavailable ? <KeyAccessLimitsPanel key={data.consumerId} token={token} consumerId={data.consumerId} capabilities={CAPABILITY_CATALOG} /> : null}
+      </Panel> : null}
       {[
         {
           key: 'operations',
@@ -3187,7 +3198,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           total: capabilityRows.filter((row) => row.metadata.group === 'compatibility'),
           tableLabel: '兼容接口合同授权与策略',
         },
-      ].map((section) => (
+      ].filter(section=>section.key===consumerSection).map((section) => (
         <Panel
           key={section.key}
           title={section.title}
@@ -3249,6 +3260,8 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         </Panel>
       ))}
 
+      </> : null}
+      </div>
       {configureTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${platformLabel(configureTarget.platform)}`}

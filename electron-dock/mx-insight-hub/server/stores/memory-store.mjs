@@ -3,6 +3,7 @@ import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
 import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { tenantAccessPreview, assertTenantAccessReview } from '../tenant-access-sync.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
 import { customerRequestPrice, usageMeterKey } from '../billing/contracts.mjs'
 import { consumptionItem, consumptionPage } from '../billing/consumption.mjs'
@@ -588,10 +589,37 @@ export class MemoryStore {
       grants.set(consumerId,[...current].sort())
     }
   }
-  async putTenantServiceAccess(tenantId, input, actor) {
+  tenantAccessSnapshot(tenantId, input) {
     const before = this.tenantServiceAccess.get(tenantId) || {platforms:[],capabilities:[],revision:0}
-    if (before.revision !== input.revision) throw new AppError(409,'revision_conflict','Tenant access changed; reload before saving')
+    const keys = [...this.apiKeys.values()].filter(key => key.tenantId === tenantId).map(key => ({
+      ...this.#publicApiKey(key), consumerName: this.consumers.get(key.consumerId)?.name,
+    }))
+    return { before, preview: tenantAccessPreview(tenantId, before, input, keys, [...this.consumers.values()].filter(c => c.tenantId === tenantId).length) }
+  }
+  async previewTenantServiceAccess(tenantId, input) { return this.tenantAccessSnapshot(tenantId, input).preview }
+  async putTenantServiceAccess(tenantId, input, actor, review) {
+    const { before, preview } = this.tenantAccessSnapshot(tenantId, input)
+    assertTenantAccessReview(preview, review)
     const after = {...input, revision:before.revision+1}
+    // Capture legacy entitlements before consumer grants change. Existing
+    // per-Key limits and extra scopes survive the conversion to a snapshot.
+    for (const change of preview.keys.filter(key => key.changed)) {
+      const key = this.apiKeys.get(change.id)
+      for (const [field, column, map, dynamic] of [
+        ['platforms', 'platform', this.apiKeyPlatformEntitlements, this.#dynamicPlatformEntitlements(key)],
+        ['capabilities', 'capability', this.apiKeyCapabilityEntitlements, this.#dynamicCapabilityEntitlements(key)],
+      ]) {
+        const old = key.scopeMode === 'legacy_dynamic' ? dynamic : map.get(key.id) || []
+        map.set(key.id, change.next[field].map(scope => old.find(row => row[column] === scope) || {
+          [column]: scope, maxRequests: after.maxRequests, windowSeconds: after.windowSeconds,
+          ...(field === 'platforms' ? { maxPageSize: after.maxPageSize } : {}),
+        }))
+      }
+      key.scopeMode = 'snapshot'
+      key.webSearchOrder = change.next.webSearchOrder
+      this.apiKeyScopeEvents ||= []
+      this.apiKeyScopeEvents.push({ id: key.id, actor, before: clone(change.previous), after: clone(change.next) })
+    }
     for (const consumer of this.consumers.values()) if (consumer.tenantId === tenantId) this.applyTenantServiceAccess(consumer.id,before,after)
     this.tenantServiceAccess.set(tenantId,clone(after))
     this.tenantServiceAccessEvents.push({tenantId,actor,...clone(after)})

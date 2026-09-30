@@ -77,7 +77,7 @@ test('disabled suppliers make no request; unauthorized supplier and test keys ca
  const testKey=await h.service.createApiKey({consumerId:h.consumer.id,name:'Test',environment:'test',platforms:['web_search'],capabilities:['web.search','web.search.provider.baidu']});const testCtx=await h.service.authenticate(testKey.secret)
  await assert.rejects(h.search.search(testCtx,{body:{query:'AI'},idempotencyKey:'web-test-key-denied'}),{status:403});assert.equal(h.calls.length,0)
 })
-test('tenant grants do not expand existing keys; order edits compare-and-swap atomically',async()=>{
+test('individual consumer grants do not expand existing keys; order edits compare-and-swap atomically',async()=>{
  const h=await harness({providers:['baidu']});await h.service.putCapabilityConfiguration('web.search.provider.tavily',{tenantId:h.tenant.id,consumerId:h.consumer.id,enabled:true})
  assert.deepEqual((await h.search.capabilities(h.context)).order,['baidu'])
  await assert.rejects(h.service.updateApiKeyScopes(h.key.id,{platforms:[],capabilities:[],webSearchOrder:[],expected:{scopeMode:'snapshot',platforms:h.key.platforms,capabilities:h.key.capabilities,webSearchOrder:['tavily']}},'fixture'),{code:'api_key_scopes_changed'})

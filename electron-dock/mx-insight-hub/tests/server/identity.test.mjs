@@ -373,6 +373,8 @@ test('tenant capabilities come from the role held in the target tenant', async (
     assert.equal(denied.status,403)
     assert.equal((await denied.json()).error.code,'platform_admin_required')
   }
+  const deniedPreview = await callAdmin(`/internal/v1/admin/tenants/${tenantA.id}/service-access/preview`, {token:'mx-v1-mixed-role',method:'POST',body:{revision:0,platforms:[],capabilities:[],reason:'test'}})
+  assert.equal(deniedPreview.status,403)
   const opened = await callAdmin(`/internal/v1/admin/tenants/${tenantA.id}/service-access`, {method:'PUT',body:{revision:0,platforms:[],capabilities:['nlp.tokenize'],reason:'Approved NLP'}})
   assert.equal(opened.status,200)
   const selfKey = await callAdmin('/internal/v1/admin/api-keys', {token:'mx-v1-mixed-role',method:'POST',body:{consumerId:consumerA.id,name:'Scoped self service',capabilities:['nlp.tokenize']}})

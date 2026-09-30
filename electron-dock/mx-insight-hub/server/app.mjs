@@ -2700,6 +2700,13 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:tenantId/service-access/preview')
+      if (params && request.method === 'POST') {
+        requirePlatformAdmin(principal)
+        response.setHeader('Cache-Control', 'no-store')
+        sendJson(response,200,{data:await service.previewTenantServiceAccess(params.tenantId,await readJson(request)),requestId})
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/tenants/:tenantId/service-access')
       if (params && request.method === 'GET') {
         requireTenantCapability(principal, params.tenantId, 'tenant.read')
