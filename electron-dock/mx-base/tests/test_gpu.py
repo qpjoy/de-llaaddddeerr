@@ -15,7 +15,7 @@ spec.loader.exec_module(gpu)
 
 class GpuTests(unittest.TestCase):
     def setUp(self):
-        self.inventory = '0,GPU-0,Disabled,Disabled\n1,GPU-1,Disabled,Disabled\n2,GPU-2,Disabled,Disabled\n3,GPU-3,Enabled,Enabled'
+        self.inventory = '0,GPU-0,Disabled\n1,GPU-1,Disabled\n2,GPU-2,Disabled\n3,GPU-3,Enabled'
         self.containers, self.processes = [], ''
         self.env = patch.dict(os.environ, {'DOCKER_HOST': '', 'MX_BASE_DISPLAY_GPU': '3',
             'MX_BASE_OCR_GPU': '2', 'MX_BASE_EMBEDDING_GPU': '1'})
@@ -32,6 +32,7 @@ class GpuTests(unittest.TestCase):
         if args[:2] == ('docker', 'inspect'): return json.dumps(self.containers)
         if args[:2] == ('docker', 'top'): return 'PID\n123'
         if args[0] == 'nvidia-smi':
+            self.assertNotIn('display_mode', args[1], 'R580 may return a deprecated-function error here')
             return self.processes if args[1].startswith('--query-compute') else self.inventory
         raise AssertionError(args)
 
@@ -42,12 +43,23 @@ class GpuTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '三张不同'): gpu.check('mx-embedding')
 
     def test_display_unknown_remote_and_busy_fail_closed(self):
-        self.inventory = self.inventory.replace('1,GPU-1,Disabled,Disabled', '1,GPU-1,Enabled,Disabled')
+        self.inventory = self.inventory.replace('1,GPU-1,Disabled', '1,GPU-1,Enabled')
         with self.assertRaisesRegex(ValueError, '显示输出'): gpu.check('mx-embedding')
-        self.inventory = self.inventory.replace('1,GPU-1,Enabled,Disabled', '1,GPU-1,N/A,N/A')
-        with self.assertRaises(ValueError): gpu.check('mx-embedding')
+        self.inventory = self.inventory.replace('1,GPU-1,Enabled', '1,GPU-1,N/A')
+        with self.assertRaisesRegex(ValueError, 'display_active=N/A'): gpu.check('mx-embedding')
         os.environ['DOCKER_HOST'] = 'ssh://remote'
         with self.assertRaisesRegex(ValueError, '本地执行'): gpu.check('mx-embedding')
+
+    def test_missing_display_evidence_cannot_pass_admission(self):
+        for inventory in ('', '1,GPU-1', '1,GPU-1,', '1,GPU-1,Requested functionality has been deprecated'):
+            with self.subTest(inventory=inventory):
+                self.inventory = '0,GPU-0,Disabled\n2,GPU-2,Disabled\n3,GPU-3,Enabled\n' + inventory
+                with self.assertRaises(ValueError): gpu.check('mx-embedding')
+
+    def test_reserved_display_gpu_is_protected_even_when_display_inactive(self):
+        self.inventory = self.inventory.replace('3,GPU-3,Enabled', '3,GPU-3,Disabled')
+        os.environ['MX_BASE_EMBEDDING_GPU'] = 'GPU-3'
+        with self.assertRaisesRegex(ValueError, '三张不同'): gpu.check('mx-embedding')
 
     def test_container_and_process_ownership(self):
         c = {'Id': 'a', 'Name': '/other', 'State': {'Running': True}, 'Config': {'Labels': {}},

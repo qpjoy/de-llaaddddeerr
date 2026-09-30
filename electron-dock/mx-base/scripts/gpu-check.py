@@ -14,6 +14,16 @@ def command(*args):
     return subprocess.check_output(args, universal_newlines=True, timeout=15).strip()
 
 
+def gpu_inventory():
+    # display_mode is deprecated and can contain an error string on R580.
+    # display_active reports initialized display use, including headless X11.
+    raw = command('nvidia-smi', '--query-gpu=index,uuid,display_active', '--format=csv,noheader,nounits')
+    cards = [[v.strip() for v in row] for row in csv.reader(io.StringIO(raw))]
+    if not cards or any(len(card) != 3 or not card[0].isdigit() or not card[1] for card in cards):
+        raise ValueError('GPU 状态格式不完整，无法确认显示活跃状态；拒绝占用')
+    return cards
+
+
 def top_pids(output):
     lines = output.splitlines()
     if not lines or 'PID' not in lines[0].split():
@@ -98,8 +108,7 @@ def describe_process(pid, containers, cache=None):
 
 
 def report(selector=None):
-    raw = command('nvidia-smi', '--query-gpu=index,uuid,display_active,display_mode', '--format=csv,noheader,nounits')
-    cards = [[v.strip() for v in row] for row in csv.reader(io.StringIO(raw))]
+    cards = gpu_inventory()
     if selector is not None:
         cards = [c for c in cards if selector in c[:2]]
     if not cards:
@@ -117,7 +126,7 @@ def report(selector=None):
     rows = [[v.strip() for v in row] for row in csv.reader(io.StringIO(processes))]
     cache = {}
     for card in cards:
-        print('GPU {} ({}) · 显示活跃={} · 显示模式={}'.format(*card))
+        print('GPU {} ({}) · 显示活跃={}'.format(*card))
         reservations = [c for c in containers if c.get('State', {}).get('Running') and reserves_gpu(c, card)]
         for c in reservations:
             print('  容器设备申请：{}（仅配置关联，不证明下列 PID 属于它）'.format(container_description(c)))
@@ -136,8 +145,7 @@ def check(app):
     if not endpoint.startswith('unix://'):
         raise ValueError('请在 GPU 主机本地执行；不能用本机 nvidia-smi 校验远程 Docker')
     command('docker', 'info', '--format', '{{.OSType}}')
-    raw = command('nvidia-smi', '--query-gpu=index,uuid,display_active,display_mode', '--format=csv,noheader,nounits')
-    rows = [[v.strip() for v in row] for row in csv.reader(io.StringIO(raw))]
+    rows = gpu_inventory()
     by_id = {key: row for row in rows for key in row[:2]}
     def resolve(value):
         if value not in by_id:
@@ -149,8 +157,10 @@ def check(app):
     if len({display[1], ocr[1], embedding[1]}) != 3:
         raise ValueError('显示器、OCR、Embedding 必须分配三张不同的 GPU')
     target = ocr if app == 'mx-ocr' else embedding
-    if any(v.lower() != 'disabled' for v in target[2:]):
-        raise ValueError(f'GPU {target[0]} 显示输出未明确禁用，拒绝占用')
+    if target[2].lower() != 'disabled':
+        raise ValueError('GPU {} ({}) 显示输出活跃或状态未知（display_active={}），拒绝占用；'
+                         '可运行 bash scripts/manage.sh gpu {} 查看'.format(
+                             target[0], target[1], safe_label(target[2]), target[0]))
     # Container reservations catch another service even when it has no CUDA process yet.
     ids = command('docker', 'ps', '-a', '-q').split()
     owned_pids = set()

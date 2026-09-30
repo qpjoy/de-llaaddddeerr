@@ -40,7 +40,20 @@ Jenkins 使用相同的 `操作 jenkins`；额外支持 `password jenkins`、`ag
 
 Docker 应用（mx-static、mx-ocr、mx-embedding）的 `deploy` 执行前均要求输入完整的 `yes`；其他输入或 EOF 取消且不执行部署。重复执行会更新同一服务，不创建另一套实例，也不轮换已有凭据/删除模型缓存。它不是无中断发布：OCR 会先准备镜像，再核验并停止本服务旧容器、重新创建并等待健康；替换后的启动失败不保证自动回滚。构建失败时 OCR 旧服务保持运行。
 
-GPU 校验按容器名称和应用标签识别归属，兼容 `docker top` 多列输出，并通过主机 cgroup 核验新建 Worker。`yes` 不会跳过显示器保护或授权终止其他应用进程；无法证明属于本应用的 PID 仍会拒绝并打印原因。
+GPU 校验按容器名称和应用标签识别归属，兼容 `docker top` 多列输出，并通过主机 cgroup 核验新建 Worker。普通部署的 `yes` 不会跳过显示器保护或授权终止其他应用进程；无法证明属于本应用的 PID 仍会拒绝并打印原因。
+
+NVIDIA 已废弃 `display_mode`（[官方说明](https://docs.nvidia.com/deploy/nvidia-smi/)），R580 可能返回废弃提示。普通 GPU 检查只查询仍受支持的 `display_active`，仅明确 `Disabled` 才继续；活跃、未知或缺失均拒绝，配置中保留给显示器的 GPU 不用于普通 OCR/Embedding 部署。此检查确认显示是否初始化，不承诺没有连接但尚未启用的显示器。其余容器申请和计算进程归属检查保持生效，不允许因为 0% GPU-util 就抢占其他模型显存。
+
+用户明确选择维持现有 Embedding 的 GPU 3 共享部署后，新增 `bash scripts/manage.sh deploy mx-embedding --keep-gpu`：只升级已运行、属于本 Compose 项目的现有实例，沿用其 GPU UUID、模型与资源上限、缓存/端口/Key 挂载，允许维持原卡上的显示和其他模型共享；不终止或重配其他服务。先展示计划并确认，构建后重验容器 ID/配置，再仅替换 api。例外不持久化，不扩展到 OCR、新部署或普通 start/restart；详见 [共享实例升级](mx-embedding/README.md#沿用已经运行的共享-gpu-实例)。
+
+若 `bash scripts/manage.sh gpu 1` 返回 `usage: gpu-check.py mx-ocr|mx-embedding`，说明主机脚本版本不匹配/较旧，需一并同步 `scripts/manage.sh` 与 `scripts/gpu-check.py`。同步前可用以下只读命令核对原始状态与旧容器绑定（不输出凭据）：
+
+```bash
+nvidia-smi --query-gpu=index,uuid,display_active --format=csv,noheader
+docker inspect mx-embedding-api --format '{{json .HostConfig.DeviceRequests}}'
+```
+
+`.env.gpu` 的 Embedding 默认编号为 1，部署解析后写入容器的是 UUID。修改 `.env.gpu` 不会迁移运行中的旧容器；部署会使用新配置，start/restart 要求已保存的 GPU 与当前配置一致。请先核对实际绑定，勿为越过检查任意换卡。部署在 GPU admission 阶段被拒绝时尚未执行 Compose 更新，旧实例保持原状。
 
 `gpu` 是只读诊断：显示 GPU 编号/UUID、显示状态、计算进程 PID/显存、进程名以及能核验的容器名、镜像、mx-base/Compose/Kubernetes 服务标签；非 Docker 进程尝试显示 systemd unit。按 cgroup 或 docker top 关联，不凭 Python 进程名称猜服务。无法查询时明确显示归属未确认，不输出命令行参数和环境变量。NVIDIA 计算进程列表不包含全部图形进程，不能据此断言显卡空闲。部署拒绝提示也会带上可查到的占用服务。
 

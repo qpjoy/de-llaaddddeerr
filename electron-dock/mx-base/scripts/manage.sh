@@ -23,6 +23,7 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
   bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
   bash scripts/manage.sh deploy mx-embedding --proxy http://<宿主机IP>:7788 # 自动保存下载设置
+  bash scripts/manage.sh deploy mx-embedding --keep-gpu # 明确沿用运行中实例的共享 GPU 与资源上限
   bash scripts/manage.sh deploy jenkins   # 显式启用可选构建基础设施
   bash scripts/manage.sh <操作> <应用>
 
@@ -137,6 +138,12 @@ static_jobs() {
 run_app() {
   local action="$1" app="$2"
   shift 2
+  local option
+  for option in "$@"; do
+    if [ "$option" = --keep-gpu ] && { [ "$app" != mx-embedding ] || [ "$action" != deploy ]; }; then
+      die '--keep-gpu 仅支持 deploy mx-embedding，不适用于其他服务或操作'
+    fi
+  done
   if [[ "$app" = mx-ocr || "$app" = mx-embedding ]]; then
     bash "$ROOT_DIR/$app/scripts/manage.sh" "$action" "$@"
     return

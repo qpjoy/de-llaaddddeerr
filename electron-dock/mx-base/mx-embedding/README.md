@@ -42,6 +42,28 @@ deploy 执行前要求输入完整的 `yes`，其他输入或 EOF 取消；重�
 
 修改配置后使用 `deploy` 应用；`restart` 只重启保存的配置。GPU 改动后普通 start/restart 会拒绝旧 UUID，要求重新部署。两服务部署操作通过主机 `/var/lock/mx-base-gpu.lock` 串行化，同一主机应由同一运维用户执行；不要直接 `docker compose up` 绕过启动检查。首次拉取可能耗时，日志不代表健康，默认等待最多 30 分钟。
 
+### 沿用已经运行的共享 GPU 实例
+
+2026-09-30 用户确认：当前 Embedding 已固定绑定显示卡 GPU 3 的 UUID，并与桌面/vLLM 共用；本次只更新 Embedding，不迁卡、不增加 batch/显存上限。对应显式升级方式，在同步完整 `mx-base/scripts` 与 `mx-base/mx-embedding` 后执行：
+
+```bash
+bash scripts/manage.sh deploy mx-embedding --keep-gpu
+```
+
+此模式只接受本 Compose 项目已经运行且归属可核验的 `mx-embedding-api`，从容器读取唯一 GPU UUID，不重新解释 `.env.gpu` 的数字编号。允许维持该卡已有的显示/其他模型共享，但不停止、迁移或修改任何其他进程，也不为新实例开放任意共享用卡。驱动查询失败、GPU UUID 消失/状态未知、容器停止、名称/应用/Compose 项目归属不符、原先用 all/多卡、旧资源缺失或 Key 挂载与当前项目不一致，都会在替换前拒绝。
+
+读取旧实例的模型路径/revision、维度/精度、输入长度/token/batch/micro-batch 上限、GPU allocator 比例、CPU 线程与 CPU/内存/共享内存上限、模型缓存与端口映射，覆盖本次部署环境，保留现有 Key 文件。数值先展示，再使用已有的 `yes` 部署确认；不把全部容器环境变量或凭据写入计划。计划只在临时目录保存，结束时清理，不改 `.env.gpu`、不持久启用共享例外。
+
+先构建镜像，旧实例继续服务；构建成功后再次检查容器 ID 和这些配置是否变化，再仅更新 Compose 的 `api` 服务。构建失败或计划过期不执行替换。最终替换仍有短暂中断，不能保证显存容量或自动回滚：相同比例上限不是显存预留。普通 deploy/start/restart 与 OCR 保留严格用卡检查；此参数仅支持 Embedding 的 deploy，后续共享升级仍需明确指定 `--keep-gpu`。
+
+部署成功后可将下面整行复制执行，避免多条命令粘连：
+
+```bash
+bash scripts/manage.sh test mx-embedding && bash scripts/manage.sh bench mx-embedding --requests 20
+```
+
+新版本压测的 `microBatch`、`maxPending`、`queryReserved` 应为实际数值。旧基线的 80 请求仅 20 成功、60 个 429（所有后台请求失败），不能将其中的成功查询 QPS 当作整机稳定混合吞吐。比较时先看两类成功率，再看 P95、成功文本/token 吞吐；模拟调度测试不代表真实 GPU 性能。
+
 国内下载可以设置可信的 Hugging Face-compatible `MX_EMBEDDING_HF_ENDPOINT`，或将**完整模型快照**预先放到模型缓存目录下，设置 `MX_EMBEDDING_MODEL_PATH=/models/<目录>`。离线快照必须与上面的固定版本一致；服务不验证整个快照的文件摘要，运维需核对来源。不要把普通 Chat 模型放在这个目录。`MX_EMBEDDING_PROXY` 同时用于 pip 构建阶段和运行时模型下载，显式覆盖 Docker 客户端默认构建代理；留空表示这两个阶段直连。不会修改 Docker daemon 或宿主机代理，基础镜像拉取仍使用 daemon 的配置。命令行提供的 `MX_EMBEDDING_PROXY` 和 `MX_EMBEDDING_PIP_INDEX` 优先于本服务的 `.env`（包括显式空代理）。
 
 例如宿主机 HTTP/混合代理在 `192.168.1.2:7788`，且允许 Docker 容器网络访问：

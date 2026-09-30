@@ -31,17 +31,19 @@ status() {
   echo "${output:-mx-embedding NOT DEPLOYED}"
 }
 action="${1:-help}"
+keep_gpu=false
 [ "$#" = 0 ] || shift
 while [ "$#" -gt 0 ]; do
   [ "$action" != bench ] || break
-  [ "$action" = deploy ] || { echo '下载参数仅用于 deploy' >&2; exit 1; }
+  [ "$action" = deploy ] || { echo '这些参数仅用于 deploy' >&2; exit 1; }
   case "$1" in
+    --keep-gpu) keep_gpu=true; shift;;
     --proxy|--pip-index)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "$1 需要一个 URL" >&2; exit 1; }
       if [ "$1" = --proxy ]; then export MX_EMBEDDING_PROXY="$2"; else export MX_EMBEDDING_PIP_INDEX="$2"; fi
       shift 2;;
     --direct) export MX_EMBEDDING_PROXY=; shift;;
-    *) echo '未知部署参数；支持 --proxy URL / --direct / --pip-index URL' >&2; exit 1;;
+    *) echo '未知部署参数；支持 --keep-gpu / --proxy URL / --direct / --pip-index URL' >&2; exit 1;;
   esac
 done
 validate_download() {
@@ -82,12 +84,29 @@ save_download() {
 case "$action" in
   deploy)
     validate_download
-    confirm_deploy mx-embedding
-    gpu_admit mx-embedding
+    if [ "$keep_gpu" = true ]; then
+      gpu_lock
+      upgrade_plan_dir="$(mktemp -d)"
+      trap 'rm -rf -- "$upgrade_plan_dir"' EXIT
+      python3 "$BASE_DIR/scripts/embedding-keep-gpu.py" prepare "$APP_DIR" "$upgrade_plan_dir/plan.json" "$upgrade_plan_dir/values.sh"
+      source "$upgrade_plan_dir/values.sh"
+      confirm_deploy 'mx-embedding（仅升级现有 GPU 上的共享实例）'
+    else
+      confirm_deploy mx-embedding
+      gpu_admit mx-embedding
+    fi
     init
     compose config --quiet
     save_download
-    compose up -d --build --wait --wait-timeout 1800
+    if [ "$keep_gpu" = true ]; then
+      # Prepare the image while the old instance serves; revalidate its identity
+      # immediately before replacement. Never stop another GPU owner.
+      compose build api
+      python3 "$BASE_DIR/scripts/embedding-keep-gpu.py" check "$APP_DIR" "$upgrade_plan_dir/plan.json"
+      compose up -d --no-build --no-deps --wait --wait-timeout 1800 api
+    else
+      compose up -d --build --wait --wait-timeout 1800
+    fi
     status
     ;;
   start|restart)
@@ -112,6 +131,6 @@ case "$action" in
   stats) docker stats --no-stream mx-embedding-api; nvidia-smi;;
   test) docker exec -i mx-embedding-api python - < "$APP_DIR/scripts/smoke.py";;
   bench) docker exec -i mx-embedding-api python - "$@" < "$APP_DIR/scripts/benchmark.py";;
-  help|-h|--help) echo 'deploy 可用 --proxy URL / --direct / --pip-index URL，确认后自动保存下载设置'; echo 'mx-embedding: deploy | start | stop | restart | status | doctor | logs | stats | test | bench';;
+  help|-h|--help) echo 'deploy 可用 --keep-gpu（保留运行中实例的 GPU 和资源）/ --proxy URL / --direct / --pip-index URL'; echo 'mx-embedding: deploy | start | stop | restart | status | doctor | logs | stats | test | bench';;
   *) echo "不支持的操作：$action" >&2; exit 1;;
 esac

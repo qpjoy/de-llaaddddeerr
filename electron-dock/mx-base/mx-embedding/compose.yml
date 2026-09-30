@@ -23,7 +23,7 @@ services:
       - '${MX_EMBEDDING_BIND:-127.0.0.1}:${MX_EMBEDDING_PORT:-18210}:8000'
     cpus: ${MX_EMBEDDING_CPUS:-4}
     mem_limit: ${MX_EMBEDDING_MEMORY:-8g}
-    shm_size: 1g
+    shm_size: ${MX_EMBEDDING_SHM_SIZE:-1g}
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -49,7 +49,7 @@ services:
       BACKGROUND_TIMEOUT: ${MX_EMBEDDING_BACKGROUND_TIMEOUT:-45}
       BATCH_WAIT_MS: ${MX_EMBEDDING_BATCH_WAIT_MS:-2}
       DTYPE: ${MX_EMBEDDING_DTYPE:-bfloat16}
-      CPU_THREADS: ${MX_EMBEDDING_CPUS:-4}
+      CPU_THREADS: ${MX_EMBEDDING_CPU_THREADS:-${MX_EMBEDDING_CPUS:-4}}
       GPU_MEMORY_FRACTION: ${MX_EMBEDDING_GPU_FRACTION:-0.25}
       HF_ENDPOINT: ${MX_EMBEDDING_HF_ENDPOINT:-https://huggingface.co}
       http_proxy: ${MX_EMBEDDING_PROXY:-}
