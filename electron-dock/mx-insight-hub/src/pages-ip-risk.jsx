@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Copy, DownloadSimple, Info, MagnifyingGlass, ShieldCheck } from '@phosphor-icons/react'
+import { CaretLeft, CaretRight, Copy, DownloadSimple, Info, MagnifyingGlass, ShieldCheck } from '@phosphor-icons/react'
 import { REQUEST_FORMATS, requestSnippet } from './request-snippets.js'
 import { copyText } from './open-capabilities.js'
 import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck, useDemoCredentialExpiry } from './demo-credentials.jsx'
@@ -10,7 +10,7 @@ import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { DocsPage } from './pages-docs.jsx'
 import { ServicePrice } from './service-price.jsx'
 import { PagedItems } from './paged-items.jsx'
-import { IP_RISK_STATES, parseIpRiskInput, ipRiskRows, ipRiskFailureRows, riskTone, riskValue, riskTime, riskWarning, filterIpRiskRows, ipRiskSummary, ipRiskCsv } from './ip-risk-view.js'
+import { IP_RISK_STATES, parseIpRiskInput, ipRiskRows, ipRiskFailureRows, ipRiskBatchRows, riskTone, riskValue, riskTime, riskWarning, filterIpRiskRows, ipRiskSummary, ipRiskCsv } from './ip-risk-view.js'
 import './ip-risk.css'
 
 const DOC_QUERY = new URLSearchParams({ path: '/docs/ip-risk' })
@@ -36,6 +36,17 @@ function RiskTags({ tags }) {
   const list = items => <ul className="mih-ip-tag-list">{items.map(({ entry: tag, index }) => <li key={index}><strong>{tag.name || tag.code || '未命名标签'}</strong>{tag.code ? <code>{tag.code}</code> : null}<small>最后发现：{tag.last_seen || '未提供'}</small></li>)}</ul>
   return tags.length <= 8 ? list(tags.map((entry, index) => ({ entry, index }))) : <PagedItems items={tags} label="风险标签" pageSize={8} text={tag => `${tag.name || ''} ${tag.code || ''}`}>{list}</PagedItems>
 }
+function BatchNavigator({ rows, active, onSelect }) {
+  const position = rows.findIndex(row => row.id === active.id)
+  return <nav className="qp-panel mih-ip-batch-nav" aria-label="当前批次 IP 切换">
+    <div className="mih-ip-batch-caption"><strong>批次画像</strong><span role="status">第 {active.index + 1} / {active.batchSize} 项{rows.length < active.batchSize ? ` · 本页保留 ${rows.length} 项` : ''}</span><small>切换仅查看已返回结果，不会重新查询</small></div>
+    <div className="mih-ip-batch-controls">
+      <button type="button" className="qp-button qp-button--outline" disabled={position <= 0} onClick={() => onSelect(rows[position - 1].id)}><CaretLeft size={16} aria-hidden="true" />上一个 IP</button>
+      <DropdownField label="选择批次 IP" value={active.id} options={rows.map(row => ({ value: row.id, label: `第 ${row.index + 1} 项 · ${row.ip}`, description: `${IP_RISK_STATES[row.status].label} · 风险等级：${riskValue(row.profile?.risk_level)}` }))} onChange={onSelect} />
+      <button type="button" className="qp-button qp-button--outline" disabled={position < 0 || position >= rows.length - 1} onClick={() => onSelect(rows[position + 1].id)}>下一个 IP<CaretRight size={16} aria-hidden="true" /></button>
+    </div>
+  </nav>
+}
 function Portrait({ row, onCopy }) {
   const p = row.profile || {}, state = IP_RISK_STATES[row.status]
   const hasPortrait = ['success', 'partial'].includes(row.status)
@@ -45,11 +56,12 @@ function Portrait({ row, onCopy }) {
       <button type="button" className="qp-button qp-button--outline qp-button--sm" onClick={() => download(JSON.stringify(row.envelope || row.raw, null, 2), `ip-risk-${row.ip}.json`, 'application/json;charset=utf-8')}><DownloadSimple size={16} aria-hidden="true" />导出 JSON</button>
     </div></header>
     {hasPortrait ? <>
-      <div className="mih-ip-overview"><div className={`mih-ip-risk-level is-${riskTone(p.risk_level)}`}><div><strong>{riskValue(p.risk_level)}</strong></div><span>风险等级</span></div>
+      <div className="mih-ip-overview"><div className={`mih-ip-risk-level is-${riskTone(p.risk_level)}`}><div><strong>{p.risk_level || '未评级'}</strong></div><span>风险等级</span></div>
         <Metric label="风险评分" value={p.risk_score} hint="保留返回评分，不套用统一满分或评级阈值。" />
         <Metric label="秒拨概率" value={p.rapid_rotation_probability_percent} percent hint="快速拨号或频繁切换地址的概率，0 是有效值。" />
         <Metric label="真人概率" value={p.human_probability_percent} percent hint="流量由真人产生的概率，不是身份认证结论。" />
       </div>
+      {!p.risk_level ? <p className="mih-ip-unrated"><Info size={16} aria-hidden="true" />本次未返回风险等级{p.risk_score === 0 ? '；评分 0 不等于无风险' : '，不从评分推算等级'}。查询成功仅说明已获得有效响应。</p> : null}
       <dl className="mih-ip-facts"><div><dt>代理类型</dt><dd>{riskValue(p.proxy_type)}</dd></div><div><dt>查询时间</dt><dd>{riskTime(row.capturedAt)}</dd></div><div><dt>交付方式</dt><dd>{row.sourceMode === 'idempotent_replay' ? '原结果回放' : '本次查询'}</dd></div></dl>
       <section className="mih-ip-tags"><header><h3>风险标签 <small>{p.risk_tags?.length != null ? `${p.risk_tags.length} 项` : ''}</small></h3><span>历史观察线索，不对当前使用者定性</span></header>
         {p.risk_tags?.length ? <RiskTags key={row.id} tags={p.risk_tags} /> : <p>{p.risk_tags == null ? '未提供标签信息，不能据此判断安全。' : '本次返回空标签集合，不等于无风险。'}</p>}
@@ -81,6 +93,7 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
   const blocked = rows.some(row => row.status === 'unknown' && parsed.values.includes(row.ip))
   const canSend = allowed && parsed.valid && !busy && !blocked
   const active = rows.find(row => row.id === selected) || rows[0]
+  const activeBatchRows = ipRiskBatchRows(rows, active)
   const matching = filterIpRiskRows(rows, query, stateFilter, levelFilter)
   const pages = Math.max(1, Math.ceil(matching.length / 10)), currentPage = Math.min(page, pages)
   const visible = matching.slice((currentPage - 1) * 10, currentPage * 10)
@@ -134,7 +147,7 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
       {priceOpen ? <ServicePrice path={SINGLE_PATH} /> : null}
       <div aria-busy={busy} className="mih-ip-results" ref={portraitRef}>
         {busy ? <p className="mih-ip-loading" role="status">正在查询{batch ? ` ${parsed.values.length} 项，批量结果返回后统一展示` : ''}…下方保留已返回记录，切换标签不会再次发送。</p> : null}
-        {active ? <><div className="mih-ip-section-caption"><h2>画像详情</h2><span>{busy ? '上一次提交的结果 · 新查询进行中' : currentIds.includes(active.id) ? '本次提交的结果' : '正在查看本页较早记录'}{active.capturedAt ? '' : ` · 接收于 ${riskTime(active.receivedAt)}`}</span></div><Portrait row={active} onCopy={copy} /></> : busy ? null : <section className="qp-panel mih-ip-empty"><div className="mih-ip-empty-icon"><ShieldCheck size={35} aria-hidden="true" /></div><h2>从一个 IP，了解风险线索</h2><p>输入地址后点击“查询画像”，查看风险等级、代理类型、行为概率与标签。</p><div><span>01 输入单个或批量 IP</span><span>02 查看画像与数据完整性</span><span>03 筛选、复制或导出结果</span></div><small>尚未发起查询，不展示推测数据。</small></section>}
+        {active ? <><div className="mih-ip-section-caption"><h2>画像详情</h2><span>{busy ? '上一次提交的结果 · 新查询进行中' : currentIds.includes(active.id) ? '本次提交的结果' : '正在查看本页较早记录'}{active.capturedAt ? '' : ` · 接收于 ${riskTime(active.receivedAt)}`}</span></div>{activeBatchRows.length ? <BatchNavigator rows={activeBatchRows} active={active} onSelect={setSelected} /> : null}<Portrait row={active} onCopy={copy} /></> : busy ? null : <section className="qp-panel mih-ip-empty"><div className="mih-ip-empty-icon"><ShieldCheck size={35} aria-hidden="true" /></div><h2>从一个 IP，了解风险线索</h2><p>输入地址后点击“查询画像”，查看风险等级、代理类型、行为概率与标签。</p><div><span>01 输入单个或批量 IP</span><span>02 查看画像与数据完整性</span><span>03 筛选、复制或导出结果</span></div><small>尚未发起查询，不展示推测数据。</small></section>}
         {rows.length ? <section className="qp-panel mih-ip-history" aria-label="本页查询记录"><header><div><h2>查询记录 <small>{rows.length} 项</small></h2><p>仅保留当前身份在本页最近 {HISTORY_LIMIT} 项；切换身份或离开页面后清空。{dropped ? `已移出 ${dropped} 项较早记录。` : ''}</p></div><button type="button" className="qp-button qp-button--outline qp-button--sm" disabled={!matching.length} onClick={() => download(ipRiskCsv(matching), 'ip-risk-filtered.csv', 'text/csv;charset=utf-8')}><DownloadSimple size={16} aria-hidden="true" />导出筛选结果（{matching.length}）</button></header>
           <div className="mih-ip-counts" aria-label="本次结果统计"><span>本次 {currentRows.length} 项</span>{Object.entries(IP_RISK_STATES).map(([state, value]) => { const count = currentRows.filter(row => row.status === state).length; return count ? <span key={state}>{value.label} <b>{count}</b></span> : null })}</div>
           <div className="mih-ip-history-filters"><input aria-label="搜索查询记录" className="qp-input" type="search" placeholder="搜索 IP、代理、标签或请求编号" value={query} onChange={event => { setQuery(event.target.value); setPage(1) }} /><DropdownField label="数据状态" value={stateFilter} options={[{ value: '', label: '全部状态' }, ...Object.entries(IP_RISK_STATES).map(([value, state]) => ({ value, label: state.label }))]} onChange={value => { setStateFilter(value); setPage(1) }} /><DropdownField label="风险等级" value={levelFilter} options={[{ value: '', label: '全部等级' }, ...levels.map(value => ({ value, label: value }))]} onChange={value => { setLevelFilter(value); setPage(1) }} /></div>

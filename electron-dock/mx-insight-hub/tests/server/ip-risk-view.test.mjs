@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseIpRiskInput, ipRiskRows, ipRiskFailureRows, filterIpRiskRows, ipRiskCsv, ipRiskSummary, riskTone } from '../../src/ip-risk-view.js'
+import { parseIpRiskInput, ipRiskRows, ipRiskFailureRows, ipRiskBatchRows, filterIpRiskRows, ipRiskCsv, ipRiskSummary, riskTone } from '../../src/ip-risk-view.js'
 import { ipRiskExample, ipRiskBatchExample } from '../../server/contracts/ip-risk-docs.mjs'
 
 const result = payload => ({ payload, localId: 'test', status: 200, elapsedMs: 25, receivedAt: '2026-10-01T00:00:00.000Z', request: { ip: '1.1.1.1' } })
@@ -57,6 +57,26 @@ test('IP network/auth/balance errors and whole-batch unknown retain reconciliati
   for (const [status, expected] of [[401, 'expired'], [402, 'balance'], [403, 'forbidden'], [429, 'limited'], [503, 'unavailable']]) {
     assert.equal(ipRiskFailureRows({ status, code: status === 503 ? 'ip_risk_unavailable' : undefined }, { ip: '1.1.1.1' }, 'e', '')[0].status, expected)
   }
+})
+test('batch navigation keeps input order, duplicates, failed items and original submission boundaries', () => {
+  const payload = structuredClone(ipRiskBatchExample)
+  payload.data.push({ ...payload.data[0], index: 2 })
+  const first = ipRiskRows(result(payload))
+  const replay = ipRiskRows({ ...result(payload), localId: 'replay' })
+  const single = ipRiskRows({ ...result(ipRiskExample), localId: 'single' })
+  const history = [...single, ...replay, ...first]
+  assert.deepEqual(ipRiskBatchRows(history, first[1]).map(row => row.id), first.map(row => row.id))
+  assert.deepEqual(ipRiskBatchRows(history, replay[2]).map(row => row.id), replay.map(row => row.id))
+  assert.equal(first[2].ip, first[0].ip)
+  assert.notEqual(first[2].id, first[0].id)
+  assert.equal(first[0].batchSize, 3)
+  assert.deepEqual(ipRiskBatchRows(history, single[0]), [])
+  assert.deepEqual(ipRiskBatchRows([], undefined), [])
+  const retained = first.slice(1)
+  assert.equal(ipRiskBatchRows(retained, retained[0]).length, 2)
+  assert.equal(retained[0].batchSize, 3, 'original batch size survives bounded history eviction')
+  const failed = ipRiskFailureRows(new TypeError('network loss'), { ips: ['1.1.1.1', '8.8.8.8'] }, 'failure', '')
+  assert.deepEqual(ipRiskBatchRows([...failed, ...history], failed[0]), failed)
 })
 test('IP local filters/CSV preserve tags and zeroes, and neutralize spreadsheet formulas', () => {
   const payload = structuredClone(ipRiskExample)

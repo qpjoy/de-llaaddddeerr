@@ -35,6 +35,30 @@ test('IPv4 contract is strict and preserves zero, unknowns and percentages', () 
   assert.equal(result.status, 'success'); assert.equal(result.data.risk_score, 0); assert.equal(result.data.human_probability_percent, 70)
   assert.equal(result.data.risk_level, null)
 })
+test('adapter maps documented upstream fields without substituting zero, empty level or default probability', async () => {
+  const samples = [
+    { mb_rate: '0.00%', proxy: '是', real: '51%', risk_level: '中风险', risk_score: 90, risk_tag: [{ label: 'highRiskDevice', label_name: '高危设备', last_time: '2024-05-10 12:17:26' }] },
+    payload.data.risk,
+    { proxy: '否', risk_score: null, risk_level: null, mb_rate: null, real: null, risk_tag: [] },
+    { proxy: '是' },
+  ]
+  let calls = 0
+  const adapter = new IpSearchAdapter({ apiKey: 'test-only', fetchImpl: async (_url, options) => {
+    assert.equal(new URLSearchParams(options.body).get('ip'), `1.1.1.${calls + 1}`)
+    return Response.json({ code: 200, data: { risk: samples[calls++] } })
+  } })
+  for (const [index, sample] of samples.entries()) {
+    const result = await adapter.query(`1.1.1.${index + 1}`)
+    assert.deepEqual(result.restrictedResponseArchive.parsedPayload.data.risk, sample)
+    assert.equal(result.normalized.data.risk_score, sample.risk_score ?? null)
+    assert.equal(result.normalized.data.risk_level, sample.risk_level || null)
+    assert.equal(result.normalized.data.human_probability_percent, sample.real ? Number(sample.real.replace('%', '')) : null)
+    assert.equal(result.normalized.data.rapid_rotation_probability_percent, sample.mb_rate ? Number(sample.mb_rate.replace('%', '')) : null)
+    if (index === 0) assert.deepEqual(result.normalized.data.risk_tags, [{ code: 'highRiskDevice', name: '高危设备', last_seen: '2024-05-10 12:17:26' }])
+    if (index === 3) assert.ok(result.normalized.warnings.includes('FIELD_MISSING:risk_score'))
+  }
+  assert.equal(calls, samples.length)
+})
 test('only granted keys dispatch; successful calls archive exact evidence and replay without dispatch or billing', async () => {
   let calls = 0
   const fetchImpl = async (url, options) => { calls++; assert.equal(options.redirect, 'error'); assert.equal(new URLSearchParams(options.body).get('key'), 'secret-not-public'); return new Response(JSON.stringify(payload)) }

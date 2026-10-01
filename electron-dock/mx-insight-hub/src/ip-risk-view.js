@@ -1,6 +1,6 @@
 // Presentation only. Preserve the public envelope, input order and duplicate IPs.
 export const IP_RISK_STATES = {
-  success: { label: '完整数据', tone: 'complete', hint: '本次返回的画像字段已通过校验；不代表低风险。' },
+  success: { label: '查询成功', tone: 'complete', hint: '本次响应已通过校验；不代表所有字段齐全或 IP 无风险。' },
   partial: { label: '部分数据', tone: 'warning', hint: '部分字段缺失或不可用，已保留其余有效信息。' },
   no_data: { label: '暂无数据', tone: 'neutral', hint: '本次没有可用画像，不等于无风险。有效无数据响应仍按套餐计费。' },
   unknown: { label: '结果待核对', tone: 'warning', hint: '请求可能已执行。请保留请求或批次编号，先在用量与账单中核对，勿连续重试。' },
@@ -49,6 +49,7 @@ export function ipRiskRows(result) {
       ? envelope.data.status : !error && item.status === 200 ? 'unknown' : ipRiskErrorState(item.status, error?.code)
     return {
       id: `${result.localId}:${offset}`, index: item.index ?? offset, ip: item.ip,
+      submissionId: result.localId, batchSize: batch ? result.request?.ips?.length || items.length : null,
       status, httpStatus: item.status, profile: envelope?.data?.data || null,
       warnings: envelope?.data?.warnings || [], errorCode: error?.code || null,
       requestId: envelope?.requestId || item.requestId || (!batch ? result.evidence?.requestId : null),
@@ -63,11 +64,17 @@ export function ipRiskRows(result) {
 export function ipRiskFailureRows(error, request, localId, receivedAt) {
   return (request.ips || [request.ip]).map((ip, index) => ({
     id: `${localId}:${index}`, index, ip, status: ipRiskErrorState(error.status, error.code),
+    submissionId: localId, batchSize: request.ips?.length || null,
     httpStatus: error.status || null, profile: null, warnings: [], errorCode: error.code || 'transport_error',
     requestId: error.requestId || error.details?.requestId || null,
     batchId: error.details?.batchId || null, capturedAt: null, receivedAt,
     raw: { ip, error: { code: error.code || 'transport_error' }, requestId: error.requestId, batchId: error.details?.batchId },
   }))
+}
+
+export function ipRiskBatchRows(rows, active) {
+  if (!active?.batchSize) return []
+  return rows.filter(row => row.submissionId === active.submissionId).sort((a, b) => a.index - b.index)
 }
 
 export function riskTone(level) {
