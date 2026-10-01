@@ -237,6 +237,8 @@ export const publicDataApi = {
   enterpriseQuery: (key, apiId, body, options) => publicDataRequest(key, `/api/v1/data/enterprise/${encodeURIComponent(apiId)}/query`, { ...options, method: 'POST', body }),
   ipRiskBatch: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk/batch', { ...options, method: 'POST', body }),
   ipRisk: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk', { ...options, method: 'POST', body }),
+  ipRiskHistory: (key, query, signal) => publicDataRequest(key, `/api/v1/data/ip/risk/history${queryString(query)}`, { signal }),
+  ipRiskHistoryDetail: (key, kind, id, signal) => publicDataRequest(key, `/api/v1/data/ip/risk/history/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { signal }),
   serviceCatalog: (key, query = {}) => publicDataRequest(key, `/api/v1/data/source-catalog/services${queryString(query)}`),
   sourceCatalog: (apiKey, query = {}) => publicDataRequest(apiKey, `/api/v1/data/source-catalog${queryString(query)}`),
   sourceCatalogMetadata: apiKey => publicDataRequest(apiKey, '/api/v1/data/source-catalog/metadata'),

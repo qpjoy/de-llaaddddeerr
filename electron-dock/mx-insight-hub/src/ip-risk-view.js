@@ -77,6 +77,17 @@ export function ipRiskBatchRows(rows, active) {
   return rows.filter(row => row.submissionId === active.submissionId).sort((a, b) => a.index - b.index)
 }
 
+export function ipRiskHistorySummary(item) {
+  return { ...item, status: ['success', 'partial', 'no_data', 'unknown'].includes(item.state) ? item.state : item.httpStatus == null ? 'failed' : ipRiskErrorState(item.httpStatus, item.errorCode), warnings: [] }
+}
+
+export function ipRiskHistoryRows(detail) {
+  const result = { ...detail, localId: `history:${detail.kind}:${detail.id}`, receivedAt: detail.createdAt }
+  return ipRiskRows(result).map(row => ({ ...row,
+    ...(detail.requestState === 'released' && !detail.hasStoredResponse ? { status: 'failed' } : {}),
+    historical: true, createdAt: detail.createdAt }))
+}
+
 export function riskTone(level) {
   // Scores have no published universal range/threshold; never derive a level.
   return ({ '高风险': 'danger', '中风险': 'warning', '低风险': 'complete', high: 'danger', medium: 'warning', low: 'complete' })[String(level || '').toLowerCase()] || 'neutral'
@@ -108,16 +119,27 @@ export function ipRiskSummary(row) {
     `查询时间：${riskTime(row.capturedAt)}`, `请求编号：${row.requestId || '未返回'}`,
     ...(row.batchId ? [`批次编号：${row.batchId}`] : []), '此画像仅反映本次查询结果，不代表绝对安全。'].join('\n')
 }
-export function ipRiskCsv(rows) {
+function csvTable(rows) {
   const cell = value => {
     const text = value == null ? '' : String(value)
     // Spreadsheet exports may contain arbitrary supplier-provided text.
     return `"${(/^[\s]*[=+@\-]/u.test(text) || /^[\t\r\n]/u.test(text) ? "'" : '') + text.replaceAll('"', '""')}"`
   }
-  return '\ufeff' + [
+  return '\ufeff' + rows.map(row => row.map(cell).join(',')).join('\r\n')
+}
+export function ipRiskHistoryCsv(rows) {
+  return csvTable([
+    ['输入序号', 'IP', '数据状态', '风险等级', '风险评分', '代理类型', '提交时间', '原查询时间', '请求编号', '批次编号', '错误码'],
+    ...rows.map(row => [row.index >= 0 ? row.index + 1 : '', row.ip, IP_RISK_STATES[row.status].label,
+      row.profile?.risk_level, row.profile?.risk_score, row.profile?.proxy_type, row.createdAt, row.capturedAt,
+      row.requestId, row.batchId, row.errorCode]),
+  ])
+}
+export function ipRiskCsv(rows) {
+  return csvTable([
     ['输入序号', 'IP', '数据状态', '风险等级', '风险评分', '代理类型', '秒拨概率(%)', '真人概率(%)', '风险标签(JSON)', '查询时间', '请求编号', '批次编号', '错误码', '字段警告(JSON)'],
     ...rows.map(row => [row.index + 1, row.ip, IP_RISK_STATES[row.status].label, row.profile?.risk_level, row.profile?.risk_score,
       row.profile?.proxy_type, row.profile?.rapid_rotation_probability_percent, row.profile?.human_probability_percent,
       row.profile?.risk_tags == null ? '' : JSON.stringify(row.profile.risk_tags), row.capturedAt, row.requestId, row.batchId, row.errorCode, JSON.stringify(row.warnings)]),
-  ].map(row => row.map(cell).join(',')).join('\r\n')
+  ])
 }

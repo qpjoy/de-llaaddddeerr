@@ -1,6 +1,6 @@
 # IP 风险画像
 
-2026-10-01：首屏已调整为风险画像产品，支持单个/批量、逐项状态、复制与筛选导出；接口调用和接口文档位于后续标签。[产品交互、状态矩阵与渠道/供应商/独立代理规划](../product/ip-risk-product-and-channels.md)区分已实现与后续接入。当前来源为 ipsearch，百度尚未接入；本次不改变原服务端调用出口。
+2026-10-01：首屏已调整为风险画像产品，支持单个/批量、批内切换、逐项状态、复制与筛选导出，并从服务端恢复刷新前的历史记录；接口调用和接口文档位于后续标签。[产品交互、状态矩阵与渠道/供应商/独立代理规划](../product/ip-risk-product-and-channels.md)区分已实现与后续接入。当前来源为 ipsearch，百度尚未接入；本次不改变原服务端调用出口。
 
 仓库实现：`POST /api/v1/data/ip/risk` 和 `POST /api/v1/data/ip/risk/batch`，产品页面 `#/data-products/ip-risk`，接口说明 `/docs/ip-risk`（沿用控制台登录保护）。
 
@@ -19,6 +19,18 @@
 5. 用户登录、DNS、WireGuard、Internal/Domestic 和 Launcher 部署不变。用户将在服务器执行 `bash scripts/manage.sh ops internal-production deploy`；Dockerfile 会打包整个 migrations 目录，现有 migration Job 会按校验和顺序应用 081/082/083，再更新 Public/Admin 工作负载，本次无需修改 deploy 脚本。当前尚未执行服务器迁移或生产上线。
 
 开发 memory store 的凭据与批次记录在重启后消失，仅适用于本地模拟验证；真实使用必须部署 PostgreSQL。
+
+## 历史查询与上线
+
+历史功能需要同时更新 Hub 前端与 Public API，并按既有迁移流程应用 `121_ip_risk_history_indexes.sql`。此迁移只为 `usage_requests`（ip_risk 部分索引）及 `external_platform.ipsearch_batches` 增加 tenant/consumer/Key/时间索引，不新增表、回填结果或更改授权/计费。大表应按现有维护窗口安排索引创建。本次仅完成代码与本地验证，未执行生产迁移或上线。
+
+- `GET /api/v1/data/ip/risk/history`：当前真实 Key 所属 tenant + consumer + Key 的历史逐项概要；`q` 最多 100 字符，`state` 为 success/partial/no_data/unknown/error，`level` 为原始风险等级，`limit` 默认 10/最大 50，下一页原样传 `nextCursor` 到 `cursor`。游标以原提交时间、记录身份和输入序号稳定排序，不使用 offset。
+- `GET /api/v1/data/ip/risk/history/single/:id` 或 `/batch/:id`：返回原有客户交付快照，batch 保留顺序、重复项与逐项错误。`payload` 是原保存响应；无交付快照的单条仅显示状态与请求编号，不推测画像。未完整保存的批次返回 409 待核对，跨身份或无记录返回 404。
+- 使用现有 Public Live Key 认证与当前有效 `ip_risk` + `ip.risk.query` 权限。临时调用凭据刷新后仍绑定原真实 Key ID。供应商关闭/无凭据时仍可回看；权限撤销或换成另一 Key 时不可读取原 Key 数据。
+- 历史 GET 不写采集请求、不预留余额、不计供应商/客户查询费、不使用 POST 回放，不访问受限供应商原始归档。响应为 private/no-store；浏览器不保存结果或密钥到 localStorage。
+- 现有数据库记录直接可读，无需重新请求供应商。列表概要与详情分开读取；前置校验失败等从未保存的画像无法恢复。内存演示刷新页面可恢复、重启进程会清空；PostgreSQL 数据按既有保留与备份策略保存。
+
+本地回归覆盖刷新后读取、混合状态/重复项、游标分页、原批次还原、权限撤销、跨 Key 隔离和供应商停用后回看，并验证读取不增加调用、预留或费用。隔离 PostgreSQL 引擎验证索引迁移、磁盘重新打开、微秒游标与 tenant/consumer/Key 隔离；上线数据库仍需按正常迁移验收流程检查。
 
 ## 调用
 

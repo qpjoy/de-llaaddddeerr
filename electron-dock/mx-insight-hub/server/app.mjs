@@ -5591,6 +5591,20 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/ip/risk/history') {
+        const context = await requirePublic(request)
+        if (!ipRiskGateway) throw new AppError(503, 'ip_risk_unavailable', 'IP history is unavailable')
+        sendJson(response, 200, await ipRiskGateway.history.list(context, Object.fromEntries(searchParams)), { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/ip/risk/history/:kind/:id')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'IP history detail')
+        if (!ipRiskGateway) throw new AppError(503, 'ip_risk_unavailable', 'IP history is unavailable')
+        sendJson(response, 200, await ipRiskGateway.history.detail(context, params.kind, params.id), { 'cache-control': 'private, no-store' })
+        return
+      }
       if (request.method === 'POST' && ['/api/v1/data/ip/risk', '/api/v1/data/ip/risk/batch'].includes(pathname)) {
         const context = await requirePublic(request)
         if (!ipRiskGateway) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is unavailable')

@@ -11,7 +11,7 @@ import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contr
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
-import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml } from './contracts/ip-risk-docs.mjs'
+import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml, ipRiskHistoryPaths } from './contracts/ip-risk-docs.mjs'
 import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
 import {
   DEFAULT_SEARCH_PROFILE,
@@ -1308,6 +1308,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/xiaohongshu/pgy/get_note_detail': { post: { ...xhsResearchPaths['/data/xiaohongshu/notes/detail'].post, operationId: 'xiaohongshuNoteAnalyticsAlias', description: '与 /data/xiaohongshu/notes/detail 相同的 JSON POST 合同、授权和幂等身份。' } },
     '/xiaohongshu/pgy/get_blogger_notes_v2': { post: { ...xhsResearchPaths['/data/xiaohongshu/users/notes/analytics'].post, operationId: 'xiaohongshuUserNoteAnalyticsAlias', description: '与 /data/xiaohongshu/users/notes/analytics 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
+    ...ipRiskHistoryPaths,
     '/data/ip/risk': {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
@@ -6521,7 +6522,7 @@ const TENANT_PRODUCT_PATHS = {
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
-  'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch'],
+  'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch', ...Object.keys(ipRiskHistoryPaths)],
   'source-catalog': ['/data/source-catalog/services', '/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/users/notes/analytics', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
   'ecommerce-treasure-box': ['/data/ecommerce/products/search', ...nativeDocPaths('ecommerce-treasure-box')],

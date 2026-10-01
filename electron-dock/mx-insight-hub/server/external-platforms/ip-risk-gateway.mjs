@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { IpRiskBatch } from './ip-risk-batch.mjs'
+import { IpRiskHistory } from './ip-risk-history.mjs'
 import { IpSearchEvents } from './ipsearch-events.mjs'
 import { IP_RISK_PLATFORM, IP_RISK_OPERATION, IP_RISK_VERSION, normalizeIpRiskRequest } from '../contracts/ip-risk.mjs'
 import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
@@ -11,6 +12,7 @@ export class IpRiskGateway {
     this.events = new IpSearchEvents(platformStore.pool)
     this.active = 0
     this.batch = new IpRiskBatch(this)
+    this.history = new IpRiskHistory(this)
   }
   async capabilities() {
     const credential = await this.credentialStore?.describeCredential('ipsearch')

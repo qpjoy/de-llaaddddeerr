@@ -93,16 +93,19 @@
 .mih-ip-counts b { color: var(--qp-text-1); }
 .mih-ip-history-filters { display: grid; grid-template-columns: minmax(180px, 1fr) 180px 170px; align-items: end; gap: 12px; margin-bottom: 16px; }
 .mih-ip-history-filters > .qp-input { min-height: 40px; }
+.mih-ip-history-search { grid-template-columns: minmax(180px, 1fr) 160px 150px auto; margin-top: 18px; }
+.mih-ip-history-search > button { min-height: 40px; justify-content: center; }
+.mih-ip-history-pagination { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 16px; font-size: 12px; }
+.mih-ip-history-pagination > span { margin-right: auto; color: var(--ip-muted); }
 .mih-ip-table { min-width: 820px; }
 .mih-ip-table td { font-size: 12px; }
 .mih-ip-table td > strong { font-size: 13px; font-variant-numeric: tabular-nums; }
 .mih-ip-table td > small, .mih-ip-channels td > small { display: block; color: var(--ip-muted); font-size: 11px; margin-top: 4px; }
 .mih-ip-table tr.is-selected td { background: color-mix(in srgb, var(--qp-primary) 5%, transparent); }
-.mih-ip-empty { text-align: center; padding: 54px 24px; }
-.mih-ip-empty-icon { margin: 0 auto 16px; display: grid; place-items: center; width: 66px; height: 66px; border-radius: 18px; background: color-mix(in srgb, var(--qp-primary) 7%, transparent); color: var(--qp-primary); }
-.mih-ip-empty p { color: var(--ip-muted); margin: 14px 0 24px; }
-.mih-ip-empty > div:not(.mih-ip-empty-icon) { display: flex; justify-content: center; flex-wrap: wrap; gap: 24px; font-size: 12px; color: var(--qp-text-2); }
-.mih-ip-empty small { display: block; margin-top: 24px; color: var(--ip-muted); font-size: 11px; }
+.mih-ip-empty { display: flex; align-items: center; gap: 16px; padding: 20px 24px; }
+.mih-ip-empty-icon { display: grid; place-items: center; flex: 0 0 52px; height: 52px; border-radius: 14px; background: color-mix(in srgb, var(--qp-primary) 7%, transparent); color: var(--qp-primary); }
+.mih-ip-empty h2 { font-size: 17px; }
+.mih-ip-empty p { color: var(--ip-muted); margin: 6px 0 0; font-size: 12px; }
 .mih-ip-loading, .mih-ip-blocked { border-radius: 8px; padding: 12px 16px; background: color-mix(in srgb, var(--ip-warning) 8%, transparent); color: var(--ip-warning); margin: 0; }
 .mih-ip-blocked { margin-top: 12px; }
 .mih-ip-debug-form { margin: 20px 0; }
@@ -149,9 +152,9 @@
   .mih-ip-tag-list { grid-template-columns: 1fr; }
   .mih-ip-history-filters { grid-template-columns: 1fr 1fr; }
   .mih-ip-history-filters > input { grid-column: 1 / -1; }
+  .mih-ip-history-search > button { grid-column: 1 / -1; }
   .mih-ip-section-caption { align-items: flex-start; flex-wrap: wrap; }
-  .mih-ip-empty { padding: 32px 20px; }
-  .mih-ip-empty > div:not(.mih-ip-empty-icon) { flex-direction: column; gap: 14px; }
+  .mih-ip-empty { padding: 16px; align-items: flex-start; }
   .mih-ip-debug .mih-api-console-main { padding: 16px; }
 }
 .mih-content--ip-risk > .mih-demo-identity--compact { padding: 10px 16px; margin: 0; }

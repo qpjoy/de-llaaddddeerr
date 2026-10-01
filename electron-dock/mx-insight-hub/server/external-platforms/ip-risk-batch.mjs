@@ -10,7 +10,8 @@ export class IpRiskBatch {
     const identity = JSON.stringify([context.consumer.id, key])
     if (!this.pool) {
       if (this.rows.has(identity)) return { row: this.rows.get(identity), owned: false }
-      const row = { id: randomUUID(), fingerprint, response: null }
+      const row = { id: randomUUID(), fingerprint, response: null, tenantId: context.tenant.id,
+        consumerId: context.consumer.id, apiKeyId: context.apiKey.id, createdAt: new Date().toISOString() }
       this.rows.set(identity, row)
       return { row, owned: true }
     }

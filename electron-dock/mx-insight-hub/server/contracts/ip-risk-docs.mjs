@@ -76,6 +76,30 @@ export const ipRiskBatchExample = {
     { index: 1, ip: '8.8.8.8', status: 429, error: { code: 'api_key_rate_limit_exceeded', message: 'Item could not be completed' } }],
   meta: { sourceMode: 'live', pricingStatus: 'plan_based', chargeStatus: 'see_usage', requestedItems: 2, succeededItems: 1 },
 }
+export const ipRiskHistoryPaths = {
+  '/data/ip/risk/history': { get: {
+    tags: ['IP 风险画像'], summary: '检索当前 Key 的历史画像', operationId: 'listIpRiskHistory',
+    'x-mx-required-platform': 'ip_risk', 'x-mx-required-capabilities': ['ip.risk.query'],
+    security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
+    description: '只读已保存结果，按租户、调用者和原 Key 隔离；不调用供应商、不增加查询计量或收费，不要求实时查询服务就绪。批次逐 IP 展示，保留输入顺序和重复项。列表为概要，完整标签/响应通过历史详情读取。',
+    parameters: [
+      { in: 'query', name: 'q', schema: { type: 'string', maxLength: 100 }, description: '搜索 IP、代理、标签、请求编号或批次编号；按字面匹配。' },
+      { in: 'query', name: 'state', schema: { type: 'string', enum: ['success', 'partial', 'no_data', 'unknown', 'error'] }, description: 'error 汇总失败/未派发；unknown 含处理中/待核对。' },
+      { in: 'query', name: 'level', schema: { type: 'string', maxLength: 256 }, description: '精确匹配原风险等级文本。' },
+      { in: 'query', name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 50, default: 10 } },
+      { in: 'query', name: 'cursor', schema: { type: 'string' }, description: '上一页 nextCursor，筛选条件改变时从第一页开始。' },
+    ],
+    responses: { '200': { description: 'items（逐 IP 概要，含 kind/recordId/index、原请求与批次编号、时间、状态和 available）、nextCursor、storage（persistent 或 memory）、readOnly=true。nextCursor=null 表示已到末页。' }, '400': { description: '筛选或游标无效' }, '401': { description: '身份失效' }, '403': { description: '授权不足' } },
+  } },
+  '/data/ip/risk/history/{kind}/{id}': { get: {
+    tags: ['IP 风险画像'], summary: '回看单次或整批原始 Hub 结果', operationId: 'readIpRiskHistory',
+    'x-mx-required-platform': 'ip_risk', 'x-mx-required-capabilities': ['ip.risk.query'],
+    security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
+    description: 'GET 只读取原 Key 的既有结果，不重新派发。payload 保留当时的 Hub 交付和时间，不冒充最新画像。未完成批次不会自动续跑。',
+    parameters: [{ in: 'path', name: 'kind', required: true, schema: { type: 'string', enum: ['single', 'batch'] } }, { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: '历史列表的 recordId。' }],
+    responses: { '200': { description: 'kind/id/createdAt/status/request/payload/readOnly。status 为原 HTTP 语义状态；payload 为原 Hub 单项或批次响应。没有已保存响应的异常只提供请求状态，不生成画像。' }, '401': { description: '身份失效' }, '403': { description: '授权不足' }, '404': { description: '不存在或不属于当前 Key' }, '409': { description: '批次尚无完整快照，保留编号核对，勿重新派发' } },
+  } },
+}
 const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
 const table = rows => `<table><thead><tr><th>字段</th><th>类型</th><th>含义</th></tr></thead><tbody>${rows.map(([name, type, description]) => `<tr><td><code>${escape(name)}</code></td><td>${escape(type)}</td><td>${escape(description)}</td></tr>`).join('')}</tbody></table>`
 const schemaRows = (properties, prefix = '') => Object.entries(properties).map(([name, schema]) => [prefix + name, [].concat(schema.type || 'object').join(' / '), schema.description || '见下方字段说明'])
@@ -92,6 +116,7 @@ export function ipRiskDocumentationHtml() {
 ${table([['ip', 'string · 单条必填', 'POST /api/v1/data/ip/risk：一个 IPv4，首尾空格会去除。'], ['ips', 'string[] · 批量必填', 'POST /api/v1/data/ip/risk/batch：1–100 个 IPv4，保留顺序及重复项。任一格式无效则整个请求拒绝。']])}
 <pre><code>POST /api/v1/data/ip/risk\n{"ip":"1.1.1.1"}\n\nPOST /api/v1/data/ip/risk/batch\n{"ips":["1.1.1.1","8.8.8.8"]}</code></pre>
 <p>普通请求不需要请求去重标识，每次提交都是新查询。高级调用者可选用 Idempotency-Key（8–128 个字母、数字或 . _ : -，首字符为字母或数字）重放已完成的成功结果；修改参数应换新标识。结果未知时保留请求编号核对，不连续重试。</p>
+<h3>历史查询与回看（只读，不计费）</h3><p>GET /api/v1/data/ip/risk/history 按当前租户、调用者及原 Key 返回已保存记录，支持 q、state、level、limit（默认 10，最多 50）及 cursor。items 为逐 IP 概要，nextCursor 为空即末页；搜索和翻页不会触发采集。历史标签/完整字段由 GET /api/v1/data/ip/risk/history/{kind}/{id} 读取，kind 为 single 或 batch，id 使用列表 recordId。详情 payload 保留原始结果和时间，批次保留重复项、输入顺序与失败状态。服务未就绪不影响已授权的历史读取；授权撤销后不可读。正式数据库保存的记录不因页面刷新丢失，memory 演示环境仅能保留到服务重启前。无完整快照的批次返回 409，不自动续跑。</p>
 <h3>单条返回结构</h3>${table(schemaRows(ipRiskResponseSchema.properties))}${table(schemaRows(ipRiskResponseSchema.properties.data.properties, 'data.'))}
 <h3>画像字段 · data.data</h3>${table(schemaRows(ipRiskFields, 'data.data.'))}
 <h3>风险标签子字段</h3>${table(schemaRows(ipRiskFields.risk_tags.items.properties, 'risk_tags[].'))}
