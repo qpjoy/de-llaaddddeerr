@@ -1,5 +1,7 @@
 # IP 风险画像
 
+2026-10-01：首屏已调整为风险画像产品，支持单个/批量、逐项状态、复制与筛选导出；接口调用和接口文档位于后续标签。[产品交互、状态矩阵与渠道/供应商/独立代理规划](../product/ip-risk-product-and-channels.md)区分已实现与后续接入。当前来源为 ipsearch，百度尚未接入；本次不改变原服务端调用出口。
+
 仓库实现：`POST /api/v1/data/ip/risk` 和 `POST /api/v1/data/ip/risk/batch`，产品页面 `#/data-products/ip-risk`，接口说明 `/docs/ip-risk`（沿用控制台登录保护）。
 
 ## 接入与权限

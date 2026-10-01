@@ -940,8 +940,8 @@ export function App() {
             </button>
           </div>
         </header>
-        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
-          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search'].includes(route.path)} />
+        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}${route.path === '/data-products/ip-risk' ? ' mih-content--ip-risk' : ''}`} id="mih-main-content" tabIndex="-1">
+          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search', '/data-products/ip-risk'].includes(route.path)} />
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
