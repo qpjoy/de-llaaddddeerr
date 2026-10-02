@@ -598,9 +598,9 @@ export const QUESTS = [
       detail:
         facts.browserActions > 0
           ? count(facts.browserActions, '次浏览器工具调用', '')
-          : facts.browserOrigins > 0
-            ? `已允许 ${facts.browserOrigins} 个 origin，但还没有真的跑过`
-            : '还没有允许任何 origin'
+          : facts.browserReady
+            ? '浏览器测试已开启，但还没有真的跑过'
+            : '浏览器工具还没有开启'
     })
   },
   {
@@ -745,6 +745,9 @@ export function systemFacts({
     providers: config.model?.providers?.length ?? 0,
     allowedTools: config.policy?.allowedTools?.length ?? 0,
     browserOrigins: config.policy?.browserOrigins?.length ?? 0,
+    browserReady:
+      (config.policy?.allowedTools ?? []).includes('browser_open') &&
+      (config.policy?.browserSites !== 'list' || (config.policy?.browserOrigins?.length ?? 0) > 0),
     authoredOrchestrations: orchestrations.filter((entry) => !entry.builtin).length,
     scheduledOrchestrations: orchestrations.filter((entry) => entry.schedule?.enabled).length,
     egressProfiles: (egress.profiles ?? []).length,

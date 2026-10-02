@@ -17,7 +17,7 @@ Rig 管理入口：`https://<rig-internal-origin>/rig/`；完整测试管理台�
 
 本版本不提供伪造的 ProductNetwork 注册 manifest。需要独立 VPN 能力时，后续通过明确的 Launcher 注册合同申请自己的地址段，不能复制旧 Autotest 身份，也不能只为“应用展示”申请网络权限。
 
-身份：Rig 使用公开 OAuth/introspection 合同，audience mx-sdk，用户首次进入默认 viewer。Rig 的操作员/管理员角色由其独立数据库维护，模型不能提升权限。服务间密码/校验请求延续旧独立服务的公平预算、负缓存和并发限制。
+身份：Rig 默认使用自己的账号与会话（见 [docs/12](12-self-contained-rig-and-flight-model.md) §6.1），不依赖 MX-H2I 或 Launcher 登录。配置 Launcher 地址时，可选地通过公开 OAuth/introspection 合同接受 Launcher 账号，audience mx-sdk，首次进入默认 viewer。Rig 的操作员/管理员角色由其独立数据库维护，模型不能提升权限。服务间密码/校验请求延续旧独立服务的公平预算、负缓存和并发限制。
 
 平台测试中心将来可以调用 Rig 测试 API并保存 evidence 引用；只接入有限摘要、状态与原始证据 URL。MX Rig 的 Agent 答复不能直接调用 Launcher gate evaluate，更不能给生产发布自动放行——内置 Agent 的角色说明里写明了这一点，工具集里也没有任何门禁接口。
 

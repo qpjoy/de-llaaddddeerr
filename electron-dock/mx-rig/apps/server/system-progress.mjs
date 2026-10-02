@@ -1,8 +1,6 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
-import { dirname } from 'node:path'
-import { randomUUID } from 'node:crypto'
 import { RigError } from '../../packages/contracts/index.mjs'
 import { QUEST_IDS, SIGNALS } from './system.mjs'
+import { DocumentConflict, documentFor } from './state-documents.mjs'
 
 const MAX_MEMBERS = 500
 
@@ -19,18 +17,17 @@ const MAX_MEMBERS = 500
  * back as a member who never did anything.
  */
 export class SystemProgress {
-  constructor(file) {
-    this.file = file
+  /** @param {string | object} source a progress file path, or a shared document */
+  constructor(source) {
+    this.document = documentFor(source)
+    this.version = 0
     this.value = { members: {} }
     this.queue = Promise.resolve()
   }
   async init() {
-    try {
-      const stored = JSON.parse(await readFile(this.file, 'utf8'))
-      this.value = { members: this.#clean(stored.members) }
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error
-    }
+    const { value, version } = await this.document.load()
+    this.value = { members: this.#clean(value?.members) }
+    this.version = version
     return this
   }
   /** Drop anything a newer build no longer knows about, rather than replaying it. */
@@ -72,12 +69,12 @@ export class SystemProgress {
    */
   async claim(owner, questId, verified) {
     if (!QUEST_IDS.includes(questId)) throw new RigError('quest_unknown', '任务不存在', 404)
-    const entry = this.#entry(owner)
-    if (entry.claimed.includes(questId)) return { entry: this.get(owner), changed: false }
-    if (!verified) throw new RigError('quest_unverified', '这项任务还没有完成，无法领取', 409)
-    entry.claimed.push(questId)
-    await this.#persist()
-    return { entry: this.get(owner), changed: true }
+    return this.#mutate(owner, (entry) => {
+      if (entry.claimed.includes(questId)) return false
+      if (!verified) throw new RigError('quest_unverified', '这项任务还没有完成，无法领取', 409)
+      entry.claimed.push(questId)
+      return true
+    })
   }
   /**
    * Record a workbench-reported action.
@@ -88,29 +85,50 @@ export class SystemProgress {
    */
   async signal(owner, name) {
     if (!SIGNALS.includes(name)) throw new RigError('signal_unknown', '未知的界面上报', 400)
-    const entry = this.#entry(owner)
-    if (entry.signals[name]) return { entry: this.get(owner), changed: false }
-    entry.signals[name] = new Date().toISOString()
-    await this.#persist()
-    return { entry: this.get(owner), changed: true }
+    return this.#mutate(owner, (entry) => {
+      if (entry.signals[name]) return false
+      entry.signals[name] = new Date().toISOString()
+      return true
+    })
   }
   /** Remember which catalogue version this member has already been shown. */
   async seen(owner, version) {
-    const entry = this.#entry(owner)
-    if (entry.seenVersion === version) return { entry: this.get(owner), changed: false }
-    entry.seenVersion = version
-    await this.#persist()
-    return { entry: this.get(owner), changed: true }
+    return this.#mutate(owner, (entry) => {
+      if (entry.seenVersion === version) return false
+      entry.seenVersion = version
+      return true
+    })
   }
-  async #persist() {
-    const json = JSON.stringify(this.value, null, 2)
+  /**
+   * Apply one member's change and store it. When another replica saved in
+   * between, re-read and apply again: each change is idempotent on the
+   * member's own entry, so replaying it on fresh data is always correct.
+   */
+  async #mutate(owner, apply) {
     const operation = this.queue.then(async () => {
-      await mkdir(dirname(this.file), { recursive: true })
-      const temp = `${this.file}.${randomUUID()}.tmp`
-      await writeFile(temp, json, { mode: 0o600 })
-      await rename(temp, this.file)
+      for (let attempt = 0; ; attempt += 1) {
+        if (attempt > 0 || this.document.shared) await this.#reload()
+        const entry = this.#entry(owner)
+        if (!apply(entry)) return { entry: this.get(owner), changed: false }
+        try {
+          this.version = await this.document.save(this.value, this.version)
+          return { entry: this.get(owner), changed: true }
+        } catch (error) {
+          if (!(error instanceof DocumentConflict) || attempt >= 3) throw error
+        }
+      }
     })
     this.queue = operation.catch(() => {})
-    await operation
+    return operation
+  }
+  /** Read what other replicas saved; a single-process file has nothing newer. */
+  async refresh() {
+    if (this.document.shared) await this.#reload()
+    return this
+  }
+  async #reload() {
+    const { value, version } = await this.document.load()
+    this.value = { members: this.#clean(value?.members) }
+    this.version = version
   }
 }

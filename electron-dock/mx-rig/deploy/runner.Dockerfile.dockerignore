@@ -1,0 +1,5 @@
+# The runner image needs exactly one file from mx-rig. Everything else —
+# node_modules with Electron and Playwright, .runtime, .env — stays out of
+# the build context.
+*
+!packages/test-platform/bin/mxt-runner.mjs

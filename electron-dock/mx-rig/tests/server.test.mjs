@@ -71,6 +71,47 @@ test('login keeps credential out of browser JSON; config and model require autho
   )
   assert.equal(foreign.status, 403)
 })
+test('a Rig account signs in to the workbench and native client without any other system', async (t) => {
+  const { api } = await fixture(t)
+  const created = await api('/api/v1/members', {
+    account: 'tester',
+    displayName: '测试员',
+    role: 'operator',
+    password: 'tester-password-1'
+  })
+  assert.equal(created.status, 201)
+
+  // Browser workbench: an HttpOnly cookie, never the token in JSON.
+  const web = await api(
+    '/api/rig/v1/login',
+    { account: 'tester', password: 'tester-password-1' },
+    {}
+  )
+  assert.equal(web.status, 200)
+  assert.equal(web.body.token, undefined)
+  assert.equal(web.body.member.kind, 'local')
+  const cookie = web.headers.get('set-cookie').split(';')[0]
+  const me = await api('/api/rig/v1/me', undefined, { cookie })
+  assert.equal(me.status, 200)
+  assert.equal(me.body.principal.id, 'local:tester')
+  assert.equal(me.body.principal.role, 'operator')
+
+  // Native client: the desktop main process holds the bearer token.
+  const native = await api(
+    '/api/rig/v1/native-login',
+    { account: 'tester', password: 'tester-password-1' },
+    {}
+  )
+  assert.equal(native.status, 200)
+  assert.match(native.body.token, /^rig_s1_/)
+  const bearer = { authorization: `Bearer ${native.body.token}` }
+  assert.equal((await api('/api/rig/v1/missions', undefined, bearer)).status, 200)
+
+  // Logging out ends that session on the server, not only in this client.
+  assert.equal((await api('/api/rig/v1/logout', {}, bearer)).status, 200)
+  assert.equal((await api('/api/rig/v1/me', undefined, bearer)).status, 401)
+  assert.equal((await api('/api/rig/v1/me', undefined, { cookie })).status, 200)
+})
 test('real HTTP workflow integrates inherited task API without fake test success', async (t) => {
   const { api, runtime } = await fixture(t)
   assert.equal(
@@ -146,4 +187,35 @@ test('viewer cannot edit policies, call model or authorize local execution', asy
     (await api('/api/rig/v1/missions', { mode: 'agent', goal: 'test' }, headers)).status,
     403
   )
+})
+
+test('a service opened to the LAN still takes its own loopback page, and no other site', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'mx-rig-origin-'))
+  const runtime = await start(
+    {
+      MX_RIG_ADMIN_TOKEN: 'test-only-rig-secret',
+      MX_RIG_HOST: '127.0.0.1',
+      MX_RIG_PORT: '0',
+      MX_RIG_STORE: 'memory',
+      MX_RIG_STATE_DIR: root,
+      MX_RIG_ARTIFACTS_DIR: join(root, 'artifacts'),
+      // What `manage.sh local init --lan` sets: the address colleagues use.
+      MX_RIG_PUBLIC_URL: 'http://192.168.1.7:8791',
+      MX_RIG_INSECURE_COOKIES: 'true'
+    },
+    { schedule: false }
+  )
+  t.after(() => runtime.close())
+  const port = new URL(runtime.origin).port
+  const login = (origin) =>
+    fetch(`${runtime.origin}/api/rig/v1/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ account: 'admin', password: 'test-only-rig-secret' })
+    }).then((response) => response.status)
+  assert.equal(await login('http://192.168.1.7:8791'), 200, 'the public address')
+  assert.equal(await login(`http://127.0.0.1:${port}`), 200, 'this machine, as 127.0.0.1')
+  assert.equal(await login(`http://localhost:${port}`), 200, 'this machine, as localhost')
+  assert.equal(await login('https://evil.example'), 403)
+  assert.equal(await login(`http://127.0.0.1:${Number(port) + 1}`), 403, 'another server on this machine')
 })

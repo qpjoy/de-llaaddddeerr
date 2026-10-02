@@ -191,3 +191,175 @@ test('a full build wires every section together', () => {
   assert.equal(insights.duration.p50, 60_000)
   assert.ok(Array.isArray(insights.risks))
 })
+
+// -- Agent findings and page assertions ---------------------------------------
+
+const { missionInsights } = await import('../apps/server/insights.mjs')
+const { start: startServer } = await import('../apps/server/index.mjs')
+
+const AGENT_NOW = new Date('2026-09-25T12:00:00.000Z')
+const mission = (overrides) => ({
+  id: crypto.randomUUID(),
+  goal: '任务',
+  mode: 'agent',
+  status: 'completed',
+  createdAt: '2026-09-24T08:00:00.000Z',
+  events: [],
+  ...overrides
+})
+
+test('findings and assertions are counted in the window, never as test results', () => {
+  const stats = missionInsights(
+    [
+      mission({
+        finding: {
+          verdict: 'product-defect',
+          confidence: 'high',
+          summary: '按钮无响应',
+          unverified: 0
+        }
+      }),
+      mission({
+        surface: 'desktop',
+        finding: {
+          verdict: 'environment-blocked',
+          confidence: 'medium',
+          summary: '执行机离线',
+          unverified: 2
+        },
+        assertions: [
+          {
+            kind: 'text_visible',
+            description: '页面上可见指定文本',
+            expected: '已保存',
+            actual: false,
+            passed: false,
+            at: '2026-09-24T08:01:00.000Z'
+          },
+          {
+            kind: 'url_contains',
+            description: '当前地址包含指定片段',
+            expected: '/done',
+            actual: 'https://t/done',
+            passed: true,
+            at: '2026-09-24T08:02:00.000Z'
+          }
+        ]
+      }),
+      // Outside the window: not counted anywhere.
+      mission({
+        createdAt: '2026-08-01T00:00:00.000Z',
+        finding: { verdict: 'flaky', summary: '旧' },
+        assertions: [{ passed: false }]
+      })
+    ],
+    { windowDays: 7, now: AGENT_NOW }
+  )
+  assert.equal(stats.total, 2)
+  assert.deepEqual(stats.bySurface, { internal: 1, desktop: 1 })
+  assert.equal(stats.findings.total, 2)
+  assert.equal(stats.findings.byVerdict['product-defect'], 1)
+  assert.equal(stats.findings.byVerdict.flaky, 0)
+  assert.equal(stats.findings.unverified, 1)
+  assert.equal(stats.assertions.total, 2)
+  assert.equal(stats.assertions.passRate, 0.5)
+  assert.equal(stats.assertions.recentFailures[0].expected, '已保存')
+  assert.equal(stats.findings.recent.length, 2)
+  assert.ok(stats.caveats.some((line) => /不是测试结论/.test(line)))
+
+  const none = missionInsights([], { windowDays: 7, now: AGENT_NOW })
+  assert.equal(none.assertions.passRate, null, 'no checks, no ratio')
+  const counts = missionInsights([mission({ finding: { verdict: 'flaky', summary: 's' } })], {
+    windowDays: 7,
+    now: AGENT_NOW,
+    detail: false
+  })
+  assert.equal(counts.findings.total, 1)
+  assert.deepEqual(counts.findings.recent, [])
+  assert.equal(none.usage.perMission, null, 'nothing metered, no average')
+
+  const spent = missionInsights(
+    [
+      mission({ usage: { calls: 3, promptTokens: 900, completionTokens: 100, estimated: false } }),
+      mission({ usage: { calls: 1, promptTokens: 80, completionTokens: 20, estimated: true } }),
+      mission({})
+    ],
+    { windowDays: 7, now: AGENT_NOW }
+  )
+  assert.deepEqual(
+    [spent.usage.missions, spent.usage.calls, spent.usage.promptTokens, spent.usage.estimated],
+    [2, 4, 980, 1]
+  )
+  assert.equal(spent.usage.perMission, 550)
+})
+
+test('the quality report carries Agent work; a viewer sees counts only', async (t) => {
+  const { mkdtemp } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const state = await mkdtemp(join(tmpdir(), 'mx-rig-insights-'))
+  const runtime = await startServer(
+    {
+      MX_RIG_ADMIN_TOKEN: 'insights-admin',
+      MX_RIG_HOST: '127.0.0.1',
+      MX_RIG_PORT: '0',
+      MX_RIG_STORE: 'memory',
+      MX_RIG_STATE_DIR: join(state, 'control'),
+      MX_RIG_ARTIFACTS_DIR: join(state, 'artifacts')
+    },
+    { schedule: false }
+  )
+  t.after(() => runtime.close())
+  const call = async (path, body, token = 'insights-admin') => {
+    const response = await fetch(runtime.origin + path, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' })
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const synced = await call('/api/rig/v1/missions:sync', {
+    missions: [
+      mission({
+        createdAt: new Date().toISOString(),
+        finding: {
+          verdict: 'product-defect',
+          confidence: 'high',
+          summary: '保存后没有提示',
+          unverified: 0
+        },
+        assertions: [
+          {
+            kind: 'text_visible',
+            description: '页面上可见指定文本',
+            expected: '已保存',
+            passed: false
+          }
+        ]
+      })
+    ]
+  })
+  assert.equal(synced.body.synced, 1)
+  const report = (await call('/api/rig/v1/insights?window=7')).body.insights.missions
+  assert.equal(report.bySurface.desktop, 1)
+  assert.equal(report.findings.byVerdict['product-defect'], 1)
+  assert.equal(report.findings.recent[0].summary, '保存后没有提示')
+  assert.equal(report.assertions.failed, 1)
+
+  await call('/api/v1/members', {
+    account: 'reader',
+    role: 'viewer',
+    password: 'reader-password-1'
+  })
+  const reader = (
+    await call('/api/rig/v1/native-login', { account: 'reader', password: 'reader-password-1' }, '')
+  ).body.token
+  const seen = (await call('/api/rig/v1/insights?window=7', undefined, reader)).body.insights
+    .missions
+  assert.equal(seen.findings.total, 1)
+  assert.deepEqual(seen.findings.recent, [])
+  assert.deepEqual(seen.assertions.recentFailures, [])
+})

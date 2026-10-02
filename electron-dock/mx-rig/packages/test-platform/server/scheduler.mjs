@@ -3,9 +3,10 @@ import { resolvePlacement } from './runner/placement.mjs'
 
 // Turns due tasks into runs, and reaps runs nobody is looking after.
 //
-// Runs in-process on a timer. The tick is idempotent per task because the next
-// fire time is advanced in the same pass that creates the run, so a slow tick
-// overlapping the next one cannot double-fire a schedule.
+// Runs in-process on a timer, on every replica. Each fire is claimed before
+// its run is created: the claim moves the task's next fire time only if it is
+// still the one this tick read, so of two ticks — on one process or on two
+// replicas — exactly one creates the run.
 
 export function computeNextRunAt(task, after = new Date()) {
   if (!task.enabled) return null
@@ -32,6 +33,13 @@ export async function runDueTasks(store, now = new Date()) {
       await store.updateTask(task.id, { enabled: false, nextRunAt: null })
       continue
     }
+    // `once` tasks disable themselves after firing; cron tasks advance.
+    const nextRunAt = task.scheduleKind === 'once' ? null : computeNextRunAt(task, now)
+    const claimed = await store.claimTaskFire(task.id, task.nextRunAt, {
+      nextRunAt,
+      disable: task.scheduleKind === 'once',
+    })
+    if (!claimed) continue
     const placement = resolvePlacement({ task, suite, now })
     const run = await store.createRun({
       appId: task.appId,
@@ -47,14 +55,7 @@ export async function runDueTasks(store, now = new Date()) {
       ...placement,
     })
     created.push(run)
-
-    // `once` tasks disable themselves after firing; cron tasks advance.
-    const nextRunAt = task.scheduleKind === 'once' ? null : computeNextRunAt(task, now)
-    await store.updateTask(task.id, {
-      lastRunId: run.id,
-      nextRunAt,
-      ...(task.scheduleKind === 'once' ? { enabled: false } : {}),
-    })
+    await store.updateTask(task.id, { lastRunId: run.id })
   }
   return created
 }

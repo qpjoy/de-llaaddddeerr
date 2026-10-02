@@ -40,7 +40,7 @@ export const CONFIDENCE_KEYS = Object.keys(CONFIDENCE)
 // The platform's own id shapes. Anything else in the evidence field is prose:
 // it may well be true, but it is not something this product can verify, so it
 // is not reported as verified either.
-const REFERENCE =
+export const REFERENCE =
   /\b(trun_[A-Za-z0-9_-]{2,60}|tsk_[A-Za-z0-9_-]{2,60}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g
 
 export function normalizeFinding(args) {

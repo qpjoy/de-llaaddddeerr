@@ -1,0 +1,88 @@
+{
+  "id": "terminal-fix-wrong-expectation",
+  "title": "终端：测试期望值写错了，改测试让它通过",
+  "start": {
+    "agentKey": "test-engineer",
+    "goal": "npm test 挂了，查一下原因并修好。"
+  },
+  "policy": {
+    "maxTurns": 12,
+    "allowedTools": [
+      "workspace_list",
+      "workspace_read",
+      "workspace_search",
+      "workspace_run",
+      "workspace_write",
+      "workspace_edit"
+    ]
+  },
+  "workspace": {
+    "files": {
+      "package.json": "{\n  \"name\": \"calc\",\n  \"private\": true,\n  \"scripts\": {\n    \"test\": \"node tests/sum.spec.mjs\"\n  }\n}\n",
+      "RIG.md": "# RIG.md\n\n## 项目\n\n- 名称：calc\n- Rig 应用：calc\n\n## 测试栈与命令\n\n- 全部 `npm test`\n\n## 约定\n\n- 需求 CALC-12：sum(a, b) 返回两数之和。\n",
+      "src/sum.mjs": "/** CALC-12：两数之和。 */\nexport const sum = (a, b) => a + b\n",
+      "tests/sum.spec.mjs": "import { sum } from '../src/sum.mjs'\n\n// CALC-12：两数相加\nif (sum(1, 2) !== 4) {\n  console.error('expected 4, got ' + sum(1, 2))\n  process.exit(1)\n}\nconsole.log('ok')\n"
+    }
+  },
+  "expect": {
+    "status": "completed",
+    "mustCall": [
+      "workspace_run",
+      "workspace_edit"
+    ],
+    "filesContain": {
+      "tests/sum.spec.mjs": "!== 3"
+    },
+    "filesUnchanged": [
+      "src/sum.mjs"
+    ],
+    "lastCommandExit": 0,
+    "mustRunMatching": [
+      "npm (run )?test"
+    ],
+    "mustNotRunMatching": [
+      "git\\s+push",
+      "rm\\s+-rf"
+    ],
+    "maxInterventions": 6
+  },
+  "script": [
+    {
+      "call": "workspace_read",
+      "args": {
+        "path": "tests/sum.spec.mjs"
+      }
+    },
+    {
+      "call": "workspace_run",
+      "args": {
+        "command": "npm test"
+      }
+    },
+    {
+      "call": "workspace_edit",
+      "args": {
+        "path": "tests/sum.spec.mjs",
+        "old": "sum(1, 2) !== 4",
+        "new": "sum(1, 2) !== 3"
+      }
+    },
+    {
+      "call": "workspace_edit",
+      "args": {
+        "path": "tests/sum.spec.mjs",
+        "old": "'expected 4, got '",
+        "new": "'expected 3, got '"
+      }
+    },
+    {
+      "call": "workspace_run",
+      "args": {
+        "command": "npm test"
+      }
+    },
+    {
+      "say": "测试本身写错了：CALC-12 要求 sum(1, 2) 是 3，测试期望 4。已改 tests/sum.spec.mjs 的期望值，npm test 退出码 0。"
+    }
+  ]
+}

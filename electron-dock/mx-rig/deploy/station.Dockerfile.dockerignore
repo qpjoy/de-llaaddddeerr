@@ -1,0 +1,14 @@
+# The station image needs the lockfile and the few modules it imports.
+# node_modules (with Electron), .runtime, .env and the server stay out.
+*
+!package.json
+!package-lock.json
+!packages/test-platform/package.json
+!packages/contracts/
+!packages/runtime/aria.mjs
+!packages/runtime/browser.mjs
+!packages/runtime/procedure.mjs
+!packages/runtime/station.mjs
+!bin/mx-rig.mjs
+!apps/terminal/station.mjs
+!apps/terminal/launcher.mjs

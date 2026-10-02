@@ -33,6 +33,13 @@ export const missionStartBody = z
     taskId: z.string().max(200).optional(),
     agentKey: identifier.optional(),
     orchestrationKey: identifier.optional(),
+    // A drafted flight plan, run once without being saved. Its shape is
+    // checked by the orchestration schema in the runtime; here it is only
+    // bounded in size.
+    spec: z.looseObject({ key: identifier, nodes: z.array(z.unknown()).min(1).max(24) }).optional(),
+    // A member's own grant for this mission only; honoured only when the
+    // admin allowed it, and never beyond the allowed test origins.
+    grants: z.object({ browserWrites: z.boolean() }).strict().optional(),
     inputs: z.record(z.string().max(40), z.string().max(400)).optional()
   })
   .strict()
@@ -40,8 +47,8 @@ export const missionStartBody = z
     message: '测试工作流必须选择一个测试计划',
     path: ['taskId']
   })
-  .refine((body) => body.mode !== 'orchestration' || Boolean(body.orchestrationKey), {
-    message: '运行编排必须选择一条编排',
+  .refine((body) => body.mode !== 'orchestration' || Boolean(body.orchestrationKey || body.spec), {
+    message: '运行编排必须选择一条编排，或提供一份飞行计划',
     path: ['orchestrationKey']
   })
 
@@ -51,6 +58,34 @@ export const missionApproveBody = z.object({ approvalId: z.uuid(), approved: z.b
 
 export const missionCancelBody = z.object({}).strict()
 
+// A desktop mission as its Runtime last saved it. Loose on purpose: the record
+// grows with the Runtime, and the server stores it for reading, never executes
+// it. What matters is bounded here — identity, status and size — and the
+// owner is always the caller, whatever the record says.
+const syncedMission = z.looseObject({
+  id: z.uuid(),
+  goal: z.string().max(8000),
+  mode: z.enum(['agent', 'workflow', 'orchestration']),
+  status: z.enum([
+    'queued',
+    'running',
+    'awaiting_approval',
+    'completed',
+    'failed',
+    'blocked',
+    'cancelled'
+  ]),
+  createdAt: z.iso.datetime(),
+  events: z.array(z.unknown()).max(200)
+})
+
+export const missionSyncBody = z
+  .object({ missions: z.array(syncedMission).min(1).max(20) })
+  .strict()
+
+/** The largest single desktop record the service stores; the desktop trims to fit. */
+export const SYNCED_MISSION_BYTES = 512 * 1024
+
 const toolCall = z
   .object({
     id: z.string().min(1).max(200),
@@ -59,8 +94,31 @@ const toolCall = z
   })
   .strict()
 
+// A screenshot for a vision-capable model: one JPEG or PNG, inline, bounded.
+const contentPart = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string().max(24_000) }).strict(),
+  z
+    .object({
+      type: z.literal('image_url'),
+      image_url: z
+        .object({
+          url: z
+            .string()
+            .max(1_400_000)
+            .regex(/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/)
+        })
+        .strict()
+    })
+    .strict()
+])
+
 const chatMessage = z.discriminatedUnion('role', [
-  z.object({ role: z.literal('user'), content: z.string().max(24_000) }).strict(),
+  z
+    .object({
+      role: z.literal('user'),
+      content: z.union([z.string().max(24_000), z.array(contentPart).min(1).max(2)])
+    })
+    .strict(),
   z
     .object({
       role: z.literal('assistant'),
@@ -80,7 +138,19 @@ const chatMessage = z.discriminatedUnion('role', [
 export const modelTurnBody = z
   .object({
     agentKey: identifier.optional(),
-    messages: z.array(chatMessage).max(90),
+    messages: z
+      .array(chatMessage)
+      .max(90)
+      // The Runtime keeps only the latest screenshot; more is a client bug.
+      .refine(
+        (messages) =>
+          messages.filter(
+            (message) =>
+              Array.isArray(message.content) &&
+              message.content.some((part) => part.type === 'image_url')
+          ).length <= 1,
+        { message: '一次模型调用最多附带一张截图' }
+      ),
     // Only the name is read; the schema itself always comes from our registry.
     tools: z
       .array(
@@ -104,7 +174,8 @@ const providerBody = z
     apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
     timeoutMs: z.number().int().min(5_000).max(120_000),
     enabled: z.boolean(),
-    stream: z.boolean().optional()
+    stream: z.boolean().optional(),
+    vision: z.boolean().optional()
   })
   .strict()
 
@@ -138,7 +209,7 @@ const agentBody = z
     displayName: z.string().min(1).max(60),
     summary: z.string().min(1).max(240),
     category: z.enum(Object.keys(AGENT_CATEGORIES)),
-    surface: z.enum(['any', 'desktop']),
+    surface: z.enum(['any', 'desktop', 'terminal']),
     tools: z.array(z.enum(TOOL_NAMES)).max(TOOL_NAMES.length),
     persona: z.string().min(1).max(4000),
     starter: z.string().max(400).optional(),
@@ -164,6 +235,10 @@ export const adminConfigBody = z
     maxTurns: z.number().int().min(1).max(30),
     allowedTools: z.array(z.enum(TOOL_NAMES)).max(TOOL_NAMES.length),
     browserOrigins: z.array(z.string().max(2000)).max(30),
+    browserSites: z.enum(['ask', 'list']).optional(),
+    productionHosts: z.array(z.string().max(253)).max(30).optional(),
+    browserPreauth: z.boolean().optional(),
+    tokenBudget: z.number().int().min(0).max(50_000_000).optional(),
     providers: z.array(providerBody).min(1).max(8),
     sequence: z.array(identifier).max(8),
     agents: z.array(agentBody).max(24),
@@ -194,6 +269,10 @@ export const dispatchPlanBody = z
     // the tool executor at execution time.
     surface: z.enum(['web', 'desktop']).optional()
   })
+  .strict()
+
+export const flightDraftBody = z
+  .object({ text: z.string().min(1).max(2000), surface: z.enum(['web', 'desktop']).optional() })
   .strict()
 
 export const egressActivateBody = z.object({ activeId: identifier.nullable().optional() }).strict()

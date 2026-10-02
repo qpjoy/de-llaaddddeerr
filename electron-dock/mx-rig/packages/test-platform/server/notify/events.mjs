@@ -14,8 +14,56 @@ import { redactLine } from '../core/redact.mjs'
 // second consecutive failure carries no new information — the dashboard already
 // says so, and repeating it is what trains people to ignore the channel.
 
-/** Events a channel can subscribe to. */
-export const NOTIFY_EVENTS = ['failure', 'recovery', 'blocked']
+/**
+ * Events a channel can subscribe to.
+ *
+ * `debrief` is the one exception to "transitions, not results": it is sent
+ * only by a flight plan whose author put a notifying debrief step in it, which
+ * is somebody asking for that report on purpose. Channels created before it
+ * existed keep their stored list and do not start receiving it.
+ */
+export const NOTIFY_EVENTS = ['failure', 'recovery', 'blocked', 'debrief']
+
+/**
+ * A flight report as a channel message, rebuilt field by field from what a
+ * Runtime sent: bounded, redacted, and with the link composed here rather
+ * than taken from the request.
+ */
+export function composeDebrief(input, { baseUrl = '' } = {}) {
+  const source = input && typeof input === 'object' ? input : {}
+  const number = (value) => (Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0)
+  const totals = source.totals && typeof source.totals === 'object' ? source.totals : {}
+  const failed = Array.isArray(source.failedCases) ? source.failedCases.slice(0, 5) : []
+  return {
+    event: 'debrief',
+    title: redactLine(String(source.title ?? '飞行报告'), 200),
+    runId: null,
+    runUrl: baseUrl ? `${baseUrl.replace(/\/$/u, '')}/rig/` : null,
+    appSlug: null,
+    suiteSlug: null,
+    taskName: redactLine(String(source.taskName ?? ''), 120) || null,
+    profile: null,
+    status: redactLine(String(source.status ?? ''), 40),
+    totals: {
+      tests: number(totals.tests),
+      passed: number(totals.passed),
+      failed: number(totals.failed),
+      notRun: number(totals.notRun),
+    },
+    blockedReason: source.blockedReason ? redactLine(String(source.blockedReason), 300) : null,
+    // A sentence of judgement, when the sender has one — Rig's hooks put the
+    // Agent's conclusion here, labelled as such.
+    note: source.note ? redactLine(String(source.note), 400) : null,
+    failedCases: failed.map((entry) => ({
+      caseId: redactLine(String(entry?.caseId ?? ''), 80),
+      title: redactLine(String(entry?.title ?? ''), 120),
+      error: null,
+    })),
+    failedCasesOmitted: number(source.failedCasesOmitted),
+    sourceRef: null,
+    lastGood: null,
+  }
+}
 
 /**
  * What, if anything, this run changed.

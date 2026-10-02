@@ -28,7 +28,75 @@ export const NODE_TYPES = Object.freeze({
     kind: 'subflow',
     hint: '把另一条已保存的编排整条嵌进来；它的变量带前缀，同一条子编排可以用多次'
   },
-  finish: { title: '结束', kind: 'output', hint: '写下结论并结束这条编排' }
+  finish: { title: '结束', kind: 'output', hint: '写下结论并结束这条编排' },
+  // The flight-plan palette. Same rule as everything above: each type is a
+  // step the runtime implements; an author decides order and parameters.
+  preflight: {
+    title: 'T-minus 预检',
+    kind: 'gate',
+    hint: '派发前核对执行机、模型、浏览器 origin、被测包与生产环境禁区；不满足就取消发射（Scrub），不制造排队的 Run'
+  },
+  flight: {
+    title: '架次',
+    kind: 'tool',
+    hint: '派发一个测试计划，有界等待它结束，并把用例结果汇总成变量；派发仍需确认，除非管理员对这条计划预授权'
+  },
+  explore: {
+    title: '探索',
+    kind: 'model',
+    hint: '在计划里跑一段有步数上限的 Agent 探索；写动作仍逐次确认，断言记录在任务上'
+  },
+  procedure: {
+    title: '规程试车',
+    kind: 'tool',
+    hint: '按原样重放一组试验规程（不经模型），每条记为一次执行；只在桌面端运行，不需要逐次确认'
+  },
+  gate: {
+    title: '放行评审',
+    kind: 'gate',
+    hint: '按确定性标准判定 Go / No-Go，可再要求一个人确认；不由模型自评'
+  },
+  debrief: { title: '讲评', kind: 'output', hint: '汇总各阶段结果生成飞行报告，可推送到通知通道' }
+})
+
+/**
+ * Where a node sits in a flight plan. Only a label for grouping the plan and
+ * its report; it changes nothing about execution.
+ */
+export const STAGES = Object.freeze({
+  tminus: 'T-minus 预检',
+  'static-fire': 'Static Fire 冒烟',
+  flight: 'Flight 功能',
+  regression: 'Regression 回归',
+  recovery: 'Recovery 回收',
+  debrief: 'Debrief 讲评'
+})
+
+/**
+ * Deterministic exit criteria for a gate. Each reads the recorded result of a
+ * stage — never the model's opinion of it.
+ */
+export const GATE_METRICS = Object.freeze({
+  preflight_go: { label: '预检通过', stage: 'preflight', needsValue: false },
+  run_passed: { label: '执行结论为 passed', stage: 'flight', needsValue: false },
+  failed_max: { label: '失败用例数不超过', stage: 'flight', needsValue: true },
+  blocked_none: { label: '没有受阻', stage: 'flight', needsValue: false },
+  pass_rate_min: { label: '用例通过率不低于（%）', stage: 'flight', needsValue: true },
+  assertions_all_passed: {
+    label: '断言全部通过（且至少一条）',
+    stage: 'explore',
+    needsValue: false
+  },
+  procedures_passed: { label: '规程全部通过', stage: 'procedure', needsValue: false },
+  procedure_pass_rate_min: { label: '规程通过率不低于（%）', stage: 'procedure', needsValue: true }
+})
+
+export const PREFLIGHT_CHECKS = Object.freeze({
+  runners: '有能执行该计划的在线执行机',
+  model: '模型已配置（探索与分析需要）',
+  browser: '浏览器工具与 origin 已允许（探索需要）',
+  package: 'Electron 计划已有可用安装包',
+  production: '目标地址不在生产环境禁区'
 })
 
 const nodeId = z
@@ -86,7 +154,23 @@ const testSpec = z
     path: ['values']
   })
 
-const baseNode = { id: nodeId, title: z.string().min(1).max(60) }
+const baseNode = {
+  id: nodeId,
+  title: z.string().min(1).max(60),
+  stage: z.enum(Object.keys(STAGES)).optional()
+}
+
+const gateCriterion = z
+  .object({
+    metric: z.enum(Object.keys(GATE_METRICS)),
+    stage: nodeId,
+    value: z.number().min(0).max(100000).optional()
+  })
+  .strict()
+  .refine((entry) => !GATE_METRICS[entry.metric].needsValue || entry.value !== undefined, {
+    message: '该标准需要填写数值',
+    path: ['value']
+  })
 
 export const nodeSpec = z.discriminatedUnion('type', [
   z
@@ -151,8 +235,102 @@ export const nodeSpec = z.discriminatedUnion('type', [
       next: nodeId.nullable().default(null)
     })
     .strict(),
-  z.object({ ...baseNode, type: z.literal('finish'), message: z.string().min(1).max(400) }).strict()
+  z
+    .object({ ...baseNode, type: z.literal('finish'), message: z.string().min(1).max(400) })
+    .strict(),
+  z
+    .object({
+      ...baseNode,
+      type: z.literal('preflight'),
+      taskIds: z.array(argValue).max(6).default([]),
+      checks: z
+        .array(z.enum(Object.keys(PREFLIGHT_CHECKS)))
+        .min(1)
+        .max(5)
+        .default(['runners']),
+      onNoGo: nodeId.nullable().default(null),
+      next: nodeId.nullable().default(null)
+    })
+    .strict(),
+  z
+    .object({
+      ...baseNode,
+      type: z.literal('flight'),
+      taskId: argValue,
+      waitMinutes: z.number().int().min(1).max(180).default(30),
+      next: nodeId.nullable().default(null)
+    })
+    .strict(),
+  z
+    .object({
+      ...baseNode,
+      type: z.literal('explore'),
+      goal: z.string().min(1).max(2000),
+      agentKey: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[a-z0-9][a-z0-9_-]*$/)
+        .optional(),
+      maxTurns: z.number().int().min(1).max(20).default(8),
+      next: nodeId.nullable().default(null)
+    })
+    .strict(),
+  z
+    .object({
+      ...baseNode,
+      type: z.literal('procedure'),
+      // Literal ids only: a procedure stage names reviewed procedures, it
+      // does not pick them at run time.
+      procedureIds: z
+        .array(z.string().regex(/^prc_[a-f0-9]{18}$/, '规程编号格式应为 prc_ 加 18 位十六进制'))
+        .min(1)
+        .max(20),
+      next: nodeId.nullable().default(null)
+    })
+    .strict(),
+  z
+    .object({
+      ...baseNode,
+      type: z.literal('gate'),
+      criteria: z.array(gateCriterion).min(1).max(8),
+      confirm: z.boolean().default(false),
+      onFail: nodeId.nullable().default(null),
+      next: nodeId.nullable().default(null)
+    })
+    .strict(),
+  z
+    .object({
+      ...baseNode,
+      type: z.literal('debrief'),
+      notify: z.boolean().default(false),
+      next: nodeId.nullable().default(null)
+    })
+    .strict()
 ])
+
+/**
+ * A flight whose plan is a fixed id, not something filled in at run time —
+ * the only kind an admin's standing authorisation can cover.
+ */
+export function preauthorizable(node) {
+  return node.type === 'flight' && !/\{\{/.test(node.taskId)
+}
+
+/** Variables a flight-plan node records for later nodes, by node id. */
+export function stageVariables(node) {
+  if (node.type === 'preflight') return [`${node.id}_go`, `${node.id}_reasons`]
+  if (node.type === 'flight')
+    return ['run', 'status', 'passed', 'failed', 'flaky', 'skipped', 'total'].map(
+      (name) => `${node.id}_${name}`
+    )
+  if (node.type === 'explore')
+    return ['assertions', 'failed_assertions', 'summary'].map((name) => `${node.id}_${name}`)
+  if (node.type === 'procedure')
+    return ['passed', 'failed', 'blocked', 'total'].map((name) => `${node.id}_${name}`)
+  if (node.type === 'gate') return [`${node.id}_passed`]
+  return []
+}
 
 export const orchestrationSpec = z
   .object({
@@ -189,6 +367,13 @@ export const orchestrationSpec = z
       .default({}),
     // Unattended execution. Whether this orchestration is *allowed* to run
     // unattended is decided in apps/server, which knows which tools write.
+    // Standing authorisation an admin gives when saving the plan: dispatching
+    // the plans it names by literal id needs no per-run approval. It is
+    // ignored on a draft run inline, and never covers browser writes.
+    authorize: z
+      .object({ dispatch: z.boolean().default(false) })
+      .strict()
+      .default({ dispatch: false }),
     schedule: z
       .object({
         cronExpr: z.string().min(1).max(120),
@@ -246,7 +431,8 @@ export function expandSubflows(spec, resolve, stack = []) {
       ...(child.inputs ?? []).map((input) => input.name),
       ...inner.nodes.flatMap((entry) =>
         entry.type === 'tool' ? Object.keys(entry.capture ?? {}) : []
-      )
+      ),
+      ...inner.nodes.flatMap((entry) => stageVariables(entry))
     ])
     const renameVar = (name) => (owned.has(name) ? prefix + name : name)
     const renameTemplate = (value) =>
@@ -314,6 +500,26 @@ function rename(node, prefix, renameVar, renameTemplate, renameTarget) {
       ),
       next: renameTarget(node.next)
     }
+  if (node.type === 'preflight')
+    return {
+      ...base,
+      taskIds: node.taskIds.map(renameTemplate),
+      onNoGo: node.onNoGo === null ? null : prefix + node.onNoGo,
+      next: renameTarget(node.next)
+    }
+  if (node.type === 'flight')
+    return { ...base, taskId: renameTemplate(node.taskId), next: renameTarget(node.next) }
+  if (node.type === 'explore')
+    return { ...base, goal: renameTemplate(node.goal), next: renameTarget(node.next) }
+  if (node.type === 'procedure') return { ...base, next: renameTarget(node.next) }
+  if (node.type === 'gate')
+    return {
+      ...base,
+      criteria: node.criteria.map((entry) => ({ ...entry, stage: prefix + entry.stage })),
+      onFail: node.onFail === null ? null : prefix + node.onFail,
+      next: renameTarget(node.next)
+    }
+  if (node.type === 'debrief') return { ...base, next: renameTarget(node.next) }
   // finish: ends the whole run, on purpose. "结束" inside a child means the
   // orchestration is finished, not that the child returned.
   return { ...base, message: renameTemplate(node.message) }
@@ -334,7 +540,11 @@ const outgoing = (node) =>
       ? [...node.branches, node.join]
       : node.type === 'finish'
         ? []
-        : [node.next]
+        : node.type === 'preflight'
+          ? [node.next, node.onNoGo]
+          : node.type === 'gate'
+            ? [node.next, node.onFail]
+            : [node.next]
 
 export const MAX_SUBFLOW_DEPTH = 3
 export const MAX_EXPANDED_NODES = 80
@@ -386,6 +596,7 @@ export function validateOrchestration(input, { toolNames = [], agentKeys = [], r
   for (const node of expanded.nodes) {
     if (node.type === 'tool') for (const name of Object.keys(node.capture)) known.add(name)
     if (node.type === 'subflow') for (const name of Object.keys(node.seed ?? {})) known.add(name)
+    for (const name of stageVariables(node)) known.add(name)
   }
 
   for (const node of expanded.nodes) {
@@ -399,7 +610,13 @@ export function validateOrchestration(input, { toolNames = [], agentKeys = [], r
           ? Object.values(node.seed ?? {})
           : node.type === 'finish' || node.type === 'approval'
             ? [node.message]
-            : []
+            : node.type === 'preflight'
+              ? node.taskIds
+              : node.type === 'flight'
+                ? [node.taskId]
+                : node.type === 'explore'
+                  ? [node.goal]
+                  : []
     for (const value of templates)
       for (const name of references(value))
         if (!known.has(name))
@@ -408,8 +625,26 @@ export function validateOrchestration(input, { toolNames = [], agentKeys = [], r
       throw new OrchestrationError(`节点 ${node.id} 使用了未知工具 ${node.tool}`, node.id)
     if (node.type === 'branch' && !known.has(node.test.var))
       throw new OrchestrationError(`节点 ${node.id} 判断了未定义的变量 ${node.test.var}`, node.id)
-    if (node.type === 'analyze' && agentKeys.length && !agentKeys.includes(node.agentKey))
+    if (
+      (node.type === 'analyze' || (node.type === 'explore' && node.agentKey)) &&
+      agentKeys.length &&
+      !agentKeys.includes(node.agentKey)
+    )
       throw new OrchestrationError(`节点 ${node.id} 引用了不存在的 Agent ${node.agentKey}`, node.id)
+    if (node.type === 'flight' && !node.taskId.trim())
+      throw new OrchestrationError(`架次 ${node.id} 需要一个测试计划`, node.id)
+    if (node.type === 'procedure' && new Set(node.procedureIds).size !== node.procedureIds.length)
+      throw new OrchestrationError(`规程试车 ${node.id} 里有重复的规程`, node.id)
+    if (node.type === 'gate')
+      for (const criterion of node.criteria) {
+        const stage = byId.get(criterion.stage)
+        const wanted = GATE_METRICS[criterion.metric].stage
+        if (!stage || stage.type !== wanted)
+          throw new OrchestrationError(
+            `放行评审 ${node.id} 的标准「${GATE_METRICS[criterion.metric].label}」需要引用一个${NODE_TYPES[wanted].title}节点，${criterion.stage} 不是`,
+            node.id
+          )
+      }
     if (node.type === 'fanout') {
       if (new Set(node.branches).size !== node.branches.length)
         throw new OrchestrationError(`节点 ${node.id} 的分支重复`, node.id)

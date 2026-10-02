@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-rig-artifacts-pv
+  labels:
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  # hostPath records a capacity but does not enforce it; the artifact store
+  # enforces its own totals and free-space reserve. The directory is chosen
+  # by manage.sh at the first deploy (a mounted /data wins over the root
+  # disk) and is immutable afterwards.
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: mx-rig-artifacts
+  hostPath:
+    path: __MX_RIG_DATA_ROOT__/artifacts
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-rig-artifacts
+  namespace: mx-rig
+  labels:
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: mx-rig-artifacts
+  resources:
+    requests:
+      storage: 50Gi

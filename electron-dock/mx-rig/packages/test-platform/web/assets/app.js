@@ -232,6 +232,7 @@ function shell(content) {
               { admin: '管理员', operator: '测试工程师', viewer: '只读' }[state.me?.role] ?? state.me?.role ?? '',
             )}</div>
           </div>
+          ${state.me?.kind === 'local' ? '<button class="qp-button qp-button--ghost qp-button--sm" data-password>修改密码</button>' : ''}
           <button class="qp-button qp-button--ghost qp-button--sm" data-logout>退出登录</button>
         </div>
       </aside>
@@ -1646,31 +1647,115 @@ async function pageRunners(main) {
   )
 }
 
+const ROLE_OPTIONS = [
+  ['viewer', '只读 —— 只能看'],
+  ['operator', '测试工程师 —— 写用例、建任务、跑测试'],
+  ['admin', '管理员 —— 还能注册应用和套件'],
+]
+
+// Shown once: the server keeps only a hash, so closing this dialog is the last
+// time anyone can read the password.
+function showOneTimePassword(title, account, password) {
+  const body = $(`
+    <div>
+      <p class="qp-body-2">账号 <b class="mxt-mono">${esc(account)}</b> 的一次性密码：</p>
+      <p class="mxt-mono qp-heading-2" style="user-select:all">${esc(password)}</p>
+      <p class="mxt-hint">只显示这一次。请当面或经私信交给本人；对方首次登录后应立即在左下角「修改密码」。</p>
+    </div>`)
+  modal({ title, body, confirmLabel: null })
+}
+
+function openCreateMember() {
+  const body = $(`
+    <form class="mxt-form">
+      ${field('账号', '<input class="qp-input mxt-mono" name="account" autocomplete="off" required maxlength="40">', '2–40 位小写字母、数字、点、- 和 _')}
+      ${field('显示名', '<input class="qp-input" name="displayName" maxlength="80">')}
+      ${field('权限', `<select class="qp-select" name="role">${ROLE_OPTIONS.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select>`)}
+    </form>`)
+  modal({
+    title: '新建 Rig 账号',
+    body,
+    confirmLabel: '创建',
+    onConfirm: async (close) => {
+      const data = Object.fromEntries(new FormData(body))
+      const result = await api('POST', '/api/v1/members', {
+        account: data.account,
+        displayName: data.displayName || undefined,
+        role: data.role,
+      })
+      close()
+      render()
+      showOneTimePassword('账号已创建', result.member.local.account, result.initialPassword)
+    },
+  })
+}
+
 async function pageMembers(main) {
-  const { members } = await api('GET', '/api/v1/members')
+  const { members, federated } = await api('GET', '/api/v1/members')
+  const me = state.me?.id ?? state.me?.principalId
   main.innerHTML = `
     <div class="mxt-head"><div>
       <h1 class="qp-heading-1">成员</h1>
-      <p class="qp-body-2 qp-muted">账号来自 mx-launcher，这里只管在测试平台里能做什么。新人首次登录默认是「只读」。</p>
-    </div></div>
+      <p class="qp-body-2 qp-muted">Rig 账号由这里的管理员开通，不依赖任何其他系统的登录。${
+        federated ? '已启用 Launcher 联邦登录，Launcher 账号首次登录默认「只读」。' : ''
+      }权限只在本平台生效。</p>
+    </div><button class="qp-button qp-button--primary" data-create>新建账号</button></div>
     <div class="mxt-panel"><div class="mxt-table__wrap"><table class="mxt-table">
-      <thead><tr><th>成员</th><th>权限</th><th>最近登录</th></tr></thead>
+      <thead><tr><th>成员</th><th>来源</th><th>权限</th><th>最近登录</th><th></th></tr></thead>
       <tbody>${members
-        .map(
-          (member) => `
+        .map((member) => {
+          const local = member.local
+          const status = local?.disabled
+            ? '<span class="mxt-status mxt-status--muted">已停用</span>'
+            : local?.mustChangePassword
+              ? '<span class="mxt-status mxt-status--warning">待改密码</span>'
+              : ''
+          return `
         <tr>
-          <td><b>${esc(member.displayName)}</b><div class="qp-caption qp-muted mxt-mono">${esc(member.principalId)}</div></td>
+          <td><b>${esc(member.displayName)}</b> ${status}<div class="qp-caption qp-muted mxt-mono">${esc(member.principalId)}</div></td>
+          <td class="qp-body-2">${member.source === 'local' ? 'Rig 账号' : 'Launcher'}</td>
           <td>
             <select class="qp-select" data-role="${esc(member.principalId)}" data-current-role="${esc(member.role)}" style="max-width:220px">
-              <option value="viewer" ${member.role === 'viewer' ? 'selected' : ''}>只读 —— 只能看</option>
-              <option value="operator" ${member.role === 'operator' ? 'selected' : ''}>测试工程师 —— 写用例、建任务、跑测试</option>
-              <option value="admin" ${member.role === 'admin' ? 'selected' : ''}>管理员 —— 还能注册应用和套件</option>
+              ${ROLE_OPTIONS.map(([value, label]) => `<option value="${value}" ${member.role === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
             </select>
           </td>
           <td class="qp-body-2 qp-muted">${ago(member.lastSeenAt)}</td>
-        </tr>`,
-        )
+          <td>${
+            local
+              ? `<button class="qp-button qp-button--ghost qp-button--sm" data-reset="${esc(member.principalId)}" data-account="${esc(local.account)}">重置密码</button>
+                 ${member.principalId === me ? '' : `<button class="qp-button qp-button--ghost qp-button--sm" data-disable="${esc(member.principalId)}" data-disabled="${local.disabled ? '1' : ''}">${local.disabled ? '启用' : '停用'}</button>`}`
+              : ''
+          }</td>
+        </tr>`
+        })
         .join('')}</tbody></table></div></div>`
+
+  main.querySelector('[data-create]').addEventListener('click', guard(async () => openCreateMember()))
+
+  main.querySelectorAll('[data-reset]').forEach((button) =>
+    button.addEventListener(
+      'click',
+      guard(async () => {
+        if (!confirm(`重置 ${button.dataset.account} 的密码？该账号所有已登录的会话会立即失效。`)) return
+        const result = await api('POST', `/api/v1/members/${encodeURIComponent(button.dataset.reset)}:resetPassword`)
+        showOneTimePassword('密码已重置', button.dataset.account, result.initialPassword)
+        render()
+      }),
+    ),
+  )
+
+  main.querySelectorAll('[data-disable]').forEach((button) =>
+    button.addEventListener(
+      'click',
+      guard(async () => {
+        const disable = !button.dataset.disabled
+        if (disable && !confirm('停用后该账号立即退出，且无法再登录。确定？')) return
+        await api('PATCH', `/api/v1/members/${encodeURIComponent(button.dataset.disable)}`, { disabled: disable })
+        toast(disable ? '已停用' : '已启用')
+        render()
+      }),
+    ),
+  )
 
   main.querySelectorAll('[data-role]').forEach((select) =>
     select.addEventListener(
@@ -1679,11 +1764,11 @@ async function pageMembers(main) {
         const previousRole = select.dataset.currentRole
         select.disabled = true
         try {
-          await api('PATCH', `/api/v1/members/${select.dataset.role}`, { role: select.value })
+          await api('PATCH', `/api/v1/members/${encodeURIComponent(select.dataset.role)}`, { role: select.value })
           select.dataset.currentRole = select.value
           toast('权限已更新')
-          if (select.dataset.role === (state.me?.id ?? state.me?.principalId)) {
-            // A Launcher administrator may lower their own local role. Refresh
+          if (select.dataset.role === me) {
+            // An administrator may lower their own local role. Refresh
             // immediately so Admin-only navigation never lingers until reload.
             history.pushState({}, '', '/')
             await boot()
@@ -1697,6 +1782,27 @@ async function pageMembers(main) {
       }),
     ),
   )
+}
+
+function openChangePassword() {
+  const body = $(`
+    <form class="mxt-form">
+      ${field('当前密码', '<input class="qp-input" type="password" name="current" autocomplete="current-password" required>')}
+      ${field('新密码', '<input class="qp-input" type="password" name="next" autocomplete="new-password" required minlength="10">', '至少 10 个字符。修改后你在其他设备上的登录会失效。')}
+    </form>`)
+  modal({
+    title: '修改密码',
+    body,
+    confirmLabel: '修改',
+    onConfirm: async (close) => {
+      const data = Object.fromEntries(new FormData(body))
+      await api('POST', '/api/v1/auth/password', { current: data.current, next: data.next })
+      state.me = { ...state.me, mustChangePassword: false }
+      close()
+      toast('密码已修改')
+      render()
+    },
+  })
 }
 
 function pageHelp(main) {
@@ -1731,7 +1837,7 @@ function pageHelp(main) {
       </ul>
 
       <h2 class="qp-heading-2" style="margin-top:24px">权限</h2>
-      <p class="qp-muted">用 mx-launcher 账号登录。首次登录是「只读」，找管理员在「成员」页面升成「测试工程师」就能写用例和跑测试。</p>
+      <p class="qp-muted">用管理员开通的 Rig 账号登录。需要写用例和跑测试时，找管理员在「成员」页面把权限升成「测试工程师」。</p>
     </div></div>`
 }
 
@@ -1743,14 +1849,14 @@ function renderLogin(root) {
       <div class="mxt-login__card">
         <div class="mxt-brand" style="margin-bottom:20px">
           <div class="mxt-brand__mark">MX</div>
-          <div><div class="qp-heading-2">测试平台</div><div class="qp-caption qp-muted">Launcher 用户或服务管理员登录</div></div>
+          <div><div class="qp-heading-2">测试平台</div><div class="qp-caption qp-muted">Rig 账号或服务管理员登录</div></div>
         </div>
         <form class="mxt-form">
           ${field('账号', '<input class="qp-input" name="username" autocomplete="username" required>')}
           ${field('密码', '<input class="qp-input" type="password" name="password" autocomplete="current-password" required>')}
           <button class="qp-button qp-button--primary qp-button--block" type="submit">登录</button>
         </form>
-        <p class="mxt-hint" style="margin-top:16px">日常用户使用平时登录 MX 的账号，首次登录会自动开通只读权限。服务管理员使用账号 <code>admin</code>，密码填写部署生成的 admin token。</p>
+        <p class="mxt-hint" style="margin-top:16px">使用管理员为你开通的 Rig 账号。服务管理员使用账号 <code>admin</code>，密码填写部署生成的 admin token。</p>
       </div>
     </div>`)
   const form = card.querySelector('form')
@@ -1802,10 +1908,16 @@ async function render() {
       render()
     }),
   )
+  frame.querySelector('[data-password]')?.addEventListener('click', guard(async () => openChangePassword()))
   const main = frame.querySelector('.mxt-main')
   main.innerHTML = '<div class="qp-spinner"></div>'
   try {
     await PAGES[state.route.name](main, state.route.params)
+    if (state.me.mustChangePassword) {
+      main.prepend(
+        $(`<div class="mxt-banner mxt-banner--warning"><b>请修改初始密码</b><p>你正在使用管理员发放的一次性密码。点左下角「修改密码」换成只有你知道的密码。</p></div>`),
+      )
+    }
   } catch (error) {
     main.innerHTML = `<div class="mxt-banner mxt-banner--danger"><b>加载失败</b><p>${esc(error.message)}</p></div>`
   }

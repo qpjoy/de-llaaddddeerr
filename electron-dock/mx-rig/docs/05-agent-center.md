@@ -70,7 +70,16 @@ builtin      是否内置（可改写、可停用，不可删除）
 1. **persona 由服务端按 key 解析。** 客户端只能传 `agentKey`。能自带人设的客户端，等于 Internal 的允许列表是装饰品。
 2. **tools 是意图，不是授权。** 实际可用集合 = Agent 的 tools ∩ Internal 允许列表。中心关掉一个工具，所有 Agent 同时失去它。
 
-内置六个：冒烟领航员（编排执行）、结果分析师 / 失败定级员（结果定级）、覆盖审计员（覆盖与资产）、执行机医生（执行机与环境）、页面巡检员（页面巡检，仅桌面端）。角色说明在 Agent 市场页可以直接读到原文——被告知了什么，操作者应该看得见。
+内置九个：
+- 编排执行：冒烟领航员；
+- 结果定级：结果分析师、失败定级员；
+- 覆盖与资产：覆盖审计员；
+- 执行机与环境：执行机医生；
+- 页面巡检：页面巡检员（仅桌面端）；
+- 用例与规程：用例设计师（起草用例）、规程维护员（在规程失败的那一步提出修正，仅桌面端，见 [试验规程](13-agent-client-and-test-procedures.md)）；
+- 项目工程：测试工程师（在成员的项目目录里读代码、跑测试、修测试，仅 `mx-rig` 终端，执行面 `terminal`，见 [终端 Agent](14-terminal-agent.md)）。
+
+角色说明在 Agent 市场页可以直接读到原文——被告知了什么，操作者应该看得见。
 
 ## Provider 与调用序列
 
@@ -130,7 +139,16 @@ nextStep    一条可执行的下一步（可选）
 
 ## 工具集
 
-15 个工具，三组。测试领域十个（`tests_apps`、`tests_list`、`tests_runs`、`tests_result`、`tests_cases`、`tests_case_results`、`tests_artifacts`、`tests_runners` 只读，`tests_run`、`tests_cancel` 需确认），浏览器四个（仅桌面端，默认全部关闭），结论一个（`finding_submit`，只读效果）。
+36 个工具，分六组：
+
+| 组 | 工具 | 说明 |
+| --- | --- | --- |
+| 测试领域（11） | `tests_apps`、`tests_list`、`tests_runs`、`tests_result`、`tests_wait`、`tests_cases`、`tests_case_results`、`tests_artifacts`、`tests_runners`；`tests_run`、`tests_cancel` | 后两个需确认 |
+| 浏览器（11） | `browser_*` 十个与 `electron_launch` | 仅桌面端和终端。新部署默认允许（每一步写操作仍逐条确认），已有部署在「Internal 配置」里一键开启。站点不用先列出，第一次去时问发起人，见 [docs/17](17-sites-and-page-behaviour.md)。`browser_handoff` 请人来做密码、验证码这类步骤，要和 `browser_open` / `electron_launch` / `native_launch` 之一一起允许才会提供，见 [docs/16](16-live-takeover.md) |
+| 原生桌面（5） | `native_*` | macOS 预览，仅桌面端 |
+| 结论（1） | `finding_submit` | 只读效果 |
+| 测试资产起草（2） | `case_draft`、`procedure_propose` | 只写进本次任务记录，由人导入或批准 |
+| 项目工作区（6） | `workspace_list`、`workspace_read`、`workspace_search`；`workspace_run`、`workspace_write`、`workspace_edit` | 仅 `mx-rig` 终端；前三个新部署默认允许，后三个需管理员允许，且每次逐条确认 |
 
 工具 schema 永远来自本地注册表，不接受客户端提交的描述或参数定义。执行前重新拉取策略并比对版本号：策略变了，等待中的确认立即作废。
 

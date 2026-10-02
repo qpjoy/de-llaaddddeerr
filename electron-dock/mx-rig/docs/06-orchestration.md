@@ -10,7 +10,9 @@
 
 这条线划在这里，是因为编排要能在浏览器里编辑、由管理员保存、对所有人生效。如果保存的配置可以变成任意执行逻辑，那么"改一条编排"和"往服务端塞一段代码"就是同一件事，Internal 的工具允许列表也随之失去意义。节点类型固定，工具仍受允许列表约束，写动作仍然逐次确认——编排只是把这些既有边界串起来，一个都没有放宽。
 
-## 七种节点
+## 节点
+
+通用的七种：
 
 | 类型 | 作用 | 关键字段 |
 | --- | --- | --- |
@@ -21,6 +23,19 @@
 | `analyze` | 把已收集的证据交给一个 Agent，产出文字结论 | `agentKey`、`instruction`、`next` |
 | `subflow` | 把另一条已保存的编排整条嵌进来 | `orchestrationKey`、`inputs`、`next` |
 | `finish` | 写下结论并结束 | `message` |
+
+飞行计划还有六种（详见 [docs/12](12-self-contained-rig-and-flight-model.md) §6.9 与 [docs/13](13-agent-client-and-test-procedures.md)）：
+
+| 类型 | 作用 | 关键字段 |
+| --- | --- | --- |
+| `preflight` | T-minus 预检，不满足就 Scrub | `taskIds`、`checks`、`onNoGo`、`next` |
+| `flight` | 派发一个测试计划并等待结论 | `taskId`、`waitMinutes`、`next` |
+| `procedure` | 按原样重放一组试验规程（不经模型），每条记为一次执行；只在桌面端运行 | `procedureIds`（固定编号）、`next` |
+| `explore` | 有步数上限的 Agent 探索，断言记在任务上；只在桌面端运行 | `goal`、`maxTurns`、`next` |
+| `gate` | 按确定性标准判 Go / No-Go，可要求人工放行 | `criteria`、`confirm`、`onFail`、`next` |
+| `debrief` | 生成飞行报告，可推送通知 | `notify`、`next` |
+
+`procedure` 节点会写出变量 `<id>_passed`、`_failed`、`_blocked`、`_total`。放行评审可以用「规程全部通过」或「规程通过率不低于（%）」；受阻的规程既不算通过，也不算失败。含 `procedure` 节点的编排不能定时执行，因为定时编排在服务端运行，服务端没有浏览器工位。要定时回归规程，用「试验规程 → 定时回归」：服务端排程，由工位执行（见 [docs/13](13-agent-client-and-test-procedures.md) §3.10）。
 
 `next` / `then` / `otherwise` 为 `null` 表示走到结束。
 

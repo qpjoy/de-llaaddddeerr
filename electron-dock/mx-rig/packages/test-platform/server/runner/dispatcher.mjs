@@ -933,6 +933,9 @@ export async function dispatchQueued({
   const activeServerRunIds = new Set()
   let unidentifiedActiveServerRuns = 0
   for (const running of await store.listRuns({ status: 'running', limit: 200 })) {
+    // A Rig procedure batch runs on a Rig station, never in the cluster; it
+    // does not use the cluster's budget.
+    if ((await store.getSuite(running.suiteId))?.engine === 'rig-procedure') continue
     let runsOn = running.runsOn
     if (!runsOn) {
       const runningSuite = await store.getSuite(running.suiteId)
@@ -971,6 +974,9 @@ export async function dispatchQueued({
     if (activeServerRuns >= maxConcurrentServerRuns) break
     const suite = await store.getSuite(run.suiteId)
     if (!suite) continue
+    // No image and no command: a Rig station claims these, including ones
+    // placed on "the server" (a station registered as `kind: server`).
+    if (suite.engine === 'rig-procedure') continue
     // The run says where it goes, not the suite. That is the whole point of
     // letting somebody choose: the same suite can be dispatched to a container
     // here and pinned to a Windows machine there. Runs created before that

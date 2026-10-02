@@ -1,0 +1,217 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-rig-server
+  namespace: mx-rig
+  labels:
+    app.kubernetes.io/name: mx-rig-server
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  # Every piece of state is claimed in PostgreSQL (missions, approvals, Rig
+  # schedules, test-plan fires), so an old and a new Pod may overlap: a
+  # deploy rolls without a gap. One replica is enough on a single node.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-rig-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-rig-server
+        app.kubernetes.io/part-of: mx-rig
+      annotations:
+        # manage.sh replaces these with digests of the Secret-backed settings
+        # and of the resource policy: changing either rolls the Pod.
+        mx-rig.qpjoy.dev/secret-checksum: __MX_RIG_SECRET_CHECKSUM__
+        mx-rig.qpjoy.dev/resource-policy-checksum: __MX_RIG_POLICY_CHECKSUM__
+    spec:
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: mx-rig-server
+      # Needed to create runner Jobs; the Role allows nothing else.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: fix-permissions
+          image: mx-rig.invalid/mx-rig-server:managed-image-required
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown -R 1000:1000 /data/artifacts"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
+      containers:
+        - name: server
+          image: mx-rig.invalid/mx-rig-server:managed-image-required
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8791
+          env:
+            - name: MX_RIG_HOST
+              value: 0.0.0.0
+            - name: MX_RIG_PORT
+              value: "8791"
+            - name: MX_RIG_STORE
+              value: postgres
+            - name: MX_RIG_STATE_DIR
+              value: /data/control
+            - name: MX_RIG_ARTIFACTS_DIR
+              value: /data/artifacts
+            - name: MX_RIG_NAMESPACE
+              value: mx-rig
+            - name: MX_RIG_SELF_URL
+              value: http://mx-rig-server
+            - name: MX_RIG_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_DATABASE_URL
+            - name: MX_RIG_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_ADMIN_TOKEN
+            - name: MX_RIG_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_SECRET_KEY
+            - name: MX_RIG_PUBLIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_PUBLIC_URL
+                  optional: true
+            - name: MX_RIG_INSECURE_COOKIES
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_INSECURE_COOKIES
+                  optional: true
+            # Model keys live only here. The name a Provider references in
+            # the Agent center (apiKeyEnv) must match one of these.
+            - name: MX_RIG_MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_MODEL_API_KEY
+                  optional: true
+            - name: MX_RIG_MODEL_API_KEY_2
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_MODEL_API_KEY_2
+                  optional: true
+            # Off unless an operator set it at deploy time: Rig accounts are
+            # its own, and nothing here looks for Launcher.
+            - name: MX_RIG_LAUNCHER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_LAUNCHER_URL
+                  optional: true
+            - name: MX_RIG_GIT_TOKEN_SECRET
+              value: mx-rig-secrets
+            - name: MX_RIG_GIT_TOKEN_SECRET_KEY
+              value: MX_RIG_GIT_TOKEN
+            - name: NODE_EXTRA_CA_CERTS
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          envFrom:
+            - configMapRef:
+                name: mx-rig-resource-policy
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
+            # With the PostgreSQL store nothing durable lives here; it only
+            # holds a legacy file import, so a Pod-local directory is enough.
+            - name: control
+              mountPath: /data/control
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          # Keep serving for a few seconds after the Pod is marked for
+          # removal, while the Service stops sending it new requests; without
+          # this a rolling update drops the requests in between.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+              ephemeral-storage: 512Mi
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: mx-rig-artifacts
+        - name: control
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-rig-server
+  namespace: mx-rig
+  labels:
+    app.kubernetes.io/name: mx-rig-server
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mx-rig-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

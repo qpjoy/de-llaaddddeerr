@@ -1,0 +1,35 @@
+{
+  "id": "browser-save-profile",
+  "title": "页面操作：改昵称并断言保存成功",
+  "start": {
+    "agentKey": "page-inspector",
+    "goal": "打开 {{origin}}/settings，把昵称改成 Rig 并保存，然后用断言确认页面出现「已保存」。"
+  },
+  "policy": {
+    "maxTurns": 10,
+    "allowedTools": [
+      "browser_open",
+      "browser_snapshot",
+      "browser_click",
+      "browser_fill",
+      "browser_wait",
+      "browser_assert"
+    ]
+  },
+  "site": {
+    "/settings": "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>个人设置</title></head><body><main><h1>个人设置</h1><form onsubmit=\"event.preventDefault();setTimeout(function(){document.getElementById('status').textContent='已保存：'+document.getElementById('nick').value},200)\"><label for=\"nick\">昵称</label><input id=\"nick\" name=\"nick\" value=\"旧昵称\"><label for=\"mail\">邮箱</label><input id=\"mail\" type=\"email\" value=\"a@example.test\"><button type=\"submit\">保存</button><button type=\"button\">取消</button></form><p id=\"status\" role=\"status\"></p></main></body></html>"
+  },
+  "expect": {
+    "status": "completed",
+    "mustCall": ["browser_fill", "browser_click", "browser_assert"],
+    "assertionsPassed": 1,
+    "maxInterventions": 3
+  },
+  "script": [
+    { "call": "browser_open", "args": { "url": "{{origin}}/settings" } },
+    { "call": "browser_fill", "args": { "label": "昵称", "value": "Rig" } },
+    { "call": "browser_click", "args": { "role": "button", "name": "保存" } },
+    { "call": "browser_assert", "args": { "kind": "text_visible", "expected": "已保存" } },
+    { "say": "已把昵称改为 Rig 并保存，页面显示「已保存：Rig」，断言通过。" }
+  ]
+}

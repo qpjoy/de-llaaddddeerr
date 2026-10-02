@@ -24,8 +24,15 @@ export const ORCHESTRATION_CHANNELS = {
   // `capture` rules to apply to the result.
   sourceNode: channel(z.string().max(60).nullable(), { initial: () => null }),
   answer: channel(z.string().max(24_000).nullable(), { initial: () => null }),
+  // How a pre-flight check or a gate came out, for the edge that follows it.
+  outcome: channel(z.enum(['pass', 'fail']).nullable(), { initial: () => null }),
   trace: appendChannel(z.object({ node: z.string(), at: z.string() }), { max: 400 })
 }
+
+// Second graph node of a two-step flight-plan node: waiting on a dispatched
+// run, or the human half of a gate.
+const waitId = (id) => `${graphId(id)}__wait`
+const pollId = (id) => `${graphId(id)}__poll`
 
 const stamp = (node) => ({ trace: [{ node, at: new Date().toISOString() }] })
 
@@ -41,7 +48,15 @@ const stamp = (node) => ({ trace: [{ node, at: new Date().toISOString() }] })
 export function compileOrchestration(spec, handlers, { maxSteps = 120, layout } = {}) {
   const graph = new StateGraph(ORCHESTRATION_CHANNELS)
   const target = (id) => (id === null ? 'conclude' : graphId(id))
-  const allTargets = [...spec.nodes.map((node) => graphId(node.id)), 'conclude']
+  // Where a failed check goes when the author did not say: a pre-flight that
+  // is not Go scrubs the launch, a gate that fails is a No-Go.
+  const scrubTarget = (node) => (node.onNoGo === null ? 'scrub' : graphId(node.onNoGo))
+  const failTarget = (node) => (node.onFail === null ? 'nogo' : graphId(node.onFail))
+  const allTargets = [
+    ...spec.nodes.map((node) => graphId(node.id)),
+    ...spec.nodes.filter((node) => node.type === 'flight').map((node) => waitId(node.id)),
+    'conclude'
+  ]
 
   // Every node is declared before any edge is added: `addEdge` refuses an
   // unknown target, which is the guard that makes a compiled spec trustworthy,
@@ -49,6 +64,7 @@ export function compileOrchestration(spec, handlers, { maxSteps = 120, layout } 
   graph.addNode(
     'approve',
     async (state, ctx) => {
+      if (await handlers.preapprove?.(state, ctx)) return { approved: true, ...stamp('approve') }
       const approved = ctx.interrupt({ call: state.call })
       return { approved: approved === true, ...stamp('approve') }
     },
@@ -94,6 +110,32 @@ export function compileOrchestration(spec, handlers, { maxSteps = 120, layout } 
     },
     { title: '编排结束', kind: 'output', description: '写入结论。编排跑完不等于测试通过。' }
   )
+  if (spec.nodes.some((node) => node.type === 'preflight' && node.onNoGo === null))
+    graph.addNode(
+      'scrub',
+      async (state, ctx) => {
+        await handlers.scrub(state, ctx)
+        return stamp('scrub')
+      },
+      {
+        title: '取消发射（Scrub）',
+        kind: 'output',
+        description: '预检没有通过，这次不派发任何测试；记为受阻，不是失败。'
+      }
+    )
+  if (spec.nodes.some((node) => node.type === 'gate' && node.onFail === null))
+    graph.addNode(
+      'nogo',
+      async (state, ctx) => {
+        await handlers.nogo(state, ctx)
+        return stamp('nogo')
+      },
+      {
+        title: 'No-Go',
+        kind: 'output',
+        description: '放行评审没有通过，计划到此为止；飞行结论记为 No-Go。'
+      }
+    )
 
   for (const node of spec.nodes) {
     const meta = {
@@ -159,6 +201,86 @@ export function compileOrchestration(spec, handlers, { maxSteps = 120, layout } 
         async (state, ctx) => ({ ...(await handlers.analyze(node, state, ctx)), ...stamp(id) }),
         meta
       )
+    else if (node.type === 'preflight')
+      graph.addNode(
+        id,
+        async (state, ctx) => ({ ...(await handlers.preflight(node, state, ctx)), ...stamp(id) }),
+        meta
+      )
+    else if (node.type === 'flight') {
+      graph.addNode(
+        id,
+        async (state, ctx) => ({
+          ...(await handlers.dispatchFlight(node, state, ctx)),
+          resumeTo: waitId(node.id),
+          sourceNode: node.id,
+          ...stamp(id)
+        }),
+        meta
+      )
+      graph.addNode(
+        waitId(node.id),
+        async (state, ctx) => ({
+          ...(await handlers.awaitFlight(node, state, ctx)),
+          ...stamp(waitId(node.id))
+        }),
+        {
+          title: `${node.title} · 等待结论`,
+          kind: 'tool',
+          description: `有界等待这次执行结束（最长 ${node.waitMinutes} 分钟），再读取用例级结果。`
+        }
+      )
+    } else if (node.type === 'explore')
+      graph.addNode(
+        id,
+        async (state, ctx) => {
+          const step = await handlers.explore(node, state, ctx)
+          return step.call
+            ? { ...step, resumeTo: id, sourceNode: node.id, ...stamp(id) }
+            : { ...step, call: null, write: false, ...stamp(id) }
+        },
+        meta
+      )
+    else if (node.type === 'gate') {
+      graph.addNode(
+        id,
+        async (state, ctx) => ({ ...(await handlers.gate(node, state, ctx)), ...stamp(id) }),
+        meta
+      )
+      if (node.confirm)
+        graph.addNode(
+          pollId(node.id),
+          async (state, ctx) => {
+            // Go/No-Go poll: the criteria passed; a person still says go.
+            const approved = ctx.interrupt({
+              checkpoint: node,
+              message: `放行评审「${node.title}」的标准已满足，是否放行进入下一阶段？`
+            })
+            await handlers.checkpoint(node, approved === true, ctx)
+            return { approved: approved === true, ...stamp(pollId(node.id)) }
+          },
+          {
+            title: `${node.title} · Go/No-Go`,
+            kind: 'human',
+            interrupts: true,
+            description: '标准已满足后由人确认放行；拒绝即 No-Go。'
+          }
+        )
+    } else if (node.type === 'debrief')
+      graph.addNode(
+        id,
+        async (state, ctx) => ({ ...(await handlers.debrief(node, state, ctx)), ...stamp(id) }),
+        meta
+      )
+    else if (node.type === 'procedure')
+      graph.addNode(
+        id,
+        async (state, ctx) => ({
+          ...(await handlers.procedureStage(node, state, ctx)),
+          ...stamp(id)
+        }),
+        meta
+      )
     else
       graph.addNode(
         id,
@@ -208,10 +330,56 @@ export function compileOrchestration(spec, handlers, { maxSteps = 120, layout } 
           )
         }
       )
-    else if (node.type === 'analyze' || node.type === 'subflow')
+    else if (
+      node.type === 'analyze' ||
+      node.type === 'subflow' ||
+      node.type === 'debrief' ||
+      node.type === 'procedure'
+    )
       graph.addEdge(id, target(node.next))
-    else graph.addEdge(id, 'conclude')
+    else if (node.type === 'preflight')
+      graph.addConditionalEdges(
+        id,
+        (state) => (state.outcome === 'pass' ? target(node.next) : scrubTarget(node)),
+        [...new Set([target(node.next), scrubTarget(node)])],
+        { labels: { [target(node.next)]: 'Go', [scrubTarget(node)]: 'No-Go' } }
+      )
+    else if (node.type === 'flight') {
+      graph.addConditionalEdges(
+        id,
+        (state) => (state.write ? 'approve' : 'act'),
+        ['approve', 'act'],
+        { labels: { approve: '需确认', act: '已预授权' } }
+      )
+      graph.addEdge(waitId(node.id), target(node.next))
+    } else if (node.type === 'explore')
+      graph.addConditionalEdges(
+        id,
+        (state) => (state.call ? (state.write ? 'approve' : 'act') : target(node.next)),
+        [...new Set(['approve', 'act', target(node.next)])],
+        { labels: { approve: '写动作', act: '读动作', [target(node.next)]: '探索结束' } }
+      )
+    else if (node.type === 'gate') {
+      const pass = node.confirm ? pollId(node.id) : target(node.next)
+      graph.addConditionalEdges(
+        id,
+        (state) => (state.outcome === 'pass' ? pass : failTarget(node)),
+        [...new Set([pass, failTarget(node)])],
+        { labels: { [pass]: '达标', [failTarget(node)]: '未达标' } }
+      )
+      if (node.confirm)
+        graph.addConditionalEdges(
+          pollId(node.id),
+          (state) => (state.approved ? target(node.next) : failTarget(node)),
+          [...new Set([target(node.next), failTarget(node)])],
+          { labels: { [target(node.next)]: 'Go', [failTarget(node)]: 'No-Go' } }
+        )
+    } else graph.addEdge(id, 'conclude')
   }
+  if (spec.nodes.some((node) => node.type === 'preflight' && node.onNoGo === null))
+    graph.addEdge('scrub', END)
+  if (spec.nodes.some((node) => node.type === 'gate' && node.onFail === null))
+    graph.addEdge('nogo', END)
 
   graph.addConditionalEdges(
     'approve',
@@ -245,6 +413,15 @@ function describeNode(node) {
   if (node.type === 'fanout')
     return `${node.branches.length} 条分支依次执行，全部到达 ${node.join} 后继续`
   if (node.type === 'approval') return node.message
+  if (node.type === 'preflight')
+    return `核对：${node.checks.join('、')}${node.taskIds.length ? `；计划 ${node.taskIds.join('、')}` : ''}`
+  if (node.type === 'flight') return `派发 ${node.taskId}，最长等待 ${node.waitMinutes} 分钟`
+  if (node.type === 'explore') return `探索（最多 ${node.maxTurns} 步）：${node.goal}`
+  if (node.type === 'gate')
+    return `${node.criteria.map((entry) => `${entry.metric}(${entry.stage}${entry.value !== undefined ? `, ${entry.value}` : ''})`).join('；')}${node.confirm ? '；需人工放行' : ''}`
+  if (node.type === 'debrief') return `生成飞行报告${node.notify ? '并推送通知' : ''}`
+  if (node.type === 'procedure')
+    return `按原样重放 ${node.procedureIds.length} 条规程：${node.procedureIds.join('、')}`
   if (node.type === 'analyze') return `交给 ${node.agentKey}：${node.instruction}`
   if (node.type === 'subflow') {
     const seeded = Object.keys(node.seed ?? {})

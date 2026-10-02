@@ -1,0 +1,84 @@
+{
+  "id": "triage-runner-offline",
+  "title": "失败归因：执行机离线是环境受阻",
+  "start": {
+    "agentKey": "failure-triage",
+    "goal": "「商城冒烟」今天没有跑出结果，帮我看看是怎么回事，并提交结构化结论。"
+  },
+  "policy": {
+    "maxTurns": 10,
+    "allowedTools": [
+      "tests_runs",
+      "tests_result",
+      "tests_case_results",
+      "tests_artifacts",
+      "tests_runners",
+      "tests_cases",
+      "finding_submit"
+    ]
+  },
+  "platform": {
+    "/api/v1/runs?limit=20": {
+      "runs": [
+        {
+          "id": "trun_smoke_0926",
+          "taskId": "tsk_smoke",
+          "status": "blocked",
+          "createdAt": "2026-09-26T01:00:00Z",
+          "counts": { "total": 0 }
+        }
+      ]
+    },
+    "/api/v1/runs/trun_smoke_0926": {
+      "run": {
+        "id": "trun_smoke_0926",
+        "taskId": "tsk_smoke",
+        "status": "blocked",
+        "engine": "playwright",
+        "runnerId": null,
+        "counts": { "total": 0 }
+      },
+      "task": { "id": "tsk_smoke", "name": "商城冒烟" },
+      "pending": {
+        "reason": "no_eligible_runner",
+        "detail": "没有在线且支持 playwright 的执行机，排队 30 分钟后判为受阻"
+      }
+    },
+    "/api/v1/runs/trun_smoke_0926/cases": { "cases": [] },
+    "/api/v1/runners": {
+      "runners": [
+        {
+          "id": "rnr_ci1",
+          "name": "ci-linux-1",
+          "online": false,
+          "lastSeenAt": "2026-09-25T18:02:00Z",
+          "engines": ["playwright"]
+        },
+        { "id": "rnr_mac", "name": "mac-mini", "online": true, "engines": ["cypress"] }
+      ]
+    }
+  },
+  "expect": {
+    "status": "completed",
+    "verdict": "environment-blocked",
+    "verified": true,
+    "cites": ["trun_smoke_0926"],
+    "mustCall": ["tests_runners"]
+  },
+  "script": [
+    { "call": "tests_runs" },
+    { "call": "tests_result", "args": { "runId": "trun_smoke_0926" } },
+    { "call": "tests_runners" },
+    {
+      "call": "finding_submit",
+      "args": {
+        "verdict": "environment-blocked",
+        "confidence": "high",
+        "summary": "唯一支持 playwright 的执行机 ci-linux-1 昨晚起离线，冒烟没有真正执行。",
+        "evidence": "trun_smoke_0926 状态 blocked，pending 为 no_eligible_runner；执行机列表中 ci-linux-1 离线。",
+        "nextStep": "恢复 ci-linux-1 或为 playwright 增加一台执行机后重跑。"
+      }
+    },
+    { "say": "没有跑出结果是因为执行机离线（环境受阻），不代表产品质量变化。" }
+  ]
+}

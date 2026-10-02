@@ -1,5 +1,232 @@
 # 验证记录
 
+## 2026-10-02：本机一键体验、自带测试浏览器、写好服务器地址的安装包
+
+- `npm run check`：189 个模块通过。
+- `npm test`：566 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过。整套连跑两次都通过，每次约 55 秒。
+- `npm run test:kernel`：322 项全部通过。
+- `npm run eval`：11 个场景全部通过。
+- `npm run test:browser`：通过。
+- `npm run test:desktop -- --browser`：
+  - 登录页一打开就是安装包写好的地址；
+  - 测试浏览器无需安装；
+  - 退出后记住了地址和账号，没有记住密码。
+- 新增测试：
+  - `tests/browser-provision.test.mjs`：查找顺序、镜像回退、只下载一次、失败原因；
+  - `tests/first-run.test.mjs`：隔离标记和临时副本的判断、命令转义；
+  - `tests/local-script.test.mjs`：按行输入的答案、0600、生成的密码不打印、`up` / `status` / `token` / `down` 全流程。
+- **安装包实测（Apple 芯片）**：
+  - `--dir` 和 DMG 都打出来了；签名校验通过；DMG 262 MB，里面有「首次打开说明.txt」；
+  - 用 Playwright 启动打包后的应用：登录页是写好的地址；登录后使用的是安装包自带的 Chromium 145，页面零报错。
+- **实际下载**：只走 npmmirror，下载、解压、启动 Chromium 全部成功，用了 29 分钟。
+- **本机一键体验实测**：在这台 Mac 上分别用按行输入和 `--yes` 跑了 `local init`、`up`、`status`、`logs`、`down`、`reset`。
+- 实测中发现并修复：
+  - **Mac 安装包以前从没运行过**：签名在打包后失效，Apple 芯片直接杀掉子进程；启动时往 app.asar 里写设计资源，弹出「MX Rig 启动失败：ENOTDIR」。
+  - 这一轮新引入的问题：安装包里的 `playwright-core` 在嵌套目录下，导致登录失败。
+  - 每个问题一个 readline 的写法，会丢掉按行预先输入的答案（数据库和模型的问题被跳过了）。
+  - 打包时写下的服务器地址留在了源码目录里，会影响之后从源码运行的桌面端。
+- 没有做：Linux 和 Windows 的 Git Bash 实测；从浏览器下载 DMG 后第一次打开的真实流程。
+- 详见 [docs/18](18-out-of-the-box-delivery.md)。
+
+## 2026-10-01：开箱即用的站点范围、页面自己的行为、接管放宽
+
+- `npm run check`：183 个模块通过。
+- `npm test`：557 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过。整套连跑两次都通过，每次约 55 秒。
+- `npm run test:kernel`：322 项全部通过。
+- `npm run eval`：11 个场景全部通过。
+- `npm run test:browser`：通过。
+- 新增测试：
+  - `tests/sites.test.mjs`，6 项，真实 Chromium，四个主机名扮演四个站点：
+    - 站点判定；
+    - 页面的跨站脚本、接口、WebSocket；
+    - 生产禁区连图片都不放行；
+    - 跳到范围外、新标签页、确认框、下载；
+    - 「一律不打开」模式；
+    - 接管时去别的站点、在面板上回答对话框、复制；
+    - 一项完整任务里的两次站点确认，以及一次接管时由人打开的站点；
+    - 规程带着 `dialog` 和自己的站点重放。
+  - `tests/takeover.test.mjs`：拖动滑块；原生应用的交接。
+  - `tests/browser-avionics.test.mjs`：真实 Electron 应用的窗口被接管，包括 confirm。
+  - `tests/procedure.test.mjs`：规程带着自己的站点、生产禁区、「一律不打开」。
+- 改了的断言：
+  - 工具目录里 `browser_click` 现在默认允许；
+  - 页面检查员开箱即可用；
+  - 接管计数多了对话框、复制、下载三项。
+- `npm run test:desktop -- --browser`（Electron + 真实 Chromium）新增：
+  - 一键开启浏览器测试并保存；
+  - 确认框里的新站点提示；
+  - 接管时在面板上回答 confirm；
+  - 交还计数「点击 2 次、输入 1 段文字、按键 1 次、回答了 1 个对话框」。
+  - 截图：`.runtime/qa/desktop-site.png`、`desktop-dialog.png`。
+- 实测中发现并修复：
+  - **设置页的「重新绘制」一直是坏的**：它画进了一个已经被搬空的 DocumentFragment。Provider 的「上移」「删除」「＋ 新增 Provider」点了之后页面不变。
+  - 冒烟测试里接管面板和确认框各有一套交还按钮。现在有实时画面时，附言只在面板上问。
+  - 被 Chromium 拦下的跳转会留下一个错误页；现在退回到原来的页面。
+  - 新标签页还没加载完时，结果里的截图拍的是空白页；现在等它加载完。
+- 一次未复现的失败：第一次整套运行时，`procedure-loop` 测试里 Chromium 启动卡满了 180 秒的超时。单独运行和之后连续三次整套运行都通过，每次整套约 55 秒。
+- 详见 [docs/17](17-sites-and-page-behaviour.md)。
+
+## 2026-09-30（第四轮）：在实时画面里接管、Agent 请人来操作、快照里的密码
+
+- `npm run check`：181 个模块通过。
+- `npm test`：548 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过。整套连跑两次都通过。
+- `npm run test:kernel`：322 项全部通过。
+- `npm run eval`：11 个场景全部通过。
+- 新增测试 `tests/takeover.test.mjs`：
+  - 接管之外的输入被拒绝，输入只记计数；
+  - 文件选择；
+  - 敏感字段的填写和取值断言被拒绝；
+  - 一项完整的「填写被拒 → 请人 → 人输入 → 交还 → 断言」任务，密码不在任何模型请求和任务记录里；
+  - 快照遮盖。
+- `npm run test:desktop -- --browser`：Playwright 在 Electron 的实时画面里点密码框、打字、回车，然后交还，任务完成。截图在 `.runtime/qa/desktop-takeover*.png`。
+- `npm run test:browser`：通过。
+- 实测中发现并修复：
+  - **已有的泄露**：可访问性快照会带上密码框的值，发给了模型；
+  - 输入层 `line-height` 为 0，打不进字；
+  - 按事件计数「输入 N 段文字」，等于记下了密码长度；
+  - 被拒绝的填写被算成「未通过」；
+  - 实时画面在负载下偶尔会发出一个空帧：迟到的节流定时器在帧已经发出后又发了一次。整套测试连跑时 `pilot.test.mjs` 失败一次，查出了这个问题。
+- 详见 [docs/16](16-live-takeover.md)。
+
+## 2026-09-30（第三轮）：看得见的工作过程、领航光标、实时画面与回放
+
+- `npm run check`：180 个模块通过。
+- `npm test`：545 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过。整套连跑两次都通过。
+- `npm run test:kernel`：322 项全部通过。
+- `npm run eval`：11 个场景全部通过。
+- 新增测试：
+  - `tests/pilot.test.mjs`：严格 CSP 页面、按像素判定证据干净、不进可访问性结构；
+  - `tests/replay.test.mjs`：回放文件在真实浏览器里自动播放；
+  - 终端 `/replay`。
+- `npm run test:desktop -- --browser`（Electron + 真实 Chromium）：实时画面、确认前在页面上标出元素、画中画、折叠的步骤与缩略图、灯箱、回放。截图在 `.runtime/qa/desktop-*.png`。
+- `npm run test:browser`：通过（修正了质量报告页一条过期的指标数量断言）。
+- 实测中发现并修复：
+  - 截图 `style` 选项在严格 CSP 页面上被拦截，光标框线会留在证据截图里；
+  - 实时画面节流会丢掉最后一帧，画面停在 `about:blank`；
+  - `details` 与已有样式类重名，导致步骤组布局错乱；
+  - 钩子测试在负载下的竞态。
+- 详见 [docs/15](15-agent-workbench-and-replay.md)。
+
+## 2026-09-30（第二轮）：命令沙箱、终端规程修正、会话续接、独立安装包
+
+- `npm run check`：174 个模块通过。
+- `npm test`：541 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过。
+- `npm run test:kernel`：322 项全部通过。
+- `npm run eval`（脚本模式）：11 个场景全部通过。
+- 新增的测试：
+  - 沙箱：macOS 实测，写家目录被拒、工作区和临时目录可写；
+  - 终端里的规程修正：真实 Chromium，从 `/fire`、`/repair`、批准到再次 `/fire` 通过；
+  - `-c` 续接：只接这个项目的任务；
+  - 安装包：内容正好是 CLI 的 import 图，解开后能运行。
+- 手工验证：
+  - 从 tgz 真实安装到临时前缀，安装出来的 `mx-rig exec` 和 `status` 正常；
+  - 伪终端里粘贴多行只算一条消息，历史能跨会话找回。
+- 没有做：Linux 上的 bubblewrap 实测、真实模型基线、PostgreSQL 重跑（这一轮没有改数据层）。
+- 详见 [docs/14](14-terminal-agent.md)。
+
+## 2026-09-30：终端 Agent `mx-rig`（P5）
+
+- `npm run check`：172 个模块通过。
+- `npm test`：537 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过（这次没有连临时数据库重跑）。新增的测试：
+  - `tests/workspace.test.mjs` 7 项：工作区边界、命令、编辑、项目识别；
+  - `tests/terminal.test.mjs` 3 项：会话端到端、命令行子进程、真实 Chromium；
+  - `tests/eval-harness.test.mjs` 1 项：终端作弊脚本判失败。
+- `npm run test:kernel`：322 项全部通过。
+- `npm run eval`（脚本模式）：11 个场景全部通过，其中 3 个是新增的终端场景；真实模型基线尚未运行。
+- 伪终端走查：隐藏密码输入、确认、Ctrl-C 取消后没有残留进程、空闲时连按两次 Ctrl-C 退出。
+- 修复了 2 个问题：
+  - 拒绝写操作后接着聊，对话里会留下没有回应的工具调用；
+  - 钩子测试按次数计的等待在负载下偶尔不够。
+- 详见 [docs/14](14-terminal-agent.md) §6。
+
+## 2026-09-29：服务端回归（服务端排程，工位执行）
+
+- `npm run check`：161 个模块通过。
+- `npm test`：526 项，0 失败；不设数据库时 14 项 PostgreSQL 测试跳过。连临时 PostgreSQL 16 容器（测完删除）时，这 14 项全部通过，其中 2 项是新增的：
+  - 两个副本、两个工位争同一批，只有一个领到；
+  - 读不懂的时间不会留下孤儿执行。
+- `npm run test:kernel`：322 项全部通过，新增规程批次的放置规则。
+- 新增 `tests/station.test.mjs` 共 6 项，覆盖以下场景：
+  - 批次汇总；
+  - 真实 Chromium 一过一败；
+  - 取消；
+  - 桌面值守起真实子进程；
+  - 网页端定时回归；
+  - SIGTERM 发生在一批中间。
+- `npm run test:desktop`：通过真实的桌面端完成工位登记、开始值守（Electron 以 Node 身份运行 `mx-rig station watch`）、停止值守（进程以 0 退出）和注销。
+- Docker 实测：compose + 工位容器 + cron，测完删除全部容器、卷和镜像，并退出 Docker Desktop。
+- 实测中发现并修复了 3 个问题：停止值守会关掉浏览器；团队工位的批次会永远排队；读不懂的时间会留下孤儿执行。
+- 详见 [docs/13](13-agent-client-and-test-procedures.md) §3.10。
+
+## 2026-09-29：飞行计划里的规程阶段
+
+- `npm run check` 通过。
+- `npm test`：517 项，0 失败，12 项 PostgreSQL 测试未设置数据库时跳过。
+- 新增 3 项测试：节点规则与定时限制；起草时的规程选择与校验；真实 Chromium 上一过一败的计划被评审判为 NO-GO、报告写明原因，以及同一计划在服务端运行时记为受阻。
+- 网页端走查了编排图、编辑器和阶段展示。详见 [docs/13](13-agent-client-and-test-procedures.md) §3.9。
+
+## 2026-09-28：钩子，以及 PostgreSQL 实测
+
+- `npm run check`：156 个模块通过。
+- `npm test`：514 项，0 失败。不设数据库时 502 通过、12 项跳过；连临时 PostgreSQL 16 容器（测完删除）时 514 项全部通过，其中 12 项 PostgreSQL 多副本测试全部通过：
+  - 迁移 021、022 实际执行；
+  - 规程的多副本共享与同一修正只批准一次；
+  - 钩子跨副本只认领一次。
+- 钩子的服务测试、端到端自动修正、网页端走查见 [docs/13](13-agent-client-and-test-procedures.md) §3.8。
+
+## 2026-09-28：试验规程
+
+`npm run check`：154 个模块通过。`npm test`：511 项，500 通过、0 失败，11 项 PostgreSQL 测试因未设置数据库跳过。
+
+新增测试：
+- 规程重放：真实 Chromium，覆盖通过、改名后失败、断言失败、受阻、只重放到指定步骤；
+- 端到端闭环：真实服务 + 真实 Chromium，模型为脚本；
+- 规则：未经证明的修正不能批准、权限、用例导入逐条；
+- 评测集两个修正场景及反例；
+- 丢失断言的统计。
+
+网页端界面用无头浏览器走查过。详见 [docs/13](13-agent-client-and-test-procedures.md) §3.6。
+
+未运行（PostgreSQL 上的规程多副本测试已在同日补跑通过，见上一条）：
+- 真实模型下的修正评测；
+- 桌面端界面（Electron）里的试车与修正按钮：它们调用的试验台逻辑已由端到端测试覆盖；
+- Electron 规程。
+
+## 2026-09-27：飞行计划、航电、Pad、用量、评测集、原生工位、部署
+
+`npm run check`：148 个模块通过。`npm test`：502 项，0 失败。其中 PostgreSQL 测试连临时 PostgreSQL 16 容器全部通过，不设数据库时这 10 项跳过。`npm run eval`（脚本模式）6 个场景全部通过。
+
+部署实测（本机 Docker Desktop，测完删除容器、卷、命名空间、PV、虚拟机内的数据目录和这次构建与拉取的镜像，并退出 Docker Desktop）：
+- **compose**：
+  - 构建 → 迁移 20/20 → 上线 → 执行机注册；
+  - 本地账号、Web 界面、设置存 PostgreSQL；
+  - Rig 工作流任务 → 确认 → 派发 → compose 执行机认领执行 → Run passed；
+  - `down --purge` 不加 `--yes` 会拒绝执行。
+- **Kubernetes（docker-desktop）**：
+  - `deploy` 首次成功，再次部署沿用已有密钥与数据目录；
+  - 滚动更新期间主机与集群内的探测全部 200；
+  - 服务端 Run 派成 K8s Job 并返回 passed。
+- 实测发现并修复了 4 个问题：`mxt-runner watch` 空闲即退出（本轮引入）、滚动后 `verify` 误报失败、滚动更新掉请求、Docker Desktop 集群地址打印错误。
+
+- 新增测试覆盖：
+  - 用量计量与估算标注、上下文压缩（保留 ID，压缩后仍是合法对话，结论审计仍能核对）、token 上限在下一次调用前停下；
+  - Provider 上报用量的两种返回方式；
+  - 评测集的正反例：服从日志注入、引用没读过的 ID，都会被扣分；
+  - 内网 HTTP 放行规则；
+  - 原生工位：控件树、ref、过期引用、密码框、权限错误、不在预授权范围内、断言入账；
+  - 测试内核定时调度在两个调度并发时只建一个 Run（去掉认领后能复现出两个 Run）。
+- 无头 Chromium 走查了三处界面：任务详情的用量行、配置页的 token 上限（保存后读回一致）、质量报告的用量指标。
+- 原生工位生成的 JXA 用 `osacompile` 编译通过（编译不发 Apple 事件）。
+- `deploy/compose.yaml` 通过 `docker compose config` 校验。`scripts/manage.sh` 通过 `bash -n`。全部 Kubernetes 清单经脚本渲染后，占位符都已替换，YAML 可解析。
+
+没有做的：
+- 真实模型下的评测；
+- 原生工位对真实应用的操作（需要系统授权）；
+- Internal 服务器上的部署（kubeadm + containerd 镜像导入路径）；
+- Windows、桌面安装包。
+
+另外：一次对 System Events 的探测在本机等待 macOS 授权对话框超时，已终止，没有代为操作对话框。原生工位因此改为只在人点按钮时探测，每次调用都有超时。
+
 ## 2026-09-21：MCP 工具入口与可靠性
 
 `npm run check`：122 个模块通过语法与网络所有权耦合检查。`npm test`：430 项通过，0 failed / skipped。新增 MCP stdio 到真实临时 Rig API 的读/写/权限/策略回归、有界等待、实际 Runner 取消回执、父/孙进程组清理、K8s 删除确认与调度竞争、SSE 截断、finding 自证、窗口外用例与生产只读资源测试。

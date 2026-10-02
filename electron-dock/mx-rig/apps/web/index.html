@@ -10,6 +10,7 @@
     <title>MX Rig · 自动化测试与 Agent 工作台</title>
     <link rel="stylesheet" href="./vendor/styles.css" />
     <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./replay.css" />
   </head>
   <body class="qp-app qp-theme-neon-void qp-density--medium">
     <div id="login" class="rig-login">
@@ -35,6 +36,10 @@
           ><span class="qp-field__label">Internal 服务地址</span
           ><input id="server" class="qp-input" type="url" value="http://127.0.0.1:8791" required
         /></label>
+        <label id="private-http-field" class="qp-choice qp-choice--checkbox"
+          ><input id="private-http" type="checkbox" /><span class="qp-choice__control"></span
+          ><span class="qp-caption">内网测试服务器，允许私有 IP 的 HTTP（10.x / 172.16–31.x / 192.168.x / 100.64–127.x）</span></label
+        >
         <label class="qp-field"
           ><span class="qp-field__label">账号</span
           ><input id="account" class="qp-input" autocomplete="username" required
@@ -53,7 +58,7 @@
         </button>
         <p id="login-error" class="qp-body-2 rig-error" role="alert"></p>
         <p class="qp-caption qp-muted">
-          本地开发使用 admin 与 .runtime/dev-token 文件中的密码。凭据只在主进程与服务端处理。
+          用管理员发给你的账号和一次性密码登录。本机体验：账号 admin，密码用 bash scripts/manage.sh local token 查看。凭据只在主进程与服务端处理。
         </p>
       </form>
     </div>
@@ -78,6 +83,9 @@
               <div id="member-role" class="qp-user-card__role"></div>
             </div>
           </div>
+          <button id="change-password" class="qp-button qp-button--ghost qp-button--sm" hidden>
+            修改密码
+          </button>
           <button id="logout" class="qp-button qp-button--ghost qp-button--sm">退出登录</button>
         </div>
       </aside>
@@ -112,12 +120,43 @@
           </div>
         </header>
         <div id="notice" class="qp-panel qp-panel--active qp-body-2 rig-notice" role="status" hidden></div>
+        <div id="browser-provision" class="qp-body-2 rig-provision" role="status" hidden></div>
         <section id="view" class="rig-view"></section>
       </main>
       <!-- The teaching panel. Outside #view on purpose: it follows the reader
            across pages and survives every redraw. -->
       <aside id="hud" class="rig-hud rig-print-hide" aria-label="系统面板" hidden></aside>
     </div>
+    <dialog id="password-dialog" class="qp-dialog rig-dialog" aria-labelledby="password-title">
+      <form id="password-form" class="rig-dialog__form" method="dialog">
+        <h2 id="password-title" class="qp-heading-2">修改密码</h2>
+        <label class="qp-field"
+          ><span class="qp-field__label">当前密码</span
+          ><input
+            id="password-current"
+            class="qp-input"
+            type="password"
+            autocomplete="current-password"
+            required
+        /></label>
+        <label class="qp-field"
+          ><span class="qp-field__label">新密码</span
+          ><input
+            id="password-next"
+            class="qp-input"
+            type="password"
+            autocomplete="new-password"
+            minlength="10"
+            required
+        /></label>
+        <p class="qp-caption qp-muted">至少 10 个字符。修改后你在其他设备上的登录会失效。</p>
+        <p id="password-error" class="qp-body-2 rig-error" role="alert"></p>
+        <div class="qp-row rig-dialog__actions">
+          <button id="password-cancel" class="qp-button qp-button--ghost" type="button">取消</button>
+          <button class="qp-button qp-button--primary" type="submit">修改</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

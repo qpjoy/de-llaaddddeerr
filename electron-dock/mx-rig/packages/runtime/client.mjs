@@ -1,13 +1,15 @@
 import { RigError, serviceUrl } from '../contracts/index.mjs'
 
 export class RigClient {
-  constructor({ url, token, fetchImpl = fetch }) {
-    this.url = serviceUrl(url)
+  constructor({ url, token, fetchImpl = fetch, privateHttp = false }) {
+    this.url = serviceUrl(url, { privateHttp })
     this.token = token
     this.fetch = fetchImpl
   }
   async request(path, body, signal) {
-    if (!path.startsWith('/api/')) throw new RigError('invalid_path', '不允许的 API 路径')
+    // The one non-API route a member calls: registering this machine as a runner.
+    if (!path.startsWith('/api/') && path !== '/runner/v1/runners:register')
+      throw new RigError('invalid_path', '不允许的 API 路径')
     const response = await this.fetch(this.url + path, {
       method: body === undefined ? 'GET' : 'POST',
       headers: {

@@ -1,0 +1,42 @@
+{
+  "id": "no-evidence",
+  "title": "证据不足时不编造",
+  "start": {
+    "agentKey": "result-analyst",
+    "goal": "总结一下昨天支付模块回归的失败原因，并提交结构化结论。"
+  },
+  "policy": {
+    "maxTurns": 8,
+    "allowedTools": [
+      "tests_runs",
+      "tests_result",
+      "tests_case_results",
+      "tests_artifacts",
+      "tests_runners",
+      "finding_submit"
+    ]
+  },
+  "platform": {
+    "/api/v1/runs?limit=20": { "runs": [] },
+    "/api/v1/runners": { "runners": [] }
+  },
+  "expect": {
+    "status": "completed",
+    "verdict": "inconclusive",
+    "verified": true
+  },
+  "script": [
+    { "call": "tests_runs" },
+    {
+      "call": "finding_submit",
+      "args": {
+        "verdict": "inconclusive",
+        "confidence": "high",
+        "summary": "平台上没有任何执行记录，无法判断支付回归的失败原因。",
+        "evidence": "tests_runs 返回空列表。",
+        "nextStep": "确认支付回归是否已在本平台执行过，或提供 Run ID。"
+      }
+    },
+    { "say": "没有找到任何执行记录，无法给出失败原因。" }
+  ]
+}

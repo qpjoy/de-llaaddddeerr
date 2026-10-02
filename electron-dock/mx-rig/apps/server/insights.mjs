@@ -302,3 +302,119 @@ export function buildInsights({
     ]
   }
 }
+
+const FINDING_VERDICTS = [
+  'product-defect',
+  'environment-blocked',
+  'case-issue',
+  'flaky',
+  'inconclusive'
+]
+const RECENT = 10
+
+/**
+ * What the Agents concluded and what the browser checked, in the same window.
+ *
+ * Kept apart from the test verdicts above on purpose. A finding is an Agent's
+ * judgement about a run; an assertion is a deterministic check on a page the
+ * Agent happened to visit. Neither is a test result, and neither is folded
+ * into the pass rate. `detail: false` gives counts only — the lists carry
+ * mission goals and summaries, which a read-only member does not get to
+ * browse across the whole team.
+ */
+export function missionInsights(
+  missions = [],
+  { windowDays = 14, now = new Date(), detail = true } = {}
+) {
+  const from = now.getTime() - windowDays * 86_400_000
+  const inWindow = missions.filter((row) => {
+    const at = Date.parse(row.createdAt)
+    return Number.isFinite(at) && at >= from && at <= now.getTime()
+  })
+  const bySurface = { internal: 0, desktop: 0 }
+  for (const row of inWindow) bySurface[row.surface === 'desktop' ? 'desktop' : 'internal'] += 1
+
+  const findings = inWindow.filter((row) => row.finding)
+  const byVerdict = Object.fromEntries(FINDING_VERDICTS.map((verdict) => [verdict, 0]))
+  for (const row of findings)
+    if (byVerdict[row.finding.verdict] !== undefined) byVerdict[row.finding.verdict] += 1
+  const unverified = findings.filter((row) => (row.finding.unverified ?? 0) > 0).length
+
+  const assertions = inWindow.flatMap((row) =>
+    (row.assertions ?? []).map((entry) => ({ ...entry, missionId: row.id, goal: row.goal }))
+  )
+  const passed = assertions.filter((entry) => entry.passed === true).length
+  const newest = (a, b) => String(b.at ?? '').localeCompare(String(a.at ?? ''))
+
+  const metered = inWindow.filter((row) => row.usage?.calls > 0)
+  const sum = (key) => metered.reduce((total, row) => total + (Number(row.usage[key]) || 0), 0)
+  const usage = {
+    missions: metered.length,
+    calls: sum('calls'),
+    promptTokens: sum('promptTokens'),
+    completionTokens: sum('completionTokens'),
+    // Any mission whose provider did not report is counted by estimate.
+    estimated: metered.filter((row) => row.usage.estimated).length,
+    perMission: metered.length
+      ? Math.round((sum('promptTokens') + sum('completionTokens')) / metered.length)
+      : null
+  }
+
+  return {
+    total: inWindow.length,
+    bySurface,
+    findings: {
+      total: findings.length,
+      byVerdict,
+      unverified,
+      recent: detail
+        ? findings
+            .map((row) => ({
+              missionId: row.id,
+              goal: row.goal,
+              surface: row.surface === 'desktop' ? 'desktop' : 'internal',
+              testRunId: row.testRunId ?? null,
+              verdict: row.finding.verdict,
+              confidence: row.finding.confidence,
+              summary: row.finding.summary,
+              nextStep: row.finding.nextStep ?? null,
+              unverified: row.finding.unverified ?? 0,
+              at: row.updatedAt ?? row.createdAt
+            }))
+            .sort(newest)
+            .slice(0, RECENT)
+        : []
+    },
+    assertions: {
+      total: assertions.length,
+      passed,
+      failed: assertions.length - passed,
+      // Same rule as the pass rate: no checks, no ratio.
+      passRate: rate(passed, assertions.length),
+      recentFailures: detail
+        ? assertions
+            .filter((entry) => entry.passed !== true)
+            .sort(newest)
+            .slice(0, RECENT)
+            .map((entry) => ({
+              missionId: entry.missionId,
+              goal: entry.goal,
+              description: entry.description ?? entry.kind,
+              expected: entry.expected ?? null,
+              actual:
+                entry.actual === undefined || entry.actual === null
+                  ? null
+                  : String(entry.actual).slice(0, 200),
+              at: entry.at ?? null
+            }))
+        : []
+    },
+    usage,
+    caveats: [
+      'Agent 结论是 Agent 对执行结果的判断，不是测试结论，不计入通过率；引用未核实的结论需要人工复核。',
+      '页面断言只覆盖 Agent 在浏览器工位里实际走过的页面，是确定性检查，但不等于这些页面的完整回归。',
+      '桌面端执行的任务在同步到服务之后才计入；服务最多读取窗口内最近 500 项任务。',
+      '模型用量优先采用 Provider 上报的数字；未上报的调用按字数估算，只适合看趋势，不适合对账。'
+    ]
+  }
+}

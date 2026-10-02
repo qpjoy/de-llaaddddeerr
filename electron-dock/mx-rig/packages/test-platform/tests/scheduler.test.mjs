@@ -62,6 +62,24 @@ test('a cron task fires and immediately schedules its next fire', async () => {
   assert.equal(again.created.length, 0, 'the same due time must not fire twice')
 })
 
+test('two schedulers ticking at once create one run between them', async () => {
+  const { store, app, suite } = await fixture()
+  const task = await store.createTask(
+    baseTask(app, suite, {
+      scheduleKind: 'cron',
+      cronExpr: '0 2 * * *',
+      nextRunAt: '2026-08-12T18:00:00.000Z',
+    }),
+  )
+  // Two replicas (or an overrunning tick) both read the task as due.
+  const at = new Date('2026-08-12T18:00:05Z')
+  const [a, b] = await Promise.all([tick(store, at), tick(store, at)])
+  assert.equal(a.created.length + b.created.length, 1)
+  const after = await store.getTask(task.id)
+  assert.equal(after.nextRunAt, '2026-08-13T18:00:00.000Z')
+  assert.equal(after.lastRunId, [...a.created, ...b.created][0])
+})
+
 test('a once task fires exactly once and then disables itself', async () => {
   const { store, app, suite } = await fixture()
   const task = await store.createTask(

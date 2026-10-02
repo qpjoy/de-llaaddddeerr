@@ -5,6 +5,10 @@
   "description": "MX Rig desktop agent workbench and independent Internal test control plane.",
   "author": "QPJoy",
   "type": "module",
+  "bin": {
+    "mx-rig": "bin/mx-rig.mjs",
+    "mx-rig-mcp": "bin/mx-rig-mcp.mjs"
+  },
   "workspaces": [
     "packages/test-platform"
   ],
@@ -15,9 +19,11 @@
     "desktop": "electron apps/desktop/main.mjs",
     "test": "node scripts/test.mjs",
     "test:kernel": "node scripts/test.mjs kernel",
+    "eval": "node evals/run.mjs",
     "check": "node scripts/check.mjs",
     "browser:install": "node scripts/browser-install.mjs",
     "package": "node scripts/package.mjs",
+    "pack:cli": "node scripts/pack-cli.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
     "migrate": "node apps/server/migrate.mjs",

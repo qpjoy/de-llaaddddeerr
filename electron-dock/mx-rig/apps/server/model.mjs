@@ -167,7 +167,7 @@ export class ModelGateway {
         const streaming = typeof onDelta === 'function' && provider.stream !== false
         let shown = 0
         try {
-          const message = streaming
+          const { message, usage } = streaming
             ? await this.#streamCall(provider, { messages, tools, names }, key, signal, (text) => {
                 shown += 1
                 onDelta(text)
@@ -176,7 +176,10 @@ export class ModelGateway {
           return {
             message,
             provider: { id: provider.id, model: provider.model },
-            streamed: shown > 0
+            streamed: shown > 0,
+            // What the provider itself reported, when it did. The Runtime
+            // estimates otherwise, and says so.
+            usage
           }
         } catch (error) {
           // A cancelled request is the user's decision, not a provider fault;
@@ -221,7 +224,8 @@ export class ModelGateway {
       await response.body?.cancel()
       throw new RigError('model_error', `模型服务请求失败 (${response.status})`, 502)
     }
-    return accept(await readJson(response), payload.names)
+    const json = await readJson(response)
+    return { message: accept(json, payload.names), usage: readUsage(json.usage) }
   }
 
   async #streamCall(provider, payload, key, signal, onDelta) {
@@ -233,8 +237,10 @@ export class ModelGateway {
     // A gateway is allowed to ignore `stream: true`. If it answered with an
     // ordinary body, read it as one — reporting "streaming" for a single blob
     // that arrived at the end would be a lie about the transport.
-    if (!/text\/event-stream/i.test(headerOf(response, 'content-type')))
-      return accept(await readJson(response), payload.names)
+    if (!/text\/event-stream/i.test(headerOf(response, 'content-type'))) {
+      const json = await readJson(response)
+      return { message: accept(json, payload.names), usage: readUsage(json.usage) }
+    }
 
     const decoder = new TextDecoder()
     const calls = new Map()
@@ -242,6 +248,7 @@ export class ModelGateway {
     let buffered = ''
     let size = 0
     let finished = false
+    let usage = null
     stream: for await (const chunk of response.body) {
       size += chunk.length
       if (size > 512_000) throw new RigError('model_limit', '模型响应超过上限', 502)
@@ -266,6 +273,8 @@ export class ModelGateway {
           throw new RigError('model_response', '模型流包含损坏的 JSON，无法确认完整结果', 502)
         }
         if (parsed.error) throw new RigError('model_response', '模型流返回了错误', 502)
+        // Gateways that report usage on a stream send it in a late frame.
+        if (parsed.usage) usage = readUsage(parsed.usage) ?? usage
         const choice = parsed.choices?.[0]
         if (choice?.finish_reason != null) {
           if (!['stop', 'tool_calls'].includes(choice.finish_reason))
@@ -288,9 +297,8 @@ export class ModelGateway {
         }
       }
     }
-    if (!finished)
-      throw new RigError('model_incomplete', '模型流在最终完成标记之前中断', 502)
-    return accept(
+    if (!finished) throw new RigError('model_incomplete', '模型流在最终完成标记之前中断', 502)
+    const message = accept(
       {
         choices: [
           {
@@ -315,6 +323,7 @@ export class ModelGateway {
       },
       payload.names
     )
+    return { message, usage }
   }
 }
 
@@ -338,6 +347,14 @@ async function readJson(response) {
   } catch {
     throw new RigError('model_response', '模型响应不是有效 JSON', 502)
   }
+}
+
+/** Token counts as the provider reported them, or null when it did not. */
+function readUsage(usage) {
+  if (!usage || !Number.isFinite(usage.prompt_tokens)) return null
+  const promptTokens = Math.max(0, Math.floor(usage.prompt_tokens))
+  const completionTokens = Math.max(0, Math.floor(usage.completion_tokens ?? 0))
+  return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }
 }
 
 /**

@@ -44,15 +44,30 @@ test('the tool catalogue reports effect, surface and whether Internal allows it'
   const { api } = await fixture(t)
   const { status, body } = await api('/api/rig/v1/tools')
   assert.equal(status, 200)
-  assert.equal(body.tools.length, 16)
+  assert.equal(body.tools.length, 36)
+  // The project directory exists only in a terminal: reading it ships on for
+  // new deployments, running or changing things waits for an admin.
+  const workspace = Object.fromEntries(
+    body.tools.filter((tool) => tool.group === 'workspace').map((tool) => [tool.name, [tool.surface, tool.effect, tool.allowed]])
+  )
+  assert.deepEqual(workspace, {
+    workspace_list: ['terminal', 'read', true],
+    workspace_read: ['terminal', 'read', true],
+    workspace_search: ['terminal', 'read', true],
+    workspace_run: ['terminal', 'write', false],
+    workspace_write: ['terminal', 'write', false],
+    workspace_edit: ['terminal', 'write', false]
+  })
   const run = body.tools.find((tool) => tool.name === 'tests_run')
   assert.equal(run.effect, 'write')
   assert.equal(run.surface, 'internal')
   assert.equal(run.allowed, true)
   const click = body.tools.find((tool) => tool.name === 'browser_click')
   assert.equal(click.surface, 'desktop')
-  // Browser tools ship switched off; an allow-list that starts open is not one.
-  assert.equal(click.allowed, false)
+  // Web testing ships on: every action is still confirmed, and a site nobody
+  // listed is asked about in the mission. The native station stays off.
+  assert.equal(click.allowed, true)
+  assert.equal(body.tools.find((tool) => tool.name === 'native_click').allowed, false)
   assert.ok(body.groups.test && body.groups.browser && body.groups.finding)
   // The structured conclusion is a tool like any other: allow-listed, and
   // read-effect because it only writes onto the mission it is recorded on.
@@ -99,9 +114,10 @@ test('built-in Agents are published and a mission can pick one', async (t) => {
   const analyst = config.body.agents.find((agent) => agent.key === 'result-analyst')
   assert.ok(analyst.persona.length > 0)
   assert.ok(analyst.effectiveTools.every((name) => analyst.tools.includes(name)))
-  // page-inspector wants browser tools, which Internal has not allowed yet.
+  // page-inspector's browser tools are on out of the box.
   const inspector = config.body.agents.find((agent) => agent.key === 'page-inspector')
-  assert.deepEqual(inspector.effectiveTools, [])
+  assert.deepEqual(inspector.effectiveTools, inspector.tools)
+  assert.equal(config.body.policy.browserSites, 'ask')
   const created = await api('/api/rig/v1/missions', {
     mode: 'agent',
     goal: '分析最近一次执行',

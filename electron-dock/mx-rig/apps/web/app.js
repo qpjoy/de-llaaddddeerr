@@ -1,5 +1,6 @@
 import * as views from './views.js'
 import { h } from './views.js'
+import { live, pushFrame } from './activity.js'
 
 const $ = (id) => document.getElementById(id)
 const native = Boolean(window.mxRig?.desktop)
@@ -20,20 +21,31 @@ const GET_ROUTES = {
   tasks: '/api/v1/tasks',
   runs: '/api/v1/runs?limit=20',
   apps: '/api/v1/apps',
-  runners: '/api/v1/runners'
+  runners: '/api/v1/runners',
+  procedures: '/api/rig/v1/procedures',
+  'procedure-tasks': '/api/rig/v1/procedure-tasks',
+  hooks: '/api/rig/v1/hooks'
 }
 const POST_ROUTES = {
   login: '/api/rig/v1/login',
   logout: '/api/rig/v1/logout',
+  'change-password': '/api/v1/auth/password',
   'save-config': '/api/rig/v1/admin/config',
   probe: '/api/rig/v1/admin/providers:probe',
   'preview-orchestration': '/api/rig/v1/admin/orchestrations:preview',
   'activate-egress': '/api/rig/v1/admin/egress:activate',
   'plan-dispatch': '/api/rig/v1/dispatch:plan',
+  'draft-flight-plan': '/api/rig/v1/flight-plans:draft',
   'system-signal': '/api/rig/v1/system/signal',
   'system-claim': '/api/rig/v1/system/claim',
   'system-seen': '/api/rig/v1/system/seen',
-  start: '/api/rig/v1/missions'
+  start: '/api/rig/v1/missions',
+  'procedure-create': '/api/rig/v1/procedures',
+  'procedure-capture': '/api/rig/v1/procedures:capture',
+  'procedure-task-create': '/api/rig/v1/procedure-tasks',
+  'cases-import': '/api/rig/v1/cases:import',
+  'hooks-save': '/api/rig/v1/hooks',
+  'hooks-tick': '/api/rig/v1/hooks:tick'
 }
 const MISSION_ACTIONS = ['approve', 'cancel', 'followup']
 
@@ -78,8 +90,15 @@ const PAGES = [
         id: 'tests',
         glyph: '▤',
         title: '测试中心',
-        sub: '应用、计划与执行证据',
+        sub: '应用、用例、计划与执行',
         kicker: 'QUALITY EVIDENCE'
+      },
+      {
+        id: 'procedures',
+        glyph: '⟲',
+        title: '试验规程',
+        sub: 'Agent 写、机器跑、失败时修正',
+        kicker: 'TEST PROCEDURES'
       },
       {
         id: 'guide',
@@ -113,6 +132,13 @@ const PAGES = [
         title: '编排中心',
         sub: '可视化编排：节点、分支与暂停点',
         kicker: 'ORCHESTRATION'
+      },
+      {
+        id: 'hooks',
+        glyph: '⚓',
+        title: '钩子',
+        sub: '失败时自动定级、自动修正',
+        kicker: 'HOOKS'
       },
       {
         id: 'tools',
@@ -154,6 +180,9 @@ const state = {
   tools: [],
   toolGroups: {},
   nodeTypes: {},
+  flightVocab: { stages: {}, gateMetrics: {}, preflightChecks: {} },
+  // A drafted flight plan waiting to be reviewed; never run on its own.
+  flightDraft: null,
   graph: null,
   orchestration: { selected: 'mission', graph: null, preview: null, draft: null, error: null },
   missions: [],
@@ -202,6 +231,37 @@ async function api(action, body) {
         Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
       )}`
     )
+  if (action === 'export')
+    return request('GET', `/api/rig/v1/missions/${encodeURIComponent(body.id)}/export`)
+  if (action === 'app-cases') return request('GET', `/api/v1/apps/${encodeURIComponent(body.app)}/cases`)
+  // 试验规程. Replays and repairs drive a browser, which only the desktop has.
+  if (
+    action === 'procedure-fire' ||
+    action === 'procedure-repair' ||
+    action === 'procedure-fire-all'
+  )
+    throw new Error('试车与修正在 MX Rig 桌面端进行')
+  if (action === 'procedure-task-run')
+    return request('POST', `/api/rig/v1/procedure-tasks/${encodeURIComponent(body.id)}:run`, {})
+  if (action.startsWith('station-')) throw new Error('本机工位值守在 MX Rig 桌面端进行')
+  if (action.startsWith('procedure-') || action === 'procedure') {
+    const id = encodeURIComponent(body?.id)
+    if (action === 'procedure') return request('GET', `/api/rig/v1/procedures/${id}`)
+    if (action === 'procedure-revise')
+      return request('POST', `/api/rig/v1/procedures/${id}:revise`, {
+        expectedRevision: body.expectedRevision,
+        procedure: body.procedure,
+        reason: body.reason
+      })
+    if (action === 'procedure-status')
+      return request('POST', `/api/rig/v1/procedures/${id}:status`, { status: body.status })
+    if (action === 'procedure-decide')
+      return request(
+        'POST',
+        `/api/rig/v1/procedures/${id}/proposals/${encodeURIComponent(body.proposalId)}:decide`,
+        { approved: body.approved }
+      )
+  }
   if (MISSION_ACTIONS.includes(action)) {
     const { id, ...rest } = body
     return request('POST', `/api/rig/v1/missions/${encodeURIComponent(id)}/${action}`, rest)
@@ -387,6 +447,37 @@ function reportText(insights) {
     lines.push('', '要先处理的：')
     for (const risk of insights.risks.slice(0, 5))
       lines.push(`- [${risk.level}] ${risk.title}：${risk.detail}`)
+  }
+  // Agent work gets its own lines, labelled for what it is.
+  const agents = insights.missions
+  if (agents?.total) {
+    lines.push(
+      '',
+      `Agent 任务 ${agents.total} 项（服务端 ${agents.bySurface.internal}，桌面 ${agents.bySurface.desktop}）`
+    )
+    if (agents.findings.total) {
+      const verdicts = Object.entries(agents.findings.byVerdict)
+        .filter(([, count]) => count > 0)
+        .map(([verdict, count]) => `${views.VERDICT_TEXT[verdict]?.label ?? verdict} ${count}`)
+        .join('，')
+      lines.push(
+        `Agent 结论 ${agents.findings.total} 条：${verdicts}${
+          agents.findings.unverified
+            ? `；其中 ${agents.findings.unverified} 条引用未核实，需要复核`
+            : ''
+        }（Agent 的判断，不是测试结论）`
+      )
+    }
+    if (agents.assertions.total)
+      lines.push(
+        `页面断言通过 ${percent(agents.assertions.passRate)}（${agents.assertions.passed}/${agents.assertions.total}）`
+      )
+    if (agents.usage?.calls)
+      lines.push(
+        `模型用量 ${agents.usage.promptTokens + agents.usage.completionTokens} tokens，${agents.usage.calls} 次调用${
+          agents.usage.estimated ? `（${agents.usage.estimated} 项任务含估算）` : ''
+        }`
+      )
   }
   lines.push('', '口径：' + insights.caveats.join(' '))
   return lines.join('\n')
@@ -637,7 +728,17 @@ function renderNav() {
           }
         },
         h('span', { text: row.goal }),
-        h('small', { text: `${row.mode === 'agent' ? 'AGENT' : 'WORKFLOW'} · ${row.status}` })
+        h('small', {
+          text: `${row.surface === 'desktop' ? (row.client === 'terminal' ? '终端 · ' : '桌面 · ') : ''}${
+            row.mode === 'agent'
+              ? 'AGENT'
+              : row.mode === 'workflow'
+                ? 'WORKFLOW'
+                : row.flight
+                  ? 'FLIGHT'
+                  : 'ORCHESTRATION'
+          } · ${row.status}`
+        })
       )
     )
   nav.append(
@@ -721,12 +822,17 @@ async function enter(principal) {
   state.principal = principal
   $('login').hidden = true
   $('workspace').hidden = false
+  // A download may already be under way (it starts with the Runtime).
+  if (native) api('browser-status').then(showProvision).catch(() => {})
   $('member').textContent = principal.displayName || principal.id || principal.principalId || ''
   $('member-role').textContent =
     { admin: '管理员', operator: '测试工程师', viewer: '只读' }[principal.role] ??
     principal.role ??
     ''
   $('surface').textContent = native ? 'DESKTOP · 本地 Runtime' : 'INTERNAL · Web 工作台'
+  // Only a Rig account has a password Rig can change; Launcher accounts and
+  // the service admin token are managed where they come from.
+  $('change-password').hidden = principal.kind !== 'local'
   const [config, graph, catalogue] = await Promise.all([
     api('config'),
     api('graph').catch(() => ({ graph: null, nodeTypes: {} })),
@@ -735,6 +841,7 @@ async function enter(principal) {
   state.config = config
   state.graph = graph.graph
   state.nodeTypes = graph.nodeTypes ?? {}
+  state.flightVocab = graph.flight ?? { stages: {}, gateMetrics: {}, preflightChecks: {} }
   state.orchestration.graph = graph.graph
   state.tools = catalogue.tools ?? []
   state.toolGroups = catalogue.groups ?? {}
@@ -748,10 +855,58 @@ async function enter(principal) {
   await refreshSystem().catch(() => {})
   if (native) signal('desktop_login')
   await render()
+  if (principal.mustChangePassword)
+    notice('你正在使用管理员发放的一次性密码，请点左下角「修改密码」换成只有你知道的密码。')
 }
 
 $('server-field').hidden = !native
+$('private-http-field').hidden = !native
 $('server').required = native
+// The address this build was made for, or the one that worked last time.
+if (native)
+  api('login-defaults')
+    .then((defaults) => {
+      $('server').value = defaults.server
+      $('private-http').checked = defaults.privateHttp === true
+      if (defaults.account && !$('account').value) $('account').value = defaults.account
+    })
+    .catch(() => {})
+
+/**
+ * The test browser on first use: nothing to say once it is there; while it
+ * downloads, how far along; when it failed, why, and a way to try again.
+ */
+function showProvision(info) {
+  const box = $('browser-provision')
+  if (!box || !info) return
+  box.replaceChildren()
+  box.dataset.tone = info.phase === 'failed' || (info.failure && !info.downloading) ? 'error' : 'info'
+  if (info.phase === 'downloading' || (info.downloading && info.progress)) {
+    const progress = info.phase === 'downloading' ? info : info.progress
+    const percent = progress.total ? Math.floor((progress.done / progress.total) * 100) : 0
+    const size = progress.total ? `约 ${Math.round(progress.total / 1048576)} MB，` : ''
+    box.textContent = `正在准备测试浏览器（只在第一次使用时下载，${size}来源 ${progress.source}）… ${percent}%`
+    box.hidden = false
+    return
+  }
+  if (info.ready) {
+    box.hidden = true
+    return
+  }
+  if (info.failure || info.phase === 'failed') {
+    box.append(
+      `测试浏览器下载失败：${info.failure}。也可以安装 Google Chrome，MX Rig 会直接使用它。`,
+      h('button', {
+        class: 'qp-button qp-button--outline qp-button--sm',
+        type: 'button',
+        text: '重试下载',
+        onclick: () => api('browser-download').then(showProvision).catch((error) => notice(error.message, 'error'))
+      })
+    )
+    box.hidden = false
+  }
+}
+if (native) window.mxRig.onProvision?.(showProvision)
 $('console-link').hidden = false
 $('console-link').onclick = (event) => {
   if (!native) return
@@ -781,6 +936,32 @@ $('logout').onclick = () =>
     $('login').hidden = false
     $('workspace').hidden = true
   })
+$('change-password').onclick = () => {
+  $('password-error').textContent = ''
+  $('password-form').reset()
+  $('password-dialog').showModal()
+}
+$('password-cancel').onclick = () => $('password-dialog').close()
+$('password-form').onsubmit = async (event) => {
+  event.preventDefault()
+  const button = event.submitter
+  button.disabled = true
+  $('password-error').textContent = ''
+  try {
+    await api('change-password', {
+      current: $('password-current').value,
+      next: $('password-next').value
+    })
+    $('password-form').reset()
+    $('password-dialog').close()
+    state.principal = { ...state.principal, mustChangePassword: false }
+    notice('密码已修改；其他设备上的登录已失效。')
+  } catch (error) {
+    $('password-error').textContent = error.message
+  } finally {
+    button.disabled = false
+  }
+}
 $('login-form').onsubmit = async (event) => {
   event.preventDefault()
   const button = event.submitter
@@ -788,12 +969,14 @@ $('login-form').onsubmit = async (event) => {
   $('login-error').textContent = ''
   try {
     const result = await api('login', {
-      ...(native ? { url: $('server').value } : {}),
+      ...(native ? { url: $('server').value, privateHttp: $('private-http').checked } : {}),
       account: $('account').value,
       password: $('password').value
     })
     $('password').value = ''
     await enter(result.member)
+    if (result.cleartext)
+      notice('当前连接是内网 HTTP，未加密：只在可信的内网或 WireGuard 隧道里使用。')
   } catch (error) {
     $('login-error').textContent = error.message
     $('login').hidden = false
@@ -820,6 +1003,28 @@ setInterval(() => {
   if (ticks % every !== 0) return
   refresh().catch((error) => notice(error.message, 'error'))
 }, TICK_MS)
+
+// The desktop streams the page the Agent is driving; the activity view shows
+// it in the mission's browser tab, and anywhere else as a small window.
+if (native && typeof window.mxRig.onFrame === 'function') {
+  window.mxRig.onFrame((frame) => pushFrame(frame))
+  // During takeover the page may ask for a file; the pane offers the dialog.
+  window.mxRig.onChooser?.((info) => {
+    live.chooser = info
+    render()
+  })
+  window.mxRig.onDialog?.((info) => {
+    live.dialog = info
+    render()
+  })
+  live.open = (missionId) => {
+    if (missionId) {
+      state.selected = missionId
+      state.missionTab = { id: missionId, tab: 'browser', chosen: true }
+    }
+    go('missions')
+  }
+}
 
 if (!native)
   api('me')

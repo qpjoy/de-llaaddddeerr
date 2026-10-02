@@ -449,3 +449,33 @@ test('the streaming route answers NDJSON, and refuses before the first byte with
     403
   )
 })
+
+test('provider-reported usage comes back from both call shapes', async () => {
+  const settings = await settingsWith([provider()])
+  const streamed = new ModelGateway(settings, {
+    environment: { MX_RIG_MODEL_API_KEY: 'k' },
+    fetchImpl: async () =>
+      sse([
+        say('好'),
+        { choices: [], usage: { prompt_tokens: 42, completion_tokens: 7, total_tokens: 49 } }
+      ])
+  })
+  const first = await streamed.turn(
+    'alice',
+    { messages: [{ role: 'user', content: 'go' }], tools: [] },
+    undefined,
+    () => {}
+  )
+  assert.deepEqual([first.usage.promptTokens, first.usage.completionTokens], [42, 7])
+
+  const plain = new ModelGateway(settings, {
+    environment: { MX_RIG_MODEL_API_KEY: 'k' },
+    fetchImpl: async () =>
+      Response.json({ choices: [{ message: { role: 'assistant', content: '好' } }] })
+  })
+  const second = await plain.turn('alice', {
+    messages: [{ role: 'user', content: 'go' }],
+    tools: []
+  })
+  assert.equal(second.usage, null, 'nothing reported, nothing invented')
+})

@@ -21,7 +21,11 @@ import { join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // Where the runner keeps its credentials. Small, and belongs with the user.
-const CONFIG_DIR = join(homedir(), '.mx-rig-runner')
+// A host that manages the runner (the MX Rig desktop) keeps its config in its
+// own profile instead of the shared home-directory default.
+const CONFIG_DIR = process.env.MXT_RUNNER_CONFIG_DIR
+  ? resolve(process.env.MXT_RUNNER_CONFIG_DIR)
+  : join(homedir(), '.mx-rig-runner')
 const CONFIG_FILE = join(CONFIG_DIR, 'runner.json')
 
 /**
@@ -206,9 +210,12 @@ async function cmdUninstall() {
   const config = await loadConfig()
   if (!config.server) return say('这台机器没有接入过任何平台。')
 
-  if (config.runnerId && config.runnerToken) {
+  if (config.runnerId && (config.userToken || config.runnerToken)) {
+    // Removing a machine is its owner's act: the member's session can do it,
+    // the runner's own token cannot. A machine attached with a one-shot code
+    // has no member session here, so it is removed in the web UI instead.
     await api(config, 'DELETE', `/api/v1/runners/${config.runnerId}`, {
-      token: config.runnerToken,
+      token: config.userToken ?? config.runnerToken,
     }).catch((error) => say(`! 平台上没能注销（${error.message}），可以在界面上手动删除`))
   }
   await rm(CONFIG_FILE, { force: true })
@@ -1108,9 +1115,20 @@ async function cmdWatch({ once = false } = {}) {
 
   say(`等待任务中（${config.runnerName}）。Ctrl-C 退出。`)
   let stop = false
+  // Cuts an idle wait short, so a stop does not sit out the polling interval.
+  let wake = null
   process.on('SIGINT', () => {
     stop = true
     say('收到退出信号，当前任务完成后停止。')
+    wake?.()
+  })
+  // A managing host (the MX Rig desktop) asks over IPC: signals are not a
+  // dependable way to ask a child to stop politely on every OS.
+  process.on('message', (message) => {
+    if (message !== 'stop') return
+    stop = true
+    say('收到停止请求，当前任务完成后停止。')
+    wake?.()
   })
 
   while (!stop) {
@@ -1122,9 +1140,20 @@ async function cmdWatch({ once = false } = {}) {
     }
     if (once) return
     if (!worked && !stop) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, POLL_IDLE_MS))
+      // The timer stays referenced: it is what keeps a runner started from a
+      // terminal (no IPC channel) alive between polls. A stop clears it.
+      await new Promise((resolvePromise) => {
+        const timer = setTimeout(resolvePromise, POLL_IDLE_MS)
+        wake = () => {
+          clearTimeout(timer)
+          resolvePromise()
+        }
+      })
+      wake = null
     }
   }
+  // An open IPC channel would keep this process alive after it stopped.
+  if (process.connected) process.disconnect()
 }
 
 const usage = `mxt-runner — 在自己的电脑上执行测试平台派发的任务

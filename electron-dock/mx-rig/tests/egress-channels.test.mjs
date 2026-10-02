@@ -284,7 +284,7 @@ test('the isolated browser is relaunched when the channel changes', async (t) =>
     goto: async () => {},
     url: () => 'https://test.example/',
     title: async () => 'stub',
-    locator: () => ({ innerText: async () => 'stub body' }),
+    locator: () => ({ ariaSnapshot: async () => '- heading "stub" [level=1]' }),
     screenshot: async ({ path }) => writeFile(path, 'png')
   }
   const chromium = {

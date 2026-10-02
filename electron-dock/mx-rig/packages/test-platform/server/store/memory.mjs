@@ -25,6 +25,8 @@ export class MemoryStore {
   #runners = new Map()
   #enrollments = new Map()
   #members = new Map()
+  #localAccounts = new Map() // account -> local account
+  #sessions = new Map() // sha256(token) -> session
 
   async close() {}
 
@@ -337,6 +339,15 @@ export class MemoryStore {
 
   async deleteTask(id) {
     return this.#tasks.delete(id)
+  }
+
+  /** Take one fire of a task: succeeds only if its next fire time is still `expected`. */
+  async claimTaskFire(id, expected, { nextRunAt, disable = false }) {
+    const task = this.#tasks.get(id)
+    if (!task || !task.enabled || task.nextRunAt !== expected) return false
+    task.nextRunAt = nextRunAt
+    if (disable) task.enabled = false
+    return true
   }
 
   async dueTasks(now) {
@@ -679,6 +690,114 @@ export class MemoryStore {
     return clone(
       [...this.#members.values()].sort((a, b) => a.displayName.localeCompare(b.displayName)),
     )
+  }
+
+  // -- local accounts and sessions -------------------------------------------
+
+  /** Member and account together: one without the other is not an account. */
+  async createLocalMember({ member, account }) {
+    if (this.#localAccounts.has(account.account) || this.#members.has(member.principalId)) {
+      throw new AppError(409, 'local_account_exists', `账号 ${account.account} 已存在`)
+    }
+    const now = new Date().toISOString()
+    this.#members.set(member.principalId, {
+      principalId: member.principalId,
+      displayName: member.displayName,
+      launcherSub: null,
+      role: member.role,
+      lastSeenAt: null,
+      createdAt: now,
+    })
+    this.#localAccounts.set(account.account, {
+      account: account.account,
+      principalId: member.principalId,
+      passwordHash: account.passwordHash,
+      mustChangePassword: account.mustChangePassword ?? true,
+      failedLogins: 0,
+      lockedUntil: null,
+      disabledAt: null,
+      passwordChangedAt: null,
+      createdBy: account.createdBy ?? null,
+      createdAt: now,
+    })
+    return {
+      member: clone(this.#members.get(member.principalId)),
+      account: clone(this.#localAccounts.get(account.account)),
+    }
+  }
+
+  async getLocalAccount(account) {
+    return clone(this.#localAccounts.get(account)) ?? null
+  }
+
+  async getLocalAccountByPrincipal(principalId) {
+    return clone([...this.#localAccounts.values()].find((entry) => entry.principalId === principalId)) ?? null
+  }
+
+  async listLocalAccounts() {
+    return clone([...this.#localAccounts.values()])
+  }
+
+  async updateLocalAccount(account, patch) {
+    const record = this.#localAccounts.get(account)
+    if (!record) return null
+    for (const field of ['passwordHash', 'mustChangePassword', 'failedLogins', 'lockedUntil', 'disabledAt', 'passwordChangedAt']) {
+      if (Object.hasOwn(patch, field)) record[field] = patch[field]
+    }
+    return clone(record)
+  }
+
+  /** Count one failed attempt; lock once the budget is spent. */
+  async recordFailedLogin(account, { maxFailures, lockoutMs }) {
+    const record = this.#localAccounts.get(account)
+    if (!record) return null
+    record.failedLogins += 1
+    if (record.failedLogins >= maxFailures) {
+      record.lockedUntil = new Date(Date.now() + lockoutMs).toISOString()
+      record.failedLogins = 0
+    }
+    return clone(record)
+  }
+
+  async createSession({ tokenHash, principalId, expiresAt, source }) {
+    const session = {
+      tokenHash,
+      principalId,
+      source: source ?? null,
+      createdAt: new Date().toISOString(),
+      expiresAt,
+      revokedAt: null,
+    }
+    this.#sessions.set(tokenHash, session)
+    return clone(session)
+  }
+
+  async getSession(tokenHash) {
+    return clone(this.#sessions.get(tokenHash)) ?? null
+  }
+
+  async revokeSession(tokenHash) {
+    const session = this.#sessions.get(tokenHash)
+    if (session && !session.revokedAt) session.revokedAt = new Date().toISOString()
+  }
+
+  async revokeSessionsFor(principalId, { exceptTokenHash = null } = {}) {
+    let revoked = 0
+    for (const session of this.#sessions.values()) {
+      if (session.principalId !== principalId || session.revokedAt) continue
+      if (session.tokenHash === exceptTokenHash) continue
+      session.revokedAt = new Date().toISOString()
+      revoked += 1
+    }
+    return revoked
+  }
+
+  /** Drop sessions that can no longer be used; the table must not grow forever. */
+  async pruneSessions(now = new Date()) {
+    const cutoff = now.getTime()
+    for (const [hash, session] of this.#sessions) {
+      if (session.revokedAt || Date.parse(session.expiresAt) <= cutoff) this.#sessions.delete(hash)
+    }
   }
 
   // -- case authoring --------------------------------------------------------

@@ -19,6 +19,7 @@ import { AppError } from '../core/errors.mjs'
 function asText(message) {
   const lines = [message.title]
   if (message.taskName) lines.push(`任务：${message.taskName}`)
+  if (message.note) lines.push(message.note)
 
   const { tests, passed, failed, notRun } = message.totals
   if (message.event !== 'blocked') {

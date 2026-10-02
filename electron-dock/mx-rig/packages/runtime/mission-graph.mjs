@@ -5,7 +5,12 @@ import { channel, appendChannel } from '../graph/state.mjs'
 export const toolCallSchema = z.object({
   id: z.string().min(1).max(200),
   name: z.string().min(1).max(64),
-  args: z.record(z.string(), z.string()).default({})
+  // Tool parameters are strings, bounded integers or booleans; the tool's own
+  // schema decides which, this only keeps the checkpoint JSON-shaped.
+  args: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+  // Set only by a flight step an admin pre-authorised; the executor still
+  // re-checks policy and role on every call.
+  preauthorized: z.boolean().optional()
 })
 
 /**
@@ -62,6 +67,9 @@ export function buildMissionGraph(handlers, { maxSteps = 200 } = {}) {
   graph.addNode(
     'approve',
     async (state, ctx) => {
+      // A grant the member gave this mission, checked against live policy,
+      // can stand in for the click. It never touches resume state.
+      if (await handlers.preapprove?.(state, ctx)) return { approved: true, ...stamp('approve') }
       // The pause. Everything needed to resume is in the checkpoint, so a
       // restart can refuse to replay instead of guessing what was approved.
       const approved = ctx.interrupt({ call: state.call })

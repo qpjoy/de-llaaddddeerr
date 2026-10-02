@@ -3,11 +3,28 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { RigError, TERMINAL } from '../contracts/index.mjs'
 
+/**
+ * A desktop mission as the service keeps it: readable, never executable.
+ *
+ * The transcript, checkpoint and raw evidence stay on the machine that ran it;
+ * the owner is always the member who sent it, whatever the record claims.
+ */
+export function syncedRecord(owner, input) {
+  const { messages, graph, evidence, skippedCalls, stream, crew, ...visible } = input
+  return { ...structuredClone(visible), owner, surface: 'desktop', pending: null }
+}
+
 export class MissionStore {
-  constructor(root) {
+  /**
+   * @param {string} root
+   * @param {{ onSaved?: (row: object) => void }} [options] called after every
+   *   durable save; the desktop uses it to know what to send to the service.
+   */
+  constructor(root, { onSaved } = {}) {
     this.root = root
     this.rows = new Map()
     this.queue = Promise.resolve()
+    this.onSaved = onSaved
   }
   async init() {
     await mkdir(this.root, { recursive: true })
@@ -15,6 +32,8 @@ export class MissionStore {
       if (!/^[a-f0-9-]{36}\.json$/.test(file)) continue
       const row = JSON.parse(await readFile(join(this.root, file), 'utf8'))
       this.rows.set(row.id, row)
+      // A desktop's copy is that desktop's to update; this process never ran it.
+      if (row.surface === 'desktop') continue
       if (!TERMINAL.has(row.status)) {
         row.status = 'blocked'
         row.pending = null
@@ -50,8 +69,16 @@ export class MissionStore {
     // `evidence` the raw tool output kept for an analysis step: none is part
     // of the workbench contract, and the UI already shows tool results as
     // events. `trace` is kept because the orchestration view renders it.
-    const { messages, graph, evidence, ...visible } = row
+    const { messages, graph, evidence, skippedCalls, crew, ...visible } = row
     return structuredClone(visible)
+  }
+  /** Every owner's missions, newest first, for reports. Never includes transcripts. */
+  recent({ limit = 200, since = null } = {}) {
+    return [...this.rows.values()]
+      .filter((row) => !since || row.createdAt >= new Date(since).toISOString())
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit)
+      .map((row) => this.public(row))
   }
   async create(owner, input) {
     if (this.list(owner).length >= 500)
@@ -79,7 +106,23 @@ export class MissionStore {
     await this.save(row)
     return row
   }
+  /** Store what a desktop reported, unless the id belongs to someone or something else. */
+  async syncDesktop(owner, rows) {
+    let stored = 0
+    for (const input of rows) {
+      const existing = this.rows.get(input.id)
+      if (existing && (existing.surface !== 'desktop' || existing.owner !== owner)) continue
+      if (existing?.updatedAt && input.updatedAt && existing.updatedAt > input.updatedAt) continue
+      if (!existing && this.list(owner).length >= 500) break
+      const row = syncedRecord(owner, input)
+      this.rows.set(row.id, row)
+      await this.save(row)
+      stored += 1
+    }
+    return stored
+  }
   async save(row) {
+    if (row.surface !== 'desktop') row.updatedAt = new Date().toISOString()
     const json = JSON.stringify(row, null, 2)
     const file = join(this.root, `${row.id}.json`)
     const next = this.queue.then(async () => {
@@ -88,6 +131,11 @@ export class MissionStore {
       await rename(temp, file)
     })
     this.queue = next.catch(() => {})
-    return next
+    await next
+    try {
+      this.onSaved?.(row)
+    } catch {
+      /* Bookkeeping for sync must never fail a save. */
+    }
   }
 }

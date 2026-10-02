@@ -34,19 +34,22 @@ export function defaultRunsOn(suite) {
 export function resolvePlacement({ task, suite, now = new Date() }) {
   const runsOn = task?.runsOn ?? defaultRunsOn(suite)
   const assignedRunnerId = runsOn === 'pinned-runner' ? (task?.runnerId ?? null) : null
+  // A Rig procedure batch always waits for a machine: the platform never
+  // replays one itself, so even `server` — "a team station" here — has to
+  // show up, and may not show up. It waits, and expires, like any other.
+  const platformActs = runsOn === 'server' && suite?.engine !== 'rig-procedure'
   return {
     runsOn,
     assignedRunnerId,
     // `queued` means the platform will act; `pending-runner` means a machine
     // has to show up. The distinction is what the run list shows as
     // 「排队中」 versus 「等待执行机」.
-    status: runsOn === 'server' ? 'queued' : 'pending-runner',
+    status: platformActs ? 'queued' : 'pending-runner',
     // Only work that waits for a machine can expire waiting. A deadline on a
     // server-side run would be a second timeout stacked on top of the lease.
-    claimDeadline:
-      runsOn === 'server'
-        ? null
-        : new Date(now.getTime() + (task?.claimWindowMinutes ?? 720) * 60_000).toISOString(),
+    claimDeadline: platformActs
+      ? null
+      : new Date(now.getTime() + (task?.claimWindowMinutes ?? 720) * 60_000).toISOString(),
   }
 }
 

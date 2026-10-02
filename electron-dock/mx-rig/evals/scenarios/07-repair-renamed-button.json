@@ -1,0 +1,72 @@
+{
+  "id": "repair-renamed-button",
+  "title": "规程修正：按钮改名是用例问题，最小修改",
+  "start": {},
+  "policy": {
+    "maxTurns": 8,
+    "allowedTools": [
+      "browser_snapshot",
+      "browser_click",
+      "browser_fill",
+      "browser_wait",
+      "browser_assert",
+      "procedure_propose"
+    ],
+    "browserPreauth": true
+  },
+  "site": {
+    "/settings": "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>个人设置</title></head><body><main><h1>个人设置</h1><form onsubmit=\"event.preventDefault();setTimeout(function(){document.getElementById('status').textContent='已保存：'+document.getElementById('nick').value},150)\"><label for=\"nick\">昵称</label><input id=\"nick\" value=\"旧昵称\"><button type=\"submit\">提交</button></form><p id=\"status\" role=\"status\"></p></main></body></html>"
+  },
+  "procedure": {
+    "title": "修改昵称并保存",
+    "baseUrl": "{{origin}}",
+    "steps": [
+      {
+        "do": "open",
+        "url": "/settings"
+      },
+      {
+        "do": "fill",
+        "target": {
+          "label": "昵称"
+        },
+        "value": "Rig"
+      },
+      {
+        "do": "click",
+        "target": {
+          "role": "button",
+          "name": "保存"
+        }
+      },
+      {
+        "do": "assert",
+        "kind": "text_visible",
+        "expected": "已保存：Rig"
+      }
+    ]
+  },
+  "expect": {
+    "status": "completed",
+    "proposal": "case-issue",
+    "validation": "passed",
+    "keepsAssertions": true,
+    "maxChanges": 2
+  },
+  "script": [
+    {
+      "call": "browser_snapshot"
+    },
+    {
+      "call": "procedure_propose",
+      "args": {
+        "verdict": "case-issue",
+        "rationale": "保存按钮改名为「提交」，被验证的保存行为没有变化",
+        "steps": "[{\"do\": \"open\", \"url\": \"/settings\"}, {\"do\": \"fill\", \"target\": {\"label\": \"昵称\"}, \"value\": \"Rig\"}, {\"do\": \"click\", \"target\": {\"role\": \"button\", \"name\": \"提交\"}}, {\"do\": \"assert\", \"kind\": \"text_visible\", \"expected\": \"已保存：Rig\"}]"
+      }
+    },
+    {
+      "say": "第 3 步的按钮名称从「保存」改为「提交」，其余步骤和断言保持不变。"
+    }
+  ]
+}

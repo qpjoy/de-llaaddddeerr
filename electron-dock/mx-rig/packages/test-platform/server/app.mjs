@@ -38,7 +38,7 @@ import { completeBuildRun, findBuildArtifact } from './ingest/build.mjs'
 import { junitToSummary } from './ingest/junit.mjs'
 import { NOTIFY_KINDS, adapterFor, redactChannel } from './notify/adapters.mjs'
 import { enqueueForRun } from './notify/dispatch.mjs'
-import { NOTIFY_EVENTS } from './notify/events.mjs'
+import { NOTIFY_EVENTS, channelWants, composeDebrief } from './notify/events.mjs'
 import { catalogSubsetFor, parseCaseFilter, resolveCaseFilter } from './ingest/case-filter.mjs'
 import { compareWithCatalog, normalizeSourceRef, normalizeSummary } from './ingest/summary.mjs'
 import { buildCompassPlan, DEFAULT_COMPASS_REPO } from './onboarding/compass.mjs'
@@ -78,7 +78,12 @@ const CATALOG_COVERAGE_STATES = ['automated', 'manual-witness', 'unsupported', '
 // the contract (JUnit XML or summary.json, exit code 0/1/2). Each entry here
 // exists to pick a default image and nothing else; `generic` covers everything
 // not listed, and requires the suite to name its own image.
-const ENGINES = ['cypress', 'playwright', 'playwright-electron', 'pytest', 'k6', 'generic']
+//
+// `rig-procedure` is MX Rig's 试验规程: replayed by a Rig station (a desktop on
+// duty, `mx-rig station`, or a station container) that claims the run like any
+// runner. There is no command and no container image for it.
+const ENGINES = ['cypress', 'playwright', 'playwright-electron', 'pytest', 'k6', 'generic', 'rig-procedure']
+const PROCEDURE_SUITE = 'rig-procedures'
 const SURFACES = ['web', 'electron']
 const RUNNER_KINDS = ['server', 'local']
 // How long a machine has to redeem an enrolment code.
@@ -497,6 +502,43 @@ export function createApp({
     return app
   }
 
+  /**
+   * The suite that carries an app's Rig procedures. It has no command: its
+   * runs are claimed by Rig stations (engine `rig-procedure`), or recorded
+   * directly when a desktop replays a procedure. A suite of that name made by
+   * an earlier version, with a Playwright engine, is brought up to date so a
+   * Playwright runner never claims a run it cannot execute.
+   */
+  async function ensureProcedureSuite(app, surface = 'web') {
+    const suite = (await store.listSuites(app.id)).find((entry) => entry.slug === PROCEDURE_SUITE)
+    if (suite) {
+      if (suite.engine === 'rig-procedure' && suite.targetMode === 'self') return suite
+      return store.updateSuite(suite.id, { engine: 'rig-procedure', targetMode: 'self', runnerKind: 'local' })
+    }
+    return store.createSuite({
+      appId: app.id,
+      slug: PROCEDURE_SUITE,
+      displayName: 'Rig 试验规程',
+      engine: 'rig-procedure',
+      surface,
+      // A machine has to show up: a desktop on duty or a station container.
+      runnerKind: 'local',
+      runnerImage: null,
+      workingDir: null,
+      // Each procedure carries its own address; a task needs no target URL.
+      targetMode: 'self',
+      kind: 'test',
+      repoUrl: null,
+      defaultBranch: null,
+      artifactPath: null,
+      requirements: {},
+      command: [],
+      retryPolicy: { maxAttempts: 1 },
+      secretRefs: [],
+      writesData: false,
+    })
+  }
+
   /** A suite of this app, addressed by slug or by id — whichever the caller has. */
   async function requireSuite(appId, ref) {
     const suites = await store.listSuites(appId)
@@ -864,11 +906,16 @@ export function createApp({
       method: 'POST',
       pattern: '/api/v1/auth/logout',
       auth: 'none',
-      handler: async () => ({
-        status: 200,
-        body: { ok: true },
-        headers: { 'set-cookie': clearSessionCookie() },
-      }),
+      handler: async ({ request }) => {
+        // A Rig session ends on the server too, not only in this browser: a
+        // copied cookie must stop working the moment its owner signs out.
+        await identity.logout(bearerToken(request))
+        return {
+          status: 200,
+          body: { ok: true },
+          headers: { 'set-cookie': clearSessionCookie() },
+        }
+      },
     },
     {
       method: 'GET',
@@ -876,11 +923,74 @@ export function createApp({
       handler: async ({ principal }) => ({ status: 200, body: { member: principal } }),
     },
     {
+      method: 'POST',
+      pattern: '/api/v1/auth/password',
+      handler: async ({ principal, body, request }) => {
+        const result = await identity.changePassword(
+          principal,
+          {
+            current: requiredString(body, 'current', { maxLength: 200 }),
+            next: requiredString(body, 'next', { maxLength: 200 }),
+          },
+          bearerToken(request),
+        )
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'member.password_change',
+          resourceType: 'member',
+          resourceId: principal.id,
+          before: null,
+          after: { revokedSessions: result.revokedSessions },
+        })
+        return { status: 200, body: result }
+      },
+    },
+    {
       method: 'GET',
       pattern: '/api/v1/members',
       handler: async ({ principal }) => {
         requireRole(principal, 'admin')
-        return { status: 200, body: { members: await store.listMembers() } }
+        const [members, local] = await Promise.all([store.listMembers(), identity.localAccounts()])
+        return {
+          status: 200,
+          body: {
+            members: members.map((member) => ({
+              ...member,
+              source: local.has(member.principalId) ? 'local' : 'launcher',
+              local: local.get(member.principalId) ?? null,
+            })),
+            federated: identity.federated,
+          },
+        }
+      },
+    },
+    {
+      // A Rig account: the product's own way in, independent of any other
+      // system's login. The one-time password is in this response only.
+      method: 'POST',
+      pattern: '/api/v1/members',
+      handler: async ({ principal, body, request }) => {
+        requireRole(principal, 'admin')
+        const result = await identity.createLocalMember(
+          {
+            account: requiredString(body, 'account', { maxLength: 40 }),
+            displayName: optionalString(body, 'displayName', { maxLength: 80 }),
+            role: enumValue(body, 'role', ROLES),
+            password: body?.password == null ? null : requiredString(body, 'password', { maxLength: 200 }),
+          },
+          principal,
+        )
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'member.local_create',
+          resourceType: 'member',
+          resourceId: result.member.principalId,
+          before: null,
+          after: { role: result.member.role, account: result.member.local?.account },
+        })
+        return { status: 201, body: result }
       },
     },
     {
@@ -888,22 +998,67 @@ export function createApp({
       pattern: '/api/v1/members/:principalId',
       handler: async ({ principal, params, body, request }) => {
         requireRole(principal, 'admin')
-        const role = enumValue(body, 'role', ROLES)
+        const unknown = Object.keys(body ?? {}).filter((key) => !['role', 'disabled'].includes(key))
+        if (unknown.length > 0 || Object.keys(body ?? {}).length === 0) {
+          throw new AppError(400, 'invalid_request', '只能修改 role 或 disabled')
+        }
         const before = await store.getMember(params.principalId)
-        const member = await store.setMemberRole(params.principalId, role)
-        if (!member) throw new AppError(404, 'member_not_found', '找不到该成员')
-        // Who can create a suite is who can decide what runs on real machines,
-        // so a role change is part of the same trail as the suites themselves.
+        if (!before) throw new AppError(404, 'member_not_found', '找不到该成员')
+        let member = before
+        if (Object.hasOwn(body, 'role')) {
+          const role = enumValue(body, 'role', ROLES)
+          member = await store.setMemberRole(params.principalId, role)
+          // Who can create a suite is who can decide what runs on real machines,
+          // so a role change is part of the same trail as the suites themselves.
+          await recordAudit(store, {
+            principal,
+            request,
+            action: 'member.role_change',
+            resourceType: 'member',
+            resourceId: member.id ?? params.principalId,
+            before: { role: before.role },
+            after: { role: member.role },
+          })
+        }
+        let local = null
+        if (Object.hasOwn(body, 'disabled')) {
+          if (typeof body.disabled !== 'boolean') {
+            throw new AppError(400, 'invalid_request', 'disabled 必须是布尔值')
+          }
+          if (params.principalId === principal.id && body.disabled) {
+            throw new AppError(409, 'self_disable', '不能停用自己的账号')
+          }
+          const result = await identity.setLocalDisabled(params.principalId, body.disabled)
+          local = result.local
+          await recordAudit(store, {
+            principal,
+            request,
+            action: body.disabled ? 'member.disable' : 'member.enable',
+            resourceType: 'member',
+            resourceId: params.principalId,
+            before: null,
+            after: { revokedSessions: result.revokedSessions },
+          })
+        }
+        return { status: 200, body: { member: { ...member, ...(local ? { local } : {}) } } }
+      },
+    },
+    {
+      method: 'POST',
+      pattern: '/api/v1/members/:principalId:resetPassword',
+      handler: async ({ principal, params, request }) => {
+        requireRole(principal, 'admin')
+        const result = await identity.resetLocalPassword(params.principalId)
         await recordAudit(store, {
           principal,
           request,
-          action: 'member.role_change',
+          action: 'member.password_reset',
           resourceType: 'member',
-          resourceId: member.id ?? params.principalId,
-          before: before ? { role: before.role } : null,
-          after: { role: member.role },
+          resourceId: params.principalId,
+          before: null,
+          after: { revokedSessions: result.revokedSessions },
         })
-        return { status: 200, body: { member } }
+        return { status: 200, body: result }
       },
     },
     {
@@ -1358,6 +1513,97 @@ export function createApp({
       },
     },
     {
+      method: 'POST',
+      pattern: '/api/v1/apps/:app/procedure-suite',
+      // The suite a regression task of Rig procedures is created on. Made on
+      // first use; operators may schedule procedures, so operators may ask.
+      handler: async ({ params, principal }) => {
+        requireRole(principal, 'operator')
+        const app = await requireApp(params.app)
+        return { status: 200, body: { suite: await ensureProcedureSuite(app, 'web') } }
+      },
+    },
+    {
+      // A run executed somewhere other than a runner — a Rig procedure replayed
+      // on a desktop station — recorded as a run of this app. It goes through
+      // the same ingest as a runner's result, so the quality report, case
+      // history and flaky detection see it without a second reporting path.
+      // It is measured only against the cases it reports.
+      method: 'POST',
+      pattern: '/api/v1/apps/:app/results:record',
+      handler: async ({ params, body, principal, request }) => {
+        requireRole(principal, 'operator')
+        const app = await requireApp(params.app)
+        const summary = body?.summary
+        if (!summary || typeof summary !== 'object' || !Array.isArray(summary.cases) || summary.cases.length === 0)
+          throw new AppError(400, 'invalid_request', 'summary.cases 至少要有一条')
+        const surface = enumValue(body, 'surface', SURFACES, 'web')
+        const suite = await ensureProcedureSuite(app, surface)
+        // The client's clock, when it is a time at all. A value the database
+        // cannot read would otherwise fail after the run exists.
+        const instant = (value) => {
+          const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN
+          return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null
+        }
+        const startedAt = instant(summary.startedAt) ?? new Date().toISOString()
+        const finishedAt = instant(summary.finishedAt)
+        const created = await store.createRun({
+          appId: app.id,
+          suiteId: suite.id,
+          taskId: null,
+          profile: 'rig',
+          track: 'functional',
+          engine: suite.engine,
+          // Created running and completed in the same request: never queued,
+          // so no runner can claim it in between.
+          status: 'running',
+          trigger: 'rig-procedure',
+          targetUrl: typeof summary.targetUrl === 'string' ? summary.targetUrl.slice(0, 2000) : null,
+          createdBy: principal.id,
+        })
+        let completed
+        try {
+          const run = await store.updateRun(created.id, { startedAt }) ?? created
+          completed = await completeRun({
+            store,
+            artifacts,
+            run: { ...run, startedAt },
+            body: {
+              summary: { ...summary, startedAt, finishedAt: finishedAt ?? undefined },
+              exitCode: summary.status === 'passed' ? 0 : 1,
+            },
+            config,
+            scope: new Set(summary.cases.map((entry) => String(entry?.caseId ?? '')).filter(Boolean)),
+          })
+        } catch (error) {
+          // Nothing will ever claim or renew this run: close it rather than
+          // leave it "running" forever.
+          await store
+            .updateRun(created.id, {
+              status: 'blocked',
+              finishedAt: new Date().toISOString(),
+              blockedReason: `记录失败：${String(error.message ?? error).slice(0, 200)}`,
+            }, ['running'])
+            .catch(() => {})
+          throw error
+        }
+        await recordRunEvents(completed.id, [
+          normalizeRunEvent({ kind: 'run.finished', status: completed.status, durationMs: completed.durationMs }),
+        ]).catch(() => {})
+        await enqueueForRun({ store, run: completed, config, logger }).catch(() => {})
+        await recordAudit(store, {
+          principal,
+          request,
+          action: 'run.record',
+          resourceType: 'run',
+          resourceId: completed.id,
+          appId: app.id,
+          after: { status: completed.status, trigger: 'rig-procedure', cases: summary.cases.length },
+        })
+        return { status: 201, body: { run: completed } }
+      },
+    },
+    {
       // Hand-off file: what testers wrote here, in the shape the repository
       // expects, so an engineer can commit it and implement the specs.
       method: 'GET',
@@ -1764,6 +2010,39 @@ export function createApp({
     },
 
     // -- notification channels -----------------------------------------------
+    {
+      // A flight plan's debrief step: queue its report for every enabled
+      // channel that subscribed to `debrief` (and covers the plan's app).
+      // Delivery is the ordinary outbox, on the scheduler tick.
+      method: 'POST',
+      pattern: '/api/v1/notifications:debrief',
+      handler: async ({ body, principal }) => {
+        requireRole(principal, 'operator')
+        const appSlug = optionalString(body, 'app', { maxLength: 64 })
+        const app = appSlug ? await requireApp(appSlug) : null
+        const runId = optionalString(body, 'runId', { maxLength: 80 })
+        const run = runId ? await store.getRun(runId) : null
+        const message = {
+          ...composeDebrief(body.message, { baseUrl: config.publicUrl ?? '' }),
+          runId: run?.id ?? null,
+          appSlug: app?.slug ?? null,
+        }
+        const channels = (await store.listNotificationChannels({ enabled: true })).filter((channel) =>
+          channelWants(channel, { event: 'debrief', appId: app?.id ?? null }),
+        )
+        const queued = []
+        for (const channel of channels) {
+          const row = await store.createNotification({
+            channelId: channel.id,
+            runId: run?.id ?? null,
+            event: 'debrief',
+            payload: message,
+          })
+          queued.push(row.id)
+        }
+        return { status: 200, body: { queued: queued.length } }
+      },
+    },
     {
       method: 'GET',
       pattern: '/api/v1/notification-channels',
@@ -2521,7 +2800,47 @@ export function createApp({
     return false
   }
 
-  return async function handle(request, response) {
+  /**
+   * Call a person-facing route in the same process, as `principal`.
+   *
+   * The Rig control plane executes Agent tools on the server; going through
+   * HTTP to itself would need its own address, a network path and the user's
+   * bearer token held in memory for the whole mission. This runs the exact
+   * same route handler — same validation, same role checks, same audit —
+   * without any of that. Machine-authenticated routes (runner, run token) and
+   * unauthenticated ones are not reachable this way.
+   */
+  async function invoke({ method, path, body, principal, source = 'in-process' }) {
+    const url = new URL(path, 'http://in-process')
+    for (const route of routes) {
+      if (route.method !== method) continue
+      const params = routeMatch(url.pathname, route.pattern)
+      if (!params) continue
+      if (route.auth || route.rawBody) {
+        throw new AppError(403, 'forbidden', '该接口不能在进程内调用')
+      }
+      const request = {
+        method,
+        url: `${url.pathname}${url.search}`,
+        headers: {},
+        socket: { remoteAddress: source },
+      }
+      const result = await route.handler({ params, url, request, body: body ?? {}, principal })
+      if (result.status >= 400) {
+        throw new AppError(
+          result.status,
+          result.body?.error?.code ?? 'request_failed',
+          result.body?.error?.message ?? '请求失败',
+        )
+      }
+      // A JSON round trip, so the caller gets exactly what an HTTP client
+      // would have: plain data, no shared references into the store.
+      return result.status === 204 ? null : JSON.parse(JSON.stringify(result.body))
+    }
+    throw new AppError(404, 'not_found', '没有这个接口')
+  }
+
+  async function handle(request, response) {
     let url
     try {
       url = new URL(request.url, `http://${request.headers.host || 'localhost'}`)
@@ -2611,6 +2930,9 @@ export function createApp({
       sendJson(response, 500, { error: { code: 'internal_error', message: '服务器内部错误' } })
     }
   }
+
+  handle.invoke = invoke
+  return handle
 }
 
 /**
@@ -2887,7 +3209,7 @@ async function completeBuild({ store, artifacts, run, exitCode, config, sourceRe
   })
 }
 
-export async function completeRun({ store, artifacts, run, body, config = null }) {
+export async function completeRun({ store, artifacts, run, body, config = null, scope = null }) {
   const current = await store.getRun(run.id)
   if (!current || !['queued', 'pending-runner', 'running'].includes(current.status))
     throw new AppError(409, 'run_already_finished', '执行已结束，不能覆盖结果')
@@ -2962,12 +3284,22 @@ export async function completeRun({ store, artifacts, run, body, config = null }
   const filter = run.caseFilter
     ? await resolveCaseFilter({ store, appId: run.appId, filter: run.caseFilter }).catch(() => null)
     : null
-  const inScope = catalogSubsetFor(catalogCases, filter)
+  // A run recorded from outside (a Rig procedure replay) names the cases it
+  // executed; it is measured against exactly those, like a filtered run. So is
+  // a batch of procedures a station replayed: a case some other suite
+  // implements is not "not run" here.
+  if (!scope && runSuite?.engine === 'rig-procedure')
+    scope = new Set(normalized.cases.map((entry) => entry.caseId))
+  const inScope = scope
+    ? catalogCases.filter((entry) => scope.has(entry.caseId))
+    : catalogSubsetFor(catalogCases, filter)
   const { cases, catalog } = compareWithCatalog(inScope, normalized.cases, {
     // A suite may reconcile against its own full catalog and report every case
     // it knows about — compass does. Those extra entries are registered cases
     // outside this run's scope, not unknown ones.
-    outOfScopeIds: filter
+    outOfScopeIds: scope
+      ? new Set(catalogCases.filter((entry) => !scope.has(entry.caseId)).map((entry) => entry.caseId))
+      : filter
       ? new Set(
           catalogCases
             .filter((entry) => !inScope.some((scoped) => scoped.caseId === entry.caseId))

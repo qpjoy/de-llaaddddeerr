@@ -1,5 +1,3 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { RigError, TOOL_NAMES, key, text } from '../../packages/contracts/index.mjs'
 import { AGENT_CATEGORIES, BUILTIN_AGENTS } from './agent-presets.mjs'
@@ -11,16 +9,39 @@ import {
   withoutDerived
 } from '../../packages/graph/orchestration.mjs'
 import { compileOrchestration } from '../../packages/runtime/orchestration-graph.mjs'
-import { DEFINITIONS } from '../../packages/runtime/tools.mjs'
+import { DEFINITIONS, usableTools } from '../../packages/runtime/tools.mjs'
 import { nextFireAt, readSchedule } from './orchestration-schedule.mjs'
 import { EMPTY_EGRESS, browserProxy, publicEgress, readEgress } from './egress-profiles.mjs'
+import { DocumentConflict, documentFor } from './state-documents.mjs'
+import { SITE_MODES } from '../../packages/runtime/sites.mjs'
+
+// How stale a replica's copy of the policy may be before a request re-checks
+// the shared version. One round trip per second at most, and never across a
+// save made by this same process.
+const REFRESH_MS = 1_000
 
 const WRITE_TOOLS = DEFINITIONS.filter((tool) => tool.effect === 'write').map((tool) => tool.name)
+// The browser station's everyday tools: what「开启浏览器测试」turns on.
+export const BROWSER_DEFAULTS = Object.freeze([
+  'browser_open',
+  'browser_snapshot',
+  'browser_click',
+  'browser_fill',
+  'browser_select',
+  'browser_check',
+  'browser_press',
+  'browser_wait',
+  'browser_assert',
+  'electron_launch'
+])
+// A host name, or a `.suffix` that covers every host under it.
+const HOST_PATTERN = /^\.?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
 
 export const MAX_PROVIDERS = 8
 export const MAX_AGENTS = 24
 export const MAX_ORCHESTRATIONS = 24
-const SURFACES = ['any', 'desktop']
+// `terminal`: needs a project directory, which only `mx-rig` has.
+const SURFACES = ['any', 'desktop', 'terminal']
 
 const DEFAULT_PROVIDER = Object.freeze({
   id: 'primary',
@@ -74,7 +95,9 @@ function readProvider(input) {
     apiKeyEnv: input.apiKeyEnv,
     timeoutMs,
     enabled: input.enabled !== false,
-    stream: input.stream !== false
+    stream: input.stream !== false,
+    // Only a provider that says so is sent screenshots.
+    vision: input.vision === true
   }
 }
 
@@ -173,8 +196,11 @@ function readOrchestration(input, builtinKeys, { toolNames, agentKeys, resolve }
 }
 
 export class Settings {
-  constructor(file) {
-    this.file = file
+  /** @param {string | object} source a settings.json path, or a shared document */
+  constructor(source) {
+    this.document = documentFor(source)
+    this.version = 0
+    this.checkedAt = 0
     this.value = {
       revision: randomUUID(),
       maxTurns: 12,
@@ -193,9 +219,36 @@ export class Settings {
         // Agent can only answer in prose. An existing deployment keeps its
         // stored list — widening someone's allow-list on upgrade is exactly
         // the kind of surprise this product refuses.
-        'finding_submit'
+        'finding_submit',
+        // Same kind as finding_submit: drafts recorded on the mission, which
+        // a person imports or approves. New deployments only.
+        'case_draft',
+        'procedure_propose',
+        // Testing a web page out of the box: seeing it is free, every action
+        // on it is confirmed one by one, and a site nobody listed is asked
+        // about once per mission (browserSites: 'ask'). New deployments only;
+        // an existing one turns them on with one click in the settings.
+        ...BROWSER_DEFAULTS,
+        // Asking a person to do what the Agent must not (a password, a code):
+        // it pauses the mission and acts on nothing. New deployments only.
+        'browser_handoff',
+        // Reading the member's own project, in a terminal they started there.
+        // Running commands and changing files stay off until an admin allows
+        // them — and then each one is still confirmed at the terminal.
+        'workspace_list',
+        'workspace_read',
+        'workspace_search'
       ],
+      // Sites that need no question. The rest are asked about (`ask`), or
+      // refused (`list`).
       browserOrigins: [],
+      browserSites: 'ask',
+      productionHosts: [],
+      // Whether a member may, for one mission, let browser writes on allowed
+      // test origins go ahead without a click each. Off until an admin says.
+      browserPreauth: false,
+      // Model tokens one mission may spend; 0 means no cap.
+      tokenBudget: 0,
       providers: [{ ...DEFAULT_PROVIDER }],
       sequence: [DEFAULT_PROVIDER.id],
       agents: mergeBuiltins([], BUILTIN_AGENTS),
@@ -205,12 +258,42 @@ export class Settings {
     this.queue = Promise.resolve()
   }
   async init() {
-    try {
-      this.value = this.#upgrade(JSON.parse(await readFile(this.file, 'utf8')))
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e
+    const { value, version } = await this.document.load()
+    if (value) {
+      this.value = this.#upgrade(value)
+      this.version = version
+      return this
+    }
+    // A shared store must agree on one set of defaults, including the policy
+    // revision: replicas that each invented their own would reject each
+    // other's approvals as "policy changed". The first to write wins.
+    if (this.document.shared) {
+      try {
+        this.version = await this.document.save(this.value, 0)
+      } catch (error) {
+        if (!(error instanceof DocumentConflict)) throw error
+        return this.#reload()
+      }
     }
     return this
+  }
+  async #reload() {
+    const { value, version } = await this.document.load()
+    if (value) this.value = this.#upgrade(value)
+    this.version = version
+    this.checkedAt = Date.now()
+    return this
+  }
+  /**
+   * Pick up a save another replica made. Cheap when nothing changed: one
+   * version lookup, at most once a second.
+   */
+  async refresh({ force = false } = {}) {
+    if (!this.document.shared) return this
+    if (!force && Date.now() - this.checkedAt < REFRESH_MS) return this
+    this.checkedAt = Date.now()
+    if ((await this.document.latestVersion()) === this.version) return this
+    return this.#reload()
   }
   /**
    * 0.1 stored exactly one model as `model`. Read it forward into the provider
@@ -236,6 +319,17 @@ export class Settings {
     return {
       ...stored,
       allowedTools: (stored.allowedTools || []).filter((name) => TOOL_NAMES.includes(name)),
+      // Stored before there was a choice: members may confirm a site. Nothing
+      // opens without a person's yes, so this widens no one's automation.
+      browserSites: SITE_MODES.includes(stored.browserSites) ? stored.browserSites : 'ask',
+      browserPreauth: stored.browserPreauth === true,
+      tokenBudget:
+        Number.isInteger(stored.tokenBudget) && stored.tokenBudget > 0 ? stored.tokenBudget : 0,
+      productionHosts: Array.isArray(stored.productionHosts)
+        ? stored.productionHosts.filter(
+            (entry) => typeof entry === 'string' && HOST_PATTERN.test(entry)
+          )
+        : [],
       egress,
       providers,
       sequence,
@@ -278,8 +372,8 @@ export class Settings {
   /** Tools an Agent may actually reach: its own intent ∩ the Internal allow-list. */
   agentTools(agentKey) {
     const allowed = this.value.allowedTools
-    if (!agentKey) return [...allowed]
-    return this.agent(agentKey).tools.filter((name) => allowed.includes(name))
+    if (!agentKey) return usableTools(allowed)
+    return usableTools(this.agent(agentKey).tools.filter((name) => allowed.includes(name)))
   }
   /**
    * @param {object}  [options]
@@ -289,7 +383,16 @@ export class Settings {
    *   internal proxy endpoint is not something a read-only member needs.
    */
   public({ egressEndpoints = false } = {}) {
-    const { revision, maxTurns, allowedTools, browserOrigins } = this.value
+    const {
+      revision,
+      maxTurns,
+      allowedTools,
+      browserOrigins,
+      browserSites = 'ask',
+      productionHosts = [],
+      browserPreauth = false,
+      tokenBudget = 0
+    } = this.value
     const chain = this.chain()
     const egress = publicEgress(this.value.egress, {})
     return {
@@ -298,6 +401,10 @@ export class Settings {
         maxTurns,
         allowedTools,
         browserOrigins,
+        browserSites,
+        productionHosts,
+        browserPreauth,
+        tokenBudget,
         egress: {
           activeId: egress.activeId,
           model: egress.model,
@@ -317,7 +424,10 @@ export class Settings {
         })),
         // True when the first provider in the chain can stream; the workbench
         // uses it to explain why text arrives all at once.
-        streaming: chain[0]?.stream !== false
+        streaming: chain[0]?.stream !== false,
+        // Screenshots go to the model only when every provider in the chain
+        // can read them: a fallback that cannot would get an unreadable turn.
+        vision: chain.length > 0 && chain.every((provider) => provider.vision === true)
       },
       agents: this.value.agents
         .filter((agent) => agent.enabled)
@@ -333,7 +443,7 @@ export class Settings {
           // and exactly which tools remain after the Internal allow-list.
           persona: agent.persona,
           tools: agent.tools,
-          effectiveTools: agent.tools.filter((name) => allowedTools.includes(name))
+          effectiveTools: usableTools(agent.tools.filter((name) => allowedTools.includes(name)))
         })),
       orchestrations: (this.value.orchestrations || [])
         .filter((entry) => entry.enabled)
@@ -371,6 +481,12 @@ export class Settings {
     return this.update({ ...this.value, egress: { activeId: activeId ?? null, profiles } })
   }
   async update(input) {
+    await this.refresh({ force: true })
+    // An editor that says which revision it started from gets protection
+    // against overwriting a save it never saw. Callers that do not say keep
+    // the old last-write-wins behaviour.
+    if (input.revision && input.revision !== this.value.revision)
+      throw new RigError('settings_conflict', '配置已被其他管理员修改，请刷新后再保存', 409)
     const allowedTools = readTools(input.allowedTools, '工具列表')
     if (!Number.isInteger(input.maxTurns) || input.maxTurns < 1 || input.maxTurns > 30)
       throw new RigError('invalid_budget', '任务步数必须为 1–30')
@@ -456,11 +572,36 @@ export class Settings {
     // is stored. Clearing every channel is `profiles: []`, said on purpose.
     const egress = readEgress(input.egress ?? this.value.egress ?? EMPTY_EGRESS)
 
+    // Hosts no automation may touch: a pre-flight scrubs a plan aimed at one,
+    // and the browser station refuses to open one even when an origin was
+    // allowed by mistake. An absent list keeps what is stored.
+    const rawProduction = input.productionHosts ?? this.value.productionHosts ?? []
+    if (!Array.isArray(rawProduction) || rawProduction.length > 30)
+      throw new RigError('invalid_production_hosts', '生产环境禁区最多 30 项')
+    const productionHosts = rawProduction.map((entry) => {
+      const host = typeof entry === 'string' ? entry.trim().toLowerCase() : ''
+      if (!HOST_PATTERN.test(host))
+        throw new RigError(
+          'invalid_production_hosts',
+          `生产环境禁区只能填主机名或 .后缀，例如 app.example.com 或 .prod.example.com：${entry}`
+        )
+      return host
+    })
     const value = {
       revision: randomUUID(),
       maxTurns: input.maxTurns,
       allowedTools,
       browserOrigins: [...new Set(origins)],
+      // Same convention again: absent keeps what is stored.
+      browserSites: SITE_MODES.includes(input.browserSites)
+        ? input.browserSites
+        : (this.value.browserSites ?? 'ask'),
+      productionHosts: [...new Set(productionHosts)],
+      browserPreauth:
+        typeof input.browserPreauth === 'boolean'
+          ? input.browserPreauth
+          : this.value.browserPreauth === true,
+      tokenBudget: readBudget(input.tokenBudget ?? this.value.tokenBudget ?? 0),
       providers,
       sequence,
       agents,
@@ -469,16 +610,26 @@ export class Settings {
       model: head(providers, sequence)
     }
     const operation = this.queue.then(async () => {
-      await mkdir(dirname(this.file), { recursive: true })
-      const temp = `${this.file}.${randomUUID()}.tmp`
-      await writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 })
-      await rename(temp, this.file)
+      try {
+        this.version = await this.document.save(value, this.version)
+      } catch (error) {
+        if (error instanceof DocumentConflict)
+          throw new RigError('settings_conflict', '配置已被其他管理员修改，请刷新后再保存', 409)
+        throw error
+      }
       this.value = value
+      this.checkedAt = Date.now()
     })
     this.queue = operation.catch(() => {})
     await operation
     return this.public()
   }
+}
+
+function readBudget(value) {
+  if (!Number.isInteger(value) || value < 0 || value > 50_000_000)
+    throw new RigError('invalid_budget', '单任务模型用量上限必须是 0–50000000 的整数（0 表示不限）')
+  return value
 }
 
 /** Legacy single-model view, kept so 0.1 readers and tests keep working. */

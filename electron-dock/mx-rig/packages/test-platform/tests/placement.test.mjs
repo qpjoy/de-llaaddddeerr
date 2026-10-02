@@ -55,6 +55,15 @@ test('a task that says nothing keeps the behaviour its suite always had', () => 
   assert.equal(server.claimDeadline, null, 'a deadline here would double up on the lease')
 })
 
+test('a Rig procedure batch waits for a station even when it runs on team capacity', () => {
+  const suite = { runnerKind: 'local', engine: 'rig-procedure' }
+  const team = resolvePlacement({ task: { runsOn: 'server' }, suite })
+  assert.equal(team.runsOn, 'server', 'still only a server-kind station may take it')
+  assert.equal(team.status, 'pending-runner', 'the platform never replays one itself')
+  assert.ok(team.claimDeadline, 'with no team station online it expires instead of queueing forever')
+  assert.equal(resolvePlacement({ task: { runsOn: 'any-runner' }, suite }).status, 'pending-runner')
+})
+
 test('online is derived from the last check-in, never stored', () => {
   const now = Date.now()
   assert.equal(runnerIsOnline({ lastSeenAt: new Date(now - 5_000).toISOString() }, now), true)

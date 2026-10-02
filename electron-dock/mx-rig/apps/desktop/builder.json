@@ -14,6 +14,9 @@
     "packages/runtime/**",
     "packages/graph/**",
     "packages/contracts/**",
+    "packages/test-platform/bin/mxt-runner.mjs",
+    "bin/mx-rig.mjs",
+    "apps/terminal/**",
     "scripts/design-assets.mjs",
     "package.json"
   ],
@@ -30,7 +33,10 @@
     "target": [
       "dmg"
     ],
-    "category": "public.app-category.developer-tools"
+    "category": "public.app-category.developer-tools",
+    "extendInfo": {
+      "NSAppleEventsUsageDescription": "MX Rig 在你允许后读取并操作你登记的原生应用窗口，用于自动化测试。"
+    }
   },
   "linux": {
     "target": [

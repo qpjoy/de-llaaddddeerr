@@ -81,6 +81,11 @@ export function loadConfig(environment = process.env) {
     // First login provisions this role. `viewer` means a new account can look
     // but not act until an admin raises it.
     defaultMemberRole: environment.MXT_DEFAULT_ROLE?.trim() || 'viewer',
+    // How long a session issued for a local account stays valid. Matches the
+    // session cookie's Max-Age so the browser and the server agree on when a
+    // login ends.
+    sessionTtlMs:
+      positiveInteger(environment.MXT_SESSION_TTL_HOURS, 12, 'MXT_SESSION_TTL_HOURS') * 3_600_000,
     artifactRetainDays: positiveInteger(environment.MXT_ARTIFACT_RETAIN_DAYS, 30, 'MXT_ARTIFACT_RETAIN_DAYS'),
     artifactLimits: {
       fileBytes: positiveInteger(

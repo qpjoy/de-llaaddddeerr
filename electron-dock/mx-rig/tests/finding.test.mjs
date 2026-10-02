@@ -186,13 +186,35 @@ test('submitting a conclusion calls nothing and needs no approval', async (t) =>
 })
 
 test('an invalid verdict is refused before it can look like a conclusion', async (t) => {
-  const f = await fixture(t, [toolCall('finding_submit', { ...FINDING, verdict: '还行' })])
+  const f = await fixture(t, [
+    toolCall('finding_submit', { ...FINDING, verdict: '还行' }),
+    { content: '我没有给出合法的结论类型。' }
+  ])
   const row = await f.engine.start({ mode: 'agent', goal: '定级' })
   await f.engine.job
   const done = f.store.get(row.id, 'alice')
-  assert.equal(done.status, 'blocked')
+  // Nothing was recorded: the enum is checked at the door.
   assert.equal(done.finding, undefined)
-  assert.ok(done.events.some((entry) => entry.kind === 'error'))
+  assert.ok(
+    done.events.some((entry) => entry.kind === 'tool_error' && /只能是/.test(entry.message))
+  )
+  // The refusal went back to the model as the tool's answer, so it could have
+  // corrected itself; the transcript stays a valid call/answer pair.
+  const reply = f.engine.store.rows.get(row.id).messages.find((entry) => entry.role === 'tool')
+  assert.equal(JSON.parse(reply.content).error.code, 'invalid_arguments')
+})
+
+test('a corrected verdict after a refusal is recorded normally', async (t) => {
+  const f = await fixture(t, [
+    toolCall('finding_submit', { ...FINDING, verdict: '还行' }),
+    toolCall('finding_submit', FINDING),
+    { content: '已提交结论。' }
+  ])
+  const row = await f.engine.start({ mode: 'agent', goal: '定级' })
+  await f.engine.job
+  const done = f.store.get(row.id, 'alice')
+  assert.equal(done.status, 'completed')
+  assert.equal(done.finding.verdict, FINDING.verdict)
 })
 
 test('a conclusion is refused outright when Internal has not allowed the tool', async (t) => {

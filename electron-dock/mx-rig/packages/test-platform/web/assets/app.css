@@ -335,6 +335,7 @@
 .mxt-banner { padding: var(--qp-space-4); border-radius: var(--qp-radius-md); margin-bottom: var(--qp-space-5); border: 1px solid; }
 .mxt-banner--danger { background: rgba(238, 96, 103, 0.1); border-color: rgba(238, 96, 103, 0.35); }
 .mxt-banner--info { background: rgba(94, 142, 236, 0.1); border-color: rgba(94, 142, 236, 0.35); }
+.mxt-banner--warning { background: rgba(248, 208, 108, 0.1); border-color: rgba(248, 208, 108, 0.35); }
 .mxt-banner p { margin: 6px 0 0; color: var(--qp-text-2); }
 
 .mxt-empty { padding: var(--qp-space-6); text-align: center; color: var(--qp-text-3); font-size: var(--qp-font-body-1); line-height: 1.8; }

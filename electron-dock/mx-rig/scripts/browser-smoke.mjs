@@ -29,14 +29,22 @@ let server, browser
 try {
   const opened = await tools.execute('browser_open', { url: origin }, context)
   assert.equal(opened.title, 'Rig Browser Acceptance')
-  assert.match(opened.text, /准备就绪/)
-  await tools.execute('browser_fill', { label: '项目名称', value: 'MX Rig' }, context)
+  assert.match(opened.snapshot, /准备就绪/)
+  const ref = (pattern) =>
+    /\[ref=(e\d+)\]/.exec(opened.snapshot.split('\n').find((line) => pattern.test(line)))[1]
+  await tools.execute('browser_fill', { ref: ref(/textbox "项目名称"/), value: 'MX Rig' }, context)
   await assert.rejects(
     tools.execute('browser_fill', { label: '密码', value: 'never-fill' }, context),
     { code: 'sensitive_field' }
   )
-  const result = await tools.execute('browser_click', { role: 'button', name: '保存' }, context)
-  assert.match(result.text, /操作完成/)
+  const result = await tools.execute('browser_click', { ref: ref(/button "保存"/) }, context)
+  assert.match(result.snapshot, /操作完成/)
+  const verdict = await tools.execute(
+    'browser_assert',
+    { kind: 'text_visible', expected: '操作完成' },
+    context
+  )
+  assert.equal(verdict.assertion.passed, true)
   assert.ok((await stat(join(state, 'artifacts', result.screenshot))).size > 0)
   await assert.rejects(tools.execute('browser_open', { url: 'http://localhost:1' }, context), {
     code: 'origin_denied'
@@ -146,7 +154,8 @@ try {
     (await lens.evaluate((el) => el.getBoundingClientRect().height)) > 24,
     'the lens switcher must not collapse'
   )
-  const metrics = await page.locator('.qp-metric__value').allTextContents()
+  // The headline row; the Agent section below has tiles of its own.
+  const metrics = await page.locator('.qp-metric-grid').first().locator('.qp-metric__value').allTextContents()
   assert.equal(metrics.length, 4)
   // Nothing ran in this fixture, so every rate must read "—", never 0% or 100%.
   assert.equal(metrics[0], '—')

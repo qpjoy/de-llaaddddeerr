@@ -160,6 +160,41 @@ function mapMember(row) {
   }
 }
 
+function mapLocalAccount(row) {
+  return {
+    account: row.account,
+    principalId: row.principal_id,
+    passwordHash: row.password_hash,
+    mustChangePassword: row.must_change_password,
+    failedLogins: row.failed_logins,
+    lockedUntil: iso(row.locked_until),
+    disabledAt: iso(row.disabled_at),
+    passwordChangedAt: iso(row.password_changed_at),
+    createdBy: row.created_by ?? null,
+    createdAt: iso(row.created_at),
+  }
+}
+
+function mapSession(row) {
+  return {
+    tokenHash: row.token_hash,
+    principalId: row.principal_id,
+    source: row.source ?? null,
+    createdAt: iso(row.created_at),
+    expiresAt: iso(row.expires_at),
+    revokedAt: iso(row.revoked_at),
+  }
+}
+
+const LOCAL_ACCOUNT_COLUMNS = {
+  passwordHash: 'password_hash',
+  mustChangePassword: 'must_change_password',
+  failedLogins: 'failed_logins',
+  lockedUntil: 'locked_until',
+  disabledAt: 'disabled_at',
+  passwordChangedAt: 'password_changed_at',
+}
+
 function mapTask(row) {
   return {
     id: row.id,
@@ -696,6 +731,23 @@ export class PostgresStore {
     return rows[0] ? mapTask(rows[0]) : null
   }
 
+  /**
+   * Take one fire of a task. The row only moves if its next fire time is
+   * still the one the caller read, so concurrent schedulers — two replicas,
+   * or a slow tick overlapping the next — create one run between them.
+   */
+  async claimTaskFire(id, expected, { nextRunAt, disable = false }) {
+    const { rowCount } = await this.pool.query(
+      `UPDATE mxt_tasks
+          SET next_run_at = $3::timestamptz,
+              enabled = CASE WHEN $4::boolean THEN false ELSE enabled END,
+              updated_at = now()
+        WHERE id = $1 AND enabled AND next_run_at = $2::timestamptz`,
+      [id, expected, nextRunAt, disable],
+    )
+    return rowCount === 1
+  }
+
   async deleteTask(id) {
     const { rowCount } = await this.pool.query('DELETE FROM mxt_tasks WHERE id = $1', [id])
     return rowCount > 0
@@ -1210,6 +1262,123 @@ export class PostgresStore {
   async listMembers() {
     const { rows } = await this.pool.query('SELECT * FROM mxt_members ORDER BY display_name')
     return rows.map(mapMember)
+  }
+
+  // -- local accounts and sessions -------------------------------------------
+
+  /** Member and account in one transaction: one without the other is not an account. */
+  async createLocalMember({ member, account }) {
+    try {
+      return await this.#tx(async (client) => {
+        const created = await client.query(
+          `INSERT INTO mxt_members (principal_id, display_name, role)
+           VALUES ($1,$2,$3) RETURNING *`,
+          [member.principalId, member.displayName, member.role],
+        )
+        const local = await client.query(
+          `INSERT INTO mxt_local_accounts
+             (account, principal_id, password_hash, must_change_password, created_by)
+           VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+          [
+            account.account,
+            member.principalId,
+            account.passwordHash,
+            account.mustChangePassword ?? true,
+            account.createdBy ?? null,
+          ],
+        )
+        return { member: mapMember(created.rows[0]), account: mapLocalAccount(local.rows[0]) }
+      })
+    } catch (error) {
+      if (error.code === '23505') {
+        throw new AppError(409, 'local_account_exists', `账号 ${account.account} 已存在`)
+      }
+      throw error
+    }
+  }
+
+  async getLocalAccount(account) {
+    const { rows } = await this.pool.query('SELECT * FROM mxt_local_accounts WHERE account = $1', [
+      account,
+    ])
+    return rows[0] ? mapLocalAccount(rows[0]) : null
+  }
+
+  async getLocalAccountByPrincipal(principalId) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM mxt_local_accounts WHERE principal_id = $1',
+      [principalId],
+    )
+    return rows[0] ? mapLocalAccount(rows[0]) : null
+  }
+
+  async listLocalAccounts() {
+    const { rows } = await this.pool.query('SELECT * FROM mxt_local_accounts ORDER BY account')
+    return rows.map(mapLocalAccount)
+  }
+
+  async updateLocalAccount(account, patch) {
+    const fields = Object.keys(LOCAL_ACCOUNT_COLUMNS).filter((field) => Object.hasOwn(patch, field))
+    if (fields.length === 0) return this.getLocalAccount(account)
+    const assignments = fields.map((field, index) => `${LOCAL_ACCOUNT_COLUMNS[field]} = $${index + 2}`)
+    const { rows } = await this.pool.query(
+      `UPDATE mxt_local_accounts SET ${assignments.join(', ')} WHERE account = $1 RETURNING *`,
+      [account, ...fields.map((field) => patch[field])],
+    )
+    return rows[0] ? mapLocalAccount(rows[0]) : null
+  }
+
+  /** Count one failed attempt in a single statement, so parallel guesses cannot race the lock. */
+  async recordFailedLogin(account, { maxFailures, lockoutMs }) {
+    const { rows } = await this.pool.query(
+      `UPDATE mxt_local_accounts SET
+         locked_until = CASE WHEN failed_logins + 1 >= $2
+                             THEN now() + ($3::text || ' milliseconds')::interval
+                             ELSE locked_until END,
+         failed_logins = CASE WHEN failed_logins + 1 >= $2 THEN 0 ELSE failed_logins + 1 END
+       WHERE account = $1 RETURNING *`,
+      [account, maxFailures, String(lockoutMs)],
+    )
+    return rows[0] ? mapLocalAccount(rows[0]) : null
+  }
+
+  async createSession({ tokenHash, principalId, expiresAt, source }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO mxt_sessions (token_hash, principal_id, source, expires_at)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [tokenHash, principalId, source ?? null, expiresAt],
+    )
+    return mapSession(rows[0])
+  }
+
+  async getSession(tokenHash) {
+    const { rows } = await this.pool.query('SELECT * FROM mxt_sessions WHERE token_hash = $1', [
+      tokenHash,
+    ])
+    return rows[0] ? mapSession(rows[0]) : null
+  }
+
+  async revokeSession(tokenHash) {
+    await this.pool.query(
+      'UPDATE mxt_sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL',
+      [tokenHash],
+    )
+  }
+
+  async revokeSessionsFor(principalId, { exceptTokenHash = null } = {}) {
+    const { rowCount } = await this.pool.query(
+      `UPDATE mxt_sessions SET revoked_at = now()
+       WHERE principal_id = $1 AND revoked_at IS NULL
+         AND ($2::text IS NULL OR token_hash <> $2)`,
+      [principalId, exceptTokenHash],
+    )
+    return rowCount
+  }
+
+  async pruneSessions(now = new Date()) {
+    await this.pool.query('DELETE FROM mxt_sessions WHERE revoked_at IS NOT NULL OR expires_at <= $1', [
+      now,
+    ])
   }
 
   // -- case authoring --------------------------------------------------------

@@ -3,6 +3,9 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { nextCronTime, parseCron } from '../../packages/test-platform/server/core/cron.mjs'
 import { RigError } from '../../packages/contracts/index.mjs'
+import { preauthorizable } from '../../packages/graph/orchestration.mjs'
+
+export { preauthorizable }
 
 /**
  * Which orchestrations may run unattended, and when.
@@ -22,6 +25,18 @@ export function blockingSteps(spec, writeTools) {
       reasons.push(`写工具 ${node.tool}（节点「${node.title}」）`)
     if (node.type === 'subflow')
       reasons.push(`子编排 ${node.orchestrationKey}（请给子编排本身排期）`)
+    // A flight dispatches a plan. Unattended, that is only acceptable when
+    // the admin who saved this plan pre-authorised it and the plan is named
+    // literally — a template could be filled with anything at run time.
+    if (node.type === 'flight' && !(spec.authorize?.dispatch && preauthorizable(node)))
+      reasons.push(`架次「${node.title}」需要逐次确认派发（保存时可预授权，且计划 ID 须为固定值）`)
+    if (node.type === 'explore') reasons.push(`探索「${node.title}」需要有人在场确认写动作`)
+    // Scheduled plans run on the service, which has no browser station.
+    if (node.type === 'procedure')
+      reasons.push(
+        `规程试车「${node.title}」只在桌面端执行（需要浏览器工位；回归请用桌面端「全部试车」）`
+      )
+    if (node.type === 'gate' && node.confirm) reasons.push(`放行评审「${node.title}」要求人工确认`)
   }
   return reasons
 }
@@ -112,6 +127,18 @@ export class ScheduleState {
     }
     return this
   }
+  /** One process owns the file; there is nothing newer to read. */
+  async refresh() {
+    return this
+  }
+  /**
+   * Take a slot. With a single process the slot is always this one's; the
+   * shared ledger below is where the answer can be no.
+   */
+  async claim(key, firedFor) {
+    await this.record(key, firedFor)
+    return true
+  }
   async record(key, firedAt) {
     this.value = { ...this.value, [key]: { lastFiredAt: firedAt } }
     const snapshot = JSON.stringify(this.value, null, 2)
@@ -123,5 +150,46 @@ export class ScheduleState {
     })
     this.queue = operation.catch(() => {})
     await operation
+  }
+}
+
+/**
+ * The same state, shared between replicas.
+ *
+ * A slot is claimed by inserting it: the primary key lets exactly one replica
+ * succeed, so a nightly orchestration runs once however many copies of the
+ * service are ticking.
+ */
+export class SharedScheduleState {
+  constructor(pool, { claimant = null } = {}) {
+    this.pool = pool
+    this.claimant = claimant
+    this.value = {}
+  }
+  async init() {
+    return this.refresh()
+  }
+  async refresh() {
+    const { rows } = await this.pool.query(
+      `SELECT orchestration_key, max(fired_for) AS last
+       FROM rig_schedule_fires GROUP BY orchestration_key`
+    )
+    this.value = Object.fromEntries(
+      rows.map((row) => [row.orchestration_key, { lastFiredAt: new Date(row.last).toISOString() }])
+    )
+    return this
+  }
+  async claim(key, firedFor) {
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO rig_schedule_fires (orchestration_key, fired_for, claimed_by)
+       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [key, firedFor, this.claimant]
+    )
+    const last = this.value[key]?.lastFiredAt
+    if (!last || last < firedFor) this.value = { ...this.value, [key]: { lastFiredAt: firedFor } }
+    return rowCount === 1
+  }
+  async record(key, firedFor) {
+    await this.claim(key, firedFor)
   }
 }

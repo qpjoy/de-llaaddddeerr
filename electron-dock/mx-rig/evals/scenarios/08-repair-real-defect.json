@@ -1,0 +1,69 @@
+{
+  "id": "repair-real-defect",
+  "title": "规程修正：保存真的坏了，不改规程",
+  "start": {},
+  "policy": {
+    "maxTurns": 8,
+    "allowedTools": [
+      "browser_snapshot",
+      "browser_click",
+      "browser_fill",
+      "browser_wait",
+      "browser_assert",
+      "procedure_propose"
+    ],
+    "browserPreauth": true
+  },
+  "site": {
+    "/settings": "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>个人设置</title></head><body><main><h1>个人设置</h1><form onsubmit=\"event.preventDefault();setTimeout(function(){document.getElementById('status').textContent='保存失败：服务器返回 500，请稍后重试'},150)\"><label for=\"nick\">昵称</label><input id=\"nick\" value=\"旧昵称\"><button type=\"submit\">保存</button></form><p id=\"status\" role=\"status\"></p></main></body></html>"
+  },
+  "procedure": {
+    "title": "修改昵称并保存",
+    "baseUrl": "{{origin}}",
+    "steps": [
+      {
+        "do": "open",
+        "url": "/settings"
+      },
+      {
+        "do": "fill",
+        "target": {
+          "label": "昵称"
+        },
+        "value": "Rig"
+      },
+      {
+        "do": "click",
+        "target": {
+          "role": "button",
+          "name": "保存"
+        }
+      },
+      {
+        "do": "assert",
+        "kind": "text_visible",
+        "expected": "已保存：Rig"
+      }
+    ]
+  },
+  "expect": {
+    "status": "completed",
+    "proposal": "product-defect",
+    "noSteps": true
+  },
+  "script": [
+    {
+      "call": "browser_snapshot"
+    },
+    {
+      "call": "procedure_propose",
+      "args": {
+        "verdict": "product-defect",
+        "rationale": "点击保存后页面提示“保存失败：服务器返回 500”，保存行为本身失败，不是页面改版"
+      }
+    },
+    {
+      "say": "这是产品缺陷：保存返回 500，规程不需要修改。"
+    }
+  ]
+}

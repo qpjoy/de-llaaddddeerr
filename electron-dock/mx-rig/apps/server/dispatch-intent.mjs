@@ -248,7 +248,10 @@ export function planDispatch({
   }
 
   // -- which agent -------------------------------------------------------------
-  const usable = agents.filter((agent) => agent.surface !== 'desktop' || native)
+  // A terminal Agent needs a project directory: it is started from `mx-rig`, not dispatched.
+  const usable = agents.filter(
+    (agent) => agent.surface !== 'terminal' && (agent.surface !== 'desktop' || native)
+  )
   const scoredAgents = usable
     .map((agent) => {
       const name = overlap(`${agent.displayName} ${agent.summary}`, said)

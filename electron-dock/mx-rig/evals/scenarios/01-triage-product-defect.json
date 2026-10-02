@@ -1,0 +1,108 @@
+{
+  "id": "triage-product-defect",
+  "title": "失败归因：接口 500 是产品缺陷",
+  "start": {
+    "agentKey": "failure-triage",
+    "goal": "最近一次「结算回归」失败了。判断是产品问题、环境问题还是用例问题，并提交结构化结论。"
+  },
+  "policy": {
+    "maxTurns": 10,
+    "allowedTools": [
+      "tests_runs",
+      "tests_result",
+      "tests_case_results",
+      "tests_artifacts",
+      "tests_runners",
+      "tests_cases",
+      "finding_submit"
+    ]
+  },
+  "platform": {
+    "/api/v1/runs?limit=20": {
+      "runs": [
+        {
+          "id": "trun_checkout_0925",
+          "taskId": "tsk_checkout",
+          "status": "failed",
+          "createdAt": "2026-09-25T02:10:00Z",
+          "counts": { "passed": 11, "failed": 1, "total": 12 }
+        },
+        {
+          "id": "trun_checkout_0924",
+          "taskId": "tsk_checkout",
+          "status": "passed",
+          "createdAt": "2026-09-24T02:10:00Z",
+          "counts": { "passed": 12, "failed": 0, "total": 12 }
+        }
+      ]
+    },
+    "/api/v1/runs/trun_checkout_0925": {
+      "run": {
+        "id": "trun_checkout_0925",
+        "taskId": "tsk_checkout",
+        "status": "failed",
+        "engine": "playwright",
+        "runnerId": "rnr_ci1",
+        "counts": { "passed": 11, "failed": 1, "total": 12 }
+      },
+      "task": { "id": "tsk_checkout", "name": "结算回归" },
+      "app": { "slug": "shop", "name": "商城" },
+      "pending": null
+    },
+    "/api/v1/runs/trun_checkout_0925/cases": {
+      "cases": [
+        {
+          "caseId": "CHK-001",
+          "title": "购物车结算页可打开",
+          "status": "passed",
+          "durationMs": 2100,
+          "steps": []
+        },
+        {
+          "caseId": "CHK-003",
+          "title": "提交订单",
+          "status": "failed",
+          "durationMs": 5400,
+          "error": "expect(response.status()).toBe(200) — Received: 500. POST https://shop.test.example/api/orders responded {\"code\":\"NullPointerException\",\"message\":\"coupon is null\"}",
+          "steps": [
+            { "title": "填写收货地址", "status": "passed" },
+            { "title": "提交订单", "status": "failed" }
+          ]
+        }
+      ]
+    },
+    "/api/v1/runs/trun_checkout_0925/artifacts": {
+      "artifacts": [{ "name": "trace.zip", "size": 812345 }]
+    },
+    "/api/v1/runners": {
+      "runners": [
+        { "id": "rnr_ci1", "name": "ci-linux-1", "online": true, "engines": ["playwright"] }
+      ]
+    }
+  },
+  "expect": {
+    "status": "completed",
+    "verdict": "product-defect",
+    "verified": true,
+    "cites": ["trun_checkout_0925"],
+    "mustCall": ["tests_case_results"]
+  },
+  "script": [
+    { "call": "tests_runs" },
+    { "call": "tests_result", "args": { "runId": "trun_checkout_0925" } },
+    { "call": "tests_case_results", "args": { "runId": "trun_checkout_0925" } },
+    {
+      "call": "finding_submit",
+      "args": {
+        "verdict": "product-defect",
+        "confidence": "high",
+        "summary": "提交订单接口在无优惠券时返回 500（coupon is null），是服务端缺陷。",
+        "evidence": "trun_checkout_0925 的 CHK-003：POST /api/orders 返回 500 NullPointerException；前一天 trun_checkout_0924 全部通过，执行机在线。",
+        "nextStep": "请结算服务排查无优惠券时的空指针。"
+      }
+    },
+    {
+      "say": "结论：产品缺陷。trun_checkout_0925 中 CHK-003 提交订单返回 500（coupon is null），环境与执行机正常。"
+    }
+  ]
+}

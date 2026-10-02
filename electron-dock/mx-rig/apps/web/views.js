@@ -1,4 +1,5 @@
 import { renderGraph } from './graph-view.js'
+import { activityView, browserPane, live, stepLabel } from './activity.js'
 
 // -- dom helpers --------------------------------------------------------------
 // Everything is built as nodes with textContent. There is no HTML string
@@ -448,11 +449,12 @@ export async function missions(ctx, mount) {
   const selected = ctx.state.missions.find((row) => row.id === ctx.state.selected) ?? null
   const left = h('div', { class: 'rig-section' })
   const right = h('div', { class: 'rig-section' })
-  mount.append(h('div', { class: 'rig-workspace' }, left, right))
+  const workspace = h('div', { class: 'rig-workspace' }, left, right)
+  mount.append(workspace)
 
   if (!selected) {
     const agents = (ctx.state.config?.agents ?? []).filter(
-      (agent) => agent.surface !== 'desktop' || ctx.state.native
+      (agent) => agent.surface !== 'terminal' && (agent.surface !== 'desktop' || ctx.state.native)
     )
     left.append(
       panel(
@@ -537,53 +539,108 @@ export async function missions(ctx, mount) {
               : ((selected?.trace ?? []).at(-1)?.node ?? null)
         })
       )
-    : orchestrated
-      ? h(
-          'button',
-          {
-            class: 'qp-button qp-button--outline qp-button--sm',
-            onclick: () => {
-              ctx.selectOrchestration(selected.orchestrationKey)
-              ctx.go('orchestration')
-            }
-          },
-          `在编排中心查看「${selected.orchestrationKey}」`
-        )
-      : empty('编排图尚未加载')
+    : orchestrated && selected.inlineSpec
+      ? h('p', {
+          class: 'qp-caption qp-muted',
+          text: `一次性飞行计划「${selected.inlineSpec.displayName}」（未保存），共 ${selected.inlineSpec.nodes.length} 步。`
+        })
+      : orchestrated
+        ? h(
+            'button',
+            {
+              class: 'qp-button qp-button--outline qp-button--sm',
+              onclick: () => {
+                ctx.selectOrchestration(selected.orchestrationKey)
+                ctx.go('orchestration')
+              }
+            },
+            `在编排中心查看「${selected.orchestrationKey}」`
+          )
+        : empty('编排图尚未加载')
 
-  right.append(
-    panel(
-      '编排位置',
-      railBody,
-      h('p', {
-        class: 'qp-caption qp-muted',
-        text: '高亮的是这项任务真实走过的节点。虚线是条件分支，带「暂停点」的节点必须由人确认。'
+  const railPanel = panel(
+    '编排位置',
+    railBody,
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '高亮的是这项任务真实走过的节点。虚线是条件分支，带「暂停点」的节点必须由人确认。'
+    })
+  )
+  const boundsPanel = panel(
+    '本次执行边界',
+    h(
+      'dl',
+      { class: 'rig-kv' },
+      h('dt', { text: '模型' }),
+      h('dd', {
+        text: ctx.state.config?.model.configured ? ctx.state.config.model.name : '未配置'
+      }),
+      h('dt', { text: '步数上限' }),
+      h('dd', { text: String(ctx.state.config?.policy.maxTurns ?? '—') }),
+      h('dt', { text: '允许工具' }),
+      h('dd', { text: String(ctx.state.config?.policy.allowedTools.length ?? 0) }),
+      h('dt', { text: '浏览器站点' }),
+      h('dd', {
+        text:
+          ctx.state.config?.policy.browserSites === 'list'
+            ? `只允许列表内 ${ctx.state.config?.policy.browserOrigins.length ?? 0} 个`
+            : `预先允许 ${ctx.state.config?.policy.browserOrigins.length ?? 0} 个，其他由发起人确认`
       })
-    ),
-    panel(
-      '本次执行边界',
-      h(
-        'dl',
-        { class: 'rig-kv' },
-        h('dt', { text: '模型' }),
-        h('dd', {
-          text: ctx.state.config?.model.configured ? ctx.state.config.model.name : '未配置'
-        }),
-        h('dt', { text: '步数上限' }),
-        h('dd', { text: String(ctx.state.config?.policy.maxTurns ?? '—') }),
-        h('dt', { text: '允许工具' }),
-        h('dd', { text: String(ctx.state.config?.policy.allowedTools.length ?? 0) }),
-        h('dt', { text: '浏览器 origin' }),
-        h('dd', { text: String(ctx.state.config?.policy.browserOrigins.length ?? 0) })
-      )
     )
+  )
+  if (!selected) {
+    right.append(railPanel, boundsPanel)
+    return
+  }
+  // A mission's side panel, as tabs: the browser it drove (live, then a
+  // replay), where it is in the graph, and what it was allowed.
+  const touched = (selected.events ?? []).some(
+    (event) => event.kind === 'tool_start' && /^(browser_|electron_launch)/.test(event.data?.tool ?? '')
+  )
+  // The browser tab comes forward when the mission starts using the browser,
+  // unless the member picked a tab themselves.
+  if (ctx.state.missionTab?.id !== selected.id)
+    ctx.state.missionTab = { id: selected.id, tab: touched ? 'browser' : 'graph', chosen: false }
+  else if (!ctx.state.missionTab.chosen && touched) ctx.state.missionTab.tab = 'browser'
+  const tab = ctx.state.missionTab.tab
+  // The browser needs room to be read; the conversation gives some up.
+  if (tab === 'browser') workspace.classList.add('rig-workspace--browser')
+  const TABS = [
+    ['browser', '浏览器'],
+    ['graph', '编排'],
+    ['bounds', '边界']
+  ]
+  right.append(
+    h(
+      'div',
+      { class: 'rig-side-tabs' },
+      h(
+        'div',
+        { class: 'qp-segmented', role: 'tablist', 'aria-label': '任务侧栏' },
+        ...TABS.map(([key, label]) =>
+          h('button', {
+            class: `qp-segmented__item ${tab === key ? 'is-active' : ''}`,
+            role: 'tab',
+            type: 'button',
+            'aria-selected': String(tab === key),
+            id: `mission-tab-${key}`,
+            text: label,
+            onclick: () => {
+              ctx.state.missionTab = { id: selected.id, tab: key, chosen: true }
+              ctx.render()
+            }
+          })
+        )
+      )
+    ),
+    tab === 'browser' ? panel(null, browserPane(ctx, selected)) : tab === 'graph' ? railPanel : boundsPanel
   )
 }
 
 // Labels for the structured conclusion. Mirrored from
 // `packages/runtime/finding.mjs` the same way status words are: the workbench
 // is served as plain files from apps/web and cannot import from packages/.
-const VERDICT_TEXT = {
+export const VERDICT_TEXT = {
   'product-defect': { label: '产品缺陷', tone: 'danger' },
   'environment-blocked': { label: '环境受阻', tone: 'warning' },
   'case-issue': { label: '用例问题', tone: 'warning' },
@@ -646,6 +703,15 @@ function findingCard(finding) {
   )
 }
 
+const kilo = (value) => (value >= 10_000 ? `${(value / 1000).toFixed(1)}k` : String(value))
+
+/** What the mission spent on the model; an estimate says so. */
+function usageLine(usage) {
+  return `模型用量：${usage.calls} 次调用 · 输入 ${kilo(usage.promptTokens)} / 输出 ${kilo(
+    usage.completionTokens
+  )} tokens${usage.estimated ? '（部分为按字数估算）' : ''}`
+}
+
 function missionDetail(ctx, row) {
   const box = h('div', { class: 'rig-section' })
   box.append(
@@ -657,77 +723,78 @@ function missionDetail(ctx, row) {
         {},
         h('p', {
           class: 'qp-caption qp-muted',
-          text: `MISSION / ${row.id.slice(0, 8)} · ${row.mode === 'agent' ? 'AGENT' : 'WORKFLOW'}${row.agentKey ? ` · ${row.agentKey}` : ''}`
+          text: `MISSION / ${row.id.slice(0, 8)} · ${
+            row.mode === 'agent'
+              ? 'AGENT'
+              : row.mode === 'workflow'
+                ? 'WORKFLOW'
+                : row.flight
+                  ? 'FLIGHT PLAN'
+                  : 'ORCHESTRATION'
+          }${row.agentKey ? ` · ${row.agentKey}` : ''}${row.surface === 'desktop' ? (row.client === 'terminal' ? ' · 终端执行' : ' · 桌面执行') : ''}`
         }),
-        h('h2', { class: 'qp-heading-2', text: row.goal })
+        h('h2', { class: 'qp-heading-2', text: row.goal }),
+        row.usage?.calls
+          ? h('p', {
+              class: 'qp-caption qp-muted',
+              id: 'mission-usage',
+              text: usageLine(row.usage)
+            })
+          : null
       ),
       statusTag(row.status, 'mission-status')
     )
   )
   if (row.finding) box.append(findingCard(row.finding))
-  const timeline = h('div', { class: 'rig-timeline', id: 'timeline' })
-  for (const event of row.events) {
-    const body = h(
-      'div',
-      { class: 'rig-event__body' },
-      h('div', { class: 'qp-body-2', text: event.message })
+  if (row.flight) box.append(flightPanel(ctx, row))
+  // What was said and done, folded into steps (activity.js).
+  box.append(panel(null, activityView(ctx, row)))
+  if (row.stream?.text) ctx.signal?.('saw_stream')
+  const exporter = exportPanel(ctx, row)
+  if (exporter) box.append(exporter)
+  const authoring = authoringPanel(ctx, row)
+  if (authoring) box.append(authoring)
+
+  // A desktop's record, synced for reading. Its browser and its checkpoint
+  // are on that machine; approving or stopping it from here would have
+  // nothing to act on.
+  if (row.surface === 'desktop' && !ctx.state.native) {
+    box.append(
+      h('p', {
+        class: 'qp-caption qp-muted',
+        text:
+          row.client === 'terminal'
+            ? `这项任务在成员的 mx-rig 终端里执行，这里是同步来的只读记录${row.truncated ? '（较早的工具输出已省略）' : ''}。命令输出、改动的文件和对话都留在那台电脑的项目里。`
+            : `这项任务在桌面端执行，这里是同步来的只读记录${row.truncated ? '（较早的工具输出已省略）' : ''}。确认、停止或继续请回到执行它的桌面端；截图与 trace 保存在那台电脑上。`
+      })
     )
-    if (event.data) {
-      const details = h('details')
-      details.append(
-        h('summary', { text: '查看执行证据' }),
-        h('pre', { class: 'qp-code-block', text: JSON.stringify(event.data, null, 2) })
-      )
-      body.append(details)
-      const screenshot = event.data.result?.screenshot
-      if (ctx.state.native && screenshot)
-        body.append(
-          h('button', {
-            class: 'qp-button qp-button--outline qp-button--sm rig-inline-action',
-            text: '打开截图',
-            onclick: () => ctx.run(() => ctx.api('artifact', { path: screenshot }))
-          })
-        )
-    }
-    timeline.append(
-      h(
-        'article',
-        { class: 'rig-event', 'data-kind': event.kind },
-        h('time', { text: new Date(event.at).toLocaleTimeString() }),
-        body
-      )
-    )
+    return box
   }
-  // Partial model text. It arrives on the mission row and is redrawn by the
-  // same poll as everything else, so the desktop and the web behave the same;
-  // what it is not is a token-by-token feed.
-  if (row.stream?.text) {
-    timeline.append(
-      h(
-        'article',
-        { class: 'rig-event', 'data-kind': 'stream' },
-        h('time', { text: '正在输出' }),
-        h(
-          'div',
-          { class: 'rig-event__body' },
-          h('p', {
-            class: 'qp-caption qp-muted',
-            text: `模型正在生成第 ${row.stream.turn || row.turns || 1} 步的回复`
-          }),
-          h('p', { class: 'rig-stream qp-body-2', text: row.stream.text })
-        )
-      )
-    )
-    ctx.signal?.('saw_stream')
-  }
-  box.append(panel(null, timeline))
 
   if (row.status === 'awaiting_approval' && row.pending) {
-    const buttons = h('div', { class: 'qp-row' })
-    for (const [approved, label, cls] of [
-      [true, '确认执行', 'qp-button qp-button--primary'],
-      [false, '拒绝并停止', 'qp-button qp-button--danger']
-    ])
+    const takeover = row.pending.name === 'takeover'
+    // Handing back can carry a word for the Agent — here too, for a native
+    // app or a window with no live pane. With the pane, it is asked there.
+    const inPane = ctx.state.native && live.frame?.missionId === row.id
+    const note = takeover && !inPane
+      ? h('input', {
+          class: 'qp-input',
+          id: 'approval-note',
+          placeholder: '交还时给 Agent 的一句话（可选，别写密码）',
+          value: ctx.state.handbackNote ?? ''
+        })
+      : null
+    note?.addEventListener('input', () => (ctx.state.handbackNote = note.value))
+    const buttons = h('div', { class: 'qp-row' }, note)
+    for (const [approved, label, cls] of takeover
+      ? [
+          [true, '交还给 Agent', 'qp-button qp-button--primary'],
+          [false, '结束这一段', 'qp-button qp-button--ghost']
+        ]
+      : [
+          [true, '确认执行', 'qp-button qp-button--primary'],
+          [false, '拒绝并停止', 'qp-button qp-button--danger']
+        ])
       buttons.append(
         h('button', {
           class: cls,
@@ -738,8 +805,10 @@ function missionDetail(ctx, row) {
               await ctx.api('approve', {
                 id: row.id,
                 approvalId: row.pending.approvalId,
-                approved
+                approved,
+                ...(approved && note?.value.trim() ? { note: note.value.trim() } : {})
               })
+              if (note) ctx.state.handbackNote = ''
               await ctx.refresh()
             })
           }
@@ -749,16 +818,58 @@ function missionDetail(ctx, row) {
       h(
         'div',
         { class: 'rig-approval', id: 'approval' },
-        h('h3', { class: 'qp-heading-2', text: '确认这一次操作' }),
+        h('h3', {
+          class: 'qp-heading-2',
+          text: takeover ? (row.pending.by === 'agent' ? 'Agent 请你来操作' : '人工接管中') : '确认这一次操作'
+        }),
         h('p', {
           class: 'qp-body-2',
-          text: `${ctx.toolTitle(row.pending.name)} · 确认只对下面这组参数生效；策略变更后需要重新发起。`
+          text: takeover
+            ? `${row.pending.args?.说明 ?? '浏览器现在归你操作。'}${
+                ctx.state.native ? '右侧「浏览器」画面可以直接点击和输入。' : ''
+              }交还后 Agent 会先重新观察页面再继续；你输入的内容不会记录，也不会给 Agent。`
+            : `${ctx.toolTitle(row.pending.name)} · 确认只对下面这组参数生效；策略变更后需要重新发起。${
+                ctx.state.native && /^browser_/.test(row.pending.name) ? '浏览器里已经标出这一步要操作的元素。' : ''
+              }`
         }),
-        h('pre', { class: 'qp-code-block', text: JSON.stringify(row.pending.args, null, 2) }),
+        !takeover &&
+          h('p', {
+            class: 'qp-body-1 qp-body-1--semibold rig-approval__what',
+            text: String(row.pending.preview ?? stepLabel(row.pending.name, row.pending.args)).split('\n')[0]
+          }),
+        // A site nobody has said yes to yet: this yes covers it for the mission.
+        !takeover &&
+          row.pending.site &&
+          h('p', {
+            class: 'qp-body-2 rig-warning-line',
+            id: 'approval-site',
+            text: `${row.pending.site} 是这项任务第一次去的站点：确认后，本任务里 Agent 可以在这个站点上操作，每一步仍然要确认。`
+          }),
+        !takeover &&
+          h(
+            'details',
+            {},
+            h('summary', { class: 'qp-caption qp-muted', text: '完整参数' }),
+            h('pre', { class: 'qp-code-block', text: JSON.stringify(row.pending.args, null, 2) })
+          ),
         buttons
       )
     )
   }
+  // Takeover is a desktop affair: the browser it hands over is on this machine.
+  if (row.status === 'running' && ctx.state.native && ['agent', 'orchestration'].includes(row.mode))
+    box.append(
+      h('button', {
+        class: 'qp-button qp-button--outline qp-button--sm',
+        text: '暂停并接管浏览器',
+        onclick: () =>
+          ctx.run(async () => {
+            await ctx.api('takeover', { id: row.id })
+            ctx.notice('已请求接管：Agent 会在当前这一步结束后暂停。')
+            await ctx.refresh()
+          })
+      })
+    )
   if (!['completed', 'failed', 'blocked', 'cancelled'].includes(row.status))
     box.append(
       h('button', {
@@ -885,6 +996,8 @@ function proposalPanel(ctx) {
 }
 
 function composer(ctx, selected) {
+  if (selected?.surface === 'desktop' && !ctx.state.native)
+    return h('p', { class: 'qp-caption qp-muted', text: '桌面端任务只能在桌面端继续对话。' })
   const terminal =
     !selected || ['completed', 'failed', 'blocked', 'cancelled'].includes(selected.status)
   if (!terminal)
@@ -904,9 +1017,17 @@ function composer(ctx, selected) {
     'select',
     { class: 'qp-select', id: 'mode', 'aria-label': '执行方式' },
     h('option', { value: 'agent', text: 'Agent 对话' }),
-    h('option', { value: 'workflow', text: '测试工作流 · 无需模型' })
+    h('option', { value: 'workflow', text: '测试工作流 · 无需模型' }),
+    h('option', { value: 'flight', text: '飞行计划 · 一句话生成' })
   )
   mode.value = ctx.state.mode
+  const start = h('button', {
+    class: 'qp-button qp-button--primary',
+    id: 'start',
+    type: 'submit',
+    text: selected ? '继续对话 ↑' : ctx.state.mode === 'flight' ? '生成飞行计划 ✈' : '开始任务 ↑',
+    disabled: !['operator', 'admin'].includes(ctx.state.principal?.role)
+  })
   const task = h('select', { class: 'qp-select', id: 'task', 'aria-label': '测试计划' })
   for (const entry of ctx.state.tasks)
     task.append(h('option', { value: entry.id, text: entry.name || entry.id }))
@@ -918,14 +1039,34 @@ function composer(ctx, selected) {
   mode.onchange = () => {
     ctx.state.mode = mode.value
     task.hidden = mode.value !== 'workflow'
+    start.textContent = mode.value === 'flight' ? '生成飞行计划 ✈' : '开始任务 ↑'
   }
   mode.hidden = Boolean(selected)
 
+  // A member's own grant for this mission: offered only on the desktop (where
+  // the browser is) and only when the admin allows grants at all.
+  const grant = h('input', { type: 'checkbox', id: 'grant-browser' })
+  grant.checked = Boolean(ctx.state.grantBrowser)
+  grant.onchange = () => {
+    ctx.state.grantBrowser = grant.checked
+  }
+  const grantable = !selected && ctx.state.native && ctx.state.config?.policy.browserPreauth
   const controls = h(
     'div',
     { class: 'rig-composer__controls' },
     mode,
     task,
+    grantable &&
+      h(
+        'label',
+        {
+          class: 'qp-choice qp-choice--checkbox',
+          title: '只覆盖浏览器写动作，且只在允许的测试 origin 内；策略变更即失效；可随时停止任务'
+        },
+        grant,
+        h('span', { class: 'qp-choice__control' }),
+        h('span', { text: '本任务内自动确认浏览器操作' })
+      ),
     !selected &&
       ctx.state.agentKey &&
       h('span', { class: 'qp-tag qp-tag--primary', text: `Agent · ${ctx.state.agentKey}` }),
@@ -942,13 +1083,7 @@ function composer(ctx, selected) {
             ? ctx.run(() => ctx.planDispatch(textarea.value.trim()))
             : ctx.notice('先写一句话，例如「跑一下 Compass Electron 的登录验收」。')
       }),
-    h('button', {
-      class: 'qp-button qp-button--primary',
-      id: 'start',
-      type: 'submit',
-      text: selected ? '继续对话 ↑' : '开始任务 ↑',
-      disabled: !['operator', 'admin'].includes(ctx.state.principal?.role)
-    })
+    start
   )
   const form = h(
     'form',
@@ -957,6 +1092,19 @@ function composer(ctx, selected) {
       onsubmit: (event) => {
         event.preventDefault()
         ctx.run(async () => {
+          // A flight plan is drafted, shown, and only run once somebody says so.
+          if (!selected && mode.value === 'flight') {
+            if (!textarea.value.trim())
+              return ctx.notice(
+                '先写一句话，例如「冒烟 Compass 登录，通过后跑全量回归，结果发飞书」。'
+              )
+            const { draft } = await ctx.api('draft-flight-plan', {
+              text: textarea.value.trim(),
+              surface: ctx.state.native ? 'desktop' : 'web'
+            })
+            ctx.state.flightDraft = draft
+            return ctx.render()
+          }
           const body = selected
             ? { id: selected.id, goal: textarea.value }
             : {
@@ -965,6 +1113,9 @@ function composer(ctx, selected) {
                 ...(mode.value === 'workflow' ? { taskId: task.value } : {}),
                 ...(mode.value === 'agent' && ctx.state.agentKey
                   ? { agentKey: ctx.state.agentKey }
+                  : {}),
+                ...(grantable && grant.checked && mode.value === 'agent'
+                  ? { grants: { browserWrites: true } }
                   : {})
               }
           const { mission } = await ctx.api(selected ? 'followup' : 'start', body)
@@ -982,8 +1133,330 @@ function composer(ctx, selected) {
       text: '写动作会展示具体参数，确认后才执行。任务完成不等于测试通过。'
     })
   )
-  const parsed = selected ? null : proposalPanel(ctx)
+  const parsed = selected ? null : (flightDraftPanel(ctx) ?? proposalPanel(ctx))
   return parsed ? h('div', { class: 'rig-section' }, parsed, form) : form
+}
+
+const FLIGHT_VERDICT = {
+  go: { label: 'GO · 放行', tone: 'success' },
+  'no-go': { label: 'NO-GO · 不放行', tone: 'danger' },
+  scrubbed: { label: 'SCRUB · 取消发射', tone: 'warning' }
+}
+
+/** One line per plan step, in the order a flight takes them. */
+function planSteps(ctx, spec) {
+  const vocab = ctx.state.flightVocab ?? { stages: {}, gateMetrics: {} }
+  const byId = new Map(spec.nodes.map((node) => [node.id, node]))
+  const ordered = []
+  const seen = new Set()
+  for (let id = spec.entry; id && !seen.has(id) && byId.has(id); id = byId.get(id).next) {
+    seen.add(id)
+    ordered.push(byId.get(id))
+  }
+  for (const node of spec.nodes) if (!seen.has(node.id)) ordered.push(node)
+  const planName = (taskId) => ctx.state.tasks.find((task) => task.id === taskId)?.name ?? taskId
+  const describe = (node) => {
+    if (node.type === 'preflight') return `核对：${node.checks.join('、')}`
+    if (node.type === 'flight')
+      return `派发「${planName(node.taskId)}」，最长等 ${node.waitMinutes} 分钟`
+    if (node.type === 'explore') return node.goal
+    if (node.type === 'procedure')
+      return `按原样重放 ${node.procedureIds.length} 条规程：${node.procedureIds
+        .map(
+          (id) =>
+            ctx.state.procedureList?.find((entry) => entry.id === id)?.title ??
+            ctx.state.flightDraft?.procedures?.find((entry) => entry.id === id)?.title ??
+            id
+        )
+        .join('、')}`
+    if (node.type === 'gate')
+      return `${node.criteria
+        .map(
+          (c) =>
+            `${vocab.gateMetrics[c.metric]?.label ?? c.metric}${c.value !== undefined ? ` ${c.value}` : ''}（${c.stage}）`
+        )
+        .join('；')}${node.confirm ? '；需人工放行' : ''}`
+    if (node.type === 'debrief') return node.notify ? '生成报告并推送通知' : '生成报告'
+    return node.message ?? node.instruction ?? ''
+  }
+  return h(
+    'ol',
+    { class: 'rig-plan' },
+    ...ordered.map((node) =>
+      h(
+        'li',
+        { class: 'rig-plan__step', 'data-type': node.type },
+        h(
+          'div',
+          { class: 'qp-row qp-row--between' },
+          h('strong', {
+            class: 'qp-body-2',
+            text: `${NODE_GLYPH[ctx.state.nodeTypes[node.type]?.kind] ?? '·'} ${node.title}`
+          }),
+          node.stage && h('span', { class: 'qp-tag', text: vocab.stages[node.stage] ?? node.stage })
+        ),
+        h('p', { class: 'qp-caption qp-muted rig-wrap', text: describe(node) })
+      )
+    )
+  )
+}
+
+/** A drafted flight plan, for review. Nothing here runs until a button says so. */
+function flightDraftPanel(ctx) {
+  const draft = ctx.state.flightDraft
+  if (!draft) return null
+  const spec = draft.spec
+  const admin = ctx.state.principal?.role === 'admin'
+  return panel(
+    `飞行计划草稿：${spec.displayName}`,
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('span', {
+        class: 'qp-tag qp-tag--primary',
+        text: draft.source === 'model' ? '模型草稿 · 已校验' : '模板草稿 · 未使用模型'
+      }),
+      h('span', { class: 'qp-caption qp-muted', text: spec.summary })
+    ),
+    draft.warnings?.length
+      ? h(
+          'ul',
+          { class: 'qp-body-2 rig-warnings' },
+          ...draft.warnings.map((line) => h('li', { text: line }))
+        )
+      : null,
+    planSteps(ctx, spec),
+    draft.graph &&
+      h('div', { class: 'rig-graph rig-graph--compact' }, renderGraph(draft.graph, {})),
+    h(
+      'details',
+      {},
+      h('summary', { text: '查看计划原文（JSON）' }),
+      h('pre', { class: 'qp-code-block', text: JSON.stringify(spec, null, 2) })
+    ),
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('button', {
+        class: 'qp-button qp-button--primary',
+        text: '运行一次 ✈',
+        disabled: !ctx.canRun(),
+        onclick: () =>
+          ctx.run(async () => {
+            const { mission } = await ctx.api('start', {
+              mode: 'orchestration',
+              goal: spec.displayName,
+              spec,
+              ...(ctx.state.native &&
+              ctx.state.grantBrowser &&
+              ctx.state.config?.policy.browserPreauth
+                ? { grants: { browserWrites: true } }
+                : {})
+            })
+            ctx.state.flightDraft = null
+            ctx.state.draft = ''
+            ctx.state.selected = mission.id
+            await ctx.refresh()
+          })
+      }),
+      admin &&
+        h('button', {
+          class: 'qp-button qp-button--outline',
+          text: '保存为编排',
+          onclick: () =>
+            ctx.run(async () => {
+              const config = await ctx.api('admin-config')
+              await ctx.api('save-config', {
+                ...config,
+                orchestrations: [...(config.orchestrations ?? []), spec]
+              })
+              ctx.state.flightDraft = null
+              ctx.notice(
+                `已保存为编排「${spec.displayName}」（${spec.key}）。可以在编排中心修改、预授权派发或设置定时。`
+              )
+              await ctx.render()
+            })
+        }),
+      h('button', {
+        class: 'qp-button qp-button--ghost',
+        text: '丢弃',
+        onclick: () => {
+          ctx.state.flightDraft = null
+          ctx.render()
+        }
+      })
+    ),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '一次性运行的草稿不带任何预授权：派发仍逐次确认。放行结论只由预检与放行标准判定。'
+    })
+  )
+}
+
+/** Save text as a file, from both the browser and the desktop renderer. */
+function download(filename, text, type = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }))
+  const link = h('a', { href: url, download: filename })
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function copyText(ctx, text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ctx.notice('已复制到剪贴板。')
+  } catch {
+    ctx.notice('剪贴板不可用，请从页面上的文本手动复制。')
+  }
+}
+
+/** Verdict, stages, gates and the report of a flight-plan mission. */
+function flightPanel(ctx, row) {
+  const flight = row.flight
+  const vocab = ctx.state.flightVocab ?? { stages: {} }
+  const verdict = FLIGHT_VERDICT[flight.verdict] ?? { label: '未设放行标准', tone: 'default' }
+  const stages = Object.entries(flight.stages ?? {})
+  const describe = (stage) => {
+    if (stage.type === 'preflight')
+      return stage.go
+        ? 'Go'
+        : `No-Go：${(stage.checks ?? [])
+            .filter((c) => !c.ok)
+            .map((c) => c.detail)
+            .join('；')}`
+    if (stage.type === 'flight') {
+      const c = stage.counts ?? {}
+      return `${stage.status ?? '—'} · Run ${stage.runId ?? '—'} · 通过 ${c.passed ?? 0} / 失败 ${c.failed ?? 0} / 共 ${c.total ?? 0}${stage.note ? ` · ${stage.note}` : ''}`
+    }
+    if (stage.type === 'explore')
+      return `断言 ${(stage.assertions ?? 0) - (stage.failedAssertions ?? 0)}/${stage.assertions ?? 0} 通过${stage.summary ? ` · ${stage.summary}` : ''}`
+    if (stage.type === 'procedure') {
+      const c = stage.counts ?? {}
+      const misses = (stage.results ?? [])
+        .filter((entry) => entry.verdict !== 'passed')
+        .map(
+          (entry) =>
+            `「${entry.title}」${entry.verdict === 'blocked' ? '受阻' : `第 ${entry.failedStep + 1} 步失败`}`
+        )
+      return `规程 ${c.passed ?? 0}/${c.total ?? 0} 通过${misses.length ? ` · ${misses.join('；')}` : ''}`
+    }
+    return ''
+  }
+  const body = [
+    h(
+      'div',
+      { class: 'qp-row qp-row--between' },
+      h('p', { class: 'qp-caption qp-muted', text: 'FLIGHT · 结论只由预检与放行标准判定' }),
+      h('span', { class: 'qp-status', 'data-status': verdict.tone, text: verdict.label })
+    ),
+    stages.length &&
+      h(
+        'dl',
+        { class: 'rig-kv' },
+        ...stages.flatMap(([id, stage]) => [
+          h('dt', {
+            text: `${stage.title ?? id}${
+              stage.stage && (vocab.stages[stage.stage] ?? stage.stage) !== stage.title
+                ? ` · ${vocab.stages[stage.stage] ?? stage.stage}`
+                : ''
+            }`
+          }),
+          h('dd', { class: 'rig-wrap', text: describe(stage) })
+        ])
+      ),
+    ...Object.entries(flight.gates ?? {}).map(([id, gate]) =>
+      h(
+        'div',
+        { class: 'rig-gate', 'data-passed': String(gate.passed && gate.approved !== false) },
+        h('strong', {
+          class: 'qp-body-2',
+          text: `⛳ ${gate.title ?? id}：${gate.passed ? '达标' : '未达标'}${gate.approved === false ? '（人工 No-Go）' : gate.approved === true ? '（人工放行）' : ''}`
+        }),
+        h(
+          'ul',
+          { class: 'qp-caption' },
+          ...(gate.results ?? []).map((result) =>
+            h('li', {
+              text: `${result.ok ? '✅' : '❌'} ${result.label}${result.value !== undefined ? ` ${result.value}` : ''}：实际 ${result.actual}`
+            })
+          )
+        )
+      )
+    )
+  ]
+  if (row.report?.markdown)
+    body.push(
+      h(
+        'details',
+        {},
+        h('summary', { text: '飞行报告（Markdown）' }),
+        h('pre', { class: 'qp-code-block', text: row.report.markdown })
+      ),
+      h(
+        'div',
+        { class: 'qp-row' },
+        h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
+          text: '复制报告',
+          onclick: () => copyText(ctx, row.report.markdown)
+        }),
+        h('button', {
+          class: 'qp-button qp-button--ghost qp-button--sm',
+          text: '下载 .md',
+          onclick: () =>
+            download(`flight-report-${row.id.slice(0, 8)}.md`, row.report.markdown, 'text/markdown')
+        })
+      )
+    )
+  return panel(null, ...body.filter(Boolean))
+}
+
+/** Offer the exploration → script export when the mission has browser steps. */
+function exportPanel(ctx, row) {
+  const hasSteps = (row.events ?? []).some(
+    (event) => event.data?.action || event.data?.result?.action || event.kind === 'assertion'
+  )
+  if (!hasSteps) return null
+  const output = h('div', { class: 'rig-section' })
+  return h(
+    'div',
+    { class: 'rig-section' },
+    h('button', {
+      class: 'qp-button qp-button--outline qp-button--sm',
+      text: '导出 Playwright 用例草稿',
+      onclick: () =>
+        ctx.run(async () => {
+          const { export: spec } = await ctx.api('export', { id: row.id })
+          output.replaceChildren(
+            ...spec.warnings.map((line) =>
+              h('p', { class: 'qp-caption rig-warning-line', text: line })
+            ),
+            h('pre', { class: 'qp-code-block', text: spec.content }),
+            h(
+              'div',
+              { class: 'qp-row' },
+              h('button', {
+                class: 'qp-button qp-button--outline qp-button--sm',
+                text: '复制',
+                onclick: () => copyText(ctx, spec.content)
+              }),
+              h('button', {
+                class: 'qp-button qp-button--ghost qp-button--sm',
+                text: `下载 ${spec.filename}`,
+                onclick: () => download(spec.filename, spec.content, 'text/typescript')
+              })
+            ),
+            h('p', {
+              class: 'qp-caption qp-muted',
+              text: `共 ${spec.steps} 步。这是草稿：审阅定位方式、测试数据和断言后，再提交到测试包并登记用例目录。`
+            })
+          )
+        })
+    }),
+    output
+  )
 }
 
 // -- tests ---------------------------------------------------------------------
@@ -995,6 +1468,19 @@ export async function tests(ctx, mount) {
     ctx.api('apps').catch(() => ({ apps: [] }))
   ])
   ctx.state.tasks = tasks
+  // Each app's case catalogue, as the full test-management console lists it:
+  // what is to be verified, whether code implements it, how it last went.
+  const catalogues = await Promise.all(
+    apps.map((app) =>
+      ctx
+        .api('app-cases', { app: app.slug })
+        .then(({ cases = [] }) => ({ app, cases }))
+        .catch((error) => ({ app, cases: [], error: error.message }))
+    )
+  )
+  const casesOf = new Map(catalogues.map((entry) => [entry.app.slug, entry.cases]))
+  if (ctx.state.native && ['operator', 'admin'].includes(ctx.state.principal?.role))
+    mount.append(await localRunnerPanel(ctx))
   mount.append(
     panel(
       '已接入的应用',
@@ -1016,7 +1502,8 @@ export async function tests(ctx, mount) {
                   { class: 'rig-chips' },
                   ...(app.surfaces ?? []).map((surface) =>
                     h('span', { class: 'rig-chip', text: surface })
-                  )
+                  ),
+                  h('span', { class: 'rig-chip', text: caseCount(casesOf.get(app.slug) ?? []) })
                 )
               )
             )
@@ -1025,6 +1512,7 @@ export async function tests(ctx, mount) {
             '还没有接入应用。到完整测试管理台用「接入 / 对齐 Compass」登记 Web 与 Electron 两个 surface。'
           )
     ),
+    casesPanel(ctx, catalogues),
     panel(
       '测试计划',
       tasks.length
@@ -1104,6 +1592,90 @@ export async function tests(ctx, mount) {
   )
 }
 
+const caseCount = (cases) => {
+  const pending = cases.filter((entry) => !entry.implemented).length
+  return `用例 ${cases.length} 条${pending ? `，${pending} 条待实现` : ''}`
+}
+
+/**
+ * The case catalogue of every app. Read here; written in the full
+ * test-management console (or drafted by an Agent and imported there).
+ */
+function casesPanel(ctx, catalogues) {
+  const edit = h('button', {
+    class: 'qp-button qp-button--ghost qp-button--sm',
+    type: 'button',
+    text: '在完整测试管理台写用例 ↗',
+    onclick: () => ctx.openPath('/test-center/')
+  })
+  const withCases = catalogues.filter((entry) => entry.cases.length || entry.error)
+  if (!withCases.length)
+    return panel(
+      '用例',
+      empty(
+        catalogues.length
+          ? '还没有用例。到完整测试管理台的「应用与用例」写一条，或者让 Agent 用 case_draft 起草后导入。'
+          : '还没有接入应用，所以也还没有用例。'
+      ),
+      edit
+    )
+  return panel(
+    '用例',
+    h('p', {
+      class: 'qp-body-2 qp-muted',
+      text: '每个应用要验证什么。「已实现」表示代码仓库里有对应的测试代码；没有实现的用例在报告里显示「未执行」。'
+    }),
+    ...withCases.map(({ app, cases, error }) =>
+      h(
+        'section',
+        { class: 'rig-section', 'data-app': app.slug },
+        h('h3', { class: 'qp-body-1 qp-body-1--semibold', text: `${app.displayName || app.slug} · ${caseCount(cases)}` }),
+        error
+          ? h('p', { class: 'qp-body-2 rig-warning-line', text: `读不到用例：${error}` })
+          : table(
+              [
+                { title: '编号', cell: (entry) => h('code', { class: 'qp-caption', text: entry.caseId }) },
+                { title: '标题', cell: (entry) => h('span', { class: 'qp-body-2', text: entry.title }) },
+                { title: '优先级', cell: (entry) => h('span', { class: 'qp-body-2', text: entry.priority ?? '—' }) },
+                {
+                  title: '实现',
+                  cell: (entry) =>
+                    h('span', {
+                      class: `qp-tag ${entry.implemented ? 'qp-tag--success' : 'qp-tag--warning'}`,
+                      text: entry.implemented ? '已实现' : '待实现'
+                    })
+                },
+                {
+                  title: '最近结果',
+                  cell: (entry) =>
+                    entry.lastRunId
+                      ? h(
+                          'button',
+                          {
+                            class: 'qp-button qp-button--ghost qp-button--sm',
+                            type: 'button',
+                            title: `执行 ${entry.lastRunId} 的报告`,
+                            onclick: () => ctx.openPath(`/api/v1/runs/${entry.lastRunId}/report`)
+                          },
+                          statusTag(entry.lastStatus)
+                        )
+                      : h('span', { class: 'qp-body-2 qp-muted', text: '—' })
+                },
+                {
+                  title: '来源',
+                  cell: (entry) =>
+                    h('span', { class: 'qp-body-2 qp-muted', text: entry.origin === 'platform' ? '界面登记' : '代码仓库' })
+                }
+              ],
+              cases,
+              { layout: 'case-catalog' }
+            )
+      )
+    ),
+    edit
+  )
+}
+
 // -- agent market ---------------------------------------------------------------
 
 export async function agents(ctx, mount) {
@@ -1172,6 +1744,12 @@ function agentCard(ctx, agent) {
         'data-status': 'info',
         text: '仅桌面端可用（需要隔离浏览器）'
       }),
+    agent.surface === 'terminal' &&
+      h('span', {
+        class: 'qp-status',
+        'data-status': 'info',
+        text: '仅 mx-rig 终端可用：在项目目录里运行 mx-rig'
+      }),
     persona,
     h(
       'div',
@@ -1180,7 +1758,9 @@ function agentCard(ctx, agent) {
         class: 'qp-button qp-button--outline qp-button--sm',
         text: '用这个 Agent 开始',
         disabled:
-          agent.effectiveTools.length === 0 || (agent.surface === 'desktop' && !ctx.state.native),
+          agent.effectiveTools.length === 0 ||
+          agent.surface === 'terminal' ||
+          (agent.surface === 'desktop' && !ctx.state.native),
         onclick: () => {
           ctx.state.agentKey = agent.key
           ctx.state.mode = 'agent'
@@ -1283,6 +1863,7 @@ const NODE_GLYPH = {
   human: '✋',
   model: '◈',
   output: '◉',
+  gate: '⛳',
   step: '·'
 }
 
@@ -1537,7 +2118,60 @@ const NEW_NODE = {
     instruction: '基于已收集的证据给出结论。',
     next: null
   }),
-  finish: () => ({ id: '', title: '结束', type: 'finish', message: '编排结束。' })
+  finish: () => ({ id: '', title: '结束', type: 'finish', message: '编排结束。' }),
+  preflight: () => ({
+    id: '',
+    title: 'T-minus 预检',
+    type: 'preflight',
+    stage: 'tminus',
+    taskIds: [],
+    checks: ['runners', 'production'],
+    onNoGo: null,
+    next: null
+  }),
+  flight: () => ({
+    id: '',
+    title: '新架次',
+    type: 'flight',
+    stage: 'static-fire',
+    taskId: '',
+    waitMinutes: 30,
+    next: null
+  }),
+  explore: () => ({
+    id: '',
+    title: '新探索',
+    type: 'explore',
+    stage: 'flight',
+    goal: '按页面检查……，每个检查点用 browser_assert 记录。',
+    maxTurns: 8,
+    next: null
+  }),
+  procedure: () => ({
+    id: '',
+    title: '规程试车',
+    type: 'procedure',
+    stage: 'static-fire',
+    procedureIds: [],
+    next: null
+  }),
+  gate: () => ({
+    id: '',
+    title: '放行评审',
+    type: 'gate',
+    criteria: [],
+    confirm: false,
+    onFail: null,
+    next: null
+  }),
+  debrief: () => ({
+    id: '',
+    title: 'Debrief 讲评',
+    type: 'debrief',
+    stage: 'debrief',
+    notify: false,
+    next: null
+  })
 }
 const OPS = [
   ['exists', '有值'],
@@ -1550,6 +2184,9 @@ const OPS = [
 ]
 
 async function editorPanel(ctx, spec) {
+  ctx.state.procedureList = (
+    await ctx.api('procedures').catch(() => ({ procedures: [] }))
+  ).procedures
   const store = ctx.state.orchestration
   const draft = store.draft ?? structuredClone(spec)
   store.draft = draft
@@ -1648,6 +2285,10 @@ async function editorPanel(ctx, spec) {
               if (other.next === node.id) other.next = null
               if (other.then === node.id) other.then = null
               if (other.otherwise === node.id) other.otherwise = null
+              if (other.onNoGo === node.id) other.onNoGo = null
+              if (other.onFail === node.id) other.onFail = null
+              if (other.criteria)
+                other.criteria = other.criteria.filter((criterion) => criterion.stage !== node.id)
             }
             if (draft.entry === node.id) draft.entry = draft.nodes[0]?.id ?? ''
             rerender()
@@ -1671,6 +2312,10 @@ async function editorPanel(ctx, spec) {
               if (other.next === previous) other.next = value
               if (other.then === previous) other.then = value
               if (other.otherwise === previous) other.otherwise = value
+              if (other.onNoGo === previous) other.onNoGo = value
+              if (other.onFail === previous) other.onFail = value
+              for (const criterion of other.criteria ?? [])
+                if (criterion.stage === previous) criterion.stage = value
             }
             if (draft.entry === previous) draft.entry = value
           },
@@ -1954,6 +2599,315 @@ async function editorPanel(ctx, spec) {
           { area: true }
         )
       )
+    const vocab = ctx.state.flightVocab ?? { stages: {}, gateMetrics: {}, preflightChecks: {} }
+    const nextField = (label = '下一步') =>
+      h(
+        'label',
+        { class: 'qp-field' },
+        h('span', { class: 'qp-field__label', text: label }),
+        select(node.next, targets(), (value) => {
+          node.next = value
+        })
+      )
+    const numberField = (label, value, min, max, onChange) => {
+      const control = h('input', {
+        class: 'qp-input',
+        type: 'number',
+        min: String(min),
+        max: String(max)
+      })
+      control.value = String(value)
+      control.oninput = () => {
+        const parsed = Number(control.value)
+        if (Number.isInteger(parsed)) onChange(parsed)
+      }
+      return h(
+        'label',
+        { class: 'qp-field' },
+        h('span', { class: 'qp-field__label', text: label }),
+        control
+      )
+    }
+    const checkbox = (label, checked, onChange) => {
+      const box = h('input', { type: 'checkbox' })
+      box.checked = Boolean(checked)
+      box.onchange = () => onChange(box.checked)
+      return h(
+        'label',
+        { class: 'qp-choice qp-choice--checkbox' },
+        box,
+        h('span', { class: 'qp-choice__control' }),
+        h('span', { text: label })
+      )
+    }
+    const planOptions = () =>
+      (ctx.state.tasks ?? []).map((task) => ({
+        value: task.id,
+        label: `${task.name}（${task.id}）`
+      }))
+    if (['preflight', 'flight', 'procedure', 'explore', 'gate', 'debrief'].includes(node.type))
+      fields.push(
+        h(
+          'label',
+          { class: 'qp-field' },
+          h('span', { class: 'qp-field__label', text: '阶段（只用于分组与报告）' }),
+          select(
+            node.stage ?? '',
+            [
+              { value: '', label: '（不标注）' },
+              ...Object.entries(vocab.stages).map(([value, label]) => ({ value, label }))
+            ],
+            (value) => {
+              if (value) node.stage = value
+              else delete node.stage
+            }
+          )
+        )
+      )
+    if (node.type === 'preflight')
+      fields.push(
+        textField(
+          '要核对的测试计划 ID（逗号分隔，可用 {{变量名}}）',
+          node.taskIds.join(', '),
+          (value) => {
+            node.taskIds = value
+              .split(/[,，\s]+/)
+              .map((entry) => entry.trim())
+              .filter(Boolean)
+          }
+        ),
+        h(
+          'div',
+          { class: 'rig-chips' },
+          ...Object.entries(vocab.preflightChecks).map(([check, label]) =>
+            checkbox(label, node.checks.includes(check), (on) => {
+              node.checks = on
+                ? [...new Set([...node.checks, check])]
+                : node.checks.filter((entry) => entry !== check)
+            })
+          )
+        ),
+        h(
+          'div',
+          { class: 'rig-grid-2' },
+          nextField('Go 之后'),
+          h(
+            'label',
+            { class: 'qp-field' },
+            h('span', { class: 'qp-field__label', text: 'No-Go 时' }),
+            select(
+              node.onNoGo,
+              [{ value: '', label: '→ 取消发射（Scrub）' }, ...targets().slice(1)],
+              (value) => {
+                node.onNoGo = value
+              }
+            )
+          )
+        )
+      )
+    if (node.type === 'flight')
+      fields.push(
+        h(
+          'div',
+          { class: 'rig-grid-2' },
+          h(
+            'label',
+            { class: 'qp-field' },
+            h('span', { class: 'qp-field__label', text: '测试计划' }),
+            select(
+              planOptions().some((option) => option.value === node.taskId) ? node.taskId : '',
+              [{ value: '', label: '（选择，或在右侧填模板）' }, ...planOptions()],
+              (value) => {
+                if (value) {
+                  node.taskId = value
+                  rerender()
+                }
+              }
+            )
+          ),
+          textField('计划 ID 或 {{变量名}}', node.taskId, (value) => {
+            node.taskId = value.trim()
+          })
+        ),
+        h(
+          'div',
+          { class: 'rig-grid-2' },
+          numberField('最长等待（分钟）', node.waitMinutes, 1, 180, (value) => {
+            node.waitMinutes = value
+          }),
+          nextField()
+        ),
+        h('span', {
+          class: 'qp-field__hint',
+          text: `结果会存成变量：${node.id || '<ID>'}_run、_status、_passed、_failed、_flaky、_skipped、_total。`
+        })
+      )
+    if (node.type === 'procedure') {
+      const available = (ctx.state.procedureList ?? []).filter(
+        (entry) => entry.status !== 'retired' || node.procedureIds.includes(entry.id)
+      )
+      fields.push(
+        h('p', { class: 'qp-field__label', text: '要重放的规程（按勾选顺序执行）' }),
+        available.length
+          ? h(
+              'div',
+              { class: 'qp-stack qp-stack--tight' },
+              ...available.map((entry) =>
+                checkbox(
+                  `${entry.title}${entry.caseId ? ` · ${entry.caseId}` : ''}${entry.status === 'active' ? '' : `（${entry.status === 'draft' ? '草稿' : '已停用'}）`}`,
+                  node.procedureIds.includes(entry.id),
+                  (checked) => {
+                    node.procedureIds = checked
+                      ? [...node.procedureIds, entry.id]
+                      : node.procedureIds.filter((id) => id !== entry.id)
+                  }
+                )
+              )
+            )
+          : h('span', {
+              class: 'qp-caption qp-muted',
+              text: '还没有规程；先在「试验规程」里固化一条。'
+            }),
+        nextField(),
+        h('span', {
+          class: 'qp-field__hint',
+          text: `只在桌面端运行；每条规程记为所属应用的一次执行。结果存成变量：${node.id || '<ID>'}_passed、_failed、_blocked、_total；放行评审可以用「规程全部通过」或「规程通过率」。`
+        })
+      )
+    }
+    if (node.type === 'explore')
+      fields.push(
+        textField(
+          '探索目标（可以用 {{变量名}}）',
+          node.goal,
+          (value) => {
+            node.goal = value
+          },
+          { area: true }
+        ),
+        h(
+          'div',
+          { class: 'rig-grid-2' },
+          h(
+            'label',
+            { class: 'qp-field' },
+            h('span', { class: 'qp-field__label', text: 'Agent（可选）' }),
+            select(
+              node.agentKey ?? '',
+              [
+                { value: '', label: '（不指定）' },
+                ...(ctx.state.config?.agents ?? []).map((agent) => ({
+                  value: agent.key,
+                  label: `${agent.displayName}（${agent.key}）`
+                }))
+              ],
+              (value) => {
+                if (value) node.agentKey = value
+                else delete node.agentKey
+              }
+            )
+          ),
+          numberField('本阶段最多步数', node.maxTurns, 1, 20, (value) => {
+            node.maxTurns = value
+          })
+        ),
+        nextField(),
+        h('span', {
+          class: 'qp-field__hint',
+          text: '探索只能在桌面端运行浏览器工具；写动作仍逐次确认，不能派发测试。'
+        })
+      )
+    if (node.type === 'gate') {
+      const stageOptions = (metric) => {
+        const wanted = vocab.gateMetrics[metric]?.stage
+        return draft.nodes
+          .filter((other) => other.type === wanted)
+          .map((other) => ({ value: other.id, label: `${other.title}（${other.id}）` }))
+      }
+      const rows = node.criteria.map((criterion, position) =>
+        h(
+          'div',
+          { class: 'rig-grid-2' },
+          select(
+            criterion.metric,
+            Object.entries(vocab.gateMetrics).map(([value, meta]) => ({
+              value,
+              label: meta.label
+            })),
+            (value) => {
+              criterion.metric = value
+              criterion.stage = stageOptions(value)[0]?.value ?? ''
+              if (!vocab.gateMetrics[value]?.needsValue) delete criterion.value
+              else criterion.value ??= 0
+              rerender()
+            }
+          ),
+          h(
+            'div',
+            { class: 'qp-row' },
+            select(
+              criterion.stage,
+              [{ value: '', label: '（选择阶段）' }, ...stageOptions(criterion.metric)],
+              (value) => {
+                criterion.stage = value ?? ''
+              }
+            ),
+            vocab.gateMetrics[criterion.metric]?.needsValue &&
+              numberField('数值', criterion.value ?? 0, 0, 100000, (value) => {
+                criterion.value = value
+              }),
+            h('button', {
+              class: 'qp-button qp-button--ghost qp-button--sm',
+              text: '移除',
+              onclick: () => {
+                node.criteria.splice(position, 1)
+                rerender()
+              }
+            })
+          )
+        )
+      )
+      fields.push(
+        h('span', { class: 'qp-field__label', text: '放行标准（全部满足才达标）' }),
+        ...rows,
+        h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
+          text: '＋ 标准',
+          onclick: () => {
+            const metric = Object.keys(vocab.gateMetrics)[1] ?? 'run_passed'
+            node.criteria.push({ metric, stage: stageOptions(metric)[0]?.value ?? '' })
+            rerender()
+          }
+        }),
+        checkbox('标准满足后还要一个人确认放行（Go/No-Go）', node.confirm, (on) => {
+          node.confirm = on
+        }),
+        h(
+          'div',
+          { class: 'rig-grid-2' },
+          nextField('达标后'),
+          h(
+            'label',
+            { class: 'qp-field' },
+            h('span', { class: 'qp-field__label', text: '未达标时' }),
+            select(
+              node.onFail,
+              [{ value: '', label: '→ No-Go 结束' }, ...targets().slice(1)],
+              (value) => {
+                node.onFail = value
+              }
+            )
+          )
+        )
+      )
+    }
+    if (node.type === 'debrief')
+      fields.push(
+        checkbox('推送到订阅了「飞行报告」的通知通道', node.notify, (on) => {
+          node.notify = on
+        }),
+        nextField()
+      )
     if (node.type === 'finish')
       fields.push(
         textField(
@@ -2034,6 +2988,26 @@ async function editorPanel(ctx, spec) {
         text: '定时执行时没有人在场，所以只有能自己跑完的编排可以排期：不能有人工检查点、写工具或子编排，也不能有必填输入。保存时会检查。'
       })
     )
+    if (draft.nodes.some((node) => node.type === 'flight')) {
+      const authorize = h('input', { type: 'checkbox' })
+      authorize.checked = Boolean(draft.authorize?.dispatch)
+      authorize.onchange = () => {
+        draft.authorize = { dispatch: authorize.checked }
+      }
+      rows.push(
+        h(
+          'label',
+          { class: 'qp-choice qp-choice--checkbox' },
+          authorize,
+          h('span', { class: 'qp-choice__control' }),
+          h('span', { text: '预授权派发：运行这条计划时，固定 ID 的架次不再逐次确认' })
+        ),
+        h('p', {
+          class: 'qp-caption qp-muted',
+          text: '只有管理员保存的计划才带这项授权；用 {{变量}} 指定的计划、一次性运行的草稿、以及浏览器写动作都不受它覆盖。定时执行飞行计划需要勾选它。'
+        })
+      )
+    }
     return h('article', { class: 'qp-panel qp-stack' }, ...rows)
   }
 
@@ -2098,7 +3072,10 @@ async function editorPanel(ctx, spec) {
           }
         })
       ),
-      store.error && h('span', { class: 'qp-status', 'data-status': 'danger', text: store.error })
+      // DOM append turns null into the text "null"; only append a real node.
+      ...(store.error
+        ? [h('span', { class: 'qp-status', 'data-status': 'danger', text: store.error })]
+        : [])
     )
   }
   build()
@@ -2165,6 +3142,7 @@ export async function tools(ctx, mount) {
       text: '工具由 Internal 允许列表控制，执行前还会重新校验一次策略版本；策略变了，等待中的确认就作废。'
     })
   )
+  if (ctx.state.native) mount.append(await electronAppsPanel(ctx))
   for (const [group, meta] of Object.entries(groups)) {
     const entries = catalogue.filter((tool) => tool.group === group)
     if (!entries.length) continue
@@ -2613,13 +3591,17 @@ export async function settings(ctx, mount) {
   ctx.state.toolGroups = groups
 
   const draft = structuredClone(value)
+  // The view is built into a fragment that the app then empties onto the
+  // page; rebuilding has to happen in an element that stays there.
+  const root = h('div', { class: 'rig-settings' })
+  mount.append(root)
   const rerender = () => {
-    mount.replaceChildren()
+    root.replaceChildren()
     build()
   }
 
   function build() {
-    mount.append(
+    root.append(
       h('p', {
         class: 'qp-body-2 qp-muted',
         text: '配置保存在 MX Rig 自己的服务里。保存会生成新的策略版本号，等待确认中的旧动作随即失效。'
@@ -2639,14 +3621,23 @@ export async function settings(ctx, mount) {
             ctx
               .run(async () => {
                 const saved = await ctx.api('save-config', {
+                  // The revision this page was loaded at: a save someone else
+                  // made in the meantime is refused instead of overwritten.
+                  revision: draft.revision,
                   maxTurns: draft.maxTurns,
                   allowedTools: draft.allowedTools,
                   browserOrigins: draft.browserOrigins,
+                  browserSites: draft.browserSites === 'list' ? 'list' : 'ask',
+                  productionHosts: draft.productionHosts ?? [],
+                  browserPreauth: draft.browserPreauth === true,
+                  tokenBudget: Number(draft.tokenBudget) || 0,
                   providers: draft.providers,
                   sequence: draft.providers.map((provider) => provider.id),
                   agents: draft.agents
                 })
                 ctx.state.config = saved
+                // Later saves from this same page start from the new revision.
+                draft.revision = saved.policy.revision
                 ctx.notice('已保存。新的策略版本已生效，等待确认中的旧动作不会再执行。')
                 event.target.disabled = false
               })
@@ -2683,6 +3674,80 @@ export async function settings(ctx, mount) {
         .map((line) => line.trim())
         .filter(Boolean)
     }
+    // Where the browser may go: asked about per mission, or the list only.
+    const siteChoice = (value, label) => {
+      const input = h('input', { type: 'radio', name: 'browser-sites', value, id: `browser-sites-${value}` })
+      input.checked = (draft.browserSites ?? 'ask') === value
+      input.onchange = () => {
+        if (input.checked) draft.browserSites = value
+      }
+      return h(
+        'label',
+        { class: 'qp-choice qp-choice--radio' },
+        input,
+        h('span', { class: 'qp-choice__control' }),
+        h('span', { text: label })
+      )
+    }
+    const sites = h(
+      'div',
+      { class: 'qp-field' },
+      h('span', { class: 'qp-field__label', text: '没有列出的站点' }),
+      siteChoice('ask', '任务里第一次打开时，由发起人确认（推荐，开箱即用）'),
+      siteChoice('list', '一律不打开，只允许上面列出的站点'),
+      h('span', {
+        class: 'qp-field__hint',
+        text: '确认只对那一项任务有效；人接管时自己去的站点也算确认过。页面自己加载的脚本、接口、登录或验证码框不受站点限制；生产环境禁区始终拒绝。'
+      })
+    )
+    // Browser testing, off on a deployment that predates it being a default.
+    const browserTools = catalogue.filter((tool) => tool.group === 'browser').map((tool) => tool.name)
+    const enableBrowser = draft.allowedTools.includes('browser_open')
+      ? null
+      : h(
+          'div',
+          { class: 'qp-row rig-enable-browser' },
+          h('span', { text: '浏览器测试还没有开启：Agent 现在不能打开和操作网页。' }),
+          h('button', {
+            class: 'qp-button qp-button--outline qp-button--sm',
+            type: 'button',
+            id: 'enable-browser',
+            text: '开启浏览器测试',
+            onclick: () => {
+              draft.allowedTools = [...new Set([...draft.allowedTools, ...browserTools])]
+              rerender()
+              ctx.notice('已勾选浏览器工具。点「保存到 Internal」后生效；每一步操作仍然要确认。')
+            }
+          })
+        )
+    const preauth = h('input', { type: 'checkbox' })
+    preauth.checked = draft.browserPreauth === true
+    preauth.onchange = () => {
+      draft.browserPreauth = preauth.checked
+    }
+    const production = h('textarea', {
+      class: 'qp-textarea',
+      rows: '2',
+      placeholder: '.prod.example.com'
+    })
+    production.value = (draft.productionHosts ?? []).join('\n')
+    production.oninput = () => {
+      draft.productionHosts = production.value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+    }
+    const budget = h('input', {
+      class: 'qp-input',
+      id: 'token-budget',
+      type: 'number',
+      min: '0',
+      step: '10000'
+    })
+    budget.value = String(draft.tokenBudget ?? 0)
+    budget.oninput = () => {
+      draft.tokenBudget = Number(budget.value)
+    }
     const toolBoxes = h('div', { class: 'rig-cards' })
     for (const [group, meta] of Object.entries(groups)) {
       const box = h(
@@ -2716,6 +3781,7 @@ export async function settings(ctx, mount) {
     }
     return panel(
       '执行策略',
+      enableBrowser,
       h(
         'div',
         { class: 'rig-grid-2' },
@@ -2730,10 +3796,46 @@ export async function settings(ctx, mount) {
           { class: 'qp-field' },
           h('span', {
             class: 'qp-field__label',
-            text: '浏览器允许访问的 origin（每行一个，含资源域名）'
+            text: '预先允许的站点（不用再确认；每行一个 origin，可以留空）'
           }),
           origins
         )
+      ),
+      sites,
+      h(
+        'label',
+        { class: 'qp-field' },
+        h('span', {
+          class: 'qp-field__label',
+          text: '生产环境禁区（每行一个主机名，或以 . 开头的后缀）'
+        }),
+        production,
+        h('span', {
+          class: 'qp-field__hint',
+          text: '飞行计划的预检会拒绝指向这些主机的测试计划；浏览器工位即使 origin 被误加入也不会打开它们。'
+        })
+      ),
+      h(
+        'label',
+        { class: 'qp-field' },
+        h('span', {
+          class: 'qp-field__label',
+          text: '每项任务的模型用量上限（tokens，0 表示不限）'
+        }),
+        budget,
+        h('span', {
+          class: 'qp-field__hint',
+          text: '每次调用模型前核对；Provider 未上报用量时按字数估算。超过上限的任务会停下并说明原因，已有结果保留。'
+        })
+      ),
+      h(
+        'label',
+        { class: 'qp-choice qp-choice--checkbox' },
+        preauth,
+        h('span', { class: 'qp-choice__control' }),
+        h('span', {
+          text: '允许发起人对单个任务预授权浏览器写动作（只在允许的测试 origin 内，生产禁区始终拒绝）'
+        })
       ),
       h('p', { class: 'qp-field__label', text: '允许的工具' }),
       toolBoxes
@@ -2770,6 +3872,11 @@ export async function settings(ctx, mount) {
       streaming.checked = provider.stream !== false
       streaming.onchange = () => {
         provider.stream = streaming.checked
+      }
+      const vision = h('input', { type: 'checkbox' })
+      vision.checked = provider.vision === true
+      vision.onchange = () => {
+        provider.vision = vision.checked
       }
       rows.append(
         h(
@@ -2838,6 +3945,15 @@ export async function settings(ctx, mount) {
               streaming,
               h('span', { class: 'qp-choice__control' }),
               h('span', { text: '流式输出（网关不支持时关掉）' })
+            ),
+            h(
+              'label',
+              { class: 'qp-choice qp-choice--checkbox' },
+              vision,
+              h('span', { class: 'qp-choice__control' }),
+              h('span', {
+                text: '能读图：浏览器工位把最新截图交给它（调用序列里全部都能读图才生效）'
+              })
             )
           )
         )
@@ -2984,7 +4100,361 @@ export async function settings(ctx, mount) {
   build()
 }
 
+/**
+ * This computer as a runner: register, start, stop, remove — the three
+ * terminal commands it used to take, as buttons. Desktop only.
+ */
+async function localRunnerPanel(ctx) {
+  const status = await ctx.api('runner-status')
+  const act = (action, body) =>
+    ctx.run(async () => {
+      await ctx.api(action, body)
+      await ctx.render()
+    })
+  const name = h('input', { class: 'qp-input', placeholder: '这台电脑在平台上的名字（可留空）' })
+  const rows = []
+  if (!status.registered)
+    rows.push(
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: '把这台电脑接入为执行机后，派给「任意执行机」或指定给它的测试计划会在这里运行（Cypress / Playwright / Electron）。注册使用你当前的登录，执行机凭据只保存在这台电脑上。'
+      }),
+      h(
+        'div',
+        { class: 'qp-row' },
+        name,
+        h('button', {
+          class: 'qp-button qp-button--primary',
+          text: '注册这台电脑',
+          onclick: () => act('runner-register', { name: name.value })
+        })
+      )
+    )
+  else
+    rows.push(
+      h(
+        'dl',
+        { class: 'rig-kv' },
+        h('dt', { text: '名称' }),
+        h('dd', { text: status.name ?? '—' }),
+        h('dt', { text: '状态' }),
+        h('dd', {
+          text: status.running
+            ? `运行中（进程 ${status.pid}）`
+            : status.exited
+              ? `已停止（${status.exited.signal ?? status.exited.code}）`
+              : '未启动'
+        }),
+        h('dt', { text: '可执行' }),
+        h('dd', { text: `${status.engines.join('、')} × ${status.surfaces.join('、')}` })
+      ),
+      h(
+        'div',
+        { class: 'qp-row' },
+        status.running
+          ? h('button', {
+              class: 'qp-button qp-button--outline',
+              text: '停止（当前任务结束后）',
+              onclick: () => act('runner-stop')
+            })
+          : h('button', {
+              class: 'qp-button qp-button--primary',
+              text: '启动执行机',
+              onclick: () => act('runner-start')
+            }),
+        h('button', {
+          class: 'qp-button qp-button--ghost',
+          text: '注销这台电脑',
+          onclick: () => act('runner-remove')
+        })
+      ),
+      status.log.length
+        ? h(
+            'details',
+            {},
+            h('summary', { text: '最近输出' }),
+            h('pre', { class: 'qp-code-block', text: status.log.join('\n') })
+          )
+        : null
+    )
+  return panel(
+    '本机执行机 · 桌面端',
+    ...rows,
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '退出登录或关闭 MX Rig 时执行机会一并停止。需要 Node.js、git 与测试包自己的依赖；带网络副作用的被测客户端请放在专用测试机上跑。'
+    })
+  )
+}
+
+/**
+ * The Electron apps this machine's user allowed an Agent to start. Kept on
+ * this computer only; the Agent names an app by id and never sees a path.
+ */
+async function electronAppsPanel(ctx) {
+  const { apps = [], platform } = await ctx.api('electron-apps')
+  const mac = platform === 'darwin'
+  const body = apps.length
+    ? table(
+        [
+          {
+            title: '应用',
+            cell: (entry) =>
+              h(
+                'span',
+                { class: 'qp-data-cell' },
+                h('strong', { text: entry.name }),
+                h('small', { text: `ID：${entry.id}` })
+              )
+          },
+          {
+            title: '可执行文件',
+            cell: (entry) =>
+              h(
+                'span',
+                { class: 'qp-data-cell' },
+                h('span', {
+                  class: 'qp-caption',
+                  text:
+                    entry.kind === 'native'
+                      ? `原生 · native_launch · ${entry.bundleId}`
+                      : 'Electron · electron_launch'
+                }),
+                h('small', { class: 'rig-wrap', text: entry.path })
+              )
+          },
+          {
+            title: '',
+            cell: (entry) =>
+              h('button', {
+                class: 'qp-button qp-button--ghost qp-button--sm',
+                text: '移除',
+                onclick: () =>
+                  ctx.run(async () => {
+                    await ctx.api('electron-app-remove', { id: entry.id })
+                    await ctx.render()
+                  })
+              })
+          }
+        ],
+        apps,
+        { layout: 'electron-apps' }
+      )
+    : empty('还没有登记应用。登记后，Agent 可以用 electron_launch 启动它（每次都要确认）。')
+  const probeResult = h('p', { class: 'qp-caption qp-muted', id: 'native-probe-result' })
+  const nativeTools = mac
+    ? h(
+        'div',
+        { class: 'qp-stack qp-stack--tight' },
+        h('p', {
+          class: 'qp-caption qp-muted',
+          text: '原生应用（macOS 预览）：通过系统辅助功能读取窗口控件树、点击和填写，Agent 使用 native_* 工具，每次写动作都要确认、不适用任务级预授权，也不会填写密码框。需要在 系统设置 → 隐私与安全性 → 辅助功能 与 自动化 中允许 MX Rig。Windows 暂不支持。'
+        }),
+        h(
+          'div',
+          { class: 'qp-row' },
+          h('button', {
+            class: 'qp-button qp-button--outline qp-button--sm',
+            text: '登记原生应用…',
+            onclick: () =>
+              ctx.run(async () => {
+                await ctx.api('electron-app-add', { kind: 'native' })
+                await ctx.render()
+              })
+          }),
+          h('button', {
+            class: 'qp-button qp-button--ghost qp-button--sm',
+            text: '检查辅助功能权限',
+            onclick: (event) => {
+              event.target.disabled = true
+              probeResult.textContent = '正在检查；macOS 可能会弹出授权对话框，请在对话框里选择。'
+              ctx
+                .run(async () => {
+                  const status = await ctx.api('native-probe')
+                  probeResult.replaceChildren(
+                    status.permitted
+                      ? '可以使用：系统已允许 MX Rig 读取和操作原生窗口。'
+                      : `暂不可用：${status.reason ?? '未获授权'}。在系统设置里打开 MX Rig 的开关，再点一次「检查辅助功能权限」。`
+                  )
+                  // The panes where the switch is: no hunting through System Settings.
+                  if (!status.permitted && status.supported)
+                    for (const [pane, label] of [
+                      ['accessibility', '打开「辅助功能」设置'],
+                      ['automation', '打开「自动化」设置']
+                    ])
+                      probeResult.append(
+                        ' ',
+                        h('button', {
+                          class: 'qp-button qp-button--outline qp-button--sm',
+                          type: 'button',
+                          text: label,
+                          onclick: () => ctx.run(() => ctx.api('open-privacy', { pane }))
+                        })
+                      )
+                })
+                .finally(() => {
+                  event.target.disabled = false
+                })
+            }
+          })
+        ),
+        probeResult
+      )
+    : null
+  return panel(
+    '本机 Electron 与原生应用 · 桌面端',
+    h('p', {
+      class: 'qp-body-2 qp-muted',
+      text: '只保存在这台电脑上。Agent 只能按 ID 启动这里登记过的应用，并用浏览器工具操作它的窗口；管理员还需要在允许列表里打开 electron_launch。'
+    }),
+    body,
+    h('button', {
+      class: 'qp-button qp-button--outline qp-button--sm',
+      text: '登记 Electron 应用…',
+      onclick: () =>
+        ctx.run(async () => {
+          await ctx.api('electron-app-add')
+          await ctx.render()
+        })
+    }),
+    nativeTools
+  )
+}
+
 // -- quality report ---------------------------------------------------------------
+
+/**
+ * What the Agents concluded and what the browser checked in this window.
+ *
+ * Deliberately its own panel, next to the test numbers and never inside them:
+ * a finding is a judgement and an assertion covers only the pages an Agent
+ * walked. Lists are present only for members who can run missions; a read-only
+ * member sees the counts.
+ */
+function agentSection(ctx, stats) {
+  if (!stats) return null
+  const byVerdict = stats.findings.byVerdict
+  const verdictLine = Object.entries(byVerdict)
+    .filter(([, count]) => count > 0)
+    .map(([verdict, count]) => `${VERDICT_TEXT[verdict]?.label ?? verdict} ${count}`)
+    .join(' · ')
+  const body = [
+    h(
+      'div',
+      { class: 'qp-metric-grid' },
+      metric(
+        'Agent 任务',
+        String(stats.total),
+        `服务端 ${stats.bySurface.internal} · 桌面 ${stats.bySurface.desktop}`
+      ),
+      metric(
+        '结构化结论',
+        String(stats.findings.total),
+        stats.findings.total ? verdictLine : '窗口内没有 Agent 提交结论'
+      ),
+      metric(
+        '引用未核实',
+        String(stats.findings.unverified),
+        stats.findings.unverified ? '这些结论需要人工复核' : '没有未核实的引用'
+      ),
+      metric(
+        '页面断言',
+        stats.assertions.total ? asPercent(stats.assertions.passRate) : '—',
+        stats.assertions.total
+          ? `${stats.assertions.passed} / ${stats.assertions.total} 通过`
+          : '窗口内没有断言'
+      ),
+      stats.usage?.calls
+        ? metric(
+            '模型用量',
+            kilo(stats.usage.promptTokens + stats.usage.completionTokens),
+            `${stats.usage.calls} 次调用 · 均 ${kilo(stats.usage.perMission)}/任务${
+              stats.usage.estimated ? ' · 含估算' : ''
+            }`
+          )
+        : null
+    )
+  ]
+  const open = (missionId) =>
+    ctx.state.missions.some((row) => row.id === missionId)
+      ? h('button', {
+          class: 'qp-button qp-button--ghost qp-button--sm',
+          text: '打开任务',
+          onclick: () => {
+            ctx.state.selected = missionId
+            ctx.go('missions')
+          }
+        })
+      : h('span', { class: 'qp-caption qp-muted', text: '他人任务' })
+  if (stats.findings.recent.length)
+    body.push(
+      h('h3', { class: 'qp-body-1 qp-body-1--semibold', text: '最近的结论' }),
+      table(
+        [
+          {
+            title: '结论',
+            cell: (row) =>
+              h('span', {
+                class: 'qp-status',
+                'data-status': VERDICT_TEXT[row.verdict]?.tone ?? 'default',
+                text: VERDICT_TEXT[row.verdict]?.label ?? row.verdict
+              })
+          },
+          {
+            title: '任务',
+            cell: (row) =>
+              h('span', {
+                class: 'qp-body-2',
+                text: `${row.surface === 'desktop' ? (row.client === 'terminal' ? '［终端］' : '［桌面］') : ''}${row.goal}`
+              })
+          },
+          {
+            title: '摘要',
+            cell: (row) =>
+              h('span', {
+                class: 'qp-body-2 rig-wrap',
+                text: `${row.summary}${row.unverified ? `（${row.unverified} 个引用未核实）` : ''}`
+              })
+          },
+          { title: '', cell: (row) => open(row.missionId) }
+        ],
+        stats.findings.recent,
+        { layout: 'findings' }
+      )
+    )
+  if (stats.assertions.recentFailures.length)
+    body.push(
+      h('h3', { class: 'qp-body-1 qp-body-1--semibold', text: '未通过的断言' }),
+      table(
+        [
+          {
+            title: '检查',
+            cell: (row) => h('span', { class: 'qp-body-2', text: row.description })
+          },
+          {
+            title: '期望 / 实际',
+            cell: (row) =>
+              h('span', {
+                class: 'qp-body-2 rig-wrap',
+                text: `${row.expected ?? '—'} / ${row.actual ?? '—'}`
+              })
+          },
+          { title: '任务', cell: (row) => h('span', { class: 'qp-body-2', text: row.goal }) },
+          { title: '', cell: (row) => open(row.missionId) }
+        ],
+        stats.assertions.recentFailures,
+        { layout: 'assertions' }
+      )
+    )
+  body.push(
+    h(
+      'ul',
+      { class: 'qp-caption qp-muted' },
+      ...stats.caveats.map((line) => h('li', { text: line }))
+    )
+  )
+  return panel('Agent 结论与页面断言', ...body)
+}
 
 export const LENSES = {
   // `short` is what fits the 256px rail; `title` is what a report header says.
@@ -3137,6 +4607,7 @@ export async function report(ctx, mount) {
           )
         : h('div', { class: 'rig-empty qp-body-2', text: '窗口内没有反复失败或时通时不通的用例。' })
     ),
+    agents: agentSection(ctx, insights.missions),
     coverage: panel(
       '覆盖与资产',
       h(
@@ -3166,11 +4637,11 @@ export async function report(ctx, mount) {
 
   // The same numbers, ordered by what this reader opens the page for.
   const order = {
-    tester: ['risks', 'cases', 'trend', 'coverage'],
-    developer: ['cases', 'risks', 'trend', 'coverage'],
-    lead: ['trend', 'risks', 'coverage', 'cases']
+    tester: ['risks', 'agents', 'cases', 'trend', 'coverage'],
+    developer: ['cases', 'agents', 'risks', 'trend', 'coverage'],
+    lead: ['trend', 'risks', 'agents', 'coverage', 'cases']
   }[lens]
-  for (const key of order) mount.append(sections[key])
+  for (const key of order) if (sections[key]) mount.append(sections[key])
 
   mount.append(
     panel(
@@ -3495,5 +4966,1330 @@ export async function system(ctx, mount) {
         ...state.caveats.map((line) => h('li', { text: line }))
       )
     )
+  )
+}
+
+// -- 试验规程 ---------------------------------------------------------------------
+
+const VERDICT_TONE = { passed: 'success', failed: 'danger', blocked: 'warning' }
+const VERDICT_WORD = { passed: '通过', failed: '失败', blocked: '受阻' }
+const PROCEDURE_STATE = {
+  draft: ['草稿', 'default'],
+  active: ['启用', 'success'],
+  retired: ['停用', 'default']
+}
+const JUDGEMENT = {
+  'case-issue': '用例问题（页面改了写法）',
+  'product-defect': '产品缺陷',
+  'environment-blocked': '环境问题',
+  inconclusive: '证据不足'
+}
+const STATION = { desktop: '桌面试车', validation: '修正验证', test: '测试' }
+
+const tone = (label, value) => h('span', { class: 'qp-status', 'data-status': value, text: label })
+const verdictTag = (verdict) =>
+  tone(VERDICT_WORD[verdict] ?? verdict, VERDICT_TONE[verdict] ?? 'default')
+const stateTag = (status) => tone(...(PROCEDURE_STATE[status] ?? [status, 'default']))
+
+export async function procedures(ctx, mount) {
+  const { procedures: list = [] } = await ctx.api('procedures')
+  if (ctx.state.procedureId && !list.some((entry) => entry.id === ctx.state.procedureId))
+    ctx.state.procedureId = null
+  const activeCount = list.filter((entry) => entry.status === 'active').length
+  const fireAll =
+    ctx.state.native && ctx.canRun() && activeCount
+      ? h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
+          id: 'procedure-fire-all',
+          text: `全部试车（${activeCount} 条启用的规程）`,
+          onclick: (event) => {
+            event.target.disabled = true
+            ctx.notice(`回归试车中：${activeCount} 条规程依次执行，每条都记为一次执行……`)
+            ctx
+              .run(async () => {
+                const { results, passed, total } = await ctx.api('procedure-fire-all', {})
+                const failed = results.filter((entry) => entry.verdict !== 'passed')
+                ctx.notice(
+                  `回归试车完成：${passed}/${total} 通过。${failed
+                    .map(
+                      (entry) =>
+                        `「${entry.title}」${VERDICT_WORD[entry.verdict] ?? entry.error ?? entry.verdict}`
+                    )
+                    .join('，')}`,
+                  failed.length ? 'error' : 'info'
+                )
+                await ctx.render()
+              })
+              .finally(() => {
+                event.target.disabled = false
+              })
+          }
+        })
+      : null
+  const open = (id) => {
+    ctx.state.procedureId = id
+    ctx.render()
+  }
+  mount.append(
+    panel(
+      '试验规程',
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: '规程是 Agent 写下、机器按原样重放的测试：重放时没有模型参与，同一版本每次都做同样的事，红了就是页面变了。探索过的任务在任务详情里「固化为规程」；试车失败时交给规程维护员，在失败的那一步提出修正，修正经重放验证后由你批准。每次试车都记为所属应用的一次执行，进入质量报告。'
+      }),
+      fireAll,
+      list.length
+        ? table(
+            [
+              {
+                title: '规程',
+                cell: (entry) =>
+                  h(
+                    'span',
+                    { class: 'qp-data-cell' },
+                    h('strong', { text: entry.title }),
+                    h('small', {
+                      text: `${entry.id} · 第 ${entry.revision} 版 · ${entry.steps} 步`
+                    })
+                  )
+              },
+              {
+                title: '用例',
+                cell: (entry) =>
+                  h('span', {
+                    class: 'qp-caption',
+                    text: entry.caseId
+                      ? `${entry.caseId}${entry.app ? ` · ${entry.app}` : ''}`
+                      : '未关联'
+                  })
+              },
+              { title: '状态', cell: (entry) => stateTag(entry.status) },
+              {
+                title: '最近试车',
+                cell: (entry) =>
+                  entry.lastRun
+                    ? h(
+                        'span',
+                        { class: 'qp-data-cell' },
+                        verdictTag(entry.lastRun.verdict),
+                        h('small', {
+                          text: `第 ${entry.lastRun.revision} 版 · ${ago(entry.lastRun.at)}${
+                            entry.lastRun.failedStep !== null
+                              ? ` · 停在第 ${entry.lastRun.failedStep + 1} 步`
+                              : ''
+                          }`
+                        })
+                      )
+                    : h('span', { class: 'qp-caption qp-muted', text: '还没有试车' })
+              },
+              {
+                title: '',
+                cell: (entry) =>
+                  h(
+                    'span',
+                    { class: 'qp-row' },
+                    entry.openProposals
+                      ? h('span', {
+                          class: 'qp-tag qp-tag--warning',
+                          text: `${entry.openProposals} 个待审修正`
+                        })
+                      : null,
+                    h('button', {
+                      class: 'qp-button qp-button--ghost qp-button--sm',
+                      text: ctx.state.procedureId === entry.id ? '已打开' : '打开',
+                      onclick: () => open(entry.id)
+                    })
+                  )
+              }
+            ],
+            list,
+            { layout: 'procedures' }
+          )
+        : empty(
+            '还没有规程。让「页面巡检员」在桌面端走一遍页面并做断言，然后在任务详情里点「固化为规程」。'
+          )
+    )
+  )
+  if (ctx.state.procedureId) mount.append(await procedureDetail(ctx, ctx.state.procedureId))
+  mount.append(await regressionPanel(ctx))
+  if (ctx.state.native) mount.append(await localStationPanel(ctx))
+}
+
+const RUNS_ON = {
+  'any-runner': '任意工位（含值守中的桌面）',
+  server: '团队工位（服务器 / 容器）'
+}
+
+/**
+ * 定时回归. The service keeps the schedule and the queue; a station — a
+ * desktop on duty, `mx-rig station watch`, a station container — claims the
+ * batch and replays it with its own browser. The service never opens one.
+ */
+async function regressionPanel(ctx) {
+  let data
+  try {
+    data = await ctx.api('procedure-tasks')
+  } catch (error) {
+    return panel('定时回归', empty(`读取回归任务失败：${error.message}`))
+  }
+  const writable = ctx.canRun()
+  const dispatch = (task, button) => {
+    button.disabled = true
+    ctx
+      .run(async () => {
+        const { run } = await ctx.api('procedure-task-run', { id: task.id })
+        ctx.notice(
+          run.status === 'pending-runner'
+            ? `已排队：${run.id}，等工位来取。`
+            : `已派发：${run.id}（${STATUS_TEXT[run.status] ?? run.status}）`
+        )
+        await ctx.render()
+      })
+      .finally(() => {
+        button.disabled = false
+      })
+  }
+  const tasks = data.tasks.length
+    ? table(
+        [
+          {
+            title: '回归任务',
+            cell: (task) =>
+              h(
+                'span',
+                { class: 'qp-data-cell' },
+                h('strong', { text: task.name }),
+                h('small', { text: `${task.app} · ${task.enabled === false ? '已停用' : task.id}` })
+              )
+          },
+          {
+            title: '时间',
+            cell: (task) =>
+              h('span', {
+                class: 'qp-caption',
+                text:
+                  task.scheduleKind === 'cron'
+                    ? `${task.cronExpr}（${task.timezone}）${task.nextRunAt ? ` · 下次 ${new Date(task.nextRunAt).toLocaleString()}` : ''}`
+                    : '手动'
+              })
+          },
+          {
+            title: '在哪里',
+            cell: (task) => h('span', { class: 'qp-caption', text: RUNS_ON[task.runsOn ?? 'any-runner'] })
+          },
+          {
+            title: '最近一次',
+            cell: (task) =>
+              task.lastRun
+                ? h(
+                    'span',
+                    { class: 'qp-data-cell' },
+                    statusTag(task.lastRun.status),
+                    h('small', { text: `${task.lastRun.id} · ${ago(task.lastRun.finishedAt)}` })
+                  )
+                : h('span', { class: 'qp-caption qp-muted', text: '还没有执行' })
+          },
+          {
+            title: '',
+            cell: (task) =>
+              writable
+                ? h('button', {
+                    class: 'qp-button qp-button--ghost qp-button--sm',
+                    text: '立即回归',
+                    onclick: (event) => dispatch(task, event.target)
+                  })
+                : h('span')
+          }
+        ],
+        data.tasks,
+        { layout: 'procedure-tasks' }
+      )
+    : empty('还没有回归任务。')
+  const stations = data.stations.length
+    ? table(
+        [
+          {
+            title: '工位',
+            cell: (station) =>
+              h(
+                'span',
+                { class: 'qp-data-cell' },
+                h('strong', { text: station.name }),
+                h('small', { text: `${station.id}${station.mine ? ' · 我的' : ''}` })
+              )
+          },
+          {
+            title: '类型',
+            cell: (station) =>
+              h('span', { class: 'qp-caption', text: station.kind === 'server' ? '团队工位' : '个人工位' })
+          },
+          {
+            title: '状态',
+            cell: (station) =>
+              h('span', {
+                class: 'qp-status',
+                'data-status': station.online ? (station.status === 'busy' ? 'info' : 'success') : 'default',
+                text: station.online ? (station.status === 'busy' ? '回归中' : '在线') : '离线'
+              })
+          },
+          {
+            title: '最近心跳',
+            cell: (station) => h('span', { class: 'qp-caption', text: ago(station.lastSeenAt) })
+          }
+        ],
+        data.stations,
+        { layout: 'stations' }
+      )
+    : empty(
+        '还没有工位。在桌面端打开「本机工位值守」，或在测试机上运行 mx-rig station enroll / watch，或用 scripts/manage.sh up --station 起一个工位容器。'
+      )
+  return panel(
+    '定时回归',
+    h('p', {
+      class: 'qp-body-2 qp-muted',
+      text: '服务端只负责排程和排队：到点把应用里「已启用、关联了用例」的规程排成一批，由工位领走、用工位自己的浏览器重放，结果按用例记为一次执行，每条规程的试车记录里也看得到。服务器不开浏览器。'
+    }),
+    tasks,
+    writable ? regressionForm(ctx, data.apps) : null,
+    h('h3', { class: 'qp-heading-3', text: '工位' }),
+    stations
+  )
+}
+
+function regressionForm(ctx, apps) {
+  if (!apps.length)
+    return h('p', {
+      class: 'qp-caption qp-muted',
+      text: '新建回归任务前，先把规程关联到用例并启用——没有用例的规程在一次执行里无处记录。'
+    })
+  const app = h(
+    'select',
+    { class: 'qp-input', id: 'regression-app' },
+    ...apps.map((entry) =>
+      h('option', { value: entry.slug, text: `${entry.slug}（${entry.procedures} 条规程）` })
+    )
+  )
+  const name = h('input', { class: 'qp-input', id: 'regression-name', placeholder: '名称，例如「夜间回归」' })
+  const cron = h('input', {
+    class: 'qp-input rig-code-input',
+    id: 'regression-cron',
+    placeholder: 'cron，例如 0 2 * * *（留空为手动触发）'
+  })
+  const runsOn = h(
+    'select',
+    { class: 'qp-input', id: 'regression-runs-on' },
+    ...Object.entries(RUNS_ON).map(([value, text]) => h('option', { value, text }))
+  )
+  return h(
+    'details',
+    { class: 'rig-section', id: 'regression-form' },
+    h('summary', { text: '新建回归任务' }),
+    h('div', { class: 'rig-grid-2' }, app, name),
+    h('div', { class: 'rig-grid-2' }, cron, runsOn),
+    h('button', {
+      class: 'qp-button qp-button--primary qp-button--sm',
+      id: 'regression-save',
+      text: '保存回归任务',
+      onclick: () =>
+        ctx.run(async () => {
+          await ctx.api('procedure-task-create', {
+            app: app.value,
+            name: name.value.trim() || `${app.value} 规程回归`,
+            cronExpr: cron.value.trim() || null,
+            runsOn: runsOn.value
+          })
+          ctx.notice('回归任务已保存。')
+          await ctx.render()
+        })
+    })
+  )
+}
+
+/**
+ * This computer on duty (值守): procedure batches queued on the service are
+ * replayed here in the background, headless, in a process of its own.
+ * Desktop only.
+ */
+async function localStationPanel(ctx) {
+  const status = await ctx.api('station-status')
+  const act = (action, body) =>
+    ctx.run(async () => {
+      await ctx.api(action, body)
+      await ctx.render()
+    })
+  const name = h('input', { class: 'qp-input', placeholder: '这个工位在平台上的名字（可留空）' })
+  const rows = []
+  if (!status.registered)
+    rows.push(
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: '值守时，派给「任意工位」的规程回归会在这台电脑上后台重放（无头浏览器，不打扰你的任务）。注册使用你当前的登录，工位凭据只保存在这台电脑上；它只能执行试验规程。'
+      }),
+      h(
+        'div',
+        { class: 'qp-row' },
+        name,
+        h('button', {
+          class: 'qp-button qp-button--primary',
+          id: 'station-register',
+          text: '把这台电脑登记为工位',
+          onclick: () => act('station-register', { name: name.value })
+        })
+      )
+    )
+  else
+    rows.push(
+      h(
+        'dl',
+        { class: 'rig-kv' },
+        h('dt', { text: '名称' }),
+        h('dd', { text: status.name ?? '—' }),
+        h('dt', { text: '值守' }),
+        h('dd', {
+          text: status.running
+            ? `值守中（进程 ${status.pid}）`
+            : status.exited
+              ? `已停止（${status.exited.signal ?? status.exited.code}）`
+              : '未值守'
+        })
+      ),
+      h(
+        'div',
+        { class: 'qp-row' },
+        status.running
+          ? h('button', {
+              class: 'qp-button qp-button--outline',
+              id: 'station-stop',
+              text: '停止值守（当前批次结束后）',
+              onclick: () => act('station-stop')
+            })
+          : h('button', {
+              class: 'qp-button qp-button--primary',
+              id: 'station-start',
+              text: '开始值守',
+              onclick: () => act('station-start')
+            }),
+        h('button', {
+          class: 'qp-button qp-button--ghost',
+          text: '注销工位',
+          onclick: () => act('station-remove')
+        })
+      ),
+      status.log.length
+        ? h(
+            'details',
+            {},
+            h('summary', { text: '最近输出' }),
+            h('pre', { class: 'qp-code-block', text: status.log.join('\n') })
+          )
+        : null
+    )
+  return panel(
+    '本机工位值守 · 桌面端',
+    ...rows,
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '退出登录或关闭 MX Rig 时值守一并停止。靶场安全策略随批次下发，工位照样只访问允许的地址。'
+    })
+  )
+}
+
+async function procedureDetail(ctx, id) {
+  const { procedure } = await ctx.api('procedure', { id })
+  const writable = ctx.canRun()
+  const native = ctx.state.native
+  const box = h('section', { class: 'qp-panel rig-section', id: 'procedure-detail' })
+  box.append(
+    h(
+      'div',
+      { class: 'qp-row qp-row--between' },
+      h(
+        'div',
+        {},
+        h('p', {
+          class: 'qp-caption qp-muted',
+          text: `PROCEDURE / ${procedure.id} · 第 ${procedure.revision} 版 · ${
+            procedure.surface === 'electron' ? 'Electron' : '网页'
+          }${procedure.baseUrl ? ` · ${procedure.baseUrl}` : ''}`
+        }),
+        h('h2', { class: 'qp-heading-2', text: procedure.title }),
+        h('p', {
+          class: 'qp-caption qp-muted',
+          text: procedure.caseId
+            ? `实现用例 ${procedure.caseId}${procedure.app ? `（${procedure.app}）` : ''}；每次试车记为该应用的一次执行。`
+            : '没有关联用例：试车只记在这里，不进入质量报告。'
+        })
+      ),
+      stateTag(procedure.status)
+    )
+  )
+
+  const actions = h('div', { class: 'qp-row rig-procedure-actions' })
+  if (writable && native && procedure.status !== 'retired')
+    actions.append(
+      h('button', {
+        class: 'qp-button qp-button--primary qp-button--sm',
+        id: 'procedure-fire',
+        text: '试车',
+        onclick: (event) => {
+          event.target.disabled = true
+          ctx.notice('试车中：浏览器工位正在按规程逐步执行……')
+          ctx
+            .run(async () => {
+              const { run, kernelRun, kernelError } = await ctx.api('procedure-fire', { id })
+              ctx.notice(
+                run.verdict === 'passed'
+                  ? `试车通过（${run.steps.length} 步）。${kernelRun ? `已记为执行 ${kernelRun.id}。` : ''}`
+                  : `试车${VERDICT_WORD[run.verdict]}：第 ${run.failedStep + 1} 步 ${run.failure?.message ?? ''}${
+                      kernelError ? `（记入质量报告失败：${kernelError}）` : ''
+                    }`,
+                run.verdict === 'passed' ? 'info' : 'error'
+              )
+              await ctx.render()
+            })
+            .finally(() => {
+              event.target.disabled = false
+            })
+        }
+      })
+    )
+  if (!native)
+    actions.append(
+      h('span', {
+        class: 'qp-caption qp-muted',
+        text: '试车与修正需要 MX Rig 桌面端（浏览器工位在那里）。'
+      })
+    )
+  const setStatus = (status, label) =>
+    h('button', {
+      class: 'qp-button qp-button--outline qp-button--sm',
+      text: label,
+      onclick: () =>
+        ctx.run(async () => {
+          const { caseUpdated } = await ctx.api('procedure-status', { id, status })
+          ctx.notice(
+            status === 'active'
+              ? `已启用。${caseUpdated ? `用例 ${procedure.caseId} 已标记为「已自动化」。` : ''}`
+              : status === 'retired'
+                ? '已停用。历史试车记录保留。'
+                : '已改回草稿。'
+          )
+          await ctx.render()
+        })
+    })
+  if (writable && procedure.status === 'draft') actions.append(setStatus('active', '启用'))
+  if (writable && procedure.status !== 'retired') actions.append(setStatus('retired', '停用'))
+  if (writable && procedure.status === 'retired') actions.append(setStatus('draft', '恢复为草稿'))
+  const editor = h('div', { class: 'rig-section' })
+  if (writable && procedure.status !== 'retired')
+    actions.append(
+      h('button', {
+        class: 'qp-button qp-button--ghost qp-button--sm',
+        text: '编辑步骤',
+        onclick: () => {
+          if (editor.childElementCount) return editor.replaceChildren()
+          const body = {
+            title: procedure.title,
+            app: procedure.app,
+            caseId: procedure.caseId,
+            surface: procedure.surface,
+            baseUrl: procedure.baseUrl,
+            variables: procedure.variables,
+            steps: procedure.steps
+          }
+          const area = h('textarea', {
+            class: 'qp-textarea rig-code-input',
+            rows: '18',
+            id: 'procedure-json'
+          })
+          area.value = JSON.stringify(body, null, 2)
+          const reason = h('input', {
+            class: 'qp-input',
+            placeholder: '修改原因（会写进修订历史）'
+          })
+          editor.replaceChildren(
+            h('p', {
+              class: 'qp-caption qp-muted',
+              text: '直接编辑规程 JSON。保存后生成新版本并回到草稿，下一次试车通过后才能启用。'
+            }),
+            area,
+            reason,
+            h('button', {
+              class: 'qp-button qp-button--primary qp-button--sm',
+              text: `保存为第 ${procedure.revision + 1} 版`,
+              onclick: () =>
+                ctx.run(async () => {
+                  let parsed
+                  try {
+                    parsed = JSON.parse(area.value)
+                  } catch {
+                    throw new Error('不是合法的 JSON')
+                  }
+                  await ctx.api('procedure-revise', {
+                    id,
+                    expectedRevision: procedure.revision,
+                    procedure: parsed,
+                    reason: reason.value.trim() || '手工修改'
+                  })
+                  ctx.notice(`已保存为第 ${procedure.revision + 1} 版，请重新试车。`)
+                  await ctx.render()
+                })
+            })
+          )
+        }
+      })
+    )
+  box.append(actions, editor)
+
+  box.append(
+    h('h3', { class: 'qp-heading-3', text: '步骤' }),
+    table(
+      [
+        {
+          title: '#',
+          cell: (entry) => h('span', { class: 'qp-caption', text: String(entry.index + 1) })
+        },
+        { title: '步骤', cell: (entry) => h('span', { class: 'qp-body-2', text: entry.text }) },
+        {
+          title: '说明',
+          cell: (entry) => h('span', { class: 'qp-caption qp-muted', text: entry.note ?? '' })
+        }
+      ],
+      procedure.steps.map((step, index) => ({
+        index,
+        text: procedure.stepText[index],
+        note: step.note
+      })),
+      { layout: 'procedure-steps' }
+    )
+  )
+
+  const pending = procedure.proposals.filter((entry) => entry.status === 'pending')
+  for (const proposal of pending) box.append(proposalReview(ctx, procedure, proposal))
+
+  box.append(h('h3', { class: 'qp-heading-3', text: '试车记录' }))
+  const latestRepairable = procedure.runs.find(
+    (run) => run.revision === procedure.revision && run.station !== 'validation'
+  )
+  box.append(
+    procedure.runs.length
+      ? table(
+          [
+            {
+              title: '时间',
+              cell: (run) =>
+                h(
+                  'span',
+                  { class: 'qp-data-cell' },
+                  h('span', { class: 'qp-caption', text: ago(run.finishedAt) }),
+                  h('small', {
+                    text: `${STATION[run.station] ?? run.station} · 第 ${run.revision} 版`
+                  })
+                )
+            },
+            { title: '结果', cell: (run) => verdictTag(run.verdict) },
+            {
+              title: '位置',
+              cell: (run) => {
+                const cell = h('div', { class: 'qp-caption' })
+                cell.append(
+                  h('span', {
+                    text: run.failure
+                      ? `第 ${run.failure.index + 1} 步：${run.failure.message}`
+                      : `${run.steps.length} 步全部通过`
+                  })
+                )
+                const details = h('details')
+                details.append(
+                  h('summary', { text: '逐步结果' }),
+                  h(
+                    'ol',
+                    { class: 'rig-step-results' },
+                    ...run.steps.map((step) =>
+                      h('li', {
+                        'data-status': step.status,
+                        text: `${step.text}${step.error ? ` —— ${step.error.message}` : ''}`
+                      })
+                    )
+                  ),
+                  ...(run.failure?.snapshot
+                    ? [h('pre', { class: 'qp-code-block', text: run.failure.snapshot })]
+                    : [])
+                )
+                cell.append(details)
+                return cell
+              }
+            },
+            {
+              title: '',
+              cell: (run) =>
+                h(
+                  'span',
+                  { class: 'qp-row' },
+                  native && run.failure?.screenshot
+                    ? h('button', {
+                        class: 'qp-button qp-button--ghost qp-button--sm',
+                        text: '截图',
+                        onclick: () =>
+                          ctx.run(() => ctx.api('artifact', { path: run.failure.screenshot }))
+                      })
+                    : null,
+                  run.kernelRunId
+                    ? h('button', {
+                        class: 'qp-button qp-button--ghost qp-button--sm',
+                        text: '执行记录',
+                        onclick: () => ctx.openPath(`/test-center/#/runs/${run.kernelRunId}`)
+                      })
+                    : null,
+                  writable &&
+                    native &&
+                    run === latestRepairable &&
+                    run.verdict === 'failed' &&
+                    run.repairable
+                    ? h('button', {
+                        class: 'qp-button qp-button--primary qp-button--sm',
+                        id: 'procedure-repair',
+                        text: '交给规程维护员修正',
+                        onclick: (event) => {
+                          event.target.disabled = true
+                          ctx
+                            .run(async () => {
+                              const { mission } = await ctx.api('procedure-repair', {
+                                id,
+                                runId: run.id
+                              })
+                              ctx.notice(
+                                '已重放到失败的那一步，并交给规程维护员。修正提出后会先自动验证，再回到这里等你批准。'
+                              )
+                              ctx.state.selected = mission.id
+                              ctx.go('missions')
+                            })
+                            .finally(() => {
+                              event.target.disabled = false
+                            })
+                        }
+                      })
+                    : null
+                )
+            }
+          ],
+          procedure.runs,
+          { layout: 'procedure-runs' }
+        )
+      : empty(native ? '还没有试车。点上方「试车」按规程跑一遍。' : '还没有试车记录。')
+  )
+
+  const decided = procedure.proposals.filter((entry) => entry.status !== 'pending')
+  if (procedure.history.length || decided.length) {
+    const history = h('details', { class: 'rig-section' })
+    history.append(
+      h('summary', {
+        text: `修订历史（${procedure.history.length} 个旧版本，${decided.length} 条已处理的修正）`
+      }),
+      h(
+        'ul',
+        { class: 'qp-body-2 qp-soft' },
+        h('li', {
+          text: `第 ${procedure.revision} 版（当前）· ${procedure.updatedBy} · ${ago(procedure.updatedAt)} · ${procedure.reason}`
+        }),
+        ...procedure.history.map((entry) =>
+          h('li', {
+            text: `第 ${entry.revision} 版 · ${entry.by} · ${ago(entry.at)} · ${entry.reason}`
+          })
+        ),
+        ...decided.map((entry) =>
+          h('li', {
+            text: `修正 ${entry.id}（基于第 ${entry.baseRevision} 版）：${
+              { approved: '已批准', rejected: '已驳回', dismissed: '已读', superseded: '已失效' }[
+                entry.status
+              ] ?? entry.status
+            } · ${entry.rationale}`
+          })
+        )
+      )
+    )
+    box.append(history)
+  }
+  return box
+}
+
+function proposalReview(ctx, procedure, proposal) {
+  const proven = proposal.validation?.verdict === 'passed'
+  const card = h('article', { class: 'qp-panel rig-proposal', 'data-proven': String(proven) })
+  card.append(
+    h(
+      'div',
+      { class: 'qp-row qp-row--between' },
+      h('strong', {
+        class: 'qp-body-1',
+        text: `待审修正 · ${JUDGEMENT[proposal.verdict] ?? proposal.verdict}`
+      }),
+      proposal.steps
+        ? proven
+          ? tone('验证试车通过', 'success')
+          : tone(proposal.validation ? '验证试车未通过' : '未验证', 'danger')
+        : tone('不修改规程', 'default')
+    ),
+    h('p', { class: 'qp-body-2', text: proposal.rationale }),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: `由 ${proposal.by} 的修正任务提出，基于第 ${proposal.baseRevision} 版${
+        proposal.validation?.failure
+          ? `；验证停在第 ${proposal.validation.failure.index + 1} 步：${proposal.validation.failure.message}`
+          : ''
+      }`
+    })
+  )
+  if (proposal.droppedAssertions)
+    card.append(
+      h('p', {
+        class: 'qp-body-2 rig-warning-line',
+        id: 'proposal-weakens',
+        text: `这个修正删除或改动了 ${proposal.droppedAssertions} 条原有断言。验证试车看不出这一点：断言没了，就没有东西会失败。批准前确认这是需求本身变了，而不是为了让试车变绿。`
+      })
+    )
+  if (proposal.diff)
+    card.append(
+      h(
+        'ol',
+        { class: 'rig-diff' },
+        ...proposal.diff.entries.map((line) =>
+          h('li', {
+            class: 'rig-diff__line',
+            'data-op': line.op,
+            text: `${line.op === 'add' ? '+ ' : line.op === 'remove' ? '− ' : '  '}${line.text}`
+          })
+        )
+      )
+    )
+  if (ctx.canRun()) {
+    const decide = (approved) =>
+      ctx.run(async () => {
+        await ctx.api('procedure-decide', { id: procedure.id, proposalId: proposal.id, approved })
+        ctx.notice(
+          approved
+            ? `已批准，规程更新为第 ${procedure.revision + 1} 版。`
+            : proposal.steps
+              ? '已驳回。规程保持原样。'
+              : '已标记为已读。'
+        )
+        await ctx.render()
+      })
+    card.append(
+      h(
+        'div',
+        { class: 'qp-row' },
+        proposal.steps
+          ? h('button', {
+              class: 'qp-button qp-button--primary qp-button--sm',
+              id: 'proposal-approve',
+              text: proposal.droppedAssertions ? '仍然批准…' : '批准修正',
+              disabled: !proven,
+              onclick: (event) => {
+                // Weakening a check takes a second, deliberate click.
+                if (proposal.droppedAssertions && event.target.dataset.confirm !== 'yes') {
+                  event.target.dataset.confirm = 'yes'
+                  event.target.textContent = `确认批准（少了 ${proposal.droppedAssertions} 条断言）`
+                  return
+                }
+                decide(true)
+              }
+            })
+          : null,
+        h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
+          text: proposal.steps ? '驳回' : '知道了',
+          onclick: () => decide(false)
+        })
+      )
+    )
+  }
+  return card
+}
+
+/** What a mission produced toward the test assets: drafts, a capture, a proposal. */
+function authoringPanel(ctx, row) {
+  const parts = []
+  if (row.caseDrafts?.length) parts.push(caseDraftsCard(ctx, row))
+  if (row.proposal) parts.push(repairCard(ctx, row))
+  const capturable =
+    row.status === 'completed' &&
+    !row.procedureBase &&
+    (row.events ?? []).some(
+      (event) =>
+        (event.kind === 'tool_result' && (event.data?.action || event.data?.result?.action)) ||
+        event.kind === 'assertion'
+    )
+  // On the desktop the capture reads the full local record; on the web, the
+  // synced copy (the service says so when early steps were trimmed).
+  if (capturable && ctx.canRun()) parts.push(captureCard(ctx, row))
+  return parts.length ? panel('测试资产', ...parts) : null
+}
+
+function caseDraftsCard(ctx, row) {
+  const card = h('div', { class: 'rig-section', id: 'case-drafts' })
+  const picks = row.caseDrafts.map(() => h('input', { type: 'checkbox' }))
+  picks.forEach((box) => {
+    box.checked = true
+  })
+  const results = h('div', { class: 'qp-caption' })
+  card.append(
+    h('h3', { class: 'qp-heading-3', text: `用例草稿（${row.caseDrafts.length} 条）` }),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '这些是 Agent 起草的用例，还没有进入用例目录。勾选要保留的，加入后状态为「计划中」，之后可以固化为规程来实现它们。'
+    }),
+    ...row.caseDrafts.map((draft, index) => {
+      const details = h('details', { class: 'rig-case-draft' })
+      details.append(
+        h(
+          'summary',
+          {},
+          h(
+            'label',
+            { class: 'qp-choice qp-choice--checkbox' },
+            picks[index],
+            h('span', { class: 'qp-choice__control' }),
+            h('span', { text: `${draft.caseId} · ${draft.priority} · ${draft.title}` })
+          )
+        ),
+        h('p', {
+          class: 'qp-caption qp-muted',
+          text: `应用 ${draft.app}${draft.requirementRef ? ` · 需求 ${draft.requirementRef}` : ''}${draft.preconditions ? ` · 前置：${draft.preconditions}` : ''}`
+        }),
+        h(
+          'ol',
+          { class: 'qp-body-2' },
+          ...draft.steps.map((step) =>
+            h('li', { text: `${step.action}${step.expect ? ` ⇒ ${step.expect}` : ''}` })
+          )
+        )
+      )
+      return details
+    }),
+    ctx.canRun()
+      ? h('button', {
+          class: 'qp-button qp-button--primary qp-button--sm',
+          id: 'import-cases',
+          text: '把勾选的加入用例目录',
+          onclick: () =>
+            ctx.run(async () => {
+              const cases = row.caseDrafts.filter((_draft, index) => picks[index].checked)
+              if (!cases.length) throw new Error('没有勾选任何草稿')
+              const { results: outcome } = await ctx.api('cases-import', { cases })
+              results.replaceChildren(
+                ...outcome.map((entry) =>
+                  h('p', {
+                    class: entry.ok ? '' : 'rig-warning-line',
+                    text: entry.ok
+                      ? `✓ ${entry.caseId} 已加入用例目录`
+                      : `✗ ${entry.caseId}：${entry.error}`
+                  })
+                )
+              )
+            })
+        })
+      : null,
+    results
+  )
+  return card
+}
+
+function captureCard(ctx, row) {
+  const title = h('input', { class: 'qp-input', id: 'capture-title', placeholder: '规程名称' })
+  title.value = String(row.goal ?? '').slice(0, 120)
+  const app = h('input', { class: 'qp-input', placeholder: '应用 slug（可选，例如 compass）' })
+  const caseId = h('input', {
+    class: 'qp-input',
+    placeholder: '实现的用例编号（可选，例如 CPS-WEB-AUTH-004）'
+  })
+  return h(
+    'div',
+    { class: 'rig-section', id: 'capture' },
+    h('h3', { class: 'qp-heading-3', text: '固化为规程' }),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '把这项任务里真实执行过的浏览器动作和断言保存为一条规程草稿，之后可以不经模型反复重放。关联用例编号后，每次试车都记为该应用的执行、进入质量报告。'
+    }),
+    h('div', { class: 'rig-grid-2' }, title, app),
+    caseId,
+    h('button', {
+      class: 'qp-button qp-button--outline qp-button--sm',
+      id: 'capture-procedure',
+      text: '固化为规程',
+      onclick: () =>
+        ctx.run(async () => {
+          const { procedure, warnings = [] } = await ctx.api('procedure-capture', {
+            missionId: row.id,
+            title: title.value.trim() || row.goal,
+            app: app.value.trim() || null,
+            caseId: caseId.value.trim().toUpperCase() || null
+          })
+          ctx.notice(
+            `已保存为规程草稿（${procedure.steps.length} 步）。${warnings.join(' ')} 先试车，通过后再启用。`
+          )
+          ctx.state.procedureId = procedure.id
+          ctx.go('procedures')
+        })
+    })
+  )
+}
+
+function repairCard(ctx, row) {
+  const proposal = row.proposal
+  return h(
+    'div',
+    { class: 'rig-section', id: 'repair-proposal' },
+    h('h3', {
+      class: 'qp-heading-3',
+      text: `规程修正 · ${JUDGEMENT[proposal.verdict] ?? proposal.verdict}`
+    }),
+    h('p', { class: 'qp-body-2', text: proposal.rationale }),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: proposal.steps
+        ? row.proposalPosted
+          ? '修正已经过验证试车并提交，等待规程负责人批准。'
+          : '修正会在任务结束后自动验证试车，再提交审批。'
+        : '判断不是用例问题，规程保持原样；这条判断已提交给规程负责人。'
+    }),
+    row.procedureBase
+      ? h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
+          text: '到规程页查看',
+          onclick: () => {
+            ctx.state.procedureId = row.procedureBase.id
+            ctx.go('procedures')
+          }
+        })
+      : null
+  )
+}
+
+// -- 钩子 -------------------------------------------------------------------------
+
+const HOOK_EVENTS = {
+  'run.finished': { label: '执行结束 → 自动定级', where: '服务端' },
+  'procedure.failed': { label: '规程在全部试车中失败 → 自动修正', where: '桌面端' }
+}
+const FIRE_STATE = {
+  pending: ['排队', 'info'],
+  running: ['进行中', 'info'],
+  done: ['完成', 'success'],
+  skipped: ['跳过', 'default'],
+  failed: ['未完成', 'warning']
+}
+const RUN_WORD = {
+  failed: '失败',
+  blocked: '受阻',
+  flaky: '不稳定',
+  timeout: '超时',
+  expired: '过期'
+}
+
+/** The fields a rule is saved with; the service adds the rest. */
+const ruleInput = (rule) => ({
+  id: rule.id,
+  name: rule.name,
+  enabled: rule.enabled,
+  event: rule.event,
+  statuses: rule.statuses,
+  apps: rule.apps,
+  includeProcedureRuns: rule.includeProcedureRuns,
+  agentKey: rule.agentKey,
+  maxPerHour: rule.maxPerHour,
+  notify: rule.notify
+})
+
+export async function hooks(ctx, mount) {
+  const data = await ctx.api('hooks')
+  const admin = ctx.state.principal?.role === 'admin'
+  const save = (rules, message) =>
+    ctx.run(async () => {
+      await ctx.api('hooks-save', { version: data.version, rules: rules.map(ruleInput) })
+      ctx.notice(message)
+      await ctx.render()
+    })
+
+  mount.append(
+    panel(
+      '钩子',
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: '钩子让 Rig 在事件发生时自己动手。执行失败或受阻后，服务端由只读的定级 Agent 读证据、提交结构化结论，结论进入质量报告，也可以推送到通知渠道。规程在「全部试车」里失败时，由执行这次试车的桌面端交给规程维护员提出修正，修正仍要人批准。'
+      }),
+      h(
+        'ul',
+        { class: 'qp-caption qp-muted' },
+        h('li', { text: '钩子任务只能用只读工具：不派发、不取消、不点击，所以不需要任何人确认。' }),
+        h('li', {
+          text: '同一次执行只会触发一次，几个服务副本同时发现也一样；每条钩子有每小时上限，超出的记为跳过。'
+        }),
+        h('li', { text: '只对钩子建立之后结束的执行生效，打开钩子不会回头处理历史失败。' })
+      )
+    )
+  )
+
+  const rules = data.rules
+  mount.append(
+    panel(
+      '规则',
+      rules.length
+        ? table(
+            [
+              {
+                title: '钩子',
+                cell: (rule) =>
+                  h(
+                    'span',
+                    { class: 'qp-data-cell' },
+                    h('strong', { text: rule.name }),
+                    h('small', {
+                      text: `${HOOK_EVENTS[rule.event]?.label ?? rule.event} · ${HOOK_EVENTS[rule.event]?.where ?? ''}`
+                    })
+                  )
+              },
+              {
+                title: '条件',
+                cell: (rule) =>
+                  h('span', {
+                    class: 'qp-caption',
+                    text: [
+                      rule.event === 'run.finished'
+                        ? `状态：${rule.statuses.map((status) => RUN_WORD[status] ?? status).join('、')}`
+                        : null,
+                      `应用：${rule.apps.length ? rule.apps.join('、') : '全部'}`,
+                      rule.event === 'run.finished' && rule.includeProcedureRuns
+                        ? '含规程试车'
+                        : null,
+                      rule.event === 'run.finished'
+                        ? `Agent：${data.agents.find((agent) => agent.key === rule.agentKey)?.displayName ?? rule.agentKey}`
+                        : null
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  })
+              },
+              {
+                title: '上限 / 通知',
+                cell: (rule) =>
+                  h('span', {
+                    class: 'qp-caption',
+                    text: `每小时 ${rule.maxPerHour} 次${rule.notify ? ' · 推送结论' : ''}`
+                  })
+              },
+              {
+                title: '',
+                cell: (rule) =>
+                  admin
+                    ? h(
+                        'span',
+                        { class: 'qp-row' },
+                        h('button', {
+                          class: 'qp-button qp-button--ghost qp-button--sm',
+                          text: rule.enabled ? '停用' : '启用',
+                          onclick: () =>
+                            save(
+                              rules.map((entry) =>
+                                entry.id === rule.id ? { ...entry, enabled: !rule.enabled } : entry
+                              ),
+                              rule.enabled ? `已停用「${rule.name}」。` : `已启用「${rule.name}」。`
+                            )
+                        }),
+                        h('button', {
+                          class: 'qp-button qp-button--ghost qp-button--sm',
+                          text: '删除',
+                          onclick: () =>
+                            save(
+                              rules.filter((entry) => entry.id !== rule.id),
+                              `已删除「${rule.name}」。`
+                            )
+                        })
+                      )
+                    : h('span', {
+                        class: 'qp-caption qp-muted',
+                        text: rule.enabled ? '启用中' : '已停用'
+                      })
+              }
+            ],
+            rules,
+            { layout: 'hooks' }
+          )
+        : empty(
+            admin
+              ? '还没有钩子。在下面新建一条，例如「执行失败 → 自动定级」。'
+              : '还没有钩子；由管理员建立。'
+          ),
+      admin ? hookForm(data, (rule) => save([...rules, rule], `已建立「${rule.name}」。`)) : null,
+      admin
+        ? h('button', {
+            class: 'qp-button qp-button--outline qp-button--sm',
+            id: 'hooks-tick',
+            text: '立即检查一次',
+            onclick: () =>
+              ctx.run(async () => {
+                const { tick } = await ctx.api('hooks-tick', {})
+                ctx.notice(
+                  `检查完成：新触发 ${tick.claimed} 次，跳过 ${tick.skipped} 次，收尾 ${tick.settled} 个任务${tick.started ? '，已启动一个定级任务' : ''}。`
+                )
+                await ctx.render()
+              })
+          })
+        : null
+    )
+  )
+
+  mount.append(
+    panel(
+      '钩子做了什么',
+      data.fires.length
+        ? table(
+            [
+              {
+                title: '时间 / 钩子',
+                cell: (fire) =>
+                  h(
+                    'span',
+                    { class: 'qp-data-cell' },
+                    h('span', { class: 'qp-caption', text: ago(fire.createdAt) }),
+                    h('small', { text: fire.ruleName })
+                  )
+              },
+              {
+                title: '对象',
+                cell: (fire) =>
+                  h('span', {
+                    class: 'qp-caption',
+                    text:
+                      fire.kind === 'repair'
+                        ? `规程「${fire.procedure?.title ?? ''}」试车 ${fire.subjectId}`
+                        : `执行 ${fire.run?.id ?? fire.subjectId}（${RUN_WORD[fire.run?.status] ?? fire.run?.status}${fire.run?.app ? ` · ${fire.run.app}` : ''}）`
+                  })
+              },
+              {
+                title: '状态',
+                cell: (fire) => tone(...(FIRE_STATE[fire.status] ?? [fire.status, 'default']))
+              },
+              {
+                title: '结果',
+                cell: (fire) =>
+                  h('span', {
+                    class: fire.status === 'done' ? 'qp-caption' : 'qp-caption qp-muted',
+                    text: fire.finding
+                      ? `${VERDICT_TEXT[fire.finding.verdict]?.label ?? fire.finding.verdict}（${fire.finding.confidence}）：${fire.finding.summary}${fire.finding.unverified ? ` · ${fire.finding.unverified} 个引用未核实` : ''}`
+                      : fire.kind === 'repair' && fire.proposalId
+                        ? `已提出修正 ${fire.proposalId}，验证试车${fire.validation === 'passed' ? '通过' : fire.validation ? '未通过' : '未进行'}；到「试验规程」审批`
+                        : (fire.reason ??
+                          fire.answer ??
+                          (fire.status === 'running' ? '定级中……' : '—'))
+                  })
+              }
+            ],
+            data.fires,
+            { layout: 'hook-fires' }
+          )
+        : empty('还没有触发过。')
+    )
+  )
+}
+
+function hookForm(data, onSave) {
+  const name = h('input', {
+    class: 'qp-input',
+    id: 'hook-name',
+    placeholder: '名称，例如「回归失败自动定级」'
+  })
+  const event = h(
+    'select',
+    { class: 'qp-input', id: 'hook-event' },
+    ...Object.entries(HOOK_EVENTS).map(([value, meta]) => h('option', { value, text: meta.label }))
+  )
+  const statusBoxes = Object.entries(RUN_WORD).map(([value, label]) => {
+    const box = h('input', { type: 'checkbox', value })
+    box.checked = value === 'failed'
+    return { value, box, label }
+  })
+  const apps = h('input', {
+    class: 'qp-input',
+    placeholder: '只看这些应用（slug，逗号分隔；留空为全部）'
+  })
+  const agent = h(
+    'select',
+    { class: 'qp-input', id: 'hook-agent' },
+    ...data.agents.map((entry) => h('option', { value: entry.key, text: entry.displayName }))
+  )
+  agent.value = data.agents.some((entry) => entry.key === 'failure-triage')
+    ? 'failure-triage'
+    : (data.agents[0]?.key ?? '')
+  const includeProcedures = h('input', { type: 'checkbox' })
+  const notify = h('input', { type: 'checkbox' })
+  const perHour = h('input', { class: 'qp-input', type: 'number', min: '1', max: '60' })
+  perHour.value = '6'
+  const choice = (input, text) =>
+    h(
+      'label',
+      { class: 'qp-choice qp-choice--checkbox' },
+      input,
+      h('span', { class: 'qp-choice__control' }),
+      h('span', { text })
+    )
+  const triageOnly = h(
+    'div',
+    { class: 'qp-stack qp-stack--tight' },
+    h(
+      'div',
+      { class: 'qp-row rig-procedure-actions' },
+      h('span', { class: 'qp-caption', text: '执行状态：' }),
+      ...statusBoxes.map((entry) => choice(entry.box, entry.label))
+    ),
+    h(
+      'label',
+      { class: 'qp-field' },
+      h('span', { class: 'qp-field__label', text: '定级 Agent（只列出只读的）' }),
+      agent
+    ),
+    choice(includeProcedures, '也处理规程试车记下的执行（规程失败默认由修正流程处理）'),
+    choice(notify, '把结论推送到通知渠道（订阅了「讲评」事件的渠道）')
+  )
+  event.onchange = () => {
+    triageOnly.hidden = event.value !== 'run.finished'
+  }
+  return h(
+    'details',
+    { class: 'rig-section', id: 'hook-form' },
+    h('summary', { text: '新建钩子' }),
+    h('div', { class: 'rig-grid-2' }, name, event),
+    triageOnly,
+    h(
+      'div',
+      { class: 'rig-grid-2' },
+      apps,
+      h(
+        'label',
+        { class: 'qp-field' },
+        h('span', { class: 'qp-field__label', text: '每小时最多触发' }),
+        perHour
+      )
+    ),
+    h('button', {
+      class: 'qp-button qp-button--primary qp-button--sm',
+      id: 'hook-save',
+      text: '保存钩子',
+      onclick: () =>
+        onSave({
+          name: name.value.trim() || HOOK_EVENTS[event.value].label,
+          enabled: true,
+          event: event.value,
+          statuses: statusBoxes.filter((entry) => entry.box.checked).map((entry) => entry.value),
+          apps: apps.value
+            .split(/[,，\s]+/)
+            .map((value) => value.trim())
+            .filter(Boolean),
+          includeProcedureRuns: includeProcedures.checked,
+          agentKey: agent.value || 'failure-triage',
+          maxPerHour: Number(perHour.value) || 6,
+          notify: notify.checked
+        })
+    })
   )
 }

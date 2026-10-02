@@ -1,0 +1,165 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-rig-postgres-pv
+  labels:
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: mx-rig-postgres
+  hostPath:
+    path: __MX_RIG_DATA_ROOT__/postgres
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-rig-postgres-data
+  namespace: mx-rig
+  labels:
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: mx-rig-postgres
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-rig-postgres
+  namespace: mx-rig
+  labels:
+    app.kubernetes.io/name: mx-rig-postgres
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mx-rig-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mx-rig-postgres
+  namespace: mx-rig
+  labels:
+    app.kubernetes.io/name: mx-rig-postgres
+    app.kubernetes.io/part-of: mx-rig
+spec:
+  serviceName: mx-rig-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-rig-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-rig-postgres
+        app.kubernetes.io/part-of: mx-rig
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: fix-permissions
+          image: postgres:17-alpine
+          command: ["sh", "-c", "chown -R 999:999 /var/lib/postgresql/data"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: postgres-run
+              mountPath: /var/run/postgresql
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: mx_rig
+            - name: POSTGRES_USER
+              value: mx_rig
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: postgres-run
+              mountPath: /var/run/postgresql
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mx_rig", "-d", "mx_rig"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mx_rig", "-d", "mx_rig"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mx-rig-postgres-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: postgres-run
+          emptyDir:
+            sizeLimit: 64Mi

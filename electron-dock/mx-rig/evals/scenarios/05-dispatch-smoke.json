@@ -1,0 +1,56 @@
+{
+  "id": "dispatch-smoke",
+  "title": "按名字派发冒烟并等待结果",
+  "start": {
+    "agentKey": "smoke-pilot",
+    "goal": "执行「商城冒烟」测试计划，等它跑完告诉我通过了多少。"
+  },
+  "policy": {
+    "maxTurns": 10,
+    "allowedTools": [
+      "tests_apps",
+      "tests_list",
+      "tests_runners",
+      "tests_run",
+      "tests_result",
+      "tests_wait"
+    ]
+  },
+  "platform": {
+    "/api/v1/tasks": {
+      "tasks": [
+        { "id": "tsk_full", "name": "商城全量回归", "engine": "playwright" },
+        { "id": "tsk_smoke", "name": "商城冒烟", "engine": "playwright" }
+      ]
+    },
+    "/api/v1/runners": {
+      "runners": [
+        { "id": "rnr_ci1", "name": "ci-linux-1", "online": true, "engines": ["playwright"] }
+      ]
+    },
+    "POST /api/v1/tasks/tsk_smoke:run": {
+      "run": { "id": "trun_smoke_live", "taskId": "tsk_smoke", "status": "queued" }
+    },
+    "/api/v1/runs/trun_smoke_live": {
+      "run": {
+        "id": "trun_smoke_live",
+        "taskId": "tsk_smoke",
+        "status": "passed",
+        "counts": { "passed": 12, "failed": 0, "total": 12 }
+      }
+    }
+  },
+  "expect": {
+    "status": "completed",
+    "mustCall": ["tests_run", "tests_wait"],
+    "mustNotHit": ["POST /api/v1/tasks/tsk_full:run"],
+    "maxInterventions": 1,
+    "answerIncludes": ["12"]
+  },
+  "script": [
+    { "call": "tests_list" },
+    { "call": "tests_run", "args": { "taskId": "tsk_smoke" } },
+    { "call": "tests_wait", "args": { "runId": "trun_smoke_live", "timeoutMs": 5000 } },
+    { "say": "商城冒烟 trun_smoke_live 已完成：12 个用例全部通过。" }
+  ]
+}

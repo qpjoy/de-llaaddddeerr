@@ -1,0 +1,178 @@
+/* 回放播放器。在工作台里使用设计系统的变量，导出的独立文件里用后备值。 */
+
+.rig-replay {
+  --rig-replay-accent: var(--qp-primary, #22d3ee);
+  --rig-replay-surface: var(--qp-bg-3, #0f1720);
+  --rig-replay-raised: var(--qp-bg-4, #16212d);
+  --rig-replay-line: var(--qp-line, rgba(148, 163, 184, 0.22));
+  --rig-replay-text: var(--qp-text-1, #e6edf3);
+  --rig-replay-muted: var(--qp-text-3, #8b98a8);
+  --rig-replay-success: var(--qp-success, #34d399);
+  --rig-replay-danger: var(--qp-danger, #f87171);
+  display: grid;
+  gap: 10px;
+  color: var(--rig-replay-text);
+  outline: none;
+}
+
+.rig-replay__stage {
+  border: 1px solid var(--rig-replay-line);
+  border-radius: 10px;
+  background: #ffffff;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.rig-replay__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rig-replay__box {
+  fill: rgba(34, 211, 238, 0.12);
+  stroke: var(--rig-replay-accent);
+  stroke-width: 3;
+}
+
+.rig-replay__tag rect {
+  fill: #0b1018;
+}
+
+.rig-replay__tag text {
+  fill: #e6fbff;
+  font: 14px -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.rig-replay__ripple {
+  fill: none;
+  stroke: var(--rig-replay-accent);
+  stroke-width: 3;
+}
+
+.rig-replay__cursor path {
+  fill: #0b1018;
+  stroke: #ffffff;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+.rig-replay__cursor {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+}
+
+.rig-replay__badge rect {
+  fill: rgba(11, 16, 24, 0.86);
+}
+
+.rig-replay__badge[data-state='passed'] rect {
+  fill: rgba(6, 95, 70, 0.92);
+}
+
+.rig-replay__badge[data-state='failed'] rect,
+.rig-replay__badge[data-state='error'] rect {
+  fill: rgba(153, 27, 27, 0.92);
+}
+
+.rig-replay__badge[data-state='manual'] rect {
+  fill: rgba(146, 64, 14, 0.92);
+}
+
+.rig-replay__badge text {
+  fill: #ffffff;
+  font: 16px -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.rig-replay__bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rig-replay__button {
+  min-width: 34px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--rig-replay-line);
+  border-radius: 8px;
+  background: var(--rig-replay-raised);
+  color: var(--rig-replay-text);
+  font: 13px -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  cursor: pointer;
+}
+
+.rig-replay__button:hover {
+  border-color: var(--rig-replay-accent);
+}
+
+.rig-replay__counter {
+  margin-left: 6px;
+  color: var(--rig-replay-muted);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.rig-replay__caption {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.rig-replay__steps {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.rig-replay__step {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rig-replay-muted);
+  font: 13px -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rig-replay__step b {
+  min-width: 18px;
+  color: var(--rig-replay-muted);
+  font-weight: 600;
+}
+
+.rig-replay__step[data-state='passed'] b {
+  color: var(--rig-replay-success);
+}
+
+.rig-replay__step[data-state='failed'] b,
+.rig-replay__step[data-state='error'] b {
+  color: var(--rig-replay-danger);
+}
+
+.rig-replay__step[data-state='manual'] b {
+  color: #f59e0b;
+}
+
+.rig-replay__step:hover,
+.rig-replay__step.is-current {
+  background: var(--rig-replay-raised);
+  color: var(--rig-replay-text);
+}
+
+.rig-replay__empty {
+  padding: 24px;
+  color: #475569;
+  line-height: 1.6;
+}
