@@ -16,7 +16,7 @@ export function readCredentials(filename) {
     if (!entry || !/^[a-zA-Z0-9._-]{1,80}$/.test(entry.id) || !/^[a-zA-Z0-9._-]{1,80}$/.test(entry.appId)
       || !['test','live'].includes(entry.environment) || typeof entry.secret !== 'string' || entry.secret.length < 32
       || !Array.isArray(entry.scopes) || !entry.scopes.length
-      || entry.scopes.some(scope => !['orders.read','orders.write','receipts.confirm','settings.write','events.read','events.ack'].includes(scope))
+      || entry.scopes.some(scope => !['orders.read','orders.write','receipts.confirm','settings.write','events.read','events.ack','reports.read'].includes(scope))
       || ids.has(entry.id) || secrets.has(entry.secret)) throw new Error('Invalid or duplicate mx-pay credential')
     ids.add(entry.id); secrets.add(entry.secret)
     return { id: entry.id, appId: entry.appId, environment: entry.environment, scopes: entry.scopes, hash: digest(entry.secret) }

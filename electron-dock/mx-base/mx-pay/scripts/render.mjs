@@ -28,7 +28,8 @@ export function render(env = process.env) {
   readCredentials(env.MX_PAY_CREDENTIALS_SOURCE)
   const credentialJson = readFileSync(env.MX_PAY_CREDENTIALS_SOURCE, 'utf8')
   const image = env.MX_PAY_IMAGE || '', replicas = Number(env.MX_PAY_REPLICAS || 2)
-  if (!/^[-a-zA-Z0-9.:/_]+@sha256:[a-f0-9]{64}$/.test(image)) throw new Error('Kubernetes requires an immutable image digest')
+  const nodeLoaded=/^local\.mx\/mx-pay:[a-f0-9]{64}$/.test(image) && env.MX_PAY_IMAGE_DELIVERY==='nodes'
+  if (!nodeLoaded && !/^[-a-zA-Z0-9.:/_]+@sha256:[a-f0-9]{64}$/.test(image)) throw new Error('Kubernetes requires an immutable image digest or a verified content-addressed node image')
   if (!Number.isInteger(replicas) || replicas < 2 || replicas > 20) throw new Error('MX_PAY_REPLICAS must be 2–20')
   const runtimeName = `mx-pay-runtime-${hash(JSON.stringify(runtime.values) + credentialJson).slice(0,16)}`
   const migrationName = `mx-pay-migration-${hash(JSON.stringify(migration.values)).slice(0,16)}`
@@ -40,6 +41,12 @@ export function render(env = process.env) {
   const placement = { nodeAffinity: { requiredDuringSchedulingIgnoredDuringExecution: { nodeSelectorTerms: [{ matchExpressions: [
     { key: 'node-role.kubernetes.io/control-plane', operator: 'DoesNotExist' }, { key: 'node-role.kubernetes.io/master', operator: 'DoesNotExist' },
   ] }] } } }
+  if (nodeLoaded) {
+    const nodes=JSON.parse(readFileSync(env.MX_PAY_IMAGE_NODES_FILE,'utf8'))
+    if (!Array.isArray(nodes) || new Set(nodes).size<2 || nodes.some(n=>! /^[a-z0-9][a-z0-9.-]{0,252}$/.test(n))) throw new Error('At least two verified image nodes required')
+    placement.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchFields=[{key:'metadata.name',operator:'In',values:nodes}]
+  }
+  const imagePullPolicy=nodeLoaded ? 'Never' : 'IfNotPresent'
   const pullSecrets = env.MX_PAY_IMAGE_PULL_SECRET ? [{ name: env.MX_PAY_IMAGE_PULL_SECRET }] : []
   if (pullSecrets.some(s => !/^[a-z0-9][-a-z0-9.]{0,251}[a-z0-9]$/.test(s.name))) throw new Error('Invalid image pull Secret')
   const secret = (name, values) => ({ ...base('Secret',name), immutable: true, type: 'Opaque', data: Object.fromEntries(Object.entries(values).map(([k,v]) => [k,Buffer.from(v).toString('base64')])) })
@@ -49,7 +56,7 @@ export function render(env = process.env) {
   const job = { ...base('Job',jobName,'batch/v1'), spec: { backoffLimit: 0, activeDeadlineSeconds: 240, ttlSecondsAfterFinished: 86400,
     template: { metadata: { labels: { ...labels, 'mx-pay-role': 'migration' } }, spec: {
       automountServiceAccountToken: false, restartPolicy: 'Never', securityContext: podSecurity, affinity: placement, imagePullSecrets: pullSecrets,
-      containers: [{ name: 'migrate', image, imagePullPolicy: 'IfNotPresent', command: ['node','server/migrate.mjs'], envFrom: envFrom(migrationName), securityContext: containerSecurity,
+      containers: [{ name: 'migrate', image, imagePullPolicy, command: ['node','server/migrate.mjs'], envFrom: envFrom(migrationName), securityContext: containerSecurity,
         resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '500m', memory: '256Mi' } } }],
     } } } }
   const apiLabels = { ...labels, 'mx-pay-role': 'api' }
@@ -62,7 +69,7 @@ export function render(env = process.env) {
         securityContext: podSecurity, affinity: placement, imagePullSecrets: pullSecrets,
         topologySpreadConstraints: [{ maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'DoNotSchedule', labelSelector: { matchLabels: apiLabels } }],
         volumes: [{ name: 'credentials', secret: { secretName: runtimeName, items: [{ key: 'credentials.json', path: 'credentials.json' }], defaultMode: 292 } }],
-        containers: [{ name: 'api', image, imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 18230 }],
+        containers: [{ name: 'api', image, imagePullPolicy, ports: [{ name: 'http', containerPort: 18230 }],
           env: Object.entries(runtime.values).map(([name]) => ({ name, valueFrom: { secretKeyRef: { name: runtimeName, key: name } } })).concat([{ name: 'MX_PAY_CREDENTIALS_FILE', value: '/run/mx-pay/credentials.json' }]),
           volumeMounts: [{ name: 'credentials', mountPath: '/run/mx-pay', readOnly: true }], securityContext: containerSecurity,
           resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '1000m', memory: '384Mi' } },
@@ -73,7 +80,10 @@ export function render(env = process.env) {
       } },
     } },
   ] }
-  const installation = { ...base('ConfigMap','mx-pay-installation'), data: { databaseIdentity: runtime.identity, lastAttemptImage: image, contractVersion: '1' } }
+  const installation = { ...base('ConfigMap','mx-pay-installation'), data: { databaseIdentity: runtime.identity, lastAttemptImage: image, contractVersion: '2',
+    runtimeSecret:runtimeName,migrationSecret:migrationName,imageRepository:env.MX_PAY_IMAGE_REPOSITORY || '',imageDelivery:nodeLoaded ? 'nodes' : 'registry',
+    serviceURL:`http://mx-pay.${namespace}.svc.cluster.local:18230`,
+  } }
   return { secrets, job, workload, installation }
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -89,7 +99,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
       const count = nodes.filter(n => !n.spec?.unschedulable && !Object.hasOwn(n.metadata.labels || {},'node-role.kubernetes.io/control-plane')
         && !Object.hasOwn(n.metadata.labels || {},'node-role.kubernetes.io/master') && n.status?.conditions?.some(c => c.type === 'Ready' && c.status === 'True')).length
       const minimum = Number(process.env.MX_PAY_MIN_READY_WORKERS || 2)
-      if (!Number.isInteger(minimum) || minimum < 2 || count < minimum) throw new Error('At least two ready, schedulable worker nodes required')
+      if (!Number.isInteger(minimum) || minimum < 2 || count < minimum) throw new Error(`At least ${Math.max(2,minimum)} ready, schedulable worker nodes required; discovered ${count}. Deployment cannot create machines or silently reduce availability`)
       console.log(`Ready worker nodes: ${count}; workload scheduling and capacity will be verified by rollout`)
     } else if (mode === 'check-installation') {
       const previous = readFileSync(0,'utf8').trim()

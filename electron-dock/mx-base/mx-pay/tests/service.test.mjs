@@ -49,6 +49,9 @@ test('dedicated PostgreSQL and HTTP: scopes, concurrent receipts, transactional 
     assert.equal((await restricted.create(credentials[0],{businessOrderId:randomUUID(),customerRef:'runtime-role-test',amountMinor:500},randomUUID())).status,'pending')
     await assert.rejects(runtimePool.query('DELETE FROM pay.orders'),{code:'42501'})
     await assert.rejects(runtimePool.query('UPDATE pay.audit SET document=document'),{code:'42501'})
+    assert.ok((await runtimePool.query('SELECT document FROM pay.reporting_changes WHERE app_id=$1',[app])).rowCount>0)
+    await assert.rejects(runtimePool.query('UPDATE pay.reporting_changes SET document=document'),{code:'42501'})
+    await assert.rejects(runtimePool.query('DELETE FROM pay.reporting_heads'),{code:'42501'})
   } finally {
     await runtimePool.end()
     await pool.query(`DROP OWNED BY ${runtimeRole}`)

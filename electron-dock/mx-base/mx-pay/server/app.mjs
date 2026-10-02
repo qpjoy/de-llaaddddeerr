@@ -16,6 +16,12 @@ async function json(request, maximum = 8192) {
 }
 export function createApp({ service, credentials, state = { draining: false }, logger = console }) {
   let inFlight = 0
+  let reportingInFlight = 0
+  const reportingPage=async work=>{
+    requirePayment(reportingInFlight<2,'reporting_busy','Reporting readers busy; retry with the same cursor',429)
+    reportingInFlight+=1
+    try {return await work()} finally {reportingInFlight-=1}
+  }
   return async (request, response) => {
     const requestId = randomUUID()
     const reply = (status, data) => {
@@ -47,6 +53,8 @@ export function createApp({ service, credentials, state = { draining: false }, l
         noQuery(); data = await service.create(principal, await json(request), request.headers['idempotency-key'])
         return reply(201, { data })
       } else if (path === '/v1/events' && request.method === 'GET') data = await service.pending(principal, url.searchParams)
+      else if (path === '/v1/reporting/snapshot' && request.method === 'GET') data = await reportingPage(()=>service.reporting.snapshot(principal,url.searchParams))
+      else if (path === '/v1/reporting/changes' && request.method === 'GET') data = await reportingPage(()=>service.reporting.changes(principal,url.searchParams))
       else {
         noQuery()
         const order = /^\/v1\/orders\/([^/]+)(?:\/(submit|cancel|confirm|reject))?$/.exec(path)

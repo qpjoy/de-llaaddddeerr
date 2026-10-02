@@ -34,6 +34,7 @@ export async function migrate(databaseUrl, logger = console, { runtimeRole = pro
         await client.query(`GRANT SELECT ON public.schema_migrations TO ${role}`)
         await client.query(`GRANT SELECT, INSERT, UPDATE ON pay.orders, pay.settings, pay.outbox TO ${role}`)
         await client.query(`GRANT SELECT, INSERT ON pay.audit TO ${role}`)
+        await client.query(`GRANT SELECT ON pay.reporting_source, pay.reporting_heads, pay.reporting_changes TO ${role}`)
         await client.query('COMMIT')
       } catch (error) { await client.query('ROLLBACK'); throw error }
       finally { client.release() }

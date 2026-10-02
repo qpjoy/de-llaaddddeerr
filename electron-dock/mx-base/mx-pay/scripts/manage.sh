@@ -9,19 +9,22 @@ die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 usage() {
   cat <<'HELP'
-mx-pay: deploy | migrate | status | doctor | logs | start | stop | restart
-  bash scripts/manage.sh deploy   # validate, build/push, lock, migrate, rollout, readiness
+mx-pay: deploy | migrate | status | doctor | discover | backup | logs | start | stop | restart
+  bash scripts/manage.sh deploy   # discover, provision dedicated PG, migrate, rollout
+  bash scripts/manage.sh discover # read-only JSON capabilities for a future global manage.sh
+  bash scripts/manage.sh backup   # verified PG archive + private recovery metadata
   bash scripts/manage.sh status   # read-only, current deployment target
-Configuration: .env (see .env.example); private database/credentials in secrets/.
+Configuration is discovered at runtime; .env is optional overrides (see .env.example).
 Default Kubernetes; MX_PAY_DEPLOY_DRIVER=compose is development/transition only.
 deploy does NOT move Hub orders/wallets, enable live collection, or restart other systems.
 No delete-data/down/all command. Noninteractive deployment needs no extra prompt.
 HELP
 }
-case "$ACTION" in help|-h|--help) usage; exit 0;; deploy|migrate|status|doctor|logs|start|stop|restart) ;; *) die "Unsupported action: $ACTION";; esac
+case "$ACTION" in help|-h|--help) usage; exit 0;; deploy|migrate|status|doctor|discover|backup|logs|start|stop|restart) ;; *) die "Unsupported action: $ACTION";; esac
 [ "$#" -le 1 ] || die 'Unexpected arguments'
 if [ -f "$ROOT/.env" ]; then set -a; source "$ROOT/.env"; set +a; fi
 export MX_PAY_DEPLOY_DRIVER="${MX_PAY_DEPLOY_DRIVER:-k8s}"
+export MX_PAY_ACTION="$ACTION"
 export MX_PAY_NAMESPACE="${MX_PAY_NAMESPACE:-mx-pay}"
 export MX_PAY_REPLICAS="${MX_PAY_REPLICAS:-2}"
 export MX_PAY_MIN_READY_WORKERS="${MX_PAY_MIN_READY_WORKERS:-2}"
@@ -29,7 +32,14 @@ export MX_PAY_MIN_READY_WORKERS="${MX_PAY_MIN_READY_WORKERS:-2}"
 [[ "$MX_PAY_REPLICAS" =~ ^([2-9]|1[0-9]|20)$ ]] || die 'MX_PAY_REPLICAS must be 2–20'
 absolute() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$ROOT" "$1";; esac; }
 export MX_PAY_RUNTIME_ENV_FILE="$(absolute "${MX_PAY_RUNTIME_ENV_FILE:-secrets/runtime.env}")"
-export MX_PAY_MIGRATION_ENV_FILE="$(absolute "${MX_PAY_MIGRATION_ENV_FILE:-$MX_PAY_RUNTIME_ENV_FILE}")"
+# Preserve previously configured single-role installs; a fresh managed database
+# gets a distinct owner credential that is never mounted in the API Pod.
+if [ -z "${MX_PAY_MIGRATION_ENV_FILE:-}" ]; then
+  if [ -f "$ROOT/secrets/migration.env" ]; then MX_PAY_MIGRATION_ENV_FILE=secrets/migration.env
+  elif [ -f "$MX_PAY_RUNTIME_ENV_FILE" ]; then MX_PAY_MIGRATION_ENV_FILE="$MX_PAY_RUNTIME_ENV_FILE"
+  else MX_PAY_MIGRATION_ENV_FILE=secrets/migration.env; fi
+fi
+export MX_PAY_MIGRATION_ENV_FILE="$(absolute "$MX_PAY_MIGRATION_ENV_FILE")"
 export MX_PAY_CREDENTIALS_SOURCE="$(absolute "${MX_PAY_CREDENTIALS_SOURCE:-secrets/credentials.json}")"
 export MX_PAY_UID="${MX_PAY_UID:-$(id -u)}" MX_PAY_GID="${MX_PAY_GID:-$(id -g)}"
 TMP='' LOCK_UID='' JOB_RUNNING=0 LOCAL_LOCK=0 PHASE=preflight
@@ -39,6 +49,14 @@ compose() { docker compose --project-directory "$ROOT" -f "$ROOT/deploy/compose.
 cleanup() {
   local result=$?
   trap - EXIT INT TERM
+  if [ "$PHASE" = database ] && [ "$result" != 0 ] && [ -n "$LOCK_UID" ]; then
+    # Initialization has its own bounded Job. Never unlock while its termination
+    # or completion is unknown, including a lost kubectl connection.
+    if ! kube get job mx-pay-postgres-init --ignore-not-found -o json | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{if(s.trim()&&!JSON.parse(s).status?.succeeded)process.exit(1)})'; then
+      say 'Database initialization unresolved; retained mx-pay-deploy-lock. Inspect mx-pay-postgres-init before recovery.' >&2
+      LOCK_UID=''
+    fi
+  fi
   if [ "$JOB_RUNNING" = 1 ]; then
     # A timeout must not release the deploy lock while the DDL Job is still alive.
     if ! kube delete job "$MX_PAY_JOB_NAME" --ignore-not-found --wait=true --timeout=90s --request-timeout=100s; then
@@ -62,13 +80,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 case "$MX_PAY_DEPLOY_DRIVER" in
   k8s)
-    need kubectl
-    [ -n "${MX_PAY_KUBE_CONTEXT:-}" ] || die 'Set MX_PAY_KUBE_CONTEXT explicitly'
-    say "target=k8s context=$MX_PAY_KUBE_CONTEXT namespace=$MX_PAY_NAMESPACE"
+    need kubectl; need node
+    MX_PAY_KUBE_CONTEXT="$(node "$ROOT/scripts/runtime.mjs" target "$ROOT")" || exit 1
+    export MX_PAY_KUBE_CONTEXT
+    [ "$ACTION" = discover ] || say "target=k8s context=$MX_PAY_KUBE_CONTEXT namespace=$MX_PAY_NAMESPACE"
     case "$ACTION" in
-      status) kube get deployment,service,pdb,job -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
+      discover) node "$ROOT/scripts/runtime.mjs" discover "$ROOT"; exit;;
+      status) kube get deployment,statefulset,service,pdb,job,pvc -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
       logs) kube logs deployment/mx-pay --all-pods=true --tail=100 --follow; exit;;
-      doctor) kube get nodes -o wide; kube get deployment,pods,job,pdb -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
+      doctor) node "$ROOT/scripts/runtime.mjs" discover "$ROOT"; kube get nodes -o wide; kube get deployment,pods,job,pdb,pvc -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
     esac
     ;;
   compose)
@@ -76,6 +96,7 @@ case "$MX_PAY_DEPLOY_DRIVER" in
     say "target=compose context=$(docker context show) (no rolling availability guarantee)"
     if [ -f "$ROOT/.deploy/image" ]; then export MX_PAY_IMAGE="${MX_PAY_IMAGE:-$(cat "$ROOT/.deploy/image")}"; fi
     case "$ACTION" in
+      discover|backup) die "$ACTION currently requires Kubernetes; Compose uses an externally managed database";;
       status|doctor) export MX_PAY_IMAGE="${MX_PAY_IMAGE:-mx-pay:not-deployed}"; compose ps --all; exit;;
       logs) compose logs --tail=100 --follow api; exit;;
     esac
@@ -84,7 +105,7 @@ case "$MX_PAY_DEPLOY_DRIVER" in
 esac
 need node
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mx-pay-deploy.XXXXXXXX")"
-if [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; then
+if [ "$MX_PAY_DEPLOY_DRIVER" = compose ] && { [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; }; then
   node "$ROOT/scripts/render.mjs" validate
 fi
 if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
@@ -100,9 +121,15 @@ else
   mkdir "$ROOT/.deploy/lock" 2>/dev/null || die 'Another local mx-pay operation is running; inspect before recovering its lock'
   LOCAL_LOCK=1
 fi
+if [ "$ACTION" = backup ]; then
+  PHASE=backup
+  node "$ROOT/scripts/postgres.mjs" backup "$ROOT"
+  exit
+fi
 case "$ACTION" in
   stop|start|restart)
     if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+      [ "$ACTION" = stop ] || node "$ROOT/scripts/postgres.mjs" check "$ROOT"
       case "$ACTION" in
         stop) kube scale deployment/mx-pay --replicas=0;;
         start) kube scale deployment/mx-pay --replicas="$MX_PAY_REPLICAS";;
@@ -112,22 +139,47 @@ case "$ACTION" in
     else compose "$ACTION" api; fi
     say 'Operation complete; database and credentials retained'; exit;;
 esac
+if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+  PHASE=discovery
+  node "$ROOT/scripts/runtime.mjs" prepare "$ROOT"
+  source "$ROOT/.deploy/discovered.env"
+fi
 PHASE=image
 if [ "${MX_PAY_BUILD:-1}" = 1 ]; then
   need docker
   tag="$(date -u +%Y%m%d%H%M%S)-$(node -e 'console.log(require("crypto").randomBytes(4).toString("hex"))')"
   if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
-    [ -n "${MX_PAY_IMAGE_REPOSITORY:-}" ] || die 'Set MX_PAY_IMAGE_REPOSITORY to a registry reachable by every worker'
-    docker buildx build --build-context "mx_common=$ROOT/../../mx-common" --metadata-file "$TMP/build.json" \
-      --tag "$MX_PAY_IMAGE_REPOSITORY:$tag" --push "$ROOT"
-    digest="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1]))["containerimage.digest"];if(!/^sha256:[a-f0-9]{64}$/.test(d))process.exit(1);console.log(d)' "$TMP/build.json")"
-    export MX_PAY_IMAGE="$MX_PAY_IMAGE_REPOSITORY@$digest"
+    if [ "$MX_PAY_IMAGE_DELIVERY" = registry ]; then
+      [ -n "$MX_PAY_IMAGE_REPOSITORY" ] || die 'Discovered registry has no imageRepository'
+      platform="$(node "$ROOT/scripts/runtime.mjs" image-platforms "$ROOT")"
+      docker buildx build --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --metadata-file "$TMP/build.json" \
+        --tag "$MX_PAY_IMAGE_REPOSITORY:$tag" --push "$ROOT"
+      digest="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1]))["containerimage.digest"];if(!/^sha256:[a-f0-9]{64}$/.test(d))process.exit(1);console.log(d)' "$TMP/build.json")"
+      export MX_PAY_IMAGE="$MX_PAY_IMAGE_REPOSITORY@$digest"
+    else
+      say 'No registry configured; verifying existing local/trusted SSH containerd access to every worker'
+      platform="$(node "$ROOT/scripts/runtime.mjs" image-plan "$ROOT")"
+      docker buildx build --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --tag "local.mx/mx-pay:$tag" --load "$ROOT"
+      content_id="$(docker image inspect --format '{{.Id}}' "local.mx/mx-pay:$tag")"
+      [[ "$content_id" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'Invalid built image identity'
+      export MX_PAY_IMAGE="local.mx/mx-pay:${content_id#sha256:}"
+      docker image tag "local.mx/mx-pay:$tag" "$MX_PAY_IMAGE"
+      docker image save --output "$TMP/image.tar" "$MX_PAY_IMAGE"
+      node "$ROOT/scripts/runtime.mjs" import-image "$ROOT" "$TMP/image.tar" "$MX_PAY_IMAGE"
+      export MX_PAY_IMAGE_NODES_FILE="$ROOT/.deploy/image-nodes.json"
+    fi
   else
     export MX_PAY_IMAGE="mx-pay:$tag"
     docker buildx build --build-context "mx_common=$ROOT/../../mx-common" --tag "$MX_PAY_IMAGE" --load "$ROOT"
   fi
 elif [ "${MX_PAY_BUILD:-1}" != 0 ]; then die 'MX_PAY_BUILD must be 0 or 1'; fi
 [ -n "${MX_PAY_IMAGE:-}" ] || die 'MX_PAY_IMAGE is required with MX_PAY_BUILD=0'
+if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+  PHASE=database
+  say 'Checking dedicated PostgreSQL and retained storage identity'
+  node "$ROOT/scripts/postgres.mjs" provision "$ROOT"
+  node "$ROOT/scripts/render.mjs" validate
+fi
 PHASE=migration
 if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
   export MX_PAY_JOB_NAME="mx-pay-migrate-$(date -u +%s)-$(node -e 'console.log(require("crypto").randomBytes(3).toString("hex"))')"

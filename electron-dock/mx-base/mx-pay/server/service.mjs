@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createOrder, transitionOrder, settingsInput, requestKey, fingerprint, defaultSettings, requirePayment, fields, text, PaymentError } from '../src/index.mjs'
 import { authorize } from './config.mjs'
+import { ReportingReader } from './reporting.mjs'
 
 export const uuid = value => {
   requirePayment(typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value), 'invalid_payment_id', 'Invalid UUID')
@@ -8,7 +9,7 @@ export const uuid = value => {
 }
 const actorOf = principal => `credential:${principal.id}`
 export class PaymentCenter {
-  constructor(pool) { this.pool = pool }
+  constructor(pool, { reportingPool = pool } = {}) { this.pool = pool; this.reporting = new ReportingReader(reportingPool) }
   async atomic(scope, work) {
     const client = await this.pool.connect()
     let committing = false

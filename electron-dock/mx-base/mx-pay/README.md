@@ -6,7 +6,7 @@
 
 ## 一个命令部署或更新
 
-在目标部署主机完成一次性配置后，在本目录运行：
+在有 Node.js 22.18+、kubectl 和 Docker Buildx 的目标部署主机，在本目录运行；无需先复制 `.env` 或手填 context、密码：
 
 ```sh
 bash scripts/manage.sh deploy
@@ -18,24 +18,29 @@ bash scripts/manage.sh deploy
 bash scripts/manage.sh deploy mx-pay
 ```
 
-Kubernetes 为默认方式：配置验证 → 检查至少两个就绪工作节点 → 取得部署锁 → 构建并推送镜像、固定 digest → 创建本版本不可变配置 → 执行数据库迁移 Job → 迁移完成后更新 API → 等待 rollout 与 readiness。重复执行检查原迁移校验和，不重复执行已完成 SQL。部署失败返回非零退出码，阶段结果在 `.deploy/last-result.json`，方便后续 Internal Admin 执行器接入。
+Kubernetes 为默认方式：发现并固定集群 → 检查至少两个就绪工作节点 → 取得部署锁 → 发现/保留配置与凭据 → 构建和分发镜像 → 准备专用 PostgreSQL、固定存储身份 → 创建本版本不可变配置 → 执行迁移 Job → 迁移成功后更新 API → 等待 rollout 与 readiness。重复执行检查原迁移校验和，不重复执行已完成 SQL。失败返回非零退出码，阶段结果在 `.deploy/last-result.json`。
 
-API 为两个或以上副本，RollingUpdate 的 `maxUnavailable=0`、`maxSurge=1`，按主机分布，配置资源限额、探针、退出排空与 PDB。无 hostNetwork、hostPort、Ingress、NodePort 或自动公网域名。镜像需可被每台 worker 拉取；数据库使用独立 PostgreSQL，不调用 mx-common 的共享集群部署，也不等待 Hub、Launcher、ES、Redis 或 AI 服务。
+API 为两个或以上副本，RollingUpdate 的 `maxUnavailable=0`、`maxSurge=1`，按主机分布，配置资源限额、探针、退出排空与 PDB。无 hostNetwork、hostPort、Ingress、NodePort 或自动公网域名。数据库使用专用 PostgreSQL 实例，不调用 mx-common 的共享集群部署，也不等待 Hub、Launcher、ES、Redis 或 AI 服务。
 
-部署脚本目前不会创建 PostgreSQL 集群、数据库角色或镜像仓库。两台 worker 和此部署配置也不等于数据库/控制面已高可用；这些环境前提与滚更中的请求连续性仍需在目标集群验收。
+未配置外部支付数据库时，自动创建专用 PG16、`mx_pay` 数据库、迁移 owner 与运行角色、持久卷、数据库 Secret 和应用凭据。API 发布不重启/升级已有 PostgreSQL。当前托管 PG 为一个 StatefulSet 副本，采用 `OnDelete` 更新策略和 PDB；**双节点 API 不等于 PostgreSQL 或控制面高可用**。生产主备、WAL/PITR、异地备份与断电恢复仍需单独建设和验收。脚本不能凭空创建第二台机器。
 
-## 一次性配置
+## 自动发现与可选配置
 
-准备 Node.js 22.18+、Docker Buildx、kubectl，以及目标 Kubernetes context、专用 PostgreSQL 数据库和所有 worker 可访问的镜像仓库。构建主机的镜像架构应与目标 worker 匹配；异构集群需使用已构建的多架构镜像 digest。
+- 集群：显式覆盖值 → 已记录的部署目标 → 当前 context → 唯一 context。保留 context、`kube-system` namespace UID 和目标 namespace，不修改全局 `kubectl use-context`。重复部署拒绝变更集群身份。
+- 凭据：优先现有 `secrets/` 文件；文件丢失则从当前 Deployment/安装记录引用的 Secret 恢复。首次生成应用 test/live、核实人员和渠道管理员独立凭据。只恢复配置，不恢复业务数据；已有服务凭据不能因查询失败而被当成“不存在”。
+- 镜像仓库：显式 `.env` → 安装记录 → 当前 namespace 的 `ConfigMap/mx-platform-runtime` 中 `data.imageRepository`。这是一份可选运行时能力声明，为后续总 `manage.sh` 预留，无需额外中心在线。
+- 无仓库：检查所有就绪 worker 的 containerd，通过本机 `ctr` 或已有可信 SSH 导入同一镜像。远端默认使用节点 InternalIP 与当前 SSH 用户，可用 Node annotation `mx-pay.io/ssh-target=user@host` 明确已有入口。使用 `BatchMode`、严格 known_hosts 和无交互 sudo；不自动信任新主机、不改 containerd 配置。任一节点无法访问则在迁移前失败，提示所缺节点或可选镜像仓库。
+- 节点镜像采用 Docker 内容 ID 命名、逐节点验证、`imagePullPolicy: Never`，API/迁移仅调度到已导入的节点。新增节点后再次 deploy 才纳入。节点镜像被运行时 GC 清除时也需重新 deploy；长期生产优先使用可靠仓库。节点导入目前要求同构 amd64/arm64，自动选择对应构建平台；异构集群可提供多架构镜像 digest。
+- 存储：唯一默认 StorageClass → 本机 Linux 专用 local PV。无动态存储时，仅在通过 InternalIP 确认的本机上创建目录；优先挂载后的 `/data/mx-pay/<namespace>/postgres`，否则 `/var/lib/mx-pay/<namespace>/postgres`。存在 `/data` 却未挂载立即失败。已有路径、卷和数据身份优先，不扫描备份寻找“可用数据”。首次本地目录创建需要该主机文件权限，截图中的 root 运行方式可满足。
 
 ```sh
+# 可选：自定义，而不是 deploy 的前置要求
 cp .env.example .env
-node scripts/init-credentials.mjs mx-insight-hub
 ```
 
-编辑 `.env` 中 context、镜像仓库、namespace 等值。`init-credentials` 只在目标文件不存在时生成应用的 test/live 调用凭据、各环境独立的核实凭据和渠道管理凭据；已有文件保留，输出不打印密钥，不启用真实收款。应用 API 凭据仅放在业务服务端，不分发给浏览器，不复用 Hub Admin Token 或 Launcher 登录令牌。
+`.env.example` 所有配置均为注释形式的可选覆盖。自动生成和恢复的本地文件为 `0600`，日志不打印密码；不启用真实收款。应用 API 凭据仅放在业务服务端，不分发给浏览器，不复用 Hub Admin Token 或 Launcher 登录令牌。
 
-自行创建权限为 `0600` 的 `secrets/runtime.env`：
+如需接入**已经由外部管理的专用 PostgreSQL**，可自行提供 `0600` 的 `secrets/runtime.env`：
 
 ```dotenv
 MX_PAY_DATABASE_URL=postgresql://mx_pay_runtime:URL_ENCODED_PASSWORD@PAYMENT_DB_HOST:5432/mx_pay
@@ -51,17 +56,19 @@ MX_PAY_DATABASE_URL=postgresql://mx_pay_owner:URL_ENCODED_PASSWORD@PAYMENT_DB_HO
 MX_PAY_RUNTIME_ROLE=mx_pay_runtime
 ```
 
-两个角色和数据库先由数据库管理员建立；运行角色须能连接该库。迁移结束后自动对运行角色授予当前支付表需要的查询/写入权限，不授予 DDL、DELETE 或审计修改权限。API Pod 只挂载运行凭据，迁移 owner 仅进入 Job。未单独配置迁移文件时沿用运行连接，适用于本机/过渡环境。
+外部数据库的两个角色和数据库由其管理员建立；托管模式由脚本自动建立。迁移结束后自动对运行角色授予当前支付表需要的查询/写入权限，不授予 DDL、DELETE 或审计修改权限。API Pod 只挂载运行凭据，迁移 owner 仅进入 Job。已有单连接配置保持兼容，首次托管部署始终使用独立的 `runtime.env`、`migration.env`。
 
 `secrets/credentials.json` 可登记多个应用；每条记录有独立 `id`、`appId`、`environment`、`secret` 和 `scopes`。身份与环境从凭据确定，请求体不能指定其他应用或环境。凭据更新通过新版本 Secret 和 Pod 发布生效；旧 Pod 完全退出前旧凭据可能仍有效，不能把修改文件当成即时撤销。
 
-预构建镜像部署：设置 `MX_PAY_BUILD=0` 和 `MX_PAY_IMAGE=registry/path@sha256:<64位摘要>`。一般重复 deploy 自动构建新镜像，不使用 `latest` 或单节点的 `imagePullPolicy: Never`。
+预构建镜像部署：设置 `MX_PAY_BUILD=0` 和 `MX_PAY_IMAGE=registry/path@sha256:<64位摘要>`。一般重复 deploy 自动构建新镜像。
 
 ## 管理与恢复
 
 ```sh
 bash scripts/manage.sh status
 bash scripts/manage.sh doctor
+bash scripts/manage.sh discover  # 只读 JSON：版本、动作、实际节点、服务地址和依赖
+bash scripts/manage.sh backup    # 独立托管 PG 的一致性逻辑归档与恢复配置
 bash scripts/manage.sh logs
 bash scripts/manage.sh migrate   # 只迁移，不更新 API
 bash scripts/manage.sh restart   # Kubernetes 滚动重启当前版本
@@ -75,6 +82,17 @@ bash scripts/manage.sh start
 - rollout 失败可能已有部分新副本就绪；脚本报告失败并保留证据，不声称已经自动回滚。检查 Job、Pod 和原镜像/Secret 后，可使用上一个兼容镜像 digest 重新 deploy。回退程序不回退付款事实或数据库。
 - 首次部署即记录数据库目标指纹；之后普通 deploy 不允许悄悄换库。密码更新不改变目标指纹。数据库迁移或主机名称切换是独立运维变更。
 - 每代 Secret 保留，便于兼容回退；后续清理必须先核对 Deployment/ReplicaSet/Job 引用。当前不自动删旧凭据、数据库、PVC 或备份。
+- 首次 PostgreSQL 初始化使用独立 Job。完成后固定 PV/PVC UID、PG system identifier 与安装标记；普通数据库启动命令没有 `initdb`，数据缺失或身份不一致则拒绝启动。local PV 使用 `local.path` 与硬节点亲和性，保留策略为 `Retain`，不会因调度到另一台节点而创建空目录。独立宿主机收据位于 `/var/lib/mx-pay/<namespace>/storage-identity.json`，绑定文件系统 UUID、挂载点与路径；不要删除它来“修复”部署。
+- 动态 PV 也固定 UID，并将本服务专有 PV 的回收策略改为 `Retain`。既有 PG 镜像、路径、PVC、密码不因默认值变化而重建。初始化失败/超时保留 Job；完成/终止未确认时保留部署锁，需排查，不能自动删除锁或换库重试。
+- `backup` 使用 `pg_dump -Fc` 的一致性快照；经 `pg_restore --list` 验证并生成 SHA-256 后才把 `.partial` 目录发布为完成目录。同时保留安装信息、专用 PG 凭据、当前及在运行副本引用的支付凭据，目录 `0700`、文件 `0600`。默认 Linux 路径 `/var/backups/mx-pay/<namespace>`，可用 `MX_PAY_BACKUP_DIR` 指定；需安全复制到异机。归档可读不代表已完成恢复演练，manifest 明确记录 `restoreDrillCompleted=false`。外部 PG 由其备份/PITR体系管理；普通 deploy 从不恢复任何备份。
+
+### 重启、持久化与存量系统
+
+Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已有 PG system identifier、文件系统 UUID 与保留卷检查，Hub 遇到 mx-common 存储身份错误会停止部署。这些已有机制与 mx-pay 相互独立；本次不修改 H2I 登录、Launcher 身份或 Hub 租户数据。
+
+曾出现“重启后像切到了另一份备份”的情况，应先核对实际挂载、PV/PVC、数据库连接、PG 身份、关键记录最新时间和业务流水，保留所有候选数据，不能用部署命令自动择库。身份检查能阻止误指向与空库初始化，**不能证明同一实例的一份物理历史备份足够新**；正式恢复仍需确定恢复点、核对在途交易/总账/上游流水后才开放写入。当前仅完成代码检查和测试，未连接服务器确认上次事故原因，也未替现有数据做新旧裁决。
+
+后续总 `manage.sh` 应消费各中心的 `discover`/`last-result` 合约，编排部署、只读数据身份检查和独立备份任务；不能把“某个服务不可用”解释为允许为它选择备用数据、轮换凭据或创建新数据库。
 
 脚本 `stop` 是停进程，会中断该服务；正式支付维护应先安排停止新单并处理在途订单。尚未实现业务层维护开关、自动渠道回调、退款或自动开票，不能把 restart/stop 当成退款或取消付款。
 
@@ -95,6 +113,8 @@ bash scripts/manage.sh start
 | `GET/PUT /v1/settings` | 收款码配置；`settings.write`；写入仅 live 凭据 |
 | `GET /v1/events` | 未确认付款事件，最多 100 条；支持 after 分页；`events.read` |
 | `POST /v1/events/:id/ack` | 业务已提交凭据 businessReceipt；`events.ack` |
+| `GET /v1/reporting/snapshot` | 存量分页与初始增量水位；独立 `reports.read` |
+| `GET /v1/reporting/changes` | 可重放的已提交订单变更，独立于业务 ACK；`reports.read` |
 
 金额使用整数分；当前 CNY 500–10,000,000 分。重复下单需保持相同业务单、金额和幂等键。确认时严格校验订单版本、实收金额、真实流水与到账时间，同一收款账户的流水不能被多个应用重复使用。用户提交付款流水不会使订单变成已支付。
 
@@ -108,15 +128,19 @@ bash scripts/manage.sh start
 
 ## 验证与后续
 
+跨 Kubernetes／数据库集成使用业务 API 与只读报表数据契约。现已补齐存量分页、增量游标、独立报表凭据与 SDK；Hub 和财务消费者可各自建读模型并保存进度，尚未自动接入 Hub 报表界面。详见[跨中心同步与财务报表](docs/cross-center-reporting.md)。
+
 ```sh
 npm ci --omit=optional --ignore-scripts
 npm test
 # 使用已创建的可丢弃测试库；包含 HTTP、本地事务、权限和迁移验证
 MX_PAY_TEST_DATABASE_URL=postgresql://.../mx_pay_test npm test
+# PG16 初始化脚本、权限、备份恢复和拒绝空库启动；仅创建可丢弃临时实例
+MX_PAY_TEST_PG_BIN=/path/to/postgresql-16/bin node --test tests/bootstrap-postgres.test.mjs
 ```
 
-部署测试使用替身命令验证执行顺序、失败停止、锁与配置代际；数据库测试使用真实 PostgreSQL。2026-10-02 本机 13 项支付测试、43 项 Hub 登录/钱包/充值回归及 1 项 mx-base 管理回归通过。当前机器 Docker daemon 未启动，未完成容器构建、真实双节点 rollout 或生产部署验收。
+部署测试使用替身命令验证执行顺序、自动发现、重复部署/丢失配置恢复、错误集群/卷/数据库拦截、每节点镜像导入、迁移失败停止、锁与归档失败不发布；数据库测试使用真实 PostgreSQL。2026-10-02 全部 25 项支付测试通过（无跳过），含真实 PG16 初始化、运行权限、逻辑备份恢复到新库、数据身份错误/目录缺失时拒绝启动，以及报表存量/增量、并发提交/回滚、权限隔离、时钟偏差和独立消费者。Launcher/mx-common 现有 48 项存储与恢复保护测试、mx-base 管理回归也已通过。测试不代表目标机器状态；当前未完成 Docker 容器构建、真实双节点 rollout 或生产部署验收。
 
 后续先接 Hub 业务 inbox、充值交付与存量单写交接，再完善独立人类管理台和 Launcher 身份接入。官方支付宝、Creem、微信、退款执行、分账和供应商付款尚未实现。业务架构见[统一管理规划](../../mx-launcher/docs/32-platform-business-centers-and-management-integration.md)与[支付规划](../../mx-insight-hub/docs/product/payments-and-cost-control.md)。
 
-部署机制参考 [Kubernetes Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/)、[Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)与[PostgreSQL 锁](https://www.postgresql.org/docs/16/explicit-locking.html)。实际可用性须按目标环境进行故障和恢复验收。
+部署机制参考 [Kubernetes Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/)、[Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)、[持久卷保留](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)、[PG16 初始化](https://www.postgresql.org/docs/16/app-initdb.html)与[归档恢复](https://www.postgresql.org/docs/16/app-pgrestore.html)。实际可用性须按目标环境进行故障和恢复验收。

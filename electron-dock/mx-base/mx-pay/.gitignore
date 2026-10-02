@@ -3,3 +3,4 @@
 !.env.example
 secrets/
 .deploy/
+backups/

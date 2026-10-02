@@ -28,6 +28,19 @@ export class PaymentClient {
   act(id, action, body, key) { return this.request(`/v1/orders/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body, key }) }
   events(after) { return this.request(`/v1/events${after ? `?after=${encodeURIComponent(after)}` : ''}`) }
   acknowledge(id, businessReceipt) { return this.request(`/v1/events/${encodeURIComponent(id)}/ack`, { method: 'POST', body: { businessReceipt } }) }
+  reportingSnapshot(after, limit=100) { return this.request(`/v1/reporting/snapshot?${new URLSearchParams({limit:String(limit),...(after ? {after} : {})})}`) }
+  reportingChanges(after, limit=100) { return this.request(`/v1/reporting/changes?${new URLSearchParams({limit:String(limit),...(after ? {after} : {})})}`) }
+  async syncReportingPage(commitProjectionPage, checkpoint=null, {limit=100}={}) {
+    if (checkpoint && (!['snapshot','changes'].includes(checkpoint.phase) || typeof checkpoint.cursor!=='string' || !checkpoint.cursor)) throw new Error('Invalid saved reporting checkpoint')
+    const phase=checkpoint?.phase || 'snapshot'
+    const page=phase==='snapshot' ? await this.reportingSnapshot(checkpoint?.cursor,limit) : await this.reportingChanges(checkpoint.cursor,limit)
+    const nextCheckpoint=phase==='snapshot' && page.hasMore ? {phase:'snapshot',cursor:page.nextCursor}
+      : {phase:'changes',cursor:page.changesCursor}
+    // One consumer-local transaction: revision-guarded upserts + checkpoint.
+    // Returning is NOT an acknowledgement and cannot hide data from other readers.
+    await commitProjectionPage({...page,phase,nextCheckpoint})
+    return {checkpoint:nextCheckpoint,hasMore:page.hasMore,initialCatchupRequired:phase==='snapshot',observedAt:page.observedAt}
+  }
   async consumeBatch(commitBusinessEvent, { after } = {}) {
     const { items, nextAfter = null } = await this.events(after), result = { acknowledged: [], failed: [], nextAfter }
     for (const event of items) {
