@@ -4,6 +4,8 @@
 MX Launcher 后续主线。短期不建设 AI 训练平台，优先借鉴 K8s 和成熟运维系统能力，
 把 MX Launcher 做成稳定、可观测、可审计、可回滚的 Internal 控制面。
 
+2026-10-02 后续决策：[完整平台设计](33-mx-platform-identity-and-sustainable-architecture.md)将身份、运维、桌面网络和业务产品分域；[总部署契约](34-platform-deploy-and-recovery-contract.md)定义一个入口与各子系统自己的部署责任。用户不再需要 AWX provider，本文下方 AWX 优先路线保留为历史；目标采用现有 Runner 与受限执行适配器，实际删除前盘点引用和在途任务，本轮未卸载或改动执行代码。
+
 2026-10-02 范围补充：[平台业务分域与统一管理](32-platform-business-centers-and-management-integration.md)
 建议保留 Launcher Runtime/SDK/登录/网络，从现有 Admin 演进可独立发布的运维控制台。
 平台入口统一接入各中心的业务工作台，安装维护通过受限执行器完成；本文件的 Internal

@@ -64,6 +64,7 @@ import { CatalogClassifier } from './agent/catalog-classifier.mjs'
 import { NotificationService } from './notifications.mjs'
 import { FeishuAlertNotifier } from './notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
+import { createPaymentReporting } from './payments/reporting.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -497,6 +498,7 @@ export async function createRuntime(config = loadConfig()) {
   // bot hooks are read from the database on every pass, so an operator's edit
   // takes effect without restarting anything.
   const feishuAlerts = config.listenerMode === 'public' ? null : new FeishuAlertNotifier({ pool })
+  const paymentReporting = config.listenerMode === 'public' ? null : createPaymentReporting(config.paymentReporting)
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const app = createApp({
     service,
@@ -525,6 +527,7 @@ export async function createRuntime(config = loadConfig()) {
     provisioning: new ProvisioningService({ service, control: externalPlatformControlStore, runtime: async provider => (await externalPlatformAdmin.provisioningContext(provider)).runtime }),
     notifications,
     balanceMonitor,
+    paymentReporting,
     nightAllA,
     externalPlatformGateway,
     xiaohongshuHotNotesGateway,
@@ -544,7 +547,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, balanceMonitor, feishuAlerts,
+    notifications, balanceMonitor, feishuAlerts, paymentReporting,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -567,7 +570,9 @@ export async function start(config = loadConfig()) {
   runtime.notifications?.start()
   runtime.balanceMonitor?.start()
   runtime.feishuAlerts?.start()
+  runtime.paymentReporting?.start?.()
   const close = async () => {
+    await runtime.paymentReporting?.close?.()
     await runtime.feishuAlerts?.close()
     await runtime.balanceMonitor?.close()
     await runtime.notifications?.close()

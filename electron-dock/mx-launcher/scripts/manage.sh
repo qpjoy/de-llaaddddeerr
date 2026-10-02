@@ -1394,6 +1394,8 @@ shadow_image_admin_assets() {
   mkdir -p "$out_dir/node_modules/three/build"
   cp "$ROOT/desktop/index.html" "$out_dir/index.html"
   cp "$ROOT/desktop/renderer.js" "$out_dir/renderer.js"
+  cp "$ROOT/desktop/service-operations.js" "$out_dir/service-operations.js"
+  cp "$ROOT/desktop/service-operations-catalog.js" "$out_dir/service-operations-catalog.js"
   cp "$ROOT/desktop/styles.css" "$out_dir/styles.css"
   cp "$three_build_dir"/*.js "$out_dir/node_modules/three/build/"
 }
@@ -4357,6 +4359,30 @@ EOF
   native_host_runner_status "$port"
 }
 
+service_operations_ensure() {
+  local enabled="${MX_SERVICE_OPERATIONS_INSTALL:-1}"
+  case "$enabled" in
+    0) say "skip independent service executor install (MX_SERVICE_OPERATIONS_INSTALL=0); retain existing service and Secret"; return ;;
+    1) ;;
+    *) die "MX_SERVICE_OPERATIONS_INSTALL must be 0 or 1" ;;
+  esac
+  [ "$(uname -s)" = "Linux" ] || die "production service executor requires Linux/systemd; explicitly set MX_SERVICE_OPERATIONS_INSTALL=0 for another deployment environment"
+  local node_bin initial_bind
+  node_bin="$(command -v node)" || die "Node.js 22+ is required for the independent service executor"
+  initial_bind="$(k8s_detect_lan_ip || true)"
+  local args=("$ROOT/server/scripts/service-operations-install.mjs" --workspace "$(dirname "$ROOT")" --connect-k8s)
+  [ -z "$initial_bind" ] || args+=(--default-bind "$initial_bind")
+  [ -z "${MX_SERVICE_OPERATIONS_BIND:-}" ] || args+=(--bind "$MX_SERVICE_OPERATIONS_BIND")
+  [ -z "${MX_SERVICE_OPERATIONS_PORT:-}" ] || args+=(--port "$MX_SERVICE_OPERATIONS_PORT")
+  say "ensure independent service executor and API connection (preserve token, profiles and tasks)"
+  if [ "$(id -u)" = "0" ]; then
+    "$node_bin" "${args[@]}"
+  else
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to install the independent service executor"
+    sudo -E "$node_bin" "${args[@]}"
+  fi
+}
+
 native_host_runner_install_linux() {
   local port="${1:-19190}"
   local service node_bin node_dir temp artifact_dir bundle_dir root_cmd
@@ -5779,6 +5805,13 @@ Notes:
     bash scripts/manage.sh ops site-slot materialize-domestic-ready domestic-main
     bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply
   - HDO V1 uses 8080 and hdo-home/hdo-internal; this path does not stop them.
+  - Deploy ensures the independent service operations executor before API rollout.
+    First install uses the detected LAN IP (MX_SERVICE_OPERATIONS_BIND override)
+    and port 19290 (MX_SERVICE_OPERATIONS_PORT override). Existing settings and
+    credentials are preserved. Same-version installs do not restart the executor;
+    updates drain running tasks and switch after their results are saved.
+    MX_SERVICE_OPERATIONS_INSTALL=0 skips this step without removing its service
+    or Secret. This executor is separate from the native Internal host runner.
 EOF
 }
 
@@ -5944,6 +5977,7 @@ ops_internal_production() {
       k8s_recover_cluster_network
       k8s_require_production_node_ready
       k8s_production_disk_preflight
+      service_operations_ensure
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.mjs", "./client": "./src/client.mjs" },
+  "exports": { ".": "./src/index.mjs", "./client": "./src/client.mjs", "./reporting": "./reporting/index.mjs" },
   "engines": { "node": ">=22.18" },
   "scripts": {
     "start": "node server/index.mjs",

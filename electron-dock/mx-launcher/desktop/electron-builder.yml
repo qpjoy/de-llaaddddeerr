@@ -9,6 +9,8 @@ files:
   - main.cjs
   - preload.cjs
   - renderer.js
+  - service-operations.js
+  - service-operations-catalog.js
   - styles.css
   - package.json
 extraResources:

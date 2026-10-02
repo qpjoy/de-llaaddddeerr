@@ -1563,7 +1563,7 @@ assert.match(stylesSource, /\.mx-h2i-dashboard-hero\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-banned-user-row\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-lease-drawer\s*\{/);
 assert.match(stylesSource, /\.launcher-network-product-scope\s*\{/);
-assert.match(indexSource, /<strong>Launcher Network<\/strong>/);
+assert.match(indexSource, /<strong>网络与设备<\/strong>/);
 assert.match(indexSource, /id="tab-mx-h2i-dashboard"[\s\S]*data-app-surface="dashboard"/);
 assert.match(indexSource, /id="mx-h2i-lease-drawer"/);
 assert.match(packageSource, /node scripts\/mx-h2i-operations-ui\.test\.mjs/);

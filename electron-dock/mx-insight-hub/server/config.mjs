@@ -12,6 +12,7 @@ import {
 } from './external-platforms/config.mjs'
 import { parseServerFileRoots } from './ingest/external/server-files.mjs'
 import { parseExternalMediaConfig } from './external-media-config.mjs'
+import { reportingConfig } from './payments/reporting.mjs'
 
 export {
   parseExternalMediaConfig,
@@ -348,6 +349,7 @@ export function loadConfig(environment = process.env) {
     reservationLeaseMs,
     storeDriver,
     databaseUrl,
+    paymentReporting: listenerMode==='public' ? null : reportingConfig(environment),
     nightAllA: nightAllAConfig(environment),
     nightAll: {
       baseUrl: environment.NIGHT_ALL_BASE_URL || 'http://127.0.0.1:13141',

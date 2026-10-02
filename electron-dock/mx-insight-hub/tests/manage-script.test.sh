@@ -75,6 +75,22 @@ assert_eq \
   "scoped build proxy covers buildx client token requests"
 rm -f -- "$build_proxy_marker"
 
+# UI/CLI proxy overrides, including explicit direct mode, survive .env.internal.
+for proxy_mode in custom direct saved; do
+  proxy_override_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-proxy-override.XXXXXX")"
+  (
+    unset MX_INSIGHT_BUILD_PROXY
+    case "$proxy_mode" in custom) export MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7999;; direct) export MX_INSIGHT_BUILD_PROXY=;; esac
+    need() { :; }
+    load_env_file() { MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788; }
+    kubectl() { printf '%s' "${MX_INSIGHT_BUILD_PROXY-}" > "$proxy_override_marker"; }
+    ops_action internal-production status
+  )
+  case "$proxy_mode" in custom) expected_proxy=http://127.0.0.1:7999;; direct) expected_proxy=;; saved) expected_proxy=http://127.0.0.1:7788;; esac
+  assert_eq "$expected_proxy" "$(cat "$proxy_override_marker")" "production proxy mode $proxy_mode survives env loading"
+  rm -f -- "$proxy_override_marker"
+done
+
 # ---------------------------------------------------------------------------
 # Credential drift
 # ---------------------------------------------------------------------------

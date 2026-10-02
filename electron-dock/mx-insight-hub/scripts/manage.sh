@@ -1128,6 +1128,21 @@ create_model_key_secret() {
   say "model keys wired:${wired}"
 }
 
+configure_payment_reporting() {
+  local namespace="$1"
+  local reporting_file="${MX_INSIGHT_PAYMENT_REPORTING_ENV_FILE:-${ROOT_DIR}/secrets/payment-reporting.env}"
+  # Absence preserves the existing optional Secret; never disable/repoint an
+  # integration merely because this deployment host lacks its configuration.
+  if [ ! -f "$reporting_file" ]; then
+    [ -z "${MX_INSIGHT_PAYMENT_REPORTING_ENV_FILE:-}" ] || die "payment reporting env file not found"
+    return 0
+  fi
+  node "${ROOT_DIR}/scripts/check-payment-reporting-config.mjs" "$reporting_file" \
+    || die "payment reporting configuration rejected"
+  kubectl -n "$namespace" create secret generic mx-insight-hub-payment-reporting \
+    --from-env-file="$reporting_file" --dry-run=client -o yaml | kubectl apply -f -
+}
+
 create_runtime_config() {
   local namespace="mx-insight-hub"
   need node
@@ -1338,6 +1353,7 @@ create_runtime_config() {
   # untouched and a disabled deployment cannot become dispatch-capable later.
   apply_secret_from_protected_files \
     "$namespace" mx-insight-hub-secrets "${secret_values[@]}"
+  configure_payment_reporting "$namespace"
 
   kubectl -n "$namespace" create configmap mx-insight-hub-config \
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \
@@ -2788,6 +2804,8 @@ reindex_search() {
 ops_action() {
   local environment="${1:-}"
   local action="${2:-}"
+  local build_proxy_override_set="${MX_INSIGHT_BUILD_PROXY+x}"
+  local build_proxy_override="${MX_INSIGHT_BUILD_PROXY-}"
   local sync_launcher_override_set=0
   local sync_launcher_override=""
   local justone_token_override_set=0
@@ -2866,6 +2884,10 @@ ops_action() {
   # A one-shot safety choice on the command line must beat the persisted env
   # file. The Launcher delegator explicitly passes 1; an independent Hub deploy
   # explicitly passes 0 so it cannot unexpectedly roll the login control plane.
+  if [ "$build_proxy_override_set" = x ]; then
+    MX_INSIGHT_BUILD_PROXY="$build_proxy_override"
+    export MX_INSIGHT_BUILD_PROXY
+  fi
   if [ "$sync_launcher_override_set" = 1 ]; then
     MX_INSIGHT_SYNC_LAUNCHER="$sync_launcher_override"
   else

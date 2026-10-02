@@ -5,6 +5,8 @@
 > 适用范围：飞书中国版企业自建应用、MX-H2I Electron、Internal User Center、
 > Launcher Network。本文不改变 HDO V1，也不把飞书 OAuth 配置放到 Domestic。
 
+2026-10-02 目标扩展见[统一身份设计第 6 节](33-mx-platform-identity-and-sustainable-architecture.md#6-从手工开户到可追踪的开通流程)：复用现有飞书应用，增量增加 Web SSO 回调、邀请码注册和本地/飞书账号绑定。旧 H2I 回调、token、用户 ID、飞书 lease profile 与现有自动开通行为保持兼容；新的公开客户流程不能复用员工自动授予 H2I 访问的路径。账号绑定/重复账号归并尚是规划，不能将现有匿名 enrollment 的 linkIdentity 视为已实现账号归并。
+
 ## 1. 当前实现结论
 
 MX-H2I 的飞书登录使用 OAuth 2.0 authorization code flow，并采用以下固定边界：

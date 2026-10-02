@@ -25,6 +25,7 @@ RUN npm ci --registry="$NPM_REGISTRY" --no-audit --no-fund --fetch-retries=5 --f
 COPY --from=mx_common src /workspace/mx-common/src
 COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY --from=mx_pay src /workspace/mx-base/mx-pay/src
+COPY --from=mx_pay reporting /workspace/mx-base/mx-pay/reporting
 COPY . ./
 RUN npm run build
 
@@ -76,6 +77,7 @@ WORKDIR /app
 COPY --from=production-dependencies /mx-common /mx-common
 COPY --from=mx_pay package.json /mx-base/mx-pay/package.json
 COPY --from=mx_pay src /mx-base/mx-pay/src
+COPY --from=mx_pay reporting /mx-base/mx-pay/reporting
 COPY --from=build /workspace/mx-insight-hub/package.json ./package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /workspace/mx-insight-hub/agent-market ./agent-market

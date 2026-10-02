@@ -39,6 +39,10 @@ spec:
           image: mx-insight-hub:shadow
           imagePullPolicy: Never
           command: ["node", "server/migrate.mjs"]
+          envFrom:
+            - secretRef:
+                name: mx-insight-hub-payment-reporting
+                optional: true
           env:
             - name: DATABASE_URL
               valueFrom:

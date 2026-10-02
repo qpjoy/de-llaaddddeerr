@@ -127,6 +127,18 @@ spec:
                 name: mx-release-oss
                 optional: true
           env:
+            - name: MX_SERVICE_OPERATIONS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-service-operations
+                  key: MX_SERVICE_OPERATIONS_URL
+                  optional: true
+            - name: MX_SERVICE_OPERATIONS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-service-operations
+                  key: MX_SERVICE_OPERATIONS_TOKEN
+                  optional: true
             - name: SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED
               value: "1"
             - name: SITE_SLOT_WORKER_REMOTE_SSH

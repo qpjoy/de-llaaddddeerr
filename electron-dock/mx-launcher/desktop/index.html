@@ -17,26 +17,27 @@
           <div class="brand-mark">MX</div>
           <div>
             <h1>MX Launcher</h1>
-            <p>Internal platform</p>
+            <p>Internal · 管理工作台</p>
           </div>
         </div>
 
-        <nav class="nav-tabs" aria-label="Primary">
-          <section id="nav-group-mx-h2i-dashboard" class="nav-group mx-h2i-dashboard-nav-group is-active" aria-label="Launcher Network">
-            <button id="tab-mx-h2i-dashboard" class="nav-tab mx-h2i-dashboard-nav is-active" type="button" data-view="app-center" data-app-node="mx-h2i" data-app-surface="dashboard" data-short="OPS">
-              <strong>Launcher Network</strong>
-              <span>ProductNetwork 连接与策略</span>
+        <nav class="nav-tabs" aria-label="管理导航">
+          <section class="nav-group is-active" aria-label="工作台">
+            <button id="tab-workbench" class="nav-tab is-active" type="button" data-view="workbench" data-short="首页">
+              <strong>工作台</strong>
+              <span>常用任务与中心入口</span>
             </button>
           </section>
-          <section id="nav-group-apps" class="nav-group" aria-label="Applications" data-nav-group="apps">
-            <button id="app-nav-toggle" class="nav-group-title nav-group-toggle" type="button" aria-expanded="true" aria-controls="app-nav-tree">
+          <p class="nav-category">业务与访问</p>
+          <section id="nav-group-apps" class="nav-group is-group-collapsed" aria-label="应用与工作空间" data-nav-group="apps">
+            <button id="app-nav-toggle" class="nav-group-title nav-group-toggle" type="button" aria-expanded="false" aria-controls="app-nav-tree">
               <span>
-                <strong>应用 App</strong>
-                <small>Launcher products</small>
+                <strong>应用与工作空间</strong>
+                <small>产品目录与应用管理</small>
               </span>
-              <b aria-hidden="true">⌃</b>
+              <b aria-hidden="true">⌄</b>
             </button>
-            <div id="app-nav-tree" class="nav-tree">
+            <div id="app-nav-tree" class="nav-tree" hidden>
               <button id="tab-mx-h2i" class="nav-tab" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
                 <strong>MX-H2I</strong>
                 <span>VPN / standalone launcher</span>
@@ -51,29 +52,55 @@
               </button>
             </div>
           </section>
-          <section id="nav-group-operations" class="nav-group admin-nav-group" aria-label="I-HDO" data-nav-group="operations">
-            <button id="tab-admin" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview" data-short="I-HDO" aria-expanded="true">
+          <section id="nav-group-members" class="nav-group admin-nav-group is-group-collapsed" aria-label="成员与访问" data-nav-group="members">
+            <button id="tab-members" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="user-center" data-short="成员" aria-expanded="false">
               <span class="nav-tab-copy">
-                <strong>I-HDO</strong>
-                <span>Operations H/D/I/O</span>
-              </span>
-              <b class="nav-disclosure" aria-hidden="true">⌃</b>
-            </button>
-          </section>
-          <section id="nav-group-internal" class="nav-group admin-nav-group is-group-collapsed" aria-label="Internal" data-nav-group="internal">
-            <button id="tab-internal" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" data-short="INT" aria-expanded="false">
-              <span class="nav-tab-copy">
-                <strong>Internal 基础系统</strong>
-                <span>User / RBAC / Config</span>
+                <strong>成员与访问</strong>
+                <span>账号、角色与权限</span>
               </span>
               <b class="nav-disclosure" aria-hidden="true">⌄</b>
             </button>
           </section>
-          <section id="nav-group-evidence" class="nav-group admin-nav-group is-group-collapsed" aria-label="Evidence" data-nav-group="evidence">
-            <button id="tab-evidence" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="overview" data-short="EVD" aria-expanded="false">
+          <section id="nav-group-mx-h2i-dashboard" class="nav-group mx-h2i-dashboard-nav-group" aria-label="网络与设备">
+            <button id="tab-mx-h2i-dashboard" class="nav-tab mx-h2i-dashboard-nav" type="button" data-view="app-center" data-app-node="mx-h2i" data-app-surface="dashboard" data-short="网络">
+              <strong>网络与设备</strong>
+              <span>Launcher Network · 连接与策略</span>
+            </button>
+          </section>
+          <p class="nav-category">交付与运行</p>
+          <section id="nav-group-releases" class="nav-group admin-nav-group is-group-collapsed" aria-label="发布与交付" data-nav-group="releases">
+            <button id="tab-releases" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="release" data-short="发布" aria-expanded="false">
               <span class="nav-tab-copy">
-                <strong>Evidence History</strong>
-                <span>Trace / log / gate</span>
+                <strong>发布与交付</strong>
+                <span>版本、灰度与发布门禁</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <section id="nav-group-operations" class="nav-group admin-nav-group is-group-collapsed" aria-label="运行与维护" data-nav-group="operations">
+            <button id="tab-admin" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview" data-short="运维" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>运行与维护</strong>
+                <span>站点、部署与运行状态</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <section id="nav-group-evidence" class="nav-group admin-nav-group is-group-collapsed" aria-label="日志与记录" data-nav-group="evidence">
+            <button id="tab-evidence" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="overview" data-short="记录" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>日志与记录</strong>
+                <span>执行、审计与回滚证据</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <p class="nav-category">平台管理</p>
+          <section id="nav-group-internal" class="nav-group admin-nav-group is-group-collapsed" aria-label="平台设置" data-nav-group="settings">
+            <button id="tab-internal" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" data-short="设置" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>平台设置</strong>
+                <span>配置、DNS 与接入契约</span>
               </span>
               <b class="nav-disclosure" aria-hidden="true">⌄</b>
             </button>
@@ -88,6 +115,10 @@
             </div>
           </div>
           <div id="admin-subnav-items" class="admin-subnav-items">
+            <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="services" data-admin-subsection="services">
+              <strong>服务与部署</strong>
+              <span>服务操作、命令与任务记录</span>
+            </button>
             <button class="admin-module-tab is-active" type="button" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview">
               <strong>Dashboard</strong>
               <span>拓扑、状态、全局进度</span>
@@ -109,11 +140,11 @@
               <span>Internal 控制面总览</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="user-center" hidden>
-              <strong>User Center</strong>
+              <strong>用户与账号</strong>
               <span>用户、服务账号、设备身份</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="rbac" hidden>
-              <strong>RBAC</strong>
+              <strong>角色与权限</strong>
               <span>角色、权限、审批边界</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="config-center" hidden>
@@ -121,7 +152,7 @@
               <span>SSH Profile / policy / snapshot</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="awx-provider" hidden>
-              <strong>AWX Provider</strong>
+              <strong>AWX Provider · 兼容</strong>
               <span>inventory / credential / template</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="dns" hidden>
@@ -133,7 +164,7 @@
               <span>订阅源与外网访问策略</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="release" hidden>
-              <strong>Release Center</strong>
+              <strong>版本与灰度</strong>
               <span>artifact、灰度、回滚</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="e2e-gate" hidden>
@@ -188,31 +219,51 @@
         </nav>
 
         <section class="sidebar-connection" aria-label="Internal connection">
-          <label class="server-field">
-            <span>MX Server</span>
-            <input id="server-input" placeholder="http://127.0.0.1:18090" />
-          </label>
-          <form id="ops-token-form" class="server-field ops-token-field">
-            <label for="ops-token-input">Internal Ops Token</label>
-            <div class="ops-token-controls">
-              <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
-              <button id="ops-token-apply" class="primary-button" type="submit" aria-label="应用 Internal Ops Token">应用</button>
-            </div>
-            <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
-            <small id="ops-token-feedback" role="status" aria-live="polite" hidden></small>
-          </form>
-
           <div class="sidebar-status">
             <span id="connection-state" class="state-chip">Ready</span>
             <span id="platform-status">Waiting for service</span>
           </div>
+          <details id="connection-settings" class="connection-settings">
+            <summary>连接与应急访问</summary>
+            <div class="connection-fields">
+              <label class="server-field">
+                <span>MX Server</span>
+                <input id="server-input" placeholder="http://127.0.0.1:18090" />
+              </label>
+              <form id="ops-token-form" class="server-field ops-token-field">
+                <label for="ops-token-input">Internal Ops Token</label>
+                <div class="ops-token-controls">
+                  <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
+                  <button id="ops-token-apply" class="primary-button" type="submit" aria-label="应用 Internal Ops Token">应用</button>
+                </div>
+                <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
+                <small id="ops-token-feedback" role="status" aria-live="polite" hidden></small>
+              </form>
+            </div>
+          </details>
         </section>
 
         <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true">收起 ←</button>
       </aside>
 
       <section class="workspace">
-        <section id="view-app-center" class="view is-active" aria-labelledby="app-center-heading">
+        <section id="view-workbench" class="view is-active" aria-labelledby="workbench-heading">
+          <header class="view-header">
+            <div>
+              <p class="workbench-eyebrow">MX / INTERNAL</p>
+              <h2 id="workbench-heading">工作台</h2>
+              <p>管理应用与访问，查看交付和运行情况。</p>
+            </div>
+            <button id="workbench-refresh" class="secondary-button" type="button">刷新应用目录</button>
+          </header>
+          <div class="workbench-toolbar">
+            <label for="workbench-search">查找功能或应用</label>
+            <input id="workbench-search" type="search" placeholder="搜索用户、权限、发版、Hub…" autocomplete="off" />
+            <span id="workbench-search-result" role="status" aria-live="polite"></span>
+          </div>
+          <div id="workbench-content"></div>
+        </section>
+        <section id="view-app-center" class="view" aria-labelledby="app-center-heading">
           <header class="view-header">
             <div>
               <h2 id="app-center-heading">AppCenter</h2>
@@ -489,6 +540,10 @@
                     <ol id="pipeline-timeline" class="timeline"></ol>
                   </section>
                 </section>
+              </section>
+
+              <section id="admin-section-services" class="admin-section" hidden>
+                <div id="service-operations-panel"></div>
               </section>
 
               <section id="admin-section-foundations" class="admin-section" hidden>

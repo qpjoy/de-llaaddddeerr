@@ -6,8 +6,11 @@ source "$BASE_DIR/scripts/gpu-common.sh"
 source "$BASE_DIR/scripts/deploy-confirm.sh"
 # Explicit command-line BIND must win over an older .env containing loopback.
 bind_override="${BIND-}"
+proxy_override_set="${PROXY+x}"
+proxy_override="${PROXY-}"
 if [ -f "$APP_DIR/.env" ]; then set -a; source "$APP_DIR/.env"; set +a; fi
 [ -z "$bind_override" ] || BIND="$bind_override"
+if [ "$proxy_override_set" = x ]; then export PROXY="$proxy_override"; fi
 gpu_config
 export PROJECT=mx-ocr GPU_ID="$MX_BASE_OCR_GPU"
 export BIND="${BIND:-0.0.0.0}" PORT="${PORT:-8710}" STRICT_PORT=1
@@ -47,7 +50,16 @@ case "$action" in
     echo "${output:-mx-ocr NOT DEPLOYED}"
     ;;
   doctor) python3 "$BASE_DIR/scripts/gpu-check.py" mx-ocr; bash "$APP_DIR/scripts/upstream-manage.sh" doctor;;
-  logs|stats|disk|test|bench|compare) exec bash "$APP_DIR/scripts/upstream-manage.sh" "$action" "$@";;
+  stats)
+    # The retained upstream dispatcher references an absent cmd_stats. Keep this
+    # observation bounded and scoped to the already labelled OCR containers.
+    docker info >/dev/null
+    names=(); while IFS= read -r name; do [ -z "$name" ] || names+=("$name"); done < <(containers)
+    [ "${#names[@]}" -gt 0 ] || { echo 'mx-ocr NOT DEPLOYED'; exit 1; }
+    docker stats --no-stream "${names[@]}"
+    nvidia-smi
+    ;;
+  logs|disk|test|bench|compare) exec bash "$APP_DIR/scripts/upstream-manage.sh" "$action" "$@";;
   help|-h|--help) echo 'mx-ocr: deploy | start | stop | restart | status | doctor | logs [api|vllm] | stats | disk | test [file] | bench | compare';;
   *) echo "不支持的操作：$action" >&2; exit 1;;
 esac

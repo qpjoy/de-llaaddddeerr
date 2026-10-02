@@ -30,6 +30,8 @@ async function assertBuilderContract() {
     'requestedExecutionLevel: asInvoker',
     'afterSign: scripts/after-sign.mjs',
     'from: native',
+    '- service-operations.js',
+    '- service-operations-catalog.js',
     'from: products'
   ]) {
     if (!text.includes(required)) {

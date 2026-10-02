@@ -1,6 +1,7 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { PaymentService } from './payments/service.mjs'
 import { paymentRoute } from './payments/routes.mjs'
+import { paymentReportingRoute } from './payments/reporting.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
@@ -764,6 +765,7 @@ export function createApp({
   provisioning = null,
   notifications = null,
   balanceMonitor = null,
+  paymentReporting = null,
   nightAllA = null,
   externalPlatformGateway = null,
   hubSocialGateway = null,
@@ -1524,6 +1526,7 @@ export function createApp({
       }
 
       if (await paymentRoute({ payments, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
+      if (await paymentReportingRoute({ reporting:paymentReporting, request, response, pathname, searchParams, principal, sendJson, requestId })) return
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
         const scopes = await documentationScopes(principal)

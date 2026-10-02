@@ -2,6 +2,8 @@
 
 日期：2026-10-02。状态：宏观分层与运维产品仍为架构建议，独立支付增量见下一段；未执行目标环境迁库、注册应用或部署。本文承接 [Internal 运维规划](13-platform-ops-and-admin-design-system-roadmap.md)、[Hub 集成](26-mx-insight-hub-integration-architecture.md)、[支付服务边界](../../mx-insight-hub/docs/architecture/payment-center-service-boundaries-and-reliability.md)与[身份和存量租户过渡](../../mx-insight-hub/docs/architecture/platform-identity-and-product-consoles.md)。
 
+同日后续详细设计见 [33 平台统一身份与可持续架构](33-mx-platform-identity-and-sustainable-architecture.md)和[34 总部署与恢复](34-platform-deploy-and-recovery-contract.md)。用户已进一步确认邀请码自助注册、后台可切开放注册、复用现有 Hub 租户、复用 H2I 飞书并支持账号绑定。本文“沿用 Launcher 账号权威”描述兼容阶段；长期按 33 渐进形成独立身份领域。本文 C5 的“不开放自由注册”仅代表此前阶段不执行开放操作，后续注册能力与模式以 33 为准，现网开关未变。
+
 同日实现增量：[mx-pay](../../mx-base/mx-pay/README.md)已具备独立服务及 `scripts/manage.sh deploy`，先迁移、后发布、失败返回非零，可作为后续运维执行器的首个接入目标。尚未接入 Admin 页面、切换 Hub 存量或执行集群部署；本文其他运维/财务产品仍是规划。
 
 ## 1. 建议：沿用现有入口，逐步形成独立运维产品

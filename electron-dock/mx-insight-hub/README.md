@@ -1,5 +1,7 @@
 # MX Insight Hub
 
+2026-10-02：[独立支付中心报表同步](docs/operations/payment-reporting.md)已提供可选的 PostgreSQL 投影、后台续传和管理员查询 API。配置后随 deploy 自动迁移；现有充值、钱包及 Launcher/MX-H2I 登录链路保持原有路径。
+
 新增：[微信数据服务与公众号产品](docs/integrations/wechat-services.md)（2026-09-29，本地实现；迁移 118、新操作默认禁用）。
 
 2026-09-30：`/api/v1/search/raw` 与 `/api/v1/data/search` 微信请求转入 Hub 新合同；聚合微信实时子请求也使用新网关。仅显式 Night-All 微信搜索返回 410。新授权、价格与幂等生效，旧游标不可复用；其他平台和 MX-H2I 登录联网不变。

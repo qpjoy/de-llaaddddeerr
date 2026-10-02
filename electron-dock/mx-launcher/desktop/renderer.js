@@ -1,4 +1,5 @@
 import * as THREE from './node_modules/three/build/three.module.js';
+import { createServiceOperations } from './service-operations.js';
 
 const SSH_READONLY_PROBE_FEATURE_KEY = 'site-slot.ssh-readonly-probe.execute';
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
@@ -76,10 +77,11 @@ const launcherProductUserAccessRequests = new Map();
 const initialLauncherNetworkServerIdentity = launcherNetworkServerIdentity(defaultServerBaseUrl());
 
 const state = {
-  activeView: 'app-center',
+  activeView: 'workbench',
   activeAppNode: MX_H2I_PRODUCT_ID,
   mxH2iSurface: 'dashboard',
-  appNavCollapsed: false,
+  appNavCollapsed: true,
+  workbenchCatalogLoadedAt: null,
   appCenterApps: [],
   appCenterAppsError: null,
   insightHubOverview: null,
@@ -101,8 +103,10 @@ const state = {
   sidebarCollapsed: false,
   inspectorCollapsed: false,
   adminNavCollapsed: {
-    operations: false,
-    internal: true,
+    operations: true,
+    members: true,
+    releases: true,
+    settings: true,
     evidence: true
   },
   hoverAdminMenu: null,
@@ -421,6 +425,110 @@ const adminMenuMeta = {
   }
 };
 
+// Navigation groups are presentation only; existing admin routes and API ownership stay unchanged.
+const workspaceGroupMeta = {
+  members: { heading: '成员与访问', kicker: 'Access', title: '用户、角色与权限' },
+  releases: { heading: '发布与交付', kicker: 'Delivery', title: '版本、灰度与门禁' },
+  operations: { heading: '运行与维护', kicker: 'Operations', title: '站点与运行状态' },
+  evidence: { heading: '日志与记录', kicker: 'Evidence', title: '执行与审计证据' },
+  settings: { heading: '平台设置', kicker: 'Settings', title: 'Internal 配置与接入' }
+};
+
+const workspaceShortcuts = [
+  { id: 'users', title: '用户与账号', description: '查找成员，管理账号与应用访问。', keywords: 'user center 人员 开户', nav: { menu: 'internal', section: 'foundations', subsection: 'user-center' } },
+  { id: 'permissions', title: '角色与权限', description: '查看角色、授权范围与操作边界。', keywords: 'rbac access 授权', nav: { menu: 'internal', section: 'foundations', subsection: 'rbac' } },
+  { id: 'network', title: '网络与设备', description: '按产品查看连接、租约与准入策略。', keywords: 'vpn launcher network 设备 h2i luopan 内网', appNode: MX_H2I_PRODUCT_ID, appSurface: 'dashboard' },
+  { id: 'releases', title: '版本与灰度', description: '管理制品、发布说明和更新渠道。', keywords: 'release 发版 发布 回滚', nav: { menu: 'internal', section: 'foundations', subsection: 'release' } },
+  { id: 'operations', title: '服务与部署', description: '管理 Launcher、Hub、Embedding 与 OCR。', keywords: 'operations 运维 服务器 部署 向量 识别', nav: { menu: 'operations', section: 'services', subsection: 'services' } },
+  { id: 'evidence', title: '日志与记录', description: '追踪执行结果、审计和回滚证据。', keywords: 'evidence logs audit 日志', nav: { menu: 'evidence', section: 'evidence', subsection: 'overview' } }
+];
+
+const pendingWorkspaceCenters = [
+  { title: 'MX Rig', description: '测试任务、Runner 与执行证据', keywords: '测试 test' },
+  { title: 'MX Pay', description: '支付订单、事件与对账', keywords: '支付 财务 账单' },
+  { title: 'MX Static', description: '静态文件与存储服务', keywords: '文件 nas 存储' },
+  { title: 'Night-All', description: '既有数据接口与迁移进度', keywords: '数据 迁移' }
+];
+
+function workspaceGroupForAdminNav(nav = {}) {
+  if (nav.menu === 'evidence') return nav.subsection === 'release-gate' ? 'releases' : 'evidence';
+  if (nav.menu === 'internal') {
+    if (['user-center', 'rbac'].includes(nav.subsection)) return 'members';
+    if (['release', 'e2e-gate'].includes(nav.subsection)) return 'releases';
+    if (['observability', 'admin-runner'].includes(nav.subsection)) return 'operations';
+    return 'settings';
+  }
+  return 'operations';
+}
+
+function activeAdminWorkspaceGroup() {
+  return workspaceGroupForAdminNav({ menu: state.adminMenu, subsection: state.adminSubsection });
+}
+
+function renderWorkbench() {
+  if (!workbenchContent) return;
+  const query = String(workbenchSearch?.value || '').trim().toLocaleLowerCase();
+  const matches = (...values) => values.join(' ').toLocaleLowerCase().includes(query);
+  const shortcuts = workspaceShortcuts.filter((item) => matches(item.title, item.description, item.keywords));
+  const apps = orderedAppCenterApps().filter((app) => matches(app.displayName, app.appId, app.description || ''));
+  const registeredIds = new Set(asArray(state.appCenterApps).map((app) => app.appId));
+  const pending = pendingWorkspaceCenters.filter((center) => (
+    !registeredIds.has(center.title.toLowerCase().replaceAll(' ', '-'))
+    && matches(center.title, center.description, center.keywords)
+  ));
+  const count = shortcuts.length + apps.length + pending.length;
+  if (workbenchSearchResult) workbenchSearchResult.textContent = query ? `${count} 个匹配入口` : '';
+  const catalogStatus = state.appCenterAppsError
+    ? '应用目录暂不可用。内置入口仍可打开，服务状态尚未确认。'
+    : state.workbenchCatalogLoadedAt
+      ? `目录更新于 ${new Date(state.workbenchCatalogLoadedAt).toLocaleTimeString('zh-CN')}。目录登记不代表服务健康。`
+      : '正在读取应用目录，服务状态尚未确认。';
+  workbenchContent.innerHTML = `
+    ${shortcuts.length ? `
+      <section class="workbench-section" aria-labelledby="workbench-tasks-heading">
+        <div class="workbench-section-heading"><h3 id="workbench-tasks-heading">常用任务</h3><span>按要做的事找到入口</span></div>
+        <div class="workbench-task-grid">${shortcuts.map((item) => `
+          <button class="workbench-task" type="button" data-workspace-shortcut="${item.id}">
+            <strong>${item.title}<span aria-hidden="true">↗</span></strong>
+            <span>${item.description}</span>
+          </button>
+        `).join('')}</div>
+      </section>
+    ` : ''}
+    ${apps.length ? `
+      <section class="workbench-section" aria-labelledby="workbench-apps-heading">
+        <div class="workbench-section-heading"><h3 id="workbench-apps-heading">应用与工作空间</h3><span>${apps.length} 个管理入口</span></div>
+        <p class="workbench-catalog-status" role="status">${escapeHtml(catalogStatus)}</p>
+        <div class="workbench-app-grid">${apps.map((app) => {
+          const description = app.appId === MX_INSIGHT_HUB_APP_ID ? '数据中心 · 租户、接口与数据服务'
+            : app.appId === 'luopan' ? '独立应用 · 产品网络与更新管理'
+              : app.appId === MX_H2I_PRODUCT_ID ? '连接内网 · 独立网络应用'
+                : app.appId === APP_CENTER_PRODUCT_ID ? '应用目录 · 产品接入与配置'
+                  : app.displayName || app.appId;
+          const status = app.enabled === false ? '已停用' : registeredIds.has(app.appId) ? '已登记' : '内置入口';
+          return `
+            <article class="workbench-app-card">
+              <div class="workbench-app-heading"><strong>${escapeHtml(app.displayName || app.appId)}</strong><span class="workbench-tag">${status}</span></div>
+              <p>${escapeHtml(description)}</p>
+              <button type="button" class="secondary-button" data-workspace-app="${escapeHtml(app.appId)}" aria-label="管理应用：${escapeHtml(app.displayName || app.appId)}">管理应用 →</button>
+            </article>
+          `;
+        }).join('')}</div>
+      </section>
+    ` : ''}
+    ${pending.length ? `
+      <details class="workbench-pending" ${query ? 'open' : ''}>
+        <summary>更多中心 <span>${pending.length} 个管理入口待接入</span></summary>
+        <p>这些中心将逐步接入当前工作台；此处不代表其服务运行状态。</p>
+        <div class="workbench-app-grid">${pending.map((center) => `
+          <article class="workbench-app-card is-pending"><strong>${center.title}</strong><p>${center.description}</p><span class="workbench-tag">管理界面待接入</span></article>
+        `).join('')}</div>
+      </details>
+    ` : ''}
+    ${!count ? '<div class="empty-state">未找到匹配入口，请尝试“用户”“发版”或应用名称。</div>' : ''}
+  `;
+}
+
 const internalSubsectionMeta = {
   overview: {
     title: 'Internal 基础系统',
@@ -512,6 +620,10 @@ const sidebarCollapse = document.getElementById('sidebar-collapse');
 const stateChip = document.getElementById('connection-state');
 const appNavToggle = document.getElementById('app-nav-toggle');
 const appNavTree = document.getElementById('app-nav-tree');
+const workbenchContent = document.getElementById('workbench-content');
+const workbenchSearch = document.getElementById('workbench-search');
+const workbenchSearchResult = document.getElementById('workbench-search-result');
+const workbenchRefresh = document.getElementById('workbench-refresh');
 const appCenterHeading = document.getElementById('app-center-heading');
 const appCenterSubtitle = document.getElementById('app-center-subtitle');
 const appProductsPanel = document.getElementById('app-products-panel');
@@ -670,19 +782,21 @@ function appSurfaceForTab(tab) {
 }
 
 function primaryNavTabIsActive(tab) {
+  if (state.activeView === 'workbench') return tab.dataset.view === 'workbench';
   if (state.activeView === 'app-center') {
     const appId = tab.dataset.appNode || APP_CENTER_PRODUCT_ID;
     if (tab.dataset.view !== 'app-center' || appId !== state.activeAppNode) return false;
     return appId !== MX_H2I_PRODUCT_ID || appSurfaceForTab(tab) === state.mxH2iSurface;
   }
-  return tab.dataset.view === 'admin' && adminMenuFromElement(tab) === state.adminMenu;
+  return tab.dataset.view === 'admin'
+    && workspaceGroupForAdminNav(adminNavFromElement(tab)) === activeAdminWorkspaceGroup();
 }
 
 function handlePrimaryNavTabClick(tab) {
   state.hoverAdminMenu = null;
   if (tab.dataset.view === 'admin') {
-    const menuName = adminMenuFromElement(tab);
-    const sameActiveMenu = state.activeView === 'admin' && state.adminMenu === menuName;
+    const menuName = workspaceGroupForAdminNav(adminNavFromElement(tab));
+    const sameActiveMenu = state.activeView === 'admin' && activeAdminWorkspaceGroup() === menuName;
     if (!state.sidebarCollapsed && sameActiveMenu) {
       state.adminNavCollapsed[menuName] = !adminNavIsCollapsed(menuName);
       renderAdminShell();
@@ -720,8 +834,42 @@ function refreshNavTabs() {
   for (const tab of tabs) bindPrimaryNavTab(tab);
 }
 
+const serviceOperationsPanel = createServiceOperations(document.getElementById('service-operations-panel'), {
+  request: fetchJson,
+  serverKey: () => normalizedServerBase(),
+  isVisible: () => state.activeView === 'admin' && state.adminSection === 'services'
+});
+
 refreshNavTabs();
 void boot();
+
+if (workbenchSearch) workbenchSearch.addEventListener('input', () => renderWorkbench());
+if (workbenchContent) {
+  workbenchContent.addEventListener('click', (event) => {
+    const shortcut = event.target.closest('[data-workspace-shortcut]');
+    const target = workspaceShortcuts.find((item) => item.id === shortcut?.dataset.workspaceShortcut);
+    if (target) {
+      setActiveView(target.nav ? 'admin' : 'app-center', target.nav || {}, target);
+      return;
+    }
+    const appButton = event.target.closest('[data-workspace-app]');
+    if (appButton && appCenterAppById(appButton.dataset.workspaceApp)) {
+      setActiveView('app-center', {}, { appNode: appButton.dataset.workspaceApp });
+    }
+  });
+}
+if (workbenchRefresh) {
+  workbenchRefresh.addEventListener('click', async () => {
+    workbenchRefresh.disabled = true;
+    workbenchRefresh.textContent = '正在刷新…';
+    try {
+      await refreshAppCenterNetwork();
+    } finally {
+      workbenchRefresh.disabled = false;
+      workbenchRefresh.textContent = '刷新应用目录';
+    }
+  });
+}
 
 if (h2oLaunch) {
   h2oLaunch.addEventListener('click', () => {
@@ -744,7 +892,14 @@ if (appNavToggle) {
 
 serverInput.addEventListener('input', () => {
   clearOpsTokenIfServerBaseChanged();
-  synchronizeLauncherNetworkServerScope(serverInput.value);
+  if (synchronizeLauncherNetworkServerScope(serverInput.value)) {
+    serviceOperationsPanel.reset();
+    state.appCenterApps = [];
+    state.appCenterAppsError = '连接地址已变化，请刷新应用目录。';
+    state.workbenchCatalogLoadedAt = null;
+    renderAppNav();
+    renderWorkbench();
+  }
 });
 
 serverInput.addEventListener('change', () => {
@@ -778,7 +933,7 @@ sidebarCollapse.addEventListener('click', () => {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   state.hoverAdminMenu = null;
   if (!state.sidebarCollapsed && state.activeView === 'admin') {
-    state.adminNavCollapsed[state.adminMenu] = false;
+    state.adminNavCollapsed[activeAdminWorkspaceGroup()] = false;
   }
   sidebar.classList.toggle('is-collapsed', state.sidebarCollapsed);
   sidebar.classList.toggle('is-subnav-open', state.sidebarCollapsed && state.activeView === 'admin');
@@ -827,8 +982,12 @@ document.addEventListener('click', (event) => {
 }, true);
 
 function handleAdminModuleNavigation(tab) {
+  if (state.activeView !== 'admin') {
+    setActiveView('admin', adminNavFromElement(tab));
+    return;
+  }
   applyAdminNavigation(adminNavFromElement(tab), { stopSetupMessage: 'Stopped because the operator changed sections.' });
-  state.adminNavCollapsed[state.adminMenu] = false;
+  state.adminNavCollapsed[activeAdminWorkspaceGroup()] = false;
   state.hoverAdminMenu = null;
   renderAdminShell();
   if (state.dashboard && state.adminSection === 'deployment') {
@@ -1004,6 +1163,7 @@ window.addEventListener('keydown', (event) => {
 });
 
 async function boot() {
+  renderWorkbench();
   setServerBaseInputValue(serverInput.value || defaultServerBaseUrl());
   const config = await api.getConfig();
   setServerBaseInputValue(config.serverBaseUrl || serverInput.value || defaultServerBaseUrl());
@@ -1024,17 +1184,13 @@ function adminNavFromElement(element) {
   };
 }
 
-function adminMenuFromElement(element) {
-  return element?.dataset?.adminMenu || 'operations';
-}
-
 function adminNavIsCollapsed(menuName) {
   return state.adminNavCollapsed?.[menuName] === true;
 }
 
 function previewCollapsedAdminSubnav(tab) {
   if (!state.sidebarCollapsed || tab.dataset.view !== 'admin') return;
-  state.hoverAdminMenu = adminMenuFromElement(tab);
+  state.hoverAdminMenu = workspaceGroupForAdminNav(adminNavFromElement(tab));
   sidebar.classList.add('is-subnav-open');
   renderAdminSubnav();
 }
@@ -1042,7 +1198,7 @@ function previewCollapsedAdminSubnav(tab) {
 function setActiveView(view, nav = {}, options = {}) {
   const nextAppNode = options.appNode || state.activeAppNode || 'appcenter';
   const nextMxH2iSurface = options.appSurface === 'dashboard' ? 'dashboard' : 'product';
-  if (view === 'admin' || nextAppNode !== MX_H2I_PRODUCT_ID || nextMxH2iSurface !== 'dashboard') {
+  if (view !== 'app-center' || nextAppNode !== MX_H2I_PRODUCT_ID || nextMxH2iSurface !== 'dashboard') {
     disposeMxH2iTopology();
   }
   if (view !== 'admin' && state.setupRun.active) {
@@ -1050,12 +1206,13 @@ function setActiveView(view, nav = {}, options = {}) {
   }
   if (view === 'admin') {
     applyAdminNavigation(nav);
-    state.adminNavCollapsed[state.adminMenu] = false;
+    state.adminNavCollapsed[activeAdminWorkspaceGroup()] = false;
   }
-  state.activeView = view === 'admin' ? 'admin' : 'app-center';
+  state.activeView = ['workbench', 'admin'].includes(view) ? view : 'app-center';
   if (state.activeView === 'app-center') {
     state.activeAppNode = nextAppNode;
     state.mxH2iSurface = state.activeAppNode === MX_H2I_PRODUCT_ID ? nextMxH2iSurface : 'product';
+    if (state.mxH2iSurface === 'product') state.appNavCollapsed = false;
   }
   if (state.activeView !== 'app-center'
     || state.activeAppNode !== MX_H2I_PRODUCT_ID
@@ -1075,6 +1232,7 @@ function setActiveView(view, nav = {}, options = {}) {
     item.classList.toggle('is-active', item.id === `view-${state.activeView}`);
   }
   renderAppNav();
+  if (state.activeView === 'workbench') renderWorkbench();
   if (state.activeView === 'app-center') {
     renderAppCenterShell();
     if (state.activeAppNode === MX_INSIGHT_HUB_APP_ID
@@ -1147,6 +1305,7 @@ async function refreshAppCenterNetwork() {
   if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
   state.appCenterApps = asArray(appPayload.apps);
   state.appCenterAppsError = appPayload.error || null;
+  state.workbenchCatalogLoadedAt = appPayload.error ? null : new Date().toISOString();
   state.appOnboardingTemplates = asArray(templatesPayload.templates);
   state.appOnboardingTemplatesError = templatesPayload.error || null;
   state.launcherServiceVipSmokes = asArray(serviceVipSmokePayload.smokes);
@@ -1244,6 +1403,7 @@ async function refreshAdmin() {
     state.awxProviders = asArray(dashboard.awxProviders);
     state.appCenterApps = asArray(appCenterAppsPayload.apps);
     state.appCenterAppsError = appCenterAppsPayload.error || null;
+    state.workbenchCatalogLoadedAt = appCenterAppsPayload.error ? null : new Date().toISOString();
     state.appOnboardingTemplates = asArray(appOnboardingTemplatesPayload.templates);
     state.appOnboardingTemplatesError = appOnboardingTemplatesPayload.error || null;
     state.launcherServiceVipSmokes = asArray(dashboard.launcherServiceVipSmokes);
@@ -4382,6 +4542,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   }
   const verb = String(method || 'GET').toUpperCase();
   const path = url.pathname;
+  if (['GET', 'POST'].includes(verb) && /^\/internal\/v1\/admin\/service-operations\/(?:instances|profiles|plans|execute|operations(?:\/[a-f0-9-]{36})?|reconcile)$/.test(path)) return true;
   if (verb === 'GET') {
     return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts|system-subscriptions)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|oversea\/subscription-link|h2o\/runtime-profile)$/.test(path)
@@ -4706,12 +4867,17 @@ function renderPrimaryNav() {
   for (const tab of tabs) {
     const active = primaryNavTabIsActive(tab);
     tab.classList.toggle('is-active', active);
+    if (active) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
     const group = tab.closest('.nav-group');
     if (active && group) group.classList.add('is-active');
     if (tab.dataset.view === 'admin') {
-      const menuName = adminMenuFromElement(tab);
-      const collapsed = adminNavIsCollapsed(menuName);
+      const menuName = workspaceGroupForAdminNav(adminNavFromElement(tab));
+      const collapsed = adminNavIsCollapsed(menuName)
+        || state.activeView !== 'admin'
+        || activeAdminWorkspaceGroup() !== menuName;
       tab.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      tab.setAttribute('aria-controls', 'admin-subnav');
       tab.closest('.nav-group')?.classList.toggle('is-group-collapsed', collapsed);
       const disclosure = tab.querySelector('.nav-disclosure');
       if (disclosure) disclosure.textContent = collapsed ? '⌄' : '⌃';
@@ -4723,7 +4889,7 @@ function renderAdminShell() {
   renderInspectorChrome();
   renderPrimaryNav();
   renderAdminSubnav();
-  const menu = adminMenuMeta[state.adminMenu] || adminMenuMeta.operations;
+  const menu = workspaceGroupMeta[activeAdminWorkspaceGroup()];
   if (adminHeading) adminHeading.textContent = menu.heading;
   renderAdminSectionHeadings();
   for (const section of adminSections) {
@@ -4731,6 +4897,7 @@ function renderAdminShell() {
     section.classList.toggle('is-active', active);
     section.hidden = !active;
   }
+  if (state.activeView === 'admin' && state.adminSection === 'services') serviceOperationsPanel.show();
   if (state.adminSection === 'deployment') {
     const label = deploymentKindLabel(state.deploymentKind);
     deploymentTitle.textContent = `${label} Deployment`;
@@ -4755,6 +4922,7 @@ function deploymentKindSubtitle(kind) {
 
 function renderInspectorChrome() {
   if (!adminConsole || !adminInspector || !inspectorToggle) return;
+  adminConsole.classList.toggle('is-services-workspace', state.adminSection === 'services');
   adminConsole.classList.toggle('is-inspector-collapsed', state.inspectorCollapsed);
   adminInspector.classList.toggle('is-collapsed', state.inspectorCollapsed);
   inspectorToggle.setAttribute('aria-expanded', state.inspectorCollapsed ? 'false' : 'true');
@@ -4765,12 +4933,12 @@ function renderInspectorChrome() {
 
 function renderAdminSubnav() {
   if (!adminSubnav) return;
-  const displayMenuName = state.hoverAdminMenu || state.adminMenu;
+  const displayMenuName = state.hoverAdminMenu || activeAdminWorkspaceGroup();
   const flyout = state.sidebarCollapsed;
   const visible = state.activeView === 'admin' || Boolean(state.hoverAdminMenu);
   const collapsed = !flyout && adminNavIsCollapsed(displayMenuName);
-  const menu = adminMenuMeta[displayMenuName] || adminMenuMeta.operations;
-  const anchor = tabs.find((tab) => tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === displayMenuName);
+  const menu = workspaceGroupMeta[displayMenuName] || workspaceGroupMeta.operations;
+  const anchor = tabs.find((tab) => tab.dataset.view === 'admin' && workspaceGroupForAdminNav(adminNavFromElement(tab)) === displayMenuName);
   if (anchor && adminSubnav.previousElementSibling !== anchor) {
     anchor.insertAdjacentElement('afterend', adminSubnav);
   }
@@ -4782,6 +4950,9 @@ function renderAdminSubnav() {
   adminSubnav.dataset.flyout = flyout ? 'true' : 'false';
   adminSubnav.setAttribute('aria-label', `${menu.heading} modules`);
   adminSubnav.classList.toggle('is-collapsed', collapsed);
+  for (const tab of tabs.filter((item) => item.dataset.view === 'admin')) {
+    tab.setAttribute('aria-expanded', tab === anchor && visible && !collapsed ? 'true' : 'false');
+  }
   if (adminSubnavKicker) adminSubnavKicker.textContent = menu.kicker;
   if (adminSubnavTitle) adminSubnavTitle.textContent = menu.title;
   for (const tab of adminModuleTabs) {
@@ -4789,10 +4960,10 @@ function renderAdminSubnav() {
     const section = tab.dataset.adminSection || 'deployment';
     const kind = tab.dataset.deploymentKind || '';
     const subsection = tab.dataset.adminSubsection || 'overview';
-    tab.hidden = menuName !== displayMenuName;
+    tab.hidden = workspaceGroupForAdminNav(adminNavFromElement(tab)) !== displayMenuName;
     tab.classList.toggle(
       'is-active',
-      displayMenuName === state.adminMenu
+      displayMenuName === activeAdminWorkspaceGroup()
         && menuName === state.adminMenu
         && section === state.adminSection
         && (section !== 'deployment' || kind === state.deploymentKind)
@@ -7223,6 +7394,7 @@ function renderFoundationGrid(overview) {
       state.adminMenu = 'internal';
       state.adminSection = 'foundations';
       state.adminSubsection = internalSubsectionMeta[card.dataset.internalModule] ? card.dataset.internalModule : 'overview';
+      state.adminNavCollapsed[activeAdminWorkspaceGroup()] = false;
       renderAdminShell();
       renderFoundationGrid(state.dashboard?.overview || overview || {});
       renderInspector();
@@ -10759,6 +10931,7 @@ function renderAppCenterShell() {
   renderAppCatalogPanel();
   renderSelectedAppDetail();
   renderAppNav();
+  renderWorkbench();
 }
 
 function filteredAppCenterApps() {

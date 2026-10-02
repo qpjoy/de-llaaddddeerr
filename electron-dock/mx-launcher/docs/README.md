@@ -14,6 +14,24 @@
 
 相关专题：
 
+- [36-service-operations.md](./36-service-operations.md)：
+  服务与部署已在本地实现：Launcher/Hub/Embedding/OCR 的参数表单、命令预览、独立执行器、
+  版本与配置预检、持久任务及断线查询。包含随 Launcher deploy 幂等安装/安全更新及生产验收边界，未部署生产。
+
+- [35-platform-implementation-and-acceptance.md](./35-platform-implementation-and-acceptance.md)：
+  分阶段实施与验收进度。首期工作台、导航归纳和连接设置折叠已在本地实现与验证，未部署生产；
+  后续依次接邀请注册、SSO、Hub 自助开通、飞书绑定及统一运维。
+
+- [33-mx-platform-identity-and-sustainable-architecture.md](./33-mx-platform-identity-and-sustainable-architecture.md)：
+  2026-10-02 完整平台设计：身份分域、SSO、复用原飞书、邀请码/开放注册、已有账号绑定与归并、
+  按应用自动开通、产品权限和生效期限、Launcher 统一管理工作区、证书与服务风险、AWX 退出，
+  以及保持 H2I/Luopan/Hub 老用户无感的分阶段方案。Luopan 线上产品为外部 po-frontend 的
+  feat/yjj/hdo_v2 分支，demos/luopan 仅作演示，本轮不改实际产品。首期邀请码、后台可切开放。
+
+- [34-platform-deploy-and-recovery-contract.md](./34-platform-deploy-and-recovery-contract.md)：
+  总 deploy 的清单、子系统契约、依赖顺序、重启/换系统恢复、原凭据与数据库身份保护、
+  失败续跑、运维按钮/动作目录、自更新和证书任务。总部署仍为设计；首批单服务执行见 36，阶段进度见 35。
+
 - [32-platform-business-centers-and-management-integration.md](./32-platform-business-centers-and-management-integration.md)：
   平台入口、技术运维、业务管理的职责划分；从现有 Internal Admin 演进独立运维控制台，
   各中心独立数据/API/工作台，统一安装维护与财务、支付、Hub 的渐进接入。目标规划。

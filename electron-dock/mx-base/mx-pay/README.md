@@ -128,7 +128,7 @@ Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已
 
 ## 验证与后续
 
-跨 Kubernetes／数据库集成使用业务 API 与只读报表数据契约。现已补齐存量分页、增量游标、独立报表凭据与 SDK；Hub 和财务消费者可各自建读模型并保存进度，尚未自动接入 Hub 报表界面。详见[跨中心同步与财务报表](docs/cross-center-reporting.md)。
+跨 Kubernetes／数据库集成使用业务 API 与只读报表数据契约。现已补齐存量分页、增量游标、独立报表凭据、SDK，以及可复用的 PostgreSQL 消费组件 `@qpjoy/mx-pay/reporting`。Hub 已接可选同步任务与管理员明细/状态/日汇总 API，可使用独立报表数据库；尚未新增浏览器报表页面或切换充值。详见[跨中心同步与财务报表](docs/cross-center-reporting.md)与 [Hub 接入部署](../../mx-insight-hub/docs/operations/payment-reporting.md)。
 
 ```sh
 npm ci --omit=optional --ignore-scripts
@@ -140,6 +140,8 @@ MX_PAY_TEST_PG_BIN=/path/to/postgresql-16/bin node --test tests/bootstrap-postgr
 ```
 
 部署测试使用替身命令验证执行顺序、自动发现、重复部署/丢失配置恢复、错误集群/卷/数据库拦截、每节点镜像导入、迁移失败停止、锁与归档失败不发布；数据库测试使用真实 PostgreSQL。2026-10-02 全部 25 项支付测试通过（无跳过），含真实 PG16 初始化、运行权限、逻辑备份恢复到新库、数据身份错误/目录缺失时拒绝启动，以及报表存量/增量、并发提交/回滚、权限隔离、时钟偏差和独立消费者。Launcher/mx-common 现有 48 项存储与恢复保护测试、mx-base 管理回归也已通过。测试不代表目标机器状态；当前未完成 Docker 容器构建、真实双节点 rollout 或生产部署验收。
+
+消费者接入后追加通过 Hub 的 31 项报表/部署配置/原充值/身份回归（无跳过），其中端到端测试使用临时 PG16 的独立支付库和报表库，经真实 HTTP 拉取、投影和管理接口查询；Hub manage 脚本回归也通过。此测试不替代目标环境的部署验收。
 
 后续先接 Hub 业务 inbox、充值交付与存量单写交接，再完善独立人类管理台和 Launcher 身份接入。官方支付宝、Creem、微信、退款执行、分账和供应商付款尚未实现。业务架构见[统一管理规划](../../mx-launcher/docs/32-platform-business-centers-and-management-integration.md)与[支付规划](../../mx-insight-hub/docs/product/payments-and-cost-control.md)。
 

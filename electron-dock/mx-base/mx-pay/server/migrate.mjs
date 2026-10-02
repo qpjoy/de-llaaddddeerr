@@ -7,8 +7,8 @@ import { createPool } from './database.mjs'
 
 export const migrationsDir = fileURLToPath(new URL('../migrations/', import.meta.url))
 export async function assertPaymentDatabase(pool) {
-  const { rows } = await pool.query("SELECT to_regclass('public.tenants') AS hub, to_regclass('public.mx_platform_records') AS launcher, to_regclass('mx_pay.orders') AS legacy")
-  if (rows[0].hub || rows[0].launcher || rows[0].legacy) throw new Error('Refusing Hub/Launcher database: use dedicated mx-pay PostgreSQL')
+  const { rows } = await pool.query("SELECT to_regclass('public.tenants') AS hub, to_regclass('public.mx_platform_records') AS launcher, to_regclass('mx_pay.orders') AS legacy, to_regclass('pay_reporting.orders') AS reporting")
+  if (rows[0].hub || rows[0].launcher || rows[0].legacy || rows[0].reporting) throw new Error('Refusing Hub/Launcher/reporting database: use dedicated mx-pay PostgreSQL')
 }
 export async function assertSchema(pool) {
   for (const name of (await readdir(migrationsDir)).filter(name => name.endsWith('.sql')).sort()) {

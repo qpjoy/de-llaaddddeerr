@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import pg from 'pg'
 import { syncCapabilityCatalog } from './data/capability-catalog.mjs'
+import { migratePaymentReporting, reportingConfig } from './payments/reporting.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // Distinct from mx-common's lock. Two Hub migration Jobs may overlap across
@@ -91,4 +92,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const { runCommonMigrations } = await import('@qpjoy/mx-common')
   await runCommonMigrations({ connectionString })
   await runMigrations({ connectionString })
+  await migratePaymentReporting(reportingConfig(process.env))
 }

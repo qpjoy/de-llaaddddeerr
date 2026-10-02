@@ -3,9 +3,9 @@ dist/
 .env
 .env.*
 !.env.example
+secrets/payment-reporting.env
 .runtime/
 coverage/
 design-qa/
 *.log
 es_scripts/
-
