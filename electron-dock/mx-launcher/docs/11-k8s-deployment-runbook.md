@@ -816,8 +816,10 @@ bash scripts/manage.sh ops internal-production deploy
 该参数不改变 MX-H2I 用户流量的 WireGuard / Hysteria2 / Mihomo 链路，也不修改登录
 配置、系统路由或数据库；独立 BuildKit 容器保留的代理设置仅用于后续构建。
 
-启用后要求本机 Linux Docker Engine 和 buildx 插件，使用独立的 `docker-container`
-构建器及 host 网络，因此 `127.0.0.1` 指向部署主机。相同代理配置复用构建器，修改
+启用后要求本机 Linux Docker Engine 和 buildx 插件，使用独立 BuildKit 容器的 host
+网络，因此 `127.0.0.1` 指向部署主机。Buildx 通过 `remote` 驱动及
+`docker-container://<容器名>` 连接该本机容器，不开放 BuildKit TCP 端口。
+相同代理配置复用构建器，修改
 代理或绕行列表后使用另一个构建器；不切换 Docker 默认构建器，不修改或重启 Docker /
 containerd。原有 `MX_SHADOW_BUILDKIT_*` 清理参数在这里仅作用于选定构建器的缓存。
 构建代理使用 `127.0.0.1` 或实际可达的主机地址，不依赖 `host.docker.internal`。
@@ -828,10 +830,18 @@ containerd。原有 `MX_SHADOW_BUILDKIT_*` 清理参数在这里仅作用于选�
 containerd 2.x 自动加 `--local`，1.x 使用客户端原有下载路径。缺少的 PostgreSQL /
 CoreDNS / Caddy 镜像也走这条路径，已缓存镜像直接复用。临时镜像归档使用 `TMPDIR`，
 成功或失败均清理；下载缓存位于独立的 `mx-launcher-build-proxy` containerd namespace。
-Buildx 首次启动仍可能尝试更新 BuildKit 镜像；更新失败时可使用已预载的本地镜像。
+2026-10-03 修复首次启动绕过代理的问题：本地镜像准备好后显式 `docker create --pull=never`，
+再启动容器和检查 BuildKit 就绪；不再让 `docker-container` 驱动在创建时调用 dockerd 重新拉取。
+这样首次引导和丢失容器后的重建都沿用本次指定的代理下载路径。
+新构建器使用 `mx-launcher-proxy-local-*` 名称与独立缓存卷。旧 `mx-launcher-proxy-*`
+构建器和缓存保留，不停止或删除；首次迁移需重新积累构建缓存并预留磁盘空间。
+后续复用运行容器；已停止时只启动该容器；容器丢失时复用同名缓存卷重建。
+已有容器所有权/网络或构建器驱动/目标不符时停止构建，不接管未知实例。
 默认 BuildKit 镜像为 `moby/buildkit:buildx-stable-1`，可用 `MX_LAUNCHER_BUILDKIT_IMAGE`
 指定已有镜像或镜像源。`ctr` 预载不读取 Docker 的私有仓库登录配置，私有镜像应先安全地
 预载到本机 Docker。此过程不修改应用 Secret、PV/PVC 或数据库数据。
+
+该连接方式见 [Docker remote driver 文档](https://docs.docker.com/build/builders/drivers/remote/#example-remote-buildkit-in-docker-container)。本地脚本契约测试覆盖首次下载、缓存、复用、重建、代理/绕行参数、目标冲突及启动失败；Linux Docker/containerd 真机构建仍需目标主机验收。
 
 构建代理默认绕过 localhost、RFC1918 内网、`.svc` 和 `.cluster.local`，不继承可能把
 公网请求全部绕过的 `NO_PROXY=*`。企业仓库需要直连时可设置

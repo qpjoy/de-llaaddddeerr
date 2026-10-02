@@ -5750,10 +5750,12 @@ Notes:
     Wrong/missing disks, an empty database or a different cluster stop recovery.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
-  - Set MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:7788 on the Linux host to
+  - Set MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:7789 on the Linux host to
     override the build proxy for Corepack/npm, registry tokens and BuildKit.
     This uses a scoped host-network buildx builder. Uncached bootstrap/runtime
     images are fetched by ctr and loaded into Docker, without daemon changes.
+    BuildKit starts from the local image with --pull=never; Buildx connects over
+    docker-container:// using its remote driver, without a TCP listener.
     MX_LAUNCHER_BUILD_NO_PROXY overrides the build-only bypass list.
   - On kubeadm Internal hosts, deploy auto-repairs stale LAN IPs in
     /etc/kubernetes and kubeconfig before the first kubectl apply. Override the

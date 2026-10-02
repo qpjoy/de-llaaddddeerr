@@ -25,7 +25,8 @@ try {
   process.exit(1);
 }
 const config = [proxy, process.env.NO_PROXY, process.env.MX_LAUNCHER_BUILDKIT_IMAGE];
-console.log("mx-launcher-proxy-" + createHash("sha256").update(JSON.stringify(config)).digest("hex").slice(0, 16));
+// Separate from legacy docker-container builders; never remove their containers/cache.
+console.log("mx-launcher-proxy-local-" + createHash("sha256").update(JSON.stringify(config)).digest("hex").slice(0, 16));
 ')"
   MX_LAUNCHER_PROXY_BUILDER="$builder"
   export HTTP_PROXY="$MX_LAUNCHER_BUILD_PROXY" HTTPS_PROXY="$MX_LAUNCHER_BUILD_PROXY" ALL_PROXY="$MX_LAUNCHER_BUILD_PROXY"
@@ -84,29 +85,48 @@ launcher_proxy_pull_image() (
 )
 
 launcher_ensure_proxy_builder() {
-  local driver no_proxy_option
+  local driver container endpoint identity running
   launcher_require_local_docker
   docker buildx version >/dev/null 2>&1 || die "MX_LAUNCHER_BUILD_PROXY requires the Docker buildx plugin"
+  container="$MX_LAUNCHER_PROXY_BUILDER"
+  endpoint="docker-container://$container"
+  # Buildx's docker-container driver always asks dockerd to pull at first boot,
+  # even after a proxy-assisted preload. Own the bootstrap with --pull=never,
+  # then use its documented local container transport (no TCP listener).
+  if identity="$(docker container inspect "$container" --format '{{index .Config.Labels "dev.qpjoy.mx-launcher.proxy-builder"}}|{{.Config.Image}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.Privileged}}' 2>/dev/null)"; then
+    [ "$identity" = "$MX_LAUNCHER_PROXY_BUILDER|$MX_LAUNCHER_BUILDKIT_IMAGE|host|true" ] \
+      || die "the MX Launcher BuildKit container has unexpected ownership/configuration; left unchanged"
+  else
+    if ! docker image inspect "$MX_LAUNCHER_BUILDKIT_IMAGE" >/dev/null 2>&1; then
+      launcher_proxy_pull_image "$MX_LAUNCHER_BUILDKIT_IMAGE"
+    fi
+    say "create local BuildKit from cached image (no dockerd registry pull): $container"
+    docker create --name "$container" --pull=never --init --privileged --network host \
+      --restart unless-stopped \
+      --label dev.qpjoy.mx-launcher.project=mx-launcher \
+      --label dev.qpjoy.mx-launcher.component=buildkit \
+      --label "dev.qpjoy.mx-launcher.proxy-builder=$MX_LAUNCHER_PROXY_BUILDER" \
+      --volume "$container-state:/var/lib/buildkit" \
+      --env HTTP_PROXY --env HTTPS_PROXY --env ALL_PROXY --env NO_PROXY \
+      --env http_proxy --env https_proxy --env all_proxy --env no_proxy \
+      "$MX_LAUNCHER_BUILDKIT_IMAGE" --allow-insecure-entitlement network.host >/dev/null
+  fi
+  running="$(docker container inspect "$container" --format '{{.State.Running}}')"
+  if [ "$running" != true ]; then
+    say "start local BuildKit with the selected build proxy: $container"
+    docker start "$container" >/dev/null
+  fi
   if driver="$(docker buildx inspect "$MX_LAUNCHER_PROXY_BUILDER" 2>/dev/null)"; then
-    printf '%s\n' "$driver" | grep -Eq '^Driver:[[:space:]]+docker-container$' \
-      || die "the MX Launcher proxy builder has an unexpected driver"
-    return 0
+    printf '%s\n' "$driver" | grep -Eq '^Driver:[[:space:]]+remote$' \
+      || die "the MX Launcher proxy builder has an unexpected driver; left unchanged"
+    printf '%s\n' "$driver" | grep -Eq "^Endpoint:[[:space:]]+$endpoint[[:space:]]*$" \
+      || die "the MX Launcher proxy builder has an unexpected endpoint; left unchanged"
+  else
+    say "register scoped proxy builder using local container transport: $MX_LAUNCHER_PROXY_BUILDER"
+    docker buildx create --name "$MX_LAUNCHER_PROXY_BUILDER" --driver remote "$endpoint" >/dev/null
   fi
-  if ! docker image inspect "$MX_LAUNCHER_BUILDKIT_IMAGE" >/dev/null 2>&1; then
-    launcher_proxy_pull_image "$MX_LAUNCHER_BUILDKIT_IMAGE"
-  fi
-  # buildx driver options are CSV. Quote the complete NO_PROXY entry, including
-  # its comma list, so bypass rules are passed as one environment variable.
-  no_proxy_option="${NO_PROXY//\"/\"\"}"
-  say "create scoped proxy builder: $MX_LAUNCHER_PROXY_BUILDER"
-  docker buildx create --name "$MX_LAUNCHER_PROXY_BUILDER" \
-    --driver docker-container --driver-opt network=host \
-    --driver-opt "image=$MX_LAUNCHER_BUILDKIT_IMAGE" \
-    --driver-opt "env.HTTP_PROXY=$HTTP_PROXY" --driver-opt "env.HTTPS_PROXY=$HTTPS_PROXY" \
-    --driver-opt "env.http_proxy=$http_proxy" --driver-opt "env.https_proxy=$https_proxy" \
-    --driver-opt "env.ALL_PROXY=$ALL_PROXY" --driver-opt "env.all_proxy=$all_proxy" \
-    --driver-opt "\"env.NO_PROXY=$no_proxy_option\"" --driver-opt "\"env.no_proxy=$no_proxy_option\"" \
-    --buildkitd-flags '--allow-insecure-entitlement network.host' >/dev/null
+  say "verify local BuildKit readiness before building Internal"
+  docker buildx inspect "$MX_LAUNCHER_PROXY_BUILDER" --bootstrap >/dev/null
 }
 
 launcher_build_internal_with_proxy() {

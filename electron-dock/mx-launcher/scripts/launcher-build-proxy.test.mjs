@@ -47,8 +47,27 @@ else if (args[0] === 'version') console.log('linux/amd64');
 else if (action === 'buildx version') console.log('buildx test');
 else if (action === 'buildx inspect') {
   if (!fs.existsSync(path.join(base,args[2]))) process.exit(1);
-  console.log('Driver: docker-container');
-} else if (action === 'buildx create') fs.writeFileSync(path.join(base,args[args.indexOf('--name')+1]), 'builder');
+  if (args.includes('--bootstrap') && e.MX_TEST_BOOT_FAIL === '1') die();
+  const builder = JSON.parse(fs.readFileSync(path.join(base,args[2])));
+  console.log('Driver: '+(e.MX_TEST_BUILDER_DRIVER || builder.driver));
+  console.log('Endpoint: '+(e.MX_TEST_BUILDER_ENDPOINT || builder.endpoint));
+} else if (action === 'buildx create') fs.writeFileSync(path.join(base,args[args.indexOf('--name')+1]), JSON.stringify({driver:args[args.indexOf('--driver')+1],endpoint:args.at(-1)}));
+else if (action === 'container inspect') {
+  if (e.MX_TEST_CONTAINER_CONFLICT === '1') { console.log('unowned|wrong-image|bridge|false'); process.exit(); }
+  const file = path.join(base,'container-'+args[2]);
+  if (!fs.existsSync(file)) process.exit(1);
+  const container = JSON.parse(fs.readFileSync(file));
+  console.log(args.at(-1).includes('.State.Running') ? String(container.running) : container.identity);
+} else if (args[0] === 'create') {
+  if (!args.includes('--pull=never')) die();
+  const name = args[args.indexOf('--name')+1];
+  const image = args[args.indexOf('--allow-insecure-entitlement')-1];
+  fs.writeFileSync(path.join(base,'container-'+name), JSON.stringify({running:false,identity:name+'|'+image+'|host|true'}));
+} else if (args[0] === 'start') {
+  if (e.MX_TEST_START_FAIL === '1') die();
+  const file = path.join(base,'container-'+args[1]), container = JSON.parse(fs.readFileSync(file));
+  container.running = true; fs.writeFileSync(file,JSON.stringify(container));
+}
 else if (action === 'image inspect') {
   const canonical = s => s.replace(/^docker\\.io\\//,'').replace(/^library\\//,'');
   const missing = JSON.parse(e.MX_TEST_MISSING_IMAGES || '[]').map(canonical);
@@ -94,7 +113,7 @@ ${body}`], { encoding: 'utf8', timeout: 15000, env: {
     cleanup: () => rmSync(dir, { recursive: true, force: true })
   };
 }
-const proxy = 'http://127.0.0.1:7788';
+const proxy = 'http://127.0.0.1:7789';
 function checkProxy(call) {
   for (const name of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy','npm_config_proxy','npm_config_https_proxy']) {
     assert.equal(call.env[name], proxy, `${call.tool}: ${name}`);
@@ -124,12 +143,17 @@ test('custom proxy covers artifacts, registry-token client, buildkitd and RUN; p
     assert.equal(result.status, 0, result.stderr);
     const calls = f.calls();
     for (const call of calls.filter(c => ['test-artifacts','buildx','compose'].includes(c.args[0]))) checkProxy(call);
+    const container = calls.find(c => c.args[0] === 'create');
+    checkProxy(container);
+    assert.ok(container.args.includes('--pull=never'), 'bootstrap must never delegate a registry pull to dockerd');
+    assert.equal(container.args[container.args.indexOf('--network')+1], 'host');
+    for (const name of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy']) assert.ok(container.args.includes(name));
+    assert.ok(container.args.includes('--allow-insecure-entitlement'));
+    assert.ok(container.args.includes('network.host'));
+    assert.ok(!container.args.includes('-p') && !container.args.includes('--publish'), 'BuildKit must not expose a TCP port');
     const create = calls.find(c => c.args[0] === 'buildx' && c.args[1] === 'create');
-    assert.ok(create.args.includes('network=host'));
-    assert.ok(create.args.includes(`env.HTTP_PROXY=${proxy}`));
-    assert.ok(create.args.includes(`env.https_proxy=${proxy}`));
-    assert.ok(create.args.some(a => a.startsWith('"env.NO_PROXY=localhost,') && a.endsWith('"')));
-    assert.ok(create.args.includes('--allow-insecure-entitlement network.host'));
+    assert.equal(create.args[create.args.indexOf('--driver')+1], 'remote');
+    assert.equal(create.args.at(-1), 'docker-container://'+container.args[container.args.indexOf('--name')+1]);
     assert.ok(!create.args.includes('--use'));
     const build = calls.find(c => c.args[0] === 'buildx' && c.args[1] === 'build');
     for (const flag of ['--load','--builder','--network','--allow','network.host','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']) assert.ok(build.args.includes(flag), flag);
@@ -153,7 +177,10 @@ MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:8899 shadow_image_build`, { MX_LAUNCHER
     const creates = f.calls().filter(c => c.args[0] === 'buildx' && c.args[1] === 'create');
     assert.equal(creates.length, 2);
     assert.notEqual(creates[0].args[3], creates[1].args[3]);
-    assert.ok(creates[1].args.includes('env.HTTP_PROXY=http://127.0.0.1:8899'));
+    const containers = f.calls().filter(c => c.args[0] === 'create');
+    assert.equal(containers.length, 2);
+    assert.equal(containers[1].env.HTTP_PROXY, 'http://127.0.0.1:8899');
+    assert.equal(f.calls().filter(c => c.args[0] === 'start').length, 2, 'a running builder must not restart');
   } finally { f.cleanup(); }
 });
 
@@ -173,10 +200,58 @@ test('uncached BuildKit bootstraps through the ctr client for both containerd 1.
       assert.ok(!pull.args.includes('k8s.io'));
       assert.ok(pull.args.includes('linux/amd64'));
       const load = calls.findIndex(c => c.args[0] === 'load');
-      const create = calls.findIndex(c => c.args[1] === 'create');
+      const create = calls.findIndex(c => c.args[0] === 'create');
       assert.ok(load >= 0 && create > load);
       assert.ok(!calls.some(c => c.tool === 'docker' && c.args[0] === 'pull'));
       assert.deepEqual(readdirSync(join(f.dir, 'tmp')), []);
+    } finally { f.cleanup(); }
+  }
+});
+
+test('stopped or missing managed BuildKit resumes without pulling through dockerd or replacing its cache', () => {
+  const f = fixture();
+  try {
+    assert.equal(f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy }).status, 0);
+    const create = f.calls().find(c => c.args[0] === 'create');
+    const name = create.args[create.args.indexOf('--name')+1];
+    const file = join(f.dir, 'container-'+name);
+    const container = JSON.parse(readFileSync(file));
+    container.running = false; writeFileSync(file, JSON.stringify(container));
+    assert.equal(f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy }).status, 0);
+    assert.equal(f.calls().filter(c => c.args[0] === 'create').length, 1);
+    assert.equal(f.calls().filter(c => c.args[0] === 'start').length, 2);
+    rmSync(file);
+    assert.equal(f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy }).status, 0);
+    const creates = f.calls().filter(c => c.args[0] === 'create');
+    assert.equal(creates.length, 2);
+    assert.deepEqual(creates[0].args, creates[1].args, 'recreation reattaches the same dedicated volume');
+    assert.equal(f.calls().filter(c => c.args[0] === 'buildx' && c.args[1] === 'create').length, 1);
+    assert.ok(!f.calls().some(c => ['pull','stop','restart','rm','volume','system'].includes(c.args[0]) || c.tool === 'ctr'));
+  } finally { f.cleanup(); }
+});
+
+test('unexpected container or builder identity is preserved and blocks the build', () => {
+  for (const env of [{ MX_TEST_CONTAINER_CONFLICT: '1' }, { MX_TEST_BUILDER_DRIVER: 'docker-container' }, { MX_TEST_BUILDER_ENDPOINT: 'tcp://other-host:1234' }]) {
+    const f = fixture();
+    try {
+      assert.equal(f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy }).status, 0);
+      const previous = f.calls().length;
+      const result = f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy, ...env });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /unexpected/);
+      const calls = f.calls().slice(previous);
+      assert.ok(!calls.some(c => ['create','start','stop','restart','rm','test-artifacts'].includes(c.args[0]) || c.args[1] === 'build'));
+    } finally { f.cleanup(); }
+  }
+});
+
+test('start/readiness failures stop before artifact generation and application build', () => {
+  for (const env of [{ MX_TEST_START_FAIL: '1' }, { MX_TEST_BOOT_FAIL: '1' }]) {
+    const f = fixture();
+    try {
+      const result = f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy, ...env });
+      assert.notEqual(result.status, 0);
+      assert.ok(!f.calls().some(c => c.args[0] === 'test-artifacts' || c.args[1] === 'build'));
     } finally { f.cleanup(); }
   }
 });
@@ -262,8 +337,9 @@ test('an explicit bypass list reaches both buildkitd and the build client unchan
     const bypass = 'localhost,127.0.0.1,.corp.example';
     const result = f.run(undefined, { MX_LAUNCHER_BUILD_PROXY: proxy, MX_LAUNCHER_BUILD_NO_PROXY: bypass });
     assert.equal(result.status, 0, result.stderr);
-    const create = f.calls().find(c => c.args[0] === 'buildx' && c.args[1] === 'create');
-    assert.ok(create.args.includes(`"env.NO_PROXY=${bypass}"`));
+    const create = f.calls().find(c => c.args[0] === 'create');
+    assert.ok(create.args.includes('NO_PROXY'));
+    assert.equal(create.env.NO_PROXY, bypass);
     const build = f.calls().find(c => c.args[0] === 'buildx' && c.args[1] === 'build');
     assert.equal(build.env.NO_PROXY, bypass);
     assert.equal(f.calls().at(-1).env.NO_PROXY, '*');
