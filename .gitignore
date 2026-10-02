@@ -81,3 +81,5 @@ electron-dock/mx-launcher/demos/*/pnpm-workspace.yaml
 spec_docs/
 
 electron-dock/mx-insight-hub/docs/architecture/atlas/
+# Launcher vendors canonical Neon Void assets during dev/build.
+electron-dock/mx-launcher/desktop/ui-design/

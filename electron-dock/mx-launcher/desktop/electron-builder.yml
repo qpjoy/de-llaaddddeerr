@@ -12,6 +12,8 @@ files:
   - service-operations.js
   - service-operations-catalog.js
   - styles.css
+  - neon-void.css
+  - ui-design/**/*
   - package.json
 extraResources:
   - from: products

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Neon Void UI Demo</title>
     <link rel="stylesheet" href="../../ui-design/src/styles.css" />
+    <link rel="stylesheet" href="../../ui-design/src/select.css" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body class="qp-app qp-theme-neon-void qp-density--medium demo-app">
@@ -473,35 +474,17 @@
               <div class="demo-form-grid">
                 <div class="qp-field">
                   <span class="qp-field__label">Tenant</span>
-                  <div class="qp-dropdown qp-dropdown--searchable" data-dropdown data-searchable>
-                    <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-                      <span class="qp-dropdown__value" data-dropdown-value>All tenants</span>
-                      <span class="qp-dropdown__chevron">⌄</span>
-                    </button>
-                    <div class="qp-dropdown__menu qp-dropdown__menu--searchable" aria-label="Tenant menu">
-                      <label class="qp-dropdown__search">
-                        <input type="search" placeholder="Search tenants" aria-label="Search tenant options" aria-controls="demo-tenant-options" />
-                      </label>
-                      <div class="qp-dropdown__options" id="demo-tenant-options" role="listbox" aria-label="Tenant">
-                        <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="All tenants">All tenants</button>
-                        <div class="qp-dropdown__group" role="presentation">Workspace tenants</div>
-                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="LCY">LCY</button>
-                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="ystest">ystest</button>
-                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="bootstrap">bootstrap</button>
-                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="舟山租户">舟山租户</button>
-                        <p class="qp-dropdown__empty" hidden>No matching options</p>
-                      </div>
-                    </div>
-                  </div>
+                  <select aria-label="Tenant" id="demo-tenant-select">
+                    <option value="all">All tenants</option>
+                    <optgroup label="Workspace tenants">
+                      <option value="LCY">LCY</option><option value="ystest">ystest</option>
+                      <option value="bootstrap">bootstrap</option><option value="舟山租户">舟山租户</option>
+                    </optgroup>
+                  </select>
                 </div>
                 <div class="qp-field">
                   <span class="qp-field__label">Disabled</span>
-                  <div class="qp-dropdown">
-                    <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false" disabled>
-                      <span class="qp-dropdown__value">Inherited from policy</span>
-                      <span class="qp-dropdown__chevron">⌄</span>
-                    </button>
-                  </div>
+                  <select aria-label="Disabled selection" disabled><option>Inherited from policy</option></select>
                 </div>
               </div>
             </section>
@@ -741,14 +724,7 @@
                   <div class="qp-property-section__body">
                     <div class="qp-property-row">
                       <span class="qp-property-label">UvSpreadType</span>
-                      <div class="qp-dropdown" data-dropdown>
-                        <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false"><span class="qp-dropdown__value" data-dropdown-value>ModelUV</span><span class="qp-dropdown__chevron">⌄</span></button>
-                        <div class="qp-dropdown__menu" role="listbox" aria-label="UvSpreadType">
-                          <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="ModelUV">ModelUV</button>
-                          <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="WorldUV">WorldUV</button>
-                          <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="ScreenUV">ScreenUV</button>
-                        </div>
-                      </div>
+                      <select aria-label="UvSpreadType"><option>ModelUV</option><option>WorldUV</option><option>ScreenUV</option></select>
                     </div>
                     <div class="qp-property-row">
                       <span class="qp-property-label">MainColor</span>

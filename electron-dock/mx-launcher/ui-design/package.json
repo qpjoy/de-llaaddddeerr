@@ -13,7 +13,12 @@
     "./styles.css": "./dist/styles.css",
     "./tokens.css": "./dist/tokens.css",
     "./tokens.json": "./dist/tokens.json",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./select.js": {
+      "types": "./dist/select.d.ts",
+      "import": "./dist/select.js"
+    },
+    "./select.css": "./dist/select.css"
   },
   "files": [
     "dist",
@@ -25,12 +30,14 @@
   },
   "sideEffects": [
     "./dist/styles.css",
-    "./dist/tokens.css"
+    "./dist/tokens.css",
+    "./dist/select.css"
   ],
   "scripts": {
     "build": "node scripts/build.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepack": "pnpm build"
+    "prepack": "pnpm build",
+    "test:browser": "node tests/select.browser.mjs"
   },
   "keywords": [
     "qpjoy",

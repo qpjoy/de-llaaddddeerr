@@ -8,6 +8,6 @@ const dist = join(root, 'dist');
 await rm(dist, { force: true, recursive: true });
 await mkdir(dist, { recursive: true });
 
-for (const asset of ['styles.css', 'tokens.css', 'tokens.json']) {
+for (const asset of ['styles.css', 'tokens.css', 'tokens.json', 'select.js', 'select.css', 'select.d.ts']) {
   await copyFile(join(root, 'src', asset), join(dist, asset));
 }

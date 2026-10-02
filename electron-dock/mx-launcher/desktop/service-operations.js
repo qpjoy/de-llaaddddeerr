@@ -92,6 +92,7 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
     try { spec = preview(); } catch (cause) { error = cause.message; }
     root.querySelector('[data-service-preview]').textContent = spec?.command || '请修正配置后生成命令。';
     root.querySelector('[data-service-validation]').textContent = error;
+    root.querySelector('[data-service-impact]').dataset.impact = spec?.impact ? 'write' : 'read';
     root.querySelector('[data-service-impact]').textContent = spec?.impact || '读取所选服务信息，不自动修复或重启。';
     root.querySelector('[data-service-feedback]').textContent = feedback;
     const validPlan = plan && Date.parse(plan.expiresAt) > Date.now();

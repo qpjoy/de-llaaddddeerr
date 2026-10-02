@@ -4,6 +4,8 @@
 
 MX Rig 的当前实现与运行说明以 [README](../../mx-rig/README.md) 和 [架构](../../mx-rig/docs/01-architecture.md) 为准。旧 mx-test-framework、mx-auto-server 和 demos/mx-autotest 保留作历史，既有代码不被新产品动态加载。
 
+2026-10-02 时效补充：后续 Rig 已改为自有账号默认、Launcher 联邦可选，不要求 standalone 网络宿主；下文身份描述保留初期边界背景。当前以 [Rig docs/12](../../mx-rig/docs/12-self-contained-rig-and-flight-model.md) 的修订决策和 [全景规划](37-ecosystem-review-and-rig-roadmap.md) 为准。
+
 Internal 管理组织配置、模型连接和工具策略。身份通过 Launcher 公开合同验证，Rig 角色与任务数据独立。桌面 Runtime 托管自己的浏览器子进程，当前不申请 network lease，不接管 MX-H2I/Luopan 的 profile、DNS、PAC、NRPT 或网络所有权。
 
 Launcher 的现有 test-center 继续承担平台质量与发布门禁。Rig 可作为统一测试入口下的独立工作台；详细入口方案见 [集成说明](../../mx-rig/docs/02-launcher-integration.md)。本次只增加文档，不修改 Launcher Controller、登录限流、readiness 或部署资源；没有执行现网注册。

@@ -1385,6 +1385,7 @@ shadow_image_artifacts() {
 shadow_image_admin_assets() {
   local out_dir="$ROOT/server/artifacts/admin"
   local three_build_dir="$ROOT/desktop/node_modules/three/build"
+  local asset
   [ -f "$ROOT/desktop/index.html" ] || die "missing desktop/index.html"
   [ -f "$ROOT/desktop/renderer.js" ] || die "missing desktop/renderer.js"
   [ -f "$ROOT/desktop/styles.css" ] || die "missing desktop/styles.css"
@@ -1397,6 +1398,11 @@ shadow_image_admin_assets() {
   cp "$ROOT/desktop/service-operations.js" "$out_dir/service-operations.js"
   cp "$ROOT/desktop/service-operations-catalog.js" "$out_dir/service-operations-catalog.js"
   cp "$ROOT/desktop/styles.css" "$out_dir/styles.css"
+  cp "$ROOT/desktop/neon-void.css" "$out_dir/neon-void.css"
+  mkdir -p "$out_dir/ui-design"
+  for asset in styles.css tokens.css select.css select.js; do
+    cp "$ROOT/ui-design/src/$asset" "$out_dir/ui-design/$asset"
+  done
   cp "$three_build_dir"/*.js "$out_dir/node_modules/three/build/"
 }
 

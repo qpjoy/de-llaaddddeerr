@@ -30,6 +30,8 @@ async function assertBuilderContract() {
     'requestedExecutionLevel: asInvoker',
     'afterSign: scripts/after-sign.mjs',
     'from: native',
+    '- neon-void.css',
+    '- ui-design/**/*',
     '- service-operations.js',
     '- service-operations-catalog.js',
     'from: products'

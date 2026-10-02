@@ -133,6 +133,37 @@ Use the compact `qp-dialog` surface for a destructive confirmation. A host shoul
 
 For destructive dialogs, Escape and the backdrop may cancel only while idle. Disable every dismissal control and set `aria-busy="true"` while the request is in flight. After closing, restore focus to the invoking control or to a stable nearby fallback if that control was deleted.
 
+## Searchable native-select adapter
+
+Use the same runtime as the Neon Void demo and MX Launcher. Keep the original `select` and its option values; the adapter supplies the searchable menu, keyboard interaction and portal placement.
+
+```js
+import '@qpjoy/ui-design-neon-void/styles.css';
+import '@qpjoy/ui-design-neon-void/select.css';
+import { installNeonSelects } from '@qpjoy/ui-design-neon-void/select.js';
+
+// Call after mounting the client DOM. Theme the document body with Neon Void.
+const controls = installNeonSelects(document);
+// For component-scoped integrations, pass the mounted element and call
+// controls.destroy() on unmount. controls.refresh() explicitly reconciles state.
+```
+
+- Enhances single selects, including fields added by later renders. Retains native `name`, value, FormData, required validation and exactly one input/change pair for a changed selection.
+- Search matches option labels, values and group labels. Disabled options/groups cannot be selected. Arrow keys, Home/End, Enter, Escape and Tab work; IME confirmation does not commit a choice.
+- Reflects option/disabled mutations, form reset, and assignments to `select.value` / `selectedIndex`. After directly changing an individual option's `selected` property without a DOM mutation, dispatch `change` or call `refresh()`.
+- Menus use a body portal, viewport positioning and an upward fallback so scroll panels do not clip them. They inherit resolved Neon Void tokens from the field, including a scoped light theme. No service requests, persistence or authorization logic are part of the component.
+- `multiple` and listbox (`size > 1`) selects stay native. Use `data-neon-native` to opt out before initialization. Call `destroy()` to remove the adapter and restore native fields.
+- Import the adapter once per managed DOM subtree. Do not attach a second adapter to overlapping roots. The CSS-only `qp-dropdown` anatomy remains available for non-select menus.
+
+The desktop copies `styles.css`, `tokens.css`, `select.css` and `select.js` from this source during dev/build. Its production admin asset assembly copies the same canonical files; do not edit generated `desktop/ui-design/` files.
+
+Browser contract checks use an already installed Playwright/Chrome runtime:
+
+```sh
+# Or set MX_PLAYWRIGHT_MODULE to an existing Playwright module path.
+pnpm --dir electron-dock/mx-launcher/ui-design run test:browser
+```
+
 ## Demo
 
 From `electron-dock/mx-launcher`:

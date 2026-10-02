@@ -1,8 +1,10 @@
+import { installNeonSelects } from '../../ui-design/src/select.js';
+installNeonSelects(document);
+
 const app = document.querySelector('.demo-app');
 const densityButtons = Array.from(document.querySelectorAll('[data-density]'));
 const themeButtons = Array.from(document.querySelectorAll('[data-theme]'));
 const partialCheck = document.querySelector('#partial-check');
-const dropdowns = Array.from(document.querySelectorAll('[data-dropdown]'));
 const routeTitle = document.querySelector('#route-title');
 const routeKicker = document.querySelector('#route-kicker');
 const routeSections = Array.from(document.querySelectorAll('[data-route]'));
@@ -137,121 +139,6 @@ for (const button of themeButtons) {
   });
 }
 
-function closeDropdown(dropdown) {
-  dropdown.classList.remove('is-open');
-  dropdown.querySelector('.qp-dropdown__trigger')?.setAttribute('aria-expanded', 'false');
-  for (const option of dropdown.querySelectorAll('.qp-dropdown__option')) {
-    option.classList.remove('is-highlighted');
-  }
-}
-
-function openDropdown(dropdown) {
-  for (const item of dropdowns) {
-    if (item !== dropdown) closeDropdown(item);
-  }
-  dropdown.classList.add('is-open');
-  dropdown.querySelector('.qp-dropdown__trigger')?.setAttribute('aria-expanded', 'true');
-  const search = dropdown.querySelector('.qp-dropdown__search input');
-  if (search instanceof HTMLInputElement) {
-    search.value = '';
-    search.dispatchEvent(new Event('input'));
-    window.requestAnimationFrame(() => search.focus());
-  }
-}
-
-for (const dropdown of dropdowns) {
-  const trigger = dropdown.querySelector('.qp-dropdown__trigger');
-  const value = dropdown.querySelector('[data-dropdown-value]');
-  const options = Array.from(dropdown.querySelectorAll('.qp-dropdown__option'));
-  const search = dropdown.querySelector('.qp-dropdown__search input');
-  const empty = dropdown.querySelector('.qp-dropdown__empty');
-  const groups = Array.from(dropdown.querySelectorAll('.qp-dropdown__group'));
-
-  const visibleOptions = () => options.filter((option) => !option.hidden && !option.disabled);
-  const highlight = (option) => {
-    for (const item of options) item.classList.toggle('is-highlighted', item === option);
-    option?.scrollIntoView({ block: 'nearest' });
-  };
-  const moveHighlight = (delta) => {
-    const visible = visibleOptions();
-    if (!visible.length) return;
-    const current = visible.findIndex((option) => option.classList.contains('is-highlighted'));
-    const next = current < 0 ? (delta > 0 ? 0 : visible.length - 1) : (current + delta + visible.length) % visible.length;
-    highlight(visible[next]);
-  };
-  const choose = (option) => {
-    if (!option) return;
-    const nextValue = option.dataset.value || option.textContent?.trim() || '';
-    if (value) value.textContent = nextValue;
-    for (const item of options) {
-      const selected = item === option;
-      item.classList.toggle('is-selected', selected);
-      item.setAttribute('aria-selected', selected ? 'true' : 'false');
-    }
-    closeDropdown(dropdown);
-    trigger?.focus();
-  };
-  const filterOptions = () => {
-    const query = search instanceof HTMLInputElement ? search.value.trim().toLocaleLowerCase() : '';
-    for (const option of options) {
-      option.hidden = Boolean(query) && !(option.dataset.value || option.textContent || '').toLocaleLowerCase().includes(query);
-    }
-    for (const group of groups) group.hidden = visibleOptions().length === 0;
-    if (empty instanceof HTMLElement) empty.hidden = visibleOptions().length > 0;
-    highlight(visibleOptions()[0]);
-  };
-
-  trigger?.addEventListener('click', () => {
-    if (dropdown.classList.contains('is-open')) {
-      closeDropdown(dropdown);
-    } else {
-      openDropdown(dropdown);
-    }
-  });
-
-  trigger?.addEventListener('keydown', (event) => {
-    if (event.isComposing) return;
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      if (!dropdown.classList.contains('is-open')) openDropdown(dropdown);
-      else moveHighlight(event.key === 'ArrowDown' ? 1 : -1);
-    } else if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      if (!dropdown.classList.contains('is-open')) openDropdown(dropdown);
-      else choose(visibleOptions().find((option) => option.classList.contains('is-highlighted')) || visibleOptions()[0]);
-    } else if (event.key === 'Escape') {
-      closeDropdown(dropdown);
-    }
-  });
-
-  search?.addEventListener('input', filterOptions);
-  search?.addEventListener('keydown', (event) => {
-    if (event.isComposing) return;
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      moveHighlight(event.key === 'ArrowDown' ? 1 : -1);
-    } else if (event.key === 'Home' || event.key === 'End') {
-      event.preventDefault();
-      const visible = visibleOptions();
-      highlight(event.key === 'Home' ? visible[0] : visible.at(-1));
-    } else if (event.key === 'Enter') {
-      event.preventDefault();
-      const option = visibleOptions().find((item) => item.classList.contains('is-highlighted')) || visibleOptions()[0];
-      if (option) choose(option);
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      closeDropdown(dropdown);
-      trigger?.focus();
-    }
-  });
-
-  for (const option of options) {
-    option.addEventListener('mousedown', (event) => event.preventDefault());
-    option.addEventListener('mouseenter', () => highlight(option));
-    option.addEventListener('click', () => choose(option));
-  }
-}
-
 function paginationItems(page, totalPages) {
   if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
   const candidates = [...new Set([1, page - 1, page, page + 1, totalPages])]
@@ -319,18 +206,3 @@ if (paginationDemo) {
   });
   renderPaginationDemo(Number(paginationDemo.dataset.page));
 }
-
-document.addEventListener('click', (event) => {
-  const target = event.target;
-  if (!(target instanceof Node)) return;
-  for (const dropdown of dropdowns) {
-    if (!dropdown.contains(target)) closeDropdown(dropdown);
-  }
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') return;
-  for (const dropdown of dropdowns) {
-    closeDropdown(dropdown);
-  }
-});

@@ -14,6 +14,13 @@
 
 相关专题：
 
+- [38-neon-void-admin-ui.md](./38-neon-void-admin-ui.md)：
+  管理界面统一到 Neon Void，共用搜索下拉、键盘交互、目录布局和设计资产同步/打包约定。
+
+- [37-ecosystem-review-and-rig-roadmap.md](./37-ecosystem-review-and-rig-roadmap.md)：
+  2026-10-02 跨项目源码走读、Launcher/Hub/Night-All/Rig 职责、当前能力与历史文档差异，
+  以及面向测试的 Agent 工作台分阶段规划；包含本次本地验证及未验证边界。
+
 - [36-service-operations.md](./36-service-operations.md)：
   服务与部署已在本地实现：Launcher/Hub/Embedding/OCR 的参数表单、命令预览、独立执行器、
   版本与配置预检、持久任务及断线查询。包含随 Launcher deploy 幂等安装/安全更新及生产验收边界，未部署生产。

@@ -1,5 +1,8 @@
 import * as THREE from './node_modules/three/build/three.module.js';
 import { createServiceOperations } from './service-operations.js';
+import { installNeonSelects } from './ui-design/select.js';
+
+installNeonSelects(document);
 
 const SSH_READONLY_PROBE_FEATURE_KEY = 'site-slot.ssh-readonly-probe.execute';
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
@@ -206,7 +209,6 @@ const state = {
       roleId: 'all',
       status: 'all'
     },
-    openDropdown: null,
     drawer: null,
     defaultOverseaOnCreate: true,
     importBusy: false,
@@ -1120,12 +1122,6 @@ if (mxH2iLeaseBackdrop) {
   mxH2iLeaseBackdrop.addEventListener('click', () => closeMxH2iLeaseDrawer());
 }
 
-document.addEventListener('click', (event) => {
-  if (!state.userCenter.openDropdown) return;
-  if (event.target?.closest?.('[data-user-dropdown-root]')) return;
-  closeUserCenterDropdown();
-});
-
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Tab' && mxH2iLeaseDrawer && !mxH2iLeaseDrawer.hidden) {
     trapMxH2iLeaseDrawerFocus(event);
@@ -1134,11 +1130,6 @@ window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && mxH2iLeaseDrawer && !mxH2iLeaseDrawer.hidden) {
     event.preventDefault();
     closeMxH2iLeaseDrawer();
-    return;
-  }
-  if (event.key === 'Escape' && state.userCenter.openDropdown) {
-    event.preventDefault();
-    closeUserCenterDropdown();
     return;
   }
   if (event.key === 'Escape' && userEditorDrawer && !userEditorDrawer.hidden) {
@@ -3130,26 +3121,6 @@ function rerenderUserCenterDropdownContext() {
   }
 }
 
-function syncUserDropdownDom() {
-  for (const dropdown of document.querySelectorAll('[data-user-dropdown-root]')) {
-    const open = dropdown.dataset.userDropdownRoot === state.userCenter.openDropdown;
-    dropdown.classList.toggle('is-open', open);
-    dropdown.querySelector('[data-user-dropdown-toggle]')?.setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
-}
-
-function closeUserCenterDropdown() {
-  if (!state.userCenter.openDropdown) return;
-  state.userCenter.openDropdown = null;
-  syncUserDropdownDom();
-}
-
-function toggleUserCenterDropdown(dropdownId) {
-  if (!dropdownId) return;
-  state.userCenter.openDropdown = state.userCenter.openDropdown === dropdownId ? null : dropdownId;
-  rerenderUserCenterDropdownContext();
-}
-
 function applyUserCenterDropdownValue(field, value) {
   if (!field) return;
   if (field.startsWith('filter:')) {
@@ -3168,19 +3139,9 @@ function applyUserCenterDropdownValue(field, value) {
 
 function bindUserDropdownControls(root) {
   if (!root) return;
-  for (const trigger of root.querySelectorAll('[data-user-dropdown-toggle]')) {
-    trigger.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      toggleUserCenterDropdown(trigger.dataset.userDropdownToggle);
-    });
-  }
-  for (const option of root.querySelectorAll('[data-user-dropdown-option]')) {
-    option.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      applyUserCenterDropdownValue(option.dataset.userDropdownField, option.dataset.userDropdownValue);
-      state.userCenter.openDropdown = null;
+  for (const select of root.querySelectorAll('[data-user-choice-field]')) {
+    select.addEventListener('change', () => {
+      applyUserCenterDropdownValue(select.dataset.userChoiceField, select.value);
       rerenderUserCenterDropdownContext();
     });
   }
@@ -3346,7 +3307,6 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
     // which re-renders the drawer shortly after it opens.
     overseaSiteIds: user ? asArray(entitlement?.siteIds) : []
   };
-  state.userCenter.openDropdown = null;
   state.userCenter.feedback = null;
   state.userCenter.overseaFeedback = null;
   state.userCenter.selectedOverseaUserId = user?.userId || null;
@@ -3359,7 +3319,10 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   const linkRequestGeneration = state.userCenter.overseaLinkRequestGeneration;
   renderUserEditorDrawer();
   if (user?.userId) void loadUserOverseaPublicLinkMeta(user.userId, linkRequestGeneration);
+  const openedDrawer = state.userCenter.drawer;
   requestAnimationFrame(() => {
+    // Do not steal focus from a field the user has already started editing.
+    if (state.userCenter.drawer !== openedDrawer || !userEditorDrawer || userEditorDrawer.hidden || userEditorDrawer.contains(document.activeElement)) return;
     const firstField = userEditorDrawer?.querySelector('[data-user-editor-field="account"]:not([readonly]), [data-user-editor-field="displayName"]');
     firstField?.focus?.();
   });
@@ -3367,7 +3330,6 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
 
 function openSystemSubscriptionsDrawer() {
   state.userCenter.drawer = { mode: 'system-subscriptions' };
-  state.userCenter.openDropdown = null;
   state.userCenter.feedback = null;
   state.userCenter.systemSubscriptionFeedback = null;
   renderUserEditorDrawer();
@@ -3384,7 +3346,6 @@ function closeUserEditorDrawer() {
   state.userCenter.systemSubscriptionFeedback = null;
   state.userCenter.systemSubscriptionBusy = false;
   state.userCenter.drawer = null;
-  state.userCenter.openDropdown = null;
   state.userCenter.busy = false;
   if (userEditorBackdrop) userEditorBackdrop.hidden = true;
   if (userEditorDrawer) {
@@ -4923,6 +4884,7 @@ function deploymentKindSubtitle(kind) {
 function renderInspectorChrome() {
   if (!adminConsole || !adminInspector || !inspectorToggle) return;
   adminConsole.classList.toggle('is-services-workspace', state.adminSection === 'services');
+  adminConsole.classList.toggle('is-directory-workspace', state.adminSection === 'foundations' && ['user-center', 'rbac', 'release', 'dns'].includes(state.adminSubsection));
   adminConsole.classList.toggle('is-inspector-collapsed', state.inspectorCollapsed);
   adminInspector.classList.toggle('is-collapsed', state.inspectorCollapsed);
   inspectorToggle.setAttribute('aria-expanded', state.inspectorCollapsed ? 'false' : 'true');
@@ -7804,44 +7766,11 @@ function userDropdownLabel(options, selectedValue, fallback = '-') {
 }
 
 function renderUserDropdown({ id, field, value, options, label, disabled = false }) {
-  const normalizedOptions = asArray(options).filter((option) => option && option.value);
-  const selectedValue = value || normalizedOptions[0]?.value || '';
-  const selectedLabel = label || userDropdownLabel(normalizedOptions, selectedValue, 'Select');
-  const open = state.userCenter.openDropdown === id;
-  return `
-    <div class="qp-dropdown user-dropdown ${open ? 'is-open' : ''}" data-user-dropdown-root="${escapeHtml(id)}">
-      <button
-        class="qp-dropdown__trigger user-dropdown__trigger"
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded="${open ? 'true' : 'false'}"
-        data-user-dropdown-toggle="${escapeHtml(id)}"
-        data-user-dropdown-field="${escapeHtml(field)}"
-        ${disabled ? 'disabled' : ''}
-      >
-        <span class="qp-dropdown__value user-dropdown__value">${escapeHtml(selectedLabel)}</span>
-        <span class="qp-dropdown__chevron user-dropdown__chevron" aria-hidden="true">⌄</span>
-      </button>
-      <div class="qp-dropdown__menu user-dropdown__menu" role="listbox" aria-label="${escapeHtml(selectedLabel)}">
-        ${normalizedOptions.length ? normalizedOptions.map((option) => {
-          const selected = option.value === selectedValue;
-          return `
-            <button
-              class="qp-dropdown__option user-dropdown__option ${selected ? 'is-selected' : ''}"
-              type="button"
-              role="option"
-              aria-selected="${selected ? 'true' : 'false'}"
-              data-user-dropdown-option="${escapeHtml(id)}"
-              data-user-dropdown-field="${escapeHtml(field)}"
-              data-user-dropdown-value="${escapeHtml(option.value)}"
-            >${escapeHtml(option.label || option.value)}</button>
-          `;
-        }).join('') : `
-          <button class="qp-dropdown__option user-dropdown__option" type="button" role="option" aria-disabled="true" disabled>No options</button>
-        `}
-      </div>
-    </div>
-  `;
+  const normalized = asArray(options).filter((option) => option && option.value);
+  const selected = value || normalized[0]?.value || '';
+  return `<select id="${escapeHtml(id)}" data-placeholder="${escapeHtml(label || '请选择')}" data-user-choice-field="${escapeHtml(field)}" aria-label="${escapeHtml(field === 'filter:roleId' ? '角色' : field === 'filter:status' ? '账号状态' : '用户角色')}" ${disabled ? 'disabled' : ''}>
+    ${normalized.map(option => `<option value="${escapeHtml(option.value)}" ${option.value === selected ? 'selected' : ''}>${escapeHtml(option.label || option.value)}</option>`).join('')}
+  </select>`;
 }
 
 function renderUserStatusBadge(status) {

@@ -1,0 +1,27 @@
+/* Functional select adapter. Visual tokens and option anatomy come from Neon Void. */
+.qp-select-control { display: inline-grid; position: relative; min-width: 0; width: 100%; vertical-align: middle; }
+select.qp-select-native { position: absolute !important; width: 1px !important; height: 1px !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important; border: 0 !important; clip-path: inset(50%); opacity: 0; pointer-events: none; }
+.qp-select-control .qp-select-trigger { min-height: var(--qp-select-height, 36px); font-size: var(--qp-select-font-size, 13px); font-weight: 400; line-height: 1.5; box-shadow: none; }
+.qp-select-trigger .qp-dropdown__chevron { flex-shrink: 0; width: 16px; height: 16px; }
+.qp-select-trigger:disabled { cursor: not-allowed; opacity: .45; }
+.qp-select-trigger[aria-invalid="true"] { border-color: var(--qp-danger); }
+.qp-select-validation { margin-top: 4px; color: var(--qp-danger); font-size: 12px; }
+.qp-select-popup.qp-dropdown__menu { position: fixed; z-index: 100000; display: grid; gap: 4px; min-width: 0; margin: 0; padding: 7px; font-family: var(--qp-font-family); line-height: 1.5; color: var(--qp-text-1); box-sizing: border-box; box-shadow: var(--qp-shadow-drop-3); }
+.qp-select-popup *, .qp-select-popup *::before, .qp-select-popup *::after { box-sizing: border-box; }
+.qp-select-popup [hidden] { display: none !important; }
+.qp-select-popup .qp-dropdown__search { min-height: 34px; flex-wrap: nowrap; gap: 8px; margin: 0 0 3px; }
+.qp-select-popup .qp-select-search { width: 100%; height: 32px; min-height: 32px; margin: 0; padding: 0; font: 400 13px/1.5 var(--qp-font-family); border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--qp-text-1); outline: 0; }
+.qp-select-popup .qp-select-search::placeholder { color: var(--qp-text-3); }
+.qp-select-popup .qp-select-search:focus-visible { outline: 0; box-shadow: none; }
+.qp-select-popup .qp-dropdown__search > svg { flex: 0 0 16px; color: var(--qp-text-3); }
+.qp-select-popup .qp-dropdown__options { overscroll-behavior: contain; scroll-padding: 4px; }
+.qp-select-popup .qp-select-option { min-height: 34px; padding: 7px 9px; font: 400 13px/1.45 var(--qp-font-family); cursor: pointer; }
+.qp-select-popup .qp-select-option::before { content: none; }
+.qp-select-option-label { overflow-wrap: anywhere; }
+.qp-select-popup .qp-dropdown__check { width: 16px; height: 16px; }
+.qp-select-popup .qp-select-option[aria-disabled="true"] { cursor: not-allowed; }
+.qp-select-popup .qp-dropdown__empty { color: var(--qp-text-3); font-size: 12px; }
+.qp-select-popup .qp-dropdown__group { font-size: 11px; color: var(--qp-text-3); margin: 2px 0 4px; }
+.qp-select-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; padding: 6px 4px 1px; border-top: 1px solid var(--qp-line); color: var(--qp-text-3); font-size: 10px; }
+@media (pointer: coarse) { .qp-select-control .qp-select-trigger, .qp-select-popup .qp-select-option { min-height: 42px; } }
+@media (prefers-reduced-motion: reduce) { .qp-select-control *, .qp-select-popup * { transition: none !important; scroll-behavior: auto !important; } }

@@ -1,0 +1,175 @@
+/* Launcher adapter for the canonical ui-design Neon Void tokens/components.
+   Keep domain layouts/visibility in styles.css; this file owns visual consistency. */
+:root {
+  --mx-bg-canvas: var(--qp-bg-1); --mx-bg-workspace: var(--qp-bg-2);
+  --mx-bg-panel: var(--qp-bg-3); --mx-bg-elevated: var(--qp-bg-4);
+  --mx-bg-input: var(--qp-bg-input); --mx-bg-hover: var(--qp-bg-hover);
+  --mx-line: var(--qp-line); --mx-line-strong: var(--qp-line-strong);
+  --mx-text: var(--qp-text-1); --mx-text-soft: var(--qp-text-2); --mx-text-muted: var(--qp-text-3);
+  --mx-primary: var(--qp-primary); --mx-primary-hover: var(--qp-primary-hover); --mx-primary-pressed: var(--qp-primary-pressed);
+  --mx-info: var(--qp-info); --mx-success: var(--qp-success); --mx-warning: var(--qp-warning); --mx-danger: var(--qp-danger);
+  --mx-shadow: var(--qp-shadow-drop-3); --mx-panel-shadow: var(--qp-shadow-inner-1);
+}
+body.qp-app { font-size: 14px; line-height: 1.5; }
+button, input, textarea { transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease; }
+button:disabled { cursor: not-allowed; }
+input::placeholder, textarea::placeholder { color: var(--qp-text-3); opacity: 1; }
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]), textarea {
+  border-radius: var(--qp-radius-sm); border-color: var(--qp-line); font-size: 13px; background: var(--qp-bg-input);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]) { min-height: 36px; }
+input:not(:disabled):hover, textarea:not(:disabled):hover { border-color: color-mix(in srgb, var(--qp-text-2) 28%, var(--qp-line)); }
+input:focus-visible, textarea:focus-visible, .qp-select-trigger:focus-visible { outline: 2px solid color-mix(in srgb, var(--qp-primary) 65%, transparent); outline-offset: 2px; }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--qp-primary); }
+input:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
+code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+pre { scrollbar-width: thin; tab-size: 2; }
+* { scrollbar-width: thin; scrollbar-color: var(--qp-light-3) transparent; }
+
+/* Quiet navigation, clear active destination, consistent content rhythm. */
+.sidebar { padding: 20px 16px 14px; gap: 18px; background: var(--qp-sidebar-bg); }
+.brand { gap: 10px; padding: 0 4px 6px; }
+.brand-mark { flex-shrink: 0; width: 38px; height: 38px; box-shadow: var(--qp-logo-shadow); font-size: 15px; }
+.brand h1 { font-size: 18px; font-weight: 650; letter-spacing: -.035em; }
+.brand p { margin-top: 4px; font-size: 11px; }
+.nav-tabs { gap: 5px; padding-right: 3px; }
+.nav-category { margin: 14px 10px 3px; font-size: 10px; letter-spacing: .09em; color: var(--qp-text-3); }
+.nav-tab, .nav-group-toggle { border: 1px solid transparent; border-radius: var(--qp-radius-sm); background: transparent; box-shadow: none; min-height: 44px; padding: 8px 10px; }
+.nav-tab strong, .nav-group-toggle strong { font-size: 13px; line-height: 1.5; font-weight: 550; }
+.nav-tab span, .nav-group-toggle small, .nav-tab .nav-tab-copy > span { font-size: 11px; line-height: 1.5; color: var(--qp-text-3); }
+.nav-tab:hover, .nav-group-toggle:hover { background: var(--qp-light-5); }
+.nav-tab.is-active, .nav-group.is-active > .nav-group-toggle {
+  background: color-mix(in srgb, var(--qp-primary) 8%, var(--qp-sidebar-bg)); border-color: color-mix(in srgb, var(--qp-primary) 28%, transparent); box-shadow: none;
+}
+.nav-tab.is-active strong, .nav-group.is-active > .nav-group-toggle strong { color: var(--qp-primary); }
+.nav-tab.is-active.nav-group-parent { border-color: transparent; background: var(--qp-light-5); }
+.sidebar:not(.is-collapsed) .nav-group > .nav-tree, .sidebar:not(.is-collapsed) .sidebar-admin-nav { margin: 5px 0 5px 12px; padding-left: 10px; border-left: 1px solid var(--qp-line); }
+.sidebar:not(.is-collapsed) .sidebar-admin-nav .admin-subnav-items { gap: 4px; }
+.sidebar:not(.is-collapsed) .admin-module-tab { min-height: 40px; padding: 8px 10px; border: 1px solid transparent; border-radius: var(--qp-radius-sm); background: transparent; box-shadow: none; }
+.sidebar:not(.is-collapsed) .admin-module-tab strong { font-size: 12px; font-weight: 500; }
+.sidebar:not(.is-collapsed) .admin-module-tab span { font-size: 10px; color: var(--qp-text-3); line-height: 1.5; }
+.sidebar:not(.is-collapsed) .admin-module-tab:hover { background: var(--qp-light-5); }
+.sidebar:not(.is-collapsed) .admin-module-tab.is-active { background: color-mix(in srgb, var(--qp-primary) 10%, transparent); border-color: color-mix(in srgb, var(--qp-primary) 40%, transparent); box-shadow: inset 2px 0 var(--qp-primary); }
+.sidebar:not(.is-collapsed) .admin-module-tab.is-active strong { color: var(--qp-primary); }
+.sidebar-connection { padding-top: 12px; }
+.connection-settings summary { font-size: 11px; }
+.sidebar-collapse { min-height: 32px; font-size: 12px; background: transparent; }
+.workspace { background: linear-gradient(90deg, var(--qp-grid-line) 1px, transparent 1px) 0 0 / 56px 56px, var(--qp-bg-2); }
+.view { padding: 24px 28px 32px; }
+.view-header { align-items: center; gap: 16px; margin-bottom: 24px; }
+.view-header h2 { font-size: 24px; font-weight: 600; letter-spacing: -.04em; line-height: 1.3; }
+.view-header p { margin-top: 5px; font-size: 12px; }
+#view-workbench { padding: 28px; }
+#view-workbench .view-header h2 { font-size: 28px; font-weight: 600; }
+.workbench-eyebrow { font-size: 10px !important; letter-spacing: .12em; }
+.workbench-toolbar { margin-bottom: 22px; }
+.workbench-card { border-radius: var(--qp-radius-md); box-shadow: var(--qp-shadow-inner-1); }
+
+/* A shared 36px form/action scale across all existing management surfaces. */
+.primary-button, .secondary-button { min-height: 36px; border-radius: var(--qp-radius-sm); padding: 7px 13px; font-size: 12px; font-weight: 500; line-height: 1.5; }
+.primary-button { box-shadow: none; font-weight: 600; }
+.secondary-button { background: color-mix(in srgb, var(--qp-bg-input) 68%, transparent); }
+.primary-button:disabled, .secondary-button:disabled { opacity: .4; box-shadow: none; }
+.qp-select-control .qp-select-trigger { font-size: 13px; min-height: 36px; padding: 7px 10px; }
+.qp-select-control .qp-dropdown__value { font-size: inherit; line-height: 1.5; color: inherit; }
+.qp-select-popup .qp-select-search { min-height: 32px; height: 32px; border: 0; outline: 0; background: transparent; }
+.qp-select-popup .qp-select-search:focus-visible { outline: 0; box-shadow: none; }
+.service-field > span, .server-field > span, .form-field > span { font-size: 12px; color: var(--qp-text-2); font-weight: 400; }
+.service-field small, .service-hint { font-size: 11px; color: var(--qp-text-3); line-height: 1.65; }
+.state-chip, .health-chip, .product-state { min-height: 22px; font-size: 11px; font-weight: 500; padding: 1px 8px; }
+
+/* Tables retain their domain columns, selection, scroll containers and actions. */
+table { font-size: 12px; border-collapse: separate; border-spacing: 0; }
+thead th { background: color-mix(in srgb, var(--qp-bg-4) 70%, var(--qp-bg-3)); color: var(--qp-text-3); font-size: 10px; font-weight: 550; letter-spacing: .035em; }
+tbody td { border-color: var(--qp-line); line-height: 1.6; }
+tbody tr { transition: background-color 120ms ease; }
+tbody tr:hover { background: var(--qp-light-5); }
+tbody td strong { font-weight: 550; }
+td .primary-button, td .secondary-button { min-height: 28px; font-size: 11px; padding: 4px 9px; }
+.foundation-panel, .admin-panel, .registry-panel, .release-panel { background: var(--qp-bg-3); border-color: var(--qp-line); border-radius: var(--qp-radius-md); box-shadow: var(--qp-shadow-inner-1); }
+.foundation-scope-card, .history-scope-card { border-color: var(--qp-line); border-radius: var(--qp-radius-md); background: color-mix(in srgb, var(--qp-primary) 4%, var(--qp-bg-3)); }
+.foundation-scope-card strong, .history-scope-card strong { font-size: 16px; font-weight: 550; }
+.foundation-scope-card > span, .history-scope-card > span { min-width: 54px; font-weight: 550; font-size: 12px; }
+.foundation-card { border-radius: var(--qp-radius-md); }
+.foundation-card span { font-size: 22px; font-weight: 550; }
+.app-editor-drawer, .evidence-drawer, .admin-inspector { background: var(--qp-bg-3); border-color: var(--qp-line); }
+.app-editor-drawer h2, .evidence-header h2 { font-size: 20px; font-weight: 550; }
+
+/* Service workspace: short field rows, one heading per area, restrained emphasis. */
+#service-operations-panel { gap: 18px; }
+.service-page-heading { padding-bottom: 16px; border-bottom: 1px solid var(--qp-line); }
+.service-page-heading h3 { margin: 0 0 4px; font-size: 20px; font-weight: 550; letter-spacing: -.025em; }
+.service-page-heading p { font-size: 12px; color: var(--qp-text-3); }
+.service-eyebrow { display: none; }
+.service-connection { font-size: 11px; }
+.service-picker { gap: 10px; }
+.service-choice { padding: 14px; border-radius: var(--qp-radius-md); box-shadow: var(--qp-shadow-inner-1); }
+.service-choice strong { font-size: 14px; font-weight: 550; margin-bottom: 4px; }
+.service-choice span { font-size: 11px; }
+.service-choice.is-selected { border-color: color-mix(in srgb, var(--qp-primary) 65%, transparent); background: color-mix(in srgb, var(--qp-primary) 6%, var(--qp-bg-3)); }
+.service-choice.is-selected strong { color: var(--qp-primary); }
+.service-workspace { gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
+.service-form-panel, .service-command-panel, .service-task-panel { padding: 20px; border-radius: var(--qp-radius-md); box-shadow: var(--qp-shadow-inner-1); }
+.service-panel-heading { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--qp-line); }
+.service-panel-heading h4 { font-size: 14px; font-weight: 550; }
+.service-panel-heading > span { font-size: 11px; }
+.service-field { gap: 6px; margin-bottom: 14px; }
+.service-form-actions { gap: 8px; }
+.service-command-code { padding: 16px; font-size: 11px; line-height: 1.8; border-radius: var(--qp-radius-sm); background: var(--qp-bg-1); color: color-mix(in srgb, var(--qp-primary) 32%, var(--qp-text-1)); }
+.service-impact { border-left: 2px solid color-mix(in srgb, var(--qp-warning) 70%, transparent); padding: 6px 10px; margin-top: 12px; font-size: 11px; line-height: 1.7; background: color-mix(in srgb, var(--qp-warning) 4%, transparent); }
+.service-impact[data-impact="read"] { border-color: var(--qp-line); color: var(--qp-text-2); background: transparent; }
+.service-feedback { font-size: 11px; }
+.service-switch { border-radius: var(--qp-radius-sm); }
+.service-switch strong { font-size: 12px; font-weight: 500; }
+.service-task-log { background: var(--qp-bg-1); font-size: 11px; border-radius: var(--qp-radius-sm); }
+.service-history button { border-radius: var(--qp-radius-sm); padding: 9px 12px; font-size: 12px; }
+.service-setup { border-top: 1px solid var(--qp-line); padding-top: 14px; font-size: 12px; }
+.service-setup p { line-height: 1.8; overflow-wrap: anywhere; }
+
+@media (max-width: 1100px) {
+  .view, #view-workbench { padding: 20px; }
+  .service-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .service-workspace { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 680px) {
+  .view, #view-workbench { padding: 16px 12px 28px; }
+  .view-header h2 { font-size: 21px; }
+  #view-workbench .view-header h2 { font-size: 24px; }
+  .service-page-heading { align-items: flex-start; gap: 10px; }
+  .service-page-heading h3 { font-size: 18px; }
+  .service-page-heading p { font-size: 11px; }
+  .service-page-heading > button { max-width: 132px; white-space: normal; }
+  .service-form-panel, .service-command-panel, .service-task-panel { padding: 14px; }
+  .service-choice { padding: 12px; }
+  .service-choice strong { font-size: 12px; }
+  .service-connection > span:last-child { margin-left: 0; width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+
+/* Directory pages use the full workspace; host inspection belongs to operations. */
+.admin-console.is-directory-workspace, .admin-console.is-directory-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr); }
+.admin-console.is-directory-workspace .admin-inspector { display: none; }
+.app-catalog-toolbar, .user-catalog-toolbar, .release-catalog-toolbar { flex-wrap: wrap; gap: 16px; align-items: start; }
+.app-catalog-toolbar > div:first-child { min-width: 180px; }
+.user-catalog-controls { display: flex; flex: 1 1 610px; width: auto; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.user-catalog-controls > input { flex: 1 1 160px; width: 160px; min-width: 120px; }
+.user-catalog-controls > .qp-select-control { flex: 0 1 145px; width: 145px; }
+.user-catalog-controls > button, .user-catalog-controls > label { flex: 0 0 auto; }
+.user-catalog-controls .user-default-oversea { min-height: 36px; max-width: none; padding: 6px 10px; border-radius: var(--qp-radius-sm); font-size: 11px; }
+.user-catalog-controls .user-default-oversea span { white-space: nowrap; }
+.app-catalog-controls > .qp-select-control { width: auto; min-width: 130px; }
+.app-table, .foundation-table { background: var(--qp-bg-3); border-color: var(--qp-line); border-radius: var(--qp-radius-md); }
+.app-table-row, .foundation-table-row { padding: 11px 14px; font-size: 12px; }
+.app-table-row.is-header, .foundation-table-row.is-header { font-size: 10px; font-weight: 550; letter-spacing: .035em; background: var(--qp-light-5); }
+.app-table-row strong, .app-table-row b, .foundation-table-row strong { font-size: 12px; font-weight: 550; }
+.app-table-row small, .foundation-table-row small { font-size: 11px; }
+.app-table-row mark { font-size: 10px; font-weight: 500; min-height: 21px; }
+.user-workbench-meta { font-size: 11px; font-weight: 400; gap: 8px; }
+.user-workbench-meta > span:not(.profile-feedback) { border-radius: var(--qp-radius-sm); padding: 3px 7px; background: var(--qp-light-5); }
+.foundation-panel-head h4 { font-size: 15px; font-weight: 550; }
+.foundation-panel-head p { font-size: 12px; }
+@media (max-width: 680px) {
+  .user-catalog-controls { justify-content: flex-start; flex-basis: 100%; }
+  .user-catalog-controls > input { flex-basis: 100%; width: 100%; }
+  .user-catalog-controls > .qp-select-control { flex: 1 1 120px; }
+}
