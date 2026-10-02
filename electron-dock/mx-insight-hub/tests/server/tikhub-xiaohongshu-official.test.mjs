@@ -607,6 +607,41 @@ test('deep valid App V2 JSON is staged with exact bytes before contract rejectio
   assert.equal(state.platformStore.ingestJobs.length, 0)
 })
 
+test('official user-info delivers userid profiles, archives and ingests once, and replays without dispatch', async () => {
+  const payload = {
+    code: 200,
+    data: { code: 0, success: true, data: { userid: USER_ID, nickname: 'Alice', fans: 1234 } },
+  }
+  let calls = 0
+  const state = await fixture(async (url) => {
+    calls += 1
+    assert.equal(new URL(url).searchParams.get('user_id'), USER_ID)
+    return jsonResponse(payload)
+  })
+  const request = {
+    endpointName: 'get_user_info',
+    path: TIKHUB_XIAOHONGSHU_USER_INFO_ENDPOINT_PATH,
+    query: { user_id: USER_ID },
+    idempotencyKey: 'official-user-info-userid-profile',
+  }
+  const first = await state.gateway.officialXiaohongshu(state.context, request)
+  const replay = await state.gateway.officialXiaohongshu(state.context, request)
+  assert.equal(first.status, 200)
+  assert.deepEqual(first.body, payload)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, first.body)
+  assert.equal(calls, 1)
+  assert.equal(state.platformStore.calls.size, 1)
+  assert.equal([...state.platformStore.calls.values()][0].outcome, 'succeeded')
+  assert.equal(state.platformStore.restrictedResponseArchives.size, 1)
+  assert.deepEqual([...state.platformStore.restrictedResponseArchives.values()][0].parsedPayload, payload)
+  assert.equal(state.platformStore.ingestJobs.length, 1)
+  const [record] = state.platformStore.ingestJobs[0].payload.records
+  assert.equal(record.objectType, 'profile')
+  assert.equal(record.externalId, USER_ID)
+  assert.equal(state.usageStore.requests.get(first.requestId).unitsActual, 1)
+})
+
 test('official identity routes preserve documented service-error envelopes without canonical ingest', async () => {
   const envelopes = new Map()
   const state = await fixture(async (url) => {

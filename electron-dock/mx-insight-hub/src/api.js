@@ -410,6 +410,13 @@ export const adminApi = {
   ),
   usage: (token, query) => request(token, `${ADMIN_ROOT}/usage`, { query }),
   tenantConsumption: (token, tenantId, query = {}) => request(token, `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing/consumption`, { query }),
+  paymentChannels: (token, tenantId) => request(token, `${ADMIN_ROOT}/payments/channels`, { query: { tenantId } }),
+  paymentSettings: (token) => request(token, `${ADMIN_ROOT}/payments/settings`),
+  savePaymentSettings: (token, body) => request(token, `${ADMIN_ROOT}/payments/settings`, { method: 'PUT', body }),
+  paymentOrders: (token, query) => request(token, `${ADMIN_ROOT}/payments/orders`, { query }),
+  paymentOrder: (token, tenantId, id) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders/${encodeURIComponent(id)}`),
+  createPaymentOrder: (token, tenantId, body, key) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders`, { method: 'POST', body, headers: { 'idempotency-key': key } }),
+  paymentAction: (token, tenantId, id, action, body, key) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body, headers: { 'idempotency-key': key } }),
   tenantBilling: (token, tenantId, query = {}) => request(
     token,
     `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing`,

@@ -1,0 +1,41 @@
+.mih-pay-page { display: grid; gap: 20px; }
+.mih-pay-toolbar, .mih-pay-balance { display:flex; flex-wrap:wrap; align-items:center; gap:24px; padding:20px 24px; }
+.mih-pay-toolbar > * { flex:1; min-width:200px; }
+.mih-pay-tabs, .mih-pay-actions, .mih-pay-presets, .mih-pay-pagination { display:flex; gap:10px; flex-wrap:wrap; }
+.mih-pay-checkout { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:20px; }
+.mih-pay-card { padding:26px; min-width:0; }
+.mih-pay-card h2 { display:flex; align-items:center; gap:10px; font-size:18px; margin:0 0 18px; }
+.mih-pay-card > p, .mih-pay-muted, .mih-pay-card > small { color:var(--qp-text-2); line-height:1.7; }
+.mih-pay-presets { margin:24px 0; }
+.mih-pay-presets button { flex:1; }
+.mih-pay-facts { display:grid; gap:16px; margin:20px 0; }
+.mih-pay-facts > div { display:flex; justify-content:space-between; gap:20px; }
+.mih-pay-facts dt { color:var(--qp-text-2); flex-shrink:0; }
+.mih-pay-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; }
+.mih-pay-total, .mih-pay-order-total strong { font-size:32px; font-weight:650; letter-spacing:-.7px; }
+.mih-pay-balance strong, .mih-pay-balance span { display:block; }
+.mih-pay-balance strong { font-size:25px; margin-top:6px; }
+.mih-pay-balance a { margin-left:auto; }
+.mih-pay-notice { padding:14px 18px; border:1px solid var(--qp-line); border-radius:10px; background:var(--qp-bg-2); line-height:1.7; }
+.mih-pay-record-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; }
+.mih-pay-filters { display:grid; grid-template-columns:1fr 1fr 1.6fr; gap:16px; margin:16px 0 24px; }
+.mih-pay-filters form { display:flex; align-items:flex-end; gap:10px; }
+.mih-pay-filters form > :first-child { min-width:0; flex:1; }
+.mih-pay-table { overflow:auto; }
+.mih-pay-table table { border-collapse:collapse; width:100%; text-align:left; white-space:nowrap; }
+.mih-pay-table th { font-size:12px; color:var(--qp-text-2); font-weight:500; }
+.mih-pay-table th, .mih-pay-table td { border-bottom:1px solid var(--qp-line); padding:16px 12px; }
+.mih-pay-table small { display:block; margin-top:7px; color:var(--qp-text-2); font:11px ui-monospace,monospace; }
+.mih-pay-badge { display:inline-block; padding:5px 9px; border-radius:7px; background:var(--qp-bg-2); font-size:12px; white-space:nowrap; }
+.mih-pay-badge--paid, .mih-pay-badge--issued { color:var(--qp-success-foreground); background:rgba(28,170,111,.1); }
+.mih-pay-badge--submitted, .mih-pay-badge--requested { color:var(--qp-warning); background:rgba(205,150,43,.12); }
+.mih-pay-pagination { justify-content:flex-end; align-items:center; margin-top:22px; }
+.mih-pay-empty { padding:32px; text-align:center; color:var(--qp-text-2); }
+.mih-pay-detail { padding:8px 2px 18px; }
+.mih-pay-order-total { display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.mih-pay-qr { display:block; width:230px; height:230px; object-fit:contain; background:white; padding:12px; border-radius:12px; margin:22px auto; }
+.mih-pay-form { display:grid; gap:16px; margin:22px 0; }
+.mih-pay-check { display:flex; align-items:flex-start; gap:10px; line-height:1.6; }
+.mih-pay-check input { margin-top:5px; }
+.mih-pay-invoice { margin-top:25px; padding-top:15px; border-top:1px solid var(--qp-line); overflow-wrap:anywhere; }
+@media(max-width:760px) { .mih-pay-checkout,.mih-pay-filters { grid-template-columns:1fr; } .mih-pay-card { padding:20px; } .mih-pay-toolbar { padding:16px; } .mih-pay-balance { gap:16px; } .mih-pay-facts > div { flex-wrap:wrap; gap:8px; } .mih-pay-facts dd { text-align:left; } }

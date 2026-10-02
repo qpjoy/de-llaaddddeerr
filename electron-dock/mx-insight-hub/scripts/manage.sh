@@ -1627,6 +1627,7 @@ build_and_import_image() {
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
       --build-context "mx_common=${MX_COMMON_DIR}" \
+      --build-context "mx_pay=${ELECTRON_DOCK_DIR}/mx-base/mx-pay" \
       -t "$image" \
       -f "${ROOT_DIR}/Dockerfile" \
       --load \
@@ -1652,6 +1653,7 @@ build_and_import_image() {
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
       --build-context "mx_common=${MX_COMMON_DIR}" \
+      --build-context "mx_pay=${ELECTRON_DOCK_DIR}/mx-base/mx-pay" \
       -t "$image" \
       -f "${ROOT_DIR}/Dockerfile" \
       "$ROOT_DIR"

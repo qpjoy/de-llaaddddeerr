@@ -276,8 +276,10 @@ export function normalizeTikHubXiaohongshuUserInfoResponse(raw, {
   }
   const source = profileData(raw)
   if (!source) invalid('invalid_upstream_contract', 'TikHub user info response omitted profile data')
+  // App V2 profiles also use userid (verified against a restricted live archive).
+  // Keep the response identity authoritative; never substitute request params.
   const userId = normalizedUserId(
-    source.user_id ?? source.userId ?? source.id,
+    source.user_id ?? source.userId ?? source.id ?? source.userid,
   )
   if (!userId) invalid('invalid_upstream_contract', 'TikHub user info response omitted a valid user_id')
   if (expectedUserId && userId !== expectedUserId.toLowerCase()) {

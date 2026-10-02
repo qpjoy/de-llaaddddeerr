@@ -1,5 +1,7 @@
 # Unified identity and platform module integration
 
+2026-10-02 planning extension: [Platform identity, product consoles and existing-tenant migration](platform-identity-and-product-consoles.md) defines an independent payment console, shared account authority, a future public OIDC login surface, and additive bindings to existing Hub members. The opaque-token implementation described below remains current. No new registration, SSO protocol, role migration or public route is enabled by that plan.
+
 ## Status and scope
 
 This document defines the boundary between MX Launcher and MX Insight Hub for
@@ -23,8 +25,10 @@ JIT identity provisioning creates only a member/binding; it never creates a
 tenant or membership. A configured Launcher scope allowlist may grant the
 separate platform-admin role. The Admin Token remains an unscoped, global
 break-glass path. Append-only customer billing/credit ledgers are implemented;
-online payment, subscription lifecycle and invoice processing remain roadmap
-work.
+manual QR recharge, administrator receipt confirmation and manual invoice
+requests are implemented in the Hub P0 slice. Automated payment channels,
+subscription lifecycle, an invoice engine and the independent payment service
+remain roadmap work; see [payment scope](../product/payments-and-cost-control.md).
 
 Multi-tenancy in the current release scopes control-plane ownership,
 authorization and accounting. It is not a blanket claim that every canonical

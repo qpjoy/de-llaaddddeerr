@@ -2,6 +2,14 @@
 
 Last reviewed: 2026-09-30.
 
+## 支付与财务（2026-10-02）
+
+- [mx-pay 独立服务与一键部署](../../mx-base/mx-pay/README.md)：已实现独立支付 API、专用数据库迁移、应用/环境凭据、持久付款事件与 SDK；`manage.sh deploy` 自动迁移后发布。Hub 存量充值仍走原路径，未执行生产切换或部署。
+- [平台业务分域与统一管理入口](../../mx-launcher/docs/32-platform-business-centers-and-management-integration.md)：从现有 Launcher Admin 演进统一平台入口和独立运维控制台；区分支付、财务、Hub 与技术运维，各中心保留数据/API/工作台，按阶段集成安装与维护。规划，未改动现有登录或部署。
+- [Hub 支付、充值与成本管控](product/payments-and-cost-control.md)：mx-pay、扫码人工核实、原租户钱包、测试隔离、开票申请与财务工作台已实现；第 11 节规划公司统一支付中心的跨应用接口、凭据、收银台与可靠通知。官方支付、完整对账、成本归集、渠道和供应商付款分期规划。
+- [支付中心：服务边界、存储与 Kubernetes 稳定性](architecture/payment-center-service-boundaries-and-reliability.md)：目标为 mx-pay 独立服务/数据库，Hub 充值也是接入应用；核对当前 Recreate/单 PG/队列认领缺口，明确 common 原语、退款/折扣/报表职责、滚更与迁移验收。规划，尚未部署。
+- [平台统一身份、产品控制台与存量租户过渡](architecture/platform-identity-and-product-consoles.md)：支付独立管理台、Hub 租户账单入口、统一账号与分别授权；保留原 member/tenant/Key/钱包，规划内网身份中心到公开 SSO/邀请的渐进迁移。当前不开放注册或切换登录。
+
 This directory is the source of truth for MX Insight Hub as an independent
 control plane and data center. TikHub/JustOne operations already migrated to
 Hub are governed here. Night-All-specific implementation details remain in the

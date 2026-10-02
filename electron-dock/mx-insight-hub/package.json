@@ -34,6 +34,7 @@
     "test:ops": "bash tests/manage-script.test.sh"
   },
   "dependencies": {
+    "@qpjoy/mx-pay": "file:../mx-base/mx-pay",
     "@qpjoy/mx-common": "file:../mx-common",
     "croner": "10.0.1",
     "pg": "8.22.0",

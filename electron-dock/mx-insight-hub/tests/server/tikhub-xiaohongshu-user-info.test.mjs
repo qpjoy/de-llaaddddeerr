@@ -189,6 +189,50 @@ test('user-info normalizer preserves provider business fields without exposing r
   )
 })
 
+test('user-info normalizer accepts the observed App V2 userid field without trusting request echoes', () => {
+  // Shape confirmed from the restricted archive for Hub request 4359ba99-ab95-4924-b26b-7611e5ad6572.
+  // All profile values here are synthetic; the upstream identity field is userid.
+  const raw = {
+    code: 200,
+    params: { user_id: USER_ID },
+    data: {
+      code: 0,
+      success: true,
+      data: {
+        userid: USER_ID,
+        nickname: 'Alice',
+        red_id: 'alice-red',
+        desc: 'Profile bio',
+        images: 'https://sns-avatar-qc.xhscdn.com/avatar.webp',
+        fans: 1234,
+        follows: 88,
+        interactions: 999,
+      },
+    },
+  }
+  const options = { expectedUserId: USER_ID, capturedAt: CAPTURED_AT }
+  const profile = normalizeTikHubXiaohongshuUserInfoResponse(raw, options)
+  assert.equal(profile.user_id, USER_ID)
+  assert.equal(profile.name, 'Alice')
+  assert.equal(profile.followers_count, 1234)
+  assert.equal(profile.metrics.interactions, 999)
+  assert.equal(normalizeTikHubXiaohongshuUserInfoResponse(raw).user_id, USER_ID,
+    'share-text requests can identify the returned profile without an expected user ID')
+  assert.equal(raw.data.data.user_id, undefined, 'do not rewrite the provider business envelope')
+
+  for (const userid of [undefined, '', 'invalid-id']) {
+    assert.throws(() => normalizeTikHubXiaohongshuUserInfoResponse({
+      ...raw, data: { ...raw.data, data: { ...raw.data.data, userid } },
+    }, options), { code: 'invalid_upstream_contract' }, 'request params cannot supply a missing response identity')
+  }
+  assert.throws(() => normalizeTikHubXiaohongshuUserInfoResponse({
+    ...raw, data: { ...raw.data, data: { ...raw.data.data, userid: NOTE_ID } },
+  }, options), { code: 'upstream_identity_mismatch' })
+  assert.throws(() => normalizeTikHubXiaohongshuUserInfoResponse({
+    ...raw, data: { ...raw.data, data: { ...raw.data.data, user_id: NOTE_ID } },
+  }, options), { code: 'upstream_identity_mismatch' }, 'the alias must not override an existing conflicting identity')
+})
+
 test('legacy user-info envelope keeps raw_info/raw_data and nine-field page contract', () => {
   const plan = buildXiaohongshuUserInfoPlan({
     platform: 'xiaohongshu', userId: USER_ID, count: 20,

@@ -72,6 +72,10 @@ import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((module) => ({
   default: module.AgentMarketPage,
 })))
+const LazyPaymentsPage = lazy(() => import('./pages-payments.jsx').then(module => ({ default: module.PaymentsPage })))
+function PaymentsPage(props) {
+  return <Suspense fallback={<LoadingState label="正在加载充值与发票" />}><LazyPaymentsPage {...props} /></Suspense>
+}
 const LazyAgentStudioPage = lazy(() => import('./pages-agent-studio.tsx').then((module) => ({
   default: module.AgentStudioPage,
 })))
@@ -363,6 +367,7 @@ const ROUTES = [
   { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
+  { path: '/payments', label: '充值与发票', description: '充值、核账与开票', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'consumer.write' },
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },

@@ -19,10 +19,12 @@ COPY --from=ui_design src /workspace/mx-launcher/ui-design/src
 # sources are read at build and run time, never at install time, and copying
 # them first made every edit to shared source re-run a ~70s network install.
 COPY --from=mx_common package.json package-lock.json /workspace/mx-common/
+COPY --from=mx_pay package.json /workspace/mx-base/mx-pay/package.json
 COPY package.json package-lock.json ./
 RUN npm ci --registry="$NPM_REGISTRY" --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000
 COPY --from=mx_common src /workspace/mx-common/src
 COPY --from=mx_common migrations /workspace/mx-common/migrations
+COPY --from=mx_pay src /workspace/mx-base/mx-pay/src
 COPY . ./
 RUN npm run build
 
@@ -57,6 +59,7 @@ COPY --from=mx_common src ./src
 COPY --from=mx_common migrations ./migrations
 
 WORKDIR /app
+COPY --from=mx_pay package.json /mx-base/mx-pay/package.json
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
       --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
@@ -71,6 +74,8 @@ WORKDIR /app
 # must exist in the runtime stage at the same resolved path or every import of
 # @qpjoy/mx-common fails at startup with a dangling link.
 COPY --from=production-dependencies /mx-common /mx-common
+COPY --from=mx_pay package.json /mx-base/mx-pay/package.json
+COPY --from=mx_pay src /mx-base/mx-pay/src
 COPY --from=build /workspace/mx-insight-hub/package.json ./package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /workspace/mx-insight-hub/agent-market ./agent-market

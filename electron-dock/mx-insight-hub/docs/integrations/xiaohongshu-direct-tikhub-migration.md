@@ -375,3 +375,35 @@ the TikHub credential, parent contract gate, direct snapshots, provider-call led
 observations and signed cursor support through the rollback window so already-issued direct cursors remain on
 their original connector. Night-All credentials, routes and historical datasets stay available throughout
 migration. Rollback changes future route ownership; it never rewrites completed evidence.
+
+## 2026-10-02 user-info identity compatibility correction
+
+Hub request `4359ba99-ab95-4924-b26b-7611e5ad6572` (2026-10-01 14:35:32 UTC)
+received one TikHub App V2 `get_user_info` response with HTTP/business code 200,
+inner `data.code=0`, `data.success=true`, and a profile at `data.data`. The profile
+used `userid`, a valid 24-hex ID matching `params.user_id`. It did not contain
+`user_id`, `userId` or `id`. Hub rejected the otherwise usable profile with
+`invalid_upstream_contract`; the public error was `external_platform_response_unusable` / 502.
+This incident is a Hub field-mapping defect, not evidence of a missing user.
+
+The shared user-info normalizer now accepts `userid` after the existing identity
+aliases. It still validates the returned ID and rejects a mismatch with the
+requested ID; request parameters and `red_id` never supply a missing identity.
+Official business envelopes remain unchanged, and the same correction applies
+to the direct legacy user-info adapter. No new grant, migration or upstream call
+is required by this parser correction.
+
+The regression fixtures reproduce the observed structure with synthetic profile
+values and cover native delivery, canonical ingest, exact restricted archives,
+identity rejection and replay without another dispatch. To check a deployed
+parser against existing evidence without paying for a new request, run
+`bash scripts/diagnose-xiaohongshu-user-info.sh` on the Hub Kubernetes host;
+the incident should report `currentParser.accepted=true` after the updated
+Hub image is running. This does not rewrite the historical 502: replaying the
+original idempotency key still returns its original result. A new live check
+is a separate explicit request and follows the existing pricing rules.
+
+The incident also recorded a customer charge of CNY 0.10. The existing TikHub
+failure path commits a stable failed response and can capture per-request
+customer charges. This correction does not change that settlement policy or
+refund/rewrite historical charges. MX-H2I/Launcher login and networking are unchanged.

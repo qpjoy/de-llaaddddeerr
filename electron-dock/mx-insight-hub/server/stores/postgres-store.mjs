@@ -1916,9 +1916,9 @@ export class PostgresStore {
   }
 
   async addTenantCredit({
-    tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor, debit = false, expectedRevision,
+    tenantId, amountMinor, currency, reason, externalReference, idempotencyKey, actor, debit = false, expectedRevision, transactionClient = null,
   }) {
-    return withPgTransaction(this.pool, async (client) => {
+    const applyCredit = async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing:tenant:${tenantId}`])
       const existing = await client.query(
         `SELECT * FROM billing.credit_ledger_entries
@@ -1976,7 +1976,10 @@ export class PostgresStore {
         ],
       )
       return creditLedgerRecord(entryResult.rows[0])
-    }, { outcomeUnknownCode: 'credit_adjustment_outcome_unknown' })
+    }
+    // mx-pay confirmation and this existing wallet journal commit together.
+    return transactionClient ? applyCredit(transactionClient)
+      : withPgTransaction(this.pool, applyCredit, { outcomeUnknownCode: 'credit_adjustment_outcome_unknown' })
   }
 
   async reconcileUnknownCustomerCharge({
@@ -9266,7 +9269,7 @@ async function saveCursorInTransaction(client, id, position, {
 // Local transaction helper. mx-common exports an equivalent, but the store
 // receives a pool rather than the shared config and should not reach into the
 // package for one three-line function.
-async function withPgTransaction(pool, fn, {
+export async function withPgTransaction(pool, fn, {
   outcomeUnknownCode = null,
   sessionClient = null,
 } = {}) {

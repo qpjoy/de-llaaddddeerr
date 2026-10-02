@@ -1,4 +1,6 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
+import { PaymentService } from './payments/service.mjs'
+import { paymentRoute } from './payments/routes.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
@@ -809,6 +811,8 @@ export function createApp({
     databasePuller,
   })
 
+  const payments = new PaymentService(store)
+
   /**
    * Resolve the caller of an administrative route.
    *
@@ -1518,6 +1522,8 @@ export function createApp({
       if (isAdminPath) {
         principal = await resolvePrincipal(request)
       }
+
+      if (await paymentRoute({ payments, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
         const scopes = await documentationScopes(principal)
