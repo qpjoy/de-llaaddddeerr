@@ -33,6 +33,9 @@ function loadProfile(file = PROFILE) {
   let p;
   try { p = JSON.parse(readFileSync(file, 'utf8')); }
   catch { throw new Error('身份档案 JSON 损坏；请恢复备份（不输出文件内容）'); }
+  return validateProfileContent(p);
+}
+function validateProfileContent(p) {
   if (p.version !== 1 || p.origin !== internalOrigin(p.origin) || p.issuer !== `${p.origin}/identity` || !p.installationId
     || p.clientId !== 'mx-launcher-admin' || !/^[A-Za-z0-9_-]{43}$/.test(p.clientSecret) || !Array.isArray(p.cookieKeys)
     || p.cookieKeys.length !== 2 || p.cookieKeys.some(key => !/^[A-Za-z0-9_-]{43}$/.test(key)) || p.jwks?.keys?.length !== 1) throw new Error('身份配置不完整；请从备份恢复，不能自动重建密钥');
@@ -65,6 +68,14 @@ export function readProfile(file = PROFILE) {
 export function diagnoseProfile(file = PROFILE) {
   const p = loadProfile(file);
   return p ? { configured: true, node: process.version, nodeOpenSSL: process.versions.openssl, ...certificateChecks(p) } : { configured: false };
+}
+// Backups may retain the known, not-yet-published CA-extension bug so normal
+// startup can repair it. Keys, leaf signature and issuer must still agree.
+export function validateProfileForBackup(p) {
+  validateProfileContent(p);
+  const { caValid, ...checks } = certificateChecks(p);
+  if (!Object.values(checks).every(Boolean)) throw new Error('身份档案密钥、签名或入口不一致；停止覆盖恢复备份');
+  return p;
 }
 function openssl(args, cwd, input) {
   const r = spawnSync('openssl', args, { cwd, input, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });

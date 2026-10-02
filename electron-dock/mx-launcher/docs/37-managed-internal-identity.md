@@ -44,6 +44,19 @@ bash scripts/manage.sh ops identity on https://10.88.88.88:18543
 
 原 HTTP 管理入口和 Ops Token 应急访问保留。已启用身份服务后，旧入口的“个人账号”区显示“打开安全管理入口”，不在 HTTP 页面启动 Secure Cookie 登录。
 
+## 文件保存在哪里
+
+| 内容 | 持久保存位置 | 容器重建后的处理 |
+| --- | --- | --- |
+| 完整身份档案，含 CA 私钥、OIDC 密钥、证书、安装标识 | 宿主机 `/var/lib/mx-launcher/identity/profile.json`（600，目录 700） | deploy 读取并复用，不在镜像构建时生成 |
+| 身份服务需要的配置、服务证书/私钥、公开 CA | Kubernetes Secret `mx-identity-runtime`、`mx-identity-ca`、`mx-launcher-admin-sso` | 新 Pod 重新挂载；运行时不获得 CA 私钥 |
+| 用户、绑定与身份会话 | 原 PostgreSQL 数据库/PVC | 复用持久数据库，不随应用镜像删除 |
+| 完整身份档案及运行时 Secrets 的本机恢复快照 | 宿主机 `/var/lib/mx-launcher-recovery/latest.json` 与变更时的历史快照（600） | 同一原集群部署时可恢复丢失文件/Secret；已有配置不覆盖 |
+
+普通 Docker 镜像重建、Pod 替换和服务器重启不会删除这些宿主机文件、Kubernetes Secret 或数据库卷。部署在身份预检/初始化后、以及身份服务就绪后 **API 滚动更新前** 就保存检查点，因此后续检查失败也保留本批凭据。相同内容重复部署不会增加快照；只有凭据、证书等内容变化才形成新版本。完整 CA 私钥只在宿主机私有档案和私有备份中，不同步进应用容器或普通管理接口。
+
+本机快照不是异机灾备。迁移或重装系统仍须把上述私有档案、恢复目录及数据库/业务数据备份到另一块可靠存储；删除宿主机数据目录、etcd 或数据库卷属于数据删除，不能靠重建容器恢复。
+
 ## 登录与身份兼容
 
 使用已有 MX 账号密码登录，大小写、别名冲突、密码哈希与账号停用沿用原语义。身份进程只查询旧 `iam-user` / `iam-user-credential` 记录，不复制账号、不写入密码、不触发网络开通；`sub` 使用原不可变 `userId`。Launcher 仅对显式配置的自管 issuer 自动建立映射，无需再输入一次密码关联。外部 IdP 仍采用原来的验证后关联流程，不按姓名/邮箱自动合并。
@@ -64,7 +77,7 @@ bash scripts/manage.sh ops identity on https://10.88.88.88:18543
 2. 读取身份档案，核对已有 Kubernetes 资源的安装标识、issuer、密钥与 CA；有冲突就停止，不接管另一套 SSO。
 3. 幂等配置 `mx-identity-runtime`、`mx-identity-ca`，启动独立 `mx-identity` Deployment。复用本次 Launcher 镜像但运行独立 Node 进程，限定 CPU/内存和数据库连接池，不持有 Kubernetes ServiceAccount Token。
 4. 身份进程就绪后写入 `mx-launcher-admin-sso`，再按原流程更新 Launcher API。API 自动挂载并信任该 CA。
-5. 从真实 Launcher API 容器内检查 HTTPS 信任、OIDC discovery 和 SSO 启用状态，失败不报告部署成功。
+5. 从未进入退出阶段、已就绪的 Launcher API Pod 内依次检查配置/CA、本机 SSO 接口、HTTPS OIDC discovery 和 HTTPS 管理转发。只对连接超时、Pod 替换等暂时失败做有限重试；失败输出检查阶段和错误代码，不输出凭据或响应正文，也不自动重复部署。
 
 身份 Deployment 使用持久 Secret 和 PostgreSQL，机器或 Pod 重启后由 Kubernetes 拉起，无需再跑 init 或设置开关。进程重启不会重建签名密钥或丢失数据库会话；独立身份进程更新时新登录可能短暂不可用，已有 Launcher 会话仍由 API 验证。
 
@@ -81,7 +94,9 @@ bash scripts/manage.sh ops identity doctor
 bash scripts/manage.sh ops identity check
 ```
 
-尚未 init 的现有部署继续使用原登录；没有身份档案却发现已运行的自管身份服务时拒绝重建，提示恢复档案。原单机恢复检查点已包含三个身份 Secret，并保留安装归属标识；它不能替代异机备份。
+尚未 init 的现有部署继续使用原登录。原单机恢复检查点包含完整身份档案及三个身份 Secret，并保留安装归属标识；检查原主机挂载、集群、数据库及凭据一致后可恢复丢失的主机档案。没有可用快照且发现已运行的自管身份服务时拒绝重新生成密钥；它不能替代异机备份。
+
+若日志已经显示身份服务就绪和 API `successfully rolled out`，最后检查失败并不代表前面的部署被撤销。先运行 `ops identity check`：`configuration` 表示配置或 CA 挂载，`local-session` 表示 API 本机 SSO 状态，`discovery` 表示 API Pod 到 HTTPS 身份入口，`https-session` 表示 HTTPS 入口转发回管理 API，`pod-exec` 表示无法选中/执行就绪 Pod。不要用反复初始化密钥处理网络或检查错误。
 
 ### OpenSSL 1.1.1 初次 CA 生成失败的恢复
 

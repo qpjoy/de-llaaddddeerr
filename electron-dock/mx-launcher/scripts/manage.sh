@@ -2841,6 +2841,10 @@ k8s_apply() {
   if [ "$target" = "internal-shadow" ]; then
     say "ensure configured identity service before enabling personal login"
     node "$SCRIPT_DIR/identity-deploy.mjs" apply "$(git -C "$ROOT" rev-parse HEAD)"
+    if [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ]; then
+      say "checkpoint identity profile and Secrets before API rollout and final checks"
+      k8s_production_recovery_state checkpoint
+    fi
   fi
   say "apply internal api"
   kubectl apply --validate=false -f "$dir/40-internal-api.yaml"
@@ -6035,6 +6039,7 @@ ops_internal_production() {
       k8s_production_disk_preflight
       say "preflight personal SSO address, port and durable configuration"
       identity_prepare_for_deploy
+      k8s_production_recovery_state checkpoint
       service_operations_ensure
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"

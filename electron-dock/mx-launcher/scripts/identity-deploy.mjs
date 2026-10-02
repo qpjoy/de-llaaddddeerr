@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus, diagnoseProfile } from './identity-profile.mjs';
+import { identityProbe } from './identity-check.mjs';
 
 export const NS = 'mx-internal-shadow';
 export const MANAGED = 'mx.qpjoy.com/identity-installation';
 const sha = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function run(args, input) {
-  const result = spawnSync('kubectl', [`--request-timeout=${args.includes('rollout') ? '190s' : '30s'}`, ...args], { input, encoding: 'utf8', timeout: 210000, maxBuffer: 8 * 1024 * 1024 });
+  const result = spawnSync('kubectl', [`--request-timeout=${args.includes('rollout') ? '190s' : args.includes('exec') ? '40s' : '30s'}`, ...args], { input, encoding: 'utf8', timeout: 210000, maxBuffer: 8 * 1024 * 1024 });
   if (result.error || result.status) throw new Error('身份部署 kubectl 操作失败；请检查集群与 Pod 状态（不输出凭据）');
   return result.stdout;
 }
@@ -89,15 +91,31 @@ export function activateIdentity({ file = PROFILE, execute = run } = {}) {
   execute(['-n', NS, 'patch', 'deployment', 'mx-launcher-internal', '--type=merge', '--patch',
     JSON.stringify({ spec: { template: { metadata: { annotations: { 'mx.qpjoy.com/identity-config': sha([admin.data, ca.data]) } } } } })]);
 }
-export function verifyIdentity({ file = PROFILE, execute = run, log = console.log } = {}) {
+export async function verifyIdentity({ file = PROFILE, execute = run, log = console.log, wait = delay } = {}) {
   const p = readProfile(file); if (!p) return;
-  execute(['-n', NS, 'exec', 'deployment/mx-launcher-internal', '-c', 'internal-api', '--', 'node', '--input-type=module', '-e', `
-    const origin=process.argv[1];
-    const discovery=await fetch(origin+'/identity/.well-known/openid-configuration',{signal:AbortSignal.timeout(10000)});
-    if(!discovery.ok || (await discovery.json()).issuer!==origin+'/identity') throw new Error('Identity discovery not ready');
-    const session=await fetch(origin+'/auth/admin/session',{signal:AbortSignal.timeout(10000)});
-    if(!session.ok || !(await session.json()).enabled) throw new Error('Launcher SSO not enabled');
-  `, p.origin]);
+  let report;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const pods = JSON.parse(execute(['-n', NS, 'get', 'pods', '-l', 'app.kubernetes.io/name=mx-launcher-internal', '-o', 'json'])).items;
+      const pod = pods.filter(pod => !pod.metadata.deletionTimestamp && pod.status?.phase === 'Running' &&
+        pod.status.containerStatuses?.some(container => container.name === 'internal-api' && container.ready))
+        .sort((a, b) => Date.parse(b.metadata.creationTimestamp) - Date.parse(a.metadata.creationTimestamp))[0];
+      if (!pod) report = { stage: 'pod-exec', code: 'NO_READY_POD' };
+      else {
+        const output = execute(['-n', NS, 'exec', pod.metadata.name, '-c', 'internal-api', '--', 'node', '--input-type=module', '-e',
+          `const probe=${identityProbe.toString()}; console.log(JSON.stringify(await probe(process.argv[1],process.argv[2])));`,
+          p.origin, new X509Certificate(p.caCert).fingerprint256]);
+        report = JSON.parse(output.trim());
+        if (report.version !== 1 || typeof report.ok !== 'boolean' || !['configuration', 'local-session', 'discovery', 'https-session', 'complete'].includes(report.stage)
+          || !/^[A-Z_]{2,60}$/.test(report.code) || (report.status !== undefined && (!Number.isInteger(report.status) || report.status < 100 || report.status > 599))) throw new Error('invalid probe output');
+      }
+    } catch { report = { stage: 'pod-exec', code: 'KUBECTL_EXEC_FAILED' }; }
+    if (report.ok) break;
+    // Only read-only checks retry; never silently redeploy or rotate credentials.
+    if (!['NO_READY_POD', 'KUBECTL_EXEC_FAILED', 'ECONNREFUSED', 'ECONNRESET', 'TIMEOUT', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET'].includes(report.code) || attempt === 2) break;
+    await wait(1000);
+  }
+  if (!report.ok) throw new Error(`身份检查失败 [${report.stage}/${report.code}${report.status ? `/HTTP ${report.status}` : ''}]；工作负载可能已更新，请运行 ops identity check 复查，无需重新生成密钥。`);
   log('身份入口 HTTPS 信任、OIDC 发现和 Launcher SSO 启用检查通过。');
   log(`个人管理入口：${p.origin}/admin/；管理员首次需信任 ${dirname(file)}/ca.crt。`);
 }
@@ -114,7 +132,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const version = spawnSync('openssl', ['version'], { encoding: 'utf8', timeout: 5000 });
       console.log(JSON.stringify({ ...diagnoseProfile(), systemOpenSSL: version.status === 0 ? version.stdout.trim() : 'unavailable' }, null, 2));
     } else if (action === 'status') console.log(JSON.stringify(publicStatus(readProfile()), null, 2));
-    else if (action === 'check') verifyIdentity();
+    else if (action === 'check') await verifyIdentity();
     else if (action === 'activate') activateIdentity();
     else if (action === 'export') {
       if (!value || existsSync(value)) throw new Error('请指定尚不存在的私有备份文件路径');

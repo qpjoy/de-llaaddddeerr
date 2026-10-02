@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { initializeProfile, readProfile, internalOrigin, savePrivate } from './identity-profile.mjs';
 import { activateIdentity, deployIdentity, resources, verifyIdentity } from './identity-deploy.mjs';
 
-test('init/redeploy/restore preserve keys, TLS root and issuer; no credentials in deploy output', () => {
+test('init/redeploy/restore preserve keys, TLS root and issuer; no credentials in deploy output', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mx-identity-deploy-')); const file = join(dir, 'profile.json');
   const live = new Map(); const calls = []; const logs = [];
   const execute = (args, input) => {
@@ -34,9 +34,13 @@ test('init/redeploy/restore preserve keys, TLS root and issuer; no credentials i
     assert.deepEqual(activation[0], activation[1], 'same config must not change the API rollout annotation');
     assert.ok(!JSON.stringify(activation).includes(p.clientSecret));
     const verification = [];
-    verifyIdentity({ file, execute: args => { verification.push(args); return ''; }, log() {} });
-    assert.ok(verification[0].includes('deployment/mx-launcher-internal'));
-    assert.throws(() => verifyIdentity({ file, execute() { throw new Error('TLS unreachable'); } }), /TLS unreachable/);
+    await verifyIdentity({ file, execute: args => {
+      verification.push(args);
+      return args.includes('get') ? JSON.stringify({ items: [{ metadata: { name: 'api-ready', creationTimestamp: new Date().toISOString() },
+        status: { phase: 'Running', containerStatuses: [{ name: 'internal-api', ready: true }] } }] }) : JSON.stringify({ version: 1, ok: true, stage: 'complete', code: 'OK' });
+    }, log() {} });
+    assert.ok(verification[1].includes('api-ready'));
+    await assert.rejects(verifyIdentity({ file, execute() { throw new Error('raw sensitive kubectl output'); }, wait: async () => {} }), /pod-exec\/KUBECTL_EXEC_FAILED/);
     const copy = join(dir, 'restored', 'profile.json'); savePrivate(copy, p);
     assert.deepEqual(readProfile(copy), p);
     assert.throws(() => initializeProfile('https://10.88.88.89:18443', file), /迁移/);

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mountIdentity, assertFstabMounted, recoverState } from './k8s-recovery-state.mjs';
 import { guardPostgres } from './k8s-postgres-recovery.mjs';
+import { initializeProfile, readProfile } from './identity-profile.mjs';
+import { resources } from './identity-deploy.mjs';
 
 const identity = { node: 'mx-internal-server', ca: 'same-ca', pgSystemId: 'original-db', mounts: [{ path: '/var/lib/mx-launcher', identity: { device: 'disk-uuid', root: '/mx-runtime/mx-launcher' } }] };
 function fixture() {
@@ -83,6 +85,54 @@ test('identity recovery preserves installation ownership and original keys', () 
     f.invoke('checkpoint'); const before = f.secrets[name]; delete f.secrets[name]; f.invoke('restore');
     assert.deepEqual(f.secrets[name].data, before.data);
     assert.deepEqual(f.secrets[name].metadata.labels, { 'mx.qpjoy.com/identity-installation': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+  } finally { f.cleanup(); }
+});
+
+test('checkpoint retains the full host identity profile; a lost host file and runtime Secrets restore together', () => {
+  const f = fixture();
+  try {
+    const file = join(f.directory, 'identity', 'profile.json');
+    const p = initializeProfile('https://10.88.88.88:18443', file);
+    const r = resources(p, 'abc123');
+    for (const s of [r.runtime, r.admin, r.ca]) f.secrets[s.metadata.name] = s;
+    f.invoke('checkpoint', { identityProfileFile: file });
+    const first = readFileSync(join(f.directory, 'latest.json'), 'utf8');
+    assert.deepEqual(JSON.parse(first).identityProfile, p);
+    for (const s of [r.runtime, r.admin, r.ca]) delete f.secrets[s.metadata.name];
+    unlinkSync(file);
+    f.invoke('restore', { identityProfileFile: file });
+    assert.deepEqual(readProfile(file), p);
+    assert.equal(readFileSync(join(f.directory, 'identity', 'ca.crt'), 'utf8'), p.caCert);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.ok(!JSON.stringify(f.writes).includes(p.caKey), 'CA private key must never be written to Kubernetes');
+    f.invoke('restore', { identityProfileFile: file });
+    f.invoke('checkpoint', { identityProfileFile: file });
+    assert.equal(readFileSync(join(f.directory, 'latest.json'), 'utf8'), first);
+    assert.equal(readdirSync(f.directory).filter(name => name.startsWith('secrets-')).length, 1);
+    assert.ok(!f.logs.join('').includes(p.clientSecret));
+    unlinkSync(file);
+    assert.throws(() => f.invoke('checkpoint', { identityProfileFile: file }), /identity profile missing/);
+    assert.equal(readFileSync(join(f.directory, 'latest.json'), 'utf8'), first);
+  } finally { f.cleanup(); }
+});
+
+test('identity restore never overwrites a live profile or restores keys inconsistent with running Secrets', () => {
+  const f = fixture();
+  try {
+    const file = join(f.directory, 'identity', 'profile.json');
+    const p = initializeProfile('https://10.88.88.88:18443', file);
+    for (const s of Object.values(resources(p, 'abc')).filter(r => r.kind === 'Secret')) f.secrets[s.metadata.name] = s;
+    f.invoke('checkpoint', { identityProfileFile: file });
+    const original = readFileSync(file, 'utf8');
+    f.invoke('restore', { identityProfileFile: file });
+    assert.equal(readFileSync(file, 'utf8'), original);
+    unlinkSync(file);
+    const config = JSON.parse(Buffer.from(f.secrets['mx-identity-runtime'].data['config.json'], 'base64').toString());
+    config.clientSecret = 'foreign-runtime';
+    f.secrets['mx-identity-runtime'].data['config.json'] = Buffer.from(JSON.stringify(config)).toString('base64');
+    assert.throws(() => f.invoke('restore', { identityProfileFile: file }), /credentials differ/);
+    assert.equal(f.writes.length, 0);
+    assert.equal(readProfile(file), null);
   } finally { f.cleanup(); }
 });
 

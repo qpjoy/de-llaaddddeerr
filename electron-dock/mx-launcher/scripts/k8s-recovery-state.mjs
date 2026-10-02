@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PROFILE, savePrivate, validateProfileForBackup } from './identity-profile.mjs';
 
 export const SECRET_NAMES = [
   'mx-launcher-db', 'mx-internal-ops', 'mx-feishu-oauth',
@@ -92,7 +93,26 @@ function cleanSecret(secret, namespace, name) {
     ...(identitySecret && owner ? { labels: { 'mx.qpjoy.com/identity-installation': owner } } : {}) }, type: 'Opaque',
     ...(secret.immutable ? { immutable: true } : {}), data: secret.data };
 }
-export function recoverState(action, { directory, namespace, identity, execute = run, log = console.log }) {
+function assertIdentityProfileMatchesSecrets(profile, secrets) {
+  if (!profile) return;
+  const field = (secret, key) => Buffer.from(secret.data[key] ?? '', 'base64').toString('utf8');
+  for (const name of ['mx-identity-runtime', 'mx-identity-ca', 'mx-launcher-admin-sso']) {
+    const secret = secrets[name]; if (!secret) continue;
+    if (secret.metadata.labels?.['mx.qpjoy.com/identity-installation'] !== profile.installationId) throw new Error('identity profile and Secret ownership differ; recovery stopped');
+    if (name === 'mx-identity-runtime') {
+      let config;
+      try { config = JSON.parse(field(secret, 'config.json')); } catch { throw new Error('invalid identity runtime snapshot'); }
+      for (const key of ['origin', 'issuer', 'clientId', 'clientSecret', 'cookieKeys', 'jwks']) {
+        if (!same(config[key], profile[key])) throw new Error('identity profile and runtime credentials differ; recovery stopped');
+      }
+    }
+    if (name !== 'mx-launcher-admin-sso' && field(secret, 'ca.crt') !== profile.caCert) throw new Error('identity profile and runtime CA differ; recovery stopped');
+    if (name === 'mx-launcher-admin-sso' && (field(secret, 'MX_ADMIN_SSO_ORIGIN') !== profile.origin ||
+      field(secret, 'MX_ADMIN_SSO_ISSUER') !== profile.issuer || field(secret, 'MX_ADMIN_SSO_CLIENT_ID') !== profile.clientId ||
+      field(secret, 'MX_ADMIN_SSO_CLIENT_SECRET') !== profile.clientSecret)) throw new Error('identity profile and Launcher SSO credentials differ; recovery stopped');
+  }
+}
+export function recoverState(action, { directory, namespace, identity, identityProfileFile, execute = run, log = console.log }) {
   if (!['host', 'restore', 'checkpoint'].includes(action) || !/^[a-z0-9][a-z0-9-]*$/.test(namespace)) throw new Error('invalid recovery action or namespace');
   privateDir(directory);
   const hostFile = join(directory, 'host.json');
@@ -123,12 +143,16 @@ export function recoverState(action, { directory, namespace, identity, execute =
     if (!SECRET_NAMES.includes(name)) throw new Error('unexpected Secret in recovery snapshot');
     stored[name] = cleanSecret(secret, namespace, name);
   }
+  const storedProfile = backup?.identityProfile ? validateProfileForBackup(backup.identityProfile) : null;
+  const liveProfile = identityProfileFile && existsSync(identityProfileFile) ? validateProfileForBackup(readPrivate(identityProfileFile)) : null;
+  if (storedProfile && !identityProfileFile) throw new Error('identity profile restore target not configured');
   // Read the complete set before any mutation; an API failure is never NotFound.
   const live = {};
   for (const name of SECRET_NAMES) {
     const secret = get('secret', name, namespace);
     if (secret) live[name] = cleanSecret(secret, namespace, name);
   }
+  assertIdentityProfileMatchesSecrets(liveProfile ?? storedProfile, action === 'restore' ? { ...stored, ...live } : live);
   const missing = Object.keys(stored).filter(name => !live[name]);
   if (action === 'restore') {
     if (!backup) {
@@ -142,13 +166,22 @@ export function recoverState(action, { directory, namespace, identity, execute =
       if (!same(cleanSecret(get('secret', name, namespace), namespace, name), stored[name])) throw new Error(`restored Secret ${name} could not be verified`);
       log(`restored missing Secret ${name}; original credential retained`);
     }
+    if (storedProfile && !liveProfile) {
+      // Same original cluster, mounts, node and database were checked above.
+      // Never replace an existing profile; create-only protects concurrent init.
+      savePrivate(identityProfileFile, storedProfile, true);
+      writeFileSync(join(dirname(identityProfileFile), 'ca.crt'), storedProfile.caCert, { mode: 0o644 });
+      log('restored missing host identity profile and public CA; original keys retained');
+    }
     if (!missing.length) log('existing Secrets retained; no credential restored or rotated');
     if (!(live['mx-feishu-oauth'] || stored['mx-feishu-oauth'])) log('WARNING: no Feishu Secret or snapshot; verify Feishu login configuration separately');
     return;
   }
   if (missing.length) throw new Error(`refusing to replace recovery snapshot while Secrets are missing: ${missing.join(', ')}`);
+  if (storedProfile && !liveProfile) throw new Error('identity profile missing; restore the original profile before checkpoint');
   if (!live['mx-launcher-db'] || !live['mx-internal-ops']) throw new Error('database and ops Secrets required before checkpoint');
-  const payload = { version: 1, namespace, clusterUid, identity, secrets: live };
+  const payload = { version: 1, namespace, clusterUid, identity, secrets: live,
+    ...(liveProfile ? { identityProfile: liveProfile } : {}) };
   const snapshot = { ...payload, checksum: hash(JSON.stringify(payload)) };
   if (!backup || !same(backup, snapshot)) {
     // Retain prior generations; never overwrite the sole copy after a rotation.
@@ -163,7 +196,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const [action, namespace, node] = process.argv.slice(2);
     if (!node) throw new Error('node name required');
     const directory = '/var/lib/mx-launcher-recovery';
-    recoverState(action, { directory, namespace, identity: localIdentity(node) });
+    recoverState(action, { directory, namespace, identity: localIdentity(node), identityProfileFile: PROFILE });
   } catch (error) {
     // JSON / fs errors can include private fragments. Only our own errors are safe.
     console.error(`production recovery stopped: ${error instanceof SyntaxError || error.code ? 'cannot read/validate local recovery data or required data directories; check mounts and private file permissions' : error.message}`);
