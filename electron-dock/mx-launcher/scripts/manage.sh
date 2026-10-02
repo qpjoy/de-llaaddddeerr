@@ -5842,6 +5842,15 @@ internal_production_predeploy_gate() {
   [ -f "$ROOT/server/src/modules/release/release-sdk-publisher.test.ts" ] || \
     die "missing release SDK publisher test"
 
+  # The gate runs on the host before Docker installs image dependencies. An
+  # existing node_modules directory may belong to an older checkout. Reconcile
+  # against the pinned workspace lock on every run; pnpm reuses its shared store.
+  # Include dev tools even under NODE_ENV=production; do not run desktop/native
+  # install hooks on the production server. Only these two packages are needed
+  # for the server gate and the browser admin assets copied into the image.
+  say "predeploy gate: sync server and admin asset dependencies from lockfile"
+  CI=1 run_pnpm_dir "$ROOT" --filter @qpjoy/mx-launcher-server --filter @qpjoy/mx-launcher \
+    install --frozen-lockfile --prod=false --ignore-scripts
   say "predeploy gate: release SDK publisher test"
   run_pnpm_dir "$ROOT/server" exec node --test --import tsx \
     src/modules/release/release-sdk-publisher.test.ts

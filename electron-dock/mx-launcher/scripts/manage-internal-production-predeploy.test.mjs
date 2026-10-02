@@ -31,6 +31,9 @@ if [ -n "\${MX_MANAGE_PREDEPLOY_EXPECT_PROXY:-}" ]; then
 fi
 printf '%s\\n' "$*" >> "$MX_MANAGE_PREDEPLOY_TEST_LOG"
 case "$*" in
+  *"install --frozen-lockfile --prod=false --ignore-scripts"*)
+    [ "$CI" = 1 ] || exit 30
+    exit "\${MX_MANAGE_PREDEPLOY_TEST_INSTALL_STATUS:-0}" ;;
   *release-sdk-publisher.test.ts*) exit "\${MX_MANAGE_PREDEPLOY_TEST_RELEASE_STATUS:-0}" ;;
   *"run typecheck"*) exit "\${MX_MANAGE_PREDEPLOY_TEST_TYPECHECK_STATUS:-0}" ;;
 esac
@@ -57,13 +60,14 @@ function runPredeploy(env) {
   );
 }
 
-test('predeploy uses the repository-pinned pnpm for the focused test and typecheck', () => {
+test('predeploy reconciles pinned server/admin dependencies before the focused test and typecheck', () => {
   const files = fixture();
   try {
     const result = runPredeploy(files.env);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Internal production predeploy gate OK/);
     assert.deepEqual(readFileSync(files.log, 'utf8').trim().split('\n'), [
+      `pnpm@10.24.0 --dir ${root} --filter @qpjoy/mx-launcher-server --filter @qpjoy/mx-launcher install --frozen-lockfile --prod=false --ignore-scripts`,
       `pnpm@10.24.0 --dir ${root}/server exec node --test --import tsx src/modules/release/release-sdk-publisher.test.ts`,
       `pnpm@10.24.0 --dir ${root}/server run typecheck`
     ]);
@@ -81,8 +85,8 @@ test('predeploy stops before typecheck when the focused release test fails', () 
     });
     assert.equal(result.status, 23);
     const calls = readFileSync(files.log, 'utf8').trim().split('\n');
-    assert.equal(calls.length, 1);
-    assert.match(calls[0], /release-sdk-publisher\.test\.ts/);
+    assert.equal(calls.length, 2);
+    assert.match(calls[1], /release-sdk-publisher\.test\.ts/);
   } finally {
     files.cleanup();
   }
@@ -96,10 +100,35 @@ test('predeploy Corepack receives the explicit build proxy', () => {
       MX_LAUNCHER_BUILD_PROXY: 'http://127.0.0.1:7788',
       MX_MANAGE_PREDEPLOY_EXPECT_PROXY: 'http://127.0.0.1:7788' });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(files.log, 'utf8').trim().split('\n').length, 2);
+    assert.equal(readFileSync(files.log, 'utf8').trim().split('\n').length, 3);
   } finally {
     files.cleanup();
   }
+});
+
+test('dependency install failure stops the gate before any tests or rollout', () => {
+  const files = fixture();
+  try {
+    const result = runPredeploy({ ...files.env, MX_MANAGE_PREDEPLOY_TEST_INSTALL_STATUS: '31' });
+    assert.equal(result.status, 31);
+    const calls = readFileSync(files.log, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /install --frozen-lockfile/);
+    assert.doesNotMatch(result.stdout, /Internal production predeploy gate OK/);
+  } finally { files.cleanup(); }
+});
+
+test('repeat predeploy still reconciles dependencies under production NODE_ENV without changing the lockfile', () => {
+  const files = fixture();
+  try {
+    const before = readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = runPredeploy({ ...files.env, NODE_ENV: 'production' });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    assert.equal(readFileSync(files.log, 'utf8').trim().split('\n').filter(line => line.includes('install --frozen-lockfile')).length, 2);
+    assert.equal(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'), before);
+  } finally { files.cleanup(); }
 });
 
 test('break-glass skip is explicit and does not run corepack', () => {
