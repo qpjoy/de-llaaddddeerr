@@ -12,6 +12,7 @@ import { BadRequestException, Body, ConflictException, Controller, ForbiddenExce
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import { internalAdminContext } from '../../lib/internal-admin-context.js';
 import type { PlatformStore, PublisherReleasePlanInput } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
@@ -1120,6 +1121,7 @@ function releaseDecisionSecret(): string {
 // remains a migration fallback only when Internal ops auth is not configured.
 // Installed clients must use POST /internal/v1/release/check.
 function assertReleasePlansAccess(req: IncomingMessage): void {
+  if (internalAdminContext.getStore()) return;
   if (nullableString(process.env.MX_INTERNAL_OPS_TOKEN)) {
     assertInternalOpsToken(requestHeader(req, INTERNAL_OPS_TOKEN_HEADER));
     return;

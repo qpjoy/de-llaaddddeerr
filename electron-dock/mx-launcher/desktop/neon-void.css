@@ -10,6 +10,20 @@
   --mx-info: var(--qp-info); --mx-success: var(--qp-success); --mx-warning: var(--qp-warning); --mx-danger: var(--qp-danger);
   --mx-shadow: var(--qp-shadow-drop-3); --mx-panel-shadow: var(--qp-shadow-inner-1);
 }
+.admin-account { display: grid; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--qp-line); font-size: 12px; color: var(--qp-text-2); }
+.admin-account-label { color: var(--qp-text-3); font-size: 11px; letter-spacing: .08em; }
+.admin-account-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-account-dialog { width: min(440px, calc(100vw - 32px)); box-sizing: border-box; max-height: calc(100dvh - 40px); overflow: auto; padding: 28px; color: var(--qp-text-1); background: var(--qp-bg-3); border: 1px solid var(--qp-line-strong); border-radius: var(--qp-radius-md); box-shadow: var(--qp-shadow-drop-3); }
+.admin-account-dialog::backdrop { background: rgb(0 0 0 / 65%); backdrop-filter: blur(4px); }
+.admin-account-dialog form, .admin-account-dialog label { display: grid; gap: 12px; }
+.admin-account-dialog label { gap: 6px; }
+.admin-account-dialog p { margin: 0; font-size: 13px; line-height: 1.65; color: var(--qp-text-2); }
+.admin-account-dialog h2 { margin: 0; font-size: 22px; }
+.admin-account-dialog a { color: var(--qp-primary); font-size: 13px; }
+.admin-account-dialog input { box-sizing: border-box; width: 100%; color: var(--qp-text-1); padding: 10px 12px; }
+.admin-account-dialog #admin-account-link-feedback { color: var(--qp-warning); }
+.admin-account-dialog .admin-account-actions { justify-content: flex-end; margin-top: 4px; }
+.sidebar.is-collapsed .admin-account { display: none; }
 body.qp-app { font-size: 14px; line-height: 1.5; }
 button, input, textarea { transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease; }
 button:disabled { cursor: not-allowed; }

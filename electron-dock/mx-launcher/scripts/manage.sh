@@ -1396,6 +1396,7 @@ shadow_image_admin_assets() {
   cp "$ROOT/desktop/index.html" "$out_dir/index.html"
   cp "$ROOT/desktop/renderer.js" "$out_dir/renderer.js"
   cp "$ROOT/desktop/service-operations.js" "$out_dir/service-operations.js"
+  cp "$ROOT/desktop/admin-session.js" "$out_dir/admin-session.js"
   cp "$ROOT/desktop/service-operations-catalog.js" "$out_dir/service-operations-catalog.js"
   cp "$ROOT/desktop/styles.css" "$out_dir/styles.css"
   cp "$ROOT/desktop/neon-void.css" "$out_dir/neon-void.css"

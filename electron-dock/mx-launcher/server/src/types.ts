@@ -606,7 +606,7 @@ export interface AdminActionDescriptor {
 }
 
 export interface AdminActionPolicy {
-  authMode: 'shadow-rbac-v1';
+  authMode: 'shadow-rbac-v1' | 'personal-sso-v1';
   principal: PlatformPrincipal;
   warnings: string[];
   actions: AdminActionDescriptor[];

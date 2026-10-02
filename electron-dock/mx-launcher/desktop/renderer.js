@@ -1,6 +1,7 @@
 import * as THREE from './node_modules/three/build/three.module.js';
 import { createServiceOperations } from './service-operations.js';
 import { installNeonSelects } from './ui-design/select.js';
+import { createAdminSessionUi } from './admin-session.js';
 
 installNeonSelects(document);
 
@@ -371,6 +372,7 @@ const state = {
 
 let setupMonitorToken = 0;
 let opsTokenBinding = null;
+const adminSession = createAdminSessionUi({ serverBase: () => normalizedServerBase() });
 
 const overseaTerminalTemplates = {
   inspect: [
@@ -894,6 +896,7 @@ if (appNavToggle) {
 
 serverInput.addEventListener('input', () => {
   clearOpsTokenIfServerBaseChanged();
+  adminSession.reset();
   if (synchronizeLauncherNetworkServerScope(serverInput.value)) {
     serviceOperationsPanel.reset();
     state.appCenterApps = [];
@@ -908,6 +911,7 @@ serverInput.addEventListener('change', () => {
   clearOpsTokenIfServerBaseChanged();
   synchronizeLauncherNetworkServerScope(serverInput.value);
   void persistConfig();
+  void adminSession.refresh();
 });
 
 if (opsTokenInput) {
@@ -1159,6 +1163,7 @@ async function boot() {
   const config = await api.getConfig();
   setServerBaseInputValue(config.serverBaseUrl || serverInput.value || defaultServerBaseUrl());
   initTopologyScene();
+  await adminSession.refresh();
   await refreshProducts();
   const status = await api.getStatus();
   renderStatus(status);
@@ -4464,6 +4469,7 @@ async function fetchJson(path, options = {}) {
   };
   const opsToken = opsTokenForRequest(requestUrl, method);
   if (opsToken) headers['x-mx-ops-token'] = opsToken;
+  const usesPersonalSession = adminSession.prepare(requestUrl, headers, Boolean(opsToken));
   const url = requestUrl.href;
   let response;
   try {
@@ -4471,7 +4477,7 @@ async function fetchJson(path, options = {}) {
       method,
       headers: Object.keys(headers).length > 0 ? headers : undefined,
       body,
-      redirect: opsToken ? 'error' : 'follow'
+      redirect: opsToken || usesPersonalSession ? 'error' : 'follow'
     });
   } catch (error) {
     throw new Error(`Admin API network error: ${url} (${error.message})`);
@@ -4484,6 +4490,7 @@ async function fetchJson(path, options = {}) {
     throw new Error('Admin API returned invalid JSON');
   }
   if (!response.ok) {
+    if (usesPersonalSession) await adminSession.rejected(payload);
     throw new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`);
   }
   return payload;

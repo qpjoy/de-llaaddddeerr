@@ -124,6 +124,9 @@ spec:
             - configMapRef:
                 name: mx-launcher-internal-config
             - secretRef:
+                name: mx-launcher-admin-sso
+                optional: true
+            - secretRef:
                 name: mx-release-oss
                 optional: true
           env:

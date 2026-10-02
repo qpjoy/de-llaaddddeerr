@@ -9,8 +9,13 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 
 import { AppModule } from './app.module.js';
-import { RUNTIME_CONFIG } from './tokens.js';
+import { RUNTIME_CONFIG, PLATFORM_STORE } from './tokens.js';
 import type { RuntimeConfig } from './types.js';
+import type { PlatformStore } from './store/platform-store.js';
+import { loadAdminSsoConfig } from './admin-sso/config.js';
+import { createAdminOidcClient } from './admin-sso/oidc.js';
+import { createAdminSsoMiddleware } from './admin-sso/middleware.js';
+import { PostgresSsoRepository } from './admin-sso/repository.js';
 
 const httpBodyLimit = process.env.MX_HTTP_BODY_LIMIT || '10mb';
 const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -28,6 +33,26 @@ if (trustProxyHops) {
 
 app.useBodyParser('json', { limit: httpBodyLimit });
 app.useBodyParser('urlencoded', { limit: httpBodyLimit, extended: true });
+
+// Opt-in and isolated: a missing/invalid SSO setting must not take down the
+// established SDK/password/Feishu/network or emergency Ops Token paths.
+let ssoConfig: ReturnType<typeof loadAdminSsoConfig> = null;
+let ssoUnavailable = false;
+try {
+  ssoConfig = loadAdminSsoConfig();
+  if (ssoConfig && (!config.databaseUrl || config.storeDriver !== 'postgres')) throw new Error('SSO requires durable Postgres');
+} catch {
+  ssoConfig = null;
+  ssoUnavailable = true;
+  console.warn(JSON.stringify({ event: 'admin.sso.configuration-invalid', message: 'SSO disabled; legacy authentication remains available' }));
+}
+const ssoRepository = ssoConfig ? new PostgresSsoRepository(config.databaseUrl!, config.environment) : undefined;
+app.use(createAdminSsoMiddleware({ config: ssoConfig, unavailable: ssoUnavailable,
+  repository: ssoRepository, oidc: ssoConfig ? createAdminOidcClient(ssoConfig) : undefined,
+  store: app.get<PlatformStore>(PLATFORM_STORE) }));
+if (ssoRepository) app.getHttpServer().once('close', () => {
+  void ssoRepository.close().catch(() => console.warn(JSON.stringify({ event: 'admin.sso.store-close-failed' })));
+});
 
 // Internal responses can vary from a redacted view to a full worker contract
 // based on x-mx-ops-token. Never let a browser or intermediary reuse the

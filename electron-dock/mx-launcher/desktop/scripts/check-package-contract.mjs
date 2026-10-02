@@ -33,6 +33,7 @@ async function assertBuilderContract() {
     '- neon-void.css',
     '- ui-design/**/*',
     '- service-operations.js',
+    '- admin-session.js',
     '- service-operations-catalog.js',
     'from: products'
   ]) {

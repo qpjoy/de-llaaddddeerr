@@ -264,7 +264,7 @@ assert.match(fetchJsonSource, /requestHeadersWithoutOpsToken\(options\.headers\)
 assert.match(fetchJsonSource, /opsTokenForRequest\(requestUrl, method\)/);
 assert.match(
   fetchJsonSource,
-  /redirect: opsToken \? 'error' : 'follow'/,
+  /redirect: opsToken \|\| usesPersonalSession \? 'error' : 'follow'/,
   'a token-bearing request must not follow a redirect to another origin'
 );
 assert.match(

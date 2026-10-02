@@ -10,6 +10,7 @@ files:
   - preload.cjs
   - renderer.js
   - service-operations.js
+  - admin-session.js
   - service-operations-catalog.js
   - styles.css
   - neon-void.css

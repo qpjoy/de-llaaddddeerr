@@ -10,6 +10,7 @@ import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers
 
 import { asRecord } from '../../lib/http.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import { internalAdminContext } from '../../lib/internal-admin-context.js';
 import { siteSlotOpsAwareView } from '../../lib/site-slot-credential-view.js';
 import { kubernetesRequest } from '../../store/kubernetes.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -1740,6 +1741,14 @@ export class AdminController {
   }
 
   private async buildActionPolicy(authorization?: string, rawToken?: string, rawUserId?: string): Promise<AdminActionPolicy> {
+    const personal = internalAdminContext.getStore();
+    if (personal) {
+      const context = await this.store.resolvePrincipalContext({ userId: personal.userId, requestId: personal.requestId, audience: 'mx-admin' });
+      if (context.principal.userId !== personal.userId || !context.principal.roles.includes('mx-admin')) {
+        throw new ForbiddenException('Personal management permission is no longer available');
+      }
+      return { authMode: 'personal-sso-v1', principal: context.principal, warnings: [], actions: buildAdminActions(context.principal) };
+    }
     const token = bearerToken(authorization) ?? stringValue(rawToken);
     const userId = stringValue(rawUserId);
     if (!token && !userId) {

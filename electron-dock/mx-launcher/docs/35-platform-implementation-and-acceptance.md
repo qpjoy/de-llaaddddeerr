@@ -1,8 +1,8 @@
 # MX 平台分阶段实现与验收
 
-日期：2026-10-02。依据：[目标架构](33-mx-platform-identity-and-sustainable-architecture.md)、[总部署与恢复契约](34-platform-deploy-and-recovery-contract.md)。
+日期：2026-10-03。依据：[目标架构](33-mx-platform-identity-and-sustainable-architecture.md)、[总部署与恢复契约](34-platform-deploy-and-recovery-contract.md)。
 
-用户已授权开始实现，按可独立验收的小阶段交付。首期界面归纳，以及随后要求的四服务部署工作区与独立执行器，已在本地实现并验证，尚未发布到生产。邀请注册、SSO、Hub 新登录、账号绑定，以及证书/备份/总编排仍待实现。文档 33 中的 P1 包含更完整的可观测能力，不能把当前界面和单服务操作当作全部完成。
+用户已授权开始实现，按可独立验收的小阶段交付。首期界面归纳，以及随后要求的四服务部署工作区与独立执行器，已在本地实现并验证。2026-10-03 增加 Launcher 个人管理账号的 OIDC 客户端、持久化会话与已有密码账号绑定试点，默认关闭，见第 6 节。本次没有部署生产或建立真实身份提供方；身份引擎兼容适配、邀请注册、Hub 新登录、飞书关联，以及证书/备份/总编排仍待后续交付。文档 33 中的 P1 包含更完整的可观测能力，不能把当前界面和单服务操作当作全部完成。
 
 ## 1. 持续保护的基线
 
@@ -94,3 +94,58 @@
 这批已包含后端和可选 K8s 配置，不再只是首期三份静态资源。没有新增业务数据库迁移或修改旧登录/网络协议。新执行 API 使用原 Ops Token，独立执行器未配置时返回未接入；原管理与登录服务继续按旧配置运行。
 
 完整操作、随 Launcher deploy 幂等安装/安全更新、测试与限制见 [服务与部署使用说明](36-service-operations.md)。正式发布需交付新增两份前端模块、服务端 controller/agent/install、K8s 可选 Secret 引用、mx-base 机器计划授权与 OCR 修正、Hub 代理优先级修正；只同步旧三份静态文件会缺少模块。本机真实子进程已验证任务结果落盘后切换版本，Linux systemd 实际托管与 GPU/联网验收仍待在目标环境完成。
+
+## 6. Launcher 个人管理登录试点（2026-10-03）
+
+### 已实现的范围
+
+Launcher 管理站作为标准 OIDC 客户端（RP），新增“个人账号”入口、已有密码账号关联、管理会话和当前浏览器退出。使用固定版本 `openid-client@6.8.8` 实现 code + PKCE S256、state/nonce、issuer/audience/有效期和 RS256 签名验证；没有自建 OAuth 授权服务器。[标准客户端说明](https://github.com/panva/openid-client)。
+
+这一步是管理站试点，不代表统一身份平台已部署。上游 IdP、原密码兼容桥、公共注册、Hub 接入、复用 H2I 飞书应用的 Web 登录与飞书账号关联尚未实现。现有用户无需切换、重新绑定或修改客户端；只有选择参加个人管理登录试点的操作人员需要首次关联。正式对用户推广前仍需完成第 3 阶段的身份唯一写入者验证，不能让两套账号系统独立注册并互相同步密码。
+
+首轮流程：
+
+1. 操作人员从同源 HTTPS `/admin/` 点击“个人账号登录”，进入已配置的 IdP。
+2. IdP 验证成功后，没有映射的主体进入“关联已有 MX 账号”，验证原账号密码。这里调用原密码校验，不改密码哈希、不 upsert 用户、不按邮箱/姓名自动合并。
+3. `(issuer, sub)` 原子绑定至已有 `userId`。同一个外部主体不能覆盖或换绑到另一个用户。多个副本同时关联只有一个成功，冲突提示重新登录。
+4. 原用户具有 `mx-admin` 才能操作管理 API。普通用户可以完成登录/绑定，但显示“尚无管理权限”。上游传来的 role/email/name 不授予本地管理权限。历史 bootstrap 演示账号 `usr_demo_admin` / `usr_demo_user` 曾带预置密码，禁止参与此个人入口；试点请使用单独的个人账号，旧演示账号的原登录不改。
+5. 再次登录直接复用映射；服务端每次请求检查原账号状态及当前角色，停用/移除 `mx-admin` 后下一次请求拒绝。该批只提供完整管理权限，不宣称已经具备细粒度分中心授权。
+
+### 会话与兼容边界
+
+- 浏览器仅保存 `__Host-`、Secure、HttpOnly、SameSite=Lax 的随机会话 cookie；无 Domain，Path 为 `/`。数据库记录会话 ID 摘要，浏览器不保存上游 access/refresh/ID token，也不获得 Ops Token。
+- 登录事务与待关联会话有效期 5 分钟；管理会话闲置 30 分钟失效，绝对上限 12 小时。全部管理写操作要求上游 `auth_time` 在最近 5 分钟内；过期时点击“重新验证”，操作不会自动重放。
+- 状态、事务、映射存于现有 PostgreSQL `mx_platform_records` 的三个新 kind：`admin-sso-transaction`、`admin-sso-session`、`admin-sso-binding`。复用原复合主键，不修改旧用户/租户记录，无新增 schema 迁移。登录事务用原子 DELETE RETURNING 消费，续期只 UPDATE 已存在且未过期记录，不恢复已退出的会话；过期瞬态记录在新会话/事务插入时回收。
+- 管理请求改走同源 `/admin-api/internal/v1/*`，校验 cookie、CSRF、Origin、当前用户与角色后，在服务端请求上下文内授权。原 `/internal/v1/*` 不因为携带 SSO cookie 获得管理权限。旧 SDK token、密码、飞书、VPN 接口及网络 lease 不改。
+- 每个 BFF 请求记录原 `userId`、服务端生成的 requestId、method、path 和响应状态；不记录密码、cookie、授权码或响应体。现有领域审计仍保留，可通过新入口审计辨认个人操作者。
+- `/auth/admin/logout` 只撤销当前 Launcher 浏览器会话，不退出 IdP、不退出其他应用、不踢 VPN。全局登出、IdP back-channel logout、单个绑定的自助解除/恢复、细粒度授权后续实现。IdP 单方面撤销会话尚不会立即撤销此处已建立的会话，因此本批不开放公网广泛注册。
+- 跨服务器地址、Electron 的 file 页面、旧站点不自动携带个人凭据；请从目标服务器同源 `/admin/` 使用个人登录。原“连接与应急访问”的 Ops Token 路径保留；显式提供有效 Ops Token 的请求仍走旧路径。
+
+### 配置与部署
+
+缺省不启用。启用时必须使用 Postgres；错误配置只关闭新增 SSO 入口并输出不含凭据的告警，不中断旧登录与管理服务。配置示例见 `server/.env.example`：
+
+```dotenv
+MX_ADMIN_SSO_ENABLED=1
+MX_ADMIN_SSO_ORIGIN=https://launcher.example.com
+MX_ADMIN_SSO_ISSUER=https://accounts.example.com/realms/mx
+MX_ADMIN_SSO_CLIENT_ID=mx-launcher-admin
+MX_ADMIN_SSO_CLIENT_SECRET=<独立 OIDC 客户端密钥>
+```
+
+`ISSUER` 必须与发现文档精确一致，不填 discovery 文档 URL；`ORIGIN` 只能是 HTTPS origin，无路径/查询。IdP 登记精确回调 `https://launcher.example.com/auth/admin/callback`，启用 confidential client、client_secret_basic、标准授权码流程、PKCE S256、RS256，并支持 max_age/auth_time；禁用 wildcard callback、implicit/password grant。此客户端密钥不是 H2I 的飞书 App Secret，也不是 Ops Token。登录域名与管理域名可以不同，但管理 UI、`/auth/admin/*` 和 `/admin-api/*` 必须同源。
+
+K8s Deployment 新增可选 `mx-launcher-admin-sso` Secret 引用。初次创建 Secret 后运行原 `ops internal-production deploy` 即会读入；后续 deploy 保留 Secret。没有此 Secret 的现有部署继续禁用 SSO。Secret 更新需要滚动部署后生效；不把明文配置文件提交到仓库。管理页新增 `admin-session.js`，已加入管理静态资源同步与桌面打包清单，不能只替换 renderer.js。
+
+首次实际联调还需要明确：IdP 实例/issuer、Launcher HTTPS 入口、精确回调、独立 client ID/secret、受信代理跳数，以及仅对该管理入口开放的反向代理规则。不要为启用个人登录直接把整个 Internal 端口暴露到公网。
+
+回退时将 SSO 设置为关闭并重部署；旧 Ops Token 入口仍可用。回退不删账户或映射，不撤销旧 SDK/VPN 凭据。若需要撤销所有试点会话，应仅删除相应 environment 下 `admin-sso-session` 和 `admin-sso-transaction` 记录，保留 `admin-sso-binding`。
+
+### 本地验收与下一批
+
+- `pnpm --dir server run test:admin-sso`：真实 HTTP OIDC 测试提供方、JWT 签名/PKCE/nonce/state、过期与回放、验证旧密码、绑定并发、CSRF、普通账号拒绝、停用/角色撤销、近期验证、旧 Ops 路径及真实 Nest/Express 上下文隔离。
+- PostgreSQL 用独立回环测试库验证。显式设置 `MX_SSO_TEST_DATABASE_URL`，数据库名必须包含 `sso_test`；不读取生产 `DATABASE_URL`。验证多连接单次消费、绑定唯一性、重建连接后会话保留、闲置/绝对过期及退出后不复活。没有测试库时该数据库测试明确跳过。
+- 原 SDK 密码/飞书相关 46 项、网络产品隔离 5 项、lease 身份 1 项回归通过。构建、类型检查、桌面 Ops Token 来源保护、资源打包及服务操作 UI 检查通过。
+- 在 `127.0.0.1:18119` 隔离预览，以浏览器测试响应检查默认关闭/登录入口/关联表单/错误清空密码/无管理权限/退出等状态；1440×960 与 390×844 无脚本异常。页面用测试响应的验收不等于真实 IdP 的浏览器联调。
+
+下一批先完成身份引擎与现有账号/密码的兼容适配及真实 HTTPS 试点，再实现邀请码/公开注册策略与 Hub 的幂等开通，随后接入 H2I 的飞书 Web 回调和已存在账号关联。Hub、Luopan、H2I 生产用户继续使用原路径，直到各自完成独立兼容验收。
