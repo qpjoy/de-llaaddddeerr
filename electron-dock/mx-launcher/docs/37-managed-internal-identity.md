@@ -74,11 +74,24 @@ bash scripts/manage.sh ops identity on https://10.88.88.88:18543
 # 查看本机部署档案和证书到期时间，不输出密钥
 bash scripts/manage.sh ops identity status
 
+# 只读诊断：Node/系统 OpenSSL 版本、CA/签名/IP/两组密钥匹配结果，不输出密钥
+bash scripts/manage.sh ops identity doctor
+
 # 从 API 容器验证真实 HTTPS/发现/启用状态
 bash scripts/manage.sh ops identity check
 ```
 
 尚未 init 的现有部署继续使用原登录；没有身份档案却发现已运行的自管身份服务时拒绝重建，提示恢复档案。原单机恢复检查点已包含三个身份 Secret，并保留安装归属标识；它不能替代异机备份。
+
+### OpenSSL 1.1.1 初次 CA 生成失败的恢复
+
+若旧版本首次部署在 `ensure configured identity service` 报“身份 TLS 证书/密钥不匹配”，而诊断显示仅 `caValid: false`，其余四项为 `true`，可能是旧生成命令与主机 `openssl.cnf` 的 `x509_extensions` 叠加，形成重复的 `basicConstraints`。已用原生成代码 + OpenSSL 1.1.1w + Linux 风格默认配置复现这一问题，Node 内置 OpenSSL 3.5.4 会判定该 CA 无效；不是密码或私钥配错。[OpenSSL 1.1.1 的扩展合并实现](https://github.com/openssl/openssl/blob/OpenSSL_1_1_1w/apps/req.c#L715-L729)。
+
+新生成流程使用独立的 OpenSSL 配置和唯一扩展节，生成后立即校验，避免构建结束才发现问题。同步修复版本后直接重试原 deploy 或 `ops identity on`：在构建前、部署锁内检查是否确属上述重复扩展，且集群尚无任何身份 Deployment/Secret 或 SSO 配置，满足条件才自动修复。
+
+修复先保存唯一的 600 权限备份 `profile.before-ca-repair.json`，保留 issuer、安装标识、OIDC 密钥、CA 私钥、CA 序列号和原服务证书/私钥，仅重签异常 CA 证书并验证完整 TLS 信任链。重复部署不会再次修复或不断增加备份。真正的密钥错配、不同旧备份、无法查询集群或已有 SSO 资源都会停止，不自动更换现网信任根。
+
+**修正后的 CA 证书指纹会改变；如已导入旧 `ca.crt`，需重新导入服务器导出的新文件。** 不要删除 `profile.json` 重新初始化。原 HTTP/Ops 入口及 H2I/Luopan 登录与网络配置不参与这次修复。
 
 ## 新服务器与恢复
 

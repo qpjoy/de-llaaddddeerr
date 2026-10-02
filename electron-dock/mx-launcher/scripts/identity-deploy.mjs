@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus } from './identity-profile.mjs';
+import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus, diagnoseProfile } from './identity-profile.mjs';
 
 export const NS = 'mx-internal-shadow';
 export const MANAGED = 'mx.qpjoy.com/identity-installation';
@@ -110,6 +110,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       writeFileSync(join(dirname(PROFILE), 'ca.crt'), p.caCert, { mode: 0o644 });
       console.log(JSON.stringify(publicStatus(p), null, 2));
       console.log(`配置已保存，运行原 deploy 即可。管理员首次需信任 ${dirname(PROFILE)}/ca.crt；备份 profile.json 与 Launcher 数据库。`);
+    } else if (action === 'doctor') {
+      const version = spawnSync('openssl', ['version'], { encoding: 'utf8', timeout: 5000 });
+      console.log(JSON.stringify({ ...diagnoseProfile(), systemOpenSSL: version.status === 0 ? version.stdout.trim() : 'unavailable' }, null, 2));
     } else if (action === 'status') console.log(JSON.stringify(publicStatus(readProfile()), null, 2));
     else if (action === 'check') verifyIdentity();
     else if (action === 'activate') activateIdentity();
@@ -123,6 +126,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     } else if (action === 'apply') {
       if (!value || !/^[a-f0-9]{12,64}$/.test(value)) throw new Error('identity apply 需要已构建代码版本');
       deployIdentity({ revision: value });
-    } else throw new Error('Usage: ops identity on [https://内网IPv4:18443] | init <https://内网IPv4:18443> | status | check | export <file> | restore <file>');
+    } else throw new Error('Usage: ops identity on [https://内网IPv4:18443] | init <https://内网IPv4:18443> | status | doctor | check | export <file> | restore <file>');
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

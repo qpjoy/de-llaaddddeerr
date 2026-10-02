@@ -102,7 +102,7 @@ Usage:
   bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
-  bash scripts/manage.sh ops identity status|check|export <file>|restore <file>
+  bash scripts/manage.sh ops identity status|doctor|check|export <file>|restore <file>
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow

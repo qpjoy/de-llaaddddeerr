@@ -62,6 +62,10 @@ bash scripts/manage.sh ops internal-production reinit-kubeadm
 # 另起一个终端，repair-cni
 bash scripts/manage.sh ops internal-production repair-cni
 
+
+# 开启oidc sso单点登录
+bash scripts/manage.sh ops identity on
+
 # 重新部署 MX：
 TMPDIR=/data/tmp \
 MX_K8S_OS_HOSTNAME=mx-internal-server \

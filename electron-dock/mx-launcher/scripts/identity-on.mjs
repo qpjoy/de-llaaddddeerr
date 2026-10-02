@@ -5,7 +5,7 @@ import { createConnection, createServer } from 'node:net';
 import { writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROFILE, initializeProfile, internalOrigin, readProfile } from './identity-profile.mjs';
+import { PROFILE, initializeProfile, internalOrigin, readProfile, repairBootstrapCa } from './identity-profile.mjs';
 import { NS, inspectIdentity, run } from './identity-deploy.mjs';
 
 function privateAddress(address) {
@@ -80,7 +80,16 @@ export async function probePort(origin, managedPort = false) {
 
 export async function prepareIdentity({ enable = false, requested, file = PROFILE, execute = run,
   interfaces = networkInterfaces(), probe = probePort, log = console.log } = {}) {
-  const p = readProfile(file);
+  let p;
+  try { p = readProfile(file); }
+  catch {
+    p = repairBootstrapCa(file, () => {
+      try { inspectIdentity(null, execute, true); }
+      catch { throw new Error('无法确认 SSO 尚未发布；停止自动修复 CA，请检查集群可达性与现有身份资源。原档案未修改。'); }
+    });
+    log('已修复 OpenSSL 1.1.1 初次生成 CA 的重复扩展；OIDC 密钥、CA 私钥和服务证书保持不变。');
+    log(`原档案已备份到 ${join(dirname(file), 'profile.before-ca-repair.json')}；CA 证书指纹已改变，如曾导入请重新信任 ca.crt。`);
+  }
   const { deployment } = inspectIdentity(p, execute, enable);
   if (!p && !enable) {
     log('个人 SSO 尚未开启；可运行 bash scripts/manage.sh ops identity on 自动配置并部署。');
