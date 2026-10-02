@@ -1,0 +1,32 @@
+name: mx-pay
+services:
+  migrate:
+    user: '${MX_PAY_UID:-1000}:${MX_PAY_GID:-1000}'
+    image: ${MX_PAY_IMAGE:?MX_PAY_IMAGE required}
+    command: [node, server/migrate.mjs]
+    env_file: ${MX_PAY_MIGRATION_ENV_FILE:?migration env file required}
+    restart: 'no'
+    profiles: [tools]
+    security_opt: [no-new-privileges:true]
+  api:
+    user: '${MX_PAY_UID:-1000}:${MX_PAY_GID:-1000}'
+    image: ${MX_PAY_IMAGE:?MX_PAY_IMAGE required}
+    env_file: ${MX_PAY_RUNTIME_ENV_FILE:?runtime env file required}
+    environment:
+      MX_PAY_HOST: 0.0.0.0
+      MX_PAY_PORT: 18230
+      MX_PAY_CREDENTIALS_FILE: /run/secrets/credentials.json
+    volumes:
+      - ${MX_PAY_CREDENTIALS_SOURCE:?credentials required}:/run/secrets/credentials.json:ro
+    ports:
+      - '${MX_PAY_BIND:-127.0.0.1}:${MX_PAY_PORT:-18230}:18230'
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    stop_grace_period: 35s
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:18230/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 12s
+      retries: 6

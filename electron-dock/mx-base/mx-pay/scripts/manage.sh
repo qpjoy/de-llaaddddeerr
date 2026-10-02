@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Stable per-product deployment contract for the future Internal Admin executor.
+set -Eeuo pipefail
+umask 077
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ACTION="${1:-help}"
+say() { printf '[mx-pay] %s\n' "$*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+usage() {
+  cat <<'HELP'
+mx-pay: deploy | migrate | status | doctor | logs | start | stop | restart
+  bash scripts/manage.sh deploy   # validate, build/push, lock, migrate, rollout, readiness
+  bash scripts/manage.sh status   # read-only, current deployment target
+Configuration: .env (see .env.example); private database/credentials in secrets/.
+Default Kubernetes; MX_PAY_DEPLOY_DRIVER=compose is development/transition only.
+deploy does NOT move Hub orders/wallets, enable live collection, or restart other systems.
+No delete-data/down/all command. Noninteractive deployment needs no extra prompt.
+HELP
+}
+case "$ACTION" in help|-h|--help) usage; exit 0;; deploy|migrate|status|doctor|logs|start|stop|restart) ;; *) die "Unsupported action: $ACTION";; esac
+[ "$#" -le 1 ] || die 'Unexpected arguments'
+if [ -f "$ROOT/.env" ]; then set -a; source "$ROOT/.env"; set +a; fi
+export MX_PAY_DEPLOY_DRIVER="${MX_PAY_DEPLOY_DRIVER:-k8s}"
+export MX_PAY_NAMESPACE="${MX_PAY_NAMESPACE:-mx-pay}"
+export MX_PAY_REPLICAS="${MX_PAY_REPLICAS:-2}"
+export MX_PAY_MIN_READY_WORKERS="${MX_PAY_MIN_READY_WORKERS:-2}"
+[[ "$MX_PAY_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]] || die 'Invalid namespace'
+[[ "$MX_PAY_REPLICAS" =~ ^([2-9]|1[0-9]|20)$ ]] || die 'MX_PAY_REPLICAS must be 2–20'
+absolute() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$ROOT" "$1";; esac; }
+export MX_PAY_RUNTIME_ENV_FILE="$(absolute "${MX_PAY_RUNTIME_ENV_FILE:-secrets/runtime.env}")"
+export MX_PAY_MIGRATION_ENV_FILE="$(absolute "${MX_PAY_MIGRATION_ENV_FILE:-$MX_PAY_RUNTIME_ENV_FILE}")"
+export MX_PAY_CREDENTIALS_SOURCE="$(absolute "${MX_PAY_CREDENTIALS_SOURCE:-secrets/credentials.json}")"
+export MX_PAY_UID="${MX_PAY_UID:-$(id -u)}" MX_PAY_GID="${MX_PAY_GID:-$(id -g)}"
+TMP='' LOCK_UID='' JOB_RUNNING=0 LOCAL_LOCK=0 PHASE=preflight
+mkdir -p "$ROOT/.deploy"
+kube() { kubectl --context "$MX_PAY_KUBE_CONTEXT" --request-timeout=15s -n "$MX_PAY_NAMESPACE" "$@"; }
+compose() { docker compose --project-directory "$ROOT" -f "$ROOT/deploy/compose.yml" "$@"; }
+cleanup() {
+  local result=$?
+  trap - EXIT INT TERM
+  if [ "$JOB_RUNNING" = 1 ]; then
+    # A timeout must not release the deploy lock while the DDL Job is still alive.
+    if ! kube delete job "$MX_PAY_JOB_NAME" --ignore-not-found --wait=true --timeout=90s --request-timeout=100s; then
+      say 'Migration termination unconfirmed; retained mx-pay-deploy-lock. Inspect the Job before recovering.' >&2
+      LOCK_UID=''; result=1
+    fi
+  fi
+  if [ -n "$LOCK_UID" ]; then
+    printf '{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"%s"}}' "$LOCK_UID" > "$TMP/unlock.json"
+    kube delete --raw "/api/v1/namespaces/$MX_PAY_NAMESPACE/configmaps/mx-pay-deploy-lock" -f "$TMP/unlock.json" >/dev/null || result=1
+  fi
+  if [ "$LOCAL_LOCK" = 1 ]; then rmdir "$ROOT/.deploy/lock" || result=1; fi
+  if [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; then
+    printf '{"action":"%s","phase":"%s","exitCode":%s}\n' "$ACTION" "$PHASE" "$result" > "$ROOT/.deploy/last-result.json"
+  fi
+  [ -z "$TMP" ] || rm -rf "$TMP"
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+case "$MX_PAY_DEPLOY_DRIVER" in
+  k8s)
+    need kubectl
+    [ -n "${MX_PAY_KUBE_CONTEXT:-}" ] || die 'Set MX_PAY_KUBE_CONTEXT explicitly'
+    say "target=k8s context=$MX_PAY_KUBE_CONTEXT namespace=$MX_PAY_NAMESPACE"
+    case "$ACTION" in
+      status) kube get deployment,service,pdb,job -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
+      logs) kube logs deployment/mx-pay --all-pods=true --tail=100 --follow; exit;;
+      doctor) kube get nodes -o wide; kube get deployment,pods,job,pdb -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
+    esac
+    ;;
+  compose)
+    need docker
+    say "target=compose context=$(docker context show) (no rolling availability guarantee)"
+    if [ -f "$ROOT/.deploy/image" ]; then export MX_PAY_IMAGE="${MX_PAY_IMAGE:-$(cat "$ROOT/.deploy/image")}"; fi
+    case "$ACTION" in
+      status|doctor) export MX_PAY_IMAGE="${MX_PAY_IMAGE:-mx-pay:not-deployed}"; compose ps --all; exit;;
+      logs) compose logs --tail=100 --follow api; exit;;
+    esac
+    ;;
+  *) die 'MX_PAY_DEPLOY_DRIVER must be k8s or compose';;
+esac
+need node
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/mx-pay-deploy.XXXXXXXX")"
+if [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; then
+  node "$ROOT/scripts/render.mjs" validate
+fi
+if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+  if [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; then
+    kube get nodes -o json | node "$ROOT/scripts/render.mjs" workers
+    kube create namespace "$MX_PAY_NAMESPACE" --dry-run=client -o json | kube apply -f - >/dev/null
+  fi
+  # A cluster-wide lock protects migrations AND rollout across operator hosts.
+  LOCK_UID="$(kube create configmap mx-pay-deploy-lock --from-literal=action="$ACTION" -o jsonpath='{.metadata.uid}')" \
+    || die 'Another mx-pay operation holds the deploy lock; inspect it rather than deleting it blindly'
+  [ -n "$LOCK_UID" ] || die 'Deployment lock has no UID'
+else
+  mkdir "$ROOT/.deploy/lock" 2>/dev/null || die 'Another local mx-pay operation is running; inspect before recovering its lock'
+  LOCAL_LOCK=1
+fi
+case "$ACTION" in
+  stop|start|restart)
+    if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+      case "$ACTION" in
+        stop) kube scale deployment/mx-pay --replicas=0;;
+        start) kube scale deployment/mx-pay --replicas="$MX_PAY_REPLICAS";;
+        restart) kube rollout restart deployment/mx-pay;;
+      esac
+      [ "$ACTION" = stop ] || kube rollout status deployment/mx-pay --timeout=300s --request-timeout=320s
+    else compose "$ACTION" api; fi
+    say 'Operation complete; database and credentials retained'; exit;;
+esac
+PHASE=image
+if [ "${MX_PAY_BUILD:-1}" = 1 ]; then
+  need docker
+  tag="$(date -u +%Y%m%d%H%M%S)-$(node -e 'console.log(require("crypto").randomBytes(4).toString("hex"))')"
+  if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+    [ -n "${MX_PAY_IMAGE_REPOSITORY:-}" ] || die 'Set MX_PAY_IMAGE_REPOSITORY to a registry reachable by every worker'
+    docker buildx build --build-context "mx_common=$ROOT/../../mx-common" --metadata-file "$TMP/build.json" \
+      --tag "$MX_PAY_IMAGE_REPOSITORY:$tag" --push "$ROOT"
+    digest="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1]))["containerimage.digest"];if(!/^sha256:[a-f0-9]{64}$/.test(d))process.exit(1);console.log(d)' "$TMP/build.json")"
+    export MX_PAY_IMAGE="$MX_PAY_IMAGE_REPOSITORY@$digest"
+  else
+    export MX_PAY_IMAGE="mx-pay:$tag"
+    docker buildx build --build-context "mx_common=$ROOT/../../mx-common" --tag "$MX_PAY_IMAGE" --load "$ROOT"
+  fi
+elif [ "${MX_PAY_BUILD:-1}" != 0 ]; then die 'MX_PAY_BUILD must be 0 or 1'; fi
+[ -n "${MX_PAY_IMAGE:-}" ] || die 'MX_PAY_IMAGE is required with MX_PAY_BUILD=0'
+PHASE=migration
+if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
+  export MX_PAY_JOB_NAME="mx-pay-migrate-$(date -u +%s)-$(node -e 'console.log(require("crypto").randomBytes(3).toString("hex"))')"
+  node "$ROOT/scripts/render.mjs" "$TMP"
+  kube get configmap mx-pay-installation --ignore-not-found -o json | node "$ROOT/scripts/render.mjs" check-installation
+  # Immutable per-generation secrets keep old pods on their old configuration.
+  kube apply -f "$TMP/secrets.json" >/dev/null
+  # Pin database identity even if first rollout fails, to prevent silent retargeting on retry.
+  kube apply -f "$TMP/installation.json" >/dev/null
+  JOB_RUNNING=1
+  kube create -f "$TMP/job.json"
+  if ! kube wait --for=condition=complete "job/$MX_PAY_JOB_NAME" --timeout=260s --request-timeout=280s; then
+    kube logs "job/$MX_PAY_JOB_NAME" --tail=100 >&2 || true
+    die 'Migration failed/timed out; API workload was not updated'
+  fi
+  JOB_RUNNING=0
+  if [ "$ACTION" = deploy ]; then
+    PHASE=rollout
+    kube apply -f "$TMP/workload.json"
+    kube rollout status deployment/mx-pay --timeout=320s --request-timeout=340s || die 'Rollout failed; inspect old/new replicas. No automatic database rollback was attempted'
+  fi
+else
+  compose config --quiet
+  compose run --rm --no-deps -T migrate
+  if [ "$ACTION" = deploy ]; then
+    PHASE=rollout
+    compose up -d --no-deps --wait --wait-timeout 120 api
+    printf '%s\n' "$MX_PAY_IMAGE" > "$ROOT/.deploy/image"
+  fi
+fi
+PHASE=complete
+if [ "$ACTION" = deploy ]; then say 'deploy completed; migrations verified and API ready'; else say 'migrations completed; API workload unchanged'; fi

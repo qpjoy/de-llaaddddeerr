@@ -4,6 +4,7 @@
 
 | 应用 | 职责 | 部署与状态 |
 | --- | --- | --- |
+| [mx-pay](mx-pay/README.md) | 统一支付规则与独立交易 API；人工核账、可靠付款事件 | 已实现独立 PostgreSQL + Kubernetes/Compose 一键迁移部署；默认 18230，Hub 存量路径尚未切换 |
 | mx-static | 多媒体持久采集、缓存、文件读取与签名预览 | 独立 Docker Compose，writer + reader，默认 18200 / 18201 |
 | mx-ocr | 图片文字提取、文档精修与 Web 调试 | 独立 Docker，默认 GPU 2，0.0.0.0:8710 |
 | mx-embedding | Qwen3-Embedding-0.6B 文本向量服务 | 独立 Docker Compose，默认 GPU 1，127.0.0.1:18210 |
@@ -22,6 +23,7 @@ bash scripts/manage.sh gpu              # 所有 GPU 的计算进程与服务归
 bash scripts/manage.sh gpu 2            # 只检查 GPU 2（也支持完整 UUID）
 bash scripts/manage.sh deploy           # 交互选择，非交互必须指定应用
 bash scripts/manage.sh deploy mx-static # 生成首次凭据、准备目录、构建、等待健康
+bash scripts/manage.sh deploy mx-pay    # 独立支付：校验配置、构建、迁移成功后滚更与健康验收
 bash scripts/manage.sh jobs mx-static   # 项目任务状态计数、writer 内存缓存指标
 bash scripts/manage.sh logs mx-static
 bash scripts/manage.sh restart mx-static
@@ -37,6 +39,8 @@ bash scripts/manage.sh start mx-ocr      # 恢复保存的容器配置，不重�
 ```
 
 Jenkins 使用相同的 `操作 jenkins`；额外支持 `password jenkins`、`agent-cmd jenkins`。不提供全量部署、全停或删除数据命令。Docker 不可用、集群访问失败显示 UNKNOWN；只有查询成功且没有对应资源才显示 NOT DEPLOYED。`status` 只读，不会启用任何应用。Jenkins 停止仅缩容为零。
+
+mx-pay 的明确 `deploy mx-pay` 支持无人值守执行，不增加交互确认，配置位于 `mx-pay/.env` 与私有 secrets 文件。返回非零即失败，不连带部署 Hub/Launcher；可供后续 Internal Admin 按产品编排。各系统一个部署入口不等于一次重启所有系统。
 
 Docker 应用（mx-static、mx-ocr、mx-embedding）的 `deploy` 执行前均要求输入完整的 `yes`；其他输入或 EOF 取消且不执行部署。重复执行会更新同一服务，不创建另一套实例，也不轮换已有凭据/删除模型缓存。它不是无中断发布：OCR 会先准备镜像，再核验并停止本服务旧容器、重新创建并等待健康；替换后的启动失败不保证自动回滚。构建失败时 OCR 旧服务保持运行。
 
