@@ -74,6 +74,18 @@ test('API failures never become missing Secrets and all reads precede writes', (
   } finally { f.cleanup(); }
 });
 
+test('identity recovery preserves installation ownership and original keys', () => {
+  const f = fixture();
+  try {
+    const name = 'mx-identity-runtime';
+    f.secrets[name] = f.secret(name);
+    f.secrets[name].metadata.labels = { 'mx.qpjoy.com/identity-installation': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', unrelated: 'drop' };
+    f.invoke('checkpoint'); const before = f.secrets[name]; delete f.secrets[name]; f.invoke('restore');
+    assert.deepEqual(f.secrets[name].data, before.data);
+    assert.deepEqual(f.secrets[name].metadata.labels, { 'mx.qpjoy.com/identity-installation': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+  } finally { f.cleanup(); }
+});
+
 test('wrong CA, node, database, mount or cluster cannot restore credentials', () => {
   for (const field of ['ca', 'node', 'pgSystemId', 'mounts', 'clusterUid']) {
     const f = fixture();

@@ -13,6 +13,12 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     try { return ['http:', 'https:'].includes(location.protocol) && new URL(serverBase()).origin === location.origin; }
     catch { return false; }
   };
+  const secureEntry = () => {
+    try {
+      const url = new URL(session?.loginOrigin);
+      return url.protocol === 'https:' && !url.username && !url.password && url.origin !== location.origin ? `${url.origin}/admin/` : null;
+    } catch { return null; }
+  };
   const request = async (path, body) => {
     if (!sameOrigin()) throw new Error('请在 MX Server 同源的 /admin/ 页面使用个人登录。');
     const response = await fetch(path, {
@@ -31,10 +37,11 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     logout.hidden = !session?.authenticated;
     if (!sameOrigin()) status.textContent = '个人登录请打开服务器的 /admin/ 管理入口';
     else if (!session?.enabled) status.textContent = session?.unavailable ? '个人登录暂不可用 · 可使用应急访问' : '个人 SSO 待启用';
+    else if (secureEntry()) status.textContent = '个人登录已就绪，请使用 HTTPS 管理入口';
     else if (!session.authenticated) status.textContent = '登录个人账号，使用已获授权的管理功能';
     else if (session.bindingRequired) status.textContent = '统一登录已验证 · 请关联已有 MX 账号';
     else status.textContent = `${session.user.displayName} · ${session.canManage ? '管理权限已生效' : '尚无管理权限'}`;
-    login.textContent = session?.bindingRequired ? '关联已有账号' : session?.authenticated ? '重新验证' : '个人账号登录';
+    login.textContent = secureEntry() ? '打开安全管理入口' : session?.bindingRequired ? '关联已有账号' : session?.authenticated ? '重新验证' : '个人账号登录';
   };
   async function refresh() {
     const current = ++revision;
@@ -48,7 +55,8 @@ export function createAdminSessionUi({ serverBase, root = document }) {
   }
   login?.addEventListener('click', () => {
     if (!sameOrigin()) return;
-    if (session?.bindingRequired) { feedback.textContent = ''; dialog.showModal(); }
+    if (secureEntry()) location.assign(secureEntry());
+    else if (session?.bindingRequired) { feedback.textContent = ''; dialog.showModal(); }
     else location.assign('/auth/admin/login');
   });
   logout?.addEventListener('click', async () => {

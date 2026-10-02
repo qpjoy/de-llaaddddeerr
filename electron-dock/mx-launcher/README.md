@@ -43,6 +43,7 @@ platform. New Launcher solution design and implementation should happen here.
 - [mx-launcher.deploy.md](mx-launcher.deploy.md) - current production paths,
   deployment commands, migration incident findings, and retained recovery backups.
 - `docs/00-delivery-plan.md` - executable implementation phases.
+- [Managed internal SSO](docs/37-managed-internal-identity.md) - `ops identity on` auto-configures and deploys existing-account login; repeat deploy, restart and identity backup/restore.
 - `docs/01-windows-uac-service-model.md` - UAC, service, signing, and update
   model.
 - `docs/02-backend-contract.md` - backend contract and HDI compatibility policy.

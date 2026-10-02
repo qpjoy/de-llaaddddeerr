@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 export const SECRET_NAMES = [
   'mx-launcher-db', 'mx-internal-ops', 'mx-feishu-oauth',
-  'mx-sdk-service-account-secrets', 'mx-release-oss', 'mx-insight-hub-admin'
+  'mx-sdk-service-account-secrets', 'mx-release-oss', 'mx-insight-hub-admin',
+  'mx-launcher-admin-sso', 'mx-identity-runtime', 'mx-identity-ca'
 ];
 const PG = '/var/lib/mx-launcher/k8s/postgres/pgdata';
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -84,7 +85,11 @@ function cleanSecret(secret, namespace, name) {
       !Object.values(secret.data).every(value => typeof value === 'string' && Buffer.from(value, 'base64').toString('base64') === value)) {
     throw new Error(`invalid recovery Secret ${name}`);
   }
-  return { apiVersion: 'v1', kind: 'Secret', metadata: { name, namespace }, type: 'Opaque',
+  const owner = secret.metadata.labels?.['mx.qpjoy.com/identity-installation'];
+  const identitySecret = ['mx-launcher-admin-sso', 'mx-identity-runtime', 'mx-identity-ca'].includes(name);
+  if (identitySecret && owner !== undefined && !/^[a-f0-9-]{36}$/.test(owner)) throw new Error('invalid identity ownership label');
+  return { apiVersion: 'v1', kind: 'Secret', metadata: { name, namespace,
+    ...(identitySecret && owner ? { labels: { 'mx.qpjoy.com/identity-installation': owner } } : {}) }, type: 'Opaque',
     ...(secret.immutable ? { immutable: true } : {}), data: secret.data };
 }
 export function recoverState(action, { directory, namespace, identity, execute = run, log = console.log }) {

@@ -4,6 +4,7 @@ export interface AdminSsoConfig {
   clientId: string;
   clientSecret: string;
   callbackUrl: string;
+  localSubjects?: boolean;
 }
 
 // No development HTTP escape hatch in production configuration. Tests inject a
@@ -22,5 +23,7 @@ export function loadAdminSsoConfig(env = process.env): AdminSsoConfig | null {
   const clientId = env.MX_ADMIN_SSO_CLIENT_ID?.trim();
   const clientSecret = env.MX_ADMIN_SSO_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) throw new Error('SSO client credentials are required');
-  return { issuer, origin, clientId, clientSecret, callbackUrl: `${origin}/auth/admin/callback` };
+  const localSubjects = env.MX_ADMIN_SSO_LOCAL_SUBJECTS === '1';
+  if (localSubjects && issuer !== `${origin}/identity`) throw new Error('Managed identity issuer must share the configured origin');
+  return { issuer, origin, clientId, clientSecret, callbackUrl: `${origin}/auth/admin/callback`, localSubjects };
 }

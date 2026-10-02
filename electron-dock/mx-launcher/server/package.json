@@ -11,6 +11,7 @@
     "start": "node dist/src/index.js",
     "typecheck": "tsc -p tsconfig.test.json",
     "test:admin-sso": "node --test --import tsx src/admin-sso/*.test.ts",
+    "test:identity": "node --test --import tsx src/identity/*.test.ts ../scripts/identity-deploy.test.mjs",
     "migrate:up": "node dist/src/migrate.js",
     "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",
     "smoke:config-secret-registry": "pnpm run build && node dist/scripts/config-secret-registry-smoke.js",
@@ -48,6 +49,7 @@
     "@nestjs/common": "^11.1.19",
     "@nestjs/core": "^11.1.19",
     "@nestjs/platform-express": "^11.1.19",
+    "oidc-provider": "9.12.2",
     "openid-client": "6.8.8",
     "pg": "^8.16.3",
     "reflect-metadata": "^0.2.2",
@@ -56,6 +58,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
+    "@types/oidc-provider": "^9.12.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

@@ -199,6 +199,8 @@ sequenceDiagram
 
 ### 5.2 标准协议实现选择
 
+实施更新（2026-10-03）：内网试点最终采用成熟的 `oidc-provider@9.12.2`，作为独立 Node/Kubernetes 进程，直接只读适配现有账号凭据，避免本批增加 Java SPI、第二套账号和运维控制台。以下 Keycloak 为最初候选分析，未部署；最新接入、边界与恢复方案见 [文档 37](37-managed-internal-identity.md)。协议引擎选择不改变稳定 userId、唯一凭据写入者与业务权限分域原则。
+
 建议优先验证成熟 OIDC 引擎，**Keycloak 作为首个验证候选**，MX 自己维护账号兼容、组织/产品目录与领域权限。不自行从头实现授权服务器、密码找回、MFA 和 token 安全协议。Keycloak 提供 User Storage SPI，可对接外部用户和凭据存储；这只证明存在扩展机制，不证明已经兼容本项目的 scrypt、飞书绑定和账户禁用语义。[Keycloak User Storage SPI](https://www.keycloak.org/docs/latest/server_development/index.html#_user-storage-spi)
 
 验证阶段保持当前 Launcher 为唯一账号/凭据写入者。候选 IdP 通过受限的身份适配验证既有用户，暂不启用第二套密码修改/注册；IdP 自己保存标准会话与客户端配置，这不等于复制业务账号真相。适配接口需要独立服务凭据、客户端限流和稳定主体映射，不能持有全局 Ops Token。

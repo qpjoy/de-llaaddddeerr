@@ -145,7 +145,21 @@ export function createAdminSsoMiddleware(deps: {
         const callback = new URL(config.callbackUrl);
         callback.search = new URL(req.url!, config.origin).search;
         const identity = await oidc.redeem(callback, transaction);
-        const binding = await repository.read('admin-sso-binding', bindingKey(identity.issuer, identity.subject));
+        const identityKey = bindingKey(identity.issuer, identity.subject);
+        let binding = await repository.read('admin-sso-binding', identityKey);
+        if (!binding && config.localSubjects) {
+          // Only the explicitly managed issuer emits the existing immutable MX
+          // userId as sub. External IdPs still require proven account linking.
+          const user = (await store.listUserCenterUsers()).find(item => item.userId === identity.subject);
+          if (!user || user.status !== 'active' || BOOTSTRAP_USERS.has(user.userId)) throw unauthorized();
+          await repository.insert('admin-sso-binding', identityKey, {
+            issuer: identity.issuer, subject: identity.subject, userId: user.userId,
+            bindingId: randomUUID(), createdAt: new Date().toISOString(), source: 'managed-identity'
+          });
+          binding = await repository.read('admin-sso-binding', identityKey);
+          if (binding?.userId !== user.userId) throw unauthorized();
+        }
+        if (config.localSubjects && binding?.userId !== identity.subject) throw unauthorized();
         if (transaction.expectedUserId && transaction.expectedUserId !== binding?.userId) throw unauthorized();
         if (binding) {
           const user = (await store.listUserCenterUsers()).find((item) => item.userId === binding.userId);
@@ -163,15 +177,16 @@ export function createAdminSsoMiddleware(deps: {
     }
     const session = await sessionFor(req);
     if (path === '/auth/admin/session' && req.method === 'GET') {
-      if (!session) return json(res, 200, { enabled: true, authenticated: false });
-      if (!session.bindingId) return json(res, 200, { enabled: true, authenticated: true, bindingRequired: true, csrf: session.csrf });
+      const entry = { enabled: true, loginOrigin: config.origin };
+      if (!session) return json(res, 200, { ...entry, authenticated: false });
+      if (!session.bindingId) return json(res, 200, { ...entry, authenticated: true, bindingRequired: true, csrf: session.csrf });
       const user = await userFor(session);
       if (!user) {
         await repository.remove('admin-sso-session', digest(cookie(req, SESSION_COOKIE)));
         setCookie(res, SESSION_COOKIE, '', 0);
-        return json(res, 200, { enabled: true, authenticated: false });
+        return json(res, 200, { ...entry, authenticated: false });
       }
-      return json(res, 200, { enabled: true, authenticated: true, csrf: session.csrf,
+      return json(res, 200, { ...entry, authenticated: true, csrf: session.csrf,
         user: { userId: user.userId, displayName: user.displayName }, canManage: user.roleIds.includes('mx-admin'),
         needsReauthentication: Date.now() / 1000 - session.authTime > 300 });
     }

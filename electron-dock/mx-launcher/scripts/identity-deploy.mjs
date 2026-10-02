@@ -1,0 +1,128 @@
+#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus } from './identity-profile.mjs';
+
+export const NS = 'mx-internal-shadow';
+export const MANAGED = 'mx.qpjoy.com/identity-installation';
+const sha = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export function run(args, input) {
+  const result = spawnSync('kubectl', [`--request-timeout=${args.includes('rollout') ? '190s' : '30s'}`, ...args], { input, encoding: 'utf8', timeout: 210000, maxBuffer: 8 * 1024 * 1024 });
+  if (result.error || result.status) throw new Error('身份部署 kubectl 操作失败；请检查集群与 Pod 状态（不输出凭据）');
+  return result.stdout;
+}
+export function resources(p, revision) {
+  const metadata = name => ({ name, namespace: NS, labels: { [MANAGED]: p.installationId } });
+  const { issuer, origin, clientId, clientSecret, cookieKeys, jwks } = p;
+  const url = new URL(origin); const port = Number(url.port);
+  const secret = (name, values) => ({ apiVersion: 'v1', kind: 'Secret', metadata: metadata(name), type: 'Opaque',
+    data: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Buffer.from(value).toString('base64')])) });
+  const runtime = secret('mx-identity-runtime', { 'config.json': JSON.stringify({ issuer, origin, clientId, clientSecret, cookieKeys, jwks }), 'tls.crt': p.tlsCert, 'tls.key': p.tlsKey, 'ca.crt': p.caCert });
+  const admin = secret('mx-launcher-admin-sso', { MX_ADMIN_SSO_ENABLED: '1', MX_ADMIN_SSO_ORIGIN: origin, MX_ADMIN_SSO_ISSUER: issuer,
+    MX_ADMIN_SSO_CLIENT_ID: clientId, MX_ADMIN_SSO_CLIENT_SECRET: clientSecret, MX_ADMIN_SSO_LOCAL_SUBJECTS: '1', NODE_EXTRA_CA_CERTS: '/run/mx-identity-ca/ca.crt' });
+  const ca = secret('mx-identity-ca', { 'ca.crt': p.caCert });
+  const deployment = { apiVersion: 'apps/v1', kind: 'Deployment', metadata: metadata('mx-identity'), spec: {
+    replicas: 1, strategy: { type: 'Recreate' }, selector: { matchLabels: { app: 'mx-identity' } },
+    template: { metadata: { labels: { app: 'mx-identity' }, annotations: { 'mx.qpjoy.com/identity-version': sha([runtime.data, revision]) } }, spec: {
+      automountServiceAccountToken: false,
+      tolerations: ['node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'].map(key => ({ key, operator: 'Exists', effect: 'NoSchedule' })),
+      containers: [{ name: 'identity', image: 'qpjoy/mx-launcher-server:shadow', imagePullPolicy: 'Never', command: ['node', 'dist/src/identity/index.js'],
+        envFrom: [{ configMapRef: { name: 'mx-launcher-internal-config' } }],
+        env: [{ name: 'DATABASE_URL', valueFrom: { secretKeyRef: { name: 'mx-launcher-db', key: 'DATABASE_URL' } } }],
+        ports: [{ name: 'https', containerPort: port, hostPort: port, hostIP: url.hostname }],
+        startupProbe: { httpGet: { scheme: 'HTTPS', path: '/healthz', port, httpHeaders: [{ name: 'Host', value: url.host }] }, failureThreshold: 30, periodSeconds: 2 },
+        readinessProbe: { httpGet: { scheme: 'HTTPS', path: '/healthz', port, httpHeaders: [{ name: 'Host', value: url.host }] }, periodSeconds: 5 },
+        livenessProbe: { tcpSocket: { port }, periodSeconds: 15, failureThreshold: 6 },
+        resources: { requests: { cpu: '50m', memory: '128Mi' }, limits: { cpu: '500m', memory: '384Mi' } },
+        volumeMounts: [{ name: 'identity', mountPath: '/run/mx-identity', readOnly: true }],
+        securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } }
+      }], volumes: [{ name: 'identity', secret: { secretName: 'mx-identity-runtime', defaultMode: 256 } }]
+    } }
+  } };
+  return { runtime, admin, ca, deployment };
+}
+export function inspectIdentity(p, execute = run, initializing = false) {
+  const get = (kind, name) => { const raw = execute(['-n', NS, 'get', kind, name, '--ignore-not-found', '-o', 'json']); return raw.trim() ? JSON.parse(raw) : null; };
+  const previous = get('secret', 'mx-identity-runtime');
+  const deployment = get('deployment', 'mx-identity');
+  if (!p) {
+    const admin = get('secret', 'mx-launcher-admin-sso');
+    if (previous || deployment || get('secret', 'mx-identity-ca') || admin?.metadata?.labels?.[MANAGED]) throw new Error('身份服务已存在但主机部署档案丢失；请恢复 profile.json，不能生成新密钥');
+    if (initializing && admin) throw new Error('已有 SSO 配置；拒绝覆盖，请先确认原身份服务及备份');
+    return { deployment };
+  }
+  const oldAdmin = get('secret', 'mx-launcher-admin-sso');
+  for (const existing of [previous, oldAdmin, get('secret', 'mx-identity-ca'), deployment]) {
+    if (existing && existing.metadata?.labels?.[MANAGED] !== p.installationId) throw new Error('已有 SSO 资源归属不同；拒绝覆盖现有身份配置');
+  }
+  if (previous) {
+    let old;
+    try { old = JSON.parse(Buffer.from(previous.data['config.json'], 'base64').toString()); }
+    catch { throw new Error('已有身份运行配置无法解析；请核对备份（不输出凭据）'); }
+    const expected = resources(p).runtime.data;
+    if (sha(old) !== sha(JSON.parse(Buffer.from(expected['config.json'], 'base64').toString())) || Buffer.from(previous.data['ca.crt'], 'base64').toString() !== p.caCert) throw new Error('身份密钥或 issuer 与现有部署不一致；请恢复原部署档案');
+  }
+  return { deployment };
+}
+export function deployIdentity({ file = PROFILE, execute = run, revision, log = console.log } = {}) {
+  const p = readProfile(file);
+  inspectIdentity(p, execute);
+  if (!p) {
+    log('统一身份未启用；保留原登录。首次可运行 bash scripts/manage.sh ops identity on（自动配置并部署）。'); return;
+  }
+  const renewed = renewProfile(p, file);
+  const built = resources(renewed, revision);
+  const apply = value => execute(['apply', '--server-side', '--field-manager=mx-identity-deploy', '-f', '-'], JSON.stringify(value));
+  apply(built.runtime); apply(built.ca); apply(built.deployment);
+  execute(['-n', NS, 'rollout', 'status', 'deployment/mx-identity', '--timeout=180s']);
+  // Enable RP only after the durable provider is ready. The normal API apply /
+  // restart later in deploy reads this Secret and the trusted CA volume.
+  apply(built.admin);
+  log(`统一身份已就绪：${p.origin}/admin/；原 HTTP 入口保留。`);
+}
+export function activateIdentity({ file = PROFILE, execute = run } = {}) {
+  const p = readProfile(file); if (!p) return;
+  const { admin, ca } = resources(p);
+  execute(['-n', NS, 'patch', 'deployment', 'mx-launcher-internal', '--type=merge', '--patch',
+    JSON.stringify({ spec: { template: { metadata: { annotations: { 'mx.qpjoy.com/identity-config': sha([admin.data, ca.data]) } } } } })]);
+}
+export function verifyIdentity({ file = PROFILE, execute = run, log = console.log } = {}) {
+  const p = readProfile(file); if (!p) return;
+  execute(['-n', NS, 'exec', 'deployment/mx-launcher-internal', '-c', 'internal-api', '--', 'node', '--input-type=module', '-e', `
+    const origin=process.argv[1];
+    const discovery=await fetch(origin+'/identity/.well-known/openid-configuration',{signal:AbortSignal.timeout(10000)});
+    if(!discovery.ok || (await discovery.json()).issuer!==origin+'/identity') throw new Error('Identity discovery not ready');
+    const session=await fetch(origin+'/auth/admin/session',{signal:AbortSignal.timeout(10000)});
+    if(!session.ok || !(await session.json()).enabled) throw new Error('Launcher SSO not enabled');
+  `, p.origin]);
+  log('身份入口 HTTPS 信任、OIDC 发现和 Launcher SSO 启用检查通过。');
+  log(`个人管理入口：${p.origin}/admin/；管理员首次需信任 ${dirname(file)}/ca.crt。`);
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const [action, value, ...extra] = process.argv.slice(2);
+    if (extra.length) throw new Error('identity 命令参数过多');
+    if (action === 'init') {
+      const p = initializeProfile(value);
+      writeFileSync(join(dirname(PROFILE), 'ca.crt'), p.caCert, { mode: 0o644 });
+      console.log(JSON.stringify(publicStatus(p), null, 2));
+      console.log(`配置已保存，运行原 deploy 即可。管理员首次需信任 ${dirname(PROFILE)}/ca.crt；备份 profile.json 与 Launcher 数据库。`);
+    } else if (action === 'status') console.log(JSON.stringify(publicStatus(readProfile()), null, 2));
+    else if (action === 'check') verifyIdentity();
+    else if (action === 'activate') activateIdentity();
+    else if (action === 'export') {
+      if (!value || existsSync(value)) throw new Error('请指定尚不存在的私有备份文件路径');
+      const p = readProfile(); if (!p) throw new Error('尚未配置身份服务'); savePrivate(resolve(value), p, true); console.log('身份档案已导出（含私钥），数据库需同时备份。');
+    } else if (action === 'restore') {
+      const p = readProfile(resolve(value)); if (!p) throw new Error('未找到身份备份');
+      const old = readProfile(); if (old && sha(old) !== sha(p)) throw new Error('目标已有不同身份档案；拒绝覆盖');
+      if (!old) savePrivate(PROFILE, p, true); console.log('身份档案已恢复；恢复原数据库后运行 deploy。原 issuer 地址必须保持可达。');
+    } else if (action === 'apply') {
+      if (!value || !/^[a-f0-9]{12,64}$/.test(value)) throw new Error('identity apply 需要已构建代码版本');
+      deployIdentity({ revision: value });
+    } else throw new Error('Usage: ops identity on [https://内网IPv4:18443] | init <https://内网IPv4:18443> | status | check | export <file> | restore <file>');
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
+}

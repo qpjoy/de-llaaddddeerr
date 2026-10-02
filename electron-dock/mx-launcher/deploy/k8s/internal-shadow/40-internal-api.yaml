@@ -242,6 +242,9 @@ spec:
               memory: 1Gi
               ephemeral-storage: 1Gi
           volumeMounts:
+            - name: identity-ca
+              mountPath: /run/mx-identity-ca
+              readOnly: true
             - name: internal-ssh
               mountPath: /app/artifacts/ssh
             - name: release-artifacts
@@ -249,6 +252,10 @@ spec:
             - name: site-slots
               mountPath: /app/runtime-artifacts/site-slots
       volumes:
+        - name: identity-ca
+          secret:
+            secretName: mx-identity-ca
+            optional: true
         - name: internal-ssh
           persistentVolumeClaim:
             claimName: mx-launcher-internal-ssh

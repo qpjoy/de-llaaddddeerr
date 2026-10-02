@@ -97,6 +97,8 @@
 
 ## 6. Launcher 个人管理登录试点（2026-10-03）
 
+本节记录首批外部 OIDC 客户端实现。随后已新增内网自管身份进程、原账号直接登录和随 deploy 配置/恢复；最新范围与操作见 [内网统一登录部署](37-managed-internal-identity.md)。下文“上游未实现”和手填环境变量描述仅对应首批，不代表自管模式仍需这样部署。
+
 ### 已实现的范围
 
 Launcher 管理站作为标准 OIDC 客户端（RP），新增“个人账号”入口、已有密码账号关联、管理会话和当前浏览器退出。使用固定版本 `openid-client@6.8.8` 实现 code + PKCE S256、state/nonce、issuer/audience/有效期和 RS256 签名验证；没有自建 OAuth 授权服务器。[标准客户端说明](https://github.com/panva/openid-client)。

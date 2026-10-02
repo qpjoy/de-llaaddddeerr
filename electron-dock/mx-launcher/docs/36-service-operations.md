@@ -25,6 +25,8 @@
 
 ### 在 Launcher 界面重新部署自身
 
+已配置的内网身份服务也随此 deploy 幂等启动/更新，无需额外填写 SSO 环境变量；首次运行 `bash scripts/manage.sh ops identity on` 即可自动检查内网地址/18443 端口、生成配置并执行原 deploy。重启与异机恢复见 [内网统一登录](37-managed-internal-identity.md)。未开启时保留原登录，并提示开启入口。
+
 首次完整 deploy 成功、页面显示独立执行器已连接后，日常重新部署无需再到终端拼接命令：
 
 1. 打开“运行与维护 → 服务与部署”，选择“MX Launcher → 部署当前检出版本”。

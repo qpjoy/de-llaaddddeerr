@@ -34,7 +34,7 @@ test('production deploy ensures executor before build and API rollout; failure s
     'ops_internal_production_plan', 'k8s_configure_proxy_bypass', 'internal_production_predeploy_gate',
     'k8s_prepare_production_host', 'k8s_repair_kubeadm_endpoint', 'k8s_require_apiserver_ready', 'k8s_recover_production_node',
     'k8s_production_recovery_state', 'k8s_preflight_secret_bundle', 'k8s_release_oss_secret_dry_run', 'k8s_local_pvs',
-    'k8s_recover_cluster_network', 'k8s_require_production_node_ready', 'k8s_production_disk_preflight',
+    'k8s_recover_cluster_network', 'k8s_require_production_node_ready', 'k8s_production_disk_preflight', 'identity_prepare_for_deploy',
     'shadow_image_build', 'shadow_image_import_containerd', 'k8s_preload_runtime_images', 'k8s_apply', 'k8s_restart_internal_api',
     'native_host_runner_install', 'ops_local_platform_apply_native_host_runner_url', 'k8s_apply_internal_gateway',
     'k8s_rollout_status', 'k8s_status', 'k8s_gateway_smoke', 'k8s_db_summary', 'ops_insight_hub', 'k8s_production_auth_smoke'

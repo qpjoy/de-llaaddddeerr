@@ -48,7 +48,7 @@ const cookieValue = (response: Response, name: string) => response.headers.getSe
 type TestPayload = { csrf: string; authenticated: boolean; bindingRequired?: boolean; canManage?: boolean; user: { userId: string }; actor?: string };
 type TestResponse = Omit<Response, 'json'> & { json(): Promise<TestPayload> };
 
-async function fixture() {
+async function fixture(localSubjects = false) {
   const repository = new TestRepository();
   const store = new MemoryStore(loadConfig());
   await store.createUserCenterUser({ userId: 'existing-admin', account: 'Admin', password: 'ExistingPassword123!', roleIds: ['mx-admin'] });
@@ -96,7 +96,7 @@ async function fixture() {
     });
   });
   const origin = await listen(server);
-  const settings = { issuer, origin, clientId: 'launcher', clientSecret: 'secret', callbackUrl: `${origin}/auth/admin/callback` };
+  const settings = { issuer, origin, clientId: 'launcher', clientSecret: 'secret', callbackUrl: `${origin}/auth/admin/callback`, localSubjects };
   const config = new oidc.Configuration({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/jwks` }, 'launcher',
     { client_secret: 'secret', id_token_signed_response_alg: 'RS256' }, oidc.ClientSecretBasic('secret'));
   oidc.allowInsecureRequests(config); // Test fixture only; production config requires HTTPS.
@@ -145,6 +145,36 @@ test('SSO config defaults off; enabled config requires HTTPS and fixed callback'
   for (const origin of ['http://localhost', 'https://user:pass@launcher.test', 'https://launcher.test/redirect', 'https://launcher.test?x=1']) {
     assert.throws(() => loadAdminSsoConfig({ ...env, MX_ADMIN_SSO_ORIGIN: origin }));
   }
+});
+
+test('managed identity preserves the existing account without requiring a second password binding', async () => {
+  const f = await fixture(true);
+  try {
+    const before = await f.store.listUserCenterUsers();
+    f.setClaims({ sub: 'existing-admin' });
+    const cookie = await f.login();
+    const session = await (await f.request('/auth/admin/session', cookie)).json();
+    assert.ok(!session.bindingRequired);
+    assert.equal(session.canManage, true);
+    assert.equal(session.user.userId, 'existing-admin');
+    assert.deepEqual(await f.store.listUserCenterUsers(), before);
+    assert.equal((await (await f.request('/auth/admin/session', await f.login())).json()).user.userId, 'existing-admin');
+  } finally { await f.close(); }
+});
+
+test('managed identity cannot mint a new account or elevate an ordinary existing user', async () => {
+  const f = await fixture(true);
+  try {
+    f.setClaims({ sub: 'unknown-user' });
+    const flow = await f.begin();
+    const rejected = await f.request(flow.callback, flow.loginCookie);
+    assert.match(rejected.headers.get('location')!, /sso_error/);
+    f.setClaims({ sub: 'existing-user' });
+    const cookie = await f.login();
+    const session = await (await f.request('/auth/admin/session', cookie)).json();
+    assert.equal(session.canManage, false);
+    assert.equal(session.user.userId, 'existing-user');
+  } finally { await f.close(); }
 });
 
 test('real OIDC code/PKCE/signature -> verified old password -> same local admin -> logout, with isolated legacy paths', async () => {

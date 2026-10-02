@@ -101,6 +101,8 @@ Usage:
   bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down
   bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
+  bash scripts/manage.sh ops identity on [https://private-ip:18443]
+  bash scripts/manage.sh ops identity status|check|export <file>|restore <file>
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow
@@ -2836,10 +2838,17 @@ k8s_apply() {
     die "migration job failed"
   fi
 
+  if [ "$target" = "internal-shadow" ]; then
+    say "ensure configured identity service before enabling personal login"
+    node "$SCRIPT_DIR/identity-deploy.mjs" apply "$(git -C "$ROOT" rev-parse HEAD)"
+  fi
   say "apply internal api"
   kubectl apply --validate=false -f "$dir/40-internal-api.yaml"
   k8s_apply_release_oss_rollout_version "$ns"
   k8s_apply_secret_bundle_rollout_version "$ns"
+  if [ "$target" = "internal-shadow" ]; then
+    node "$SCRIPT_DIR/identity-deploy.mjs" activate
+  fi
   if [ "$restart_rebuilt_internal_api" = "1" ] \
     && [ "${K8S_INTERNAL_API_RESTARTED:-0}" != "1" ]; then
     say "restart Internal API before rollout wait so the rebuilt local image is resolved"
@@ -2850,6 +2859,9 @@ k8s_apply() {
   if ! k8s_rollout_status "$ns" deployment mx-launcher-internal 180s; then
     k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
     die "internal api rollout failed"
+  fi
+  if [ "$target" = "internal-shadow" ]; then
+    node "$SCRIPT_DIR/identity-deploy.mjs" check
   fi
   say "apply internal gateway"
   k8s_apply_internal_gateway "$target"
@@ -5736,8 +5748,16 @@ Commands:
   bash scripts/manage.sh ops internal-production repair-network
   bash scripts/manage.sh ops internal-production repair-cni
   bash scripts/manage.sh ops internal-production down
+  bash scripts/manage.sh ops identity on [https://private-ip:18443]
 
 Notes:
+  - Personal SSO is opt-in once: ops identity on discovers the existing private
+    gateway address (fallback: local node IP), checks TCP 18443, saves persistent
+    credentials and runs this deploy. No manual OIDC keys or separate deploy.
+    Later deploys reuse the profile and check its address/port before building.
+    Administrators must trust the generated internal CA once. On a replacement
+    host restore the identity profile AND database before deploying; do not init
+    replacement credentials. See docs/37-managed-internal-identity.md.
   - Deploy runs the release SDK publisher test and server typecheck with the
     repository-pinned pnpm before building an image. Emergency break-glass only:
     set MX_INTERNAL_PRODUCTION_SKIP_PREDEPLOY_GATE=1 to skip this gate.
@@ -5959,6 +5979,24 @@ ops_insight_hub() {
   (cd "$hub_root" && MX_INSIGHT_SYNC_LAUNCHER=1 bash scripts/manage.sh ops internal-production "$action")
 }
 
+ops_identity_on() {
+  [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops identity on [https://private-ip:18443]"
+  [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] \
+    || die "identity on requires root on the local Linux production host"
+  # Function-local values reach the nested deploy but never become persistent
+  # environment flags. Production recovery owns the existing deploy lock.
+  local identity_enable_requested=1 identity_requested_origin="${1:-}"
+  ops_internal_production deploy
+}
+
+identity_prepare_for_deploy() {
+  if [ "${identity_enable_requested:-0}" = 1 ]; then
+    node "$SCRIPT_DIR/identity-on.mjs" on "${identity_requested_origin:-}"
+  else
+    node "$SCRIPT_DIR/identity-on.mjs" preflight
+  fi
+}
+
 ops_internal_production() {
   local action="$1"
   shift || true
@@ -5995,6 +6033,8 @@ ops_internal_production() {
       k8s_recover_cluster_network
       k8s_require_production_node_ready
       k8s_production_disk_preflight
+      say "preflight personal SSO address, port and durable configuration"
+      identity_prepare_for_deploy
       service_operations_ensure
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
@@ -6700,6 +6740,14 @@ case "$cmd" in
       insight-hub)
         [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down"
         ops_insight_hub "$@"
+        ;;
+      identity)
+        if [ "${1:-}" = on ]; then
+          shift
+          ops_identity_on "$@"
+        else
+          node "$SCRIPT_DIR/identity-deploy.mjs" "$@"
+        fi
         ;;
       internal-production)
         [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
