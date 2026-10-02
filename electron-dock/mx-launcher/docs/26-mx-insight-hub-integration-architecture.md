@@ -2,6 +2,8 @@
 
 本文记录从 HDO V1 到 MX-H2I V2 的边界，并定义 MX Insight Hub 的最新接入原则。目标是在不改变现有 MX-H2I 用户联网行为的前提下，把数据产品、订阅、权限、稳定 API、ETL/ELT、BI 和 Data Agent 作为独立模块纳入 Launcher 运维与用户入口。
 
+2026-10-02 规划补充：[平台统一身份、产品控制台与存量租户过渡](../../mx-insight-hub/docs/architecture/platform-identity-and-product-consoles.md)明确支付中心独立管理台、Hub 数据产品边界，以及共用 Launcher 账号、保留本地成员与产品授权的方式。未来公开身份入口和 OIDC/PKCE 通过新旧绑定灰度接入，当前 opaque token、Internal 登录地址、现有 member/tenant/Key/钱包和 MX-H2I 登录联网保持原样；不因这份规划开放注册或 Internal 管理接口。
+
 ## 1. 三代产品边界
 
 | 系统 | 中心 | 网络/用户真相 | 在本设计中的角色 |
@@ -338,3 +340,16 @@ Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参
   请求、Launcher token/session、Internal 配置、ProductNetwork、WireGuard、route、
   PAC、DNS、NRPT、resolver 或 MX-H2I ownership 状态机。共享包的 dark 合同保持
   兼容，Luopan 仅需构建/视觉回归。
+
+## 14. 2026-09-30 Web Search 接入边界
+
+- Hub 已实现独立 Web Search 数据服务：百度与 Night-All 的七家 HTTP 搜索改为 Hub 直连，
+  不转发 Night-All；“开放能力”配置租户默认渠道与顺序，API Key 可缩小范围和覆盖顺序，默认不开放。
+  见 [当前实现与开通指南](../../mx-insight-hub/docs/integrations/web-search.md)；尚未执行生产迁移或部署。
+- Domestic → Internal 继续只承担数据 API 入站；供应商 Key、搜索 Sequence、授权、计费、
+  幂等与出网绑定均由 Internal Hub 管理。Public `18150` 与 Admin `18151` 保持分离。
+- 百度默认评估 Internal 系统出口；需要不同网络条件时，逐供应商绑定已有 System Proxy
+  或经审核的固定出口。搜索供应商顺序、代理端点顺序、LLM Sequence 是不同配置对象。
+- Web Search 不参与 Launcher/MX-H2I 登录、会话、用户权限或网络准入；不改 ProductNetwork、
+  WireGuard、DNS、PAC、NRPT、resolver 与 ownership。Luopan 仍为独立测试产品。
+  Hub/百度不可用只能影响该数据服务，不能成为现有登录和联网的失败条件。

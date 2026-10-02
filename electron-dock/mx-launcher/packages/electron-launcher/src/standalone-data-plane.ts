@@ -463,6 +463,49 @@ export function releaseElectronLauncherStandaloneOwnershipClaim(
   return standaloneOwnershipState(file, claims);
 }
 
+// Callers must prove the retired owners' local data plane is inactive. Repeat
+// that proof while holding the same lock as registration; never prune by age.
+export function pruneElectronLauncherStandaloneOwnershipClaims(input: {
+  productId: string;
+  currentOwnerId: string;
+  expectedClaims: ElectronLauncherNetworkOwnershipClaim[];
+  verifyInactive: () => boolean;
+  statePath?: string | null;
+}) {
+  const file = canonicalStandaloneOwnershipStatePath(input.statePath, true);
+  return withStandaloneOwnershipLock(file, () => {
+    const claims = readStandaloneOwnershipClaimsFromFile(file, true);
+    const rejected = (reason: string) => ({
+      ...standaloneOwnershipState(file, claims),
+      repaired: false, removedOwnerIds: [] as string[], backupPath: null as string | null, reason
+    });
+    if (!input.productId || !input.currentOwnerId || !input.expectedClaims.length) {
+      return rejected('no-candidates');
+    }
+    for (const expected of input.expectedClaims) {
+      if (!expected.ownerId || expected.ownerId === input.currentOwnerId
+        || expected.productId !== input.productId || expected.metadata?.dataPlaneOwner !== true) {
+        return rejected('invalid-candidate');
+      }
+      const current = claims.find((row) => row.ownerId === expected.ownerId);
+      if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
+        return rejected('claim-snapshot-changed');
+      }
+    }
+    if (input.verifyInactive() !== true) return rejected('inactive-proof-lost');
+    const removedOwnerIds = [...new Set(input.expectedClaims.map((row) => row.ownerId))];
+    const retained = claims.filter((row) => !removedOwnerIds.includes(row.ownerId));
+    // Backup failure aborts the repair. Only public network claims are copied.
+    const backupPath = `${file}.before-repair-${randomUUID()}.bak`;
+    writeFileSync(backupPath, readFileSync(file), { flag: 'wx', mode: 0o600 });
+    writeStandaloneOwnershipState(file, retained);
+    return {
+      ...standaloneOwnershipState(file, retained),
+      repaired: true, removedOwnerIds, backupPath, reason: 'stale-claims-pruned'
+    };
+  });
+}
+
 export function buildElectronLauncherStandaloneOwnershipClaim(
   routePlan: LauncherRoutePlan,
   input: ElectronLauncherStandaloneOwnershipInput = {}

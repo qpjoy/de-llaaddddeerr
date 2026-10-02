@@ -10,6 +10,7 @@ const dgram = require('node:dgram');
 const { execFile } = require('node:child_process');
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
+const { inspectOrRepairWindowsOwnership } = require('./windows-ownership-recovery.cjs');
 const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   darwinSupersedableOwnershipOwnerIds,
@@ -201,6 +202,7 @@ let wireGuardRecoveryInterval = null;
 let wireGuardRecoveryInFlight = null;
 let wireGuardConnectInFlight = false;
 const wireGuardConnectOperations = new Set();
+let lastWindowsOwnershipRepair = null;
 let wireGuardDisconnectInFlight = false;
 let networkMutationEpoch = 0;
 let activeForegroundNetworkOperation = null;
@@ -2096,6 +2098,15 @@ function registerIpc() {
     } finally {
       finishForegroundNetworkOperation(operation);
     }
+  });
+  ipcMain.handle('mx-h2i:repair-network-ownership', async () => {
+    const result = await windowsOwnershipRecoveryForRuntime('manual-ownership-repair', true);
+    runtime.feedback = {
+      tone: result.repaired || result.status === 'no-candidates' ? 'success' : 'warning',
+      message: result.message
+    };
+    await saveAndBroadcast();
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:open-admin', async () => {
     const baseUrl = runtime.connection?.state === 'connected'
@@ -5232,6 +5243,10 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
   const status = await systemDomainProxyStatusForDiagnostics(phase);
   const endpointRoute = await collectDarwinEndpointRouteDiagnostics(reason, { phase });
   const windowsNrpt = await collectWindowsNrptDiagnostics();
+  const windowsOwnershipRecovery = process.platform === 'win32'
+    && (reason === 'diagnostic-export' || reason.startsWith('manual-'))
+    ? await windowsOwnershipRecoveryForRuntime(reason, false)
+    : runtime?.connection?.diagnostics?.windowsOwnershipRecovery || null;
   let resolution = null;
   try {
     const mod = await importInstalledPackage('@qpjoy/electron-launcher/network-diagnostics');
@@ -5289,6 +5304,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
     resolution,
     endpointRoute,
     windowsNrpt,
+    windowsOwnershipRecovery,
     systemDomainProxy: compactSystemDomainProxyStatus(status),
     priority: phase === 'connected'
       ? ['v2-split-dns', 'mx-h2i-wireguard', 'system-proxy-or-dns-for-unmatched', 'external-dns-for-unmatched']
@@ -5445,6 +5461,16 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair', options =
     };
   }
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
+  if (process.platform === 'win32') {
+    checkpoint('ownership-repair');
+    const ownershipRecovery = await windowsOwnershipRecoveryForRuntime(reason, true);
+    if (ownershipRecovery.repaired || ownershipRecovery.candidateOwnerIds?.length) {
+      // Reconnecting rebuilds the profile from the current lease. A generic
+      // repair here could otherwise restart the retired identity's .conf.
+      runtime.feedback = { tone: ownershipRecovery.repaired ? 'success' : 'warning', message: ownershipRecovery.message };
+      return { before, windowsOwnershipRecovery: ownershipRecovery };
+    }
+  }
   checkpoint('endpoint-probe');
   // Probe endpoint routes without privilege first. On macOS the endpoint,
   // WireGuard routes, PAC, and resolver mutations are appended to one
@@ -7018,6 +7044,13 @@ async function upsertStandaloneOwnershipForRoutePlan(
       updatedAt: nowIso()
     };
     let ownershipState = mod.claimElectronLauncherStandaloneOwnershipClaim(nextClaim);
+    let windowsOwnershipRecovery = null;
+    if (ownershipState?.claimed === false && process.platform === 'win32' && reason === 'connect-preflight') {
+      windowsOwnershipRecovery = runWindowsOwnershipRecovery(mod, reason, true);
+      if (windowsOwnershipRecovery.repaired) {
+        ownershipState = mod.claimElectronLauncherStandaloneOwnershipClaim(nextClaim);
+      }
+    }
     if (ownershipState?.claimed === false && process.platform === 'darwin') {
       const proof = await darwinOwnershipSupersessionProof(reason);
       const supersedeOwnerIds = darwinSupersedableOwnershipOwnerIds({
@@ -7050,7 +7083,10 @@ async function upsertStandaloneOwnershipForRoutePlan(
         }
       }
     }
-    return compactStandaloneOwnershipState(ownershipState, reason);
+    return {
+      ...compactStandaloneOwnershipState(ownershipState, reason),
+      ...(windowsOwnershipRecovery ? { windowsOwnershipRecovery } : {})
+    };
   } catch (err) {
     return {
       ok: false,
@@ -7059,6 +7095,57 @@ async function upsertStandaloneOwnershipForRoutePlan(
       updatedAt: nowIso()
     };
   }
+}
+
+async function windowsOwnershipRecoveryForRuntime(reason, repair) {
+  if (process.platform !== 'win32') return { status: 'unsupported', repaired: false };
+  const epoch = networkMutationEpoch;
+  try {
+    const mod = await importInstalledPackage('@qpjoy/electron-launcher/standalone-data-plane');
+    return runWindowsOwnershipRecovery(mod, reason, repair, epoch !== networkMutationEpoch);
+  } catch (err) {
+    return recordWindowsOwnershipRecovery({
+      status: 'repair-failed', repaired: false,
+      message: `无法检查残留网络声明：${errorMessage(err)}`
+    }, reason);
+  }
+}
+
+function runWindowsOwnershipRecovery(mod, reason, repair, superseded = false) {
+  const preflight = reason === 'connect-preflight';
+  const result = inspectOrRepairWindowsOwnership({
+    platform: process.platform,
+    currentOwnerId: standaloneOwnershipOwnerId(),
+    claims: mod.readElectronLauncherStandaloneOwnershipState().claims,
+    connected: runtime?.connection?.state === 'connected',
+    busy: superseded || wireGuardDisconnectInFlight
+      || (reason === 'manual-ownership-repair' && Boolean(activeForegroundNetworkOperation))
+      || wireGuardConnectOperations.size > (preflight ? 1 : 0)
+      || (!preflight && (wireGuardRecoveryInFlight || runtime?.connection?.state === 'connecting')),
+    repair,
+    prune: mod.pruneElectronLauncherStandaloneOwnershipClaims
+  });
+  return recordWindowsOwnershipRecovery(result, reason);
+}
+
+function recordWindowsOwnershipRecovery(result, reason) {
+  const diagnostic = { ...result, reason, updatedAt: nowIso() };
+  if (result.repaired) {
+    lastWindowsOwnershipRepair = diagnostic;
+    if (reason !== 'connect-preflight') networkRecoveryPaused = true;
+    queueDiagnosticLog('info', 'standalone-ownership.windows-stale-claims-repaired', result.message, diagnostic);
+  }
+  runtime.connection = {
+    ...(runtime.connection || idleConnection()),
+    diagnostics: {
+      ...(runtime.connection?.diagnostics || {}),
+      windowsOwnershipRecovery: {
+        ...diagnostic,
+        lastRepair: lastWindowsOwnershipRepair
+      }
+    }
+  };
+  return runtime.connection.diagnostics.windowsOwnershipRecovery;
 }
 
 async function darwinOwnershipSupersessionProof(reason) {
@@ -14290,7 +14377,9 @@ async function rotateLocalLauncherIdentity(reason, options = {}) {
   runtime.installation = normalizeInstallation({
     installId,
     deviceId,
-    ownershipInstanceId: installId,
+    // Network ownership identifies this local installation, independently of
+    // the server lease/key identity being rotated. Keep the old claim reachable.
+    ownershipInstanceId: stableOwnershipInstanceId(current) || installId,
     siteId: current.siteId,
     deviceLabel: current.deviceLabel || `${launcherProductDisplayName()} Desktop`,
     deviceModel: await detectDeviceModel(),

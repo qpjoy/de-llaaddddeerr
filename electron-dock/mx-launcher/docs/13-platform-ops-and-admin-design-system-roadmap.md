@@ -4,6 +4,11 @@
 MX Launcher 后续主线。短期不建设 AI 训练平台，优先借鉴 K8s 和成熟运维系统能力，
 把 MX Launcher 做成稳定、可观测、可审计、可回滚的 Internal 控制面。
 
+2026-10-02 范围补充：[平台业务分域与统一管理](32-platform-business-centers-and-management-integration.md)
+建议保留 Launcher Runtime/SDK/登录/网络，从现有 Admin 演进可独立发布的运维控制台。
+平台入口统一接入各中心的业务工作台，安装维护通过受限执行器完成；本文件的 Internal
+权威原则适用于所属平台领域，不要求支付、财务、Hub 数据进入 Launcher 库或主进程。
+
 Launcher Network 当前多产品 Dashboard、MX-H2I/Luopan 过滤与拓扑归属、Connections 抽屉、
 Feishu 用户显示、产品级用户 ban/unban、blocked inventory、匿名 ProductNetwork 隔离、
 静态 lease 与实时 WireGuard 状态的区分，以及未来安全下线状态机见
@@ -25,7 +30,7 @@ MX Launcher 的平台边界保持三层：
 
 - Launcher Runtime：桌面常驻、登录、设备身份、AppCenter、Launcher Network。
 - Internal 控制面：User/RBAC、Config、Release、DNS、Admin、Runner、
-  Observability、Test/Evidence，是唯一真相。
+  Observability、Test/Evidence，保存各自平台领域的权威记录。
 - Domestic / Oversea slot：接收 Internal 推送的模块化 artifact，运行 relay、
   proxy、cache、forwarder、mihomo、hysteria2 和 site-agent 能力。
 
@@ -35,10 +40,14 @@ Internal 的基础设施能力接入；Domestic / Oversea 不保存平台主数�
 
 ## 架构原则
 
-### Internal 仍是唯一真相
+### Internal 保留所属平台领域的权威记录
 
-PostgreSQL 继续保存 MX 的业务真相，包括用户、角色、配置、release、site slot、
+Launcher PostgreSQL 继续保存现有平台领域的权威记录，包括用户、角色、平台配置、release、site slot、
 runner job、worker report、evidence、audit event 和 gate verdict。
+
+未来支付、财务、数据等中心通过自身 API 管理自身业务数据。它们可在同一 Internal
+管理环境中部署、从同一个界面操作，但不共用 Launcher 的业务表写入权。领域内的配置
+通过所属中心校验保存；平台登记部署参数、版本、连接与密钥引用，避免两套可编辑配置真相。
 
 etcd 不直接作为 MX Config Center 的业务数据库。etcd 是 K8s 控制面存储，MX 应通过
 Kubernetes API 间接使用它：

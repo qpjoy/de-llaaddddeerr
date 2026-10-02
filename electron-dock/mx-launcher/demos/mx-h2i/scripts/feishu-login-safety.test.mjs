@@ -1499,8 +1499,9 @@ assert.doesNotMatch(
   /data-action="disconnect"/,
   'logical cancel and paused retry UI must never be implemented as disconnect'
 );
-const backgroundRecoveryUi = Function(
+const renderBackgroundRecoveryUi = Function(
   'state',
+  'isWindows',
   `let busyAction = '';
 let cancelNetworkOperationInFlight = false;
 function escapeHtml(value) { return String(value); }
@@ -1513,7 +1514,8 @@ ${functionSource(rendererSource, 'networkOperationIsGuestConnect')}
 ${functionSource(rendererSource, 'rendererPendingNetworkOperation')}
 ${networkOperationUiSource}
 return renderNetworkOperationControl();`
-)({
+);
+const backgroundRecoveryState = {
   connection: { state: 'connecting', mode: 'employee' },
   networkOperation: {
     id: null,
@@ -1522,10 +1524,12 @@ return renderNetworkOperationControl();`
     cancelable: true,
     message: '正在原位校验保留网络'
   }
-});
+};
+const backgroundRecoveryUi = renderBackgroundRecoveryUi(backgroundRecoveryState, false);
 assert.match(backgroundRecoveryUi, /停止后续恢复/);
 assert.match(backgroundRecoveryUi, /data-action="cancelNetworkOperation"/);
 assert.match(backgroundRecoveryUi, /data-operation-id=""/);
+assert.doesNotMatch(renderBackgroundRecoveryUi(backgroundRecoveryState, true), /macOS/);
 
 const operationGate = Function(
   'state',

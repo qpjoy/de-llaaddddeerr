@@ -420,6 +420,13 @@ Installer 类走同样的目标圈选，但激活永远手动：`ready-to-instal
 
 ## Layer 6.7: MX-H2I ASAR 与全量安装包双轨发布
 
+2026-09-30 Windows 残留 ownership 修复新增了安装基座 API，必须通过全量 EXE 交付；
+仅更新 ASAR 不能获得此恢复能力。发版前按
+[Windows 身份冲突恢复记录](31-windows-h2i-identity-conflict-2026-09-30.md)
+验证旧 claim 定向清理、活跃实例保护、升级登录保留及 Luopan 共存。
+`make:win` 已增加只读 `windows-ownership-probe-smoke.mjs` 检查，确认发包机器上的
+Windows PowerShell 能正确返回进程、服务和网卡状态；它不代替真实连接回归。
+
 MX-H2I 的旧版本已内置 ASAR bootstrap API，但生产 ASAR 基座必须包含 2026-07-31 的
 Electron 物理 `.asar` 校验修复；建议先全量安装 `2.1.10+`，再用更高版本 ASAR 验证。
 否则 Electron 会把外部 `.asar` 虚拟根误判为目录并删除 pending/current 指针。

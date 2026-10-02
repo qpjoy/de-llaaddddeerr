@@ -14,6 +14,10 @@
 
 相关专题：
 
+- [32-platform-business-centers-and-management-integration.md](./32-platform-business-centers-and-management-integration.md)：
+  平台入口、技术运维、业务管理的职责划分；从现有 Internal Admin 演进独立运维控制台，
+  各中心独立数据/API/工作台，统一安装维护与财务、支付、Hub 的渐进接入。目标规划。
+
 - [31-internal-reboot-recovery.md](./31-internal-reboot-recovery.md)：
   Internal 服务器搬迁/重启的 deploy 恢复、原数据与凭据保护、失败停止条件和现场验收。
 

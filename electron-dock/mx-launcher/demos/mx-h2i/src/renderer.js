@@ -781,6 +781,7 @@ async function runAction(action, payload) {
       openRollback: () => api.openRollbackInstaller?.(payload),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
       repairSystemNetwork: () => api.repairSystemNetwork?.(),
+      repairNetworkOwnership: () => api.repairNetworkOwnership?.(),
       openDiagnosticLogs: () => api.openDiagnosticLogs?.(),
       exportDiagnostics: () => api.exportDiagnostics?.(),
       openAdmin: () => api.openAdmin()
@@ -1034,6 +1035,7 @@ function isNetworkMutatingAction(action) {
     'login-employee',
     'login-feishu',
     'repairSystemNetwork',
+    'repairNetworkOwnership',
     'refreshDiagnostics',
     'disconnect',
     'resetLocalNetworkIdentity'
@@ -1107,7 +1109,7 @@ function renderNetworkOperationControl() {
   return `
     <section class="connection-recovery-panel" role="status" aria-live="polite" data-network-operation-status="${escapeAttr(operation.status)}">
       <strong>${escapeHtml(operation.message || (networkOperationIsRepair(operation) ? '正在修复系统网络' : '正在建立网络连接'))}</strong>
-      <span>如果 macOS 系统权限框已经打开，请同时在系统权限框中点“取消”；此按钮会停止后续步骤，不会执行断开或清理当前健康连接。</span>
+      <span>${isWindows ? '此按钮会停止后续步骤，不会断开或清理当前健康连接。' : '如果 macOS 系统权限框已经打开，请同时在系统权限框中点“取消”；此按钮会停止后续步骤，不会执行断开或清理当前健康连接。'}</span>
       <div class="connect-actions">
         <button class="secondary-button" type="button" data-action="cancelNetworkOperation" data-operation-id="${escapeAttr(operation.id || '')}" ${cancelRequested || operation.cancelable === false ? 'disabled' : ''}>${escapeHtml(label)}</button>
       </div>
@@ -1614,6 +1616,7 @@ function renderAdvancedPhone() {
       </section>
       ${renderAnonymousAccessPanel()}
       ${renderInstallationIdentityPanel()}
+      ${renderWindowsOwnershipRecoveryPanel()}
       ${renderDiagnosticLogPanel()}
       ${renderWireGuardDiagnostics()}
       ${renderConfigForm()}
@@ -1791,6 +1794,27 @@ function renderAdvancedRow(title, detail, icon) {
       </span>
       <span class="advanced-row__arrow">›</span>
     </button>
+  `;
+}
+
+function renderWindowsOwnershipRecoveryPanel() {
+  if (!isWindows) return '';
+  const recovery = state.connection?.diagnostics?.windowsOwnershipRecovery
+    || state.connection?.diagnostics?.networkEnvironment?.windowsOwnershipRecovery;
+  const blocked = Boolean(busyAction) || networkOperationBlocksMutation();
+  const connected = state.connection?.state === 'connected';
+  return `
+    <section class="settings-panel" aria-label="Windows 网络恢复">
+      <div class="panel-head"><div><h2>网络恢复 · 保留登录</h2><p>清理历史安装身份留下的网络占用</p></div></div>
+      <p class="diagnostic-log-hint">仅在 WireGuard 已停止、网卡地址已释放且没有其他 MX-H2I 实例时清理。保留员工登录、设备密钥、租约和其他产品的网络配置。</p>
+      <p class="diagnostic-note" role="status">${escapeHtml(recovery?.message || '连接前会自动检查冲突。也可以先刷新诊断，再清理残留声明。')}</p>
+      ${recovery?.lastRepair?.removedOwnerIds?.length ? `<p class="diagnostic-note">最近已清理 ${recovery.lastRepair.removedOwnerIds.length} 条残留声明，并保存恢复前备份。</p>` : ''}
+      <div class="toolbar-actions">
+        <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${blocked ? 'disabled' : ''}>刷新诊断</button>
+        <button class="secondary-button" type="button" data-action="repairNetworkOwnership" ${blocked || connected ? 'disabled' : ''}>${busyAction === 'repairNetworkOwnership' ? '正在检查并清理' : '清理残留网络声明'}</button>
+      </div>
+      <p class="diagnostic-log-hint">${connected ? '当前已连接，无需清理。' : '若提示隧道仍运行，请先正常断开，再执行清理；完成后使用原员工身份连接。'}</p>
+    </section>
   `;
 }
 
@@ -4961,6 +4985,9 @@ function createMockApi() {
         }
       },
       feedback: { tone: 'success', message: '诊断已刷新。' }
+    }),
+    repairNetworkOwnership: async () => commit({
+      feedback: { tone: 'success', message: '已备份并清理残留网络声明，登录信息已保留；请使用原员工身份连接。' }
     }),
     repairSystemNetwork: async () => commit({
       connection: {

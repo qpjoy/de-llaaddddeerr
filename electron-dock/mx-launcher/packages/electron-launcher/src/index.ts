@@ -139,6 +139,7 @@ export {
   claimElectronLauncherStandaloneOwnershipClaim,
   diagnoseElectronLauncherStandaloneDataPlane,
   readElectronLauncherStandaloneOwnershipState,
+  pruneElectronLauncherStandaloneOwnershipClaims,
   releaseElectronLauncherStandaloneOwnershipClaim,
   stopElectronLauncherStandaloneDataPlane,
   upsertElectronLauncherStandaloneOwnershipClaim,

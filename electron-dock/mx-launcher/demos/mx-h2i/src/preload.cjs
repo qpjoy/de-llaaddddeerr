@@ -37,6 +37,7 @@ const api = {
   listStateBackups: () => ipcRenderer.invoke('mx-h2i:list-state-backups'),
   restoreStateBackup: (fileName) => ipcRenderer.invoke('mx-h2i:restore-state-backup', fileName),
   repairSystemNetwork: () => ipcRenderer.invoke('mx-h2i:repair-system-network'),
+  repairNetworkOwnership: () => ipcRenderer.invoke('mx-h2i:repair-network-ownership'),
   openAdmin: () => ipcRenderer.invoke('mx-h2i:open-admin'),
   setWindowMode: (mode) => ipcRenderer.invoke('mx-h2i:set-window-mode', mode),
   startWindowDrag: (input) => ipcRenderer.invoke('mx-h2i:start-window-drag', input),
