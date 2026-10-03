@@ -30,6 +30,8 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
   const user = await memory.createUserCenterUser({ userId: 'identity-existing-admin', account: 'ExactAdmin', password: 'OldPassword123!', roleIds: ['mx-admin'] });
   const credential = createUserCenterUserCredential(user.userId, 'OldPassword123!');
   for (const [kind, data] of [['iam-user', user], ['iam-user-credential', credential]] as const) await db.query('INSERT INTO mx_platform_records (kind,id,environment,data) VALUES ($1,$2,$3,$4)', [kind, user.userId, environment, data]);
+  const other = memory.createUserCenterUser({ userId: 'identity-other-user', account: 'OtherUser', password: 'OtherPassword123!' });
+  for (const [kind, data] of [['iam-user', other], ['iam-user-credential', createUserCenterUserCredential(other.userId, 'OtherPassword123!')]] as const) await db.query('INSERT INTO mx_platform_records (kind,id,environment,data) VALUES ($1,$2,$3,$4)', [kind, other.userId, environment, data]);
   let application: ReturnType<typeof createIdentityProvider>;
   const server = createServer({ cert, key }, (req, res) => { void application.handle(req, res).catch(() => { res.statusCode = 500; res.end(); }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -41,13 +43,16 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
     await repository.close(); repository = new IdentityRepository(databaseUrl!, environment, scope, 'fixture-rate-key'); await repository.initialize();
     application = createIdentityProvider(settings, repository, name => repository.adapter(name));
     application.provider.on('server_error', (_ctx, error) => { providerError = error.stack ?? error.message; });
+    application.provider.on('authorization.error', (_ctx, error) => { providerError = error.stack ?? error.message; });
   };
   application = createIdentityProvider(settings, repository, name => repository.adapter(name));
+  application.provider.on('authorization.error', (_ctx, error) => { providerError = error.stack ?? error.message; });
+  application.provider.on('server_error', (_ctx, error) => { providerError = error.stack ?? error.message; });
   const jar = new Map<string, string>();
-  const request = (path: string, options: { method?: string; body?: string; headers?: Record<string, string> } = {}) => new Promise<{ status: number; text: string; location?: string }>((resolve, reject) => {
+  const request = (path: string, options: { method?: string; body?: string; headers?: Record<string, string> } = {}) => new Promise<{ status: number; text: string; location?: string; csp?: string }>((resolve, reject) => {
     const req = httpsRequest(new URL(path, origin), { ca: cert, method: options.method ?? 'GET', headers: { cookie: [...jar].map(([k,v]) => `${k}=${v}`).join('; '), ...options.headers } }, res => {
       for (const value of res.headers['set-cookie'] ?? []) { const item = value.split(';')[0]; const index = item.indexOf('='); jar.set(item.slice(0, index), item.slice(index + 1)); }
-      let text = ''; res.on('data', chunk => text += chunk); res.on('end', () => resolve({ status: res.statusCode!, text, location: res.headers.location }));
+      let text = ''; res.on('data', chunk => text += chunk); res.on('end', () => resolve({ status: res.statusCode!, text, location: res.headers.location, csp: res.headers['content-security-policy'] as string }));
     }); req.on('error', reject); req.end(options.body);
   });
   try {
@@ -84,6 +89,27 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
     await restart();
     step = await request(authorize);
     assert.ok(step.location?.includes('/auth/admin/callback'), `SSO session must survive restart: ${JSON.stringify(step)}`);
+    const explicitLogin = new URL(authorize); explicitLogin.searchParams.set('prompt', 'login');
+    step = await request(explicitLogin.href);
+    assert.match(step.location!, /\/identity\/interaction\//, 'explicit login must not silently reuse the prior identity');
+    const switchInteraction = step.location!;
+    step = await request(switchInteraction);
+    assert.match(step.text, /autocomplete="current-password"/);
+    const switchCsrf = /name="csrf" value="([^"]+)"/.exec(step.text)![1];
+    step = await request(switchInteraction, { method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf: switchCsrf, login: 'OtherUser', password: 'OtherPassword123!' }).toString() });
+    step = await request(step.location!);
+    assert.equal(step.status, 200);
+    const script = /<script>([\s\S]+?)<\/script>/.exec(step.text)![1];
+    assert.ok(step.csp?.includes(`'sha256-${createHash('sha256').update(script).digest('base64')}'`), 'switch form must have an exact CSP script hash');
+    assert.ok(!/script-src[^;]*unsafe-inline/.test(step.csp!));
+    const action = /<form method="post" action="([^"]+)"/.exec(step.text)![1];
+    const fields = new URLSearchParams([...step.text.matchAll(/name="([^"]+)" value="([^"]*)"/g)].map(match => [match[1], match[2]] as [string, string]));
+    step = await request(action, { method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: fields.toString() });
+    for (let i = 0; i < 5 && !step.location?.includes('/auth/admin/callback'); i++) step = await request(step.location!);
+    assert.ok(step.location?.includes('/auth/admin/callback'), `new identity finishes the account-switch transition: ${JSON.stringify(step)} ${providerError}`);
+    const switchedToken = await token(new URLSearchParams({ grant_type: 'authorization_code', code: new URL(step.location!).searchParams.get('code')!, code_verifier: verifier, redirect_uri: `${origin}/auth/admin/callback` }).toString());
+    assert.equal(switchedToken.status, 200, switchedToken.text);
+    assert.equal(JSON.parse(Buffer.from(JSON.parse(switchedToken.text).id_token.split('.')[1], 'base64url').toString()).sub, other.userId);
     assert.deepEqual(await db.query('SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 ORDER BY kind', [environment]), before);
     await db.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{status}','\"disabled\"') WHERE environment=$1 AND kind='iam-user'", [environment]);
     assert.equal(await repository.authenticate('ExactAdmin', 'OldPassword123!'), undefined);

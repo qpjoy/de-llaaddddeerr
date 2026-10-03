@@ -111,6 +111,7 @@ async function fixture(localSubjects = false) {
     const authorize = new URL(response.headers.get('location')!);
     assert.equal(authorize.searchParams.get('code_challenge_method'), 'S256');
     assert.equal(authorize.searchParams.get('scope'), 'openid');
+    assert.equal(authorize.searchParams.get('prompt'), 'login');
     const code = randomUUID(); codes.set(code, authorize.searchParams);
     return { loginCookie: cookieValue(response, '__Host-mx-admin-login'), callback: `/auth/admin/callback?code=${code}&state=${authorize.searchParams.get('state')}` };
   }
@@ -234,6 +235,22 @@ test('write operations require recent authentication; expired/idle sessions cann
     assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 401);
     record.touched = Date.now(); record.data.expiresAt = new Date(Date.now() - 1).toISOString();
     assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 401);
+  } finally { await f.close(); }
+});
+
+test('reauthentication pins the current account; logout removes the pin so another existing account can log in', async () => {
+  const f = await fixture(true);
+  try {
+    f.setClaims({ sub: 'existing-user' });
+    const original = await f.login();
+    const session = await (await f.request('/auth/admin/session', original)).json();
+    const reauth = await f.begin(original);
+    f.setClaims({ sub: 'existing-admin' });
+    assert.match((await f.request(reauth.callback, `${reauth.loginCookie}; ${original}`)).headers.get('location')!, /login_failed/);
+    assert.equal((await f.request('/auth/admin/logout', original, {}, session.csrf)).status, 200);
+    const switched = await f.login();
+    assert.equal((await (await f.request('/auth/admin/session', switched)).json()).user.userId, 'existing-admin');
+    assert.equal((await (await f.request('/auth/admin/session', original)).json()).authenticated, false);
   } finally { await f.close(); }
 });
 

@@ -1,7 +1,8 @@
 import * as THREE from './node_modules/three/build/three.module.js';
 import { createServiceOperations } from './service-operations.js';
 import { installNeonSelects } from './ui-design/select.js';
-import { createAdminSessionUi } from './admin-session.js';
+import { createAdminSessionUi, adminAccessPresentation } from './admin-session.js';
+import { createRegistrationUi } from './registration.js';
 
 installNeonSelects(document);
 
@@ -373,6 +374,7 @@ const state = {
 let setupMonitorToken = 0;
 let opsTokenBinding = null;
 const adminSession = createAdminSessionUi({ serverBase: () => normalizedServerBase() });
+const registrationUi = createRegistrationUi({ request: fetchJson });
 
 const overseaTerminalTemplates = {
   inspect: [
@@ -897,6 +899,7 @@ if (appNavToggle) {
 serverInput.addEventListener('input', () => {
   clearOpsTokenIfServerBaseChanged();
   adminSession.reset();
+  registrationUi.reset();
   if (synchronizeLauncherNetworkServerScope(serverInput.value)) {
     serviceOperationsPanel.reset();
     state.appCenterApps = [];
@@ -1483,7 +1486,8 @@ async function refreshAdmin() {
     renderAppCenterShell();
     state.overseaOverviewError = error.message;
     renderAdminError(error);
-    setConnection('error', 'Offline', 'Admin API unavailable');
+    const access = adminAccessPresentation(error);
+    setConnection(access.health === 'failed' ? 'error' : 'connected', access.connection, access.title);
     return false;
   }
 }
@@ -4491,7 +4495,7 @@ async function fetchJson(path, options = {}) {
   }
   if (!response.ok) {
     if (usesPersonalSession) await adminSession.rejected(payload);
-    throw new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`);
+    throw Object.assign(new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`), { code: payload?.code, status: response.status });
   }
   return payload;
 }
@@ -4510,6 +4514,8 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   }
   const verb = String(method || 'GET').toUpperCase();
   const path = url.pathname;
+  if ((verb === 'GET' && path === '/internal/v1/user-center/registration') ||
+    (verb === 'POST' && /^\/internal\/v1\/user-center\/registration\/(?:policy|invitations|invitations\/revoke)$/.test(path))) return true;
   if (['GET', 'POST'].includes(verb) && /^\/internal\/v1\/admin\/service-operations\/(?:instances|profiles|plans|execute|operations(?:\/[a-f0-9-]{36})?|reconcile)$/.test(path)) return true;
   if (verb === 'GET') {
     return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts|system-subscriptions)$/.test(path)
@@ -7372,6 +7378,7 @@ function renderFoundationGrid(overview) {
   const bootstrapUsers = foundationGrid.querySelector('[data-user-bootstrap]');
   if (bootstrapUsers) bootstrapUsers.addEventListener('click', () => void bootstrapUserCenterFromAdmin());
   const newUser = foundationGrid.querySelector('[data-user-new]');
+  foundationGrid.querySelector('[data-registration]')?.addEventListener('click', () => registrationUi.open());
   if (newUser) newUser.addEventListener('click', () => openUserEditorDrawer('create'));
   const userDefaultOversea = foundationGrid.querySelector('[data-user-default-oversea]');
   if (userDefaultOversea) {
@@ -7879,6 +7886,7 @@ function renderUserCenterPanel() {
           </label>
           <button class="secondary-button" type="button" data-user-bootstrap ${state.userCenter.busy ? 'disabled' : ''} title="Initialize User Center seed records">Bootstrap</button>
           <button class="primary-button" type="button" data-user-new ${state.userCenter.busy ? 'disabled' : ''}>New User</button>
+          <button class="secondary-button" type="button" data-registration>注册与邀请</button>
         </div>
       </div>
       <div class="user-workbench-meta">
@@ -16968,6 +16976,7 @@ function renderAdminLoading() {
 }
 
 function renderAdminError(error) {
+  const access = adminAccessPresentation(error);
   state.currentPipeline = null;
   state.sshProfileBootstrap = null;
   state.awxProviders = [];
@@ -16975,38 +16984,38 @@ function renderAdminError(error) {
   state.awxProviderCheck = null;
   renderAdminShell();
   closeEvidenceDrawer();
-  adminGenerated.textContent = 'Admin API unavailable';
+  adminGenerated.textContent = access.title;
   renderConsoleStatus({
-    internal: 'Offline',
+    internal: access.internal,
     store: error.message,
     provider: 'Unavailable',
     gate: 'blocked',
     evidence: '0',
     osScope: 'Ubuntu + CentOS',
     principal: 'Unknown',
-    principalScope: 'Admin API unavailable'
+    principalScope: access.title
   });
   metricSiteSlots.textContent = '0';
   metricRollbacks.textContent = '0';
   metricReleases.textContent = '0';
   metricTests.textContent = '0';
   sshProfileCount.textContent = '0';
-  sshProfileList.innerHTML = '<div class="empty-state">Admin API unavailable</div>';
+  sshProfileList.innerHTML = `<div class="empty-state">${escapeHtml(access.title)}</div>`;
   sshProfileFeedback.textContent = '';
   sshProfileFeedback.removeAttribute('data-kind');
   renderSshProfileSaveState();
   renderSshProfileBootstrap();
   renderSshProfileReadiness();
   awxProviderCount.textContent = '0';
-  awxProviderList.innerHTML = '<div class="empty-state">Admin API unavailable</div>';
+  awxProviderList.innerHTML = `<div class="empty-state">${escapeHtml(access.title)}</div>`;
   awxProviderFeedback.textContent = '';
   awxProviderFeedback.removeAttribute('data-kind');
   renderAwxProviderSaveState();
   renderAwxProviderCheck();
   renderAwxRuntimeGates();
   pipelineCount.textContent = '0';
-  pipelineHealth.textContent = 'Offline';
-  pipelineHealth.dataset.health = 'failed';
+  pipelineHealth.textContent = access.title;
+  pipelineHealth.dataset.health = access.health;
   pipelineList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   pipelineSummary.textContent = '';
   pipelineStepper.innerHTML = '';
@@ -17017,7 +17026,7 @@ function renderAdminError(error) {
   evidenceHistory.innerHTML = '';
   renderSetupGuidance(null, []);
   renderDashboardGuidance();
-  renderInspector({ mode: 'error', message: error.message });
+  renderInspector({ mode: 'error', message: error.message, code: error.code });
 }
 
 function renderAdminDashboard(dashboard) {
@@ -17119,18 +17128,19 @@ function renderInspector(options = {}) {
     return;
   }
   if (options.mode === 'error') {
+    const access = adminAccessPresentation(options);
     inspectorKind.textContent = 'Inspector';
-    inspectorTitle.textContent = 'Admin API unavailable';
+    inspectorTitle.textContent = access.title;
     inspectorMeta.textContent = options.message || 'Cannot load Internal state.';
-    inspectorStatus.textContent = 'failed';
-    inspectorStatus.dataset.health = 'failed';
+    inspectorStatus.textContent = access.health;
+    inspectorStatus.dataset.health = access.health;
     inspectorFacts.innerHTML = renderInspectorFacts([
-      ['Internal', 'offline'],
-      ['Provider', 'unavailable'],
+      ['Internal', access.internal],
+      ['Provider', 'not loaded'],
       ['OS Scope', 'Ubuntu + CentOS/RHEL'],
       ['Evidence', 'not loaded']
     ]);
-    inspectorNext.innerHTML = '<div class="empty-state">Reconnect Internal before running gated actions.</div>';
+    inspectorNext.innerHTML = `<div class="empty-state">${escapeHtml(access.next)}</div>`;
     inspectorEvidence.innerHTML = '<div class="empty-state">No evidence loaded.</div>';
     return;
   }

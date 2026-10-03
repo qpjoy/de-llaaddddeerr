@@ -1,9 +1,21 @@
+export function adminAccessPresentation(error) {
+  if (error?.code === 'management_forbidden') return {
+    title: '已登录，等待管理授权', connection: '已连接', health: 'blocked', internal: '可达',
+    next: '请由管理员在“成员与访问 → 用户与账号”中将需要管理工作台的账号设为 MX Admin（mx-admin），然后刷新。也可以退出后切换账号。'
+  };
+  if (['session_required', 'reauth_required'].includes(error?.code)) return {
+    title: '请验证个人身份', connection: '需要登录', health: 'blocked', internal: '可达', next: '请在左侧个人账号区域登录或重新验证。'
+  };
+  return { title: 'Admin API unavailable', connection: 'Offline', health: 'failed', internal: 'offline', next: 'Reconnect Internal before running gated actions.' };
+}
+
 /** Same-origin BFF only. No bearer token or credential is stored in the browser. */
 export function createAdminSessionUi({ serverBase, root = document }) {
   const panel = root.getElementById('admin-account');
   const status = root.getElementById('admin-account-status');
   const login = root.getElementById('admin-account-login');
   const logout = root.getElementById('admin-account-logout');
+  const switchAccount = root.getElementById('admin-account-switch');
   const dialog = root.getElementById('admin-account-link');
   const form = root.getElementById('admin-account-link-form');
   const feedback = root.getElementById('admin-account-link-feedback');
@@ -35,12 +47,15 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     panel.hidden = false;
     login.hidden = !session?.enabled;
     logout.hidden = !session?.authenticated;
+    if (switchAccount) switchAccount.hidden = !session?.authenticated;
     if (!sameOrigin()) status.textContent = '个人登录请打开服务器的 /admin/ 管理入口';
     else if (!session?.enabled) status.textContent = session?.unavailable ? '个人登录暂不可用 · 可使用应急访问' : '个人 SSO 待启用';
     else if (secureEntry()) status.textContent = '个人登录已就绪，请使用 HTTPS 管理入口';
     else if (!session.authenticated) status.textContent = '登录个人账号，使用已获授权的管理功能';
     else if (session.bindingRequired) status.textContent = '统一登录已验证 · 请关联已有 MX 账号';
-    else status.textContent = `${session.user.displayName} · ${session.canManage ? '管理权限已生效' : '尚无管理权限'}`;
+    else status.textContent = `${session.user.displayName} · ${session.canManage ? '管理权限已生效' : '已登录，尚无工作台管理权限'}`;
+    status.title = session?.authenticated && !session?.bindingRequired && !session?.canManage
+      ? '请由管理员在“成员与访问 → 用户与账号”中授予 MX Admin（mx-admin）。普通应用账号不会自动成为管理员。可退出后登录其他账号。' : '';
     login.textContent = secureEntry() ? '打开安全管理入口' : session?.bindingRequired ? '关联已有账号' : session?.authenticated ? '重新验证' : '个人账号登录';
   };
   async function refresh() {
@@ -64,6 +79,15 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     try { await request('/auth/admin/logout', {}); location.reload(); }
     catch (error) { status.textContent = error.message; }
     finally { logout.disabled = false; }
+  });
+  switchAccount?.addEventListener('click', async () => {
+    switchAccount.disabled = true;
+    try {
+      await request('/auth/admin/logout', {});
+      session = null;
+      location.assign('/auth/admin/login');
+    } catch (error) { status.textContent = error.message; }
+    finally { switchAccount.disabled = false; }
   });
   root.getElementById('admin-account-link-cancel')?.addEventListener('click', () => dialog.close());
   dialog?.addEventListener('close', () => form.reset());

@@ -34,6 +34,7 @@ async function assertBuilderContract() {
     '- ui-design/**/*',
     '- service-operations.js',
     '- admin-session.js',
+    '- registration.js',
     '- service-operations-catalog.js',
     'from: products'
   ]) {

@@ -30,7 +30,9 @@ export function createAdminOidcClient(settings: AdminSsoConfig, injected?: oidc.
       return oidc.buildAuthorizationUrl(await configuration(), {
         redirect_uri: settings.callbackUrl, scope: 'openid', response_type: 'code', response_mode: 'query',
         code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
-        state: transaction.state, nonce: transaction.nonce, max_age: '300'
+        // Explicit console login/reauthentication must show an interaction even
+        // when the IdP has a recent session (local logout does not end SSO).
+        state: transaction.state, nonce: transaction.nonce, max_age: '300', prompt: 'login'
       });
     },
     async redeem(url, transaction) {

@@ -187,3 +187,18 @@ td .primary-button, td .secondary-button { min-height: 28px; font-size: 11px; pa
   .user-catalog-controls > input { flex-basis: 100%; width: 100%; }
   .user-catalog-controls > .qp-select-control { flex: 1 1 120px; }
 }
+
+/* Identity registration uses the same Internal workbench controls. */
+.registration-dialog { width: min(820px, calc(100vw - 32px)); max-height: calc(100svh - 40px); overflow-y: auto; }
+.registration-dialog > p { color: var(--text-muted, #a7b3bf); }
+.registration-dialog fieldset { border: 1px solid #303b4c; border-radius: 12px; margin: 20px 0; padding: 18px; }
+.registration-dialog legend { padding: 0 8px; font-weight: 650; }
+.registration-dialog form button { margin-top: 16px; }
+.registration-modes { display: flex; flex-wrap: wrap; gap: 20px; }
+.registration-modes label { display: inline-flex; align-items: center; gap: 8px; }
+.registration-modes input { width: auto; accent-color: #16dfc3; }
+.registration-code { display: grid; gap: 12px; padding: 18px; border: 1px solid #16dfc3; border-radius: 12px; }
+.registration-code code { overflow-wrap: anywhere; user-select: all; }
+.registration-invites article { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 16px 0; border-bottom: 1px solid #303b4c; }
+.registration-invites article > div { flex: 1; min-width: 160px; }
+.registration-invites small { display: block; color: #a7b3bf; margin-top: 6px; }

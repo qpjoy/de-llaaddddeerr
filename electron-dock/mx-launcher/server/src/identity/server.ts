@@ -2,12 +2,14 @@ import { createServer } from 'node:https';
 import { request } from 'node:http';
 import { createIdentityProvider, type IdentitySettings } from './provider.js';
 import type { IdentityRepository } from './repository.js';
+import { createRegistrationClient } from '../registration/backchannel.js';
 
 export function createIdentityServer({ settings, repository, cert, key, upstream }: {
   settings: IdentitySettings; repository: IdentityRepository; cert: Buffer; key: Buffer; upstream: URL;
 }) {
   const origin = new URL(settings.origin);
-  const identity = createIdentityProvider(settings, repository, name => repository.adapter(name));
+  const identity = createIdentityProvider(settings, repository, name => repository.adapter(name),
+    createRegistrationClient(upstream, settings.clientId, settings.clientSecret));
   const server = createServer({ cert: cert, key: key, minVersion: 'TLSv1.2' }, async (req, res) => {
     try {
       if (req.headers.host !== origin.host) { res.writeHead(421).end(); return; }

@@ -137,4 +137,4 @@ bash scripts/manage.sh ops identity restore /root/mx-backup/identity.json
 
 运行 `pnpm --dir server test:identity`；真实数据库用例只接受显式 `MX_SSO_TEST_DATABASE_URL`，要求回环主机与名称含 `sso_test` 的独立数据库，未设置时会明确跳过，不读取生产数据库配置。发布验收须把数据库用例实际跑过，不能把跳过视为通过。
 
-身份进程虽然独立且有资源预算，本批仍使用 Launcher 数据库凭据，只在实现中对旧账号做只读查询；不是独立数据库权限边界。对外开放前需完成凭据最小权限、限流/审计运营、身份管理恢复、全局撤销等验收。下一阶段先完善部署向导与状态入口，再推进飞书复用、邀请注册与 Hub 成员/租户无感关联。
+身份进程虽然独立且有资源预算，本批仍使用 Launcher 数据库凭据，只在实现中对旧账号做只读查询；不是独立数据库权限边界。对外开放前需完成凭据最小权限、限流/审计运营、身份管理恢复、全局撤销等验收。后续账号切换、内网邀请注册及公网 Hub 接入边界见 [文档 39](39-registration-and-account-switching.md)。Hub 成员/租户无感关联、飞书 Web 接入仍待后续交付。

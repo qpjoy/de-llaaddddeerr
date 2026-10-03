@@ -10,6 +10,7 @@ export interface IdentityAccounts {
   account(id: string): Promise<UserCenterUser | undefined>;
   authenticate(login: string, password: string): Promise<UserCenterUser | undefined>;
   allowAttempt(ip: string, login: string): Promise<boolean>;
+  allowRegistrationAttempt?(ip: string, login: string): Promise<boolean>;
 }
 
 /** Separate pool and tables. Existing user/credential records are read-only:
@@ -62,7 +63,9 @@ export class IdentityRepository implements IdentityAccounts {
         if (rows.length !== 1) throw new Error('Identity record already consumed or expired');
       },
       async destroy(id: string) { await query('DELETE FROM mx_identity_records WHERE scope=$1 AND kind=$2 AND id=$3', [scope, kind, id]); },
-      async revokeByGrantId(id: string) { await query("DELETE FROM mx_identity_records WHERE scope=$1 AND data->>'grantId'=$2", [scope, id]); }
+      // The provider invokes this once per token model. An Interaction may
+      // carry the old grant while switching accounts and must survive logout.
+      async revokeByGrantId(id: string) { await query("DELETE FROM mx_identity_records WHERE scope=$1 AND kind=$2 AND data->>'grantId'=$3", [scope, kind, id]); }
     };
   }
   async account(id: string) {
@@ -89,5 +92,9 @@ export class IdentityRepository implements IdentityAccounts {
       if (rows[0].count > limit) return false;
     }
     return true;
+  }
+  async allowRegistrationAttempt(ip: string, login: string) {
+    // Independent budgets: signup cannot consume existing password login limits.
+    return this.allowAttempt(`signup:${ip}`, `signup:${login.trim().toLowerCase()}`);
   }
 }

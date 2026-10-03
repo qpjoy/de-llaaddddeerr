@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 
 import { createPlatformDataSource } from '../db/data-source.js';
+import { accountWriteLock } from '../registration/repository.js';
 import { PlatformRecordEntity, type PlatformRecordRow } from '../db/entities.js';
 import {
   consumeFixedWindowRateLimit,
@@ -1072,27 +1073,32 @@ export class PostgresStore implements PlatformStore {
   }
 
   async createUserCenterUser(input: CreateUserInput): Promise<UserCenterUser> {
-    const previous = await this.findUserCenterUserForInput(input);
-    const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
-    const previousCredential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', draft.userId);
-    const credential = input.password !== undefined && input.password !== null
-      ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
-      : previousCredential;
-    if (credential) await this.saveRecord('iam-user-credential', credential.userId, credential, this.config.siteId);
-    const user = createUserCenterUser(input, previous, userCredentialSummary(credential));
-    await this.upsertRecord('iam-user', user.userId, user, this.config.siteId);
-    await this.recordAudit({
-      eventType: 'iam.user.upserted',
-      actorKind: 'user-center',
-      userId: user.userId,
-      requestId: input.requestId ?? null,
-      metadata: {
-        account: user.account,
-        email: user.email,
-        roleIds: user.roleIds,
-        status: user.status,
-        hasPassword: user.credential.hasPassword
-      }
+    const user = await this.dataSource.transaction(async manager => {
+      await accountWriteLock(manager, this.config.environment);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const previous = await this.findUserCenterUserForInput(input, records);
+      const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
+      const previousCredential = (await records.findOneBy({ kind: 'iam-user-credential', id: draft.userId, environment: this.config.environment }))?.data as unknown as UserCenterUserCredential | null;
+      const credential = input.password !== undefined && input.password !== null
+        ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
+        : previousCredential;
+      if (credential) await this.saveRecordTo(records, 'iam-user-credential', credential.userId, credential, this.config.siteId);
+      const user = createUserCenterUser(input, previous, userCredentialSummary(credential));
+      await this.saveRecordTo(records, 'iam-user', user.userId, user, this.config.siteId);
+      await this.recordAuditTo(records, {
+        eventType: 'iam.user.upserted',
+        actorKind: 'user-center',
+        userId: user.userId,
+        requestId: input.requestId ?? null,
+        metadata: {
+          account: user.account,
+          email: user.email,
+          roleIds: user.roleIds,
+          status: user.status,
+          hasPassword: user.credential.hasPassword
+        }
+      });
+      return user;
     });
     const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
     if (input.provisionOversea === true) {
@@ -6499,15 +6505,15 @@ export class PostgresStore implements PlatformStore {
     return orderDefaultOverseaSiteCandidates(await this.listLauncherProductNetworks());
   }
 
-  private async findUserCenterUserForInput(input: CreateUserInput): Promise<UserCenterUser | null> {
+  private async findUserCenterUserForInput(input: CreateUserInput, records = this.records): Promise<UserCenterUser | null> {
     const userId = input.userId?.trim();
     if (userId) {
-      const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+      const user = (await records.findOneBy({ kind: 'iam-user', id: userId, environment: this.config.environment }))?.data as unknown as UserCenterUser | null;
       if (user) return user;
     }
     const candidates = [input.account, input.username, input.email].filter((value): value is string => typeof value === 'string');
     if (!candidates.length) return null;
-    const users = await this.listRecords<UserCenterUser>('iam-user');
+    const users = await this.listRecordsFrom<UserCenterUser>(records, 'iam-user');
     return users.find((user) => candidates.some((candidate) => userMatchesLogin(user, candidate))) ?? null;
   }
 

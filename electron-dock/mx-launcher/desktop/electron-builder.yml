@@ -11,6 +11,7 @@ files:
   - renderer.js
   - service-operations.js
   - admin-session.js
+  - registration.js
   - service-operations-catalog.js
   - styles.css
   - neon-void.css
