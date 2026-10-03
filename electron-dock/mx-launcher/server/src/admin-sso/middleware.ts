@@ -178,7 +178,7 @@ export function createAdminSsoMiddleware(deps: {
     }
     const session = await sessionFor(req);
     if (path === '/auth/admin/session' && req.method === 'GET') {
-      const entry = { enabled: true, loginOrigin: config.origin };
+      const entry = { enabled: true, loginOrigin: config.origin, accessMode: config.ingressToken ? 'sso-only' : 'sso-or-ops' };
       if (!session) return json(res, 200, { ...entry, authenticated: false });
       if (!session.bindingId) return json(res, 200, { ...entry, authenticated: true, bindingRequired: true, csrf: session.csrf });
       const user = await userFor(session);

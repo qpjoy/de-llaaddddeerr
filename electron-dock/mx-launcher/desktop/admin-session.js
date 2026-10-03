@@ -6,11 +6,17 @@ export function adminAccessPresentation(error) {
   if (['session_required', 'reauth_required'].includes(error?.code)) return {
     title: '请验证个人身份', connection: '需要登录', health: 'blocked', internal: '可达', next: '请在左侧个人账号区域登录或重新验证。'
   };
+  if (error?.code === 'binding_required') return {
+    title: '请关联已有账号', connection: '需要关联', health: 'blocked', internal: '可达', next: '请在左侧个人账号区域完成账号关联。'
+  };
+  if (error?.code === 'sso_unavailable') return {
+    title: '个人登录暂不可用', connection: '待重试', health: 'failed', internal: '待确认', next: '请刷新页面重试，或检查身份服务连接。'
+  };
   return { title: 'Admin API unavailable', connection: 'Offline', health: 'failed', internal: 'offline', next: 'Reconnect Internal before running gated actions.' };
 }
 
 /** Same-origin BFF only. No bearer token or credential is stored in the browser. */
-export function createAdminSessionUi({ serverBase, root = document }) {
+export function createAdminSessionUi({ serverBase, root = document, onChange = () => {} }) {
   const panel = root.getElementById('admin-account');
   const status = root.getElementById('admin-account-status');
   const login = root.getElementById('admin-account-login');
@@ -21,6 +27,7 @@ export function createAdminSessionUi({ serverBase, root = document }) {
   const feedback = root.getElementById('admin-account-link-feedback');
   let session = null;
   let revision = 0;
+  let refreshing = null;
   const sameOrigin = () => {
     try { return ['http:', 'https:'].includes(location.protocol) && new URL(serverBase()).origin === location.origin; }
     catch { return false; }
@@ -42,6 +49,15 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     if (!response.ok) throw new Error(payload.message || '个人登录请求失败');
     return payload;
   };
+  const accessError = (hasOpsToken = false) => {
+    if (!sameOrigin() || secureEntry() || (hasOpsToken && session?.accessMode !== 'sso-only')) return null;
+    if (session?.unavailable) return Object.assign(new Error('个人登录状态暂不可用，请刷新页面重试。'), { code: 'sso_unavailable', status: 503 });
+    if (!session?.enabled) return null;
+    if (!session.authenticated) return Object.assign(new Error('请先在左侧登录个人账号，再读取管理数据。'), { code: 'session_required', status: 401 });
+    if (session.bindingRequired) return Object.assign(new Error('请先关联已有 MX 账号，再读取管理数据。'), { code: 'binding_required', status: 401 });
+    if (!session.canManage) return Object.assign(new Error('已登录；此账号尚未获得 Launcher 管理权限。'), { code: 'management_forbidden', status: 403 });
+    return null;
+  };
   const render = () => {
     if (!panel) return;
     panel.hidden = false;
@@ -49,7 +65,8 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     logout.hidden = !session?.authenticated;
     if (switchAccount) switchAccount.hidden = !session?.authenticated;
     if (!sameOrigin()) status.textContent = '个人登录请打开服务器的 /admin/ 管理入口';
-    else if (!session?.enabled) status.textContent = session?.unavailable ? '个人登录暂不可用 · 可使用应急访问' : '个人 SSO 待启用';
+    else if (session?.unavailable) status.textContent = '个人登录状态暂不可用，请刷新页面重试';
+    else if (!session?.enabled) status.textContent = '个人 SSO 待启用';
     else if (secureEntry()) status.textContent = '个人登录已就绪，请使用 HTTPS 管理入口';
     else if (!session.authenticated) status.textContent = '登录个人账号，使用已获授权的管理功能';
     else if (session.bindingRequired) status.textContent = '统一登录已验证 · 请关联已有 MX 账号';
@@ -57,16 +74,23 @@ export function createAdminSessionUi({ serverBase, root = document }) {
     status.title = session?.authenticated && !session?.bindingRequired && !session?.canManage
       ? '请由管理员在“成员与访问 → 用户与账号”中授予 MX Admin（mx-admin）。普通应用账号不会自动成为管理员。可退出后登录其他账号。' : '';
     login.textContent = secureEntry() ? '打开安全管理入口' : session?.bindingRequired ? '关联已有账号' : session?.authenticated ? '重新验证' : '个人账号登录';
+    onChange();
   };
-  async function refresh() {
+  async function loadSession() {
     const current = ++revision;
     if (!sameOrigin()) { session = null; render(); return; }
     try {
       const value = await request('/auth/admin/session');
       if (current !== revision || !sameOrigin()) return;
       session = value;
-    } catch { if (current === revision) session = { unavailable: true }; }
+    } catch { if (current === revision) session = { ...session, authenticated: false, unavailable: true }; }
     if (current === revision) render();
+  }
+  function refresh() {
+    if (refreshing) return refreshing;
+    const pending = loadSession().finally(() => { if (refreshing === pending) refreshing = null; });
+    refreshing = pending;
+    return pending;
   }
   login?.addEventListener('click', () => {
     if (!sameOrigin()) return;
@@ -114,11 +138,23 @@ export function createAdminSessionUi({ serverBase, root = document }) {
         history.replaceState(null, '', url);
       }
     },
-    reset() { revision++; session = null; dialog?.close(); render(); },
-    prepare(url, headers, hasOpsToken) {
-      if (!hasOpsToken && session?.authenticated && sameOrigin() && url.origin === location.origin
-        && url.pathname.startsWith('/internal/v1/')) {
+    reset() { revision++; session = null; refreshing = null; dialog?.close(); render(); },
+    accessError,
+    async prepare(url, headers, hasOpsToken) {
+      if (!sameOrigin() || url.origin !== location.origin || !url.pathname.startsWith('/internal/v1/')) return false;
+      if (!session || refreshing) {
+        const pending = refresh(), expectedRevision = revision;
+        await pending;
+        if (revision !== expectedRevision) throw new Error('连接地址已变化，请重新操作。');
+      }
+      if (!sameOrigin() || url.origin !== new URL(serverBase()).origin) throw new Error('连接地址已变化，请重新操作。');
+      const error = accessError(hasOpsToken);
+      if (error) throw error;
+      // Public management never falls back to the raw Internal API, including
+      // after logout/expiry or when an emergency token was entered by mistake.
+      if (session?.enabled && !secureEntry() && (!hasOpsToken || session.accessMode === 'sso-only')) {
         url.pathname = `/admin-api${url.pathname}`;
+        for (const name of Object.keys(headers)) if (name.toLowerCase() === 'x-mx-ops-token') delete headers[name];
         headers['x-mx-admin-csrf'] = session.csrf;
         return true;
       }

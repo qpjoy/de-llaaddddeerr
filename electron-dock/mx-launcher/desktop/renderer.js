@@ -373,7 +373,25 @@ const state = {
 
 let setupMonitorToken = 0;
 let opsTokenBinding = null;
-const adminSession = createAdminSessionUi({ serverBase: () => normalizedServerBase() });
+const adminSession = createAdminSessionUi({ serverBase: () => normalizedServerBase(), onChange: () => {
+  renderWorkbench();
+  const error = currentAdminAccessError();
+  if (error) {
+    const access = adminAccessPresentation(error);
+    setConnection(access.health === 'failed' ? 'error' : 'idle', access.connection, access.title);
+  }
+} });
+
+function currentAdminAccessError() {
+  try { return adminSession.accessError(hasAdminOpsToken(new URL(`${normalizedServerBase()}/`))); }
+  catch { return null; }
+}
+
+function hasAdminOpsToken(target) {
+  // Some legacy reads do not require a token header, but still belong to the
+  // explicitly selected emergency connection rather than the personal BFF.
+  return Boolean(opsTokenForRequest(new URL('/internal/v1/user-center/roles', target), 'GET'));
+}
 const registrationUi = createRegistrationUi({ request: fetchJson });
 
 const overseaTerminalTemplates = {
@@ -484,11 +502,11 @@ function renderWorkbench() {
   ));
   const count = shortcuts.length + apps.length + pending.length;
   if (workbenchSearchResult) workbenchSearchResult.textContent = query ? `${count} 个匹配入口` : '';
-  const catalogStatus = state.appCenterAppsError
+  const catalogStatus = currentAdminAccessError()?.message || (state.appCenterAppsError
     ? '应用目录暂不可用。内置入口仍可打开，服务状态尚未确认。'
     : state.workbenchCatalogLoadedAt
       ? `目录更新于 ${new Date(state.workbenchCatalogLoadedAt).toLocaleTimeString('zh-CN')}。目录登记不代表服务健康。`
-      : '正在读取应用目录，服务状态尚未确认。';
+      : '正在读取应用目录，服务状态尚未确认。');
   workbenchContent.innerHTML = `
     ${shortcuts.length ? `
       <section class="workbench-section" aria-labelledby="workbench-tasks-heading">
@@ -4475,7 +4493,7 @@ async function fetchJson(path, options = {}) {
   };
   const opsToken = opsTokenForRequest(requestUrl, method);
   if (opsToken) headers['x-mx-ops-token'] = opsToken;
-  const usesPersonalSession = adminSession.prepare(requestUrl, headers, Boolean(opsToken));
+  const usesPersonalSession = await adminSession.prepare(requestUrl, headers, hasAdminOpsToken(requestUrl));
   const url = requestUrl.href;
   let response;
   try {
@@ -4823,6 +4841,12 @@ function overseaCallbackBaseUrlFromForm() {
 }
 
 function renderStatus(status) {
+  const error = currentAdminAccessError();
+  if (error) {
+    const access = adminAccessPresentation(error);
+    setConnection(access.health === 'failed' ? 'error' : 'idle', access.connection, access.title);
+    return;
+  }
   if (status.connectionState === 'error') {
     setConnection('error', 'Missing service', 'Service required');
     return;
@@ -9141,17 +9165,15 @@ async function uploadReleaseArtifactFile(input, file) {
   });
   if (input.platform) params.set('platform', input.platform);
   if (input.arch) params.set('arch', input.arch);
-  const url = `${normalizedServerBase()}/internal/v1/release-artifacts?${params}`;
-  const requestUrl = new URL(url);
+  const requestUrl = new URL(`${normalizedServerBase()}/internal/v1/release-artifacts?${params}`);
   const opsToken = opsTokenForRequest(requestUrl, 'POST');
-  const response = await fetch(url, {
+  const headers = { 'content-type': input.contentType, ...(opsToken ? { 'x-mx-ops-token': opsToken } : {}) };
+  const usesPersonalSession = await adminSession.prepare(requestUrl, headers, hasAdminOpsToken(requestUrl));
+  const response = await fetch(requestUrl.href, {
     method: 'POST',
-    headers: {
-      'content-type': input.contentType,
-      ...(opsToken ? { 'x-mx-ops-token': opsToken } : {})
-    },
+    headers,
     body: file,
-    redirect: opsToken ? 'error' : 'follow'
+    redirect: opsToken || usesPersonalSession ? 'error' : 'follow'
   });
   const text = await response.text();
   let payload = null;
@@ -9161,6 +9183,7 @@ async function uploadReleaseArtifactFile(input, file) {
     throw new Error('Release artifact upload returned invalid JSON');
   }
   if (!response.ok) {
+    if (usesPersonalSession) await adminSession.rejected(payload);
     throw new Error(payload?.message || `Artifact upload failed HTTP ${response.status}`);
   }
   return payload;

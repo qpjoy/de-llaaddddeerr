@@ -25,6 +25,7 @@
 - 新回源只绑定 `10.88.88.88:18444`。Public TLS 在 Domestic 网关终止，经 WireGuard → Internal Nginx → 公网身份进程。端口占用预检不会接管其他服务。
 - Internal ingress 默认只接受已知 WG 对端 `10.88.0.1` 并加入独立网关凭据。身份进程验证凭据、客户端 IP 与精确 Host；Launcher 公网 BFF 再验证凭据、Cookie/CSRF 和当前用户管理角色。
 - Auth 域名只提供 `/identity/`；Launcher 只提供 `/admin/`、`/auth/admin/`、`/admin-api/`。原始 Internal API、注册 backchannel 不对公网代理，外部 Ops Token/Authorization 在公网管理代理中丢弃。
+- 公网管理页先读取 `/auth/admin/session`；`accessMode: sso-only` 表示必须使用个人登录。未登录或未获管理授权时只显示提示，不加载管理数据；已授权的 JSON 请求和发布文件上传统一经过 `/admin-api/internal/v1/` 并携带会话 CSRF。会话过期不会回退到原始 `/internal/v1/`。内网应急 Token 模式保留原路径。
 - 注册策略、邀请码和账号库沿用私网原 namespace。公开注册不授予管理角色。明确禁止 `mx-launcher` 后旧管理会话的下一次受保护请求也被拒绝。
 - Hub 新登录使用公网 issuer；旧私网 SSO 会话沿原 issuer 走完最多 8 小时有效期，复用同一加密密钥。新旧身份经原 `mx-user-center:<environment>` 身份绑定复用成员/租户，不按同名或邮箱合并。
 - H2I、Luopan 的 SDK 登录协议、客户端配置、VPN 不由此入口改写。本次仍未改实际 Luopan 产品目录。正常 deploy 有既有滚动/重建行为，不能据此承诺线上完全无中断。
@@ -64,7 +65,7 @@ bash certificates/manage.sh migrate hub.minsight-ai.com compass.minsight-ai.com 
 bash certificates/manage.sh install-timer
 ```
 
-先在每个已有证书全部 SAN 对应的宿主 80 server 内配置 webroot。迁移用 Certbot ≥2.3 的 reconfigure staging 检查；成功后才能启用无人值守续期。脚本拒绝未迁移的 standalone 和历史 pre/post 停服 hook。已存在的其他 cron/自建定时任务须核对。续期成功后仅 Nginx 检查与 reload，不重建 Docker。
+先在需要 HTTP 验证的证书全部 SAN 对应的宿主 80 server 内配置 webroot。配套 de-mingxi 的 `cert migrate` 自动兼容版本：Certbot ≥2.3 使用 reconfigure staging 检查；旧版先对指定证书 dry-run，成功后正式续期一次以保存 webroot。已经使用 webroot 或自动 DNS 插件的证书重复运行只验证保存的配置，不切换验证方式或再次强制签发。成功后才能启用无人值守续期。脚本拒绝未迁移的 standalone、manual 验证和历史 pre/post 停服 hook。`cert methods` 查看当前验证方式；`cert force-renew` 是独立的一次性批量操作，全部试续期通过后才正式签发，不能加入应用 deploy 或定时任务。已存在的其他 cron/自建定时任务须核对。续期成功后仅 Nginx 检查与 reload，不重建 Docker。
 
 备份 Domestic **整个 `/etc/letsencrypt`**（不只是 live 软链接），宿主/网关 Nginx 配置与调度；备份 Internal 身份目录、Hub `secrets/identity`、两应用数据库和原持久数据。公网 TLS 私钥不分发给应用；OIDC 密钥不放 Git/镜像。
 

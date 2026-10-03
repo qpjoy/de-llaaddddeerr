@@ -45,7 +45,7 @@ async function listen(server: Server) {
 }
 const close = (server: Server) => new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); server.closeAllConnections(); });
 const cookieValue = (response: Response, name: string) => response.headers.getSetCookie().find((entry) => entry.startsWith(`${name}=`))?.split(';')[0] ?? '';
-type TestPayload = { csrf: string; authenticated: boolean; bindingRequired?: boolean; canManage?: boolean; user: { userId: string }; actor?: string };
+type TestPayload = { csrf: string; authenticated: boolean; bindingRequired?: boolean; canManage?: boolean; accessMode?: string; user: { userId: string }; actor?: string };
 type TestResponse = Omit<Response, 'json'> & { json(): Promise<TestPayload> };
 
 async function fixture(localSubjects = false, publicGateway = false) {
@@ -182,6 +182,7 @@ test('real OIDC code/PKCE/signature -> verified old password -> same local admin
   const f = await fixture();
   try {
     const beforeUsers = await f.store.listUserCenterUsers();
+    assert.equal((await (await f.request('/auth/admin/session')).json()).accessMode, 'sso-or-ops');
     const pendingCookie = await f.login();
     const pending = await (await f.request('/auth/admin/session', pendingCookie)).json();
     assert.equal(pending.bindingRequired, true);
@@ -388,9 +389,13 @@ test('BFF context survives real Nest/Express routing and cannot leak into concur
 test('public console requires gateway provenance and immediately honors a user app ban', async () => {
   const f = await fixture(true, true);
   try {
+    const anonymous = await (await f.request('/auth/admin/session')).json();
+    assert.equal(anonymous.accessMode, 'sso-only');
+    assert.equal(anonymous.authenticated, false);
     f.setClaims({ sub: 'existing-admin' });
     const cookie = await f.login();
-    const { csrf } = await (await f.request('/auth/admin/session', cookie)).json();
+    const { csrf, accessMode } = await (await f.request('/auth/admin/session', cookie)).json();
+    assert.equal(accessMode, 'sso-only');
     assert.equal((await f.request('/admin-api/internal/v1/admin', cookie, undefined, csrf)).status, 200);
     assert.equal((await fetch(`${f.origin}/auth/admin/session`, { headers: { cookie } })).status, 403);
     assert.equal((await fetch(`${f.origin}/admin-api/internal/v1/admin`, { headers: { cookie, 'x-mx-identity-gateway': 'spoofed' } })).status, 403);
