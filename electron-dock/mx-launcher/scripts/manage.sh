@@ -102,6 +102,7 @@ Usage:
   bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
+  bash scripts/manage.sh ops identity ingress
   bash scripts/manage.sh ops identity hub <https://hub-origin>
   bash scripts/manage.sh ops identity public <https://auth-origin> <https://launcher-origin> <https://hub-origin>
   bash scripts/manage.sh ops identity status|doctor|check|export <file>|restore <file>
@@ -5756,6 +5757,7 @@ Commands:
   bash scripts/manage.sh ops internal-production repair-cni
   bash scripts/manage.sh ops internal-production down
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
+  bash scripts/manage.sh ops identity ingress
   bash scripts/manage.sh ops identity hub <https://hub-origin>
   bash scripts/manage.sh ops identity public <https://auth-origin> <https://launcher-origin> <https://hub-origin>
 
@@ -6752,7 +6754,7 @@ case "$cmd" in
         ops_insight_hub "$@"
         ;;
       identity)
-        if [ "${1:-}" = hub ] || [ "${1:-}" = public ]; then
+        if [ "${1:-}" = hub ] || [ "${1:-}" = public ] || [ "${1:-}" = ingress ]; then
           identity_action="$1"
           shift
           [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] || die "identity configuration requires root on the local production host"

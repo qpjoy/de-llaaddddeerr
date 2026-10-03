@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync,readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {mkdtempSync,rmSync,readFileSync,writeFileSync,mkdirSync,statSync,readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
@@ -8,8 +8,9 @@ import {fileURLToPath} from 'node:url';
 import {initializeProfile,readProfile,savePrivate} from './identity-profile.mjs';
 import {registerPublic,renderInternalIngress} from './identity-public.mjs';
 import {registerHub} from './identity-hub.mjs';
-import {resources,inspectIdentity} from './identity-deploy.mjs';
+import {resources,inspectIdentity,deployIdentity} from './identity-deploy.mjs';
 import {publicAdminConfig} from './identity-public-profile.mjs';
+import {writeInternalIngress} from './identity-ingress.mjs';
 
 test('public registration preserves private issuer/keys, Hub members contract and session key; idempotent/recovery fences',()=>{
  const dir=mkdtempSync(join(tmpdir(),'mx-public-')),file=join(dir,'profile.json'),hubFile=join(dir,'hub','profile.json');
@@ -33,6 +34,18 @@ test('public registration preserves private issuer/keys, Hub members contract an
   assert.ok(!JSON.stringify(built).includes(old.caKey));
   const execute=args=>args.includes('mx-identity-runtime')?JSON.stringify(built.runtime):'';
   assert.doesNotThrow(()=>inspectIdentity(next,execute));assert.throws(()=>inspectIdentity(old,execute),/issuer/);
+  const generated=writeInternalIngress(next,file);
+  assert.equal(statSync(generated).mode&0o777,0o600);
+  rmSync(generated);writeInternalIngress(next,file);
+  assert.equal(readFileSync(generated,'utf8'),renderInternalIngress(entry));
+  assert.equal(readFileSync(file,'utf8'),before,'regenerating ingress never changes credentials');
+  assert.ok(!readdirSync(dir).some(name=>name.endsWith('.tmp')));
+  assert.throws(()=>writeInternalIngress(old,file),/尚未登记/);
+  rmSync(generated);
+  const deployed=[];deployIdentity({file,execute:(args,input)=>{deployed.push([args,input]);return ''},log:()=>{}});
+  assert.equal(readFileSync(generated,'utf8'),renderInternalIngress(entry),'normal deploy recreates a missing derived config');
+  assert.equal(readFileSync(file,'utf8'),before);
+  assert.ok(deployed.some(([args])=>args.includes('deployment/mx-identity-public')));
   const ingress=renderInternalIngress(entry);assert.match(ingress,/allow 10\.88\.0\.1;/);assert.ok(!ingress.includes('location /internal/'));
   savePrivate(file,{...next,publicEntry:{...entry,transportOrigin:'http://0.0.0.0:18444'}});assert.throws(()=>readProfile(file),/公网身份档案/);
  } finally {rmSync(dir,{recursive:true,force:true})}

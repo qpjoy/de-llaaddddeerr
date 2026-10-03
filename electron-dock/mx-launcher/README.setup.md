@@ -65,6 +65,14 @@ bash scripts/manage.sh ops internal-production repair-cni
 
 # 开启oidc sso单点登录
 bash scripts/manage.sh ops identity on
+# 一次登记三个入口
+bash scripts/manage.sh ops identity public \
+  https://auth.minsight-ai.com \
+  https://launcher.minsight-ai.com \
+  https://hub.minsight-ai.com
+
+install -m 600 /var/lib/mx-launcher/identity/public-ingress.conf /etc/nginx/conf.d/mx-public-identity.conf
+nginx -t && nginx -s reload
 
 # 重新部署 MX：
 TMPDIR=/data/tmp \

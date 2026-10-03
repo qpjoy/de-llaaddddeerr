@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus, diagnoseProfile } from './identity-profile.mjs';
 import { publicAdminConfig } from './identity-public-profile.mjs';
 import { identityProbe } from './identity-check.mjs';
+import { writeInternalIngress } from './identity-ingress.mjs';
 
 export const NS = 'mx-internal-shadow';
 export const MANAGED = 'mx.qpjoy.com/identity-installation';
@@ -100,6 +101,7 @@ export function deployIdentity({ file = PROFILE, execute = run, revision, log = 
     log('统一身份未启用；保留原登录。首次可运行 bash scripts/manage.sh ops identity on（自动配置并部署）。'); return;
   }
   const renewed = renewProfile(p, file);
+  if (renewed.publicEntry) log(`已同步 Internal Nginx 回源配置：${writeInternalIngress(renewed, file)}（由内网 Nginx 独立加载）`);
   const built = resources(renewed, revision);
   const apply = value => execute(['apply', '--server-side', '--field-manager=mx-identity-deploy', '-f', '-'], JSON.stringify(value));
   apply(built.runtime); apply(built.ca); apply(built.deployment);

@@ -78,3 +78,9 @@ bash certificates/manage.sh install-timer
 - 证书 CLI 隔离测试：新证书选择、完整 SAN、HTTP 验证失败不签发、standalone/hook 拒绝、reconfigure、dry-run 后调度、复用已有 timer；不会真正签证书/停服务。
 
 真实公网、生产设备和飞书授权仍须上线后验收。证书 UI 看板未在本次实现；本批提供统一脚本和自动续期基础。
+
+## 回源配置缺失时
+
+`ops identity public` 属于 Launcher，必须在 `mx-launcher` 目录执行，Hub 的同名脚本不支持此子命令。只有成功登记后才会产生 `/var/lib/mx-launcher/identity/public-ingress.conf`。已经登记但该文件丢失时，在 Launcher 目录执行 `bash scripts/manage.sh ops identity ingress`，只按原档案补回文件，不轮换密钥或重启服务；今后 deploy 也会自动补回。内网 Nginx 仍独立检查和加载此文件。
+
+配套 de-mingxi 新增仓库根目录/compass/deploy 的 `scripts/manage.sh cert ...` 统一入口、`internal-identity-install` 及 Auth/Launcher 内网参考模板。模板不含真实凭据，不可直接当生产配置安装。公网启用脚本在改变配置前先检查内网 discovery 和 SSO session，回源未就绪时停止。
