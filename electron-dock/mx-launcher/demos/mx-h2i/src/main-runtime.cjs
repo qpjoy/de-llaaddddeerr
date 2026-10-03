@@ -2323,6 +2323,7 @@ async function promoteEmployeeConnection(options = {}) {
     let authenticated = options.auth || null;
     let resolvedBootstrap = options.bootstrap || null;
     let dataPlaneApplyStarted = false;
+    let employeeSessionApplied = false;
     try {
       const bootstrap = resolvedBootstrap || await resolveBootstrapEndpoint(runtime.config, {
         requireSecureTransport: provider === 'feishu'
@@ -2396,6 +2397,8 @@ async function promoteEmployeeConnection(options = {}) {
         transitionId,
         transitionStartedAt
       });
+      employeeSessionApplied = runtime.auth?.user?.userId === auth.user.userId
+        && runtime.auth?.accessToken === auth.accessToken;
     } catch (err) {
       if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
       if (networkFallback && !dataPlaneApplyStarted) {
@@ -2415,7 +2418,7 @@ async function promoteEmployeeConnection(options = {}) {
         transitionId
       });
     }
-    if (authenticated && resolvedBootstrap && runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connected') {
+    if (employeeSessionApplied && authenticated && resolvedBootstrap && runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connected') {
       try {
         await hydrateH2oSystemSubscriptionsForUser({
           userId: authenticated.user.userId,
@@ -17749,6 +17752,7 @@ async function authenticateUserViaGateway(baseUrl, account, password, requestOpt
     bootstrapResolveMode: requestOptions.bootstrapResolveMode,
     body: {
       grant_type: 'password',
+      appId: 'mx-h2i',
       username: account,
       password,
       audience: 'mx-sdk',
@@ -17780,6 +17784,7 @@ async function authenticateFeishuViaGateway(
       codeVerifier,
       exchangeHandle,
       audience: 'mx-sdk',
+      appId: 'mx-h2i',
       scope: FEISHU_OAUTH_SCOPE,
       requestId: makeRequestId('feishu-oauth')
     }
@@ -20190,6 +20195,9 @@ function classifyConnectionError(err) {
   const message = errorMessage(err);
   const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
   const lower = message.toLowerCase();
+  if (err?.payload?.code === 'app_access_denied') {
+    return { state: 'forbidden', message };
+  }
   if (isLocalRuntimePersistenceError(err)) {
     return {
       state: 'local-storage-error',

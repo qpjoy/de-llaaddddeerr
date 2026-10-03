@@ -29,9 +29,11 @@ import {
   LAUNCHER_LEASE_CAPABILITY_HEADER,
   mintLauncherLeaseCapability
 } from '../../lib/launcher-lease-auth.js';
+import { rethrowUserAppAccessError } from '../../lib/user-app-access.js';
 import {
   LauncherAnonymousEnrollmentPolicyError,
   LauncherProductUserAccessDeniedError,
+  assertUserAppAccess,
   assertLauncherProductUserAccess,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseMatchesProfile,
@@ -151,7 +153,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       this.config.launcherNetworkLegacyUnauthenticatedUserLeasesEnabled
     );
     if (auth.userId && existingLease && !internalOpsTokenMatches(opsToken)) {
-      await this.assertProductUserAccess(auth.userId, existingLease.productId);
+      await this.assertProductUserAccess(auth.userId, existingLease.productId, existingLease.appId);
     }
     try {
       return {
@@ -855,7 +857,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       && options.allowInactiveUserCapability !== true
       && !internalOpsTokenMatches(opsToken)
     ) {
-      await this.assertProductUserAccess(lease.userId, lease.productId);
+      await this.assertProductUserAccess(lease.userId, lease.productId, lease.appId);
     }
     if (!launcherNetworkLeaseIsActive(lease)) {
       if (
@@ -883,7 +885,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
         if (!user || user.status !== 'active') {
           throw new UnauthorizedException('Launcher lease user is disabled or no longer exists');
         }
-        await this.assertProductUserAccess(lease.userId, lease.productId);
+        await this.assertProductUserAccess(lease.userId, lease.productId, lease.appId);
       }
       return lease;
     }
@@ -903,16 +905,20 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       throw new UnauthorizedException('Launcher lease token is inactive or does not own this lease');
     }
     if (options.allowInactiveUserCapability !== true) {
-      await this.assertProductUserAccess(lease.userId, lease.productId);
+      await this.assertProductUserAccess(lease.userId, lease.productId, lease.appId);
     }
     return lease;
   }
 
   private async assertProductUserAccess(
     userId: string,
-    productId: string
+    productId: string,
+    appId?: string | null
   ): Promise<void> {
     try {
+      const user = await this.store.getUserCenterUserIdentity(userId);
+      assertUserAppAccess(user, productId);
+      if (appId) assertUserAppAccess(user, appId);
       assertLauncherProductUserAccess(
         await this.store.getLauncherProductUserAccess(productId, userId),
         productId,
@@ -1770,7 +1776,7 @@ function rethrowLauncherNetworkPolicyError(error: unknown): never {
       userId: error.userId
     });
   }
-  throw error;
+  rethrowUserAppAccessError(error);
 }
 
 function publicLauncherLease(

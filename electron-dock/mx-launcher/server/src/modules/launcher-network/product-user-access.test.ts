@@ -261,7 +261,7 @@ test('product access endpoint validates boolean input and preserves an idempoten
   assert.equal(readBack.productUserAccess.accessRevision, 2);
 });
 
-test('legacy AppCenter deniedAppIds without trusted network audit remains app-only', async () => {
+test('explicit app deny also blocks product admission without manufacturing a network ban record', async () => {
   const store = new MemoryStore(config);
   const controller = new LauncherNetworkController(store, config);
   const user = store.createUserCenterUser({
@@ -279,8 +279,10 @@ test('legacy AppCenter deniedAppIds without trusted network audit remains app-on
   );
   assert.equal(store.getLauncherProductUserAccess('mx-h2i', user.userId), null);
 
-  const enrolled = await enrollUser(controller, token, user.userId, 'mx-h2i', 'legacy-app-deny');
-  assert.equal(enrolled.lease.status, 'active', 'AppCenter deny must not become a ProductNetwork ban');
+  await assert.rejects(enrollUser(controller, token, user.userId, 'mx-h2i', 'legacy-app-deny'),
+    (error: any) => error.getStatus() === 403 && error.getResponse().code === 'app_access_denied');
+  const enrolled = await enrollUser(controller, token, user.userId, 'luopan', 'legacy-app-deny');
+  assert.equal(enrolled.lease.status, 'active', 'ban must remain scoped to H2I');
   assert.equal(store.getLauncherProductUserAccess('mx-h2i', user.userId), null);
 });
 

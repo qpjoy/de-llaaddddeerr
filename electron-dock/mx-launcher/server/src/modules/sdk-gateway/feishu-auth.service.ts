@@ -45,6 +45,7 @@ export interface FeishuAuthorizeInput {
 }
 
 export interface FeishuTokenExchangeInput {
+  appId?: string | null;
   code?: string | null;
   redirectUri?: string | null;
   codeVerifier?: string | null;
@@ -156,6 +157,7 @@ export class FeishuAuthService {
       audience: input.audience?.trim() || 'mx-sdk',
       scopes: input.scopes ?? [],
       authProvider: 'feishu',
+      appId: input.appId,
       ttlSeconds: FEISHU_TOKEN_TTL_SECONDS,
       requestId: input.requestId ?? null
     });

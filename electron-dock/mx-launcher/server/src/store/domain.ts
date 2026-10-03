@@ -422,6 +422,26 @@ export function userCenterUserIdentity(user: UserCenterUser): UserCenterUserIden
   };
 }
 
+export class UserAppAccessDeniedError extends Error {
+  readonly code = 'app_access_denied';
+
+  constructor(readonly appId: string, readonly userId: string) {
+    super(`此账号已被禁止访问 ${appId}，请联系管理员。`);
+    this.name = 'UserAppAccessDeniedError';
+  }
+}
+
+/** Explicit user bans override public access, additional grants and admin bypass. */
+export function userAppAccessDenied(user: UserCenterUserIdentity | null | undefined, appId: string): boolean {
+  return Boolean(user?.appAccess?.deniedAppIds?.includes(normalizeOptionalAppId(appId) ?? ''));
+}
+
+export function assertUserAppAccess(user: UserCenterUserIdentity | null | undefined, appId: string): void {
+  if (user && userAppAccessDenied(user, appId)) {
+    throw new UserAppAccessDeniedError(normalizeOptionalAppId(appId)!, user.userId);
+  }
+}
+
 export class LauncherProductUserAccessDeniedError extends Error {
   readonly code = 'launcher_product_user_access_denied';
 
@@ -1051,6 +1071,7 @@ export function createUserCenterTokenRecord(
     audience: input.audience?.trim() || 'mx-sdk',
     scopes: input.scopes ?? [],
     authProvider: input.authProvider?.trim() || null,
+    ...(input.appId ? { appId: normalizeOptionalAppId(input.appId) } : {}),
     issuer: `mx-user-center:${config.environment}`,
     issuedAt,
     expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
@@ -1110,7 +1131,8 @@ export function introspectUserCenterToken(
   config: RuntimeConfig,
   input: TokenIntrospectionInput,
   record: UserCenterTokenRecord | null,
-  principal: PlatformPrincipal | null
+  principal: PlatformPrincipal | null,
+  user?: UserCenterUserIdentity | null
 ): TokenIntrospectionResult | null {
   if (!record) return null;
   const audience = input.audience?.trim() || record.audience;
@@ -1125,6 +1147,9 @@ export function introspectUserCenterToken(
   }
   if (!principal) {
     return inactiveToken(record.issuer, audience, 'token subject is not active');
+  }
+  if (record.subjectKind === 'user' && record.appId && userAppAccessDenied(user, record.appId)) {
+    return inactiveToken(record.issuer, audience, 'app_access_denied');
   }
   const scopes = record.scopes.length > 0
     ? record.scopes.filter((scope) => principal.scopes.includes(scope))
@@ -1880,12 +1905,12 @@ export function evaluateAppCenterAccess(
   if (app.enabled === false && input.includeDisabled !== true) {
     return appAccessDecision(appId, policy, principal, false, false, 'app is disabled', [], ['enabled-app']);
   }
-  if (policy.allowAdmin !== false && principal?.roles.includes('mx-admin')) {
-    return appAccessDecision(appId, policy, principal, true, true, 'admin role can access all applications', ['role:mx-admin'], []);
-  }
   const userAppAccess = user?.appAccess ?? emptyUserAppAccess();
   if (userAppAccess.deniedAppIds.includes(appId)) {
     return appAccessDecision(appId, policy, principal, false, false, 'user is explicitly denied for this application', [], [`user-deny:${appId}`]);
+  }
+  if (policy.allowAdmin !== false && principal?.roles.includes('mx-admin')) {
+    return appAccessDecision(appId, policy, principal, true, true, 'admin role can access all applications', ['role:mx-admin'], []);
   }
   if (policy.defaultDecision === 'public') {
     return appAccessDecision(appId, policy, principal, true, true, 'application is public', ['policy:public'], []);

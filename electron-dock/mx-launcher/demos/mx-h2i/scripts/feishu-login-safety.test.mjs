@@ -1730,3 +1730,71 @@ assert.match(anonymousUiSource, /data-action="resetLocalNetworkIdentity"/);
 assert.match(anonymousUiSource, /员工网络正在使用中/);
 
 console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests passed');
+
+// Execute the real login helpers: both providers must tell Internal which app is logging in.
+{
+  const { runInNewContext } = await import('node:vm');
+  const requests = [];
+  const context = {
+    requestJson: async (url, options) => { requests.push({ url, ...options }); return {}; },
+    joinApiUrl: (base, path) => base + path,
+    makeRequestId: tag => tag,
+    gatewayUserAuth: () => ({ provider: 'feishu' }),
+    FEISHU_OAUTH_SCOPE: 'auth.read'
+  };
+  runInNewContext(`${functionSource(mainSource, 'authenticateUserViaGateway')}\n${functionSource(mainSource, 'authenticateFeishuViaGateway')}`, context);
+  await context.authenticateUserViaGateway('https://internal.example', 'account', 'fixture-password');
+  await context.authenticateFeishuViaGateway('https://internal.example', 'code', 'redirect', 'verifier', 'handle');
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(request => request.body.appId === 'mx-h2i'));
+}
+
+// A failed employee admission with an older connection must never provision H2O
+// for the rejected identity. Successful promotion still provisions normally.
+{
+  const { runInNewContext } = await import('node:vm');
+  for (const initialMode of ['guest', 'employee']) {
+    for (const stage of ['denied', 'rolled-back', 'success']) {
+      const oldConnection = { mode: initialMode, state: 'connected', wireGuard: { active: true } };
+      const oldAuth = initialMode === 'employee' ? { user: { userId: 'old-user' }, accessToken: 'old-token' } : null;
+      const runtime = { connection: oldConnection, auth: oldAuth, identity: { account: 'old-user' }, config: {} };
+      let applied = 0, hydrated = 0;
+      const noOp = () => {};
+      const context = {
+        runtime, makeRequestId: tag => tag, nullableString: value => value || null,
+        beginForegroundNetworkOperation: () => ({ epoch: 1 }), beginWireGuardConnectOperation: () => ({ finish: noOp }),
+        assertForegroundNetworkOperationCurrent: noOp, drainWireGuardRecoveryOperation: noOp,
+        ensureCredentialStorageRecoveryReady: noOp, repairDarwinEndpointRouteBeforeBootstrap: () => null,
+        probeConnectedModeBeforeTransition: () => ({}), connectionHasReadyNetworkProof: () => true,
+        retainableConnectionSnapshot: value => value, setConnecting: () => { runtime.connection = { mode: 'employee', state: 'connecting' }; },
+        publishNetworkModeEvent: noOp, saveAndBroadcast: noOp, scheduleNetworkEnvironmentDiagnostics: noOp,
+        NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS: 100, EMPLOYEE_IDENTITY_BASE_SCOPES: [],
+        resolveBootstrapEndpoint: () => ({ baseUrl: 'https://internal.example' }),
+        assertLiveSecureLauncherCapabilityTransport: noOp, applyResolvedBootstrapEndpoint: noOp,
+        displayNameFromAccount: account => account, touchRuntime: noOp,
+        connectLauncherNetworkWithLocalIdentityRepair: () => {
+          if (stage === 'denied') throw Object.assign(new Error('此账号已被禁止访问 mx-h2i'), { payload: { code: 'app_access_denied' } });
+          return {};
+        },
+        applyNetworkSession: (_session, options) => {
+          applied++;
+          runtime.connection = stage === 'rolled-back' ? oldConnection : { mode: 'employee', state: 'connected' };
+          runtime.auth = stage === 'rolled-back' ? oldAuth : options.auth;
+        },
+        isSupersededNetworkTransitionError: () => false, errorMessage: error => error.message,
+        hydrateH2oSystemSubscriptionsForUser: ({ userId }) => { hydrated++; assert.equal(userId, 'new-user'); },
+        finishForegroundNetworkOperation: noOp, visibleRuntime: () => runtime
+      };
+      runInNewContext(functionSource(mainSource, 'promoteEmployeeConnection'), context);
+      await context.promoteEmployeeConnection({ authenticate: () => ({ user: { userId: 'new-user' }, accessToken: 'new-token' }) });
+      assert.equal(applied, stage === 'denied' ? 0 : 1);
+      assert.equal(hydrated, stage === 'success' ? 1 : 0);
+      if (stage === 'denied') {
+        assert.equal(runtime.connection, oldConnection);
+        assert.equal(runtime.auth, oldAuth);
+        assert.match(runtime.feedback.message, /已被禁止访问 mx-h2i/);
+      }
+    }
+  }
+}
+console.log('application-scoped login and failed-admission subscription safety: passed');

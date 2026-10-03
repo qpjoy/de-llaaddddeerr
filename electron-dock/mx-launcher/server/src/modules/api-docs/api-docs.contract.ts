@@ -672,7 +672,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '获取用户或服务账号 token',
-        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用数据库中的 scrypt verifier 校验账号独立 client secret；明文只在创建或轮换时返回一次。全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。',
+        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用数据库中的 scrypt verifier 校验账号独立 client secret；明文只在创建或轮换时返回一次。全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。password 可传 appId 指明应用（MX-H2I 使用 mx-h2i）；身份验证后若在该用户 deniedAppIds 中则返回 403 / app_access_denied，public 或管理员通行不能覆盖明确禁止。带应用上下文的令牌在 introspection 时重验禁止名单；不传 appId 的旧通用身份令牌保持兼容，资源入口仍必须验证实际目标应用。',
         operationId: 'issueSdkToken',
         routeId: 'sdk.oauth.token',
         auth: 'public',
@@ -680,6 +680,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           grant_type: 'password',
           username: 'partner-alice',
           password: '<password>',
+          appId: 'mx-h2i',
           scope: 'sdk.identity.read sdk.user.read permission.request',
           audience: 'mx-sdk',
           requestId: 'partner-login-001'
@@ -751,12 +752,13 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '用飞书授权码换取 MX token',
-        description: 'Internal 先尝试原子消费 exchangeHandle 的共享 store 记录，并校验其绑定的 redirect URI 与 PKCE verifier；如果记录在部署/路由切换期间不可见，则校验新版签名 handle 中的 redirect、challenge 与过期时间。随后使用 App Secret 和授权码向飞书换票，读取用户身份并校验 tenant allowlist。响应只返回 MX User Center token；飞书 access/refresh token 不返回且不持久化。飞书当前公开 v2 token 文档未明确声明 PKCE 字段，生产启用前仍须用真实租户证明错误 verifier 会被飞书上游拒绝。',
+        description: 'Internal 先尝试原子消费 exchangeHandle 的共享 store 记录，并校验其绑定的 redirect URI 与 PKCE verifier；如果记录在部署/路由切换期间不可见，则校验新版签名 handle 中的 redirect、challenge 与过期时间。随后使用 App Secret 和授权码向飞书换票，读取用户身份并校验 tenant allowlist。响应只返回 MX User Center token；飞书 access/refresh token 不返回且不持久化。飞书当前公开 v2 token 文档未明确声明 PKCE 字段，生产启用前仍须用真实租户证明错误 verifier 会被飞书上游拒绝。 可传 appId（MX-H2I 使用 mx-h2i）执行与密码登录一致的明确禁止校验；被禁用户返回 403 / app_access_denied，飞书自动应用授权不会覆盖禁止。',
         operationId: 'exchangeFeishuAuthorizationCode',
         routeId: 'sdk.oauth.feishu.token',
         auth: 'public',
         request: {
           code: '<one-time-authorization-code>',
+          appId: 'mx-h2i',
           redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback',
           codeVerifier: '<pkce-code-verifier>',
           exchangeHandle: 'mxfx2.<signed-payload>.<signature>',

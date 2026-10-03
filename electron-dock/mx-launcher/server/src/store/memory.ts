@@ -140,6 +140,7 @@ import {
   assertLauncherAnonymousEnrollmentPolicy,
   assertLauncherNetworkLeaseEntitlement,
   assertLauncherProductUserAccess,
+  assertUserAppAccess,
   launcherNetworkAppIdForLeaseInput,
   launcherNetworkLeaseProductId,
   launcherNetworkProductIsStandaloneDefault,
@@ -965,6 +966,11 @@ export class MemoryStore implements PlatformStore {
     return [...this.users.values()]
       .map((user) => userCenterUserIdentity(user))
       .sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  getUserCenterUserIdentity(userId: string): UserCenterUserIdentity | null {
+    const user = this.users.get(userId);
+    return user ? userCenterUserIdentity(user) : null;
   }
 
   createUserCenterUser(input: CreateUserInput): UserCenterUser {
@@ -1849,6 +1855,9 @@ export class MemoryStore implements PlatformStore {
     if (!principal) {
       throw new Error(`Unknown token subject: ${input.subjectKind}:${input.subjectId}`);
     }
+    if (input.subjectKind === 'user' && input.appId) {
+      assertUserAppAccess(this.getUserCenterUserIdentity(input.subjectId), input.appId);
+    }
     const requestedScopes = input.scopes?.length ? input.scopes : principal.scopes;
     const allowedScopes = requestedScopes.filter((scope) => principal.scopes.includes(scope));
     const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
@@ -1913,7 +1922,9 @@ export class MemoryStore implements PlatformStore {
     const token = input.token?.trim() ?? '';
     const record = token ? this.tokens.get(hashToken(token)) ?? null : null;
     const principal = record ? this.principalForSubject(record.subjectKind, record.subjectId) : null;
-    const result = introspectUserCenterToken(this.config, input, record, principal)
+    const user = record?.subjectKind === 'user' && record.appId
+      ? this.getUserCenterUserIdentity(record.subjectId) : null;
+    const result = introspectUserCenterToken(this.config, input, record, principal, user)
       ?? introspectShadowToken(this.config, input);
     this.recordAudit({
       eventType: 'auth.token.introspected',
@@ -2696,6 +2707,11 @@ export class MemoryStore implements PlatformStore {
       installId,
       deviceId
     };
+    if (normalizedInput.userId) {
+      const user = this.getUserCenterUserIdentity(normalizedInput.userId);
+      assertUserAppAccess(user, product.productId);
+      assertUserAppAccess(user, normalizedInput.appId!);
+    }
     assertLauncherProductUserAccess(
       normalizedInput.userId
         ? this.getLauncherProductUserAccess(product.productId, normalizedInput.userId)
@@ -3507,6 +3523,12 @@ export class MemoryStore implements PlatformStore {
       throw new Error('Launcher network lease user does not match snapshot userId');
     }
     const snapshotUserId = requestedLease?.userId ?? input.userId?.trim() ?? null;
+    if (snapshotUserId) {
+      const user = this.getUserCenterUserIdentity(snapshotUserId);
+      assertUserAppAccess(user, requestedLease?.productId ?? appId);
+      if (requestedLease?.appId) assertUserAppAccess(user, requestedLease.appId);
+      assertUserAppAccess(user, appId);
+    }
     assertLauncherProductUserAccess(
       snapshotUserId
         ? this.getLauncherProductUserAccess(requestedLease?.productId ?? appId, snapshotUserId)

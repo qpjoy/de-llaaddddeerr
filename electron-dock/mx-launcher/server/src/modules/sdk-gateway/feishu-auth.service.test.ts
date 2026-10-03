@@ -493,3 +493,25 @@ function unexpectedFetch(): FeishuFetch {
     throw new Error('unexpected fetch');
   };
 }
+
+
+test('Feishu login cannot re-grant an explicitly banned public app', async () => {
+  const config = feishuConfig();
+  const store = new MemoryStore(config);
+  const user = store.createUserCenterUser({
+    account: 'banned-feishu', roleIds: ['mx-user'], deniedAppIds: ['mx-h2i'],
+    externalIds: { feishuSubject: 'tenant_allowed:ou_banned' }
+  });
+  const upstream = sequenceFetch([
+    { code: 0, access_token: 'fixture-upstream-access', expires_in: 7200 },
+    { code: 0, data: { tenant_key: 'tenant_allowed', open_id: 'ou_banned', name: 'Banned user' } }
+  ]);
+  const controller = new SdkGatewayController(store, new FeishuAuthService(config, store, upstream.fetch));
+  const auth = await controller.feishuAuthorize({ redirectUri: REDIRECT_URI, state: STATE, codeChallenge: CODE_CHALLENGE });
+  await assert.rejects(controller.feishuToken({
+    appId: 'mx-h2i', code: 'fixture-code', redirectUri: REDIRECT_URI, codeVerifier: CODE_VERIFIER,
+    exchangeHandle: auth.exchangeHandle
+  }), (error: any) => error.getStatus() === 403 && error.getResponse().code === 'app_access_denied');
+  assert.deepEqual(store.getUserCenterUserIdentity(user.userId)?.appAccess.deniedAppIds, ['mx-h2i']);
+  assert.equal(store.getUserCenterUserIdentity(user.userId)?.status, 'active');
+});

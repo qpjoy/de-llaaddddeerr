@@ -19,6 +19,7 @@ import {
   UnauthorizedException
 } from '@nestjs/common';
 
+import { rethrowUserAppAccessError } from '../../lib/user-app-access.js';
 import { authenticationRateLimitBucketKey } from '../../lib/auth-rate-limit.js';
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
@@ -79,7 +80,7 @@ export class SdkGatewayController {
       }
       return this.issueServiceAccountToken(body, sourceIp);
     }
-    return this.issueUserToken(body, sourceIp);
+    return this.issueUserToken(body, sourceIp).catch(rethrowUserAppAccessError);
   }
 
   @Get('internal/v1/sdk/oauth/feishu/config')
@@ -109,10 +110,11 @@ export class SdkGatewayController {
       codeVerifier: exactString(body.codeVerifier),
       exchangeHandle: exactString(body.exchangeHandle),
       audience: nullableString(body.audience),
+      appId: nullableString(body.appId),
       scopes: oauthScopes(body.scope, undefined),
       requestId: nullableString(body.requestId),
       sourceKey: sourceIp
-    });
+    }).catch(rethrowUserAppAccessError);
     return { token: oauthTokenResponse(result.issued, result.introspection) };
   }
 
@@ -327,6 +329,7 @@ export class SdkGatewayController {
       audience: nullableString(body.audience) ?? 'mx-sdk',
       scopes: oauthScopes(body.scope, body.scopes),
       authProvider: 'local-password',
+      appId: nullableString(body.appId),
       ttlSeconds: Math.min(
         numberValue(body.expires_in) ?? numberValue(body.ttlSeconds) ?? USER_ACCESS_TOKEN_TTL_SECONDS,
         USER_ACCESS_TOKEN_TTL_SECONDS

@@ -319,6 +319,7 @@ import {
   MX_H2I_PRODUCT_ID,
   assertLauncherNetworkLeaseEntitlement,
   assertLauncherProductUserAccess,
+  assertUserAppAccess,
   launcherNetworkAppIdForLeaseInput,
   launcherNetworkLeaseProductId,
   launcherNetworkProductIsStandaloneDefault,
@@ -1070,6 +1071,11 @@ export class PostgresStore implements PlatformStore {
     return (await this.listRecords<UserCenterUser>('iam-user'))
       .map((user) => userCenterUserIdentity(user))
       .sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  async getUserCenterUserIdentity(userId: string): Promise<UserCenterUserIdentity | null> {
+    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    return user ? userCenterUserIdentity(user) : null;
   }
 
   async createUserCenterUser(input: CreateUserInput): Promise<UserCenterUser> {
@@ -2161,6 +2167,9 @@ export class PostgresStore implements PlatformStore {
     if (!principal) {
       throw new Error(`Unknown token subject: ${input.subjectKind}:${input.subjectId}`);
     }
+    if (input.appId) {
+      assertUserAppAccess(await this.getUserCenterUserIdentity(input.subjectId), input.appId);
+    }
     const requestedScopes = input.scopes?.length ? input.scopes : principal.scopes;
     const allowedScopes = requestedScopes.filter((scope) => principal.scopes.includes(scope));
     const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
@@ -2350,7 +2359,9 @@ export class PostgresStore implements PlatformStore {
     const token = input.token?.trim() ?? '';
     const record = token ? await this.getRecord<UserCenterTokenRecord>('iam-token', hashToken(token)) : null;
     const principal = record ? await this.principalForSubject(record.subjectKind, record.subjectId) : null;
-    const result = introspectUserCenterToken(this.config, input, record, principal)
+    const user = record?.subjectKind === 'user' && record.appId
+      ? await this.getUserCenterUserIdentity(record.subjectId) : null;
+    const result = introspectUserCenterToken(this.config, input, record, principal, user)
       ?? introspectShadowToken(this.config, input);
     await this.recordAudit({
       eventType: 'auth.token.introspected',
@@ -3509,6 +3520,9 @@ export class PostgresStore implements PlatformStore {
           }
         });
         if (!userRow) throw new Error(`User not found: ${normalizedInput.userId}`);
+        const user = userRow.data as unknown as UserCenterUser;
+        assertUserAppAccess(user, product.productId);
+        assertUserAppAccess(user, normalizedInput.appId!);
         const accessRow = await records.findOne({
           where: {
             kind: 'launcher-product-user-access',
@@ -4403,6 +4417,12 @@ export class PostgresStore implements PlatformStore {
       throw new Error('Launcher network lease user does not match snapshot userId');
     }
     const snapshotUserId = requestedLease?.userId ?? input.userId?.trim() ?? null;
+    if (snapshotUserId) {
+      const user = await this.getUserCenterUserIdentity(snapshotUserId);
+      assertUserAppAccess(user, requestedLease?.productId ?? appId);
+      if (requestedLease?.appId) assertUserAppAccess(user, requestedLease.appId);
+      assertUserAppAccess(user, appId);
+    }
     assertLauncherProductUserAccess(
       snapshotUserId
         ? await this.getLauncherProductUserAccess(requestedLease?.productId ?? appId, snapshotUserId)

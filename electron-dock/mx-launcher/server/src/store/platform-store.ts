@@ -260,6 +260,7 @@ export interface PlatformStore {
   listUserCenterRoles(): MaybePromise<UserCenterRole[]>;
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;
   listUserCenterUserIdentities(): MaybePromise<UserCenterUserIdentity[]>;
+  getUserCenterUserIdentity(userId: string): MaybePromise<UserCenterUserIdentity | null>;
   createUserCenterUser(input: CreateUserInput): MaybePromise<UserCenterUser>;
   importUserCenterUsers(input: ImportUserCenterUsersInput): MaybePromise<ImportUserCenterUsersResult>;
   updateUserCenterPassword(input: UserPasswordUpdateInput): MaybePromise<UserPasswordUpdateResult>;

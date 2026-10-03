@@ -9869,7 +9869,7 @@ function renderUserEditorDrawer() {
             <div class="app-form-field app-form-wide">
               <label for="user-denied-apps">明确禁止的应用 · Denied Apps</label>
               <select id="user-denied-apps" multiple data-user-editor-field="deniedAppIds" aria-label="明确禁止的应用" data-placeholder="无额外禁止">${userAppOptions(draft.deniedAppIds)}</select>
-              <small>在 Launcher 应用访问检查中，禁止优先于允许；应用允许管理员通行时仍遵循其管理员策略。应用独立入口及内部数据权限由各应用管理。</small>
+              <small>明确禁止优先于公开应用、额外授权和管理员通行。MX-H2I 登录及产品网络准入会校验禁止名单；其他应用独立入口及内部数据权限由各应用管理。</small>
             </div>
             <label class="app-form-field app-form-wide">
               <span>Attributes JSON</span>

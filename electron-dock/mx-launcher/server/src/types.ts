@@ -883,6 +883,8 @@ export interface UserCenterIssuedServiceAccountCredential {
 }
 
 export interface UserCenterTokenRecord {
+  /** Optional application context; legacy generic tokens remain compatible. */
+  appId?: string | null;
   tokenId: string;
   tokenHash: string;
   subjectKind: 'user' | 'service-account';
@@ -1096,6 +1098,8 @@ export interface UserCenterServiceAccountCredentialImportResult {
 }
 
 export interface IssueTokenInput {
+  /** Optional application context; legacy generic tokens remain compatible. */
+  appId?: string | null;
   subjectKind: 'user' | 'service-account';
   subjectId: string;
   audience?: string | null;
