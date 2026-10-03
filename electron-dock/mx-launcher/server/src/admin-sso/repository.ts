@@ -55,7 +55,6 @@ export class PostgresSsoRepository implements SsoRepository {
   async touchSession(id: string): Promise<SsoRecord | null> {
     return (await this.query(`WITH touched AS (UPDATE mx_platform_records SET updated_at=now()
       WHERE kind='admin-sso-session' AND id=$1 AND environment=$2
-        AND (data->>'expiresAt')::timestamptz > now()
-        AND updated_at > now() - interval '30 minutes' RETURNING data) SELECT data FROM touched`, [id, this.environment]))[0]?.data ?? null;
+        AND (data->>'expiresAt')::timestamptz > now() RETURNING data) SELECT data FROM touched`, [id, this.environment]))[0]?.data ?? null;
   }
 }

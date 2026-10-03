@@ -1,3 +1,4 @@
+import { USER_SESSION_TTL_SECONDS } from '../lib/session-lifetime.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PlatformStore } from '../store/platform-store.js';
@@ -11,7 +12,7 @@ import { bindingKey, digest, type SsoRepository, type SsoRecord } from './reposi
 const SESSION_COOKIE = '__Host-mx-admin-session';
 const TRANSACTION_COOKIE = '__Host-mx-admin-login';
 const FIVE_MINUTES = 300_000;
-const SESSION_LIFETIME = 12 * 60 * 60 * 1000;
+const SESSION_LIFETIME = USER_SESSION_TTL_SECONDS * 1000;
 // Historical bootstrap identities have shipped preset credentials. Preserve
 // their legacy behavior, but never turn them into personal console principals.
 const BOOTSTRAP_USERS = new Set(['usr_demo_admin', 'usr_demo_user']);
@@ -21,6 +22,7 @@ interface Session extends SsoRecord, OidcIdentity {
   expiresAt: string;
   bindingId: string | null;
   scope: string;
+  opsTokenHash?: string;
 }
 class SsoError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
@@ -87,6 +89,7 @@ export function createAdminSsoMiddleware(deps: {
     if (!token || !repository) return null;
     const session = await repository.touchSession(digest(token)) as Session | null;
     if (!session || session.scope !== scope || Date.parse(session.expiresAt) <= Date.now()) return null;
+    if (session.opsTokenHash && !same(session.opsTokenHash, digest(process.env.MX_INTERNAL_OPS_TOKEN?.trim() ?? ''))) return null;
     return session;
   }
   async function userFor(session: Session) {
@@ -119,15 +122,34 @@ export function createAdminSsoMiddleware(deps: {
     if (!config || !repository || !oidc) throw new SsoError(503, 'sso_unavailable', '个人 SSO 登录尚未启用，现有应急访问仍可使用。');
     if (config.ingressToken && !same(String(req.headers['x-mx-identity-gateway'] ?? ''), config.ingressToken)) throw new SsoError(403, 'gateway_required', '请从配置的公网管理入口访问。');
     if (req.headers.origin && req.headers.origin !== config.origin) throw new SsoError(403, 'origin_rejected', '请从配置的管理入口访问。');
+    if (path === '/auth/admin/ops-login' && req.method === 'POST') {
+      if (req.headers.origin !== config.origin || req.headers['sec-fetch-site'] === 'cross-site') throw new SsoError(403, 'origin_rejected', '请从管理入口验证 Token。');
+      await rateLimit(req, 'ops-login');
+      const supplied = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+      const expected = process.env.MX_INTERNAL_OPS_TOKEN?.trim();
+      if (!expected || !supplied || supplied.length > 4096 || !same(supplied, expected)) throw new SsoError(401, 'invalid_ops_token', 'Internal Ops Token 不正确或尚未配置。');
+      const token = random();
+      if (!await repository.insert('admin-sso-session', digest(token), {
+        scope, issuer: config.issuer, subject: 'internal-ops', bindingId: null,
+        csrf: random(), authTime: Date.now() / 1000, opsTokenHash: digest(expected),
+        expiresAt: new Date(Date.now() + SESSION_LIFETIME).toISOString()
+      })) throw new Error('Session collision');
+      const previous = cookie(req, SESSION_COOKIE);
+      if (previous) await repository.remove('admin-sso-session', digest(previous));
+      setCookie(res, SESSION_COOKIE, token, USER_SESSION_TTL_SECONDS);
+      return json(res, 200, { ok: true });
+    }
     if (path === '/auth/admin/login' && req.method === 'GET') {
       await rateLimit(req, 'login');
       const existing = await sessionFor(req);
       const currentUser = existing ? await userFor(existing) : null;
+      const switching = new URL(req.url!, config.origin).searchParams.get('switch') === '1';
       const transaction: LoginTransaction = {
         state: random(), nonce: random(), verifier: random(), scope,
         expiresAt: new Date(Date.now() + FIVE_MINUTES).toISOString(),
         // Reauthentication cannot silently switch the administrator/account.
-        expectedUserId: currentUser?.userId ?? null
+        expectedUserId: switching ? null : currentUser?.userId ?? null,
+        reauthenticate: switching || Boolean(existing)
       };
       const url = await oidc.authorize(transaction);
       const token = random();
@@ -180,6 +202,8 @@ export function createAdminSsoMiddleware(deps: {
     if (path === '/auth/admin/session' && req.method === 'GET') {
       const entry = { enabled: true, loginOrigin: config.origin, accessMode: config.ingressToken ? 'sso-only' : 'sso-or-ops' };
       if (!session) return json(res, 200, { ...entry, authenticated: false });
+      if (session.opsTokenHash) return json(res, 200, { ...entry, authenticated: true, csrf: session.csrf,
+        authMethod: 'ops-token', canManage: true, user: { userId: null, displayName: 'Internal Ops Token' } });
       if (!session.bindingId) return json(res, 200, { ...entry, authenticated: true, bindingRequired: true, csrf: session.csrf });
       const user = await userFor(session);
       if (!user) {
@@ -203,7 +227,7 @@ export function createAdminSsoMiddleware(deps: {
     }
     if (path === '/auth/admin/link' && req.method === 'POST') {
       assertRecent(session);
-      if (session.bindingId) throw new SsoError(409, 'already_bound', '当前统一身份已绑定账号。');
+      if (session.bindingId || session.opsTokenHash) throw new SsoError(409, 'already_bound', '当前统一身份已绑定账号。');
       const login = typeof req.body?.login === 'string' ? req.body.login.trim() : '';
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
       if (!login || login.length > 255 || !password || password.length > 1024) throw new SsoError(400, 'invalid_credentials', '请填写已有 MX 账号和密码。');
@@ -225,6 +249,14 @@ export function createAdminSsoMiddleware(deps: {
       return json(res, 200, { ok: true });
     }
     if (bffPath && /^\/admin-api\/internal\/v1\//.test(path)) {
+      if (session.opsTokenHash) {
+        // The cookie contains only an opaque session id. Use the current server
+        // credential after checking its fingerprint, so rotation revokes it.
+        if (!['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method ?? '')) throw new SsoError(405, 'method_not_allowed', '不支持此操作。');
+        req.headers['x-mx-ops-token'] = process.env.MX_INTERNAL_OPS_TOKEN!.trim();
+        req.url = req.url!.slice('/admin-api'.length);
+        return next();
+      }
       const user = await userFor(session);
       if (!user) throw unauthorized();
       if (!user.roleIds.includes('mx-admin')) throw new SsoError(403, 'management_forbidden', '已登录；此账号尚未获得 Launcher 管理权限。');

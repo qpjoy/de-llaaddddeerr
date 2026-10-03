@@ -18,7 +18,7 @@
 
 | 核对对象 | 当前事实 | 对本设计的影响 |
 | --- | --- | --- |
-| Launcher SDK 登录 | `sdk-gateway.controller.ts` 支持 password/client_credentials 及专门的飞书流程；普通用户 token 默认期限为 7 天 | 不是通用 OIDC Provider；新 SSO 不能直接把现有接口换个公网域名 |
+| Launcher SDK 登录 | `sdk-gateway.controller.ts` 支持 password/client_credentials 及专门的飞书流程；普通用户 token 新签发默认期限为 30 天（2026-10-04 更新） | 不是通用 OIDC Provider；新 SSO 不能直接把现有接口换个公网域名 |
 | Launcher 管理入口 | SDK 创建用户需要 Internal Ops Token；截图也以服务器地址与 Ops Token 接入 | 要新增面向人的管理会话，保留受控应急通道，不能把公共注册接到此接口 |
 | 飞书账号解析 | 当前按 `tenant_key:open_id` 找 `profile.externalIds.feishuSubject`，未命中可创建 `usr_feishu_*`；会补 H2I/AppCenter/H2O 访问 | 已有外部身份定位基础，但不是完整绑定/归并系统；新公开飞书登录不能照搬员工自动开通 |
 | Launcher 存储 | `mx_platform_records` 按 kind/id/environment 存储身份、网络、发布等记录；`PostgresPlatformStore` 聚合多个领域 | 先收敛写入接口和领域依赖，不能复制一套库并让两边同时修改用户 |
@@ -166,6 +166,8 @@ Hub 保留自己的 `member_id → tenant_membership → tenant/consumer/Key`。
 | 长连接、流式返回、长任务 | 开始、续订/心跳、交付敏感结果前复核 | 到期停止新派发与后续交付；已发生的采购/付款保留并结算，不能假装被取消 |
 | Hub 数据 Key | 保留现有产品过期/撤销语义，新增统一观测 | 不使用网页登录 TTL 替换 Key；未来改变缓存要单独验证 |
 | H2I/Luopan 网络 | 本轮沿用现有语义；后续单独制定可验证的真实下线时限 | 当前 ban/release 不是 peer 删除；必须等执行与共享 peer 引用核验后才能显示已断开 |
+
+2026-10-04 实施更新：按用户要求，新的人类登录会话及 SDK 用户 Token 统一采用 30 天期限，原到期时间不追溯改写；管理写操作仍需最近 5 分钟身份验证。以下旧会话期限仅保留为前期候选，当前实现以 [公网身份部署说明](41-public-identity-and-certificates.md#2026-10-04-登录入口与-30-天会话更新) 为准。
 
 上述数字是设计候选与验收目标，不是现网 SLA，不追溯改变旧 token 的 7 天默认值。新普通 Web 会话建议空闲 12 小时、绝对 7 天；高权限管理会话空闲 30 分钟、绝对 12 小时；OIDC access token 建议 5 分钟，refresh token 轮换并检测重放。它们是不同层次：短 token 不能替代实时产品授权，长会话不能延长权益。
 

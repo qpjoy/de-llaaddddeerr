@@ -94,6 +94,7 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
   }
   login?.addEventListener('click', () => {
     if (!sameOrigin()) return;
+    if (session?.authMethod === 'ops-token') { logout.click(); return; }
     if (secureEntry()) location.assign(secureEntry());
     else if (session?.bindingRequired) { feedback.textContent = ''; dialog.showModal(); }
     else location.assign('/auth/admin/login');
@@ -109,7 +110,7 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
     try {
       await request('/auth/admin/logout', {});
       session = null;
-      location.assign('/auth/admin/login');
+      location.assign('/auth/admin/login?switch=1');
     } catch (error) { status.textContent = error.message; }
     finally { switchAccount.disabled = false; }
   });
@@ -133,12 +134,16 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
       await refresh();
       const url = new URL(location.href);
       if (url.searchParams.has('sso_error')) {
-        status.textContent = '登录验证未完成，请重新登录；原有账号不受影响。';
+        session = { ...session, errorMessage: '登录验证未完成，请重新登录；原有账号不受影响。' };
+        render();
+        status.textContent = session.errorMessage;
         url.searchParams.delete('sso_error');
         history.replaceState(null, '', url);
       }
     },
     reset() { revision++; session = null; refreshing = null; dialog?.close(); render(); },
+    entry() { return sameOrigin() ? session : null; },
+    async signInWithOps(token) { await request('/auth/admin/ops-login', { token }); await refresh(); },
     accessError,
     async prepare(url, headers, hasOpsToken) {
       if (!sameOrigin() || url.origin !== location.origin || !url.pathname.startsWith('/internal/v1/')) return false;

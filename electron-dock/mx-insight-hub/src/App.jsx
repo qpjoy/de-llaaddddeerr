@@ -563,8 +563,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
           </div>
         </div>
         <div className="mih-auth-copy">
-          <p className="qp-kicker">ADMIN SESSION</p>
-          <h1 id="mih-auth-title">进入数据网关管理台</h1>
+          <h1 id="mih-auth-title">登录 Insight Hub</h1>
           <p>使用统一 MX 账号访问自己的租户。管理权限与数据权限由 Hub 单独控制。</p>
         </div>
         {message ? <div className="mih-auth-notice"><ShieldCheck size={18} weight="duotone" aria-hidden="true" /><span>{message}</span></div> : null}
@@ -576,18 +575,20 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
         ) : (
           <>
             {options?.sso ? <div className="mih-auth-form">
-              <a className="qp-button qp-button--primary qp-button--lg qp-button--block" href={options.sso.loginUrl}>统一账号登录 / 注册</a>
-              <a className="qp-button qp-button--ghost" href={options.sso.switchUrl}>使用其他账号</a>
-              <p className="mih-auth-hint">登录后查看自己的数据、用量和账户。</p>
+              <a className="qp-button qp-button--primary qp-button--lg qp-button--block" href={options.sso.loginUrl}>统一账号登录</a>
+              <p className="mih-auth-caption">使用已有 Launcher 账号；注册与飞书登录在统一认证页完成。</p>
+              <details className="mih-auth-account-options"><summary>账号选项</summary><a className="qp-button qp-button--ghost" href={options.sso.switchUrl}>切换统一账号</a></details>
             </div> : null}
-            {options && !options.launcher && options.launcherUnavailableReason ? (
+            {options && !options.sso && !options.launcher && options.launcherUnavailableReason ? (
               // Shown rather than hidden: an operator who configured Launcher
               // and sees no tab needs to know which half is missing.
               <p className="mih-auth-hint">
                 Launcher 账号登录未启用：{options.launcherUnavailableReason}
               </p>
             ) : null}
-            {options?.launcher ? (
+            <details className="mih-auth-alternative">
+              <summary>使用 Admin Token{!options?.sso && options?.launcher ? ' / 兼容登录' : ''}</summary>
+            {!options?.sso && options?.launcher ? (
               <div className="mih-signin-tabs" role="tablist">
                 <button type="button" role="tab" aria-selected={mode === 'launcher'}
                   className={`qp-button qp-button--ghost${mode === 'launcher' ? ' is-active' : ''}`}
@@ -598,7 +599,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
               </div>
             ) : null}
 
-            {options?.launcher && mode === 'launcher' ? (
+            {!options?.sso && options?.launcher && mode === 'launcher' ? (
               <form className="mih-auth-form" onSubmit={submitLauncher}>
                 <Field label="账号" hint="使用 MX Launcher 的账号密码；由 Hub 转发给 Launcher 校验。">
                   <input className="qp-input" value={account.username} autoComplete="username" autoFocus required
@@ -621,7 +622,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
               </form>
             ) : (
               <form className="mih-auth-form" onSubmit={submit}>
-                <Field label="Admin Token" hint="请求时通过 x-mx-insight-admin-token 发送，不写入 URL。">
+                <Field label="Admin Token" hint="仅保存在当前浏览器会话，关闭会话后清除。">
                   <span className="qp-input-group">
                     <span className="qp-input-group__prefix"><LockKey size={17} aria-hidden="true" /></span>
                     <input
@@ -629,9 +630,8 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
                       type="password"
                       value={candidate}
                       onChange={(event) => setCandidate(event.target.value)}
-                      placeholder="输入管理凭证或 Launcher token"
+                      placeholder="输入 Admin Token"
                       autoComplete="off"
-                      autoFocus
                       required
                     />
                   </span>
@@ -643,11 +643,12 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
                 </button>
               </form>
             )}
+            </details>
           </>
         )}
         <footer className="mih-auth-footer">
           <LockKey size={15} aria-hidden="true" />
-          <span>管理面与公共 Data API 严格分离</span>
+          <span>统一账号登录保持 30 天。原成员与租户权限继续保留。</span>
         </footer>
       </section>
     </div>

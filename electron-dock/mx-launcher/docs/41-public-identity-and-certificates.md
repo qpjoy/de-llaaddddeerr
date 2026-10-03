@@ -25,9 +25,9 @@
 - 新回源只绑定 `10.88.88.88:18444`。Public TLS 在 Domestic 网关终止，经 WireGuard → Internal Nginx → 公网身份进程。端口占用预检不会接管其他服务。
 - Internal ingress 默认只接受已知 WG 对端 `10.88.0.1` 并加入独立网关凭据。身份进程验证凭据、客户端 IP 与精确 Host；Launcher 公网 BFF 再验证凭据、Cookie/CSRF 和当前用户管理角色。
 - Auth 域名只提供 `/identity/`；Launcher 只提供 `/admin/`、`/auth/admin/`、`/admin-api/`。原始 Internal API、注册 backchannel 不对公网代理，外部 Ops Token/Authorization 在公网管理代理中丢弃。
-- 公网管理页先读取 `/auth/admin/session`；`accessMode: sso-only` 表示必须使用个人登录。未登录或未获管理授权时只显示提示，不加载管理数据；已授权的 JSON 请求和发布文件上传统一经过 `/admin-api/internal/v1/` 并携带会话 CSRF。会话过期不会回退到原始 `/internal/v1/`。内网应急 Token 模式保留原路径。
+- 公网管理页先读取 `/auth/admin/session`；`accessMode: sso-only` 表示禁止浏览器直连原始 Internal API。2026-10-04 起支持统一账号或在同源 `/auth/admin/ops-login` 验证 Ops Token 后建立管理 Cookie；未登录或未获管理授权时只显示登录页，不展示工作台或加载管理数据；已授权的 JSON 请求和发布文件上传统一经过 `/admin-api/internal/v1/` 并携带会话 CSRF。会话过期不会回退到原始 `/internal/v1/`。内网应急 Token 模式保留原路径。
 - 注册策略、邀请码和账号库沿用私网原 namespace。公开注册不授予管理角色。明确禁止 `mx-launcher` 后旧管理会话的下一次受保护请求也被拒绝。
-- Hub 新登录使用公网 issuer；旧私网 SSO 会话沿原 issuer 走完最多 8 小时有效期，复用同一加密密钥。新旧身份经原 `mx-user-center:<environment>` 身份绑定复用成员/租户，不按同名或邮箱合并。
+- Hub 新登录使用公网 issuer；旧私网 SSO 会话沿原 issuer 走完原有有效期（早期版本为 8 小时；2026-10-04 起新签发为 30 天），复用同一加密密钥。新旧身份经原 `mx-user-center:<environment>` 身份绑定复用成员/租户，不按同名或邮箱合并。
 - H2I、Luopan 的 SDK 登录协议、客户端配置、VPN 不由此入口改写。本次仍未改实际 Luopan 产品目录。正常 deploy 有既有滚动/重建行为，不能据此承诺线上完全无中断。
 
 ## 一次登记，重复部署复用
@@ -85,3 +85,18 @@ bash certificates/manage.sh install-timer
 `ops identity public` 属于 Launcher，必须在 `mx-launcher` 目录执行，Hub 的同名脚本不支持此子命令。只有成功登记后才会产生 `/var/lib/mx-launcher/identity/public-ingress.conf`。已经登记但该文件丢失时，在 Launcher 目录执行 `bash scripts/manage.sh ops identity ingress`，只按原档案补回文件，不轮换密钥或重启服务；今后 deploy 也会自动补回。内网 Nginx 仍独立检查和加载此文件。
 
 配套 de-mingxi 新增仓库根目录/compass/deploy 的 `scripts/manage.sh cert ...` 统一入口、`internal-identity-install` 及 Auth/Launcher 内网参考模板。模板不含真实凭据，不可直接当生产配置安装。公网启用脚本在改变配置前先检查内网 discovery 和 SSO session，回源未就绪时停止。
+
+
+## 2026-10-04 登录入口与 30 天会话更新
+
+- Launcher 首页先验证登录，未登录、过期或没有 `mx-admin` 时隐藏整个工作台。默认「统一账号登录」前往 Auth；「账号选项」内可强制切换身份。Internal Ops Token 入口折叠显示。
+- Hub 同样使用 Auth 主入口及折叠的 Admin Token 入口。已配置 SSO 时不再重复显示 Launcher 密码表单；未配置 SSO 的旧部署仍保留兼容入口和原 API。
+- Auth 使用原 Launcher 用户中心及原密码，不创建另一份账号库。Hub 只复用同一身份对应的 member/tenant/membership，管理权和数据权限仍由各应用分别检查。没有按名称、邮箱合并账号或覆盖原数据。
+- Auth 的登录/注册/飞书绑定保持一个认证界面；interaction ID 是每次认证事务的随机标识，变化是正常现象。默认 SSO 可复用有效身份；明确切换或管理操作重新验证才要求再次输入身份凭证。
+- 新 Auth Session/Grant、Launcher 管理 Cookie、Hub SSO Cookie 及其服务端 access token、新 SDK 密码/飞书用户 Token 默认 30 天。请求更短有效期的 SDK 调用继续遵守请求值；服务账号 Token 的原期限不变。授权码、登录事务、待关联会话及短期 ID Token 不延长。个人管理写操作仍要求最近 5 分钟认证。
+- 旧 Cookie/Token 按已经保存的绝对到期时间继续有效；部署不会重写它们。需要立即获得 30 天期限时退出后重新登录一次。密码更新、账号禁用、应用封禁及现有撤销机制继续生效。
+- 公网 Ops Token 在请求正文提交一次，经 Origin、网关来源和限流检查后转换为 Secure/HttpOnly 管理 Cookie。数据库只保存凭据指纹和随机会话 ID 摘要；Token 轮换使相关会话失效。后续请求通过 BFF 和 CSRF 校验，不在公网 Nginx 放行 `/internal/`，不向前端返回服务器 Ops Token。
+
+已完成初次域名/SSO 登记的服务器：同步代码后，先执行原 **mx-launcher deploy**，再执行原 **mx-insight-hub deploy**，沿用原 7789 代理、TMPDIR、节点与 IP 参数。该更新无需重新运行 `identity public`、换证书或增加 env key，也无需修改 de-mingxi/内网 Nginx。部署后刷新两个页面，以已有账号与折叠 Token 入口分别验收登录、退出和权限；Auth 服务随 Launcher 部署更新。
+
+本地验收包含真实 OIDC/HTTPS 与 PostgreSQL 的旧身份复用、租户连续性、重启恢复、30 天 Cookie、Token 登录来源/CSRF/轮换/退出，以及浏览器匿名门禁、文件上传 BFF、会话过期、普通账号阻挡、移动布局。生产入口仍需部署后验收。

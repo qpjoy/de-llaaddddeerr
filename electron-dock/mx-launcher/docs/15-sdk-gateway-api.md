@@ -154,10 +154,10 @@ token 的 subject 必须来自精确匹配的用户；大小写不准确或同�
 导入旧系统账号时应把旧 `account/password/user_name` 写入 User Center，而不是继续让 Domestic
 保存登录真相。
 
-password grant 签发的用户 access token 默认有效 `604800` 秒（7 天），并以 7 天为上限；
+password grant 签发的用户 access token 默认有效 `2592000` 秒（30 天），并以 30 天为上限；
 MX-H2I、Luopan 和其他未显式传入更短 `expires_in` 的 standalone 都使用这个周期。当前尚未
 实现 refresh token grant，token 到期、被撤销或用户修改密码后需要重新登录。修改默认值
-不会延长已经签发的 token，客户端应重新登录以获得新的 7 天 token。
+不会延长已经签发的 token，客户端应重新登录以获得新的 30 天 token。
 
 password grant 在执行同步密码哈希前，使用 PostgreSQL 原子固定窗口同时消费来源 IP、
 canonical user 和 IP+user 三类 SHA-256 bucket；窗口为 5 分钟，限额分别为 60、25、10。

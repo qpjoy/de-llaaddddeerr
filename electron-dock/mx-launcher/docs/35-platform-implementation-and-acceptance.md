@@ -116,7 +116,7 @@ Launcher 管理站作为标准 OIDC 客户端（RP），新增“个人账号”
 ### 会话与兼容边界
 
 - 浏览器仅保存 `__Host-`、Secure、HttpOnly、SameSite=Lax 的随机会话 cookie；无 Domain，Path 为 `/`。数据库记录会话 ID 摘要，浏览器不保存上游 access/refresh/ID token，也不获得 Ops Token。
-- 登录事务与待关联会话有效期 5 分钟；管理会话闲置 30 分钟失效，绝对上限 12 小时。全部管理写操作要求上游 `auth_time` 在最近 5 分钟内；过期时点击“重新验证”，操作不会自动重放。
+- 登录事务与待关联会话有效期 5 分钟；2026-10-04 起新管理会话绝对上限为 30 天，取消旧的 30 分钟闲置失效；已签发会话保留原绝对到期时间。个人账号的全部管理写操作要求上游 `auth_time` 在最近 5 分钟内；过期时点击“重新验证”，操作不会自动重放。
 - 状态、事务、映射存于现有 PostgreSQL `mx_platform_records` 的三个新 kind：`admin-sso-transaction`、`admin-sso-session`、`admin-sso-binding`。复用原复合主键，不修改旧用户/租户记录，无新增 schema 迁移。登录事务用原子 DELETE RETURNING 消费，续期只 UPDATE 已存在且未过期记录，不恢复已退出的会话；过期瞬态记录在新会话/事务插入时回收。
 - 管理请求改走同源 `/admin-api/internal/v1/*`，校验 cookie、CSRF、Origin、当前用户与角色后，在服务端请求上下文内授权。原 `/internal/v1/*` 不因为携带 SSO cookie 获得管理权限。旧 SDK token、密码、飞书、VPN 接口及网络 lease 不改。
 - 每个 BFF 请求记录原 `userId`、服务端生成的 requestId、method、path 和响应状态；不记录密码、cookie、授权码或响应体。现有领域审计仍保留，可通过新入口审计辨认个人操作者。

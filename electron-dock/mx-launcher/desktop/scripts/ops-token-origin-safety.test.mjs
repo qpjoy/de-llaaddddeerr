@@ -48,7 +48,7 @@ const security = Function(
   'opsTokenInput',
   'opsTokenApply',
   'opsTokenFeedback',
-  'fetchJson',
+  'fetch',
   'refreshAdmin',
   `
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
@@ -56,6 +56,9 @@ ${functionSource(rendererSource, 'isLocalStaticAdminBaseUrl')}
 ${functionSource(rendererSource, 'normalizeServerBaseValue')}
 function defaultServerBaseUrl() { return LOCAL_SERVER_BASE_URL; }
 let opsTokenBinding = null;
+let verifiedOpsBinding = null;
+function renderLoginGate() {}
+function normalizedServerBase() { return serverInput.value; }
 let drawerRenderCount = 0;
 function renderUserEditorDrawer() { drawerRenderCount += 1; }
 const state = { userCenter: {
@@ -88,9 +91,9 @@ return {
   setDrawer: (value) => { state.userCenter.drawer = value; }
 };
 `
-)(serverInput, opsTokenInput, opsTokenApply, opsTokenFeedback, (path) => {
-  requests.push({ path, token: security.opsTokenForRequest(new URL(path, serverInput.value), 'GET') });
-  return requestResponse;
+)(serverInput, opsTokenInput, opsTokenApply, opsTokenFeedback, (url, options) => {
+  requests.push({ path: new URL(url).pathname, token: options.headers['x-mx-ops-token'] });
+  return requestResponse.then(() => ({ ok: true, json: async () => ({ roles: [] }) }));
 }, async () => {
   refreshCount += 1;
   return refreshResult;

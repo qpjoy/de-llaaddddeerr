@@ -1,3 +1,4 @@
+import { USER_SESSION_TTL_SECONDS } from '../../lib/session-lifetime.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import {
@@ -21,7 +22,7 @@ import type {
 } from '../../types.js';
 
 const FEISHU_APP_IDS = ['mx-h2i', 'appcenter', 'h2o'];
-const FEISHU_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+const FEISHU_TOKEN_TTL_SECONDS = USER_SESSION_TTL_SECONDS;
 const FEISHU_REQUEST_TIMEOUT_MS = 10_000;
 const FEISHU_RATE_LIMIT_WINDOW_SECONDS = 60;
 const FEISHU_AUTHORIZE_LIMIT_PER_SOURCE = 60;

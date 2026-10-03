@@ -1,4 +1,5 @@
 import * as oidc from 'openid-client';
+import { USER_SESSION_TTL_SECONDS } from '../lib/session-lifetime.js';
 import type { AdminSsoConfig } from './config.js';
 
 export interface LoginTransaction extends Record<string, unknown> {
@@ -6,6 +7,7 @@ export interface LoginTransaction extends Record<string, unknown> {
   nonce: string;
   verifier: string;
   expiresAt: string;
+  reauthenticate?: boolean;
 }
 export interface OidcIdentity { issuer: string; subject: string; authTime: number }
 export interface AdminOidcClient {
@@ -30,15 +32,15 @@ export function createAdminOidcClient(settings: AdminSsoConfig, injected?: oidc.
       return oidc.buildAuthorizationUrl(await configuration(), {
         redirect_uri: settings.callbackUrl, scope: 'openid', response_type: 'code', response_mode: 'query',
         code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
-        // Explicit console login/reauthentication must show an interaction even
-        // when the IdP has a recent session (local logout does not end SSO).
-        state: transaction.state, nonce: transaction.nonce, max_age: '300', prompt: 'login'
+        state: transaction.state, nonce: transaction.nonce,
+        max_age: String(transaction.reauthenticate ? 300 : USER_SESSION_TTL_SECONDS),
+        ...(transaction.reauthenticate ? { prompt: 'login' } : {})
       });
     },
     async redeem(url, transaction) {
       const tokens = await oidc.authorizationCodeGrant(await configuration(), url, {
         pkceCodeVerifier: transaction.verifier, expectedState: transaction.state,
-        expectedNonce: transaction.nonce, maxAge: 300, idTokenExpected: true
+        expectedNonce: transaction.nonce, maxAge: transaction.reauthenticate ? 300 : USER_SESSION_TTL_SECONDS, idTokenExpected: true
       });
       const claims = tokens.claims();
       if (!claims || claims.iss !== settings.issuer || typeof claims.sub !== 'string' || !claims.sub

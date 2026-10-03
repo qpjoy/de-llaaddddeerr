@@ -1,3 +1,4 @@
+import { USER_SESSION_TTL_SECONDS } from '../../lib/session-lifetime.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
@@ -35,7 +36,7 @@ import type {
 import { toPrincipalInput, toTokenInput } from '../user-center/user-center.controller.js';
 import { FeishuAuthService } from './feishu-auth.service.js';
 
-const USER_ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+const USER_ACCESS_TOKEN_TTL_SECONDS = USER_SESSION_TTL_SECONDS;
 const SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const OAUTH_RATE_LIMIT_WINDOW_SECONDS = 5 * 60;
 const PASSWORD_SOURCE_ATTEMPT_LIMIT = 60;

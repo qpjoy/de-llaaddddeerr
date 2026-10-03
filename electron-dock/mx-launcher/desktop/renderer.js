@@ -373,7 +373,9 @@ const state = {
 
 let setupMonitorToken = 0;
 let opsTokenBinding = null;
+let verifiedOpsBinding = null;
 const adminSession = createAdminSessionUi({ serverBase: () => normalizedServerBase(), onChange: () => {
+  renderLoginGate();
   renderWorkbench();
   const error = currentAdminAccessError();
   if (error) {
@@ -381,6 +383,37 @@ const adminSession = createAdminSessionUi({ serverBase: () => normalizedServerBa
     setConnection(access.health === 'failed' ? 'error' : 'idle', access.connection, access.title);
   }
 } });
+
+function managementSignedIn() {
+  const entry = adminSession.entry();
+  return Boolean((entry?.authenticated && entry.canManage && !entry.unavailable)
+    || (verifiedOpsBinding && verifiedOpsBinding === opsTokenBinding));
+}
+
+function renderLoginGate() {
+  const gate = document.getElementById('login-gate');
+  if (!gate) return;
+  const allowed = managementSignedIn(), entry = adminSession.entry();
+  document.body.classList.toggle('is-locked', !allowed);
+  document.querySelector('.shell').inert = !allowed;
+  gate.hidden = allowed;
+  const login = document.getElementById('gate-login');
+  login.disabled = !entry?.enabled || entry?.unavailable;
+  document.getElementById('gate-switch').disabled = login.disabled;
+  login.textContent = entry?.bindingRequired ? '关联已有账号' : entry?.authenticated ? '切换账号' : '统一账号登录';
+  document.getElementById('gate-status').textContent = entry?.errorMessage || (entry?.unavailable ? '暂时无法验证登录状态，请刷新重试。'
+    : entry?.bindingRequired ? '请先关联已有 MX 账号。'
+      : entry?.authenticated && !entry.canManage ? '账号已登录，尚未获得 Launcher 管理权限。请联系管理员授权或切换账号。'
+        : entry?.enabled ? '使用已有 Launcher 账号，登录后进入管理工作台。' : '统一登录暂未启用，可展开下方 Token 入口。');
+  document.getElementById('gate-signout').hidden = !entry?.authenticated;
+  document.getElementById('gate-server-field').hidden = entry?.accessMode === 'sso-only';
+  document.getElementById('gate-server').value = serverInput.value || defaultServerBaseUrl();
+  document.getElementById('ops-session-logout').hidden = !verifiedOpsBinding;
+}
+
+function requireManagementLogin() {
+  if (!managementSignedIn()) throw Object.assign(new Error('请先登录管理工作台。'), { code: 'session_required', status: 401 });
+}
 
 function currentAdminAccessError() {
   try { return adminSession.accessError(hasAdminOpsToken(new URL(`${normalizedServerBase()}/`))); }
@@ -865,6 +898,34 @@ const serviceOperationsPanel = createServiceOperations(document.getElementById('
 });
 
 refreshNavTabs();
+document.getElementById('gate-login').addEventListener('click', () => {
+  const entry = adminSession.entry();
+  document.getElementById(entry?.authenticated && !entry.bindingRequired ? 'admin-account-switch' : 'admin-account-login').click();
+});
+document.getElementById('gate-switch').addEventListener('click', () => { location.assign('/auth/admin/login?switch=1'); });
+document.getElementById('gate-signout').addEventListener('click', () => document.getElementById('admin-account-logout').click());
+document.getElementById('ops-session-logout').addEventListener('click', () => { clearOpsToken(); location.reload(); });
+document.getElementById('gate-token-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button'), input = document.getElementById('gate-token');
+  const feedback = document.getElementById('gate-token-error');
+  button.disabled = true; feedback.textContent = '';
+  try {
+    const entry = adminSession.entry();
+    if (entry?.enabled && entry.loginOrigin === location.origin) {
+      await adminSession.signInWithOps(input.value.trim());
+    } else {
+      setServerBaseInputValue(document.getElementById('gate-server').value);
+      opsTokenInput.value = input.value.trim(); bindOpsTokenToCurrentServer();
+      await applyOpsToken();
+      if (!managementSignedIn()) throw new Error('Token 验证失败，请检查凭证与服务器地址。');
+    }
+    input.value = '';
+    renderLoginGate();
+    await refreshProducts();
+  } catch (error) { feedback.textContent = error.message; input.value = ''; }
+  finally { button.disabled = false; }
+});
 void boot();
 
 if (workbenchSearch) workbenchSearch.addEventListener('input', () => renderWorkbench());
@@ -938,6 +999,7 @@ serverInput.addEventListener('change', () => {
 if (opsTokenInput) {
   opsTokenInput.addEventListener('input', () => {
     bindOpsTokenToCurrentServer();
+    renderLoginGate();
   });
 }
 
@@ -1185,7 +1247,8 @@ async function boot() {
   setServerBaseInputValue(config.serverBaseUrl || serverInput.value || defaultServerBaseUrl());
   initTopologyScene();
   await adminSession.refresh();
-  await refreshProducts();
+  renderLoginGate();
+  if (managementSignedIn()) await refreshProducts();
   const status = await api.getStatus();
   renderStatus(status);
 }
@@ -4479,6 +4542,7 @@ function awxActionBodyForExecution(action, body) {
 }
 
 async function fetchJson(path, options = {}) {
+  requireManagementLogin();
   const method = String(options.method || 'GET').toUpperCase();
   const body = options.body ? JSON.stringify(options.body) : undefined;
   let requestUrl;
@@ -4514,6 +4578,7 @@ async function fetchJson(path, options = {}) {
     throw new Error('Admin API returned invalid JSON');
   }
   if (!response.ok) {
+    if (opsToken && response.status === 401) { verifiedOpsBinding = null; renderLoginGate(); }
     if (usesPersonalSession) await adminSession.rejected(payload);
     throw Object.assign(new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`), { code: payload?.code, status: response.status });
   }
@@ -4680,6 +4745,7 @@ function synchronizeLauncherNetworkServerScope(value) {
 function clearOpsToken() {
   if (opsTokenInput) opsTokenInput.value = '';
   opsTokenBinding = null;
+  verifiedOpsBinding = null;
   setOpsTokenFeedback();
   clearSystemSubscriptionSecrets();
 }
@@ -4704,8 +4770,13 @@ async function applyOpsToken() {
   opsTokenApply.textContent = '应用中';
   setOpsTokenFeedback('', '正在验证 Token…');
   try {
-    await fetchJson('/internal/v1/user-center/roles');
+    const response = await fetch(`${normalizedServerBase()}/internal/v1/user-center/roles`, {
+      headers: { 'x-mx-ops-token': binding.token }, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok || !Array.isArray((await response.json()).roles)) throw new Error('Token 验证失败');
     if (opsTokenBinding !== binding) return;
+    verifiedOpsBinding = binding;
+    renderLoginGate();
     state.userCenter.feedback = null;
     const refreshed = await refreshAdmin();
     if (opsTokenBinding !== binding) return;
@@ -9153,6 +9224,7 @@ function commaList(value) {
 }
 
 async function uploadReleaseArtifactFile(input, file) {
+  requireManagementLogin();
   const params = new URLSearchParams({
     releaseId: input.releaseId,
     productId: input.productId,

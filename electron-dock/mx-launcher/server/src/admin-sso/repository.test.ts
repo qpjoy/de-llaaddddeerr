@@ -32,8 +32,8 @@ test('Postgres replicas atomically consume callbacks, bind once and preserve/rev
     await a.insert('admin-sso-session', 'session', { expiresAt, bindingId: 'binding' });
     await a.close();
     assert.equal((await b.touchSession('session'))?.bindingId, 'binding');
-    await db.query("UPDATE mx_platform_records SET updated_at=now()-interval '31 minutes' WHERE environment=$1 AND kind='admin-sso-session'", [environment]);
-    assert.equal(await b.touchSession('session'), null);
+    await db.query("UPDATE mx_platform_records SET updated_at=now()-interval '20 days' WHERE environment=$1 AND kind='admin-sso-session'", [environment]);
+    assert.equal((await b.touchSession('session'))?.bindingId, 'binding');
     await db.query("UPDATE mx_platform_records SET updated_at=now(), data=jsonb_set(data,'{expiresAt}',to_jsonb((now()-interval '1 minute')::text)) WHERE environment=$1 AND kind='admin-sso-session'", [environment]);
     assert.equal(await b.touchSession('session'), null);
     await b.remove('admin-sso-session', 'session');

@@ -31,7 +31,7 @@ class TestRepository implements SsoRepository {
   async remove(kind: SsoKind, id: string) { await this.take(kind, id); }
   async touchSession(id: string) {
     const value = this.records.get(`admin-sso-session:${id}`);
-    if (!value || Date.parse(value.data.expiresAt as string) <= Date.now() || Date.now() - value.touched >= 1800000) return null;
+    if (!value || Date.parse(value.data.expiresAt as string) <= Date.now()) return null;
     value.touched = Date.now(); return structuredClone(value.data);
   }
 }
@@ -105,13 +105,14 @@ async function fixture(localSubjects = false, publicGateway = false) {
     return await fetch(`${origin}${path}`, { redirect: 'manual', ...(body !== undefined ? { method: 'POST', body: JSON.stringify(body) } : {}),
       headers: { ...(publicGateway ? { 'x-mx-identity-gateway': 'test-gateway-secret', 'x-mx-client-ip': '203.0.113.1' } : {}), ...(sessionCookie ? { cookie: sessionCookie } : {}), ...(body !== undefined ? { 'content-type': 'application/json', origin: requestOrigin } : {}), ...(csrf ? { 'x-mx-admin-csrf': csrf } : {}) } }) as TestResponse;
   }
-  async function begin(sessionCookie = '') {
-    const response = await request('/auth/admin/login', sessionCookie);
+  async function begin(sessionCookie = '', switching = false) {
+    const response = await request('/auth/admin/login' + (switching ? '?switch=1' : ''), sessionCookie);
     assert.equal(response.status, 303);
     const authorize = new URL(response.headers.get('location')!);
     assert.equal(authorize.searchParams.get('code_challenge_method'), 'S256');
     assert.equal(authorize.searchParams.get('scope'), 'openid');
-    assert.equal(authorize.searchParams.get('prompt'), 'login');
+    assert.equal(authorize.searchParams.get('prompt'), sessionCookie || switching ? 'login' : null);
+    assert.equal(authorize.searchParams.get('max_age'), sessionCookie || switching ? '300' : '2592000');
     const code = randomUUID(); codes.set(code, authorize.searchParams);
     return { loginCookie: cookieValue(response, '__Host-mx-admin-login'), callback: `/auth/admin/callback?code=${code}&state=${authorize.searchParams.get('state')}` };
   }
@@ -222,7 +223,7 @@ test('ordinary accounts gain no management rights; role removal and account disa
   } finally { await f.close(); }
 });
 
-test('write operations require recent authentication; expired/idle sessions cannot resurrect after logout', async () => {
+test('write operations require recent authentication; 30-day sessions survive idle time but expire absolutely', async () => {
   const f = await fixture();
   try {
     const sessionCookie = await f.bind(await f.login());
@@ -232,8 +233,9 @@ test('write operations require recent authentication; expired/idle sessions cann
     record.data.authTime = Math.floor(Date.now() / 1000) - 301;
     assert.equal((await f.request('/admin-api/internal/v1/admin/service-operations/execute', sessionCookie, {}, session.csrf)).status, 401);
     assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 200);
-    record.touched = Date.now() - 1800001;
-    assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 401);
+    assert.ok(Date.parse(record.data.expiresAt as string) - Date.now() > 29 * 86400000);
+    record.touched = Date.now() - 20 * 86400000;
+    assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 200);
     record.touched = Date.now(); record.data.expiresAt = new Date(Date.now() - 1).toISOString();
     assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 401);
   } finally { await f.close(); }
@@ -401,5 +403,58 @@ test('public console requires gateway provenance and immediately honors a user a
     assert.equal((await fetch(`${f.origin}/admin-api/internal/v1/admin`, { headers: { cookie, 'x-mx-identity-gateway': 'spoofed' } })).status, 403);
     await f.store.createUserCenterUser({ userId: 'existing-admin', deniedAppIds: ['mx-launcher'] });
     assert.equal((await f.request('/admin-api/internal/v1/admin', cookie, undefined, csrf)).status, 401);
+  } finally { await f.close(); }
+});
+
+
+test('public Ops sign-in issues an opaque 30-day cookie; checks origin, gateway, CSRF, rotation and logout without creating a user', async () => {
+  const previous = process.env.MX_INTERNAL_OPS_TOKEN;
+  process.env.MX_INTERNAL_OPS_TOKEN = 'fixture-ops-secret';
+  const f = await fixture(true, true);
+  try {
+    const users = await f.store.listUserCenterUsers();
+    assert.equal((await f.request('/auth/admin/ops-login', '', { token: 'wrong' })).status, 401);
+    assert.equal((await f.request('/auth/admin/ops-login', '', { token: 'fixture-ops-secret' }, undefined, 'https://evil.test')).status, 403);
+    assert.equal((await f.request('/auth/admin/ops-login', '', { token: 'fixture-ops-secret' }, undefined, '')).status, 403);
+    assert.equal((await fetch(`${f.origin}/auth/admin/ops-login`, { method: 'POST', headers: { origin: f.origin, 'content-type': 'application/json' }, body: JSON.stringify({ token: 'fixture-ops-secret' }) })).status, 403);
+    const login = await f.request('/auth/admin/ops-login', '', { token: 'fixture-ops-secret' });
+    assert.equal(login.status, 200);
+    assert.match(login.headers.getSetCookie().join(';'), /HttpOnly; Secure; SameSite=Lax; Max-Age=2592000/);
+    const cookie = cookieValue(login, '__Host-mx-admin-session');
+    assert.ok(!cookie.includes('fixture-ops-secret'));
+    assert.ok(!JSON.stringify([...f.repository.records]).includes('fixture-ops-secret'));
+    const session = await (await f.request('/auth/admin/session', cookie)).json();
+    assert.equal(session.canManage, true);
+    assert.equal(session.user.userId, null);
+    assert.equal((await f.request('/admin-api/internal/v1/user-center/users', cookie)).status, 403);
+    assert.equal((await f.request('/admin-api/internal/v1/user-center/users', cookie, {}, session.csrf, 'https://evil.test')).status, 403);
+    const response = await f.request('/admin-api/internal/v1/user-center/users', cookie, undefined, session.csrf);
+    assert.equal(response.status, 200); assert.equal((await response.json()).actor, 'ops');
+    assert.equal((await f.request('/internal/v1/user-center/users', cookie, undefined, session.csrf)).status, 401);
+    assert.equal((await f.request('/auth/admin/logout', cookie, {}, session.csrf)).status, 200);
+    assert.equal((await f.request('/admin-api/internal/v1/user-center/users', cookie, undefined, session.csrf)).status, 401);
+    const next = cookieValue(await f.request('/auth/admin/ops-login', '', { token: 'fixture-ops-secret' }), '__Host-mx-admin-session');
+    process.env.MX_INTERNAL_OPS_TOKEN = 'fixture-rotated';
+    assert.equal((await (await f.request('/auth/admin/session', next)).json()).authenticated, false);
+    assert.deepEqual(await f.store.listUserCenterUsers(), users);
+  } finally { await f.close(); if (previous === undefined) delete process.env.MX_INTERNAL_OPS_TOKEN; else process.env.MX_INTERNAL_OPS_TOKEN = previous; }
+});
+
+test('normal SSO accepts a remembered identity; explicit switching and write reauthentication require fresh proof', async () => {
+  const f = await fixture(true);
+  try {
+    f.setClaims({ sub: 'existing-admin', auth_time: Math.floor(Date.now() / 1000) - 20 * 86400 });
+    const cookie = await f.login();
+    const session = await (await f.request('/auth/admin/session', cookie)).json();
+    assert.equal(session.canManage, true);
+    assert.equal((await f.request('/admin-api/internal/v1/admin/actions', cookie, {}, session.csrf)).status, 401);
+    const stale = await f.begin(cookie);
+    assert.match((await f.request(stale.callback, `${stale.loginCookie}; ${cookie}`)).headers.get('location')!, /sso_error/);
+    f.setClaims({ sub: 'existing-user' });
+    const switched = await f.begin(cookie, true);
+    const result = await f.request(switched.callback, `${switched.loginCookie}; ${cookie}`);
+    assert.equal(result.headers.get('location'), '/admin/');
+    const next = cookieValue(result, '__Host-mx-admin-session');
+    assert.equal((await (await f.request('/auth/admin/session', next)).json()).user.userId, 'existing-user');
   } finally { await f.close(); }
 });

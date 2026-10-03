@@ -1,3 +1,4 @@
+import { USER_SESSION_TTL_SECONDS } from '../lib/session-lifetime.js';
 import { createHmac, timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Provider, { type Configuration } from 'oidc-provider';
@@ -24,32 +25,35 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
   const registrationAllowed = policy && policy.mode !== 'closed';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${registering ? '注册' : '登录'} · MX</title>
   <style>
+  :root{color-scheme:dark;--bg:#141417;--panel:#21232d;--input:#252936;--line:#3c4658;--text:#e2e2e2;--muted:#a7b3bf;--accent:#2bf6d2;--on-accent:#052823}
   *{box-sizing:border-box}
-  body{margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;background:#141417;color:#e2e2e2;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-  main{width:100%;max-width:440px;min-width:0;padding:28px;background:#1a1b23;border:1px solid #303747;border-radius:16px}
+  body{margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  main{width:100%;max-width:460px;min-width:0;padding:32px;background:var(--panel);border:1px solid var(--line);border-radius:16px}
   .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.02em}
   .mark{display:grid;place-items:center;width:36px;height:36px;background:#2bf6d2;color:#062a25;border-radius:10px;font-size:15px;font-weight:800}
   h1{font-size:24px;line-height:1.3;letter-spacing:-.02em;margin:20px 0 8px}
-  .intro{color:#a7b3bf;margin:0 0 24px}
+  .intro{color:var(--muted);margin:0 0 24px}
   form{display:grid;gap:16px}
   .field{min-width:0}
   label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
   input,button{width:100%;min-width:0;min-height:44px;border-radius:8px;font:inherit}
-  input{padding:9px 12px;background:#21232d;border:1px solid #435166;color:#fff;font-size:16px;line-height:24px}
+  input{padding:9px 12px;background:var(--input);border:1px solid var(--line);color:var(--text);font-size:16px;line-height:24px}
   input:hover{border-color:#647386}
   input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid #2bf6d2;outline-offset:3px}
-  .hint{display:block;font-size:12px;color:#a7b3bf;margin-top:6px}
-  button{margin-top:4px;padding:10px 16px;border:0;background:#2bf6d2;color:#052823;font-weight:600;cursor:pointer}
+  .hint{display:block;font-size:12px;color:var(--muted);margin-top:6px}
+  button{margin-top:4px;padding:10px 16px;border:0;background:var(--accent);color:var(--on-accent);font-weight:600;cursor:pointer}
   button:hover{background:#11cdb5}
-  button.secondary{background:#21232d;border:1px solid #435166;color:#e2e2e2}
-  button.secondary:hover{border-color:#70e9d8}
-  button.link-button{margin:0;padding:4px;background:transparent;color:#70e9d8;font-size:13px;font-weight:400;min-height:32px}
+  button.secondary{background:var(--input);border:1px solid var(--line);color:var(--text)}
+  button.secondary:hover{border-color:var(--accent)}
+  button.link-button{margin:0;padding:4px;background:transparent;color:var(--accent);font-size:13px;font-weight:400;min-height:32px}
   button.link-button:hover{text-decoration:underline}
   .message{color:#ffb7a7;background:#33242a;border:1px solid #734049;border-radius:8px;padding:10px 12px;margin:0 0 20px;overflow-wrap:anywhere}
   .alternate{margin:20px 0 0;text-align:center}
-  footer{display:grid;gap:6px;border-top:1px solid #303747;padding-top:16px;margin-top:20px;font-size:12px;color:#a7b3bf;text-align:center}
-  a{color:#70e9d8;text-decoration:none;text-underline-offset:3px}
+  footer{display:grid;gap:6px;border-top:1px solid var(--line);padding-top:16px;margin-top:20px;font-size:12px;color:var(--muted);text-align:center}
+  a{color:var(--accent);text-decoration:none;text-underline-offset:3px}
   a:hover{text-decoration:underline}
+  details{margin-top:8px;text-align:center}summary{cursor:pointer;color:var(--muted);font-size:13px}
+  @media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f3f7fa;--panel:#f8fbfd;--input:#edf3f6;--line:#c7d8df;--text:#192b3a;--muted:#657584;--accent:#008d82;--on-accent:#fff}.message{color:#8e293b;background:#fbecef;border-color:#e9bcc4}.mark{background:var(--accent);color:#fff}}
   @media(max-width:480px){body{padding:16px}main{padding:22px}h1{font-size:22px}}
   @media(max-height:700px){body{align-items:start}}
   </style></head><body>
@@ -79,10 +83,10 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
       <input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>
     </div>` : ''}` : ''}
     <button type="submit">${registering ? (web.pending ? '注册并绑定飞书' : '注册并继续') : (web.pending ? '验证账号并绑定' : '登录并继续')}</button>
-    ${web.enabled && !web.pending && !registering ? '<button class="secondary" type="submit" name="intent" value="feishu" formnovalidate>使用飞书登录</button><button class="link-button" type="submit" name="intent" value="feishu-link" formnovalidate>绑定飞书到已有 MX 账号</button>' : ''}
+    ${web.enabled && !web.pending && !registering ? '<button class="secondary" type="submit" name="intent" value="feishu" formnovalidate>使用飞书登录</button><details><summary>绑定已有账号</summary><button class="link-button" type="submit" name="intent" value="feishu-link" formnovalidate>绑定飞书到已有 MX 账号</button></details>' : ''}
   </form>
   <p class="alternate">${registering ? `<a href="${escape(action)}">已有账号，返回登录</a>` : registrationAllowed ? `<a href="${escape(action)}?view=register">${policy.mode === 'invite_code' ? '使用邀请码注册' : '创建账号'}</a>` : '新账号注册暂未开放'}</p>
-  <footer><span>账号与权限由成员与访问中心管理。</span><a href="${escape(web.returnUrl ?? '/admin/')}">返回应用</a></footer>
+  <footer><span>使用原有账号即可登录，无需重新注册。登录保持 30 天。</span><a href="${escape(web.returnUrl ?? '/admin/')}">返回应用</a></footer>
   </main></body></html>`;
 }
 export function createIdentityProvider(settings: IdentitySettings, accounts: IdentityAccounts, adapter: Configuration['adapter'], registration?: RegistrationClient) {
@@ -108,7 +112,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     claims: { openid: ['sub'], 'mx:hub': ['mx_identity'] }, scopes: ['openid', 'mx:hub'],
     cookies: { keys: settings.cookieKeys, names: { session: 'mx_identity', interaction: 'mx_identity_interaction', resume: 'mx_identity_resume' },
       long: { secure: true, httpOnly: true, sameSite: 'lax' }, short: { secure: true, httpOnly: true, sameSite: 'lax' } },
-    ttl: { AuthorizationCode: 60, AccessToken: (_ctx, _token, client) => applications.has(client.clientId) ? 28800 : 300, IdToken: 300, Interaction: 300, Session: 43200, Grant: 43200 },
+    ttl: { AuthorizationCode: 60, AccessToken: (_ctx, _token, client) => applications.has(client.clientId) ? USER_SESSION_TTL_SECONDS : 300, IdToken: 300, Interaction: 300, Session: USER_SESSION_TTL_SECONDS, Grant: USER_SESSION_TTL_SECONDS },
     interactions: { url: (_ctx, interaction) => `/identity/interaction/${interaction.uid}` },
     findAccount: async (ctx, id) => {
       const user = await accounts.account(id);

@@ -7,6 +7,7 @@ import { SsoStore } from './sso-store.mjs'
 
 const random = () => randomBytes(32).toString('base64url')
 const fingerprint = value => createHash('sha256').update(value).digest('hex')
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 const SID = '__Host-mx_hub_sso', TX = '__Host-mx_hub_login'
 const cookie = (name, value, age) => `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${age}`
 const cookies = request => Object.fromEntries(String(request.headers.cookie || '').split(';').map(v => v.trim().split('=')))
@@ -107,7 +108,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration }) {
         const canonical = await verified(session)
         await store.provision({ issuer: settings.issuer, subject: claims.sub, clientId: settings.clientId, canonical, personalTenant: settings.personalTenant === true })
         const old = cookies(request)[SID]; if (old) await store.remove('session', old)
-        const sid = random(), seconds = Math.min(28800, tokens.expires_in)
+        const sid = random(), seconds = Math.min(SESSION_TTL_SECONDS, tokens.expires_in)
         await store.put('session', sid, session, seconds)
         response.setHeader('Set-Cookie', [cookie(TX, '', 0), cookie(SID, sid, seconds)])
         redirect('/?sso=ready'); return true

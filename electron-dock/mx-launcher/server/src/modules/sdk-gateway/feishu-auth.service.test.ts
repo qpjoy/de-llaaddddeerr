@@ -122,6 +122,7 @@ test('Feishu token exchange provisions an isolated user and returns only an inte
     scope: 'auth.read appcenter.read',
     requestId: 'req-feishu-test'
   });
+  assert.equal(response.token.expires_in, 30 * 86400);
   assert.equal(response.token.auth_provider, 'feishu');
   assert.equal(
     response.token.subject,

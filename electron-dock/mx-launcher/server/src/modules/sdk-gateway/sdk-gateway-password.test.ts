@@ -50,6 +50,8 @@ test('SDK Gateway password login returns the exact-case user principal', async (
     audience: 'mx-sdk'
   }, '203.0.113.31');
 
+  assert.equal(upper.token.expires_in, 30 * 86400);
+  assert.equal(lower.token.expires_in, 30 * 86400);
   assert.equal(upper.token.subject, 'user:usr_Test');
   assert.equal((upper.token.principal as PlatformPrincipal).userId, 'usr_Test');
   assert.equal(lower.token.subject, 'user:usr_test');

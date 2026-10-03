@@ -13,8 +13,45 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./neon-void.css" />
   </head>
-  <body class="qp-app qp-theme-neon-void">
-    <main class="shell">
+  <body class="qp-app qp-theme-neon-void is-locked">
+    <section id="login-gate" class="login-gate" aria-labelledby="gate-title">
+      <div class="login-card">
+        <div class="brand"><div class="brand-mark">MX</div><div><h1>MX Launcher</h1><p>统一管理工作台</p></div></div>
+        <h2 id="gate-title">登录管理工作台</h2>
+        <p id="gate-status" class="login-intro" role="status">正在验证登录状态…</p>
+        <button id="gate-login" class="primary-button login-primary" type="button" disabled>统一账号登录</button>
+        <p class="login-hint">账号登录、注册与飞书绑定在统一认证页完成。</p>
+        <details class="login-account-options"><summary>账号选项</summary><button id="gate-switch" class="secondary-button" type="button">切换统一账号</button></details>
+        <button id="gate-signout" class="secondary-button" type="button" hidden>退出当前账号</button>
+        <details class="login-alternative">
+          <summary>使用 Internal Ops Token</summary>
+          <form id="gate-token-form">
+            <label id="gate-server-field">MX Server<input id="gate-server" type="url" autocomplete="url" /></label>
+            <label>Internal Ops Token<input id="gate-token" type="password" autocomplete="off" required /></label>
+            <p id="gate-token-error" role="alert"></p>
+            <button class="secondary-button" type="submit">验证并进入</button>
+          </form>
+        </details>
+        <footer>统一账号登录保持 30 天。管理权限由 Launcher 单独控制。</footer>
+      </div>
+    </section>
+      <dialog id="admin-account-link" class="admin-account-dialog" aria-labelledby="admin-account-link-title">
+        <form id="admin-account-link-form">
+          <span class="site-kind">MX ACCOUNT</span>
+          <h2 id="admin-account-link-title">关联已有 MX 账号</h2>
+          <p>统一登录已验证。再验证一次已有 MX 账号，后续即可使用个人登录进入。原用户、权限和联网配置保持不变。</p>
+          <label>已有账号<input name="login" required maxlength="255" autocomplete="username" /></label>
+          <label>账号密码<input name="password" type="password" required maxlength="1024" autocomplete="current-password" /></label>
+          <p class="admin-account-hint">仅支持已有密码账号。只有飞书登录的账号将在飞书接入阶段支持关联。</p>
+          <p id="admin-account-link-feedback" role="status" aria-live="polite"></p>
+          <a href="/auth/admin/login">重新验证统一登录</a>
+          <div class="admin-account-actions">
+            <button id="admin-account-link-cancel" type="button" class="secondary-button">稍后处理</button>
+            <button type="submit" class="primary-button">验证并关联</button>
+          </div>
+        </form>
+      </dialog>
+    <main class="shell" inert>
       <aside id="sidebar" class="sidebar">
         <div class="brand">
           <div class="brand-mark">MX</div>
@@ -235,6 +272,7 @@
             <span id="connection-state" class="state-chip">Ready</span>
             <span id="platform-status">Waiting for service</span>
           </div>
+          <button id="ops-session-logout" class="secondary-button" type="button" hidden>退出 Token 会话</button>
           <details id="connection-settings" class="connection-settings">
             <summary>连接与应急访问</summary>
             <div class="connection-fields">
@@ -258,22 +296,7 @@
         <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true">收起 ←</button>
       </aside>
 
-      <dialog id="admin-account-link" class="admin-account-dialog" aria-labelledby="admin-account-link-title">
-        <form id="admin-account-link-form">
-          <span class="site-kind">MX ACCOUNT</span>
-          <h2 id="admin-account-link-title">关联已有 MX 账号</h2>
-          <p>统一登录已验证。再验证一次已有 MX 账号，后续即可使用个人登录进入。原用户、权限和联网配置保持不变。</p>
-          <label>已有账号<input name="login" required maxlength="255" autocomplete="username" /></label>
-          <label>账号密码<input name="password" type="password" required maxlength="1024" autocomplete="current-password" /></label>
-          <p class="admin-account-hint">仅支持已有密码账号。只有飞书登录的账号将在飞书接入阶段支持关联。</p>
-          <p id="admin-account-link-feedback" role="status" aria-live="polite"></p>
-          <a href="/auth/admin/login">重新验证统一登录</a>
-          <div class="admin-account-actions">
-            <button id="admin-account-link-cancel" type="button" class="secondary-button">稍后处理</button>
-            <button type="submit" class="primary-button">验证并关联</button>
-          </div>
-        </form>
-      </dialog>
+
 
       <section class="workspace">
         <section id="view-workbench" class="view is-active" aria-labelledby="workbench-heading">

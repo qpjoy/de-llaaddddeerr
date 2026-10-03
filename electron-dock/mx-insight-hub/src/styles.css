@@ -13252,3 +13252,16 @@ button.mih-catalog-status {
 .mih-access-help { color:var(--qp-text-3); font-size:12px; margin-bottom:14px; }
 .mih-access-help summary { cursor:pointer; }
 .mih-access-help p { margin-top:10px; line-height:1.8; }
+
+/* The product chooses an entry; account credentials live on Auth. */
+.mih-auth-card { width:min(100%,460px); padding:32px; gap:24px; }
+.mih-auth-copy h1 { font-size:26px; line-height:1.3; }
+.mih-auth-brand { gap:14px; }
+.mih-auth-brand img { width:44px; height:44px; }
+.mih-auth-caption { font-size:12px; line-height:1.6; color:var(--qp-text-3); text-align:center; margin:0; }
+.mih-auth-alternative { border-top:1px solid var(--qp-line); padding-top:20px; }
+.mih-auth-alternative summary,.mih-auth-account-options summary { cursor:pointer; font-size:14px; color:var(--qp-text-3); }
+.mih-auth-account-options { text-align:center; }
+.mih-auth-alternative .mih-auth-form { margin-top:20px; }
+.mih-auth-alternative .mih-signin-tabs { margin-top:20px; }
+@media(max-width:480px) { .mih-auth-card{padding:24px} }

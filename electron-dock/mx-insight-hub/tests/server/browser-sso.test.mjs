@@ -65,9 +65,10 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   const original = await store.upsertExternalIdentity({ ...canonical('existing'), displayName: 'Existing customer' })
   const tenant = await store.createTenant({ name: 'Original tenant' })
   await pool.query("INSERT INTO iam.tenant_memberships(id,member_id,tenant_id,role) VALUES($1,$2,$3,'viewer')", [randomUUID(), original.id, tenant.id])
-  const jar = new Map()
+  const jar = new Map(), cookieHeaders = []
   const request = (path, { method = 'GET', body, headers = {}, useCookies = true } = {}) => new Promise((resolve, reject) => {
     const req = httpsRequest(new URL(path, origin), { ca: cert, method, headers: { ...(useCookies ? { cookie: [...jar].map(([k,v])=>`${k}=${v}`).join('; ') } : {}), ...headers } }, res => {
+      cookieHeaders.push(...(res.headers['set-cookie'] || []))
       for (const raw of res.headers['set-cookie'] || []) { const [name,value] = raw.split(';')[0].split('='); jar.set(name,value) }
       let text = ''; res.on('data', chunk => text += chunk); res.on('end', ()=>resolve({ status: res.statusCode, text, location: res.headers.location }))
     }); req.on('error',reject); req.end(body)
@@ -95,6 +96,10 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
     assert.equal((await request(callback)).status,400,'callback replay rejected')
   }
   await login()
+  assert.ok(cookieHeaders.some(value => value.startsWith('__Host-mx_hub_sso=') && /Max-Age=2592000/i.test(value)), 'Hub cookie persists for 30 days')
+  assert.ok(cookieHeaders.some(value => value.startsWith('mx_identity=') && Date.parse(/expires=([^;]+)/i.exec(value)?.[1] || '') - Date.now() > 29 * 86400000), 'Auth cookie survives browser restart for 30 days')
+  const monthSession = await sso.store.get('session', jar.get('__Host-mx_hub_sso'))
+  assert.ok(monthSession.accessToken, 'provider access token is retained only in the encrypted server session')
   let principal = JSON.parse((await request('/principal')).text)
   assert.equal(principal.memberId,original.id); assert.deepEqual(principal.tenantIds,[tenant.id]); assert.equal(principal.memberships[0].role,'viewer')
   restart(); principal=JSON.parse((await request('/principal')).text); assert.equal(principal.memberId,original.id)
