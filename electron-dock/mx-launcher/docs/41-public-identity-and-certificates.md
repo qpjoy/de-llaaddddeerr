@@ -100,3 +100,13 @@ bash certificates/manage.sh install-timer
 已完成初次域名/SSO 登记的服务器：同步代码后，先执行原 **mx-launcher deploy**，再执行原 **mx-insight-hub deploy**，沿用原 7789 代理、TMPDIR、节点与 IP 参数。该更新无需重新运行 `identity public`、换证书或增加 env key，也无需修改 de-mingxi/内网 Nginx。部署后刷新两个页面，以已有账号与折叠 Token 入口分别验收登录、退出和权限；Auth 服务随 Launcher 部署更新。
 
 本地验收包含真实 OIDC/HTTPS 与 PostgreSQL 的旧身份复用、租户连续性、重启恢复、30 天 Cookie、Token 登录来源/CSRF/轮换/退出，以及浏览器匿名门禁、文件上传 BFF、会话过期、普通账号阻挡、移动布局。生产入口仍需部署后验收。
+
+### 跨域登录或切换账号后停在 303、刷新变为 400
+
+若浏览器控制台同时提示 `form-action 'self'`，原因是 Auth 的 CSP 拦截了表单提交后的跨域回调。303 本身是正常跳转；此时认证事务可能已经消费，刷新旧 interaction/resume 地址会返回 400。
+
+Auth 现在只将静态登记的 Launcher、Hub origin 加入 `form-action`，不从请求的 Host、Origin 或 redirect_uri 扩展白名单。OIDC 仍校验精确的回调地址，账号切换自动提交脚本仍使用精确哈希，不开放任意内联脚本。
+
+此修复仅需更新代码并执行原 **mx-launcher deploy**，Auth 随之更新；已经完成上节升级的 Hub 无需再次部署。无需重新登记域名、修改 Nginx、轮换密钥或清空账号数据。部署后从 Hub/Launcher 首页重新发起登录，不刷新已经消费的 Auth 地址。
+
+已在本地 Chrome、三个不同 HTTPS 测试域名及真实 OIDC/PostgreSQL 下验证首次登录、Hub 切换 A→B、Launcher 切换 B→A，以及应用退出后复用 Auth 会话；应用回调使用测试客户端验证授权码兑换、签名、state、nonce 与新账号 subject。原有用户和密码记录保持不变。

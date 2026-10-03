@@ -94,6 +94,13 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
   for (const app of applications.values()) {
     if (app.clientId === settings.clientId || new URL(app.origin).origin !== app.origin || !app.origin.startsWith('https://') || app.appId !== 'mx-insight-hub' || !app.audience) throw new Error('Invalid first-party identity client');
   }
+  // Browsers check form-action through the POST/303 chain, including the
+  // final application callback. Use only statically registered client origins,
+  // never a request's redirect_uri/Host. OIDC still validates the exact callback.
+  const formActionOrigins = new Set([settings.adminOrigin ?? settings.origin, ...[...applications.values()].map(app => app.origin)]
+    .map(origin => new URL(origin).origin));
+  formActionOrigins.delete(new URL(settings.origin).origin);
+  const formAction = ["'self'", ...formActionOrigins].join(' ');
   const allowed = (user: Awaited<ReturnType<IdentityAccounts['account']>>, clientId: string) => user && !user.appAccess?.deniedAppIds?.includes(applications.get(clientId)?.appId ?? 'mx-launcher');
   const provider: Provider = new Provider(settings.issuer, {
     adapter, jwks: settings.jwks,
@@ -150,7 +157,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     // oidc-provider appends the exact script hash to an explicit script-src
     // for its account-switch form. Without this directive default-src blocks
     // that transition, leaving a blank page when the identity changes.
-    res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`);
     const path = (req.url ?? '').split('?')[0];
     if (path === '/identity/feishu/callback' && req.method === 'GET') {
       try {

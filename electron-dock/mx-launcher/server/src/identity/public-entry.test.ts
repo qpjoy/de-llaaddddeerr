@@ -25,17 +25,18 @@ test('public gateway: exact hosts/secret, isolated paths, HTTPS OIDC discovery a
  const upstream=createServer((req,res)=>{seenHeaders=req.headers;res.end('upstream');});
  await new Promise<void>(resolve=>upstream.listen(0,'127.0.0.1',resolve));
  const settings={origin:'https://auth.example.test',adminOrigin:'https://launcher.example.test',issuer:'https://auth.example.test/identity',
+  applications:[{clientId:'mx-hub-public',clientSecret:'h'.repeat(43),origin:'https://hub.example.test',appId:'mx-insight-hub',audience:'hub-test'}],
   clientId:'mx-launcher-public-admin',clientSecret:'s'.repeat(43),ingressToken:'g'.repeat(43),cookieKeys:['a'.repeat(43),'b'.repeat(43)],
   jwks:{keys:[{...generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'jwk'}),kid:'public-test',alg:'RS256',use:'sig'}]}};
  const server=createIdentityServer({settings,repository:repo,cert:Buffer.alloc(0),key:Buffer.alloc(0),upstream:new URL(`http://127.0.0.1:${(upstream.address() as {port:number}).port}`)});
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
  t.after(async()=>{server.closeAllConnections();upstream.closeAllConnections();await Promise.all([new Promise(r=>server.close(r)),new Promise(r=>upstream.close(r))]);await repo.close();await db.query('DELETE FROM mx_platform_records WHERE environment=$1',[environment]);await db.destroy();});
  const jar=new Map<string,string>();
- const call=(path:string,{host='auth.example.test',method='GET',body='',headers={}}:{host?:string;method?:string;body?:string;headers?:Record<string,string>}={})=>new Promise<{status:number;text:string;location?:string;cookies:string[]}>((resolve,reject)=>{
+ const call=(path:string,{host='auth.example.test',method='GET',body='',headers={}}:{host?:string;method?:string;body?:string;headers?:Record<string,string>}={})=>new Promise<{status:number;text:string;location?:string;csp?:string;cookies:string[]}>((resolve,reject)=>{
   const url=new URL(path,settings.origin);
   const req=request({hostname:'127.0.0.1',port:(server.address() as {port:number}).port,path:url.pathname+url.search,method,headers:{host,'x-mx-identity-gateway':settings.ingressToken,'x-mx-client-ip':'198.51.100.9',cookie:[...jar].map(([k,v])=>`${k}=${v}`).join('; '),...headers}},res=>{
    for(const raw of res.headers['set-cookie']??[]){const [k,v]=raw.split(';')[0].split('=');jar.set(k,v);}
-   let text='';res.on('data',p=>text+=p);res.on('end',()=>resolve({status:res.statusCode!,text,location:res.headers.location,cookies:res.headers['set-cookie']??[]}));
+   let text='';res.on('data',p=>text+=p);res.on('end',()=>resolve({status:res.statusCode!,text,location:res.headers.location,csp:res.headers['content-security-policy'] as string|undefined,cookies:res.headers['set-cookie']??[]}));
   });req.on('error',reject);req.end(body);
  });
  assert.equal((await call('/identity/.well-known/openid-configuration',{host:'wrong.example.test'})).status,421);
@@ -50,6 +51,8 @@ test('public gateway: exact hosts/secret, isolated paths, HTTPS OIDC discovery a
  let step=await call('/identity/auth?'+new URLSearchParams({client_id:settings.clientId,response_type:'code',scope:'openid',redirect_uri:`${settings.adminOrigin}/auth/admin/callback`,state,nonce:'n'.repeat(43),code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'}));
  assert.equal(step.status,303,step.text);assert.ok(step.cookies.every(c=>/secure/i.test(c)));
  const interaction=step.location!;step=await call(interaction);assert.equal(step.status,200,step.text);
+ assert.equal(step.csp?.split(';').map(value=>value.trim()).find(value=>value.startsWith('form-action ')),
+  "form-action 'self' https://launcher.example.test https://hub.example.test", 'public login must allow only the statically registered application origins');
  const csrf=/name="csrf" value="([^"]+)"/.exec(step.text)![1];
  step=await call(interaction,{method:'POST',headers:{origin:settings.origin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,login:'OriginalUser',password:'OriginalPassword123!'}).toString()});
  for(let i=0;i<6&&!step.location?.startsWith(settings.adminOrigin);i++)step=await call(step.location!);

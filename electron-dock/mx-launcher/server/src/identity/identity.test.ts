@@ -15,7 +15,7 @@ import { IdentityRepository } from './repository.js';
 import { createIdentityProvider } from './provider.js';
 
 const databaseUrl = process.env.MX_SSO_TEST_DATABASE_URL;
-test('real persisted provider: old password, HTTPS code/PKCE, one-use code, restart, account disable and durable throttling', { skip: !databaseUrl }, async () => {
+for (const publicEntry of [false, true]) test(`real persisted provider (${publicEntry ? 'cross-origin' : 'same-origin'}): old password, HTTPS code/PKCE, one-use code, restart, account disable and durable throttling`, { skip: !databaseUrl }, async () => {
   const target = new URL(databaseUrl!);
   assert.ok(['127.0.0.1', 'localhost'].includes(target.hostname) && target.pathname.includes('sso_test'));
   const environment = `identity-test-${randomUUID()}`; const scope = environment;
@@ -36,8 +36,9 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
   const server = createServer({ cert, key }, (req, res) => { void application.handle(req, res).catch(() => { res.statusCode = 500; res.end(); }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `https://127.0.0.1:${(server.address() as { port: number }).port}`; const issuer = `${origin}/identity`;
+  const adminOrigin = publicEntry ? 'https://launcher.example.test' : origin;
   const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const settings = { origin, issuer, clientId: 'mx-launcher-admin', clientSecret: 'fixture-secret', cookieKeys: ['fixture-cookie-key1', 'fixture-cookie-key2'], jwks: { keys: [{ ...pair.privateKey.export({ format: 'jwk' }), kid: 'test-key', alg: 'RS256', use: 'sig' }] } };
+  const settings = { origin, issuer, adminOrigin: publicEntry ? adminOrigin : undefined, clientId: 'mx-launcher-admin', clientSecret: 'fixture-secret', cookieKeys: ['fixture-cookie-key1', 'fixture-cookie-key2'], jwks: { keys: [{ ...pair.privateKey.export({ format: 'jwk' }), kid: 'test-key', alg: 'RS256', use: 'sig' }] } };
   let providerError = '';
   const restart = async () => {
     await repository.close(); repository = new IdentityRepository(databaseUrl!, environment, scope, 'fixture-rate-key'); await repository.initialize();
@@ -62,13 +63,16 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
     const discovery = JSON.parse((await request('/identity/.well-known/openid-configuration')).text);
     assert.equal(discovery.issuer, issuer); assert.match(discovery.authorization_endpoint, /\/identity\/auth$/);
     const verifier = 'a'.repeat(43); const state = randomUUID(); const nonce = randomUUID();
-    const authorize = `${discovery.authorization_endpoint}?${new URLSearchParams({ client_id: settings.clientId, response_type: 'code', redirect_uri: `${origin}/auth/admin/callback`, scope: 'openid', state, nonce, max_age: '300', code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url') })}`;
+    const authorize = `${discovery.authorization_endpoint}?${new URLSearchParams({ client_id: settings.clientId, response_type: 'code', redirect_uri: `${adminOrigin}/auth/admin/callback`, scope: 'openid', state, nonce, max_age: '300', code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url') })}`;
     const badRedirect = new URL(authorize); badRedirect.searchParams.set('redirect_uri', 'https://other.invalid/callback');
     const refused = await request(badRedirect.href);
     assert.equal(refused.status, 400); assert.ok(!refused.location?.startsWith('https://other.invalid'));
+    const expectedFormAction = `form-action 'self'${publicEntry ? ` ${adminOrigin}` : ''}`;
+    assert.equal(refused.csp?.split(';').map(value => value.trim()).find(value => value.startsWith('form-action ')), expectedFormAction, 'unregistered redirect must not enter the CSP allowlist');
     let step = await request(authorize); assert.equal(step.status, 303, step.text);
     const interaction = step.location!;
     step = await request(interaction); assert.equal(step.status, 200, step.text);
+    assert.ok(step.csp?.includes(expectedFormAction), 'password form must allow the registered cross-origin application');
     const csrf = /name="csrf" value="([^"]+)"/.exec(step.text)![1];
     const submit = (password: string, token = csrf) => request(interaction, { method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf: token, login: 'ExactAdmin', password }).toString() });
     assert.equal((await submit('OldPassword123!', 'wrong-csrf')).status, 400);
@@ -76,7 +80,7 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
     step = await submit('OldPassword123!'); assert.equal(step.status, 303, step.text);
     for (let i = 0; i < 5 && !step.location?.includes('/auth/admin/callback'); i++) step = await request(step.location!);
     const callback = new URL(step.location!); assert.equal(callback.searchParams.get('state'), state, JSON.stringify(step));
-    const tokenBody = new URLSearchParams({ grant_type: 'authorization_code', code: callback.searchParams.get('code')!, code_verifier: verifier, redirect_uri: `${origin}/auth/admin/callback` }).toString();
+    const tokenBody = new URLSearchParams({ grant_type: 'authorization_code', code: callback.searchParams.get('code')!, code_verifier: verifier, redirect_uri: `${adminOrigin}/auth/admin/callback` }).toString();
     const token = (body = tokenBody) => request(discovery.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Basic ${Buffer.from(`${settings.clientId}:${settings.clientSecret}`).toString('base64')}` }, body });
     await restart(); // The already-issued authorization code survives restart.
     assert.equal((await token(tokenBody.replace(verifier, 'b'.repeat(43)))).status, 400);
@@ -99,6 +103,7 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
     step = await request(switchInteraction, { method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf: switchCsrf, login: 'OtherUser', password: 'OtherPassword123!' }).toString() });
     step = await request(step.location!);
     assert.equal(step.status, 200);
+    assert.ok(step.csp?.includes(expectedFormAction), 'provider account-switch form must allow the same cross-origin application');
     const script = /<script>([\s\S]+?)<\/script>/.exec(step.text)![1];
     assert.ok(step.csp?.includes(`'sha256-${createHash('sha256').update(script).digest('base64')}'`), 'switch form must have an exact CSP script hash');
     assert.ok(!/script-src[^;]*unsafe-inline/.test(step.csp!));
@@ -107,7 +112,7 @@ test('real persisted provider: old password, HTTPS code/PKCE, one-use code, rest
     step = await request(action, { method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: fields.toString() });
     for (let i = 0; i < 5 && !step.location?.includes('/auth/admin/callback'); i++) step = await request(step.location!);
     assert.ok(step.location?.includes('/auth/admin/callback'), `new identity finishes the account-switch transition: ${JSON.stringify(step)} ${providerError}`);
-    const switchedToken = await token(new URLSearchParams({ grant_type: 'authorization_code', code: new URL(step.location!).searchParams.get('code')!, code_verifier: verifier, redirect_uri: `${origin}/auth/admin/callback` }).toString());
+    const switchedToken = await token(new URLSearchParams({ grant_type: 'authorization_code', code: new URL(step.location!).searchParams.get('code')!, code_verifier: verifier, redirect_uri: `${adminOrigin}/auth/admin/callback` }).toString());
     assert.equal(switchedToken.status, 200, switchedToken.text);
     assert.equal(JSON.parse(Buffer.from(JSON.parse(switchedToken.text).id_token.split('.')[1], 'base64url').toString()).sub, other.userId);
     assert.deepEqual(await db.query('SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 ORDER BY kind', [environment]), before);
