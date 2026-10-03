@@ -34,9 +34,10 @@
     "test:ops": "bash tests/manage-script.test.sh"
   },
   "dependencies": {
-    "@qpjoy/mx-pay": "file:../mx-base/mx-pay",
     "@qpjoy/mx-common": "file:../mx-common",
+    "@qpjoy/mx-pay": "file:../mx-base/mx-pay",
     "croner": "10.0.1",
+    "openid-client": "6.8.8",
     "pg": "8.22.0",
     "undici": "7.29.0",
     "zod": "^4.4.3"

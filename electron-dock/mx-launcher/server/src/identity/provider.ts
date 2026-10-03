@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Provider, { type Configuration } from 'oidc-provider';
 import type { IdentityAccounts } from './repository.js';
@@ -7,14 +7,20 @@ import type { RegistrationPolicy } from '../registration/repository.js';
 
 export interface IdentitySettings {
   issuer: string;
+  adminOrigin?: string;
+  transportOrigin?: string;
+  ingressToken?: string;
+  publicEntry?: IdentitySettings;
   origin: string;
   clientId: string;
   clientSecret: string;
   cookieKeys: string[];
   jwks: NonNullable<Configuration['jwks']>;
+  applications?: Array<{ clientId: string; clientSecret: string; origin: string; appId: string; audience: string }>;
 }
+const sourceIp = (req: IncomingMessage, settings: IdentitySettings) => settings.adminOrigin ? String(req.headers['x-mx-client-ip'] ?? req.socket.remoteAddress ?? 'unknown') : req.socket.remoteAddress ?? 'unknown';
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false) {
+function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false, web: { enabled?: boolean; pending?: boolean; appName?: string; returnUrl?: string } = {}) {
   const registrationAllowed = policy && policy.mode !== 'closed';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${registering ? '注册' : '登录'} · MX</title>
   <style>
@@ -35,6 +41,10 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
   .hint{display:block;font-size:12px;color:#a7b3bf;margin-top:6px}
   button{margin-top:4px;padding:10px 16px;border:0;background:#2bf6d2;color:#052823;font-weight:600;cursor:pointer}
   button:hover{background:#11cdb5}
+  button.secondary{background:#21232d;border:1px solid #435166;color:#e2e2e2}
+  button.secondary:hover{border-color:#70e9d8}
+  button.link-button{margin:0;padding:4px;background:transparent;color:#70e9d8;font-size:13px;font-weight:400;min-height:32px}
+  button.link-button:hover{text-decoration:underline}
   .message{color:#ffb7a7;background:#33242a;border:1px solid #734049;border-radius:8px;padding:10px 12px;margin:0 0 20px;overflow-wrap:anywhere}
   .alternate{margin:20px 0 0;text-align:center}
   footer{display:grid;gap:6px;border-top:1px solid #303747;padding-top:16px;margin-top:20px;font-size:12px;color:#a7b3bf;text-align:center}
@@ -45,8 +55,8 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
   </style></head><body>
   <main aria-labelledby="page-title">
   <div class="brand"><span class="mark" aria-hidden="true">MX</span><span>MX 统一账号</span></div>
-  <h1 id="page-title">${registering ? '创建 MX 账号' : '登录 MX 工作台'}</h1>
-  <p class="intro">${registering ? '使用统一账号访问已开通的应用。工作台管理权限需单独授权。' : '使用已有 MX 账号，继续进入 Launcher。'}</p>
+  <h1 id="page-title">${registering ? '创建 MX 账号' : web.pending ? '绑定你的 MX 账号' : '登录 MX 账号'}</h1>
+  <p class="intro">${registering ? '使用统一账号访问已开通的应用。工作台管理权限需单独授权。' : web.pending ? '飞书身份已验证。验证已有 MX 账号完成绑定，或使用邀请码创建账号。' : `使用已有 MX 账号，继续进入 ${escape(web.appName ?? 'Launcher')}。`}</p>
   ${message ? `<div class="message" role="alert">${escape(message)}</div>` : ''}
   <form method="post" action="${escape(action)}${registering ? '?view=register' : ''}">
     <input type="hidden" name="csrf" value="${csrf}">
@@ -68,48 +78,65 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
       <label for="inviteCode">邀请码</label>
       <input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>
     </div>` : ''}` : ''}
-    <button type="submit">${registering ? '注册并继续' : '登录并继续'}</button>
+    <button type="submit">${registering ? (web.pending ? '注册并绑定飞书' : '注册并继续') : (web.pending ? '验证账号并绑定' : '登录并继续')}</button>
+    ${web.enabled && !web.pending && !registering ? '<button class="secondary" type="submit" name="intent" value="feishu" formnovalidate>使用飞书登录</button><button class="link-button" type="submit" name="intent" value="feishu-link" formnovalidate>绑定飞书到已有 MX 账号</button>' : ''}
   </form>
   <p class="alternate">${registering ? `<a href="${escape(action)}">已有账号，返回登录</a>` : registrationAllowed ? `<a href="${escape(action)}?view=register">${policy.mode === 'invite_code' ? '使用邀请码注册' : '创建账号'}</a>` : '新账号注册暂未开放'}</p>
-  <footer><span>账号与权限由成员与访问中心管理。</span><a href="/admin/">返回管理工作台</a></footer>
+  <footer><span>账号与权限由成员与访问中心管理。</span><a href="${escape(web.returnUrl ?? '/admin/')}">返回应用</a></footer>
   </main></body></html>`;
 }
 export function createIdentityProvider(settings: IdentitySettings, accounts: IdentityAccounts, adapter: Configuration['adapter'], registration?: RegistrationClient) {
+  const applications = new Map((settings.applications ?? []).map(app => [app.clientId, app]));
+  for (const app of applications.values()) {
+    if (app.clientId === settings.clientId || new URL(app.origin).origin !== app.origin || !app.origin.startsWith('https://') || app.appId !== 'mx-insight-hub' || !app.audience) throw new Error('Invalid first-party identity client');
+  }
+  const allowed = (user: Awaited<ReturnType<IdentityAccounts['account']>>, clientId: string) => user && !user.appAccess?.deniedAppIds?.includes(applications.get(clientId)?.appId ?? 'mx-launcher');
   const provider: Provider = new Provider(settings.issuer, {
     adapter, jwks: settings.jwks,
     clients: [{ client_id: settings.clientId, client_secret: settings.clientSecret,
-      redirect_uris: [`${settings.origin}/auth/admin/callback`], response_types: ['code'],
+      redirect_uris: [`${settings.adminOrigin ?? settings.origin}/auth/admin/callback`], response_types: ['code'],
       grant_types: ['authorization_code'], token_endpoint_auth_method: 'client_secret_basic',
-      id_token_signed_response_alg: 'RS256' }],
+      id_token_signed_response_alg: 'RS256' }, ...[...applications.values()].map(app => ({
+        client_id: app.clientId, client_secret: app.clientSecret, redirect_uris: [`${app.origin}/auth/sso/callback`],
+        response_types: ['code'] as const, grant_types: ['authorization_code'], token_endpoint_auth_method: 'client_secret_basic' as const,
+        id_token_signed_response_alg: 'RS256' as const, scope: 'openid mx:hub'
+      }))],
     responseTypes: ['code'], clientAuthMethods: ['client_secret_basic'],
     pkce: { required: () => true },
     features: { devInteractions: { enabled: false }, registration: { enabled: false },
-      userinfo: { enabled: false }, introspection: { enabled: false }, revocation: { enabled: false } },
-    claims: { openid: ['sub'] }, scopes: ['openid'],
+      userinfo: { enabled: true }, introspection: { enabled: false }, revocation: { enabled: false } },
+    claims: { openid: ['sub'], 'mx:hub': ['mx_identity'] }, scopes: ['openid', 'mx:hub'],
     cookies: { keys: settings.cookieKeys, names: { session: 'mx_identity', interaction: 'mx_identity_interaction', resume: 'mx_identity_resume' },
       long: { secure: true, httpOnly: true, sameSite: 'lax' }, short: { secure: true, httpOnly: true, sameSite: 'lax' } },
-    ttl: { AuthorizationCode: 60, AccessToken: 300, IdToken: 300, Interaction: 300, Session: 43200, Grant: 43200 },
+    ttl: { AuthorizationCode: 60, AccessToken: (_ctx, _token, client) => applications.has(client.clientId) ? 28800 : 300, IdToken: 300, Interaction: 300, Session: 43200, Grant: 43200 },
     interactions: { url: (_ctx, interaction) => `/identity/interaction/${interaction.uid}` },
-    findAccount: async (_ctx, id) => {
+    findAccount: async (ctx, id) => {
       const user = await accounts.account(id);
-      return user ? { accountId: user.userId, claims: async () => ({ sub: user.userId }) } : undefined;
+      const clientId = ctx.oidc.client?.clientId ?? ctx.oidc.accessToken?.clientId ?? '';
+      const app = applications.get(clientId);
+      return allowed(user, clientId) && user ? { accountId: user.userId, claims: async () => ({ sub: user.userId,
+        ...(app && accounts.hubIdentity ? { mx_identity: await accounts.hubIdentity(user, app.audience) } : {}) }) } : undefined;
     },
     async loadExistingGrant(ctx) {
-      const id = ctx.oidc.result?.consent?.grantId ?? ctx.oidc.session?.grantIdFor(settings.clientId);
+      const clientId = ctx.oidc.client?.clientId;
+      if (!clientId || (clientId !== settings.clientId && !applications.has(clientId))) return undefined;
+      const id = ctx.oidc.result?.consent?.grantId ?? ctx.oidc.session?.grantIdFor(clientId);
       if (id) {
         const grant = await provider.Grant.find(id);
         if (grant) return grant;
       }
       const accountId = ctx.oidc.session?.accountId;
-      if (!accountId || !await accounts.account(accountId)) return undefined;
+      if (!accountId || !allowed(await accounts.account(accountId), clientId)) return undefined;
       // Only our statically registered first-party client and openid scope.
-      const grant = new provider.Grant({ accountId, clientId: settings.clientId });
-      grant.addOIDCScope('openid');
+      const grant = new provider.Grant({ accountId, clientId });
+      grant.addOIDCScope(applications.has(clientId) ? 'openid mx:hub' : 'openid');
       await grant.save();
       return grant;
     },
-    renderError: async (ctx) => { ctx.type = 'html'; ctx.body = '<!doctype html><meta charset="utf-8"><p>登录请求无效或已过期，请返回工作台重新登录。</p><a href="/admin/">返回工作台</a>'; }
+    renderError: async (ctx) => { ctx.type = 'html'; ctx.body = `<!doctype html><meta charset="utf-8"><p>登录请求无效或已过期，请返回工作台重新登录。</p><a href="${escape(settings.adminOrigin ?? settings.origin)}/admin/">返回工作台</a>`; }
   });
+  // The public listener is reachable only through the private gateway; HTTPS is terminated at the edge.
+  provider.proxy = Boolean(settings.adminOrigin);
   provider.on('server_error', () => console.warn(JSON.stringify({ event: 'identity.request-failed' })));
   const csrfFor = (uid: string) => createHmac('sha256', settings.cookieKeys[0]).update(`login:${uid}`).digest('base64url');
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
@@ -121,21 +148,55 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     // that transition, leaving a blank page when the identity changes.
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const path = (req.url ?? '').split('?')[0];
+    if (path === '/identity/feishu/callback' && req.method === 'GET') {
+      try {
+        if (!accounts.webState || !registration?.feishu) throw new Error('Web login unavailable');
+        const query = new URL(req.url!, settings.origin).searchParams;
+        const state = query.get('state') ?? '';
+        const bound = /(?:^|;\s*)__Host-mx_feishu=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
+        if (!bound || bound !== state) throw new Error('Invalid OAuth state');
+        const transaction = await accounts.webState.read('transaction', state, true);
+        if (!transaction || query.has('error') || !query.get('code')) throw new Error('OAuth rejected or expired');
+        const proof = await registration.feishu('exchange', { code: query.get('code'), verifier: transaction.verifier, exchangeHandle: transaction.exchangeHandle, sourceKey: sourceIp(req, settings) });
+        await accounts.webState.put('proof', String(transaction.uid), { ...proof, link: transaction.link });
+        res.setHeader('Set-Cookie', '__Host-mx_feishu=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0');
+        res.writeHead(303, { location: `/identity/interaction/${transaction.uid}` }).end();
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<meta charset="utf-8"><p>飞书验证失败、已取消或已过期，请返回应用重新登录。</p>');
+      }
+      return;
+    }
     const match = /^\/identity\/interaction\/([A-Za-z0-9_-]+)$/.exec(path);
     if (match) {
       try {
         const interaction = await provider.interactionDetails(req, res);
-        if (match[1] !== interaction.uid || interaction.params.client_id !== settings.clientId || interaction.prompt.name !== 'login') throw new Error('Invalid interaction');
+        const clientId = String(interaction.params.client_id);
+        if (match[1] !== interaction.uid || (clientId !== settings.clientId && !applications.has(clientId)) || interaction.prompt.name !== 'login') throw new Error('Invalid interaction');
         const registering = new URL(req.url!, settings.origin).searchParams.get('view') === 'register';
         let policy: RegistrationPolicy | undefined;
-        if (req.method === 'GET') { try { policy = await registration?.policy(); } catch { /* Login stays available if signup is down. */ } }
+        const proof = await accounts.webState?.read('proof', interaction.uid);
+        if (req.method === 'GET' && proof?.userId && !proof.link) {
+          const linked = await accounts.account(String(proof.userId));
+          if (!allowed(linked, clientId)) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('此账号已被停用或禁止访问该应用，请联系管理员。'); return; }
+          await accounts.webState!.read('proof', interaction.uid, true);
+          return provider.interactionFinished(req, res, { login: { accountId: String(proof.userId) } }, { mergeWithLastSubmission: false });
+        }
+        let feishuEnabled = false;
+        if (req.method === 'GET') {
+          // Optional sign-up/provider discovery must not serially delay password login.
+          const [policyResult, feishuResult] = await Promise.allSettled([
+            registration?.policy(), accounts.webState ? registration?.feishu?.('info', {}) : undefined
+          ]);
+          if (policyResult.status === 'fulfilled') policy = policyResult.value;
+          if (feishuResult.status === 'fulfilled') feishuEnabled = feishuResult.value?.enabled === true;
+        }
         const render = (message = '', status = 200) => {
           res.statusCode = status;
           // Native form POSTs under no-referrer carry Origin:null in browsers.
           // Preserve same-origin provenance without allowing cross-site refs.
           res.setHeader('Referrer-Policy', 'same-origin');
           res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed')));
+          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), appName: applications.has(clientId) ? 'Insight Hub' : 'Launcher', returnUrl: applications.get(clientId)?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/` }));
         };
         if (req.method === 'GET') return render();
         if (req.method !== 'POST' || req.headers.origin !== settings.origin || req.headers['sec-fetch-site'] === 'cross-site'
@@ -145,25 +206,45 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         const body = new URLSearchParams(text);
         const csrf = Buffer.from(body.get('csrf') ?? ''); const expected = Buffer.from(csrfFor(interaction.uid));
         if (csrf.length !== expected.length || !timingSafeEqual(csrf, expected)) throw new Error('Invalid CSRF');
+        if (['feishu', 'feishu-link'].includes(body.get('intent') ?? '')) {
+          if (!accounts.webState || !registration?.feishu) return render('飞书 Web 登录尚未配置。', 503);
+          const state = randomBytes(32).toString('base64url'), verifier = randomBytes(32).toString('base64url');
+          const authorization = await registration.feishu('authorize', { state, codeChallenge: createHash('sha256').update(verifier).digest('base64url'), sourceKey: sourceIp(req, settings) });
+          await accounts.webState.remove('proof', interaction.uid);
+          await accounts.webState.put('transaction', state, { uid: interaction.uid, verifier, exchangeHandle: authorization.exchangeHandle, link: body.get('intent') === 'feishu-link' });
+          res.setHeader('Set-Cookie', `__Host-mx_feishu=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`);
+          res.writeHead(303, { location: String(authorization.authorizationUrl) }).end(); return;
+        }
         const login = (body.get('login') ?? '').trim(); const password = body.get('password') ?? '';
         if (registering) {
           if (!registration || !accounts.allowRegistrationAttempt) return render('注册暂不可用，请使用已有账号登录。', 503);
-          if (!await accounts.allowRegistrationAttempt(req.socket.remoteAddress ?? 'unknown', login)) return render('注册尝试过于频繁，请稍后重试。', 429);
+          if (!await accounts.allowRegistrationAttempt(sourceIp(req, settings), login)) return render('注册尝试过于频繁，请稍后重试。', 429);
           try {
             policy = await registration.policy();
             if (policy.mode === 'closed') return render('暂未开放新账号注册，已有账号可正常登录。', 403);
             if (password !== body.get('passwordConfirm')) return render('两次输入的密码不一致。', 400);
             const result = await registration.register({ transactionId: interaction.uid, policyVersion: Number(body.get('policyVersion')),
-              account: login, password, inviteCode: body.get('inviteCode') ?? '' });
+              account: login, password, inviteCode: body.get('inviteCode') ?? '', ...(proof ? { verifiedFeishuSubject: String(proof.subject) } : {}) });
+            await accounts.webState?.remove('proof', interaction.uid);
             return provider.interactionFinished(req, res, { login: { accountId: result.userId } }, { mergeWithLastSubmission: false });
           } catch (error) {
             return render(error instanceof RegistrationClientError ? error.message : '注册暂不可用，请稍后重试。', error instanceof RegistrationClientError && error.status < 500 ? error.status : 503);
           }
         }
         if (!login || login.length > 255 || !password || password.length > 1024) return render('请填写账号和密码。', 400);
-        if (!await accounts.allowAttempt(req.socket.remoteAddress ?? 'unknown', login)) return render('尝试过于频繁，请稍后重试。', 429);
+        if (!await accounts.allowAttempt(sourceIp(req, settings), login)) return render('尝试过于频繁，请稍后重试。', 429);
+        if (proof && registration?.feishu) {
+          try {
+            const bound = await registration.feishu('bind', { subject: proof.subject, login, password });
+            const linked = await accounts.account(String(bound.userId));
+            if (!allowed(linked, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
+            await accounts.webState?.remove('proof', interaction.uid);
+            return provider.interactionFinished(req, res, { login: { accountId: String(bound.userId) } }, { mergeWithLastSubmission: false });
+          } catch (error) { return render(error instanceof RegistrationClientError ? error.message : '绑定暂不可用，请稍后重试。', error instanceof RegistrationClientError ? error.status : 503); }
+        }
         const user = await accounts.authenticate(login, password);
         if (!user) return render('账号或密码不正确，或账号不可用。', 401);
+        if (!allowed(user, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
         console.info(JSON.stringify({ event: 'identity.password-login', userId: user.userId }));
         return provider.interactionFinished(req, res, { login: { accountId: user.userId } }, { mergeWithLastSubmission: false });
       } catch {

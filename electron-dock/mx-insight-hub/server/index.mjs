@@ -23,6 +23,7 @@ import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
+import { createSso, readSsoProfile } from './identity/sso.mjs'
 import { loadConfig } from './config.mjs'
 import { AppError } from './core/errors.mjs'
 import { HubService } from './hub-service.mjs'
@@ -65,6 +66,7 @@ import { NotificationService } from './notifications.mjs'
 import { FeishuAlertNotifier } from './notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
 import { createPaymentReporting } from './payments/reporting.mjs'
+import { createRechargeService } from './payments/recharge.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -499,6 +501,7 @@ export async function createRuntime(config = loadConfig()) {
   // takes effect without restarting anything.
   const feishuAlerts = config.listenerMode === 'public' ? null : new FeishuAlertNotifier({ pool })
   const paymentReporting = config.listenerMode === 'public' ? null : createPaymentReporting(config.paymentReporting)
+  const recharge = config.listenerMode === 'public' ? null : createRechargeService(store, config.paymentDeliverySources, { logger: console })
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const app = createApp({
     service,
@@ -507,6 +510,7 @@ export async function createRuntime(config = loadConfig()) {
     hubSocialGateway,
     webSearchService: webSearch.service,
     identity,
+    sso: config.listenerMode === 'public' ? null : createSso({ settings: readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE), pool, identity }),
     queue,
     importer,
     serverFileReader,
@@ -528,6 +532,7 @@ export async function createRuntime(config = loadConfig()) {
     notifications,
     balanceMonitor,
     paymentReporting,
+    recharge,
     nightAllA,
     externalPlatformGateway,
     xiaohongshuHotNotesGateway,
@@ -547,7 +552,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, balanceMonitor, feishuAlerts, paymentReporting,
+    notifications, balanceMonitor, feishuAlerts, paymentReporting, recharge,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -571,8 +576,10 @@ export async function start(config = loadConfig()) {
   runtime.balanceMonitor?.start()
   runtime.feishuAlerts?.start()
   runtime.paymentReporting?.start?.()
+  runtime.recharge?.start?.()
   const close = async () => {
     await runtime.paymentReporting?.close?.()
+    await runtime.recharge?.close?.()
     await runtime.feishuAlerts?.close()
     await runtime.balanceMonitor?.close()
     await runtime.notifications?.close()

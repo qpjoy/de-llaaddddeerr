@@ -106,7 +106,9 @@ export class PaymentStore {
         if (value) { args.push(value); clauses.push(`${column}=$${args.length}`) }
       }
       args.push(pageSize + 1, (page - 1) * pageSize)
-      rows = (await this.pool.query(`SELECT document - 'checkout' AS document FROM mx_pay.orders WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT $${args.length - 1} OFFSET $${args.length}`, args)).rows.map(row => row.document)
+      const source = this.includeRecharge ? `(SELECT id,tenant_id,environment,status,invoice_status,created_at,document FROM mx_pay.orders
+        UNION ALL SELECT id,tenant_id,environment,status,invoice_status,created_at,document FROM hub_recharge.order_documents) AS orders` : 'mx_pay.orders'
+      rows = (await this.pool.query(`SELECT document - 'checkout' AS document FROM ${source} WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT $${args.length - 1} OFFSET $${args.length}`, args)).rows.map(row => row.document)
     } else {
       rows = [...this.memory.orders.values()].map(row => copy(row.document))
         .filter(row => row.environment === environment && (!tenantId || row.tenantId === tenantId) && (!status || row.status === status) && (!invoiceStatus || row.invoice?.status === invoiceStatus) && (!orderId || row.id === orderId))

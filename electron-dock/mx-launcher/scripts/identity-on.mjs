@@ -90,7 +90,7 @@ export async function prepareIdentity({ enable = false, requested, file = PROFIL
     log('已修复 OpenSSL 1.1.1 初次生成 CA 的重复扩展；OIDC 密钥、CA 私钥和服务证书保持不变。');
     log(`原档案已备份到 ${join(dirname(file), 'profile.before-ca-repair.json')}；CA 证书指纹已改变，如曾导入请重新信任 ca.crt。`);
   }
-  const { deployment } = inspectIdentity(p, execute, enable);
+  const { deployment, publicDeployment } = inspectIdentity(p, execute, enable);
   if (!p && !enable) {
     log('个人 SSO 尚未开启；可运行 bash scripts/manage.sh ops identity on 自动配置并部署。');
     return;
@@ -100,9 +100,14 @@ export async function prepareIdentity({ enable = false, requested, file = PROFIL
   const config = get(['-n', NS, 'get', 'configmap', 'mx-launcher-internal-config', '--ignore-not-found']);
   const selected = selectOrigin({ profile: p, requested, interfaces, nodes, baseUrl: config.data?.MX_PUBLIC_BASE_URL });
   const pods = get(['get', 'pods', '--all-namespaces']).items ?? [];
-  const replicaSets = deployment ? get(['-n', NS, 'get', 'replicasets']).items ?? [] : [];
+  const replicaSets = deployment || publicDeployment ? get(['-n', NS, 'get', 'replicasets']).items ?? [] : [];
   const managedPort = inspectPorts({ ...selected, pods, replicaSets, deployment });
   await probe(selected.origin, managedPort);
+  if (p?.publicEntry) {
+    const origin = p.publicEntry.transportOrigin;
+    const managed = inspectPorts({ origin, node:selected.node, pods, replicaSets, deployment:publicDeployment });
+    await probe(origin, managed);
+  }
   // Generate credentials only after every read-only check succeeded. Interrupted
   // deploys retain the same profile and can resume with on or the normal deploy.
   const saved = initializeProfile(selected.origin, file);

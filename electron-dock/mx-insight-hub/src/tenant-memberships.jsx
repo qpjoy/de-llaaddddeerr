@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, Modal } from './components.jsx'
 
-const ROLES = [{value:'viewer',label:'查看者'},{value:'analyst',label:'分析员'},{value:'admin',label:'租户管理员'},{value:'owner',label:'租户所有者'}]
-const ROLE_HINTS = {viewer:'查看租户接入与用量，不可签发 Key。',analyst:'查看调用者、Key 和用量，不可修改授权。',admin:'管理调用者与 Key；业务权限由平台管理员开通。',owner:'管理租户、成员、调用者与 Key；不可自行开通业务权限。'}
+const ROLES = [{value:'viewer',label:'查看者'},{value:'analyst',label:'分析员'},{value:'billing',label:'租户账务员'},{value:'admin',label:'租户管理员'},{value:'owner',label:'租户所有者'}]
+const ROLE_HINTS = {viewer:'查看租户接入与用量，不可签发 Key。',analyst:'查看调用者、Key 和用量，不可修改授权。',billing:'查看本租户账单、发起充值和申请开票；不能管理 Key、确认收款或管理其他租户。',admin:'管理调用者与 Key；业务权限由平台管理员开通。',owner:'管理租户、成员、调用者与 Key；不可自行开通业务权限。'}
 
 export function TenantMemberships({ token, tenants }) {
   const [members, setMembers] = useState([])

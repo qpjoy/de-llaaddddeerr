@@ -62,7 +62,7 @@ export function createAdminSsoMiddleware(deps: {
   const scope = config ? digest(JSON.stringify([config.issuer, config.clientId, config.origin])) : '';
   async function rateLimit(req: Request, purpose: string, subject?: string) {
     const decisions = await store.consumeAuthenticationRateLimits([
-      { bucketKey: authenticationRateLimitBucketKey(`admin-sso.${purpose}.ip`, req.ip ?? req.socket.remoteAddress ?? 'unknown'), limit: 30, windowSeconds: 300 },
+      { bucketKey: authenticationRateLimitBucketKey(`admin-sso.${purpose}.ip`, (config?.ingressToken ? String(req.headers['x-mx-client-ip'] ?? 'unknown') : req.ip ?? req.socket.remoteAddress ?? 'unknown')), limit: 30, windowSeconds: 300 },
       ...(subject ? [{ bucketKey: authenticationRateLimitBucketKey(`admin-sso.${purpose}.subject`, subject), limit: 5, windowSeconds: 300 }] : [])
     ]);
     if (decisions.some((decision) => !decision.allowed)) throw new SsoError(429, 'rate_limited', '尝试过于频繁，请 5 分钟后重试。');
@@ -94,7 +94,7 @@ export function createAdminSsoMiddleware(deps: {
     const binding = await repository.read('admin-sso-binding', bindingKey(session.issuer, session.subject));
     if (!binding || binding.bindingId !== session.bindingId) return null;
     const user = (await store.listUserCenterUsers()).find((item) => item.userId === binding.userId);
-    return user?.status === 'active' && !BOOTSTRAP_USERS.has(user.userId) ? user : null;
+    return user?.status === 'active' && !BOOTSTRAP_USERS.has(user.userId) && !user.appAccess.deniedAppIds.includes('mx-launcher') ? user : null;
   }
   async function issueSession(req: Request, res: ServerResponse, identity: OidcIdentity, bindingId: string | null) {
     const token = random();
@@ -117,6 +117,7 @@ export function createAdminSsoMiddleware(deps: {
       return json(res, 200, { enabled: false, authenticated: false, unavailable: Boolean(deps.unavailable) });
     }
     if (!config || !repository || !oidc) throw new SsoError(503, 'sso_unavailable', '个人 SSO 登录尚未启用，现有应急访问仍可使用。');
+    if (config.ingressToken && !same(String(req.headers['x-mx-identity-gateway'] ?? ''), config.ingressToken)) throw new SsoError(403, 'gateway_required', '请从配置的公网管理入口访问。');
     if (req.headers.origin && req.headers.origin !== config.origin) throw new SsoError(403, 'origin_rejected', '请从配置的管理入口访问。');
     if (path === '/auth/admin/login' && req.method === 'GET') {
       await rateLimit(req, 'login');

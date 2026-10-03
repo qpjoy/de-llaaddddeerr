@@ -1118,6 +1118,7 @@ function renderNetworkOperationControl() {
 }
 
 function isConnectionPending() {
+  if (state.connection?.diagnostics?.applicationAccessDenied && !rendererPendingNetworkOperation()) return false;
   if (networkOperationPaused()) return false;
   const operation = currentNetworkOperation();
   const idlessBackgroundRecovery = !operation?.id && operation?.kind === 'background-recovery';
@@ -1301,6 +1302,8 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   const anonymousRecoveryBlocked = anonymousRecoveryBlockedByPolicy();
   const modeTitle = disconnecting
     ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 正在断开`
+    : state.connection?.diagnostics?.applicationAccessDenied
+      ? '账号访问已被禁止'
     : recoveryPaused
       ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 恢复已暂停`
     : connecting
@@ -1409,6 +1412,7 @@ function renderGuestConnect(connected, connecting, retainedConnection = false) {
 
 function renderConnectionRecoverySteps(show) {
   if (!show || networkOperationPaused() || anonymousRecoveryBlockedByPolicy()) return '';
+  if (state.connection?.diagnostics?.applicationAccessDenied) return '';
   const connection = state.connection || {};
   const health = connection.health || {};
   const diagnostics = connection.diagnostics || {};
@@ -4153,6 +4157,7 @@ function compactText(value, limit = 90) {
 }
 
 function connectionCaption() {
+  if (state.connection?.diagnostics?.applicationAccessDenied) return '已停止后续操作 · 请联系管理员或更换账号';
   const connection = state.connection || {};
   if (busyAction === 'disconnect') return '正在等待一次系统授权，以原子停止 WireGuard 并恢复 PAC / split DNS';
   if (anonymousRecoveryBlockedByPolicy()) return ANONYMOUS_LOGIN_DISABLED_MESSAGE;

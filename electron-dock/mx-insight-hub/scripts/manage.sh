@@ -1143,6 +1143,31 @@ configure_payment_reporting() {
     --from-env-file="$reporting_file" --dry-run=client -o yaml | kubectl apply -f -
 }
 
+configure_payment_delivery() {
+  local namespace="$1"
+  local delivery_file="${MX_INSIGHT_PAYMENT_DELIVERY_ENV_FILE:-${ROOT_DIR}/secrets/payment-delivery.env}"
+  if [ ! -f "$delivery_file" ]; then
+    [ -z "${MX_INSIGHT_PAYMENT_DELIVERY_ENV_FILE:-}" ] || die "payment delivery env file not found"
+    return 0
+  fi
+  node "${ROOT_DIR}/scripts/check-payment-delivery-config.mjs" "$delivery_file" || die "payment delivery configuration rejected"
+  kubectl -n "$namespace" create secret generic mx-insight-hub-payment-delivery \
+    --from-env-file="$delivery_file" --dry-run=client -o yaml | kubectl apply -f -
+}
+
+configure_browser_sso() {
+  local namespace="$1"
+  local profile="${MX_INSIGHT_SSO_PROFILE:-${ROOT_DIR}/secrets/identity/profile.json}"
+  if [ ! -f "$profile" ]; then
+    [ -z "${MX_INSIGHT_SSO_PROFILE:-}" ] || die "Hub SSO profile not found"
+    return 0
+  fi
+  node "${ROOT_DIR}/scripts/check-sso-config.mjs" "$profile" || die "Hub SSO configuration rejected"
+  kubectl -n "$namespace" create secret generic mx-insight-hub-browser-sso \
+    --from-file="profile.json=$profile" --from-literal=MX_INSIGHT_SSO_PROFILE=/run/mx-hub-sso/profile.json \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
 create_runtime_config() {
   local namespace="mx-insight-hub"
   need node
@@ -1354,6 +1379,8 @@ create_runtime_config() {
   apply_secret_from_protected_files \
     "$namespace" mx-insight-hub-secrets "${secret_values[@]}"
   configure_payment_reporting "$namespace"
+  configure_payment_delivery "$namespace"
+  configure_browser_sso "$namespace"
 
   kubectl -n "$namespace" create configmap mx-insight-hub-config \
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \

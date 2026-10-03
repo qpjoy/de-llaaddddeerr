@@ -744,6 +744,7 @@ export function createApp({
   adapter,
   adminToken,
   identity = null,
+  sso = null,
   queue = null,
   backfillPlatforms = [],
   importer = null,
@@ -766,6 +767,7 @@ export function createApp({
   notifications = null,
   balanceMonitor = null,
   paymentReporting = null,
+  recharge = null,
   nightAllA = null,
   externalPlatformGateway = null,
   hubSocialGateway = null,
@@ -814,6 +816,7 @@ export function createApp({
   })
 
   const payments = new PaymentService(store)
+  payments.store.includeRecharge = Boolean(recharge)
 
   /**
    * Resolve the caller of an administrative route.
@@ -830,6 +833,11 @@ export function createApp({
       if (typeof request.headers['x-api-key'] === 'string' && request.headers['x-api-key'].trim()) {
         throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage external data sources')
       }
+      if (request.headers.authorization || request.headers['x-mx-insight-admin-token']) {
+        throw new AppError(401, 'invalid_session', 'Explicit credentials are invalid')
+      }
+      const browserPrincipal = await sso?.principal(request)
+      if (browserPrincipal) return browserPrincipal
       throw new AppError(401, 'admin_auth_required', 'Admin token or Launcher session is required')
     }
     // The `adminToken &&` guard is load-bearing: secureEqual stringifies its
@@ -1359,7 +1367,7 @@ export function createApp({
     try {
       const url = new URL(request.url, 'http://localhost')
       const { pathname, searchParams } = url
-      const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/')
+      const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/') || pathname.startsWith('/auth/sso/')
       const isPublicPath = pathname.startsWith('/api/v1/')
       // Listener isolation must run before unauthenticated sign-in routes. The
       // public listener previously exposed both sign-in endpoints because their
@@ -1367,6 +1375,7 @@ export function createApp({
       if ((listenerMode === 'public' && isAdminPath) || (listenerMode === 'admin' && isPublicPath)) {
         throw new AppError(404, 'not_found', 'Route not found')
       }
+      if (await sso?.handle(request, response, url)) return
 
       // Bearer-key public routes are intentionally callable by browser clients
       // hosted on the separately isolated Admin listener. The token is supplied
@@ -1408,6 +1417,7 @@ export function createApp({
         sendJson(response, 200, {
           data: {
             adminToken: true,
+            ...(sso ? { sso: { loginUrl: '/auth/sso/login', switchUrl: '/auth/sso/login?switch=1' } } : {}),
             launcher: available ? { audience: launcherAudience, mode: 'proxied' } : null,
             ...(available
               ? {}
@@ -1525,7 +1535,7 @@ export function createApp({
         principal = await resolvePrincipal(request)
       }
 
-      if (await paymentRoute({ payments, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
+      if (await paymentRoute({ payments, recharge, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentReportingRoute({ reporting:paymentReporting, request, response, pathname, searchParams, principal, sendJson, requestId })) return
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
@@ -2439,7 +2449,8 @@ export function createApp({
       }
       params = routeMatch(pathname, '/internal/v1/admin/tenants/:id/billing')
       if (request.method === 'GET' && params) {
-        requireTenantCapability(principal, params.id, 'usage.read')
+        const billingMember = principal.memberships?.find(item => item.tenantId === params.id && item.role === 'billing')
+        requireTenantCapability(principal, params.id, billingMember ? 'billing.read' : 'usage.read')
         const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'ledgerLimit')
         if (unsupported.length > 0) {
           throw new AppError(400, 'unsupported_fields', `Unsupported billing query fields: ${unsupported.join(', ')}`)

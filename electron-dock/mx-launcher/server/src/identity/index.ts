@@ -6,7 +6,9 @@ import { IdentityRepository } from './repository.js';
 import type { IdentitySettings } from './provider.js';
 import { createIdentityServer } from './server.js';
 
-const settings = JSON.parse(readFileSync('/run/mx-identity/config.json', 'utf8')) as IdentitySettings;
+const profile = JSON.parse(readFileSync('/run/mx-identity/config.json', 'utf8')) as IdentitySettings;
+const settings = process.env.MX_IDENTITY_ENTRY === 'public' ? profile.publicEntry : profile;
+if (!settings) throw new Error('Public identity is not configured');
 const origin = new URL(settings.origin);
 if (origin.protocol !== 'https:' || settings.issuer !== `${origin.origin}/identity`) throw new Error('Invalid identity HTTPS origin');
 const runtime = loadConfig();
@@ -16,7 +18,7 @@ const repository = new IdentityRepository(runtime.databaseUrl, runtime.environme
 await repository.initialize();
 const server = createIdentityServer({ settings, repository, cert: readFileSync('/run/mx-identity/tls.crt'), key: readFileSync('/run/mx-identity/tls.key'),
   upstream: new URL('http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090') });
-server.listen(Number(origin.port), '0.0.0.0');
+server.listen(Number(new URL(settings.transportOrigin ?? settings.origin).port), '0.0.0.0');
 const cleanup = setInterval(() => void repository.cleanup().catch(() => console.warn('identity cleanup unavailable')), 60000).unref();
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => {
   clearInterval(cleanup); server.close(() => void repository.close()); server.closeIdleConnections();

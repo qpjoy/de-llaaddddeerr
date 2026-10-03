@@ -1,0 +1,80 @@
+# 公网 Identity 与集中证书运维
+
+状态：2026-10-03 本地实现与隔离测试；尚未部署生产、签发公网证书或验证真实飞书。完整的公网/内网两机操作步骤在配套 `de-mingxi` 仓库的 `compass/deploy/PUBLIC-IDENTITY.md`。
+
+## 已确定入口
+
+| 域名 | 职责 | 回调 |
+| --- | --- | --- |
+| `auth.minsight-ai.com` | 统一登录、邀请码注册、飞书 Web 绑定 | `/identity/feishu/callback` |
+| `launcher.minsight-ai.com` | 个人管理台，按现有管理角色授权 | `/auth/admin/callback` |
+| `hub.minsight-ai.com` | 原 Hub，复用原成员/租户与证书 | `/auth/sso/callback` |
+
+新建 Auth、Launcher 两张证书，Hub 原证书不变。不合并到 www 的 SAN：通过同一 webroot、脚本、调度和 deploy hook 管理多个证书，Certbot 自动续期无需停止公网 80。
+
+## 部署责任边界
+
+公网 DNS/证书/443 域名路由与续期由 `de-mingxi` 管理；它只把请求经 WireGuard 转到内网 Nginx，不调用 Launcher/Hub 构建或部署脚本，也不读取应用数据库、OIDC 私钥或客户端密钥。
+
+内网 Nginx 持有域名到各服务端口的映射；Launcher、Hub 各自管理进程、数据库和配置。Launcher 导出的身份连接档案属于一次性客户端配置交付，Hub 自己校验并载入；登记脚本不 import Hub 服务源码，运行时双方通过 OIDC/HTTP 协议连接。公网页面是否开放、证书续期和应用升级可以分别进行。
+
+## 与原客户入口隔离
+
+- 原 `https://10.88.88.88:18443/identity`、签名密钥、客户端、CA、用户 ID 不变。
+- `profile.json.publicEntry` 声明单独公网 issuer `https://auth.minsight-ai.com/identity`；新 `mx-identity-public` Deployment 复用账户数据库，使用独立签名密钥与 Cookie namespace。
+- 新回源只绑定 `10.88.88.88:18444`。Public TLS 在 Domestic 网关终止，经 WireGuard → Internal Nginx → 公网身份进程。端口占用预检不会接管其他服务。
+- Internal ingress 默认只接受已知 WG 对端 `10.88.0.1` 并加入独立网关凭据。身份进程验证凭据、客户端 IP 与精确 Host；Launcher 公网 BFF 再验证凭据、Cookie/CSRF 和当前用户管理角色。
+- Auth 域名只提供 `/identity/`；Launcher 只提供 `/admin/`、`/auth/admin/`、`/admin-api/`。原始 Internal API、注册 backchannel 不对公网代理，外部 Ops Token/Authorization 在公网管理代理中丢弃。
+- 注册策略、邀请码和账号库沿用私网原 namespace。公开注册不授予管理角色。明确禁止 `mx-launcher` 后旧管理会话的下一次受保护请求也被拒绝。
+- Hub 新登录使用公网 issuer；旧私网 SSO 会话沿原 issuer 走完最多 8 小时有效期，复用同一加密密钥。新旧身份经原 `mx-user-center:<environment>` 身份绑定复用成员/租户，不按同名或邮箱合并。
+- H2I、Luopan 的 SDK 登录协议、客户端配置、VPN 不由此入口改写。本次仍未改实际 Luopan 产品目录。正常 deploy 有既有滚动/重建行为，不能据此承诺线上完全无中断。
+
+## 一次登记，重复部署复用
+
+在现有 Internal 生产机的 Launcher 根目录，以 root 运行：
+
+```bash
+bash scripts/manage.sh ops identity public \
+  https://auth.minsight-ai.com \
+  https://launcher.minsight-ai.com \
+  https://hub.minsight-ai.com
+```
+
+此命令登记而不部署。它在生产部署锁内读取原环境/audience，持久保存公网密钥与 Hub SSO profile，并生成 `/var/lib/mx-launcher/identity/public-ingress.conf`。现有 Hub 私网 profile 备份为同目录 `profile.before-public.json`。相同参数重复执行不轮换密钥；已有配置冲突会停止，旧恢复档案不能移除已发布的公网凭据。
+
+上线顺序：
+
+1. Domestic：新域名 DNS → 宿主 80 Nginx ACME location → `certificates/manage.sh issue auth.minsight-ai.com launcher.minsight-ai.com`。
+2. Internal：上面的统一登记命令 → 原 Launcher deploy（沿用 TMPDIR、K8s、7789 构建代理参数）。
+3. Internal：把生成的 `public-ingress.conf` 以 root 0600 安装到 `/etc/nginx/conf.d/mx-public-identity.conf`，合入配套 Hub `/auth/sso/` 路由；Nginx 检查后 reload。
+4. Domestic：`bash scripts/enable-public-identity.sh` 检查证书与 Nginx 后启用两个域名；更新后的 `40-hub.conf` 保留 Hub Cookie callback。
+5. 确认公网 discovery 的 issuer/端点正确，且 Internal/Pod 能访问，再运行原 Hub deploy。
+6. 验收原账号/租户、注册、权限禁用和旧客户联网。飞书后台追加公网回调，保留原回调。
+
+后续原 Launcher deploy 自动维护两套身份进程/Secret，Hub deploy 自动载入相邻项目 `secrets/identity/profile.json`，无需逐个填写 SSO env key。原私网检查命令仍只检查私网入口；公网 DNS/TLS/回源应按完整 runbook 单独验收。
+
+## 证书与重启/迁机
+
+在 Domestic 的 `de-mingxi/compass/deploy` 使用统一脚本：
+
+```bash
+bash certificates/manage.sh status
+bash certificates/manage.sh check auth.minsight-ai.com launcher.minsight-ai.com
+bash certificates/manage.sh migrate hub.minsight-ai.com compass.minsight-ai.com delta.minsight-ai.com h2i.minsight-ai.com autotest.minsight-ai.com www.minsight-ai.com
+bash certificates/manage.sh install-timer
+```
+
+先在每个已有证书全部 SAN 对应的宿主 80 server 内配置 webroot。迁移用 Certbot ≥2.3 的 reconfigure staging 检查；成功后才能启用无人值守续期。脚本拒绝未迁移的 standalone 和历史 pre/post 停服 hook。已存在的其他 cron/自建定时任务须核对。续期成功后仅 Nginx 检查与 reload，不重建 Docker。
+
+备份 Domestic **整个 `/etc/letsencrypt`**（不只是 live 软链接），宿主/网关 Nginx 配置与调度；备份 Internal 身份目录、Hub `secrets/identity`、两应用数据库和原持久数据。公网 TLS 私钥不分发给应用；OIDC 密钥不放 Git/镜像。
+
+重启使用原持久档案、Secret、数据库和 systemd/Kubernetes 恢复。新主机先恢复备份和原网络，再部署；若 IP/issuer 也改变，需要单独迁移。恢复原档案的检查会阻止通过生成随机密钥“修复”旧身份。
+
+## 本地验证
+
+- 临时真实 PostgreSQL + OIDC：公网 issuer、原账号登录、精确 Host/可信网关、Ops Token 剥离、私网邀请码复用、旧 Hub 会话跨 issuer 配置切换、成员/租户复用、当前禁用、CSRF 和重放。
+- 配置幂等、私有/公网 key 分离、Kubernetes 回源端口、旧档案恢复保护；Launcher typecheck/build 和 Hub typecheck。
+- Nginx 1.30.5 实际 `nginx -t`：公网域名/Hub、生成的 Internal ingress、宿主 HTTP-01 配置。仅使用临时测试证书。
+- 证书 CLI 隔离测试：新证书选择、完整 SAN、HTTP 验证失败不签发、standalone/hook 拒绝、reconfigure、dry-run 后调度、复用已有 timer；不会真正签证书/停服务。
+
+真实公网、生产设备和飞书授权仍须上线后验收。证书 UI 看板未在本次实现；本批提供统一脚本和自动续期基础。

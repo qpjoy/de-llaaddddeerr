@@ -52,6 +52,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
         # The Internal landing directory is operator-owned by host group 10
         # (`wheel`). Add that group without changing host permissions. The
         # current node runtime does not support supplementalGroupsPolicy.
@@ -75,6 +76,9 @@ spec:
             - secretRef:
                 name: mx-insight-hub-payment-reporting
                 optional: true
+            - secretRef:
+                name: mx-insight-hub-payment-delivery
+                optional: true
             # Model API keys, keyed by whatever `apiKeyEnv` each provider in
             # MX_INSIGHT_AGENT_PROVIDERS names. envFrom rather than explicit
             # entries so adding a provider never requires editing this file --
@@ -84,6 +88,12 @@ spec:
                 name: mx-insight-hub-model-keys
                 optional: true
           env:
+            - name: MX_INSIGHT_SSO_PROFILE
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-browser-sso
+                  key: MX_INSIGHT_SSO_PROFILE
+                  optional: true
             - name: MX_INSIGHT_PORT
               value: "18151"
             - name: MX_INSIGHT_LISTENER_MODE
@@ -148,12 +158,20 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: browser-sso
+              mountPath: /run/mx-hub-sso
+              readOnly: true
             # Only the Admin plane may resolve operator-pasted server paths.
             # The public API and background workers never receive this mount.
             - name: server-files
               mountPath: /shared_dir
               readOnly: true
       volumes:
+        - name: browser-sso
+          secret:
+            secretName: mx-insight-hub-browser-sso
+            optional: true
+            defaultMode: 288
         - name: server-files
           hostPath:
             path: /shared_dir

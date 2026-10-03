@@ -12,7 +12,7 @@ import { AppModule } from './app.module.js';
 import { RUNTIME_CONFIG, PLATFORM_STORE } from './tokens.js';
 import type { RuntimeConfig } from './types.js';
 import type { PlatformStore } from './store/platform-store.js';
-import { loadAdminSsoConfig } from './admin-sso/config.js';
+import { loadAdminSsoConfig, loadPublicAdminSsoConfig } from './admin-sso/config.js';
 import { createAdminOidcClient } from './admin-sso/oidc.js';
 import { createAdminSsoMiddleware } from './admin-sso/middleware.js';
 import { PostgresSsoRepository } from './admin-sso/repository.js';
@@ -46,10 +46,25 @@ try {
   ssoUnavailable = true;
   console.warn(JSON.stringify({ event: 'admin.sso.configuration-invalid', message: 'SSO disabled; legacy authentication remains available' }));
 }
-const ssoRepository = ssoConfig ? new PostgresSsoRepository(config.databaseUrl!, config.environment) : undefined;
-app.use(createAdminSsoMiddleware({ config: ssoConfig, unavailable: ssoUnavailable,
+let publicSsoConfig: ReturnType<typeof loadPublicAdminSsoConfig> = null;
+try {
+  publicSsoConfig = loadPublicAdminSsoConfig();
+  if (publicSsoConfig && (!config.databaseUrl || config.storeDriver !== 'postgres')) throw new Error('SSO requires Postgres');
+} catch { publicSsoConfig = null; console.warn(JSON.stringify({ event: 'admin.public-sso.configuration-invalid' })); }
+const ssoRepository = ssoConfig || publicSsoConfig ? new PostgresSsoRepository(config.databaseUrl!, config.environment) : undefined;
+const privateSso = createAdminSsoMiddleware({ config: ssoConfig, unavailable: ssoUnavailable,
   repository: ssoRepository, oidc: ssoConfig ? createAdminOidcClient(ssoConfig) : undefined,
-  store: app.get<PlatformStore>(PLATFORM_STORE) }));
+  store: app.get<PlatformStore>(PLATFORM_STORE) });
+const publicSso = createAdminSsoMiddleware({ config: publicSsoConfig, unavailable: true,
+  repository: ssoRepository, oidc: publicSsoConfig ? createAdminOidcClient(publicSsoConfig) : undefined,
+  store: app.get<PlatformStore>(PLATFORM_STORE) });
+app.use((req: Parameters<typeof privateSso>[0], res: Parameters<typeof privateSso>[1], next: () => void) => {
+  // Public identity gateway preserves the exact configured console Host.
+  // Selection is not authorization: both middleware instances independently
+  // validate issuer/client/session scope, CSRF and current management role.
+  const selected = publicSsoConfig && req.headers.host === new URL(publicSsoConfig.origin).host ? publicSso : privateSso;
+  selected(req, res, next);
+});
 if (ssoRepository) app.getHttpServer().once('close', () => {
   void ssoRepository.close().catch(() => console.warn(JSON.stringify({ event: 'admin.sso.store-close-failed' })));
 });

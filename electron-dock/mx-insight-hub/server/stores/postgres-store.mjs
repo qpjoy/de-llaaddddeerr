@@ -8450,6 +8450,8 @@ export class PostgresStore {
     if (known[0]) return { id: known[0].member_id, displayName: displayName || known[0].display_name, status: known[0].status }
 
     return withPgTransaction(this.pool, async (client) => {
+      // Serialize new legacy and SSO bindings for the same immutable identity.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`identity:${JSON.stringify([issuer, subject, audience])}`])
       const existing = await client.query(
         `SELECT b.member_id, m.display_name, m.status
            FROM iam.external_identity_bindings b

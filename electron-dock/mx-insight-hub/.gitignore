@@ -4,6 +4,7 @@ dist/
 .env.*
 !.env.example
 secrets/payment-reporting.env
+secrets/payment-delivery.env
 .runtime/
 coverage/
 design-qa/

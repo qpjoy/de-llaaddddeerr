@@ -48,7 +48,7 @@ const cookieValue = (response: Response, name: string) => response.headers.getSe
 type TestPayload = { csrf: string; authenticated: boolean; bindingRequired?: boolean; canManage?: boolean; user: { userId: string }; actor?: string };
 type TestResponse = Omit<Response, 'json'> & { json(): Promise<TestPayload> };
 
-async function fixture(localSubjects = false) {
+async function fixture(localSubjects = false, publicGateway = false) {
   const repository = new TestRepository();
   const store = new MemoryStore(loadConfig());
   await store.createUserCenterUser({ userId: 'existing-admin', account: 'Admin', password: 'ExistingPassword123!', roleIds: ['mx-admin'] });
@@ -96,14 +96,14 @@ async function fixture(localSubjects = false) {
     });
   });
   const origin = await listen(server);
-  const settings = { issuer, origin, clientId: 'launcher', clientSecret: 'secret', callbackUrl: `${origin}/auth/admin/callback`, localSubjects };
+  const settings = { issuer, origin, clientId: 'launcher', clientSecret: 'secret', callbackUrl: `${origin}/auth/admin/callback`, localSubjects, ...(publicGateway ? { ingressToken: 'test-gateway-secret' } : {}) };
   const config = new oidc.Configuration({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/jwks` }, 'launcher',
     { client_secret: 'secret', id_token_signed_response_alg: 'RS256' }, oidc.ClientSecretBasic('secret'));
   oidc.allowInsecureRequests(config); // Test fixture only; production config requires HTTPS.
   middleware = createAdminSsoMiddleware({ config: settings, oidc: createAdminOidcClient(settings, config), repository, store });
   async function request(path: string, sessionCookie = '', body?: unknown, csrf?: string, requestOrigin = origin) {
     return await fetch(`${origin}${path}`, { redirect: 'manual', ...(body !== undefined ? { method: 'POST', body: JSON.stringify(body) } : {}),
-      headers: { ...(sessionCookie ? { cookie: sessionCookie } : {}), ...(body !== undefined ? { 'content-type': 'application/json', origin: requestOrigin } : {}), ...(csrf ? { 'x-mx-admin-csrf': csrf } : {}) } }) as TestResponse;
+      headers: { ...(publicGateway ? { 'x-mx-identity-gateway': 'test-gateway-secret', 'x-mx-client-ip': '203.0.113.1' } : {}), ...(sessionCookie ? { cookie: sessionCookie } : {}), ...(body !== undefined ? { 'content-type': 'application/json', origin: requestOrigin } : {}), ...(csrf ? { 'x-mx-admin-csrf': csrf } : {}) } }) as TestResponse;
   }
   async function begin(sessionCookie = '') {
     const response = await request('/auth/admin/login', sessionCookie);
@@ -382,4 +382,19 @@ test('BFF context survives real Nest/Express routing and cannot leak into concur
     assert.equal(personal.status, 200); assert.equal((await personal.json() as TestPayload).actor, 'existing-admin');
     assert.ok([401, 503].includes(legacy.status));
   } finally { await app.close(); await f.close(); }
+});
+
+// Public Host alone must never grant access through an untrusted proxy hop.
+test('public console requires gateway provenance and immediately honors a user app ban', async () => {
+  const f = await fixture(true, true);
+  try {
+    f.setClaims({ sub: 'existing-admin' });
+    const cookie = await f.login();
+    const { csrf } = await (await f.request('/auth/admin/session', cookie)).json();
+    assert.equal((await f.request('/admin-api/internal/v1/admin', cookie, undefined, csrf)).status, 200);
+    assert.equal((await fetch(`${f.origin}/auth/admin/session`, { headers: { cookie } })).status, 403);
+    assert.equal((await fetch(`${f.origin}/admin-api/internal/v1/admin`, { headers: { cookie, 'x-mx-identity-gateway': 'spoofed' } })).status, 403);
+    await f.store.createUserCenterUser({ userId: 'existing-admin', deniedAppIds: ['mx-launcher'] });
+    assert.equal((await f.request('/admin-api/internal/v1/admin', cookie, undefined, csrf)).status, 401);
+  } finally { await f.close(); }
 });

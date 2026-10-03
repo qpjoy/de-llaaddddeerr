@@ -102,6 +102,8 @@ Usage:
   bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
+  bash scripts/manage.sh ops identity hub <https://hub-origin>
+  bash scripts/manage.sh ops identity public <https://auth-origin> <https://launcher-origin> <https://hub-origin>
   bash scripts/manage.sh ops identity status|doctor|check|export <file>|restore <file>
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
@@ -5754,6 +5756,8 @@ Commands:
   bash scripts/manage.sh ops internal-production repair-cni
   bash scripts/manage.sh ops internal-production down
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
+  bash scripts/manage.sh ops identity hub <https://hub-origin>
+  bash scripts/manage.sh ops identity public <https://auth-origin> <https://launcher-origin> <https://hub-origin>
 
 Notes:
   - Personal SSO is opt-in once: ops identity on discovers the existing private
@@ -6748,7 +6752,16 @@ case "$cmd" in
         ops_insight_hub "$@"
         ;;
       identity)
-        if [ "${1:-}" = on ]; then
+        if [ "${1:-}" = hub ] || [ "${1:-}" = public ]; then
+          identity_action="$1"
+          shift
+          [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] || die "identity configuration requires root on the local production host"
+          command -v flock >/dev/null 2>&1 || die "flock is required for identity configuration"
+          exec 9>/run/mx-launcher-deploy.lock
+          flock -n 9 || die "another Internal deploy or identity configuration is running"
+          export KUBECONFIG=/etc/kubernetes/admin.conf
+          node "$SCRIPT_DIR/identity-${identity_action}.mjs" "$@"
+        elif [ "${1:-}" = on ]; then
           shift
           ops_identity_on "$@"
         else

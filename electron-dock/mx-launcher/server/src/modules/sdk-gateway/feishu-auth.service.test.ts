@@ -515,3 +515,25 @@ test('Feishu login cannot re-grant an explicitly banned public app', async () =>
   assert.deepEqual(store.getUserCenterUserIdentity(user.userId)?.appAccess.deniedAppIds, ['mx-h2i']);
   assert.equal(store.getUserCenterUserIdentity(user.userId)?.status, 'active');
 });
+
+test('Web proof reuses the existing Feishu application without provisioning H2I or minting SDK tokens', async () => {
+  const original = feishuConfig();
+  const redirectUri = 'https://10.88.88.88:18443/identity/feishu/callback';
+  const store = new MemoryStore(original);
+  await store.bootstrapUserCenter();
+  const before = await store.listUserCenterUsers();
+  const upstream = sequenceFetch([
+    { code: 0, access_token: 'web-provider-token' },
+    { code: 0, data: { tenant_key: 'tenant_allowed', open_id: 'ou_web_proof', name: 'Web user' } }
+  ]);
+  const web = new FeishuAuthService({ ...original, feishuRedirectUris: [redirectUri] }, store, upstream.fetch);
+  const transaction = await web.authorize({ redirectUri, state: STATE, codeChallenge: CODE_CHALLENGE, exchangeHandleVersion: 'mxfx1' });
+  const input = { redirectUri, code: 'web-code', codeVerifier: CODE_VERIFIER, exchangeHandle: transaction.exchangeHandle };
+  const proof = await web.verifyExternalIdentity(input);
+  assert.deepEqual(proof, { subject: 'tenant_allowed:ou_web_proof', displayName: 'Web user' });
+  assert.deepEqual(await store.listUserCenterUsers(), before);
+  assert.equal(JSON.stringify(proof).includes('web-provider-token'), false);
+  assert.deepEqual(original.feishuRedirectUris, [REDIRECT_URI], 'desktop callback allowlist stays unchanged');
+  assert.equal(JSON.parse(String(upstream.calls[0]?.init.body)).client_id, original.feishuAppId);
+  await assert.rejects(web.verifyExternalIdentity(input), UnauthorizedException);
+});

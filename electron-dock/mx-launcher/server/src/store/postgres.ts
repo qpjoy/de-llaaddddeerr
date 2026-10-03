@@ -1084,6 +1084,11 @@ export class PostgresStore implements PlatformStore {
       const records = manager.getRepository(PlatformRecordEntity);
       const previous = await this.findUserCenterUserForInput(input, records);
       const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
+      const feishuSubject = draft.profile.externalIds.feishuSubject;
+      if (feishuSubject && feishuSubject !== previous?.profile.externalIds.feishuSubject) {
+        const linked = await manager.query("SELECT id FROM mx_platform_records WHERE environment=$1 AND kind='iam-user' AND id<>$2 AND data->'profile'->'externalIds'->>'feishuSubject'=$3 LIMIT 1", [this.config.environment, draft.userId, feishuSubject]);
+        if (linked.length) throw new Error('Feishu identity is already linked to another user');
+      }
       const previousCredential = (await records.findOneBy({ kind: 'iam-user-credential', id: draft.userId, environment: this.config.environment }))?.data as unknown as UserCenterUserCredential | null;
       const credential = input.password !== undefined && input.password !== null
         ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)

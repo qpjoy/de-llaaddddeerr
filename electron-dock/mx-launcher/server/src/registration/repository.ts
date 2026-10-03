@@ -1,11 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, type EntityManager } from 'typeorm';
-import { createUserCenterUser, createUserCenterUserCredential, userCredentialSummary, userMatchesLogin, verifyUserCenterCredential } from '../store/domain.js';
+import { createUserCenterUser, createUserCenterUserCredential, resolveUserCenterUserForLogin, userCredentialSummary, userMatchesLogin, verifyUserCenterCredential } from '../store/domain.js';
 import type { AppCenterApp, UserCenterUser, UserCenterUserCredential } from '../types.js';
 
 export type RegistrationMode = 'closed' | 'invite_code' | 'open';
 export interface RegistrationPolicy { mode: RegistrationMode; version: number }
-export interface RegistrationInput { transactionId: string; clientId: string; policyVersion: number; account: string; password: string; inviteCode?: string }
+export interface RegistrationInput { transactionId: string; clientId: string; policyVersion: number; account: string; password: string; inviteCode?: string; verifiedFeishuSubject?: string }
 export class RegistrationError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
@@ -51,6 +51,37 @@ export class RegistrationRepository {
     return await this.read(manager, 'registration-policy', 'platform') ?? { mode: 'invite_code', version: 0 };
   }
   async policy() { await this.ready(); return this.policyFor(this.db.manager); }
+  private validFeishu(subject: string) {
+    if (!/^[A-Za-z0-9_-]{1,160}:[A-Za-z0-9_-]{1,160}$/.test(subject)) fail(400, 'invalid_feishu_identity', '飞书身份验证无效。');
+  }
+  async feishuAccount(subject: string) {
+    this.validFeishu(subject); await this.ready();
+    const rows = await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user' AND data->'profile'->'externalIds'->>'feishuSubject'=$2", [this.environment, subject]);
+    if (rows.length > 1) fail(409, 'feishu_binding_conflict', '飞书已存在冲突绑定，请联系管理员核对。');
+    if (rows[0] && rows[0].data.status !== 'active') fail(403, 'feishu_account_disabled', '此飞书关联账号已停用。');
+    return { userId: rows[0]?.data.userId ?? null };
+  }
+  async bindFeishu(subject: string, login: string, password: string) {
+    this.validFeishu(subject); await this.ready();
+    return this.db.transaction(async manager => {
+      await accountWriteLock(manager, this.environment);
+      const rows: Array<{ data: UserCenterUser }> = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'", [this.environment]);
+      const user = resolveUserCenterUserForLogin(rows.map(row => row.data), login);
+      const credential = user ? await this.read<UserCenterUserCredential>(manager, 'iam-user-credential', user.userId) : undefined;
+      if (!user || user.status !== 'active' || ['usr_demo_admin','usr_demo_user'].includes(user.userId) || !credential || !verifyUserCenterCredential(password, credential))
+        fail(401, 'invalid_binding_credentials', 'MX 账号或密码不正确，或账号不可用。');
+      const linked = rows.filter(row => row.data.profile.externalIds.feishuSubject === subject);
+      if (linked.some(row => row.data.userId !== user!.userId) || (user!.profile.externalIds.feishuSubject && user!.profile.externalIds.feishuSubject !== subject))
+        fail(409, 'feishu_binding_conflict', '飞书或 MX 账号已有其他绑定；不会自动合并账号、租户或权限，请联系管理员核对。');
+      if (!linked.length) {
+        await this.write(manager, 'iam-user', user!.userId, { ...user, updatedAt: new Date().toISOString(),
+          credential: { ...user!.credential, providers: [...new Set([...user!.credential.providers, 'feishu'])] },
+          profile: { ...user!.profile, externalIds: { ...user!.profile.externalIds, feishuSubject: subject } } });
+        await this.audit(manager, 'identity.feishu.bound', { provider: 'feishu' }, user!.userId);
+      }
+      return { userId: user!.userId };
+    });
+  }
   async updatePolicy(input: RegistrationPolicy) {
     if (!['closed', 'invite_code', 'open'].includes(input.mode) || !Number.isSafeInteger(input.version)) fail(400, 'invalid_policy', '注册策略无效。');
     await this.ready();
@@ -133,6 +164,7 @@ export class RegistrationRepository {
         const stored = await this.read<UserCenterUserCredential>(manager, 'iam-user-credential', previous.userId);
         if (!user || user.status !== 'active' || user.account !== account || !stored || !verifyUserCenterCredential(input.password, stored))
           fail(409, 'registration_conflict', '此注册请求已完成，请使用原账号登录。');
+        if (input.verifiedFeishuSubject && user!.profile.externalIds.feishuSubject !== input.verifiedFeishuSubject) fail(409, 'feishu_binding_conflict', '注册身份已变化，请重新登录。');
         return { userId: previous.userId };
       }
       const policy = await this.policyFor(manager);
@@ -147,13 +179,18 @@ export class RegistrationRepository {
           || Date.parse(invitation.startsAt) > Date.now() || Date.parse(invitation.expiresAt) <= Date.now()) fail(400, 'invitation_unavailable', '邀请码无效、已停用、已到期或名额已用完。');
       }
       const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'", [this.environment]);
+      if (input.verifiedFeishuSubject) {
+        this.validFeishu(input.verifiedFeishuSubject);
+        if (rows.some((row: { data: UserCenterUser }) => row.data.profile.externalIds.feishuSubject === input.verifiedFeishuSubject)) fail(409, 'feishu_binding_conflict', '此飞书已绑定其他 MX 账号，请直接登录或联系管理员。');
+      }
       if (rows.some((row: { data: UserCenterUser }) => userMatchesLogin(row.data, account))) fail(409, 'account_unavailable', '此账号不可用，请更换账号；已有账号请直接登录。');
       // No admin role, network entitlement, tenant membership, paid quota or
       // client-supplied role is inherited from ordinary identity registration.
       // This is an immutable, server-owned snapshot. Empty and legacy invites
       // inherit application policies; they do not mean an all-app wildcard.
       const allowedAppIds = invitation?.appGrant?.appIds ?? [];
-      const user = createUserCenterUser({ userId, account, displayName: account, roleIds: ['mx-user'], registeredByAppId: 'mx-identity', allowedAppIds }, null, userCredentialSummary(credential));
+      const user = createUserCenterUser({ userId, account, displayName: account, roleIds: ['mx-user'], registeredByAppId: 'mx-identity', allowedAppIds,
+        ...(input.verifiedFeishuSubject ? { externalIds: { feishuSubject: input.verifiedFeishuSubject } } : {}) }, null, userCredentialSummary(credential));
       await this.write(manager, 'iam-user', userId, user);
       await this.write(manager, 'iam-user-credential', userId, credential);
       if (invitation) await this.write(manager, 'registration-invite', invitation.id, { ...invitation, uses: invitation.uses + 1 });

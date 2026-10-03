@@ -43,7 +43,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { landingPathFor, showsOwnAccess } from './tenant-scope.js'
-import { adminApi, configurePublicApiBase, signInWithLauncher } from './api.js'
+import { adminApi, configurePublicApiBase, signInWithLauncher, SSO_SESSION, restoreSsoSession, logoutSsoSession } from './api.js'
 import { ErrorState, Field, LoadingState, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
@@ -367,7 +367,7 @@ const ROUTES = [
   { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
-  { path: '/payments', label: '充值与发票', description: '充值、核账与开票', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'consumer.write' },
+  { path: '/payments', label: '充值与发票', description: '充值、核账与开票', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'billing.read' },
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
@@ -515,7 +515,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
   useEffect(() => {
     // Which sign-in methods exist is a server-side fact; asking avoids showing
     // a Launcher form in a deployment that has no Launcher.
-    adminApi.signInOptions().then(setOptions)
+    adminApi.signInOptions().then(setOptions).catch(setError)
   }, [])
 
   const submitLauncher = async (event) => {
@@ -565,7 +565,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
         <div className="mih-auth-copy">
           <p className="qp-kicker">ADMIN SESSION</p>
           <h1 id="mih-auth-title">进入数据网关管理台</h1>
-          <p>使用 MX Launcher 提供的 Admin Token。凭证只保存在当前浏览器会话中，关闭会话后自动清除。</p>
+          <p>使用统一 MX 账号访问自己的租户。管理权限与数据权限由 Hub 单独控制。</p>
         </div>
         {message ? <div className="mih-auth-notice"><ShieldCheck size={18} weight="duotone" aria-hidden="true" /><span>{message}</span></div> : null}
         {checking ? (
@@ -575,6 +575,11 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
           </div>
         ) : (
           <>
+            {options?.sso ? <div className="mih-auth-form">
+              <a className="qp-button qp-button--primary qp-button--lg qp-button--block" href={options.sso.loginUrl}>统一账号登录 / 注册</a>
+              <a className="qp-button qp-button--ghost" href={options.sso.switchUrl}>使用其他账号</a>
+              <p className="mih-auth-hint">登录后查看自己的数据、用量和账户。</p>
+            </div> : null}
             {options && !options.launcher && options.launcherUnavailableReason ? (
               // Shown rather than hidden: an operator who configured Launcher
               // and sees no tab needs to know which half is missing.
@@ -752,10 +757,10 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
 }
 
 export function App() {
-  const initialToken = useMemo(readSessionToken, [])
+  const initialToken = useMemo(() => new URLSearchParams(window.location.search).get('sso') === 'ready' ? SSO_SESSION : readSessionToken(), [])
   const [theme, setTheme] = useState(readThemePreference)
   const [token, setToken] = useState(initialToken)
-  const [authState, setAuthState] = useState(initialToken ? 'checking' : 'signed-out')
+  const [authState, setAuthState] = useState('checking')
   const [authMessage, setAuthMessage] = useState('')
   const [location, setLocation] = useState(readLocation)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -795,20 +800,31 @@ export function App() {
 
   useEffect(() => {
     if (authState !== 'signed-in' || !location.defaulted) return
-    const landing = landingPathFor(session) === '/my' ? '/my' : '/dashboard?range=24h'
+    const target = landingPathFor(session)
+    const landing = target === '/dashboard' ? '/dashboard?range=24h' : target
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${landing}`)
     setLocation(readLocation({ canonicalize: true }))
   }, [authState, location.defaulted, session])
 
   useEffect(() => {
-    if (authState !== 'checking' || !token) return undefined
+    if (authState !== 'checking') return undefined
     let active = true
     // `session` rather than `dashboard`: it is the endpoint that reports who
     // the caller is and what they may do, and it is reachable by every valid
     // principal including one with no tenant membership yet.
-    adminApi.session(token)
+    ;(async () => {
+      let candidate = token
+      if (!candidate || candidate === SSO_SESSION) {
+        if (!await restoreSsoSession()) { if (active) setAuthState('signed-out'); return null }
+        candidate = SSO_SESSION
+      }
+      const data = await adminApi.session(candidate)
+      if (active) { setToken(candidate); writeSessionToken(candidate) }
+      return data
+    })()
       .then((data) => {
-        if (!active) return
+        if (!active || !data) return
+        if (new URLSearchParams(window.location.search).get('sso') === 'ready') window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`)
         configurePublicApiBase(data?.publicApiBaseUrl)
         setSession(data)
         setAuthState('signed-in')
@@ -837,7 +853,11 @@ export function App() {
     setAuthState('signed-in')
   }, [])
 
-  const signOut = useCallback((message = '') => {
+  const signOut = useCallback(async (message = '') => {
+    if (token === SSO_SESSION) {
+      try { await logoutSsoSession() }
+      catch (error) { setAuthMessage(error.message); if (!message) { window.alert(error.message); return } }
+    }
     configurePublicApiBase(null)
     writeSessionToken('')
     setToken('')
@@ -845,7 +865,7 @@ export function App() {
     setAuthMessage(message)
     setSession(null)
     setMenuOpen(false)
-  }, [])
+  }, [token])
 
   const handleUnauthorized = useCallback(() => {
     signOut('管理会话已失效，请重新验证。')

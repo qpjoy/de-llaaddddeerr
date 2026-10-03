@@ -3,7 +3,7 @@ dist
 .runtime
 .env
 .env.*
+secrets/
 design-qa
 coverage
 *.log
-

@@ -14,6 +14,8 @@
 
 相关专题：
 
+- [40-hub-sso-and-feishu-web.md](./40-hub-sso-and-feishu-web.md)：Hub SSO、原成员/租户复用、新用户个人空间、飞书 Web 绑定、集中配置与部署验收边界。
+
 - [38-neon-void-admin-ui.md](./38-neon-void-admin-ui.md)：
   管理界面统一到 Neon Void，共用搜索下拉、键盘交互、目录布局和设计资产同步/打包约定。
 
@@ -66,3 +68,5 @@
 
 带“目标架构”或“后续”状态的文档不代表代码已经实现。运行时能力必须以实现、测试和
 部署证据为准。
+
+- [41 · 公网 Identity 与集中证书运维](41-public-identity-and-certificates.md)：Auth/Launcher/Hub 域名、保留私网身份、集中配置、免停机续期与迁机。

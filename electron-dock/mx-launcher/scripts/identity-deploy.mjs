@@ -6,6 +6,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus, diagnoseProfile } from './identity-profile.mjs';
+import { publicAdminConfig } from './identity-public-profile.mjs';
 import { identityProbe } from './identity-check.mjs';
 
 export const NS = 'mx-internal-shadow';
@@ -18,13 +19,14 @@ export function run(args, input) {
 }
 export function resources(p, revision) {
   const metadata = name => ({ name, namespace: NS, labels: { [MANAGED]: p.installationId } });
-  const { issuer, origin, clientId, clientSecret, cookieKeys, jwks } = p;
+  const { issuer, origin, clientId, clientSecret, cookieKeys, jwks, applications, publicEntry } = p;
   const url = new URL(origin); const port = Number(url.port);
   const secret = (name, values) => ({ apiVersion: 'v1', kind: 'Secret', metadata: metadata(name), type: 'Opaque',
     data: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Buffer.from(value).toString('base64')])) });
-  const runtime = secret('mx-identity-runtime', { 'config.json': JSON.stringify({ issuer, origin, clientId, clientSecret, cookieKeys, jwks }), 'tls.crt': p.tlsCert, 'tls.key': p.tlsKey, 'ca.crt': p.caCert });
+  const runtime = secret('mx-identity-runtime', { 'config.json': JSON.stringify({ issuer, origin, clientId, clientSecret, cookieKeys, jwks, applications, publicEntry }), 'tls.crt': p.tlsCert, 'tls.key': p.tlsKey, 'ca.crt': p.caCert });
   const admin = secret('mx-launcher-admin-sso', { MX_ADMIN_SSO_ENABLED: '1', MX_ADMIN_SSO_ORIGIN: origin, MX_ADMIN_SSO_ISSUER: issuer,
-    MX_ADMIN_SSO_CLIENT_ID: clientId, MX_ADMIN_SSO_CLIENT_SECRET: clientSecret, MX_ADMIN_SSO_LOCAL_SUBJECTS: '1', NODE_EXTRA_CA_CERTS: '/run/mx-identity-ca/ca.crt' });
+    MX_ADMIN_SSO_CLIENT_ID: clientId, MX_ADMIN_SSO_CLIENT_SECRET: clientSecret, MX_ADMIN_SSO_LOCAL_SUBJECTS: '1', NODE_EXTRA_CA_CERTS: '/run/mx-identity-ca/ca.crt',
+    ...(publicEntry ? { MX_ADMIN_PUBLIC_SSO_CONFIG: JSON.stringify(publicAdminConfig(publicEntry)) } : {}) });
   const ca = secret('mx-identity-ca', { 'ca.crt': p.caCert });
   const deployment = { apiVersion: 'apps/v1', kind: 'Deployment', metadata: metadata('mx-identity'), spec: {
     replicas: 1, strategy: { type: 'Recreate' }, selector: { matchLabels: { app: 'mx-identity' } },
@@ -44,20 +46,36 @@ export function resources(p, revision) {
       }], volumes: [{ name: 'identity', secret: { secretName: 'mx-identity-runtime', defaultMode: 256 } }]
     } }
   } };
-  return { runtime, admin, ca, deployment };
+  let publicDeployment;
+  if (publicEntry) {
+    publicDeployment = structuredClone(deployment);
+    publicDeployment.metadata = metadata('mx-identity-public');
+    publicDeployment.spec.selector.matchLabels.app = 'mx-identity-public';
+    publicDeployment.spec.template.metadata.labels.app = 'mx-identity-public';
+    const container = publicDeployment.spec.template.spec.containers[0];
+    container.env.push({ name: 'MX_IDENTITY_ENTRY', value: 'public' });
+    const transport = new URL(publicEntry.transportOrigin);
+    container.ports = [{ name:'http',containerPort:18444,hostPort:18444,hostIP:transport.hostname }];
+    for (const probe of [container.startupProbe,container.readinessProbe]) {
+      probe.httpGet = {scheme:'HTTP',path:'/healthz',port:18444,httpHeaders:[{name:'Host',value:new URL(publicEntry.origin).host}]};
+    }
+    container.livenessProbe.tcpSocket.port = 18444;
+  }
+  return { runtime, admin, ca, deployment, ...(publicDeployment ? { publicDeployment } : {}) };
 }
 export function inspectIdentity(p, execute = run, initializing = false) {
   const get = (kind, name) => { const raw = execute(['-n', NS, 'get', kind, name, '--ignore-not-found', '-o', 'json']); return raw.trim() ? JSON.parse(raw) : null; };
   const previous = get('secret', 'mx-identity-runtime');
   const deployment = get('deployment', 'mx-identity');
+  const publicDeployment = get('deployment', 'mx-identity-public');
   if (!p) {
     const admin = get('secret', 'mx-launcher-admin-sso');
-    if (previous || deployment || get('secret', 'mx-identity-ca') || admin?.metadata?.labels?.[MANAGED]) throw new Error('身份服务已存在但主机部署档案丢失；请恢复 profile.json，不能生成新密钥');
+    if (previous || deployment || publicDeployment || get('secret', 'mx-identity-ca') || admin?.metadata?.labels?.[MANAGED]) throw new Error('身份服务已存在但主机部署档案丢失；请恢复 profile.json，不能生成新密钥');
     if (initializing && admin) throw new Error('已有 SSO 配置；拒绝覆盖，请先确认原身份服务及备份');
-    return { deployment };
+    return { deployment, publicDeployment };
   }
   const oldAdmin = get('secret', 'mx-launcher-admin-sso');
-  for (const existing of [previous, oldAdmin, get('secret', 'mx-identity-ca'), deployment]) {
+  for (const existing of [previous, oldAdmin, get('secret', 'mx-identity-ca'), deployment, publicDeployment]) {
     if (existing && existing.metadata?.labels?.[MANAGED] !== p.installationId) throw new Error('已有 SSO 资源归属不同；拒绝覆盖现有身份配置');
   }
   if (previous) {
@@ -65,9 +83,15 @@ export function inspectIdentity(p, execute = run, initializing = false) {
     try { old = JSON.parse(Buffer.from(previous.data['config.json'], 'base64').toString()); }
     catch { throw new Error('已有身份运行配置无法解析；请核对备份（不输出凭据）'); }
     const expected = resources(p).runtime.data;
-    if (sha(old) !== sha(JSON.parse(Buffer.from(expected['config.json'], 'base64').toString())) || Buffer.from(previous.data['ca.crt'], 'base64').toString() !== p.caCert) throw new Error('身份密钥或 issuer 与现有部署不一致；请恢复原部署档案');
+    const next = JSON.parse(Buffer.from(expected['config.json'], 'base64').toString());
+    // Additive first-party registration is allowed; existing clients and core
+    // credentials cannot disappear/change from a stale host backup.
+    const { applications: oldApps = [], publicEntry: oldPublic, ...oldCore } = old;
+    const { applications: nextApps = [], publicEntry: nextPublic, ...nextCore } = next;
+    if ((oldPublic && sha(oldPublic) !== sha(nextPublic ?? null)) || sha(oldCore) !== sha(nextCore) || oldApps.some(app => sha(app) !== sha(nextApps.find(nextApp => nextApp.clientId === app.clientId) ?? null))
+      || Buffer.from(previous.data['ca.crt'], 'base64').toString() !== p.caCert) throw new Error('身份密钥、客户端或 issuer 与现有部署不一致；请恢复原部署档案');
   }
-  return { deployment };
+  return { deployment, publicDeployment };
 }
 export function deployIdentity({ file = PROFILE, execute = run, revision, log = console.log } = {}) {
   const p = readProfile(file);
@@ -79,6 +103,11 @@ export function deployIdentity({ file = PROFILE, execute = run, revision, log = 
   const built = resources(renewed, revision);
   const apply = value => execute(['apply', '--server-side', '--field-manager=mx-identity-deploy', '-f', '-'], JSON.stringify(value));
   apply(built.runtime); apply(built.ca); apply(built.deployment);
+  if (built.publicDeployment) {
+    apply(built.publicDeployment);
+    execute(['-n', NS, 'rollout', 'status', 'deployment/mx-identity-public', '--timeout=180s']);
+    log(`公网身份回源已就绪：${p.publicEntry.transportOrigin}；外部 DNS/TLS/网关需按部署文档验收。`);
+  }
   execute(['-n', NS, 'rollout', 'status', 'deployment/mx-identity', '--timeout=180s']);
   // Enable RP only after the durable provider is ready. The normal API apply /
   // restart later in deploy reads this Secret and the trusted CA volume.

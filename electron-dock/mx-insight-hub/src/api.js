@@ -7,6 +7,21 @@ import {
 
 const API_BASE = (import.meta.env.VITE_MX_INSIGHT_API_BASE || '').replace(/\/$/, '')
 const ADMIN_ROOT = '/internal/v1/admin'
+export const SSO_SESSION = 'mx-hub-cookie-session'
+let ssoCsrf = ''
+const authHeaders = token => token === SSO_SESSION ? { 'x-mx-hub-csrf': ssoCsrf } : token ? { 'x-mx-insight-admin-token': token } : {}
+export async function restoreSsoSession() {
+  const response = await fetch(`${API_BASE}/auth/sso/session`, { credentials: 'same-origin', cache: 'no-store' })
+  if (!response.ok) return false
+  const value = await response.json()
+  ssoCsrf = value.csrf || ''
+  return value.active === true
+}
+export async function logoutSsoSession() {
+  const response = await fetch(`${API_BASE}/auth/sso/logout`, { method: 'POST', credentials: 'same-origin', headers: { 'x-mx-hub-csrf': ssoCsrf } })
+  if (!response.ok) throw new Error('退出统一登录失败，请刷新页面后重试。')
+  ssoCsrf = ''
+}
 
 function withoutTrailingSlash(value) {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -114,7 +129,7 @@ async function request(token, path, { method = 'GET', body, query, raw, contentT
     signal,
     headers: {
       accept: 'application/json',
-      'x-mx-insight-admin-token': token,
+      ...authHeaders(token),
       ...(raw ? { 'content-type': contentType || 'application/octet-stream' } : {}),
       ...(body ? { 'content-type': 'application/json' } : {}),
       ...(headers || {}),
@@ -363,7 +378,7 @@ export const adminApi = {
   saveEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: body.requestId ? 'PUT' : 'POST', body }),
   deleteEcommerceItem: (token, body) => request(token, `${ADMIN_ROOT}/data-products/ecommerce/items`, { method: 'DELETE', body }),
   ecommerceImage: async (token, query, signal) => {
-    const response = await fetch(`${API_BASE}${ADMIN_ROOT}/data-products/ecommerce/media${queryString(query)}`, { headers: { 'x-mx-insight-admin-token': token }, signal })
+    const response = await fetch(`${API_BASE}${ADMIN_ROOT}/data-products/ecommerce/media${queryString(query)}`, { headers: authHeaders(token), signal })
     if (!response.ok) throw new ApiError({ status: response.status, message: '图片暂不可用' })
     return response.blob()
   },
@@ -417,6 +432,8 @@ export const adminApi = {
   paymentOrder: (token, tenantId, id) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders/${encodeURIComponent(id)}`),
   createPaymentOrder: (token, tenantId, body, key) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders`, { method: 'POST', body, headers: { 'idempotency-key': key } }),
   paymentAction: (token, tenantId, id, action, body, key) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body, headers: { 'idempotency-key': key } }),
+  paymentIntegration: token => request(token, `${ADMIN_ROOT}/payments/integration`),
+  activatePaymentIntegration: (token, environment, sourceId) => request(token, `${ADMIN_ROOT}/payments/integration/${environment}/activate`, {method:'POST',body:{sourceId,acknowledge:true}}),
   tenantBilling: (token, tenantId, query = {}) => request(
     token,
     `${ADMIN_ROOT}/tenants/${encodeURIComponent(tenantId)}/billing`,

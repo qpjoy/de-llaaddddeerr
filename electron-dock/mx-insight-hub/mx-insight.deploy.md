@@ -2,6 +2,8 @@
 
 此文件是本项目日常部署、停机恢复及后续排查的入口。适用当前 Internal 单节点 Kubernetes/containerd 环境；已知环境信息核验于 2026-09-21。服务器上的实际 PV、身份记录和配置是最终依据，不能只凭目录名选择数据。功能设计见 `docs/`，本次旧盘恢复经过见[恢复复盘](docs/operations/restart-and-recovery.md)。
 
+可选的浏览器 SSO 接入见 [Hub SSO 部署与恢复](../mx-launcher/docs/40-hub-sso-and-feishu-web.md)：先在 Launcher 集中登记 Hub HTTPS origin，再依次运行两个系统原 deploy。之后无需重复设置开关；未登记的部署保留原登录。
+
 ## 固定依赖和责任边界
 
 **Hub 的持久业务数据来自兄弟项目 `../mx-common`，不是 Hub 容器文件层或 Hub 自己的 PostgreSQL。** Hub 与 mx-common 都要同步代码；仅拉取/复制 Hub 子目录不能获得共享部署脚本的修复。
@@ -43,6 +45,7 @@ PG、ES 使用 Service DNS，不固定 Kubernetes ClusterIP 或 Pod IP，它们�
 - `mx-insight-hub/mx-insight-hub-secrets`：Hub DSN、Pepper、Admin Token 等；`mx-common/mx-common-secrets` 与 `mx-common/mx-common-db-mx-insight-hub`：共享及产品数据库凭据。备份实际 Secret，不在此文档写密钥值。
 - `/var/lib/mx-common/storage-identity.json`：无密钥的存储身份记录，包含根路径、节点、PG 身份、挂载点和文件系统 UUID。首次核验后原子发布，不能为绕过校验随意删改。
 - 其他保留的 Hub runtime Secret/ConfigMap，包括 bootstrap Key 和模型配置；日常部署沿用既有配置。
+- 启用 SSO 后还需备份 `secrets/identity/profile.json`、`mx-insight-hub-browser-sso` Secret，以及 Launcher 的 `/var/lib/mx-launcher/identity/profile.json` 和身份数据库。Hub 会话随本数据库备份；换机恢复必须同时保留原会话加密密钥、客户端密钥及可信 CA，不重新生成替代。
 
 2026-09-21 核验时数据盘显示为 `/dev/nvme0n1p1`、挂载到 `/data`。设备名可能变化，应按文件系统 UUID 确认和配置主机持久挂载。脚本不会自动修改 `/etc/fstab`、挂载未知磁盘、修改 VPN 或全局 Docker 代理。
 

@@ -5,6 +5,7 @@ export interface AdminSsoConfig {
   clientSecret: string;
   callbackUrl: string;
   localSubjects?: boolean;
+  ingressToken?: string;
 }
 
 // No development HTTP escape hatch in production configuration. Tests inject a
@@ -26,4 +27,16 @@ export function loadAdminSsoConfig(env = process.env): AdminSsoConfig | null {
   const localSubjects = env.MX_ADMIN_SSO_LOCAL_SUBJECTS === '1';
   if (localSubjects && issuer !== `${origin}/identity`) throw new Error('Managed identity issuer must share the configured origin');
   return { issuer, origin, clientId, clientSecret, callbackUrl: `${origin}/auth/admin/callback`, localSubjects };
+}
+
+// Explicit managed public entry; never inferred from incoming forwarded headers.
+export function loadPublicAdminSsoConfig(env = process.env): AdminSsoConfig | null {
+  if (!env.MX_ADMIN_PUBLIC_SSO_CONFIG) return null;
+  const p = JSON.parse(env.MX_ADMIN_PUBLIC_SSO_CONFIG) as AdminSsoConfig;
+  const origin = new URL(p.origin), issuer = new URL(p.issuer);
+  if (origin.protocol !== 'https:' || origin.origin !== p.origin || origin.username || origin.password
+    || issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash || issuer.pathname !== '/identity'
+    || p.clientId !== 'mx-launcher-public-admin' || !/^[A-Za-z0-9_-]{43}$/.test(p.clientSecret)
+    || p.callbackUrl !== `${p.origin}/auth/admin/callback` || p.localSubjects !== true || !/^[A-Za-z0-9_-]{43}$/.test(p.ingressToken ?? '')) throw new Error('Invalid managed public SSO configuration');
+  return p;
 }

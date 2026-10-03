@@ -1,8 +1,8 @@
 import { createHmac } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import type { AdapterPayload } from 'oidc-provider';
-import { createUserCenterUserCredential, resolveUserCenterUserForLogin, verifyUserCenterCredential } from '../store/domain.js';
-import type { UserCenterUser, UserCenterUserCredential } from '../types.js';
+import { createUserCenterUserCredential, createUserPrincipalFromRecord, resolveUserCenterUserForLogin, verifyUserCenterCredential } from '../store/domain.js';
+import type { UserCenterUser, UserCenterUserCredential, UserCenterRole } from '../types.js';
 
 const dummy = createUserCenterUserCredential('identity-timing-placeholder', 'not-a-login-password');
 const bootstrap = new Set(['usr_demo_admin', 'usr_demo_user']);
@@ -11,6 +11,12 @@ export interface IdentityAccounts {
   authenticate(login: string, password: string): Promise<UserCenterUser | undefined>;
   allowAttempt(ip: string, login: string): Promise<boolean>;
   allowRegistrationAttempt?(ip: string, login: string): Promise<boolean>;
+  hubIdentity?(user: UserCenterUser, audience: string): Promise<Record<string, unknown>>;
+  webState?: {
+    put(kind: string, id: string, data: Record<string, unknown>): Promise<void>;
+    read(kind: string, id: string, consume?: boolean): Promise<Record<string, unknown> | undefined>;
+    remove(kind: string, id: string): Promise<void>;
+  };
 }
 
 /** Separate pool and tables. Existing user/credential records are read-only:
@@ -38,6 +44,16 @@ export class IdentityRepository implements IdentityAccounts {
   async close() { if (this.db.isInitialized) await this.db.destroy(); }
   async ready() { await this.db.query('SELECT 1'); }
   async cleanup() { await this.db.query('DELETE FROM mx_identity_records WHERE scope=$1 AND expires_at <= now()', [this.scope]); }
+  webState = {
+    put: async (kind: string, id: string, data: Record<string, unknown>) => { await this.adapter(`WebFeishu:${kind}`).upsert(id, data, 300); },
+    read: async (kind: string, id: string, consume = false): Promise<Record<string, unknown> | undefined> => {
+      const a = this.adapter(`WebFeishu:${kind}`), row = await a.find(id);
+      if (!row || row.consumed) return undefined;
+      if (consume) await a.consume(id);
+      return row;
+    },
+    remove: async (kind: string, id: string) => this.adapter(`WebFeishu:${kind}`).destroy(id)
+  };
   adapter(kind: string) {
     const query = (sql: string, values: unknown[]) => this.db.query(sql, values);
     const scope = this.scope;
@@ -80,6 +96,12 @@ export class IdentityRepository implements IdentityAccounts {
     const credential = credentials[0]?.data as UserCenterUserCredential | undefined;
     const verified = verifyUserCenterCredential(password, credential ?? dummy);
     return verified && credential && user?.status === 'active' && !bootstrap.has(user.userId) ? user : undefined;
+  }
+  async hubIdentity(user: UserCenterUser, audience: string) {
+    const rows = await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-role'", [this.environment]);
+    const principal = createUserPrincipalFromRecord(user, rows.map((row: { data: UserCenterRole }) => row.data));
+    return { issuer: `mx-user-center:${this.environment}`, subject: principal.principalId, audience,
+      authProvider: 'oidc', principal: { ...principal, organizationIds: principal.orgIds, launcherTenantId: principal.tenantId } };
   }
   async allowAttempt(ip: string, login: string) {
     const window = Math.floor(Date.now() / 300_000);

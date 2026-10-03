@@ -138,6 +138,13 @@ export class FeishuAuthService {
   }
 
   async exchange(input: FeishuTokenExchangeInput): Promise<FeishuTokenExchangeResult> {
+    const identity = await this.verifyExternalIdentity(input);
+    return this.issueIdentity(identity, input);
+  }
+
+  // Server-side Web login reuses the same provider verification, without the
+  // Electron client's historical H2I/network provisioning defaults.
+  async verifyExternalIdentity(input: FeishuTokenExchangeInput): Promise<FeishuIdentity> {
     this.assertConfigured();
     const code = requireOpaqueString(input.code, 'code', 2_048);
     const redirectUri = this.requireAllowedRedirectUri(input.redirectUri);
@@ -149,7 +156,10 @@ export class FeishuAuthService {
     await this.assertSourceRateLimit('exchange', input.sourceKey, FEISHU_EXCHANGE_LIMIT_PER_SOURCE);
     await this.consumeTransaction(input.exchangeHandle, redirectUri, codeVerifier);
     const accessToken = await this.exchangeAuthorizationCode(code, redirectUri, codeVerifier);
-    const identity = await this.loadIdentity(accessToken);
+    return this.loadIdentity(accessToken);
+  }
+
+  private async issueIdentity(identity: FeishuIdentity, input: FeishuTokenExchangeInput): Promise<FeishuTokenExchangeResult> {
     const user = await this.resolveUser(identity, input.requestId ?? null);
     const issued = await this.store.issueUserCenterToken({
       subjectKind: 'user',

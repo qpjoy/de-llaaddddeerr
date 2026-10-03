@@ -6,7 +6,7 @@ import './payments.css'
 
 const money = (value, currency = 'CNY') => `${currency === 'CNY' ? '¥' : `${currency} `}${(Number(value || 0) / 100).toFixed(2)}`
 const stamp = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
-const labels = { pending: '待付款', submitted: '待核实', paid: '已入账', cancelled: '已取消', requested: '待开票', issued: '已开票', rejected: '已退回' }
+const labels = { awaiting_credit: '付款已确认 · 待入账', pending: '待付款', submitted: '待核实', paid: '已入账', cancelled: '已取消', requested: '待开票', issued: '已开票', rejected: '已退回' }
 const parseAmount = value => /^\d{1,6}(\.\d{1,2})?$/u.test(value) ? Number(value.split('.')[0]) * 100 + Number((value.split('.')[1] || '').padEnd(2, '0')) : null
 const button = 'qp-button qp-button--ghost'
 const primary = 'qp-button qp-button--primary'
@@ -20,12 +20,14 @@ export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, 
   const [mode, setMode] = useState('recharge')
   const [environment, setEnvironment] = useState('live')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [integrationOpen, setIntegrationOpen] = useState(false)
   const [channelRevision, setChannelRevision] = useState(0)
-  const allowed = (tenants.data || []).filter(tenant => session.platformAdmin || session.memberships?.some(item => item.tenantId === tenant.id && ['owner', 'admin'].includes(item.role)))
+  const allowed = (tenants.data || []).filter(tenant => session.platformAdmin || session.memberships?.some(item => item.tenantId === tenant.id && ['owner', 'admin', 'billing'].includes(item.role)))
   const tenantId = allowed.some(item => item.id === query.get('tenantId')) ? query.get('tenantId') : allowed[0]?.id || ''
   return <div className="mih-pay-page">
     <PageHeading eyebrow="MX PAY" title={session.platformAdmin ? '充值与财务' : '充值与发票'} description="充值到当前租户钱包，供该租户下的服务共同使用。" onRefresh={tenants.refresh} loading={tenants.loading}>
       {session.platformAdmin ? <button className={button} onClick={() => setSettingsOpen(true)}><SlidersHorizontal size={17} />收款设置</button> : null}
+      {session.platformAdmin ? <button className={button} onClick={() => setIntegrationOpen(true)}>支付服务接入</button> : null}
     </PageHeading>
     {tenants.error ? <ErrorState error={tenants.error} onRetry={tenants.refresh} /> : null}
     <div className="mih-pay-toolbar qp-panel">
@@ -33,9 +35,10 @@ export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, 
       <DropdownField label="账务环境" value={environment} onChange={setEnvironment} options={[{ value: 'live', label: '正式收款' }, { value: 'test', label: '测试流程 · 不计入正式余额' }]} />
       {mode === 'recharge' ? <DropdownField label="充值租户" value={tenantId} onChange={value => setQuery({ tenantId: value })} options={allowed.map(tenant => ({ value: tenant.id, label: tenant.name }))} /> : null}
     </div>
-    {environment === 'test' ? <p className="mih-pay-notice">测试环境：不会扣款，不增加可消费余额；开票信息也只用于流程测试。</p> : null}
-    {mode === 'finance' || tenantId ? <PaymentWorkspace key={`${tenantId}:${environment}:${mode}:${channelRevision}`} {...{ token, session, tenantId, environment, mode, notify, onUnauthorized }} /> : tenants.loading ? <LoadingState /> : <p>暂无可以管理充值的租户，请联系管理员分配租户 owner/admin 角色。</p>}
+    {environment === 'test' ? <p className="mih-pay-notice">测试环境：只使用模拟订单或支付宝沙箱，不增加正式可消费余额；开票信息也只用于流程测试。</p> : null}
+    {mode === 'finance' || tenantId ? <PaymentWorkspace key={`${tenantId}:${environment}:${mode}:${channelRevision}`} {...{ token, session, tenantId, environment, mode, notify, onUnauthorized }} /> : tenants.loading ? <LoadingState /> : <p>暂无可管理账务的租户，请联系管理员分配账务员或租户管理角色。</p>}
     {settingsOpen ? <PaymentSettings {...{ token, onUnauthorized }} onClose={() => setSettingsOpen(false)} onSaved={() => { setSettingsOpen(false); setChannelRevision(value => value + 1); notify?.('收款配置已保存') }} /> : null}
+    {integrationOpen ? <PaymentIntegration {...{token,onUnauthorized}} onClose={()=>{setIntegrationOpen(false);setChannelRevision(value=>value+1)}} /> : null}
   </div>
 }
 
@@ -55,6 +58,7 @@ function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnaut
   const state = useRemoteData(load, onUnauthorized)
   const rows = state.data?.orders.items || [], channels = state.data?.channels
   const amountMinor = parseAmount(amount), enabled = channels?.[environment]?.enabled
+  const center = channels?.[environment]?.backend === 'center'
   const valid = amountMinor >= 500 && amountMinor <= 10_000_000
   const refresh = () => state.refresh()
   async function create(event) {
@@ -83,24 +87,24 @@ function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnaut
     {state.error || error ? <ErrorState error={error || state.error} onRetry={refresh} /> : null}
     {channels?.storage === 'memory' ? <p className="mih-pay-notice">当前使用临时演示数据，服务重启后订单和余额会丢失。请勿真实付款；正式收款需部署 PostgreSQL。</p> : null}
     {mode === 'recharge' ? <>
-      <section className="qp-panel mih-pay-balance"><Coins size={26} /><div><span>正式可用余额</span><strong>{state.data?.billing?.account ? money(state.data.billing.account.availableMinor, state.data.billing.account.currency) : '尚未开户'}</strong></div><div><span>冻结金额</span><strong>{money(state.data?.billing?.account?.heldMinor, state.data?.billing?.account?.currency)}</strong></div><a className={button} href={`#/plans?tenantId=${encodeURIComponent(tenantId)}`}>用量与账单</a></section>
+      <section className="qp-panel mih-pay-balance"><Coins size={26} /><div><span>正式可用余额</span><strong>{state.data?.billing?.account ? money(state.data.billing.account.availableMinor, state.data.billing.account.currency) : '尚未开户'}</strong></div><div><span>冻结金额</span><strong>{money(state.data?.billing?.account?.heldMinor, state.data?.billing?.account?.currency)}</strong></div>{session.platformAdmin || session.capabilities?.includes('consumer.read') ? <a className={button} href={`#/plans?tenantId=${encodeURIComponent(tenantId)}`}>用量与账单</a> : null}</section>
       <form className="mih-pay-checkout" onSubmit={create}>
-        <section className="qp-panel mih-pay-card"><h2><Scan size={22} />账户充值</h2><p>{environment === 'test' ? '模拟支付' : '支付宝扫码付款 · 人工核实到账'}</p>
+        <section className="qp-panel mih-pay-card"><h2><Scan size={22} />账户充值</h2><p>{center ? channels?.[environment]?.provider === 'mock' ? '模拟支付流程' : environment === 'test' ? '支付宝沙箱收银台' : '支付宝收银台' : environment === 'test' ? '模拟支付' : '支付宝扫码付款 · 人工核实到账'}</p>
           <div className="mih-pay-presets">{['50','100','500','1000'].map(value => <button key={value} type="button" className={amount === value ? primary : button} onClick={() => setAmount(value)}>{money(Number(value) * 100)}</button>)}</div>
           <Input label="自定义金额（元）" value={amount} onChange={event => setAmount(event.target.value)} inputMode="decimal" maxLength={9} required />
           <small>单笔 ¥5.00–¥100,000.00，最多两位小数。</small>
         </section>
-        <aside className="qp-panel mih-pay-card"><h2>订单摘要</h2><dl className="mih-pay-facts"><div><dt>支付方式</dt><dd>{environment === 'test' ? '模拟测试' : '支付宝'}</dd></div><div><dt>收款人</dt><dd>{environment === 'test' ? '测试账户' : channels?.live.payeeName || '尚未配置'}</dd></div><div><dt>合计</dt><dd className="mih-pay-total">{money(valid ? amountMinor : 0)}</dd></div></dl>
-          <p className="mih-pay-muted">{environment === 'test' ? '完整验证订单、核实和开票流程。' : '下单后扫码，按订单金额付款并提交流水号。核实到账后，余额即可使用。'}</p>
+        <aside className="qp-panel mih-pay-card"><h2>订单摘要</h2><dl className="mih-pay-facts"><div><dt>支付方式</dt><dd>{environment === 'test' ? center && channels?.test?.provider === 'alipay' ? '支付宝沙箱' : '模拟测试' : '支付宝'}</dd></div><div><dt>收款人</dt><dd>{environment === 'test' ? '测试账户' : channels?.live.payeeName || '尚未配置'}</dd></div><div><dt>合计</dt><dd className="mih-pay-total">{money(valid ? amountMinor : 0)}</dd></div></dl>
+          <p className="mih-pay-muted">{center ? '付款确认后自动处理余额入账。请保留原订单，勿重复付款。' : environment === 'test' ? '完整验证订单、核实和开票流程。' : '下单后扫码，按订单金额付款并提交流水号。核实到账后，余额即可使用。'}</p>
           {!enabled && !state.loading ? <p className="mih-pay-notice">收款通道尚未开通，请联系管理员。</p> : null}
           <button className={primary} disabled={busy || state.loading || !enabled || !valid}>{busy ? '正在创建…' : '创建充值订单'}</button>
         </aside>
       </form>
-    </> : <section className="qp-panel mih-pay-card"><h2>人工核账与开票</h2><p>核对收款账户的真实账单、金额和流水号，再确认入账。用户提交的流水号只作为查账线索。</p><p>本页已入账 {paid.length} 笔 / {money(paid.reduce((sum, row) => sum + row.amountMinor, 0))}，已知手续费 {money(paid.reduce((sum, row) => sum + (row.settlement.feeMinor || 0), 0))}，另有 {unknownFees} 笔手续费未知。仅统计当前页。</p></section>}
+    </> : <section className="qp-panel mih-pay-card"><h2>人工核账与开票</h2><p>旧人工收款订单需核对真实账单后确认；独立支付订单由支付中心查证收款、Hub 自动入账。付款与入账状态分别记录。</p><p>本页已入账 {paid.length} 笔 / {money(paid.reduce((sum, row) => sum + row.amountMinor, 0))}，已知手续费 {money(paid.reduce((sum, row) => sum + (row.settlement.feeMinor || 0), 0))}，另有 {unknownFees} 笔手续费未知。仅统计当前页。</p></section>}
     <section className="qp-panel mih-pay-card"><div className="mih-pay-record-heading"><h2><Receipt size={22} />{mode === 'finance' ? '收款与开票记录' : '充值记录'}</h2>{session.platformAdmin ? <button className={button} disabled={!rows.length || state.loading} onClick={exportPage}>导出当前页 CSV</button> : null}</div>
       <div className="mih-pay-filters"><DropdownField label="订单状态" value={status} onChange={value => { setStatus(value); setPage(1) }} options={[{ value: '', label: '全部状态' }, ...['pending','submitted','paid','cancelled'].map(value => ({ value, label: labels[value] }))]} /><DropdownField label="开票状态" value={invoiceStatus} onChange={value => { setInvoiceStatus(value); setPage(1) }} options={[{ value: '', label: '全部开票状态' }, ...['requested','issued','rejected'].map(value => ({ value, label: labels[value] }))]} />
         <form onSubmit={event => { event.preventDefault(); setOrderId(search.trim()); setPage(1) }}><Input label="按完整订单号查询" value={search} onChange={event => setSearch(event.target.value)} placeholder="粘贴订单号" /><button className={button}>查询</button></form></div>
-      {state.loading ? <LoadingState /> : rows.length ? <div className="mih-pay-table"><table><thead><tr><th>时间 / 订单</th>{mode === 'finance' ? <th>租户</th> : null}<th>金额</th><th>状态</th><th>发票</th><th>操作</th></tr></thead><tbody>{rows.map(row => <tr key={row.id}><td>{stamp(row.createdAt)}<small>{row.id}</small></td>{mode === 'finance' ? <td><small>{row.tenantId}</small></td> : null}<td>{money(row.amountMinor)}</td><td><Badge status={row.status} /></td><td>{row.invoice ? <Badge status={row.invoice.status} /> : '—'}</td><td><button className={button} disabled={busy} onClick={() => open(row)}>查看订单</button></td></tr>)}</tbody></table></div> : <p className="mih-pay-empty">暂无符合条件的充值记录。</p>}
+      {state.loading ? <LoadingState /> : rows.length ? <div className="mih-pay-table"><table><thead><tr><th>时间 / 订单</th>{mode === 'finance' ? <th>租户</th> : null}<th>金额</th><th>状态</th><th>发票</th><th>操作</th></tr></thead><tbody>{rows.map(row => <tr key={row.id}><td>{stamp(row.createdAt)}<small>{row.id}</small></td>{mode === 'finance' ? <td><small>{row.tenantId}</small></td> : null}<td>{money(row.amountMinor)}</td><td><Badge status={row.deliveryStatus === 'awaiting_credit' ? 'awaiting_credit' : row.status} /></td><td>{row.invoice ? <Badge status={row.invoice.status} /> : '—'}</td><td><button className={button} disabled={busy} onClick={() => open(row)}>查看订单</button></td></tr>)}</tbody></table></div> : <p className="mih-pay-empty">暂无符合条件的充值记录。</p>}
       <div className="mih-pay-pagination"><button className={button} disabled={page <= 1 || state.loading} onClick={() => setPage(value => value - 1)}>上一页</button><span>第 {page} 页 · 每页 20 条</span><button className={button} disabled={!state.data?.orders.hasMore || state.loading} onClick={() => setPage(value => value + 1)}>下一页</button></div>
     </section>
     {detail ? <OrderDetail key={detail.id} order={detail} {...{ token, session, notify }} onClose={() => setDetail(null)} onChanged={refresh} /> : null}
@@ -127,16 +131,24 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
     try { setOrder(await adminApi.paymentOrder(token, order.tenantId, order.id)); onChanged() } catch (err) { setError(err) } finally { setBusy(false) }
   }
   return <Modal title={order.environment === 'test' ? '测试充值订单' : '充值订单'} description={order.id} size="large" busy={busy} onClose={onClose} closeOnBackdrop={false} closeOnEscape={false} footer={<><button className={button} disabled={busy} onClick={refresh}>刷新订单</button><button className={button} disabled={busy} onClick={onClose}>关闭</button></>}>
-    <div className="mih-pay-detail">{error ? <ErrorState error={error} /> : null}<div className="mih-pay-order-total"><strong>{money(order.amountMinor)}</strong><Badge status={order.status} /></div>
-      <dl className="mih-pay-facts"><div><dt>环境</dt><dd>{order.environment === 'test' ? '测试（不可消费）' : '正式'}</dd></div><div><dt>收款人</dt><dd>{order.checkout.payeeName}</dd></div><div><dt>下单时间</dt><dd>{stamp(order.createdAt)}</dd></div></dl>
-      {order.status === 'pending' ? <>
+    <div className="mih-pay-detail">{error ? <ErrorState error={error} /> : null}<div className="mih-pay-order-total"><strong>{money(order.amountMinor)}</strong><Badge status={order.deliveryStatus === 'awaiting_credit' ? 'awaiting_credit' : order.status} /></div>
+      <dl className="mih-pay-facts"><div><dt>环境</dt><dd>{order.environment === 'test' ? '测试（不可消费）' : '正式'}</dd></div><div><dt>收款人</dt><dd>{order.checkout.payeeName || '请核对支付宝收银台'}</dd></div><div><dt>下单时间</dt><dd>{stamp(order.createdAt)}</dd></div></dl>
+      {order.backend === 'center' && order.status !== 'paid' ? <section className="mih-pay-card">
+        <p className="mih-pay-notice">{order.paymentStatus === 'paid' ? '付款已确认，余额入账处理中。请勿再次付款；如长时间未到账，请联系账务人员。' : !order.paymentId ? '充值意图已保存，支付订单尚待确认。请找回原订单，不要重复创建。' : order.provider === 'mock' ? '模拟订单无需真实付款。由支付中心确认测试付款后，这里会记录测试入账。' : '付款后可主动查证支付状态；余额到账以本页入账结果为准。'}</p>
+        <p>支付订单：{order.paymentId || '待确认'}</p>
+        {!order.paymentId ? <button className={primary} disabled={busy} onClick={()=>act('retry')}>找回原支付订单</button> : null}
+        {order.paymentId && order.provider === 'alipay' && order.paymentStatus === 'pending' ? <button className={primary} disabled={busy} onClick={()=>act('checkout')}>准备支付宝收银台</button> : null}
+        {order.paymentUrl && order.paymentStatus === 'pending' ? <p><a className={primary} href={order.paymentUrl} target="_blank" rel="noopener noreferrer">打开支付宝收银台</a></p> : null}
+        {order.paymentId ? <button className={button} disabled={busy} onClick={()=>act('refresh')}>查证付款状态</button> : null}
+      </section> : null}
+      {order.backend !== 'center' && order.status === 'pending' ? <>
         {order.checkout.qrImage ? <img className="mih-pay-qr" src={order.checkout.qrImage} alt={`支付宝收款码，收款人 ${order.checkout.payeeName}`} /> : null}
         <p>{order.checkout.instructions}</p><p className="mih-pay-notice">{order.environment === 'test' ? '无需真实付款。填写模拟付款人和至少 6 位测试流水号。' : `请扫码支付 ${money(order.amountMinor)}，核对支付宝显示的收款人；静态收款码需要手工输入金额。请勿重复付款。`}</p>
         {order.rejection ? <p role="alert">上次提交已退回：{order.rejection.reason}</p> : null}
         <form className="mih-pay-form" onSubmit={event => { event.preventDefault(); act('submit', { payerName, tradeNo }) }}><Input label="付款人" value={payerName} onChange={event => setPayerName(event.target.value)} maxLength={100} required /><Input label="支付宝交易流水号（测试可填 TEST-001）" value={tradeNo} onChange={event => setTradeNo(event.target.value)} minLength={6} maxLength={128} required /><button className={primary} disabled={busy}>我已付款，提交核实</button></form>
         <button className={button} disabled={busy} onClick={() => act('cancel')}>尚未付款，取消订单</button>
       </> : null}
-      {order.status === 'submitted' ? <><p className="mih-pay-notice">已提交核实，确认到账后增加余额。请勿重复付款。</p><p>付款人：{order.submission.payerName} · 用户提交流水：{order.submission.tradeNo}</p>
+      {order.backend !== 'center' && order.status === 'submitted' ? <><p className="mih-pay-notice">已提交核实，确认到账后增加余额。请勿重复付款。</p><p>付款人：{order.submission.payerName} · 用户提交流水：{order.submission.tradeNo}</p>
         {session.platformAdmin ? <form className="mih-pay-form" onSubmit={event => { event.preventDefault(); if (acknowledged) act('confirm', { tradeNo, receivedAmountMinor: parseAmount(received), feeMinor: fee === '' ? null : parseAmount(fee), paidAt: new Date(paidAt).toISOString(), note }) }}>
           <h3>管理员核实到账</h3><p>填写交易支付总额，手续费单独记录；不要把扣除手续费后的净结算额作为订单金额。</p><Input label="账单中的实际流水号" value={tradeNo} onChange={event => setTradeNo(event.target.value)} required /><Input label="实际收到的金额（元）" value={received} onChange={event => setReceived(event.target.value)} inputMode="decimal" required /><Input label="渠道手续费（元，可留空表示未知）" value={fee} onChange={event => setFee(event.target.value)} inputMode="decimal" /><Input label="实际到账时间" type="datetime-local" value={paidAt} onChange={event => setPaidAt(event.target.value)} required /><Input label="核实说明 / 退回原因" value={note} onChange={event => setNote(event.target.value)} maxLength={500} required />
           <label className="mih-pay-check"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} />{order.environment === 'test' ? '确认仅记入测试账本' : '已在收款账户核实这笔真实到账，且未通过人工充值等方式重复入账'}</label>
@@ -150,6 +162,29 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
         </section> : null}</> : null}
       {session.platformAdmin && order.events?.length ? <details><summary>最近 {order.events.length} 条操作记录（最多 100 条）</summary>{order.events.map(event => <p key={event.id}>{stamp(event.at)} · {event.action} · {event.actor}</p>)}</details> : null}
     </div>
+  </Modal>
+}
+
+function PaymentIntegration({token,onClose,onUnauthorized}) {
+  const load=useCallback(()=>adminApi.paymentIntegration(token),[token])
+  const state=useRemoteData(load,onUnauthorized),[busy,setBusy]=useState(false),[error,setError]=useState(null),[accepted,setAccepted]=useState(false)
+  async function activate(row) {
+    setBusy(true);setError(null)
+    try {await adminApi.activatePaymentIntegration(token,row.environment,row.sourceId);state.refresh();setAccepted(false)}
+    catch(err){setError(err)} finally{setBusy(false)}
+  }
+  return <Modal title="支付服务接入" description="仅控制后续新订单，保留原登录、租户和钱包。" size="large" busy={busy} onClose={onClose}>
+    {error||state.error?<ErrorState error={error||state.error} onRetry={state.refresh}/>:null}
+    {state.loading?<LoadingState/>:state.data?.items?.length?state.data.items.map(row=><section className="qp-panel mih-pay-card" key={row.environment}>
+      <h2>{row.environment==='test'?'测试流程':'正式充值'} · {row.active?'已切换':'沿用当前充值'}</h2>
+      <p>{row.configured?`已连接支付应用 ${row.appId}`:'支付服务未配置或暂不可达；请核对服务端配置。'}</p>
+      {row.sourceId?<p>支付源：{row.sourceId}</p>:null}
+      {row.legacyOrderCount>0&&!row.active?<p className="mih-pay-notice">已有 {row.legacyOrderCount} 笔正式历史订单，必须先完成存量交接，当前不能切换。</p>:null}
+      {row.workerError?<p className="mih-pay-notice">交付暂缓：{row.workerError}，系统将重试原事件。</p>:null}
+      {row.errors?.length?<details><summary>近期交付异常（最多 20 条），请核对原事件，勿直接补加余额</summary>{row.errors.map(error=><p key={error.eventId}>{error.eventId} · {error.code} · 已尝试 {error.attempts} 次</p>)}</details>:null}
+      {!row.active?<button className={primary} disabled={busy||!accepted||!row.configured||row.legacyOrderCount>0} onClick={()=>activate(row)}>启用{row.environment==='test'?'测试':'正式'}支付接入</button>:null}
+    </section>):<p>独立支付接入需要持久化数据库。</p>}
+    <label className="mih-pay-check"><input type="checkbox" checked={accepted} onChange={event=>setAccepted(event.target.checked)}/>已核对支付源与渠道；正式切换前已停用旧人工收款。启用后不会因支付服务不可达自动退回旧收款方式。</label>
   </Modal>
 }
 

@@ -350,6 +350,7 @@ export function loadConfig(environment = process.env) {
     storeDriver,
     databaseUrl,
     paymentReporting: listenerMode==='public' ? null : reportingConfig(environment),
+    paymentDeliverySources: listenerMode==='public' ? '' : environment.MX_INSIGHT_PAYMENT_DELIVERY_SOURCES || '',
     nightAllA: nightAllAConfig(environment),
     nightAll: {
       baseUrl: environment.NIGHT_ALL_BASE_URL || 'http://127.0.0.1:13141',

@@ -4,11 +4,11 @@ import { LauncherIdentityClient } from './launcher-client.mjs'
 
 export { LauncherIdentityClient } from './launcher-client.mjs'
 
-// Hub roles, ordered from most to least privileged. Each role's capabilities are
-// a superset of the ones below it.
+// Billing is an independent tenant responsibility; it grants no data/Key administration.
 const ROLE_CAPABILITIES = Object.freeze({
-  owner: ['tenant.read', 'tenant.write', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'usage.read', 'membership.write'],
-  admin: ['tenant.read', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'usage.read'],
+  owner: ['tenant.read', 'tenant.write', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'usage.read', 'membership.write', 'billing.read', 'recharge.create', 'invoice.request'],
+  admin: ['tenant.read', 'consumer.read', 'consumer.write', 'apikey.read', 'apikey.write', 'usage.read', 'billing.read', 'recharge.create', 'invoice.request'],
+  billing: ['tenant.read', 'billing.read', 'recharge.create', 'invoice.request'],
   analyst: ['tenant.read', 'consumer.read', 'apikey.read', 'usage.read'],
   viewer: ['tenant.read', 'consumer.read', 'usage.read'],
 })
@@ -67,7 +67,12 @@ export class IdentityService {
   async resolve(token) {
     const introspection = await this.client.introspect(token)
     if (!introspection) return null
+    return this.resolveVerified(introspection)
+  }
 
+  // Internal only: caller must verify the configured OIDC issuer/client,
+  // signed ID token and subject-bound UserInfo before entering this method.
+  async resolveVerified(introspection) {
     const { issuer, subject, audience, principal } = introspection
     if (!issuer || !subject) {
       throw new AppError(502, 'launcher_invalid_response', 'Introspection is missing issuer or subject')

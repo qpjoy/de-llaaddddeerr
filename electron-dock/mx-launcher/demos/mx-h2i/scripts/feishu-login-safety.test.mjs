@@ -1762,6 +1762,8 @@ console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests pas
       const noOp = () => {};
       const context = {
         runtime, makeRequestId: tag => tag, nullableString: value => value || null,
+        networkMutationEpoch: 0, cancelScheduledWireGuardRecovery: () => {},
+        markForegroundNetworkOperationPaused: () => {}, nowIso: () => new Date().toISOString(),
         beginForegroundNetworkOperation: () => ({ epoch: 1 }), beginWireGuardConnectOperation: () => ({ finish: noOp }),
         assertForegroundNetworkOperationCurrent: noOp, drainWireGuardRecoveryOperation: noOp,
         ensureCredentialStorageRecoveryReady: noOp, repairDarwinEndpointRouteBeforeBootstrap: () => null,
@@ -1785,12 +1787,14 @@ console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests pas
         hydrateH2oSystemSubscriptionsForUser: ({ userId }) => { hydrated++; assert.equal(userId, 'new-user'); },
         finishForegroundNetworkOperation: noOp, visibleRuntime: () => runtime
       };
-      runInNewContext(functionSource(mainSource, 'promoteEmployeeConnection'), context);
+      runInNewContext(functionSource(mainSource, 'stopAfterApplicationDenial') + '\n' + functionSource(mainSource, 'promoteEmployeeConnection'), context);
       await context.promoteEmployeeConnection({ authenticate: () => ({ user: { userId: 'new-user' }, accessToken: 'new-token' }) });
       assert.equal(applied, stage === 'denied' ? 0 : 1);
       assert.equal(hydrated, stage === 'success' ? 1 : 0);
       if (stage === 'denied') {
-        assert.equal(runtime.connection, oldConnection);
+        assert.equal(runtime.connection.state, 'forbidden');
+        assert.equal(runtime.connection.diagnostics.applicationAccessDenied.code, 'app_access_denied');
+        assert.equal(context.networkRecoveryPaused, true);
         assert.equal(runtime.auth, oldAuth);
         assert.match(runtime.feedback.message, /已被禁止访问 mx-h2i/);
       }
@@ -1798,3 +1802,26 @@ console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests pas
   }
 }
 console.log('application-scoped login and failed-admission subscription safety: passed');
+
+// A persisted denial survives restart and gates every automatic recovery path.
+{
+  const { runInNewContext } = await import('node:vm');
+  const marker = { code: 'app_access_denied', message: '禁止访问', updatedAt: '2026-10-03T00:00:00Z' };
+  const context = { runtime: { connection: { state: 'forbidden', diagnostics: { applicationAccessDenied: marker } } },
+    nullableString: value => value || null, nowIso: () => marker.updatedAt, normalizeInternalDirectPeerSync: () => null, normalizeDomesticPeerSync: () => null };
+  for (const name of ['normalizeDiagnostics', 'shouldRecoverWireGuardConnection', 'repairSystemNetworkForRuntime', 'restoreH2oRuntimeAfterStartup', 'hydrateH2oSystemSubscriptionsForUser', 'refreshSystemDomainProxyForRuntime']) {
+    runInNewContext(functionSource(mainSource, name), context);
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(context.normalizeDiagnostics({ applicationAccessDenied: marker }).applicationAccessDenied)), marker);
+  assert.equal(context.shouldRecoverWireGuardConnection(context.runtime.connection), false);
+  assert.equal((await context.repairSystemNetworkForRuntime()).reason, 'app-access-denied');
+  // No other dependencies are injected: reaching a network helper would throw.
+  await context.restoreH2oRuntimeAfterStartup();
+  await context.hydrateH2oSystemSubscriptionsForUser();
+  await context.refreshSystemDomainProxyForRuntime();
+  const ui = { state: context.runtime, networkOperationPaused: () => false, anonymousRecoveryBlockedByPolicy: () => false, rendererPendingNetworkOperation: () => null };
+  runInNewContext(functionSource(rendererSource, 'renderConnectionRecoverySteps') + '\n' + functionSource(rendererSource, 'isConnectionPending'), ui);
+  assert.equal(ui.renderConnectionRecoverySteps(true), '');
+  assert.equal(ui.isConnectionPending(), false);
+}
+console.log('persisted application denial: automatic recovery, H2O and recovery UI stopped');

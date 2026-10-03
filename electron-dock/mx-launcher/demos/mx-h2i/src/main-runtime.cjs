@@ -297,7 +297,7 @@ if (gotSingleInstanceLock) {
     });
     await initializeSystemDomainProxy();
     const credentialStorageRecovery = await reconcileCredentialStorageFailureAfterStartup();
-    if (credentialStorageRecovery.blocked !== true) {
+    if (credentialStorageRecovery.blocked !== true && !runtime.connection?.diagnostics?.applicationAccessDenied) {
       await reconcileExistingWireGuardAfterStartup();
       await reconcilePendingNetworkHandoverAfterStartup();
       await settleAnonymousLoginDisabledAfterStartup();
@@ -2401,7 +2401,10 @@ async function promoteEmployeeConnection(options = {}) {
         && runtime.auth?.accessToken === auth.accessToken;
     } catch (err) {
       if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
-      if (networkFallback && !dataPlaneApplyStarted) {
+      if (['app_access_denied', 'launcher_product_user_access_denied'].includes(err?.payload?.code)) {
+        if (networkFallback) { runtime.connection = networkFallback; runtime.identity = identityFallback; runtime.auth = authFallback; }
+        stopAfterApplicationDenial(err, foregroundOperation);
+      } else if (networkFallback && !dataPlaneApplyStarted) {
         runtime.connection = networkFallback;
         runtime.identity = identityFallback;
         runtime.auth = authFallback;
@@ -2717,6 +2720,11 @@ async function completeFeishuLogin(flow, code) {
       return;
     }
     clearPendingFeishuLogin('token-exchange-failed', flow);
+    if (['app_access_denied', 'launcher_product_user_access_denied'].includes(err?.payload?.code)) {
+      stopAfterApplicationDenial(err);
+      await saveAndBroadcast();
+      return;
+    }
     runtime.feedback = {
       tone: 'danger',
       message: guestPreservingFeishuMessage(`飞书登录失败：${feishuTokenExchangeFailureMessage(err)}。`)
@@ -3563,7 +3571,7 @@ function onUnlockScreen() {
 }
 
 function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000], options = {}) {
-  if (networkRecoveryPaused || anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
+  if (networkRecoveryPaused || runtime?.connection?.diagnostics?.applicationAccessDenied || anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
   const allowPrivileged = options.allowPrivileged === true;
   for (const delay of delays) {
     const timer = setTimeout(() => {
@@ -3627,7 +3635,7 @@ function scheduleNetworkChangeRecovery(reason) {
 }
 
 async function handleNetworkChange(reason) {
-  if (networkRecoveryPaused || anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
+  if (networkRecoveryPaused || runtime?.connection?.diagnostics?.applicationAccessDenied || anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
   const recoveryReason = `network-change-${reason || 'detected'}`;
   const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(recoveryReason, { force: true });
   await recordDarwinEndpointRouteRepairDiagnostics(endpointRouteRepair, recoveryReason);
@@ -4823,6 +4831,7 @@ function finishForegroundNetworkOperation(operation) {
 }
 
 function visibleForegroundNetworkOperation() {
+  if (runtime?.connection?.diagnostics?.applicationAccessDenied) return null;
   const operation = activeForegroundNetworkOperation || pausedForegroundNetworkOperation;
   if (!operation) {
     const connection = runtime?.connection;
@@ -5005,6 +5014,7 @@ function stopSystemDomainProxyRefreshWatcher() {
 }
 
 async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
+  if (runtime.connection?.diagnostics?.applicationAccessDenied) return;
   if (appShutdownRequested) return shutdownSystemDomainProxyStatus(reason);
   if (networkRecoveryPaused && isBackgroundSystemDomainProxyReason(reason)) {
     return currentSystemDomainProxyStatus(reason, {
@@ -5454,6 +5464,9 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair', options =
       assertForegroundNetworkOperationCurrent(foregroundOperation, stage);
     }
   };
+  if (runtime?.connection?.diagnostics?.applicationAccessDenied) {
+    return { skipped: true, reason: 'app-access-denied', message: '账号访问已被禁止，请重新登录验证权限。' };
+  }
   checkpoint('diagnostics-before');
   if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
     applyAnonymousLoginDisabledState(`system network repair blocked: ${reason}`);
@@ -9764,6 +9777,7 @@ function h2oRuntimeWithTunnelStatus(h2oRuntime, tunnelStatus) {
 }
 
 async function restoreH2oRuntimeAfterStartup() {
+  if (runtime.connection?.diagnostics?.applicationAccessDenied) return;
   if (!runtime?.apps?.h2o?.installed) return;
   if (runtimeHasUserIdentity()) {
     await loadH2oUserRuntimeProfileForCurrentUser({ reason: 'startup-restore' }).catch((err) => {
@@ -11131,6 +11145,7 @@ function h2oUserRuntimeProfileActiveSubscription(profile, subscriptions) {
 }
 
 async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
+  if (runtime.connection?.diagnostics?.applicationAccessDenied) return;
   if (!runtime?.apps?.h2o?.runtime || !runtimeHasUserIdentity()) return;
   let current = h2oPluginRuntime(runtime.apps.h2o.runtime);
   let baseUrl = normalizeBaseUrl(options.baseUrl)
@@ -14039,6 +14054,8 @@ function normalizeDiagnostics(input) {
     shutdownCleanup: row.shutdownCleanup && typeof row.shutdownCleanup === 'object'
       ? row.shutdownCleanup
       : null,
+    applicationAccessDenied: row.applicationAccessDenied && ['app_access_denied', 'launcher_product_user_access_denied'].includes(row.applicationAccessDenied.code)
+      ? { code: row.applicationAccessDenied.code, message: nullableString(row.applicationAccessDenied.message), updatedAt: nullableString(row.applicationAccessDenied.updatedAt) } : null,
     localPersistence: row.localPersistence && typeof row.localPersistence === 'object' ? {
       ok: row.localPersistence.ok === true,
       label: nullableString(row.localPersistence.label),
@@ -15330,7 +15347,26 @@ function applyWireGuardAuthorizationCanceled(options, wireGuardResult, handoverR
   touchRuntime(options.mode === 'employee' ? 'employee authorization canceled' : 'guest authorization canceled');
 }
 
+function stopAfterApplicationDenial(err, operation = activeForegroundNetworkOperation) {
+  const message = `${errorMessage(err)} 已停止本次登录、自动恢复和后续初始化；请联系管理员或使用其他账号登录。`;
+  networkRecoveryPaused = true;
+  networkMutationEpoch += 1;
+  cancelScheduledWireGuardRecovery();
+  if (operation) markForegroundNetworkOperationPaused(operation, message);
+  runtime.connection = {
+    ...runtime.connection,
+    state: 'forbidden',
+    diagnostics: {
+      ...runtime.connection?.diagnostics,
+      applicationAccessDenied: { code: err.payload.code, message: errorMessage(err), updatedAt: nowIso() }
+    }
+  };
+  runtime.feedback = { tone: 'danger', message };
+  touchRuntime('application access denied; subsequent network actions stopped');
+}
+
 async function applyConnectionError(label, err) {
+  if (['app_access_denied', 'launcher_product_user_access_denied'].includes(err?.payload?.code)) { stopAfterApplicationDenial(err); return; }
   const previous = retainableConnectionSnapshot(runtime.connection);
   const classified = classifyConnectionError(err);
   queueDiagnosticError('connection.failed', err, {
@@ -16700,6 +16736,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
 }
 
 function shouldRecoverWireGuardConnection(connection) {
+  if (connection?.diagnostics?.applicationAccessDenied) return false;
   if (anonymousRecoveryBlockedByPolicy(connection)) return false;
   if (pendingWindowsCleanupDiagnostic(connection)) return false;
   const state = connection?.state;

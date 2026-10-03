@@ -9,7 +9,8 @@ import { createPlatformDataSource } from '../db/data-source.js';
 import { loadConfig } from '../config.js';
 import { PostgresStore } from '../store/postgres.js';
 import { IdentityRepository } from '../identity/repository.js';
-import { RUNTIME_CONFIG } from '../tokens.js';
+import { RUNTIME_CONFIG, PLATFORM_STORE } from '../tokens.js';
+import { MemoryStore } from '../store/memory.js';
 import { internalAdminContext } from '../lib/internal-admin-context.js';
 import { UserCenterController } from '../modules/user-center/user-center.controller.js';
 import { RegistrationController } from './controller.js';
@@ -60,6 +61,30 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     assert.deepEqual(afterOld, before, 'legacy identities and credentials stay byte-for-byte identical');
     await assert.rejects(a.register({ ...winningInput, account: 'Other' }), /已完成/);
 
+    // Both identity origins consume the original invitation policy and user DB.
+    const sharedInvite = await a.createInvitation({ label: 'Public entry', maxUses: 1, days: 1 });
+    const env = { MX_ADMIN_SSO_ENABLED: '1', MX_ADMIN_SSO_ORIGIN: 'https://10.88.88.88:18443',
+      MX_ADMIN_SSO_ISSUER: 'https://10.88.88.88:18443/identity', MX_ADMIN_SSO_LOCAL_SUBJECTS: '1',
+      MX_ADMIN_SSO_CLIENT_ID: 'launcher', MX_ADMIN_SSO_CLIENT_SECRET: 'private-test-secret',
+      MX_ADMIN_PUBLIC_SSO_CONFIG: JSON.stringify({ origin: 'https://launcher.example.com', issuer: 'https://auth.example.com/identity',
+        clientId: 'mx-launcher-public-admin', clientSecret: 'p'.repeat(43), ingressToken: 'g'.repeat(43),
+        callbackUrl: 'https://launcher.example.com/auth/admin/callback', localSubjects: true }) };
+    const savedEnv = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    const controller = new RegistrationController(config, store);
+    try {
+      const body = { timestamp: Date.now(), clientId: 'mx-launcher-public-admin', action: 'register',
+        input: { ...input('PublicOriginUser', sharedInvite.code), clientId: 'mx-launcher-public-admin' } };
+      await assert.rejects(controller.backchannel(registrationSignature('wrong', body), body), /Unauthorized/);
+      const created = await controller.backchannel(registrationSignature('p'.repeat(43), body), body) as { userId: string };
+      assert.equal((await identity.authenticate('PublicOriginUser', 'RegistrationPassword123!'))?.userId, created.userId);
+      assert.equal((await a.invitations()).find(row => row.id === sharedInvite.invitation.id)?.uses, 1);
+      assert.deepEqual(await a.register({ ...body.input, clientId: 'launcher' }), created, 'public signup shares the private registration transaction namespace');
+    } finally {
+      await controller.onModuleDestroy();
+      for (const [key, value] of Object.entries(savedEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+
     for (const [appId, decision, enabled] of [['signup-public', 'public', true], ['signup-auth', 'authenticated', true], ['signup-private', 'private', true], ['signup-other', 'private', true], ['signup-disabled', 'private', false]] as const) {
       await store.upsertAppCenterApp({ appId, displayName: appId, enabled, accessPolicy: { defaultDecision: decision, allowRoles: [], allowUserIds: [], allowOrgIds: [] } });
     }
@@ -104,6 +129,31 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     assert.deepEqual((await identity.account(granted.userId))?.appAccess.deniedAppIds, []);
     assert.equal((await identity.authenticate('GrantedUser', 'RegistrationPassword123!'))?.userId, granted.userId, 'app edits preserve credentials');
     assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-private', userId: granted.userId })).allowed, false);
+
+    // Web binding verifies both identities and preserves all local privileges.
+    const bindBefore = await identity.account(old.userId);
+    await assert.rejects(a.bindFeishu('tenant:web-person', 'ExistingMember', 'wrong'), /密码/);
+    await assert.rejects(a.bindFeishu('tenant:web-person', 'missing', 'Old123!'), /密码/);
+    assert.deepEqual(await a.bindFeishu('tenant:web-person', 'ExistingMember', 'Old123!'), { userId: old.userId });
+    assert.deepEqual(await b.bindFeishu('tenant:web-person', 'ExistingMember', 'Old123!'), { userId: old.userId });
+    const bound = await identity.account(old.userId);
+    assert.deepEqual(bound?.roleIds, bindBefore?.roleIds);
+    assert.deepEqual(bound?.appAccess, bindBefore?.appAccess);
+    assert.equal(bound?.credential.hasPassword, true);
+    assert.equal((await a.feishuAccount('tenant:web-person')).userId, old.userId);
+    await assert.rejects(a.bindFeishu('tenant:web-person', winningInput.account, winningInput.password), /其他绑定/);
+    await assert.rejects(store.createUserCenterUser({ account: 'DuplicateFeishu', externalIds: { feishuSubject: 'tenant:web-person' } }), /already linked/);
+    const webInvite = await a.createInvitation({ label: 'Web Feishu', maxUses: 1, days: 1 });
+    const webInput = input('WebFeishu', webInvite.code, { verifiedFeishuSubject: 'tenant:web-new' });
+    const webUser = await a.register(webInput);
+    assert.deepEqual(await b.register(webInput), webUser);
+    assert.equal((await a.feishuAccount('tenant:web-new')).userId, webUser.userId);
+    assert.deepEqual((await identity.account(webUser.userId))?.appAccess.allowedAppIds, []);
+    const contenders = await Promise.allSettled([
+      a.bindFeishu('tenant:race-person', winningInput.account, winningInput.password),
+      b.bindFeishu('tenant:race-person', 'GrantedUser', 'RegistrationPassword123!')
+    ]);
+    assert.equal(contenders.filter(result => result.status === 'fulfilled').length, 1);
 
     let policy = await a.updatePolicy({ mode: 'closed', version: 0 });
     await assert.rejects(a.register(input('ClosedAccount', invite.code)), /暂未开放/);
@@ -152,7 +202,7 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
 
 test('registration admin and internal backchannel reject unauthenticated callers before any writes', async () => {
   const config = loadConfig();
-  @Module({ controllers: [RegistrationController], providers: [{ provide: RUNTIME_CONFIG, useValue: config }] })
+  @Module({ controllers: [RegistrationController], providers: [{ provide: RUNTIME_CONFIG, useValue: config }, { provide: PLATFORM_STORE, useValue: new MemoryStore(config) }] })
   class TestModule {}
   const app = await NestFactory.create(TestModule, { logger: false });
   await app.listen(0, '127.0.0.1');

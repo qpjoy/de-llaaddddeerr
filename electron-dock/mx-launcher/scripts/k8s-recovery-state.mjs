@@ -102,11 +102,17 @@ function assertIdentityProfileMatchesSecrets(profile, secrets) {
     if (name === 'mx-identity-runtime') {
       let config;
       try { config = JSON.parse(field(secret, 'config.json')); } catch { throw new Error('invalid identity runtime snapshot'); }
+      if (config.publicEntry && !same(config.publicEntry, profile.publicEntry)) throw new Error('public identity credentials differ; recovery stopped');
       for (const key of ['origin', 'issuer', 'clientId', 'clientSecret', 'cookieKeys', 'jwks']) {
         if (!same(config[key], profile[key])) throw new Error('identity profile and runtime credentials differ; recovery stopped');
       }
     }
     if (name !== 'mx-launcher-admin-sso' && field(secret, 'ca.crt') !== profile.caCert) throw new Error('identity profile and runtime CA differ; recovery stopped');
+    if (name === 'mx-launcher-admin-sso' && secret.data.MX_ADMIN_PUBLIC_SSO_CONFIG) {
+      const publicConfig = JSON.parse(field(secret, 'MX_ADMIN_PUBLIC_SSO_CONFIG'));
+      const entry = profile.publicEntry;
+      if (!entry || publicConfig.issuer !== entry.issuer || publicConfig.origin !== entry.adminOrigin || publicConfig.clientSecret !== entry.clientSecret || publicConfig.ingressToken !== entry.ingressToken) throw new Error('public SSO credentials differ; recovery stopped');
+    }
     if (name === 'mx-launcher-admin-sso' && (field(secret, 'MX_ADMIN_SSO_ORIGIN') !== profile.origin ||
       field(secret, 'MX_ADMIN_SSO_ISSUER') !== profile.issuer || field(secret, 'MX_ADMIN_SSO_CLIENT_ID') !== profile.clientId ||
       field(secret, 'MX_ADMIN_SSO_CLIENT_SECRET') !== profile.clientSecret)) throw new Error('identity profile and Launcher SSO credentials differ; recovery stopped');
