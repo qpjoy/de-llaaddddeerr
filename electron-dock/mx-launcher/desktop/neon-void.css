@@ -194,6 +194,8 @@ td .primary-button, td .secondary-button { min-height: 28px; font-size: 11px; pa
 .registration-dialog fieldset { border: 1px solid #303b4c; border-radius: 12px; margin: 20px 0; padding: 18px; }
 .registration-dialog legend { padding: 0 8px; font-weight: 650; }
 .registration-dialog form button { margin-top: 16px; }
+.registration-dialog .qp-select-trigger { margin-top: 0; }
+.registration-app-help { font-size: 12px; line-height: 1.7; color: var(--text-muted, #a7b3bf); }
 .registration-modes { display: flex; flex-wrap: wrap; gap: 20px; }
 .registration-modes label { display: inline-flex; align-items: center; gap: 8px; }
 .registration-modes input { width: auto; accent-color: #16dfc3; }

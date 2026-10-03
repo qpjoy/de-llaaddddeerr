@@ -148,11 +148,11 @@ const controls = installNeonSelects(document);
 // controls.destroy() on unmount. controls.refresh() explicitly reconciles state.
 ```
 
-- Enhances single selects, including fields added by later renders. Retains native `name`, value, FormData, required validation and exactly one input/change pair for a changed selection.
+- Enhances single and multiple selects, including fields added by later renders. Retains native `name`, value, FormData (use `getAll` for multiple), required validation and exactly one input/change pair for a changed selection. Multiple menus stay open while toggling choices and support selecting search matches or clearing the selection.
 - Search matches option labels, values and group labels. Disabled options/groups cannot be selected. Arrow keys, Home/End, Enter, Escape and Tab work; IME confirmation does not commit a choice.
 - Reflects option/disabled mutations, form reset, and assignments to `select.value` / `selectedIndex`. After directly changing an individual option's `selected` property without a DOM mutation, dispatch `change` or call `refresh()`.
 - Menus use a body portal, viewport positioning and an upward fallback so scroll panels do not clip them. They inherit resolved Neon Void tokens from the field, including a scoped light theme. No service requests, persistence or authorization logic are part of the component.
-- `multiple` and listbox (`size > 1`) selects stay native. Use `data-neon-native` to opt out before initialization. Call `destroy()` to remove the adapter and restore native fields.
+- Single-selection listboxes (`size > 1`) stay native. Use `data-neon-native` to opt out before initialization. Menus inside an open modal stay in its top layer. Call `destroy()` to remove the adapter and restore native fields.
 - Import the adapter once per managed DOM subtree. Do not attach a second adapter to overlapping roots. The CSS-only `qp-dropdown` anatomy remains available for non-select menus.
 
 The desktop copies `styles.css`, `tokens.css`, `select.css` and `select.js` from this source during dev/build. Its production admin asset assembly copies the same canonical files; do not edit generated `desktop/ui-design/` files.

@@ -3,7 +3,7 @@ import { RUNTIME_CONFIG } from '../tokens.js';
 import type { RuntimeConfig } from '../types.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../lib/internal-ops-auth.js';
 import { loadAdminSsoConfig } from '../admin-sso/config.js';
-import { RegistrationError, RegistrationRepository, type RegistrationInput, type RegistrationPolicy } from './repository.js';
+import { RegistrationError, RegistrationRepository, type CreateInvitationInput, type RegistrationInput, type RegistrationPolicy } from './repository.js';
 import { verifyRegistrationSignature } from './backchannel.js';
 
 @Controller()
@@ -34,7 +34,7 @@ export class RegistrationController implements OnModuleDestroy {
   @Header('Cache-Control', 'no-store')
   async overview(@Headers(INTERNAL_OPS_TOKEN_HEADER) token?: string) {
     assertInternalOpsToken(token);
-    return this.perform(async () => ({ policy: await this.store().policy(), invitations: await this.store().invitations(), scope: 'mx-account' }));
+    return this.perform(async () => ({ policy: await this.store().policy(), invitations: await this.store().invitations(), apps: await this.store().apps(), scope: 'mx-account' }));
   }
   @Post('internal/v1/user-center/registration/policy')
   @Header('Cache-Control', 'no-store')
@@ -43,7 +43,7 @@ export class RegistrationController implements OnModuleDestroy {
   }
   @Post('internal/v1/user-center/registration/invitations')
   @Header('Cache-Control', 'no-store')
-  async invite(@Headers(INTERNAL_OPS_TOKEN_HEADER) token: string | undefined, @Body() body: { label: string; maxUses: number; days: number }) {
+  async invite(@Headers(INTERNAL_OPS_TOKEN_HEADER) token: string | undefined, @Body() body: CreateInvitationInput) {
     assertInternalOpsToken(token); return this.perform(() => this.store().createInvitation(body));
   }
   @Post('internal/v1/user-center/registration/invitations/revoke')

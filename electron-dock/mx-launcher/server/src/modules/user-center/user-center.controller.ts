@@ -807,6 +807,9 @@ export function toTokenInput(body: Record<string, unknown>): TokenIntrospectionI
 }
 
 function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
+  if (body.replaceAppAccess === true && (!Array.isArray(body.allowedAppIds) || !Array.isArray(body.deniedAppIds))) {
+    throw new BadRequestException('Replacing application access requires both allowedAppIds and deniedAppIds arrays');
+  }
   return {
     userId: nullableString(body.userId),
     account: nullableString(body.account),
@@ -821,6 +824,7 @@ function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
     attributes: recordOrNull(body.attributes),
     externalIds: stringRecordOrNull(body.externalIds),
     appAccess: recordOrNull(body.appAccess),
+    replaceAppAccess: body.replaceAppAccess === true,
     homeAppId: nullableString(body.homeAppId),
     registeredByAppId: nullableString(body.registeredByAppId) ?? nullableString(body.sourceAppId),
     allowedAppIds: stringList(body.allowedAppIds),

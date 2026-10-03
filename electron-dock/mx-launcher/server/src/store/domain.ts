@@ -773,12 +773,12 @@ function mergeUserAppAccess(previous: UserCenterAppAccess | null | undefined, in
     homeAppId: normalizeOptionalAppId(input.homeAppId ?? access.homeAppId) ?? previous?.homeAppId ?? null,
     registeredByAppId: normalizeOptionalAppId(input.registeredByAppId ?? access.registeredByAppId) ?? previous?.registeredByAppId ?? null,
     allowedAppIds: uniqueAppIds([
-      ...(previous?.allowedAppIds ?? []),
+      ...(input.replaceAppAccess ? [] : previous?.allowedAppIds ?? []),
       ...appIdList(input.allowedAppIds),
       ...appIdList(access.allowedAppIds)
     ]),
     deniedAppIds: uniqueAppIds([
-      ...(previous?.deniedAppIds ?? []),
+      ...(input.replaceAppAccess ? [] : previous?.deniedAppIds ?? []),
       ...appIdList(input.deniedAppIds),
       ...appIdList(access.deniedAppIds)
     ])

@@ -10,6 +10,8 @@ import { loadConfig } from '../config.js';
 import { PostgresStore } from '../store/postgres.js';
 import { IdentityRepository } from '../identity/repository.js';
 import { RUNTIME_CONFIG } from '../tokens.js';
+import { internalAdminContext } from '../lib/internal-admin-context.js';
+import { UserCenterController } from '../modules/user-center/user-center.controller.js';
 import { RegistrationController } from './controller.js';
 import { RegistrationRepository, type RegistrationInput } from './repository.js';
 import { registrationSignature, verifyRegistrationSignature } from './backchannel.js';
@@ -57,6 +59,52 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     const afterOld = await db.query("SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 AND kind IN ('iam-user','iam-user-credential') AND id<>$2 ORDER BY kind,id", [environment, winner.userId]);
     assert.deepEqual(afterOld, before, 'legacy identities and credentials stay byte-for-byte identical');
     await assert.rejects(a.register({ ...winningInput, account: 'Other' }), /已完成/);
+
+    for (const [appId, decision, enabled] of [['signup-public', 'public', true], ['signup-auth', 'authenticated', true], ['signup-private', 'private', true], ['signup-other', 'private', true], ['signup-disabled', 'private', false]] as const) {
+      await store.upsertAppCenterApp({ appId, displayName: appId, enabled, accessPolicy: { defaultDecision: decision, allowRoles: [], allowUserIds: [], allowOrgIds: [] } });
+    }
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-public', userId: winner.userId })).allowed, true, 'empty grants inherit public policy');
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-auth', userId: winner.userId })).allowed, true);
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-private', userId: winner.userId })).allowed, false, 'empty grants are not an all-app wildcard');
+    for (const appIds of [[], ['unknown-app'], ['signup-disabled']]) {
+      await assert.rejects(a.createInvitation({ label: 'Invalid apps', maxUses: 1, days: 1, appGrant: { mode: 'selected', appIds } }), /请选择至少一个/);
+    }
+    const chosen = await a.createInvitation({ label: 'One app', maxUses: 1, days: 1, appGrant: { mode: 'selected', appIds: ['signup-private'] } });
+    const granted = await a.register({ ...input('GrantedUser', chosen.code), ...{ allowedAppIds: ['signup-other'], roleIds: ['mx-admin'] } });
+    assert.deepEqual((await identity.account(granted.userId))?.appAccess.allowedAppIds, ['signup-private'], 'only the server-owned invitation grants apps');
+    assert.deepEqual((await identity.account(granted.userId))?.roleIds, ['mx-user']);
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-private', userId: granted.userId })).allowed, true);
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-other', userId: granted.userId })).allowed, false);
+    await a.revokeInvitation(chosen.invitation.id);
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-private', userId: granted.userId })).allowed, true, 'revoking an invitation does not revoke existing accounts');
+
+    const all = await a.createInvitation({ label: 'Snapshot', maxUses: 1, days: 1, appGrant: { mode: 'all_current', appIds: [] } });
+    assert.ok(!all.invitation.appGrant!.appIds.includes('signup-disabled'));
+    await store.upsertAppCenterApp({ appId: 'signup-future', displayName: 'Future', accessPolicy: { defaultDecision: 'private' } });
+    const allUser = await a.register(input('SnapshotUser', all.code));
+    assert.deepEqual((await identity.account(allUser.userId))?.appAccess.allowedAppIds.sort(), [...all.invitation.appGrant!.appIds].sort());
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-future', userId: allUser.userId })).allowed, false, 'all-current never silently grants future apps');
+
+    const legacy = await a.createInvitation({ label: 'Legacy', maxUses: 1, days: 1 });
+    await db.query("UPDATE mx_platform_records SET data=data-'appGrant' WHERE environment=$1 AND kind='registration-invite' AND id=$2", [environment, legacy.invitation.id]);
+    const legacyUser = await a.register(input('LegacyInvite', legacy.code));
+    assert.deepEqual((await identity.account(legacyUser.userId))?.appAccess.allowedAppIds, [], 'pre-upgrade invitations preserve policy inheritance');
+
+    await store.createUserCenterUser({ userId: granted.userId, allowedAppIds: ['signup-other'], deniedAppIds: ['signup-private'] });
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-private', userId: granted.userId })).allowed, false, 'explicit deny wins over a grant');
+    assert.deepEqual((await identity.account(granted.userId))?.appAccess.allowedAppIds.sort(), ['signup-other', 'signup-private'], 'old writers still append');
+    const users = new UserCenterController(store);
+    const replacement = { userId: granted.userId, replaceAppAccess: true, allowedAppIds: [], deniedAppIds: [] };
+    await assert.rejects(users.createUser(undefined, replacement), /authentication|token/i);
+    await internalAdminContext.run({ userId: 'test-admin', requestId: randomUUID() }, async () => {
+      await assert.rejects(users.createUser(undefined, { userId: granted.userId, replaceAppAccess: true, allowedAppIds: [] }), /both/);
+      await users.createUser(undefined, replacement);
+    });
+    assert.deepEqual((await identity.account(granted.userId))?.appAccess.allowedAppIds, [], 'admin editor can remove an explicit grant');
+    assert.deepEqual((await identity.account(granted.userId))?.appAccess.deniedAppIds, []);
+    assert.equal((await identity.authenticate('GrantedUser', 'RegistrationPassword123!'))?.userId, granted.userId, 'app edits preserve credentials');
+    assert.equal((await store.evaluateAppCenterAccess({ appId: 'signup-private', userId: granted.userId })).allowed, false);
+
     let policy = await a.updatePolicy({ mode: 'closed', version: 0 });
     await assert.rejects(a.register(input('ClosedAccount', invite.code)), /暂未开放/);
     assert.deepEqual(await a.register(winningInput), winner, 'closing signup never undoes committed registration');

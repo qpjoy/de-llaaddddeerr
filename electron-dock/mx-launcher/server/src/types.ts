@@ -940,6 +940,8 @@ export interface CreateUserInput {
   attributes?: Record<string, unknown> | null;
   externalIds?: Record<string, string> | null;
   appAccess?: Partial<UserCenterAppAccess> | null;
+  /** Explicit admin editor replacement; legacy and SDK writers keep additive merging. */
+  replaceAppAccess?: boolean;
   homeAppId?: string | null;
   registeredByAppId?: string | null;
   allowedAppIds?: string[] | string | null;

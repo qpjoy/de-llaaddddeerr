@@ -1,4 +1,4 @@
-/** Enhance single native selects without changing their form values or business events. */
+/** Enhance native single/multiple selects while preserving form values and events. */
 export function installNeonSelects(root = document) {
   const doc = root.ownerDocument || root;
   const win = doc.defaultView;
@@ -38,7 +38,7 @@ export function installNeonSelects(root = document) {
     const upward = below < 230 && above > below;
     menu.style.width = `${popupWidth}px`;
     menu.style.left = `${Math.max(leftEdge + 12, Math.min(box.left, leftEdge + width - popupWidth - 12))}px`;
-    list.style.maxHeight = `${Math.max(44, Math.min(260, (upward ? above : below) - 88))}px`;
+    list.style.maxHeight = `${Math.max(44, Math.min(260, (upward ? above : below) - (opened.select.multiple ? 124 : 88)))}px`;
     menu.style.top = `${upward ? Math.max(topEdge + 8, box.top - menu.offsetHeight - 6) : box.bottom + 6}px`;
   }
   function highlight(entry, index) {
@@ -63,6 +63,15 @@ export function installNeonSelects(root = document) {
   }
   function choose(entry, item) {
     if (!item || item.getAttribute('aria-disabled') === 'true' || entry.select.matches(':disabled')) return;
+    if (entry.select.multiple) {
+      const index = Number(item.dataset.index);
+      entry.select.options[index].selected = !entry.select.options[index].selected;
+      entry.select.dispatchEvent(new win.Event('input', { bubbles: true }));
+      entry.select.dispatchEvent(new win.Event('change', { bubbles: true }));
+      const choices = entry.items.filter(option => !option.hidden && option.getAttribute('aria-disabled') !== 'true');
+      highlight(entry, choices.findIndex(option => Number(option.dataset.index) === index));
+      return;
+    }
     const index = Number(item.dataset.index), changed = entry.select.selectedIndex !== index;
     close(true); entry.select.selectedIndex = index; sync(entry);
     if (changed) {
@@ -106,12 +115,14 @@ export function installNeonSelects(root = document) {
     if (entry.trigger.disabled || !visible(entry.trigger)) return;
     close(); opened = entry;
     entry.search.value = query; entry.wrapper.classList.add('is-open'); entry.trigger.setAttribute('aria-expanded', 'true');
-    // Body portal avoids overflow clipping in tables, scroll panels and drawers.
-    inheritTheme(entry); doc.body.append(entry.menu); renderOptions(entry); position(); entry.search.focus({ preventScroll: true });
+    // Stay in a modal's top layer so its focus trap and backdrop don't hide the menu.
+    inheritTheme(entry); (entry.select.closest('dialog[open]') || doc.body).append(entry.menu); renderOptions(entry); position(); entry.search.focus({ preventScroll: true });
   }
   function sync(entry) {
     const { select, trigger, value, wrapper } = entry;
-    const text = select.selectedOptions[0]?.label || select.getAttribute('data-placeholder') || '请选择';
+    const selected = [...select.selectedOptions];
+    const text = (select.multiple ? selected.length > 2 ? `${selected[0].label} 等 ${selected.length} 项` : selected.map(option => option.label).join('、') : selected[0]?.label)
+      || select.getAttribute('data-placeholder') || '请选择';
     if (value.textContent !== text) value.textContent = text;
     const name = labelFor(select);
     for (const [key, val] of Object.entries({ 'aria-label': name, 'aria-required': String(select.required), 'aria-invalid': select.getAttribute('aria-invalid') || String(!select.validity.valid && entry.validated) })) {
@@ -126,7 +137,7 @@ export function installNeonSelects(root = document) {
     if (select.validity.valid) { entry.validation.hidden = true; entry.validated = false; }
   }
   function enhance(select) {
-    if (entries.has(select) || select.multiple || select.size > 1 || select.hasAttribute('data-neon-native')) return;
+    if (entries.has(select) || (!select.multiple && select.size > 1) || select.hasAttribute('data-neon-native')) return;
     const id = `qp-select-${++serial}`, wrapper = element('span', 'qp-dropdown qp-select-control');
     const trigger = element('button', 'qp-dropdown__trigger qp-select-trigger'); trigger.type = 'button';
     trigger.setAttribute('role', 'combobox'); trigger.setAttribute('aria-haspopup', 'listbox'); trigger.setAttribute('aria-expanded', 'false'); trigger.setAttribute('aria-controls', `${id}-list`);
@@ -136,12 +147,33 @@ export function installNeonSelects(root = document) {
     search.setAttribute('role', 'combobox'); search.setAttribute('aria-autocomplete', 'list'); search.setAttribute('aria-expanded', 'true'); search.setAttribute('aria-controls', `${id}-list`);
     searchBox.append(icon('m14 14 3 3 M15 9a6 6 0 1 1-12 0 6 6 0 0 1 12 0'), search);
     const list = element('div', 'qp-dropdown__options'); list.id = `${id}-list`; list.setAttribute('role', 'listbox');
+    if (select.multiple) list.setAttribute('aria-multiselectable', 'true');
     const empty = element('p', 'qp-dropdown__empty', '没有匹配的选项'); empty.setAttribute('role', 'status');
     const count = element('span', 'qp-select-count'); const footer = element('div', 'qp-select-footer'); footer.append(count, element('span', '', '↑↓ 选择 · Enter 确认'));
     const validation = element('span', 'qp-select-validation'); validation.setAttribute('role', 'alert'); validation.hidden = true;
     menu.append(searchBox, list, empty, footer);
     const entry = { id, select, wrapper, trigger, value, menu, search, list, empty, count, validation, items: [], validated: false, tabIndex: select.getAttribute('tabindex'), ariaHidden: select.getAttribute('aria-hidden'), descriptors: {} };
     entries.set(select, entry);
+    if (select.multiple) {
+      const actions = element('div', 'qp-select-actions');
+      for (const [label, operation] of [['全选匹配', 'select'], ['清空选择', 'clear'], ['完成', 'done']]) {
+        const button = element('button', '', label); button.type = 'button';
+        button.addEventListener('click', () => {
+          if (select.matches(':disabled')) return;
+          if (operation === 'done') { close(true); return; }
+          let changed = false;
+          for (const item of entry.items) {
+            if (item.getAttribute('aria-disabled') === 'true' || operation === 'select' && item.hidden) continue;
+            const option = select.options[Number(item.dataset.index)], next = operation === 'select';
+            if (option.selected !== next) { option.selected = next; changed = true; }
+          }
+          if (changed) { select.dispatchEvent(new win.Event('input', { bubbles: true })); select.dispatchEvent(new win.Event('change', { bubbles: true })); }
+          search.focus({ preventScroll: true });
+        });
+        actions.append(button);
+      }
+      menu.append(actions);
+    }
     select.before(wrapper); wrapper.append(select, trigger, validation);
     select.classList.add('qp-select-native'); select.tabIndex = -1; select.setAttribute('aria-hidden', 'true');
     // Reflect assignments from existing renderers without changing the native
@@ -170,7 +202,7 @@ export function installNeonSelects(root = document) {
         const current = choices.indexOf(entry.active);
         const index = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
         highlight(entry, index);
-      } else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); choose(entry, entry.active); }
+      } else if (event.key === 'Enter' && event.target === search) { event.preventDefault(); event.stopPropagation(); choose(entry, entry.active); }
       else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); }
       else if (event.key === 'Tab') {
         event.preventDefault(); event.stopPropagation(); close(true);

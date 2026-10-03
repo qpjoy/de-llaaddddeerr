@@ -23,5 +23,8 @@ select.qp-select-native { position: absolute !important; width: 1px !important; 
 .qp-select-popup .qp-dropdown__empty { color: var(--qp-text-3); font-size: 12px; }
 .qp-select-popup .qp-dropdown__group { font-size: 11px; color: var(--qp-text-3); margin: 2px 0 4px; }
 .qp-select-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; padding: 6px 4px 1px; border-top: 1px solid var(--qp-line); color: var(--qp-text-3); font-size: 10px; }
+.qp-select-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.qp-select-popup .qp-select-actions button { width: auto; min-height: 30px; margin: 0; padding: 4px 8px; border: 1px solid var(--qp-line); border-radius: 6px; background: var(--qp-bg-2); color: var(--qp-text-1); font: 400 12px/1.5 var(--qp-font-family); cursor: pointer; }
+.qp-select-popup .qp-select-actions button:hover { border-color: var(--qp-primary); color: var(--qp-primary); }
 @media (pointer: coarse) { .qp-select-control .qp-select-trigger, .qp-select-popup .qp-select-option { min-height: 42px; } }
 @media (prefers-reduced-motion: reduce) { .qp-select-control *, .qp-select-popup * { transition: none !important; scroll-behavior: auto !important; } }

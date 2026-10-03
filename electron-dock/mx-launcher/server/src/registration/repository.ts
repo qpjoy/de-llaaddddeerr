@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, type EntityManager } from 'typeorm';
 import { createUserCenterUser, createUserCenterUserCredential, userCredentialSummary, userMatchesLogin, verifyUserCenterCredential } from '../store/domain.js';
-import type { UserCenterUser, UserCenterUserCredential } from '../types.js';
+import type { AppCenterApp, UserCenterUser, UserCenterUserCredential } from '../types.js';
 
 export type RegistrationMode = 'closed' | 'invite_code' | 'open';
 export interface RegistrationPolicy { mode: RegistrationMode; version: number }
@@ -13,7 +13,9 @@ const fail = (status: number, code: string, message: string): never => { throw n
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 export const accountWriteLock = (manager: EntityManager, environment: string) =>
   manager.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))', [environment, 'mx-account-creation']);
-interface Invitation { id: string; label: string; clientId: string; codeHash: string; maxUses: number; uses: number; startsAt: string; expiresAt: string; revoked: boolean; createdAt: string }
+export interface InvitationAppGrant { mode: 'policy' | 'selected' | 'all_current'; appIds: string[] }
+export interface CreateInvitationInput { label: string; maxUses: number; days: number; appGrant?: InvitationAppGrant }
+interface Invitation { id: string; label: string; clientId: string; codeHash: string; maxUses: number; uses: number; startsAt: string; expiresAt: string; revoked: boolean; createdAt: string; appGrant?: InvitationAppGrant }
 
 /** Runs only in Internal API, the account writer. Identity calls it through a
  * narrow authenticated backchannel. Records share the existing durable backup. */
@@ -67,7 +69,24 @@ export class RegistrationRepository {
     const rows = await this.db.query("SELECT data - 'codeHash' AS data FROM mx_platform_records WHERE environment=$1 AND kind='registration-invite' ORDER BY created_at DESC LIMIT 100", [this.environment]);
     return rows.map((row: { data: Omit<Invitation, 'codeHash'> }) => row.data);
   }
-  async createInvitation(input: { label: string; maxUses: number; days: number }) {
+  private async appsFor(manager: EntityManager) {
+    const rows: Array<{ data: AppCenterApp }> = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='app-center-app' ORDER BY id", [this.environment]);
+    return rows.map(({ data }) => ({ appId: data.appId, displayName: data.displayName, enabled: data.enabled !== false, defaultDecision: data.accessPolicy?.defaultDecision ?? 'private' }));
+  }
+  async apps() { await this.ready(); return this.appsFor(this.db.manager); }
+  private async invitationGrant(manager: EntityManager, input?: InvitationAppGrant): Promise<InvitationAppGrant> {
+    if (input === undefined) return { mode: 'policy', appIds: [] };
+    if (!input || !['policy', 'selected', 'all_current'].includes(input.mode) || !Array.isArray(input.appIds)
+      || input.appIds.length > 1000 || input.appIds.some(id => typeof id !== 'string' || !id.trim()))
+      fail(400, 'invalid_app_grant', '应用范围无效，请重新选择。');
+    if (input.mode !== 'selected' && input.appIds.length) fail(400, 'invalid_app_grant', '此模式由系统确定应用范围，请勿额外提交应用。');
+    if (input.mode === 'policy') return { mode: 'policy', appIds: [] };
+    const enabled = (await this.appsFor(manager)).filter(app => app.enabled).map(app => app.appId);
+    const appIds = input.mode === 'all_current' ? enabled : [...new Set(input.appIds)];
+    if (!appIds.length || appIds.some(id => !enabled.includes(id))) fail(400, 'invalid_app_grant', '请选择至少一个已登记且启用的应用，或选择遵循应用策略。');
+    return { mode: input.mode, appIds };
+  }
+  async createInvitation(input: CreateInvitationInput) {
     const label = typeof input.label === 'string' ? input.label.trim() : '';
     if (!label || label.length > 80 || !Number.isInteger(input.maxUses) || input.maxUses < 1 || input.maxUses > 1000
       || !Number.isInteger(input.days) || input.days < 1 || input.days > 90) fail(400, 'invalid_invitation', '请填写名称、1–1000 个名额和 1–90 天有效期。');
@@ -77,8 +96,10 @@ export class RegistrationRepository {
       uses: 0, startsAt: now.toISOString(), expiresAt: new Date(now.getTime() + input.days * 86400000).toISOString(), revoked: false, createdAt: now.toISOString() };
     await this.ready();
     await this.db.transaction(async manager => {
-      await this.lock(manager); await this.write(manager, 'registration-invite', invitation.id, invitation);
-      await this.audit(manager, 'identity.invitation.created', { invitationId: invitation.id, clientId: this.clientId, maxUses: input.maxUses });
+      await this.lock(manager);
+      invitation.appGrant = await this.invitationGrant(manager, input.appGrant);
+      await this.write(manager, 'registration-invite', invitation.id, invitation);
+      await this.audit(manager, 'identity.invitation.created', { invitationId: invitation.id, clientId: this.clientId, maxUses: input.maxUses, appGrant: invitation.appGrant });
     });
     const { codeHash: _, ...safe } = invitation;
     return { invitation: safe, code };
@@ -129,12 +150,15 @@ export class RegistrationRepository {
       if (rows.some((row: { data: UserCenterUser }) => userMatchesLogin(row.data, account))) fail(409, 'account_unavailable', '此账号不可用，请更换账号；已有账号请直接登录。');
       // No admin role, network entitlement, tenant membership, paid quota or
       // client-supplied role is inherited from ordinary identity registration.
-      const user = createUserCenterUser({ userId, account, displayName: account, roleIds: ['mx-user'], registeredByAppId: 'mx-identity' }, null, userCredentialSummary(credential));
+      // This is an immutable, server-owned snapshot. Empty and legacy invites
+      // inherit application policies; they do not mean an all-app wildcard.
+      const allowedAppIds = invitation?.appGrant?.appIds ?? [];
+      const user = createUserCenterUser({ userId, account, displayName: account, roleIds: ['mx-user'], registeredByAppId: 'mx-identity', allowedAppIds }, null, userCredentialSummary(credential));
       await this.write(manager, 'iam-user', userId, user);
       await this.write(manager, 'iam-user-credential', userId, credential);
       if (invitation) await this.write(manager, 'registration-invite', invitation.id, { ...invitation, uses: invitation.uses + 1 });
       await this.write(manager, 'registration-redemption', transactionId, { userId, clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null, createdAt: new Date().toISOString() });
-      await this.audit(manager, 'identity.account.registered', { clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null }, userId);
+      await this.audit(manager, 'identity.account.registered', { clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null, allowedAppIds }, userId);
       return { userId };
     });
   }

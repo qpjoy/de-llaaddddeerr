@@ -3366,6 +3366,7 @@ function closeUserEditorDrawer() {
 function userEditorValue(root, field) {
   const element = root.querySelector(`[data-user-editor-field="${field}"]`);
   if (!element) return null;
+  if (element.tagName === 'SELECT' && element.multiple) return [...element.selectedOptions].map(option => option.value).join(', ');
   if (element.type === 'checkbox') return element.checked;
   return blankToNull(element.value);
 }
@@ -3466,6 +3467,7 @@ async function saveUserCenterUserFromEditor(root) {
         registeredByAppId: blankToNull(draft.registeredByAppId),
         allowedAppIds: stringListFromText(draft.allowedAppIds),
         deniedAppIds: stringListFromText(draft.deniedAppIds),
+        replaceAppAccess: true,
         defaultOverseaSiteIds,
         provisionOversea: defaultOverseaSiteIds.length > 0,
         requestedBy: 'desktop-admin',
@@ -9740,6 +9742,13 @@ function renderSystemSubscriptionsDrawer() {
   }
 }
 
+function userAppOptions(value) {
+  const selected = stringListFromText(value || '');
+  const catalog = new Map(asArray(state.appCenterApps).map(app => [app.appId, app]));
+  for (const id of selected) if (!catalog.has(id)) catalog.set(id, { appId: id, displayName: '历史应用（未在目录中）' });
+  return [...catalog.values()].map(app => `<option value="${escapeHtml(app.appId)}" ${selected.includes(app.appId) ? 'selected' : ''}>${escapeHtml(app.displayName || app.appId)} · ${escapeHtml(app.appId)}${app.enabled === false ? '（已停用）' : ''}</option>`).join('');
+}
+
 function renderUserEditorDrawer() {
   if (!userEditorBackdrop || !userEditorDrawer) return;
   const drawer = state.userCenter.drawer;
@@ -9851,14 +9860,17 @@ function renderUserEditorDrawer() {
               <span>Registered By</span>
               <input data-user-editor-field="registeredByAppId" value="${escapeHtml(draft.registeredByAppId || '')}" placeholder="mx-h2i / luopan" autocomplete="off" />
             </label>
-            <label class="app-form-field app-form-wide">
-              <span>Allowed Apps</span>
-              <input data-user-editor-field="allowedAppIds" value="${escapeHtml(draft.allowedAppIds || '')}" placeholder="mx-h2i, appcenter, h2o, luopan" autocomplete="off" />
-            </label>
-            <label class="app-form-field app-form-wide">
-              <span>Denied Apps</span>
-              <input data-user-editor-field="deniedAppIds" value="${escapeHtml(draft.deniedAppIds || '')}" placeholder="optional explicit deny list" autocomplete="off" />
-            </label>
+            <div class="app-form-field app-form-wide">
+              <label for="user-allowed-apps">额外允许的应用 · Allowed Apps</label>
+              <select id="user-allowed-apps" multiple data-user-editor-field="allowedAppIds" aria-label="额外允许的应用" aria-describedby="user-app-access-help" data-placeholder="未额外授权，遵循应用策略">${userAppOptions(draft.allowedAppIds)}</select>
+              <small id="user-app-access-help">为空时仍按应用策略判断：公开应用可访问，需登录的应用登录后可用，私有应用需要授权。此处不授予工作台管理权限、网络权限或 Hub 租户权限。</small>
+              ${state.appCenterAppsError ? '<small>应用目录暂不可用，已保存的应用仍保留。</small>' : ''}
+            </div>
+            <div class="app-form-field app-form-wide">
+              <label for="user-denied-apps">明确禁止的应用 · Denied Apps</label>
+              <select id="user-denied-apps" multiple data-user-editor-field="deniedAppIds" aria-label="明确禁止的应用" data-placeholder="无额外禁止">${userAppOptions(draft.deniedAppIds)}</select>
+              <small>在 Launcher 应用访问检查中，禁止优先于允许；应用允许管理员通行时仍遵循其管理员策略。应用独立入口及内部数据权限由各应用管理。</small>
+            </div>
             <label class="app-form-field app-form-wide">
               <span>Attributes JSON</span>
               <textarea data-user-editor-field="attributesJson" rows="5" spellcheck="false" placeholder="{ }">${escapeHtml(draft.attributesJson || '{}')}</textarea>
