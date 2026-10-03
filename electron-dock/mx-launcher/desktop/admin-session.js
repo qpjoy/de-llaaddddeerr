@@ -4,10 +4,10 @@ export function adminAccessPresentation(error) {
     next: '请由管理员在“成员与访问 → 用户与账号”中将需要管理工作台的账号设为 MX Admin（mx-admin），然后刷新。也可以退出后切换账号。'
   };
   if (['session_required', 'reauth_required'].includes(error?.code)) return {
-    title: '请验证个人身份', connection: '需要登录', health: 'blocked', internal: '可达', next: '请在左侧个人账号区域登录或重新验证。'
+    title: '请验证个人身份', connection: '需要登录', health: 'blocked', internal: '可达', next: '请在右上角账号菜单登录或重新验证。'
   };
   if (error?.code === 'binding_required') return {
-    title: '请关联已有账号', connection: '需要关联', health: 'blocked', internal: '可达', next: '请在左侧个人账号区域完成账号关联。'
+    title: '请关联已有账号', connection: '需要关联', health: 'blocked', internal: '可达', next: '请在右上角账号菜单完成账号关联。'
   };
   if (error?.code === 'sso_unavailable') return {
     title: '个人登录暂不可用', connection: '待重试', health: 'failed', internal: '待确认', next: '请刷新页面重试，或检查身份服务连接。'
@@ -53,7 +53,7 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
     if (!sameOrigin() || secureEntry() || (hasOpsToken && session?.accessMode !== 'sso-only')) return null;
     if (session?.unavailable) return Object.assign(new Error('个人登录状态暂不可用，请刷新页面重试。'), { code: 'sso_unavailable', status: 503 });
     if (!session?.enabled) return null;
-    if (!session.authenticated) return Object.assign(new Error('请先在左侧登录个人账号，再读取管理数据。'), { code: 'session_required', status: 401 });
+    if (!session.authenticated) return Object.assign(new Error('请先在右上角登录个人账号，再读取管理数据。'), { code: 'session_required', status: 401 });
     if (session.bindingRequired) return Object.assign(new Error('请先关联已有 MX 账号，再读取管理数据。'), { code: 'binding_required', status: 401 });
     if (!session.canManage) return Object.assign(new Error('已登录；此账号尚未获得 Launcher 管理权限。'), { code: 'management_forbidden', status: 403 });
     return null;

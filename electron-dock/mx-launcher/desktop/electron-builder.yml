@@ -9,6 +9,7 @@ files:
   - main.cjs
   - preload.cjs
   - renderer.js
+  - theme.js
   - service-operations.js
   - admin-session.js
   - registration.js

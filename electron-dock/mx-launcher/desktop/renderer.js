@@ -409,6 +409,35 @@ function renderLoginGate() {
   document.getElementById('gate-server-field').hidden = entry?.accessMode === 'sso-only';
   document.getElementById('gate-server').value = serverInput.value || defaultServerBaseUrl();
   document.getElementById('ops-session-logout').hidden = !verifiedOpsBinding;
+  renderWorkspaceTopbar();
+}
+
+function renderWorkspaceTopbar() {
+  const entry = adminSession.entry();
+  const tokenSession = Boolean(verifiedOpsBinding) || entry?.authMethod === 'ops-token';
+  const name = tokenSession ? 'Internal Ops Token' : entry?.user?.displayName || '账号与连接';
+  const trigger = document.getElementById('account-menu-name');
+  trigger.textContent = name;
+  trigger.title = name;
+  document.getElementById('account-avatar').textContent = tokenSession ? 'OP' : Array.from(name)[0].toLocaleUpperCase();
+  document.getElementById('workspace-current').textContent = state.activeView === 'admin'
+    ? (state.adminSection === 'foundations' ? internalSubsectionMeta[state.adminSubsection]?.title : null) || workspaceGroupMeta[activeAdminWorkspaceGroup()].heading
+    : state.activeView === 'app-center' ? document.getElementById('app-center-heading').textContent : '工作台';
+  if (document.body.classList.contains('is-locked')) {
+    document.getElementById('account-menu').open = false;
+    closeMobileNavigation(false);
+  }
+}
+
+function closeMobileNavigation(restoreFocus = true) {
+  const wasOpen = document.body.classList.contains('is-mobile-nav-open');
+  document.body.classList.remove('is-mobile-nav-open');
+  document.querySelector('.workspace').inert = false;
+  document.getElementById('sidebar-backdrop').hidden = true;
+  if (window.matchMedia('(max-width: 900px)').matches) {
+    document.getElementById('sidebar-collapse').setAttribute('aria-expanded', 'false');
+  }
+  if (wasOpen && restoreFocus) document.getElementById('sidebar-collapse').focus();
 }
 
 function requireManagementLogin() {
@@ -1019,6 +1048,22 @@ adminRefresh.addEventListener('click', () => {
 });
 
 sidebarCollapse.addEventListener('click', () => {
+  if (window.matchMedia('(max-width: 900px)').matches) {
+    const open = !document.body.classList.contains('is-mobile-nav-open');
+    if (!open) { closeMobileNavigation(); return; }
+    // Mobile navigation uses the full tree, regardless of the desktop rail state.
+    state.sidebarCollapsed = false;
+    sidebar.classList.remove('is-collapsed', 'is-subnav-open');
+    renderAppNav();
+    renderAdminSubnav();
+    document.body.classList.add('is-mobile-nav-open');
+    document.querySelector('.workspace').inert = true;
+    document.getElementById('account-menu').open = false;
+    document.getElementById('sidebar-backdrop').hidden = false;
+    sidebarCollapse.setAttribute('aria-expanded', 'true');
+    document.getElementById('sidebar-mobile-close').focus();
+    return;
+  }
   state.sidebarCollapsed = !state.sidebarCollapsed;
   state.hoverAdminMenu = null;
   if (!state.sidebarCollapsed && state.activeView === 'admin') {
@@ -1027,11 +1072,40 @@ sidebarCollapse.addEventListener('click', () => {
   sidebar.classList.toggle('is-collapsed', state.sidebarCollapsed);
   sidebar.classList.toggle('is-subnav-open', state.sidebarCollapsed && state.activeView === 'admin');
   sidebarCollapse.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
-  sidebarCollapse.textContent = state.sidebarCollapsed ? '展开 →' : '收起 ←';
+  sidebarCollapse.setAttribute('aria-label', state.sidebarCollapsed ? '展开导航' : '收起导航');
+  sidebarCollapse.title = state.sidebarCollapsed ? '展开导航' : '收起导航';
   renderAppNav();
   renderAdminSubnav();
   requestAnimationFrame(() => resizeTopology());
 });
+
+const accountMenu = document.getElementById('account-menu');
+const accountSummary = accountMenu.querySelector('summary');
+document.addEventListener('click', event => {
+  if (accountMenu.open && !accountMenu.contains(event.target)) accountMenu.open = false;
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if (accountMenu.open) {
+    accountMenu.open = false;
+    accountSummary.focus();
+  }
+  closeMobileNavigation();
+});
+accountMenu.addEventListener('focusout', event => {
+  if (event.relatedTarget && !accountMenu.contains(event.relatedTarget)) accountMenu.open = false;
+});
+document.getElementById('sidebar-backdrop').addEventListener('click', () => closeMobileNavigation());
+document.getElementById('sidebar-mobile-close').addEventListener('click', () => closeMobileNavigation());
+const compactNavigation = window.matchMedia('(max-width: 900px)');
+function syncNavigationViewport() {
+  closeMobileNavigation();
+  sidebarCollapse.setAttribute('aria-expanded', String(!compactNavigation.matches && !state.sidebarCollapsed));
+  sidebarCollapse.setAttribute('aria-label', compactNavigation.matches || state.sidebarCollapsed ? '展开导航' : '收起导航');
+  sidebarCollapse.title = sidebarCollapse.getAttribute('aria-label');
+}
+compactNavigation.addEventListener('change', syncNavigationViewport);
+syncNavigationViewport();
 
 if (inspectorToggle) {
   inspectorToggle.addEventListener('click', () => {
@@ -1071,6 +1145,7 @@ document.addEventListener('click', (event) => {
 }, true);
 
 function handleAdminModuleNavigation(tab) {
+  closeMobileNavigation();
   if (state.activeView !== 'admin') {
     setActiveView('admin', adminNavFromElement(tab));
     return;
@@ -1254,6 +1329,7 @@ async function boot() {
 }
 
 window.addEventListener('beforeunload', () => disposeMxH2iTopology());
+window.addEventListener('mx-theme-change', refreshTopologyTheme);
 
 function adminNavFromElement(element) {
   return {
@@ -1276,6 +1352,7 @@ function previewCollapsedAdminSubnav(tab) {
 }
 
 function setActiveView(view, nav = {}, options = {}) {
+  closeMobileNavigation();
   const nextAppNode = options.appNode || state.activeAppNode || 'appcenter';
   const nextMxH2iSurface = options.appSurface === 'dashboard' ? 'dashboard' : 'product';
   if (view !== 'app-center' || nextAppNode !== MX_H2I_PRODUCT_ID || nextMxH2iSurface !== 'dashboard') {
@@ -4963,6 +5040,7 @@ function renderAdminShell() {
   const menu = workspaceGroupMeta[activeAdminWorkspaceGroup()];
   if (adminHeading) adminHeading.textContent = menu.heading;
   renderAdminSectionHeadings();
+  renderWorkspaceTopbar();
   for (const section of adminSections) {
     const active = section.id === `admin-section-${state.adminSection}`;
     section.classList.toggle('is-active', active);
@@ -10983,6 +11061,7 @@ function renderAppCenterShell() {
   renderSelectedAppDetail();
   renderAppNav();
   renderWorkbench();
+  renderWorkspaceTopbar();
 }
 
 function filteredAppCenterApps() {
@@ -20488,23 +20567,26 @@ function createMxH2iTopologyTrafficEvidenceBadge(descriptor, theme = topologyThe
   canvas.height = 168;
   const context = canvas.getContext('2d');
   const fresh = descriptor.tone === 'fresh';
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = fresh ? 'rgba(15, 45, 42, 0.96)' : 'rgba(31, 34, 43, 0.96)';
-  context.fillRect(3, 3, canvas.width - 6, canvas.height - 6);
-  context.strokeStyle = fresh ? theme.primary : theme.textSoft;
-  context.lineWidth = 4;
-  context.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
-  context.textAlign = 'left';
-  context.textBaseline = 'middle';
-  context.fillStyle = fresh ? theme.primary : theme.text;
-  context.font = '700 29px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-  context.fillText(String(descriptor.primary).slice(0, 64), 24, 42, 720);
-  context.fillStyle = theme.text;
-  context.font = '600 21px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-  context.fillText(String(descriptor.secondary).slice(0, 88), 24, 92, 720);
-  context.fillStyle = theme.textSoft;
-  context.font = '500 19px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-  context.fillText(String(descriptor.detail).slice(0, 88), 24, 132, 720);
+  function paint(theme) {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = theme.canvas;
+    context.fillRect(3, 3, canvas.width - 6, canvas.height - 6);
+    context.strokeStyle = fresh ? theme.primary : theme.textSoft;
+    context.lineWidth = 4;
+    context.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = fresh ? theme.primary : theme.text;
+    context.font = '700 29px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    context.fillText(String(descriptor.primary).slice(0, 64), 24, 42, 720);
+    context.fillStyle = theme.text;
+    context.font = '600 21px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    context.fillText(String(descriptor.secondary).slice(0, 88), 24, 92, 720);
+    context.fillStyle = theme.textSoft;
+    context.font = '500 19px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    context.fillText(String(descriptor.detail).slice(0, 88), 24, 132, 720);
+  }
+  paint(theme);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -20515,6 +20597,7 @@ function createMxH2iTopologyTrafficEvidenceBadge(descriptor, theme = topologyThe
   }));
   sprite.scale.set(4.8, 1.05, 1);
   sprite.renderOrder = 20;
+  sprite.userData.updateTheme = theme => { paint(theme); texture.needsUpdate = true; };
   return sprite;
 }
 
@@ -20989,14 +21072,17 @@ function createTopologyLabel(letter, name, theme = topologyTheme()) {
   canvas.width = 256;
   canvas.height = 96;
   const context = canvas.getContext('2d');
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = theme.text;
-  context.font = '700 34px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-  context.textAlign = 'center';
-  context.fillText(letter, 128, 36);
-  context.fillStyle = theme.textSoft;
-  context.font = '500 18px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-  context.fillText(name, 128, 68);
+  function paint(theme) {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = theme.text;
+    context.font = '700 34px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    context.textAlign = 'center';
+    context.fillText(letter, 128, 36);
+    context.fillStyle = theme.textSoft;
+    context.font = '500 18px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    context.fillText(name, 128, 68);
+  }
+  paint(theme);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -21005,6 +21091,7 @@ function createTopologyLabel(letter, name, theme = topologyTheme()) {
     depthWrite: false
   }));
   sprite.scale.set(1.9, 0.72, 1);
+  sprite.userData.updateTheme = theme => { paint(theme); texture.needsUpdate = true; };
   return sprite;
 }
 
@@ -21133,6 +21220,34 @@ function healthColor(health) {
   if (health === 'running') return theme.info;
   if (health === 'passed') return theme.success;
   return theme.primary;
+}
+
+// Recolor existing graphics in place; theme changes never reload network observations.
+function refreshTopologyTheme() {
+  const theme = topologyTheme();
+  for (const instance of [state.topology, state.mxH2iTopology]) {
+    if (!instance || instance.disposed) continue;
+    instance.renderer.setClearColor(theme.canvas, 0);
+    instance.scene.traverse(object => object.userData.updateTheme?.(theme));
+  }
+  if (state.topology) {
+    state.topology.starField.material.color.set(theme.info);
+    updateTopologyFromPipelines(asArray(state.dashboard?.siteSlotPipelines));
+  }
+  const instance = state.mxH2iTopology;
+  if (!instance || instance.disposed) return;
+  for (const node of instance.nodes.values()) {
+    const color = mxH2iTopologyColor(node.userData.kind, theme);
+    node.userData.sphere.material.color.set(color);
+    node.userData.sphere.material.emissive.set(color);
+    node.userData.halo.material.color.set(color);
+  }
+  for (const link of instance.links) {
+    const color = mxH2iTopologyColor(link.spec.kind, theme);
+    link.line.material.color.set(color);
+    for (const particle of link.particles) particle.material.color.set(color);
+  }
+  renderMxH2iTopologyFrame(instance, 0);
 }
 
 function topologyTheme() {

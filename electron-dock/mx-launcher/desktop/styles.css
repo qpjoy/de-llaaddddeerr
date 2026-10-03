@@ -1,5 +1,4 @@
 :root {
-  color-scheme: dark;
   --mx-bg-canvas: #141417;
   --mx-bg-workspace: #1a1b23;
   --mx-bg-panel: #21232d;
@@ -72,8 +71,8 @@
 .service-switch strong { display: block; font-size: 13px; font-weight: 500; }
 .service-switch small { display: block; margin-top: 5px; color: var(--mx-text-soft); font-size: 12px; line-height: 1.65; }
 .service-form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
-.service-command-code, .service-task-log, .service-setup pre { margin: 0; width: 100%; min-width: 0; padding: 17px; border: 1px solid var(--mx-line); border-radius: 8px; background: #17191f; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.service-command-code { min-height: 140px; color: #b3e7dc; }
+.service-command-code, .service-task-log, .service-setup pre { margin: 0; width: 100%; min-width: 0; padding: 17px; border: 1px solid var(--mx-line); border-radius: 8px; background: var(--mx-bg-canvas); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.service-command-code { min-height: 140px; color: var(--mx-code-text); }
 .service-validation { color: var(--mx-danger); font-size: 13px; margin-top: 10px; }
 .service-impact { color: var(--mx-warning); font-size: 13px; line-height: 1.75; }
 .service-plan { display: grid; gap: 9px; padding: 15px; margin-top: 20px; background: var(--mx-bg-workspace); border: 1px solid var(--mx-line); border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
@@ -162,7 +161,7 @@ summary:focus-visible {
   min-height: 0;
   overflow: hidden;
   padding: 22px;
-  background: #111319;
+  background: var(--qp-sidebar-bg);
   color: var(--mx-text);
   box-shadow: inset -1px 0 0 rgba(94, 142, 236, 0.16);
 }
@@ -174,14 +173,11 @@ summary:focus-visible {
 }
 
 .sidebar.is-collapsed .brand h1,
-.sidebar.is-collapsed .brand p,
-.sidebar.is-collapsed .server-field,
-.sidebar.is-collapsed .sidebar-status span:last-child {
+.sidebar.is-collapsed .brand p {
   display: none;
 }
 
-.sidebar > .brand,
-.sidebar > .sidebar-collapse {
+.sidebar > .brand {
   flex-shrink: 0;
 }
 
@@ -202,7 +198,7 @@ summary:focus-visible {
   place-items: center;
   border-radius: 8px;
   background: var(--mx-primary);
-  color: #071311;
+  color: var(--qp-on-primary);
   font-weight: 800;
   box-shadow: 0 0 22px rgba(43, 246, 210, 0.22);
 }
@@ -268,8 +264,7 @@ p {
   letter-spacing: 0.12em;
 }
 
-.sidebar.is-collapsed .nav-category,
-.sidebar.is-collapsed .connection-settings {
+.sidebar.is-collapsed .nav-category {
   display: none;
 }
 
@@ -396,7 +391,7 @@ p {
 .nav-tab.app-nav-level-3 {
   min-height: 42px;
   padding-left: 10px;
-  background: rgba(12, 15, 22, 0.38);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 38%, transparent);
 }
 
 .nav-tab.app-nav-level-3 strong {
@@ -530,7 +525,7 @@ p {
   padding: 10px;
   border: 1px solid color-mix(in srgb, var(--mx-primary) 30%, var(--mx-line));
   border-radius: 8px;
-  background: #111319;
+  background: var(--qp-sidebar-bg);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
   opacity: 0;
   overflow: hidden;
@@ -621,14 +616,6 @@ p {
   font-weight: 700;
 }
 
-.sidebar-connection {
-  display: grid;
-  flex: 0 0 auto;
-  gap: 12px;
-  min-width: 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
 
 .server-field {
   display: grid;
@@ -693,28 +680,8 @@ select {
   overflow-wrap: anywhere;
 }
 
-.sidebar.is-collapsed .sidebar-status {
-  justify-content: center;
-}
 
-.sidebar-collapse {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 34px;
-  border: 1px solid rgba(94, 142, 236, 0.22);
-  border-radius: 8px;
-  background: var(--mx-bg-workspace);
-  color: var(--mx-text-soft);
-}
 
-.sidebar.is-collapsed .sidebar-collapse {
-  width: 52px;
-  min-height: 40px;
-  padding: 0 4px;
-  font-size: 12px;
-  white-space: nowrap;
-}
 
 .state-chip,
 .product-state,
@@ -725,7 +692,7 @@ select {
   min-height: 24px;
   border-radius: 999px;
   padding: 0 9px;
-  border: 1px solid rgba(226, 226, 226, 0.1);
+  border: 1px solid var(--qp-line);
   background: color-mix(in srgb, var(--mx-text) 8%, var(--mx-bg-panel));
   color: var(--mx-text-soft);
   font-size: 12px;
@@ -736,7 +703,7 @@ select {
 .health-chip[data-health="passed"] {
   border-color: color-mix(in srgb, var(--mx-success) 58%, transparent);
   background: color-mix(in srgb, var(--mx-success) 18%, var(--mx-bg-panel));
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
 }
 
 .state-chip[data-state="connecting"],
@@ -744,14 +711,14 @@ select {
 .health-chip[data-health="ready"] {
   border-color: color-mix(in srgb, var(--mx-info) 58%, transparent);
   background: color-mix(in srgb, var(--mx-info) 18%, var(--mx-bg-panel));
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
 }
 
 .state-chip[data-state="error"],
 .health-chip[data-health="failed"] {
   border-color: color-mix(in srgb, var(--mx-danger) 62%, transparent);
   background: color-mix(in srgb, var(--mx-danger) 18%, var(--mx-bg-panel));
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 /* Retired machine: deliberately muted so it reads as "out of service", not as a fault. */
@@ -765,13 +732,13 @@ select {
 .health-chip[data-health="blocked"] {
   border-color: color-mix(in srgb, var(--mx-warning) 62%, transparent);
   background: color-mix(in srgb, var(--mx-warning) 18%, var(--mx-bg-panel));
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
 }
 
 .health-chip[data-health="rollback"] {
   border-color: color-mix(in srgb, var(--mx-archetype) 62%, transparent);
   background: color-mix(in srgb, var(--mx-archetype) 20%, var(--mx-bg-panel));
-  color: #dfb7ff;
+  color: var(--mx-archetype-foreground);
 }
 
 .workspace {
@@ -992,7 +959,7 @@ select {
 
 .primary-button {
   background: var(--mx-primary);
-  color: #071311;
+  color: var(--qp-on-primary);
   border-color: var(--mx-primary);
   font-weight: 700;
   box-shadow: 0 8px 24px rgba(43, 246, 210, 0.16);
@@ -1518,7 +1485,7 @@ select {
   border-color: color-mix(in srgb, var(--mx-primary) 48%, var(--line));
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--mx-primary) 9%, transparent), transparent 42%),
-    rgba(20, 20, 23, 0.42);
+    color-mix(in srgb, var(--mx-bg-canvas) 42%, transparent);
 }
 
 .release-catalog-controls {
@@ -1553,7 +1520,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
-  background: rgba(18, 20, 28, 0.48);
+  background: color-mix(in srgb, var(--mx-bg-workspace) 48%, transparent);
 }
 
 .release-strategy-strip span,
@@ -1703,7 +1670,7 @@ select {
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.42);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 42%, transparent);
 }
 
 .user-drawer-summary span,
@@ -1750,7 +1717,7 @@ select {
   position: fixed;
   inset: 0;
   z-index: 30;
-  background: rgba(5, 7, 12, 0.42);
+  background: var(--qp-scrim);
   backdrop-filter: blur(3px);
 }
 
@@ -1763,7 +1730,7 @@ select {
   width: min(60vw, 1180px);
   min-width: min(760px, calc(100vw - 28px));
   border-left: 1px solid color-mix(in srgb, var(--mx-primary) 34%, var(--line));
-  background: rgba(33, 35, 45, 0.9);
+  background: color-mix(in srgb, var(--mx-bg-panel) 90%, transparent);
   backdrop-filter: blur(24px) saturate(135%);
   box-shadow: -22px 0 58px rgba(0, 0, 0, 0.42);
   overflow: hidden;
@@ -1826,7 +1793,7 @@ select {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.45);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 45%, transparent);
 }
 
 .app-decision-path {
@@ -1844,7 +1811,7 @@ select {
   border-radius: 8px;
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--mx-primary) 8%, transparent), transparent 60%),
-    rgba(20, 20, 23, 0.5);
+    color-mix(in srgb, var(--mx-bg-canvas) 50%, transparent);
 }
 
 .app-decision-path article[data-state="blocked"] {
@@ -1928,7 +1895,7 @@ select {
   border-radius: 8px;
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--mx-primary) 8%, transparent), transparent 58%),
-    rgba(20, 20, 23, 0.42);
+    color-mix(in srgb, var(--mx-bg-canvas) 42%, transparent);
 }
 
 .app-template-preview strong,
@@ -1989,7 +1956,7 @@ select {
 
 .app-form-field input[readonly] {
   color: var(--mx-text-soft);
-  background: rgba(20, 20, 23, 0.5);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 50%, transparent);
 }
 
 .app-mode-selector {
@@ -2008,7 +1975,7 @@ select {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(37, 41, 54, 0.78);
+  background: color-mix(in srgb, var(--mx-bg-input) 78%, transparent);
   cursor: pointer;
 }
 
@@ -2026,17 +1993,17 @@ select {
   margin-top: 2px;
   border: 1px solid color-mix(in srgb, var(--mx-text-muted) 70%, transparent);
   border-radius: 999px;
-  background: rgba(20, 20, 23, 0.7);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 70%, transparent);
 }
 
 .app-mode-choice.is-selected {
   border-color: color-mix(in srgb, var(--mx-primary) 72%, var(--line));
-  background: color-mix(in srgb, var(--mx-primary) 10%, rgba(37, 41, 54, 0.82));
+  background: color-mix(in srgb, var(--mx-primary) 10%, color-mix(in srgb, var(--mx-bg-input) 82%, transparent));
 }
 
 .app-mode-choice.is-selected > span {
   border-color: var(--mx-primary);
-  box-shadow: inset 0 0 0 4px rgba(37, 41, 54, 1);
+  box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--mx-bg-input) 100%, transparent);
   background: var(--mx-primary);
 }
 
@@ -2057,7 +2024,7 @@ select {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.38);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 38%, transparent);
 }
 
 .app-network-panel.has-error {
@@ -2100,7 +2067,7 @@ select {
   padding: 10px;
   border: 1px dashed color-mix(in srgb, var(--mx-primary) 36%, var(--line));
   border-radius: 8px;
-  background: rgba(37, 41, 54, 0.42);
+  background: color-mix(in srgb, var(--mx-bg-input) 42%, transparent);
 }
 
 .app-network-suggestion span {
@@ -2155,7 +2122,7 @@ select {
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.48);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 48%, transparent);
 }
 
 .app-network-facts strong,
@@ -2192,7 +2159,7 @@ select {
   height: 18px;
   border: 1px solid color-mix(in srgb, var(--mx-text-muted) 65%, transparent);
   border-radius: 4px;
-  background: rgba(20, 20, 23, 0.7);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 70%, transparent);
 }
 
 .app-check-row input:checked + span {
@@ -2202,7 +2169,7 @@ select {
 
 .app-check-row input:checked + span::after {
   content: "✓";
-  color: #101318;
+  color: var(--qp-on-primary);
   font-size: 13px;
   font-weight: 900;
 }
@@ -2222,7 +2189,7 @@ select {
   padding: 11px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.36);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 36%, transparent);
 }
 
 .app-entitlement-plan > article > div:first-child {
@@ -2254,7 +2221,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--mx-primary) 38%, transparent);
   border-radius: 8px;
   padding: 7px 9px;
-  background: color-mix(in srgb, var(--mx-primary) 8%, rgba(20, 20, 23, 0.54));
+  background: color-mix(in srgb, var(--mx-primary) 8%, color-mix(in srgb, var(--mx-bg-canvas) 54%, transparent));
   color: var(--mx-primary);
   font-size: 12px;
   font-weight: 800;
@@ -2275,7 +2242,7 @@ select {
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.44);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 44%, transparent);
 }
 
 .app-runtime-defaults strong,
@@ -2299,7 +2266,7 @@ select {
 .app-advanced-defaults {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(20, 20, 23, 0.3);
+  background: color-mix(in srgb, var(--mx-bg-canvas) 30%, transparent);
 }
 
 .app-advanced-defaults summary {
@@ -2321,7 +2288,7 @@ select {
   gap: 10px;
   padding: 14px 20px 20px;
   border-top: 1px solid var(--line);
-  background: rgba(33, 35, 45, 0.92);
+  background: color-mix(in srgb, var(--mx-bg-panel) 92%, transparent);
   backdrop-filter: blur(18px);
 }
 
@@ -4496,7 +4463,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--mx-info) 48%, transparent);
   border-radius: 999px;
   padding: 2px 7px;
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
   font-size: 11px;
   font-weight: 800;
   text-align: center;
@@ -4522,17 +4489,17 @@ select {
 
 .setup-run-progress li[data-status="passed"] span {
   border-color: color-mix(in srgb, var(--mx-success) 48%, transparent);
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
 }
 
 .setup-run-progress li[data-status="waiting"] span {
   border-color: color-mix(in srgb, var(--mx-warning) 48%, transparent);
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
 }
 
 .setup-run-progress li[data-status="failed"] span {
   border-color: color-mix(in srgb, var(--mx-danger) 48%, transparent);
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 .awx-summary-panel {
@@ -5150,7 +5117,7 @@ select {
 }
 
 .oversea-migration-list article[data-status='failed'] {
-  border-color: color-mix(in srgb, var(--line) 50%, #ff6b6b);
+  border-color: color-mix(in srgb, var(--line) 50%, var(--mx-danger));
 }
 
 .oversea-node-card {
@@ -5232,7 +5199,7 @@ select {
 
 .oversea-service-grid article {
   min-height: 84px;
-  box-shadow: inset 3px 0 0 rgba(226, 226, 226, 0.2);
+  box-shadow: inset 3px 0 0 var(--qp-light-2);
 }
 
 .oversea-service-grid article[data-status="passed"],
@@ -5274,7 +5241,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--mx-danger) 58%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--mx-danger) 15%, var(--mx-bg-panel));
-  color: #ffc4c8;
+  color: var(--qp-danger-foreground);
 }
 
 .pipeline-failure-summary {
@@ -5285,7 +5252,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--mx-danger) 58%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--mx-danger) 14%, var(--mx-bg-panel));
-  color: #ffc4c8;
+  color: var(--qp-danger-foreground);
 }
 
 .pipeline-failure-summary.is-compact {
@@ -5332,7 +5299,7 @@ select {
 }
 
 .same-host-note strong {
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
   font-size: 13px;
 }
 
@@ -5365,7 +5332,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
-  box-shadow: inset 3px 0 0 rgba(226, 226, 226, 0.2);
+  box-shadow: inset 3px 0 0 var(--qp-light-2);
 }
 
 .oversea-terminal[data-status="passed"],
@@ -5399,9 +5366,9 @@ select {
 }
 
 .terminal-action-hint {
-  border: 1px solid rgba(255, 207, 85, 0.42);
+  border: 1px solid color-mix(in srgb, var(--mx-warning) 42%, transparent);
   border-radius: 8px;
-  background: rgba(255, 207, 85, 0.12);
+  background: color-mix(in srgb, var(--mx-warning) 12%, transparent);
   padding: 9px 11px;
   color: var(--mx-warning);
   font-size: 12px;
@@ -5413,9 +5380,9 @@ select {
   max-height: 360px;
   overflow: auto;
   border-radius: 8px;
-  background: #10131a;
+  background: var(--mx-bg-canvas);
   padding: 12px;
-  color: #c9fef4;
+  color: var(--mx-code-text);
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
@@ -5882,7 +5849,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
-  background: rgba(18, 20, 28, 0.5);
+  background: color-mix(in srgb, var(--mx-bg-workspace) 50%, transparent);
 }
 
 .system-aggregate-card {
@@ -6256,15 +6223,15 @@ select {
 }
 
 .profile-feedback[data-kind="success"] {
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
 }
 
 .profile-feedback[data-kind="warning"] {
-  color: #ffe29a;
+  color: var(--mx-warning-foreground);
 }
 
 .profile-feedback[data-kind="error"] {
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 .ssh-bootstrap-result:empty,
@@ -6537,8 +6504,8 @@ select {
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #10131a;
-  color: #c9fef4;
+  background: var(--mx-bg-canvas);
+  color: var(--mx-code-text);
   font-size: 12px;
   white-space: pre-wrap;
 }
@@ -6557,8 +6524,8 @@ select {
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #10131a;
-  color: #c9fef4;
+  background: var(--mx-bg-canvas);
+  color: var(--mx-code-text);
   font-size: 12px;
   white-space: pre-wrap;
 }
@@ -6568,7 +6535,7 @@ select {
   gap: 4px;
   margin: 0;
   padding: 0 0 0 18px;
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
   font-size: 13px;
 }
 
@@ -6631,7 +6598,7 @@ select {
   padding: 0 8px;
   border: 1px solid color-mix(in srgb, var(--mx-success) 58%, transparent);
   background: color-mix(in srgb, var(--mx-success) 18%, var(--mx-bg-panel));
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
   font-size: 11px;
   font-weight: 800;
 }
@@ -6639,7 +6606,7 @@ select {
 .profile-status[data-status="paused"] {
   border-color: color-mix(in srgb, var(--mx-warning) 58%, transparent);
   background: color-mix(in srgb, var(--mx-warning) 18%, var(--mx-bg-panel));
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
 }
 
 .ssh-profile-meta,
@@ -6676,7 +6643,7 @@ select {
 
 .ssh-profile-warning,
 .awx-provider-warning {
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
   font-size: 12px;
 }
 
@@ -6746,7 +6713,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--mx-info) 42%, var(--line));
   border-radius: 999px;
   padding: 2px 7px;
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
   font-size: 11px;
   font-weight: 800;
 }
@@ -6857,15 +6824,15 @@ select {
 }
 
 .reachability-strip[data-status="passed"] strong {
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
 }
 
 .reachability-strip[data-status="ready"] strong {
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
 }
 
 .reachability-strip[data-status="blocked"] strong {
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 .action-panel {
@@ -6923,7 +6890,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
-  box-shadow: inset 3px 0 0 rgba(226, 226, 226, 0.2);
+  box-shadow: inset 3px 0 0 var(--qp-light-2);
 }
 
 .workflow-step[data-status="ready"] {
@@ -7090,7 +7057,7 @@ select {
   padding: 0 8px;
   border: 1px solid color-mix(in srgb, var(--mx-info) 58%, transparent);
   background: color-mix(in srgb, var(--mx-info) 18%, var(--mx-bg-panel));
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
   font-size: 11px;
   font-weight: 800;
 }
@@ -7098,13 +7065,13 @@ select {
 .risk-chip[data-risk="medium"] {
   border-color: color-mix(in srgb, var(--mx-warning) 58%, transparent);
   background: color-mix(in srgb, var(--mx-warning) 18%, var(--mx-bg-panel));
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
 }
 
 .risk-chip[data-risk="high"] {
   border-color: color-mix(in srgb, var(--mx-danger) 58%, transparent);
   background: color-mix(in srgb, var(--mx-danger) 18%, var(--mx-bg-panel));
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 .action-feedback {
@@ -7113,7 +7080,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--mx-success) 58%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--mx-success) 14%, var(--mx-bg-panel));
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
   font-size: 13px;
   overflow-wrap: anywhere;
 }
@@ -7121,13 +7088,13 @@ select {
 .action-feedback[data-kind="error"] {
   border-color: color-mix(in srgb, var(--mx-danger) 58%, transparent);
   background: color-mix(in srgb, var(--mx-danger) 14%, var(--mx-bg-panel));
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 .action-feedback[data-kind="warning"] {
   border-color: color-mix(in srgb, var(--mx-warning) 58%, transparent);
   background: color-mix(in srgb, var(--mx-warning) 14%, var(--mx-bg-panel));
-  color: #ffe29a;
+  color: var(--mx-warning-foreground);
 }
 
 .action-feedback pre {
@@ -7135,8 +7102,8 @@ select {
   margin: 8px 0 0;
   overflow: auto;
   border-radius: 8px;
-  background: #10131a;
-  color: #c9fef4;
+  background: var(--mx-bg-canvas);
+  color: var(--mx-code-text);
   padding: 10px;
   font-size: 12px;
   white-space: pre-wrap;
@@ -7310,8 +7277,8 @@ select {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
-  background: #10131a;
-  color: #c9fef4;
+  background: var(--mx-bg-canvas);
+  color: var(--mx-code-text);
   font-size: 12px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -7420,7 +7387,7 @@ select {
   position: fixed;
   inset: 0;
   z-index: 20;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--qp-scrim);
 }
 
 .evidence-drawer {
@@ -7558,7 +7525,7 @@ select {
   padding: 0 8px;
   border: 1px solid color-mix(in srgb, var(--mx-info) 58%, transparent);
   background: color-mix(in srgb, var(--mx-info) 18%, var(--mx-bg-panel));
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
   font-size: 11px;
   font-weight: 800;
 }
@@ -7567,19 +7534,19 @@ select {
 .step-status[data-status="simulated"] {
   border-color: color-mix(in srgb, var(--mx-success) 58%, transparent);
   background: color-mix(in srgb, var(--mx-success) 18%, var(--mx-bg-panel));
-  color: #a8f7c5;
+  color: var(--qp-success-foreground);
 }
 
 .step-status[data-status="failed"] {
   border-color: color-mix(in srgb, var(--mx-danger) 58%, transparent);
   background: color-mix(in srgb, var(--mx-danger) 18%, var(--mx-bg-panel));
-  color: #ffb8bd;
+  color: var(--qp-danger-foreground);
 }
 
 .step-status[data-status="blocked"] {
   border-color: color-mix(in srgb, var(--mx-warning) 58%, transparent);
   background: color-mix(in srgb, var(--mx-warning) 18%, var(--mx-bg-panel));
-  color: #ffe5a1;
+  color: var(--mx-warning-foreground);
 }
 
 .evidence-step-grid {
@@ -7616,8 +7583,8 @@ select {
   margin: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #10131a;
-  color: #c9fef4;
+  background: var(--mx-bg-canvas);
+  color: var(--mx-code-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.45;
@@ -7649,7 +7616,7 @@ select {
 
 .evidence-insight-head strong {
   min-width: 0;
-  color: #bfd3ff;
+  color: var(--qp-info-foreground);
   font-size: 13px;
   overflow-wrap: anywhere;
 }

@@ -1400,6 +1400,7 @@ shadow_image_admin_assets() {
   mkdir -p "$out_dir/node_modules/three/build"
   cp "$ROOT/desktop/index.html" "$out_dir/index.html"
   cp "$ROOT/desktop/renderer.js" "$out_dir/renderer.js"
+  cp "$ROOT/desktop/theme.js" "$out_dir/theme.js"
   cp "$ROOT/desktop/service-operations.js" "$out_dir/service-operations.js"
   cp "$ROOT/desktop/admin-session.js" "$out_dir/admin-session.js"
   cp "$ROOT/desktop/registration.js" "$out_dir/registration.js"

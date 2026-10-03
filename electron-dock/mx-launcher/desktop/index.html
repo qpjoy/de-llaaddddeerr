@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="qp-theme-neon-void-light">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -8,13 +8,18 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MX Launcher</title>
+    <script src="./theme.js"></script>
     <link rel="stylesheet" href="./ui-design/styles.css" />
     <link rel="stylesheet" href="./ui-design/select.css" />
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./neon-void.css" />
   </head>
-  <body class="qp-app qp-theme-neon-void is-locked">
+  <body class="qp-app is-locked">
     <section id="login-gate" class="login-gate" aria-labelledby="gate-title">
+      <button class="shell-icon-button theme-toggle login-theme-toggle" type="button" data-theme-toggle aria-label="切换到深色模式" title="切换到深色模式">
+              <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z" /></svg>
+              <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
+            </button>
       <div class="login-card">
         <div class="brand"><div class="brand-mark">MX</div><div><h1>MX Launcher</h1><p>统一管理工作台</p></div></div>
         <h2 id="gate-title">登录管理工作台</h2>
@@ -258,47 +263,66 @@
           </div>
         </nav>
 
-        <section class="sidebar-connection" aria-label="Internal connection">
-          <div id="admin-account" class="admin-account" hidden>
-            <span class="admin-account-label">个人账号</span>
-            <span id="admin-account-status" role="status" aria-live="polite"></span>
-            <div class="admin-account-actions">
-              <button id="admin-account-login" class="secondary-button" type="button" hidden>个人账号登录</button>
-              <button id="admin-account-switch" class="secondary-button" type="button" hidden>切换账号</button>
-              <button id="admin-account-logout" class="secondary-button" type="button" title="仅退出当前浏览器的 Launcher 会话" hidden>退出</button>
-            </div>
-          </div>
-          <div class="sidebar-status">
-            <span id="connection-state" class="state-chip">Ready</span>
-            <span id="platform-status">Waiting for service</span>
-          </div>
-          <button id="ops-session-logout" class="secondary-button" type="button" hidden>退出 Token 会话</button>
-          <details id="connection-settings" class="connection-settings">
-            <summary>连接与应急访问</summary>
-            <div class="connection-fields">
-              <label class="server-field">
-                <span>MX Server</span>
-                <input id="server-input" placeholder="http://127.0.0.1:18090" />
-              </label>
-              <form id="ops-token-form" class="server-field ops-token-field">
-                <label for="ops-token-input">Internal Ops Token</label>
-                <div class="ops-token-controls">
-                  <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
-                  <button id="ops-token-apply" class="primary-button" type="submit" aria-label="应用 Internal Ops Token">应用</button>
-                </div>
-                <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
-                <small id="ops-token-feedback" role="status" aria-live="polite" hidden></small>
-              </form>
-            </div>
-          </details>
-        </section>
-
-        <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true">收起 ←</button>
+        <button id="sidebar-mobile-close" class="shell-icon-button" type="button" aria-label="关闭导航">×</button>
       </aside>
-
-
+      <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="关闭导航" hidden></button>
 
       <section class="workspace">
+        <header class="workspace-topbar" aria-label="工作台工具栏">
+          <div class="workspace-location">
+            <button id="sidebar-collapse" class="shell-icon-button" type="button" aria-expanded="true" aria-controls="sidebar" aria-label="收起导航" title="收起导航"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg></button>
+            <span class="workspace-product">MX Launcher</span>
+            <span class="workspace-divider" aria-hidden="true">/</span>
+            <strong id="workspace-current" aria-live="polite">工作台</strong>
+          </div>
+          <div class="workspace-actions">
+            <button class="shell-icon-button theme-toggle" type="button" data-theme-toggle aria-label="切换到深色模式" title="切换到深色模式">
+              <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z" /></svg>
+              <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
+            </button>
+            <details id="account-menu" class="account-menu">
+              <summary aria-label="账号与连接设置" title="账号与连接设置">
+                <span id="account-avatar" class="account-avatar" aria-hidden="true">MX</span>
+                <span id="account-menu-name">账号与连接</span>
+                <svg class="account-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+              </summary>
+              <section class="account-popover" aria-label="账号与连接设置">
+                <div id="admin-account" class="admin-account" hidden>
+                  <span class="admin-account-label">个人账号</span>
+                  <span id="admin-account-status" role="status" aria-live="polite"></span>
+                  <div class="admin-account-actions">
+                    <button id="admin-account-login" class="secondary-button" type="button" hidden>个人账号登录</button>
+                    <button id="admin-account-switch" class="secondary-button" type="button" hidden>切换账号</button>
+                  </div>
+                </div>
+                <div class="sidebar-status">
+                  <span id="connection-state" class="state-chip">Ready</span>
+                  <span id="platform-status">Waiting for service</span>
+                </div>
+                <details id="connection-settings" class="connection-settings">
+                  <summary>连接与应急访问</summary>
+                  <div class="connection-fields">
+                    <label class="server-field">
+                      <span>MX Server</span>
+                      <input id="server-input" placeholder="http://127.0.0.1:18090" />
+                    </label>
+                    <form id="ops-token-form" class="server-field ops-token-field">
+                      <label for="ops-token-input">Internal Ops Token</label>
+                      <div class="ops-token-controls">
+                        <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
+                        <button id="ops-token-apply" class="primary-button" type="submit" aria-label="应用 Internal Ops Token">应用</button>
+                      </div>
+                      <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
+                      <small id="ops-token-feedback" role="status" aria-live="polite" hidden></small>
+                    </form>
+                  </div>
+                </details>
+              </section>
+            </details>
+            <button id="admin-account-logout" class="shell-icon-button" type="button" aria-label="退出当前 Launcher 会话" title="退出当前 Launcher 会话" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M8 12h11" /></svg></button>
+            <button id="ops-session-logout" class="shell-icon-button" type="button" aria-label="退出 Token 会话" title="退出 Token 会话" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M8 12h11" /></svg></button>
+          </div>
+        </header>
         <section id="view-workbench" class="view is-active" aria-labelledby="workbench-heading">
           <header class="view-header">
             <div>

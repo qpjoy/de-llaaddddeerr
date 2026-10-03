@@ -31,6 +31,7 @@ async function assertBuilderContract() {
     'afterSign: scripts/after-sign.mjs',
     'from: native',
     '- neon-void.css',
+    '- theme.js',
     '- ui-design/**/*',
     '- service-operations.js',
     '- admin-session.js',
