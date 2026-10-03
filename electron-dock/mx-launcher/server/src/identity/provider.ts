@@ -16,11 +16,63 @@ export interface IdentitySettings {
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false) {
   const registrationAllowed = policy && policy.mode !== 'closed';
-  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · MX</title>
-  <style>*{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;place-items:center;background:#101317;color:#ecf3f3;font:16px/1.6 system-ui,sans-serif;padding:24px}main{width:min(100%,440px);padding:36px;background:#1b2029;border:1px solid #303b4c;border-radius:20px}.mark{display:inline-grid;place-items:center;width:48px;height:48px;background:#16dfc3;color:#062a25;border-radius:12px;font-weight:800}h1{font-size:28px;margin:24px 0 8px}p{color:#a7b3bf;margin:0 0 28px}label{display:block;margin:18px 0 8px}input,button{width:100%;font:inherit;border-radius:10px;padding:12px 14px}input{background:#12161e;border:1px solid #435166;color:#fff}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #16dfc3;outline-offset:3px}button{margin-top:28px;border:0;background:#16dfc3;color:#052823;font-weight:700;cursor:pointer}.message{color:#ffb7a7;margin:16px 0}footer{font-size:13px;color:#99a6b7;margin-top:24px}a{color:#70e9d8}</style>
-  <main><span class="mark">MX</span><h1>${registering ? '创建 MX 账号' : '登录 MX 工作台'}</h1><p>${registering ? '使用统一账号访问已开通的应用。工作台管理权限需单独授权。' : '使用已有 MX 账号，继续进入 Launcher。'}</p>
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${registering ? '注册' : '登录'} · MX</title>
+  <style>
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;background:#141417;color:#e2e2e2;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  main{width:100%;max-width:440px;min-width:0;padding:28px;background:#1a1b23;border:1px solid #303747;border-radius:16px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.02em}
+  .mark{display:grid;place-items:center;width:36px;height:36px;background:#2bf6d2;color:#062a25;border-radius:10px;font-size:15px;font-weight:800}
+  h1{font-size:24px;line-height:1.3;letter-spacing:-.02em;margin:20px 0 8px}
+  .intro{color:#a7b3bf;margin:0 0 24px}
+  form{display:grid;gap:16px}
+  .field{min-width:0}
+  label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+  input,button{width:100%;min-width:0;min-height:44px;border-radius:8px;font:inherit}
+  input{padding:9px 12px;background:#21232d;border:1px solid #435166;color:#fff;font-size:16px;line-height:24px}
+  input:hover{border-color:#647386}
+  input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid #2bf6d2;outline-offset:3px}
+  .hint{display:block;font-size:12px;color:#a7b3bf;margin-top:6px}
+  button{margin-top:4px;padding:10px 16px;border:0;background:#2bf6d2;color:#052823;font-weight:600;cursor:pointer}
+  button:hover{background:#11cdb5}
+  .message{color:#ffb7a7;background:#33242a;border:1px solid #734049;border-radius:8px;padding:10px 12px;margin:0 0 20px;overflow-wrap:anywhere}
+  .alternate{margin:20px 0 0;text-align:center}
+  footer{display:grid;gap:6px;border-top:1px solid #303747;padding-top:16px;margin-top:20px;font-size:12px;color:#a7b3bf;text-align:center}
+  a{color:#70e9d8;text-decoration:none;text-underline-offset:3px}
+  a:hover{text-decoration:underline}
+  @media(max-width:480px){body{padding:16px}main{padding:22px}h1{font-size:22px}}
+  @media(max-height:700px){body{align-items:start}}
+  </style></head><body>
+  <main aria-labelledby="page-title">
+  <div class="brand"><span class="mark" aria-hidden="true">MX</span><span>MX 统一账号</span></div>
+  <h1 id="page-title">${registering ? '创建 MX 账号' : '登录 MX 工作台'}</h1>
+  <p class="intro">${registering ? '使用统一账号访问已开通的应用。工作台管理权限需单独授权。' : '使用已有 MX 账号，继续进入 Launcher。'}</p>
   ${message ? `<div class="message" role="alert">${escape(message)}</div>` : ''}
-  <form method="post" action="${escape(action)}${registering ? '?view=register' : ''}"><input type="hidden" name="csrf" value="${csrf}">${registering ? `<input type="hidden" name="policyVersion" value="${policy?.version}">` : ''}<label for="login">账号</label><input id="login" name="login" autocomplete="username" maxlength="255" required autofocus><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="${registering ? 'new-password' : 'current-password'}" ${registering ? 'minlength="12" maxlength="128"' : 'maxlength="1024"'} required>${registering ? `<label for="passwordConfirm">确认密码</label><input id="passwordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required>${policy?.mode === 'invite_code' ? '<label for="inviteCode">邀请码</label><input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>' : ''}<small>账号以字母开头，3–64 位；密码至少 12 位。</small>` : ''}<button type="submit">${registering ? '注册并继续' : '登录并继续'}</button></form><footer>${registering ? `<a href="${escape(action)}">已有账号，返回登录</a>` : registrationAllowed ? `<a href="${escape(action)}?view=register">${policy.mode === 'invite_code' ? '使用邀请码注册' : '创建账号'}</a>` : '新账号注册暂未开放'}<br>账号与权限由成员与访问中心管理。<br><a href="/admin/">返回管理工作台</a></footer></main></html>`;
+  <form method="post" action="${escape(action)}${registering ? '?view=register' : ''}">
+    <input type="hidden" name="csrf" value="${csrf}">
+    ${registering ? `<input type="hidden" name="policyVersion" value="${policy?.version}">` : ''}
+    <div class="field">
+      <label for="login">账号</label>
+      <input id="login" name="login" autocomplete="username" maxlength="255" ${registering ? 'aria-describedby="account-hint"' : ''} required autofocus>
+      ${registering ? '<small class="hint" id="account-hint">以字母开头，3–64 位，可用数字、点、下划线和短横线。</small>' : ''}
+    </div>
+    <div class="field">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="${registering ? 'new-password' : 'current-password'}" ${registering ? 'minlength="8" maxlength="128" aria-describedby="password-hint"' : 'maxlength="1024"'} required>
+      ${registering ? '<small class="hint" id="password-hint">8–128 位，建议组合字母、数字或符号。</small>' : ''}
+    </div>
+    ${registering ? `<div class="field">
+      <label for="passwordConfirm">确认密码</label>
+      <input id="passwordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+    </div>${policy?.mode === 'invite_code' ? `<div class="field">
+      <label for="inviteCode">邀请码</label>
+      <input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>
+    </div>` : ''}` : ''}
+    <button type="submit">${registering ? '注册并继续' : '登录并继续'}</button>
+  </form>
+  <p class="alternate">${registering ? `<a href="${escape(action)}">已有账号，返回登录</a>` : registrationAllowed ? `<a href="${escape(action)}?view=register">${policy.mode === 'invite_code' ? '使用邀请码注册' : '创建账号'}</a>` : '新账号注册暂未开放'}</p>
+  <footer><span>账号与权限由成员与访问中心管理。</span><a href="/admin/">返回管理工作台</a></footer>
+  </main></body></html>`;
 }
 export function createIdentityProvider(settings: IdentitySettings, accounts: IdentityAccounts, adapter: Configuration['adapter'], registration?: RegistrationClient) {
   const provider: Provider = new Provider(settings.issuer, {

@@ -38,7 +38,7 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
   const input = (account: string, inviteCode: string, extra: Partial<RegistrationInput> = {}): RegistrationInput =>
     ({ account, password: 'RegistrationPassword123!', inviteCode, transactionId: randomUUID(), clientId: 'launcher', policyVersion: 0, ...extra });
   try {
-    const old = await store.createUserCenterUser({ account: 'ExistingMember', password: 'ExistingPassword123!', roleIds: ['mx-admin'] });
+    const old = await store.createUserCenterUser({ account: 'ExistingMember', password: 'Old123!', roleIds: ['mx-admin'] });
     const before = await db.query("SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 AND kind IN ('iam-user','iam-user-credential') ORDER BY kind,id", [environment]);
     const invite = await a.createInvitation({ label: 'Last seat', maxUses: 1, days: 1 });
     const alice = input('Alice', invite.code), bob = input('Bob', invite.code);
@@ -53,7 +53,7 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     assert.deepEqual(newUser?.roleIds, ['mx-user']);
     assert.deepEqual(newUser?.appAccess.allowedAppIds, []);
     assert.equal((await identity.authenticate(winningInput.account, winningInput.password))?.userId, winner.userId);
-    assert.equal((await identity.authenticate('ExistingMember', 'ExistingPassword123!'))?.userId, old.userId);
+    assert.equal((await identity.authenticate('ExistingMember', 'Old123!'))?.userId, old.userId, 'legacy passwords below the signup minimum still work');
     const afterOld = await db.query("SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 AND kind IN ('iam-user','iam-user-credential') AND id<>$2 ORDER BY kind,id", [environment, winner.userId]);
     assert.deepEqual(afterOld, before, 'legacy identities and credentials stay byte-for-byte identical');
     await assert.rejects(a.register({ ...winningInput, account: 'Other' }), /已完成/);
@@ -65,8 +65,11 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     await assert.rejects(a.register(input('StaleForm', '', { policyVersion: 0 })), /已更新/);
     await assert.rejects(a.register(input('existingmember', '', { policyVersion: policy.version })), /账号不可用/);
     await assert.rejects(a.register(input('ClientSpoof', '', { policyVersion: policy.version, clientId: 'other' })), /已失效/);
-    const openUser = await a.register(input('OpenUser', '', { policyVersion: policy.version }));
+    await assert.rejects(a.register(input('TooShort', '', { policyVersion: policy.version, password: 'Abcd12!' })), /密码需为 8–128 位/);
+    await assert.rejects(a.register(input('TooLong', '', { policyVersion: policy.version, password: 'a'.repeat(129) })), /密码需为 8–128 位/);
+    const openUser = await a.register(input('OpenUser', '', { policyVersion: policy.version, password: 'Abcd123!' }));
     assert.ok(openUser.userId);
+    assert.equal((await identity.authenticate('OpenUser', 'Abcd123!'))?.userId, openUser.userId, 'eight-character signup passwords authenticate');
     const concurrent = await Promise.allSettled([
       a.register(input('Concurrent', '', { policyVersion: policy.version })),
       store.createUserCenterUser({ account: 'Concurrent', password: 'AdminAssignedPassword123!' })

@@ -98,8 +98,8 @@ export class RegistrationRepository {
     const account = typeof input.account === 'string' ? input.account.trim() : '';
     if (input.clientId !== this.clientId || !/^[A-Za-z0-9_-]{16,128}$/.test(input.transactionId ?? '')
       || !Number.isSafeInteger(input.policyVersion)) fail(400, 'invalid_transaction', '注册请求已失效，请重新打开登录页。');
-    if (!/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(account) || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128)
-      fail(400, 'invalid_registration', '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 12–128 位。');
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(account) || typeof input.password !== 'string' || input.password.length < 8 || input.password.length > 128)
+      fail(400, 'invalid_registration', '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 8–128 位。');
     const userId = `usr_${randomUUID()}`;
     const credential = createUserCenterUserCredential(userId, input.password);
     const transactionId = hash(`${input.clientId}:${input.transactionId}`);

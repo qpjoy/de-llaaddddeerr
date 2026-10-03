@@ -23,7 +23,7 @@ export function createRegistrationClient(upstream: URL, clientId: string, secret
     if (!response.ok) {
       const messages: Record<string, string> = { registration_closed: '暂未开放新账号注册。', policy_changed: '注册策略已更新，请刷新页面重试。',
         account_unavailable: '此账号不可用，请更换账号；已有账号请直接登录。', invitation_unavailable: '邀请码无效、已停用、已到期或名额已用完。',
-        registration_conflict: '此注册请求已完成，请使用原账号登录。', invalid_registration: '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 12–128 位。' };
+        registration_conflict: '此注册请求已完成，请使用原账号登录。', invalid_registration: '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 8–128 位。' };
       throw new RegistrationClientError(response.status, messages[payload.code ?? ''] ?? '注册暂不可用，请稍后重试。');
     }
     return payload;
