@@ -218,7 +218,7 @@ export function createAdminSsoMiddleware(deps: {
         return json(res, 200, { ...entry, authenticated: false });
       }
       return json(res, 200, { ...entry, authenticated: true, csrf: session.csrf,
-        user: { userId: user.userId, displayName: user.displayName }, canManage: user.roleIds.includes('mx-admin'),
+        user: { userId: user.userId, account: user.account, displayName: user.displayName }, canManage: user.roleIds.includes('mx-admin'),
         needsReauthentication: Date.now() / 1000 - session.authTime > 300 });
     }
     if (!session) throw unauthorized();

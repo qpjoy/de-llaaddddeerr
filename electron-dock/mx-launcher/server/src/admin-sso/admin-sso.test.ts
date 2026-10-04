@@ -176,6 +176,7 @@ test('managed identity cannot mint a new account or elevate an ordinary existing
     const session = await (await f.request('/auth/admin/session', cookie)).json();
     assert.equal(session.canManage, false);
     assert.equal(session.user.userId, 'existing-user');
+    assert.equal(session.user.account, 'User', 'the permission gate identifies the signed-in login account');
   } finally { await f.close(); }
 });
 

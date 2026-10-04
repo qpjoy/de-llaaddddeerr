@@ -116,6 +116,17 @@ for (const publicEntry of [false, true]) test(`real persisted provider (${public
     const switchedToken = await token(new URLSearchParams({ grant_type: 'authorization_code', code: new URL(step.location!).searchParams.get('code')!, code_verifier: verifier, redirect_uri: `${adminOrigin}/auth/admin/callback` }).toString());
     assert.equal(switchedToken.status, 200, switchedToken.text);
     assert.equal(JSON.parse(Buffer.from(JSON.parse(switchedToken.text).id_token.split('.')[1], 'base64url').toString()).sub, other.userId);
+    const expiring = await request(explicitLogin.href);
+    await request(expiring.location!);
+    await repository.adapter('Interaction').destroy(expiring.location!.split('/').at(-1)!);
+    const expired = await request(expiring.location!);
+    assert.equal(expired.status, 400);
+    assert.match(expired.text, /登录请求已失效/);
+    assert.ok(expired.text.includes(`href="${adminOrigin}/auth/admin/login?select=1"`), 'expired transaction remembers its allowlisted Launcher entry');
+    assert.equal(expired.location, undefined, 'recovery requires an explicit click');
+    const unknown = await request('/identity/interaction/unknown?return=https://evil.invalid');
+    assert.equal(unknown.status, 400);
+    assert.ok(!unknown.text.includes('evil.invalid'), 'unknown recovery never trusts a caller-supplied return URL');
     assert.deepEqual(await db.query('SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 ORDER BY kind', [environment]), before);
     await db.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{status}','\"disabled\"') WHERE environment=$1 AND kind='iam-user'", [environment]);
     assert.equal(await repository.authenticate('ExactAdmin', 'OldPassword123!'), undefined);

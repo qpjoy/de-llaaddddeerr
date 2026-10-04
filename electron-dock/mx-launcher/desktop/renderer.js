@@ -397,14 +397,26 @@ function renderLoginGate() {
   document.body.classList.toggle('is-locked', !allowed);
   document.querySelector('.shell').inert = !allowed;
   gate.hidden = allowed;
+  const unavailable = Boolean(entry?.unavailable);
+  const denied = Boolean(entry?.authenticated && !entry.bindingRequired && !entry.canManage);
+  const account = entry?.authenticated ? entry.user : null;
   const login = document.getElementById('gate-login');
-  login.disabled = !entry?.enabled || entry?.unavailable;
-  document.getElementById('gate-switch').disabled = login.disabled;
-  login.textContent = entry?.bindingRequired ? '关联已有账号' : entry?.authenticated ? '切换账号' : '统一账号登录';
-  document.getElementById('gate-status').textContent = entry?.errorMessage || (entry?.unavailable ? '暂时无法验证登录状态，请刷新重试。'
-    : entry?.bindingRequired ? '请先关联已有 MX 账号。'
-      : entry?.authenticated && !entry.canManage ? '账号已登录，尚未获得 Launcher 管理权限。请联系管理员授权或切换账号。'
-        : entry?.enabled ? '使用已有 Launcher 账号，登录后进入管理工作台。' : '统一登录暂未启用，可展开下方 Token 入口。');
+  login.disabled = !entry || (!entry.enabled && !unavailable);
+  login.textContent = unavailable ? '重试连接' : entry?.bindingRequired ? '关联已有账号' : denied ? '切换账号' : entry?.errorMessage ? '重新登录' : '登录';
+  document.getElementById('gate-title').textContent = unavailable ? '暂时无法连接账号服务' : entry?.bindingRequired ? '关联已有账号'
+    : denied ? '尚未开通 Launcher 管理权限' : entry?.errorMessage ? '登录未完成' : '登录管理工作台';
+  document.getElementById('gate-account').hidden = !account;
+  document.getElementById('gate-account-name').textContent = account?.displayName || account?.account || 'MX 账号';
+  document.getElementById('gate-account-login').textContent = account?.account ? `@${account.account}` : '';
+  document.getElementById('gate-avatar').textContent = Array.from(account?.displayName || account?.account || 'M')[0].toLocaleUpperCase();
+  const status = document.getElementById('gate-status');
+  status.classList.toggle('login-reason', denied);
+  status.textContent = unavailable ? '暂时无法确认你的登录状态，请稍后重试。'
+    : entry?.bindingRequired ? '已完成统一登录，请关联已有的 Launcher 账号。'
+      : denied ? '当前账号没有 MX Launcher 管理工作台的访问权限。请联系管理员授权，或切换有权限的账号。'
+        : entry?.errorMessage || (entry?.enabled ? '使用你的 MX 账号，进入管理工作台。' : entry ? '统一登录暂未启用，可使用下方管理员入口。' : '正在确认登录状态…');
+  document.getElementById('gate-switch').hidden = denied || unavailable || !entry?.enabled;
+  document.getElementById('gate-refresh').hidden = !denied;
   document.getElementById('gate-signout').hidden = !entry?.authenticated;
   document.getElementById('gate-server-field').hidden = entry?.accessMode === 'sso-only';
   document.getElementById('gate-server').value = serverInput.value || defaultServerBaseUrl();
@@ -929,9 +941,15 @@ const serviceOperationsPanel = createServiceOperations(document.getElementById('
 refreshNavTabs();
 document.getElementById('gate-login').addEventListener('click', () => {
   const entry = adminSession.entry();
+  if (entry?.unavailable) { adminSession.refresh().then(renderLoginGate); return; }
   document.getElementById(entry?.authenticated && !entry.bindingRequired ? 'admin-account-switch' : 'admin-account-login').click();
 });
 document.getElementById('gate-switch').addEventListener('click', () => { location.assign('/auth/admin/login?select=1'); });
+document.getElementById('gate-refresh').addEventListener('click', async (event) => {
+  event.currentTarget.disabled = true;
+  try { await adminSession.refresh(); renderLoginGate(); }
+  finally { document.getElementById('gate-refresh').disabled = false; }
+});
 document.getElementById('gate-signout').addEventListener('click', () => document.getElementById('admin-account-logout').click());
 document.getElementById('ops-session-logout').addEventListener('click', () => { clearOpsToken(); location.reload(); });
 document.getElementById('gate-token-form').addEventListener('submit', async event => {

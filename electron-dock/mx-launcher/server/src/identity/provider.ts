@@ -7,6 +7,8 @@ import { createAppAccount } from './app-account.js';
 import { sessionsPage } from './sessions-page.js';
 import { rememberedAccounts } from './remembered-accounts.js';
 import { accountsPage, type AccountChoice } from './accounts-page.js';
+import { identityErrorPage, type RecoveryApplication } from './error-page.js';
+import { interactionRecovery } from './interaction-recovery.js';
 import { resolveHubInvitation } from './hub-invitation.js';
 import { RegistrationClientError, type RegistrationClient } from '../registration/backchannel.js';
 import type { RegistrationPolicy, RegistrationSource } from '../registration/repository.js';
@@ -107,6 +109,17 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     .map(origin => new URL(origin).origin));
   formActionOrigins.delete(new URL(settings.origin).origin);
   const formAction = ["'self'", ...formActionOrigins].join(' ');
+  const recovery = interactionRecovery(settings.cookieKeys, settings.issuer);
+  const recoveryApps = new Map<string, RecoveryApplication>([
+    [settings.clientId, { name: 'MX Launcher', url: `${settings.adminOrigin ?? settings.origin}/admin/`, loginUrl: `${settings.adminOrigin ?? settings.origin}/auth/admin/login?select=1` }],
+    ...[...applications.values()].map(app => [app.clientId, { name: app.appId === 'mx-insight-hub' ? 'Insight Hub' : app.appId, url: app.origin, loginUrl: app.origin }] as [string, RecoveryApplication])
+  ]);
+  const errorPage = (clientId?: string, copy: { title?: string; description?: string; account?: { name: string; login?: string } } = {}) => identityErrorPage({
+    application: clientId ? recoveryApps.get(clientId) : undefined, applications: [...recoveryApps.values()], ...copy
+  });
+  const failPage = (res: ServerResponse, status: number, clientId?: string, copy?: Parameters<typeof errorPage>[1]) => {
+    res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' }).end(errorPage(clientId, copy));
+  };
   const allowed = (user: Awaited<ReturnType<IdentityAccounts['account']>>, clientId: string) => user && !user.appAccess?.deniedAppIds?.includes(applications.get(clientId)?.appId ?? 'mx-launcher');
   const hints = rememberedAccounts(settings.cookieKeys, settings.issuer);
   const policy = interactionPolicy.base();
@@ -156,7 +169,8 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
       await grant.save();
       return grant;
     },
-    renderError: async (ctx) => { ctx.type = 'html'; ctx.body = `<!doctype html><meta charset="utf-8"><p>登录请求无效或已过期，请返回工作台重新登录。</p><a href="${escape(settings.adminOrigin ?? settings.origin)}/admin/">返回工作台</a>`; }
+    renderError: async (ctx) => { ctx.type = 'html'; ctx.body = errorPage(ctx.oidc.client?.clientId, ctx.status >= 500
+      ? { title: '账号服务暂时不可用', description: '暂时无法完成登录，请稍后从应用重试。' } : undefined); }
   });
   // The public listener is reachable only through the private gateway; HTTPS is terminated at the edge.
   provider.proxy = Boolean(settings.adminOrigin);
@@ -226,24 +240,25 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         res.writeHead(303, { location: `/identity/interaction/${transaction.uid}` }).end();
       } catch {
         if (appReturn && returnInteraction) { res.writeHead(303, { location: `/identity/interaction/${returnInteraction}?app_error=feishu` }).end(); return; }
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<meta charset="utf-8"><p>飞书验证失败、已取消或已过期，请返回应用重新登录。</p>');
+        failPage(res, 400, undefined, { title: '飞书登录未完成', description: '授权可能已取消或过期，请从应用重新开始登录。' });
       }
       return;
     }
     const match = /^\/identity\/interaction\/([A-Za-z0-9_-]+)$/.exec(path);
     if (match) {
       const authenticationStartedAt = Date.now() / 1000;
-      let appReturn: string | undefined;
+      let recoveryClient = recovery.read(req, match[1]);
       try {
         const interaction = await provider.interactionDetails(req, res);
         const clientId = String(interaction.params.client_id);
         if (match[1] !== interaction.uid || (clientId !== settings.clientId && !applications.has(clientId)) || !['login', 'select_account'].includes(interaction.prompt.name)) throw new Error('Invalid interaction');
+        recoveryClient = clientId;
+        if (req.method === 'GET') recovery.write(res, interaction.uid, clientId);
         const query = new URL(req.url!, settings.origin).searchParams;
         const registering = query.get('view') === 'register';
         const choosing = interaction.prompt.name === 'select_account';
         const invitationHandle = typeof interaction.params.mx_invitation === 'string' ? interaction.params.mx_invitation : '';
         const invitationApp = applications.get(clientId);
-        if (interaction.params.mx_surface === 'application') appReturn = invitationApp?.origin;
         const source: RegistrationSource = { issuer: settings.issuer, clientId, appId: invitationApp?.appId ?? 'mx-launcher', appOrigin: invitationApp?.origin ?? settings.adminOrigin ?? settings.origin };
         const appName = invitationApp ? (invitationApp.appId === 'mx-insight-hub' ? 'Insight Hub' : invitationApp.appId) : 'Launcher';
         const returnUrl = invitationHandle && invitationApp ? `${invitationApp.origin}/#/join` : invitationApp?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/`;
@@ -273,7 +288,10 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         const proof = await accounts.webState?.read('proof', interaction.uid);
         if (req.method === 'GET' && proof?.userId && !proof.link) {
           const linked = await accounts.account(String(proof.userId));
-          if (!allowed(linked, clientId) || linked?.profile.externalIds.feishuSubject !== proof.subject) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('此账号已被停用或禁止访问该应用，请联系管理员。'); return; }
+          if (!allowed(linked, clientId) || linked?.profile.externalIds.feishuSubject !== proof.subject) {
+            failPage(res, 403, clientId, { title: '此账号暂时无法访问应用', description: '账号可能已停用、访问权限已变更或绑定已失效。请联系管理员，或返回应用切换账号。',
+              ...(linked ? { account: { name: linked.displayName, login: linked.account } } : {}) }); return;
+          }
           await accounts.webState!.read('proof', interaction.uid, true);
           return finish(String(proof.userId), Number(proof.verifiedAt ?? authenticationStartedAt));
         }
@@ -374,9 +392,12 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         if (!allowed(user, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
         console.info(JSON.stringify({ event: 'identity.password-login', userId: user.userId }));
         return finish(user.userId, authenticationStartedAt);
-      } catch {
-        if (appReturn) { res.writeHead(303, { location: `${appReturn}/?account=1&accountError=expired#/account` }).end(); return; }
-        res.statusCode = 400; res.setHeader('Content-Type', 'text/plain; charset=utf-8'); res.end('登录请求已失效，请返回工作台重新登录。'); return;
+      } catch (error) {
+        const status = error instanceof RegistrationClientError ? error.status : 400;
+        failPage(res, status, recoveryClient, status === 403
+          ? { title: '此账号暂时无法访问应用', description: '当前账号无法完成这次登录，请联系管理员，或返回应用切换账号。' }
+          : status >= 500 ? { title: '账号服务暂时不可用', description: '暂时无法完成登录，请稍后从应用重试。' } : undefined);
+        return;
       }
     }
     // Mounted at /identity; the provider derives its issuer path from settings.

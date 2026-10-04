@@ -23,11 +23,18 @@
       <div class="login-card">
         <div class="brand"><div class="brand-mark">MX</div><div><h1>MX Launcher</h1><p>统一管理工作台</p></div></div>
         <h2 id="gate-title">登录管理工作台</h2>
+        <div id="gate-account" class="login-identity" hidden>
+          <span id="gate-avatar" class="login-avatar" aria-hidden="true"></span>
+          <div class="login-identity-copy"><span>当前账号</span><strong id="gate-account-name"></strong><small id="gate-account-login"></small></div>
+          <span class="login-identity-state">已登录</span>
+        </div>
         <p id="gate-status" class="login-intro" role="status">正在验证登录状态…</p>
         <button id="gate-login" class="primary-button login-primary" type="button" disabled>统一账号登录</button>
-        <p class="login-hint">账号登录、注册与飞书绑定在统一认证页完成。</p>
-        <div class="login-account-options"><button id="gate-switch" class="secondary-button" type="button">选择或切换账号</button></div>
-        <button id="gate-signout" class="secondary-button" type="button" hidden>退出当前账号</button>
+        <div class="login-account-actions">
+          <button id="gate-switch" class="login-text-button" type="button">选择其他账号</button>
+          <button id="gate-refresh" class="login-text-button" type="button" hidden>刷新权限</button>
+          <button id="gate-signout" class="login-text-button" type="button" hidden>退出 Launcher</button>
+        </div>
         <details class="login-alternative">
           <summary>使用 Internal Ops Token</summary>
           <form id="gate-token-form">
@@ -37,7 +44,7 @@
             <button class="secondary-button" type="submit">验证并进入</button>
           </form>
         </details>
-        <footer>统一账号登录保持 30 天。管理权限由 Launcher 单独控制。</footer>
+        <footer>MX Launcher · 管理工作台</footer>
       </div>
     </section>
       <dialog id="admin-account-link" class="admin-account-dialog" aria-labelledby="admin-account-link-title">
