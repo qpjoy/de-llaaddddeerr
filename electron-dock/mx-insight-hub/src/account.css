@@ -1,0 +1,25 @@
+.mih-account-entry .mih-account-card { width:min(100%,520px); padding:40px; gap:26px; }
+.mih-account-entry .mih-auth-brand img { width:42px; height:42px; }
+.mih-account-entry .mih-auth-brand strong { font-size:20px; }
+.mih-account-entry .mih-auth-copy h1 { font-size:32px; line-height:1.25; letter-spacing:-.03em; }
+.mih-account-entry .mih-auth-copy p { font-size:15px; margin-top:10px; }
+.mih-account-tabs { display:flex; gap:8px; border-bottom:1px solid var(--qp-line); padding-bottom:10px; }
+.mih-account-tabs .is-active { color:var(--qp-primary); background:var(--qp-bg-3); }
+.mih-account-entry .qp-input { min-height:46px; font-size:16px; }
+.mih-account-entry .mih-auth-form { gap:18px; }
+.mih-account-help { font-size:13px; color:var(--qp-text-muted); margin:0; }
+.mih-account-help summary { cursor:pointer; }
+.mih-account-help p { margin-top:10px; line-height:1.7; }
+.mih-account-footer { display:flex; justify-content:space-between; gap:12px; align-items:center; border-top:1px solid var(--qp-line); padding-top:18px; font-size:13px; color:var(--qp-text-muted); }
+.mih-account-footer span { display:flex; align-items:center; gap:7px; }
+.mih-account-footer a { color:inherit; text-decoration:none; }
+.mih-account-footer a:hover { text-decoration:underline; }
+.mih-account-page { display:grid; gap:22px; max-width:900px; }
+.mih-account-page .qp-panel { padding:26px; display:grid; gap:18px; }
+.mih-account-page h2,.mih-account-page p { margin:0; }
+.mih-account-page h2 { font-size:18px; }
+.mih-account-page form { max-width:500px; margin-top:18px; }
+.mih-account-page summary { cursor:pointer; padding:10px 0; }
+.mih-account-devices article { border-bottom:1px solid var(--qp-line); padding-bottom:18px; overflow-wrap:anywhere; }
+.mih-account-devices article p { font-size:13px; color:var(--qp-text-muted); line-height:1.7; }
+@media(max-width:560px) { .mih-account-entry .mih-account-card { padding:26px 22px; gap:22px; } .mih-account-entry .mih-auth-copy h1 { font-size:28px; } .mih-account-page .qp-panel { padding:20px; } }

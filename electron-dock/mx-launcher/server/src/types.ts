@@ -792,7 +792,7 @@ export interface UserCenterAppAccess {
 export interface UserCenterUser {
   /** Trusted first signup provenance; absent on historical accounts, never an authorization claim. */
   registration?: {
-    source: { issuer: string; clientId: string; appId: 'mx-launcher' | 'mx-insight-hub'; appOrigin: string };
+    source: { issuer: string; clientId: string; appId: string; appOrigin: string };
     method: 'password' | 'feishu';
     policyVersion: number;
     registeredAt: string;

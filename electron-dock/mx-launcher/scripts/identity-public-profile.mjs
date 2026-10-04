@@ -1,5 +1,6 @@
 import { generateKeyPairSync, randomBytes, randomUUID, createPrivateKey } from 'node:crypto';
 import { isIP } from 'node:net';
+import { validApplicationList } from './identity-app-profile.mjs';
 
 export function publicOrigin(value) {
   const u = new URL(value);
@@ -15,11 +16,10 @@ export function validatePublicEntry(p, privateOrigin) {
     || transport.protocol !== 'http:' || transport.hostname !== internal.hostname || transport.port !== '18444' || transport.origin !== p.transportOrigin
     || internal.port === transport.port || !/^[A-Za-z0-9_-]{43}$/.test(p.clientSecret) || !/^[A-Za-z0-9_-]{43}$/.test(p.ingressToken)
     || p.cookieKeys?.length !== 2 || p.cookieKeys.some(k => !/^[A-Za-z0-9_-]{43}$/.test(k)) || p.jwks?.keys?.length !== 1
-    || p.applications?.length !== 1) throw new Error('公网身份档案无效；不能覆盖或重置已有凭据');
+    || !validApplicationList(p.applications, p.clientId, publicOrigin) || !p.applications.some(app => app.appId === 'mx-insight-hub')) throw new Error('公网身份档案无效；不能覆盖或重置已有凭据');
   createPrivateKey({key:p.jwks.keys[0],format:'jwk'});
-  const app = p.applications[0];
-  if (publicOrigin(app.origin) === origin || app.origin === admin || app.appId !== 'mx-insight-hub' || app.clientId !== 'mx-insight-hub-web'
-    || !/^[A-Za-z0-9_-]{43}$/.test(app.clientSecret) || typeof app.audience !== 'string' || !app.audience) throw new Error('公网 Hub 客户端无效');
+  if (p.applications.some(app => app.origin === origin || app.origin === admin
+    || (app.appId === 'mx-insight-hub' && app.clientId !== 'mx-insight-hub-web'))) throw new Error('公网应用客户端无效');
 }
 export function createPublicEntry({ origin, adminOrigin, hubOrigin, audience, privateOrigin }) {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength:3072 });

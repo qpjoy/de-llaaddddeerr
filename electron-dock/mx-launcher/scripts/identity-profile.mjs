@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { isIP } from 'node:net';
 
 import { validatePublicEntry } from './identity-public-profile.mjs';
+import { validApplicationList } from './identity-app-profile.mjs';
 
 export const PROFILE = '/var/lib/mx-launcher/identity/profile.json';
 export function internalOrigin(value) {
@@ -42,11 +43,7 @@ function validateProfileContent(p) {
     || p.clientId !== 'mx-launcher-admin' || !/^[A-Za-z0-9_-]{43}$/.test(p.clientSecret) || !Array.isArray(p.cookieKeys)
     || p.cookieKeys.length !== 2 || p.cookieKeys.some(key => !/^[A-Za-z0-9_-]{43}$/.test(key)) || p.jwks?.keys?.length !== 1) throw new Error('身份配置不完整；请从备份恢复，不能自动重建密钥');
   createPrivateKey({ key: p.jwks.keys[0], format: 'jwk' });
-  if (p.applications !== undefined && (!Array.isArray(p.applications) || p.applications.length > 1 || p.applications.some(app => {
-    try { const url = new URL(app.origin); return app.appId !== 'mx-insight-hub' || app.clientId !== 'mx-insight-hub-web'
-      || !/^[A-Za-z0-9_-]{43}$/.test(app.clientSecret) || !app.audience || url.protocol !== 'https:' || url.origin !== app.origin || Boolean(url.username || url.password); }
-    catch { return true; }
-  }))) throw new Error('身份应用配置无效；请恢复原配置，不能自动重建客户端密钥');
+  if (p.applications !== undefined && !validApplicationList(p.applications, p.clientId)) throw new Error('身份应用配置无效；请恢复原配置，不能自动重建客户端密钥');
   validatePublicEntry(p.publicEntry, p.origin);
   return p;
 }
@@ -185,6 +182,6 @@ export function renewProfile(p, file = PROFILE) {
 export function publicStatus(p) {
   return p ? { configured: true, installationId: p.installationId, origin: p.origin, issuer: p.issuer,
     certificateExpiresAt: new X509Certificate(p.tlsCert).validTo, caFingerprint: new X509Certificate(p.caCert).fingerprint256,
-    ...(p.publicEntry ? { publicIdentity:p.publicEntry.origin, publicLauncher:p.publicEntry.adminOrigin, publicHub:p.publicEntry.applications[0].origin } : {}),
+    ...(p.publicEntry ? { publicIdentity:p.publicEntry.origin, publicLauncher:p.publicEntry.adminOrigin, publicHub:p.publicEntry.applications.find(app => app.appId === 'mx-insight-hub').origin } : {}),
     signingKeyId: p.jwks.keys[0].kid } : { configured: false };
 }

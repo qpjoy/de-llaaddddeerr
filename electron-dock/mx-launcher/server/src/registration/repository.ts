@@ -9,7 +9,7 @@ export type RegistrationSource = NonNullable<UserCenterUser['registration']>['so
 export function validateRegistrationSource(source: RegistrationSource | undefined): void {
   if (source === undefined) return; // Old Auth replicas retain the default policy, without invented provenance.
   try {
-    if (!source || !['mx-launcher','mx-insight-hub'].includes(source.appId) || typeof source.clientId !== 'string' || !source.clientId || source.clientId.length > 160) throw new Error();
+    if (!source || typeof source.appId !== 'string' || !/^[-a-z0-9]{1,80}$/.test(source.appId) || typeof source.clientId !== 'string' || !source.clientId || source.clientId.length > 160) throw new Error();
     const issuer = new URL(source.issuer), origin = new URL(source.appOrigin);
     if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash || issuer.pathname !== '/identity'
       || origin.protocol !== 'https:' || origin.origin !== source.appOrigin) throw new Error();
@@ -111,6 +111,38 @@ export class RegistrationRepository {
       return policy;
     });
   }
+  async updateAccount(action: string, input: Record<string, unknown>) {
+    await this.ready();
+    return this.db.transaction(async manager => {
+      await accountWriteLock(manager, this.environment);
+      const user = await this.read<UserCenterUser>(manager, 'iam-user', String(input.userId));
+      const credential = user ? await this.read<UserCenterUserCredential>(manager, 'iam-user-credential', user.userId) : undefined;
+      if (!user || user.status !== 'active' || ['usr_demo_admin','usr_demo_user'].includes(user.userId) || !credential
+        || typeof input.currentPassword !== 'string' || !verifyUserCenterCredential(input.currentPassword, credential))
+        fail(401, 'invalid_account_credentials', '当前密码不正确或账号不可用。');
+      const now = new Date().toISOString();
+      const updated = { ...user!, updatedAt: now };
+      if (action === 'profile') {
+        if (typeof input.displayName !== 'string' || !input.displayName.trim() || input.displayName.trim().length > 80) fail(400, 'invalid_account_update', '显示名称需为 1–80 个字符。');
+        updated.displayName = (input.displayName as string).trim();
+      } else if (action === 'password') {
+        if (typeof input.password !== 'string' || input.password.trim().length < 8 || input.password.length > 128) fail(400, 'invalid_account_update', '密码需为 8–128 位。');
+        const next = createUserCenterUserCredential(user!.userId, input.password as string, {}, credential!, now);
+        await this.write(manager, 'iam-user-credential', user!.userId, next);
+        updated.credential = userCredentialSummary(next); updated.webSessionsInvalidBefore = now;
+        // Match the original explicit password-change policy. No lease or peer writes.
+        await manager.query(`UPDATE mx_platform_records SET data=jsonb_set(data,'{revokedAt}',to_jsonb($3::text)),updated_at=now()
+          WHERE environment=$1 AND kind='iam-token' AND data->>'subjectKind'='user' AND data->>'subjectId'=$2 AND COALESCE(data->>'revokedAt','')=''`, [this.environment, user!.userId, now]);
+      } else if (action === 'unlink-feishu') {
+        updated.profile = { ...user!.profile, externalIds: { ...user!.profile.externalIds } };
+        delete updated.profile.externalIds.feishuSubject;
+        updated.credential = { ...user!.credential, providers: user!.credential.providers.filter(p => p !== 'feishu') };
+      } else fail(400, 'invalid_account_update', '不支持的账号操作。');
+      await this.write(manager, 'iam-user', user!.userId, updated);
+      await this.audit(manager, `identity.account.${action}`, {}, user!.userId);
+      return { ok: true };
+    });
+  }
   async invitations(): Promise<Array<Omit<Invitation, 'codeHash'>>> {
     await this.ready();
     const rows = await this.db.query("SELECT data - 'codeHash' AS data FROM mx_platform_records WHERE environment=$1 AND kind='registration-invite' ORDER BY created_at DESC LIMIT 100", [this.environment]);
@@ -167,7 +199,7 @@ export class RegistrationRepository {
     const account = typeof input.account === 'string' ? input.account.trim() : '';
     if (input.clientId !== this.clientId || !/^[A-Za-z0-9_-]{16,128}$/.test(input.transactionId ?? '')
       || !Number.isSafeInteger(input.policyVersion)) fail(400, 'invalid_transaction', '注册请求已失效，请重新打开登录页。');
-    if (!/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(account) || typeof input.password !== 'string' || input.password.length < 8 || input.password.length > 128)
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(account) || typeof input.password !== 'string' || input.password.trim().length < 8 || input.password.length > 128)
       fail(400, 'invalid_registration', '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 8–128 位。');
     const userId = `usr_${randomUUID()}`;
     const credential = createUserCenterUserCredential(userId, input.password);

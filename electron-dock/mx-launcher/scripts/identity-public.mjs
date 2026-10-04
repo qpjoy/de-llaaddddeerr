@@ -25,12 +25,13 @@ export function registerPublic({ origin, adminOrigin, hubOrigin, environment, au
   if (!environment || new Set([origin,adminOrigin,hubOrigin]).size !== 3) throw new Error('需要三个不同的 HTTPS 入口及原环境标识');
   const p = readProfile(file); if (!p) throw new Error('请先启用原内网身份服务');
   const old = p.publicEntry;
-  if (old && (old.origin !== origin || old.adminOrigin !== adminOrigin || old.applications[0].origin !== hubOrigin || old.applications[0].audience !== audience)) throw new Error('已有公网入口不同；停止覆盖，请规划迁移');
+  const oldHub = old?.applications.find(app => app.appId === 'mx-insight-hub');
+  if (old && (old.origin !== origin || old.adminOrigin !== adminOrigin || oldHub?.origin !== hubOrigin || oldHub?.audience !== audience)) throw new Error('已有公网入口不同；停止覆盖，请规划迁移');
   const previous = existsSync(hubFile) ? readSsoProfile(hubFile) : null;
   if (previous && (previous.origin !== hubOrigin || previous.legacyIssuer !== `mx-user-center:${environment}` || previous.audience !== audience
     || ![p.issuer,old?.issuer].includes(previous.issuer))) throw new Error('Hub 已有不同身份配置；停止覆盖');
   const entry = old ?? createPublicEntry({ origin,adminOrigin,hubOrigin,audience,privateOrigin:p.origin });
-  const app = entry.applications[0];
+  const app = entry.applications.find(app => app.appId === 'mx-insight-hub');
   if (previous?.issuer === entry.issuer && (previous.clientId !== app.clientId || previous.clientSecret !== app.clientSecret)) throw new Error('Hub 公网客户端密钥与原档案不同；请恢复原配置');
   const hub = previous?.issuer === entry.issuer ? previous : {
     version:1, origin:hubOrigin, issuer:entry.issuer, clientId:app.clientId, clientSecret:app.clientSecret,

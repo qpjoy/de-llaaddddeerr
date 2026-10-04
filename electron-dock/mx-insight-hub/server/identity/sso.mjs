@@ -6,6 +6,7 @@ import { AppError } from '../core/errors.mjs'
 import { SsoStore } from './sso-store.mjs'
 import { TenantInvitations } from './tenant-invitations.mjs'
 import { readJson } from '../core/http.mjs'
+import { createIdentityAccountClient } from '@qpjoy/mx-common/identity'
 
 const random = () => randomBytes(32).toString('base64url')
 const fingerprint = value => createHash('sha256').update(value).digest('hex')
@@ -29,6 +30,25 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
   const invitationAttempts = new Map()
   const providers = new Map([settings, ...(settings.previousProviders ?? [])].map(p => [p.issuer,p]))
   const discoveries = new Map()
+  const accountClients = new Map()
+  function accountClient(issuer = settings.issuer) {
+    const p = providers.get(issuer)
+    if (!p) throw new AppError(401, 'sso_issuer_unknown', '请重新登录。')
+    if (!accountClients.has(issuer)) {
+      const dispatcher = new Agent({ connect: { ca: p.caCert ? [...rootCertificates, p.caCert] : rootCertificates } })
+      const client = createIdentityAccountClient({ ...p, fetch: (url, options) => secureFetch(url, { ...options, dispatcher }) })
+      accountClients.set(issuer, async (action, input) => {
+        try { return await client(action, input) }
+        catch (error) {
+          if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500) {
+            throw new AppError(error.status, error.code || 'account_request_failed', error.message)
+          }
+          throw new AppError(503, 'account_unavailable', '账号服务暂不可用，请稍后重试。')
+        }
+      })
+    }
+    return accountClients.get(issuer)
+  }
   async function configuration(issuer = settings.issuer) {
     const p = providers.get(issuer)
     if (!p) throw new AppError(401, 'sso_issuer_unknown', '统一登录来源已失效。')
@@ -145,7 +165,8 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
       if (path === '/auth/sso/login' && request.method === 'GET') {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', '请从 Hub 发起登录。')
         const old = cookies(request)[TX]; if (old) await store.remove('login', old)
-        const id = random(), transaction = { state: random(), nonce: random(), verifier: random() }
+        const id = random(), transaction = { state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
+        if (transaction.returnTo === 'account') transaction.expectedSubject = (await sessionFor(request))?.subject
         let registrationHandle
         if (url.searchParams.get('invitation') === '1') {
           const joinId=cookies(request)[INV], context=await store.get('invitation',joinId)
@@ -160,11 +181,61 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         const target = oidc.buildAuthorizationUrl(await configuration(), {
           redirect_uri: `${settings.origin}/auth/sso/callback`, response_type: 'code', response_mode: 'query', scope: 'openid mx:hub',
           state: transaction.state, nonce: transaction.nonce, code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
+          ...(url.searchParams.get('surface') === 'application' ? { mx_surface: 'application' } : {}),
           ...(registrationHandle ? {mx_invitation:registrationHandle} : {}),
           ...(url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : {})
         })
         await store.put('login', id, transaction, 300)
         response.setHeader('Set-Cookie', cookie(TX, id, 300)); redirect(target.toString()); return true
+      }
+      if (path === '/auth/sso/interaction' && request.method === 'GET') {
+        const id = cookies(request)[TX], transaction = await store.get('login', id)
+        const flow = url.searchParams.get('flow')
+        if (!transaction || !equal(transaction.state, url.searchParams.get('state')) || !/^[A-Za-z0-9_-]{43}$/.test(flow ?? ''))
+          throw new AppError(400, 'account_flow_invalid', '登录页面已过期，请从 Hub 重新登录。')
+        // Auth validates its own cookie; this separate state check binds the same browser to Hub.
+        transaction.flow = flow
+        if (!await store.update('login', id, transaction)) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
+        redirect(`/?account=1${url.searchParams.get('error') === 'feishu' ? '&accountError=feishu' : ''}#/account`); return true
+      }
+      if (path === '/auth/sso/form' && ['GET', 'POST'].includes(request.method)) {
+        const transaction = await store.get('login', cookies(request)[TX])
+        if (!transaction?.flow) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
+        if (request.method === 'GET') {
+          const result = await accountClient()('options', { flow: transaction.flow, clientIp: String(request.headers['x-forwarded-for'] || request.socket.remoteAddress).split(',')[0].trim() })
+          return json({ ...result, csrf: transaction.formCsrf, formId: fingerprint(transaction.flow), view: transaction.view, invited: Boolean(transaction.invitation) })
+        }
+        checkOrigin(request)
+        const body = await readJson(request, 8192)
+        if (!equal(transaction.formCsrf, request.headers['x-mx-hub-csrf']) || !equal(fingerprint(transaction.flow), body.formId))
+          throw new AppError(409, 'account_form_changed', '另一个页面已切换登录，请刷新后重试。')
+        if (!['login', 'register', 'feishu', 'feishu-link'].includes(body.action)) throw new AppError(400, 'account_action_invalid', '操作无效。')
+        const result = await accountClient()(body.action, { flow: transaction.flow, clientIp: String(request.headers['x-forwarded-for'] || request.socket.remoteAddress).split(',')[0].trim(),
+          expectedSubject: transaction.expectedSubject,
+          login: body.login, password: body.password, passwordConfirm: body.passwordConfirm, inviteCode: body.inviteCode, policyVersion: body.policyVersion })
+        return json(result)
+      }
+      if (path === '/auth/sso/account' && ['GET', 'POST'].includes(request.method)) {
+        const session = await sessionFor(request)
+        if (!session) throw new AppError(401, 'login_required', '请先登录。')
+        await verified(session, true)
+        const client = accountClient(session.issuer ?? settings.issuer)
+        if (request.method === 'GET') {
+          const [account, devices] = await Promise.all([client('account', { accessToken: session.accessToken }), client('sessions', { accessToken: session.accessToken })])
+          return json({ ...account, ...devices })
+        }
+        checkOrigin(request)
+        if (!equal(session.csrf, request.headers['x-mx-hub-csrf'])) throw new AppError(403, 'sso_csrf', '页面已过期，请刷新。')
+        const body = await readJson(request, 4096)
+        if (!['profile', 'password', 'unlink-feishu', 'revoke'].includes(body.action)) throw new AppError(400, 'account_action_invalid', '操作无效。')
+        const result = await client(body.action, { accessToken: session.accessToken, clientIp: String(request.headers['x-forwarded-for'] || request.socket.remoteAddress).split(',')[0].trim(),
+          currentPassword: body.currentPassword, password: body.password, displayName: body.displayName, target: body.target })
+        if (body.action === 'password' || result.signedOut) {
+          cache.delete(fingerprint(`${session.issuer ?? settings.issuer}:${session.accessToken}`))
+          await store.remove('session', cookies(request)[SID]); response.setHeader('Set-Cookie', cookie(SID, '', 0))
+          return json({ ...result, signedOut: true })
+        }
+        return json(result)
       }
       if (path === '/auth/sso/callback' && request.method === 'GET') {
         const transaction = await store.get('login', cookies(request)[TX], true)
@@ -176,6 +247,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         }) } catch { throw new AppError(400, 'sso_login_invalid', '统一登录验证失败，请重新发起。') }
         const claims = tokens.claims()
         if (claims?.iss !== settings.issuer || typeof claims.sub !== 'string' || !tokens.access_token || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0) throw new AppError(400, 'sso_login_invalid', '统一身份响应无效。')
+        if (transaction.expectedSubject && claims.sub !== transaction.expectedSubject) throw new AppError(409, 'account_changed', '请使用原账号完成绑定。')
         const session = { issuer:settings.issuer, subject: claims.sub, accessToken: tokens.access_token, csrf: random() }
         const canonical = await verified(session)
         await store.provision({ issuer: settings.issuer, subject: claims.sub, clientId: settings.clientId, canonical, personalTenant: settings.personalTenant === true && !transaction.invitation })
@@ -183,7 +255,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         const sid = random(), seconds = Math.min(SESSION_TTL_SECONDS, tokens.expires_in)
         await store.put('session', sid, session, seconds)
         response.setHeader('Set-Cookie', [cookie(TX, '', 0), cookie(SID, sid, seconds), ...(transaction.invitation ? [cookie(INV,transaction.invitation,1800)] : [])])
-        redirect(transaction.invitation ? '/?sso=ready#/join' : '/?sso=ready'); return true
+        redirect(transaction.invitation ? '/?sso=ready#/join' : transaction.returnTo === 'account' ? '/?sso=ready#/account' : '/?sso=ready'); return true
       }
       if (path === '/auth/sso/session' && request.method === 'GET') {
         let session = await sessionFor(request)

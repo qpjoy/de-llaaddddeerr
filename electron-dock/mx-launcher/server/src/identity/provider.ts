@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual, randomBytes, createHash } from 'node:crypt
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Provider, { type Configuration } from 'oidc-provider';
 import type { IdentityAccounts } from './repository.js';
+import { createAppAccount } from './app-account.js';
 import { sessionsPage } from './sessions-page.js';
 import { resolveHubInvitation } from './hub-invitation.js';
 import { RegistrationClientError, type RegistrationClient } from '../registration/backchannel.js';
@@ -94,7 +95,7 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
 export function createIdentityProvider(settings: IdentitySettings, accounts: IdentityAccounts, adapter: Configuration['adapter'], registration?: RegistrationClient) {
   const applications = new Map((settings.applications ?? []).map(app => [app.clientId, app]));
   for (const app of applications.values()) {
-    if (app.clientId === settings.clientId || new URL(app.origin).origin !== app.origin || !app.origin.startsWith('https://') || app.appId !== 'mx-insight-hub' || !app.audience) throw new Error('Invalid first-party identity client');
+    if (app.clientId === settings.clientId || new URL(app.origin).origin !== app.origin || !app.origin.startsWith('https://') || !/^[-a-z0-9]{1,80}$/.test(app.appId) || !app.audience) throw new Error('Invalid first-party identity client');
   }
   // Browsers check form-action through the POST/303 chain, including the
   // final application callback. Use only statically registered client origins,
@@ -112,14 +113,14 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
       id_token_signed_response_alg: 'RS256' }, ...[...applications.values()].map(app => ({
         client_id: app.clientId, client_secret: app.clientSecret, redirect_uris: [`${app.origin}/auth/sso/callback`],
         response_types: ['code'] as const, grant_types: ['authorization_code'], token_endpoint_auth_method: 'client_secret_basic' as const,
-        id_token_signed_response_alg: 'RS256' as const, scope: 'openid mx:hub'
+        id_token_signed_response_alg: 'RS256' as const, scope: app.appId === 'mx-insight-hub' ? 'openid mx:hub' : 'openid mx:identity'
       }))],
     responseTypes: ['code'], clientAuthMethods: ['client_secret_basic'],
-    extraParams: ['mx_invitation'],
+    extraParams: ['mx_invitation', 'mx_surface'],
     pkce: { required: () => true },
     features: { devInteractions: { enabled: false }, registration: { enabled: false },
       userinfo: { enabled: true }, introspection: { enabled: false }, revocation: { enabled: false } },
-    claims: { openid: ['sub', 'mx_session_uid'], 'mx:hub': ['mx_identity'] }, scopes: ['openid', 'mx:hub'],
+    claims: { openid: ['sub', 'mx_session_uid'], 'mx:hub': ['mx_identity'], 'mx:identity': ['mx_identity'] }, scopes: ['openid', 'mx:hub', 'mx:identity'],
     extraTokenClaims: ctx => ({ mx_auth_time: ctx.oidc.authorizationCode?.authTime ?? ctx.oidc.session?.loginTs }),
     cookies: { keys: settings.cookieKeys, names: { session: 'mx_identity', interaction: 'mx_identity_interaction', resume: 'mx_identity_resume' },
       long: { secure: true, httpOnly: true, sameSite: 'lax' }, short: { secure: true, httpOnly: true, sameSite: 'lax' } },
@@ -145,7 +146,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
       if (!accountId || !allowed(await accounts.account(accountId), clientId)) return undefined;
       // Only our statically registered first-party client and openid scope.
       const grant = new provider.Grant({ accountId, clientId });
-      grant.addOIDCScope(applications.has(clientId) ? 'openid mx:hub' : 'openid');
+      grant.addOIDCScope(applications.has(clientId) ? (applications.get(clientId)!.appId === 'mx-insight-hub' ? 'openid mx:hub' : 'openid mx:identity') : 'openid');
       await grant.save();
       return grant;
     },
@@ -155,6 +156,18 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
   provider.proxy = Boolean(settings.adminOrigin);
   provider.on('server_error', () => console.warn(JSON.stringify({ event: 'identity.request-failed' })));
   const csrfFor = (uid: string) => createHmac('sha256', settings.cookieKeys[0]).update(`login:${uid}`).digest('base64url');
+  const appAccount = createAppAccount(provider, settings, accounts, registration);
+  const startFeishu = async (req: IncomingMessage, res: ServerResponse, uid: string, link: boolean) => {
+    if (!accounts.webState || !registration?.feishu) throw new RegistrationClientError(503, '飞书登录尚未配置。');
+    const state = randomBytes(32).toString('base64url'), verifier = randomBytes(32).toString('base64url');
+    const authorization = await registration.feishu('authorize', { state, codeChallenge: createHash('sha256').update(verifier).digest('base64url'), sourceKey: sourceIp(req, settings) });
+    await accounts.webState.remove('proof', uid);
+    const interaction = await provider.Interaction.find(uid);
+    const app = interaction?.params.mx_surface === 'application' ? applications.get(String(interaction.params.client_id)) : undefined;
+    await accounts.webState.put('transaction', state, { uid, verifier, exchangeHandle: authorization.exchangeHandle, link, ...(app ? { appReturn: app.origin } : {}) });
+    res.setHeader('Set-Cookie', `__Host-mx_feishu=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`);
+    res.writeHead(303, { location: String(authorization.authorizationUrl) }).end();
+  };
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     Object.assign(req, { originalUrl: req.url, baseUrl: '/identity' });
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
@@ -164,6 +177,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     // that transition, leaving a blank page when the identity changes.
     res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`);
     const path = (req.url ?? '').split('?')[0];
+    if (path === '/identity/app-account') return appAccount.handle(req, res);
     if (path === '/identity/sessions' && accounts.browserSessions && accounts.revokeBrowserSessions) {
       const session = await provider.Session.get(provider.app.createContext(req, res));
       const user = session.accountId ? await accounts.account(session.accountId) : undefined;
@@ -182,12 +196,14 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
       }
       if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET, POST' }).end(); return; }
       const links = [{ name: 'Launcher', url: `${settings.adminOrigin ?? settings.origin}/admin/`, reauthenticate: `${settings.adminOrigin ?? settings.origin}/auth/admin/login?switch=1` },
-        ...[...applications.values()].map(app => ({ name: 'Hub', url: app.origin, reauthenticate: `${app.origin}/auth/sso/login?switch=1` }))];
+        ...[...applications.values()].map(app => ({ name: app.appId === 'mx-insight-hub' ? 'Hub' : app.appId, url: app.origin, reauthenticate: `${app.origin}/auth/sso/login?switch=1` }))];
       res.setHeader('Referrer-Policy', 'same-origin');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(sessionsPage({ name: user?.displayName,
         sessions: user ? await accounts.browserSessions(user.userId, session.uid) : [], csrf, recent, links, done: new URL(req.url!, settings.origin).searchParams.get('done') === '1' })); return;
     }
     if (path === '/identity/feishu/callback' && req.method === 'GET') {
+      let appReturn: string | undefined;
+      let returnInteraction: string | undefined;
       try {
         if (!accounts.webState || !registration?.feishu) throw new Error('Web login unavailable');
         const query = new URL(req.url!, settings.origin).searchParams;
@@ -195,12 +211,15 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         const bound = /(?:^|;\s*)__Host-mx_feishu=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
         if (!bound || bound !== state) throw new Error('Invalid OAuth state');
         const transaction = await accounts.webState.read('transaction', state, true);
+        if (typeof transaction?.appReturn === 'string' && [...applications.values()].some(app => app.origin === transaction.appReturn)) appReturn = transaction.appReturn;
+        if (appReturn && typeof transaction?.uid === 'string') returnInteraction = transaction.uid;
         if (!transaction || query.has('error') || !query.get('code')) throw new Error('OAuth rejected or expired');
         const proof = await registration.feishu('exchange', { code: query.get('code'), verifier: transaction.verifier, exchangeHandle: transaction.exchangeHandle, sourceKey: sourceIp(req, settings) });
         await accounts.webState.put('proof', String(transaction.uid), { ...proof, verifiedAt: Date.now() / 1000, link: transaction.link });
         res.setHeader('Set-Cookie', '__Host-mx_feishu=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0');
         res.writeHead(303, { location: `/identity/interaction/${transaction.uid}` }).end();
       } catch {
+        if (appReturn && returnInteraction) { res.writeHead(303, { location: `/identity/interaction/${returnInteraction}?app_error=feishu` }).end(); return; }
         res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<meta charset="utf-8"><p>飞书验证失败、已取消或已过期，请返回应用重新登录。</p>');
       }
       return;
@@ -208,6 +227,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     const match = /^\/identity\/interaction\/([A-Za-z0-9_-]+)$/.exec(path);
     if (match) {
       const authenticationStartedAt = Date.now() / 1000;
+      let appReturn: string | undefined;
       try {
         const interaction = await provider.interactionDetails(req, res);
         const clientId = String(interaction.params.client_id);
@@ -215,15 +235,26 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         const registering = new URL(req.url!, settings.origin).searchParams.get('view') === 'register';
         const invitationHandle = typeof interaction.params.mx_invitation === 'string' ? interaction.params.mx_invitation : '';
         const invitationApp = applications.get(clientId);
-        const source: RegistrationSource = { issuer: settings.issuer, clientId, appId: invitationApp ? 'mx-insight-hub' : 'mx-launcher', appOrigin: invitationApp?.origin ?? settings.adminOrigin ?? settings.origin };
+        if (interaction.params.mx_surface === 'application') appReturn = invitationApp?.origin;
+        const source: RegistrationSource = { issuer: settings.issuer, clientId, appId: invitationApp?.appId ?? 'mx-launcher', appOrigin: invitationApp?.origin ?? settings.adminOrigin ?? settings.origin };
         let enterprise: Awaited<ReturnType<typeof resolveHubInvitation>> | undefined;
         let policy: RegistrationPolicy | undefined;
         const proof = await accounts.webState?.read('proof', interaction.uid);
         if (req.method === 'GET' && proof?.userId && !proof.link) {
           const linked = await accounts.account(String(proof.userId));
-          if (!allowed(linked, clientId)) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('此账号已被停用或禁止访问该应用，请联系管理员。'); return; }
+          if (!allowed(linked, clientId) || linked?.profile.externalIds.feishuSubject !== proof.subject) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('此账号已被停用或禁止访问该应用，请联系管理员。'); return; }
           await accounts.webState!.read('proof', interaction.uid, true);
           return provider.interactionFinished(req, res, { login: { accountId: String(proof.userId), ts: Number(proof.verifiedAt ?? authenticationStartedAt) } }, { mergeWithLastSubmission: false });
+        }
+        if (req.method === 'GET' && invitationApp && interaction.params.mx_surface === 'application') {
+          const complete = new URL(req.url!, settings.origin).searchParams.get('app_complete');
+          if (complete) {
+            const result = await appAccount.completion(interaction.uid, complete);
+            if (result.intent) return startFeishu(req, res, interaction.uid, result.intent === 'feishu-link');
+            return provider.interactionFinished(req, res, { login: { accountId: String(result.userId), ts: Number(result.authTime) } }, { mergeWithLastSubmission: false });
+          }
+          const target = await appAccount.begin(interaction.uid, clientId, String(interaction.params.state), new URL(req.url!, settings.origin).searchParams.get('app_error') ?? undefined);
+          if (target) { res.writeHead(303, { location: target }).end(); return; }
         }
         let feishuEnabled = false;
         if (req.method === 'GET') {
@@ -240,7 +271,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           // Preserve same-origin provenance without allowing cross-site refs.
           res.setHeader('Referrer-Policy', 'same-origin');
           res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName: applications.has(clientId) ? 'Insight Hub' : 'Launcher', returnUrl: invitationHandle && invitationApp ? `${invitationApp.origin}/#/join` : applications.get(clientId)?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/` }));
+          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName: invitationApp ? (invitationApp.appId === 'mx-insight-hub' ? 'Insight Hub' : invitationApp.appId) : 'Launcher', returnUrl: invitationHandle && invitationApp ? `${invitationApp.origin}/#/join` : applications.get(clientId)?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/` }));
         };
         if (req.method === 'GET') {
           if (invitationHandle && invitationApp && policy?.mode !== 'closed') {
@@ -258,12 +289,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         if (csrf.length !== expected.length || !timingSafeEqual(csrf, expected)) throw new Error('Invalid CSRF');
         if (['feishu', 'feishu-link'].includes(body.get('intent') ?? '')) {
           if (!accounts.webState || !registration?.feishu) return render('飞书 Web 登录尚未配置。', 503);
-          const state = randomBytes(32).toString('base64url'), verifier = randomBytes(32).toString('base64url');
-          const authorization = await registration.feishu('authorize', { state, codeChallenge: createHash('sha256').update(verifier).digest('base64url'), sourceKey: sourceIp(req, settings) });
-          await accounts.webState.remove('proof', interaction.uid);
-          await accounts.webState.put('transaction', state, { uid: interaction.uid, verifier, exchangeHandle: authorization.exchangeHandle, link: body.get('intent') === 'feishu-link' });
-          res.setHeader('Set-Cookie', `__Host-mx_feishu=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`);
-          res.writeHead(303, { location: String(authorization.authorizationUrl) }).end(); return;
+          return startFeishu(req, res, interaction.uid, body.get('intent') === 'feishu-link');
         }
         const login = (body.get('login') ?? '').trim(); const password = body.get('password') ?? '';
         if (registering) {
@@ -302,6 +328,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         console.info(JSON.stringify({ event: 'identity.password-login', userId: user.userId }));
         return provider.interactionFinished(req, res, { login: { accountId: user.userId, ts: authenticationStartedAt } }, { mergeWithLastSubmission: false });
       } catch {
+        if (appReturn) { res.writeHead(303, { location: `${appReturn}/?account=1&accountError=expired#/account` }).end(); return; }
         res.statusCode = 400; res.setHeader('Content-Type', 'text/plain; charset=utf-8'); res.end('登录请求已失效，请返回工作台重新登录。'); return;
       }
     }

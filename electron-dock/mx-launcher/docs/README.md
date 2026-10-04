@@ -14,6 +14,8 @@
 
 相关专题：
 
+- [45-application-account-sdk-and-hub.md](./45-application-account-sdk-and-hub.md)：应用原生账号界面、服务端 SDK、通用客户端增量登记，以及 Hub 登录/注册/邀请/资料/密码/绑定/设备的完整接入和兼容边界；本地完成，未部署生产。
+
 - [44-hub-registration-policy-and-provenance.md](./44-hub-registration-policy-and-provenance.md)：Hub 独立注册策略、可信首次注册来源、新 Hub 账号的默认网络边界与原账号兼容；无新增服务或数据库，本地完成，未部署生产。
 
 - [43-hub-enterprise-invitations.md](./43-hub-enterprise-invitations.md)：已有/新建企业租户邀请、受邀注册免第二码、显式接受与原成员自动绑定、角色/并发/撤回保护及发布边界；本地完成，未部署生产。

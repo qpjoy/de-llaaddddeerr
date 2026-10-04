@@ -11,7 +11,8 @@
     "./elasticsearch": "./src/elasticsearch/index.mjs",
     "./queue": "./src/queue/index.mjs",
     "./segmenter": "./src/segmenter/index.mjs",
-    "./health": "./src/health/index.mjs"
+    "./health": "./src/health/index.mjs",
+    "./identity": "./src/identity/client.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"

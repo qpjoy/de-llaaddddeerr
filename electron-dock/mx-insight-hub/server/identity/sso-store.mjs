@@ -38,6 +38,12 @@ export class SsoStore {
     return rows[0] ? this.open(kind, key, rows[0].payload) : null
   }
   async remove(kind, id) { await this.pool.query('DELETE FROM iam.browser_sso_records WHERE kind=$1 AND id=$2', [kind, hash(id ?? '')]) }
+  async update(kind, id, value) {
+    const key = hash(id)
+    // Do not extend the original login deadline when returning from another origin.
+    const result = await this.pool.query('UPDATE iam.browser_sso_records SET payload=$3 WHERE kind=$1 AND id=$2 AND expires_at>now()', [kind, key, this.seal(kind, key, value)])
+    return result.rowCount === 1
+  }
 
   // Only called after OIDC plus UserInfo verification. Two identities from the
   // same configured authority are prebound before any just-in-time creation.

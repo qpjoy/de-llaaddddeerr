@@ -11,6 +11,7 @@ export interface RegistrationClient {
   policy(source?: RegistrationSource): Promise<RegistrationPolicy>;
   register(input: Omit<RegistrationInput, 'clientId'>): Promise<{ userId: string }>;
   feishu?(action: 'info' | 'authorize' | 'exchange' | 'bind', input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  account?(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
 export class RegistrationClientError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -23,6 +24,7 @@ export function createRegistrationClient(upstream: URL, clientId: string, secret
     const payload = await response.json() as { code?: string; message?: string };
     if (!response.ok) {
       const messages: Record<string, string> = { registration_closed: '暂未开放新账号注册。', policy_changed: '注册策略已更新，请刷新页面重试。',
+        invalid_account_update: '资料或密码格式不正确。', invalid_account_credentials: '当前密码不正确或账号不可用。',
         invalid_registration_source: '注册来源无效或身份服务需要更新，请从应用重新发起。',
         account_unavailable: '此账号不可用，请更换账号；已有账号请直接登录。', invitation_unavailable: '邀请码无效、已停用、已到期或名额已用完。',
         registration_conflict: '此注册请求已完成，请使用原账号登录。', invalid_registration: '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 8–128 位。' };
@@ -31,5 +33,5 @@ export function createRegistrationClient(upstream: URL, clientId: string, secret
     }
     return payload;
   };
-  return { policy: source => call('policy', source ? {source} : {}) as Promise<RegistrationPolicy>, register: input => call('register', input) as Promise<{ userId: string }>, feishu: (action, input) => call(`feishu-${action}`, input) };
+  return { policy: source => call('policy', source ? {source} : {}) as Promise<RegistrationPolicy>, register: input => call('register', input) as Promise<{ userId: string }>, feishu: (action, input) => call(`feishu-${action}`, input), account: (action, input) => call(`account-${action}`, input) };
 }

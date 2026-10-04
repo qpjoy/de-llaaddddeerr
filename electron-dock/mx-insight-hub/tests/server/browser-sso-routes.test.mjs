@@ -20,6 +20,11 @@ for (const listenerMode of ['admin', 'public']) test(`SSO route isolation and ex
   let r = await fetch(`${base}/auth/sso/session`)
   assert.equal(r.status,listenerMode==='admin'?200:404)
   assert.equal(handlerCalls,listenerMode==='admin'?1:0)
+  for(const path of ['form','account','interaction']) {
+    r=await fetch(`${base}/auth/sso/${path}`)
+    assert.equal(r.status,listenerMode==='admin'?200:404)
+  }
+  assert.equal(handlerCalls,listenerMode==='admin'?4:0)
   r=await fetch(`${base}/internal/v1/admin/session`)
   assert.equal(r.status,listenerMode==='admin'?200:404)
   assert.equal(cookieCalls,listenerMode==='admin'?1:0)

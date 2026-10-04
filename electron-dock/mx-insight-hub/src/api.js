@@ -11,6 +11,13 @@ export const SSO_SESSION = 'mx-hub-cookie-session'
 let ssoCsrf = ''
 let ssoSecurityUrl = ''
 export const ssoSessionManagementUrl = () => ssoSecurityUrl
+export async function accountRequest(body) {
+  const response = await fetch(`${API_BASE}/auth/sso/account`, { credentials: 'same-origin', cache: 'no-store',
+    ...(body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-mx-hub-csrf': ssoCsrf }, body: JSON.stringify(body) } : {}) })
+  const value = await response.json()
+  if (!response.ok) { const error = new Error(value.error?.message || value.message || '账号操作失败，请稍后重试。'); error.status = response.status; throw error }
+  return value
+}
 const authHeaders = token => token === SSO_SESSION ? { 'x-mx-hub-csrf': ssoCsrf } : token ? { 'x-mx-insight-admin-token': token } : {}
 export async function restoreSsoSession() {
   const response = await fetch(`${API_BASE}/auth/sso/session`, { credentials: 'same-origin', cache: 'no-store' })

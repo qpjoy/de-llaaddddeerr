@@ -89,7 +89,14 @@ export function inspectIdentity(p, execute = run, initializing = false) {
     // credentials cannot disappear/change from a stale host backup.
     const { applications: oldApps = [], publicEntry: oldPublic, ...oldCore } = old;
     const { applications: nextApps = [], publicEntry: nextPublic, ...nextCore } = next;
-    if ((oldPublic && sha(oldPublic) !== sha(nextPublic ?? null)) || sha(oldCore) !== sha(nextCore) || oldApps.some(app => sha(app) !== sha(nextApps.find(nextApp => nextApp.clientId === app.clientId) ?? null))
+    const keepsPublic = () => {
+      if (!oldPublic) return true;
+      if (!nextPublic) return false;
+      const { applications: oldClients = [], ...before } = oldPublic;
+      const { applications: nextClients = [], ...after } = nextPublic;
+      return sha(before) === sha(after) && oldClients.every(app => sha(app) === sha(nextClients.find(nextApp => nextApp.clientId === app.clientId) ?? null));
+    };
+    if (!keepsPublic() || sha(oldCore) !== sha(nextCore) || oldApps.some(app => sha(app) !== sha(nextApps.find(nextApp => nextApp.clientId === app.clientId) ?? null))
       || Buffer.from(previous.data['ca.crt'], 'base64').toString() !== p.caCert) throw new Error('身份密钥、客户端或 issuer 与现有部署不一致；请恢复原部署档案');
   }
   return { deployment, publicDeployment };

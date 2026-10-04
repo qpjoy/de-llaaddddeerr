@@ -1,3 +1,4 @@
+import { HubAccountEntry, HubAccountPage } from './account.jsx'
 import { WechatOverview } from './wechat-product.jsx'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
@@ -361,6 +362,7 @@ const NAV_PARENTS = {
 // console renders itself from the server's answer rather than from a local role
 // guess, so a scoped user never sees a control that would 403.
 const ROUTES = [
+  { path: '/account', label: '我的账号', description: '个人资料与安全', group: '账号', icon: Users, component: HubAccountPage },
   // Listed first so that a tenant whose requested route is not visible to them
   // falls back here rather than to an operator page they cannot use.
   { path: '/my', label: '我的接入', description: '额度、到期与可用性', icon: ShieldCheck, group: '业务治理', component: MyAccessPage, ownAccess: true },
@@ -553,6 +555,8 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
     }
   }
 
+  if (!checking && options?.sso && new URLSearchParams(window.location.search).get('admin') !== '1') return <HubAccountEntry themeClass={themeClassName(theme)} light={theme === 'light'} onToggleTheme={onToggleTheme} message={message} />
+
   return (
     <div className={`qp-app ${themeClassName(theme)} qp-density--medium mih-auth`}>
       <ThemeToggle theme={theme} onToggle={onToggleTheme} className="mih-auth-theme-toggle" />
@@ -566,7 +570,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
         </div>
         <div className="mih-auth-copy">
           <h1 id="mih-auth-title">登录 Insight Hub</h1>
-          <p>使用统一 MX 账号访问自己的租户。管理权限与数据权限由 Hub 单独控制。</p>
+          <p>连接数据，发现更多。</p>
         </div>
         {message ? <div className="mih-auth-notice"><ShieldCheck size={18} weight="duotone" aria-hidden="true" /><span>{message}</span></div> : null}
         {checking ? (
@@ -650,7 +654,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
         )}
         <footer className="mih-auth-footer">
           <LockKey size={15} aria-hidden="true" />
-          <span>统一账号登录保持 30 天。原成员与租户权限继续保留。</span>
+          <span>安全访问你的工作空间。</span>
         </footer>
       </section>
     </div>
@@ -763,7 +767,10 @@ export function App() {
   const initialToken = useMemo(() => new URLSearchParams(window.location.search).get('sso') === 'ready' ? SSO_SESSION : readSessionToken(), [])
   const [theme, setTheme] = useState(readThemePreference)
   const [token, setToken] = useState(initialToken)
-  const [authState, setAuthState] = useState('checking')
+  const [authState, setAuthState] = useState(() => {
+    const query = new URLSearchParams(window.location.search)
+    return query.get('account') === '1' || query.get('admin') === '1' ? 'signed-out' : 'checking'
+  })
   const [authMessage, setAuthMessage] = useState('')
   const [location, setLocation] = useState(readLocation)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -933,7 +940,7 @@ export function App() {
           <img src="assets/mx-insight-logo-mark.png" alt="" />
           <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
         </a>
-        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : !session?.platformAdmin && item.path === '/plans' ? { ...item, label: '用量与账单', description: '余额、价格与消费' } : item)} />
+        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => item.path !== '/account').filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : !session?.platformAdmin && item.path === '/plans' ? { ...item, label: '用量与账单', description: '余额、价格与消费' } : item)} />
         <section className="mih-sidebar-session">
           <ShieldCheck size={20} weight="duotone" aria-hidden="true" />
           <span>
@@ -963,7 +970,7 @@ export function App() {
           </div>
           <div className="mih-topbar-actions">
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
-            {token === SSO_SESSION && ssoSessionManagementUrl() ? <a className="qp-button qp-button--ghost qp-icon-button" href={ssoSessionManagementUrl()} aria-label="网页登录会话" title="网页登录会话"><ShieldCheck size={18} aria-hidden="true" /></a> : null}
+            {token === SSO_SESSION && ssoSessionManagementUrl() ? <a className="qp-button qp-button--ghost qp-icon-button" href="#/account" aria-label="我的账号" title="我的账号"><ShieldCheck size={18} aria-hidden="true" /></a> : null}
             <span className="qp-tag qp-tag--success mih-session-tag"><ShieldCheck size={14} weight="fill" aria-hidden="true" />受保护的管理会话</span>
             <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
               <SignOut size={17} aria-hidden="true" />
