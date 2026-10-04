@@ -4,6 +4,8 @@
 
 浏览器账号选择、历史账号提示和直接切换入口见 [46-browser-account-chooser.md](46-browser-account-chooser.md)。
 
+后续通用化已实现：新应用使用 `@qpjoy/mx-common/identity/sso` 接入回调与会话，Hub 保留业务适配；普通应用登记新增持久 sessionKey。接入、兼容和部署边界见 [47-shared-sso-and-hub-adapter.md](47-shared-sso-and-hub-adapter.md)。原 `identity` 账号操作入口保持兼容。
+
 ## 产品边界
 
 Auth 是自有服务，使用 oidc-provider；原 Launcher 用户中心仍是账号及密码的唯一写入方。应用可以继续使用默认托管登录，也可以提供自己的登录、注册和账号设置页面。Hub 是第一份完整原生接入样例，不是 Auth 的账号模型。

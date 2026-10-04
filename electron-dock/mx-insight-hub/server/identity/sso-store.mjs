@@ -1,49 +1,12 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
+import { PostgresSsoStore } from '@qpjoy/mx-common/identity/postgres'
 import { AppError } from '../core/errors.mjs'
 import { withPgTransaction } from '../stores/postgres-store.mjs'
 
 export const identityLock = (issuer, subject, audience) => `identity:${JSON.stringify([issuer, subject, audience])}`
-const hash = value => createHash('sha256').update(value).digest('hex')
 
-export class SsoStore {
-  constructor(pool, key) {
-    this.pool = pool
-    this.key = Buffer.from(key, 'base64url')
-    if (this.key.length !== 32) throw new Error('SSO session key must be 32 bytes')
-  }
-  seal(kind, id, value) {
-    const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv)
-    cipher.setAAD(Buffer.from(`${kind}:${id}`))
-    const encrypted = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()])
-    return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64url')
-  }
-  open(kind, id, value) {
-    const bytes = Buffer.from(value, 'base64url'), cipher = createDecipheriv('aes-256-gcm', this.key, bytes.subarray(0, 12))
-    cipher.setAAD(Buffer.from(`${kind}:${id}`)); cipher.setAuthTag(bytes.subarray(12, 28))
-    return JSON.parse(Buffer.concat([cipher.update(bytes.subarray(28)), cipher.final()]).toString())
-  }
-  async put(kind, id, value, seconds) {
-    const key = hash(id)
-    await this.pool.query('INSERT INTO iam.browser_sso_records(kind,id,payload,expires_at) VALUES($1,$2,$3,now()+$4*interval \'1 second\')',
-      [kind, key, this.seal(kind, key, value), seconds])
-    // Bounded opportunistic retention, also works after restart without a scheduler.
-    await this.pool.query('DELETE FROM iam.browser_sso_records WHERE (kind,id) IN (SELECT kind,id FROM iam.browser_sso_records WHERE expires_at<=now() LIMIT 100)')
-  }
-  async get(kind, id, consume = false) {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(id ?? '')) return null
-    const key = hash(id)
-    const { rows } = await this.pool.query(consume
-      ? 'DELETE FROM iam.browser_sso_records WHERE kind=$1 AND id=$2 AND expires_at>now() RETURNING payload'
-      : 'SELECT payload FROM iam.browser_sso_records WHERE kind=$1 AND id=$2 AND expires_at>now()', [kind, key])
-    return rows[0] ? this.open(kind, key, rows[0].payload) : null
-  }
-  async remove(kind, id) { await this.pool.query('DELETE FROM iam.browser_sso_records WHERE kind=$1 AND id=$2', [kind, hash(id ?? '')]) }
-  async update(kind, id, value) {
-    const key = hash(id)
-    // Do not extend the original login deadline when returning from another origin.
-    const result = await this.pool.query('UPDATE iam.browser_sso_records SET payload=$3 WHERE kind=$1 AND id=$2 AND expires_at>now()', [kind, key, this.seal(kind, key, value)])
-    return result.rowCount === 1
-  }
+export class SsoStore extends PostgresSsoStore {
+  constructor(pool, key) { super(pool, key, { table: 'iam.browser_sso_records' }) }
 
   // Only called after OIDC plus UserInfo verification. Two identities from the
   // same configured authority are prebound before any just-in-time creation.

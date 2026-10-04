@@ -19,6 +19,20 @@ test('additional applications preserve existing keys, support both entries and r
     registerApplication(input);
     const bytes = readFileSync(input.appFile, 'utf8'); registerApplication(input);
     assert.equal(readFileSync(input.appFile, 'utf8'), bytes); assert.equal(statSync(input.appFile).mode & 0o777, 0o600);
+    const consumer = JSON.parse(bytes);
+    assert.equal(Buffer.from(consumer.sessionKey, 'base64url').length, 32);
+    // The pre-SDK profile can be upgraded once without changing provider credentials.
+    const { sessionKey, ...legacyConsumer } = consumer;
+    savePrivate(input.appFile, legacyConsumer);
+    registerApplication(input);
+    const upgraded = JSON.parse(readFileSync(input.appFile, 'utf8'));
+    assert.deepEqual({ ...upgraded, sessionKey: undefined }, { ...consumer, sessionKey: undefined });
+    const upgradedBytes = readFileSync(input.appFile, 'utf8'); registerApplication(input);
+    assert.equal(readFileSync(input.appFile, 'utf8'), upgradedBytes);
+    savePrivate(input.appFile, { ...upgraded, sessionKey: 'broken' });
+    assert.throws(() => registerApplication(input), /会话密钥/);
+    assert.equal(JSON.parse(readFileSync(input.appFile, 'utf8')).sessionKey, 'broken');
+    savePrivate(input.appFile, upgraded);
     const next = readProfile(file);
     const runtime = resources({ ...p, publicEntry }).runtime;
     const execute = args => args.includes('get') && args.includes('mx-identity-runtime') ? JSON.stringify(runtime) : '';

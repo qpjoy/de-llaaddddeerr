@@ -24,8 +24,12 @@ export function registerApplication({ appId, origin, audience, entry, appFile, f
   if (existsSync(appFile)) {
     let previous;
     try { previous = JSON.parse(readFileSync(appFile, 'utf8')); } catch { throw new Error('应用身份配置无法解析，请核对备份。'); }
-    if (JSON.stringify(previous) !== JSON.stringify(consumer)) throw new Error('应用已有不同身份配置，停止覆盖。');
+    const { sessionKey, ...registered } = previous;
+    if (JSON.stringify(registered) !== JSON.stringify(consumer)) throw new Error('应用已有不同身份配置，停止覆盖。');
+    if (sessionKey !== undefined && (!/^[A-Za-z0-9_-]{43}$/.test(sessionKey) || Buffer.from(sessionKey, 'base64url').length !== 32)) throw new Error('应用会话密钥无效，停止覆盖。');
+    consumer.sessionKey = sessionKey ?? randomBytes(32).toString('base64url');
   }
+  consumer.sessionKey ??= randomBytes(32).toString('base64url');
   if (!old) savePrivate(file, entry === 'public' ? { ...p, publicEntry: { ...target, applications } } : { ...p, applications });
   savePrivate(appFile, consumer);
   return { appId, origin, issuer: target.issuer, clientId: app.clientId, appFile };

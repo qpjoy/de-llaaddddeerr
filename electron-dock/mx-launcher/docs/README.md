@@ -14,6 +14,7 @@
 
 相关专题：
 
+- [47-shared-sso-and-hub-adapter.md](./47-shared-sso-and-hub-adapter.md)：通用 SSO/BFF 与加密会话 SDK、Hub 业务适配和旧会话兼容、新应用配置与授权接入；不改支付交易实现。
 - [46-browser-account-chooser.md](./46-browser-account-chooser.md)：Auth 统一浏览器账号选择、Hub/Launcher 直接切换入口、历史账号提示与重新验证边界；无需新增数据库或服务。
 - [45-application-account-sdk-and-hub.md](./45-application-account-sdk-and-hub.md)：应用原生账号界面、服务端 SDK、通用客户端增量登记，以及 Hub 登录/注册/邀请/资料/密码/绑定/设备的完整接入和兼容边界；本地完成，未部署生产。
 

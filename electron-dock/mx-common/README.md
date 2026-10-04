@@ -4,6 +4,8 @@ MX 产品模块共用的数据面：PostgreSQL 连接与迁移、Elasticsearch �
 
 它是 `mx-insight-hub` 和 `mx-launcher` 的兄弟项目，不是任何一方的子模块。它**不包含任何业务语义**：没有租户、没有账本、没有 dataset 定义。产品自己拥有这些，只把存储原语交给这里。
 
+账号接入现提供服务端 `@qpjoy/mx-common/identity` 账号操作 SDK，以及 `identity/sso` 通用 OIDC/BFF、`identity/postgres` 加密会话存储、`identity/profile` 配置读取。Hub 已改为业务适配器；新应用无需复制 Hub 租户模型。详见[通用 SSO 接入与 Hub 兼容说明](../mx-launcher/docs/47-shared-sso-and-hub-adapter.md)。这些是随应用打包的库，不要求为 SSO 独立部署 mx-common 服务。
+
 ## 隔离模型
 
 一个产品 = 一个 `productId`（如 `mx-insight-hub`），对应：
