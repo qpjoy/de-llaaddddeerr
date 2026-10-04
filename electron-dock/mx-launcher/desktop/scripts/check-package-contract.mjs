@@ -34,6 +34,8 @@ async function assertBuilderContract() {
     '- theme.js',
     '- ui-design/**/*',
     '- service-operations.js',
+    '- identity-applications.js',
+    '- identity-applications.css',
     '- admin-session.js',
     '- registration.js',
     '- service-operations-catalog.js',

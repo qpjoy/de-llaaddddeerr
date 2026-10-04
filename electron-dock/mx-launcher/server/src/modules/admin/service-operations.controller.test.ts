@@ -8,7 +8,7 @@ test('every service-operations route requires the existing ops token before cont
   process.env.MX_INTERNAL_OPS_TOKEN = 'test-internal-token';
   try {
     const controller = new ServiceOperationsController();
-    for (const call of [() => controller.instances(), () => controller.profiles({}), () => controller.plans({}), () => controller.execute({}), () => controller.operations(), () => controller.operation('bad'), () => controller.reconcile({})]) {
+    for (const call of [() => controller.identity(), () => controller.validateIdentity({}), () => controller.saveIdentity({}), () => controller.instances(), () => controller.profiles({}), () => controller.plans({}), () => controller.execute({}), () => controller.operations(), () => controller.operation('bad'), () => controller.reconcile({})]) {
       assert.throws(call, /valid Internal ops token/);
     }
   } finally { if (saved === undefined) delete process.env.MX_INTERNAL_OPS_TOKEN; else process.env.MX_INTERNAL_OPS_TOKEN = saved; }

@@ -1403,6 +1403,8 @@ shadow_image_admin_assets() {
   cp "$ROOT/desktop/renderer.js" "$out_dir/renderer.js"
   cp "$ROOT/desktop/theme.js" "$out_dir/theme.js"
   cp "$ROOT/desktop/service-operations.js" "$out_dir/service-operations.js"
+  cp "$ROOT/desktop/identity-applications.js" "$out_dir/identity-applications.js"
+  cp "$ROOT/desktop/identity-applications.css" "$out_dir/identity-applications.css"
   cp "$ROOT/desktop/admin-session.js" "$out_dir/admin-session.js"
   cp "$ROOT/desktop/registration.js" "$out_dir/registration.js"
   cp "$ROOT/desktop/service-operations-catalog.js" "$out_dir/service-operations-catalog.js"

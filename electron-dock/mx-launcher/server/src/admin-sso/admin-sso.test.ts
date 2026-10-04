@@ -199,6 +199,12 @@ test('real OIDC code/PKCE/signature -> verified old password -> same local admin
     assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie)).status, 403);
     assert.equal((await f.request('/admin-api/internal/v1/admin/service-operations/execute', sessionCookie, {}, session.csrf, 'https://evil.test')).status, 403);
     assert.equal((await f.request('/admin-api/internal/v1/admin/service-operations/execute', sessionCookie, {}, session.csrf)).status, 200);
+    for (const endpoint of ['identity/validate', 'identity/applications']) {
+      const path = `/admin-api/internal/v1/admin/service-operations/${endpoint}`;
+      assert.equal((await f.request(path, sessionCookie, {})).status, 403);
+      assert.equal((await f.request(path, sessionCookie, {}, session.csrf, 'https://evil.test')).status, 403);
+      assert.equal((await f.request(path, sessionCookie, {}, session.csrf)).status, 200);
+    }
     assert.deepEqual(await f.store.listUserCenterUsers(), beforeUsers);
     assert.deepEqual(f.counts(), { pkceCount: 1, redemptionCount: 1 });
     assert.equal((await f.request('/auth/admin/logout', sessionCookie, {}, session.csrf)).status, 200);
@@ -233,6 +239,7 @@ test('write operations require recent authentication; 30-day sessions survive id
     const record = f.repository.records.get(`admin-sso-session:${id}`)!;
     record.data.authTime = Math.floor(Date.now() / 1000) - 301;
     assert.equal((await f.request('/admin-api/internal/v1/admin/service-operations/execute', sessionCookie, {}, session.csrf)).status, 401);
+    assert.equal((await f.request('/admin-api/internal/v1/admin/service-operations/identity/applications', sessionCookie, {}, session.csrf)).status, 401);
     assert.equal((await f.request('/admin-api/internal/v1/user-center/users', sessionCookie, undefined, session.csrf)).status, 200);
     assert.ok(Date.parse(record.data.expiresAt as string) - Date.now() > 29 * 86400000);
     record.touched = Date.now() - 20 * 86400000;

@@ -9,13 +9,13 @@ import { publicOrigin } from './identity-public-profile.mjs';
 import { validApplicationList } from './identity-app-profile.mjs';
 
 /** Additive offline registration. Deployment remains the existing separate operation. */
-export function registerApplication({ appId, origin, audience, entry, appFile, file = PROFILE }) {
+export function registerApplication({ appId, displayName, origin, audience, entry, appFile, file = PROFILE }) {
   if (!['public', 'private'].includes(entry) || !appFile || !appId || appId === 'mx-launcher' || appId === 'mx-insight-hub') throw new Error('请选择 public/private 并提供独立应用 ID、输出文件；Hub 沿用原登记命令。');
   const p = readProfile(file), target = entry === 'public' ? p?.publicEntry : p;
   if (!target) throw new Error('所选身份入口尚未配置。');
   const old = target.applications?.find(app => app.appId === appId);
   if (old && (old.origin !== origin || old.audience !== audience)) throw new Error('应用已绑定其他地址或 audience；请单独规划迁移。');
-  const app = old ?? { appId, origin, audience, clientId: `${appId}-web`, clientSecret: randomBytes(32).toString('base64url') };
+  const app = old ?? { appId, ...(displayName ? { displayName } : {}), origin, audience, clientId: `${appId}-web`, clientSecret: randomBytes(32).toString('base64url') };
   const applications = old ? target.applications : [...(target.applications ?? []), app];
   if (!validApplicationList(applications, target.clientId, entry === 'public' ? publicOrigin : undefined)
     || origin === target.origin || origin === target.adminOrigin) throw new Error('应用配置无效或客户端 ID 冲突。');

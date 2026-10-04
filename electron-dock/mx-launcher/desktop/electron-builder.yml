@@ -11,6 +11,8 @@ files:
   - renderer.js
   - theme.js
   - service-operations.js
+  - identity-applications.js
+  - identity-applications.css
   - admin-session.js
   - registration.js
   - service-operations-catalog.js

@@ -19,6 +19,10 @@ function fixture(t, { siblings = false } = {}) {
   const source = join(dir, 'source/server/scripts'); mkdirSync(source, { recursive: true }); mkdirSync(join(dir, 'source/desktop'), { recursive: true });
   cpSync(new URL('./service-operations-agent.mjs', import.meta.url), join(source, 'service-operations-agent.mjs'));
   cpSync(new URL('../../desktop/service-operations-catalog.js', import.meta.url), join(dir, 'source/desktop/service-operations-catalog.js'));
+  mkdirSync(join(dir, 'source/scripts'), { recursive: true });
+  for (const name of ['identity-console', 'identity-app', 'identity-profile', 'identity-public-profile', 'identity-app-profile']) {
+    cpSync(new URL(`../../scripts/${name}.mjs`, import.meta.url), join(dir, `source/scripts/${name}.mjs`));
+  }
   const paths = Object.fromEntries(['root', 'configuration', 'stateDir', 'units'].map(key => [key, join(dir, key)]));
   let active = false, busy = false, healthy = true, failSecret = false, current = null, boots = 0;
   const calls = [], requests = [], logs = [];
@@ -154,6 +158,10 @@ exit 1
     const release = join(dir, version); mkdirSync(join(release, 'server/scripts'), { recursive: true }); mkdirSync(join(release, 'desktop'));
     cpSync(new URL('./service-operations-agent.mjs', import.meta.url), join(release, 'server/scripts/service-operations-agent.mjs'));
     cpSync(new URL('../../desktop/service-operations-catalog.js', import.meta.url), join(release, 'desktop/service-operations-catalog.js'));
+    mkdirSync(join(release, 'scripts'));
+    for (const name of ['identity-console', 'identity-app', 'identity-profile', 'identity-public-profile', 'identity-app-profile']) {
+      cpSync(new URL(`../../scripts/${name}.mjs`, import.meta.url), join(release, `scripts/${name}.mjs`));
+    }
     writeFileSync(join(release, 'package.json'), '{"type":"module"}'); writeFileSync(join(release, 'release.json'), JSON.stringify({ runtimeVersion: version.repeat(64) }));
   }
   symlinkSync(join(dir, 'a'), join(dir, 'current'));

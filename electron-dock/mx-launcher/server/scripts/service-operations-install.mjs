@@ -86,6 +86,9 @@ export async function installOperations(options, dependencies = {}) {
     'desktop/service-operations-catalog.js': readFileSync(resolve(source, '../../desktop/service-operations-catalog.js')),
     'package.json': Buffer.from('{"type":"module"}\n')
   };
+  for (const name of ['identity-console', 'identity-app', 'identity-profile', 'identity-public-profile', 'identity-app-profile']) {
+    files[`scripts/${name}.mjs`] = readFileSync(resolve(source, `../../scripts/${name}.mjs`));
+  }
   const digest = createHash('sha256');
   for (const [path, content] of Object.entries(files)) digest.update(path).update('\0').update(content).update('\0');
   const version = digest.digest('hex');

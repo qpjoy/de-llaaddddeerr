@@ -31,7 +31,7 @@ export function resources(p, revision) {
   const ca = secret('mx-identity-ca', { 'ca.crt': p.caCert });
   const deployment = { apiVersion: 'apps/v1', kind: 'Deployment', metadata: metadata('mx-identity'), spec: {
     replicas: 1, strategy: { type: 'Recreate' }, selector: { matchLabels: { app: 'mx-identity' } },
-    template: { metadata: { labels: { app: 'mx-identity' }, annotations: { 'mx.qpjoy.com/identity-version': sha([runtime.data, revision]) } }, spec: {
+    template: { metadata: { labels: { app: 'mx-identity' }, annotations: { 'mx.qpjoy.com/identity-version': sha([runtime.data, revision]), 'mx.qpjoy.com/identity-config-digest': sha(Object.entries(runtime.data).sort(([a], [b]) => a.localeCompare(b))) } }, spec: {
       automountServiceAccountToken: false,
       tolerations: ['node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'].map(key => ({ key, operator: 'Exists', effect: 'NoSchedule' })),
       containers: [{ name: 'identity', image: 'qpjoy/mx-launcher-server:shadow', imagePullPolicy: 'Never', command: ['node', 'dist/src/identity/index.js'],

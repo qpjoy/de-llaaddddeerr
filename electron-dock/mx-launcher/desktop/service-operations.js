@@ -208,6 +208,11 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
   });
   return {
     reset,
+    select(nextService, nextAction) {
+      if (busy || !SERVICE_CATALOG[nextService]?.actions[nextAction]) return;
+      if (scope !== serverKey()) reset();
+      service = nextService; action = nextAction; plan = null; acknowledged = false; render();
+    },
     show() {
       if (scope !== serverKey()) reset();
       if (!initialized) { initialized = true; void perform('refresh'); }

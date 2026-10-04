@@ -52,6 +52,31 @@ async function complete(f, id) {
   throw new Error('fixture task did not complete');
 }
 
+test('identity registration uses authenticated fixed endpoints and blocks writes during tasks or updates', async t => {
+  let saves = 0, reads = 0, finish;
+  const identityConsole = {
+    overview: async () => { reads++; return { configured: true, entries: [] }; },
+    validate: async input => ({ appId: input.appId }),
+    save: async () => { saves++; return { saved: true }; }
+  };
+  const f = await fixture(t, () => new Promise(resolve => { finish = resolve; }), undefined, { identityConsole, onUpdateReady: () => {} });
+  assert.equal((await f.request('identity', undefined, '')).status, 401); assert.equal(reads, 0);
+  assert.equal((await f.request('identity/applications', { appId: 'mx-pay' }, '')).status, 401); assert.equal(saves, 0);
+  assert.equal((await f.request('identity')).data.instanceId, 'launcher');
+  assert.deepEqual((await f.request('identity/validate', { appId: 'mx-pay' })).data, { application: { appId: 'mx-pay' } });
+  assert.equal((await f.request('identity/applications', { appId: 'mx-pay' })).status, 200); assert.equal(saves, 1);
+  const plan = await f.plan('launcher', 'deploy');
+  await f.request('execute', { planId: plan.id, acknowledged: true });
+  assert.equal((await f.request('identity/applications', { appId: 'mx-other' })).status, 409);
+  for (let i = 0; !finish && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  finish({ code: null, uncertain: true }); await complete(f, plan.id);
+  assert.equal((await f.request('identity/applications', { appId: 'mx-other' })).status, 409);
+  await f.request('reconcile', { operationId: plan.id, note: '测试任务已核实并解除阻塞。' });
+  await f.request('lifecycle/update', { runtimeVersion: 'b'.repeat(64) });
+  assert.equal((await f.request('identity/applications', { appId: 'mx-other' })).status, 409);
+  assert.equal(saves, 1);
+});
+
 test('self-update drains accepted commands and persists results before switching; repeated task queries remain available', async t => {
   let finish, finishRead, switches = 0;
   const f = await fixture(t, spec => new Promise(resolve => { if (spec.action === 'deploy') finish = resolve; else finishRead = resolve; }), undefined, {

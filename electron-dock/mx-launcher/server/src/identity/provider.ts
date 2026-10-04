@@ -8,6 +8,7 @@ import { sessionsPage } from './sessions-page.js';
 import { rememberedAccounts } from './remembered-accounts.js';
 import { accountsPage, type AccountChoice } from './accounts-page.js';
 import { identityErrorPage, type RecoveryApplication } from './error-page.js';
+import { feishuRedirectPage } from './feishu-redirect.js';
 import { interactionRecovery } from './interaction-recovery.js';
 import { resolveHubInvitation } from './hub-invitation.js';
 import { RegistrationClientError, type RegistrationClient } from '../registration/backchannel.js';
@@ -109,6 +110,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     .map(origin => new URL(origin).origin));
   formActionOrigins.delete(new URL(settings.origin).origin);
   const formAction = ["'self'", ...formActionOrigins].join(' ');
+  const contentSecurityPolicy = `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`;
   const recovery = interactionRecovery(settings.cookieKeys, settings.issuer);
   const recoveryApps = new Map<string, RecoveryApplication>([
     [settings.clientId, { name: 'MX Launcher', url: `${settings.adminOrigin ?? settings.origin}/admin/`, loginUrl: `${settings.adminOrigin ?? settings.origin}/auth/admin/login?select=1` }],
@@ -181,12 +183,17 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     if (!accounts.webState || !registration?.feishu) throw new RegistrationClientError(503, '飞书登录尚未配置。');
     const state = randomBytes(32).toString('base64url'), verifier = randomBytes(32).toString('base64url');
     const authorization = await registration.feishu('authorize', { state, codeChallenge: createHash('sha256').update(verifier).digest('base64url'), sourceKey: sourceIp(req, settings) });
+    const redirect = feishuRedirectPage(String(authorization.authorizationUrl));
     await accounts.webState.remove('proof', uid);
     const interaction = await provider.Interaction.find(uid);
     const app = interaction?.params.mx_surface === 'application' ? applications.get(String(interaction.params.client_id)) : undefined;
     await accounts.webState.put('transaction', state, { uid, verifier, exchangeHandle: authorization.exchangeHandle, link, ...(app ? { appReturn: app.origin } : {}) });
     res.setHeader('Set-Cookie', `__Host-mx_feishu=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`);
-    res.writeHead(303, { location: String(authorization.authorizationUrl) }).end();
+    // End the form submission before external navigation: Chrome applies the
+    // original form-action policy to every hop of a POST/303 redirect chain.
+    // The exact script hash keeps password forms restricted to our own apps.
+    res.setHeader('Content-Security-Policy', contentSecurityPolicy.replace("script-src 'self'", `script-src 'self' ${redirect.scriptHash}`));
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(redirect.html);
   };
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     Object.assign(req, { originalUrl: req.url, baseUrl: '/identity' });
@@ -195,7 +202,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     // oidc-provider appends the exact script hash to an explicit script-src
     // for its account-switch form. Without this directive default-src blocks
     // that transition, leaving a blank page when the identity changes.
-    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`);
+    res.setHeader('Content-Security-Policy', contentSecurityPolicy);
     const path = (req.url ?? '').split('?')[0];
     if (path === '/identity/app-account') return appAccount.handle(req, res);
     if (path === '/identity/sessions' && accounts.browserSessions && accounts.revokeBrowserSessions) {

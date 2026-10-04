@@ -7,6 +7,8 @@ import { mkdir, readFile, writeFile, rename, readdir, realpath, stat, rm } from 
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVICE_CATALOG, SERVICE_CATALOG_VERSION, buildServiceCommand, normalizeServiceProfile } from '../../desktop/service-operations-catalog.js';
+import { identityConsoleOverview, validateIdentityApplication } from '../../scripts/identity-console.mjs';
+import { PROFILE, readProfile } from '../../scripts/identity-profile.mjs';
 
 const exec = promisify(execFile);
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -41,11 +43,11 @@ async function sourceState(cwd) {
 }
 
 async function configFingerprint(cwd, service) {
-  const files = service === 'launcher' ? ['server/.env'] : service === 'hub' ? ['.env.internal']
+  const files = service === 'launcher' ? ['server/.env', PROFILE] : service === 'hub' ? ['.env.internal']
     : ['.env.gpu', `mx-${service}/.env`, `mx-${service}/.env.download`, `mx-${service}/secrets/api-key`];
   const values = [];
   for (const file of files) {
-    try { values.push([file, hash(await readFile(join(cwd, file), 'utf8'))]); }
+    try { values.push([file, hash(await readFile(file.startsWith('/') ? file : join(cwd, file), 'utf8'))]); }
     catch (error) { if (error.code !== 'ENOENT') throw error; values.push([file, null]); }
   }
   return hash(values);
@@ -79,7 +81,19 @@ function commandEnvironment(plan) {
   return env;
 }
 
-export async function createOperationsAgent({ config, stateDir, token, runCommand, inspectSource = sourceState, runtimeVersion = 'development', onUpdateReady }) {
+async function saveIdentityOnHost(input) {
+  const child = exec('flock', ['-n', '-E', '75', '/run/mx-launcher-deploy.lock', process.execPath,
+    fileURLToPath(new URL('../../scripts/identity-console.mjs', import.meta.url))], { timeout: 10000, maxBuffer: 65536 });
+  child.child.stdin.end(JSON.stringify(input));
+  try { return JSON.parse((await child).stdout); }
+  catch (error) {
+    if (error.code === 75) throw Object.assign(new Error('主机正在部署或修改身份配置，请稍后重试。'), { status: 409 });
+    let result; try { result = JSON.parse(error.stdout); } catch { /* Never expose child output. */ }
+    throw Object.assign(new Error(result?.error ? result.message : '身份配置保存结果待核对，请刷新查看；不会自动重复操作。'), { status: result?.status || 503 });
+  }
+}
+export async function createOperationsAgent({ config, stateDir, token, runCommand, inspectSource = sourceState, runtimeVersion = 'development', onUpdateReady,
+  identityConsole = { overview: identityConsoleOverview, validate: input => validateIdentityApplication(readProfile(), input), save: saveIdentityOnHost } }) {
   assert(typeof token === 'string' && token.length >= 32, '执行器令牌至少需要 32 个字符');
   assert(config?.instances?.length > 0, '没有登记服务实例');
   const ids = new Set();
@@ -309,6 +323,21 @@ export async function createOperationsAgent({ config, stateDir, token, runComman
           try { source = await inspectSource(profile.cwd); } catch { /* Missing checkout stays unknown. */ }
           return { id: instance.id, service: instance.service, profile, source };
         })) };
+      } else if (path === '/v1/identity' && request.method === 'GET') {
+        const instance = config.instances.find(item => item.service === 'launcher');
+        assert(instance, '此执行器未登记 Launcher 实例', 404);
+        result = { ...await identityConsole.overview(), instanceId: instance.id };
+      } else if (path === '/v1/identity/validate' && request.method === 'POST') {
+        assert(config.instances.some(item => item.service === 'launcher'), '此执行器未登记 Launcher 实例', 404);
+        result = { application: await identityConsole.validate(await bodyJson(request)) };
+      } else if (path === '/v1/identity/applications' && request.method === 'POST') {
+        assert(config.instances.some(item => item.service === 'launcher'), '此执行器未登记 Launcher 实例', 404);
+        assert(!submitting && !running && !updateRequested && !updating, '执行器有任务或正在更新，请稍后保存。', 409);
+        submitting = true;
+        try {
+          try { await stat(lockPath); assert(false, '主机有待核对的执行任务，请先处理任务记录。', 409); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          result = await identityConsole.save(await bodyJson(request));
+        } finally { submitting = false; }
       } else if (request.method === 'POST' && path === '/v1/profiles') {
         const body = await bodyJson(request); const instance = instanceFor(body.instanceId);
         const profile = normalizeServiceProfile(instance.service, body.profile);

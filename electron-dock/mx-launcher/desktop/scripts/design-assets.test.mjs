@@ -9,7 +9,7 @@ test('production admin bundle carries exactly the shared UI assets used by the d
   const root = mkdtempSync(join(tmpdir(), 'mx-neon-assets-')); t.after(()=>rmSync(root,{recursive:true,force:true}));
   for (const path of ['desktop/node_modules/three/build','ui-design/src']) mkdirSync(join(root,path),{recursive:true});
   const desktop = new URL('../', import.meta.url), ui = new URL('../../ui-design/src/', import.meta.url);
-  for (const file of ['index.html','theme.js','renderer.js','styles.css','neon-void.css','admin-session.js','registration.js','service-operations.js','service-operations-catalog.js']) copyFileSync(new URL(file,desktop),join(root,'desktop',file));
+  for (const file of ['index.html','theme.js','renderer.js','styles.css','neon-void.css','admin-session.js','registration.js','service-operations.js','service-operations-catalog.js','identity-applications.js','identity-applications.css']) copyFileSync(new URL(file,desktop),join(root,'desktop',file));
   for (const file of ['styles.css','tokens.css','select.js','select.css']) copyFileSync(new URL(file,ui),join(root,'ui-design/src',file));
   writeFileSync(join(root,'desktop/node_modules/three/build/three.module.js'),'// fixture only');
   const source = readFileSync(new URL('../../scripts/manage.sh',import.meta.url),'utf8');
@@ -24,4 +24,5 @@ test('production admin bundle carries exactly the shared UI assets used by the d
   assert.deepEqual(readFileSync(join(root,'server/artifacts/admin/neon-void.css')),readFileSync(new URL('neon-void.css',desktop)));
   assert.deepEqual(readFileSync(join(root,'server/artifacts/admin/admin-session.js')),readFileSync(new URL('admin-session.js',desktop)));
   assert.deepEqual(readFileSync(join(root,'server/artifacts/admin/registration.js')),readFileSync(new URL('registration.js',desktop)));
+  for (const file of ['identity-applications.js','identity-applications.css']) assert.deepEqual(readFileSync(join(root,'server/artifacts/admin',file)),readFileSync(new URL(file,desktop)));
 });

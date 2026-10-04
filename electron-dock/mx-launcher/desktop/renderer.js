@@ -1,5 +1,6 @@
 import * as THREE from './node_modules/three/build/three.module.js';
 import { createServiceOperations } from './service-operations.js';
+import { createIdentityApplications } from './identity-applications.js';
 import { installNeonSelects } from './ui-design/select.js';
 import { createAdminSessionUi, adminAccessPresentation } from './admin-session.js';
 import { createRegistrationUi } from './registration.js';
@@ -628,6 +629,7 @@ function renderWorkbench() {
 }
 
 const internalSubsectionMeta = {
+  'identity-applications': { title: '统一认证', subtitle: '接入应用、可信域名与固定回调；发布后核对 Auth 加载状态。' },
   overview: {
     title: 'Internal 基础系统',
     subtitle: 'User Center、RBAC、Config、DNS、Release、E2E Gate、Observability、Admin、Runner、SDK Gateway 都在 Internal 控制面内规划。'
@@ -937,6 +939,14 @@ const serviceOperationsPanel = createServiceOperations(document.getElementById('
   serverKey: () => normalizedServerBase(),
   isVisible: () => state.activeView === 'admin' && state.adminSection === 'services'
 });
+const identityApplicationsPanel = createIdentityApplications(document.getElementById('identity-applications-panel'), {
+  request: fetchJson,
+  serverKey: () => normalizedServerBase(),
+  onPublish: () => {
+    serviceOperationsPanel.select('launcher', 'deploy');
+    setActiveView('admin', { menu: 'operations', section: 'services', subsection: 'services' });
+  }
+});
 
 refreshNavTabs();
 document.getElementById('gate-login').addEventListener('click', () => {
@@ -1028,6 +1038,7 @@ serverInput.addEventListener('input', () => {
   registrationUi.reset();
   if (synchronizeLauncherNetworkServerScope(serverInput.value)) {
     serviceOperationsPanel.reset();
+    identityApplicationsPanel.reset();
     state.appCenterApps = [];
     state.appCenterAppsError = '连接地址已变化，请刷新应用目录。';
     state.workbenchCatalogLoadedAt = null;
@@ -4696,7 +4707,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   const path = url.pathname;
   if ((verb === 'GET' && path === '/internal/v1/user-center/registration') ||
     (verb === 'POST' && /^\/internal\/v1\/user-center\/registration\/(?:policy|invitations|invitations\/revoke)$/.test(path))) return true;
-  if (['GET', 'POST'].includes(verb) && /^\/internal\/v1\/admin\/service-operations\/(?:instances|profiles|plans|execute|operations(?:\/[a-f0-9-]{36})?|reconcile)$/.test(path)) return true;
+  if (['GET', 'POST'].includes(verb) && /^\/internal\/v1\/admin\/service-operations\/(?:identity(?:\/validate|\/applications)?|instances|profiles|plans|execute|operations(?:\/[a-f0-9-]{36})?|reconcile)$/.test(path)) return true;
   if (verb === 'GET') {
     return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts|system-subscriptions)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|oversea\/subscription-link|h2o\/runtime-profile)$/.test(path)
@@ -5089,6 +5100,9 @@ function deploymentKindSubtitle(kind) {
 
 function renderInspectorChrome() {
   if (!adminConsole || !adminInspector || !inspectorToggle) return;
+  const identityWorkspace = state.adminSection === 'foundations' && state.adminSubsection === 'identity-applications';
+  document.getElementById('view-admin').classList.toggle('is-identity-workspace', identityWorkspace);
+  adminConsole.classList.toggle('is-identity-workspace', identityWorkspace);
   adminConsole.classList.toggle('is-services-workspace', state.adminSection === 'services');
   adminConsole.classList.toggle('is-directory-workspace', state.adminSection === 'foundations' && ['user-center', 'rbac', 'release', 'dns'].includes(state.adminSubsection));
   adminConsole.classList.toggle('is-inspector-collapsed', state.inspectorCollapsed);
@@ -7538,6 +7552,13 @@ function renderFoundationGrid(overview) {
       <span>${escapeHtml(String(active.value))}</span>
     </article>
   `;
+  const identityRoot = document.getElementById('identity-applications-panel');
+  identityRoot.hidden = activeId !== 'identity-applications';
+  foundationGrid.hidden = activeId === 'identity-applications';
+  if (activeId === 'identity-applications') {
+    identityApplicationsPanel.show();
+    return;
+  }
   let body = '';
   if (activeId === 'overview') {
     body = renderInternalOverview(cards, overview || {});
@@ -7653,6 +7674,7 @@ function renderFoundationGrid(overview) {
 
 function internalFoundationCards(overview) {
   return [
+    { id: 'identity-applications', title: '统一认证', value: 'Auth', description: '登记接入应用，查看可信域名、回调与 Auth 发布状态。' },
     {
       id: 'overview',
       title: 'Control Plane',
@@ -7733,7 +7755,7 @@ function renderInternalOverview(cards, overview) {
     {
       title: 'Identity & Access',
       summary: '用户、设备、服务账号、权限目录和 Action Gate 的入口。',
-      ids: ['user-center', 'rbac']
+      ids: ['user-center', 'rbac', 'identity-applications']
     },
     {
       title: 'Runtime Authority',

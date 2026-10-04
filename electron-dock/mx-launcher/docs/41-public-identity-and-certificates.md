@@ -110,3 +110,13 @@ Auth 现在只将静态登记的 Launcher、Hub origin 加入 `form-action`，�
 此修复仅需更新代码并执行原 **mx-launcher deploy**，Auth 随之更新；已经完成上节升级的 Hub 无需再次部署。无需重新登记域名、修改 Nginx、轮换密钥或清空账号数据。部署后从 Hub/Launcher 首页重新发起登录，不刷新已经消费的 Auth 地址。
 
 已在本地 Chrome、三个不同 HTTPS 测试域名及真实 OIDC/PostgreSQL 下验证首次登录、Hub 切换 A→B、Launcher 切换 B→A，以及应用退出后复用 Auth 会话；应用回调使用测试客户端验证授权码兑换、签名、state、nonce 与新账号 subject。原有用户和密码记录保持不变。
+
+### 点击飞书登录仍被 `form-action 'self'` 拦截
+
+这是另一段跨域跳转：Auth 登录/切换账号表单 POST 后，原实现直接以 303 跳到飞书授权域名。Chrome 会继续按原表单的 `form-action` 检查这一跳；增加飞书开发者后台的回调 URL 无法解除浏览器 CSP 拦截。
+
+Auth 现在先返回同源的 200 导航页，再通过精确 SHA-256 哈希允许的固定脚本前往服务端生成的 HTTPS 飞书授权地址。禁用 JavaScript 时可点击「继续前往飞书」。导航地址只来自认证后端，不接受请求参数指定；表单允许来源保持原来的 Auth/已登记应用，不增加飞书域名、通配符或任意内联脚本权限。state、PKCE、浏览器绑定 Cookie、一次性事务和原账号绑定检查保持不变。
+
+本地 Chrome 回归使用独立的 Auth、应用和模拟飞书 HTTPS origin，以及真实 OIDC/PostgreSQL：先复现相同 CSP 错误，再验证 Launcher/Hub 切换到已绑定飞书账号、显式绑定入口、禁用 JavaScript 后手动继续，且旧账号和密码记录不变。测试文件为 `server/src/identity/feishu-navigation.test.ts`，需设置隔离的 `MX_SSO_TEST_DATABASE_URL` 和已有 Playwright 的 `MX_SSO_BROWSER_MODULE`；浏览器测试没有使用真实飞书租户。
+
+发布此修复只需同步代码后执行原 **mx-launcher deploy**，更新随之部署的 Auth。Hub、飞书回调配置、密钥、数据库和 MX-H2I 客户端均无需因此调整。部署完成后从应用重新发起登录；本地验收不代表生产已更新。

@@ -35,6 +35,24 @@ export class ServiceOperationsController {
     return this.request('/v1/instances');
   }
 
+  @Get('identity')
+  identity(@Headers(INTERNAL_OPS_TOKEN_HEADER) token?: string) {
+    assertInternalOpsToken(token);
+    return this.request('/v1/identity');
+  }
+
+  @Post('identity/validate')
+  validateIdentity(@Body() body: unknown, @Headers(INTERNAL_OPS_TOKEN_HEADER) token?: string) {
+    assertInternalOpsToken(token);
+    return this.request('/v1/identity/validate', 'POST', body);
+  }
+
+  @Post('identity/applications')
+  saveIdentity(@Body() body: unknown, @Headers(INTERNAL_OPS_TOKEN_HEADER) token?: string) {
+    assertInternalOpsToken(token);
+    return this.request('/v1/identity/applications', 'POST', body);
+  }
+
   @Post('profiles')
   profiles(@Body() body: unknown, @Headers(INTERNAL_OPS_TOKEN_HEADER) token?: string) {
     assertInternalOpsToken(token);

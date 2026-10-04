@@ -113,6 +113,7 @@ test('Feishu token exchange provisions an isolated user and returns only an inte
     codeChallenge: CODE_CHALLENGE
   });
 
+  const startedAt = Date.now();
   const response = await controller.feishuToken({
     code: 'authorization-code',
     redirectUri: REDIRECT_URI,
@@ -122,7 +123,9 @@ test('Feishu token exchange provisions an isolated user and returns only an inte
     scope: 'auth.read appcenter.read',
     requestId: 'req-feishu-test'
   });
-  assert.equal(response.token.expires_in, 30 * 86400);
+  // expires_in is the remaining lifetime after token creation/serialization.
+  const elapsedSeconds = Math.ceil((Date.now() - startedAt) / 1000);
+  assert.ok(response.token.expires_in <= 30 * 86400 && response.token.expires_in >= 30 * 86400 - elapsedSeconds);
   assert.equal(response.token.auth_provider, 'feishu');
   assert.equal(
     response.token.subject,

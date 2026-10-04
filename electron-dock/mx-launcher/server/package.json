@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "test:admin-sso": "node --test --import tsx src/admin-sso/*.test.ts",
     "test:identity": "node --test --import tsx src/identity/*.test.ts ../scripts/identity-deploy.test.mjs",
+    "test:identity-console": "node --test ../scripts/identity-console.test.mjs ../scripts/identity-app.test.mjs ../scripts/identity-deploy.test.mjs ../scripts/identity-public.test.mjs",
     "test:registration": "node --test --import tsx src/registration/*.test.ts",
     "migrate:up": "node dist/src/migrate.js",
     "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",

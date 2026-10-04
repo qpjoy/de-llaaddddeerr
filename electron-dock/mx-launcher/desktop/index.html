@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="./ui-design/select.css" />
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./neon-void.css" />
+    <link rel="stylesheet" href="./identity-applications.css" />
   </head>
   <body class="qp-app is-locked">
     <section id="login-gate" class="login-gate" aria-labelledby="gate-title">
@@ -198,6 +199,10 @@
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="rbac" hidden>
               <strong>角色与权限</strong>
               <span>角色、权限、审批边界</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="identity-applications" hidden>
+              <strong>统一认证</strong>
+              <span>接入应用、可信域名与回调</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="config-center" hidden>
               <strong>Config Center</strong>
@@ -718,6 +723,7 @@
                   </div>
                 </details>
                 <div id="foundation-grid" class="foundation-grid"></div>
+                <div id="identity-applications-panel" hidden></div>
               </section>
 
               <section id="admin-section-evidence" class="admin-section" hidden>

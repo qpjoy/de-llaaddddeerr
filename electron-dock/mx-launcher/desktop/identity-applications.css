@@ -1,0 +1,34 @@
+#identity-applications-panel { display: grid; gap: 16px; min-width: 0; }
+.admin-view.is-identity-workspace > .view-header,
+.admin-view.is-identity-workspace #admin-section-foundations > .deployment-heading,
+.admin-console.is-identity-workspace .admin-inspector { display: none; }
+.admin-console.is-identity-workspace,
+.admin-console.is-identity-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr); }
+#identity-applications-panel[hidden] { display: none; }
+#identity-applications-panel h4 { margin: 0 0 8px; font-size: 16px; }
+.identity-entry-list { display: grid; gap: 16px; }
+.identity-entry, .identity-register, .identity-preview { min-width: 0; padding: 22px; border: 1px solid var(--mx-line); border-radius: 12px; background: var(--mx-bg-panel); }
+.identity-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.identity-heading > div { min-width: 0; }
+.identity-meta { display: block; color: var(--mx-text-soft); font-size: 12px; line-height: 1.7; }
+.identity-app-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; margin-top: 18px; }
+.identity-app { padding: 16px; min-width: 0; background: var(--mx-bg-input); border: 1px solid var(--mx-line); border-radius: 8px; }
+.identity-status { display: inline-flex; align-items: center; align-self: start; padding: 4px 9px; border: 1px solid var(--mx-line); border-radius: 6px; font-size: 12px; color: var(--mx-text-soft); }
+.identity-status[data-state="active"] { color: var(--mx-primary); border-color: var(--mx-primary); }
+.identity-status[data-state="pending"], .identity-warning { color: var(--mx-warning); }
+#identity-applications-panel dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 12px; margin: 16px 0; font-size: 12px; }
+#identity-applications-panel dt { color: var(--mx-text-soft); }
+#identity-applications-panel dd { margin: 0; overflow-wrap: anywhere; }
+#identity-applications-panel code { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+#identity-applications-panel details summary { cursor: pointer; font-size: 12px; color: var(--mx-text-soft); }
+.identity-policy { margin-top: 18px; border-top: 1px solid var(--mx-line); padding-top: 14px; }
+.identity-policy p { font-size: 12px; color: var(--mx-text-soft); }
+.identity-workspace { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.identity-register fieldset { display: grid; gap: 14px; padding: 0; margin: 18px 0 0; border: 0; min-width: 0; }
+.identity-field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.identity-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.identity-preview ol { padding-left: 20px; font-size: 13px; line-height: 2; }
+.identity-feedback { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.identity-feedback:empty { display: none; }
+@media (max-width: 1000px) { .identity-workspace { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .identity-field-pair { grid-template-columns: 1fr; } .identity-entry, .identity-register, .identity-preview { padding: 16px; } #identity-applications-panel dl { grid-template-columns: 1fr; gap: 4px; } #identity-applications-panel dd { margin-bottom: 8px; } }
