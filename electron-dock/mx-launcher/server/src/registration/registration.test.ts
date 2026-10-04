@@ -60,6 +60,16 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     const afterOld = await db.query("SELECT kind,id,data FROM mx_platform_records WHERE environment=$1 AND kind IN ('iam-user','iam-user-credential') AND id<>$2 ORDER BY kind,id", [environment, winner.userId]);
     assert.deepEqual(afterOld, before, 'legacy identities and credentials stay byte-for-byte identical');
     await assert.rejects(a.register({ ...winningInput, account: 'Other' }), /已完成/);
+    const enterpriseInvitation={issuer:'https://hub.test',clientId:'hub',invitationId:randomUUID(),expiresAt:new Date(Date.now()+86400000).toISOString()};
+    const companyInputs=[input('EnterpriseA','',{enterpriseInvitation}),input('EnterpriseB','',{enterpriseInvitation})];
+    const companyResults=await Promise.allSettled([a.register(companyInputs[0]),b.register(companyInputs[1])]);
+    assert.equal(companyResults.filter(r=>r.status==='fulfilled').length,1,'one enterprise invitation cannot mint multiple accounts');
+    const companyIndex=companyResults.findIndex(r=>r.status==='fulfilled');
+    const companyUser=(companyResults[companyIndex] as PromiseFulfilledResult<{userId:string}>).value;
+    assert.deepEqual(await b.register({...companyInputs[companyIndex],transactionId:randomUUID()}),companyUser,'a new login transaction can recover the same registered account');
+    assert.deepEqual((await identity.account(companyUser.userId))?.roleIds,['mx-user']);
+    assert.deepEqual((await identity.account(companyUser.userId))?.appAccess.allowedAppIds,[]);
+    await assert.rejects(a.register(input('ExpiredCompany','',{enterpriseInvitation:{...enterpriseInvitation,invitationId:randomUUID(),expiresAt:new Date(0).toISOString()}})),/企业邀请已失效/);
 
     // Both identity origins consume the original invitation policy and user DB.
     const sharedInvite = await a.createInvitation({ label: 'Public entry', maxUses: 1, days: 1 });
@@ -74,10 +84,14 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
     const controller = new RegistrationController(config, store);
     try {
       const body = { timestamp: Date.now(), clientId: 'mx-launcher-public-admin', action: 'register',
-        input: { ...input('PublicOriginUser', sharedInvite.code), clientId: 'mx-launcher-public-admin' } };
+        input: { ...input('PublicOriginUser', sharedInvite.code), clientId: 'mx-launcher-public-admin',
+          source: { issuer:'https://auth.example.com/identity',clientId:'hub-public',appId:'mx-insight-hub' as const,appOrigin:'https://hub.example.com' } } };
       await assert.rejects(controller.backchannel(registrationSignature('wrong', body), body), /Unauthorized/);
+      const mismatched={...body,input:{...body.input,source:{...body.input.source,issuer:'https://other.example.com/identity'}}};
+      await assert.rejects(controller.backchannel(registrationSignature('p'.repeat(43),mismatched),mismatched),/issuer mismatch/);
       const created = await controller.backchannel(registrationSignature('p'.repeat(43), body), body) as { userId: string };
       assert.equal((await identity.authenticate('PublicOriginUser', 'RegistrationPassword123!'))?.userId, created.userId);
+      assert.deepEqual((await identity.account(created.userId))?.registration?.source,body.input.source);
       assert.equal((await a.invitations()).find(row => row.id === sharedInvite.invitation.id)?.uses, 1);
       assert.deepEqual(await a.register({ ...body.input, clientId: 'launcher' }), created, 'public signup shares the private registration transaction namespace');
     } finally {
@@ -157,6 +171,7 @@ test('real PG registration: atomic last slot, replay, closure, revoke, account p
 
     let policy = await a.updatePolicy({ mode: 'closed', version: 0 });
     await assert.rejects(a.register(input('ClosedAccount', invite.code)), /暂未开放/);
+    await assert.rejects(a.register(input('ClosedEnterprise','',{enterpriseInvitation:{...enterpriseInvitation,invitationId:randomUUID()},policyVersion:policy.version})),/暂未开放/,'enterprise invitations cannot override platform closure');
     assert.deepEqual(await a.register(winningInput), winner, 'closing signup never undoes committed registration');
     await assert.rejects(a.updatePolicy({ mode: 'open', version: 0 }), /已更新/);
     policy = await a.updatePolicy({ mode: 'open', version: policy.version });

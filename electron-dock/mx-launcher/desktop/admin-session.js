@@ -64,6 +64,13 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
     login.hidden = !session?.enabled;
     logout.hidden = !session?.authenticated;
     if (switchAccount) switchAccount.hidden = !session?.authenticated;
+    const sessionsLink = root.getElementById('admin-account-sessions');
+    if (sessionsLink) {
+      const visible = session?.authenticated && session.authMethod !== 'ops-token' && session.securityUrl;
+      sessionsLink.hidden = !visible;
+      if (visible) sessionsLink.href = session.securityUrl;
+      else sessionsLink.removeAttribute('href');
+    }
     if (!sameOrigin()) status.textContent = '个人登录请打开服务器的 /admin/ 管理入口';
     else if (session?.unavailable) status.textContent = '个人登录状态暂不可用，请刷新页面重试';
     else if (!session?.enabled) status.textContent = '个人 SSO 待启用';

@@ -2,7 +2,7 @@
 
 日期：2026-10-03。依据：[目标架构](33-mx-platform-identity-and-sustainable-architecture.md)、[总部署与恢复契约](34-platform-deploy-and-recovery-contract.md)。
 
-用户已授权按可独立验收的小阶段交付。首期界面归纳、四服务部署工作区、独立执行器和 Launcher 内网托管身份已实现，部署恢复见文档 37。最新增量是账号切换修复、权限状态区分、注册策略与邀请码内网闭环，见 [文档 39](39-registration-and-account-switching.md)，本批尚未部署生产。Hub 新登录与幂等开通、飞书 Web 关联、公网身份入口仍为下一批；不把本批注册表单等同于全平台上线。文档 33 中的可观测、总编排和跨主机恢复演练继续按阶段验收。
+用户已授权按可独立验收的小阶段交付。本文下方保留各批历史记录。2026-10-04 当前实现已推进至注册邀请码、标准 SSO 与原账号兼容、Hub 原成员/租户复用及个人空间、飞书 Web 绑定，见 [39](39-registration-and-account-switching.md)、[40](40-hub-sso-and-feishu-web.md)、[41](41-public-identity-and-certificates.md)。最新补齐改密后的 Web 会话失效、全局网页登录退出和单浏览器撤销，见 [42](42-browser-session-lifecycle.md)，本批仅完成本地隔离验收，未部署生产。随后完成企业邀请、免第二码注册及显式自动租户绑定的本地验收，见 [43](43-hub-enterprise-invitations.md)，仍未部署生产。最新补齐 Hub 独立注册方式、可信来源及新 Hub 账号的默认网络边界，见 [44](44-hub-registration-policy-and-provenance.md)。本阶段不扩展统一租户或跨中心授权平台。指定联系方式验证/通知投递、完整账号恢复/MFA/密钥轮换、可观测总览、总 deploy 及跨主机恢复演练仍需后续交付；不得按下方旧「下一阶段」描述判断当前源码进度，也不能把源码完成等同于全平台上线。
 
 ## 1. 持续保护的基线
 

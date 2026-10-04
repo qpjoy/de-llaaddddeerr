@@ -4,8 +4,22 @@ import { createUserCenterUser, createUserCenterUserCredential, resolveUserCenter
 import type { AppCenterApp, UserCenterUser, UserCenterUserCredential } from '../types.js';
 
 export type RegistrationMode = 'closed' | 'invite_code' | 'open';
-export interface RegistrationPolicy { mode: RegistrationMode; version: number }
-export interface RegistrationInput { transactionId: string; clientId: string; policyVersion: number; account: string; password: string; inviteCode?: string; verifiedFeishuSubject?: string }
+export interface RegistrationPolicy { mode: RegistrationMode; version: number; hubMode?: RegistrationMode | 'inherit' }
+export type RegistrationSource = NonNullable<UserCenterUser['registration']>['source'];
+export function validateRegistrationSource(source: RegistrationSource | undefined): void {
+  if (source === undefined) return; // Old Auth replicas retain the default policy, without invented provenance.
+  try {
+    if (!source || !['mx-launcher','mx-insight-hub'].includes(source.appId) || typeof source.clientId !== 'string' || !source.clientId || source.clientId.length > 160) throw new Error();
+    const issuer = new URL(source.issuer), origin = new URL(source.appOrigin);
+    if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash || issuer.pathname !== '/identity'
+      || origin.protocol !== 'https:' || origin.origin !== source.appOrigin) throw new Error();
+  } catch { fail(400,'invalid_registration_source','注册来源无效，请从应用重新发起。'); }
+}
+function effectivePolicy(policy: RegistrationPolicy, source?: RegistrationSource): RegistrationPolicy {
+  return { ...policy, mode: policy.mode === 'closed' ? 'closed' : source?.appId === 'mx-insight-hub' && policy.hubMode && policy.hubMode !== 'inherit' ? policy.hubMode : policy.mode };
+}
+export interface EnterpriseInvitation { issuer: string; clientId: string; invitationId: string; expiresAt: string }
+export interface RegistrationInput { transactionId: string; clientId: string; policyVersion: number; account: string; password: string; inviteCode?: string; verifiedFeishuSubject?: string; enterpriseInvitation?: EnterpriseInvitation; source?: RegistrationSource }
 export class RegistrationError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
@@ -50,7 +64,7 @@ export class RegistrationRepository {
   private async policyFor(manager: EntityManager): Promise<RegistrationPolicy> {
     return await this.read(manager, 'registration-policy', 'platform') ?? { mode: 'invite_code', version: 0 };
   }
-  async policy() { await this.ready(); return this.policyFor(this.db.manager); }
+  async policy(source?: RegistrationSource) { validateRegistrationSource(source); await this.ready(); return effectivePolicy(await this.policyFor(this.db.manager),source); }
   private validFeishu(subject: string) {
     if (!/^[A-Za-z0-9_-]{1,160}:[A-Za-z0-9_-]{1,160}$/.test(subject)) fail(400, 'invalid_feishu_identity', '飞书身份验证无效。');
   }
@@ -84,12 +98,14 @@ export class RegistrationRepository {
   }
   async updatePolicy(input: RegistrationPolicy) {
     if (!['closed', 'invite_code', 'open'].includes(input.mode) || !Number.isSafeInteger(input.version)) fail(400, 'invalid_policy', '注册策略无效。');
+    if (input.hubMode !== undefined && !['inherit','closed','invite_code','open'].includes(input.hubMode)) fail(400,'invalid_policy','Hub 注册方式无效。');
     await this.ready();
     return this.db.transaction(async manager => {
       await this.lock(manager);
       const old = await this.policyFor(manager);
       if (input.version !== old.version) fail(409, 'policy_changed', '注册策略已更新，请刷新后重试。');
-      const policy = { mode: input.mode, version: old.version + 1 };
+      const hubMode = input.hubMode ?? old.hubMode;
+      const policy: RegistrationPolicy = { mode: input.mode, version: old.version + 1, ...(hubMode !== undefined ? {hubMode} : {}) };
       await this.write(manager, 'registration-policy', 'platform', policy);
       await this.audit(manager, 'identity.registration-policy.updated', { ...policy });
       return policy;
@@ -147,6 +163,7 @@ export class RegistrationRepository {
     });
   }
   async register(input: RegistrationInput) {
+    validateRegistrationSource(input.source);
     const account = typeof input.account === 'string' ? input.account.trim() : '';
     if (input.clientId !== this.clientId || !/^[A-Za-z0-9_-]{16,128}$/.test(input.transactionId ?? '')
       || !Number.isSafeInteger(input.policyVersion)) fail(400, 'invalid_transaction', '注册请求已失效，请重新打开登录页。');
@@ -167,11 +184,33 @@ export class RegistrationRepository {
         if (input.verifiedFeishuSubject && user!.profile.externalIds.feishuSubject !== input.verifiedFeishuSubject) fail(409, 'feishu_binding_conflict', '注册身份已变化，请重新登录。');
         return { userId: previous.userId };
       }
-      const policy = await this.policyFor(manager);
+      const policy = effectivePolicy(await this.policyFor(manager),input.source);
+      if (policy.hubMode && policy.hubMode !== 'inherit' && !input.source) fail(400,'invalid_registration_source','请从应用重新发起注册，身份服务需要支持注册来源。');
       if (policy.mode === 'closed') fail(403, 'registration_closed', '暂未开放新账号注册，已有账号可正常登录。');
       if (policy.version !== input.policyVersion) fail(409, 'policy_changed', '注册策略已更新，请刷新页面后重试。');
+      const enterprise = input.enterpriseInvitation;
+      let enterpriseKey: string | undefined;
+      if (enterprise) {
+        if (input.source && (input.source.appId !== 'mx-insight-hub' || enterprise.issuer !== input.source.appOrigin || enterprise.clientId !== input.source.clientId))
+          fail(400,'invalid_registration_source','企业邀请与注册应用不匹配。');
+        // Auth alone supplies this verified proof, via its signed backchannel.
+        // One minimal MX account per invitation; no tenant/network grants here.
+        if (typeof enterprise.issuer !== 'string' || !enterprise.issuer.startsWith('https://') || new URL(enterprise.issuer).origin !== enterprise.issuer
+          || typeof enterprise.clientId !== 'string' || !enterprise.clientId || !/^[a-f0-9-]{36}$/i.test(enterprise.invitationId)
+          || !Number.isFinite(Date.parse(enterprise.expiresAt)) || Date.parse(enterprise.expiresAt) <= Date.now()
+          || Date.parse(enterprise.expiresAt) > Date.now()+31*86400000) fail(400,'invitation_unavailable','企业邀请已失效。');
+        enterpriseKey = hash(JSON.stringify([enterprise.issuer,enterprise.clientId,enterprise.invitationId]));
+        const used = await this.read<{userId:string}>(manager,'registration-enterprise-redemption',enterpriseKey);
+        if (used) {
+          const user = await this.read<UserCenterUser>(manager,'iam-user',used.userId);
+          const stored = await this.read<UserCenterUserCredential>(manager,'iam-user-credential',used.userId);
+          if (!user || user.status!=='active' || user.account!==account || !stored || !verifyUserCenterCredential(input.password,stored)
+            || (input.verifiedFeishuSubject && user.profile.externalIds.feishuSubject!==input.verifiedFeishuSubject)) fail(409,'registration_conflict','此邀请已注册账号，请使用原账号登录。');
+          return {userId:used.userId};
+        }
+      }
       let invitation: Invitation | undefined;
-      if (policy.mode === 'invite_code') {
+      if (policy.mode === 'invite_code' && !enterprise) {
         const codeHash = hash(typeof input.inviteCode === 'string' ? input.inviteCode.trim() : '');
         const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='registration-invite' AND data->>'codeHash'=$2", [this.environment, codeHash]);
         invitation = rows[0]?.data;
@@ -190,12 +229,17 @@ export class RegistrationRepository {
       // inherit application policies; they do not mean an all-app wildcard.
       const allowedAppIds = invitation?.appGrant?.appIds ?? [];
       const user = createUserCenterUser({ userId, account, displayName: account, roleIds: ['mx-user'], registeredByAppId: 'mx-identity', allowedAppIds,
+        ...(input.source?.appId === 'mx-insight-hub' ? { deniedAppIds: ['mx-h2i','luopan'] } : {}),
         ...(input.verifiedFeishuSubject ? { externalIds: { feishuSubject: input.verifiedFeishuSubject } } : {}) }, null, userCredentialSummary(credential));
+      if (input.source) user.registration = { source: input.source, method: input.verifiedFeishuSubject ? 'feishu' : 'password', policyVersion: policy.version, registeredAt: user.createdAt };
       await this.write(manager, 'iam-user', userId, user);
       await this.write(manager, 'iam-user-credential', userId, credential);
       if (invitation) await this.write(manager, 'registration-invite', invitation.id, { ...invitation, uses: invitation.uses + 1 });
-      await this.write(manager, 'registration-redemption', transactionId, { userId, clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null, createdAt: new Date().toISOString() });
-      await this.audit(manager, 'identity.account.registered', { clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null, allowedAppIds }, userId);
+      await this.write(manager, 'registration-redemption', transactionId, { userId, clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null, ...(user.registration ? {registration:user.registration} : {}), createdAt: new Date().toISOString() });
+      if (enterpriseKey) await this.write(manager,'registration-enterprise-redemption',enterpriseKey,{userId,issuer:enterprise!.issuer,clientId:enterprise!.clientId,invitationId:enterprise!.invitationId,createdAt:new Date().toISOString()});
+      await this.audit(manager, 'identity.account.registered', { clientId: input.clientId, policyVersion: policy.version, invitationId: invitation?.id ?? null, allowedAppIds,
+        ...(user.registration ? {registration:user.registration,defaultDeniedAppIds:user.appAccess.deniedAppIds} : {}),
+        ...(enterprise ? { enterpriseInvitation: { issuer: enterprise.issuer, clientId: enterprise.clientId, invitationId: enterprise.invitationId } } : {}) }, userId);
       return { userId };
     });
   }

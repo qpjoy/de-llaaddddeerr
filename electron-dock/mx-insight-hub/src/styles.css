@@ -13265,3 +13265,40 @@ button.mih-catalog-status {
 .mih-auth-alternative .mih-auth-form { margin-top:20px; }
 .mih-auth-alternative .mih-signin-tabs { margin-top:20px; }
 @media(max-width:480px) { .mih-auth-card{padding:24px} }
+
+/* Tenant invitations use the same theme tokens as the surrounding Hub console. */
+.mih-invitations { padding: 20px; display: grid; gap: 16px; }
+.mih-invitations__header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.mih-invitations h2 { margin: 0; font-size: 18px; }
+.mih-invitations p { margin: 6px 0; color: var(--qp-text-2); }
+.mih-invitations small { color: var(--qp-text-2); }
+.mih-invitations__list { display: grid; gap: 10px; }
+.mih-invitations__list article { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--qp-light-3); padding-top: 12px; }
+.mih-invitations__list article > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.mih-invitations__list small { display: block; margin-top: 4px; }
+.mih-invitations__form, .mih-invitations__result { display: grid; gap: 16px; }
+.mih-invitations__checkbox { display: flex; align-items: center; gap: 10px; }
+.mih-invitations__result textarea { overflow-wrap: anywhere; }
+.mih-invitation-page { min-height: 100svh; padding: 32px 20px; display: grid; place-items: center; }
+.mih-invitation-card { width: 100%; max-width: 560px; padding: 32px; min-width: 0; }
+.mih-invitation-card header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 32px; }
+.mih-invitation-brand { display: flex; align-items: center; gap: 12px; color: inherit; text-decoration: none; font-size: 18px; font-weight: 600; }
+.mih-invitation-brand img { width: 36px; height: 36px; }
+.mih-invitation-eyebrow { color: var(--qp-primary); font-size: 11px; letter-spacing: .16em; }
+.mih-invitation-card h1 { font-size: 26px; margin: 12px 0 24px; }
+.mih-invitation-card h2 { font-size: 18px; margin: 0; }
+.mih-invitation-card p, .mih-invitation-card small, .mih-invitation-card footer { color: var(--qp-text-2); line-height: 1.7; }
+.mih-invitation-target { display: flex; gap: 16px; align-items: center; padding: 20px 0; border-block: 1px solid var(--qp-light-3); }
+.mih-invitation-target > div { min-width: 0; overflow-wrap: anywhere; }
+.mih-invitation-target p { margin: 6px 0 0; font-size: 12px; }
+.mih-invitation-identity { display: grid; gap: 4px; padding: 16px; margin-top: 24px; border: 1px solid var(--qp-light-3); border-radius: 8px; overflow-wrap: anywhere; }
+.mih-invitation-identity span, .mih-invitation-identity small { font-size: 12px; }
+.mih-invitation-card > .qp-button { width: 100%; margin-top: 12px; }
+.mih-invitation-card footer { margin-top: 28px; font-size: 12px; }
+@media (max-width: 600px) {
+  .mih-invitations__header { align-items: stretch; flex-direction: column; }
+  .mih-invitations__list article { flex-wrap: wrap; gap: 10px; }
+  .mih-invitation-page { padding: 16px; }
+  .mih-invitation-card { padding: 24px 20px; }
+  .mih-invitation-card h1 { font-size: 23px; }
+}

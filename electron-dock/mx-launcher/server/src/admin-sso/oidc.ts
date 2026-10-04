@@ -9,7 +9,7 @@ export interface LoginTransaction extends Record<string, unknown> {
   expiresAt: string;
   reauthenticate?: boolean;
 }
-export interface OidcIdentity { issuer: string; subject: string; authTime: number }
+export interface OidcIdentity { issuer: string; subject: string; authTime: number; sessionUid?: string }
 export interface AdminOidcClient {
   authorize(transaction: LoginTransaction): Promise<URL>;
   redeem(url: URL, transaction: LoginTransaction): Promise<OidcIdentity>;
@@ -33,6 +33,7 @@ export function createAdminOidcClient(settings: AdminSsoConfig, injected?: oidc.
         redirect_uri: settings.callbackUrl, scope: 'openid', response_type: 'code', response_mode: 'query',
         code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
         state: transaction.state, nonce: transaction.nonce,
+        ...(settings.localSubjects ? { claims: JSON.stringify({ id_token: { mx_session_uid: { essential: true } } }) } : {}),
         max_age: String(transaction.reauthenticate ? 300 : USER_SESSION_TTL_SECONDS),
         ...(transaction.reauthenticate ? { prompt: 'login' } : {})
       });
@@ -48,7 +49,8 @@ export function createAdminOidcClient(settings: AdminSsoConfig, injected?: oidc.
         || claims.auth_time > Date.now() / 1000 + 30) throw new Error('Invalid identity claims');
       // Access, refresh and ID tokens are deliberately not persisted or exposed
       // to this management UI. They cannot become legacy SDK credentials.
-      return { issuer: claims.iss, subject: claims.sub, authTime: claims.auth_time };
+      const sessionUid = settings.localSubjects && typeof claims.mx_session_uid === 'string' && /^[A-Za-z0-9_-]{1,255}$/.test(claims.mx_session_uid) ? claims.mx_session_uid : undefined;
+      return { issuer: claims.iss, subject: claims.sub, authTime: claims.auth_time, ...(sessionUid ? { sessionUid } : {}) };
     }
   };
 }

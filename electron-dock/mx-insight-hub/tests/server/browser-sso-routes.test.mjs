@@ -32,3 +32,32 @@ for (const listenerMode of ['admin', 'public']) test(`SSO route isolation and ex
   r=await fetch(`${base}/internal/v1/admin/session`,{headers:{'x-mx-insight-admin-token':'test-admin-token'}})
   assert.equal((await r.json()).data.kind,'admin-token');assert.equal(cookieCalls,1)
 })
+
+for (const listenerMode of ['admin','public']) test(`tenant invitation routes preserve listener isolation and resolved principal on ${listenerMode}`,async t=>{
+  const store=new MemoryStore(), calls=[]
+  const principal={kind:'launcher-user',memberId:'fixture-owner',platformAdmin:false,tenantIds:['tenant-a'],capabilities:['membership.write'],memberships:[]}
+  let signedIn=false
+  const invitations={}
+  for(const method of ['list','create','revoke']) invitations[method]=async(...args)=>{calls.push({method,args});return {operation:method}}
+  const sso={handle:async()=>false,principal:async()=>signedIn?principal:null,invitations}
+  const service=new HubService({store,adapter:{},apiKeyPepper:'test-pepper-at-least-32-characters-long'})
+  const server=createServer(createApp({store,service,identity:{enabled:true,resolve:async()=>null},adminToken:'fixture-admin',sso,listenerMode}))
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)))
+  const base=`http://127.0.0.1:${server.address().port}/internal/v1/admin/tenant-invitations`
+  let response=await fetch(base)
+  assert.equal(response.status,listenerMode==='admin'?401:404);assert.equal(calls.length,0)
+  signedIn=true
+  const body={tenantId:'tenant-a',label:'Colleague',role:'viewer'}
+  for(const [method,suffix,requestBody,operation] of [['GET','?tenantId=tenant-a',null,'list'],['POST','',body,'create'],['POST','/revoke',{id:'invite-a'},'revoke']]) {
+    response=await fetch(base+suffix,{method,headers:requestBody?{'content-type':'application/json'}:{},...(requestBody?{body:JSON.stringify(requestBody)}:{})})
+    if(listenerMode==='public'){assert.equal(response.status,404);continue}
+    assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store')
+    assert.equal((await response.json()).data.operation,operation)
+    assert.deepEqual(calls.at(-1),{method:operation,args:[principal,operation==='list'?'tenant-a':operation==='create'?body:'invite-a']})
+  }
+  assert.equal(calls.length,listenerMode==='admin'?3:0)
+  if(listenerMode==='admin') {
+    response=await fetch(base,{headers:{authorization:'Bearer invalid'}})
+    assert.ok([401,403].includes(response.status));assert.equal(calls.length,3)
+  }
+})

@@ -14,9 +14,12 @@ export function createRegistrationUi({ request, root = document }) {
     dialog.innerHTML = `<div class="app-section-title"><strong>注册与邀请</strong><button type="button" class="secondary-button" data-close>关闭</button></div>
       <p>新账号使用统一 MX 身份。注册不授予工作台管理权限，也不改变现有账号和应用的访问设置。</p>
       <p role="status" aria-live="polite">${escape(message)}</p>
-      ${data ? `<form data-policy><fieldset ${busy ? 'disabled' : ''}><legend>新账号注册方式</legend><div class="registration-modes">
+      ${data ? `<form data-policy><fieldset ${busy ? 'disabled' : ''}><legend>默认注册方式</legend><div class="registration-modes">
         ${Object.entries(modes).map(([value, label]) => `<label><input type="radio" name="mode" value="${value}" ${data.policy.mode === value ? 'checked' : ''}>${label}</label>`).join('')}
-        </div><button type="submit" class="primary-button">保存注册方式</button></fieldset></form>
+        </div><label class="app-form-field"><span>Hub 注册方式</span><select name="hubMode" aria-label="Hub 注册方式">${Object.entries({inherit:'跟随默认',...modes}).map(([value,label])=>`<option value="${value}" ${(data.policy.hubMode || 'inherit')===value?'selected':''}>${label}</option>`).join('')}</select></label>
+        <p>默认选择“关闭注册”会暂停所有统一账号新注册。需要只开放 Hub 时，默认保留“邀请码注册”，Hub 选择“开放注册”。已有账号登录、H2I 和 Luopan 原有注册入口保持不变。</p>
+        <p>新 Hub 账号默认不准入 MX-H2I 与 Luopan 网络；需要使用时，由管理员在成员的应用访问设置中明确授权。注册来源只用于记录，不作为权限依据。</p>
+        <button type="submit" class="primary-button">保存注册方式</button></fieldset></form>
       <form data-invite><fieldset ${busy ? 'disabled' : ''}><legend>创建邀请码</legend><div class="app-editor-grid">
         <label class="app-form-field"><span>邀请名称</span><input name="label" maxlength="80" placeholder="例如：第一批体验用户" value="${escape(inviteDraft.label)}" required></label>
         <label class="app-form-field"><span>注册名额</span><input name="maxUses" type="number" min="1" max="1000" value="${escape(inviteDraft.maxUses)}" required></label>
@@ -39,7 +42,8 @@ export function createRegistrationUi({ request, root = document }) {
     dialog.querySelector('[data-reload]')?.addEventListener('click', () => void load());
     dialog.querySelector('[data-policy]')?.addEventListener('submit', event => {
       event.preventDefault(); const form = event.currentTarget;
-      void perform(async () => { await request(`${endpoint}/policy`, { method: 'POST', body: { mode: form.elements.mode.value, version: data.policy.version } }); }, '注册方式已保存，已有账号不受影响。');
+      const policy = { mode: form.elements.mode.value, hubMode: form.elements.hubMode.value, version: data.policy.version };
+      void perform(async () => { await request(`${endpoint}/policy`, { method: 'POST', body: policy }); }, '注册方式已保存，已有账号不受影响。');
     });
     const inviteForm = dialog.querySelector('[data-invite]');
     const readInvite = () => ({ label: inviteForm.elements.label.value, maxUses: Number(inviteForm.elements.maxUses.value), days: Number(inviteForm.elements.days.value),

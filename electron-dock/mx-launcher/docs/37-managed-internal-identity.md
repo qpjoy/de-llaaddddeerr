@@ -2,6 +2,8 @@
 
 日期：2026-10-03。范围：Launcher 内网个人管理登录，使用现有账号与密码；尚未在生产部署验收。用户已说明 Launcher 暂无公网地址，本批不增加公网入口。
 
+阅读时点：上句及下文记录早期内网批次。后续已新增 [Hub 与飞书 Web](40-hub-sso-and-feishu-web.md)、[公网身份与证书](41-public-identity-and-certificates.md) 和 [网页登录会话撤销](42-browser-session-lifecycle.md)。已配置公网身份的环境按这些增量文档维护，不重复首次初始化或轮换原身份档案。
+
 ## 一条命令开启，后续沿用原 deploy
 
 同步完整、已提交代码到服务器后，在 Launcher 目录执行一次（需当前部署使用的 Linux root 权限与 openssl）：

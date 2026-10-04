@@ -510,7 +510,7 @@ export async function createRuntime(config = loadConfig()) {
     hubSocialGateway,
     webSearchService: webSearch.service,
     identity,
-    sso: config.listenerMode === 'public' ? null : createSso({ settings: readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE), pool, identity }),
+    sso: config.listenerMode === 'public' ? null : createSso({ settings: readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE), pool, identity, adminToken:config.adminToken }),
     queue,
     importer,
     serverFileReader,

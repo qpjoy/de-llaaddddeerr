@@ -3,8 +3,10 @@ import { createHmac, timingSafeEqual, randomBytes, createHash } from 'node:crypt
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Provider, { type Configuration } from 'oidc-provider';
 import type { IdentityAccounts } from './repository.js';
+import { sessionsPage } from './sessions-page.js';
+import { resolveHubInvitation } from './hub-invitation.js';
 import { RegistrationClientError, type RegistrationClient } from '../registration/backchannel.js';
-import type { RegistrationPolicy } from '../registration/repository.js';
+import type { RegistrationPolicy, RegistrationSource } from '../registration/repository.js';
 
 export interface IdentitySettings {
   issuer: string;
@@ -21,7 +23,7 @@ export interface IdentitySettings {
 }
 const sourceIp = (req: IncomingMessage, settings: IdentitySettings) => settings.adminOrigin ? String(req.headers['x-mx-client-ip'] ?? req.socket.remoteAddress ?? 'unknown') : req.socket.remoteAddress ?? 'unknown';
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false, web: { enabled?: boolean; pending?: boolean; appName?: string; returnUrl?: string } = {}) {
+function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false, web: { enabled?: boolean; pending?: boolean; appName?: string; returnUrl?: string; enterprise?: boolean } = {}) {
   const registrationAllowed = policy && policy.mode !== 'closed';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${registering ? '注册' : '登录'} · MX</title>
   <style>
@@ -60,7 +62,7 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
   <main aria-labelledby="page-title">
   <div class="brand"><span class="mark" aria-hidden="true">MX</span><span>MX 统一账号</span></div>
   <h1 id="page-title">${registering ? '创建 MX 账号' : web.pending ? '绑定你的 MX 账号' : '登录 MX 账号'}</h1>
-  <p class="intro">${registering ? '使用统一账号访问已开通的应用。工作台管理权限需单独授权。' : web.pending ? '飞书身份已验证。验证已有 MX 账号完成绑定，或使用邀请码创建账号。' : `使用已有 MX 账号，继续进入 ${escape(web.appName ?? 'Launcher')}。`}</p>
+  <p class="intro">${web.enterprise ? '此邀请已包含注册资格。使用已有 MX 账号登录，或创建账号后返回 Hub 确认加入企业。' : registering ? '使用统一账号访问已开通的应用。工作台管理权限需单独授权。' : web.pending ? '飞书身份已验证。验证已有 MX 账号完成绑定，或使用邀请码创建账号。' : `使用已有 MX 账号，继续进入 ${escape(web.appName ?? 'Launcher')}。`}</p>
   ${message ? `<div class="message" role="alert">${escape(message)}</div>` : ''}
   <form method="post" action="${escape(action)}${registering ? '?view=register' : ''}">
     <input type="hidden" name="csrf" value="${csrf}">
@@ -78,14 +80,14 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
     ${registering ? `<div class="field">
       <label for="passwordConfirm">确认密码</label>
       <input id="passwordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
-    </div>${policy?.mode === 'invite_code' ? `<div class="field">
+    </div>${policy?.mode === 'invite_code' && !web.enterprise ? `<div class="field">
       <label for="inviteCode">邀请码</label>
       <input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>
     </div>` : ''}` : ''}
     <button type="submit">${registering ? (web.pending ? '注册并绑定飞书' : '注册并继续') : (web.pending ? '验证账号并绑定' : '登录并继续')}</button>
     ${web.enabled && !web.pending && !registering ? '<button class="secondary" type="submit" name="intent" value="feishu" formnovalidate>使用飞书登录</button><details><summary>绑定已有账号</summary><button class="link-button" type="submit" name="intent" value="feishu-link" formnovalidate>绑定飞书到已有 MX 账号</button></details>' : ''}
   </form>
-  <p class="alternate">${registering ? `<a href="${escape(action)}">已有账号，返回登录</a>` : registrationAllowed ? `<a href="${escape(action)}?view=register">${policy.mode === 'invite_code' ? '使用邀请码注册' : '创建账号'}</a>` : '新账号注册暂未开放'}</p>
+  <p class="alternate">${registering ? `<a href="${escape(action)}">已有账号，返回登录</a>` : registrationAllowed ? `<a href="${escape(action)}?view=register">${web.enterprise ? '通过企业邀请创建账号' : policy.mode === 'invite_code' ? '使用邀请码注册' : '创建账号'}</a>` : '新账号注册暂未开放'}</p>
   <footer><span>使用原有账号即可登录，无需重新注册。登录保持 30 天。</span><a href="${escape(web.returnUrl ?? '/admin/')}">返回应用</a></footer>
   </main></body></html>`;
 }
@@ -113,10 +115,12 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         id_token_signed_response_alg: 'RS256' as const, scope: 'openid mx:hub'
       }))],
     responseTypes: ['code'], clientAuthMethods: ['client_secret_basic'],
+    extraParams: ['mx_invitation'],
     pkce: { required: () => true },
     features: { devInteractions: { enabled: false }, registration: { enabled: false },
       userinfo: { enabled: true }, introspection: { enabled: false }, revocation: { enabled: false } },
-    claims: { openid: ['sub'], 'mx:hub': ['mx_identity'] }, scopes: ['openid', 'mx:hub'],
+    claims: { openid: ['sub', 'mx_session_uid'], 'mx:hub': ['mx_identity'] }, scopes: ['openid', 'mx:hub'],
+    extraTokenClaims: ctx => ({ mx_auth_time: ctx.oidc.authorizationCode?.authTime ?? ctx.oidc.session?.loginTs }),
     cookies: { keys: settings.cookieKeys, names: { session: 'mx_identity', interaction: 'mx_identity_interaction', resume: 'mx_identity_resume' },
       long: { secure: true, httpOnly: true, sameSite: 'lax' }, short: { secure: true, httpOnly: true, sameSite: 'lax' } },
     ttl: { AuthorizationCode: 60, AccessToken: (_ctx, _token, client) => applications.has(client.clientId) ? USER_SESSION_TTL_SECONDS : 300, IdToken: 300, Interaction: 300, Session: USER_SESSION_TTL_SECONDS, Grant: USER_SESSION_TTL_SECONDS },
@@ -126,6 +130,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
       const clientId = ctx.oidc.client?.clientId ?? ctx.oidc.accessToken?.clientId ?? '';
       const app = applications.get(clientId);
       return allowed(user, clientId) && user ? { accountId: user.userId, claims: async () => ({ sub: user.userId,
+        mx_session_uid: ctx.oidc.authorizationCode?.sessionUid ?? ctx.oidc.accessToken?.sessionUid ?? ctx.oidc.session?.uid,
         ...(app && accounts.hubIdentity ? { mx_identity: await accounts.hubIdentity(user, app.audience) } : {}) }) } : undefined;
     },
     async loadExistingGrant(ctx) {
@@ -159,6 +164,29 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     // that transition, leaving a blank page when the identity changes.
     res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`);
     const path = (req.url ?? '').split('?')[0];
+    if (path === '/identity/sessions' && accounts.browserSessions && accounts.revokeBrowserSessions) {
+      const session = await provider.Session.get(provider.app.createContext(req, res));
+      const user = session.accountId ? await accounts.account(session.accountId) : undefined;
+      const csrf = csrfFor(`sessions:${session.uid}:${session.loginTs}`);
+      const recent = Boolean(user && typeof session.loginTs === 'number' && Date.now() / 1000 - session.loginTs <= 300);
+      if (req.method === 'POST') {
+        if (!recent || req.headers.origin !== settings.origin || req.headers['sec-fetch-site'] === 'cross-site'
+          || !req.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) { res.writeHead(403).end('请重新验证身份后，从会话管理页面操作。'); return; }
+        let body = ''; for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 2048) { res.writeHead(413).end(); return; } }
+        const fields = new URLSearchParams(body), supplied = Buffer.from(fields.get('csrf') ?? ''), expected = Buffer.from(csrf);
+        const target = fields.get('target') ?? '';
+        if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected) || (target !== 'all' && !/^[a-f0-9]{64}$/.test(target))) { res.writeHead(403).end('会话验证失败，请刷新页面。'); return; }
+        if (!await accounts.allowAttempt(`browser-revoke:${sourceIp(req, settings)}`, `browser-revoke:${user!.userId}`)) { res.writeHead(429).end('操作过于频繁，请稍后重试。'); return; }
+        await accounts.revokeBrowserSessions(user!.userId, target, createHash('sha256').update(`${csrf}:${target}`).digest('hex'));
+        res.writeHead(303, { location: '/identity/sessions?done=1' }).end(); return;
+      }
+      if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET, POST' }).end(); return; }
+      const links = [{ name: 'Launcher', url: `${settings.adminOrigin ?? settings.origin}/admin/`, reauthenticate: `${settings.adminOrigin ?? settings.origin}/auth/admin/login?switch=1` },
+        ...[...applications.values()].map(app => ({ name: 'Hub', url: app.origin, reauthenticate: `${app.origin}/auth/sso/login?switch=1` }))];
+      res.setHeader('Referrer-Policy', 'same-origin');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(sessionsPage({ name: user?.displayName,
+        sessions: user ? await accounts.browserSessions(user.userId, session.uid) : [], csrf, recent, links, done: new URL(req.url!, settings.origin).searchParams.get('done') === '1' })); return;
+    }
     if (path === '/identity/feishu/callback' && req.method === 'GET') {
       try {
         if (!accounts.webState || !registration?.feishu) throw new Error('Web login unavailable');
@@ -169,7 +197,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         const transaction = await accounts.webState.read('transaction', state, true);
         if (!transaction || query.has('error') || !query.get('code')) throw new Error('OAuth rejected or expired');
         const proof = await registration.feishu('exchange', { code: query.get('code'), verifier: transaction.verifier, exchangeHandle: transaction.exchangeHandle, sourceKey: sourceIp(req, settings) });
-        await accounts.webState.put('proof', String(transaction.uid), { ...proof, link: transaction.link });
+        await accounts.webState.put('proof', String(transaction.uid), { ...proof, verifiedAt: Date.now() / 1000, link: transaction.link });
         res.setHeader('Set-Cookie', '__Host-mx_feishu=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0');
         res.writeHead(303, { location: `/identity/interaction/${transaction.uid}` }).end();
       } catch {
@@ -179,24 +207,29 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     }
     const match = /^\/identity\/interaction\/([A-Za-z0-9_-]+)$/.exec(path);
     if (match) {
+      const authenticationStartedAt = Date.now() / 1000;
       try {
         const interaction = await provider.interactionDetails(req, res);
         const clientId = String(interaction.params.client_id);
         if (match[1] !== interaction.uid || (clientId !== settings.clientId && !applications.has(clientId)) || interaction.prompt.name !== 'login') throw new Error('Invalid interaction');
         const registering = new URL(req.url!, settings.origin).searchParams.get('view') === 'register';
+        const invitationHandle = typeof interaction.params.mx_invitation === 'string' ? interaction.params.mx_invitation : '';
+        const invitationApp = applications.get(clientId);
+        const source: RegistrationSource = { issuer: settings.issuer, clientId, appId: invitationApp ? 'mx-insight-hub' : 'mx-launcher', appOrigin: invitationApp?.origin ?? settings.adminOrigin ?? settings.origin };
+        let enterprise: Awaited<ReturnType<typeof resolveHubInvitation>> | undefined;
         let policy: RegistrationPolicy | undefined;
         const proof = await accounts.webState?.read('proof', interaction.uid);
         if (req.method === 'GET' && proof?.userId && !proof.link) {
           const linked = await accounts.account(String(proof.userId));
           if (!allowed(linked, clientId)) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('此账号已被停用或禁止访问该应用，请联系管理员。'); return; }
           await accounts.webState!.read('proof', interaction.uid, true);
-          return provider.interactionFinished(req, res, { login: { accountId: String(proof.userId) } }, { mergeWithLastSubmission: false });
+          return provider.interactionFinished(req, res, { login: { accountId: String(proof.userId), ts: Number(proof.verifiedAt ?? authenticationStartedAt) } }, { mergeWithLastSubmission: false });
         }
         let feishuEnabled = false;
         if (req.method === 'GET') {
           // Optional sign-up/provider discovery must not serially delay password login.
           const [policyResult, feishuResult] = await Promise.allSettled([
-            registration?.policy(), accounts.webState ? registration?.feishu?.('info', {}) : undefined
+            registration?.policy(source), accounts.webState ? registration?.feishu?.('info', {}) : undefined
           ]);
           if (policyResult.status === 'fulfilled') policy = policyResult.value;
           if (feishuResult.status === 'fulfilled') feishuEnabled = feishuResult.value?.enabled === true;
@@ -207,9 +240,15 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           // Preserve same-origin provenance without allowing cross-site refs.
           res.setHeader('Referrer-Policy', 'same-origin');
           res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), appName: applications.has(clientId) ? 'Insight Hub' : 'Launcher', returnUrl: applications.get(clientId)?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/` }));
+          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName: applications.has(clientId) ? 'Insight Hub' : 'Launcher', returnUrl: invitationHandle && invitationApp ? `${invitationApp.origin}/#/join` : applications.get(clientId)?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/` }));
         };
-        if (req.method === 'GET') return render();
+        if (req.method === 'GET') {
+          if (invitationHandle && invitationApp && policy?.mode !== 'closed') {
+            try { enterprise = await resolveHubInvitation(invitationApp,settings.issuer,invitationHandle); }
+            catch { return render('企业邀请已失效或暂不可验证。已有账号仍可登录；注册请返回 Hub 重新打开邀请。'); }
+          }
+          return render();
+        }
         if (req.method !== 'POST' || req.headers.origin !== settings.origin || req.headers['sec-fetch-site'] === 'cross-site'
           || !req.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) throw new Error('Invalid request');
         let text = '';
@@ -231,13 +270,17 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           if (!registration || !accounts.allowRegistrationAttempt) return render('注册暂不可用，请使用已有账号登录。', 503);
           if (!await accounts.allowRegistrationAttempt(sourceIp(req, settings), login)) return render('注册尝试过于频繁，请稍后重试。', 429);
           try {
-            policy = await registration.policy();
+            policy = await registration.policy(source);
             if (policy.mode === 'closed') return render('暂未开放新账号注册，已有账号可正常登录。', 403);
+            if (invitationHandle && invitationApp) {
+              try { enterprise = await resolveHubInvitation(invitationApp,settings.issuer,invitationHandle); }
+              catch { return render('企业邀请已失效或暂不可验证，请返回 Hub 重新打开邀请。',409); }
+            }
             if (password !== body.get('passwordConfirm')) return render('两次输入的密码不一致。', 400);
-            const result = await registration.register({ transactionId: interaction.uid, policyVersion: Number(body.get('policyVersion')),
-              account: login, password, inviteCode: body.get('inviteCode') ?? '', ...(proof ? { verifiedFeishuSubject: String(proof.subject) } : {}) });
+            const result = await registration.register({ transactionId: interaction.uid, policyVersion: Number(body.get('policyVersion')), source,
+              account: login, password, inviteCode: body.get('inviteCode') ?? '', ...(enterprise ? {enterpriseInvitation:enterprise} : {}), ...(proof ? { verifiedFeishuSubject: String(proof.subject) } : {}) });
             await accounts.webState?.remove('proof', interaction.uid);
-            return provider.interactionFinished(req, res, { login: { accountId: result.userId } }, { mergeWithLastSubmission: false });
+            return provider.interactionFinished(req, res, { login: { accountId: result.userId, ts: authenticationStartedAt } }, { mergeWithLastSubmission: false });
           } catch (error) {
             return render(error instanceof RegistrationClientError ? error.message : '注册暂不可用，请稍后重试。', error instanceof RegistrationClientError && error.status < 500 ? error.status : 503);
           }
@@ -250,14 +293,14 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
             const linked = await accounts.account(String(bound.userId));
             if (!allowed(linked, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
             await accounts.webState?.remove('proof', interaction.uid);
-            return provider.interactionFinished(req, res, { login: { accountId: String(bound.userId) } }, { mergeWithLastSubmission: false });
+            return provider.interactionFinished(req, res, { login: { accountId: String(bound.userId), ts: authenticationStartedAt } }, { mergeWithLastSubmission: false });
           } catch (error) { return render(error instanceof RegistrationClientError ? error.message : '绑定暂不可用，请稍后重试。', error instanceof RegistrationClientError ? error.status : 503); }
         }
         const user = await accounts.authenticate(login, password);
         if (!user) return render('账号或密码不正确，或账号不可用。', 401);
         if (!allowed(user, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
         console.info(JSON.stringify({ event: 'identity.password-login', userId: user.userId }));
-        return provider.interactionFinished(req, res, { login: { accountId: user.userId } }, { mergeWithLastSubmission: false });
+        return provider.interactionFinished(req, res, { login: { accountId: user.userId, ts: authenticationStartedAt } }, { mergeWithLastSubmission: false });
       } catch {
         res.statusCode = 400; res.setHeader('Content-Type', 'text/plain; charset=utf-8'); res.end('登录请求已失效，请返回工作台重新登录。'); return;
       }
@@ -266,5 +309,6 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     req.url = req.url?.slice('/identity'.length) || '/';
     return provider.callback()(req, res);
   };
-  return { provider, handle };
+  return { provider, handle: (req: IncomingMessage, res: ServerResponse) => accounts.withBrowserRequest
+    ? accounts.withBrowserRequest(String(req.headers['user-agent'] ?? ''), () => handle(req, res)) : handle(req, res) };
 }

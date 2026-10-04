@@ -33,6 +33,8 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
     const file = readdirSync(migrations).find(v => v.startsWith(prefix)); await pool.query(readFileSync(new URL(file, migrations), 'utf8'))
   }
   repository = new IdentityRepository(dbUrl.href, 'test', dbName, 'test-rate-key'); await repository.initialize()
+  await pool.query('CREATE TABLE mx_platform_records(kind text,id text,environment text,data jsonb,PRIMARY KEY(kind,id,environment))')
+  for (const id of ['existing','new-user']) await pool.query("INSERT INTO mx_platform_records VALUES('iam-user',$1,'test',$2)", [id,{userId:id,status:'active',displayName:id,appAccess:{deniedAppIds:[]}}])
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', join(directory, 'key'), '-out', join(directory, 'cert')], { stdio: 'ignore' })
   const cert = readFileSync(join(directory, 'cert')), key = readFileSync(join(directory, 'key'))
   let provider, sso, activeUser = 'existing', blocked = false
@@ -47,8 +49,9 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const origin = `https://127.0.0.1:${server.address().port}`, issuer = `${origin}/identity`
   const canonical = id => ({ issuer: 'mx-user-center:test', subject: `user:${id}`, audience: 'mx-insight-hub', authProvider: 'oidc', principal: { userId: id, principalId: `user:${id}`, kind: 'user', displayName: '同名成员', organizationIds: [], launcherTenantId: null, scopes: [] } })
-  const account = id => ({ userId: id, status: 'active', appAccess: { deniedAppIds: blocked ? ['mx-insight-hub'] : [] } })
-  const accounts = { webState: repository.webState, account: async id => account(id), authenticate: async (login, password) => password === 'pass1234' ? account(login) : undefined, allowAttempt: async () => true, hubIdentity: async user => canonical(user.userId) }
+  const account = id => ({ userId: id, displayName: id, status: 'active', appAccess: { deniedAppIds: blocked ? ['mx-insight-hub'] : [] } })
+  const accounts = { webState: repository.webState, account: async id => account(id), authenticate: async (login, password) => password === 'pass1234' ? account(login) : undefined, allowAttempt: async () => true, hubIdentity: async user => canonical(user.userId),
+    withBrowserRequest: repository.withBrowserRequest.bind(repository), browserSessions: repository.browserSessions.bind(repository), revokeBrowserSessions: repository.revokeBrowserSessions.bind(repository) }
   const pair = generateKeyPairSync('rsa', { modulusLength: 2048 })
   provider = createIdentityProvider({ origin, issuer, clientId: 'launcher', clientSecret: randomBytes(32).toString('hex'), cookieKeys: ['key1','key2'], jwks: { keys: [{ ...pair.privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'RS256', use: 'sig' }] }, applications: [{ origin, clientId: 'hub', clientSecret: 'hub-test-secret', appId: 'mx-insight-hub', audience: 'mx-insight-hub' }] }, accounts, name => repository.adapter(name), {
     policy: async () => ({ mode: 'invite_code', version: 0 }),
@@ -150,6 +153,7 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
       assert.equal(await page.locator('body').evaluate(el => el.scrollWidth > innerWidth), false)
       await page.screenshot({ path: '/tmp/mx-sso-register-mobile.png' })
       await page.getByRole('link', { name: '已有账号，返回登录', exact: true }).click()
+      await page.getByText('绑定已有账号', {exact:true}).click()
       await page.getByRole('button', { name: '绑定飞书到已有 MX 账号', exact: true }).click()
       await page.waitForURL('**/fake-feishu?*')
       const state = new URL(page.url()).searchParams.get('state')
@@ -159,6 +163,37 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
       await page.screenshot({ path: '/tmp/mx-sso-feishu-bind-mobile.png' })
       assert.deepEqual(errors, [])
       console.log('Browser login / registration / Feishu binding: 1440px and 390px, no overflow or JS errors')
+      const signIn = async tab => {
+        await tab.goto(`${origin}/auth/sso/login?switch=1`)
+        await tab.locator('#login').fill('existing'); await tab.locator('#password').fill('pass1234')
+        await tab.getByRole('button', {name:'登录并继续',exact:true}).click()
+        await tab.waitForURL(url => url.searchParams.get('sso') === 'ready')
+      }
+      await signIn(page)
+      const otherContext = await browser.newContext({ignoreHTTPSErrors:true}), otherPage = await otherContext.newPage()
+      await signIn(otherPage)
+      await page.setViewportSize({width:1440,height:900})
+      await page.goto(`${origin}/identity/sessions`)
+      assert.equal(await page.locator('header').count(),1)
+      await page.screenshot({path:'/tmp/mx-browser-sessions-desktop.png'})
+      await page.emulateMedia({colorScheme:'dark'})
+      await page.reload()
+      assert.equal(await page.locator('body').evaluate(el => getComputedStyle(el).colorScheme),'dark')
+      await page.screenshot({path:'/tmp/mx-browser-sessions-dark.png'})
+      await page.emulateMedia({colorScheme:'light'})
+      await page.setViewportSize({width:390,height:844})
+      await page.reload()
+      assert.equal(await page.locator('body').evaluate(el => el.scrollWidth > innerWidth),false)
+      await page.screenshot({path:'/tmp/mx-browser-sessions-mobile.png'})
+      await page.locator('article').filter({hasNotText:'当前浏览器'}).first().getByRole('button',{name:'退出此浏览器'}).click()
+      assert.equal((await (await otherContext.request.get(`${origin}/auth/sso/session`)).json()).active,false)
+      assert.equal((await (await context.request.get(`${origin}/auth/sso/session`)).json()).active,true)
+      await page.getByRole('button',{name:'退出全部网页登录',exact:true}).click()
+      await page.getByText('撤销已保存。', {exact:false}).waitFor()
+      assert.equal((await (await context.request.get(`${origin}/auth/sso/session`)).json()).active,false)
+      assert.deepEqual(errors,[])
+      await otherContext.close()
+      console.log('Browser session management: own sessions, selective/global logout, desktop/mobile, no overflow or JS errors')
     } finally { await browser.close() }
   }
   // Switching the login issuer must not evict an already issued private session.
@@ -169,6 +204,28 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   const switchedSettings={...settings,issuer:'https://new-public.invalid/identity',previousProviders:[{issuer:settings.issuer,clientId:settings.clientId,clientSecret:settings.clientSecret,caCert:settings.caCert}]}
   sso=createSso({settings:switchedSettings,pool,identity})
   assert.equal((await request('/principal')).status,200,'pre-upgrade private cookie survives public configuration migration')
+  restart()
+  const sessionsPage = await request('/identity/sessions')
+  assert.equal(sessionsPage.status,200,sessionsPage.text)
+  assert.match(sessionsPage.text,/退出全部网页登录/)
+  const securityCsrf = /name="csrf" value="([^"]+)"/.exec(sessionsPage.text)[1]
+  const revoke = (csrf, actionOrigin = origin) => request('/identity/sessions',{method:'POST',headers:{origin:actionOrigin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,target:'all'}).toString()})
+  assert.equal((await revoke('wrong')).status,403)
+  assert.equal((await revoke(securityCsrf,'https://evil.invalid')).status,403)
+  const beforeRevoke = JSON.parse((await request('/auth/sso/session')).text)
+  assert.equal((await request('/principal')).status,200,'warm the old read cache')
+  assert.equal((await revoke(securityCsrf)).status,303)
+  assert.equal((await request('/principal',{method:'POST',headers:{origin,'x-mx-hub-csrf':beforeRevoke.csrf}})).status,401,'writes must bypass stale positive cache after global logout')
+  assert.equal((await request('/principal')).status,401,'a known invalid session must not regain access through the old read cache')
+  assert.equal(JSON.parse((await request('/auth/sso/session')).text).active,false)
+  await login()
+  const afterRevoke = JSON.parse((await request('/auth/sso/session')).text)
+  assert.equal(afterRevoke.active,true,'fresh authentication succeeds after global logout')
+  await pool.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{webSessionsInvalidBefore}',to_jsonb($1::text)) WHERE kind='iam-user' AND id=$2",[new Date().toISOString(),activeUser])
+  assert.equal((await request('/principal',{method:'POST',headers:{origin,'x-mx-hub-csrf':afterRevoke.csrf}})).status,401,'password fence invalidates the provider token behind Hub cookie')
+  assert.equal(JSON.parse((await request('/auth/sso/session')).text).active,false)
+  await login()
+  assert.equal(JSON.parse((await request('/principal')).text).memberId, principal.memberId,'reauthentication preserves the same original member')
   blocked=true;restart();assert.equal((await request('/principal')).status,401)
   const finalSession=JSON.parse((await request('/auth/sso/session')).text)
   assert.equal((await request('/auth/sso/logout',{method:'POST',headers:{origin,'x-mx-hub-csrf':finalSession.csrf}})).status,204)

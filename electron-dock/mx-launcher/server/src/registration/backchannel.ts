@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import type { RegistrationInput, RegistrationPolicy } from './repository.js';
+import type { RegistrationInput, RegistrationPolicy, RegistrationSource } from './repository.js';
 
 export const registrationSignature = (secret: string, body: unknown) =>
   createHmac('sha256', secret).update(`mx-registration-v1:${JSON.stringify(body)}`).digest('hex');
@@ -8,7 +8,7 @@ export function verifyRegistrationSignature(secret: string, body: { timestamp?: 
   return timingSafeEqual(Buffer.from(signature!, 'hex'), Buffer.from(registrationSignature(secret, body), 'hex'));
 }
 export interface RegistrationClient {
-  policy(): Promise<RegistrationPolicy>;
+  policy(source?: RegistrationSource): Promise<RegistrationPolicy>;
   register(input: Omit<RegistrationInput, 'clientId'>): Promise<{ userId: string }>;
   feishu?(action: 'info' | 'authorize' | 'exchange' | 'bind', input: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
@@ -23,6 +23,7 @@ export function createRegistrationClient(upstream: URL, clientId: string, secret
     const payload = await response.json() as { code?: string; message?: string };
     if (!response.ok) {
       const messages: Record<string, string> = { registration_closed: '暂未开放新账号注册。', policy_changed: '注册策略已更新，请刷新页面重试。',
+        invalid_registration_source: '注册来源无效或身份服务需要更新，请从应用重新发起。',
         account_unavailable: '此账号不可用，请更换账号；已有账号请直接登录。', invitation_unavailable: '邀请码无效、已停用、已到期或名额已用完。',
         registration_conflict: '此注册请求已完成，请使用原账号登录。', invalid_registration: '账号需为 3–64 位字母、数字、点、下划线或短横线，并以字母开头；密码需为 8–128 位。' };
       const bindingMessages: Record<string, string> = { feishu_binding_conflict: '飞书或 MX 账号已有其他绑定；不会自动合并账号、租户或权限，请联系管理员核对。', invalid_binding_credentials: 'MX 账号或密码不正确，或账号不可用。', feishu_account_disabled: '此飞书关联账号已停用。' };
@@ -30,5 +31,5 @@ export function createRegistrationClient(upstream: URL, clientId: string, secret
     }
     return payload;
   };
-  return { policy: () => call('policy', {}) as Promise<RegistrationPolicy>, register: input => call('register', input) as Promise<{ userId: string }>, feishu: (action, input) => call(`feishu-${action}`, input) };
+  return { policy: source => call('policy', source ? {source} : {}) as Promise<RegistrationPolicy>, register: input => call('register', input) as Promise<{ userId: string }>, feishu: (action, input) => call(`feishu-${action}`, input) };
 }

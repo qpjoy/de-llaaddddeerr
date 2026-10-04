@@ -13,6 +13,7 @@ import { withIpRiskProductScopes, withEnterpriseProductScopes } from '../shared/
 import { KeyReveal } from './key-reveal.jsx'
 import { TenantServiceAccess } from './tenant-service-access.jsx'
 import { TenantMemberships } from './tenant-memberships.jsx'
+import { TenantInvitationsPanel } from './tenant-invitations.jsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowClockwise,
@@ -933,8 +934,9 @@ function TenantConsumerCard({ entry, operationLabel, canManageKeys }) {
   )
 }
 
-export function MyAccessPage({ token, session, onUnauthorized }) {
-  const load = useCallback(() => adminApi.myOverview(token), [token])
+export function MyAccessPage({ token, session, onUnauthorized, query }) {
+  const tenantId = query?.get('tenantId') || ''
+  const load = useCallback(() => adminApi.myOverview(token,tenantId), [token,tenantId])
   const state = useRemoteData(load, onUnauthorized)
   const operationLabel = useCallback(
     (operationKey) => CAPABILITY_CATALOG[operationKey]?.label || operationKey,
@@ -1160,6 +1162,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+      <TenantInvitationsPanel token={token} session={session} tenants={tenants} onCreated={state.refresh} />
       {session?.platformAdmin ? <><TenantMemberships token={token} tenants={tenants} /><a className="qp-button qp-button--outline" href="#/platforms">前往开放能力管理租户授权</a></> : null}
       <Panel
         title="租户"

@@ -354,6 +354,7 @@ export function createUserCenterUser(
     userId,
     tenantId: 'tenant_default',
     orgIds: input.orgIds?.length ? input.orgIds : ['org_default'],
+    ...(previous?.registration ? { registration: previous.registration } : {}),
     email,
     account,
     displayName,
@@ -368,6 +369,9 @@ export function createUserCenterUser(
       ])]
     },
     appAccess: mergeUserAppAccess(previous?.appAccess, input),
+    ...(previous && input.password !== undefined && input.password !== null
+      ? { webSessionsInvalidBefore: now }
+      : previous?.webSessionsInvalidBefore ? { webSessionsInvalidBefore: previous.webSessionsInvalidBefore } : {}),
     createdAt: previous?.createdAt ?? now,
     updatedAt: now
   };

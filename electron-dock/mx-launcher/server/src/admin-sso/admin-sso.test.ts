@@ -74,7 +74,7 @@ async function fixture(localSubjects = false, publicGateway = false) {
       }
       pkceCount++; redemptionCount++;
       const now = Math.floor(Date.now() / 1000);
-      const payload = { iss: issuer, aud: 'launcher', sub: 'sso-subject', nonce: auth.get('nonce'), iat: now, exp: now + 300, auth_time: now, ...claimsOverride };
+      const payload = { iss: issuer, aud: 'launcher', sub: 'sso-subject', nonce: auth.get('nonce'), iat: now, exp: now + 300, auth_time: Date.now() / 1000, ...claimsOverride };
       const signed = `${encode({ alg: 'RS256', kid: 'test-key' })}.${encode(payload)}`;
       const signature = sign('RSA-SHA256', Buffer.from(signed), (invalidSignature ? wrongKey : key).privateKey).toString('base64url');
       return res.end(JSON.stringify({ token_type: 'Bearer', access_token: 'fixture-only', expires_in: 300, id_token: `${signed}.${signature}` }));
@@ -456,5 +456,45 @@ test('normal SSO accepts a remembered identity; explicit switching and write rea
     assert.equal(result.headers.get('location'), '/admin/');
     const next = cookieValue(result, '__Host-mx-admin-session');
     assert.equal((await (await f.request('/auth/admin/session', next)).json()).user.userId, 'existing-user');
+  } finally { await f.close(); }
+});
+
+test('password changes revoke existing browser sessions without extending old expiry; profile edits do not', async () => {
+  const f = await fixture(true);
+  try {
+    f.setClaims({ sub: 'existing-admin', mx_session_uid: 'signed-browser-uid' });
+    const sid = await f.login();
+    const session = await (await f.request('/auth/admin/session', sid)).json();
+    await f.store.createUserCenterUser({ userId: 'existing-admin', displayName: 'Renamed', roleIds: ['mx-admin'] });
+    assert.equal((await (await f.request('/auth/admin/session', sid)).json()).authenticated, true);
+    await f.store.updateUserCenterPassword({ userId: 'existing-admin', password: 'ChangedPassword456!' });
+    assert.equal((await f.request('/admin-api/internal/v1/audit-probe', sid, {}, session.csrf)).status, 401);
+    assert.equal((await (await f.request('/auth/admin/session', sid)).json()).authenticated, false);
+    const fresh = await f.login();
+    assert.equal((await (await f.request('/auth/admin/session', fresh)).json()).authenticated, true);
+    await f.store.createUserCenterUser({ userId: 'existing-admin', password: 'AnotherPassword789!', roleIds: ['mx-admin'] });
+    assert.equal((await (await f.request('/auth/admin/session', fresh)).json()).authenticated, false, 'admin upsert password also revokes web sessions');
+  } finally { await f.close(); }
+});
+
+test('managed browser checks carry signed session UID; legacy sessions remain usable until explicitly revoked', async () => {
+  const f = await fixture(true);
+  try {
+    const proofs: unknown[] = [];
+    let active = true;
+    Object.assign(f.repository, { webSessionActive: async (userId: string, proof: unknown) => { proofs.push({ userId, proof }); return active; } });
+    f.setClaims({ sub: 'existing-admin', mx_session_uid: 'signed-browser-uid' });
+    const sid = await f.login();
+    const session = await (await f.request('/auth/admin/session', sid)).json();
+    assert.equal(session.authenticated, true);
+    assert.equal((proofs.at(-1) as { proof: { sessionUid: string } }).proof.sessionUid, 'signed-browser-uid');
+    active = false;
+    assert.equal((await f.request('/admin-api/internal/v1/audit-probe', sid, {}, session.csrf)).status, 401);
+    active = true;
+    f.setClaims({ sub: 'existing-admin' });
+    const legacy = await f.login();
+    assert.equal((await (await f.request('/auth/admin/session', legacy)).json()).authenticated, true);
+    active = false;
+    assert.equal((await (await f.request('/auth/admin/session', legacy)).json()).authenticated, false);
   } finally { await f.close(); }
 });

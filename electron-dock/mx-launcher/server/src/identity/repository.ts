@@ -1,4 +1,6 @@
 import { createHmac } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { passwordSessionActive, webSessionActive, webSecurityScope, webDeviceId } from '../lib/web-session-security.js';
 import { DataSource } from 'typeorm';
 import type { AdapterPayload } from 'oidc-provider';
 import { createUserCenterUserCredential, createUserPrincipalFromRecord, resolveUserCenterUserForLogin, verifyUserCenterCredential } from '../store/domain.js';
@@ -12,6 +14,9 @@ export interface IdentityAccounts {
   allowAttempt(ip: string, login: string): Promise<boolean>;
   allowRegistrationAttempt?(ip: string, login: string): Promise<boolean>;
   hubIdentity?(user: UserCenterUser, audience: string): Promise<Record<string, unknown>>;
+  withBrowserRequest?<T>(agent: string, fn: () => Promise<T>): Promise<T>;
+  browserSessions?(userId: string, currentUid: string): Promise<BrowserSession[]>;
+  revokeBrowserSessions?(userId: string, target: string, actionId: string): Promise<void>;
   webState?: {
     put(kind: string, id: string, data: Record<string, unknown>): Promise<void>;
     read(kind: string, id: string, consume?: boolean): Promise<Record<string, unknown> | undefined>;
@@ -19,10 +24,13 @@ export interface IdentityAccounts {
   };
 }
 
+export interface BrowserSession { id: string; current: boolean; agent: string; authTime: number; expiresAt: string; apps: string[] }
+
 /** Separate pool and tables. Existing user/credential records are read-only:
  * Launcher remains their only writer, including password changes and bans. */
 export class IdentityRepository implements IdentityAccounts {
   private db: DataSource;
+  private browserAgent = new AsyncLocalStorage<string>();
   constructor(url: string, private environment: string, private scope: string, private rateKey: string) {
     this.db = new DataSource({ type: 'postgres', url, synchronize: false,
       extra: { max: 4, connectionTimeoutMillis: 5000, statement_timeout: 5000 } });
@@ -43,7 +51,43 @@ export class IdentityRepository implements IdentityAccounts {
   }
   async close() { if (this.db.isInitialized) await this.db.destroy(); }
   async ready() { await this.db.query('SELECT 1'); }
-  async cleanup() { await this.db.query('DELETE FROM mx_identity_records WHERE scope=$1 AND expires_at <= now()', [this.scope]); }
+  async cleanup() { await this.db.query('DELETE FROM mx_identity_records WHERE scope=ANY($1::text[]) AND expires_at <= now()', [[this.scope, webSecurityScope(this.environment)]]); }
+  withBrowserRequest<T>(agent: string, fn: () => Promise<T>) { return this.browserAgent.run(agent.slice(0, 240), fn); }
+  private async browserActive(userId: string, authTime: number, uid?: string, scope = this.scope) {
+    const user = await this.account(userId);
+    return Boolean(user && passwordSessionActive(user, authTime)
+      && await webSessionActive((sql, values) => this.db.query(sql, values), this.environment, userId, { authTime, sessionUid: uid, issuer: '' }, scope));
+  }
+  async browserSessions(userId: string, currentUid: string): Promise<BrowserSession[]> {
+    const rows = await this.db.query(`SELECT scope,data,expires_at FROM mx_identity_records WHERE kind='Session'
+      AND (scope=$1 OR data->>'mxEnvironment'=$2) AND data->>'accountId'=$3 AND expires_at>now()
+      ORDER BY (data->>'loginTs')::numeric DESC LIMIT 100`, [this.scope, this.environment, userId]);
+    const sessions: BrowserSession[] = [];
+    for (const row of rows) {
+      if (!await this.browserActive(userId, row.data.loginTs, row.data.uid, row.scope)) continue;
+      sessions.push({ id: webDeviceId(row.scope, row.data.uid), current: row.scope === this.scope && row.data.uid === currentUid,
+        agent: row.data.mxUserAgent || '历史浏览器会话', authTime: row.data.loginTs,
+        expiresAt: new Date(row.expires_at).toISOString(), apps: Object.keys(row.data.authorizations ?? {}) });
+    }
+    return sessions;
+  }
+  async revokeBrowserSessions(userId: string, target: string, actionId: string) {
+    if (target !== 'all' && !/^[a-f0-9]{64}$/.test(target)) throw new Error('Invalid browser session');
+    // Ownership is rechecked server-side, including for a stale or forged form.
+    if (target !== 'all' && !(await this.browserSessions(userId, '')).some(session => session.id === target)) return;
+    await this.db.transaction(async manager => {
+      const scope = webSecurityScope(this.environment), before = Date.now();
+      const inserted = await manager.query(`INSERT INTO mx_identity_records(scope,kind,id,data,expires_at)
+        VALUES($1,'BrowserAction',$2,$3,now()+interval '90 days') ON CONFLICT DO NOTHING RETURNING id`,
+      [scope, `${userId}:${actionId}`, { userId, target, before }]);
+      if (!inserted.length) return;
+      const id = target === 'all' ? `all:${userId}` : `device:${userId}:${target}`;
+      await manager.query(`INSERT INTO mx_identity_records(scope,kind,id,data,expires_at)
+        VALUES($1,'BrowserRevocation',$2,$3,now()+interval '90 days') ON CONFLICT(scope,kind,id)
+        DO UPDATE SET data=jsonb_set(EXCLUDED.data,'{before}',to_jsonb(GREATEST((mx_identity_records.data->>'before')::bigint,($3->>'before')::bigint))),expires_at=EXCLUDED.expires_at`,
+      [scope, id, { userId, target, before }]);
+    });
+  }
   webState = {
     put: async (kind: string, id: string, data: Record<string, unknown>) => { await this.adapter(`WebFeishu:${kind}`).upsert(id, data, 300); },
     read: async (kind: string, id: string, consume = false): Promise<Record<string, unknown> | undefined> => {
@@ -61,11 +105,18 @@ export class IdentityRepository implements IdentityAccounts {
       const column = field === 'id' ? 'id' : `data->>'${field}'`;
       const rows = await query(`SELECT data,consumed FROM mx_identity_records WHERE scope=$1 AND kind=$2 AND ${column}=$3 AND expires_at>now()`, [scope, kind, value]);
       if (rows.length !== 1) return undefined;
+      const data = rows[0].data;
+      if (['Session', 'AuthorizationCode', 'AccessToken'].includes(kind) && data.accountId) {
+        const authTime = Number(data.extra?.mx_auth_time ?? data.authTime ?? data.loginTs ?? data.iat);
+        if (!await this.browserActive(data.accountId, authTime, data.sessionUid ?? data.uid)) return undefined;
+      }
       return { ...rows[0].data, ...(rows[0].consumed ? { consumed: Number(rows[0].consumed) } : {}) };
     };
+    const browserAgent = this.browserAgent, environment = this.environment;
     return {
       async upsert(id: string, data: AdapterPayload, expiresIn: number) {
         if (!Number.isFinite(expiresIn) || expiresIn <= 0) throw new Error('Identity record requires a bounded lifetime');
+        if (kind === 'Session') data = { ...data, mxEnvironment: environment, mxUserAgent: browserAgent.getStore() || '历史浏览器会话' };
         await query(`INSERT INTO mx_identity_records (scope,kind,id,data,expires_at) VALUES ($1,$2,$3,$4,now()+$5*interval '1 second')
           ON CONFLICT (scope,kind,id) DO UPDATE SET data=EXCLUDED.data,expires_at=EXCLUDED.expires_at`, [scope, kind, id, data, expiresIn]);
       },
@@ -90,12 +141,18 @@ export class IdentityRepository implements IdentityAccounts {
     return user?.status === 'active' && !bootstrap.has(user.userId) ? user : undefined;
   }
   async authenticate(login: string, password: string) {
-    const rows = await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'", [this.environment]);
-    const user = resolveUserCenterUserForLogin(rows.map((row: { data: UserCenterUser }) => row.data), login);
-    const credentials = user ? await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user-credential' AND id=$2", [this.environment, user.userId]) : [];
-    const credential = credentials[0]?.data as UserCenterUserCredential | undefined;
-    const verified = verifyUserCenterCredential(password, credential ?? dummy);
-    return verified && credential && user?.status === 'active' && !bootstrap.has(user.userId) ? user : undefined;
+    return this.db.transaction(async manager => {
+      // Share the account writer's lock so a concurrent password transaction
+      // cannot validate the previous credential with a newer authentication time.
+      // Multiple Web logins may still read concurrently; SDK login is unchanged.
+      await manager.query('SELECT pg_advisory_xact_lock_shared(hashtext($1),hashtext($2))', [this.environment, 'mx-account-creation']);
+      const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'", [this.environment]);
+      const user = resolveUserCenterUserForLogin(rows.map((row: { data: UserCenterUser }) => row.data), login);
+      const credentials = user ? await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user-credential' AND id=$2", [this.environment, user.userId]) : [];
+      const credential = credentials[0]?.data as UserCenterUserCredential | undefined;
+      const verified = verifyUserCenterCredential(password, credential ?? dummy);
+      return verified && credential && user?.status === 'active' && !bootstrap.has(user.userId) ? user : undefined;
+    });
   }
   async hubIdentity(user: UserCenterUser, audience: string) {
     const rows = await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-role'", [this.environment]);

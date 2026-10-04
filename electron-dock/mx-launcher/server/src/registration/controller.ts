@@ -63,7 +63,8 @@ export class RegistrationController implements OnModuleDestroy {
     const sso = body?.clientId === publicSso?.clientId ? publicSso : privateSso;
     if (!sso || !body || !verifyRegistrationSignature(sso.clientSecret, body, signature) || body.clientId !== sso.clientId) throw new UnauthorizedException();
     return this.perform(async () => {
-      if (body.action === 'policy') return this.store().policy();
+      if (['policy','register'].includes(body.action) && body.input?.source && body.input.source.issuer !== sso.issuer) throw new UnauthorizedException('Registration source issuer mismatch');
+      if (body.action === 'policy') return this.store().policy(body.input?.source);
       if (body.action.startsWith('feishu-')) {
         // Add a Web callback on this server-only service instance. Do not change
         // the Electron SDK's redirect allowlist or historical provisioning.

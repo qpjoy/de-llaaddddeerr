@@ -1163,40 +1163,45 @@ export class PostgresStore implements PlatformStore {
   }
 
   async updateUserCenterPassword(input: UserPasswordUpdateInput): Promise<UserPasswordUpdateResult> {
-    const userId = input.userId?.trim();
-    if (!userId) throw new Error('userId is required');
-    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
-    if (!user) throw new Error(`User not found: ${userId}`);
-    const password = input.password?.trim();
-    if (!password) throw new Error('password is required');
-    const now = new Date().toISOString();
-    const previousCredential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', userId);
-    const credential = createUserCenterUserCredential(userId, password, input, previousCredential, now);
-    await this.saveRecord('iam-user-credential', userId, credential, this.config.siteId);
-    const tokens = await this.listRecords<UserCenterTokenRecord>('iam-token');
-    const activeTokens = tokens.filter((token) => (
-      token.subjectKind === 'user' && token.subjectId === userId && !token.revokedAt
-    ));
-    for (const token of activeTokens) {
-      await this.saveRecord('iam-token', token.tokenHash, { ...token, revokedAt: now }, this.config.siteId);
-    }
-    const updated = {
-      ...user,
-      credential: userCredentialSummary(credential),
-      updatedAt: now
-    };
-    await this.saveRecord('iam-user', userId, updated, this.config.siteId);
-    await this.recordAudit({
-      eventType: 'iam.user.password.updated',
-      actorKind: 'user-center',
-      userId,
-      requestId: input.requestId ?? null,
-      metadata: {
-        requestedBy: input.requestedBy ?? 'user-center',
-        tokensRevoked: activeTokens.length
+    return this.dataSource.transaction(async manager => {
+      await accountWriteLock(manager, this.config.environment);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const userId = input.userId?.trim();
+      if (!userId) throw new Error('userId is required');
+      const user = (await records.findOneBy({ kind: 'iam-user', id: userId, environment: this.config.environment }))?.data as unknown as UserCenterUser | undefined;
+      if (!user) throw new Error(`User not found: ${userId}`);
+      const password = input.password?.trim();
+      if (!password) throw new Error('password is required');
+      const now = new Date().toISOString();
+      const previousCredential = ((await records.findOneBy({ kind: 'iam-user-credential', id: userId, environment: this.config.environment }))?.data as unknown as UserCenterUserCredential) ?? null;
+      const credential = createUserCenterUserCredential(userId, password, input, previousCredential, now);
+      await this.saveRecordTo(records, 'iam-user-credential', userId, credential, this.config.siteId);
+      const tokens = (await records.findBy({ kind: 'iam-token', environment: this.config.environment })).map(record => record.data as unknown as UserCenterTokenRecord);
+      const activeTokens = tokens.filter((token) => (
+        token.subjectKind === 'user' && token.subjectId === userId && !token.revokedAt
+      ));
+      for (const token of activeTokens) {
+        await this.saveRecordTo(records, 'iam-token', token.tokenHash, { ...token, revokedAt: now }, this.config.siteId);
       }
+      const updated = {
+        ...user,
+        credential: userCredentialSummary(credential),
+        webSessionsInvalidBefore: now,
+        updatedAt: now
+      };
+      await this.saveRecordTo(records, 'iam-user', userId, updated, this.config.siteId);
+      await this.recordAuditTo(records, {
+        eventType: 'iam.user.password.updated',
+        actorKind: 'user-center',
+        userId,
+        requestId: input.requestId ?? null,
+        metadata: {
+          requestedBy: input.requestedBy ?? 'user-center',
+          tokensRevoked: activeTokens.length
+        }
+      });
+      return { user: updated, tokensRevoked: activeTokens.length, updatedAt: now };
     });
-    return { user: updated, tokensRevoked: activeTokens.length, updatedAt: now };
   }
 
   async deleteUserCenterUser(input: UserCenterUserDeleteInput): Promise<UserCenterUserDeleteResult> {

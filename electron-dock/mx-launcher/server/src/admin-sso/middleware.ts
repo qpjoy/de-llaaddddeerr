@@ -1,4 +1,5 @@
 import { USER_SESSION_TTL_SECONDS } from '../lib/session-lifetime.js';
+import { passwordSessionActive } from '../lib/web-session-security.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PlatformStore } from '../store/platform-store.js';
@@ -97,7 +98,9 @@ export function createAdminSsoMiddleware(deps: {
     const binding = await repository.read('admin-sso-binding', bindingKey(session.issuer, session.subject));
     if (!binding || binding.bindingId !== session.bindingId) return null;
     const user = (await store.listUserCenterUsers()).find((item) => item.userId === binding.userId);
-    return user?.status === 'active' && !BOOTSTRAP_USERS.has(user.userId) && !user.appAccess.deniedAppIds.includes('mx-launcher') ? user : null;
+    if (!user || user.status !== 'active' || BOOTSTRAP_USERS.has(user.userId) || user.appAccess.deniedAppIds.includes('mx-launcher') || !passwordSessionActive(user, session.authTime)) return null;
+    if (config?.localSubjects && repository.webSessionActive && !await repository.webSessionActive(user.userId, session)) return null;
+    return user;
   }
   async function issueSession(req: Request, res: ServerResponse, identity: OidcIdentity, bindingId: string | null) {
     const token = random();
@@ -200,7 +203,8 @@ export function createAdminSsoMiddleware(deps: {
     }
     const session = await sessionFor(req);
     if (path === '/auth/admin/session' && req.method === 'GET') {
-      const entry = { enabled: true, loginOrigin: config.origin, accessMode: config.ingressToken ? 'sso-only' : 'sso-or-ops' };
+      const entry = { enabled: true, loginOrigin: config.origin, accessMode: config.ingressToken ? 'sso-only' : 'sso-or-ops',
+        ...(config.localSubjects ? { securityUrl: `${config.issuer}/sessions` } : {}) };
       if (!session) return json(res, 200, { ...entry, authenticated: false });
       if (session.opsTokenHash) return json(res, 200, { ...entry, authenticated: true, csrf: session.csrf,
         authMethod: 'ops-token', canManage: true, user: { userId: null, displayName: 'Internal Ops Token' } });

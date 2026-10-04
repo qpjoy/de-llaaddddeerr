@@ -10030,9 +10030,10 @@ function renderUserEditorDrawer() {
               <input data-user-editor-field="homeAppId" value="${escapeHtml(draft.homeAppId || '')}" placeholder="mx-h2i / luopan" autocomplete="off" />
             </label>
             <label class="app-form-field">
-              <span>Registered By</span>
+              <span>Registered By · 兼容归属</span>
               <input data-user-editor-field="registeredByAppId" value="${escapeHtml(draft.registeredByAppId || '')}" placeholder="mx-h2i / luopan" autocomplete="off" />
             </label>
+            ${editing ? `<div class="app-form-field app-form-wide"><span>首次注册来源（只读）</span><p>${user?.registration ? `${escapeHtml(user.registration.source.appId)} · ${escapeHtml(user.registration.source.appOrigin)}<br>客户端 ${escapeHtml(user.registration.source.clientId)} · ${escapeHtml(user.registration.method)} · 策略 v${escapeHtml(user.registration.policyVersion)}<br>${escapeHtml(user.registration.registeredAt)}` : '未记录统一注册来源，不根据应用归属推断。'}</p></div>` : ''}
             <div class="app-form-field app-form-wide">
               <label for="user-allowed-apps">额外允许的应用 · Allowed Apps</label>
               <select id="user-allowed-apps" multiple data-user-editor-field="allowedAppIds" aria-label="额外允许的应用" aria-describedby="user-app-access-help" data-placeholder="未额外授权，遵循应用策略">${userAppOptions(draft.allowedAppIds)}</select>

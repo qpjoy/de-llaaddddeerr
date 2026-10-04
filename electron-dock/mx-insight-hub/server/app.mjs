@@ -1565,6 +1565,7 @@ export function createApp({
             productScopes: await documentationScopes(principal),
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
+            tenantInvitationsEnabled: Boolean(sso?.invitations),
             // Deployment routing metadata, not a credential. Browser clients
             // still need their ordinary Hub Public API key for every public call.
             publicApiBaseUrl,
@@ -5260,6 +5261,16 @@ export function createApp({
       }
 
       // ---- membership administration ------------------------------------
+      if (pathname === '/internal/v1/admin/tenant-invitations' || pathname === '/internal/v1/admin/tenant-invitations/revoke') {
+        if (!sso?.invitations) throw new AppError(503,'invitations_unavailable','请先启用 Hub 统一登录，再使用企业邀请。')
+        response.setHeader('Cache-Control','no-store')
+        let data
+        if (request.method==='GET' && pathname.endsWith('/tenant-invitations')) data=await sso.invitations.list(principal,searchParams.get('tenantId'))
+        else if (request.method==='POST' && pathname.endsWith('/revoke')) data=await sso.invitations.revoke(principal,(await readJson(request,4096)).id)
+        else if (request.method==='POST') data=await sso.invitations.create(principal,await readJson(request,4096))
+        else throw new AppError(405,'method_not_allowed','此操作不支持该请求方式。')
+        sendJson(response,200,{data,requestId}); return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/members') {
         requirePlatformAdmin(principal)
         sendJson(response, 200, { data: await store.listMembers(), requestId })

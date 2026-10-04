@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
+import { webSessionActive, type WebSessionProof } from '../lib/web-session-security.js';
 
 export type SsoKind = 'admin-sso-transaction' | 'admin-sso-session' | 'admin-sso-binding';
 export type SsoRecord = Record<string, unknown>;
@@ -9,6 +10,7 @@ export interface SsoRepository {
   take(kind: SsoKind, id: string): Promise<SsoRecord | null>;
   remove(kind: SsoKind, id: string): Promise<void>;
   touchSession(id: string): Promise<SsoRecord | null>;
+  webSessionActive?(userId: string, proof: WebSessionProof): Promise<boolean>;
 }
 
 export function digest(value: string): string {
@@ -32,6 +34,9 @@ export class PostgresSsoRepository implements SsoRepository {
     return (await this.ready).query(sql, parameters);
   }
   async close(): Promise<void> { if (this.db.isInitialized) await this.db.destroy(); }
+  async webSessionActive(userId: string, proof: WebSessionProof) {
+    return webSessionActive((sql, values) => this.query(sql, values), this.environment, userId, proof);
+  }
   async insert(kind: SsoKind, id: string, data: SsoRecord): Promise<boolean> {
     // Expired transient records contain no tokens and are opportunistically
     // collected; persistent bindings are never included in this deletion.

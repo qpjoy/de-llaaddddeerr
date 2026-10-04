@@ -1,14 +1,17 @@
-import { randomBytes, timingSafeEqual, createHash } from 'node:crypto'
+import { randomBytes, timingSafeEqual, createHash, createHmac } from 'node:crypto'
 import { rootCertificates } from 'node:tls'
 import { Agent, fetch as secureFetch } from 'undici'
 import * as oidc from 'openid-client'
 import { AppError } from '../core/errors.mjs'
 import { SsoStore } from './sso-store.mjs'
+import { TenantInvitations } from './tenant-invitations.mjs'
+import { readJson } from '../core/http.mjs'
 
 const random = () => randomBytes(32).toString('base64url')
 const fingerprint = value => createHash('sha256').update(value).digest('hex')
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 const SID = '__Host-mx_hub_sso', TX = '__Host-mx_hub_login'
+const INV = '__Host-mx_hub_invitation'
 const cookie = (name, value, age) => `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${age}`
 const cookies = request => Object.fromEntries(String(request.headers.cookie || '').split(';').map(v => v.trim().split('=')))
 const equal = (a, b) => {
@@ -18,10 +21,12 @@ const equal = (a, b) => {
 }
 export { readSsoProfile } from './sso-config.mjs'
 
-export function createSso({ settings, pool, identity, oidcConfiguration }) {
+export function createSso({ settings, pool, identity, oidcConfiguration, adminToken }) {
   if (!settings) return null
   if (!pool) throw new Error('Hub SSO requires PostgreSQL')
   const store = new SsoStore(pool, settings.sessionKey)
+  const invitations = new TenantInvitations({pool,sessions:store,origin:settings.origin,adminToken})
+  const invitationAttempts = new Map()
   const providers = new Map([settings, ...(settings.previousProviders ?? [])].map(p => [p.issuer,p]))
   const discoveries = new Map()
   async function configuration(issuer = settings.issuer) {
@@ -41,21 +46,27 @@ export function createSso({ settings, pool, identity, oidcConfiguration }) {
     return discoveries.get(issuer)
   }
   const cache = new Map()
-  async function verified(session) {
+  async function verified(session, fresh = false) {
     const issuer = session.issuer ?? settings.previousProviders?.[0]?.issuer ?? settings.issuer
     const cacheKey = fingerprint(`${issuer}:${session.accessToken}`)
     const existing = cache.get(cacheKey)
-    if (existing && existing.until > Date.now()) return existing.value
+    if (!fresh && existing && existing.until > Date.now()) return existing.value
     let info
     try { info = await oidc.fetchUserInfo(await configuration(issuer), session.accessToken, session.subject) }
     catch (error) {
-      if ([400, 401, 403].includes(error.status)) throw new AppError(401, 'sso_session_invalid', '统一登录已过期或被禁止，请重新登录。')
+      if ([400, 401, 403].includes(error.status)) {
+        cache.delete(cacheKey)
+        throw new AppError(401, 'sso_session_invalid', '统一登录已过期或被禁止，请重新登录。')
+      }
       throw new AppError(503, 'sso_unavailable', '统一身份暂不可验证，请稍后重试；原会话仍保留。')
     }
     const value = info.mx_identity
     if (value?.issuer !== settings.legacyIssuer || value.subject !== `user:${session.subject}` || value.audience !== settings.audience
       || value.principal?.userId !== session.subject || value.principal.kind !== 'user' || !Array.isArray(value.principal.scopes)
-      || !Array.isArray(value.principal.organizationIds)) throw new AppError(401, 'sso_identity_invalid', '统一身份验证不匹配。')
+      || !Array.isArray(value.principal.organizationIds)) {
+      cache.delete(cacheKey)
+      throw new AppError(401, 'sso_identity_invalid', '统一身份验证不匹配。')
+    }
     if (cache.size >= 1000) cache.delete(cache.keys().next().value)
     cache.set(cacheKey, { value, until: Date.now() + 30000 })
     return value
@@ -68,6 +79,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration }) {
   }
   return {
     store,
+    invitations,
     async principal(request) {
       const session = await sessionFor(request)
       if (!session) return null
@@ -75,20 +87,80 @@ export function createSso({ settings, pool, identity, oidcConfiguration }) {
         checkOrigin(request)
         if (!equal(session.csrf, request.headers['x-mx-hub-csrf'])) throw new AppError(403, 'sso_csrf', '页面会话已变化，请刷新后重试。')
       }
-      return identity.resolveVerified(await verified(session))
+      return identity.resolveVerified(await verified(session, !['GET', 'HEAD', 'OPTIONS'].includes(request.method)))
     },
     async handle(request, response, url) {
       if (!url.pathname.startsWith('/auth/sso/')) return false
       response.setHeader('Cache-Control', 'no-store'); response.setHeader('Referrer-Policy', 'no-referrer')
       const path = url.pathname
       const redirect = location => { response.writeHead(303, { location }); response.end() }
+      const json = value => { response.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(value)); return true }
+      if (path === '/auth/sso/invitation-proof' && request.method === 'POST') {
+        const body = await readJson(request,4096)
+        const signature = createHmac('sha256',settings.clientSecret).update(`mx-hub-invitation-proof-v1:${JSON.stringify(body)}`).digest('hex')
+        if (body.clientId!==settings.clientId || body.issuer!==settings.issuer || !Number.isSafeInteger(body.timestamp) || Math.abs(Date.now()-body.timestamp)>30000
+          || !equal(signature,request.headers['x-mx-invitation-signature'])) throw new AppError(401,'invalid_identity_client','邀请验证失败。')
+        const context = await store.get('invitation-registration',body.handle)
+        if (!context) throw new AppError(410,'invitation_context_expired','邀请登录已超时，请返回邀请链接重试。')
+        return json({...await invitations.registrationProof(context.invitationId),clientId:settings.clientId})
+      }
+      if (path === '/auth/sso/invitation/start' && request.method === 'POST') {
+        checkOrigin(request)
+        const ip=request.socket.remoteAddress || 'unknown', now=Date.now()
+        const attempt=invitationAttempts.get(ip)
+        if (attempt && now-attempt.start<60000 && attempt.count>=30) throw new AppError(429,'invitation_rate_limited','邀请操作过于频繁，请稍后重试。')
+        if (invitationAttempts.size>=1000 && !attempt) invitationAttempts.delete(invitationAttempts.keys().next().value)
+        invitationAttempts.set(ip,attempt && now-attempt.start<60000 ? {...attempt,count:attempt.count+1} : {start:now,count:1})
+        const body = await readJson(request,4096), invitation = await invitations.inspect(body.token)
+        const old = cookies(request)[INV]; if (old) await store.remove('invitation',old)
+        const id = random(); await store.put('invitation',id,{token:body.token,invitationId:invitation.id},1800)
+        response.setHeader('Set-Cookie',cookie(INV,id,1800))
+        return json(invitation)
+      }
+      if (path === '/auth/sso/invitation' && request.method === 'GET') {
+        const context = await store.get('invitation',cookies(request)[INV])
+        if (!context) throw new AppError(410,'invitation_context_expired','邀请已超时，请重新打开原邀请链接。')
+        const session = await sessionFor(request)
+        let principal = null
+        if (session) {
+          try { principal = await identity.resolveVerified(await verified(session,true)) }
+          catch (error) { if (error.status!==401) throw error }
+        }
+        const invitation = await invitations.inspect(context.token,principal?.memberId)
+        return json({invitation,user:principal ? {displayName:principal.displayName,memberId:principal.memberId} : null,csrf:principal ? session.csrf : null})
+      }
+      if (path === '/auth/sso/invitation/accept' && request.method === 'POST') {
+        checkOrigin(request)
+        const context = await store.get('invitation',cookies(request)[INV]), session = await sessionFor(request)
+        if (!context || !session) throw new AppError(401,'login_required','请先从此邀请登录。')
+        if (!equal(session.csrf,request.headers['x-mx-hub-csrf'])) throw new AppError(403,'sso_csrf','页面会话已变化，请刷新后重试。')
+        const body=await readJson(request,4096)
+        if (body?.invitationId!==context.invitationId) throw new AppError(409,'invitation_context_changed','另一个页面已切换邀请，请重新检查目标租户后确认。')
+        const principal = await identity.resolveVerified(await verified(session,true))
+        const accepted = await invitations.accept(principal,context.token)
+        identity.client?.invalidate?.()
+        // Keep the short context for idempotent retry if the success response is lost.
+        return json({...accepted,returnUrl:`/?sso=ready#/${accepted.role==='billing' ? 'payments' : 'my'}?tenantId=${accepted.tenantId}`})
+      }
       if (path === '/auth/sso/login' && request.method === 'GET') {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', '请从 Hub 发起登录。')
         const old = cookies(request)[TX]; if (old) await store.remove('login', old)
         const id = random(), transaction = { state: random(), nonce: random(), verifier: random() }
+        let registrationHandle
+        if (url.searchParams.get('invitation') === '1') {
+          const joinId=cookies(request)[INV], context=await store.get('invitation',joinId)
+          if (!context) throw new AppError(410,'invitation_context_expired','请重新打开邀请链接。')
+          const invitation=await invitations.inspect(context.token)
+          transaction.invitation=joinId
+          if (invitation.allowRegistration) {
+            registrationHandle=random()
+            await store.put('invitation-registration',registrationHandle,{invitationId:invitation.id},300)
+          }
+        }
         const target = oidc.buildAuthorizationUrl(await configuration(), {
           redirect_uri: `${settings.origin}/auth/sso/callback`, response_type: 'code', response_mode: 'query', scope: 'openid mx:hub',
           state: transaction.state, nonce: transaction.nonce, code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
+          ...(registrationHandle ? {mx_invitation:registrationHandle} : {}),
           ...(url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : {})
         })
         await store.put('login', id, transaction, 300)
@@ -106,16 +178,24 @@ export function createSso({ settings, pool, identity, oidcConfiguration }) {
         if (claims?.iss !== settings.issuer || typeof claims.sub !== 'string' || !tokens.access_token || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0) throw new AppError(400, 'sso_login_invalid', '统一身份响应无效。')
         const session = { issuer:settings.issuer, subject: claims.sub, accessToken: tokens.access_token, csrf: random() }
         const canonical = await verified(session)
-        await store.provision({ issuer: settings.issuer, subject: claims.sub, clientId: settings.clientId, canonical, personalTenant: settings.personalTenant === true })
+        await store.provision({ issuer: settings.issuer, subject: claims.sub, clientId: settings.clientId, canonical, personalTenant: settings.personalTenant === true && !transaction.invitation })
         const old = cookies(request)[SID]; if (old) await store.remove('session', old)
         const sid = random(), seconds = Math.min(SESSION_TTL_SECONDS, tokens.expires_in)
         await store.put('session', sid, session, seconds)
-        response.setHeader('Set-Cookie', [cookie(TX, '', 0), cookie(SID, sid, seconds)])
-        redirect('/?sso=ready'); return true
+        response.setHeader('Set-Cookie', [cookie(TX, '', 0), cookie(SID, sid, seconds), ...(transaction.invitation ? [cookie(INV,transaction.invitation,1800)] : [])])
+        redirect(transaction.invitation ? '/?sso=ready#/join' : '/?sso=ready'); return true
       }
       if (path === '/auth/sso/session' && request.method === 'GET') {
-        const session = await sessionFor(request)
-        response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ active: Boolean(session), csrf: session?.csrf ?? null }))
+        let session = await sessionFor(request)
+        if (session) {
+          try { await verified(session, true) }
+          catch (error) {
+            if (error.status !== 401) throw error
+            await store.remove('session', cookies(request)[SID]); session = null
+            response.setHeader('Set-Cookie', cookie(SID, '', 0))
+          }
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ active: Boolean(session), csrf: session?.csrf ?? null, securityUrl: `${settings.issuer}/sessions` }))
         return true
       }
       if (path === '/auth/sso/logout' && request.method === 'POST') {

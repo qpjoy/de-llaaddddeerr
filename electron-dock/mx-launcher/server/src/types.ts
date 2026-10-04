@@ -790,6 +790,15 @@ export interface UserCenterAppAccess {
 }
 
 export interface UserCenterUser {
+  /** Trusted first signup provenance; absent on historical accounts, never an authorization claim. */
+  registration?: {
+    source: { issuer: string; clientId: string; appId: 'mx-launcher' | 'mx-insight-hub'; appOrigin: string };
+    method: 'password' | 'feishu';
+    policyVersion: number;
+    registeredAt: string;
+  };
+  /** Set only on an explicit password change; old browser sessions are not rewritten on upgrade. */
+  webSessionsInvalidBefore?: string;
   userId: string;
   tenantId: string;
   orgIds: string[];

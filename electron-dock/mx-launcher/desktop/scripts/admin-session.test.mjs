@@ -5,7 +5,7 @@ import { createAdminSessionUi } from '../admin-session.js';
 function fixture(t, initial, pageOrigin = 'https://launcher.example') {
   const nodes = new Map();
   const root = { getElementById(id) {
-    if (!nodes.has(id)) nodes.set(id, { hidden: false, textContent: '', addEventListener() {}, close() {} });
+    if (!nodes.has(id)) nodes.set(id, { hidden: false, textContent: '', addEventListener() {}, close() {}, removeAttribute(name) { delete this[name]; } });
     return nodes.get(id);
   } };
   let payload = initial, base = pageOrigin, calls = 0;

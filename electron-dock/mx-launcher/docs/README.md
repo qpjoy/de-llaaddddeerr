@@ -14,6 +14,12 @@
 
 相关专题：
 
+- [44-hub-registration-policy-and-provenance.md](./44-hub-registration-policy-and-provenance.md)：Hub 独立注册策略、可信首次注册来源、新 Hub 账号的默认网络边界与原账号兼容；无新增服务或数据库，本地完成，未部署生产。
+
+- [43-hub-enterprise-invitations.md](./43-hub-enterprise-invitations.md)：已有/新建企业租户邀请、受邀注册免第二码、显式接受与原成员自动绑定、角色/并发/撤回保护及发布边界；本地完成，未部署生产。
+
+- [42-browser-session-lifecycle.md](./42-browser-session-lifecycle.md)：改密失效、全局网页登录退出、单浏览器撤销、旧账号/客户端兼容、发布验收及企业邀请与注册邀请码的区别；本批本地完成，未部署生产。
+
 - [40-hub-sso-and-feishu-web.md](./40-hub-sso-and-feishu-web.md)：Hub SSO、原成员/租户复用、新用户个人空间、飞书 Web 绑定、集中配置与部署验收边界。
 
 - [38-neon-void-admin-ui.md](./38-neon-void-admin-ui.md)：
@@ -28,8 +34,7 @@
   版本与配置预检、持久任务及断线查询。包含随 Launcher deploy 幂等安装/安全更新及生产验收边界，未部署生产。
 
 - [35-platform-implementation-and-acceptance.md](./35-platform-implementation-and-acceptance.md)：
-  分阶段实施与验收进度。首期工作台、导航归纳和连接设置折叠已在本地实现与验证，未部署生产；
-  后续依次接邀请注册、SSO、Hub 自助开通、飞书绑定及统一运维。
+  分阶段实施与验收进度及历史记录；最新注册、SSO、Hub、飞书、会话生命周期、企业邀请及按应用注册进度以文档 39–44 为准。完整账号安全、邀请联系方式验证/投递、统一运维和恢复演练仍需分阶段交付。
 
 - [33-mx-platform-identity-and-sustainable-architecture.md](./33-mx-platform-identity-and-sustainable-architecture.md)：
   2026-10-02 完整平台设计：身份分域、SSO、复用原飞书、邀请码/开放注册、已有账号绑定与归并、

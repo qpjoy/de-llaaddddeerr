@@ -9,18 +9,22 @@ const API_BASE = (import.meta.env.VITE_MX_INSIGHT_API_BASE || '').replace(/\/$/,
 const ADMIN_ROOT = '/internal/v1/admin'
 export const SSO_SESSION = 'mx-hub-cookie-session'
 let ssoCsrf = ''
+let ssoSecurityUrl = ''
+export const ssoSessionManagementUrl = () => ssoSecurityUrl
 const authHeaders = token => token === SSO_SESSION ? { 'x-mx-hub-csrf': ssoCsrf } : token ? { 'x-mx-insight-admin-token': token } : {}
 export async function restoreSsoSession() {
   const response = await fetch(`${API_BASE}/auth/sso/session`, { credentials: 'same-origin', cache: 'no-store' })
   if (!response.ok) return false
   const value = await response.json()
   ssoCsrf = value.csrf || ''
+  ssoSecurityUrl = value.active === true && typeof value.securityUrl === 'string' && value.securityUrl.startsWith('https://') ? value.securityUrl : ''
   return value.active === true
 }
 export async function logoutSsoSession() {
   const response = await fetch(`${API_BASE}/auth/sso/logout`, { method: 'POST', credentials: 'same-origin', headers: { 'x-mx-hub-csrf': ssoCsrf } })
   if (!response.ok) throw new Error('退出统一登录失败，请刷新页面后重试。')
   ssoCsrf = ''
+  ssoSecurityUrl = ''
 }
 
 function withoutTrailingSlash(value) {
@@ -468,6 +472,9 @@ export const adminApi = {
   previewTenantServiceAccess: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access/preview`, { method: 'POST', body }),
   saveTenantServiceAccess: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${id}/service-access`, { method: 'PUT', body }),
   members: (token) => request(token, `${ADMIN_ROOT}/members`),
+  tenantInvitations: (token, tenantId) => request(token, `${ADMIN_ROOT}/tenant-invitations?tenantId=${encodeURIComponent(tenantId)}`),
+  createTenantInvitation: (token, body) => request(token, `${ADMIN_ROOT}/tenant-invitations`, { method:'POST', body }),
+  revokeTenantInvitation: (token, id) => request(token, `${ADMIN_ROOT}/tenant-invitations/revoke`, { method:'POST', body:{id} }),
   grantMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships`, { method: 'POST', body }),
   revokeMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships/revoke`, { method: 'POST', body }),
 

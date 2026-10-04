@@ -63,7 +63,7 @@ for (const publicEntry of [false, true]) test(`real persisted provider (${public
     const discovery = JSON.parse((await request('/identity/.well-known/openid-configuration')).text);
     assert.equal(discovery.issuer, issuer); assert.match(discovery.authorization_endpoint, /\/identity\/auth$/);
     const verifier = 'a'.repeat(43); const state = randomUUID(); const nonce = randomUUID();
-    const authorize = `${discovery.authorization_endpoint}?${new URLSearchParams({ client_id: settings.clientId, response_type: 'code', redirect_uri: `${adminOrigin}/auth/admin/callback`, scope: 'openid', state, nonce, max_age: '300', code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url') })}`;
+    const authorize = `${discovery.authorization_endpoint}?${new URLSearchParams({ client_id: settings.clientId, response_type: 'code', redirect_uri: `${adminOrigin}/auth/admin/callback`, scope: 'openid', claims: JSON.stringify({id_token:{mx_session_uid:{essential:true}}}), state, nonce, max_age: '300', code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url') })}`;
     const badRedirect = new URL(authorize); badRedirect.searchParams.set('redirect_uri', 'https://other.invalid/callback');
     const refused = await request(badRedirect.href);
     assert.equal(refused.status, 400); assert.ok(!refused.location?.startsWith('https://other.invalid'));
@@ -89,6 +89,7 @@ for (const publicEntry of [false, true]) test(`real persisted provider (${public
     assert.equal(verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), pair.publicKey, Buffer.from(signature, 'base64url')), true);
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
     assert.equal(claims.sub, user.userId); assert.equal(claims.iss, issuer); assert.equal(claims.nonce, nonce); assert.ok(claims.auth_time);
+    assert.equal(typeof claims.mx_session_uid, 'string', 'BFF receives a signed browser identity for targeted revocation');
     assert.notEqual((await token()).status, 200);
     await restart();
     step = await request(authorize);

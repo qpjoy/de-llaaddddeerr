@@ -1072,6 +1072,7 @@ export class MemoryStore implements PlatformStore {
     const updated = {
       ...user,
       credential: userCredentialSummary(credential),
+      webSessionsInvalidBefore: now,
       updatedAt: now
     };
     this.users.set(userId, updated);

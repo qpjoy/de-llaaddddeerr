@@ -6,6 +6,7 @@ import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
 import { SocialContentOverview } from './product-workbench.jsx'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
+import { TenantInvitationPage, TenantTeamPage } from './tenant-invitations.jsx'
 import { DocsPage } from './pages-docs.jsx'
 import { WebSearchPage } from './pages-web-search.jsx'
 import { IpRiskPage } from './pages-ip-risk.jsx'
@@ -43,7 +44,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { landingPathFor, showsOwnAccess } from './tenant-scope.js'
-import { adminApi, configurePublicApiBase, signInWithLauncher, SSO_SESSION, restoreSsoSession, logoutSsoSession } from './api.js'
+import { adminApi, configurePublicApiBase, signInWithLauncher, SSO_SESSION, restoreSsoSession, logoutSsoSession, ssoSessionManagementUrl } from './api.js'
 import { ErrorState, Field, LoadingState, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
@@ -365,6 +366,7 @@ const ROUTES = [
   { path: '/my', label: '我的接入', description: '额度、到期与可用性', icon: ShieldCheck, group: '业务治理', component: MyAccessPage, ownAccess: true },
   { path: '/dashboard', label: '仪表盘', description: '网关运营总览', icon: House, group: '业务治理', component: DashboardPage, capability: 'usage.read' },
   { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
+  { path: '/team', label: '团队邀请', description: '邀请同事加入租户', icon: Users, group: '业务治理', component: TenantTeamPage, capability: 'membership.write' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
   { path: '/payments', label: '充值与发票', description: '充值、核账与开票', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'billing.read' },
@@ -488,7 +490,7 @@ function readLocation({ canonicalize = false } = {}) {
     }
   }
   const studioDetail = candidatePath.startsWith('/agent/studio/')
-  const path = ROUTE_MAP.has(candidatePath) ? candidatePath : studioDetail ? '/agent/studio' : '/dashboard'
+  const path = candidatePath==='/join' || ROUTE_MAP.has(candidatePath) ? candidatePath : studioDetail ? '/agent/studio' : '/dashboard'
   return { path, detailPath: studioDetail ? candidatePath : path, query, defaulted }
 }
 
@@ -893,6 +895,7 @@ export function App() {
   }, [location.detailPath, location.path, location.query])
 
 
+  if (location.path==='/join') return <TenantInvitationPage query={location.query} theme={theme} onToggleTheme={toggleTheme} />
   if (authState !== 'signed-in') {
     return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate}
       theme={theme} onToggleTheme={toggleTheme} />
@@ -960,6 +963,7 @@ export function App() {
           </div>
           <div className="mih-topbar-actions">
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            {token === SSO_SESSION && ssoSessionManagementUrl() ? <a className="qp-button qp-button--ghost qp-icon-button" href={ssoSessionManagementUrl()} aria-label="网页登录会话" title="网页登录会话"><ShieldCheck size={18} aria-hidden="true" /></a> : null}
             <span className="qp-tag qp-tag--success mih-session-tag"><ShieldCheck size={14} weight="fill" aria-hidden="true" />受保护的管理会话</span>
             <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
               <SignOut size={17} aria-hidden="true" />
