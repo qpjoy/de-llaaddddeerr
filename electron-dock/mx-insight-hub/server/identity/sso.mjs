@@ -185,7 +185,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
           state: transaction.state, nonce: transaction.nonce, code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
           ...(url.searchParams.get('surface') === 'application' ? { mx_surface: 'application' } : {}),
           ...(registrationHandle ? {mx_invitation:registrationHandle} : {}),
-          ...(url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : {})
+          ...(url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : url.searchParams.get('select') === '1' ? { prompt: 'select_account' } : {})
         })
         await store.put('login', id, transaction, 300)
         response.setHeader('Set-Cookie', cookie(TX, id, 300)); redirect(target.toString()); return true

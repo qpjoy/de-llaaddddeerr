@@ -112,15 +112,7 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
     catch (error) { status.textContent = error.message; }
     finally { logout.disabled = false; }
   });
-  switchAccount?.addEventListener('click', async () => {
-    switchAccount.disabled = true;
-    try {
-      await request('/auth/admin/logout', {});
-      session = null;
-      location.assign('/auth/admin/login?switch=1');
-    } catch (error) { status.textContent = error.message; }
-    finally { switchAccount.disabled = false; }
-  });
+  switchAccount?.addEventListener('click', () => { location.assign('/auth/admin/login?select=1'); });
   root.getElementById('admin-account-link-cancel')?.addEventListener('click', () => dialog.close());
   dialog?.addEventListener('close', () => form.reset());
   form?.addEventListener('submit', async (event) => {

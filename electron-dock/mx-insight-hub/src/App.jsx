@@ -1,5 +1,5 @@
 import { HubAccountEntry, HubAccountPage } from './account.jsx'
-import { hubUiPath } from '../shared/account-navigation.mjs'
+import { hubLoginUrl, hubUiPath } from '../shared/account-navigation.mjs'
 import { WechatOverview } from './wechat-product.jsx'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
@@ -584,7 +584,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
             {options?.sso ? <div className="mih-auth-form">
               <a className="qp-button qp-button--primary qp-button--lg qp-button--block" href={`${options.sso.loginUrl}?ui=${encodeURIComponent(hubUiPath(window.location.pathname))}`}>统一账号登录</a>
               <p className="mih-auth-caption">使用已有 Launcher 账号；注册与飞书登录在统一认证页完成。</p>
-              <details className="mih-auth-account-options"><summary>账号选项</summary><a className="qp-button qp-button--ghost" href={`${options.sso.switchUrl}&ui=${encodeURIComponent(hubUiPath(window.location.pathname))}`}>切换统一账号</a></details>
+              <a className="qp-button qp-button--ghost qp-button--block" href={hubLoginUrl(window.location.pathname, { select: '1' })}>选择或切换账号</a>
             </div> : null}
             {options && !options.sso && !options.launcher && options.launcherUnavailableReason ? (
               // Shown rather than hidden: an operator who configured Launcher
@@ -978,6 +978,7 @@ export function App() {
           <div className="mih-topbar-actions">
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
             {token === SSO_SESSION && ssoSessionManagementUrl() ? <a className="qp-button qp-button--ghost qp-icon-button" href="#/account" aria-label="我的账号" title="我的账号"><ShieldCheck size={18} aria-hidden="true" /></a> : null}
+            {token === SSO_SESSION ? <a className="qp-button qp-button--ghost" href={hubLoginUrl(window.location.pathname, { select: '1' })}>切换账号</a> : null}
             <span className="qp-tag qp-tag--success mih-session-tag"><ShieldCheck size={14} weight="fill" aria-hidden="true" />受保护的管理会话</span>
             <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
               <SignOut size={17} aria-hidden="true" />

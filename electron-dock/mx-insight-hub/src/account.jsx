@@ -56,7 +56,7 @@ export function HubAccountEntry({ themeClass, light, onToggleTheme, message }) {
         {canRegister ? <div className="mih-account-tabs" aria-label="账号操作">{[['login', '登录'], ['register', options.enterprise || options.policy.mode === 'open' ? '注册' : '邀请码注册']].map(([value, label]) => <button className={`qp-button qp-button--ghost${mode === value ? ' is-active' : ''}`} key={value} disabled={busy} aria-pressed={mode === value} onClick={() => { setMode(value); setError(null) }}>{label}</button>)}</div> : null}
         {options.invitationError ? <p role="alert">{options.invitationError}</p> : null}
         <form className="mih-auth-form" onSubmit={submit} key={mode}>
-          <Field label="账号"><input className="qp-input" name="login" autoComplete="username" required autoFocus maxLength={registering ? 64 : 255} disabled={busy} placeholder={registering ? '设置登录账号' : '输入你的账号'} /></Field>
+          <Field label="账号"><input className="qp-input" name="login" autoComplete="username" defaultValue={registering ? '' : options.loginHint || ''} required autoFocus maxLength={registering ? 64 : 255} disabled={busy} placeholder={registering ? '设置登录账号' : '输入你的账号'} /></Field>
           <Field label="密码"><input className="qp-input" name="password" type="password" autoComplete={registering ? 'new-password' : 'current-password'} required minLength={registering ? 8 : undefined} maxLength={registering ? 128 : 1024} disabled={busy} placeholder={registering ? '至少 8 位' : '输入密码'} /></Field>
           {registering ? <><Field label="确认密码"><input className="qp-input" name="passwordConfirm" type="password" autoComplete="new-password" required minLength={8} maxLength={128} disabled={busy} /></Field>
             {options.policy?.mode === 'invite_code' && !options.enterprise ? <Field label="邀请码"><input className="qp-input" name="inviteCode" autoComplete="off" required maxLength={128} disabled={busy} /></Field> : null}</> : null}
@@ -67,6 +67,7 @@ export function HubAccountEntry({ themeClass, light, onToggleTheme, message }) {
         {!registering ? <details className="mih-account-help"><summary>忘记密码？</summary><p>请联系为你开通服务的管理员重置密码，之后使用原账号登录。</p></details> : <p className="mih-account-help">账号以字母开头，可使用字母、数字、点、下划线和短横线。</p>}
       </> : error ? <ErrorState error={error} /> : null}
       {error ? <a className="qp-button qp-button--ghost" href={hubLoginUrl(window.location.pathname, options?.invited ? { invitation: '1' } : {})}>重新开始</a> : null}
+      <a className="qp-button qp-button--ghost qp-button--block" href={hubLoginUrl(window.location.pathname, { select: '1', ...(options?.invited ? { invitation: '1' } : {}) })}>切换账号</a>
       <footer className="mih-account-footer">{options?.invited ? <a href={`${hubUiPath(window.location.pathname)}#/join`}>返回邀请</a> : <span><ShieldCheck size={15} /> 安全登录</span>}<a href={`${hubUiPath(window.location.pathname)}?admin=1`}>管理员入口</a></footer>
     </section>
   </div>
@@ -95,6 +96,7 @@ export function HubAccountPage({ token, onUnauthorized }) {
   }
   const password = <Field label="当前密码"><input className="qp-input" type="password" name="currentPassword" autoComplete="current-password" required maxLength={1024} disabled={busy} /></Field>
   return <div className="mih-account-page"><PageHeading title="我的账号" description="管理你的个人资料与账号安全。" />
+    {token === SSO_SESSION ? <a className="qp-button" href={hubLoginUrl(window.location.pathname, { select: '1' })}>切换账号</a> : null}
     {token !== SSO_SESSION ? <a className="qp-button qp-button--primary" href={hubLoginUrl(window.location.pathname, { return: 'account' })}>登录个人账号</a> : !data && !error ? <LoadingState /> : null}
     {error ? <ErrorState error={error} /> : null}{notice ? <p role="status">{notice}</p> : null}
     {data ? <>

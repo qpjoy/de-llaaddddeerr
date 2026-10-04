@@ -14,6 +14,7 @@
 
 相关专题：
 
+- [46-browser-account-chooser.md](./46-browser-account-chooser.md)：Auth 统一浏览器账号选择、Hub/Launcher 直接切换入口、历史账号提示与重新验证边界；无需新增数据库或服务。
 - [45-application-account-sdk-and-hub.md](./45-application-account-sdk-and-hub.md)：应用原生账号界面、服务端 SDK、通用客户端增量登记，以及 Hub 登录/注册/邀请/资料/密码/绑定/设备的完整接入和兼容边界；本地完成，未部署生产。
 
 - [44-hub-registration-policy-and-provenance.md](./44-hub-registration-policy-and-provenance.md)：Hub 独立注册策略、可信首次注册来源、新 Hub 账号的默认网络边界与原账号兼容；无新增服务或数据库，本地完成，未部署生产。

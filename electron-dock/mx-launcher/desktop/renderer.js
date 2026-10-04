@@ -931,7 +931,7 @@ document.getElementById('gate-login').addEventListener('click', () => {
   const entry = adminSession.entry();
   document.getElementById(entry?.authenticated && !entry.bindingRequired ? 'admin-account-switch' : 'admin-account-login').click();
 });
-document.getElementById('gate-switch').addEventListener('click', () => { location.assign('/auth/admin/login?switch=1'); });
+document.getElementById('gate-switch').addEventListener('click', () => { location.assign('/auth/admin/login?select=1'); });
 document.getElementById('gate-signout').addEventListener('click', () => document.getElementById('admin-account-logout').click());
 document.getElementById('ops-session-logout').addEventListener('click', () => { clearOpsToken(); location.reload(); });
 document.getElementById('gate-token-form').addEventListener('submit', async event => {

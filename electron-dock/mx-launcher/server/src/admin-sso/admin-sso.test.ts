@@ -105,14 +105,14 @@ async function fixture(localSubjects = false, publicGateway = false) {
     return await fetch(`${origin}${path}`, { redirect: 'manual', ...(body !== undefined ? { method: 'POST', body: JSON.stringify(body) } : {}),
       headers: { ...(publicGateway ? { 'x-mx-identity-gateway': 'test-gateway-secret', 'x-mx-client-ip': '203.0.113.1' } : {}), ...(sessionCookie ? { cookie: sessionCookie } : {}), ...(body !== undefined ? { 'content-type': 'application/json', origin: requestOrigin } : {}), ...(csrf ? { 'x-mx-admin-csrf': csrf } : {}) } }) as TestResponse;
   }
-  async function begin(sessionCookie = '', switching = false) {
-    const response = await request('/auth/admin/login' + (switching ? '?switch=1' : ''), sessionCookie);
+  async function begin(sessionCookie = '', switching = false, selecting = false) {
+    const response = await request('/auth/admin/login' + (switching ? '?switch=1' : selecting ? '?select=1' : ''), sessionCookie);
     assert.equal(response.status, 303);
     const authorize = new URL(response.headers.get('location')!);
     assert.equal(authorize.searchParams.get('code_challenge_method'), 'S256');
     assert.equal(authorize.searchParams.get('scope'), 'openid');
-    assert.equal(authorize.searchParams.get('prompt'), sessionCookie || switching ? 'login' : null);
-    assert.equal(authorize.searchParams.get('max_age'), sessionCookie || switching ? '300' : '2592000');
+    assert.equal(authorize.searchParams.get('prompt'), switching || (sessionCookie && !selecting) ? 'login' : selecting ? 'select_account' : null);
+    assert.equal(authorize.searchParams.get('max_age'), switching || (sessionCookie && !selecting) ? '300' : '2592000');
     const code = randomUUID(); codes.set(code, authorize.searchParams);
     return { loginCookie: cookieValue(response, '__Host-mx-admin-login'), callback: `/auth/admin/callback?code=${code}&state=${authorize.searchParams.get('state')}` };
   }
@@ -456,6 +456,28 @@ test('normal SSO accepts a remembered identity; explicit switching and write rea
     assert.equal(result.headers.get('location'), '/admin/');
     const next = cookieValue(result, '__Host-mx-admin-session');
     assert.equal((await (await f.request('/auth/admin/session', next)).json()).user.userId, 'existing-user');
+  } finally { await f.close(); }
+});
+
+test('account selection allows changing identity without granting management or refreshing old proof', async () => {
+  const f = await fixture(true);
+  try {
+    f.setClaims({ sub: 'existing-admin', auth_time: Math.floor(Date.now() / 1000) - 86400 });
+    const old = await f.login();
+    const selected = await f.begin(old, false, true);
+    const response = await f.request(selected.callback, `${selected.loginCookie}; ${old}`);
+    const continued = cookieValue(response, '__Host-mx-admin-session');
+    const current = await (await f.request('/auth/admin/session', continued)).json();
+    assert.equal((await f.request('/admin-api/internal/v1/admin/actions', continued, {}, current.csrf)).status, 401);
+    f.setClaims({ sub: 'existing-user' });
+    const switchToUser = await f.begin(continued, false, true);
+    const result = await f.request(switchToUser.callback, `${switchToUser.loginCookie}; ${continued}`);
+    assert.equal(result.headers.get('location'), '/admin/');
+    const next = cookieValue(result, '__Host-mx-admin-session');
+    const user = await (await f.request('/auth/admin/session', next)).json();
+    assert.equal(user.user.userId, 'existing-user');
+    assert.equal(user.canManage, false);
+    assert.equal((await f.request('/admin-api/internal/v1/admin/actions', next, {}, user.csrf)).status, 403);
   } finally { await f.close(); }
 });
 

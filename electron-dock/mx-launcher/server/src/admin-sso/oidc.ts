@@ -8,6 +8,7 @@ export interface LoginTransaction extends Record<string, unknown> {
   verifier: string;
   expiresAt: string;
   reauthenticate?: boolean;
+  selectAccount?: boolean;
 }
 export interface OidcIdentity { issuer: string; subject: string; authTime: number; sessionUid?: string }
 export interface AdminOidcClient {
@@ -35,7 +36,7 @@ export function createAdminOidcClient(settings: AdminSsoConfig, injected?: oidc.
         state: transaction.state, nonce: transaction.nonce,
         ...(settings.localSubjects ? { claims: JSON.stringify({ id_token: { mx_session_uid: { essential: true } } }) } : {}),
         max_age: String(transaction.reauthenticate ? 300 : USER_SESSION_TTL_SECONDS),
-        ...(transaction.reauthenticate ? { prompt: 'login' } : {})
+        ...(transaction.reauthenticate ? { prompt: 'login' } : transaction.selectAccount ? { prompt: 'select_account' } : {})
       });
     },
     async redeem(url, transaction) {

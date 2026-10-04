@@ -147,12 +147,14 @@ export function createAdminSsoMiddleware(deps: {
       const existing = await sessionFor(req);
       const currentUser = existing ? await userFor(existing) : null;
       const switching = new URL(req.url!, config.origin).searchParams.get('switch') === '1';
+      const selecting = new URL(req.url!, config.origin).searchParams.get('select') === '1';
       const transaction: LoginTransaction = {
         state: random(), nonce: random(), verifier: random(), scope,
         expiresAt: new Date(Date.now() + FIVE_MINUTES).toISOString(),
         // Reauthentication cannot silently switch the administrator/account.
-        expectedUserId: switching ? null : currentUser?.userId ?? null,
-        reauthenticate: switching || Boolean(existing)
+        expectedUserId: switching || selecting ? null : currentUser?.userId ?? null,
+        reauthenticate: switching || (Boolean(existing) && !selecting),
+        selectAccount: selecting
       };
       const url = await oidc.authorize(transaction);
       const token = random();

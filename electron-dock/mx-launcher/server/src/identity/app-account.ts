@@ -20,11 +20,11 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
     return user!;
   };
   return {
-    async begin(uid: string, clientId: string, oidcState: string, error?: string) {
+    async begin(uid: string, clientId: string, oidcState: string, error?: string, loginHint?: string) {
       if (!state || !apps.has(clientId)) return null;
       // A new handle invalidates older tabs for this interaction. Passwords never enter this store.
       const handle = random();
-      await state.put('app-flow', handle, { uid, clientId });
+      await state.put('app-flow', handle, { uid, clientId, loginHint });
       await state.put('app-completion-lock', handle, {});
       await state.put('app-active', uid, { handle });
       return `${apps.get(clientId)!.origin}/auth/sso/interaction?flow=${handle}&state=${encodeURIComponent(oidcState)}${error === 'feishu' ? '&error=feishu' : ''}`;
@@ -87,7 +87,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
           let enterprise = false, invitationError = '';
           if (invitationHandle) { try { enterprise = Boolean(await enterpriseProof()); } catch { invitationError = '邀请已失效，请返回原邀请链接重新开始。'; } }
           return json(200, { policy: policy.status === 'fulfilled' ? policy.value : null,
-            feishu: feishu.status === 'fulfilled' && feishu.value?.enabled === true, pending: Boolean(proof), enterprise, invitationError });
+            feishu: feishu.status === 'fulfilled' && feishu.value?.enabled === true, pending: Boolean(proof), enterprise, invitationError, loginHint: flow!.loginHint ?? '' });
         }
         if (!['login', 'register', 'feishu', 'feishu-link'].includes(action)) fail(400, '不支持的账号操作。');
         const completed = await state!.read('app-result', input.flow);
