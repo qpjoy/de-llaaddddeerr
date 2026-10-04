@@ -21,6 +21,7 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
   let scope = '', generation = 0, initialized = false, connected = false, busy = false, timer = null;
   let service = 'launcher', action = 'status', profiles = {}, instances = [], history = [], plan = null, operation = null, log = '', feedback = '';
   let uncertain = false, currentId = null, acknowledged = false, executorUpdate = null;
+  let pendingCommand = '', feedbackError = false, taskError = '';
   const storageKey = name => `mx.service-operations.v1:${scope}:${name}`;
   const readStored = name => { try { return JSON.parse(localStorage.getItem(storageKey(name))); } catch { return null; } };
   const saveStored = (name, value) => { try { if (value === null) localStorage.removeItem(storageKey(name)); else localStorage.setItem(storageKey(name), JSON.stringify(value)); } catch { /* Private browser: the draft still works in memory. */ } };
@@ -29,10 +30,22 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
     generation++; clearTimeout(timer); timer = null; scope = serverKey(); initialized = false; connected = false; busy = false;
     profiles = Object.fromEntries(Object.keys(SERVICE_CATALOG).map(key => [key, readStored(key) || defaultServiceProfile(key)]));
     instances = []; history = []; plan = null; operation = null; log = ''; feedback = ''; uncertain = false; acknowledged = false; executorUpdate = null;
+    pendingCommand = ''; feedbackError = false; taskError = '';
     currentId = readStored('last-operation') || null;
     render();
   }
   function preview() { return buildServiceCommand(service, action, profiles[service]); }
+  function executeBlockReason() {
+    if (busy) return pendingCommand === 'plan' ? '正在预检，请等待结果。' : '正在处理请求，请稍候。';
+    if (uncertain) return '上次提交结果尚未确认，请先查询原任务。';
+    if (executorUpdate) return '执行器正在等待更新，切换完成后请刷新并重新预检。';
+    if (!connected) return '执行器尚未连接，请先刷新执行器与任务。';
+    if (!instance()) return '所选服务尚未登记到主机。';
+    if (!plan) return '尚未生成有效计划，请先完成预检。';
+    if (Date.parse(plan.expiresAt) <= Date.now()) return '计划已过期，请重新预检。';
+    if (plan.requiresAcknowledgement && !acknowledged) return '请先勾选计划中的目标与影响确认。';
+    return '';
+  }
   const field = (key, label, type = 'text', hint = '') => `<label class="service-field"><span>${label}</span><input data-service-field="${key}" type="${type}" value="${escape(profiles[service][key])}" autocomplete="off" ${key === 'proxyPort' ? 'min="1" max="65535"' : ''} />${hint ? `<small>${hint}</small>` : ''}</label>`;
   const toggle = (key, label, hint) => `<label class="service-switch"><input data-service-field="${key}" type="checkbox" role="switch" ${profiles[service][key] ? 'checked' : ''} /><span><strong>${label}</strong><small>${hint}</small></span></label>`;
   function render() {
@@ -72,12 +85,14 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
           <p class="service-impact" data-service-impact></p>
           <p class="service-hint">复制命令在目标主机执行，使用该目录的检出代码。在线执行会先锁定版本、配置和目标，计划有效期 5 分钟。</p>
           <div data-service-plan></div>
-          <div class="service-form-actions"><button type="button" class="secondary-button" data-service-command="plan">预检并生成计划</button><button type="button" class="primary-button" data-service-command="execute">执行计划</button></div>
+          <div class="service-form-actions"><button type="button" class="secondary-button" data-service-command="plan">预检并生成计划</button><button type="button" class="primary-button" data-service-command="execute" aria-describedby="service-execute-reason">执行计划</button></div>
+          <p class="service-hint" id="service-execute-reason" data-service-execute-reason role="status"></p>
           <p class="service-feedback" data-service-feedback role="status"></p>
         </section>
       </div>
       <section class="service-task-panel" aria-label="执行任务">
         <div class="service-panel-heading"><h4>执行任务</h4><button type="button" class="secondary-button" data-service-command="task-refresh">查询原任务</button></div>
+        <p class="service-feedback" data-service-task-error data-state="error" role="status"></p>
         <div data-service-task></div>
         <div class="service-history" data-service-history></div>
       </section>
@@ -95,16 +110,24 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
     root.querySelector('[data-service-impact]').dataset.impact = spec?.impact ? 'write' : 'read';
     root.querySelector('[data-service-impact]').textContent = spec?.impact || '读取所选服务信息，不自动修复或重启。';
     root.querySelector('[data-service-feedback]').textContent = feedback;
+    root.querySelector('[data-service-feedback]').dataset.state = feedbackError ? 'error' : 'info';
     const validPlan = plan && Date.parse(plan.expiresAt) > Date.now();
     root.querySelector('[data-service-plan]').innerHTML = plan ? `<div class="service-plan"><strong>${validPlan ? '计划已就绪' : '计划已过期，请重新预检'}</strong><span>版本 ${escape(plan.revision)}${plan.dirty ? ' · 工作区有改动（只读操作）' : ''}</span><span>有效期至 ${escape(new Date(plan.expiresAt).toLocaleTimeString())}</span>${plan.requiresAcknowledgement ? `<label class="service-ack"><input type="checkbox" data-service-ack ${acknowledged ? 'checked' : ''} />我已核对目标与上述影响；需要排空的任务已处理。</label>` : ''}</div>` : '';
     root.querySelector('[data-service-command="copy"]').disabled = Boolean(error);
     root.querySelector('[data-service-command="plan"]').disabled = Boolean(error) || !connected || !instance() || busy || uncertain || Boolean(executorUpdate);
-    root.querySelector('[data-service-command="execute"]').disabled = !validPlan || busy || Boolean(executorUpdate) || (plan.requiresAcknowledgement && !acknowledged);
+    root.querySelector('[data-service-command="plan"]').textContent = pendingCommand === 'plan' ? '正在预检…' : '预检并生成计划';
+    const blocked = error || executeBlockReason();
+    root.querySelector('[data-service-command="execute"]').disabled = Boolean(blocked);
+    root.querySelector('[data-service-command="execute"]').title = blocked;
+    root.querySelector('[data-service-execute-reason]').textContent = blocked;
+    root.querySelector('[data-service-execute-reason]').hidden = !blocked;
     root.querySelector('[data-service-command="task-refresh"]').disabled = !currentId || busy;
     for (const control of root.querySelectorAll('[data-service-field], [data-service-action], [data-service-ack]')) control.disabled = busy;
   }
   function renderTask() {
     if (!root?.querySelector('[data-service-task]')) return;
+    root.querySelector('[data-service-task-error]').textContent = taskError;
+    root.querySelector('[data-service-task-error]').hidden = !taskError;
     root.querySelector('[data-service-task]').innerHTML = operation ? `<div class="service-task-summary"><strong>${escape(statusLabels[operation.status] || operation.status)}</strong><span>${escape(SERVICE_CATALOG[operation.service]?.label)} · ${escape(SERVICE_CATALOG[operation.service]?.actions[operation.action]?.label || operation.action)}</span><code>${escape(operation.id)}</code><p>${escape(operation.message)}</p><small>${escape(operation.updatedAt)}</small></div><pre class="service-task-log" tabindex="0">${escape(log || '暂时没有日志。')}</pre>${operation.status === 'needs_reconciliation' ? `<label class="service-field"><span>人工核对记录</span><input data-service-reconcile-note placeholder="记录检查的实际运行状态与处理结果（至少 8 字）" /></label><button type="button" class="secondary-button" data-service-command="reconcile">记录核对结果并解除阻塞</button>` : ''}` : `<p class="service-hint">${uncertain ? '提交结果尚未确认，请查询原任务；不要重复创建新部署。' : '执行后在此查看结果。关闭页面不会取消主机任务。'}</p>`;
     root.querySelector('[data-service-history]').innerHTML = history.length ? `<h5>最近任务</h5>${history.map(item => `<button type="button" data-service-task-id="${escape(item.id)}"><span>${escape(SERVICE_CATALOG[item.service]?.label || item.service)} · ${escape(SERVICE_CATALOG[item.service]?.actions[item.action]?.label || item.action)}</span><span>${escape(statusLabels[item.status] || item.status)}</span><small>${escape(new Date(item.createdAt).toLocaleString())}</small></button>`).join('')}` : '';
   }
@@ -129,7 +152,7 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
     if (currentId && !terminal.has(operation?.status)) timer = setTimeout(async () => {
       if (!isVisible()) return;
       const ticket = generation;
-      try { await refreshTask(); } catch (error) { if (ticket === generation) { feedback = error.message; connected = false; updatePreview(); } }
+      try { await refreshTask(); } catch (error) { if (ticket === generation) { taskError = error.message; connected = false; renderTask(); updatePreview(); } }
       if (ticket === generation) schedulePoll();
     }, 5000);
   }
@@ -139,8 +162,10 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
     const result = await call(`operations/${encodeURIComponent(id)}`);
     if (id !== currentId) return;
     operation = result.operation; log = result.log || ''; uncertain = false; connected = true;
+    taskError = '';
     if (operation) {
-      feedback = operation.message;
+      // Polling an earlier task must not overwrite the current preflight result.
+      // Its message already belongs to the separate task panel below.
       history = [operation, ...history.filter(item => item.id !== operation.id)].slice(0, 30);
       if (plan?.id === operation.id) { plan = null; acknowledged = false; }
     }
@@ -149,6 +174,13 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
   async function perform(command) {
     if (busy) return;
     const ticket = generation;
+    const taskCommand = command === 'task-refresh' || command === 'reconcile';
+    pendingCommand = command;
+    if (!taskCommand) feedbackError = false;
+    if (command === 'plan') {
+      // A failed recheck must not leave an older plan executable.
+      plan = null; acknowledged = false; feedback = '正在检查主机版本、配置与部署目标…';
+    }
     busy = true; updatePreview();
     try {
       if (command === 'copy') {
@@ -161,6 +193,9 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
         profiles[service] = { ...(instance()?.profile || defaultServiceProfile(service)) }; saveStored(service, null); plan = null; feedback = '已载入配置。';
       } else if (command === 'plan') {
         const result = await call('plans', { method: 'POST', body: { instanceId: instance().id, action, profile: preview().profile } });
+        if (!result || typeof result.id !== 'string' || !result.id || !Number.isFinite(Date.parse(result.expiresAt))
+          || typeof result.revision !== 'string' || result.service !== service || result.action !== action
+          || typeof result.requiresAcknowledgement !== 'boolean') throw new Error('执行器返回的计划无效，请刷新执行器后重新预检。');
         plan = result; acknowledged = false; feedback = '请核对版本和影响后执行。';
       } else if (command === 'execute') {
         if (!plan || Date.parse(plan.expiresAt) <= Date.now()) throw new Error('计划已过期，请重新预检');
@@ -175,7 +210,11 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
       }
     } catch (error) {
       if (ticket === generation) {
-        feedback = error.message;
+        if (taskCommand) taskError = error.message;
+        else {
+          feedback = command === 'plan' ? `预检失败：${error.message}` : error.message;
+          feedbackError = true;
+        }
         if (command === 'refresh' || /network error|暂不可达|未接入/.test(error.message)) connected = false;
         // Definite rejections leave no task; transport errors retain the original plan ID.
         if (command === 'execute' && /计划已过期|请确认|已变化|未提交改动|未授权|A valid Internal ops token|主机已有|正在提交|执行器正在等待更新|执行器版本已变化/.test(error.message)) {
@@ -183,24 +222,24 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
         }
       }
     } finally {
-      if (ticket === generation) { busy = false; render(); schedulePoll(); }
+      if (ticket === generation) { busy = false; pendingCommand = ''; render(); schedulePoll(); }
     }
   }
   root?.addEventListener('input', event => {
     const input = event.target.closest('[data-service-field]');
     if (!input || busy) return;
     profiles[service][input.dataset.serviceField] = input.type === 'checkbox' ? input.checked : input.value;
-    plan = null; acknowledged = false; feedback = '已更新当前服务器的浏览器草稿，尚未部署。'; saveStored(service, profiles[service]); updatePreview();
+    plan = null; acknowledged = false; feedbackError = false; feedback = '已更新当前服务器的浏览器草稿，尚未部署。'; saveStored(service, profiles[service]); updatePreview();
   });
   root?.addEventListener('change', event => {
     const input = event.target;
     if (input.matches('[data-service-ack]')) { acknowledged = input.checked; updatePreview(); }
-    if (input.matches('[data-service-action]')) { action = input.value; plan = null; acknowledged = false; render(); }
+    if (input.matches('[data-service-action]')) { action = input.value; plan = null; acknowledged = false; feedback = ''; feedbackError = false; render(); }
     if (input.dataset.serviceField === 'proxyMode') render();
   });
   root?.addEventListener('click', event => {
     const select = event.target.closest('[data-service-select]');
-    if (select && !busy) { service = select.dataset.serviceSelect; if (!SERVICE_CATALOG[service].actions[action]) action = 'status'; plan = null; acknowledged = false; render(); }
+    if (select && !busy) { service = select.dataset.serviceSelect; if (!SERVICE_CATALOG[service].actions[action]) action = 'status'; plan = null; acknowledged = false; feedback = ''; feedbackError = false; render(); }
     const button = event.target.closest('[data-service-command]');
     if (button && !button.disabled) void perform(button.dataset.serviceCommand);
     const task = event.target.closest('[data-service-task-id]');
@@ -211,7 +250,7 @@ export function createServiceOperations(root, { request, serverKey, isVisible })
     select(nextService, nextAction) {
       if (busy || !SERVICE_CATALOG[nextService]?.actions[nextAction]) return;
       if (scope !== serverKey()) reset();
-      service = nextService; action = nextAction; plan = null; acknowledged = false; render();
+      service = nextService; action = nextAction; plan = null; acknowledged = false; feedback = ''; feedbackError = false; render();
     },
     show() {
       if (scope !== serverKey()) reset();

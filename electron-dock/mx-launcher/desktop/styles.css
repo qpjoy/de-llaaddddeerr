@@ -80,6 +80,7 @@
 .service-ack { display: flex; align-items: flex-start; gap: 8px; line-height: 1.7; cursor: pointer; }
 .service-ack input { width: 16px; height: 16px; min-height: 16px; padding: 0; flex: 0 0 16px; margin-top: 4px; accent-color: var(--mx-primary); }
 .service-feedback { font-size: 13px; line-height: 1.7; color: var(--mx-text-soft); overflow-wrap: anywhere; }
+.service-feedback[data-state="error"] { color: var(--mx-danger); }
 .service-task-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; font-size: 13px; }
 .service-task-summary > code { color: var(--mx-text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .service-task-summary p { flex-basis: 100%; margin: 0; }

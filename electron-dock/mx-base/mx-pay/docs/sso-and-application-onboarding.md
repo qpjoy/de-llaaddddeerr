@@ -20,7 +20,7 @@
 
 ## 登记与配置
 
-1. 在 Internal → 平台设置 → 统一认证 → 接入应用，登记 **mx-pay**，使用独立 HTTPS origin 和 audience。沿用现有 Auth 发布流程使新增客户端生效；不会重建原用户或轮换 Hub、Launcher 凭据。
+1. 在左侧导航继续向下滚动，打开 **平台设置 → 统一认证**，在「新增接入应用」填写：认证入口 **公网认证**，应用名称 **MX Pay**，应用标识 **mx-pay**，应用 HTTPS 地址 **https://pay.minsight-ai.com**，Audience 首次登记使用 **mx-pay**。依次「校验配置 → 保存应用 → 前往 Launcher 发布」，发布完成后刷新确认「Auth 已加载」。Client ID `mx-pay-web` 和 `/auth/sso/callback` 自动生成；运行与维护的 MX Pay 卡片只负责服务操作。沿用现有 Auth 发布流程使新增客户端生效；不会重建原用户或轮换 Hub、Launcher 凭据。
 2. 将主机登记产物 `/var/lib/mx-launcher/identity/applications/{public|private}/mx-pay.json` 安全提供给支付项目，默认位置 `secrets/console/profile.json`。也可在支付 `.env` 用 `MX_PAY_SSO_SOURCE` 指定该固定私有文件。不能将内容粘贴到浏览器草稿、URL 或提交到 Git。
 3. 创建私有 `secrets/console/access.json`。初次可为 `[]`：用户能登录，但看不到任何订单。它只支持明确的 `viewer` 授权，示例：
 
@@ -44,6 +44,8 @@
 SSO 复用 `@qpjoy/mx-common/identity/sso`、`identity/postgres`、`identity/profile`，没有复制 Hub 的用户、租户、邀请或登录代码。迁移 `pay_005_console_sso.sql` 只增加通用会话表，沿用应用自己的迁移器。持久 sessionKey、会话 Cookie 与 Hub 隔离；新副本读取同一支付会话库。支付的机器凭据与渠道密钥不进入查询台 Secret。
 
 ## 部署与网络
+
+Internal Nginx 支持自动查询上游：在 `de-mingxi` 执行 `bash scripts/manage.sh internal-pay-install --pay-root <mx-pay项目目录>`。脚本读取 `.deploy/target.json` 固定目标并校验集群 UID，随后通过 kubectl 查询 API/console Service 的当前 IPv4 ClusterIP 和约定端口；无需手工填 IP。保持与 Pay 部署一致的 `KUBECONFIG`，缺少目标、查询台或集群身份不符时会停止并保留现有 Nginx。每次执行均重新查询；Service 重建后重跑同一命令即可。它是独立的网关安装步骤，尚未由 Pay deploy 自动调用或后台监听。
 
 ```sh
 # 支付项目目录；已有 .env / Secrets / 数据库身份优先
