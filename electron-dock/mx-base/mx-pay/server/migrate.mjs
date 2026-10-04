@@ -26,7 +26,8 @@ export async function migrate(databaseUrl, logger = console, { runtimeRole = pro
     const result = await runCommonMigrations({ connectionString: databaseUrl, migrationsDir, logger })
     if (runtimeRole) {
       // Deliberately allowlisted DML grants, reapplied after each schema update.
-      // No ownership, schema CREATE, DELETE or audit UPDATE rights are granted.
+      // No ownership, schema CREATE, payment DELETE or audit UPDATE rights.
+      // Session deletion is required for logout and single-use callbacks.
       const role = `"${runtimeRole}"`, client = await pool.connect()
       try {
         await client.query('BEGIN')
@@ -34,7 +35,11 @@ export async function migrate(databaseUrl, logger = console, { runtimeRole = pro
         await client.query(`GRANT SELECT ON public.schema_migrations TO ${role}`)
         await client.query(`GRANT SELECT, INSERT, UPDATE ON pay.orders, pay.settings, pay.outbox TO ${role}`)
         await client.query(`GRANT SELECT, INSERT ON pay.audit TO ${role}`)
+        await client.query(`GRANT SELECT, INSERT ON pay.channel_bindings, pay.channel_observations TO ${role}`)
+        await client.query(`GRANT SELECT, INSERT, UPDATE ON pay.channel_queries TO ${role}`)
         await client.query(`GRANT SELECT ON pay.reporting_source, pay.reporting_heads, pay.reporting_changes TO ${role}`)
+        await client.query(`GRANT USAGE ON SCHEMA app_auth TO ${role}`)
+        await client.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON app_auth.browser_sso_records TO ${role}`)
         await client.query('COMMIT')
       } catch (error) { await client.query('ROLLBACK'); throw error }
       finally { client.release() }

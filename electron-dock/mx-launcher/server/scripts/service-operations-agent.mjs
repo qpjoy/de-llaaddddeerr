@@ -5,6 +5,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readFile, writeFile, rename, readdir, realpath, stat, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { SERVICE_CATALOG, SERVICE_CATALOG_VERSION, buildServiceCommand, normalizeServiceProfile } from '../../desktop/service-operations-catalog.js';
 import { identityConsoleOverview, validateIdentityApplication } from '../../scripts/identity-console.mjs';
@@ -42,8 +43,24 @@ async function sourceState(cwd) {
   return { revision: head.stdout.trim(), dirty: Boolean(dirty.stdout.trim()), changesDigest: hash([dirty.stdout, diff.stdout]) };
 }
 
+async function paymentConfigFiles(cwd) {
+  const paths = { MX_PAY_RUNTIME_ENV_FILE: 'secrets/runtime.env', MX_PAY_MIGRATION_ENV_FILE: 'secrets/migration.env',
+    MX_PAY_CREDENTIALS_SOURCE: 'secrets/credentials.json', MX_PAY_CHANNELS_SOURCE: 'secrets/channels.json',
+    MX_PAY_SSO_SOURCE: 'secrets/console/profile.json', MX_PAY_CONSOLE_ACCESS_SOURCE: 'secrets/console/access.json' };
+  let content = '';
+  try { content = await readFile(join(cwd, '.env'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  for (const key of Object.keys(paths)) {
+    const matches = [...content.matchAll(new RegExp(`^\\s*(?:export\\s+)?${key}=(.*)$`, 'gm'))];
+    if (!matches.length) continue;
+    const value = matches.at(-1)[1].trim().replace(/^(['"])(.*)\1$/, '$2');
+    assert(value && !/[\s$`#;]/.test(value), '支付配置文件路径必须为固定路径，动态 shell 配置请在主机执行');
+    paths[key] = value;
+  }
+  return ['.env', '.deploy/target.json', ...Object.values(paths), ...(process.env.KUBECONFIG || join(homedir(), '.kube/config')).split(':')];
+}
 async function configFingerprint(cwd, service) {
   const files = service === 'launcher' ? ['server/.env', PROFILE] : service === 'hub' ? ['.env.internal']
+    : service === 'pay' ? await paymentConfigFiles(cwd)
     : ['.env.gpu', `mx-${service}/.env`, `mx-${service}/.env.download`, `mx-${service}/secrets/api-key`];
   const values = [];
   for (const file of files) {
@@ -55,9 +72,17 @@ async function configFingerprint(cwd, service) {
 
 async function outputSecrets(cwd, service, token) {
   const secrets = [token];
-  for (const name of ['server/.env', '.env.internal', `mx-${service}/.env`, `mx-${service}/.env.download`, `mx-${service}/secrets/api-key`]) {
+  const files = service === 'pay' ? await paymentConfigFiles(cwd) : ['server/.env', '.env.internal', `mx-${service}/.env`, `mx-${service}/.env.download`, `mx-${service}/secrets/api-key`];
+  for (const name of files) {
     try {
-      const content = await readFile(join(cwd, name), 'utf8');
+      const content = await readFile(resolve(cwd, name), 'utf8');
+      if (service === 'pay') {
+        if (name.endsWith('.json')) {
+          const collect = value => { if (typeof value === 'string') secrets.push(value); else if (value && typeof value === 'object') Object.values(value).forEach(collect); };
+          collect(JSON.parse(content));
+        }
+        for (const line of content.split('\n')) { const match = line.match(/^MX_PAY_DATABASE_URL=(.+)$/); if (match) secrets.push(match[1]); }
+      }
       if (name.endsWith('/api-key')) secrets.push(content.trim());
       for (const line of content.split('\n')) {
         const match = line.match(/^\s*(?:export\s+)?[\w]*(?:TOKEN|SECRET|PASSWORD|PEPPER|KEY)[\w]*\s*=\s*(.*?)\s*$/i);

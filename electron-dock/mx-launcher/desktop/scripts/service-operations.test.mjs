@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { SERVICE_CATALOG, defaultServiceProfile, buildServiceCommand, shellQuote } from '../service-operations-catalog.js';
 
-test('all four services use their real command families and isolate sibling deployments', () => {
+test('all services use their real command families and isolate sibling deployments', () => {
   for (const [service, definition] of Object.entries(SERVICE_CATALOG)) {
     for (const action of Object.keys(definition.actions)) {
       const result = buildServiceCommand(service, action, defaultServiceProfile(service));
@@ -22,6 +22,12 @@ test('all four services use their real command families and isolate sibling depl
   assert.equal(status.env.MX_K8S_APISERVER_ADVERTISE_ADDRESS, undefined);
   assert.deepEqual(buildServiceCommand('hub', 'status', {}).args, ['scripts/manage.sh', 'ops', 'internal-production', 'status']);
   assert.throws(() => buildServiceCommand('hub', 'restart', {}), /不支持/);
+  const pay = buildServiceCommand('pay', 'deploy', {});
+  assert.deepEqual(pay.args, ['scripts/manage.sh', 'deploy']);
+  assert.deepEqual(pay.env, {});
+  assert.ok(pay.cwd.endsWith('/mx-base/mx-pay'));
+  assert.deepEqual(buildServiceCommand('pay', 'logs', {}).args, ['scripts/manage.sh', 'logs']);
+  assert.throws(() => buildServiceCommand('pay', 'stop', {}), /不支持/);
 });
 
 test('proxy controls and shared-GPU switch affect only applicable deployment commands', () => {

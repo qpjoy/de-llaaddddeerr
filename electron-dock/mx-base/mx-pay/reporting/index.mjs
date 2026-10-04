@@ -42,7 +42,7 @@ function validatePage(page,source,stream,phase) {
     check(validId(order.id) && order.appId===source.appId && order.environment===source.environment
       && validText(order.businessOrderId) && validText(order.customerRef) && validText(order.merchantAccountId)
       && Number.isSafeInteger(order.revision) && order.revision>=0 && ['pending','submitted','paid','cancelled'].includes(order.status)
-      && order.provider===(source.environment==='test'?'mock':'manual_alipay') && order.currency==='CNY'
+      && [source.environment==='test'?'mock':'manual_alipay','alipay'].includes(order.provider) && order.currency==='CNY'
       && minor(order.amountMinor) && order.amountMinor>=500 && validTime(order.createdAt) && validTime(order.updatedAt))
     check(order.status==='paid' ? order.receivedAmountMinor===order.amountMinor && (order.feeMinor===null || minor(order.feeMinor) && order.feeMinor<=order.receivedAmountMinor)
       && validTime(order.paidAt) && validTime(order.confirmedAt)

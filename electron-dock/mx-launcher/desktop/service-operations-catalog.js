@@ -19,6 +19,13 @@ export const SERVICE_CATALOG = {
       smoke: action('运行验收', '显式执行 Hub 验收探针；需要主机已有验收配置。', 600)
     }
   },
+  pay: {
+    label: 'MX Pay', directory: 'mx-base/mx-pay', description: '独立支付中心 · 专用数据库与 SSO 查询台',
+    actions: {
+      status: action('查看状态'), logs: action('查看日志'), doctor: action('部署诊断'),
+      deploy: action('部署当前检出版本', '仅发布 mx-pay：专用数据库迁移、支付 API 和已配置的独立 SSO 查询台。不启用正式收款、不切换 Hub 充值、不发布 Launcher/Auth。', 7200)
+    }
+  },
   embedding: {
     label: 'MX Embedding', directory: 'mx-base', description: 'GPU 向量服务 · Hub 向量化与 RAG 依赖',
     actions: {
@@ -107,10 +114,11 @@ export function buildServiceCommand(service, operation, input) {
   let program = 'bash';
   let args = ['scripts/manage.sh'];
   const gpu = ['embedding', 'ocr'].includes(service);
-  if (gpu) args.push(operation, `mx-${service}`);
+  if (service === 'pay') args.push(operation);
+  else if (gpu) args.push(operation, `mx-${service}`);
   else args.push('ops', 'internal-production', operation);
   if (operation === 'logs') {
-    if (service === 'hub') { /* The production helper returns bounded API logs. */ }
+    if (service === 'hub' || service === 'pay') { /* Product helpers return bounded API logs. */ }
     else if (gpu) { program = 'docker'; args = ['logs', '--tail', '200', `mx-${service}-api`]; }
     else { program = 'kubectl'; args = ['-n', 'mx-internal-shadow', 'logs', 'deployment/mx-launcher-internal', '--tail=200']; }
   }
@@ -128,7 +136,7 @@ export function buildServiceCommand(service, operation, input) {
     }
   }
   if (service === 'hub') env.MX_INSIGHT_SYNC_LAUNCHER = '0';
-  if (operation === 'deploy' || (service === 'launcher' && operation === 'predeploy')) {
+  if (service !== 'pay' && (operation === 'deploy' || (service === 'launcher' && operation === 'predeploy'))) {
     const proxy = `${profile.proxyProtocol}://${profile.proxyHost}:${profile.proxyPort}`;
     if (profile.proxyMode !== 'saved') {
       const name = { launcher: 'MX_LAUNCHER_BUILD_PROXY', hub: 'MX_INSIGHT_BUILD_PROXY', embedding: 'MX_EMBEDDING_PROXY', ocr: 'PROXY' }[service];

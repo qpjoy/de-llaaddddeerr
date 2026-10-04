@@ -37,6 +37,8 @@ test('PG16 bootstrap SQL, least-privilege runtime, repeat init and backup/restor
   const runtime=new pg.Pool({host:'127.0.0.1',port,user:'mx_pay_runtime',password:credentials.runtimePassword,database:'mx_pay'})
   try {
     await runtime.query('SELECT count(*) FROM pay.orders')
+    await runtime.query("INSERT INTO app_auth.browser_sso_records(kind,id,payload,expires_at) VALUES('login','test-record','encrypted-test-payload',now())")
+    await runtime.query("DELETE FROM app_auth.browser_sso_records WHERE id='test-record'")
     await assert.rejects(runtime.query('CREATE TABLE public.should_fail(id int)'),{code:'42501'})
     await assert.rejects(runtime.query('DELETE FROM pay.audit'),{code:'42501'})
     await assert.rejects(runtime.query('ALTER ROLE mx_pay_owner PASSWORD \'no\''),{code:'42501'})
@@ -51,7 +53,7 @@ test('PG16 bootstrap SQL, least-privilege runtime, repeat init and backup/restor
   run('psql',['-X','-v','ON_ERROR_STOP=1','-d','postgres','-c','CREATE DATABASE mx_pay_restore'])
   run('pg_restore',['--exit-on-error','--no-owner','--no-acl','--dbname','mx_pay_restore',archive])
   assert.equal(run('psql',['-XAt','-d','mx_pay_restore','-c','SELECT message FROM backup_evidence WHERE id=1']).trim(),'payment evidence retained')
-  assert.equal(run('psql',['-XAt','-d','mx_pay_restore','-c','SELECT count(*) FROM schema_migrations']).trim(),'2')
+  assert.equal(Number(run('psql',['-XAt','-d','mx_pay_restore','-c','SELECT count(*) FROM schema_migrations']).trim()),fs.readdirSync(new URL('../migrations/',import.meta.url)).filter(name=>name.endsWith('.sql')).length)
   run('pg_ctl',['-D',pgdata,'-m','fast','-w','stop'])
   const guard=databaseResources({systemIdentifier:first+'1'},credentials).items.find(i=>i.kind==='StatefulSet').spec.template.spec.containers[0].command[2].replaceAll('/var/lib/postgresql/data',dataDir)
   assert.throws(()=>run('sh',['-ec',guard]),error=>error.status===1 && /identity missing\/changed/.test(error.stderr.toString()))

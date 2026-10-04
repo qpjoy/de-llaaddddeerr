@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { PaymentClient } from '@qpjoy/mx-pay/client'
+import { verifyPaymentSource, verifyPaymentOrder } from '@qpjoy/mx-pay/integration'
 import { fields, fingerprint, minor, environment, requestKey, requirePayment, transitionOrder } from '@qpjoy/mx-pay'
 import { withPgTransaction } from '../stores/postgres-store.mjs'
 import { parseRechargeSources } from './recharge-config.mjs'
@@ -33,10 +34,9 @@ export class RechargeService {
     const source = this.sources.get(env)
     requirePayment(source, 'recharge_unconfigured', '支付连接尚未配置，原订单会保留', 503)
     const identity = await source.client.identity()
-    requirePayment(uuid(identity?.sourceId) && identity.appId === source.appId && identity.environment === env && Array.isArray(identity.features) && identity.features.includes('initiatorRef'),
-      'recharge_source_mismatch', '支付服务身份或协议不匹配', 409)
-    requirePayment(Array.isArray(identity.scopes) && ['orders.read','orders.write','events.read','events.ack'].every(scope => identity.scopes.includes(scope)),
-      'recharge_credential_scope', '业务凭据需要建单、查单和事件接收权限', 409)
+    verifyPaymentSource(identity, { appId: source.appId, environment: env, features: ['initiatorRef'],
+      scopes: ['orders.read','orders.write','events.read','events.ack'] },
+    { sourceCode: 'recharge_source_mismatch', scopeCode: 'recharge_credential_scope' })
     const route = await this.route(env)
     requirePayment(route && (route.source_id ? route.source_id === identity.sourceId && route.app_id === source.appId && route.channel_id === source.channelId : allowUnbound),
       'recharge_source_mismatch', '支付服务与已绑定账务源不一致，请核对配置', 409)
@@ -132,14 +132,9 @@ export class RechargeService {
   }
   validatePayment(row, payment) {
     const expected = this.input(row)
-    requirePayment(uuid(payment?.id) && Number.isSafeInteger(payment.revision) && payment.revision >= 0
-      && ['pending','submitted','paid','cancelled'].includes(payment.status)
-      && (!row.payment_id || row.payment_id === payment.id) && payment.appId === row.app_id
-      && payment.environment === row.environment && payment.businessOrderId === expected.businessOrderId && payment.customerRef === row.tenant_id
-      && payment.amountMinor === row.intent.amountMinor && payment.currency === 'CNY' && payment.initiatorRef === expected.initiatorRef
-      && (row.intent.channelId === 'mock' ? payment.provider === 'mock' && row.environment === 'test'
-        : payment.provider === 'alipay' && payment.checkout?.channelId === row.intent.channelId),
-    'recharge_payment_mismatch', '支付记录与原充值意图不一致，已停止入账', 409)
+    verifyPaymentOrder(payment, { ...expected, paymentId: row.payment_id, appId: row.app_id,
+      environment: row.environment, currency: 'CNY', channelId: row.intent.channelId },
+    { code: 'recharge_payment_mismatch' })
   }
   async attach(row, payment) {
     this.validatePayment(row, payment)

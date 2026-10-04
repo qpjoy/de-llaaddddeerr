@@ -12,14 +12,14 @@ const token = 'test-operations-token-'.repeat(3);
 async function fixture(t, runCommand, script = '#!/bin/bash\nprintf "fixture\\n"\n', lifecycleOptions = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'mx-operations-test-'));
   const workspace = join(dir, 'workspace');
-  for (const name of ['mx-launcher', 'mx-insight-hub', 'mx-base']) {
+  for (const name of ['mx-launcher', 'mx-insight-hub', 'mx-base', 'mx-base/mx-pay']) {
     await mkdir(join(workspace, name, 'scripts'), { recursive: true });
     await writeFile(join(workspace, name, 'scripts/manage.sh'), script);
   }
   const git = args => execFileSync('git', args, { cwd: workspace, stdio: 'pipe' });
   git(['init', '--quiet']); git(['add', '.']);
   git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@invalid.test', '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'fixture']);
-  const config = { host: 'fixture-only', instances: ['launcher', 'hub', 'embedding', 'ocr'].map(service => ({
+  const config = { host: 'fixture-only', instances: ['launcher', 'hub', 'embedding', 'ocr', 'pay'].map(service => ({
     id: service, service, profile: { ...defaultServiceProfile(service, workspace), tmpDir: dir }
   })) };
   const stateDir = join(dir, 'state');
@@ -125,7 +125,7 @@ test('auth, saved profiles, source pinning, execution idempotency and persistent
   let executions = 0;
   const f = await fixture(t, async (spec, log) => { executions++; log('API_KEY=secret-test\n'); log('fixture complete\n'); return { code: 0 }; });
   assert.equal((await f.request('instances', undefined, '')).status, 401);
-  const inventory = await f.request('instances'); assert.equal(inventory.data.instances.length, 4);
+  const inventory = await f.request('instances'); assert.equal(inventory.data.instances.length, 5);
   const profile = { ...f.config.instances[0].profile, proxyPort: '7890' };
   assert.equal((await f.request('profiles', { instanceId: 'launcher', profile })).status, 200);
   const plan = await f.plan('launcher', 'status');
@@ -163,6 +163,27 @@ test('wrong target, code drift, dirty releases, config drift and expired plans c
   const expired = await f.plan();
   const path = join(f.stateDir, 'plans', `${expired.id}.json`); const data = JSON.parse(await readFile(path)); data.expiresAt = new Date(0).toISOString(); await writeFile(path, JSON.stringify(data));
   assert.equal((await f.request('execute', { planId: expired.id })).status, 409);
+  assert.equal(executions, 0);
+});
+
+test('payment plans bind private SSO/access and target configuration and never return secret contents', async t => {
+  let executions = 0;
+  const f = await fixture(t, async () => { executions++; return { code: 0 }; });
+  const pay = join(f.workspace, 'mx-base/mx-pay');
+  await writeFile(join(f.workspace, '.gitignore'), 'mx-base/mx-pay/secrets/\nmx-base/mx-pay/.deploy/\n');
+  f.git(['add', '.gitignore']); f.git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@invalid.test', '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'ignore private payment config']);
+  await mkdir(join(pay, 'secrets/console'), { recursive: true });
+  await mkdir(join(pay, '.deploy'));
+  await writeFile(join(pay, 'secrets/console/profile.json'), JSON.stringify({ clientSecret: 'private-payment-client-secret' }));
+  await writeFile(join(pay, 'secrets/console/access.json'), '[]');
+  const plan = await f.plan('pay', 'deploy');
+  assert.doesNotMatch(JSON.stringify(plan), /private-payment-client-secret/);
+  await writeFile(join(pay, 'secrets/console/access.json'), '[{"subject":"changed"}]');
+  const denied = await f.request('execute', { planId: plan.id, acknowledged: true });
+  assert.equal(denied.status, 409); assert.match(denied.data.message, /配置或凭据已变化/);
+  const targetPlan = await f.plan('pay', 'deploy');
+  await writeFile(join(pay, '.deploy/target.json'), '{"context":"different"}');
+  assert.equal((await f.request('execute', { planId: targetPlan.id, acknowledged: true })).status, 409);
   assert.equal(executions, 0);
 });
 

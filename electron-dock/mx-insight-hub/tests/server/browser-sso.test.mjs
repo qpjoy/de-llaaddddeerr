@@ -132,7 +132,11 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   assert.match(step.text,/使用飞书登录/)
   const csrf=/name="csrf" value="([^"]+)"/.exec(step.text)[1]
   step=await request(feishuInteraction,{method:'POST',headers:{origin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,intent:'feishu-link'}).toString()})
-  const upstreamState=new URL(step.location).searchParams.get('state')
+  // Auth now navigates through its CSP-safe Feishu continuation page.
+  assert.equal(step.status,200,step.text)
+  const feishuUrl=/id="feishu-continue" href="([^"]+)"/.exec(step.text)?.[1]?.replaceAll('&amp;','&')
+  assert.ok(feishuUrl,step.text)
+  const upstreamState=new URL(feishuUrl).searchParams.get('state')
   const externalCallback=`/identity/feishu/callback?state=${upstreamState}&code=verified-feishu-code`
   assert.equal((await request(externalCallback,{useCookies:false})).status,400)
   step=await request(externalCallback);assert.equal(step.status,303,step.text)

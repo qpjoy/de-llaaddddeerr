@@ -9,6 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --omit=optional --ignore-scripts && npm cache clean --force
 COPY src ./src
 COPY server ./server
+COPY console ./console
 COPY migrations ./migrations
 USER node
 EXPOSE 18230

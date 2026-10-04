@@ -1,5 +1,7 @@
 # 服务与部署：使用与接入
 
+2026-10-04 增量：增加独立 MX Pay 的状态、有限日志、诊断与部署，已有执行器安全追加服务登记。详见 [49 · 支付中心接入](49-payment-center-sso-and-operations.md)；下文四服务说明保留原交付背景。
+
 日期：2026-10-03。状态：界面、命令目录、受保护 API、独立执行器与安装程序已在本地实现并验证；开发验收未操作生产。用户提供的生产日志已显示独立执行器就绪和镜像构建继续，但尚不能据此确认整次生产 deploy 成功。用户确认 Launcher、Hub、Embedding、OCR 位于同一主机，项目根为 `/root/mx/workspace/de-llaaddddeerr/electron-dock`；OCR 已由用户验证可用。
 
 ## 1. 页面与操作

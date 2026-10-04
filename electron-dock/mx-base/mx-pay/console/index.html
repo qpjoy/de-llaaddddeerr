@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MX Pay · 支付查询台</title><link rel="stylesheet" href="/console.css"><script type="module" src="/console.js"></script></head>
+<body>
+  <header><a class="brand" href="/"><span class="mark">MX</span><span>MX Pay<small>独立支付中心</small></span></a><nav aria-label="账号"><span id="account"></span><a id="login" href="/auth/sso/login">统一登录</a><a id="switch" href="/auth/sso/login?select=1" hidden>切换账号</a><a id="security" hidden>账号安全</a><button id="logout" hidden>退出</button></nav></header>
+  <main>
+    <p class="eyebrow">PAYMENT CENTER</p><h1>支付查询台</h1><p class="intro">查看已授权应用的收款记录。业务交付、钱包余额和充值入口由各应用管理。</p>
+    <p id="message" role="status" aria-live="polite">正在检查登录状态…</p>
+    <section id="workspace" hidden aria-label="支付订单">
+      <form id="filters"><label>应用与环境<select id="scope" required></select></label><label>付款状态<select id="status"><option value="">全部状态</option><option value="pending">待付款</option><option value="submitted">待核实</option><option value="paid">已确认付款</option><option value="cancelled">已取消</option></select></label><label class="search">业务订单号<input id="businessOrderId" maxlength="128" placeholder="输入完整业务订单号" autocomplete="off"></label><button type="submit" class="primary">查询</button></form>
+      <p class="hint">测试记录与正式收款分开显示；付款确认不代表业务已经交付。</p>
+      <div class="table-scroll"><table><thead><tr><th>业务订单 / 支付单</th><th>金额</th><th>付款状态</th><th>渠道</th><th>创建时间</th></tr></thead><tbody id="orders"></tbody></table></div>
+      <div class="pagination"><span id="page"></span><button id="previous">上一页</button><button id="next">下一页</button></div>
+    </section>
+  </main><footer>MX Pay · 查询权限由支付中心单独授予</footer>
+</body></html>

@@ -86,6 +86,22 @@ test('first deploy installs available services; repeats preserve secrets, custom
   assert.ok(!JSON.stringify(f.logs).includes(token));
 });
 
+test('adding payment to an existing executor preserves credentials and profiles and requests a drained reload', async t => {
+  const f = fixture(t);
+  const first = await f.install();
+  const token = readFileSync(join(f.paths.configuration, 'token'), 'utf8');
+  mkdirSync(join(f.workspace, 'mx-base/mx-pay/scripts'), { recursive: true });
+  writeFileSync(join(f.workspace, 'mx-base/mx-pay/scripts/manage.sh'), '#!/bin/bash\n');
+  const second = await f.install();
+  assert.notEqual(second.version, first.version);
+  assert.deepEqual(second.config.instances.map(i => i.service), ['launcher','pay']);
+  assert.deepEqual(second.config.instances[0], first.config.instances[0]);
+  assert.equal(readFileSync(join(f.paths.configuration, 'token'), 'utf8'), token);
+  assert.equal(f.requests.filter(r => r.path === 'lifecycle/update').length, 1);
+  await f.install();
+  assert.equal(f.requests.filter(r => r.path === 'lifecycle/update').length, 1);
+});
+
 test('idle upgrades stage immutable code and use cooperative update; self-deploy defers and repeats safely', async t => {
   const f = fixture(t, { siblings: true });
   const first = await f.install(); assert.equal(first.config.instances.length, 4);

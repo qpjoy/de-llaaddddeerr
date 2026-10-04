@@ -14,6 +14,21 @@ async function json(request, maximum = 8192) {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
   catch { throw new PaymentError(400, 'invalid_json', 'Invalid JSON') }
 }
+async function notificationForm(request) {
+  requirePayment(/^application\/x-www-form-urlencoded(?:;|$)/i.test(request.headers['content-type'] || ''), 'invalid_content_type', 'Form required', 415)
+  const chunks = []; let length = 0
+  for await (const chunk of request) {
+    length += chunk.length
+    requirePayment(length <= 65536, 'payment_body_too_large', 'Notification too large', 413)
+    chunks.push(chunk)
+  }
+  const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8')), body = Object.create(null)
+  for (const [key,value] of form) {
+    requirePayment(/^[a-z_]{1,80}$/.test(key) && !Object.hasOwn(body,key), 'invalid_payment_notification', 'Invalid or repeated notification field')
+    body[key] = value
+  }
+  return body
+}
 export function createApp({ service, credentials, state = { draining: false }, logger = console }) {
   let inFlight = 0
   let reportingInFlight = 0
@@ -38,10 +53,19 @@ export function createApp({ service, credentials, state = { draining: false }, l
         return reply(200, { status: 'ready', service: 'mx-pay' })
       }
       requirePayment(!state.draining && inFlight <= 128, 'payment_temporarily_unavailable', 'Retry with original request identity', 503)
+      const notification = /^\/v1\/notifications\/alipay\/([a-zA-Z0-9._-]{1,80})$/.exec(path)
+      if (notification && request.method === 'POST') {
+        requirePayment(!url.search, 'invalid_payment_query', 'Unexpected query')
+        await service.channelPayments.notify(notification[1], await notificationForm(request))
+        // Alipay requires literal success. Never acknowledge before the DB commit.
+        response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        return response.end('success')
+      }
       const principal = authenticate(request.headers.authorization, credentials)
       const noQuery = () => requirePayment(!url.search, 'invalid_payment_query', 'Unexpected query')
       let data
-      if (path === '/v1/channels' && request.method === 'GET') { noQuery(); data = await service.channels(principal) }
+      if (path === '/v1/identity' && request.method === 'GET') { noQuery(); data = await service.identity(principal) }
+      else if (path === '/v1/channels' && request.method === 'GET') { noQuery(); data = await service.channels(principal) }
       else if (path === '/v1/settings' && request.method === 'GET') {
         noQuery(); authorize(principal, 'settings.write')
         requirePayment(principal.environment === 'live', 'payment_environment_mismatch', 'Live settings require a live credential', 403)
@@ -54,14 +78,16 @@ export function createApp({ service, credentials, state = { draining: false }, l
         return reply(201, { data })
       } else if (path === '/v1/events' && request.method === 'GET') data = await service.pending(principal, url.searchParams)
       else if (path === '/v1/reporting/snapshot' && request.method === 'GET') data = await reportingPage(()=>service.reporting.snapshot(principal,url.searchParams))
+      else if (path === '/v1/channel-reviews' && request.method === 'GET') data = await service.channelPayments.reviews(principal, url.searchParams)
       else if (path === '/v1/reporting/changes' && request.method === 'GET') data = await reportingPage(()=>service.reporting.changes(principal,url.searchParams))
       else {
         noQuery()
-        const order = /^\/v1\/orders\/([^/]+)(?:\/(submit|cancel|confirm|reject))?$/.exec(path)
+        const order = /^\/v1\/orders\/([^/]+)(?:\/(submit|cancel|confirm|reject|checkout|refresh))?$/.exec(path)
         const event = /^\/v1\/events\/([^/]+)\/ack$/.exec(path)
         if (order && request.method === 'GET' && !order[2]) {
           authorize(principal, 'orders.read'); data = await service.order(principal, order[1])
-        } else if (order?.[2] && request.method === 'POST') data = await service.act(principal, order[1], order[2], await json(request), request.headers['idempotency-key'])
+        } else if (order?.[2] && ['checkout','refresh'].includes(order[2]) && request.method === 'POST') data = await service.channelPayments[order[2]](principal, order[1], await json(request))
+        else if (order?.[2] && request.method === 'POST') data = await service.act(principal, order[1], order[2], await json(request), request.headers['idempotency-key'])
         else if (event && request.method === 'POST') data = await service.acknowledge(principal, event[1], await json(request))
         else throw new PaymentError(404, 'payment_route_not_found', 'Route not found')
       }

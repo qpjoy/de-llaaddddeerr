@@ -2,7 +2,13 @@
 
 2026-10-02：已实现独立 PostgreSQL 交易服务、应用凭据、付款事件、服务端 SDK 和一键部署脚本。默认真实收款关闭。仓库实现与本机测试不代表已经部署到 Internal。
 
-**现有 Hub 人工充值继续使用原内嵌路径。** `@qpjoy/mx-pay` 原规则导出保持兼容；本次未切换 Hub 支付后端，也不导入存量订单、重放历史付款或更改钱包。独立服务可单独部署并验证，正式切换须按[单写入方迁移规划](../../mx-insight-hub/docs/architecture/payment-center-service-boundaries-and-reliability.md)完成交接。同一正式收款账户不能未经交接同时在旧 Hub 和新服务中核实收款。
+2026-10-04：已接入 Launcher 共享 SSO 的独立支付查询台，按原用户身份、业务应用和 test/live 单独授权；交易 API 与人的登录分进程、分入口。Hub 复用新增的 `@qpjoy/mx-pay/integration` 一致性校验，Internal「运行与维护」新增 MX Pay。部署、配置及待定设计见 [SSO 与应用接入](docs/sso-and-application-onboarding.md)。尚未上线服务器或切换正式充值。
+
+2026-10-03：新增多渠道配置与支付宝电脑网站支付，包括官方 SDK 签名、通知验签、主动查单、异常留档和跨库报表兼容。mock/人工渠道保持兼容；部署自动保留渠道 Secret 并执行全部新增迁移。对照 Luopan Java 后端及官方模型，进一步修正渠道订单号、标题、到期窗口和特殊资金状态；已启用官方渠道的 Kubernetes 升级会先完成兼容副本替换，再恢复新收款。详见[Java 后端核对记录](docs/alipay-java-reference-review.md)和[支付宝与多渠道接入](docs/alipay-channels.md)。没有商户配置时官方收款关闭，未接真实资金或自动切换 Hub 钱包。
+
+事务与异常处理以[支付事务、异常矩阵与恢复协议](docs/transactions-and-failure-model.md)为验收依据：区分付款事实、调用结果未知和业务交付，逐项标明已实现保护、待补处置与真实环境演练。静态码的取消后到账、多付少付、额外来款以及存量支付交接仍是优先缺口。
+
+**现有 Hub 默认继续使用原内嵌充值路径。** `@qpjoy/mx-pay` 原规则导出保持兼容；已提供 Hub 独立支付适配、账务员权限和钱包事件交付，但部署不自动切换。可先审核启用测试；已有正式历史订单仍需专项交接，不导入或重放历史付款。见 [Hub 接入、事务与切换说明](../../mx-insight-hub/docs/operations/payment-delivery.md)。独立服务可单独部署并验证，正式切换须按[单写入方迁移规划](../../mx-insight-hub/docs/architecture/payment-center-service-boundaries-and-reliability.md)完成交接。同一正式收款账户不能未经交接同时在旧 Hub 和新服务中核实收款。
 
 ## 一个命令部署或更新
 
@@ -94,7 +100,7 @@ Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已
 
 后续总 `manage.sh` 应消费各中心的 `discover`/`last-result` 合约，编排部署、只读数据身份检查和独立备份任务；不能把“某个服务不可用”解释为允许为它选择备用数据、轮换凭据或创建新数据库。
 
-脚本 `stop` 是停进程，会中断该服务；正式支付维护应先安排停止新单并处理在途订单。尚未实现业务层维护开关、自动渠道回调、退款或自动开票，不能把 restart/stop 当成退款或取消付款。
+脚本 `stop` 是停进程，会中断该服务；正式支付维护应先安排停止新单并处理在途订单。支付宝通知和渠道停用开关已实现；统一业务维护开关、退款和自动开票仍未实现，不能把 restart/stop 当成退款或取消付款。
 
 本机/过渡可设置 `MX_PAY_DEPLOY_DRIVER=compose`，仍使用专用 PG，`deploy` 先迁移再更新 API 并等待健康。默认仅绑定 `127.0.0.1:18230`，保留旧镜像记录，按调用者 UID/GID 读取本机凭据。Compose 模式不提供滚动可用性或跨主机部署锁，不作为正式双节点方案。
 
@@ -124,7 +130,7 @@ Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已
 
 消费方必须验证 appId/environment/paymentId/businessOrderId/customerRef/金额和币种，将 inbox 去重记录与本地钱包或权益更新在自己的同一事务中提交，然后返回稳定的业务流水号再 ack。ack 丢失后重试不得重复入账。`consumeBatch` 只在回调成功返回业务凭据后确认；它不替业务实现事务。分页返回 `nextAfter`；每轮扫描用它继续后续页，扫描结束或进程重启后从首页重试仍未确认的事件。游标不能当作永久消费水位；这样早期失败事件不会挡住后续页面，并发晚提交也可在下一轮取回。尚无独立死信后台或自动重试调度。
 
-独立服务不持有 Hub 钱包，不处理公司发票资料。原 Hub 充值/开票界面仍按既有路径使用，接入新 API 和存量交接属于下一实施段；不能把部署新服务当作已经切换 Hub。
+独立服务不持有 Hub 钱包，不处理公司发票资料。Hub 已有独立支付适配，默认仍走原充值路径，须按环境审核启用；存量正式订单交接另行实施，不能把部署新服务当作已经切换 Hub。
 
 ## 验证与后续
 
@@ -143,6 +149,12 @@ MX_PAY_TEST_PG_BIN=/path/to/postgresql-16/bin node --test tests/bootstrap-postgr
 
 消费者接入后追加通过 Hub 的 31 项报表/部署配置/原充值/身份回归（无跳过），其中端到端测试使用临时 PG16 的独立支付库和报表库，经真实 HTTP 拉取、投影和管理接口查询；Hub manage 脚本回归也通过。此测试不替代目标环境的部署验收。
 
-后续先接 Hub 业务 inbox、充值交付与存量单写交接，再完善独立人类管理台和 Launcher 身份接入。官方支付宝、Creem、微信、退款执行、分账和供应商付款尚未实现。业务架构见[统一管理规划](../../mx-launcher/docs/32-platform-business-centers-and-management-integration.md)与[支付规划](../../mx-insight-hub/docs/product/payments-and-cost-control.md)。
+2026-10-03 事务异常验证增量：新增 7 个真实 PG 语句边界/HTTP 应答故障场景，该阶段支付测试 33 项通过、无跳过。覆盖 COMMIT 已成功但响应丢失、outbox 插入后失败、并发确认与退回，以及跨应用认领同一流水；这属于本地故障注入，未模拟真实节点/主库故障。
+
+同日支付宝扩展后，全套支付测试 **47 项通过、0 失败、0 跳过**，在 `TZ=UTC` 下验证；Hub 身份/原充值/报表回归仍为 **31 项通过、无跳过**。新增签名与通知事务、跨人工/官方渠道流水去重、独立报表库、停用后收通知和渠道 Secret 丢失恢复测试。没有连接真实支付宝商户或进行生产收款。
+
+随后对照 Java 后端与官方模型修正后，最新全套 **51 项通过、0 失败、0 跳过**（`TZ=UTC`），Hub 兼容回归 **31/31**。增加旧订单迁移与编号不可互换、SDK 实际 HTTP 查单验签、标题/付款窗口/特殊资金状态，以及两阶段升级失败停止与重试验证。
+
+Hub 业务 inbox、充值交付和支付查询台 SSO 已实现，后续重点是上线验收、存量单写交接与人员资金操作权限。支付宝已支持电脑网站支付、验签通知和主动查单；定时对账/关单、Creem、微信、退款执行、分账和供应商付款尚未实现。业务架构见[统一管理规划](../../mx-launcher/docs/32-platform-business-centers-and-management-integration.md)与[支付规划](../../mx-insight-hub/docs/product/payments-and-cost-control.md)。
 
 部署机制参考 [Kubernetes Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/)、[Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)、[持久卷保留](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)、[PG16 初始化](https://www.postgresql.org/docs/16/app-initdb.html)与[归档恢复](https://www.postgresql.org/docs/16/app-pgrestore.html)。实际可用性须按目标环境进行故障和恢复验收。

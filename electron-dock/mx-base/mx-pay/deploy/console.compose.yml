@@ -1,0 +1,25 @@
+# Optional overlay selected by manage.sh only when the private SSO profile exists.
+services:
+  console:
+    user: '${MX_PAY_UID:-1000}:${MX_PAY_GID:-1000}'
+    image: ${MX_PAY_IMAGE:?MX_PAY_IMAGE required}
+    command: [node, server/console-index.mjs]
+    env_file: ${MX_PAY_RUNTIME_ENV_FILE:?runtime env file required}
+    environment:
+      MX_PAY_SSO_PROFILE: /run/mx-pay-console/profile.json
+      MX_PAY_CONSOLE_ACCESS_FILE: /run/mx-pay-console/access.json
+    volumes:
+      - ${MX_PAY_SSO_SOURCE:?SSO profile required}:/run/mx-pay-console/profile.json:ro
+      - ${MX_PAY_CONSOLE_ACCESS_SOURCE:?console access required}:/run/mx-pay-console/access.json:ro
+    ports:
+      - '${MX_PAY_BIND:-127.0.0.1}:${MX_PAY_CONSOLE_PORT:-18231}:18231'
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    stop_grace_period: 25s
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:18231/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 12s
+      retries: 6

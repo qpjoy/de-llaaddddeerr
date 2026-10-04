@@ -1,5 +1,7 @@
 # 通用 SSO 接入模块与 Hub 业务适配
 
+后续增量：mx-pay 已使用本文共享 SDK 接入独立支付查询台，Hub 也复用支付业务接入校验，详见 [49 · 支付中心接入](49-payment-center-sso-and-operations.md)。本文后续提到 mx-pay 尚未接入，指此次共享模块抽取时的历史边界。
+
 2026-10-04。状态：代码实现与本地隔离验收；未执行生产部署。承接 [45 应用原生账号接入](45-application-account-sdk-and-hub.md)和 [46 账号选择](46-browser-account-chooser.md)。本次改造 mx-common、Hub 适配层和应用登记配置，不改 mx-pay 交易实现、Launcher 用户中心、MX-H2I 登录或网络路径。
 
 ## 已交付的边界

@@ -55,6 +55,7 @@ export async function installOperations(options, dependencies = {}) {
   const configFile = join(configuration, 'config.json');
   const tokenFile = join(configuration, 'token');
   let config;
+  let registryChanged = false;
   if (existsSync(configFile)) {
     config = JSON.parse(readFileSync(configFile, 'utf8'));
     assert(!options.bind || options.bind === config.bind, '已有 bind 与显式参数不同；请由主机管理员核对 config.json，不自动覆盖');
@@ -63,6 +64,11 @@ export async function installOperations(options, dependencies = {}) {
     assert(config.instances?.some(i => i.service === 'launcher' && i.profile.cwd === join(options.workspace, 'mx-launcher')), '已有 Launcher 目录与本次部署不符，不自动覆盖');
     for (const instance of config.instances) normalizeServiceProfile(instance.service, instance.profile);
     assert(existsSync(tokenFile), '已有执行器丢失 token，请从备份恢复；不自动生成另一套凭据');
+    if (!config.instances.some(instance => instance.service === 'pay') && existsSync(join(options.workspace, SERVICE_CATALOG.pay.directory, 'scripts/manage.sh'))) {
+      assert(!config.instances.some(instance => instance.id === 'pay'), 'pay 实例 ID 已被使用，请核对主机登记');
+      config.instances.push({ id: 'pay', service: 'pay', profile: defaultServiceProfile('pay', options.workspace) });
+      registryChanged = true;
+    }
   } else {
     config = {
       host: 'mx-internal-server', bind: options.bind || options.defaultBind || '127.0.0.1', port: Number(options.port || 19290), tokenFile, stateDir,
@@ -79,7 +85,7 @@ export async function installOperations(options, dependencies = {}) {
   chmodSync(tokenFile, 0o600);
   const token = readFileSync(tokenFile, 'utf8').trim();
   assert(token.length >= 32, '已有 token 无效；不自动轮换');
-  if (!existsSync(configFile)) atomicWrite(configFile, JSON.stringify(config, null, 2));
+  if (!existsSync(configFile) || registryChanged) atomicWrite(configFile, JSON.stringify(config, null, 2));
   chmodSync(configFile, 0o600);
   const files = {
     'server/scripts/service-operations-agent.mjs': readFileSync(join(source, 'service-operations-agent.mjs')),
@@ -90,6 +96,7 @@ export async function installOperations(options, dependencies = {}) {
     files[`scripts/${name}.mjs`] = readFileSync(resolve(source, `../../scripts/${name}.mjs`));
   }
   const digest = createHash('sha256');
+  digest.update(JSON.stringify(config.instances.map(({ id, service }) => ({ id, service })))); // New registration requires a drained reload; retain ordinary profile edits.
   for (const [path, content] of Object.entries(files)) digest.update(path).update('\0').update(content).update('\0');
   const version = digest.digest('hex');
   const releases = join(root, 'releases'); mkdirSync(releases, { recursive: true, mode: 0o700 });

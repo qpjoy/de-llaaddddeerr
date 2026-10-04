@@ -46,7 +46,7 @@
 .service-connection > span:last-child { margin-left: auto; color: var(--mx-text-muted); }
 .service-connection-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mx-warning); }
 .service-connection-dot.is-connected { background: var(--mx-primary); }
-.service-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.service-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
 .service-choice { padding: 17px 15px; border: 1px solid var(--mx-line); border-radius: 10px; background: var(--mx-bg-panel); color: var(--mx-text); text-align: left; min-width: 0; }
 .service-choice strong { display: block; font-size: 15px; margin-bottom: 8px; }
 .service-choice span { display: block; font-size: 12px; line-height: 1.65; color: var(--mx-text-soft); }

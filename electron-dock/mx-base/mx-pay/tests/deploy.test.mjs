@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, cpSync, writeFileSync, readFileSync, rmSync, re
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { generateKeyPairSync } from 'node:crypto'
 import { render } from '../scripts/render.mjs'
 import { selectContext } from '../scripts/runtime.mjs'
 import { selectStorageClass, assertStorageIdentity, assertDiskIdentity, databaseResources } from '../scripts/postgres.mjs'
@@ -11,8 +12,12 @@ import { selectStorageClass, assertStorageIdentity, assertDiskIdentity, database
 const image = `registry.example.test/mx-pay@sha256:${'a'.repeat(64)}`
 const fsDirectory=root=>readdirSync(join(root,'backups')).filter(n=>!n.startsWith('.'))
 export function fixture(t, overrides = {}) {
-  const root = mkdtempSync(join(tmpdir(),'mx-pay-deploy-test-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const workspace = mkdtempSync(join(tmpdir(),'mx-pay-deploy-test-'))
+  const root = join(workspace, 'mx-base/mx-pay')
+  mkdirSync(root, { recursive: true })
+  mkdirSync(join(workspace, 'mx-common/src/identity'), { recursive: true })
+  cpSync(new URL('../../../mx-common/src/identity/profile.mjs',import.meta.url), join(workspace, 'mx-common/src/identity/profile.mjs'))
+  t.after(() => rmSync(workspace, { recursive: true, force: true }))
   for (const dir of ['scripts','server','src','deploy']) cpSync(new URL(`../${dir}/`,import.meta.url),join(root,dir),{ recursive: true })
   mkdirSync(join(root,'secrets')); mkdirSync(join(root,'bin'))
   writeFileSync(join(root,'secrets/runtime.env'),'MX_PAY_DATABASE_URL=postgresql://payment:private@db.example.test/mx_pay\n')
@@ -169,6 +174,50 @@ test('lost local config restores currently deployed credentials and target from 
   r=f.run('deploy');assert.equal(r.status,0,r.stderr)
   assert.deepEqual(['credentials.json','runtime.env','migration.env'].map(p=>readFileSync(join(f.root,'secrets',p),'utf8')),original)
 })
+test('channel secrets are versioned, mounted, retained and restored; invalid config prevents rollout',t=>{
+  const f=fresh(t),keys=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs8',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}})
+  mkdirSync(join(f.root,'secrets'))
+  const filename=join(f.root,'secrets/channels.json'),channel={id:'alipay-test',provider:'alipay',environment:'test',enabled:false,
+    appId:'2021000000000001',sellerId:'2088000000000001',allowedApps:['demo'],keyType:'PKCS8',privateKey:keys.privateKey,alipayPublicKey:keys.publicKey,
+    notifyUrl:'https://pay.example.test/v1/notifications/alipay/alipay-test',returnUrl:'https://app.example.test/result'}
+  writeFileSync(filename,JSON.stringify([channel]))
+  let r=f.run('deploy');assert.equal(r.status,0,r.stderr)
+  const state=()=>JSON.parse(readFileSync(f.env.MOCK_STATE)),deployment=state()['deployment/mx-pay']
+  assert.ok(deployment.spec.template.spec.volumes[0].secret.items.some(i=>i.key==='channels.json'))
+  assert.ok(deployment.spec.template.spec.containers[0].env.some(e=>e.name==='MX_PAY_CHANNELS_FILE'))
+  const first=deployment.spec.template.spec.volumes[0].secret.secretName
+  assert.equal(Buffer.from(state()[`secret/${first}`].data['channels.json'],'base64').toString(),JSON.stringify([channel]))
+  rmSync(join(f.root,'secrets'),{recursive:true})
+  r=f.run('deploy');assert.equal(r.status,0,r.stderr);assert.deepEqual(JSON.parse(readFileSync(filename)),[channel])
+  assert.equal(state()['deployment/mx-pay'].spec.template.spec.volumes[0].secret.secretName,first)
+  writeFileSync(filename,JSON.stringify([{...channel,enabled:true}]))
+  const upgradeStart=f.calls().length
+  r=f.run('deploy');assert.equal(r.status,0,r.stderr)
+  assert.notEqual(state()['deployment/mx-pay'].spec.template.spec.volumes[0].secret.secretName,first)
+  assert.ok(state()[`secret/${first}`],'old replicas keep their immutable configuration')
+  const applied=calls=>calls.flatMap((c,index)=>(c.document?.items||[]).filter(i=>i.kind==='Deployment').map(d=>({index,d})))
+  const channelEnabled=d=>JSON.parse(Buffer.from(state()[`secret/${d.spec.template.spec.volumes[0].secret.secretName}`].data['channels.json'],'base64').toString())[0].enabled
+  const upgrade=f.calls().slice(upgradeStart),stages=applied(upgrade)
+  assert.deepEqual(stages.map(({d})=>channelEnabled(d)),[false,true])
+  assert.ok(upgrade.slice(stages[0].index+1,stages[1].index).some(c=>c.args.includes('rollout')&&c.args.includes('status')),'all channel readers upgraded before enabling new identities')
+  const failureStart=f.calls().length
+  f.env.MOCK_ROLLOUT_FAIL='1';r=f.run('deploy');delete f.env.MOCK_ROLLOUT_FAIL
+  assert.notEqual(r.status,0);assert.match(r.stderr,/checkout was not re-enabled/)
+  assert.deepEqual(applied(f.calls().slice(failureStart)).map(({d})=>channelEnabled(d)),[false])
+  assert.equal(JSON.parse(readFileSync(filename))[0].enabled,true,'desired private channel configuration must survive interrupted rollout')
+  const retryStart=f.calls().length
+  r=f.run('deploy');assert.equal(r.status,0,r.stderr)
+  assert.deepEqual(applied(f.calls().slice(retryStart)).map(({d})=>channelEnabled(d)),[false,true],'retry must complete the barrier again')
+  const before=f.calls().length
+  writeFileSync(filename,JSON.stringify([{...channel,privateKey:'invalid'}]))
+  r=f.run('deploy');assert.notEqual(r.status,0)
+  assert.ok(!f.calls().slice(before).some(c=>c.document?.items?.some(i=>i.kind==='Deployment')))
+  assert.doesNotMatch(r.stdout+r.stderr,/BEGIN PRIVATE KEY|invalid"/)
+  rmSync(filename)
+  const missing=state(),active=missing['deployment/mx-pay'].spec.template.spec.volumes[0].secret.secretName
+  delete missing[`secret/${active}`].data['channels.json'];writeFileSync(f.env.MOCK_STATE,JSON.stringify(missing))
+  r=f.run('deploy');assert.notEqual(r.status,0);assert.match(r.stderr,/refusing empty channel configuration/)
+})
 test('deploy refuses changed cluster, replacement PVC, wrong PG and lost database anchor',t=>{
   for(const [key,value] of [['MOCK_CLUSTER_UID','another-cluster'],['MOCK_VOLUME_DRIFT','1'],['MOCK_PG_DRIFT','1'],['MOCK_LOST_ANCHOR','1']]) {
     const f=fresh(t);let r=f.run('deploy');assert.equal(r.status,0,r.stderr)
@@ -229,4 +278,30 @@ test('discovery and storage identity fail closed on ambiguous/replaced resources
   const normal=databaseResources({systemIdentifier:'7390000000000000001'},{installationID:'a'.repeat(32)})
   const command=normal.items.find(i=>i.kind==='StatefulSet').spec.template.spec.containers[0].command.join(' ')
   assert.match(command,/7390000000000000001/);assert.doesNotMatch(command,/initdb|docker-entrypoint/)
+})
+
+test('optional SSO console is isolated from API and migration secrets and retains its identity after local config loss', t => {
+  const f = fixture(t)
+  const dir = join(f.root, 'secrets/console'); mkdirSync(dir)
+  const profile = { appId: 'mx-pay', origin: 'https://pay.example.test', issuer: 'https://auth.example.test/identity',
+    clientId: 'mx-pay-web', clientSecret: 'test-private-client', audience: 'mx-pay', scope: 'openid mx:identity', sessionKey: 'a'.repeat(43) }
+  writeFileSync(join(dir, 'profile.json'), JSON.stringify(profile), { mode: 0o600 })
+  writeFileSync(join(dir, 'access.json'), '[]', { mode: 0o600 })
+  const result = f.run('deploy'); assert.equal(result.status, 0, result.stderr)
+  const calls = f.calls(), secrets = calls.find(c => c.document?.items?.some(item => item.metadata.name.startsWith('mx-pay-console-'))).document.items
+  const consoleSecret = secrets.find(item => item.metadata.name.startsWith('mx-pay-console-'))
+  assert.equal(Buffer.from(consoleSecret.data['profile.json'], 'base64').toString(), JSON.stringify(profile))
+  assert.equal(consoleSecret.data['credentials.json'], undefined); assert.equal(consoleSecret.data['channels.json'], undefined)
+  assert.ok(secrets.filter(item => item !== consoleSecret).every(item => !item.data['profile.json'] && !item.data['access.json']))
+  const consoleDoc = calls.find(c => c.document?.items?.some(item => item.kind === 'Deployment' && item.metadata.name === 'mx-pay-console')).document
+  const consolePod = consoleDoc.items.find(item => item.kind === 'Deployment').spec.template.spec
+  assert.equal(consolePod.volumes[0].secret.defaultMode, 0o440)
+  assert.deepEqual(consolePod.containers[0].command, ['node', 'server/console-index.mjs'])
+  const apiReady = calls.findIndex(c => c.args.includes('deployment/mx-pay') && c.args.includes('status'))
+  const consoleApply = calls.findIndex(c => c.document === consoleDoc)
+  assert.ok(consoleApply > apiReady, 'console rollout cannot gate payment API rollout')
+  rmSync(dir, { recursive: true })
+  const retry = f.run('deploy'); assert.equal(retry.status, 0, retry.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'profile.json'))), profile)
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'access.json'))), [])
 })

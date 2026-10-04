@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createOrder, transitionOrder, settingsInput, requestKey, fingerprint, defaultSettings, requirePayment, fields, text, PaymentError } from '../src/index.mjs'
 import { authorize } from './config.mjs'
 import { ReportingReader } from './reporting.mjs'
+import { ChannelPayments } from './channel-payments.mjs'
 
 export const uuid = value => {
   requirePayment(typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value), 'invalid_payment_id', 'Invalid UUID')
@@ -9,7 +10,10 @@ export const uuid = value => {
 }
 const actorOf = principal => `credential:${principal.id}`
 export class PaymentCenter {
-  constructor(pool, { reportingPool = pool } = {}) { this.pool = pool; this.reporting = new ReportingReader(reportingPool) }
+  constructor(pool, { reportingPool = pool, channels = [], channelFactory } = {}) {
+    this.pool = pool; this.reporting = new ReportingReader(reportingPool)
+    this.channelPayments = new ChannelPayments(this, channels, channelFactory)
+  }
   async atomic(scope, work) {
     const client = await this.pool.connect()
     let committing = false
@@ -30,11 +34,19 @@ export class PaymentCenter {
   async settings(client = this.pool) {
     return (await client.query("SELECT document FROM pay.settings WHERE id='manual_alipay'")).rows[0]?.document || defaultSettings()
   }
+  async identity(principal) {
+    authorize(principal, 'orders.read')
+    const { rows } = await this.pool.query('SELECT id FROM pay.reporting_source WHERE singleton=true')
+    requirePayment(rows.length === 1, 'payment_source_unavailable', 'Payment source identity unavailable', 503)
+    return { sourceId: rows[0].id, appId: principal.appId, environment: principal.environment, features: ['initiatorRef'], scopes: principal.scopes }
+  }
   async channels(principal) {
     authorize(principal, 'orders.read')
     const settings = await this.settings()
     return { environment: principal.environment, provider: principal.environment === 'test' ? 'mock' : 'manual_alipay',
-      enabled: principal.environment === 'test' || settings.enabled, currency: 'CNY', minMinor: 500, maxMinor: 10_000_000 }
+      enabled: principal.environment === 'test' || settings.enabled, currency: 'CNY', minMinor: 500, maxMinor: 10_000_000,
+      items: [{ id: principal.environment === 'test' ? 'mock' : 'manual_alipay', provider: principal.environment === 'test' ? 'mock' : 'manual_alipay',
+        environment: principal.environment, enabled: principal.environment === 'test' || settings.enabled, mode: 'manual', currency: 'CNY', minMinor: 500, maxMinor: 10_000_000 }, ...this.channelPayments.available(principal)] }
   }
   async configure(principal, body) {
     authorize(principal, 'settings.write')
@@ -55,17 +67,25 @@ export class PaymentCenter {
   }
   async create(principal, body, key) {
     authorize(principal, 'orders.write'); requestKey(key)
-    fields(body, ['businessOrderId','customerRef','amountMinor'])
+    fields(body, ['businessOrderId','customerRef','amountMinor','channelId','subject','initiatorRef'])
+    requirePayment(body.channelId !== undefined || body.subject === undefined, 'invalid_payment', 'subject requires an explicit channel')
     const businessOrderId = text(body.businessOrderId, 'businessOrderId', 128), customerRef = text(body.customerRef, 'customerRef', 128)
-    const hash = fingerprint({ businessOrderId, customerRef, amountMinor: body.amountMinor })
+    const initiator = body.initiatorRef === undefined ? {} : { initiatorRef: text(body.initiatorRef, 'initiatorRef', 200) }
+    const hash = fingerprint({ businessOrderId, customerRef, amountMinor: body.amountMinor, ...initiator,
+      ...(body.channelId === undefined ? {} : { channelId: text(body.channelId, 'channelId', 80), subject: body.subject }) })
     return this.atomic(`create:${principal.appId}:${principal.environment}:${key}`, async client => {
       const prior = (await client.query('SELECT document,fingerprint,request_key FROM pay.orders WHERE app_id=$1 AND environment=$2 AND (request_key=$3 OR business_order_id=$4)', [principal.appId, principal.environment, key, businessOrderId])).rows
       if (prior.length) {
         requirePayment(prior.length === 1 && prior[0].fingerprint === hash && prior[0].request_key === key, 'payment_idempotency_conflict', 'Keep the original business order, amount and key', 409)
         return prior[0].document
       }
-      const { tenantId: ignored, invoice, ...base } = createOrder({ tenantId: customerRef, input: { environment: principal.environment, amountMinor: body.amountMinor }, settings: await this.settings(client), actor: actorOf(principal) })
-      const order = { ...base, appId: principal.appId, businessOrderId, customerRef }
+      const legacy = body.channelId === undefined || body.channelId === (principal.environment === 'test' ? 'mock' : 'manual_alipay')
+      requirePayment(!legacy || body.subject === undefined, 'invalid_payment', 'Legacy channels do not accept subject')
+      const { tenantId: ignored, invoice, ...base } = legacy
+        ? createOrder({ tenantId: customerRef, input: { environment: principal.environment, amountMinor: body.amountMinor }, settings: await this.settings(client), actor: actorOf(principal) })
+        : this.channelPayments.create(principal, body)
+      // Application-attested audit reference, never a replacement for service authorization.
+      const order = { ...base, appId: principal.appId, businessOrderId, customerRef, ...initiator }
       await client.query('INSERT INTO pay.orders(id,app_id,environment,business_order_id,request_key,fingerprint,document) VALUES ($1,$2,$3,$4,$5,$6,$7)', [order.id, principal.appId, principal.environment, businessOrderId, key, hash, order])
       await this.audit(client, order.id, `create:${key}`, hash, { action: 'create', actor: actorOf(principal), at: order.createdAt, revision: 0 })
       return order
@@ -83,6 +103,7 @@ export class PaymentCenter {
     const hash = fingerprint({ action, body })
     return this.atomic(`order:${id}`, async client => {
       const order = await this.order(principal, id, client)
+      requirePayment(order.provider !== 'alipay', 'payment_channel_action', 'Automatic channel orders require verified notification/query; manual settlement and local cancellation are forbidden', 409)
       const prior = (await client.query('SELECT fingerprint FROM pay.audit WHERE order_id=$1 AND request_key=$2', [id, key])).rows[0]
       if (prior) {
         requirePayment(prior.fingerprint === hash, 'payment_idempotency_conflict', 'Idempotency key was used for another action', 409)
@@ -93,13 +114,16 @@ export class PaymentCenter {
       await client.query('UPDATE pay.orders SET document=$2 WHERE id=$1', [id, next])
       await this.audit(client, id, key, hash, { action, actor: actorOf(principal), at: next.updatedAt, revision: next.revision, submission: next.submission, settlement: next.settlement })
       if (action === 'confirm') {
-        const event = { id: randomUUID(), version: 1, type: 'payment.paid', appId: principal.appId, environment: principal.environment,
-          paymentId: next.id, businessOrderId: next.businessOrderId, customerRef: next.customerRef, amountMinor: next.amountMinor,
-          currency: next.currency, occurredAt: next.updatedAt }
-        await client.query('INSERT INTO pay.outbox(id,order_id,app_id,environment,document) VALUES ($1,$2,$3,$4,$5)', [event.id, id, principal.appId, principal.environment, event])
+        await this.paidEvent(client, next)
       }
       return next
     })
+  }
+  async paidEvent(client, order) {
+    const event = { id: randomUUID(), version: 1, type: 'payment.paid', appId: order.appId, environment: order.environment,
+      paymentId: order.id, businessOrderId: order.businessOrderId, customerRef: order.customerRef, amountMinor: order.amountMinor,
+      currency: order.currency, occurredAt: order.updatedAt }
+    await client.query('INSERT INTO pay.outbox(id,order_id,app_id,environment,document) VALUES ($1,$2,$3,$4,$5)', [event.id, order.id, order.appId, order.environment, event])
   }
   async list(principal, query) {
     authorize(principal, 'orders.read')

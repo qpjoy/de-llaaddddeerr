@@ -16,8 +16,10 @@ services:
       MX_PAY_HOST: 0.0.0.0
       MX_PAY_PORT: 18230
       MX_PAY_CREDENTIALS_FILE: /run/secrets/credentials.json
+      MX_PAY_CHANNELS_FILE: /run/secrets/channels.json
     volumes:
       - ${MX_PAY_CREDENTIALS_SOURCE:?credentials required}:/run/secrets/credentials.json:ro
+      - ${MX_PAY_CHANNELS_SOURCE:?channels file required}:/run/secrets/channels.json:ro
     ports:
       - '${MX_PAY_BIND:-127.0.0.1}:${MX_PAY_PORT:-18230}:18230'
     read_only: true

@@ -1,5 +1,7 @@
 # Hub 充值接入独立 mx-pay
 
+2026-10-04 更新：Hub 已接 Launcher SSO；mx-pay 也提供独立、仅查看的 SSO 查询台，两者的人会话不参与机器支付认证。Hub 的支付源/订单一致性校验已抽取并实际复用 `@qpjoy/mx-pay/integration`，钱包事务、旧充值兼容和切换门槛保持。见 [支付中心 SSO、应用接入与运维](../../../mx-base/mx-pay/docs/sso-and-application-onboarding.md)。下文 10-03 的“SSO 暂不改动”描述当时交付边界。
+
 2026-10-03。已实现独立支付订单到原租户钱包的交付、账务权限及页面。默认继续使用原人工充值，部署不会自动切换正式收款。SSO 暂不改动，后续由 Hub 接入 Launcher SSO。
 
 ## 账户与业务边界

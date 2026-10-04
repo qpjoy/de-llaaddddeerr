@@ -74,6 +74,22 @@ export function prepare(root) {
   // Never treat an inaccessible API as an empty installation. get() throws on errors.
   const runtimeName=deployment?.spec.template.spec.volumes?.find(v=>v.name==='credentials')?.secret?.secretName || previous.runtimeSecret
   const runtime=runtimeName ? data(get('secret',runtimeName)) : null
+  const consoleDeployment=get('deployment','mx-pay-console')
+  const consoleName=consoleDeployment?.spec.template.spec.volumes?.find(v=>v.name==='console')?.secret?.secretName || previous.consoleSecret
+  if (consoleName) {
+    const retained=data(get('secret',consoleName))
+    for (const [file,key] of [[env.MX_PAY_SSO_SOURCE,'profile.json'],[env.MX_PAY_CONSOLE_ACCESS_SOURCE,'access.json']]) {
+      if (!fs.existsSync(file || '')) {
+        assert(file && retained?.[key],'Retained payment console identity/access missing; explicit recovery required')
+        writePrivate(file,retained[key],true)
+      }
+    }
+  }
+  if (env.MX_PAY_CHANNELS_SOURCE && !fs.existsSync(env.MX_PAY_CHANNELS_SOURCE)) {
+    const required=deployment?.spec.template.spec.containers?.some(c=>c.env?.some(e=>e.name==='MX_PAY_CHANNELS_FILE'))
+    assert(!required || runtime?.['channels.json'],'Deployed channel Secret is missing; explicit configuration recovery required, refusing empty channel configuration')
+    writePrivate(env.MX_PAY_CHANNELS_SOURCE,runtime?.['channels.json'] || '[]\n',true)
+  }
   const clientBootstrap=get('secret','mx-pay-client-bootstrap')
   if (!fs.existsSync(env.MX_PAY_CREDENTIALS_SOURCE)) {
     if (runtime) {
@@ -92,7 +108,7 @@ export function prepare(root) {
   if (!installation && !deployment && !clientBootstrap) create(resource('Secret','mx-pay-client-bootstrap',{immutable:true,type:'Opaque',data:{'credentials.json':Buffer.from(fs.readFileSync(env.MX_PAY_CREDENTIALS_SOURCE)).toString('base64')}}))
   if (!fs.existsSync(env.MX_PAY_RUNTIME_ENV_FILE) && runtime) {
     assert(runtime.MX_PAY_DATABASE_URL,'Retained runtime database connection missing')
-    writePrivate(env.MX_PAY_RUNTIME_ENV_FILE,Object.entries(runtime).filter(([k])=>k!=='credentials.json').map(([k,v])=>`${k}=${v}\n`).join(''),true)
+    writePrivate(env.MX_PAY_RUNTIME_ENV_FILE,Object.entries(runtime).filter(([k])=>!['credentials.json','channels.json'].includes(k)).map(([k,v])=>`${k}=${v}\n`).join(''),true)
   }
   if (!fs.existsSync(env.MX_PAY_MIGRATION_ENV_FILE) && previous.migrationSecret) {
     const migration=data(get('secret',previous.migrationSecret))

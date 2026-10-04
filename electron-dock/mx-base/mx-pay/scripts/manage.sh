@@ -41,11 +41,20 @@ if [ -z "${MX_PAY_MIGRATION_ENV_FILE:-}" ]; then
 fi
 export MX_PAY_MIGRATION_ENV_FILE="$(absolute "$MX_PAY_MIGRATION_ENV_FILE")"
 export MX_PAY_CREDENTIALS_SOURCE="$(absolute "${MX_PAY_CREDENTIALS_SOURCE:-secrets/credentials.json}")"
+export MX_PAY_CHANNELS_SOURCE="$(absolute "${MX_PAY_CHANNELS_SOURCE:-secrets/channels.json}")"
+export MX_PAY_SSO_SOURCE="$(absolute "${MX_PAY_SSO_SOURCE:-secrets/console/profile.json}")"
+export MX_PAY_CONSOLE_ACCESS_SOURCE="$(absolute "${MX_PAY_CONSOLE_ACCESS_SOURCE:-secrets/console/access.json}")"
 export MX_PAY_UID="${MX_PAY_UID:-$(id -u)}" MX_PAY_GID="${MX_PAY_GID:-$(id -g)}"
 TMP='' LOCK_UID='' JOB_RUNNING=0 LOCAL_LOCK=0 PHASE=preflight
 mkdir -p "$ROOT/.deploy"
 kube() { kubectl --context "$MX_PAY_KUBE_CONTEXT" --request-timeout=15s -n "$MX_PAY_NAMESPACE" "$@"; }
-compose() { docker compose --project-directory "$ROOT" -f "$ROOT/deploy/compose.yml" "$@"; }
+compose() {
+  if [ -f "$MX_PAY_SSO_SOURCE" ]; then
+    docker compose --project-directory "$ROOT" -f "$ROOT/deploy/compose.yml" -f "$ROOT/deploy/console.compose.yml" "$@"
+  else
+    docker compose --project-directory "$ROOT" -f "$ROOT/deploy/compose.yml" "$@"
+  fi
+}
 cleanup() {
   local result=$?
   trap - EXIT INT TERM
@@ -87,7 +96,11 @@ case "$MX_PAY_DEPLOY_DRIVER" in
     case "$ACTION" in
       discover) node "$ROOT/scripts/runtime.mjs" discover "$ROOT"; exit;;
       status) kube get deployment,statefulset,service,pdb,job,pvc -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
-      logs) kube logs deployment/mx-pay --all-pods=true --tail=100 --follow; exit;;
+      logs)
+        kube logs deployment/mx-pay --all-pods=true --prefix=true --tail=100
+        console_workload="$(kube get deployment mx-pay-console --ignore-not-found -o name)"
+        if [ -n "$console_workload" ]; then kube logs deployment/mx-pay-console --all-pods=true --prefix=true --tail=100; fi
+        exit;;
       doctor) node "$ROOT/scripts/runtime.mjs" discover "$ROOT"; kube get nodes -o wide; kube get deployment,pods,job,pdb,pvc -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
     esac
     ;;
@@ -98,7 +111,9 @@ case "$MX_PAY_DEPLOY_DRIVER" in
     case "$ACTION" in
       discover|backup) die "$ACTION currently requires Kubernetes; Compose uses an externally managed database";;
       status|doctor) export MX_PAY_IMAGE="${MX_PAY_IMAGE:-mx-pay:not-deployed}"; compose ps --all; exit;;
-      logs) compose logs --tail=100 --follow api; exit;;
+      logs)
+        if [ -f "$MX_PAY_SSO_SOURCE" ]; then compose logs --tail=100 api console; else compose logs --tail=100 api; fi
+        exit;;
     esac
     ;;
   *) die 'MX_PAY_DEPLOY_DRIVER must be k8s or compose';;
@@ -106,6 +121,10 @@ esac
 need node
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mx-pay-deploy.XXXXXXXX")"
 if [ "$MX_PAY_DEPLOY_DRIVER" = compose ] && { [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; }; then
+  if [ ! -f "$MX_PAY_CHANNELS_SOURCE" ]; then
+    mkdir -p "$(dirname "$MX_PAY_CHANNELS_SOURCE")"
+    printf '[]\n' > "$MX_PAY_CHANNELS_SOURCE"
+  fi
   node "$ROOT/scripts/render.mjs" validate
 fi
 if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
@@ -198,8 +217,26 @@ if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
   JOB_RUNNING=0
   if [ "$ACTION" = deploy ]; then
     PHASE=rollout
+    # A new channel protocol must not issue orders while old pods may still read
+    # them. First replace every replica with receipt/query-capable new code and
+    # checkout disabled, then restore the intended immutable channel settings.
+    # Always repeat this barrier on retry: template metadata is not rollout proof.
+    drain_checkout="$(kube get deployment mx-pay --ignore-not-found -o json | node "$ROOT/scripts/render.mjs" needs-checkout-drain)"
+    if [ "$drain_checkout" = yes ]; then
+      say 'Upgrading channel readers with new checkout paused; existing receipts and queries remain available'
+      mkdir -p "$TMP/channel-upgrade"
+      node "$ROOT/scripts/render.mjs" "$TMP/channel-upgrade" pause-checkout
+      kube apply -f "$TMP/channel-upgrade/secrets.json" >/dev/null
+      kube apply -f "$TMP/channel-upgrade/workload.json"
+      kube rollout status deployment/mx-pay --timeout=320s --request-timeout=340s || die 'Channel compatibility rollout failed; new checkout was not re-enabled. Retry deploy after diagnosis'
+    fi
     kube apply -f "$TMP/workload.json"
     kube rollout status deployment/mx-pay --timeout=320s --request-timeout=340s || die 'Rollout failed; inspect old/new replicas. No automatic database rollback was attempted'
+    if [ -f "$MX_PAY_SSO_SOURCE" ]; then
+      PHASE=console-rollout
+      kube apply -f "$TMP/console.json"
+      kube rollout status deployment/mx-pay-console --timeout=320s --request-timeout=340s || die 'Payment API ready; optional SSO console rollout failed. Inspect console without rolling back payment facts'
+    fi
   fi
 else
   compose config --quiet
@@ -207,6 +244,7 @@ else
   if [ "$ACTION" = deploy ]; then
     PHASE=rollout
     compose up -d --no-deps --wait --wait-timeout 120 api
+    if [ -f "$MX_PAY_SSO_SOURCE" ]; then compose up -d --no-deps --wait --wait-timeout 120 console; fi
     printf '%s\n' "$MX_PAY_IMAGE" > "$ROOT/.deploy/image"
   fi
 fi
