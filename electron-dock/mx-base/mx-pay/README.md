@@ -18,6 +18,8 @@
 bash scripts/manage.sh deploy
 ```
 
+如果服务器使用 `/data/tmp`，直接运行 `TMPDIR=/data/tmp bash scripts/manage.sh deploy` 即可。尚未生成 SSO 档案时正常启动内网支付 API；同机 Launcher 已登记 mx-pay 时，deploy 会自动导入唯一的公网/内网接入档案，并首次创建空的查询权限文件。无需手工复制 `profile.json`、创建 `access.json` 或指定端口。之后登记 SSO，再运行同一命令即可追加查询台；空权限表示登录后暂时不能查看订单。
+
 也可以在 `electron-dock/mx-base` 使用统一入口：
 
 ```sh
@@ -34,6 +36,7 @@ API 为两个或以上副本，RollingUpdate 的 `maxUnavailable=0`、`maxSurge=
 
 - 集群：显式覆盖值 → 已记录的部署目标 → 当前 context → 唯一 context。保留 context、`kube-system` namespace UID 和目标 namespace，不修改全局 `kubectl use-context`。重复部署拒绝变更集群身份。
 - 凭据：优先现有 `secrets/` 文件；文件丢失则从当前 Deployment/安装记录引用的 Secret 恢复。首次生成应用 test/live、核实人员和渠道管理员独立凭据。只恢复配置，不恢复业务数据；已有服务凭据不能因查询失败而被当成“不存在”。
+- 查询台：已有支付档案/权限 → 已部署查询台原 Secret → 首次从 `/var/lib/mx-launcher/identity/applications/{public|private}/mx-pay.json` 导入。保留原 clientSecret/sessionKey，不修改 Launcher。两个入口都存在时须用 `MX_PAY_SSO_SOURCE` 选择；显式路径尚未生成且查询台从未配置时继续仅发布 API。`MX_PAY_SSO_AUTO_DISCOVER=0` 可关闭首次自动发现，`MX_PAY_LAUNCHER_IDENTITY_DIR` 可指定主机身份目录。`.deploy/console-enrolled.json` 记录本机已准备过查询台；其配置后续丢失时必须恢复，不能重新生成身份或把权限清空。配置校验在构建/迁移前完成，`status/discover` 不导入或生成这些文件。
 - 镜像仓库：显式 `.env` → 安装记录 → 当前 namespace 的 `ConfigMap/mx-platform-runtime` 中 `data.imageRepository`。这是一份可选运行时能力声明，为后续总 `manage.sh` 预留，无需额外中心在线。
 - 无仓库：检查所有就绪 worker 的 containerd，通过本机 `ctr` 或已有可信 SSH 导入同一镜像。远端默认使用节点 InternalIP 与当前 SSH 用户，可用 Node annotation `mx-pay.io/ssh-target=user@host` 明确已有入口。使用 `BatchMode`、严格 known_hosts 和无交互 sudo；不自动信任新主机、不改 containerd 配置。任一节点无法访问则在迁移前失败，提示所缺节点或可选镜像仓库。
 - 节点镜像采用 Docker 内容 ID 命名、逐节点验证、`imagePullPolicy: Never`，API/迁移仅调度到已导入的节点。新增节点后再次 deploy 才纳入。节点镜像被运行时 GC 清除时也需重新 deploy；长期生产优先使用可靠仓库。节点导入目前要求同构 amd64/arm64，自动选择对应构建平台；异构集群可提供多架构镜像 digest。

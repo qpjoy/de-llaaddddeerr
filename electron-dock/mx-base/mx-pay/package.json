@@ -10,7 +10,7 @@
     "start:console": "node server/console-index.mjs",
     "migrate": "node server/migrate.mjs",
     "test": "node --test tests/*.test.mjs",
-    "test:deploy": "node --test tests/deploy.test.mjs"
+    "test:deploy": "node --test tests/deploy.test.mjs tests/console-bootstrap.test.mjs"
   },
   "dependencies": { "@qpjoy/mx-common": "file:../../mx-common", "alipay-sdk": "4.14.0", "pg": "8.22.0" }
 }

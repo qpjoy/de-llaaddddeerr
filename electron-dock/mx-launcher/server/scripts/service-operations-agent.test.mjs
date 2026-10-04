@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createOperationsAgent, redactOutput } from './service-operations-agent.mjs';
@@ -184,6 +184,25 @@ test('payment plans bind private SSO/access and target configuration and never r
   const targetPlan = await f.plan('pay', 'deploy');
   await writeFile(join(pay, '.deploy/target.json'), '{"context":"different"}');
   assert.equal((await f.request('execute', { planId: targetPlan.id, acknowledged: true })).status, 409);
+  assert.equal(executions, 0);
+});
+
+test('payment plan includes Launcher profiles that deploy may discover, even before the first local copy', async t => {
+  let executions = 0;
+  const f = await fixture(t, async () => { executions++; return { code: 0 }; });
+  const pay = join(f.workspace, 'mx-base/mx-pay'), identityDir = join(f.dir, 'launcher-identity');
+  await writeFile(join(pay, '.env'), `MX_PAY_LAUNCHER_IDENTITY_DIR=${identityDir}\n`);
+  f.git(['add', '.']); f.git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@invalid.test', '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'fixture identity source']);
+  const noProfile = await f.plan('pay', 'deploy');
+  const source = join(identityDir, 'applications/public/mx-pay.json');
+  await mkdir(dirname(source), { recursive: true });
+  await writeFile(source, JSON.stringify({ clientSecret: 'discovered-private-client', sessionKey: 'discovered-private-session' }), { mode: 0o600 });
+  const added = await f.request('execute', { planId: noProfile.id, acknowledged: true });
+  assert.equal(added.status, 409); assert.match(added.data.message, /配置或凭据已变化/);
+  const registered = await f.plan('pay', 'deploy');
+  assert.doesNotMatch(JSON.stringify(registered), /discovered-private-client|discovered-private-session/);
+  await writeFile(source, JSON.stringify({ clientSecret: 'changed-private-client' }));
+  assert.equal((await f.request('execute', { planId: registered.id, acknowledged: true })).status, 409);
   assert.equal(executions, 0);
 });
 

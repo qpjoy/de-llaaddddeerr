@@ -46,7 +46,8 @@ async function sourceState(cwd) {
 async function paymentConfigFiles(cwd) {
   const paths = { MX_PAY_RUNTIME_ENV_FILE: 'secrets/runtime.env', MX_PAY_MIGRATION_ENV_FILE: 'secrets/migration.env',
     MX_PAY_CREDENTIALS_SOURCE: 'secrets/credentials.json', MX_PAY_CHANNELS_SOURCE: 'secrets/channels.json',
-    MX_PAY_SSO_SOURCE: 'secrets/console/profile.json', MX_PAY_CONSOLE_ACCESS_SOURCE: 'secrets/console/access.json' };
+    MX_PAY_SSO_SOURCE: 'secrets/console/profile.json', MX_PAY_CONSOLE_ACCESS_SOURCE: 'secrets/console/access.json',
+    MX_PAY_LAUNCHER_IDENTITY_DIR: dirname(PROFILE) };
   let content = '';
   try { content = await readFile(join(cwd, '.env'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   for (const key of Object.keys(paths)) {
@@ -56,7 +57,10 @@ async function paymentConfigFiles(cwd) {
     assert(value && !/[\s$`#;]/.test(value), '支付配置文件路径必须为固定路径，动态 shell 配置请在主机执行');
     paths[key] = value;
   }
-  return ['.env', '.deploy/target.json', ...Object.values(paths), ...(process.env.KUBECONFIG || join(homedir(), '.kube/config')).split(':')];
+  const { MX_PAY_LAUNCHER_IDENTITY_DIR: identityDir, ...files } = paths;
+  return ['.env', '.deploy/target.json', '.deploy/console-enrolled.json', ...Object.values(files),
+    ...['public', 'private'].map(entry => join(identityDir, 'applications', entry, 'mx-pay.json')),
+    ...(process.env.KUBECONFIG || join(homedir(), '.kube/config')).split(':')];
 }
 async function configFingerprint(cwd, service) {
   const files = service === 'launcher' ? ['server/.env', PROFILE] : service === 'hub' ? ['.env.internal']

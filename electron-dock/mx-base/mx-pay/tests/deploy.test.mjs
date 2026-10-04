@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, readFileSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, readFileSync, rmSync, readdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -79,7 +79,8 @@ else if(s.includes('images ls'))console.log('local.mx/mx-pay:'+'b'.repeat(64));
 else console.log('containerd');
 `,{mode:0o755})
   const env = { ...process.env, PATH:`${join(root,'bin')}:${process.env.PATH}`, MOCK_LOG:join(root,'calls'), MOCK_STATE:join(root,'cluster-state.json'), MX_PAY_DEPLOY_DRIVER:'k8s', MX_PAY_KUBE_CONTEXT:'test-cluster', MX_PAY_NAMESPACE:'mx-pay-test', MX_PAY_REPLICAS:'2', MX_PAY_MIN_READY_WORKERS:'2', MX_PAY_BUILD:'0', MX_PAY_IMAGE:image,
-    MX_PAY_RUNTIME_ENV_FILE:join(root,'secrets/runtime.env'),MX_PAY_MIGRATION_ENV_FILE:join(root,'secrets/runtime.env'),MX_PAY_CREDENTIALS_SOURCE:join(root,'secrets/credentials.json'), ...overrides }
+    MX_PAY_RUNTIME_ENV_FILE:join(root,'secrets/runtime.env'),MX_PAY_MIGRATION_ENV_FILE:join(root,'secrets/runtime.env'),MX_PAY_CREDENTIALS_SOURCE:join(root,'secrets/credentials.json'),
+    MX_PAY_LAUNCHER_IDENTITY_DIR:join(workspace,'launcher-identity'), ...overrides }
   return { root, env, run: action => spawnSync('bash',[join(root,'scripts/manage.sh'),action],{env,encoding:'utf8',timeout:30000}), calls: () => readFileSync(env.MOCK_LOG,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) }
 }
 test('one-command deploy migrates before rollout, repeats safely and releases only its lock UID',t => {
@@ -304,4 +305,78 @@ test('optional SSO console is isolated from API and migration secrets and retain
   const retry = f.run('deploy'); assert.equal(retry.status, 0, retry.stderr)
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'profile.json'))), profile)
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'access.json'))), [])
+})
+
+test('deploy starts without SSO, later imports Launcher registration and restores grants from its own Secret before discovery',t=>{
+  const f=fresh(t)
+  let result=f.run('deploy');assert.equal(result.status,0,result.stderr)
+  const state=()=>JSON.parse(readFileSync(f.env.MOCK_STATE))
+  assert.ok(state()['deployment/mx-pay'])
+  assert.equal(state()['deployment/mx-pay-console'],undefined)
+  assert.equal(existsSync(join(f.root,'secrets/console/profile.json')),false)
+  const machine=readFileSync(join(f.root,'secrets/credentials.json'),'utf8')
+  const profile={appId:'mx-pay',origin:'https://pay.example.test',issuer:'https://auth.example.test/identity',
+    clientId:'mx-pay-web',clientSecret:'registered-original-client',audience:'mx-pay',scope:'openid mx:identity',sessionKey:'s'.repeat(43)}
+  const launcher=join(f.env.MX_PAY_LAUNCHER_IDENTITY_DIR,'applications/public/mx-pay.json')
+  mkdirSync(join(launcher,'..'),{recursive:true,mode:0o700});writeFileSync(launcher,JSON.stringify(profile),{mode:0o600})
+  result=f.run('discover');assert.equal(result.status,0,result.stderr)
+  assert.equal(existsSync(join(f.root,'secrets/console/profile.json')),false,'read-only discovery cannot copy profiles')
+  result=f.run('deploy');assert.equal(result.status,0,result.stderr)
+  assert.ok(state()['deployment/mx-pay-console'])
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'secrets/console/profile.json'))),profile)
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'secrets/console/access.json'))),[])
+  const grants=[{issuer:profile.issuer,subject:'original-user',clientId:profile.clientId,appId:'mx-insight-hub',environment:'test',role:'viewer'}]
+  writeFileSync(join(f.root,'secrets/console/access.json'),JSON.stringify(grants))
+  result=f.run('deploy');assert.equal(result.status,0,result.stderr)
+  const retainedName=state()['deployment/mx-pay-console'].spec.template.spec.volumes[0].secret.secretName
+  rmSync(join(f.root,'secrets/console'),{recursive:true})
+  writeFileSync(launcher,JSON.stringify({...profile,clientSecret:'different-launcher-secret',sessionKey:'n'.repeat(43)}))
+  result=f.run('deploy');assert.equal(result.status,0,result.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'secrets/console/profile.json'))),profile)
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'secrets/console/access.json'))),grants)
+  assert.equal(state()['deployment/mx-pay-console'].spec.template.spec.volumes[0].secret.secretName,retainedName)
+  assert.equal(readFileSync(join(f.root,'secrets/credentials.json'),'utf8'),machine)
+  assert.doesNotMatch(result.stdout+result.stderr,/registered-original-client|different-launcher-secret|ssssssss/)
+  const lost=state();delete lost[`secret/${retainedName}`].data['access.json']
+  writeFileSync(f.env.MOCK_STATE,JSON.stringify(lost));rmSync(join(f.root,'secrets/console/access.json'))
+  const before=f.calls().length
+  result=f.run('deploy');assert.notEqual(result.status,0)
+  assert.match(result.stderr,/Retained payment console identity\/access missing/)
+  assert.equal(existsSync(join(f.root,'secrets/console/access.json')),false)
+  assert.ok(!f.calls().slice(before).some(c=>c.document?.kind==='Job' || c.args.includes('buildx')))
+})
+
+test('Compose also discovers a first registration under its local lock and preserves it on repeat',t=>{
+  const f=fixture(t,{MX_PAY_DEPLOY_DRIVER:'compose'})
+  const launcher=join(f.env.MX_PAY_LAUNCHER_IDENTITY_DIR,'applications/private/mx-pay.json')
+  const profile={appId:'mx-pay',origin:'https://pay.example.test',issuer:'https://auth.example.test/identity',
+    clientId:'mx-pay-web',clientSecret:'registered-original-client',audience:'mx-pay',scope:'openid mx:identity',sessionKey:'s'.repeat(43)}
+  mkdirSync(join(launcher,'..'),{recursive:true,mode:0o700});writeFileSync(launcher,JSON.stringify(profile),{mode:0o600})
+  for(let i=0;i<2;i++){const r=f.run('deploy');assert.equal(r.status,0,r.stderr)}
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'secrets/console/profile.json'))),profile)
+  assert.ok(f.calls().some(c=>c.args.includes('up') && c.args.at(-1)==='console'))
+  rmSync(join(f.root,'secrets/console/access.json'))
+  const before=f.calls().length,result=f.run('deploy');assert.notEqual(result.status,0)
+  assert.match(result.stderr,/restore original grants/)
+  assert.ok(!f.calls().slice(before).some(c=>c.args.includes('up') || c.args.includes('migrate')))
+})
+
+test('invalid discovered SSO stops before image build, database bootstrap or migration without exposing secrets',t=>{
+  const f=fresh(t,{MX_PAY_BUILD:'1'})
+  const launcher=join(f.env.MX_PAY_LAUNCHER_IDENTITY_DIR,'applications/public/mx-pay.json')
+  mkdirSync(join(launcher,'..'),{recursive:true,mode:0o700});writeFileSync(launcher,'{"clientSecret":"do-not-print-this-secret",',{mode:0o600})
+  const result=f.run('deploy');assert.notEqual(result.status,0)
+  assert.doesNotMatch(result.stdout+result.stderr,/do-not-print-this-secret/)
+  assert.ok(!f.calls().some(c=>c.document?.kind==='Job' || c.args.includes('buildx')))
+})
+
+test('a configured but not-yet-generated SSO profile does not block first internal API startup',t=>{
+  const f=fixture(t)
+  f.env.MX_PAY_SSO_SOURCE=join(f.root,'future-registration/mx-pay.json')
+  const result=f.run('deploy');assert.equal(result.status,0,result.stderr)
+  assert.match(result.stdout,/SSO profile not available yet/)
+  const state=JSON.parse(readFileSync(f.env.MOCK_STATE))
+  assert.ok(state['deployment/mx-pay'])
+  assert.equal(state['deployment/mx-pay-console'],undefined)
+  assert.equal(existsSync(f.env.MX_PAY_SSO_SOURCE),false)
 })

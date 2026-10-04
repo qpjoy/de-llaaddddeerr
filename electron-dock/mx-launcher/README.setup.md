@@ -111,6 +111,19 @@ bash scripts/manage.sh ops internal-production status
 curl -fsS http://127.0.0.1:18090/healthz
 
 
+# deploy with sso
+cd -- '/root/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher' && \
+MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT='1' \
+MX_INSIGHT_HUB_DEPLOY='0' \
+TMPDIR='/data/tmp' \
+MX_K8S_OS_HOSTNAME='mx-internal-server' \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS='192.168.1.2' \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE='2GB' \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL='24h' \
+MX_INTERNAL_PRODUCTION_NATIVE_HOST_RUNNER_INSTALL='1' \
+MX_LAUNCHER_BUILD_PROXY='http://127.0.0.1:7789' \
+bash 'scripts/manage.sh' 'ops' 'internal-production' 'deploy'
+
 
 # local test
 bash scripts/manage.sh ops k8s-shadow cycle

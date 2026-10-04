@@ -10,6 +10,8 @@ Internal「运行与维护」增加 MX Pay 的状态、有限日志、诊断与�
 
 实际导航：左侧栏向下滚动到「平台管理」，展开「平台设置 → 统一认证」，填写「新增接入应用」。Pay 使用公网认证、名称 `MX Pay`、标识 `mx-pay`、地址 `https://pay.minsight-ai.com`，首次 Audience 设为 `mx-pay`；校验、保存后点击「前往 Launcher 发布」，完成发布再刷新确认「Auth 已加载」。密钥和回调由主机生成，接入详情显示私有档案路径。
 
+Pay 的 `deploy` 现已自动处理本机接入档案与首次空权限，无需手动复制 `profile.json` 或创建 `access.json`。未生成 SSO 档案时可先部署内网 API，后续登记后重跑同一命令补上查询台；已有身份和权限保持。Internal 运维计划将自动发现来源、已登记状态及目标配置一起纳入摘要校验，预检后档案变化须重新预检，浏览器不接收凭据内容。
+
 2026-10-05 修复：旧版生产恢复检查会把新增的公网应用也当成凭据变化，在镜像构建及业务发布前以 `public identity credentials differ; recovery stopped` 退出。恢复检查现在与身份发布的规则一致：允许主机档案新增应用，但已发布客户端的完整登记、issuer、签名密钥、Cookie 密钥、入口凭据及 CA 必须保留；公网和内网已有应用被修改或遗漏时仍然停止。
 
 服务器同步修复后，在 `mx-launcher` 目录重跑原 `bash scripts/manage.sh ops internal-production deploy` 及原有环境参数即可，`MX_INSIGHT_HUB_DEPLOY=0` 可继续保留。无需重新登记 mx-pay、删除身份档案或恢复检查点。检查点同时保留已发布 Secret 与含待发布应用的主机档案；恢复本身不会提前发布新增客户端，随后正常 Auth 发布才生效。若更新后仍报告凭据不一致，应核对已有配置差异，不能跳过保护。

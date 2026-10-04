@@ -42,6 +42,7 @@ fi
 export MX_PAY_MIGRATION_ENV_FILE="$(absolute "$MX_PAY_MIGRATION_ENV_FILE")"
 export MX_PAY_CREDENTIALS_SOURCE="$(absolute "${MX_PAY_CREDENTIALS_SOURCE:-secrets/credentials.json}")"
 export MX_PAY_CHANNELS_SOURCE="$(absolute "${MX_PAY_CHANNELS_SOURCE:-secrets/channels.json}")"
+export MX_PAY_SSO_SOURCE_EXPLICIT="${MX_PAY_SSO_SOURCE:+1}"
 export MX_PAY_SSO_SOURCE="$(absolute "${MX_PAY_SSO_SOURCE:-secrets/console/profile.json}")"
 export MX_PAY_CONSOLE_ACCESS_SOURCE="$(absolute "${MX_PAY_CONSOLE_ACCESS_SOURCE:-secrets/console/access.json}")"
 export MX_PAY_UID="${MX_PAY_UID:-$(id -u)}" MX_PAY_GID="${MX_PAY_GID:-$(id -g)}"
@@ -120,13 +121,6 @@ case "$MX_PAY_DEPLOY_DRIVER" in
 esac
 need node
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mx-pay-deploy.XXXXXXXX")"
-if [ "$MX_PAY_DEPLOY_DRIVER" = compose ] && { [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; }; then
-  if [ ! -f "$MX_PAY_CHANNELS_SOURCE" ]; then
-    mkdir -p "$(dirname "$MX_PAY_CHANNELS_SOURCE")"
-    printf '[]\n' > "$MX_PAY_CHANNELS_SOURCE"
-  fi
-  node "$ROOT/scripts/render.mjs" validate
-fi
 if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
   if [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; then
     kube get nodes -o json | node "$ROOT/scripts/render.mjs" workers
@@ -162,6 +156,14 @@ if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
   PHASE=discovery
   node "$ROOT/scripts/runtime.mjs" prepare "$ROOT"
   source "$ROOT/.deploy/discovered.env"
+else
+  PHASE=discovery
+  node "$ROOT/scripts/runtime.mjs" prepare-console "$ROOT"
+  if [ ! -f "$MX_PAY_CHANNELS_SOURCE" ]; then
+    mkdir -p "$(dirname "$MX_PAY_CHANNELS_SOURCE")"
+    printf '[]\n' > "$MX_PAY_CHANNELS_SOURCE"
+  fi
+  node "$ROOT/scripts/render.mjs" validate
 fi
 PHASE=image
 if [ "${MX_PAY_BUILD:-1}" = 1 ]; then

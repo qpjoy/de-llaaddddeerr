@@ -21,8 +21,8 @@
 ## 登记与配置
 
 1. 在左侧导航继续向下滚动，打开 **平台设置 → 统一认证**，在「新增接入应用」填写：认证入口 **公网认证**，应用名称 **MX Pay**，应用标识 **mx-pay**，应用 HTTPS 地址 **https://pay.minsight-ai.com**，Audience 首次登记使用 **mx-pay**。依次「校验配置 → 保存应用 → 前往 Launcher 发布」，发布完成后刷新确认「Auth 已加载」。Client ID `mx-pay-web` 和 `/auth/sso/callback` 自动生成；运行与维护的 MX Pay 卡片只负责服务操作。沿用现有 Auth 发布流程使新增客户端生效；不会重建原用户或轮换 Hub、Launcher 凭据。
-2. 将主机登记产物 `/var/lib/mx-launcher/identity/applications/{public|private}/mx-pay.json` 安全提供给支付项目，默认位置 `secrets/console/profile.json`。也可在支付 `.env` 用 `MX_PAY_SSO_SOURCE` 指定该固定私有文件。不能将内容粘贴到浏览器草稿、URL 或提交到 Git。
-3. 创建私有 `secrets/console/access.json`。初次可为 `[]`：用户能登录，但看不到任何订单。它只支持明确的 `viewer` 授权，示例：
+2. 在支付目录运行 `TMPDIR=/data/tmp bash scripts/manage.sh deploy`。首次自动发现本机 `/var/lib/mx-launcher/identity/applications/{public|private}/mx-pay.json`，校验归属与私有权限后导入 `secrets/console/profile.json`，沿用原客户端密钥和 sessionKey。已有本地文件优先；已部署查询台丢失文件时优先从原 Secret 恢复。不会修改 Launcher 的档案或启动、发布 Launcher。两个入口同时存在时不猜选，用支付 `.env` 的 `MX_PAY_SSO_SOURCE` 指定原私有文件；不同主机可安全提供该文件或设置 `MX_PAY_LAUNCHER_IDENTITY_DIR`。不能把内容粘贴到浏览器、URL 或提交 Git。
+3. 首次有有效档案时，deploy 自动创建私有 `secrets/console/access.json`，初始为 `[]`：用户能登录，但看不到任何订单。已有权限保持，丢失的已部署权限从原 Secret 恢复，不能以空数组代替恢复。后续按需要添加明确的 `viewer` 授权，例如：
 
 ```json
 [
@@ -45,6 +45,8 @@ SSO 复用 `@qpjoy/mx-common/identity/sso`、`identity/postgres`、`identity/pro
 
 ## 部署与网络
 
+无需等待 SSO 登记才启动内网服务：首次没有接入档案（包括显式 `MX_PAY_SSO_SOURCE` 文件尚未生成）时，同一 deploy 正常发布内网支付 API，不创建查询台或空身份。稍后登记并发布 Auth，再次 deploy 即可自动追加查询台。只有已配置过查询台后丢失档案/权限，才要求恢复原值；本机 `.deploy/console-enrolled.json` 与 Kubernetes 查询台安装记录用于区分这两种情况。`MX_PAY_SSO_AUTO_DISCOVER=0` 只关闭首次本机发现，已有查询台照常保留。
+
 Internal Nginx 支持自动查询上游：在 `de-mingxi` 执行 `bash scripts/manage.sh internal-pay-install --pay-root <mx-pay项目目录>`。脚本读取 `.deploy/target.json` 固定目标并校验集群 UID，随后通过 kubectl 查询 API/console Service 的当前 IPv4 ClusterIP 和约定端口；无需手工填 IP。保持与 Pay 部署一致的 `KUBECONFIG`，缺少目标、查询台或集群身份不符时会停止并保留现有 Nginx。每次执行均重新查询；Service 重建后重跑同一命令即可。它是独立的网关安装步骤，尚未由 Pay deploy 自动调用或后台监听。
 
 ```sh
@@ -53,7 +55,7 @@ bash scripts/manage.sh deploy
 ```
 
 - 默认 Kubernetes，支付 API 仍为 `mx-pay:18230`。配置齐全时再发布 `mx-pay-console:18231`，迁移先于两者，查询台发布在 API 就绪之后；查询台 rollout 失败返回非零，但不回滚已提交资金、不撤回已经就绪的交易 API。
-- 不配置 SSO 时继续只发布原 API。已经部署的查询台缺失本地文件时从保留的独立 Secret 恢复，不能以文件丢失为由生成新客户端、会话密钥或空权限。
+- 没有 SSO 档案时继续只发布原 API。首次发现档案后自动导入并创建空权限；已经部署的查询台缺失本地文件时从保留的独立 Secret 恢复，不能以文件丢失为由生成新客户端、会话密钥或空权限。准备步骤在部署锁内、构建和迁移之前，`status/discover` 不创建或导入文件；默认 Kubernetes 和 Compose 均接入该准备逻辑，Compose 已配置后的文件恢复需使用其原私有备份。
 - 新增查询台 origin 的 HTTPS 反代应转发根路径、静态文件、`/auth/sso/*` 与 `/console/v1/*` 到 **console Service**。不要把 `/v1/*` 机器 API 公开到查询台域名；通知入口仍走原经过验签的支付通知路径。域名、证书与 Ingress 不自动选择或发布。
 - 内网 Auth 档案包含原 CA，公共 HTTPS 档案使用系统信任。反代保留正确 Origin；Cookie 是 Secure / HttpOnly / SameSite=Lax。退出要求同源及 `x-mx-csrf`。
 - Compose 使用可选 `deploy/console.compose.yml`，只在 SSO 档案存在时由管理脚本载入。Compose 不具备双节点滚动可用性。

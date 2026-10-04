@@ -6,6 +6,8 @@ import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { databaseEnv } from './render.mjs'
 import { readCredentials } from '../server/config.mjs'
+import { readConsoleConfig } from '../server/console-config.mjs'
+import { readApplicationSsoProfile } from '../../../mx-common/src/identity/profile.mjs'
 
 export const assert = (ok, message) => { if (!ok) throw new Error(message) }
 export function run(command, args, options = {}) {
@@ -68,6 +70,51 @@ export function localNode(nodes, addresses=Object.values(os.networkInterfaces())
   assert(matches.length===1,'Cannot identify this Linux host among Kubernetes node InternalIPs; run deploy on a node or configure a StorageClass/registry')
   return matches[0]
 }
+export function prepareConsole(root, { env=process.env, configured=false, log=console.log } = {}) {
+  const profileFile=env.MX_PAY_SSO_SOURCE, accessFile=env.MX_PAY_CONSOLE_ACCESS_SOURCE
+  assert(profileFile && accessFile,'Payment console configuration paths are required')
+  const marker=path.join(root,'.deploy/console-enrolled.json')
+  const enrolled=configured || fs.existsSync(marker)
+  const auto=env.MX_PAY_SSO_AUTO_DISCOVER ?? '1'
+  assert(['0','1'].includes(auto),'MX_PAY_SSO_AUTO_DISCOVER must be 0 or 1')
+  if (!fs.existsSync(profileFile)) {
+    assert(!enrolled,'Previously configured payment console profile is missing; restore its original profile, refusing a new identity')
+    if (auto === '1' && env.MX_PAY_SSO_SOURCE_EXPLICIT !== '1') {
+      const identityDir=path.resolve(root,env.MX_PAY_LAUNCHER_IDENTITY_DIR || '/var/lib/mx-launcher/identity')
+      const candidates=['public','private'].map(entry=>path.join(identityDir,'applications',entry,'mx-pay.json')).filter(file=>{
+        try {
+          const stat=fs.lstatSync(file)
+          assert(stat.isFile() && !stat.isSymbolicLink() && !(stat.mode & 0o077) && stat.uid === process.getuid(),
+            'Launcher mx-pay profile must be a private regular file owned by the deploy user')
+          return true
+        } catch (error) { if (error.code === 'ENOENT') return false; throw error }
+      })
+      assert(candidates.length < 2,'Multiple Launcher mx-pay profiles found; select the intended entry with MX_PAY_SSO_SOURCE')
+      if (candidates.length) {
+        const settings=readApplicationSsoProfile(candidates[0])
+        assert(settings.appId === 'mx-pay' && settings.scope === 'openid mx:identity','Launcher profile must belong to mx-pay with openid mx:identity scope')
+        if (fs.existsSync(accessFile)) readConsoleConfig(candidates[0],accessFile)
+        writePrivate(profileFile,settings,true)
+        log('Payment console: imported registered Launcher mx-pay profile; existing client and session keys retained')
+      }
+    }
+  }
+  if (!fs.existsSync(profileFile)) {
+    assert(!fs.existsSync(accessFile),'Payment console access exists without its SSO profile; restore the original profile')
+    log('Payment console: SSO profile not available yet; deploying payment API only')
+    return
+  }
+  // Validate before creating an empty grant list, and never reset an enrolled console.
+  const settings=readApplicationSsoProfile(profileFile)
+  assert(settings.appId === 'mx-pay' && settings.scope === 'openid mx:identity','Payment console requires its own mx-pay SSO profile')
+  if (!fs.existsSync(accessFile)) {
+    assert(!enrolled,'Previously configured payment console access is missing; restore original grants, refusing an empty replacement')
+    writePrivate(accessFile,[],true)
+    log('Payment console: initialized empty viewer access; login grants no order visibility')
+  }
+  readConsoleConfig(profileFile,accessFile)
+  writePrivate(marker,{version:1},true)
+}
 export function prepare(root) {
   const env=process.env, installation=get('configmap','mx-pay-installation'), deployment=get('deployment','mx-pay')
   const previous=installation?.data || {}
@@ -76,6 +123,7 @@ export function prepare(root) {
   const runtime=runtimeName ? data(get('secret',runtimeName)) : null
   const consoleDeployment=get('deployment','mx-pay-console')
   const consoleName=consoleDeployment?.spec.template.spec.volumes?.find(v=>v.name==='console')?.secret?.secretName || previous.consoleSecret
+  assert(!consoleDeployment || consoleName,'Existing payment console has no retained Secret reference; explicit recovery required')
   if (consoleName) {
     const retained=data(get('secret',consoleName))
     for (const [file,key] of [[env.MX_PAY_SSO_SOURCE,'profile.json'],[env.MX_PAY_CONSOLE_ACCESS_SOURCE,'access.json']]) {
@@ -85,6 +133,7 @@ export function prepare(root) {
       }
     }
   }
+  prepareConsole(root,{configured:Boolean(consoleName)})
   if (env.MX_PAY_CHANNELS_SOURCE && !fs.existsSync(env.MX_PAY_CHANNELS_SOURCE)) {
     const required=deployment?.spec.template.spec.containers?.some(c=>c.env?.some(e=>e.name==='MX_PAY_CHANNELS_FILE'))
     assert(!required || runtime?.['channels.json'],'Deployed channel Secret is missing; explicit configuration recovery required, refusing empty channel configuration')
@@ -198,10 +247,11 @@ if (process.argv[1] && fs.realpathSync(process.argv[1])===fileURLToPath(import.m
     const [mode,root,...args]=process.argv.slice(2)
     if (mode==='target') console.log(target(root))
     else if (mode==='prepare') prepare(root)
+    else if (mode==='prepare-console') prepareConsole(root)
     else if (mode==='image-plan') console.log(imagePlan(root))
     else if (mode==='image-platforms') console.log(imagePlatforms())
     else if (mode==='import-image') importImage(root,...args)
     else if (mode==='discover') console.log(JSON.stringify(discover(),null,2))
     else throw new Error('Unknown runtime operation')
-  } catch(error) { console.error(`mx-pay discovery: ${error instanceof SyntaxError ? 'invalid retained/discovered metadata' : error.message}`); process.exitCode=1 }
+  } catch(error) { console.error(`mx-pay discovery: ${error instanceof SyntaxError || error instanceof TypeError ? 'invalid retained/discovered metadata (values hidden)' : error.message}`); process.exitCode=1 }
 }
