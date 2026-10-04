@@ -6,8 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mountIdentity, assertFstabMounted, recoverState } from './k8s-recovery-state.mjs';
 import { guardPostgres } from './k8s-postgres-recovery.mjs';
-import { initializeProfile, readProfile } from './identity-profile.mjs';
-import { resources } from './identity-deploy.mjs';
+import { initializeProfile, readProfile, savePrivate } from './identity-profile.mjs';
+import { inspectIdentity, resources } from './identity-deploy.mjs';
+import { createPublicEntry } from './identity-public-profile.mjs';
+import { registerApplication } from './identity-app.mjs';
 
 const identity = { node: 'mx-internal-server', ca: 'same-ca', pgSystemId: 'original-db', mounts: [{ path: '/var/lib/mx-launcher', identity: { device: 'disk-uuid', root: '/mx-runtime/mx-launcher' } }] };
 function fixture() {
@@ -39,8 +41,91 @@ function fixture() {
     return '';
   }
   const invoke = (action, patch = {}) => recoverState(action, { directory, namespace: ns, identity, execute, log: line => logs.push(line), ...patch });
-  return { directory, secrets, writes, logs, secret, invoke, fail: name => { failName = name; }, cluster: uid => { clusterUid = uid; }, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
+  return { directory, secrets, writes, logs, secret, invoke, execute, fail: name => { failName = name; }, cluster: uid => { clusterUid = uid; }, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
 }
+
+function identityFixture(entry) {
+  const f = fixture();
+  const file = join(f.directory, 'identity', 'profile.json');
+  const profile = initializeProfile('https://10.88.88.88:18443', file);
+  if (entry === 'public') {
+    profile.publicEntry = createPublicEntry({ origin: 'https://auth.example.com', adminOrigin: 'https://launcher.example.com',
+      hubOrigin: 'https://hub.example.com', audience: 'mx-insight-hub', privateOrigin: profile.origin });
+  } else {
+    profile.applications = [{ appId: 'mx-insight-hub', clientId: 'mx-insight-hub-web', clientSecret: 'h'.repeat(43),
+      origin: 'https://10.88.88.88:18151', audience: 'mx-insight-hub' }];
+  }
+  savePrivate(file, profile);
+  const publish = p => {
+    for (const s of Object.values(resources(p, 'abc')).filter(r => r.kind === 'Secret')) f.secrets[s.metadata.name] = s;
+  };
+  publish(profile);
+  return { ...f, file, profile, publish, invoke: action => f.invoke(action, { identityProfileFile: file }) };
+}
+
+for (const entry of ['public', 'private']) test(`${entry} application registration survives predeploy recovery, checkpoint and missing-file recovery`, () => {
+  const f = identityFixture(entry);
+  try {
+    f.invoke('checkpoint');
+    const running = structuredClone(f.secrets);
+    registerApplication({ file: f.file, appFile: join(f.directory, 'applications', 'mx-pay.json'), entry,
+      appId: 'mx-pay', origin: 'https://pay.example.com', audience: 'mx-pay' });
+    const pending = readProfile(f.file);
+    // The same unpublished profile is accepted by normal deployment.
+    inspectIdentity(pending, args => f.execute('kubectl', args));
+    f.invoke('restore'); f.invoke('checkpoint'); f.invoke('restore');
+    assert.deepEqual(f.secrets, running, 'recovery must not publish registrations or replace live credentials');
+    assert.equal(f.writes.length, 0);
+    const checkpoint = JSON.parse(readFileSync(join(f.directory, 'latest.json'), 'utf8'));
+    assert.deepEqual(checkpoint.identityProfile, pending);
+    assert.deepEqual(checkpoint.secrets['mx-identity-runtime'].data, running['mx-identity-runtime'].data);
+    unlinkSync(f.file);
+    delete f.secrets['mx-identity-runtime'];
+    f.invoke('restore');
+    assert.deepEqual(readProfile(f.file), pending, 'recover both published clients and the saved pending registration');
+    assert.deepEqual(f.secrets['mx-identity-runtime'].data, running['mx-identity-runtime'].data);
+    f.invoke('checkpoint');
+    f.publish(pending); // Model the later normal deployment publishing the saved profile.
+    f.invoke('restore'); f.invoke('checkpoint');
+    assert.deepEqual(JSON.parse(readFileSync(join(f.directory, 'latest.json'), 'utf8')).identityProfile, pending);
+    const clients = entry === 'public' ? pending.publicEntry.applications : pending.applications;
+    for (const app of clients) assert.ok(!f.logs.join('\n').includes(app.clientSecret));
+  } finally { f.cleanup(); }
+});
+
+for (const entry of ['public', 'private']) test(`${entry} recovery still rejects existing client or core credential drift before any write`, async t => {
+  const f = identityFixture(entry);
+  try {
+    f.invoke('checkpoint');
+    const checkpoint = readFileSync(join(f.directory, 'latest.json'), 'utf8');
+    const secret = f.secrets['mx-identity-runtime'];
+    const original = JSON.parse(Buffer.from(secret.data['config.json'], 'base64').toString());
+    const select = config => entry === 'public' ? config.publicEntry : config;
+    const changes = [
+      ...['appId', 'clientId', 'clientSecret', 'origin', 'audience'].map(key => ({ name: `existing application ${key}`,
+        mutate: config => { select(config).applications[0][key] = 'changed-existing-value'; } })),
+      { name: 'removed application', mutate: config => { select(config).applications.push({ appId: 'mx-pay', clientId: 'mx-pay-web',
+        clientSecret: 'p'.repeat(43), origin: 'https://pay.example.com', audience: 'mx-pay' }); } },
+      ...['origin', 'issuer', 'clientId', 'clientSecret', 'cookieKeys', 'jwks', ...(entry === 'public' ? ['adminOrigin', 'transportOrigin', 'ingressToken'] : [])]
+        .map(key => ({ name: `core ${key}`, mutate: config => { select(config)[key] = 'changed-core-value'; } })),
+      ...(entry === 'public' ? [{ name: 'removed public entry', mutate: () => {} }] : [])
+    ];
+    // A missing unrelated Secret would be restored if the identity guard were bypassed.
+    delete f.secrets['mx-internal-ops'];
+    for (const { name, mutate } of changes) await t.test(name, () => {
+      const config = structuredClone(original); mutate(config);
+      secret.data['config.json'] = Buffer.from(JSON.stringify(config)).toString('base64');
+      const profile = structuredClone(f.profile);
+      if (name === 'removed public entry') delete profile.publicEntry;
+      savePrivate(f.file, profile);
+      for (const action of ['restore', 'checkpoint']) {
+        assert.throws(() => f.invoke(action), /credentials differ/);
+        assert.equal(f.writes.length, 0);
+        assert.equal(readFileSync(join(f.directory, 'latest.json'), 'utf8'), checkpoint);
+      }
+    });
+  } finally { f.cleanup(); }
+});
 
 test('restore missing original credentials, preserve live values, and retain private snapshot generations', () => {
   const f = fixture();

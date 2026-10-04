@@ -16,6 +16,8 @@ export const SECRET_NAMES = [
 const PG = '/var/lib/mx-launcher/k8s/postgres/pgdata';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const retainsApplications = (current = [], desired = []) => Array.isArray(current) && Array.isArray(desired) &&
+  current.every(app => app && typeof app.clientId === 'string' && same(app, desired.find(next => next.clientId === app.clientId)));
 export function run(command, args, input) {
   const result = spawnSync(command, args, { input, encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
   // Do not include command output: errors can contain credentials or manifests.
@@ -102,10 +104,18 @@ function assertIdentityProfileMatchesSecrets(profile, secrets) {
     if (name === 'mx-identity-runtime') {
       let config;
       try { config = JSON.parse(field(secret, 'config.json')); } catch { throw new Error('invalid identity runtime snapshot'); }
-      if (config.publicEntry && !same(config.publicEntry, profile.publicEntry)) throw new Error('public identity credentials differ; recovery stopped');
+      // Registration saves the desired profile before deploy publishes it. As in
+      // inspectIdentity, allow additions but retain every deployed client and key.
+      if (config.publicEntry) {
+        const { applications: currentApps, ...currentCore } = config.publicEntry;
+        const { applications: desiredApps, ...desiredCore } = profile.publicEntry ?? {};
+        if (!same(currentCore, desiredCore)) throw new Error('public identity credentials differ; recovery stopped');
+        if (!retainsApplications(currentApps, desiredApps)) throw new Error('public identity application credentials differ; recovery stopped');
+      }
       for (const key of ['origin', 'issuer', 'clientId', 'clientSecret', 'cookieKeys', 'jwks']) {
         if (!same(config[key], profile[key])) throw new Error('identity profile and runtime credentials differ; recovery stopped');
       }
+      if (!retainsApplications(config.applications, profile.applications)) throw new Error('private identity application credentials differ; recovery stopped');
     }
     if (name !== 'mx-launcher-admin-sso' && field(secret, 'ca.crt') !== profile.caCert) throw new Error('identity profile and runtime CA differ; recovery stopped');
     if (name === 'mx-launcher-admin-sso' && secret.data.MX_ADMIN_PUBLIC_SSO_CONFIG) {
