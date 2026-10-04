@@ -45,7 +45,7 @@ async function listen(server: Server) {
 }
 const close = (server: Server) => new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); server.closeAllConnections(); });
 const cookieValue = (response: Response, name: string) => response.headers.getSetCookie().find((entry) => entry.startsWith(`${name}=`))?.split(';')[0] ?? '';
-type TestPayload = { csrf: string; authenticated: boolean; bindingRequired?: boolean; canManage?: boolean; accessMode?: string; user: { userId: string }; actor?: string };
+type TestPayload = { csrf: string; authenticated: boolean; bindingRequired?: boolean; canManage?: boolean; accessMode?: string; user: { userId: string; account?: string }; actor?: string };
 type TestResponse = Omit<Response, 'json'> & { json(): Promise<TestPayload> };
 
 async function fixture(localSubjects = false, publicGateway = false) {
