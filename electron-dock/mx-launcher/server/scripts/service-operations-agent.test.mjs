@@ -184,6 +184,9 @@ test('payment plans bind private SSO/access and target configuration and never r
   const targetPlan = await f.plan('pay', 'deploy');
   await writeFile(join(pay, '.deploy/target.json'), '{"context":"different"}');
   assert.equal((await f.request('execute', { planId: targetPlan.id, acknowledged: true })).status, 409);
+  const topologyPlan = await f.plan('pay', 'deploy');
+  await writeFile(join(pay, '.deploy/topology.json'), '{"mode":"single-node","node":"replacement"}');
+  assert.equal((await f.request('execute', { planId: topologyPlan.id, acknowledged: true })).status, 409);
   assert.equal(executions, 0);
 });
 

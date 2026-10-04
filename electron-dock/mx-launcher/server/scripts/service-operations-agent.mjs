@@ -58,7 +58,7 @@ async function paymentConfigFiles(cwd) {
     paths[key] = value;
   }
   const { MX_PAY_LAUNCHER_IDENTITY_DIR: identityDir, ...files } = paths;
-  return ['.env', '.deploy/target.json', '.deploy/console-enrolled.json', ...Object.values(files),
+  return ['.env', '.deploy/target.json', '.deploy/topology.json', '.deploy/console-enrolled.json', ...Object.values(files),
     ...['public', 'private'].map(entry => join(identityDir, 'applications', entry, 'mx-pay.json')),
     ...(process.env.KUBECONFIG || join(homedir(), '.kube/config')).split(':')];
 }

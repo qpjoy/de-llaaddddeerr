@@ -8,6 +8,7 @@ import { databaseEnv } from './render.mjs'
 import { readCredentials } from '../server/config.mjs'
 import { readConsoleConfig } from '../server/console-config.mjs'
 import { readApplicationSsoProfile } from '../../../mx-common/src/identity/profile.mjs'
+import { selectTopology, eligibleNodes } from './scheduling.mjs'
 
 export const assert = (ok, message) => { if (!ok) throw new Error(message) }
 export function run(command, args, options = {}) {
@@ -65,6 +66,21 @@ export function workers(nodes) {
   return nodes.filter(n=>!n.spec?.unschedulable && !Object.hasOwn(n.metadata.labels || {},'node-role.kubernetes.io/control-plane')
     && !Object.hasOwn(n.metadata.labels || {},'node-role.kubernetes.io/master') && n.status?.conditions?.some(c=>c.type==='Ready' && c.status==='True'))
 }
+export function configureTopology(root,persist=false) {
+  const target=JSON.parse(fs.readFileSync(path.join(root,'.deploy/target.json')))
+  const filename=path.join(root,'.deploy/topology.json')
+  const local=fs.existsSync(filename) ? JSON.parse(fs.readFileSync(filename)) : null
+  if(local)for(const key of ['context','clusterUID','namespace'])assert(local[key]===target[key],'Payment topology belongs to another cluster/namespace')
+  const installation=get('configmap','mx-pay-installation')
+  const previous=installation ? {mode:installation.data?.topologyMode || 'multi-node',node:installation.data?.topologyNode || ''} :
+    get('deployment','mx-pay') ? {mode:'multi-node',node:''} : null
+  if(local && previous)assert(local.mode===previous.mode && local.node===previous.node,'Local and deployed payment topology differ; restore original topology')
+  const selected=selectTopology(JSON.parse(kube('get','nodes','-o','json')).items,
+    {requested:process.env.MX_PAY_TOPOLOGY || 'auto',minimum:process.env.MX_PAY_MIN_READY_WORKERS,previous:local || previous})
+  if(persist && process.env.MX_PAY_NODE)assert(selected.node===process.env.MX_PAY_NODE,'Payment node changed after preflight; retry discovery before deployment')
+  if(persist)writePrivate(filename,{...target,...selected},true)
+  return selected
+}
 export function localNode(nodes, addresses=Object.values(os.networkInterfaces()).flat().map(a=>a.address)) {
   const matches=nodes.filter(n=>n.status?.addresses?.some(a=>a.type==='InternalIP' && addresses.includes(a.address)))
   assert(matches.length===1,'Cannot identify this Linux host among Kubernetes node InternalIPs; run deploy on a node or configure a StorageClass/registry')
@@ -116,6 +132,7 @@ export function prepareConsole(root, { env=process.env, configured=false, log=co
   writePrivate(marker,{version:1},true)
 }
 export function prepare(root) {
+  configureTopology(root,true)
   const env=process.env, installation=get('configmap','mx-pay-installation'), deployment=get('deployment','mx-pay')
   const previous=installation?.data || {}
   // Never treat an inaccessible API as an empty installation. get() throws on errors.
@@ -192,10 +209,9 @@ export const ctrCommand='if command -v ctr >/dev/null 2>&1; then if [ "$(id -u)"
 // Insert arguments into the fixed command, never interpolate an arbitrary shell value.
 export function ctrScript(args) { return ctrCommand.replaceAll('ctr -n k8s.io;',`ctr -n k8s.io ${args};`) }
 export function imagePlan(root) {
-  const nodes=workers(JSON.parse(kube('get','nodes','-o','json')).items)
-  assert(nodes.length>=2,'At least two ready workers are required; discovery cannot create machines')
+  const nodes=eligibleNodes(JSON.parse(kube('get','nodes','-o','json')).items,process.env)
   const architectures=new Set(nodes.map(n=>n.status.nodeInfo?.architecture))
-  assert(architectures.size===1 && ['amd64','arm64'].includes([...architectures][0]),'Workers must share amd64 or arm64 architecture for this build')
+  assert(architectures.size===1 && ['amd64','arm64'].includes([...architectures][0]),'Selected nodes must share amd64 or arm64 architecture for this build')
   let local=null
   try { local=localNode(nodes) } catch { /* A remote deployment host can use existing SSH access. */ }
   for (const node of nodes) {
@@ -207,9 +223,9 @@ export function imagePlan(root) {
   return plan.platform
 }
 export function imagePlatforms() {
-  const nodes=workers(JSON.parse(kube('get','nodes','-o','json')).items)
+  const nodes=eligibleNodes(JSON.parse(kube('get','nodes','-o','json')).items,process.env)
   const architectures=[...new Set(nodes.map(n=>n.status.nodeInfo?.architecture))].sort()
-  assert(architectures.length>0 && architectures.every(a=>['amd64','arm64'].includes(a)),'Cannot determine supported worker image architectures')
+  assert(architectures.length>0 && architectures.every(a=>['amd64','arm64'].includes(a)),'Cannot determine supported node image architectures')
   return architectures.map(a=>`linux/${a}`).join(',')
 }
 export function importImage(root, archive, image) {
@@ -235,6 +251,7 @@ export function discover() {
   return {version:1,product:'mx-pay',driver:'k8s',context:process.env.MX_PAY_KUBE_CONTEXT,namespace:process.env.MX_PAY_NAMESPACE,
     actions:['deploy','migrate','status','doctor','discover','backup','logs','start','stop','restart'],
     readyWorkers:workers(nodeList).map(n=>n.metadata.name),readyReplicas:deployment?.status?.readyReplicas || 0,
+    topology:installation.topologyMode || deployment ? {mode:installation.topologyMode || 'multi-node',node:installation.topologyNode || null} : null,
     serviceURL:installation.serviceURL || null,
     database:identity ? {mode:'managed',phase:identity.phase,systemIdentifier:identity.systemIdentifier,pv:identity.pvName,node:identity.node || null,path:identity.localPath || null} : {mode:installation.databaseIdentity ? 'external' : 'unconfigured'},
     imageRepository:process.env.MX_PAY_IMAGE_REPOSITORY || installation.imageRepository || capabilities.imageRepository || null,
@@ -246,6 +263,18 @@ if (process.argv[1] && fs.realpathSync(process.argv[1])===fileURLToPath(import.m
   try {
     const [mode,root,...args]=process.argv.slice(2)
     if (mode==='target') console.log(target(root))
+    else if (mode==='topology') {
+      const selected=configureTopology(root)
+      console.log(`export MX_PAY_TOPOLOGY='${selected.mode}'\nexport MX_PAY_NODE='${selected.node}'`)
+    }
+    else if (mode==='local-single-node') {
+      const selected=eligibleNodes(JSON.parse(kube('get','nodes','-o','json')).items,process.env)
+      assert(process.env.MX_PAY_TOPOLOGY==='single-node' && localNode(selected),'Proxy runtime image preload must run on the retained single Kubernetes node')
+    }
+    else if (mode==='postgres-image') {
+      const retained=get('configmap','mx-pay-database')
+      console.log(retained ? JSON.parse(retained.data.identity).image : process.env.MX_PAY_POSTGRES_IMAGE || 'postgres:16-bookworm')
+    }
     else if (mode==='prepare') prepare(root)
     else if (mode==='prepare-console') prepareConsole(root)
     else if (mode==='image-plan') console.log(imagePlan(root))

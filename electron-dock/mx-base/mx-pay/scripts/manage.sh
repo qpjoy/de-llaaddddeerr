@@ -7,6 +7,7 @@ ACTION="${1:-help}"
 say() { printf '[mx-pay] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+source "$ROOT/scripts/build-proxy.sh"
 usage() {
   cat <<'HELP'
 mx-pay: deploy | migrate | status | doctor | discover | backup | logs | start | stop | restart
@@ -22,12 +23,16 @@ HELP
 }
 case "$ACTION" in help|-h|--help) usage; exit 0;; deploy|migrate|status|doctor|discover|backup|logs|start|stop|restart) ;; *) die "Unsupported action: $ACTION";; esac
 [ "$#" -le 1 ] || die 'Unexpected arguments'
+pay_build_proxy_override_set="${MX_PAY_BUILD_PROXY+x}"
+pay_build_proxy_override="${MX_PAY_BUILD_PROXY-}"
 if [ -f "$ROOT/.env" ]; then set -a; source "$ROOT/.env"; set +a; fi
+if [ "$pay_build_proxy_override_set" = x ]; then export MX_PAY_BUILD_PROXY="$pay_build_proxy_override"; fi
 export MX_PAY_DEPLOY_DRIVER="${MX_PAY_DEPLOY_DRIVER:-k8s}"
 export MX_PAY_ACTION="$ACTION"
 export MX_PAY_NAMESPACE="${MX_PAY_NAMESPACE:-mx-pay}"
 export MX_PAY_REPLICAS="${MX_PAY_REPLICAS:-2}"
-export MX_PAY_MIN_READY_WORKERS="${MX_PAY_MIN_READY_WORKERS:-2}"
+export MX_PAY_MIN_READY_WORKERS="${MX_PAY_MIN_READY_WORKERS:-}"
+export MX_PAY_TOPOLOGY="${MX_PAY_TOPOLOGY:-auto}"
 [[ "$MX_PAY_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]] || die 'Invalid namespace'
 [[ "$MX_PAY_REPLICAS" =~ ^([2-9]|1[0-9]|20)$ ]] || die 'MX_PAY_REPLICAS must be 2–20'
 absolute() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$ROOT" "$1";; esac; }
@@ -123,7 +128,10 @@ need node
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mx-pay-deploy.XXXXXXXX")"
 if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
   if [ "$ACTION" = deploy ] || [ "$ACTION" = migrate ]; then
-    kube get nodes -o json | node "$ROOT/scripts/render.mjs" workers
+    node "$ROOT/scripts/runtime.mjs" topology "$ROOT" > "$TMP/topology.env"
+    source "$TMP/topology.env"
+    say "topology=$MX_PAY_TOPOLOGY${MX_PAY_NODE:+ node=$MX_PAY_NODE}"
+    if [ "$MX_PAY_TOPOLOGY" = single-node ]; then say 'Single-node deployment: no cross-host failover; existing cluster taints and other services are retained'; fi
     kube create namespace "$MX_PAY_NAMESPACE" --dry-run=client -o json | kube apply -f - >/dev/null
   fi
   # A cluster-wide lock protects migrations AND rollout across operator hosts.
@@ -173,14 +181,14 @@ if [ "${MX_PAY_BUILD:-1}" = 1 ]; then
     if [ "$MX_PAY_IMAGE_DELIVERY" = registry ]; then
       [ -n "$MX_PAY_IMAGE_REPOSITORY" ] || die 'Discovered registry has no imageRepository'
       platform="$(node "$ROOT/scripts/runtime.mjs" image-platforms "$ROOT")"
-      docker buildx build --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --metadata-file "$TMP/build.json" \
+      pay_buildx --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --metadata-file "$TMP/build.json" \
         --tag "$MX_PAY_IMAGE_REPOSITORY:$tag" --push "$ROOT"
       digest="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1]))["containerimage.digest"];if(!/^sha256:[a-f0-9]{64}$/.test(d))process.exit(1);console.log(d)' "$TMP/build.json")"
       export MX_PAY_IMAGE="$MX_PAY_IMAGE_REPOSITORY@$digest"
     else
-      say 'No registry configured; verifying existing local/trusted SSH containerd access to every worker'
+      say 'No registry configured; verifying existing local/trusted SSH containerd access to every selected node'
       platform="$(node "$ROOT/scripts/runtime.mjs" image-plan "$ROOT")"
-      docker buildx build --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --tag "local.mx/mx-pay:$tag" --load "$ROOT"
+      pay_buildx --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --tag "local.mx/mx-pay:$tag" --load "$ROOT"
       content_id="$(docker image inspect --format '{{.Id}}' "local.mx/mx-pay:$tag")"
       [[ "$content_id" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'Invalid built image identity'
       export MX_PAY_IMAGE="local.mx/mx-pay:${content_id#sha256:}"
@@ -191,12 +199,15 @@ if [ "${MX_PAY_BUILD:-1}" = 1 ]; then
     fi
   else
     export MX_PAY_IMAGE="mx-pay:$tag"
-    docker buildx build --build-context "mx_common=$ROOT/../../mx-common" --tag "$MX_PAY_IMAGE" --load "$ROOT"
+    pay_buildx --build-context "mx_common=$ROOT/../../mx-common" --tag "$MX_PAY_IMAGE" --load "$ROOT"
   fi
 elif [ "${MX_PAY_BUILD:-1}" != 0 ]; then die 'MX_PAY_BUILD must be 0 or 1'; fi
 [ -n "${MX_PAY_IMAGE:-}" ] || die 'MX_PAY_IMAGE is required with MX_PAY_BUILD=0'
 if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
   PHASE=database
+  if [ -n "${MX_PAY_BUILD_PROXY:-}" ] && [ "$MX_PAY_TOPOLOGY" = single-node ] && [ ! -f "$MX_PAY_RUNTIME_ENV_FILE" ]; then
+    pay_with_build_proxy pay_proxy_postgres_image
+  fi
   say 'Checking dedicated PostgreSQL and retained storage identity'
   node "$ROOT/scripts/postgres.mjs" provision "$ROOT"
   node "$ROOT/scripts/render.mjs" validate

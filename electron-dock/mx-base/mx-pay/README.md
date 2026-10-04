@@ -20,13 +20,23 @@ bash scripts/manage.sh deploy
 
 如果服务器使用 `/data/tmp`，直接运行 `TMPDIR=/data/tmp bash scripts/manage.sh deploy` 即可。尚未生成 SSO 档案时正常启动内网支付 API；同机 Launcher 已登记 mx-pay 时，deploy 会自动导入唯一的公网/内网接入档案，并首次创建空的查询权限文件。无需手工复制 `profile.json`、创建 `access.json` 或指定端口。之后登记 SSO，再运行同一命令即可追加查询台；空权限表示登录后暂时不能查看订单。
 
+使用本机 `7789` HTTP 代理下载和构建镜像：
+
+```sh
+TMPDIR=/data/tmp MX_PAY_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh deploy
+```
+
+`MX_PAY_BUILD_PROXY` 也可存入支付 `.env`；命令行环境变量优先，显式空值沿用原构建方式。代理覆盖构建客户端、镜像仓库访问和 Dockerfile 内 npm 下载，不写入支付 API/查询台的运行环境。脚本在当前 Linux 主机的本地 Docker 中创建并复用 Pay 专用 BuildKit，经 host 网络访问回环代理，不修改 Docker/containerd 的全局配置，不切换全局 builder。首次缺少 BuildKit 镜像时经 `ctr` 客户端代理下载后加载；当前单节点首次托管 PG 也会预加载 PostgreSQL 镜像，先校验本机就是已固定节点。多节点的运行时拉取仍使用各节点已有网络配置。可用 `MX_PAY_BUILD_NO_PROXY` 指定内部地址绕过列表。实现依据：[Docker 远程构建器](https://docs.docker.com/build/builders/drivers/remote/)、[预定义代理参数](https://docs.docker.com/build/building/variables/#proxy-arguments)。
+
 也可以在 `electron-dock/mx-base` 使用统一入口：
 
 ```sh
 bash scripts/manage.sh deploy mx-pay
 ```
 
-Kubernetes 为默认方式：发现并固定集群 → 检查至少两个就绪工作节点 → 取得部署锁 → 发现/保留配置与凭据 → 构建和分发镜像 → 准备专用 PostgreSQL、固定存储身份 → 创建本版本不可变配置 → 执行迁移 Job → 迁移成功后更新 API → 等待 rollout 与 readiness。重复执行检查原迁移校验和，不重复执行已完成 SQL。失败返回非零退出码，阶段结果在 `.deploy/last-result.json`。
+Kubernetes 为默认方式：发现并固定集群 → 检查节点并确定单节点/多节点模式 → 取得部署锁 → 发现/保留配置与凭据 → 构建和分发镜像 → 准备专用 PostgreSQL、固定存储身份 → 创建本版本不可变配置 → 执行迁移 Job → 迁移成功后更新 API → 等待 rollout 与 readiness。重复执行检查原迁移校验和，不重复执行已完成 SQL。失败返回非零退出码，阶段结果在 `.deploy/last-result.json`。
+
+首次安装时，若整个集群只有一个节点，自动采用单节点模式，兼容当前 Internal 的 kubeadm 控制平面。API、查询台、迁移任务和首次托管 PG 都固定在该节点；仅为 Pay Pod 添加标准控制平面 NoSchedule 容忍，不删除集群 taint，不改变 Launcher/H2I 调度。仍检查 Ready、未 cordon 和其他阻止调度的 taint。单节点模式保留两个应用副本，但**没有跨主机容灾能力**。模式和节点保存在 `.deploy/topology.json` 与安装 ConfigMap，普通 deploy 不自动切换或替换主机。其他首次集群及历史多节点安装仍要求至少两个可调度 worker；部分节点故障不会被误判为新的单机安装。单节点扩容到多节点属于单独运维变更。
 
 API 为两个或以上副本，RollingUpdate 的 `maxUnavailable=0`、`maxSurge=1`，按主机分布，配置资源限额、探针、退出排空与 PDB。无 hostNetwork、hostPort、Ingress、NodePort 或自动公网域名。数据库使用专用 PostgreSQL 实例，不调用 mx-common 的共享集群部署，也不等待 Hub、Launcher、ES、Redis 或 AI 服务。
 
@@ -38,8 +48,8 @@ API 为两个或以上副本，RollingUpdate 的 `maxUnavailable=0`、`maxSurge=
 - 凭据：优先现有 `secrets/` 文件；文件丢失则从当前 Deployment/安装记录引用的 Secret 恢复。首次生成应用 test/live、核实人员和渠道管理员独立凭据。只恢复配置，不恢复业务数据；已有服务凭据不能因查询失败而被当成“不存在”。
 - 查询台：已有支付档案/权限 → 已部署查询台原 Secret → 首次从 `/var/lib/mx-launcher/identity/applications/{public|private}/mx-pay.json` 导入。保留原 clientSecret/sessionKey，不修改 Launcher。两个入口都存在时须用 `MX_PAY_SSO_SOURCE` 选择；显式路径尚未生成且查询台从未配置时继续仅发布 API。`MX_PAY_SSO_AUTO_DISCOVER=0` 可关闭首次自动发现，`MX_PAY_LAUNCHER_IDENTITY_DIR` 可指定主机身份目录。`.deploy/console-enrolled.json` 记录本机已准备过查询台；其配置后续丢失时必须恢复，不能重新生成身份或把权限清空。配置校验在构建/迁移前完成，`status/discover` 不导入或生成这些文件。
 - 镜像仓库：显式 `.env` → 安装记录 → 当前 namespace 的 `ConfigMap/mx-platform-runtime` 中 `data.imageRepository`。这是一份可选运行时能力声明，为后续总 `manage.sh` 预留，无需额外中心在线。
-- 无仓库：检查所有就绪 worker 的 containerd，通过本机 `ctr` 或已有可信 SSH 导入同一镜像。远端默认使用节点 InternalIP 与当前 SSH 用户，可用 Node annotation `mx-pay.io/ssh-target=user@host` 明确已有入口。使用 `BatchMode`、严格 known_hosts 和无交互 sudo；不自动信任新主机、不改 containerd 配置。任一节点无法访问则在迁移前失败，提示所缺节点或可选镜像仓库。
-- 节点镜像采用 Docker 内容 ID 命名、逐节点验证、`imagePullPolicy: Never`，API/迁移仅调度到已导入的节点。新增节点后再次 deploy 才纳入。节点镜像被运行时 GC 清除时也需重新 deploy；长期生产优先使用可靠仓库。节点导入目前要求同构 amd64/arm64，自动选择对应构建平台；异构集群可提供多架构镜像 digest。
+- 无仓库：检查所选节点的 containerd（单节点模式为固定节点，多节点模式为可调度 worker），通过本机 `ctr` 或已有可信 SSH 导入同一镜像。远端默认使用节点 InternalIP 与当前 SSH 用户，可用 Node annotation `mx-pay.io/ssh-target=user@host` 明确已有入口。使用 `BatchMode`、严格 known_hosts 和无交互 sudo；不自动信任新主机、不改 containerd 配置。任一所选节点无法访问则在迁移前失败，提示所缺节点或可选镜像仓库。
+- 节点镜像采用 Docker 内容 ID 命名、逐节点验证、`imagePullPolicy: Never`，API/迁移仅调度到已导入的节点。多节点模式新增 worker 后再次 deploy 才纳入；单节点模式保持原固定节点。节点镜像被运行时 GC 清除时也需重新 deploy；长期生产优先使用可靠仓库。节点导入目前要求同构 amd64/arm64，自动选择对应构建平台；异构集群可提供多架构镜像 digest。
 - 存储：唯一默认 StorageClass → 本机 Linux 专用 local PV。无动态存储时，仅在通过 InternalIP 确认的本机上创建目录；优先挂载后的 `/data/mx-pay/<namespace>/postgres`，否则 `/var/lib/mx-pay/<namespace>/postgres`。存在 `/data` 却未挂载立即失败。已有路径、卷和数据身份优先，不扫描备份寻找“可用数据”。首次本地目录创建需要该主机文件权限，截图中的 root 运行方式可满足。
 
 ```sh

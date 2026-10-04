@@ -47,6 +47,8 @@ SSO 复用 `@qpjoy/mx-common/identity/sso`、`identity/postgres`、`identity/pro
 
 无需等待 SSO 登记才启动内网服务：首次没有接入档案（包括显式 `MX_PAY_SSO_SOURCE` 文件尚未生成）时，同一 deploy 正常发布内网支付 API，不创建查询台或空身份。稍后登记并发布 Auth，再次 deploy 即可自动追加查询台。只有已配置过查询台后丢失档案/权限，才要求恢复原值；本机 `.deploy/console-enrolled.json` 与 Kubernetes 查询台安装记录用于区分这两种情况。`MX_PAY_SSO_AUTO_DISCOVER=0` 只关闭首次本机发现，已有查询台照常保留。
 
+当前 Internal 单节点集群首次部署会自动固定该控制平面节点，并为 Pay 自己的 Pod 添加标准调度容忍；无需添加虚构 worker 或清除集群 taint。已有多节点模式不自动降级。需要本机 7789 代理时执行 `TMPDIR=/data/tmp MX_PAY_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh deploy`，无需发布 Launcher/Hub；代理范围与单节点限制见 [支付部署说明](../README.md)。
+
 Internal Nginx 支持自动查询上游：在 `de-mingxi` 执行 `bash scripts/manage.sh internal-pay-install --pay-root <mx-pay项目目录>`。脚本读取 `.deploy/target.json` 固定目标并校验集群 UID，随后通过 kubectl 查询 API/console Service 的当前 IPv4 ClusterIP 和约定端口；无需手工填 IP。保持与 Pay 部署一致的 `KUBECONFIG`，缺少目标、查询台或集群身份不符时会停止并保留现有 Nginx。每次执行均重新查询；Service 重建后重跑同一命令即可。它是独立的网关安装步骤，尚未由 Pay deploy 自动调用或后台监听。
 
 ```sh

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { readCredentials } from '../server/config.mjs'
 import { readChannels } from '../server/channel-config.mjs'
 import { readConsoleConfig } from '../server/console-config.mjs'
+import { podPlacement, eligibleNodes } from './scheduling.mjs'
 
 export const hash = value => createHash('sha256').update(value).digest('hex')
 export function databaseEnv(filename) {
@@ -42,14 +43,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
   const envFrom = name => [{ secretRef: { name } }]
   const containerSecurity = { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } }
   const podSecurity = { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } }
-  const placement = { nodeAffinity: { requiredDuringSchedulingIgnoredDuringExecution: { nodeSelectorTerms: [{ matchExpressions: [
-    { key: 'node-role.kubernetes.io/control-plane', operator: 'DoesNotExist' }, { key: 'node-role.kubernetes.io/master', operator: 'DoesNotExist' },
-  ] }] } } }
-  if (nodeLoaded) {
-    const nodes=JSON.parse(readFileSync(env.MX_PAY_IMAGE_NODES_FILE,'utf8'))
-    if (!Array.isArray(nodes) || new Set(nodes).size<2 || nodes.some(n=>! /^[a-z0-9][a-z0-9.-]{0,252}$/.test(n))) throw new Error('At least two verified image nodes required')
-    placement.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchFields=[{key:'metadata.name',operator:'In',values:nodes}]
-  }
+  const placement = podPlacement(env,nodeLoaded ? JSON.parse(readFileSync(env.MX_PAY_IMAGE_NODES_FILE,'utf8')) : undefined)
   const imagePullPolicy=nodeLoaded ? 'Never' : 'IfNotPresent'
   const pullSecrets = env.MX_PAY_IMAGE_PULL_SECRET ? [{ name: env.MX_PAY_IMAGE_PULL_SECRET }] : []
   if (pullSecrets.some(s => !/^[a-z0-9][-a-z0-9.]{0,251}[a-z0-9]$/.test(s.name))) throw new Error('Invalid image pull Secret')
@@ -59,7 +53,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
   if (!/^mx-pay-migrate-[a-z0-9-]+$/.test(jobName || '')) throw new Error('Invalid migration Job name')
   const job = { ...base('Job',jobName,'batch/v1'), spec: { backoffLimit: 0, activeDeadlineSeconds: 240, ttlSecondsAfterFinished: 86400,
     template: { metadata: { labels: { ...labels, 'mx-pay-role': 'migration' } }, spec: {
-      automountServiceAccountToken: false, restartPolicy: 'Never', securityContext: podSecurity, affinity: placement, imagePullSecrets: pullSecrets,
+      automountServiceAccountToken: false, restartPolicy: 'Never', securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
       containers: [{ name: 'migrate', image, imagePullPolicy, command: ['node','server/migrate.mjs'], envFrom: envFrom(migrationName), securityContext: containerSecurity,
         resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '500m', memory: '256Mi' } } }],
     } } } }
@@ -70,7 +64,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
     { ...base('Deployment','mx-pay','apps/v1'), spec: { replicas, revisionHistoryLimit: 5, minReadySeconds: 5, progressDeadlineSeconds: 300,
       strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }, selector: { matchLabels: apiLabels },
       template: { metadata: { labels: apiLabels }, spec: { automountServiceAccountToken: false, terminationGracePeriodSeconds: 35,
-        securityContext: podSecurity, affinity: placement, imagePullSecrets: pullSecrets,
+        securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
         topologySpreadConstraints: [{ maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'DoNotSchedule', labelSelector: { matchLabels: apiLabels } }],
         volumes: [{ name: 'credentials', secret: { secretName: runtimeName, items: [{ key: 'credentials.json', path: 'credentials.json' }, { key: 'channels.json', path: 'channels.json' }], defaultMode: 292 } }],
         containers: [{ name: 'api', image, imagePullPolicy, ports: [{ name: 'http', containerPort: 18230 }],
@@ -86,6 +80,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
   ] }
   const installation = { ...base('ConfigMap','mx-pay-installation'), data: { databaseIdentity: runtime.identity, lastAttemptImage: image, contractVersion: '2',
     runtimeSecret:runtimeName,migrationSecret:migrationName,imageRepository:env.MX_PAY_IMAGE_REPOSITORY || '',imageDelivery:nodeLoaded ? 'nodes' : 'registry',
+    topologyMode:env.MX_PAY_TOPOLOGY || 'multi-node',topologyNode:env.MX_PAY_NODE || '',
     serviceURL:`http://mx-pay.${namespace}.svc.cluster.local:18230`,
   } }
   const consoleWorkload = { apiVersion: 'v1', kind: 'List', items: [] }
@@ -100,7 +95,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
       { ...base('Deployment','mx-pay-console','apps/v1'), spec: { replicas: 2, revisionHistoryLimit: 5, progressDeadlineSeconds: 300,
         strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }, selector: { matchLabels: consoleLabels },
         template: { metadata: { labels: consoleLabels }, spec: { automountServiceAccountToken: false, terminationGracePeriodSeconds: 25,
-          securityContext: { ...podSecurity, fsGroup: 1000 }, affinity: placement, imagePullSecrets: pullSecrets,
+          securityContext: { ...podSecurity, fsGroup: 1000 }, ...placement, imagePullSecrets: pullSecrets,
           volumes: [{ name: 'console', secret: { secretName: name, defaultMode: 288, items: [{ key: 'profile.json', path: 'profile.json' }, { key: 'access.json', path: 'access.json' }] } }],
           containers: [{ name: 'console', image, imagePullPolicy, command: ['node','server/console-index.mjs'], ports: [{ name: 'http', containerPort: 18231 }],
             env: [{ name: 'MX_PAY_DATABASE_URL', valueFrom: { secretKeyRef: { name, key: 'MX_PAY_DATABASE_URL' } } },
@@ -128,10 +123,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
       console.log('Payment database and credentials configuration validated (values hidden)')
     } else if (mode === 'workers') {
       const nodes = JSON.parse(readFileSync(0,'utf8')).items
-      const count = nodes.filter(n => !n.spec?.unschedulable && !Object.hasOwn(n.metadata.labels || {},'node-role.kubernetes.io/control-plane')
-        && !Object.hasOwn(n.metadata.labels || {},'node-role.kubernetes.io/master') && n.status?.conditions?.some(c => c.type === 'Ready' && c.status === 'True')).length
-      const minimum = Number(process.env.MX_PAY_MIN_READY_WORKERS || 2)
-      if (!Number.isInteger(minimum) || minimum < 2 || count < minimum) throw new Error(`At least ${Math.max(2,minimum)} ready, schedulable worker nodes required; discovered ${count}. Deployment cannot create machines or silently reduce availability`)
+      const count = eligibleNodes(nodes,process.env).length
       console.log(`Ready worker nodes: ${count}; workload scheduling and capacity will be verified by rollout`)
     } else if (mode === 'needs-checkout-drain') {
       const previous = readFileSync(0,'utf8').trim()

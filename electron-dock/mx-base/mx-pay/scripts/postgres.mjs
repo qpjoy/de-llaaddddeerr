@@ -133,6 +133,7 @@ export function provision(root) {
   }
   if (!previous) assert(!bootstrap && !pvc && !existing && !get('configmap','mx-pay-installation'),'Orphaned payment resources exist; explicit recovery required, no initialization')
   const settings=previous || {...readJSON(path.join(root,'.deploy/target.json')),phase:'provisioning',image:env.MX_PAY_POSTGRES_IMAGE || 'postgres:16-bookworm',storageClass:selectStorageClass(JSON.parse(kube('get','storageclass','-o','json')).items,env.MX_PAY_STORAGE_CLASS)}
+  if(!previous && env.MX_PAY_TOPOLOGY==='single-node')settings.node=env.MX_PAY_NODE
   if (!settings.storageClass) Object.assign(settings,localStorage(root,previous))
   let credentials=data(bootstrap)
   if (previous) {

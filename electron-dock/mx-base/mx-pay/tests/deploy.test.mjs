@@ -44,7 +44,7 @@ if(log.document && !s.includes('delete --raw')) {
 }
 if(s==='config view -o json') console.log(JSON.stringify({contexts:[{name:'test-cluster'},{name:'other-cluster'}],'current-context':process.env.MOCK_CURRENT_CONTEXT||'test-cluster'}));
 else if(s.includes('get namespace kube-system'))console.log(process.env.MOCK_CLUSTER_UID||'cluster-uid');
-else if(s.includes('get nodes')) console.log(JSON.stringify({items:Array.from({length:Number(process.env.MOCK_WORKERS||2)},(_,i)=>({metadata:{name:'worker-'+i,labels:{}},spec:{},status:{nodeInfo:{architecture:'amd64',containerRuntimeVersion:'containerd:1.7'},addresses:[{type:'InternalIP',address:'192.0.2.'+(i+1)}],conditions:[{type:'Ready',status:'True'}]}}))}));
+else if(s.includes('get nodes')) console.log(JSON.stringify({items:process.env.MOCK_NODES ? JSON.parse(process.env.MOCK_NODES) : Array.from({length:Number(process.env.MOCK_WORKERS||2)},(_,i)=>({metadata:{name:'worker-'+i,labels:{}},spec:{},status:{nodeInfo:{architecture:'amd64',containerRuntimeVersion:'containerd:1.7'},addresses:[{type:'InternalIP',address:'192.0.2.'+(i+1)}],conditions:[{type:'Ready',status:'True'}]}}))}));
 else if(s.includes('get storageclass'))console.log(JSON.stringify({items:[{metadata:{name:'test-storage',annotations:{'storageclass.kubernetes.io/is-default-class':'true'}}}]}));
 else if(s.includes('get replicasets'))console.log(JSON.stringify({items:[]}));
 else if(s.includes('create namespace')) console.log('{}');
@@ -80,7 +80,7 @@ else console.log('containerd');
 `,{mode:0o755})
   const env = { ...process.env, PATH:`${join(root,'bin')}:${process.env.PATH}`, MOCK_LOG:join(root,'calls'), MOCK_STATE:join(root,'cluster-state.json'), MX_PAY_DEPLOY_DRIVER:'k8s', MX_PAY_KUBE_CONTEXT:'test-cluster', MX_PAY_NAMESPACE:'mx-pay-test', MX_PAY_REPLICAS:'2', MX_PAY_MIN_READY_WORKERS:'2', MX_PAY_BUILD:'0', MX_PAY_IMAGE:image,
     MX_PAY_RUNTIME_ENV_FILE:join(root,'secrets/runtime.env'),MX_PAY_MIGRATION_ENV_FILE:join(root,'secrets/runtime.env'),MX_PAY_CREDENTIALS_SOURCE:join(root,'secrets/credentials.json'),
-    MX_PAY_LAUNCHER_IDENTITY_DIR:join(workspace,'launcher-identity'), ...overrides }
+    MX_PAY_LAUNCHER_IDENTITY_DIR:join(workspace,'launcher-identity'), MX_PAY_BUILD_PROXY:'', ...overrides }
   return { root, env, run: action => spawnSync('bash',[join(root,'scripts/manage.sh'),action],{env,encoding:'utf8',timeout:30000}), calls: () => readFileSync(env.MOCK_LOG,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) }
 }
 test('one-command deploy migrates before rollout, repeats safely and releases only its lock UID',t => {
@@ -379,4 +379,56 @@ test('a configured but not-yet-generated SSO profile does not block first intern
   assert.ok(state['deployment/mx-pay'])
   assert.equal(state['deployment/mx-pay-console'],undefined)
   assert.equal(existsSync(f.env.MX_PAY_SSO_SOURCE),false)
+})
+
+test('fresh control-plane-only install deploys all Pay workloads, pins its node and never relaxes cluster taints',t=>{
+  const n={metadata:{name:'mx-internal-server',labels:{'node-role.kubernetes.io/control-plane':''}},
+    spec:{taints:[{key:'node-role.kubernetes.io/control-plane',effect:'NoSchedule'}]},status:{nodeInfo:{architecture:'amd64',containerRuntimeVersion:'containerd:1.7'},
+      addresses:[{type:'InternalIP',address:'192.0.2.1'}],conditions:[{type:'Ready',status:'True'}]}}
+  const f=fresh(t,{MOCK_NODES:JSON.stringify([n]),MX_PAY_MIN_READY_WORKERS:'',MX_PAY_BUILD:'1',MX_PAY_IMAGE:''})
+  const dir=join(f.env.MX_PAY_LAUNCHER_IDENTITY_DIR,'applications/public');mkdirSync(dir,{recursive:true,mode:0o700})
+  writeFileSync(join(dir,'mx-pay.json'),JSON.stringify({appId:'mx-pay',origin:'https://pay.example.test',issuer:'https://auth.example.test/identity',
+    clientId:'mx-pay-web',clientSecret:'original-client',audience:'mx-pay',scope:'openid mx:identity',sessionKey:'a'.repeat(43)}),{mode:0o600})
+  for(let i=0;i<2;i++){const r=f.run('deploy');assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/topology=single-node/)}
+  const state=JSON.parse(readFileSync(f.env.MOCK_STATE))
+  for(const name of ['deployment/mx-pay','deployment/mx-pay-console','statefulset/mx-pay-postgres','job/mx-pay-postgres-init',
+    ...Object.keys(state).filter(k=>k.startsWith('job/mx-pay-migrate-'))]) {
+    const p=state[name].spec.template.spec
+    assert.ok(p.tolerations.some(t=>t.key==='node-role.kubernetes.io/control-plane' && t.effect==='NoSchedule'))
+    assert.deepEqual(p.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchFields[0].values,['mx-internal-server'])
+  }
+  assert.equal(state['deployment/mx-pay'].spec.replicas,2)
+  assert.equal(state['configmap/mx-pay-installation'].data.topologyMode,'single-node')
+  assert.equal(JSON.parse(readFileSync(join(f.root,'.deploy/topology.json'))).node,n.metadata.name)
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'.deploy/image-nodes.json'))),[n.metadata.name])
+  rmSync(join(f.root,'.deploy/topology.json'))
+  const restored=f.run('deploy');assert.equal(restored.status,0,restored.stderr)
+  assert.equal(JSON.parse(readFileSync(join(f.root,'.deploy/topology.json'))).node,n.metadata.name)
+  const discovered=f.run('discover');assert.equal(discovered.status,0,discovered.stderr)
+  assert.deepEqual(JSON.parse(discovered.stdout).topology,{mode:'single-node',node:n.metadata.name})
+  assert.ok(!f.calls().some(c=>c.args.includes('taint') || (c.args.includes('patch') && c.args.includes('node'))))
+  f.env.MOCK_NODES=JSON.stringify([{...n,metadata:{...n.metadata,name:'replacement'}}])
+  const before=f.calls().length,r=f.run('deploy');assert.notEqual(r.status,0);assert.match(r.stderr,/discovered 0/)
+  assert.ok(!f.calls().slice(before).some(c=>c.document?.kind==='Job' || c.args.includes('buildx')))
+})
+
+test('an old multi-node installation never auto-downgrades when only one node remains',t=>{
+  const f=fixture(t);assert.equal(f.run('deploy').status,0)
+  const state=JSON.parse(readFileSync(f.env.MOCK_STATE));delete state['configmap/mx-pay-installation'].data.topologyMode;delete state['configmap/mx-pay-installation'].data.topologyNode
+  writeFileSync(f.env.MOCK_STATE,JSON.stringify(state));rmSync(join(f.root,'.deploy/topology.json'))
+  f.env.MOCK_WORKERS='1';f.env.MX_PAY_MIN_READY_WORKERS=''
+  const r=f.run('deploy');assert.notEqual(r.status,0);assert.match(r.stderr,/multi-node requires 2/)
+})
+
+test('deploy proxy overrides .env, supports explicit empty override and rejects invalid proxy before migration',t=>{
+  const direct=fixture(t,{MX_PAY_BUILD:'1',MX_PAY_IMAGE_REPOSITORY:'registry.example.test/mx-pay',MX_PAY_BUILD_PROXY:''})
+  writeFileSync(join(direct.root,'.env'),'MX_PAY_BUILD_PROXY=http://127.0.0.1:7789\n')
+  const r=direct.run('deploy');assert.equal(r.status,0,r.stderr)
+  assert.ok(direct.calls().some(c=>c.args[0]==='buildx' && c.args[1]==='build'))
+  assert.ok(!direct.calls().some(c=>c.args.includes('--builder')))
+  const invalid=fixture(t,{MX_PAY_BUILD:'1',MX_PAY_IMAGE_REPOSITORY:'registry.example.test/mx-pay',MX_PAY_BUILD_PROXY:'socks5://PRIVATE@localhost:7789'})
+  writeFileSync(join(invalid.root,'.env'),'MX_PAY_BUILD_PROXY=http://127.0.0.1:7789\n')
+  const failed=invalid.run('deploy');assert.notEqual(failed.status,0);assert.match(failed.stderr,/HTTP\(S\) proxy URL/)
+  assert.doesNotMatch(failed.stderr+failed.stdout,/PRIVATE/)
+  assert.ok(!invalid.calls().some(c=>c.document?.kind==='Job' || c.args.includes('buildx')))
 })
