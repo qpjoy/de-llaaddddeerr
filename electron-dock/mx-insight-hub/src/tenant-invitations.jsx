@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Buildings, Copy, Moon, Plus, Sun } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { hubLoginUrl, hubUiPath } from '../shared/account-navigation.mjs'
 import { DropdownField, ErrorState, Field, LoadingState, Modal, PageHeading, useRemoteData } from './components.jsx'
 import { ROLES, ROLE_HINTS } from './tenant-memberships.jsx'
 
@@ -94,15 +95,15 @@ export function TenantInvitationPage({ query, theme, onToggleTheme }) {
   },[initialToken,retry])
   const accept=async()=>{
     setBusy(true);setError(null)
-    try {const result=await invitationRequest('/accept',{method:'POST',headers:{'content-type':'application/json','x-mx-hub-csrf':data.csrf},body:JSON.stringify({invitationId:data.invitation.id})});window.location.assign(result.returnUrl)}
+    try {const result=await invitationRequest('/accept',{method:'POST',headers:{'content-type':'application/json','x-mx-hub-csrf':data.csrf},body:JSON.stringify({invitationId:data.invitation.id,ui:hubUiPath(window.location.pathname)})});window.location.assign(result.returnUrl)}
     catch(e){setError(e);setBusy(false)}
   }
   const invitation=data?.invitation
   return <div className={`qp-app ${theme==='dark'?'qp-theme-neon-void':'qp-theme-neon-void-light'} mih-invitation-page`}><main className="qp-panel mih-invitation-card">
-    <header><a className="mih-invitation-brand" href="/"><img src="assets/mx-insight-logo-mark.png" alt="" />MX Insight Hub</a><button className="qp-button qp-button--ghost qp-icon-button" aria-label="切换亮暗主题" onClick={onToggleTheme}>{theme==='dark'?<Sun size={20}/>:<Moon size={20}/>}</button></header>
+    <header><a className="mih-invitation-brand" href={hubUiPath(window.location.pathname)}><img src="assets/mx-insight-logo-mark.png" alt="" />MX Insight Hub</a><button className="qp-button qp-button--ghost qp-icon-button" aria-label="切换亮暗主题" onClick={onToggleTheme}>{theme==='dark'?<Sun size={20}/>:<Moon size={20}/>}</button></header>
     <span className="mih-invitation-eyebrow">TEAM INVITATION</span><h1>加入企业工作空间</h1>
     {invitation ? <><div className="mih-invitation-target"><Buildings size={30} aria-hidden="true"/><div><h2>{invitation.tenantName}</h2><p>{roleName(invitation.role)} · 有效至 {stamp(invitation.expiresAt)}</p></div></div><p>{ROLE_HINTS[invitation.role]}</p>
-      {data.user ? <><div className="mih-invitation-identity"><span>当前登录账号</span><strong>{data.user.displayName}</strong><small>成员 ID：{data.user.memberId}</small></div><p>请确认使用此账号加入。如果你已经是成员，会保留原角色。</p><button className="qp-button qp-button--primary" disabled={busy} onClick={accept}>{busy?'正在加入…':invitation.status==='accepted'?'进入工作空间':'确认接受并加入'}</button>{invitation.status!=='accepted' ? <a className={button} href="/auth/sso/login?surface=application&invitation=1&switch=1">换一个账号</a> : null}</> : <><p>{invitation.allowRegistration?'使用原 MX 账号登录；没有账号可通过此邀请注册。':'此邀请仅供已有 MX 账号使用，请登录后继续。'}</p><a className="qp-button qp-button--primary" href="/auth/sso/login?surface=application&invitation=1">{invitation.allowRegistration?'登录或注册后继续':'登录后继续'}</a></>}
+      {data.user ? <><div className="mih-invitation-identity"><span>当前登录账号</span><strong>{data.user.displayName}</strong><small>成员 ID：{data.user.memberId}</small></div><p>请确认使用此账号加入。如果你已经是成员，会保留原角色。</p><button className="qp-button qp-button--primary" disabled={busy} onClick={accept}>{busy?'正在加入…':invitation.status==='accepted'?'进入工作空间':'确认接受并加入'}</button>{invitation.status!=='accepted' ? <a className={button} href={hubLoginUrl(window.location.pathname, { invitation: '1', switch: '1' })}>换一个账号</a> : null}</> : <><p>{invitation.allowRegistration?'使用原 MX 账号登录；没有账号可通过此邀请注册。':'此邀请仅供已有 MX 账号使用，请登录后继续。'}</p><a className="qp-button qp-button--primary" href={hubLoginUrl(window.location.pathname, { invitation: '1' })}>{invitation.allowRegistration?'登录或注册后继续':'登录后继续'}</a></>}
     </> : !error ? <LoadingState /> : null}
     {error ? <><ErrorState error={error}/><button className={button} disabled={busy} onClick={()=>setRetry(value=>value+1)}>重新检查邀请</button></> : null}
     <footer>加入后自动完成租户绑定，无需管理员再次操作。</footer>

@@ -21,7 +21,12 @@ export async function accountRequest(body) {
 const authHeaders = token => token === SSO_SESSION ? { 'x-mx-hub-csrf': ssoCsrf } : token ? { 'x-mx-insight-admin-token': token } : {}
 export async function restoreSsoSession() {
   const response = await fetch(`${API_BASE}/auth/sso/session`, { credentials: 'same-origin', cache: 'no-store' })
-  if (!response.ok) return false
+  if (response.status === 404) return false // Legacy deployments without SSO retain their original sign-in form.
+  if (!response.ok) {
+    const error = new Error('暂时无法验证登录状态，请稍后重试。')
+    error.status = response.status
+    throw error
+  }
   const value = await response.json()
   ssoCsrf = value.csrf || ''
   ssoSecurityUrl = value.active === true && typeof value.securityUrl === 'string' && value.securityUrl.startsWith('https://') ? value.securityUrl : ''

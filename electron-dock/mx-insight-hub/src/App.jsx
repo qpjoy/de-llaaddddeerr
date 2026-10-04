@@ -1,4 +1,5 @@
 import { HubAccountEntry, HubAccountPage } from './account.jsx'
+import { hubUiPath } from '../shared/account-navigation.mjs'
 import { WechatOverview } from './wechat-product.jsx'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
@@ -581,9 +582,9 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
         ) : (
           <>
             {options?.sso ? <div className="mih-auth-form">
-              <a className="qp-button qp-button--primary qp-button--lg qp-button--block" href={options.sso.loginUrl}>统一账号登录</a>
+              <a className="qp-button qp-button--primary qp-button--lg qp-button--block" href={`${options.sso.loginUrl}?ui=${encodeURIComponent(hubUiPath(window.location.pathname))}`}>统一账号登录</a>
               <p className="mih-auth-caption">使用已有 Launcher 账号；注册与飞书登录在统一认证页完成。</p>
-              <details className="mih-auth-account-options"><summary>账号选项</summary><a className="qp-button qp-button--ghost" href={options.sso.switchUrl}>切换统一账号</a></details>
+              <details className="mih-auth-account-options"><summary>账号选项</summary><a className="qp-button qp-button--ghost" href={`${options.sso.switchUrl}&ui=${encodeURIComponent(hubUiPath(window.location.pathname))}`}>切换统一账号</a></details>
             </div> : null}
             {options && !options.sso && !options.launcher && options.launcherUnavailableReason ? (
               // Shown rather than hidden: an operator who configured Launcher
@@ -825,7 +826,13 @@ export function App() {
     ;(async () => {
       let candidate = token
       if (!candidate || candidate === SSO_SESSION) {
-        if (!await restoreSsoSession()) { if (active) setAuthState('signed-out'); return null }
+        if (!await restoreSsoSession()) {
+          if (active) {
+            if (new URLSearchParams(window.location.search).get('sso') === 'ready') setAuthMessage('登录状态未能保存，请确认浏览器允许本站 Cookie 后重试。')
+            setAuthState('signed-out')
+          }
+          return null
+        }
         candidate = SSO_SESSION
       }
       const data = await adminApi.session(candidate)
@@ -872,7 +879,7 @@ export function App() {
     writeSessionToken('')
     setToken('')
     setAuthState('signed-out')
-    setAuthMessage(message)
+    setAuthMessage(message || '你已退出 Hub。')
     setSession(null)
     setMenuOpen(false)
   }, [token])

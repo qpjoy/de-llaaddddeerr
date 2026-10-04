@@ -13,7 +13,7 @@ import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import { readJson } from '../../server/core/http.mjs'
 
 const connectionString=process.env.MX_SSO_TEST_DATABASE_URL
-test('enterprise invitation journey: trusted Auth proof, original registration, browser signup, explicit accept and tenant return',{skip:!connectionString,timeout:90000},async t=>{
+for(const uiPath of ['/', '/admin/']) test(`enterprise invitation journey at ${uiPath}: trusted Auth proof, original registration, browser signup, explicit accept and tenant return`,{skip:!connectionString,timeout:90000},async t=>{
   const url=new URL(connectionString)
   assert.ok(['127.0.0.1','localhost'].includes(url.hostname)&&url.pathname.includes('sso_test'))
   const {createIdentityProvider}=await import('../../../mx-launcher/server/src/identity/provider.ts')
@@ -24,9 +24,11 @@ test('enterprise invitation journey: trusted Auth proof, original registration, 
   await root.query(`CREATE DATABASE ${database}`);url.pathname=`/${database}`
   const pool=new pg.Pool({connectionString:url.href}), directory=mkdtempSync(join(tmpdir(),'mx-invitation-journey-'))
   let server,accounts,registration,provider,sso,origin
+  const pendingRequests=new Set()
   const previousCa=globalAgent.options.ca
   t.after(async()=>{
     if(server)await new Promise(resolve=>{server.close(resolve);server.closeAllConnections()})
+    await Promise.all([...pendingRequests])
     globalAgent.options.ca=previousCa
     await registration?.close();await accounts?.close();await pool.end();await root.query(`DROP DATABASE ${database} WITH (FORCE)`);await root.end();rmSync(directory,{recursive:true,force:true})
   })
@@ -40,8 +42,12 @@ test('enterprise invitation journey: trusted Auth proof, original registration, 
   globalAgent.options.ca=cert
   const json=(res,status,value)=>res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify(value))
   server=createServer({cert,key},async(req,res)=>{
+    let complete
+    const pending=new Promise(resolve=>{complete=resolve});pendingRequests.add(pending)
     try {
-      const path=new URL(req.url,origin).pathname
+      let path=new URL(req.url,origin).pathname
+      if(uiPath==='/admin/' && path==='/'){res.writeHead(302,{location:'/admin/'}).end();return}
+      if(uiPath==='/admin/' && path.startsWith('/admin/'))path=path.slice('/admin'.length)
       if(path.startsWith('/identity/'))return await provider.handle(req,res)
       if(await sso.handle(req,res,new URL(req.url,origin)))return
       if(path==='/favicon.ico'){res.writeHead(204).end();return}
@@ -58,7 +64,8 @@ test('enterprise invitation journey: trusted Auth proof, original registration, 
       if(path==='/internal/v1/admin/tenants')return json(res,200,{data:(await pool.query('SELECT id,name,status FROM tenants WHERE $1::uuid[] IS NULL OR id=ANY($1::uuid[])',[principal.tenantIds])).rows})
       if(path==='/internal/v1/admin/me/overview')return json(res,200,{data:{tenants:[],consumers:[]}})
       return json(res,200,{data:[]})
-    }catch(error){return json(res,error.status||500,{message:error.message})}
+    }catch(error){if(!res.destroyed)return json(res,error.status||500,{message:error.message})}
+    finally{pendingRequests.delete(pending);complete()}
   })
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));origin=`https://127.0.0.1:${server.address().port}`
   const issuer=`${origin}/identity`,clientSecret=randomBytes(32).toString('hex')

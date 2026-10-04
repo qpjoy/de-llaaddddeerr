@@ -15,7 +15,7 @@ import { createApp } from '../../server/app.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 
 const connectionString=process.env.MX_SSO_TEST_DATABASE_URL
-test('native account integration: separate issuer origin, legacy mapping, reusable SDK, registration and account security',{skip:!connectionString || !process.env.MX_SSO_BROWSER_MODULE,timeout:120000},async t=>{
+for(const uiPath of ['/', '/admin/']) test(`native account integration at ${uiPath}: separate issuer origin, legacy mapping, reusable SDK, registration and account security`,{skip:!connectionString || !process.env.MX_SSO_BROWSER_MODULE,timeout:120000},async t=>{
   const url=new URL(connectionString)
   assert.ok(['127.0.0.1','localhost'].includes(url.hostname)&&url.pathname.includes('sso_test'))
   const {createIdentityProvider}=await import('../../../mx-launcher/server/src/identity/provider.ts')
@@ -45,7 +45,10 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
   const json=(res,status,value)=>res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify(value))
   server=createServer({cert,key},async(req,res)=>{
     try {
-      const path=new URL(req.url,origin).pathname
+      let path=new URL(req.url,origin).pathname
+      // Match the production proxy: its root redirect deliberately drops query parameters.
+      if(uiPath==='/admin/' && path==='/'){res.writeHead(302,{location:'/admin/'}).end();return}
+      if(uiPath==='/admin/' && path.startsWith('/admin/'))path=path.slice('/admin'.length)
 
       if(path.startsWith('/auth/sso/'))return hubAuthHandler(req,res)
       if(path==='/favicon.ico'){res.writeHead(204).end();return}
@@ -100,9 +103,29 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
   browser=await chromium.launch({channel:'chrome',headless:true})
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[]
   page.setDefaultTimeout(12000);page.on('pageerror',error=>errors.push(error.message))
+  const failed=await browser.newContext({ignoreHTTPSErrors:true}),failedPage=await failed.newPage()
+  failedPage.setDefaultTimeout(5000)
+  let failedLoginStarts=0
+  failedPage.on('request',request=>{if(new URL(request.url()).pathname==='/auth/sso/login')failedLoginStarts++})
+  await failedPage.route('**/auth/sso/session',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'fixture outage'}})}))
+  await failedPage.goto(`${origin}${uiPath}`)
+  await failedPage.getByRole('link',{name:'重新登录',exact:true}).waitFor()
+  assert.equal(failedLoginStarts,0,'a session service failure must not start an SSO loop')
+  await failedPage.unroute('**/auth/sso/session')
+  await failedPage.goto(`${origin}${uiPath}?sso=ready`)
+  await failedPage.getByText('登录状态未能保存，请确认浏览器允许本站 Cookie 后重试。',{exact:true}).waitFor()
+  assert.equal(failedLoginStarts,0,'a callback without its session cookie must stop for user retry')
+  await failedPage.getByRole('link',{name:'管理员入口'}).click()
+  assert.equal(new URL(failedPage.url()).pathname,uiPath)
+  assert.equal(new URL(failedPage.url()).searchParams.get('admin'),'1')
+  await failed.close()
   await page.goto(origin)
   await page.getByRole('textbox',{name:'账号',exact:true}).waitFor()
   assert.equal(new URL(page.url()).origin,origin,'credentials form belongs to application origin')
+  assert.equal(new URL(page.url()).pathname,uiPath)
+  assert.equal(new URL(page.url()).searchParams.get('account'),'1','proxy keeps the form marker')
+  await page.reload()
+  await page.getByRole('textbox',{name:'账号',exact:true}).waitFor()
   assert.equal(await page.getByText('MX 统一账号',{exact:true}).count(),0)
   assert.match(await page.title(),/MX Insight Hub/)
   assert.equal(await page.locator('vite-error-overlay').count(),0)
@@ -131,13 +154,32 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
   const session=await (await context.request.get(`${origin}/auth/sso/session`)).json()
   const principal=await (await context.request.get(`${origin}/internal/v1/admin/session`)).json()
   assert.equal(principal.data.memberId,member)
+  assert.equal(new URL(page.url()).pathname,uiPath,'successful callback preserves SPA mount')
+  await page.reload()
+  await page.getByRole('button',{name:'退出管理会话',exact:true}).first().waitFor()
+  let extraLogins=0
+  const countLogins=request=>{if(new URL(request.url()).pathname==='/auth/sso/login')extraLogins++}
+  page.on('request',countLogins)
+  await page.route('**/internal/v1/admin/session',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'fixture member service outage'}})}))
+  await page.goto(`${origin}${uiPath}?sso=ready`)
+  await page.getByRole('link',{name:'重新登录',exact:true}).waitFor()
+  assert.equal(extraLogins,0,'valid Auth session plus Hub failure must not repeatedly redirect')
+  await page.unroute('**/internal/v1/admin/session')
+  await page.getByRole('link',{name:'重新登录',exact:true}).click()
+  await page.waitForURL(/#\/(my|dashboard)/)
+  await page.getByRole('button',{name:'退出管理会话',exact:true}).first().click()
+  await page.getByText('你已退出 Hub。',{exact:true}).waitFor()
+  assert.equal(extraLogins,1,'sign-out does not immediately restore the Auth session')
+  await page.getByRole('link',{name:'重新登录',exact:true}).click()
+  await page.waitForURL(/#\/(my|dashboard)/)
+  page.off('request',countLogins)
   assert.equal((await pool.query('SELECT role FROM iam.tenant_memberships WHERE member_id=$1',[member])).rows[0].role,'viewer')
   assert.deepEqual((await pool.query("SELECT data FROM mx_platform_records WHERE kind='iam-user' AND id=$1",[old.userId])).rows[0].data,before,'old account unchanged by login')
   assert.equal((await pool.query('SELECT count(*)::int n FROM tenants')).rows[0].n,1,'no duplicate personal tenant for existing member')
   const sid=(await context.cookies()).find(cookie=>cookie.name==='__Host-mx_hub_sso').value
   const saved=await sso.store.get('session',sid)
   assert.equal((await context.request.post(`${authOrigin}/identity/app-account`,{headers:otherAuth,data:{action:'account',input:{accessToken:saved.accessToken}}})).status(),401,'token audience is enforced')
-  await page.goto(`${origin}/#/account`)
+  await page.goto(`${origin}${uiPath}#/account`)
   await page.getByRole('heading',{name:'个人资料',exact:true}).waitFor()
   await page.screenshot({path:'/tmp/mx-native-hub-account.png'})
   const profileForm=page.locator('form').filter({has:page.getByLabel('显示名称')})
@@ -184,7 +226,7 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
   const invitation=await registration.createInvitation({label:'native signup',days:1,maxUses:1})
   const fresh=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:390,height:844}}),signup=await fresh.newPage()
   signup.setDefaultTimeout(12000);signup.on('pageerror',error=>errors.push(error.message))
-  await signup.goto(`${origin}/auth/sso/login?surface=application&view=register`)
+  await signup.goto(`${origin}/auth/sso/login?ui=${encodeURIComponent(uiPath)}&surface=application&view=register`)
   await signup.getByLabel('邀请码',{exact:true}).waitFor()
   assert.equal(await signup.locator('body').evaluate(el=>el.scrollWidth>innerWidth),false)
   await signup.screenshot({path:'/tmp/mx-native-hub-signup-mobile.png',fullPage:true,animations:'disabled'})
@@ -205,12 +247,12 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
   await registration.updatePolicy({mode:'closed',version:2})
   const logged=await (await fresh.request.get(`${origin}/auth/sso/session`)).json()
   await fresh.request.post(`${origin}/auth/sso/logout`,{headers:{origin,'x-mx-hub-csrf':logged.csrf}})
-  await signup.goto(`${origin}/auth/sso/login?surface=application`)
+  await signup.goto(`${origin}/auth/sso/login?ui=${encodeURIComponent(uiPath)}&surface=application`)
   await signup.waitForURL(/#\/(my|dashboard)/) // Existing Auth session is reused without displaying a form.
   const live=await (await fresh.request.get(`${origin}/auth/sso/session`)).json()
   const all=await fresh.request.post(`${origin}/auth/sso/account`,{headers:{origin,'x-mx-hub-csrf':live.csrf},data:{action:'revoke',target:'all',currentPassword:'CustomerPassword123!'}})
   assert.equal(all.status(),200,await all.text())
-  await signup.goto(`${origin}/auth/sso/login?surface=application`)
+  await signup.goto(`${origin}/auth/sso/login?ui=${encodeURIComponent(uiPath)}&surface=application`)
   await signup.getByRole('textbox',{name:'账号',exact:true}).waitFor()
   assert.equal(await signup.getByRole('button',{name:'邀请码注册',exact:true}).count(),0)
   await signup.getByRole('textbox',{name:'账号',exact:true}).fill('NativeCustomer')
@@ -221,7 +263,7 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
 
   // A stolen completion URL alone cannot sign another browser in.
   const handoff=await browser.newContext({ignoreHTTPSErrors:true}),handoffPage=await handoff.newPage()
-  await handoffPage.goto(`${origin}/auth/sso/login?surface=application`)
+  await handoffPage.goto(`${origin}/auth/sso/login?ui=${encodeURIComponent(uiPath)}&surface=application`)
   await handoffPage.getByLabel('密码',{exact:true}).waitFor()
   const handoffForm=await (await handoff.request.get(`${origin}/auth/sso/form`)).json()
   const submitted=await handoff.request.post(`${origin}/auth/sso/form`,{headers:{origin,'x-mx-hub-csrf':handoffForm.csrf},data:{action:'login',formId:handoffForm.formId,login:'NativeCustomer',password:'CustomerPassword123!'}})
@@ -235,7 +277,7 @@ test('native account integration: separate issuer origin, legacy mapping, reusab
   await handoffPage.waitForURL(/#\/(my|dashboard)/)
 
   const expired=await browser.newContext({ignoreHTTPSErrors:true}),expiredPage=await expired.newPage()
-  await expiredPage.goto(`${origin}/auth/sso/login?surface=application`)
+  await expiredPage.goto(`${origin}/auth/sso/login?ui=${encodeURIComponent(uiPath)}&surface=application`)
   await expiredPage.getByLabel('密码',{exact:true}).waitFor()
   const expiredForm=await (await expired.request.get(`${origin}/auth/sso/form`)).json()
   const expiredCookie=(await expired.cookies()).find(cookie=>cookie.name==='__Host-mx_hub_login').value

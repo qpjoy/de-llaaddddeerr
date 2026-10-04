@@ -4,6 +4,14 @@ import { createServer } from 'node:http'
 import { createApp } from '../../server/app.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
+import { hubUiPath, hubLoginUrl } from '../../shared/account-navigation.mjs'
+
+test('account return paths accept only the two local SPA mounts', () => {
+  for (const value of ['https://evil.example', '//evil.example', '/admin/../../', '/%2f%2fevil.example', null]) assert.equal(hubUiPath(value), '/')
+  assert.equal(hubUiPath('/admin/'), '/admin/')
+  assert.equal(hubUiPath('/'), '/')
+  assert.equal(new URL(hubLoginUrl('/admin/', { invitation: '1' }), 'https://hub.test').searchParams.get('ui'), '/admin/')
+})
 
 for (const listenerMode of ['admin', 'public']) test(`SSO route isolation and explicit credential precedence on ${listenerMode}`, async t => {
   let cookieCalls = 0, handlerCalls = 0

@@ -7,6 +7,7 @@ import { SsoStore } from './sso-store.mjs'
 import { TenantInvitations } from './tenant-invitations.mjs'
 import { readJson } from '../core/http.mjs'
 import { createIdentityAccountClient } from '@qpjoy/mx-common/identity'
+import { hubUiPath } from '../../shared/account-navigation.mjs'
 
 const random = () => randomBytes(32).toString('base64url')
 const fingerprint = value => createHash('sha256').update(value).digest('hex')
@@ -160,12 +161,13 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         const accepted = await invitations.accept(principal,context.token)
         identity.client?.invalidate?.()
         // Keep the short context for idempotent retry if the success response is lost.
-        return json({...accepted,returnUrl:`/?sso=ready#/${accepted.role==='billing' ? 'payments' : 'my'}?tenantId=${accepted.tenantId}`})
+        return json({...accepted,returnUrl:`${hubUiPath(body.ui)}?sso=ready#/${accepted.role==='billing' ? 'payments' : 'my'}?tenantId=${accepted.tenantId}`})
       }
       if (path === '/auth/sso/login' && request.method === 'GET') {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', '请从 Hub 发起登录。')
         const old = cookies(request)[TX]; if (old) await store.remove('login', old)
         const id = random(), transaction = { state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
+        transaction.uiPath = hubUiPath(url.searchParams.get('ui'))
         if (transaction.returnTo === 'account') transaction.expectedSubject = (await sessionFor(request))?.subject
         let registrationHandle
         if (url.searchParams.get('invitation') === '1') {
@@ -196,7 +198,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         // Auth validates its own cookie; this separate state check binds the same browser to Hub.
         transaction.flow = flow
         if (!await store.update('login', id, transaction)) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
-        redirect(`/?account=1${url.searchParams.get('error') === 'feishu' ? '&accountError=feishu' : ''}#/account`); return true
+        redirect(`${hubUiPath(transaction.uiPath)}?account=1${url.searchParams.get('error') === 'feishu' ? '&accountError=feishu' : ''}#/account`); return true
       }
       if (path === '/auth/sso/form' && ['GET', 'POST'].includes(request.method)) {
         const transaction = await store.get('login', cookies(request)[TX])
@@ -255,7 +257,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         const sid = random(), seconds = Math.min(SESSION_TTL_SECONDS, tokens.expires_in)
         await store.put('session', sid, session, seconds)
         response.setHeader('Set-Cookie', [cookie(TX, '', 0), cookie(SID, sid, seconds), ...(transaction.invitation ? [cookie(INV,transaction.invitation,1800)] : [])])
-        redirect(transaction.invitation ? '/?sso=ready#/join' : transaction.returnTo === 'account' ? '/?sso=ready#/account' : '/?sso=ready'); return true
+        redirect(`${hubUiPath(transaction.uiPath)}?sso=ready${transaction.invitation ? '#/join' : transaction.returnTo === 'account' ? '#/account' : ''}`); return true
       }
       if (path === '/auth/sso/session' && request.method === 'GET') {
         let session = await sessionFor(request)
