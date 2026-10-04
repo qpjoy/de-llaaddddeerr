@@ -3,9 +3,9 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { PaymentError } from '../src/index.mjs'
 
 const digest = value => createHash('sha256').update(value).digest()
-const positive = (value, fallback, maximum) => {
+const positive = (name, value, fallback, maximum) => {
   const n = Number(value ?? fallback)
-  if (!Number.isInteger(n) || n < 1 || n > maximum) throw new Error('Invalid mx-pay numeric configuration')
+  if (!Number.isInteger(n) || n < 1 || n > maximum) throw new Error(`${name} must be an integer between 1 and ${maximum} (value hidden)`)
   return n
 }
 export function readCredentials(filename) {
@@ -40,8 +40,8 @@ export function loadConfig(env = process.env) {
   return {
     databaseUrl: env.MX_PAY_DATABASE_URL,
     credentialsFile: env.MX_PAY_CREDENTIALS_FILE,
-    host: env.MX_PAY_HOST || '0.0.0.0', port: positive(env.MX_PAY_PORT, 18230, 65535),
-    maxConnections: positive(env.MX_PAY_DB_POOL_SIZE, 10, 100),
-    drainMs: positive(env.MX_PAY_DRAIN_MS, 3000, 15000),
+    host: env.MX_PAY_HOST || '0.0.0.0', port: positive('MX_PAY_PORT', env.MX_PAY_PORT, 18230, 65535),
+    maxConnections: positive('MX_PAY_DB_POOL_SIZE', env.MX_PAY_DB_POOL_SIZE, 10, 100),
+    drainMs: positive('MX_PAY_DRAIN_MS', env.MX_PAY_DRAIN_MS, 3000, 15000),
   }
 }

@@ -53,7 +53,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
   if (!/^mx-pay-migrate-[a-z0-9-]+$/.test(jobName || '')) throw new Error('Invalid migration Job name')
   const job = { ...base('Job',jobName,'batch/v1'), spec: { backoffLimit: 0, activeDeadlineSeconds: 240, ttlSecondsAfterFinished: 86400,
     template: { metadata: { labels: { ...labels, 'mx-pay-role': 'migration' } }, spec: {
-      automountServiceAccountToken: false, restartPolicy: 'Never', securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
+      enableServiceLinks: false, automountServiceAccountToken: false, restartPolicy: 'Never', securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
       containers: [{ name: 'migrate', image, imagePullPolicy, command: ['node','server/migrate.mjs'], envFrom: envFrom(migrationName), securityContext: containerSecurity,
         resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '500m', memory: '256Mi' } } }],
     } } } }
@@ -64,11 +64,12 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
     { ...base('Deployment','mx-pay','apps/v1'), spec: { replicas, revisionHistoryLimit: 5, minReadySeconds: 5, progressDeadlineSeconds: 300,
       strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }, selector: { matchLabels: apiLabels },
       template: { metadata: { labels: apiLabels }, spec: { automountServiceAccountToken: false, terminationGracePeriodSeconds: 35,
-        securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
+        // Service links would inject MX_PAY_PORT=tcp://... and break numeric port parsing.
+        enableServiceLinks: false, securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
         topologySpreadConstraints: [{ maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'DoNotSchedule', labelSelector: { matchLabels: apiLabels } }],
         volumes: [{ name: 'credentials', secret: { secretName: runtimeName, items: [{ key: 'credentials.json', path: 'credentials.json' }, { key: 'channels.json', path: 'channels.json' }], defaultMode: 292 } }],
         containers: [{ name: 'api', image, imagePullPolicy, ports: [{ name: 'http', containerPort: 18230 }],
-          env: Object.entries(runtime.values).map(([name]) => ({ name, valueFrom: { secretKeyRef: { name: runtimeName, key: name } } })).concat([{ name: 'MX_PAY_CREDENTIALS_FILE', value: '/run/mx-pay/credentials.json' }, { name: 'MX_PAY_CHANNELS_FILE', value: '/run/mx-pay/channels.json' }]),
+          env: Object.entries(runtime.values).map(([name]) => ({ name, valueFrom: { secretKeyRef: { name: runtimeName, key: name } } })).concat([{ name: 'MX_PAY_PORT', value: '18230' }, { name: 'MX_PAY_CREDENTIALS_FILE', value: '/run/mx-pay/credentials.json' }, { name: 'MX_PAY_CHANNELS_FILE', value: '/run/mx-pay/channels.json' }]),
           volumeMounts: [{ name: 'credentials', mountPath: '/run/mx-pay', readOnly: true }], securityContext: containerSecurity,
           resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '1000m', memory: '384Mi' } },
           startupProbe: { httpGet: { path: '/health/ready', port: 'http' }, periodSeconds: 3, timeoutSeconds: 12, failureThreshold: 20 },
@@ -95,11 +96,11 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
       { ...base('Deployment','mx-pay-console','apps/v1'), spec: { replicas: 2, revisionHistoryLimit: 5, progressDeadlineSeconds: 300,
         strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }, selector: { matchLabels: consoleLabels },
         template: { metadata: { labels: consoleLabels }, spec: { automountServiceAccountToken: false, terminationGracePeriodSeconds: 25,
-          securityContext: { ...podSecurity, fsGroup: 1000 }, ...placement, imagePullSecrets: pullSecrets,
+          enableServiceLinks: false, securityContext: { ...podSecurity, fsGroup: 1000 }, ...placement, imagePullSecrets: pullSecrets,
           volumes: [{ name: 'console', secret: { secretName: name, defaultMode: 288, items: [{ key: 'profile.json', path: 'profile.json' }, { key: 'access.json', path: 'access.json' }] } }],
           containers: [{ name: 'console', image, imagePullPolicy, command: ['node','server/console-index.mjs'], ports: [{ name: 'http', containerPort: 18231 }],
             env: [{ name: 'MX_PAY_DATABASE_URL', valueFrom: { secretKeyRef: { name, key: 'MX_PAY_DATABASE_URL' } } },
-              { name: 'MX_PAY_SSO_PROFILE', value: '/run/mx-pay-console/profile.json' }, { name: 'MX_PAY_CONSOLE_ACCESS_FILE', value: '/run/mx-pay-console/access.json' }],
+              { name: 'MX_PAY_CONSOLE_PORT', value: '18231' }, { name: 'MX_PAY_SSO_PROFILE', value: '/run/mx-pay-console/profile.json' }, { name: 'MX_PAY_CONSOLE_ACCESS_FILE', value: '/run/mx-pay-console/access.json' }],
             volumeMounts: [{ name: 'console', mountPath: '/run/mx-pay-console', readOnly: true }], securityContext: containerSecurity,
             resources: { requests: { cpu: '50m', memory: '96Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
             readinessProbe: { httpGet: { path: '/health/ready', port: 'http' }, periodSeconds: 5, timeoutSeconds: 12 },

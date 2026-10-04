@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
 import { render } from '../scripts/render.mjs'
+import { loadConfig } from '../server/config.mjs'
 import { selectContext } from '../scripts/runtime.mjs'
 import { selectStorageClass, assertStorageIdentity, assertDiskIdentity, databaseResources } from '../scripts/postgres.mjs'
 
@@ -137,8 +138,10 @@ test('manifest isolates generations, drains API and allows two-node rolling surg
   assert.equal(deployment.spec.replicas,2)
   assert.equal(deployment.spec.template.spec.hostNetwork,undefined)
   assert.equal(deployment.spec.template.spec.automountServiceAccountToken,false)
+  assert.equal(deployment.spec.template.spec.enableServiceLinks,false)
   assert.equal(deployment.spec.template.spec.terminationGracePeriodSeconds,35)
   assert.equal(output.job.spec.backoffLimit,0)
+  assert.equal(output.job.spec.template.spec.enableServiceLinks,false)
   assert.ok(output.secrets.items.every(s=>s.immutable))
   writeFileSync(f.env.MX_PAY_RUNTIME_ENV_FILE,'MX_PAY_DATABASE_URL=postgresql://payment:new-password@db.example.test/mx_pay\n')
   const updated=render({...f.env,MX_PAY_JOB_NAME:'mx-pay-migrate-test'})
@@ -153,6 +156,24 @@ function fresh(t, overrides={}) {
   delete f.env.MX_PAY_KUBE_CONTEXT
   return f
 }
+test('Service port environment cannot override the deployed API listener and numeric errors identify the key without its value',t=>{
+  const f=fixture(t), output=render({...f.env,MX_PAY_JOB_NAME:'mx-pay-migrate-test'})
+  const service=output.workload.items.find(i=>i.kind==='Service')
+  const pod=output.workload.items.find(i=>i.kind==='Deployment').spec.template.spec
+  const container=pod.containers[0]
+  const base={MX_PAY_DATABASE_URL:'postgresql://payment:private@db.example.test/mx_pay',MX_PAY_CREDENTIALS_FILE:'/run/mx-pay/credentials.json'}
+  // Reproduce kubelet's Docker-compatible service link on an existing mx-pay Service.
+  const serviceLinks={MX_PAY_PORT:`tcp://10.96.1.2:${service.spec.ports[0].port}`}
+  assert.throws(()=>loadConfig({...base,...serviceLinks}),/MX_PAY_PORT must be an integer/)
+  const configured=Object.fromEntries(container.env.filter(e=>Object.hasOwn(e,'value')).map(e=>[e.name,e.value]))
+  assert.equal(loadConfig({...base,...serviceLinks,...configured}).port,container.ports[0].containerPort)
+  assert.equal(loadConfig({...base,...configured}).port,service.spec.ports[0].port)
+  assert.equal(pod.enableServiceLinks,false)
+  assert.equal(container.startupProbe.httpGet.port,container.ports[0].name)
+  for(const name of ['MX_PAY_PORT','MX_PAY_DB_POOL_SIZE','MX_PAY_DRAIN_MS']) {
+    assert.throws(()=>loadConfig({...base,[name]:'private-invalid-value'}),error=>error.message.includes(name) && !error.message.includes('private-invalid-value'))
+  }
+})
 test('fresh one-command deploy discovers context, bootstraps dedicated PG and repeats without replacing data or secrets',t=>{
   const f=fresh(t)
   let r=f.run('deploy');assert.equal(r.status,0,r.stderr)
@@ -297,6 +318,8 @@ test('optional SSO console is isolated from API and migration secrets and retain
   const consoleDoc = calls.find(c => c.document?.items?.some(item => item.kind === 'Deployment' && item.metadata.name === 'mx-pay-console')).document
   const consolePod = consoleDoc.items.find(item => item.kind === 'Deployment').spec.template.spec
   assert.equal(consolePod.volumes[0].secret.defaultMode, 0o440)
+  assert.equal(consolePod.enableServiceLinks, false)
+  assert.deepEqual(consolePod.containers[0].env.find(e=>e.name==='MX_PAY_CONSOLE_PORT'), {name:'MX_PAY_CONSOLE_PORT',value:'18231'})
   assert.deepEqual(consolePod.containers[0].command, ['node', 'server/console-index.mjs'])
   const apiReady = calls.findIndex(c => c.args.includes('deployment/mx-pay') && c.args.includes('status'))
   const consoleApply = calls.findIndex(c => c.document === consoleDoc)

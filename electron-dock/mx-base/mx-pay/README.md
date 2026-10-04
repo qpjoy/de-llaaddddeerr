@@ -99,6 +99,7 @@ bash scripts/manage.sh start
 - 同一 namespace 的修改操作共用 `mx-pay-deploy-lock`，包含迁移和 rollout。并发操作直接失败，不交叉发版；不同主机也受同一锁约束。
 - 中断或超时会先等待迁移 Job 删除，再以 UID 前置条件释放自己的锁。不能确认迁移停止时保留锁。主机崩溃/SIGKILL 后，需人工确认原执行进程已停止、对应 Job/Pod 已终止，再恢复锁；脚本不会根据年龄盲目抢占。
 - rollout 失败可能已有部分新副本就绪；脚本报告失败并保留证据，不声称已经自动回滚。检查 Job、Pod 和原镜像/Secret 后，可使用上一个兼容镜像 digest 重新 deploy。回退程序不回退付款事实或数据库。
+- 若旧版本 API 在启动 `loadConfig` 的端口解析处报 `Invalid mx-pay numeric configuration`，检查 Kubernetes Service 环境变量冲突：`mx-pay` / `mx-pay-console` Service 会分别注入 `MX_PAY_PORT=tcp://…` / `MX_PAY_CONSOLE_PORT=tcp://…`。当前生成的 API、查询台及迁移 Pod 均设置 `enableServiceLinks: false`，两个监听端口也显式固定为 `18230` / `18231`；服务发现继续使用数据库 DNS。同步修复后重跑 deploy 即可保留原库、身份和凭据发布。急需恢复旧 API 时，可对原 Deployment 的 `spec.template.spec.enableServiceLinks` 做 `false` 的 merge patch 并等待 rollout；后续仍需同步新版，避免再次生成旧配置。此问题发生在连接数据库之前，无需重建 PostgreSQL。参见 [Kubernetes Service 环境变量](https://kubernetes.io/docs/concepts/services-networking/service/#environment-variables)。
 - 首次部署即记录数据库目标指纹；之后普通 deploy 不允许悄悄换库。密码更新不改变目标指纹。数据库迁移或主机名称切换是独立运维变更。
 - 每代 Secret 保留，便于兼容回退；后续清理必须先核对 Deployment/ReplicaSet/Job 引用。当前不自动删旧凭据、数据库、PVC 或备份。
 - 首次 PostgreSQL 初始化使用独立 Job。完成后固定 PV/PVC UID、PG system identifier 与安装标记；普通数据库启动命令没有 `initdb`，数据缺失或身份不一致则拒绝启动。local PV 使用 `local.path` 与硬节点亲和性，保留策略为 `Retain`，不会因调度到另一台节点而创建空目录。独立宿主机收据位于 `/var/lib/mx-pay/<namespace>/storage-identity.json`，绑定文件系统 UUID、挂载点与路径；不要删除它来“修复”部署。
